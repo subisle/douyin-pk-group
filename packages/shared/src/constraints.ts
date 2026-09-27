@@ -24,14 +24,14 @@ export interface ConstraintSet {
 /**
  * 内置条件（用户拍板）：
  * - 玖玉 / 玖妹 / 玖玥 三人两两不能同组
- * - 啸帆固定在第 1 组，啸泽固定在最后一组
+ * - 啸泽固定在第 1 组，啸帆固定在最后一组
  * - 第 1 组 08:15 开赛，之后每 15 分钟一组
  */
 export const DEFAULT_CONSTRAINTS: ConstraintSet = {
   excludeTogether: [['玖玉', '玖妹', '玖玥']],
   pinned: [
-    { name: '啸帆', group: 1 },
-    { name: '啸泽', group: 'last' },
+    { name: '啸泽', group: 1 },
+    { name: '啸帆', group: 'last' },
   ],
   schedule: { start: '08:15', intervalMin: 15 },
 };
