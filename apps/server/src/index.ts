@@ -146,6 +146,22 @@ app.delete('/api/plans/:id', async (req) => {
   return { ok: true };
 });
 
+/* ------------------------------ 前端静态托管 ------------------------------ */
+/** 生产模式：托管 apps/web/dist，/s/:id 等路径回退到 index.html（SPA） */
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import fastifyStatic from '@fastify/static';
+
+const distDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../web/dist');
+if (fs.existsSync(path.join(distDir, 'index.html'))) {
+  await app.register(fastifyStatic, { root: distDir });
+  app.setNotFoundHandler((req, reply) => {
+    if (req.raw.url?.startsWith('/api')) return reply.code(404).send({ error: 'Not Found' });
+    return reply.sendFile('index.html');
+  });
+}
+
 const port = Number(process.env.PORT ?? 8787);
 try {
   await app.listen({ port, host: '0.0.0.0' });

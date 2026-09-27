@@ -59,6 +59,9 @@ export interface SavedPlan {
   metric: WaveMetric;
   days: number;
   buckets: Array<{ name: string; players: Player[] }>;
+  /** 对外展示页用的可选信息（老方案没有也能打开） */
+  brand?: string;
+  schedule?: { start: string; intervalMin: number };
 }
 
 export interface PlanDetail {

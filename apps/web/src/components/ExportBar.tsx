@@ -108,6 +108,7 @@ export function ExportBar({ buckets }: { buckets: Bucket[] }) {
   const strategy = useStore((s) => s.strategy);
   const regroup = useStore((s) => s.regroup);
   const savePlanNow = useStore((s) => s.savePlanNow);
+  const makeShareLink = useStore((s) => s.makeShareLink);
   const notify = useStore((s) => s.notify);
   const startTime = useStore((s) => s.startTime);
   const intervalMin = useStore((s) => s.intervalMin);
@@ -169,6 +170,13 @@ export function ExportBar({ buckets }: { buckets: Bucket[] }) {
         </Button>
         <Button icon={<SaveIcon size={14} />} onClick={() => void savePlanNow()}>
           保存方案
+        </Button>
+        <Button
+          icon={<CopyIcon size={14} />}
+          onClick={() => void makeShareLink()}
+          title="保存当前分组并生成只读展示链接，复制后发到群里即可"
+        >
+          分享链接
         </Button>
       </div>
       <Button variant="dark" icon={<DownloadIcon size={14} />} onClick={() => void exportImage()}>

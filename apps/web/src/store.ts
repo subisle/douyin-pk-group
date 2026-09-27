@@ -96,6 +96,8 @@ interface State {
   moveCard: (activeKey: string, toBucketId: string, overKey: string | null) => void;
   /** 增补人员：把新主播加进已定稿的组（不重排其他人），返回是否成功 */
   addToBucket: (bucketId: string, name: string) => Promise<boolean>;
+  /** 生成对外展示链接（保存方案后返回 /s/:id 完整 URL，并复制到剪贴板） */
+  makeShareLink: () => Promise<string | null>;
   bind: (rowName: string, personId: string, anchorName: string) => Promise<void>;
   setManualWave: (rowName: string, wave: number) => void;
   savePlanNow: () => Promise<void>;
@@ -323,6 +325,40 @@ export const useStore = create<State>((set, get) => ({
     }
   },
 
+  makeShareLink: async () => {
+    const { title, metric, days, buckets, brand, startTime, intervalMin, notify } = get();
+    if (!buckets.length) {
+      notify('还没有分组结果');
+      return null;
+    }
+    try {
+      const { id } = await api.savePlan({
+        title,
+        metric,
+        days,
+        payload: {
+          title,
+          metric,
+          days,
+          brand,
+          schedule: { start: startTime, intervalMin },
+          buckets: buckets.map((b) => ({ name: b.name, players: b.players })),
+        },
+      });
+      const url = `${location.origin}/s/${id}`;
+      try {
+        await navigator.clipboard.writeText(url);
+        notify(`展示链接已复制：${url}`);
+      } catch {
+        notify(`展示链接：${url}`);
+      }
+      return url;
+    } catch (e) {
+      notify(`生成链接失败：${(e as Error).message}`);
+      return null;
+    }
+  },
+
   bind: async (rowName, personId, anchorName) => {
     const { metric, days, players, buckets, unmatched } = get();
     const w = await api.waves({ metric, days, personIds: [personId] });
@@ -349,7 +385,7 @@ export const useStore = create<State>((set, get) => ({
   },
 
   savePlanNow: async () => {
-    const { title, metric, days, buckets, notify } = get();
+    const { title, metric, days, buckets, brand, startTime, intervalMin, notify } = get();
     if (!buckets.length) {
       notify('还没有分组结果');
       return;
@@ -363,6 +399,8 @@ export const useStore = create<State>((set, get) => ({
           title,
           metric,
           days,
+          brand,
+          schedule: { start: startTime, intervalMin },
           buckets: buckets.map((b) => ({ name: b.name, players: b.players })),
         },
       });
