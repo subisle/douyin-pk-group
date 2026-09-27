@@ -1,0 +1,20 @@
+{
+  "name": "douyin-pk-group",
+  "version": "1.0.0",
+  "private": true,
+  "description": "抖音 PK 挑战赛均衡分组程序（只读接入 douyinxs 数据库）",
+  "scripts": {
+    "dev": "concurrently -n server,web -c blue,green \"pnpm -F @pk/server dev\" \"pnpm -F @pk/web dev\"",
+    "dev:server": "pnpm -F @pk/server dev",
+    "dev:web": "pnpm -F @pk/web dev",
+    "build": "pnpm -F @pk/web build",
+    "typecheck": "tsc -b packages/shared apps/server apps/web --noEmit false --emitDeclarationOnly false || true"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "typescript": "^5.7.3"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild"]
+  }
+}

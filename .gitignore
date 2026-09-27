@@ -1,0 +1,11 @@
+node_modules/
+dist/
+apps/server/data/
+*.log
+.DS_Store
+.env.local
+
+# 数据库凭据与本地状态，绝不入库
+.env
+.workbuddy/
+*.tsbuildinfo
