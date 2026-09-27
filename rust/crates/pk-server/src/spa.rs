@@ -10,7 +10,6 @@
 //! - 其余路径 → index.html + 200（前端路由自己解析）
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{header, StatusCode, Uri};
@@ -18,17 +17,24 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::json;
 
-/// 构建失败时为 None：服务只提供 API，不挂静态目录
-pub type Index = Option<Arc<Vec<u8>>>;
+/// 构建失败时为 None：服务只提供 API，不挂静态目录。
+///
+/// 这里只记录「有没有」可用于 SPA 回退的 index.html，不缓存内容：
+/// 内容每次回退时从磁盘现读。前端重新构建后 index.html 里的资源指纹会变，
+/// 若缓存旧内容，旧 index.html 引用的 js 已被删掉，而 /assets/xxx.js 这种
+/// 未命中请求又会回退到 index.html（200 + text/html），浏览器按 module 加载
+/// 时因 MIME 不对直接拒绝执行 —— 表现是页面整片空白且控制台没有报错。
+/// index.html 几百字节，回退也只在 SPA 导航时发生，现读完全够用。
+pub type Index = bool;
 
 pub async fn load_index(dist_dir: &Path) -> Index {
     let path = dist_dir.join("index.html");
-    match tokio::fs::read(&path).await {
-        Ok(bytes) if !bytes.is_empty() => Some(Arc::new(bytes)),
-        Ok(_) => None,
+    match tokio::fs::metadata(&path).await {
+        Ok(meta) if meta.len() > 0 => true,
+        Ok(_) => false,
         Err(e) => {
             tracing::warn!(path = %path.display(), error = %e, "index.html 为空");
-            None
+            false
         }
     }
 }
@@ -126,16 +132,29 @@ pub async fn handler(
         }
     }
 
+    // 构建产物里的静态资源（vite 固定输出到 /assets/）没命中就是缺文件，
+    // 不能回退成 index.html：浏览器按 module/css 加载时拿到 text/html 会直接
+    // 拒绝执行，页面整片空白且控制台无报错，很难查。这里明确 404。
+    if path.starts_with("/assets/") {
+        return (StatusCode::NOT_FOUND, "asset not found").into_response();
+    }
+
     // 其余交给前端路由
-    match index {
-        // Arc<Vec<u8>> 不走 Body::from，克隆成本也就一次 memcpy
-        Some(bytes) => Response::builder()
+    if !index {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    }
+    match tokio::fs::read(dist_dir.join("index.html")).await {
+        Ok(bytes) => Response::builder()
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
             .header(header::CACHE_CONTROL, "no-cache")
-            .body(Body::from(bytes.as_ref().clone()))
+            .body(Body::from(bytes))
             .expect("构造 SPA 响应失败"),
-        None => (StatusCode::NOT_FOUND, "not found").into_response(),
+        // 启动时有、现在没了（构建中途重跑）：按 404 处理，别把错误当 HTML 吐给浏览器
+        Err(e) => {
+            tracing::warn!(error = %e, "回退 index.html 读取失败");
+            (StatusCode::NOT_FOUND, "not found").into_response()
+        }
     }
 }
 
@@ -222,6 +241,70 @@ mod tests {
             res.status(),
             StatusCode::OK,
             "SPA 回退必须是 200，不能带 404"
+        );
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// 回归：曾经把 index.html 在启动时读进内存缓存，前端重新构建后
+    /// 资源指纹变了，旧 index.html 引用的 js 已被删除 → 页面空白且无报错。
+    #[tokio::test]
+    async fn spa_fallback_follows_rebuilt_index() {
+        let dir = std::env::temp_dir().join(format!("pk-spa-rebuild-{}", std::process::id()));
+        tokio::fs::create_dir_all(dir.join("assets")).await.unwrap();
+        tokio::fs::write(dir.join("index.html"), b"<html>v1</html>")
+            .await
+            .unwrap();
+        // 启动时加载一次，模拟服务启动
+        let index = load_index(&dir).await;
+        assert!(index, "index.html 存在时 load_index 应为 true");
+
+        // 前端重新构建：index.html 换成新指纹，新 js 上线，旧 js 删除
+        tokio::fs::write(dir.join("assets/index-new.js"), b"console.log(1)")
+            .await
+            .unwrap();
+        tokio::fs::write(dir.join("index.html"), b"<html>v2</html>")
+            .await
+            .unwrap();
+
+        let res = handler(
+            axum::extract::State((dir.clone(), index)),
+            Uri::from_static("/s/1"),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&body),
+            "<html>v2</html>",
+            "SPA 回退必须反映重新构建后的 index.html，而不是启动时的旧内容"
+        );
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// 回归：缺失的 /assets/*.js 曾经回退成 index.html（200 + text/html），
+    /// 浏览器按 module 加载时因 MIME 不对静默拒绝执行。
+    #[tokio::test]
+    async fn missing_asset_is_404_not_html() {
+        let dir = std::env::temp_dir().join(format!("pk-spa-asset-{}", std::process::id()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(dir.join("index.html"), b"<html>ok</html>")
+            .await
+            .unwrap();
+        let index = load_index(&dir).await;
+
+        let res = handler(
+            axum::extract::State((dir.clone(), index)),
+            Uri::from_static("/assets/index-gone.js"),
+        )
+        .await;
+        assert_eq!(
+            res.status(),
+            StatusCode::NOT_FOUND,
+            "缺失的构建产物必须 404，不能回退成 HTML"
         );
 
         let _ = tokio::fs::remove_dir_all(&dir).await;

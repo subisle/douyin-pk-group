@@ -241,6 +241,8 @@ function GroupColumn({
   return (
     <div
       ref={setNodeRef}
+      // data-group-col 给 uicheck / e2e 用：靠 Tailwind 类名定位会被无关改动打断
+      data-group-col={bucket.name}
       className={`group rounded-panel border-t-[5px] bg-surface p-3 pb-2 shadow-card transition-shadow ${
         isOver ? 'ring-2 ring-brand' : bad ? 'ring-2 ring-bad' : ''
       }`}

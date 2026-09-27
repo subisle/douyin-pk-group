@@ -297,6 +297,19 @@ pub fn auto_group(players: &[Player], options: &GroupOptions) -> Vec<Vec<Player>
     }
 
     groups.retain(|g| !g.is_empty());
+
+    /* 6. 组内按音浪降序。
+    蛇形/均衡只保证「谁在哪组」，不管组内顺序，直接返回的话看板上会出现
+    「序号 6 的音浪比序号 8 还大」这种刺眼场面（分享页的组内名次就是这么算的）。
+    放在最后做：前面的固定位、互斥、最小间隔、微调都只关心成员归属，不关心顺序。 */
+    for g in groups.iter_mut() {
+        g.sort_by(|a, b| {
+            b.wave
+                .partial_cmp(&a.wave)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+    }
     groups
 }
 
@@ -491,5 +504,90 @@ mod tests {
         let moved = move_player(&groups, (0, 0), (1, 0));
         assert_eq!(moved[1][0].name, "a");
         assert_eq!(moved[0].len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod intra_group_order_tests {
+    use super::*;
+
+    fn p(name: &str, wave: f64) -> Player {
+        Player {
+            key: name.to_string(),
+            raw: name.to_string(),
+            name: name.to_string(),
+            leader: None,
+            person_id: None,
+            matched: true,
+            wave,
+            avatar: None,
+            excluded: false,
+        }
+    }
+
+    fn names(g: &[Player]) -> Vec<&str> {
+        g.iter().map(|x| x.name.as_str()).collect()
+    }
+
+    /// 组内必须按音浪降序：看板上直接用数组下标当序号显示，顺序乱了序号就乱了
+    #[test]
+    fn groups_are_sorted_by_wave_desc() {
+        let players: Vec<Player> = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l"]
+            .iter()
+            .enumerate()
+            .map(|(i, n)| p(n, (12 - i) as f64 * 1000.0))
+            .collect();
+        for strategy in [
+            Strategy::Snake,
+            Strategy::SnakeNoMaster,
+            Strategy::Sequential,
+            Strategy::Random,
+        ] {
+            let groups = auto_group(&players, &GroupOptions::new(4, strategy));
+            assert!(!groups.is_empty());
+            for g in &groups {
+                let waves: Vec<f64> = g.iter().map(|x| x.wave).collect();
+                let mut sorted = waves.clone();
+                sorted.sort_by(|a, b| b.partial_cmp(a).unwrap());
+                assert_eq!(
+                    waves,
+                    sorted,
+                    "{strategy:?} 的组 {:?} 没按音浪降序",
+                    names(g)
+                );
+            }
+        }
+    }
+
+    /// 同音浪时按姓名定序，保证结果稳定可复现（不然每次刷新顺序都可能跳）
+    #[test]
+    fn equal_waves_fall_back_to_name_order() {
+        let players: Vec<Player> = ["狼耀", "浩冬", "玖玥", "啸安", "浩杰", "浩宁"]
+            .iter()
+            .map(|n| p(n, 5000.0))
+            .collect();
+        let groups = auto_group(&players, &GroupOptions::new(3, Strategy::Snake));
+        for g in &groups {
+            let list = names(g);
+            let mut want = list.clone();
+            want.sort();
+            assert_eq!(list, want, "同音浪时应按姓名排：{:?}", list);
+        }
+    }
+
+    /// 排序不能动分组结果：总人数、组数、每组音浪合计都要和排序前一致
+    #[test]
+    fn sorting_does_not_change_membership() {
+        let players: Vec<Player> = (0..20)
+            .map(|i| p(&format!("p{i:02}"), ((i * 37) % 11) as f64 * 1000.0 + 500.0))
+            .collect();
+        let groups = auto_group(&players, &GroupOptions::new(5, Strategy::Snake));
+        let total: f64 = groups.iter().flatten().map(|x| x.wave).sum();
+        let expect_total: f64 = players.iter().map(|x| x.wave).sum();
+        assert_eq!(groups.iter().flatten().count(), 20);
+        assert!(
+            (total - expect_total).abs() < f64::EPSILON,
+            "排序改变了音浪合计"
+        );
     }
 }

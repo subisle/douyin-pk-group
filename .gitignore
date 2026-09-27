@@ -16,3 +16,6 @@ deploy/data/
 .env
 .workbuddy/
 *.tsbuildinfo
+
+# uicheck 的截图产物
+.uicheck/

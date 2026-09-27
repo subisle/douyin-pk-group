@@ -129,23 +129,24 @@ async fn main() -> anyhow::Result<()> {
         .layer(cors);
 
     /* 前端静态资源 + SPA 回退（生产单端口模式）。
-    index.html 读进内存常驻，省掉每次请求一次磁盘读。 */
+    启动时只判断 index.html 在不在，内容由 spa::handler 每次回退时现读，
+    这样前端重新构建不用重启服务。 */
     let dist_dir = std::env::var("WEB_DIST")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("../../web/dist"));
     let index = spa::load_index(&dist_dir).await;
 
-    let app = match &index {
-        Some(_) => {
+    let app = match index {
+        true => {
             tracing::info!(dir = %dist_dir.display(), "静态目录已挂载");
             // 注意：回退必须自己给 200。用 ServeDir::not_found_service 的话，
             // 分享链接 /s/:id 会变成「HTML 内容 + 404 状态码」。
             let spa_router = Router::new()
                 .fallback(spa::handler)
-                .with_state((dist_dir.clone(), index.clone()));
+                .with_state((dist_dir.clone(), index));
             api.fallback_service(spa_router)
         }
-        None => {
+        false => {
             tracing::warn!(dir = %dist_dir.display(), "没有前端构建产物，仅提供 API（先跑 pnpm --filter @pk/web build）");
             api
         }

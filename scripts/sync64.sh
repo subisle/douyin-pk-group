@@ -6,6 +6,9 @@
 #
 # 用 rsync --delete 而不是 tar：tar 是覆盖式，本地删掉的文件在 64 上会残留，
 # 编译报错会指向一个「本地已经不存在」的文件，很难查。
+#
+# 用 -r 而不是 -a：-a 带 -t 会保留文件 mtime，而 cargo 是按 mtime 判断要不要重编的。
+# 保留 mtime 会出现「源码明明改了，cargo 却认为没变」→ 测的是上一次的旧二进制。
 set -euo pipefail
 
 HOST="${PK64_HOST:-64.188.8.149}"
@@ -17,7 +20,8 @@ SSH=(sshpass -p "$PASS" ssh -o StrictHostKeyChecking=no "root@$HOST")
 
 echo "==> 同步 $ROOT -> $HOST:$REMOTE"
 # 排除：VCS、构建产物、本机依赖、以及 64 上的运行时配置与数据
-rsync -az --delete \
+# -r 不用 -a：见上面的 mtime 说明
+rsync -rlz --delete \
   --exclude='.git/' \
   --exclude='node_modules/' \
   --exclude='target/' \

@@ -250,6 +250,10 @@ pub async fn plan(State(st): State<std::sync::Arc<AppState>>, Path(id): Path<i64
             // person_id 只用于回填实时音浪，任何情况下都不外泄
             p.person_id = None;
         }
+        // 按音浪名次排，而不是沿用方案里的原始顺序。
+        // 方案可能是排序修复前存的，原始顺序未必跟音浪一致，
+        // 直接渲染会出现「序号 8 的人音浪比序号 6 还大」。
+        g.players.sort_by_key(|p| p.group_rank);
     }
 
     let ranking: Vec<_> = {
@@ -374,6 +378,26 @@ mod tests {
         let v = serde_json::json!({ "wave": "不是数字" });
         assert_eq!(as_f64(&v, "wave"), 0.0);
         assert_eq!(as_f64(&serde_json::json!({}), "wave"), 0.0);
+    }
+
+    #[test]
+    fn group_players_come_back_sorted_by_rank() {
+        // 模拟「方案里顺序是乱的」（排序修复前存的老方案）
+        let mut g = vec![
+            player("低音浪的", 100.0, 0),
+            player("最高的", 900.0, 1),
+            player("中音浪的", 500.0, 2),
+        ];
+        rank_within(&mut g, |p, r| p.group_rank = r);
+        let mut display = g.clone();
+        // public.rs 收尾时做的排序
+        display.sort_by_key(|p| p.group_rank);
+        let seq: Vec<usize> = display.iter().map(|p| p.group_rank).collect();
+        assert_eq!(seq, [1, 2, 3], "展示顺序必须让名次连成 1,2,3…");
+        let waves: Vec<f64> = display.iter().map(|p| p.wave).collect();
+        let mut desc = waves.clone();
+        desc.sort_by(|a, b| b.partial_cmp(a).unwrap());
+        assert_eq!(waves, desc, "展示出来必须是音浪降序");
     }
 
     #[test]

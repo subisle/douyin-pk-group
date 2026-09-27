@@ -140,6 +140,7 @@ export function SortablePlayerCard({
     <div style={{ transform: CSS.Translate.toString(transform), transition, opacity: isDragging ? 0.4 : 1 }}>
       <div
         ref={setNodeRef}
+        data-player-card={player.name}
         className={`${CARD_SHELL} ${dense ? 'py-[4px]' : ''} ${
           conflict ? 'ring-2 ring-bad' : highlight ? 'ring-2 ring-brand' : ''
         }`}
