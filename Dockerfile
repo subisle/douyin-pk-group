@@ -29,8 +29,13 @@ RUN pnpm --filter @pk/web build
 # ---------- 阶段 2：交叉编译 Rust 后端 ----------
 FROM --platform=$BUILDPLATFORM rust:1-bookworm AS api
 ARG TARGETPLATFORM
+# gcc-aarch64-linux-gnu 只带编译器，不带目标 libc 头文件；ring 等 crate 要用
+# C 编译，会 include 目标平台的 bits/libc-header-start.h，缺了会报
+# "fatal error: bits/libc-header-start.h: No such file or directory"。
+# 所以必须同时装 libc6-dev-arm64-cross（提供 aarch64 sysroot 头文件）。
 RUN apt-get update && apt-get install -y --no-install-recommends \
       gcc-aarch64-linux-gnu \
+      libc6-dev-arm64-cross \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY rust rust
