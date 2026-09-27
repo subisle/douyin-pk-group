@@ -1,3 +1,11 @@
 packages:
   - "apps/*"
   - "packages/*"
+
+# pnpm >= 10.6 才读 pnpm-workspace.yaml 里的设置；写在 package.json#pnpm 里
+# 在 pnpm 11+ 会被忽略，esbuild 的 postinstall 于是被 CI 判成 ERR_PNPM_IGNORED_BUILDS。
+onlyBuiltDependencies:
+  - esbuild
+
+# 依赖的构建脚本不因未被批准而让 install 失败（esbuild 已在上面显式批准）
+strictDepBuilds: false

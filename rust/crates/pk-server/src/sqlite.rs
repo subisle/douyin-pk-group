@@ -28,12 +28,32 @@ pub fn init(path: &str) -> Result<()> {
            metric TEXT NOT NULL,
            days INTEGER NOT NULL DEFAULT 3,
            payload TEXT NOT NULL,
-           created_at TEXT NOT NULL
+           created_at TEXT NOT NULL,
+           published INTEGER NOT NULL DEFAULT 0
          );",
     )?;
+    migrate_plans(&conn)?;
     DB.set(Mutex::new(conn))
         .map_err(|_| anyhow::anyhow!("SQLite 重复初始化"))?;
     tracing::info!(path, "SQLite 已就绪");
+    Ok(())
+}
+
+/// 老库升级：plans 表补 `published` 列。SQLite 的 ADD COLUMN 不支持 IF NOT EXISTS，
+/// 先查 pragma 再决定，避免重复执行报错。
+fn migrate_plans(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(plans)")?;
+    let cols: Vec<String> = stmt
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .collect();
+    if !cols.iter().any(|c| c == "published") {
+        conn.execute(
+            "ALTER TABLE plans ADD COLUMN published INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+        tracing::info!("plans 表已补 published 列");
+    }
     Ok(())
 }
 
@@ -82,12 +102,14 @@ pub struct PlanRow {
     pub days: i64,
     pub payload: String,
     pub created_at: String,
+    /// 是否已发布到对外展示页
+    pub published: bool,
 }
 
 pub fn save_plan(title: &str, metric: &str, days: i64, payload: &str) -> i64 {
     let conn = db();
     conn.execute(
-        "INSERT INTO plans (title, metric, days, payload, created_at) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO plans (title, metric, days, payload, created_at, published) VALUES (?, ?, ?, ?, ?, 0)",
         rusqlite::params![
             title,
             metric,
@@ -103,7 +125,7 @@ pub fn save_plan(title: &str, metric: &str, days: i64, payload: &str) -> i64 {
 pub fn list_plans() -> Vec<PlanRow> {
     let conn = db();
     let mut stmt = conn
-        .prepare("SELECT id, title, metric, days, payload, created_at FROM plans ORDER BY id DESC LIMIT 50")
+        .prepare("SELECT id, title, metric, days, payload, created_at, published FROM plans ORDER BY id DESC LIMIT 50")
         .unwrap();
     let rows = stmt.query_map([], map_plan).expect("查方案失败");
     rows.filter_map(Result::ok).collect()
@@ -112,9 +134,26 @@ pub fn list_plans() -> Vec<PlanRow> {
 pub fn get_plan(id: i64) -> Option<PlanRow> {
     let conn = db();
     let mut stmt = conn
-        .prepare("SELECT id, title, metric, days, payload, created_at FROM plans WHERE id = ?")
+        .prepare("SELECT id, title, metric, days, payload, created_at, published FROM plans WHERE id = ?")
         .unwrap();
     stmt.query_row([id], map_plan).ok()
+}
+
+/// 发布 / 取消发布。未发布时对外展示页返回 404
+pub fn set_published(id: i64, published: bool) -> bool {
+    let conn = db();
+    let n = conn
+        .execute(
+            "UPDATE plans SET published = ? WHERE id = ?",
+            rusqlite::params![published as i64, id],
+        )
+        .expect("更新发布状态失败");
+    n > 0
+}
+
+/// 对外展示页用：只允许取已发布的方案
+pub fn get_published_plan(id: i64) -> Option<PlanRow> {
+    get_plan(id).filter(|p| p.published)
 }
 
 pub fn delete_plan(id: i64) {
@@ -130,5 +169,6 @@ fn map_plan(r: &rusqlite::Row<'_>) -> rusqlite::Result<PlanRow> {
         days: r.get(3)?,
         payload: r.get(4)?,
         created_at: r.get(5)?,
+        published: r.get::<_, i64>(6)? != 0,
     })
 }

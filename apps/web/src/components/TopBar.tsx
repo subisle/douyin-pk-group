@@ -1,7 +1,8 @@
 import type { WaveMetric } from '@pk/shared';
 import { useStore } from '../store.js';
 import { Button, Pill } from './ui.js';
-import { HistoryIcon, LayersIcon } from './icons.js';
+import { HistoryIcon, LayersIcon, LogoutIcon } from './icons.js';
+import { useAuthEnabled } from './AuthGate.js';
 
 export function TopBar() {
   const dbOk = useStore((s) => s.dbOk);
@@ -11,6 +12,8 @@ export function TopBar() {
   const anchorCount = useStore((s) => s.anchorCount);
   const openPlans = useStore((s) => s.openPlans);
   const loading = useStore((s) => s.loading);
+  const logout = useStore((s) => s.logout);
+  const authEnabled = useAuthEnabled();
 
   return (
     <header className="flex flex-wrap items-center justify-between gap-3">
@@ -40,6 +43,11 @@ export function TopBar() {
         <Button icon={<HistoryIcon size={14} />} onClick={() => void openPlans()}>
           历史方案
         </Button>
+        {authEnabled && (
+          <Button icon={<LogoutIcon size={14} />} onClick={() => void logout()} title="退出登录">
+            退出
+          </Button>
+        )}
       </div>
     </header>
   );

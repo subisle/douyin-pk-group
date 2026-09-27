@@ -2,16 +2,54 @@ import type { AnchorBrief, ParsedRow, Player, WaveMetric } from '@pk/shared';
 import type { ArrangeResponse, ConstraintsMeta, InspectResponse, PolishResponse } from './types.js';
 
 const BASE = '/api';
+const TOKEN_KEY = 'pk_admin_token';
+
+/** 管理员 token 存本地；清掉即视为未登录 */
+export function getToken(): string | null {
+  try {
+    return localStorage.getItem(TOKEN_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export function setToken(token: string | null) {
+  try {
+    if (token) localStorage.setItem(TOKEN_KEY, token);
+    else localStorage.removeItem(TOKEN_KEY);
+  } catch {
+    /* 隐私模式下 localStorage 会抛，忽略即可 */
+  }
+}
+
+/** token 失效时广播，由 <AuthGate> 切回登录页 */
+export const UNAUTHORIZED_EVENT = 'pk:unauthorized';
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
+  const token = getToken();
   const res = await fetch(BASE + path, {
     ...init,
-    headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(init?.headers ?? {}),
+    },
   });
+  if (res.status === 401) {
+    setToken(null);
+    window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT));
+  }
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`${res.status} ${text}`);
   }
+  return res.json() as Promise<T>;
+}
+
+/** 公开只读端点：不带 token，也不触发 401 广播（展示页给外网人看） */
+async function pubReq<T>(path: string): Promise<T> {
+  const res = await fetch(BASE + path);
+  if (!res.ok) throw new Error(res.status === 404 ? '展示页不存在或已下架' : `${res.status}`);
   return res.json() as Promise<T>;
 }
 
@@ -52,6 +90,8 @@ export interface PlanBrief {
   days: number;
   payload: string;
   created_at: string;
+  /** 是否已发布到对外展示页 */
+  published: boolean;
 }
 
 /** 方案落库结构：直接存完整 Player，读取即可还原看板（含拖拽所需的 key） */
@@ -72,6 +112,47 @@ export interface PlanDetail {
   days: number;
   payload: SavedPlan;
   created_at: string;
+  published: boolean;
+}
+
+/* ---------------- 对外展示页的数据结构（后端 public.rs） ---------------- */
+
+export interface PublicPlayer {
+  name: string;
+  leader?: string;
+  avatar?: string | null;
+  wave: number;
+  /** 全场音浪名次 */
+  rank: number;
+  /** 组内音浪名次 */
+  group_rank: number;
+}
+
+export interface PublicGroup {
+  name: string;
+  /** 开赛时间，如 "08:15" */
+  slot: string;
+  count: number;
+  /** 组内音浪合计 */
+  total: number;
+  players: PublicPlayer[];
+}
+
+export interface PublicPlan {
+  id: number;
+  title: string;
+  brand: string;
+  metric: WaveMetric;
+  days: number;
+  schedule: { start: string; intervalMin: number };
+  createdAt: string;
+  /** 参与统计的采集日期（倒序） */
+  dates: string[];
+  /** true = 实时音浪取失败，当前是方案保存时的快照 */
+  stale: boolean;
+  counts: { groups: number; players: number; totalWave: number };
+  groups: PublicGroup[];
+  ranking: PublicPlayer[];
 }
 
 export const api = {
@@ -129,9 +210,28 @@ export const api = {
 
   constraints: () => req<ConstraintsMeta>('/group/constraints'),
 
+  /* ---------------- 鉴权 ---------------- */
+  session: () => req<{ enabled: boolean; ok: boolean }>('/auth/session'),
+  login: (password: string) => req<{ token: string; enabled: boolean }>('/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ password }),
+  }),
+  logout: () => req<{ ok: boolean }>('/auth/logout', { method: 'POST', body: '{}' }),
+
   listPlans: () => req<{ items: PlanBrief[] }>('/plans'),
   getPlan: (id: number) => req<PlanDetail>(`/plans/${id}`),
   savePlan: (body: { title: string; metric: string; days: number; payload: SavedPlan }) =>
     req<{ id: number }>('/plans', { method: 'POST', body: JSON.stringify(body) }),
   deletePlan: (id: number) => req<{ ok: boolean }>(`/plans/${id}`, { method: 'DELETE' }),
+
+  /** 上架 / 下架对外展示页；上架后 /s/:id 才可访问 */
+  setPublished: (id: number, published: boolean) =>
+    req<{ ok: boolean; id: number; published: boolean }>(`/plans/${id}/publish`, {
+      method: 'POST',
+      body: JSON.stringify({ published }),
+    }),
+
+  /** 公开只读：不需要管理员 token */
+  publicPlans: () => pubReq<{ items: Array<{ id: number; title: string }> }>('/public/plans'),
+  publicPlan: (id: number) => pubReq<PublicPlan>(`/public/plans/${id}`),
 };

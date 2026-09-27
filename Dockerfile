@@ -1,7 +1,10 @@
 # ---------- 阶段 1：构建前端 ----------
 FROM node:22-bookworm-slim AS web
 WORKDIR /app
-RUN corepack enable
+# 不用 corepack：它拉到的 pnpm 大版本随镜像漂移，pnpm 11+ 会忽略
+# package.json#pnpm 里的 onlyBuiltDependencies，直接把 install 打成 ERR_PNPM_IGNORED_BUILDS。
+# 显式装与 CI 一致的版本，构建结果可复现。
+RUN npm install -g pnpm@10.33.0
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY apps/web/package.json apps/web/
 COPY apps/server/package.json apps/server/

@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useStore } from './store.js';
 import { TopBar } from './components/TopBar.js';
 import { WaveConfig } from './components/WaveConfig.js';
@@ -36,6 +36,40 @@ export default function App() {
   useEffect(() => {
     void init();
   }, [init]);
+
+  /* 全局找人 + 紧凑模式：组一多就靠这两个按钮定位 */
+  const [query, setQuery] = useState('');
+  const [dense, setDense] = useState(false);
+
+  const highlight = useMemo(() => {
+    const q = query.trim();
+    if (!q) return undefined;
+    const set = new Set<string>();
+    for (const p of [...buckets.flatMap((b) => b.players), ...unassigned]) {
+      if (p.name.includes(q)) set.add(p.key);
+    }
+    return set;
+  }, [query, buckets, unassigned]);
+
+  /* Cmd/Ctrl+Z 撤销、Cmd/Ctrl+Shift+Z 重做；在输入框里让给浏览器原生行为 */
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey)) return;
+      const el = e.target as HTMLElement | null;
+      const typing = Boolean(el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable));
+      if (typing) return;
+      const k = e.key.toLowerCase();
+      if (k === 'z' && !e.shiftKey) {
+        e.preventDefault();
+        undo();
+      } else if ((k === 'z' && e.shiftKey) || k === 'y') {
+        e.preventDefault();
+        redo();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [undo, redo]);
 
   const activeCount = players.filter((p) => !p.excluded).length;
 
@@ -130,8 +164,14 @@ export default function App() {
                 </div>
               )}
               <StatsBar buckets={buckets} />
-              <BoardTools />
-              <GroupBoard buckets={buckets} />
+              <BoardTools
+                query={query}
+                onQueryChange={setQuery}
+                hitCount={highlight?.size ?? 0}
+                dense={dense}
+                onDenseChange={setDense}
+              />
+              <GroupBoard buckets={buckets} highlight={highlight} dense={dense} />
             </div>
           )}
 

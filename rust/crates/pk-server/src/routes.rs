@@ -215,6 +215,26 @@ pub async fn plans() -> ApiResult {
     Ok(Json(json!({ "items": sqlite::list_plans() })))
 }
 
+/// `POST /api/plans/{id}/publish`：上架 / 下架对外展示页
+#[derive(Deserialize)]
+pub struct PublishBody {
+    pub published: Option<bool>,
+}
+
+pub async fn set_plan_published(
+    Path(id): Path<String>,
+    Json(body): Json<PublishBody>,
+) -> ApiResult {
+    let id: i64 = id.parse().map_err(|_| anyhow::anyhow!("方案不存在"))?;
+    let published = body.published.unwrap_or(true);
+    if !sqlite::set_published(id, published) {
+        return Err(anyhow::anyhow!("方案不存在").into());
+    }
+    Ok(Json(
+        json!({ "ok": true, "id": id, "published": published }),
+    ))
+}
+
 #[derive(Deserialize)]
 pub struct SavePlanBody {
     pub title: Option<String>,
@@ -242,7 +262,7 @@ pub async fn get_plan(Path(id): Path<String>) -> ApiResult {
     let payload: serde_json::Value =
         serde_json::from_str(&row.payload).unwrap_or(serde_json::Value::Null);
     Ok(Json(
-        json!({ "id": row.id, "title": row.title, "metric": row.metric, "days": row.days, "createdAt": row.created_at, "payload": payload }),
+        json!({ "id": row.id, "title": row.title, "metric": row.metric, "days": row.days, "createdAt": row.created_at, "published": row.published, "payload": payload }),
     ))
 }
 

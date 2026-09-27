@@ -97,6 +97,8 @@ export function SortablePlayerCard({
   index,
   pinned,
   conflict,
+  highlight,
+  dense,
   rankLine,
   menu,
 }: {
@@ -105,6 +107,10 @@ export function SortablePlayerCard({
   index: number;
   pinned?: boolean;
   conflict?: boolean;
+  /** 搜索命中：描边高亮并滚动到可视区 */
+  highlight?: boolean;
+  /** 紧凑模式：隐藏名次行，卡片更矮 */
+  dense?: boolean;
   rankLine?: string;
   menu?: CardMenuData;
 }) {
@@ -125,11 +131,18 @@ export function SortablePlayerCard({
     return () => document.removeEventListener('mousedown', onDoc);
   }, [open]);
 
+  // 搜索命中时滚到视野内（nearest：已经在屏内就不动，避免整页乱跳）
+  useEffect(() => {
+    if (highlight) ref.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }, [highlight]);
+
   return (
     <div style={{ transform: CSS.Translate.toString(transform), transition, opacity: isDragging ? 0.4 : 1 }}>
       <div
         ref={setNodeRef}
-        className={`${CARD_SHELL} ${conflict ? 'ring-2 ring-bad' : ''}`}
+        className={`${CARD_SHELL} ${dense ? 'py-[4px]' : ''} ${
+          conflict ? 'ring-2 ring-bad' : highlight ? 'ring-2 ring-brand' : ''
+        }`}
         style={{ background: conflict ? '#FEE4E2' : color.soft }}
         {...attributes}
         {...listeners}
@@ -224,7 +237,7 @@ export function SortablePlayerCard({
           </div>
         )}
       </div>
-      {rankLine && <div className="px-2 pt-[3px] text-[10.5px] leading-4 text-ink3">{rankLine}</div>}
+      {rankLine && !dense && <div className="px-2 pt-[3px] text-[10.5px] leading-4 text-ink3">{rankLine}</div>}
     </div>
   );
 }

@@ -17,7 +17,7 @@ import { formatWave, isPinnedName, resolvePinnedIndex, slotTime, type Player } f
 import type { Bucket } from '../types.js';
 import { useStore } from '../store.js';
 import { SortablePlayerCard, DragPreview, type CardMenuData } from './PlayerCard.js';
-import { ClockIcon, CloseIcon, PinIcon } from './icons.js';
+import { AlertIcon, ClockIcon, CloseIcon, PinIcon } from './icons.js';
 import { buildRankContext, gapLine, groupColor } from '../lib/board.js';
 
 const COL_PREFIX = 'col-';
@@ -27,7 +27,17 @@ function bucketOf(buckets: Bucket[], id: string): Bucket | undefined {
   return buckets.find((b) => b.players.some((p) => p.key === id));
 }
 
-export function GroupBoard({ buckets }: { buckets: Bucket[] }) {
+export function GroupBoard({
+  buckets,
+  highlight,
+  dense,
+}: {
+  buckets: Bucket[];
+  /** 搜索命中的 player.key 集合 */
+  highlight?: Set<string>;
+  /** 紧凑模式：一屏尽量多看几个人 */
+  dense?: boolean;
+}) {
   const moveCard = useStore((s) => s.moveCard);
   const startTime = useStore((s) => s.startTime);
   const intervalMin = useStore((s) => s.intervalMin);
@@ -91,6 +101,13 @@ export function GroupBoard({ buckets }: { buckets: Bucket[] }) {
 
   const rank = useMemo(() => buildRankContext(buckets), [buckets]);
 
+  // 每组人数上限：跟着「每组人数」配置走，超员是分组时最常见的问题，直接在组头标出来
+  const capacity = useStore((s) => s.groupSize);
+  const overCount = useMemo(
+    () => buckets.filter((b) => b.players.length > capacity).length,
+    [buckets, capacity],
+  );
+
   const mean = useMemo(() => {
     const totals = buckets.map((b) => b.players.reduce((s, p) => s + p.wave, 0));
     return totals.length ? totals.reduce((a, b) => a + b, 0) / totals.length : 0;
@@ -133,6 +150,12 @@ export function GroupBoard({ buckets }: { buckets: Bucket[] }) {
       onDragEnd={onDragEnd}
       onDragCancel={() => setActiveKey(null)}
     >
+      {overCount > 0 && (
+        <div className="mb-3 flex flex-wrap items-center gap-2 rounded-card border border-warn-soft bg-warn-soft px-3.5 py-2.5 text-[12.5px] text-warn-ink">
+          <AlertIcon size={15} />
+          有 {overCount} 组超过 {capacity} 人上限，超出的人已标在组头上，可以直接移出或交换
+        </div>
+      )}
       <div className="grid items-start gap-4" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))' }}>
         {buckets.map((b, i) => (
           <GroupColumn
@@ -146,6 +169,9 @@ export function GroupBoard({ buckets }: { buckets: Bucket[] }) {
             rank={rank}
             mean={mean}
             menuBase={menuBase}
+            highlight={highlight}
+            dense={dense}
+            capacity={capacity}
           />
         ))}
       </div>
@@ -176,6 +202,9 @@ function GroupColumn({
   rank,
   mean,
   menuBase,
+  highlight,
+  dense,
+  capacity,
 }: {
   bucket: Bucket;
   index: number;
@@ -186,6 +215,9 @@ function GroupColumn({
   rank: ReturnType<typeof buildRankContext>;
   mean: number;
   menuBase: Omit<CardMenuData, 'swapTargets' | 'locked'> & { swapTargets: Array<{ key: string; name: string; groupIndex: number }> };
+  highlight?: Set<string>;
+  dense?: boolean;
+  capacity: number;
 }) {
   const renameBucket = useStore((s) => s.renameBucket);
   const removeBucket = useStore((s) => s.removeBucket);
@@ -204,6 +236,7 @@ function GroupColumn({
   const deltaText = `${delta >= 0 ? '+' : ''}${delta.toFixed(1)}%`;
   const empty = bucket.players.length === 0;
   const bad = conflictNames.size > 0;
+  const over = bucket.players.length > capacity;
 
   return (
     <div
@@ -263,7 +296,11 @@ function GroupColumn({
           <span className="nums font-medium">{time}</span>
           <span>开赛</span>
           <span>·</span>
-          <span className="nums">{bucket.players.length} 人</span>
+          <span className={`nums font-semibold ${over ? 'text-bad' : ''}`} style={over ? { opacity: 1 } : undefined}>
+            {bucket.players.length}
+            {over && <span className="text-bad">/{capacity}</span>}
+          </span>
+          <span>人</span>
           {!empty && (
             <>
               <span>·</span>
@@ -292,6 +329,8 @@ function GroupColumn({
               pinned={Boolean(isPinnedName(p.name, cs))}
               conflict={conflictNames.has(p.name)}
               rankLine={gapLine(p, rank.rankOf.get(p.key) ?? 0, rank.waveAt)}
+              highlight={highlight?.has(p.key)}
+              dense={dense}
               menu={{
                 ...menuBase,
                 locked: locked.includes(p.key),

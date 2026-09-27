@@ -3,13 +3,16 @@
 //! - 管理员后台 API：/api/*
 //! - 对外只读展示页：/s/:planId（静态前端 + SPA 回退）
 
+mod auth;
 mod config;
 mod dialect;
 mod grouping;
 mod matching;
 mod mysql;
+mod public;
 mod repos;
 mod routes;
+mod spa;
 mod sqlite;
 mod state;
 
@@ -18,7 +21,6 @@ use std::sync::{Arc, Mutex};
 
 use axum::routing::{delete, get, post};
 use axum::Router;
-use tower_http::services::{ServeDir, ServeFile};
 
 use crate::state::AppState;
 
@@ -49,6 +51,7 @@ async fn main() -> anyhow::Result<()> {
         .filter(|id| sources.iter().any(|s| &s.id == id));
     let active = active.unwrap_or_else(|| sources[0].id.clone());
     let st = Arc::new(AppState {
+        auth: Arc::new(auth::Auth::from_env()),
         wave_ttl: repos::ttl_from_env(),
         sources,
         pools,
@@ -56,8 +59,17 @@ async fn main() -> anyhow::Result<()> {
         cache: Mutex::new(Default::default()),
     });
 
+    /* 对外公开的只读端点：不要鉴权，单独一层 */
+    let public = Router::new()
+        .route("/api/public/plans", get(public::plans))
+        .route("/api/public/plans/{id}", get(public::plan));
+
     /* API */
     let api = Router::new()
+        .merge(public)
+        .route("/api/auth/login", post(auth::login))
+        .route("/api/auth/logout", post(auth::logout))
+        .route("/api/auth/session", get(auth::session))
         .route("/api/health", get(routes::health))
         .route("/api/sources", get(routes::sources))
         .route("/api/sources/active", post(routes::set_active))
@@ -77,29 +89,69 @@ async fn main() -> anyhow::Result<()> {
             "/api/plans/{id}",
             get(routes::get_plan).delete(routes::delete_plan),
         )
+        .route("/api/plans/{id}/publish", post(routes::set_plan_published))
         // 分组算法（权威实现都在 pk-core，浏览器不再跑第二份）
         .route("/api/group/arrange", post(grouping::arrange))
         .route("/api/group/inspect", post(grouping::inspect))
         .route("/api/group/polish", post(grouping::polish))
-        .route("/api/group/constraints", get(grouping::constraints_meta))
-        .layer(tower_http::cors::CorsLayer::permissive());
+        .route("/api/group/constraints", get(grouping::constraints_meta));
 
-    /* 前端静态资源（生产单端口模式） */
+    // 鉴权：ADMIN_PASSWORD 配了就拦，没配等于本地开发全放行。
+    // 公开端点、登录、探活接口在 auth.rs 的白名单里。
+    let cors = if let Ok(origins) = std::env::var("CORS_ORIGINS") {
+        let list: Vec<axum::http::HeaderValue> = origins
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .filter_map(|s| match s.parse() {
+                Ok(v) => Some(v),
+                Err(_) => {
+                    tracing::warn!(origin = s, "CORS_ORIGINS 里的地址不合法，已忽略");
+                    None
+                }
+            })
+            .collect();
+        tracing::info!(count = list.len(), "CORS 白名单已启用");
+        tower_http::cors::CorsLayer::new()
+            .allow_origin(list)
+            .allow_methods(tower_http::cors::Any)
+            .allow_headers(tower_http::cors::Any)
+    } else {
+        // 默认只允许同源：后台和展示页都由本服务托管，不需要放开跨域
+        tracing::info!("未设置 CORS_ORIGINS，仅允许同源调用");
+        tower_http::cors::CorsLayer::new()
+    };
+    let api = api
+        .layer(axum::middleware::from_fn_with_state(
+            st.clone(),
+            auth::require_admin,
+        ))
+        .layer(cors);
+
+    /* 前端静态资源 + SPA 回退（生产单端口模式）。
+    index.html 读进内存常驻，省掉每次请求一次磁盘读。 */
     let dist_dir = std::env::var("WEB_DIST")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("../../web/dist"));
-    let index_html = dist_dir.join("index.html");
-    let has_dist = index_html.exists();
+    let index = spa::load_index(&dist_dir).await;
 
-    let app = if has_dist {
-        tracing::info!(dir = %dist_dir.display(), "静态目录已挂载");
-        api.fallback_service(ServeDir::new(&dist_dir).not_found_service(ServeFile::new(index_html)))
-    } else {
-        tracing::warn!(dir = %dist_dir.display(), "没有前端构建产物，仅提供 API（先跑 pnpm --filter @pk/web build）");
-        api
+    let app = match &index {
+        Some(_) => {
+            tracing::info!(dir = %dist_dir.display(), "静态目录已挂载");
+            // 注意：回退必须自己给 200。用 ServeDir::not_found_service 的话，
+            // 分享链接 /s/:id 会变成「HTML 内容 + 404 状态码」。
+            let spa_router = Router::new()
+                .fallback(spa::handler)
+                .with_state((dist_dir.clone(), index.clone()));
+            api.fallback_service(spa_router)
+        }
+        None => {
+            tracing::warn!(dir = %dist_dir.display(), "没有前端构建产物，仅提供 API（先跑 pnpm --filter @pk/web build）");
+            api
+        }
     };
 
-    let app = app.with_state(st);
+    let app = app.with_state(st.clone());
 
     let port: u16 = std::env::var("PORT")
         .ok()
@@ -107,6 +159,14 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or(8787);
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
     tracing::info!("pk-server 启动 http://{addr}（管理员 /  ·  对外展示 /s/:id）");
+    tracing::info!(
+        auth = if st.auth.enabled() {
+            "已开启（需口令）"
+        } else {
+            "未开启（公开）"
+        },
+        "管理员鉴权状态"
+    );
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())

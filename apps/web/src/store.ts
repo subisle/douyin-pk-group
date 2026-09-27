@@ -8,7 +8,15 @@ import {
   type Player,
   type WaveMetric,
 } from '@pk/shared';
-import { api, type PlanBrief, type SourceBrief, type SourceList, type UnmatchedItem } from './api.js';
+import {
+  api,
+  setToken,
+  UNAUTHORIZED_EVENT,
+  type PlanBrief,
+  type SourceBrief,
+  type SourceList,
+  type UnmatchedItem,
+} from './api.js';
 import type { BalanceStat, Bucket, Violation } from './types.js';
 
 export type Strategy = GroupOptions['strategy'];
@@ -80,6 +88,9 @@ interface State {
   baselineDate: string | null;
   anchorCount: number;
 
+  /* 内置条件：从 /api/group/constraints 拉的权威副本，null 表示还没拿到 */
+  constraintSet: ConstraintSet | null;
+
   /* 后端计算结果（前端不再自己算） */
   balance: BalanceStat | null;
   violations: Violation[];
@@ -95,6 +106,8 @@ interface State {
   error: string;
   toast: string | null;
   plans: PlansState;
+  /** 最近一次保存出来的方案 id，分享链接就是它 */
+  lastPlanId: number | null;
 
   /* 动作 */
   setView: (v: View) => void;
@@ -112,6 +125,8 @@ interface State {
   polish: () => Promise<void>;
 
   addBucket: () => void;
+  /** 每组内部按音浪从高到低重排（不跨组移动） */
+  sortBucketsByWave: () => void;
   removeBucket: (id: string) => void;
   renameBucket: (id: string, name: string) => void;
   moveCard: (activeKey: string, toBucketId: string, overKey: string | null) => void;
@@ -132,6 +147,9 @@ interface State {
   /** 增补人员：把新主播加进已定稿的组（不重排其他人） */
   addToBucket: (bucketId: string, name: string) => Promise<boolean>;
   makeShareLink: () => Promise<string | null>;
+  /** 上架 / 下架某个方案的对外展示页 */
+  setPublished: (id: number, published: boolean) => Promise<void>;
+  logout: () => Promise<void>;
   bind: (rowName: string, personId: string, anchorName: string) => Promise<void>;
   setManualWave: (rowName: string, wave: number) => void;
   savePlanNow: () => Promise<void>;
@@ -200,13 +218,17 @@ export const useStore = create<State>((set, get) => {
     error: '',
     toast: null,
     plans: { open: false, items: [], loading: false },
+    lastPlanId: null,
+    constraintSet: null,
 
     setView: (v) => set({ view: v }),
     patch: (cfg) => set(cfg),
 
     constraints: () => {
-      const { startTime, intervalMin } = get();
-      return { ...DEFAULT_CONSTRAINTS, schedule: { start: startTime, intervalMin } };
+      const { startTime, intervalMin, constraintSet } = get();
+      // 权威副本在 Rust（/api/group/constraints）。这里的 DEFAULT_CONSTRAINTS
+      // 只是后端连不上时的兜底，两边不会各改各的。
+      return { ...(constraintSet ?? DEFAULT_CONSTRAINTS), schedule: { start: startTime, intervalMin } };
     },
     scheduleInput: () => {
       const { startTime, intervalMin } = get();
@@ -246,6 +268,12 @@ export const useStore = create<State>((set, get) => {
         });
       } catch {
         /* meta 失败不阻塞，等点「解析并分组」时再报错 */
+      }
+      // 内置条件（互斥/固定位/最小间隔）以后端为准，前端只用来做展示高亮
+      try {
+        set({ constraintSet: await api.constraints() });
+      } catch {
+        /* 拉不到就继续用本地兜底常量 */
       }
     },
 
@@ -405,6 +433,22 @@ export const useStore = create<State>((set, get) => {
       pushHistory();
       set((s) => ({ buckets: [...s.buckets, { id: bucketId(), name: `第 ${s.buckets.length + 1} 组`, players: [] }] }));
       void get().refreshDerived();
+    },
+
+    sortBucketsByWave: () => {
+      const { buckets, notify } = get();
+      if (buckets.every((b) => b.players.length < 2)) {
+        notify('每组都不足 2 人，无需排序');
+        return;
+      }
+      pushHistory();
+      const byWave = (a: Player, b: Player) =>
+        b.wave - a.wave || a.name.localeCompare(b.name, 'zh-Hans-CN');
+      set({
+        buckets: buckets.map((b) => ({ ...b, players: [...b.players].sort(byWave) })),
+      });
+      void get().refreshDerived();
+      notify('已按音浪从高到低排列各组');
     },
 
     removeBucket: (id) => {
@@ -606,18 +650,45 @@ export const useStore = create<State>((set, get) => {
             buckets: buckets.map((b) => ({ name: b.name, players: b.players })),
           },
         });
+        // 展示页只读已发布的方案，所以存完直接上架
+        await api.setPublished(id, true);
+        set((s) => ({ lastPlanId: id, plans: { ...s.plans, items: s.plans.items.map((p) => (p.id === id ? { ...p, published: true } : p)) } }));
         const url = `${location.origin}/s/${id}`;
         try {
           await navigator.clipboard.writeText(url);
-          notify(`展示链接已复制：${url}`);
+          notify(`已上架并复制展示链接：${url}`);
         } catch {
-          notify(`展示链接：${url}`);
+          notify(`已上架，展示链接：${url}`);
         }
         return url;
       } catch (e) {
         notify(`生成链接失败：${(e as Error).message}`);
         return null;
       }
+    },
+
+    setPublished: async (id, published) => {
+      try {
+        await api.setPublished(id, published);
+        set((s) => ({
+          lastPlanId: published ? id : s.lastPlanId === id ? null : s.lastPlanId,
+          plans: { ...s.plans, items: s.plans.items.map((p) => (p.id === id ? { ...p, published } : p)) },
+        }));
+        get().notify(published ? `方案 #${id} 已上架，可访问 /s/${id}` : `方案 #${id} 已下架`);
+      } catch (e) {
+        get().notify(`操作失败：${(e as Error).message}`);
+      }
+    },
+
+    logout: async () => {
+      try {
+        await api.logout();
+      } catch {
+        /* 后端没开鉴权时 logout 无所谓，本地 token 照样清 */
+      }
+      setToken(null);
+      window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
+      get().notify('已退出登录');
     },
 
     bind: async (rowName, personId, anchorName) => {
@@ -691,6 +762,7 @@ export const useStore = create<State>((set, get) => {
       try {
         const p = await api.getPlan(id);
         set({
+          lastPlanId: id,
           title: p.payload.title || p.title,
           metric: p.payload.metric ?? 'lastN',
           days: p.payload.days ?? 3,
@@ -713,7 +785,10 @@ export const useStore = create<State>((set, get) => {
 
     removeSavedPlan: async (id) => {
       await api.deletePlan(id);
-      set((s) => ({ plans: { ...s.plans, items: s.plans.items.filter((p) => p.id !== id) } }));
+      set((s) => ({
+        lastPlanId: s.lastPlanId === id ? null : s.lastPlanId,
+        plans: { ...s.plans, items: s.plans.items.filter((p) => p.id !== id) },
+      }));
       get().notify('方案已删除');
     },
   };

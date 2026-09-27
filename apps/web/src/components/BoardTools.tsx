@@ -1,10 +1,37 @@
 import { useState } from 'react';
 import { useStore } from '../store.js';
 import { Button, Panel } from './ui.js';
-import { BalanceIcon, LockIcon, RedoIcon, TrashIcon, UndoIcon, UserSearchIcon } from './icons.js';
+import {
+  BalanceIcon,
+  CloseIcon,
+  LockIcon,
+  RedoIcon,
+  SearchIcon,
+  SortIcon,
+  TrashIcon,
+  UndoIcon,
+  UserSearchIcon,
+} from './icons.js';
 
-/** 看板工具条：撤销/重做/均衡/锁定数 + 未分组池 */
-export function BoardTools() {
+/**
+ * 看板工具条：撤销/重做/均衡/组内音浪排序/密度切换/全局找人 + 未分组池
+ *
+ * query 提到 App 里统一持有，这样工具条和看板能共用同一份「搜索命中」结果。
+ */
+export function BoardTools({
+  query,
+  onQueryChange,
+  hitCount,
+  dense,
+  onDenseChange,
+}: {
+  query: string;
+  onQueryChange: (v: string) => void;
+  /** 命中人数（组内 + 未分组） */
+  hitCount: number;
+  dense: boolean;
+  onDenseChange: (v: boolean) => void;
+}) {
   const undo = useStore((s) => s.undo);
   const redo = useStore((s) => s.redo);
   const canUndo = useStore((s) => s.past.length > 0);
@@ -13,6 +40,7 @@ export function BoardTools() {
   const locked = useStore((s) => s.locked);
   const unassigned = useStore((s) => s.unassigned);
   const assignFromPool = useStore((s) => s.assignFromPool);
+  const sortByWave = useStore((s) => s.sortBucketsByWave);
   const [filter, setFilter] = useState('');
 
   const shown = filter ? unassigned.filter((p) => p.name.includes(filter)) : unassigned;
@@ -29,6 +57,36 @@ export function BoardTools() {
         <Button size="sm" variant="subtle" icon={<BalanceIcon size={14} />} onClick={polish}>
           均衡微调
         </Button>
+        <Button size="sm" variant="subtle" icon={<SortIcon size={14} />} onClick={sortByWave} title="每组内部按音浪从高到低重排">
+          组内排序
+        </Button>
+        <Button
+          size="sm"
+          variant="subtle"
+          onClick={() => onDenseChange(!dense)}
+          title="紧凑模式一屏能看更多组，适合人数多的时候"
+        >
+          {dense ? '紧凑' : '标准'}
+        </Button>
+
+        {/* 全局找人：组内 + 未分组一起命中，命中的卡片会高亮并滚到视野内 */}
+        <div className="flex items-center gap-1.5 rounded-ctl border border-line bg-canvas px-2 py-1">
+          <SearchIcon size={13} className="text-ink3" />
+          <input
+            value={query}
+            onChange={(e) => onQueryChange(e.target.value)}
+            placeholder="找主播…"
+            className="w-24 bg-transparent text-[12px] text-ink outline-none placeholder:text-ink3"
+          />
+          {query && (
+            <>
+              <span className="nums text-[11px] text-ink3">{hitCount} 人</span>
+              <button type="button" onClick={() => onQueryChange('')} title="清空" className="text-ink3 hover:text-ink">
+                <CloseIcon size={12} />
+              </button>
+            </>
+          )}
+        </div>
         <span className="flex-1" />
         {locked.length > 0 && (
           <span className="flex items-center gap-1 text-[12px] text-ink2">

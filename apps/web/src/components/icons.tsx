@@ -272,3 +272,46 @@ export function MoreIcon(p: IconProps) {
     </Svg>
   );
 }
+
+/** 趋势（折线向上），排行榜标题用 */
+export function TrendIcon(p: IconProps) {
+  return (
+    <Svg {...p}>
+      <path d="M2 12.2l3.4-3.8 2.6 2.2 4-5" stroke="currentColor" strokeWidth={S.width} strokeLinecap={S.linecap} strokeLinejoin={S.linejoin} />
+      <path d="M9.6 5.6H12v2.4" stroke="currentColor" strokeWidth={S.width} strokeLinecap={S.linecap} strokeLinejoin={S.linejoin} />
+    </Svg>
+  );
+}
+
+/** 公网 / 对外展示 */
+export function GlobeIcon(p: IconProps) {
+  return (
+    <Svg {...p}>
+      <circle cx="8" cy="8" r="5.6" stroke="currentColor" strokeWidth={S.width} />
+      <path d="M2.4 8h11.2" stroke="currentColor" strokeWidth={S.width} strokeLinecap={S.linecap} />
+      <path d="M8 2.4c1.5 1.6 2.3 3.5 2.3 5.6S9.5 12 8 13.6C6.5 12 5.7 10.1 5.7 8S6.5 4 8 2.4z" stroke="currentColor" strokeWidth={S.width} />
+    </Svg>
+  );
+}
+
+/** 退出登录 */
+export function LogoutIcon(p: IconProps) {
+  return (
+    <Svg {...p}>
+      <path d="M6.2 13.4H3.6a1 1 0 0 1-1-1V3.6a1 1 0 0 1 1-1h2.6" stroke="currentColor" strokeWidth={S.width} strokeLinecap={S.linecap} />
+      <path d="M9.6 11.2L13 8l-3.4-3.2" stroke="currentColor" strokeWidth={S.width} strokeLinecap={S.linecap} strokeLinejoin={S.linejoin} />
+      <path d="M13 8H5.6" stroke="currentColor" strokeWidth={S.width} strokeLinecap={S.linecap} />
+    </Svg>
+  );
+}
+
+/** 排序（上下箭头带横线） */
+export function SortIcon(p: IconProps) {
+  return (
+    <Svg {...p}>
+      <path d="M3 4.6h10" stroke="currentColor" strokeWidth={S.width} strokeLinecap={S.linecap} />
+      <path d="M3 8h6.5" stroke="currentColor" strokeWidth={S.width} strokeLinecap={S.linecap} />
+      <path d="M3 11.4h3.5" stroke="currentColor" strokeWidth={S.width} strokeLinecap={S.linecap} />
+    </Svg>
+  );
+}

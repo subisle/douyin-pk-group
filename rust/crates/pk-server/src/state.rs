@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use crate::auth::Auth;
 use crate::config::SourceConfig;
 use crate::mysql::Pools;
 
@@ -51,6 +52,8 @@ pub struct AnchorBrief {
 }
 
 pub struct AppState {
+    /// 管理员鉴权（口令 -> 内存 token）
+    pub auth: std::sync::Arc<Auth>,
     pub sources: Vec<SourceConfig>,
     pub pools: Pools,
     /// 当前数据源 id（切换后缓存整体失效）

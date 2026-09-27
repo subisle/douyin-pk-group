@@ -1,6 +1,5 @@
 export * from './types.js';
 export * from './roster.js';
-export * from './group.js';
 export * from './constraints.js';
 
 export function formatWave(n: number): string {
