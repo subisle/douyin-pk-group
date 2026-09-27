@@ -5,6 +5,13 @@ apps/server/data/
 .DS_Store
 .env.local
 
+# Rust 构建产物
+rust/target/
+
+# 部署时的运行时密钥与数据（镜像由 GitHub Actions 构建）
+deploy/.env
+deploy/data/
+
 # 数据库凭据与本地状态，绝不入库
 .env
 .workbuddy/

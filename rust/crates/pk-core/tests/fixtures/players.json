@@ -1,0 +1,554 @@
+{
+  "players": [
+    {
+      "key": "浩杰#1",
+      "raw": "2. 浩杰",
+      "name": "浩杰",
+      "personId": "29",
+      "matched": true,
+      "wave": 86218,
+      "avatar": null,
+      "excluded": false
+    },
+    {
+      "key": "浩宁#2",
+      "raw": "3. 浩宁",
+      "name": "浩宁",
+      "personId": "1029",
+      "matched": true,
+      "wave": 62200,
+      "avatar": null,
+      "excluded": false
+    },
+    {
+      "key": "浩延#3",
+      "raw": "4. 浩延",
+      "name": "浩延",
+      "personId": "18",
+      "matched": true,
+      "wave": 38951,
+      "avatar": null,
+      "excluded": false
+    },
+    {
+      "key": "浩鸣#4",
+      "raw": "5. 浩鸣   李斌",
+      "name": "浩鸣",
+      "leader": "李斌",
+      "personId": "113",
+      "matched": true,
+      "wave": 296037,
+      "avatar": null,
+      "excluded": false
+    },
+    {
+      "key": "浩艺#5",
+      "raw": "6. 浩艺",
+      "name": "浩艺",
+      "personId": "25",
+      "matched": true,
+      "wave": 56851,
+      "avatar": null,
+      "excluded": false
+    },
+    {
+      "key": "浩阳#6",
+      "raw": "7. 浩阳",
+      "name": "浩阳",
+      "personId": "13",
+      "matched": true,
+      "wave": 83331,
+      "avatar": null,
+      "excluded": false
+    },
+    {
+      "key": "浩运#7",
+      "raw": "8. 浩运",
+      "name": "浩运",
+      "personId": "28",
+      "matched": true,
+      "wave": 123936,
+      "avatar": null,
+      "excluded": false
+    },
+    {
+      "key": "浩龙#8",
+      "raw": "9. 浩龙",
+      "name": "浩龙",
+      "personId": "31",
+      "matched": true,
+      "wave": 1685222,
+      "avatar": null,
+      "excluded": false
+    },
+    {
+      "key": "玖玥#9",
+      "raw": "10. 玖玥",
+      "name": "玖玥",
+      "personId": "71",
+      "matched": true,
+      "wave": 511439,
+      "avatar": null,
+      "excluded": false
+    },
+    {
+      "key": "狼兴#10",
+      "raw": "11. 狼兴",
+      "name": "狼兴",
+      "personId": "10",
+      "matched": true,
+      "wave": 682925,
+      "avatar": null,
+      "excluded": false
+    },
+    {
+      "key": "凤九#11",
+      "raw": "12. 凤九",
+      "name": "凤九",
+      "personId": "1034",
+      "matched": true,
+      "wave": 180123,
+      "avatar": null,
+      "excluded": false
+    },
+    {
+      "key": "狼辉#12",
+      "raw": "13. 狼辉",
+      "name": "狼辉",
+      "personId": "16",
+      "matched": true,
+      "wave": 129999,
+      "avatar": null,
+      "excluded": false
+    },
+    {
+      "key": "浩哲#13",
+      "raw": "14. 浩哲",
+      "name": "浩哲",
+      "personId": "121",
+      "matched": true,
+      "wave": 574818,
+      "avatar": null,
+      "excluded": false
+    },
+    {
+      "key": "啸安#14",
+      "raw": "15. 啸安➕狼兴",
+      "name": "啸安",
+      "leader": "狼兴",
+      "personId": "144",
+      "matched": true,
+      "wave": 274624,
+      "avatar": null,
+      "excluded": false
+    },
+    {
+      "key": "狼耀#15",
+      "raw": "16. 狼耀",
+      "name": "狼耀",
+      "personId": "1028",
+      "matched": true,
+      "wave": 126958,
+      "avatar": null,
+      "excluded": false
+    },
+    {
+      "key": "浩玟#16",
+      "raw": "17. 浩玟",
+      "name": "浩玟",
+      "personId": "23",
+      "matched": true,
+      "wave": 205984,
+      "avatar": null,
+      "excluded": false
+    },
+    {
+      "key": "狼征#17",
+      "raw": "18. 狼征",
+      "name": "狼征",
+      "personId": "1",
+      "matched": true,
+      "wave": 43103,
+      "avatar": null,
+      "excluded": false
+    },
+    {
+      "key": "狼小宝#18",
+      "raw": "19. 狼小宝",
+      "name": "狼小宝",
+      "personId": "145",
+      "matched": true,
+      "wave": 375625,
+      "avatar": null,
+      "excluded": false
+    },
+    {
+      "key": "啸恒#19",
+      "raw": "20. 啸恒",
+      "name": "啸恒",
+      "personId": "1020",
+      "matched": true,
+      "wave": 116499,
+      "avatar": null,
+      "excluded": false
+    },
+    {
+      "key": "狼澈#20",
+      "raw": "21. 狼澈",
+      "name": "狼澈",
+      "personId": "119",
+      "matched": true,
+      "wave": 600175,
+      "avatar": null,
+      "excluded": false
+    },
+    {
+      "key": "啸阳#21",
+      "raw": "22. 啸阳（狼泽）",
+      "name": "啸阳",
+      "leader": "狼泽）",
+      "personId": "186",
+      "matched": true,
+      "wave": 68526,
+      "avatar": null,
+      "excluded": false
+    },
+    {
+      "key": "啸辰#22",
+      "raw": "23. 啸辰",
+      "name": "啸辰",
+      "personId": "131",
+      "matched": true,
+      "wave": 186072,
+      "avatar": null,
+      "excluded": false
+    },
+    {
+      "key": "狼途#23",
+      "raw": "24. 狼途",
+      "name": "狼途",
+      "personId": "188",
+      "matched": true,
+      "wave": 13480,
+      "avatar": null,
+      "excluded": false
+    },
+    {
+      "key": "啸泽#24",
+      "raw": "25. 啸泽",
+      "name": "啸泽",
+      "personId": "149",
+      "matched": true,
+      "wave": 109756,
+      "avatar": null,
+      "excluded": false
+    },
+    {
+      "key": "啸森#25",
+      "raw": "26. 啸森——狼俊",
+      "name": "啸森",
+      "leader": "狼俊",
+      "personId": "116",
+      "matched": true,
+      "wave": 246835,
+      "avatar": null,
+      "excluded": false
+    },
+    {
+      "key": "狼岳#26",
+      "raw": "27. 狼岳",
+      "name": "狼岳",
+      "personId": "140",
+      "matched": true,
+      "wave": 156633,
+      "avatar": null,
+      "excluded": false
+    },
+    {
+      "key": "狼明#27",
+      "raw": "28. 狼明+浩龙",
+      "name": "狼明",
+      "leader": "浩龙",
+      "personId": "2",
+      "matched": true,
+      "wave": 193234,
+      "avatar": null,
+      "excluded": false
+    },
+    {
+      "key": "玖柒#28",
+      "raw": "29. 玖柒",
+      "name": "玖柒",
+      "personId": "138",
+      "matched": true,
+      "wave": 322216,
+      "avatar": null,
+      "excluded": false
+    },
+    {
+      "key": "狼九#29",
+      "raw": "30. 狼九",
+      "name": "狼九",
+      "personId": "175",
+      "matched": true,
+      "wave": 273234,
+      "avatar": null,
+      "excluded": false
+    },
+    {
+      "key": "狼哲#30",
+      "raw": "31. 狼哲",
+      "name": "狼哲",
+      "personId": "127",
+      "matched": true,
+      "wave": 116579,
+      "avatar": null,
+      "excluded": false
+    },
+    {
+      "key": "浩冬#31",
+      "raw": "32. 浩冬",
+      "name": "浩冬",
+      "personId": "8",
+      "matched": true,
+      "wave": 782106,
+      "avatar": null,
+      "excluded": false
+    },
+    {
+      "key": "狼影#32",
+      "raw": "33. 狼影",
+      "name": "狼影",
+      "personId": "1004",
+      "matched": true,
+      "wave": 277859,
+      "avatar": null,
+      "excluded": false
+    },
+    {
+      "key": "狼佑#33",
+      "raw": "34. 狼佑",
+      "name": "狼佑",
+      "personId": "86",
+      "matched": true,
+      "wave": 119271,
+      "avatar": null,
+      "excluded": false
+    },
+    {
+      "key": "浩辰#34",
+      "raw": "35. 浩辰",
+      "name": "浩辰",
+      "personId": "27",
+      "matched": true,
+      "wave": 161454,
+      "avatar": null,
+      "excluded": false
+    },
+    {
+      "key": "狼艺#35",
+      "raw": "36. 狼艺",
+      "name": "狼艺",
+      "personId": "22",
+      "matched": true,
+      "wave": 53506,
+      "avatar": null,
+      "excluded": false
+    },
+    {
+      "key": "狼雨#36",
+      "raw": "37. 狼雨",
+      "name": "狼雨",
+      "personId": "1005",
+      "matched": true,
+      "wave": 116853,
+      "avatar": null,
+      "excluded": false
+    },
+    {
+      "key": "南方楠#37",
+      "raw": "38. 阿楠",
+      "name": "南方楠",
+      "personId": "21",
+      "matched": true,
+      "wave": 490686,
+      "avatar": null,
+      "excluded": false
+    },
+    {
+      "key": "浩雨#38",
+      "raw": "39. 浩雨",
+      "name": "浩雨",
+      "personId": "20",
+      "matched": true,
+      "wave": 399426,
+      "avatar": null,
+      "excluded": false
+    },
+    {
+      "key": "啸帆#39",
+      "raw": "40. 啸帆",
+      "name": "啸帆",
+      "personId": "1001",
+      "matched": true,
+      "wave": 302992,
+      "avatar": null,
+      "excluded": false
+    },
+    {
+      "key": "狼俊#40",
+      "raw": "41. 狼俊",
+      "name": "狼俊",
+      "personId": "11",
+      "matched": true,
+      "wave": 169177,
+      "avatar": null,
+      "excluded": false
+    },
+    {
+      "key": "玖雪#41",
+      "raw": "42. 玖雪",
+      "name": "玖雪",
+      "personId": "115",
+      "matched": true,
+      "wave": 203926,
+      "avatar": null,
+      "excluded": false
+    },
+    {
+      "key": "啸强#42",
+      "raw": "43. 啸强（狼俊）",
+      "name": "啸强",
+      "leader": "狼俊）",
+      "personId": "125",
+      "matched": true,
+      "wave": 61732,
+      "avatar": null,
+      "excluded": false
+    },
+    {
+      "key": "狼赫#43",
+      "raw": "44. 狼赫+浩雨",
+      "name": "狼赫",
+      "leader": "浩雨",
+      "personId": "108",
+      "matched": true,
+      "wave": 167759,
+      "avatar": null,
+      "excluded": false
+    },
+    {
+      "key": "浩森#44",
+      "raw": "45. 浩森",
+      "name": "浩森",
+      "personId": "141",
+      "matched": true,
+      "wave": 111068,
+      "avatar": null,
+      "excluded": false
+    },
+    {
+      "key": "啸宇#45",
+      "raw": "46.  啸宇 + 狼俊",
+      "name": "啸宇",
+      "leader": "狼俊",
+      "personId": "105",
+      "matched": true,
+      "wave": 92872,
+      "avatar": null,
+      "excluded": false
+    },
+    {
+      "key": "浩启#46",
+      "raw": "47. 浩启",
+      "name": "浩启",
+      "personId": "26",
+      "matched": true,
+      "wave": 192314,
+      "avatar": null,
+      "excluded": false
+    },
+    {
+      "key": "狼泽#47",
+      "raw": "48. 狼泽",
+      "name": "狼泽",
+      "personId": "17",
+      "matched": true,
+      "wave": 121156,
+      "avatar": null,
+      "excluded": false
+    },
+    {
+      "key": "啸弘#48",
+      "raw": "49. 啸弘 （狼泽）",
+      "name": "啸弘",
+      "leader": "狼泽）",
+      "personId": "1026",
+      "matched": true,
+      "wave": 21446,
+      "avatar": null,
+      "excluded": false
+    },
+    {
+      "key": "啸寻#49",
+      "raw": "50. 啸寻",
+      "name": "啸寻",
+      "personId": "1031",
+      "matched": true,
+      "wave": 45527,
+      "avatar": null,
+      "excluded": false
+    },
+    {
+      "key": "啸昭#50",
+      "raw": "51. 啸昭",
+      "name": "啸昭",
+      "personId": "1030",
+      "matched": true,
+      "wave": 31985,
+      "avatar": null,
+      "excluded": false
+    },
+    {
+      "key": "狼仔#51",
+      "raw": "52. 狼仔",
+      "name": "狼仔",
+      "personId": "12",
+      "matched": true,
+      "wave": 250912,
+      "avatar": null,
+      "excluded": false
+    },
+    {
+      "key": "狼轩#52",
+      "raw": "53. 狼轩",
+      "name": "狼轩",
+      "personId": "5",
+      "matched": true,
+      "wave": 76256,
+      "avatar": null,
+      "excluded": false
+    },
+    {
+      "key": "狼辰#53",
+      "raw": "54. 狼辰—浩杰",
+      "name": "狼辰",
+      "leader": "浩杰",
+      "personId": "24",
+      "matched": true,
+      "wave": 262527,
+      "avatar": null,
+      "excluded": false
+    },
+    {
+      "key": "浩月#54",
+      "raw": "55. 浩月",
+      "name": "浩月",
+      "personId": "9",
+      "matched": true,
+      "wave": 106884,
+      "avatar": null,
+      "excluded": false
+    }
+  ]
+}

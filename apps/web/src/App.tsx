@@ -1,15 +1,15 @@
-import { useEffect, useMemo } from 'react';
-import { findViolations } from '@pk/shared';
+import { useEffect } from 'react';
 import { useStore } from './store.js';
 import { TopBar } from './components/TopBar.js';
 import { WaveConfig } from './components/WaveConfig.js';
 import { RosterImport } from './components/RosterImport.js';
 import { StatsBar } from './components/StatsBar.js';
+import { BoardTools } from './components/BoardTools.js';
 import { GroupBoard } from './components/GroupBoard.js';
 import { ExportBar } from './components/ExportBar.js';
 import { HistoryPlans } from './components/HistoryPlans.js';
 import { Button, Tag, Toaster } from './components/ui.js';
-import { AlertIcon, ChevronDownIcon, EditIcon, RefreshIcon } from './components/icons.js';
+import { AlertIcon, ChevronDownIcon, EditIcon, RefreshIcon, UndoIcon, RedoIcon, BalanceIcon, LockIcon } from './components/icons.js';
 
 export default function App() {
   const view = useStore((s) => s.view);
@@ -24,19 +24,20 @@ export default function App() {
   const init = useStore((s) => s.init);
   const addBucket = useStore((s) => s.addBucket);
   const regroup = useStore((s) => s.regroup);
-  const constraints = useStore((s) => s.constraints);
+  const polish = useStore((s) => s.polish);
+  const violations = useStore((s) => s.violations);
+  const locked = useStore((s) => s.locked);
+  const undo = useStore((s) => s.undo);
+  const redo = useStore((s) => s.redo);
+  const canUndo = useStore((s) => s.past.length > 0);
+  const canRedo = useStore((s) => s.future.length > 0);
+  const unassigned = useStore((s) => s.unassigned);
 
   useEffect(() => {
     void init();
   }, [init]);
 
   const activeCount = players.filter((p) => !p.excluded).length;
-
-  const violations = useMemo(
-    () => findViolations(buckets.map((b) => b.players), constraints()),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [buckets, constraints],
-  );
 
   return (
     <div className="mx-auto flex max-w-[1440px] flex-col gap-4 px-5 py-5 pb-16">
@@ -120,12 +121,16 @@ export default function App() {
                     ))}
                   </div>
                   <span className="flex-1" />
+                  <Button size="sm" variant="ghost" icon={<BalanceIcon size={14} />} onClick={polish}>
+                    均衡微调
+                  </Button>
                   <Button size="sm" variant="ghost" icon={<RefreshIcon size={14} />} onClick={regroup}>
                     自动修正
                   </Button>
                 </div>
               )}
               <StatsBar buckets={buckets} />
+              <BoardTools />
               <GroupBoard buckets={buckets} />
             </div>
           )}

@@ -209,3 +209,66 @@ export function ClockIcon(p: IconProps) {
     </Svg>
   );
 }
+
+/** 撤销：左弯箭头 */
+export function UndoIcon(p: IconProps) {
+  return (
+    <Svg {...p}>
+      <path d="M6 4.4L2.8 7.6 6 10.8" stroke="currentColor" strokeWidth={S.width} strokeLinecap={S.linecap} strokeLinejoin={S.linejoin} />
+      <path d="M2.8 7.6h6.4a3.6 3.6 0 013.6 3.6v.4" stroke="currentColor" strokeWidth={S.width} strokeLinecap={S.linecap} />
+    </Svg>
+  );
+}
+
+/** 重做：右弯箭头 */
+export function RedoIcon(p: IconProps) {
+  return (
+    <Svg {...p}>
+      <path d="M10 4.4l3.2 3.2L10 10.8" stroke="currentColor" strokeWidth={S.width} strokeLinecap={S.linecap} strokeLinejoin={S.linejoin} />
+      <path d="M13.2 7.6H6.8a3.6 3.6 0 00-3.6 3.6v.4" stroke="currentColor" strokeWidth={S.width} strokeLinecap={S.linecap} />
+    </Svg>
+  );
+}
+
+/** 均衡：天平 */
+export function BalanceIcon(p: IconProps) {
+  return (
+    <Svg {...p}>
+      <path d="M8 2.6v10.8M4.4 4.6h7.2" stroke="currentColor" strokeWidth={S.width} strokeLinecap={S.linecap} />
+      <path d="M4.4 4.6L2.2 8.4h4.4L4.4 4.6zM11.6 4.6L9.4 8.4h4.4l-2.2-3.8z" stroke="currentColor" strokeWidth={S.width} strokeLinejoin={S.linejoin} />
+    </Svg>
+  );
+}
+
+/** 锁定（手动锁定，与固定位区分） */
+export function LockIcon(p: IconProps) {
+  return (
+    <Svg {...p}>
+      <rect x="3.6" y="7" width="8.8" height="6" rx="1.6" stroke="currentColor" strokeWidth={S.width} />
+      <path d="M5.8 7V5.2a2.2 2.2 0 014.4 0V7" stroke="currentColor" strokeWidth={S.width} strokeLinecap={S.linecap} />
+    </Svg>
+  );
+}
+
+/** 搜索（找人） */
+export function UserSearchIcon(p: IconProps) {
+  return (
+    <Svg {...p}>
+      <circle cx="7" cy="6.2" r="3.4" stroke="currentColor" strokeWidth={S.width} />
+      <path d="M2.4 13.2c0-2.2 2.1-3.6 4.6-3.6.9 0 1.7.2 2.4.5" stroke="currentColor" strokeWidth={S.width} strokeLinecap={S.linecap} />
+      <circle cx="12" cy="11.6" r="2.4" stroke="currentColor" strokeWidth={S.width} />
+      <path d="M13.8 13.4l1.6 1.6" stroke="currentColor" strokeWidth={S.width} strokeLinecap={S.linecap} />
+    </Svg>
+  );
+}
+
+/** 更多操作（三点） */
+export function MoreIcon(p: IconProps) {
+  return (
+    <Svg {...p}>
+      <circle cx="3.4" cy="8" r="0.9" fill="currentColor" />
+      <circle cx="8" cy="8" r="0.9" fill="currentColor" />
+      <circle cx="12.6" cy="8" r="0.9" fill="currentColor" />
+    </Svg>
+  );
+}

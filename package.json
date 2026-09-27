@@ -2,13 +2,14 @@
   "name": "douyin-pk-group",
   "version": "1.0.0",
   "private": true,
-  "description": "抖音 PK 挑战赛均衡分组程序（只读接入 douyinxs 数据库）",
+  "description": "抖音 PK 挑战赛均衡分组程序（Rust 后端，只读接入 douyinxs 数据库）",
   "scripts": {
-    "dev": "concurrently -n server,web -c blue,green \"pnpm -F @pk/server dev\" \"pnpm -F @pk/web dev\"",
-    "dev:server": "pnpm -F @pk/server dev",
+    "dev": "concurrently -n api,web -c blue,green \"pnpm -F @pk/api dev\" \"pnpm -F @pk/web dev\"",
+    "dev:api": "pnpm -F @pk/api dev",
     "dev:web": "pnpm -F @pk/web dev",
-    "build": "pnpm -F @pk/web build",
-    "typecheck": "tsc -b packages/shared apps/server apps/web --noEmit false --emitDeclarationOnly false || true"
+    "build": "pnpm -F @pk/web build && cd rust && cargo build --release -p pk-server",
+    "test": "cd rust && cargo test --workspace",
+    "typecheck": "pnpm -F @pk/web exec tsc --noEmit"
   },
   "devDependencies": {
     "concurrently": "^9.1.2",

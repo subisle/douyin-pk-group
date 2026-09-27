@@ -1,0 +1,17 @@
+[package]
+name = "pk-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "抖音 PK 挑战赛分组核心算法（名单解析 / 约束 / 均衡分组）"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+rand = "0.8"
+
+[dev-dependencies]
+serde_json = { workspace = true }

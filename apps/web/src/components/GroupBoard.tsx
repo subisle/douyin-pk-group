@@ -13,17 +13,10 @@ import {
   type DragStartEvent,
 } from '@dnd-kit/core';
 import { SortableContext, verticalListSortingStrategy } from '@dnd-kit/sortable';
-import {
-  findViolations,
-  formatWave,
-  isPinnedName,
-  resolvePinnedIndex,
-  slotTime,
-  type Player,
-} from '@pk/shared';
+import { formatWave, isPinnedName, resolvePinnedIndex, slotTime, type Player } from '@pk/shared';
 import type { Bucket } from '../types.js';
 import { useStore } from '../store.js';
-import { SortablePlayerCard, DragPreview } from './PlayerCard.js';
+import { SortablePlayerCard, DragPreview, type CardMenuData } from './PlayerCard.js';
 import { ClockIcon, CloseIcon, PinIcon } from './icons.js';
 import { buildRankContext, gapLine, groupColor } from '../lib/board.js';
 
@@ -39,21 +32,47 @@ export function GroupBoard({ buckets }: { buckets: Bucket[] }) {
   const startTime = useStore((s) => s.startTime);
   const intervalMin = useStore((s) => s.intervalMin);
   const constraints = useStore((s) => s.constraints);
+  const violations = useStore((s) => s.violations);
+  const locked = useStore((s) => s.locked);
+  const toggleLock = useStore((s) => s.toggleLock);
   const [activeKey, setActiveKey] = useState<string | null>(null);
 
   const cs = useMemo(() => constraints(), [constraints]);
   const schedule = { start: startTime, intervalMin };
 
-  /** 每组是否违反内置条件 + 涉及的人名（用于卡片高亮） */
+  /** 每组是否违反内置条件 + 涉及的人名（后端算好，用于卡片高亮） */
   const violationsByGroup = useMemo(() => {
     const m = new Map<number, Set<string>>();
-    for (const v of findViolations(buckets.map((b) => b.players), cs)) {
+    for (const v of violations) {
       const set = m.get(v.groupIndex) ?? new Set<string>();
       v.names.forEach((n) => set.add(n));
       m.set(v.groupIndex, set);
     }
     return m;
-  }, [buckets, cs]);
+  }, [violations]);
+
+  const assignPlayer = useStore((s) => s.assignPlayer);
+  const swapPlayers = useStore((s) => s.swapPlayers);
+  const unassign = useStore((s) => s.unassign);
+
+  /** 卡片操作菜单的公共部分：目标组 / 可交换的人 */
+  const menuBase = useMemo(() => {
+    const groups: Array<[number, string]> = buckets.map((b, i) => [i, b.name]);
+    const swapTargets = buckets.flatMap((b, gi) =>
+      b.players.map((p) => ({ key: p.key, name: p.name, groupIndex: gi })),
+    );
+    return {
+      groups,
+      swapTargets,
+      onToggleLock: (key: string) => toggleLock(key),
+      onMove: (key: string, gi: number) => {
+        const target = buckets[gi];
+        if (target) assignPlayer(key, target.id);
+      },
+      onSwap: (key: string, other: string) => swapPlayers(key, other),
+      onUnassign: (key: string) => unassign(key),
+    };
+  }, [buckets, assignPlayer, swapPlayers, unassign, toggleLock]);
 
   /** 每组被钉住的人 */
   const pinnedByGroup = useMemo(() => {
@@ -126,6 +145,7 @@ export function GroupBoard({ buckets }: { buckets: Bucket[] }) {
             pinnedNames={pinnedByGroup.get(i) ?? EMPTY_LIST}
             rank={rank}
             mean={mean}
+            menuBase={menuBase}
           />
         ))}
       </div>
@@ -155,6 +175,7 @@ function GroupColumn({
   pinnedNames,
   rank,
   mean,
+  menuBase,
 }: {
   bucket: Bucket;
   index: number;
@@ -164,11 +185,13 @@ function GroupColumn({
   pinnedNames: string[];
   rank: ReturnType<typeof buildRankContext>;
   mean: number;
+  menuBase: Omit<CardMenuData, 'swapTargets' | 'locked'> & { swapTargets: Array<{ key: string; name: string; groupIndex: number }> };
 }) {
   const renameBucket = useStore((s) => s.renameBucket);
   const removeBucket = useStore((s) => s.removeBucket);
   const addToBucket = useStore((s) => s.addToBucket);
   const constraints = useStore((s) => s.constraints);
+  const locked = useStore((s) => s.locked);
   const [editing, setEditing] = useState(false);
   const [adding, setAdding] = useState(false);
   const [newName, setNewName] = useState('');
@@ -269,6 +292,12 @@ function GroupColumn({
               pinned={Boolean(isPinnedName(p.name, cs))}
               conflict={conflictNames.has(p.name)}
               rankLine={gapLine(p, rank.rankOf.get(p.key) ?? 0, rank.waveAt)}
+              menu={{
+                ...menuBase,
+                locked: locked.includes(p.key),
+                swapTargets: menuBase.swapTargets.filter((t) => t.key !== p.key && t.groupIndex === index)
+                  .concat(menuBase.swapTargets.filter((t) => t.key !== p.key && t.groupIndex !== index)),
+              }}
             />
           ))}
           {empty && (

@@ -1,4 +1,5 @@
 import type { AnchorBrief, ParsedRow, Player, WaveMetric } from '@pk/shared';
+import type { ArrangeResponse, ConstraintsMeta, InspectResponse, PolishResponse } from './types.js';
 
 const BASE = '/api';
 
@@ -106,6 +107,27 @@ export const api = {
   anchors: (q: string) => req<{ items: AnchorBrief[] }>(`/anchors?q=${encodeURIComponent(q)}`),
 
   refreshCache: () => req<{ ok: boolean }>('/cache/refresh', { method: 'POST', body: '{}' }),
+
+  /* ---------------- 分组算法（权威实现 = Rust pk-core） ---------------- */
+  arrange: (body: {
+    players: Player[];
+    groupSize: number;
+    strategy: string;
+    constraints?: { schedule?: { start: string; intervalMin: number } };
+  }) => req<ArrangeResponse>('/group/arrange', { method: 'POST', body: JSON.stringify(body) }),
+
+  inspect: (body: {
+    groups: Player[][];
+    constraints?: { schedule?: { start: string; intervalMin: number } };
+  }) => req<InspectResponse>('/group/inspect', { method: 'POST', body: JSON.stringify(body) }),
+
+  polish: (body: {
+    groups: Player[][];
+    protected?: string[];
+    constraints?: { schedule?: { start: string; intervalMin: number } };
+  }) => req<PolishResponse>('/group/polish', { method: 'POST', body: JSON.stringify(body) }),
+
+  constraints: () => req<ConstraintsMeta>('/group/constraints'),
 
   listPlans: () => req<{ items: PlanBrief[] }>('/plans'),
   getPlan: (id: number) => req<PlanDetail>(`/plans/${id}`),

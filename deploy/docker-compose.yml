@@ -1,0 +1,25 @@
+# 部署到 64：镜像由 GitHub Actions 构建（ghcr.io/subisle/douyin-pk-group）
+# 用法：
+#   echo "MYSQL_HOST=... MYSQL_PORT=... MYSQL_USER=... MYSQL_PASSWORD=... MYSQL_DATABASE=..." > .env
+#   docker compose -f deploy/docker-compose.yml up -d
+services:
+  pk-server:
+    image: ghcr.io/subisle/douyin-pk-group:latest
+    container_name: pk-server
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8787:8787"   # 只监听本机，公网入口交给 Caddy
+    env_file:
+      - .env
+    environment:
+      PORT: "8787"
+      WEB_DIST: /app/web
+      SQLITE_PATH: /app/data/app.db
+      WAVE_CACHE_TTL: "600"
+    volumes:
+      - ./data:/app/data        # SQLite（方案 + 别名）持久化
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/pk-server", "--health-check"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
