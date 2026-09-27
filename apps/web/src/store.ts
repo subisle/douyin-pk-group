@@ -110,7 +110,7 @@ export const useStore = create<State>((set, get) => ({
   configOpen: false,
 
   text: DEFAULT_ROSTER,
-  metric: 'lastN',
+  metric: 'total', // 排名按累计总音浪（与抖音榜单一致），近N天增量口径可手动切换
   days: 3,
   groupSize: 8,
   strategy: 'snake',

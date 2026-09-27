@@ -32,8 +32,8 @@ export function TopBar() {
         {latestDate && <span className="text-[12px] text-ink2">数据截止 {latestDate}</span>}
         {dates.length > 0 && <span className="text-[12px] text-ink3">可用日期 {dates.length} 天</span>}
         {baselineDate && (
-          <span className="text-[12px] text-ink3" title="首次采集那天记的是累计音浪，不是当日增量，统计时会剔除">
-            已剔除基线日 {baselineDate}
+          <span className="text-[12px] text-ink3" title="首次采集那天记的是账号累计音浪，已作为基数计入总音浪排名">
+            累计基数日 {baselineDate}
           </span>
         )}
         {anchorCount > 0 && <span className="text-[12px] text-ink3">主播库 {anchorCount} 人</span>}

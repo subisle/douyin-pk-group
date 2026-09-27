@@ -1,4 +1,4 @@
-import { queryReadonly, getActiveId, getSource, type SourceId } from '../db/mysql.js';
+import { queryReadonly, getActiveId, type SourceId } from '../db/mysql.js';
 import { dialectOf } from '../db/dialect.js';
 import type { WaveMetric } from '@pk/shared';
 
@@ -23,19 +23,19 @@ const TTL = Number(process.env.WAVE_CACHE_TTL ?? 600) * 1000;
 
 async function getDatesInfo(force = false, sourceId?: SourceId): Promise<DateCache> {
   const src = sourceId ?? getActiveId();
-  const cfg = getSource(src);
   const hit = dateCaches.get(src);
   if (!force && hit && Date.now() - hit.at < TTL) return hit;
 
   const dia = dialectOf(src);
   const rows = await queryReadonly<DateRow>(dia.datesSql, [], src);
-  let dates = rows.map((r) => r.d);
+  const dates = rows.map((r) => r.d);
 
+  // 基线日仅作标记（首日 wave 是「账号累计音浪」快照，不是当日增量）。
+  // 它是总音浪的基数，必须计入 total 口径；只有 lastN（近N日增量）口径要排除它。
   let baseline: string | null = null;
-  if (cfg.excludeBaselineDay && dia.baselineSql && dates.length > 1) {
+  if (dia.baselineSql) {
     const b = await queryReadonly<DateRow>(dia.baselineSql, [], src);
     baseline = b[0]?.d ?? null;
-    if (baseline) dates = dates.filter((d) => d !== baseline);
   }
 
   const info: DateCache = { at: Date.now(), dates, baseline };
@@ -43,16 +43,17 @@ async function getDatesInfo(force = false, sourceId?: SourceId): Promise<DateCac
   return info;
 }
 
-/** 可用于统计的日期（A 库已剔除基线日） */
+/** 全部采集日期（含基线日：它是累计基数，total 口径必须计入） */
 export async function getAvailableDates(force = false, sourceId?: SourceId): Promise<string[]> {
   return (await getDatesInfo(force, sourceId)).dates;
 }
 
 /**
  * 基线日 = 最早那个采集日（限 A 库）。那天没有上一个快照（prev_snapshot_date 全为 NULL），
- * daily_metric.wave 记的是「账号累计音浪」而不是当日增量，会比正常日高出 10~40 倍
- * （例：浩龙 09-21 = 140.6 万，09-22 / 09-23 只有 16.0 万 / 5.0 万）。
- * 参与求和会把人虚高到百万级，分组直接失衡，所以聚合时剔除。
+ * daily_metric.wave 记的是「账号累计音浪」而不是当日增量
+ * （例：玖玉 09-21 = 167 万，而之后每天只有几千到两万）。
+ * 注意：它不是脏数据——它正是总音浪的基数，「总计」口径必须计入；
+ * 只有「近N天」这类增量口径需要排除，否则会把百万级快照算进近几日的增量里。
  */
 export async function getBaselineDate(force = false, sourceId?: SourceId): Promise<string | null> {
   return (await getDatesInfo(force, sourceId)).baseline;
@@ -60,8 +61,8 @@ export async function getBaselineDate(force = false, sourceId?: SourceId): Promi
 
 /**
  * 音浪口径：
- * - lastN：最近 N 个可用日期求和
- * - total：全部可用日期求和
+ * - total：全部日期求和 = 基线日累计快照 + 之后每日增量 ≈ 真实累计总音浪
+ * - lastN：最近 N 个「增量日」求和（排除基线日，避免把累计快照算进近几日）
  */
 export async function getWaves(
   metric: WaveMetric,
@@ -71,8 +72,10 @@ export async function getWaves(
   sourceId?: SourceId,
 ): Promise<{ metric: WaveMetric; days: number; dates: string[]; waves: Record<string, number> }> {
   const src = sourceId ?? getActiveId();
-  const available = (await getDatesInfo(force, src)).dates;
-  const useDates = metric === 'lastN' ? available.slice(0, Math.max(1, days)) : available;
+  const info = await getDatesInfo(force, src);
+  // lastN 只在增量日里取近 N 天；total 用全部日期（含基线日累计基数）
+  const deltaDates = info.baseline ? info.dates.filter((d) => d !== info.baseline) : info.dates;
+  const useDates = metric === 'lastN' ? deltaDates.slice(0, Math.max(1, days)) : info.dates;
 
   const cacheKey = `${src}:${metric}:${days}`;
   const hit = waveCaches.get(cacheKey);
