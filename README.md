@@ -83,6 +83,16 @@ docker compose -f deploy/docker-compose.yml pull && docker compose -f deploy/doc
 ```
 
 服务只监听 `127.0.0.1:8787`，公网入口交给 Caddy 反代。
+`deploy/Caddyfile.example` 是可直接用的配置：`/s/*` 放开展示页并给短缓存，
+其余路径 `no-store` 防止后台看到旧分组，另加了限流。
+
+```bash
+# 64 上
+cp deploy/Caddyfile.example /etc/caddy/Caddyfile.d/pk-group.caddy
+caddy reload
+```
+
+拿到的对外展示 URL 就是 `https://你的域名/s/<方案号>`。
 
 ## 本地开发机上验证（64）
 
