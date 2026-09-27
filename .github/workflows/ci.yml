@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      platforms:
+        description: "镜像架构，逗号分隔（默认只出部署机要用的 amd64）"
+        type: string
+        default: "linux/amd64"
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -55,21 +60,38 @@ jobs:
         run: pnpm --filter @pk/web build
 
   docker:
-    name: 构建镜像（amd64 + arm64）
+    name: 构建镜像（${{ inputs.platforms || 'linux/amd64' }}）
     needs: [rust, web]
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     permissions:
       contents: read
       packages: write
     steps:
       - uses: actions/checkout@v4
-      - uses: docker/setup-qemu-action@v3
+
+      # 只有真的要出 arm64 才装 QEMU：跨架构模拟编译 Rust 会把构建从几分钟
+      # 拖到半小时以上，而部署机（64 / x86_64）只需要 amd64。
+      - name: 判断是否需要 QEMU
+        id: qemu
+        run: |
+          if echo "${{ inputs.platforms || 'linux/amd64' }}" | grep -q 'arm64'; then
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 准备 QEMU
+        if: steps.qemu.outputs.needed == 'true'
+        uses: docker/setup-qemu-action@v3
+
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: 构建并推送
         uses: docker/build-push-action@v6
         with:
@@ -78,6 +100,8 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository }}:latest
             ghcr.io/${{ github.repository }}:${{ github.sha }}
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ inputs.platforms || 'linux/amd64' }}
+          # mode=max 会把每层都存一遍，仓库 artifact 配额有限（曾经撞满导致缓存上传失败），
+          # 这里只保留中间层，体积小很多，命中率和耗时基本不变。
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=min
