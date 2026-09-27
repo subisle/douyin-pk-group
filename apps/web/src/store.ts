@@ -115,7 +115,7 @@ export const useStore = create<State>((set, get) => ({
   groupSize: 8,
   strategy: 'snake',
   title: 'PK 挑战赛分组',
-  brand: '星嗨艺创',
+  brand: 'ST-001',
   startTime: DEFAULT_CONSTRAINTS.schedule.start,
   intervalMin: DEFAULT_CONSTRAINTS.schedule.intervalMin,
 
