@@ -2,10 +2,13 @@ import type { BalanceStat, GroupOptions, GroupStat, Player } from './types.js';
 import {
   DEFAULT_CONSTRAINTS,
   findByName,
+  gapConflicts,
   placePinned,
   polishBalance,
   resolveExclusions,
+  resolveMinGaps,
   resolvePinnedIndex,
+  type MinGapRule,
 } from './constraints.js';
 
 export function groupCount(total: number, groupSize: number): number {
@@ -182,13 +185,20 @@ export function autoGroup(players: Player[], options: GroupOptions): Player[][] 
   /* 4. 互斥修复 */
   groups = resolveExclusions(groups, cs.excludeTogether, pinnedKeys);
 
-  /* 5. 均衡微调：只接受让极差变小的交换，绝不移动固定位、绝不制造新的互斥冲突。
+  /* 4.5 最小间隔修复（啸昭/啸寻这类「至少相隔 N 组」） */
+  const minGapRules = cs.minGap ?? [];
+  if (minGapRules.length) {
+    groups = resolveMinGaps(groups, minGapRules, pinnedKeys, cs.excludeTogether);
+  }
+
+  /* 5. 均衡微调：只接受让极差变小的交换，绝不移动固定位、绝不制造新的互斥/间隔冲突。
      从高到低（梯队式）除外——均衡会把阶梯打散，失去这种分组的意义 */
   if (options.strategy !== 'sequential') {
     groups = polishBalance(groups, {
       protectedKeys: pinnedKeys,
       excludeSets: cs.excludeTogether,
       avoidMaster: options.strategy === 'snake-no-master',
+      minGapRules,
     });
   }
 

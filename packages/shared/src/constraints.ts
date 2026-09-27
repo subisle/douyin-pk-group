@@ -12,6 +12,13 @@ export interface ScheduleRule {
   intervalMin: number;
 }
 
+/** 最小间隔：两个人所在组号之差必须 ≥ gap（组数不足时约束自动放宽跳过） */
+export interface MinGapRule {
+  a: string;
+  b: string;
+  gap: number;
+}
+
 export interface ConstraintSet {
   /** 互斥组：同一数组内的人两两不能分到同一组 */
   excludeTogether: string[][];
@@ -19,12 +26,15 @@ export interface ConstraintSet {
   pinned: PinnedRule[];
   /** 开赛时间 */
   schedule: ScheduleRule;
+  /** 最小间隔（可选，向后兼容旧调用） */
+  minGap?: MinGapRule[];
 }
 
 /**
  * 内置条件（用户拍板）：
  * - 玖玉 / 玖妹 / 玖玥 三人两两不能同组
  * - 啸泽固定在第 1 组，啸帆固定在最后一组
+ * - 啸昭和啸寻至少相隔 4 组（组号差 ≥ 4）
  * - 第 1 组 08:15 开赛，之后每 15 分钟一组
  */
 export const DEFAULT_CONSTRAINTS: ConstraintSet = {
@@ -34,6 +44,7 @@ export const DEFAULT_CONSTRAINTS: ConstraintSet = {
     { name: '啸帆', group: 'last' },
   ],
   schedule: { start: '08:15', intervalMin: 15 },
+  minGap: [{ a: '啸昭', b: '啸寻', gap: 4 }],
 };
 
 export function normName(name: string): string {
@@ -177,6 +188,8 @@ export interface PolishOptions {
   excludeSets?: string[][];
   /** 是否同时避免同门（师傅）扎堆 */
   avoidMaster?: boolean;
+  /** 最小间隔规则：交换后违约数不许增加 */
+  minGapRules?: MinGapRule[];
   maxIter?: number;
 }
 
@@ -199,10 +212,17 @@ function masterConflicts(groups: Player[][]): number {
 }
 
 export function polishBalance(groups: Player[][], options: PolishOptions = {}): Player[][] {
-  const { protectedKeys = new Set(), excludeSets = [], avoidMaster = false, maxIter = 400 } = options;
+  const {
+    protectedKeys = new Set(),
+    excludeSets = [],
+    avoidMaster = false,
+    minGapRules = [],
+    maxIter = 400,
+  } = options;
   const setList = excludeSets.map((s) => new Set(s.map(normName))).filter((s) => s.size > 1);
   const result = groups.map((g) => [...g]);
   if (result.length < 2) return result;
+  const baseGapConflicts = gapConflicts(result, minGapRules);
 
   const totals = result.map((g) => sumWave(g));
   /** 交换后两组的新总和，据此算极差（O(g)，避免每候选重算全量） */
@@ -264,6 +284,16 @@ export function polishBalance(groups: Player[][], options: PolishOptions = {}): 
             const q = result[bi][qi];
             if (protectedKeys.has(q.key)) continue;
             if (setList.length && conflictsAfter(ai, bi, p, q) > 0) continue;
+            // 最小间隔：交换后违约数不许增加（起点可能是 0，也可能带着既有违约一起优化）
+            if (minGapRules.length) {
+              const tmpP = result[ai][pi];
+              result[ai][pi] = q;
+              result[bi][qi] = tmpP;
+              const gapAfter = gapConflicts(result, minGapRules);
+              result[ai][pi] = p;
+              result[bi][qi] = q;
+              if (gapAfter > baseGapConflicts) continue;
+            }
             const cost =
               spreadAfter(ai, bi, p, q) + (avoidMaster ? masterAfter(ai, bi, p, q) * 1e6 : 0);
             if (!best || cost < best.cost) best = { ai, bi, pi, qi, cost };
@@ -285,7 +315,7 @@ export function polishBalance(groups: Player[][], options: PolishOptions = {}): 
 }
 
 export interface Violation {
-  type: 'exclude' | 'pin';
+  type: 'exclude' | 'pin' | 'gap';
   groupIndex: number;
   message: string;
   /** 涉及的人名，用于卡片高亮 */
@@ -330,5 +360,117 @@ export function findViolations(groups: Player[][], cs: ConstraintSet = DEFAULT_C
     }
   }
 
+  for (const rule of cs.minGap ?? []) {
+    const ia = groupIndexOfName(groups, rule.a);
+    const ib = groupIndexOfName(groups, rule.b);
+    if (ia < 0 || ib < 0) continue;
+    if (Math.abs(ia - ib) >= rule.gap) continue;
+    out.push({
+      type: 'gap',
+      groupIndex: Math.min(ia, ib),
+      message: `${rule.a}（第 ${ia + 1} 组）和 ${rule.b}（第 ${ib + 1} 组）需至少间隔 ${rule.gap} 组`,
+      names: [rule.a, rule.b],
+    });
+  }
+
   return out;
+}
+
+function groupIndexOfName(groups: Player[][], name: string): number {
+  const n = normName(name);
+  return groups.findIndex((g) => g.some((p) => normName(p.name) === n));
+}
+
+/** 统计最小间隔违约数（找不到人不计） */
+export function gapConflicts(groups: Player[][], rules: MinGapRule[] = []): number {
+  let n = 0;
+  for (const r of rules) {
+    const ia = groupIndexOfName(groups, r.a);
+    const ib = groupIndexOfName(groups, r.b);
+    if (ia < 0 || ib < 0) continue;
+    if (Math.abs(ia - ib) < r.gap) n++;
+  }
+  return n;
+}
+
+/**
+ * 最小间隔修复：对违约的两人，把其中非固定位的一人换到满足间隔的组，
+ * 换入者选择对音浪均衡损伤最小、且不制造互斥冲突的对象。
+ */
+export function resolveMinGaps(
+  groups: Player[][],
+  rules: MinGapRule[] = [],
+  protectedKeys: Set<string> = new Set(),
+  excludeSets: string[][] = [],
+  maxIter = 200,
+): Player[][] {
+  const result = groups.map((g) => [...g]);
+  const setList = excludeSets.map((s) => new Set(s.map(normName))).filter((s) => s.size > 1);
+  if (!rules.length || result.length < 2) return result;
+
+  /** 交换 p(在 gi) 与 q(在 ki) 后，两组成员中互斥组是否超 1 人 */
+  const exclusionOk = (gi: number, ki: number, p: Player, q: Player): boolean => {
+    for (const s of setList) {
+      const cnt = (arr: Player[], out: Player, inn: Player) =>
+        arr.reduce((m, x) => m + (s.has(normName(x.name)) ? 1 : 0), 0) -
+        (s.has(normName(out.name)) ? 1 : 0) +
+        (s.has(normName(inn.name)) ? 1 : 0);
+      if (cnt(result[gi], p, q) > 1 || cnt(result[ki], q, p) > 1) return false;
+    }
+    return true;
+  };
+
+  const total = result.reduce((s, g) => s + sumWave(g), 0);
+  const mean = result.length ? total / result.length : 0;
+
+  for (let iter = 0; iter < maxIter; iter++) {
+    if (gapConflicts(result, rules) === 0) break;
+    let best: { gi: number; pi: number; ki: number; qi: number; score: number } | null = null;
+
+    for (const r of rules) {
+      const ia = groupIndexOfName(result, r.a);
+      const ib = groupIndexOfName(result, r.b);
+      if (ia < 0 || ib < 0 || Math.abs(ia - ib) >= r.gap) continue;
+
+      // 两个方向都可尝试：动 a 或动 b（固定位优先不动）
+      const moves: Array<{ mi: number; other: number }> = [];
+      if (!result[ia].some((p) => protectedKeys.has(p.key) && normName(p.name) === normName(r.a)))
+        moves.push({ mi: ia, other: ib });
+      if (!result[ib].some((p) => protectedKeys.has(p.key) && normName(p.name) === normName(r.b)))
+        moves.push({ mi: ib, other: ia });
+
+      for (const { mi, other } of moves) {
+        const fromArr = result[mi];
+        for (let pi = 0; pi < fromArr.length; pi++) {
+          const p = fromArr[pi];
+          const nameP = normName(p.name);
+          if (nameP !== normName(r.a) && nameP !== normName(r.b)) continue;
+          if (protectedKeys.has(p.key)) continue;
+          for (let ki = 0; ki < result.length; ki++) {
+            if (ki === mi) continue;
+            if (Math.abs(ki - other) < r.gap) continue;
+            const sumFrom = sumWave(result[mi]);
+            const sumTo = sumWave(result[ki]);
+            for (let qi = 0; qi < result[ki].length; qi++) {
+              const q = result[ki][qi];
+              if (protectedKeys.has(q.key)) continue;
+              if (!exclusionOk(mi, ki, p, q)) continue;
+              const before = Math.abs(sumFrom - mean) + Math.abs(sumTo - mean);
+              const after =
+                Math.abs(sumFrom - p.wave + q.wave - mean) + Math.abs(sumTo - q.wave + p.wave - mean);
+              const score = after - before;
+              if (!best || score < best.score) best = { gi: mi, pi, ki, qi, score };
+            }
+          }
+        }
+      }
+    }
+
+    if (!best) break;
+    const { gi, pi, ki, qi } = best;
+    const tmp = result[gi][pi];
+    result[gi][pi] = result[ki][qi];
+    result[ki][qi] = tmp;
+  }
+  return result;
 }

@@ -2,10 +2,11 @@
  * 内置条件自检（真实名单 + 真实音浪）：
  * 1) 啸泽是否在第 1 组、啸帆是否在最后一组
  * 2) 玖玉 / 玖妹 / 玖玥 是否两两不同组（名单里补上玖玉、玖妹后验）
- * 3) 开赛时间列是否 08:15 起每 15 分钟一组
- * 4) 顺带打印极差，对比四种策略/约束组合
+ * 3) 啸昭 / 啸寻 是否至少相隔 4 组
+ * 4) 开赛时间列是否 08:15 起每 15 分钟一组
+ * 5) 顺带打印极差，对比四种策略/约束组合
  *
- * 用法：apps/web/node_modules/.bin/tsx scripts/check-constraints.ts
+ * 用法：cd apps/server && node --import tsx ../../scripts/check-constraints.ts
  */
 import {
   DEFAULT_ROSTER,
@@ -24,7 +25,7 @@ async function parse(text: string): Promise<Player[]> {
   const res = await fetch(`${BASE}/api/roster/parse`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text, metric: 'lastN', days: 3 }),
+    body: JSON.stringify({ text, metric: 'total', days: 3 }),
   });
   return ((await res.json()) as { players: Player[] }).players;
 }
@@ -48,6 +49,10 @@ async function main() {
   console.log(`\n最高 ${(b.max / 10000).toFixed(1)}万 / 最低 ${(b.min / 10000).toFixed(1)}万 / 极差 ${b.spread}%`);
 
   const bad = findViolations(groups, DEFAULT_CONSTRAINTS);
+  const at = (name: string) => groups.findIndex((g) => g.some((p) => p.name === name)) + 1;
+  console.log(
+    `\n啸昭=第 ${at('啸昭')} 组，啸寻=第 ${at('啸寻')} 组（需组号差 ≥ 4，实际差 ${Math.abs(at('啸昭') - at('啸寻'))}）`,
+  );
   console.log(bad.length ? `\n❌ 冲突：\n${bad.map((v) => '  - ' + v.message).join('\n')}` : '\n✅ 内置条件全部满足');
 
   /* 名单里目前只有 玖玥，玖玉 / 玖妹 不在名单上；补进去验互斥是否真的生效 */
