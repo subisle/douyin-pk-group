@@ -66,7 +66,11 @@ pnpm install && pnpm --filter @pk/web dev   # 5173，/api 代理到 8787
 构建全部走 GitHub Actions（`.github/workflows/ci.yml`）：
 - `rust` job：`cargo test` / `cargo clippy -D warnings` / `cargo fmt --check`
 - `web` job：`tsc --noEmit` + `vite build`
-- `docker` job：构建多架构镜像（amd64 + arm64）推到 `ghcr.io/subisle/douyin-pk-group`
+- `docker` job：构建镜像推到 `ghcr.io/subisle/douyin-pk-group`
+  - push 默认只出 `linux/amd64`（部署机 64 是 x86_64）。多架构会走 QEMU 模拟编译 Rust，
+    实测把构建从 4 分钟拖到 25 分钟以上还没跑完
+  - 需要 arm64 时手动触发：Actions → CI → Run workflow → `platforms` 填
+    `linux/amd64,linux/arm64`
 
 部署到 64（镜像由 Actions 构建，本机只 pull）：
 
@@ -152,6 +156,26 @@ scripts/sync64.sh --check    # 同步后跑 cargo fmt / clippy / test + tsc
 1. 所有 SQL 集中在 `pk-server/src/dialect.rs`，不接受外部传入的 SQL 字符串
 2. `queryReadonly()` 只放行 `SELECT / SHOW`，含写操作关键字（按词边界，`deleted_at` 这类列名不算）直接抛错
 3. 分组方案、别名等写操作落到本地 SQLite（`apps/server/data/app.db`）
+
+## 部署前必须先解决：64 连不上 MySQL
+
+开发机 64 访问 `mysql7.sqlpub.com:3312` 的现象是：
+
+```
+TCP connect 成功（本地端 64.188.8.149:17218）
+recv 等待 12s 超时 —— 服务端一个 MySQL 握手包都没发
+```
+
+TCP 能建连但应用层无响应，是**按来源 IP 丢弃**的典型特征，不是网络不通、
+也不是本机配置错。sqlx 侧表现为 `pool timed out while waiting for an open connection`。
+
+解决办法（二选一，都在代码之外）：
+
+1. 在 sqlpub 控制台把 **64.188.8.149** 加进该库的 IP 白名单
+2. 换成 64 能连的库/实例，改 `deploy/.env` 里的 `DB_A_*` 即可
+
+注意：连不上库时服务**照常启动**（见 `mysql.rs` 的处理），`/api/health` 会报
+`db.ok=false`，展示页降级用方案快照。所以部署和登录不受影响，只是拿不到实时音浪。
 
 ## 已知事项
 
