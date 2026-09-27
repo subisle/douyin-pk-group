@@ -167,8 +167,12 @@ function GroupColumn({
 }) {
   const renameBucket = useStore((s) => s.renameBucket);
   const removeBucket = useStore((s) => s.removeBucket);
+  const addToBucket = useStore((s) => s.addToBucket);
   const constraints = useStore((s) => s.constraints);
   const [editing, setEditing] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [newName, setNewName] = useState('');
+  const [addBusy, setAddBusy] = useState(false);
   const { setNodeRef, isOver } = useDroppable({ id: COL_PREFIX + bucket.id });
 
   const cs = constraints();
@@ -221,6 +225,15 @@ function GroupColumn({
               <span className="truncate">{pinnedNames.join('、')}</span>
             </span>
           )}
+          <button
+            type="button"
+            onClick={() => setAdding((v) => !v)}
+            title="增补人员到该组"
+            className="ml-auto flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-white/75 text-[14px] font-bold leading-none transition-transform hover:scale-110"
+            style={{ color: color.ink }}
+          >
+            {adding ? '×' : '+'}
+          </button>
         </div>
         <div className="mt-0.5 flex items-center gap-1.5 text-[11.5px] leading-4" style={{ color: color.ink, opacity: 0.82 }}>
           <ClockIcon size={12} />
@@ -275,6 +288,51 @@ function GroupColumn({
           )}
         </div>
       </SortableContext>
+
+      {adding && (
+        <div className="mt-1.5 flex items-center gap-1.5">
+          <input
+            autoFocus
+            value={newName}
+            disabled={addBusy}
+            placeholder="输入主播名，回车增补"
+            className="h-7 flex-1 rounded-[6px] border border-line2 bg-white px-2 text-[12px] outline-none focus:border-brand"
+            onChange={(e) => setNewName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                const n = newName.trim();
+                if (!n || addBusy) return;
+                setAddBusy(true);
+                void addToBucket(bucket.id, n).then(() => {
+                  setAddBusy(false);
+                  setNewName('');
+                });
+              }
+              if (e.key === 'Escape') {
+                setAdding(false);
+                setNewName('');
+              }
+            }}
+          />
+          <button
+            type="button"
+            disabled={addBusy || !newName.trim()}
+            onClick={() => {
+              const n = newName.trim();
+              if (!n || addBusy) return;
+              setAddBusy(true);
+              void addToBucket(bucket.id, n).then(() => {
+                setAddBusy(false);
+                setNewName('');
+              });
+            }}
+            className="h-7 shrink-0 rounded-[6px] px-2.5 text-[12px] font-semibold text-white disabled:opacity-40"
+            style={{ background: color.bar }}
+          >
+            {addBusy ? '…' : '加入'}
+          </button>
+        </div>
+      )}
     </div>
   );
 }

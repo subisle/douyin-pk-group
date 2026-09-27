@@ -94,6 +94,8 @@ interface State {
   removeBucket: (id: string) => void;
   renameBucket: (id: string, name: string) => void;
   moveCard: (activeKey: string, toBucketId: string, overKey: string | null) => void;
+  /** 增补人员：把新主播加进已定稿的组（不重排其他人），返回是否成功 */
+  addToBucket: (bucketId: string, name: string) => Promise<boolean>;
   bind: (rowName: string, personId: string, anchorName: string) => Promise<void>;
   setManualWave: (rowName: string, wave: number) => void;
   savePlanNow: () => Promise<void>;
@@ -282,6 +284,43 @@ export const useStore = create<State>((set, get) => ({
       }
       return { buckets: next };
     });
+  },
+
+  /** 增补人员：只解析这一个名字（带音浪），插到指定组末尾，不动其他人 */
+  addToBucket: async (bucketId, name) => {
+    const trimmed = name.trim();
+    if (!trimmed) return false;
+    const norm = (s: string) => s.replace(/[\s\u3000]/g, '');
+    const dup = get().buckets.some((b) => b.players.some((p) => norm(p.name) === norm(trimmed)));
+    if (dup) {
+      get().notify(`${trimmed} 已经在分组里了`);
+      return false;
+    }
+    try {
+      const res = await api.parse({ text: trimmed, metric: get().metric, days: get().days });
+      const hit = res.players.find((p) => !p.excluded);
+      if (!hit) {
+        get().notify(`名单里没有匹配到「${trimmed}」，请检查名字或先绑定账号`);
+        return false;
+      }
+      set((s) => ({
+        buckets: s.buckets.map((b) =>
+          b.id === bucketId ? { ...b, players: [...b.players, hit] } : b,
+        ),
+      }));
+      const bad = findViolations(get().buckets.map((b) => b.players), get().constraints());
+      const mine = bad.filter((v) => v.names.includes(hit.name));
+      const unmatchedHint = hit.matched ? '' : '（未匹配到账号，音浪按 0 计，可到「名单」页绑定）';
+      get().notify(
+        mine.length
+          ? `已把 ${hit.name} 加入，但有约束冲突：${mine[0].message}`
+          : `已把 ${hit.name} 增补进该组${unmatchedHint}`,
+      );
+      return true;
+    } catch (e) {
+      get().notify(`增补失败：${(e as Error).message}`);
+      return false;
+    }
   },
 
   bind: async (rowName, personId, anchorName) => {
