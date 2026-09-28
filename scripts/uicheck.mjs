@@ -163,6 +163,7 @@ try {
       trend: !!document.querySelector('svg path'),
       hasSchedule: /开赛/.test(document.body.innerText),
       hasWave: /音浪/.test(document.body.innerText),
+      hasTrendTitle: /每日音浪曲线/.test(document.body.innerText),
       colWidth: g ? Math.round(g.getBoundingClientRect().width) : 0,
       viewport: window.innerWidth,
       hScroll: document.documentElement.scrollWidth > window.innerWidth + 1,
@@ -172,11 +173,13 @@ try {
   mobile.root ? ok('React 已挂载') : bad('React 没挂载');
   expect('手机端每页分组数', mobile.cards, 1);
   mobile.players > 0 ? ok(`组内渲染 ${mobile.players} 人`) : bad('组内没渲染人员');
-  mobile.dates > 1 ? ok(`日期条 ${mobile.dates} 个（口径 + 每日）`) : bad('日期条没渲染');
   mobile.slots > 0 ? ok(`赛程时段 ${mobile.slots} 段`) : bad('赛程时长没渲染');
-  mobile.hasSchedule && mobile.hasWave ? ok('展示了赛程时长与音浪') : bad('缺少赛程时长或音浪');
+  mobile.hasSchedule ? ok('展示了赛程时长') : bad('缺少赛程时长');
   mobile.pagerCount > 0 ? ok(`分页控件：${mobile.pager}`) : bad('没有分页控件');
-  mobile.trend ? ok('每日音浪曲线已渲染') : bad('曲线图没渲染');
+  // 公布页刻意不上音浪：这三样都不该出现在页面上
+  mobile.hasWave ? bad('公布页出现了「音浪」，与新契约冲突') : ok('全页无「音浪」字样');
+  mobile.dates === 0 ? ok('日期条已下线（只为切音浪快照而存在）') : bad(`还剩 ${mobile.dates} 个日期 chip`);
+  mobile.hasTrendTitle ? bad('每日音浪曲线还在页面上') : ok('每日音浪曲线已下线');
   expect('手机端无横向滚动', mobile.hScroll, false);
   mobile.colWidth > 300 && mobile.colWidth < 400
     ? ok(`单列宽度 ${mobile.colWidth}px（视口 ${mobile.viewport}px）`)
@@ -208,8 +211,8 @@ try {
   console.log('  ->  ' + (await shot(ws, 'share-pc.png')));
   errors.length ? bad('PC 端 console 报错: ' + errors.join(' | ')) : ok('PC 端无 console 报错');
 
-  /* ============ 3. 翻页 + 按日期切换 ============ */
-  console.log('== 翻页与日期切换 ==');
+  /* ============ 3. 翻页 + 赛程条联动 ============ */
+  console.log('== 翻页与赛程条联动 ==');
   const paged = JSON.parse(await evaluate(ws, `(() => {
     const before = [...document.querySelectorAll('[data-group-card]')].map(c => c.dataset.groupCard);
     const next = [...document.querySelectorAll('[data-pager] button')].find(b => b.getAttribute('aria-label') === '下一页');
@@ -228,23 +231,28 @@ try {
   console.log('  ->  ' + (await shot(ws, 'share-page2.png')));
 
   const dated = JSON.parse(await evaluate(ws, `(() => {
-    const chips = [...document.querySelectorAll('[data-date-chip]')];
-    const day = chips[chips.length - 1];
-    const label = day?.dataset.dateChip;
-    day?.click();
-    return JSON.stringify({ clicked: !!day, label, before: document.querySelector('[data-group-card]')?.innerText.replace(/\s+/g, ' ').slice(0, 40) });
+    const slots = [...document.querySelectorAll('[data-group-slot]')];
+    const last = slots[slots.length - 1];
+    last?.click();
+    return JSON.stringify({
+      clicked: !!last,
+      label: last?.dataset.groupSlot,
+      active: document.querySelectorAll('[data-group-slot][aria-current=true]').length,
+    });
   })()`));
   await sleep(500);
   const dayState = JSON.parse(await evaluate(ws, `JSON.stringify({
     head: document.querySelector('header')?.innerText.replace(/\s+/g, ' ').slice(0, 90) ?? '',
-    active: document.querySelector('[data-date-chip][aria-pressed=true]')?.dataset.dateChip ?? '',
-    firstCard: document.querySelector('[data-group-card]')?.innerText.replace(/\s+/g, ' ').slice(0, 40) ?? '',
+    firstCard: document.querySelector('[data-group-card]')?.dataset.groupCard ?? '',
+    pager: document.querySelector('[data-pager]')?.innerText.replace(/\s+/g, ' ') ?? '',
   })`));
-  dated.clicked ? ok(`切到日期「${dated.label}」`) : bad('没有日期切换按钮');
-  dayState.active === dated.label ? ok('日期 chip 高亮跟随') : bad(`日期 chip 高亮不对：${dayState.active}`);
-  dayState.head.includes('统计日期') ? ok(`头部切到按日口径：${dayState.head.slice(0, 60)}`) : bad('头部没切到统计日期');
+  dated.clicked ? ok(`点赛程条「${dated.label}」跳到该组所在页`) : bad('赛程条没渲染');
+  dated.active > 0 ? ok(`当前页 ${dated.active} 个时段高亮（${dayState.pager}）`) : bad('赛程条没有当前页高亮');
+  dayState.firstCard === dated.label
+    ? ok(`跳页正确：首张卡就是 ${dayState.firstCard}`)
+    : bad(`跳页后首张卡是 ${dayState.firstCard}，期望 ${dated.label}`);
   console.log('  ->  ' + (await shot(ws, 'share-dated.png')));
-  errors.length ? bad('翻页/切日期 console 报错: ' + errors.join(' | ')) : ok('翻页/切日期无 console 报错');
+  errors.length ? bad('翻页/点时段 console 报错: ' + errors.join(' | ')) : ok('翻页/点时段无 console 报错');
 
   /* ============ 4. 管理员登录页 ============ */
   console.log('== 管理员登录页 ==');

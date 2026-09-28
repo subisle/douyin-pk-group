@@ -1,23 +1,23 @@
 /**
  * 对外展示页（只读、无需口令）：/s/:planId
  *
- * 这一页只回答六件事：分好的组、每人音浪、哪一天、曲线、赛程时长、第几页。
- * 顺序也是按「先看赛程，再看分组，最后看走势」排的：
- *   1. 头部    方案名 + 总音浪 / 人数 / 组数
- *   2. 日期条  年-月-日切换（吸顶，滚到哪儿都能换）
- *   3. 赛程条  几点开赛、每组多久、全程多久
- *   4. 分组    组分页，一页一组（手机）/ 一页三组（PC）
- *   5. 曲线    每日音浪折线
+ * 这一页只回答三件事：我在第几组、几点开赛、组里有哪些人。
+ *   1. 头部    方案名 + 开赛时间 / 人数 / 组数 / 每组间隔
+ *   2. 赛程条  几点开赛、每组多久、全程多久，当前页高亮
+ *   3. 分组    组分页，一页一组（手机）/ 一页三组（PC）
+ *
+ * 刻意不上的东西：音浪、口径、日期切换、每日曲线。
+ * 音浪是营收数据，公布页只用来对人对时间；分组是按音浪排的，但均衡结果
+ * 对外只通过「组内序号」和「各组人数一致」体现，不摊开具体数字。
+ * 日期条和每日曲线随音浪一起去掉——它们存在的唯一目的就是换一份音浪快照，
+ * 音浪没了之后就是死控件，留着只会和「分组不给看音浪」自相矛盾。
  *
  * 数据来自 /api/public/plans/:id（后端已裁掉 personId / key 等内部字段）。
- * 音浪由后端按方案口径实时取；取不到时 stale=true，页面用方案保存时的快照并标注。
  */
 import { useEffect, useMemo, useState } from 'react';
-import { formatWave } from '@pk/shared';
 import { api, type PublicGroup, type PublicPlan } from '../api.js';
-import { TrendChart } from './TrendChart.js';
 import { groupColor } from '../lib/board.js';
-import { AlertIcon, ChevronLeftIcon, ClockIcon, RefreshIcon, TrendIcon } from './icons.js';
+import { AlertIcon, ChevronLeftIcon, ClockIcon, RefreshIcon } from './icons.js';
 
 /** 一页放几组：手机一屏一组，PC 一屏三组 */
 function groupsPerPage(width: number): number {
@@ -74,8 +74,6 @@ export function ShareView({ planId }: { planId: string }) {
   const [plan, setPlan] = useState<PublicPlan | null>(null);
   const [error, setError] = useState('');
   const [nonce, setNonce] = useState(0);
-  /** -1 = 按方案口径（总音浪 / 近 N 天）；>=0 = 按 daily.dates 下标看某一天 */
-  const [dateIdx, setDateIdx] = useState(-1);
   const [page, setPage] = useState(0);
   const width = useViewportWidth();
   const perPage = groupsPerPage(width);
@@ -93,53 +91,14 @@ export function ShareView({ planId }: { planId: string }) {
     };
   }, [planId, nonce]);
 
-  // 榜单页长时间开着，顺手按分钟刷一次音浪
+  // 榜单页长时间开着，顺手按分钟刷一次
   useEffect(() => {
     const t = setInterval(() => setNonce((n) => n + 1), 60_000);
     return () => clearInterval(t);
   }, []);
 
-  // 日期或分页粒度一变，回到第一页，否则可能停在不存在的页码上
-  useEffect(() => setPage(0), [dateIdx, perPage]);
-
-  /** 按选中日期重算分组（名次依赖音浪，必须重排） */
-  const dayView = useMemo(() => {
-    if (!plan?.daily || dateIdx < 0) return null;
-    const d = plan.daily;
-    if (dateIdx >= d.dates.length) return null;
-    const i = dateIdx;
-    const groups: PublicGroup[] = d.groups.map((dg, gi) => {
-      const players = dg.players
-        .map((p) => ({
-          name: p.name,
-          leader: p.leader,
-          wave: p.values[i] ?? 0,
-          rank: 0,
-          group_rank: 0,
-        }))
-        .sort((a, b) => b.wave - a.wave || a.name.localeCompare(b.name, 'zh-Hans-CN'));
-      players.forEach((p, k) => {
-        p.group_rank = k + 1;
-      });
-      return {
-        name: dg.name,
-        slot: plan.groups[gi]?.slot ?? '',
-        count: players.length,
-        total: players.reduce((s, p) => s + p.wave, 0),
-        players,
-      };
-    });
-    const all = groups.flatMap((g) => g.players).sort((a, b) => b.wave - a.wave);
-    all.forEach((p, k) => {
-      p.rank = k + 1;
-    });
-    return { groups, total: all.reduce((s, p) => s + p.wave, 0), date: d.dates[i] };
-  }, [plan, dateIdx]);
-
-  const metricLabel = useMemo(() => {
-    if (!plan) return '';
-    return plan.metric === 'total' ? '总音浪' : `近 ${plan.days} 天音浪`;
-  }, [plan]);
+  // 视口跨档（手机→平板→PC）时回到第一页，否则可能停在不存在的页码上
+  useEffect(() => setPage(0), [perPage]);
 
   if (error) {
     return (
@@ -160,11 +119,10 @@ export function ShareView({ planId }: { planId: string }) {
     );
   }
 
-  const realGroups = dayView?.groups ?? plan.groups;
+  const realGroups = plan.groups;
   // 不足 9 组时内置补空组占位，第 9 组的时段和卡位先占好
   const groups = withBuiltinGroups(realGroups);
   const builtinCount = groups.length - realGroups.length;
-  const totalWave = dayView?.total ?? plan.counts.totalWave;
   const pageCount = Math.max(1, Math.ceil(groups.length / perPage));
   // 夹住页码：窄屏翻到第 5 页后拉宽窗口，perPage 变小会让当前页越界，
   // 不夹的话 slice 切出空数组，分组区会闪一帧空白
@@ -213,40 +171,15 @@ export function ShareView({ planId }: { planId: string }) {
             </button>
           </div>
 
-          {/* 汇总：手机 2 列，PC 一行铺开 */}
+          {/* 汇总：手机 2 列，PC 一行铺开。四个数字都只回答「怎么打」 */}
           <dl className="mt-3.5 grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-4">
-            <Stat label="总音浪" value={formatWave(totalWave)} accent />
+            <Stat label="开赛" value={fmtHm(startMin)} accent />
             <Stat label="参赛人数" value={`${plan.counts.players} 人`} />
             <Stat label="分组" value={`${plan.counts.groups} 组`} />
-            <Stat label={dayView ? '统计日期' : '统计口径'} value={dayView ? dayView.date : metricLabel} />
+            <Stat label="每组间隔" value={`${step} 分钟`} />
           </dl>
-
-          {plan.stale && (
-            <p className="mt-3 rounded-lg bg-white/12 px-3 py-2 text-[12px] leading-relaxed text-white/90">
-              实时音浪暂时取不到，当前显示方案保存时的数据。
-            </p>
-          )}
         </div>
       </header>
-
-      {/* --------------------------- 日期条（吸顶） --------------------------- */}
-      {plan.daily && plan.daily.dates.length > 0 && (
-        <div className="sticky top-0 z-20 -mx-4 mt-3 border-b border-line bg-canvas/94 px-4 py-2 backdrop-blur sm:-mx-5 sm:px-5">
-          <div className="mx-auto flex max-w-[1180px] items-center gap-2">
-            <span className="shrink-0 text-[11.5px] font-medium text-ink3">日期</span>
-            <div className="hide-scrollbar flex min-w-0 flex-1 gap-1.5 overflow-x-auto">
-              <DateChip active={dateIdx === -1} onClick={() => setDateIdx(-1)}>
-                {metricLabel}
-              </DateChip>
-              {plan.daily.dates.map((d, i) => (
-                <DateChip key={d} active={dateIdx === i} onClick={() => setDateIdx(i)}>
-                  {d}
-                </DateChip>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* ------------------------------ 赛程时长 ------------------------------ */}
       <section className="mt-3 rounded-xl border border-line bg-surface px-4 py-3 shadow-card">
@@ -261,7 +194,8 @@ export function ShareView({ planId }: { planId: string }) {
           </span>
         </div>
         {/* 每组时段：手机上横向滑动，点一下直接跳到该组所在页 */}
-        <div className="rail hide-scrollbar mt-2.5 flex gap-1.5 overflow-x-auto pb-1">
+        <div className="rail-fade mt-2.5">
+        <div className="rail hide-scrollbar flex gap-1.5 overflow-x-auto pb-1">
           {slots.map((s) => {
             const onPage = s.index >= pageFrom && s.index < pageFrom + perPage;
             const c = groupColor(s.index);
@@ -288,6 +222,7 @@ export function ShareView({ planId }: { planId: string }) {
             );
           })}
         </div>
+        </div>
       </section>
 
       {/* ------------------------------ 分组 + 分页 ------------------------------ */}
@@ -295,7 +230,6 @@ export function ShareView({ planId }: { planId: string }) {
         <div className="mb-2 flex items-center gap-2">
           <h2 className="text-[13px] font-bold text-ink">
             分组
-            {dayView && <span className="ml-1.5 font-normal text-ink3">{dayView.date}</span>}
           </h2>
           <span className="nums text-[11.5px] text-ink3">共 {groups.length} 组</span>
           {builtinCount > 0 && (
@@ -310,7 +244,7 @@ export function ShareView({ planId }: { planId: string }) {
         {realGroups.length === 0 ? (
           <div className="py-16 text-center text-[14px] text-ink3">这个方案还没有分组</div>
         ) : (
-          <div className="grid grid-cols-1 items-start gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {shown.map((g, i) => (
               <GroupCard
                 key={g.name}
@@ -329,21 +263,6 @@ export function ShareView({ planId }: { planId: string }) {
           </div>
         )}
       </section>
-
-      {/* ------------------------------ 曲线图 ------------------------------ */}
-      {plan.trend && plan.trend.dates.length > 1 && (
-        <section className="mt-4 rounded-xl border border-line bg-surface px-3 py-3 shadow-card sm:px-4">
-          <div className="mb-1 flex items-center gap-1.5 px-1">
-            <TrendIcon size={14} className="text-ink3" />
-            <h2 className="text-[13px] font-bold text-ink">每日音浪曲线</h2>
-            <span className="flex-1" />
-            <span className="nums text-[11.5px] text-ink3">
-              {plan.trend.dates[0]} ~ {plan.trend.dates[plan.trend.dates.length - 1]}
-            </span>
-          </div>
-          <TrendChart trend={plan.trend} />
-        </section>
-      )}
 
       <footer className="pb-8 pt-6 text-center">
         <p className="text-[11px] text-ink3">
@@ -385,30 +304,6 @@ function Stat({
         {value}
       </dd>
     </div>
-  );
-}
-
-function DateChip({
-  active,
-  onClick,
-  children,
-}: {
-  active: boolean;
-  onClick: () => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      aria-pressed={active}
-      data-date-chip={children}
-      className={`h-7 shrink-0 rounded-ctl px-2.5 text-[12px] font-medium transition-colors ${
-        active ? 'bg-ink text-white' : 'bg-surface text-ink2 shadow-card hover:bg-subtle'
-      }`}
-    >
-      {children}
-    </button>
   );
 }
 
