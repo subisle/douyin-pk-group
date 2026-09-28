@@ -169,8 +169,8 @@ export function ShareView({ planId }: { planId: string }) {
   // 夹住页码：窄屏翻到第 5 页后拉宽窗口，perPage 变小会让当前页越界，
   // 不夹的话 slice 切出空数组，分组区会闪一帧空白
   const safePage = Math.min(page, pageCount - 1);
+  const pageFrom = safePage * perPage;
   const shown = groups.slice(safePage * perPage, safePage * perPage + perPage);
-  const maxGroupTotal = Math.max(1, ...groups.map((g) => g.total));
 
   // 赛程：开赛时刻 + 每组间隔 = 每组时段；末组结束时刻 = 全程时长
   const step = Math.max(1, plan.schedule.intervalMin);
@@ -188,9 +188,9 @@ export function ShareView({ planId }: { planId: string }) {
   return (
     <Frame>
       {/* ------------------------------ 头部 ------------------------------ */}
-      <header className="overflow-hidden rounded-2xl shadow-card">
+      <header className="masthead relative overflow-hidden rounded-2xl shadow-pop">
         <div
-          className="px-5 py-4 text-white sm:px-7 sm:py-5"
+          className="relative px-5 py-4 text-white sm:px-7 sm:py-5"
           style={{ background: 'linear-gradient(135deg, #1b2430 0%, #26364a 55%, #33415a 100%)' }}
         >
           <div className="flex items-start gap-3">
@@ -261,21 +261,32 @@ export function ShareView({ planId }: { planId: string }) {
           </span>
         </div>
         {/* 每组时段：手机上横向滑动，点一下直接跳到该组所在页 */}
-        <div className="hide-scrollbar mt-2.5 flex gap-1.5 overflow-x-auto pb-0.5">
-          {slots.map((s) => (
-            <button
-              key={s.name}
-              type="button"
-              onClick={() => jumpTo(s.index)}
-              data-group-slot={s.name}
-              className="flex shrink-0 items-center gap-1.5 rounded-ctl border border-line bg-subtle px-2.5 py-1.5 text-[11.5px] text-ink2 transition-colors hover:border-brand hover:bg-brand-soft hover:text-brand"
-            >
-              <b className="font-semibold text-ink">{s.name}</b>
-              <span className="nums">
-                {fmtHm(s.from)}–{fmtHm(s.to)}
-              </span>
-            </button>
-          ))}
+        <div className="rail hide-scrollbar mt-2.5 flex gap-1.5 overflow-x-auto pb-1">
+          {slots.map((s) => {
+            const onPage = s.index >= pageFrom && s.index < pageFrom + perPage;
+            const c = groupColor(s.index);
+            return (
+              <button
+                key={s.name}
+                type="button"
+                onClick={() => jumpTo(s.index)}
+                aria-current={onPage ? 'true' : undefined}
+                data-group-slot={s.name}
+                className={`flex shrink-0 items-center gap-1.5 rounded-ctl border px-2.5 py-1.5 text-[11.5px] transition-all ${
+                  onPage
+                    ? 'border-transparent text-ink shadow-card'
+                    : 'border-line bg-subtle text-ink2 hover:-translate-y-px hover:border-line2 hover:bg-surface'
+                }`}
+                style={onPage ? { background: c.soft, color: c.ink } : undefined}
+              >
+                <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: c.bar }} />
+                <b className="font-semibold">{s.name}</b>
+                <span className="nums opacity-70">
+                  {fmtHm(s.from)}–{fmtHm(s.to)}
+                </span>
+              </button>
+            );
+          })}
         </div>
       </section>
 
@@ -305,7 +316,6 @@ export function ShareView({ planId }: { planId: string }) {
                 key={g.name}
                 group={g}
                 colorIndex={safePage * perPage + i}
-                maxTotal={maxGroupTotal}
                 step={step}
                 from={slots[safePage * perPage + i]?.from}
               />
@@ -335,9 +345,12 @@ export function ShareView({ planId }: { planId: string }) {
         </section>
       )}
 
-      <footer className="pb-8 pt-5 text-center text-[11px] text-ink3">
-        共 {plan.counts.players} 人 · 更新于{' '}
-        {new Date(plan.createdAt).toLocaleString('zh-CN', { hour12: false })}
+      <footer className="pb-8 pt-6 text-center">
+        <p className="text-[11px] text-ink3">
+          共 {plan.counts.players} 人 · {groups.length} 组 · 更新于{' '}
+          {new Date(plan.createdAt).toLocaleString('zh-CN', { hour12: false })}
+        </p>
+        <p className="mt-1.5 text-[11px] text-ink3/80">按组名找到自己那一组，按组头时段开赛</p>
       </footer>
     </Frame>
   );
@@ -445,87 +458,97 @@ function Pager({
 function GroupCard({
   group,
   colorIndex,
-  maxTotal,
   step,
   from,
 }: {
   group: PublicGroup;
   colorIndex: number;
-  maxTotal: number;
   step: number;
   from?: number;
 }) {
   const color = groupColor(colorIndex);
-  const maxWave = Math.max(1, ...group.players.map((p) => p.wave));
+  // 公布页只回答「谁在第几组、几点开赛」：音浪、口径、人均、组间占比一律不上版面。
+  // 均衡结果对外只通过「组内序号」和「各组人数一致」体现，不摊开具体数字。
+  const mentors = new Set(group.players.map((p) => p.leader).filter(Boolean));
   return (
     <section
       data-group-card={group.name}
-      className={`overflow-hidden rounded-xl border-t-[4px] bg-surface shadow-card ${
-        group.builtin ? 'border-dashed border-2 border-line opacity-80' : ''
+      className={`flex flex-col overflow-hidden rounded-xl bg-surface shadow-pop ${
+        group.builtin ? 'opacity-75' : ''
       }`}
-      style={{ borderTopColor: color.bar }}
     >
-      <div className="px-3.5 py-2.5" style={{ background: color.soft }}>
+      {/* 顶色条：9 组同屏时，扫一眼色条就能数出这是第几组 */}
+      <div className="h-1 w-full shrink-0" style={{ background: color.bar }} />
+
+      <header className="px-3.5 pb-2.5 pt-3" style={{ background: color.soft }}>
         <div className="flex items-baseline justify-between gap-2">
           <h3 className="truncate text-[15px] font-bold" style={{ color: color.ink }}>
             {group.name}
           </h3>
-          <span className="nums shrink-0 text-[15px] font-black" style={{ color: color.ink }}>
-            {group.builtin ? '待补员' : formatWave(group.total)}
-          </span>
-        </div>
-        <div
-          className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-[11.5px]"
-          style={{ color: color.ink, opacity: 0.85 }}
-        >
-          {from !== undefined && (
-            <span className="nums flex items-center gap-1 font-medium">
-              <ClockIcon size={11} />
+          {from !== undefined && !group.builtin && (
+            <span
+              className="nums shrink-0 text-[12.5px] font-semibold"
+              style={{ color: color.ink, opacity: 0.9 }}
+            >
               {fmtHm(from)}–{fmtHm(from + step)}
             </span>
           )}
-          <span className="nums">{group.count} 人</span>
-          <span className="nums">人均 {formatWave(group.count ? group.total / group.count : 0)}</span>
+          {group.builtin && (
+            <span
+              className="shrink-0 rounded-full border border-current px-2 py-0.5 text-[11px] font-semibold"
+              style={{ color: color.ink }}
+            >
+              待补员
+            </span>
+          )}
         </div>
-        {/* 组间占比条，一眼看出哪组偏重 */}
-        <div className="mt-2 h-1 w-full overflow-hidden rounded-full bg-white/60">
-          <div
-            className="h-full rounded-full"
-            style={{ width: `${Math.max(4, (group.total / maxTotal) * 100)}%`, background: color.bar }}
-          />
+        <div
+          className="mt-1 flex items-center gap-1.5 text-[11.5px] font-medium"
+          style={{ color: color.ink, opacity: 0.72 }}
+        >
+          {from !== undefined && !group.builtin && (
+            <>
+              <ClockIcon size={11} />
+              <span className="nums">{fmtHm(from)} 开赛</span>
+            </>
+          )}
+          {group.count > 0 && (
+            <>
+              <span className="opacity-40">·</span>
+              <span className="nums">{group.count} 人</span>
+            </>
+          )}
+          {mentors.size > 0 && (
+            <>
+              <span className="opacity-40">·</span>
+              <span className="nums">{mentors.size} 位师傅</span>
+            </>
+          )}
         </div>
-      </div>
+      </header>
 
-      <ul className="flex flex-col gap-1 px-2 py-2">
+      <ul className="roster flex flex-1 flex-col px-1.5 py-1">
         {group.players.map((p) => (
           <li
             key={p.name}
             data-player-card={p.name}
-            className="flex items-center gap-2 rounded-full py-1.5 pl-1.5 pr-2.5"
-            style={{ background: color.soft }}
+            className="flex items-center gap-2.5 rounded-lg px-2 py-[7px] transition-colors"
           >
-            <span
-              className="nums flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-white text-[10.5px] font-bold"
-              style={{ color: color.ink }}
-            >
+            <span className="nums w-4 shrink-0 text-right text-[11.5px] font-semibold text-ink3">
               {p.group_rank}
             </span>
-            <span className="min-w-0 flex-1 truncate text-[13px] font-semibold text-ink">{p.name}</span>
-            {p.leader && <span className="shrink-0 text-[10.5px] text-ink3">师傅 {p.leader}</span>}
-            <span className="nums shrink-0 text-[12px] font-semibold text-ink2">{formatWave(p.wave)}</span>
-            <span
-              className="hidden h-1 w-12 shrink-0 overflow-hidden rounded-full bg-white sm:block"
-              title={`组内第 ${p.group_rank} 名`}
-            >
-              <span
-                className="block h-full rounded-full"
-                style={{ width: `${Math.max(6, (p.wave / maxWave) * 100)}%`, background: color.bar }}
-              />
+            <span className="min-w-0 flex-1 truncate text-[15px] font-semibold leading-6 text-ink">
+              {p.name}
             </span>
+            {p.leader && (
+              <span className="shrink-0 rounded-full bg-subtle px-2 py-[1px] text-[11px] text-ink2">
+                师傅 {p.leader}
+              </span>
+            )}
           </li>
         ))}
         {group.players.length === 0 && (
-          <li className="py-3 text-center text-[12px] text-ink3">
+          <li className="px-2 py-6 text-center text-[12px] text-ink3">
             {group.builtin ? '内置占位，后台分出该组后自动填实' : '暂无人员'}
           </li>
         )}

@@ -72,3 +72,65 @@ body {
 .hide-scrollbar::-webkit-scrollbar {
   display: none;
 }
+
+/* --------------------------------- 公布页 --------------------------------- */
+
+/* 选中文本用品牌色底：名单页会被大段复制，不用默认灰蓝 */
+::selection {
+  background: var(--color-brand);
+  color: #fff;
+}
+
+/* 焦点环统一成品牌色 + 偏移，替掉浏览器默认蓝 */
+:where(a, button, [tabindex]):focus-visible {
+  outline: 2px solid var(--color-brand);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* 赛程条横向滚动：细窄滚动条 + 品牌色 thumb，滑块藏起来但要能看见能滚 */
+.rail {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-line2) transparent;
+}
+.rail::-webkit-scrollbar {
+  height: 6px;
+}
+.rail::-webkit-scrollbar-track {
+  background: transparent;
+}
+.rail::-webkit-scrollbar-thumb {
+  background: var(--color-line2);
+  border-radius: 999px;
+}
+.rail::-webkit-scrollbar-thumb:hover {
+  background: var(--color-ink3);
+}
+
+/* 深色头部的氛围层：一层极轻的对角光 + 颗粒，透明度都压在 6% 以下 */
+.masthead::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(120% 90% at 88% 0%, rgba(99, 102, 241, 0.5) 0%, transparent 62%),
+    radial-gradient(90% 80% at 6% 100%, rgba(6, 182, 212, 0.28) 0%, transparent 58%);
+  opacity: 0.55;
+}
+.masthead::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.035;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* 名单行：发丝级分隔线 + 悬停整行点亮，扫名字比一排彩色胶囊快 */
+.roster > li + li {
+  border-top: 1px solid color-mix(in srgb, var(--color-line) 70%, transparent);
+}
+.roster > li:hover {
+  background: var(--color-subtle);
+}
