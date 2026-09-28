@@ -149,68 +149,102 @@ try {
   await goto(ws, `${BASE}/s/1`);
 
   expect('页面标题', await evaluate(ws, 'document.title'), 'PK 挑战赛分组');
-  const mobile = await evaluate(ws, `(() => {
-    const g = document.querySelector('main .grid, .grid');
+  await sleep(800);
+  const mobile = JSON.parse(await evaluate(ws, `(() => {
+    const g = document.querySelector('[data-group-card]')?.parentElement;
     return JSON.stringify({
       root: !!document.getElementById('root').firstElementChild,
-      groups: document.querySelectorAll('section').length,
-      bodyText: document.body.innerText.slice(0, 60),
-      // 手机上不应该出现多列：网格实际列宽应接近视口宽
+      cards: document.querySelectorAll('[data-group-card]').length,
+      players: document.querySelectorAll('[data-player-card]').length,
+      dates: document.querySelectorAll('[data-date-chip]').length,
+      slots: document.querySelectorAll('[data-group-slot]').length,
+      pager: document.querySelector('[data-pager]')?.innerText.replace(/\s+/g, ' ') ?? '',
+      pagerCount: document.querySelectorAll('[data-pager]').length,
+      trend: !!document.querySelector('svg path'),
+      hasSchedule: /开赛/.test(document.body.innerText),
+      hasWave: /音浪/.test(document.body.innerText),
       colWidth: g ? Math.round(g.getBoundingClientRect().width) : 0,
       viewport: window.innerWidth,
       hScroll: document.documentElement.scrollWidth > window.innerWidth + 1,
+      bodyText: document.body.innerText.slice(0, 80),
     });
-  })()`);
-  const m = JSON.parse(mobile);
-  m.root ? ok('React 已挂载') : bad('React 没挂载');
-  expect('分组卡片数', m.groups, 7);
-  expect('手机端单列（无横向滚动）', m.hScroll, false);
-  m.colWidth > 300 && m.colWidth < 400
-    ? ok(`单列宽度 ${m.colWidth}px（视口 ${m.viewport}px）`)
-    : bad(`手机端列宽异常：${m.colWidth}px`);
-  console.log(`  ..  首屏文字：${m.bodyText.replace(/\n/g, ' / ')}`);
+  })()`));
+  mobile.root ? ok('React 已挂载') : bad('React 没挂载');
+  expect('手机端每页分组数', mobile.cards, 1);
+  mobile.players > 0 ? ok(`组内渲染 ${mobile.players} 人`) : bad('组内没渲染人员');
+  mobile.dates > 1 ? ok(`日期条 ${mobile.dates} 个（口径 + 每日）`) : bad('日期条没渲染');
+  mobile.slots > 0 ? ok(`赛程时段 ${mobile.slots} 段`) : bad('赛程时长没渲染');
+  mobile.hasSchedule && mobile.hasWave ? ok('展示了赛程时长与音浪') : bad('缺少赛程时长或音浪');
+  mobile.pagerCount > 0 ? ok(`分页控件：${mobile.pager}`) : bad('没有分页控件');
+  mobile.trend ? ok('每日音浪曲线已渲染') : bad('曲线图没渲染');
+  expect('手机端无横向滚动', mobile.hScroll, false);
+  mobile.colWidth > 300 && mobile.colWidth < 400
+    ? ok(`单列宽度 ${mobile.colWidth}px（视口 ${mobile.viewport}px）`)
+    : bad(`手机端列宽异常：${mobile.colWidth}px`);
+  console.log(`  ..  首屏文字：${mobile.bodyText.replace(/\n/g, ' / ')}`);
   console.log('  ->  ' + (await shot(ws, 'share-mobile.png')));
   errors.length ? bad('手机端 console 报错: ' + errors.join(' | ')) : ok('手机端无 console 报错');
 
-  /* ============ 2. 对外展示页：PC ============ */
+  /* ============ 2. 对外展示页：PC 1440x900 ============ */
   console.log('== 对外展示页 /s/1 · PC 1440x900 ==');
   errors = await session(ws, { width: 1440, height: 900, mobile: false });
   await goto(ws, `${BASE}/s/1`);
+  await sleep(800);
   const desk = JSON.parse(await evaluate(ws, `(() => {
-    const secs = [...document.querySelectorAll('section')];
-    const tops = [...new Set(secs.map(s => Math.round(s.getBoundingClientRect().top)))];
+    const cards = [...document.querySelectorAll('[data-group-card]')];
+    const tops = [...new Set(cards.map(c => Math.round(c.getBoundingClientRect().top)))];
     return JSON.stringify({
-      groups: secs.length,
-      columns: tops.length,
-      firstRowWidth: secs[0] ? Math.round(secs[0].getBoundingClientRect().width) : 0,
+      cards: cards.length,
+      rows: tops.length,
+      names: cards.map(c => c.dataset.groupCard),
+      pager: document.querySelector('[data-pager]')?.innerText.replace(/\s+/g, ' ') ?? '',
       hScroll: document.documentElement.scrollWidth > window.innerWidth + 1,
-      hasWave: /音浪|万/.test(document.body.innerText),
     });
   })()`));
-  expect('PC 端分组卡片数', desk.groups, 7);
-  desk.columns >= 2 ? ok(`PC 端排成 ${desk.columns} 列`) : bad(`PC 端只有 1 列`);
+  expect('PC 端每页分组数', desk.cards, 3);
+  desk.rows === 1 ? ok('PC 端三组并排一行') : bad(`PC 端排了 ${desk.rows} 行`);
+  desk.pager ? ok(`分页控件：${desk.pager}`) : bad('没有分页控件');
   expect('PC 端无横向滚动', desk.hScroll, false);
-  desk.hasWave ? ok('展示了音浪数据') : bad('没看到音浪数据');
   console.log('  ->  ' + (await shot(ws, 'share-pc.png')));
   errors.length ? bad('PC 端 console 报错: ' + errors.join(' | ')) : ok('PC 端无 console 报错');
 
-  /* ============ 3. 音浪排行视图 ============ */
-  console.log('== 音浪排行视图 ==');
-  const ranking = JSON.parse(await evaluate(ws, `(() => {
-    const btn = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === '音浪排行');
-    if (!btn) return JSON.stringify({ found: false });
-    btn.click();
-    return JSON.stringify({ found: true });
+  /* ============ 3. 翻页 + 按日期切换 ============ */
+  console.log('== 翻页与日期切换 ==');
+  const paged = JSON.parse(await evaluate(ws, `(() => {
+    const before = [...document.querySelectorAll('[data-group-card]')].map(c => c.dataset.groupCard);
+    const next = [...document.querySelectorAll('[data-pager] button')].find(b => b.getAttribute('aria-label') === '下一页');
+    next?.click();
+    return JSON.stringify({ before, clicked: !!next });
   })()`));
-  ranking.found ? ok('找到「音浪排行」切换按钮') : bad('找不到「音浪排行」按钮');
-  await sleep(600);
-  const rl = JSON.parse(await evaluate(ws, `JSON.stringify({
-    rows: document.querySelectorAll('li').length,
-    first: document.querySelector('li')?.innerText.replace(/\\n/g, ' ') ?? '',
+  await sleep(400);
+  const after = JSON.parse(await evaluate(ws, `JSON.stringify({
+    names: [...document.querySelectorAll('[data-group-card]')].map(c => c.dataset.groupCard),
+    pager: document.querySelector('[data-pager]')?.innerText.replace(/\s+/g, ' ') ?? '',
   })`));
-  rl.rows > 5 ? ok(`排行榜渲染 ${rl.rows} 行，首行：${rl.first}`) : bad(`排行榜只有 ${rl.rows} 行`);
-  console.log('  ->  ' + (await shot(ws, 'share-ranking.png')));
-  errors.length ? bad('排行榜 console 报错: ' + errors.join(' | ')) : ok('排行榜无 console 报错');
+  paged.clicked ? ok('点「下一页」') : bad('没有下一页按钮');
+  JSON.stringify(after.names) !== JSON.stringify(paged.before) && after.names.length > 0
+    ? ok(`翻页生效：${paged.before.join('/')} → ${after.names.join('/')}（${after.pager}）`)
+    : bad(`翻页后分组没变：${after.names.join('/')}`);
+  console.log('  ->  ' + (await shot(ws, 'share-page2.png')));
+
+  const dated = JSON.parse(await evaluate(ws, `(() => {
+    const chips = [...document.querySelectorAll('[data-date-chip]')];
+    const day = chips[chips.length - 1];
+    const label = day?.dataset.dateChip;
+    day?.click();
+    return JSON.stringify({ clicked: !!day, label, before: document.querySelector('[data-group-card]')?.innerText.replace(/\s+/g, ' ').slice(0, 40) });
+  })()`));
+  await sleep(500);
+  const dayState = JSON.parse(await evaluate(ws, `JSON.stringify({
+    head: document.querySelector('header')?.innerText.replace(/\s+/g, ' ').slice(0, 90) ?? '',
+    active: document.querySelector('[data-date-chip][aria-pressed=true]')?.dataset.dateChip ?? '',
+    firstCard: document.querySelector('[data-group-card]')?.innerText.replace(/\s+/g, ' ').slice(0, 40) ?? '',
+  })`));
+  dated.clicked ? ok(`切到日期「${dated.label}」`) : bad('没有日期切换按钮');
+  dayState.active === dated.label ? ok('日期 chip 高亮跟随') : bad(`日期 chip 高亮不对：${dayState.active}`);
+  dayState.head.includes('当日音浪') ? ok(`头部切到当日口径：${dayState.head.slice(0, 60)}`) : bad('头部没切到当日音浪');
+  console.log('  ->  ' + (await shot(ws, 'share-dated.png')));
+  errors.length ? bad('翻页/切日期 console 报错: ' + errors.join(' | ')) : ok('翻页/切日期无 console 报错');
 
   /* ============ 4. 管理员登录页 ============ */
   console.log('== 管理员登录页 ==');

@@ -63,3 +63,12 @@ body {
   width: 750px;
   background: #ffffff;
 }
+
+/* 横向滚动的日期条 / 赛程条：留滚动能力但不显示滚动条 */
+.hide-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.hide-scrollbar::-webkit-scrollbar {
+  display: none;
+}

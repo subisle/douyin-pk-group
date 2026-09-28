@@ -145,6 +145,18 @@ export interface PublicTrend {
   series: Array<{ name: string; values: number[] }>;
 }
 
+/** 按日期明细：每组每天、每人每天的音浪（后端 trend 同一份查询里一起算出） */
+export interface PublicDaily {
+  /** 采集日期，正序（老 → 新） */
+  dates: string[];
+  groups: Array<{
+    name: string;
+    /** 该组每日合计，与 trend.series 同源 */
+    values: number[];
+    players: Array<{ name: string; leader?: string; values: number[] }>;
+  }>;
+}
+
 export interface PublicPlan {
   id: number;
   title: string;
@@ -162,6 +174,8 @@ export interface PublicPlan {
   ranking: PublicPlayer[];
   /** 每日音浪曲线；取不到时后端省略该字段 */
   trend?: PublicTrend | null;
+  /** 按年月日切换用的每日明细；取不到时后端省略该字段 */
+  daily?: PublicDaily | null;
 }
 
 export const api = {

@@ -1,0 +1,542 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>公布页重设计 · 四方向样机</title>
+<style>
+  *,*::before,*::after{box-sizing:border-box}
+  html{-webkit-text-size-adjust:100%}
+  body{margin:0;background:#eceef1;color:#14161a;
+    font-family:"PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans SC",system-ui,sans-serif;
+    padding:0 0 80px}
+  .qmdp-frame{position:sticky;top:0;z-index:80}
+
+  .note{max-width:1400px;margin:0 auto;padding:18px 24px 0}
+  .note p{margin:0;font-size:12.5px;line-height:1.7;color:#5a6270}
+  .note b{color:#14161a;font-weight:700}
+
+  .band{max-width:1400px;margin:26px auto 0;padding:0 24px;
+    display:grid;grid-template-columns:minmax(0,1fr) 384px;gap:24px;align-items:start}
+  .band.is-selected{outline:2px solid #168a5f;outline-offset:14px;border-radius:8px}
+
+  .stage{position:relative;width:100%;height:620px;overflow:hidden;background:#fff;
+    box-shadow:0 1px 2px rgba(16,24,40,.06),0 12px 32px rgba(16,24,40,.10);border-radius:6px}
+  .stage-inner{position:absolute;top:0;left:0;width:1080px;height:640px;transform-origin:top left}
+  .stage-cap{position:absolute;left:10px;bottom:8px;z-index:5;font-size:10.5px;letter-spacing:.08em;
+    color:#8b93a1;background:rgba(255,255,255,.86);padding:2px 7px;border-radius:3px}
+
+  .side h2{margin:0 0 2px;font-size:19px;letter-spacing:-.01em}
+  .side .tag{display:inline-block;margin:0 0 10px;font-size:11px;letter-spacing:.1em;color:#6a7280;
+    border:1px solid #d3d7de;border-radius:999px;padding:2px 9px}
+  .side dl{margin:0;font-size:12.5px;line-height:1.75;color:#3d4450}
+  .side dt{font-weight:700;color:#14161a;margin-top:9px}
+  .side dd{margin:1px 0 0}
+  .side .rec{margin-top:12px;padding:9px 11px;background:#e8f3ee;border-left:3px solid #168a5f;
+    font-size:12.5px;line-height:1.7;color:#1d3a30}
+  .phone-wrap{margin-top:16px}
+  .phone-cap{font-size:11px;color:#8b93a1;margin-bottom:6px;letter-spacing:.06em}
+  .phone{width:360px;height:620px;overflow:hidden;border-radius:22px;border:1px solid #d7dae0;
+    box-shadow:0 2px 6px rgba(16,24,40,.08),0 16px 36px rgba(16,24,40,.12);position:relative;background:#fff}
+  .phone-inner{position:absolute;top:0;left:0;width:360px;height:620px;transform-origin:top left;overflow:hidden}
+  .mock-scale{position:absolute;top:0;left:0;height:640px;width:1080px;transform-origin:top left}
+
+  .nums{font-variant-numeric:tabular-nums;font-feature-settings:"tnum"}
+  @media (max-width:1180px){
+    .band{grid-template-columns:minmax(0,1fr)}
+    .stage{height:auto}
+  }
+</style>
+<style id="dir-a">
+/* ============ A 擂台记分板 ============ */
+.a{background:#f3f3f0;color:#14161a;padding:26px 34px;font-family:"PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif}
+.a *{font-style:normal}
+.a-top{display:flex;align-items:baseline;gap:14px;border-bottom:3px solid #14161a;padding-bottom:12px}
+.a-id{font-size:30px;font-weight:900;letter-spacing:-.02em}
+.a-title{font-size:16px;font-weight:700;color:#3d4450}
+.a-sp{flex:1}
+.a-kv{font-size:11.5px;color:#6b7078;letter-spacing:.02em}
+.a-kv b{font-size:15px;color:#14161a;font-weight:800;margin-left:4px}
+.a-tabs{display:flex;gap:6px;margin:10px 0 14px}
+.a-tab{font-size:12px;padding:4px 12px;border:1px solid #cfd3d8;color:#5b6069;border-radius:2px}
+.a-tab.on{background:#14161a;border-color:#14161a;color:#fff;font-weight:700}
+.a-h{font-size:12px;font-weight:800;letter-spacing:.14em;color:#6b7078;margin-bottom:8px;display:flex;align-items:baseline}
+.a-h span{margin-left:auto;letter-spacing:0;font-weight:600;color:#8b9099}
+.a-rows{display:flex;flex-direction:column;gap:7px}
+.a-row{display:flex;align-items:center;gap:10px;background:#fff;border:1px solid #e0e1dd;
+  border-left:4px solid var(--c);padding:5px 10px 5px 8px}
+.a-row.top{background:#fffdf5;border-color:#e8dca8}
+.a-rn{font-size:12px;font-weight:800;width:46px;color:#14161a}
+.a-rs{font-size:10.5px;color:#8b9099;width:38px}
+.a-rv{font-size:13.5px;font-weight:800;width:62px;text-align:right}
+.a-bar{flex:1;height:9px;background:#eeefec;position:relative;min-width:60px}
+.a-bar i{position:absolute;inset:0 auto 0 0;background:var(--c);display:block}
+.a-rc{font-size:10.5px;color:#8b9099;width:26px;text-align:right}
+.a-two{display:grid;grid-template-columns:1fr 1fr;gap:0 26px;margin-top:20px}
+.a-pl{display:flex;align-items:center;gap:8px;padding:6.5px 0;border-bottom:1px dotted #d5d7d2}
+.a-pn{font-size:10.5px;font-weight:800;color:#fff;background:var(--c);width:17px;height:17px;
+  display:flex;align-items:center;justify-content:center;border-radius:2px;flex:none}
+.a-pnm{font-size:12.5px;font-weight:600;flex:none;width:44px}
+.a-pld{font-size:10px;color:#9aa0a8;flex:none;width:40px}
+.a-pb{flex:1;height:5px;background:#eeefec;position:relative;min-width:20px}
+.a-pb i{position:absolute;inset:0 auto 0 0;background:var(--c);opacity:.55;display:block}
+.a-pv{font-size:11.5px;font-weight:700;width:54px;text-align:right}
+.a-m{width:1080px;padding:26px 34px;transform-origin:top left}
+</style>
+<style id="dir-b">
+/* ============ B 夜场舞台 ============ */
+.b{position:relative;width:1080px;height:640px;background:#07070b;color:#f4f4f6;overflow:hidden;
+  font-family:"PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif}
+.b *{font-style:normal}
+.b-glow{position:absolute;inset:0;
+  background:
+   radial-gradient(760px 420px at 26% 30%, rgba(34,211,238,.24), transparent 62%),
+   radial-gradient(620px 380px at 78% 18%, rgba(232,121,249,.20), transparent 64%),
+   radial-gradient(900px 500px at 50% 108%, rgba(56,189,248,.12), transparent 66%),
+   repeating-linear-gradient(0deg, rgba(255,255,255,.028) 0 1px, transparent 1px 34px),
+   repeating-linear-gradient(90deg, rgba(255,255,255,.028) 0 1px, transparent 1px 34px)}
+.b-nav{position:relative;display:flex;align-items:center;gap:12px;padding:16px 34px;
+  font-size:11.5px;letter-spacing:.22em;color:#8f8fa0;text-transform:uppercase}
+.b-nav b{color:#f4f4f6;letter-spacing:.1em;font-size:13px}
+.b-nav .r{margin-left:auto;letter-spacing:.06em;color:#c9c9d6}
+.b-hero{position:relative;padding:26px 34px 0}
+.b-kick{display:inline-flex;align-items:center;gap:7px;font-size:11px;letter-spacing:.2em;color:#07070b;
+  background:linear-gradient(90deg,#22d3ee,#a5f3fc);padding:4px 11px;border-radius:999px;font-weight:700}
+.b-big{font-size:118px;font-weight:900;line-height:.9;letter-spacing:-.05em;margin-top:14px;
+  background:linear-gradient(96deg,#ffffff 12%,#67e8f9 58%,#e879f9 96%);
+  -webkit-background-clip:text;background-clip:text;color:transparent}
+.b-big span{font-size:40px;font-weight:800;margin-left:6px;letter-spacing:0}
+.b-nm{display:flex;align-items:baseline;gap:14px;margin-top:8px}
+.b-nm h2{font-size:30px;font-weight:800;margin:0;letter-spacing:.02em}
+.b-nm p{margin:0;font-size:12.5px;color:#9a9aae}
+.b-nm em{font-style:normal;color:#67e8f9}
+.b-sec{position:relative;padding:22px 34px 0}
+.b-sech{display:flex;align-items:baseline;gap:12px;font-size:11px;letter-spacing:.2em;color:#7c7c90;margin-bottom:11px}
+.b-sech s{text-decoration:none;margin-left:auto;letter-spacing:.04em;color:#a5a5b6}
+.b-stars{display:flex;flex-wrap:wrap;gap:3px;align-content:flex-start}
+.b-st{height:44px;border-radius:2px;background:#14141d;position:relative;overflow:hidden;min-width:9px}
+.b-st i{position:absolute;inset:0;display:block}
+.b-st span{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+  font-size:11px;font-weight:700;color:#fff;opacity:0;letter-spacing:.04em;
+  text-shadow:0 0 12px rgba(0,0,0,.95)}
+.b-st.big{height:92px}
+.b-st.big span{opacity:1;font-size:17px}
+.b-seats{position:relative;display:grid;grid-template-columns:repeat(7,1fr);gap:8px;padding:18px 34px 0}
+.b-seat{border:1px solid rgba(255,255,255,.10);border-radius:6px;padding:8px 9px;background:rgba(255,255,255,.028)}
+.b-seat.on{border-color:rgba(34,211,238,.55);background:rgba(34,211,238,.09)}
+.b-seat h3{margin:0;font-size:11.5px;font-weight:700;color:#c8c8d6;display:flex;justify-content:space-between}
+.b-seat h3 b{color:#fff;font-size:12.5px}
+.b-seat p{margin:5px 0 0;font-size:9.5px;color:#75758a;line-height:1.65}
+.b-seat p em{font-style:normal;color:#a9a9bd}
+</style>
+<style id="dir-c">
+/* ============ C 公报 ============ */
+.c{width:1080px;height:640px;background:#f8f4ea;color:#22302b;padding:30px 36px;overflow:hidden;
+  font-family:"PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif}
+.c *{font-style:normal}
+.c-rule{height:3px;background:#22302b}
+.c-rule2{height:1px;background:#22302b;margin-top:3px}
+.c-grid{display:grid;grid-template-columns:236px 1fr;gap:28px;margin-top:16px}
+.c-side{border-right:1px solid #cfc6b0;padding-right:24px;position:relative}
+.c-brand{font-size:11px;letter-spacing:.32em;color:#8a7c5c}
+.c-side h1{font-family:"Songti SC","STSong","SimSun",serif;font-size:40px;line-height:1.16;margin:8px 0 0;
+  font-weight:700;letter-spacing:.01em}
+.c-date{font-size:11px;color:#7c705a;margin-top:10px;letter-spacing:.06em;padding-top:10px;border-top:1px solid #d8cfb8}
+.c-stats{margin:14px 0 0;width:100%;border-collapse:collapse;font-size:12px}
+.c-stats th{text-align:left;font-weight:400;color:#6f6552;padding:4px 0;letter-spacing:.04em}
+.c-stats td{text-align:right;font-weight:700;padding:4px 0;font-size:13px}
+.c-stats tr+tr th,.c-stats tr+tr td{border-top:1px dotted #d3c9b0}
+.c-seal{position:absolute;right:18px;bottom:6px;width:56px;height:56px;border:2.5px solid #a8321f;
+  color:#a8321f;border-radius:3px;display:flex;align-items:center;justify-content:center;
+  font-family:"Songti SC","STSong","SimSun",serif;font-size:17px;font-weight:700;line-height:1.05;
+  letter-spacing:.06em;text-align:center;transform:rotate(-7deg);opacity:.88}
+.c-mh{display:flex;align-items:baseline;border-bottom:1px solid #22302b;padding-bottom:7px;margin-bottom:16px}
+.c-mh h2{font-family:"Songti SC","STSong","SimSun",serif;font-size:17px;margin:0;font-weight:700;letter-spacing:.06em}
+.c-mh s{text-decoration:none;margin-left:auto;font-size:11px;color:#6f6552;letter-spacing:.04em}
+.c-cols{column-count:3;column-gap:24px;column-rule:1px solid #e0d7c2}
+.c-g{break-inside:avoid;margin-bottom:20px}
+.c-gh{display:flex;align-items:baseline;gap:7px;border-bottom:1.5px solid #22302b;padding-bottom:4px;margin-bottom:5px}
+.c-gh h3{font-family:"Songti SC","STSong","SimSun",serif;font-size:14.5px;margin:0;font-weight:700}
+.c-gh s{text-decoration:none;font-size:9.5px;color:#7c705a;letter-spacing:.04em}
+.c-gh b{margin-left:auto;font-size:13px;font-weight:800}
+.c-li{display:flex;align-items:baseline;gap:6px;font-size:12.5px;padding:5px 0;border-bottom:1px dotted #ddd4bf}
+.c-li i{font-style:normal;font-size:9.5px;color:#9a8d72;width:14px;flex:none}
+.c-li b{font-weight:600;flex:none;min-width:44px}
+.c-li u{text-decoration:none;font-size:9.5px;color:#9a8d72;flex:none}
+.c-li s{text-decoration:none;margin-left:auto;font-weight:700;font-size:11.5px}
+.c-li.lead b:after{content:"★";color:#a8321f;font-size:9px;margin-left:3px;vertical-align:super}
+</style>
+<style id="dir-d">
+/* ============ D 数据墙 ============ */
+.d{width:1080px;height:640px;background:#e8ecef;color:#0e1418;padding:20px 24px;overflow:hidden;
+  font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"PingFang SC",monospace}
+.d *{font-style:normal}
+.d-head{display:flex;align-items:center;gap:10px;font-size:10.5px;letter-spacing:.16em;color:#61707c;
+  border-bottom:1px solid #c3ccd3;padding-bottom:8px;text-transform:uppercase}
+.d-head b{color:#0e1418;font-size:14px;letter-spacing:.04em}
+.d-head .st{margin-left:auto;display:flex;align-items:center;gap:6px;letter-spacing:.06em;color:#0e1418}
+.d-dot{width:6px;height:6px;border-radius:50%;background:#00a06a;box-shadow:0 0 0 3px rgba(0,160,106,.18)}
+.d-panels{display:grid;grid-template-columns:1.15fr .7fr .7fr 1.5fr;gap:8px;margin-top:10px}
+.d-p{background:#f6f8f9;border:1px solid #c9d2d8;padding:9px 11px}
+.d-p label{display:block;font-size:9.5px;letter-spacing:.18em;color:#6b7a86}
+.d-p b{display:block;font-size:27px;font-weight:700;letter-spacing:-.02em;margin-top:3px;line-height:1.05}
+.d-p b u{text-decoration:none;font-size:13px;color:#6b7a86;margin-left:3px}
+.d-p em{font-style:normal;font-size:10px;color:#00a06a;letter-spacing:.04em}
+.d-main{display:grid;grid-template-columns:1fr 232px;gap:8px;margin-top:8px}
+.d-lanes{background:#f6f8f9;border:1px solid #c9d2d8;padding:8px 10px}
+.d-lh{font-size:9.5px;letter-spacing:.18em;color:#6b7a86;margin-bottom:6px}
+.d-lane{display:flex;align-items:center;gap:8px;padding:7.5px 0;border-top:1px solid #dfe5e9}
+.d-lane:first-of-type{border-top:0}
+.d-ln{width:52px;flex:none;font-size:11px;font-weight:700}
+.d-ls{width:34px;flex:none;font-size:9.5px;color:#7d8a95}
+.d-lb{flex:1;display:flex;gap:2px;height:26px;min-width:40px}
+.d-lb i{display:block;background:var(--c,#00a06a);opacity:.82;height:100%}
+.d-lb i.hi{opacity:1;outline:1px solid rgba(0,0,0,.35);outline-offset:-1px}
+.d-lv{width:56px;flex:none;text-align:right;font-size:12px;font-weight:700}
+.d-rank{background:#0e1418;color:#cfd8de;padding:8px 10px}
+.d-rank .d-lh{color:#6f7f8b}
+.d-rl{display:flex;align-items:baseline;gap:6px;font-size:10.5px;padding:5px 0;border-top:1px solid #1e2a32}
+.d-rl:first-of-type{border-top:0}
+.d-rl i{font-style:normal;width:15px;color:#5d6b76}
+.d-rl b{font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11.5px}
+.d-rl s{text-decoration:none;color:#7fe0b4}
+.d-rl.top b{color:#fff}
+</style>
+</head>
+<body>
+<div class="note">
+  <p><b>这是设计方向样机</b>，用于选择公布页的视觉与信息布局气质，<b>不是最终页面</b>。数据取自线上真实方案（ST-001 · 7 组 · 54 人）。选定方向后再进入正式实现。也可以只选中意某个细节，例如「A 的分组记分 + B 的冠军位」。</p>
+</div>
+
+<div id="bands"></div>
+
+<script>
+const G = [
+ {n:'第 1 组',s:'08:15',t:199.7,c:8,p:[['浩龙',168.5],['啸泽',11.0],['狼艺',5.4],['狼征',4.3],['浩延',3.9],['啸昭',3.2],['啸弘',2.1,'狼泽'],['狼途',1.3]]},
+ {n:'第 2 组',s:'08:30',t:176.0,c:8,p:[['浩冬',78.2],['狼仔',25.1],['啸森',24.7,'狼俊'],['狼岳',15.7],['狼哲',11.7],['狼轩',7.6],['啸阳',6.9,'狼泽'],['啸强',6.2,'狼俊']]},
+ {n:'第 3 组',s:'08:45',t:175.8,c:7,p:[['狼兴',68.3],['狼九',27.3],['狼辰',26.3,'浩杰'],['浩玟',20.6],['狼明',19.3,'浩龙'],['浩阳',8.3],['浩艺',5.7]]},
+ {n:'第 4 组',s:'09:00',t:175.9,c:7,p:[['浩哲',57.5],['玖玥',51.1],['狼赫',16.8,'浩雨'],['浩辰',16.1],['狼辉',13.0],['狼耀',12.7],['浩杰',8.6]]},
+ {n:'第 5 组',s:'09:15',t:175.8,c:8,p:[['玖柒',32.2],['浩鸣',29.6,'李斌'],['狼影',27.8],['啸安',27.5,'狼兴'],['玖雪',20.4],['狼俊',16.9],['狼泽',12.1],['啸宇',9.3,'狼俊']]},
+ {n:'第 6 组',s:'09:30',t:175.8,c:8,p:[['狼澈',60.0],['狼小宝',37.6],['浩启',19.2],['凤九',18.0],['浩运',12.4],['狼雨',11.7],['浩月',10.7],['浩宁',6.2]]},
+ {n:'第 7 组',s:'09:45',t:177.2,c:8,p:[['南方楠',49.1],['浩雨',39.9],['啸帆',30.3],['啸辰',18.6],['狼佑',11.9],['啸恒',11.6],['浩森',11.1],['啸寻',4.6]]}
+];
+const TREND={d:['09-22','09-23','09-24','09-25','09-26'],
+ s:[[16.9,7.3,2.4,3.6,2.6],[6.7,5.3,6.9,2.3,6.9],[1.7,4.3,5.5,10.3,6.7],[13.1,3.9,3.8,7.4,9.7],[5.9,9.9,3.6,6.7,5.8],[7.7,6.8,8.6,8.6,5.5],[7.5,19.1,3.0,6.4,2.9]]};
+const TOP=[];G.forEach((g,gi)=>g.p.forEach(p=>TOP.push({n:p[0],w:p[1],g:g.n,gi})));
+TOP.sort((a,b)=>b.w-a.w);
+const ALL=TOP.reduce((s,x)=>s+x.w,0);
+const f=v=>v.toFixed(1);
+const esc=s=>String(s).replace(/&/g,'&amp;');
+const flat=[];G.forEach((g,gi)=>g.p.forEach(p=>flat.push({n:p[0],w:p[1],ld:p[2],g,gi})));
+
+function spark(vals,w,h,color,fill){
+  const mx=Math.max(...vals),n=vals.length;
+  const pts=vals.map((v,i)=>[(i/(n-1))*w,h-(v/mx)*(h-4)-2]);
+  const d='M'+pts.map(p=>p[0].toFixed(1)+' '+p[1].toFixed(1)).join('L');
+  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" aria-hidden="true">
+    ${fill?`<path d="${d}L${w} ${h}L0 ${h}Z" fill="${color}" opacity=".12"/>`:''}
+    <path d="${d}" fill="none" stroke="${color}" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/></svg>`;
+}
+
+/* ============================ A 擂台记分板 ============================ */
+function mockA(w){
+  const mob=w<520;
+  if(mob){
+    const g1=G[0];
+    return `<div class="a" style="width:360px;height:620px;padding:14px 14px;overflow:hidden">
+      <div class="a-top" style="gap:8px;padding-bottom:8px">
+        <span class="a-id" style="font-size:20px">ST-001</span>
+        <span class="a-title" style="font-size:12px">PK 挑战赛分组</span>
+        <span class="a-sp"></span>
+        <span class="a-kv" style="font-size:9.5px">截止<b style="font-size:11px">09-26</b></span>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:5px;margin:8px 0 10px">
+        <div class="a-row" style="border-left-width:3px;--c:#a8321f"><span class="a-rn" style="width:auto;font-size:10px;color:#6b7078">总音浪</span><span class="a-sp"></span><span class="a-rv" style="width:auto;font-size:14px">1256.1万</span></div>
+        <div class="a-row" style="border-left-width:3px;--c:#14161a"><span class="a-rn" style="width:auto;font-size:10px;color:#6b7078">参赛</span><span class="a-sp"></span><span class="a-rv" style="width:auto;font-size:14px">54 人 / 7 组</span></div>
+      </div>
+      <div class="a-h" style="font-size:10px;letter-spacing:.1em;margin-bottom:5px">全场分组记分</div>
+      <div class="a-rows" style="gap:3px">
+        ${G.map((g,i)=>`<div class="a-row ${i===0?'top':''}" style="--c:${i===0?'#a8321f':'#14161a'};padding:4px 7px;gap:6px">
+          <span class="a-rn" style="width:38px;font-size:11px">${g.n}</span>
+          <span class="a-rs" style="width:30px">${g.s}</span>
+          <span class="a-bar" style="height:7px"><i style="width:${(g.t/199.7*100).toFixed(1)}%;background:${i===0?'#a8321f':'#14161a'}"></i></span>
+          <span class="a-rv" style="width:48px;font-size:11.5px">${f(g.t)}万</span>
+        </div>`).join('')}
+      </div>
+      <div class="a-h" style="font-size:10px;letter-spacing:.1em;margin:10px 0 4px">第 1 组 · 组内记分<span>199.7万</span></div>
+      <div>
+        ${g1.p.map((p,i)=>{const c=i===0?'#a8321f':'#14161a';return `<div class="a-pl" style="--c:${c};gap:6px">
+          <span class="a-pn">${i+1}</span><span class="a-pnm" style="width:38px;font-size:12px">${p[0]}</span>
+          <span class="a-pld">${p[2]?'师 '+p[2]:''}</span>
+          <span class="a-pb" style="height:4px"><i style="width:${Math.max(2,p[1]/168.5*100).toFixed(1)}%"></i></span>
+          <span class="a-pv" style="width:44px;font-size:11px">${f(p[1])}万</span></div>`}).join('')}
+      </div>
+    </div>`;
+  }
+  const g1=G[0],mx=Math.max(...G.map(g=>g.t));
+  return `<div class="a" style="width:1080px;height:640px;padding:26px 34px;overflow:hidden">
+    <div class="a-top">
+      <span class="a-id">ST-001</span><span class="a-title">PK 挑战赛分组</span>
+      <span class="a-sp"></span>
+      <span class="a-kv">总音浪<b class="nums">1256.1万</b></span>
+      <span class="a-kv">参赛<b class="nums">54 人 · 7 组</b></span>
+      <span class="a-kv">截止<b class="nums">09-26</b></span>
+    </div>
+    <div class="a-tabs"><span class="a-tab on">分组记分</span><span class="a-tab">音浪排行</span><span class="a-tab">趋势</span></div>
+    <div class="a-h">全场分组记分<span>七组同屏可比 · 点击任一组展开组内</span></div>
+    <div class="a-rows">
+      ${G.map((g,i)=>`<div class="a-row ${i===0?'top':''}" style="--c:${i===0?'#a8321f':'#14161a'}">
+        <span class="a-rn">${g.n}</span><span class="a-rs nums">${g.s}</span>
+        <span class="a-rv nums">${f(g.t)}万</span>
+        <span class="a-bar"><i style="width:${(g.t/mx*100).toFixed(1)}%"></i></span>
+        <span class="a-rc nums">${g.c}人</span></div>`).join('')}
+    </div>
+    <div class="a-two">
+      <div>
+        <div class="a-h">第 1 组 · 组内记分<span>199.7万 · 8 人</span></div>
+        ${g1.p.map((p,i)=>{const c=i===0?'#a8321f':'#14161a';return `<div class="a-pl" style="--c:${c}">
+          <span class="a-pn">${i+1}</span><span class="a-pnm">${p[0]}</span>
+          <span class="a-pld">${p[2]?'师傅 '+p[2]:''}</span>
+          <span class="a-pb"><i style="width:${Math.max(2,p[1]/168.5*100).toFixed(1)}%"></i></span>
+          <span class="a-pv nums">${f(p[1])}万</span></div>`}).join('')}
+      </div>
+      <div>
+        <div class="a-h">全场音浪 TOP 6<span>合计 1256.1万</span></div>
+        ${TOP.slice(0,6).map((x,i)=>`<div class="a-pl" style="--c:${i===0?'#a8321f':'#14161a'}">
+          <span class="a-pn">${i+1}</span><span class="a-pnm">${x.n}</span>
+          <span class="a-pld">${x.g}</span>
+          <span class="a-pb"><i style="width:${(x.w/TOP[0].w*100).toFixed(1)}%"></i></span>
+          <span class="a-pv nums">${f(x.w)}万</span></div>`).join('')}
+      </div>
+    </div>
+  </div>`;
+}
+
+/* ============================ B 夜场舞台 ============================ */
+function mosaicB(k,h,bh){
+  const items=flat.slice().sort((a,b)=>b.w-a.w);
+  return `<div class="b-stars" style="gap:${k<2?2:3}px">${items.map(x=>{
+    const big=x.w>=39, w=x.w/ALL*100*k;
+    const g=big?'linear-gradient(140deg,rgba(34,211,238,.5),rgba(232,121,249,.42))'
+      :`linear-gradient(180deg,${x.gi%2?'rgba(232,121,249,.55)':'rgba(34,211,238,.5)'},rgba(255,255,255,.03))`;
+    return `<div class="b-st ${big?'big':''}" style="flex:0 0 ${Math.max(1.4,w).toFixed(2)}%;height:${big?bh:h}px;background:${g};${big?'':'opacity:'+(Math.min(1,.3+x.w/70).toFixed(2))}">${x.w>=9?`<span>${esc(x.n)}</span>`:''}</div>`}).join('')}</div>`;
+}
+function mockB(w){
+  const mob=w<520, top=flat.slice().sort((a,b)=>b.w-a.w)[0];
+  if(mob){
+    return `<div class="b" style="width:360px;height:620px">
+      <div class="b-glow"></div>
+      <div class="b-nav" style="padding:12px 16px;font-size:9px"><b style="font-size:11px">ST-001</b><span class="r">09-26</span></div>
+      <div class="b-hero" style="padding:14px 16px 0">
+        <span class="b-kick" style="font-size:9px">全场第一 · 第 1 组</span>
+        <div class="b-big" style="font-size:74px;margin-top:10px">${f(top.w)}<span style="font-size:24px">万</span></div>
+        <div class="b-nm" style="margin-top:6px;gap:9px;flex-wrap:wrap">
+          <h2 style="font-size:22px">${top.n}</h2>
+          <p style="font-size:10.5px">占全场 <em>${(top.w/ALL*100).toFixed(1)}%</em></p>
+        </div>
+      </div>
+      <div class="b-sec" style="padding:18px 16px 0">
+        <div class="b-sech" style="font-size:9px">全场 54 人 · 音浪占比<s>面积 = 音浪</s></div>
+        ${mosaicB(3.2,32,64)}
+      </div>
+      <div class="b-sec" style="padding:16px 16px 0">
+        <div class="b-sech" style="font-size:9px">分组卡座</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">
+        ${G.map((g,i)=>`<div class="b-seat ${i===0?'on':''}"><h3><span>${g.n}</span><b>${f(g.t)}万</b></h3>
+          <p>${g.p.slice(0,3).map(p=>`<em>${esc(p[0])}</em> ${f(p[1])}`).join('<br>')}</p></div>`).join('')}
+        </div>
+      </div>
+    </div>`;
+  }
+  return `<div class="b" style="width:1080px;height:640px">
+    <div class="b-glow"></div>
+    <div class="b-nav"><b>ST-001</b><span>PK 挑战赛分组</span><span class="r">54 人 · 7 组 · 截止 09-26</span></div>
+    <div class="b-hero">
+      <span class="b-kick">全场第一 · 第 1 组</span>
+      <div class="b-big nums">${f(top.w)}<span>万</span></div>
+      <div class="b-nm">
+        <h2>${esc(top.n)}</h2>
+        <p>占全场音浪 <em>${(top.w/ALL*100).toFixed(1)}%</em> · 是第二名 ${(top.w/TOP[1].w).toFixed(1)} 倍</p>
+      </div>
+    </div>
+    <div class="b-sec">
+      <div class="b-sech">全场 54 人 · 音浪占比<s>方块面积 = 音浪</s></div>
+      ${mosaicB(3.2)}
+    </div>
+    <div class="b-seats">
+      ${G.map((g,i)=>`<div class="b-seat ${i===0?'on':''}">
+        <h3><span>${g.n} · ${g.s}</span><b>${f(g.t)}万</b></h3>
+        <p>${g.p.slice(0,3).map((p,k)=>`${k?'<br>':''}<em>${esc(p[0])}</em> ${f(p[1])}万`).join('')}</p>
+      </div>`).join('')}
+    </div>
+  </div>`;
+}
+
+/* ============================ C 公报 ============================ */
+function groupBlockC(g,gi){
+  return `<div class="c-g">
+    <div class="c-gh"><h3>${g.n}</h3><s>${g.s} 开赛</s><b class="nums">${f(g.t)}万</b></div>
+    ${g.p.map((p,i)=>`<div class="c-li ${i===0?'lead':''}"><i>${i+1}</i><b>${esc(p[0])}</b><u>${p[2]?'师 '+p[2]:''}</u><s class="nums">${f(p[1])}万</s></div>`).join('')}
+  </div>`;
+}
+function mockC(w){
+  const stats=[['总音浪','1256.1万'],['参赛人数','54 人'],['分组数','7 组'],['统计口径','总音浪'],['开赛','08:15 起'],['数据截止','09-26']];
+  if(w<520){
+    return `<div class="c" style="width:360px;height:620px;padding:16px 16px">
+      <div class="c-rule"></div><div class="c-rule2"></div>
+      <div style="display:flex;align-items:baseline;gap:8px;margin-top:12px">
+        <span class="c-brand" style="font-size:9px">ST-001</span>
+        <h1 class="c-h" style="font-size:24px;margin:0;flex:1">PK 挑战赛分组</h1>
+        <div class="c-seal" style="width:38px;height:38px;font-size:12px;position:static;transform:rotate(-7deg)">公布</div>
+      </div>
+      <div class="c-date" style="margin-top:8px;padding-top:7px">公布 · 2026 年 9 月 26 日</div>
+      <table class="c-stats" style="margin-top:8px">
+        ${stats.map((s,i)=>`<tr><th>${s[0]}</th><td class="nums">${s[1]}</td>${i===1?'<th style="padding-left:14px">分组数</th><td class="nums" style="text-align:left;padding-left:10px">7 组</td>':''}</tr>`).join('')}
+      </table>
+      <div class="c-mh" style="margin-top:12px"><h2 style="font-size:14px">分组名单</h2><s>按音浪降序</s></div>
+      <div class="c-cols" style="column-count:1">
+        ${G.map((g,i)=>groupBlockC(g,i)).join('')}
+      </div>
+    </div>`;
+  }
+  return `<div class="c" style="width:1080px;height:640px;padding:30px 36px">
+    <div class="c-rule"></div><div class="c-rule2"></div>
+    <div class="c-grid">
+      <aside class="c-side">
+        <div class="c-brand">ST-001</div>
+        <h1>PK<br>挑战赛<br>分组</h1>
+        <div class="c-date">公布 · 2026 年 9 月 26 日<br>统计口径 · 总音浪</div>
+        <table class="c-stats">${stats.map(s=>`<tr><th>${s[0]}</th><td class="nums">${s[1]}</td></tr>`).join('')}</table>
+        <div class="c-seal">公<br>布</div>
+      </aside>
+      <div>
+        <div class="c-mh"><h2>分组名单</h2><s>共 7 组 54 人 · 组内按音浪降序 · 姓名后为师傅</s></div>
+        <div class="c-cols">${G.map((g,i)=>groupBlockC(g,i)).join('')}</div>
+      </div>
+    </div>
+  </div>`;
+}
+
+/* ============================ D 数据墙 ============================ */
+function mockD(w){
+  const mob=w<520;
+  const lanes=G.map(g=>{
+    const mx=Math.max(...g.p.map(p=>p[1]));
+    return `<div class="d-lane">
+      <span class="d-ln">${g.n}</span><span class="d-ls nums">${g.s}</span>
+      <span class="d-lb">${g.p.map((p,i)=>`<i class="${i===0?'hi':''}" style="width:${(p[1]/mx*100).toFixed(1)}%"></i>`).join('')}</span>
+      <span class="d-lv nums">${f(g.t)}万</span></div>`;
+  }).join('');
+  const rank=`<div class="d-rank"><div class="d-lh">全场 TOP 10</div>
+    ${TOP.slice(0,10).map((x,i)=>`<div class="d-rl ${i<3?'top':''}"><i>${String(i+1).padStart(2,'0')}</i><b>${esc(x.n)}</b><s class="nums">${f(x.w)}</s></div>`).join('')}</div>`;
+  const panels=(mw)=>`<div class="d-panels" style="grid-template-columns:${mw}">
+      <div class="d-p"><label>TOTAL WAVE 总音浪</label><b class="nums">1256.1<u>万</u></b><em>▲ 实时</em></div>
+      <div class="d-p"><label>PLAYERS</label><b class="nums">54</b><em>7 组</em></div>
+      <div class="d-p"><label>GROUPS</label><b class="nums">7</b><em>08:15 起</em></div>
+      <div class="d-p"><label>5-DAY TREND 每日音浪</label>${spark(TREND.s.reduce((a,v)=>a.map((x,i)=>x+v[i]),[0,0,0,0,0]),mw?150:230,mw?30:44,'#00a06a',true)}</div>
+    </div>`;
+  if(mob){
+    return `<div class="d" style="width:360px;height:620px;padding:12px 12px">
+      <div class="d-head"><b style="font-size:12px">ST-001</b><span>PK 挑战赛分组</span>
+        <span class="st"><i class="d-dot"></i>09-26</span></div>
+      <div class="d-panels" style="grid-template-columns:1fr 1fr;gap:6px;margin-top:8px">
+        <div class="d-p"><label>TOTAL WAVE</label><b class="nums" style="font-size:21px">1256.1<u>万</u></b></div>
+        <div class="d-p"><label>PLAYERS</label><b class="nums" style="font-size:21px">54</b><em>7 组</em></div>
+        <div class="d-p" style="grid-column:span 2"><label>5-DAY TREND</label>${spark([45,62,38,71,54],320,34,'#00a06a',true)}</div>
+      </div>
+      <div class="d-lanes" style="margin-top:6px;padding:6px 8px">
+        <div class="d-lh">分组赛道 · 块宽 = 组内音浪</div>
+        ${lanes}
+      </div>
+      <div class="d-rank" style="margin-top:6px">
+        <div class="d-lh">全场 TOP 5</div>
+        ${TOP.slice(0,5).map((x,i)=>`<div class="d-rl ${i<3?'top':''}"><i>${i+1}</i><b>${esc(x.n)}</b><s class="nums">${f(x.w)}</s></div>`).join('')}
+      </div>
+    </div>`;
+  }
+  return `<div class="d" style="width:1080px;height:640px;padding:20px 24px">
+    <div class="d-head"><b>ST-001</b><span>PK 挑战赛分组</span>
+      <span class="st"><i class="d-dot"></i>LIVE 09-26 20:14 · 口径 总音浪</span></div>
+    ${panels('1.15fr .7fr .7fr 1.5fr')}
+    <div class="d-main">
+      <div class="d-lanes"><div class="d-lh">分组赛道 · 块宽 = 组内音浪 · 高亮为组内第一</div>${lanes}</div>
+      ${rank}
+    </div>
+  </div>`;
+}
+
+/* ============================ 组装 ============================ */
+const DIRS=[
+ {id:'A',name:'擂台记分板',render:mockA,
+  info:[['气质','体育记分牌。分组不是七张彩色卡，而是七行可以横向比较的赛道，组内点开才展开。'],
+        ['字体策略','中文系统黑体无衬线；数字全 tabular-nums 等宽对齐，不用装饰字体'],
+        ['色彩策略','单色克制：墨黑 + 一个朱红只给冠军。放弃 8 组彩虹色'],
+        ['记忆点','七组同屏一屏看完，组总量条共用同一基准线'],
+        ['手机端','统计压成 2×2，七行记分条 + 选中组内名单，滚动量减半'],
+        ['适用','参赛者最关心「我在哪组、组里谁强」，公开传播和群里截图都合适'],
+        ['混搭提示','可以把现有 8 组色降级成记分条左侧 4px 色标，其余保持黑白']],
+  rec:'推荐。它把「7 组 × 8 人 = 54 行」的纵向长页改成可比较的横向结构，手机端滚动量砍掉一半，且完全不依赖图片资源。'},
+ {id:'B',name:'夜场舞台',render:mockB,
+  info:[['气质','直播夜场。深色底 + 光晕，第一名做成巨幅 champion 位，其余人是发光星群。'],
+        ['字体策略','超大无衬线数字做主角（128px 级），中文系统栈正文'],
+        ['色彩策略','暗底双色对撞：电光青 × 洋红，只此两色'],
+        ['记忆点','冠军 168.5万 占全场 13.4%，是第二名的 2.2 倍——页面第一眼就说这件事'],
+        ['手机端','冠军数字降到 74px，星群换行成马赛克带，卡座两列'],
+        ['适用','公会内部氛围宣发、大屏投放、当直播画面挂车'],
+        ['混搭提示','暗底版本建议只用于 `/s/:id` 冠军视角，后台保持亮底不动']],
+  rec:'气质最强、最适合直播场景，但暗底长时间看表格偏累，且打印/截图转发时不如亮底通用。'},
+ {id:'C',name:'公报',render:mockC,
+  info:[['气质','复古印刷公报。像一张打印出来的对账单，窄栏元信息 + 报纸三栏名单。'],
+        ['字体策略','宋体标题 + 中文系统黑体正文；数字 tabular 对齐'],
+        ['色彩策略','纸底米白 + 墨绿单色 + 朱红印章，全页仅两色'],
+        ['记忆点','右上角「公布」印章，标题竖排三行，像正式公告'],
+        ['手机端','标题转横排、印章缩小、名单单栏顺排'],
+        ['适用','需要长期存档、截图发群、被公会当作正式通知的场景'],
+        ['混搭提示','纸张底色可换成纯白提高手机屏阅读性，其余结构不动']],
+  rec:'辨识度最高的「公告感」方案，但三栏密排在 7 组数据下容易一眼扫不到自己想找的人。'},
+ {id:'D',name:'数据墙',render:mockD,
+  info:[['气质','监控大屏。等宽字体 + 面板 + 赛道条，信息密度拉到最高。'],
+        ['字体策略','全等宽（含中文回退），数字与文字同栅格'],
+        ['色彩策略','冷灰面板 + 荧光绿单色点缀，LIVE 状态点'],
+        ['记忆点','趋势曲线常驻在顶部（不再藏进 Tab），七条赛道并排，块宽 = 组内音浪'],
+        ['手机端','面板 2×2，赛道保持横条，TOP 榜缩到 5 人'],
+        ['适用','运营盯盘、内部复盘、每天固定时间刷新查看'],
+        ['混搭提示','可以把 D 的「顶部常驻趋势」单独搬到 A 或 C，其他部分不要']],
+  rec:'信息效率最高、趋势不再被藏起来，但全等宽中文字幕感强，中文正文可读性弱于其它三个方向。'}
+];
+
+document.getElementById('bands').innerHTML=DIRS.map(d=>`
+<section class="band" data-design-option="${d.id}" data-name="${d.name}">
+  <div>
+    <div class="stage" data-w="1080"><div class="stage-inner">${d.render(1080)}</div><span class="stage-cap">方向样机 · ${d.id}</span></div>
+  </div>
+  <div class="side">
+    <span class="tag">方向 ${d.id}</span>
+    <h2>${d.name}</h2>
+    <dl>${d.info.map(i=>`<dt>${i[0]}</dt><dd>${i[1]}</dd>`).join('')}</dl>
+    <p class="rec">${d.rec}</p>
+    <div class="phone-wrap">
+      <div class="phone-cap">手机 360×620 · 同方向真实窄屏布局</div>
+      <div class="phone" data-w="360"><div class="phone-inner">${d.render(360)}</div></div>
+    </div>
+  </div>
+</section>`).join('');
+
+function fit(){
+  document.querySelectorAll('.stage').forEach(s=>{
+    const w=+s.dataset.w, inner=s.firstElementChild;
+    const k=s.clientWidth/w;
+    inner.style.transform=`scale(${k})`;
+  });
+  document.querySelectorAll('.phone').forEach(s=>{
+    const w=+s.dataset.w, inner=s.firstElementChild;
+    const k=s.clientWidth/w;
+    inner.style.transform=`scale(${k})`;
+  });
+}
+fit();
+addEventListener('resize',fit);
+if(document.fonts&&document.fonts.ready)document.fonts.ready.then(fit);
+</script>
+</body>
+</html>

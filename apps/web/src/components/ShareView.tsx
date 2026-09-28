@@ -1,28 +1,67 @@
 /**
  * 对外展示页（只读、无需口令）：/s/:planId
  *
- * 展示「音浪数据 + 分组」两件事：
- * - 手机：单列卡片 + 顶部吸顶汇总条，组内按音浪排
- * - PC：多列网格 + 右侧全场音浪排行
- * - 趋势页：每组每日音浪曲线（后端算好，前端只画）
+ * 这一页只回答六件事：分好的组、每人音浪、哪一天、曲线、赛程时长、第几页。
+ * 顺序也是按「先看赛程，再看分组，最后看走势」排的：
+ *   1. 头部    方案名 + 总音浪 / 人数 / 组数
+ *   2. 日期条  年-月-日切换（吸顶，滚到哪儿都能换）
+ *   3. 赛程条  几点开赛、每组多久、全程多久
+ *   4. 分组    组分页，一页一组（手机）/ 一页三组（PC）
+ *   5. 曲线    每日音浪折线
  *
  * 数据来自 /api/public/plans/:id（后端已裁掉 personId / key 等内部字段）。
  * 音浪由后端按方案口径实时取；取不到时 stale=true，页面用方案保存时的快照并标注。
  */
 import { useEffect, useMemo, useState } from 'react';
 import { formatWave } from '@pk/shared';
-import { api, type PublicGroup, type PublicPlan, type PublicPlayer } from '../api.js';
+import { api, type PublicGroup, type PublicPlan } from '../api.js';
 import { TrendChart } from './TrendChart.js';
 import { groupColor } from '../lib/board.js';
-import { AlertIcon, ClockIcon, RefreshIcon, TrendIcon } from './icons.js';
+import { AlertIcon, ChevronLeftIcon, ClockIcon, RefreshIcon, TrendIcon } from './icons.js';
 
-type Tab = 'groups' | 'ranking' | 'trend';
+/** 一页放几组：手机一屏一组，PC 一屏三组 */
+function groupsPerPage(width: number): number {
+  if (width >= 1024) return 3;
+  if (width >= 640) return 2;
+  return 1;
+}
+
+function parseHm(s: string): number {
+  const [h, m] = s.split(':').map((x) => Number(x));
+  return (Number.isFinite(h) ? h : 0) * 60 + (Number.isFinite(m) ? m : 0);
+}
+
+function fmtHm(min: number): string {
+  const v = ((min % 1440) + 1440) % 1440;
+  return `${String(Math.floor(v / 60)).padStart(2, '0')}:${String(v % 60).padStart(2, '0')}`;
+}
+
+function fmtDuration(min: number): string {
+  const h = Math.floor(min / 60);
+  const m = min % 60;
+  return h ? (m ? `${h} 小时 ${m} 分` : `${h} 小时`) : `${m} 分钟`;
+}
+
+function useViewportWidth(): number {
+  const [w, setW] = useState(() => (typeof window === 'undefined' ? 1280 : window.innerWidth));
+  useEffect(() => {
+    const on = () => setW(window.innerWidth);
+    on();
+    window.addEventListener('resize', on);
+    return () => window.removeEventListener('resize', on);
+  }, []);
+  return w;
+}
 
 export function ShareView({ planId }: { planId: string }) {
   const [plan, setPlan] = useState<PublicPlan | null>(null);
   const [error, setError] = useState('');
-  const [tab, setTab] = useState<Tab>('groups');
   const [nonce, setNonce] = useState(0);
+  /** -1 = 按方案口径（总音浪 / 近 N 天）；>=0 = 按 daily.dates 下标看某一天 */
+  const [dateIdx, setDateIdx] = useState(-1);
+  const [page, setPage] = useState(0);
+  const width = useViewportWidth();
+  const perPage = groupsPerPage(width);
 
   useEffect(() => {
     let alive = true;
@@ -43,7 +82,44 @@ export function ShareView({ planId }: { planId: string }) {
     return () => clearInterval(t);
   }, []);
 
-  const period = useMemo(() => {
+  // 日期或分页粒度一变，回到第一页，否则可能停在不存在的页码上
+  useEffect(() => setPage(0), [dateIdx, perPage]);
+
+  /** 按选中日期重算分组（名次依赖音浪，必须重排） */
+  const dayView = useMemo(() => {
+    if (!plan?.daily || dateIdx < 0) return null;
+    const d = plan.daily;
+    if (dateIdx >= d.dates.length) return null;
+    const i = dateIdx;
+    const groups: PublicGroup[] = d.groups.map((dg, gi) => {
+      const players = dg.players
+        .map((p) => ({
+          name: p.name,
+          leader: p.leader,
+          wave: p.values[i] ?? 0,
+          rank: 0,
+          group_rank: 0,
+        }))
+        .sort((a, b) => b.wave - a.wave || a.name.localeCompare(b.name, 'zh-Hans-CN'));
+      players.forEach((p, k) => {
+        p.group_rank = k + 1;
+      });
+      return {
+        name: dg.name,
+        slot: plan.groups[gi]?.slot ?? '',
+        count: players.length,
+        total: players.reduce((s, p) => s + p.wave, 0),
+        players,
+      };
+    });
+    const all = groups.flatMap((g) => g.players).sort((a, b) => b.wave - a.wave);
+    all.forEach((p, k) => {
+      p.rank = k + 1;
+    });
+    return { groups, total: all.reduce((s, p) => s + p.wave, 0), date: d.dates[i] };
+  }, [plan, dateIdx]);
+
+  const metricLabel = useMemo(() => {
     if (!plan) return '';
     return plan.metric === 'total' ? '总音浪' : `近 ${plan.days} 天音浪`;
   }, [plan]);
@@ -67,87 +143,189 @@ export function ShareView({ planId }: { planId: string }) {
     );
   }
 
+  const groups = dayView?.groups ?? plan.groups;
+  const totalWave = dayView?.total ?? plan.counts.totalWave;
+  const pageCount = Math.max(1, Math.ceil(groups.length / perPage));
+  const shown = groups.slice(page * perPage, page * perPage + perPage);
+  const maxGroupTotal = Math.max(1, ...groups.map((g) => g.total));
+
+  // 赛程：开赛时刻 + 每组间隔 = 每组时段；末组结束时刻 = 全程时长
+  const step = Math.max(1, plan.schedule.intervalMin);
+  const startMin = parseHm(plan.schedule.start);
+  const slots = groups.map((g, i) => ({
+    name: g.name,
+    from: startMin + i * step,
+    to: startMin + (i + 1) * step,
+    index: i,
+  }));
+  const fullMin = groups.length * step;
+
+  const jumpTo = (i: number) => setPage(Math.floor(i / perPage));
+
   return (
     <Frame>
       {/* ------------------------------ 头部 ------------------------------ */}
-      <header
-        className="rounded-2xl px-5 py-5 text-white shadow-card sm:px-7 sm:py-6"
-        style={{ background: 'linear-gradient(120deg, #ec4899 0%, #8b5cf6 55%, #3b82f6 100%)' }}
-      >
-        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-          {plan.brand && <span className="text-[22px] font-black tracking-wide sm:text-[26px]">{plan.brand}</span>}
-          <span className="text-[15px] font-semibold opacity-90 sm:text-[17px]">{plan.title}</span>
+      <header className="overflow-hidden rounded-2xl shadow-card">
+        <div
+          className="px-5 py-4 text-white sm:px-7 sm:py-5"
+          style={{ background: 'linear-gradient(135deg, #1b2430 0%, #26364a 55%, #33415a 100%)' }}
+        >
+          <div className="flex items-start gap-3">
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-0.5">
+                {plan.brand && (
+                  <span className="text-[20px] font-black tracking-wide sm:text-[24px]">{plan.brand}</span>
+                )}
+                <span className="text-[14px] font-semibold text-white/80 sm:text-[16px]">{plan.title}</span>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setNonce((n) => n + 1)}
+              title="刷新音浪"
+              aria-label="刷新音浪"
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-ctl bg-white/10 text-white/85 transition-colors hover:bg-white/20 hover:text-white"
+            >
+              <RefreshIcon size={15} />
+            </button>
+          </div>
+
+          {/* 汇总：手机 2 列，PC 一行铺开 */}
+          <dl className="mt-3.5 grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-4">
+            <Stat label="总音浪" value={formatWave(totalWave)} accent />
+            <Stat label="参赛人数" value={`${plan.counts.players} 人`} />
+            <Stat label="分组" value={`${plan.counts.groups} 组`} />
+            <Stat label={dayView ? '当日音浪' : '统计口径'} value={dayView ? dayView.date : metricLabel} />
+          </dl>
+
+          {plan.stale && (
+            <p className="mt-3 rounded-lg bg-white/12 px-3 py-2 text-[12px] leading-relaxed text-white/90">
+              实时音浪暂时取不到，当前显示方案保存时的数据。
+            </p>
+          )}
         </div>
-
-        {/* 汇总指标：手机 2 列，PC 一行铺开 */}
-        <dl className="mt-4 grid grid-cols-2 gap-x-4 gap-y-3 sm:mt-5 sm:grid-cols-4 lg:grid-cols-5">
-          <Stat label="总音浪" value={formatWave(plan.counts.totalWave)} accent />
-          <Stat label="参赛人数" value={`${plan.counts.players} 人`} />
-          <Stat label="分组数" value={`${plan.counts.groups} 组`} />
-          <Stat label="统计口径" value={period} />
-          <Stat
-            label="数据截止"
-            value={plan.dates[0] ?? (plan.stale ? '快照' : '-')}
-            className="col-span-2 sm:col-span-1"
-          />
-        </dl>
-
-        {plan.stale && (
-          <p className="mt-3 rounded-lg bg-white/15 px-3 py-2 text-[12px] leading-relaxed">
-            实时音浪暂时取不到，当前显示方案保存时的数据。
-          </p>
-        )}
       </header>
 
-      {/* --------------------------- 吸顶汇总 + 切换 --------------------------- */}
-      <div className="sticky top-0 z-10 -mx-4 mt-4 border-b border-line bg-canvas/92 px-4 py-2 backdrop-blur sm:-mx-5 sm:px-5">
-        <div className="mx-auto flex max-w-[1180px] items-center gap-2">
-          <TabButton active={tab === 'groups'} onClick={() => setTab('groups')}>
-            分组
-          </TabButton>
-          <TabButton active={tab === 'ranking'} onClick={() => setTab('ranking')}>
-            音浪排行
-          </TabButton>
-          {plan.trend && plan.trend.dates.length > 1 && (
-            <TabButton active={tab === 'trend'} onClick={() => setTab('trend')}>
-              趋势
-            </TabButton>
-          )}
-          <span className="flex-1" />
-          <span className="nums hidden text-[11.5px] text-ink3 sm:inline">
-            更新于 {new Date(plan.createdAt).toLocaleString('zh-CN', { hour12: false })}
-          </span>
-          <button
-            type="button"
-            onClick={() => setNonce((n) => n + 1)}
-            title="刷新音浪"
-            className="flex h-7 w-7 items-center justify-center rounded-ctl text-ink3 transition-colors hover:bg-subtle hover:text-ink"
-          >
-            <RefreshIcon size={15} />
-          </button>
-        </div>
-      </div>
-
-      {tab === 'groups' && <GroupGrid groups={plan.groups} />}
-      {tab === 'ranking' && <Ranking players={plan.ranking} total={plan.counts.totalWave} />}
-      {tab === 'trend' && plan.trend && (
-        <div className="py-4">
-          <TrendChart trend={plan.trend} />
+      {/* --------------------------- 日期条（吸顶） --------------------------- */}
+      {plan.daily && plan.daily.dates.length > 0 && (
+        <div className="sticky top-0 z-20 -mx-4 mt-3 border-b border-line bg-canvas/94 px-4 py-2 backdrop-blur sm:-mx-5 sm:px-5">
+          <div className="mx-auto flex max-w-[1180px] items-center gap-2">
+            <span className="shrink-0 text-[11.5px] font-medium text-ink3">日期</span>
+            <div className="hide-scrollbar flex min-w-0 flex-1 gap-1.5 overflow-x-auto">
+              <DateChip active={dateIdx === -1} onClick={() => setDateIdx(-1)}>
+                {metricLabel}
+              </DateChip>
+              {plan.daily.dates.map((d, i) => (
+                <DateChip key={d} active={dateIdx === i} onClick={() => setDateIdx(i)}>
+                  {d}
+                </DateChip>
+              ))}
+            </div>
+          </div>
         </div>
       )}
 
-      <footer className="pb-10 pt-6 text-center text-[11px] text-ink3">只读展示页 · 数据每小时更新</footer>
+      {/* ------------------------------ 赛程时长 ------------------------------ */}
+      <section className="mt-3 rounded-xl border border-line bg-surface px-4 py-3 shadow-card">
+        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+          <h2 className="flex items-center gap-1.5 text-[13px] font-bold text-ink">
+            <ClockIcon size={13} className="text-ink3" />
+            赛程时长
+          </h2>
+          <span className="nums text-[12.5px] text-ink2">
+            {fmtHm(startMin)} 开赛 · 每组 {step} 分钟 · 共 {groups.length} 组 · 全程{' '}
+            <b className="font-bold text-ink">{fmtDuration(fullMin)}</b>（至 {fmtHm(startMin + fullMin)}）
+          </span>
+        </div>
+        {/* 每组时段：手机上横向滑动，点一下直接跳到该组所在页 */}
+        <div className="hide-scrollbar mt-2.5 flex gap-1.5 overflow-x-auto pb-0.5">
+          {slots.map((s) => (
+            <button
+              key={s.name}
+              type="button"
+              onClick={() => jumpTo(s.index)}
+              data-group-slot={s.name}
+              className="flex shrink-0 items-center gap-1.5 rounded-ctl border border-line bg-subtle px-2.5 py-1.5 text-[11.5px] text-ink2 transition-colors hover:border-brand hover:bg-brand-soft hover:text-brand"
+            >
+              <b className="font-semibold text-ink">{s.name}</b>
+              <span className="nums">
+                {fmtHm(s.from)}–{fmtHm(s.to)}
+              </span>
+            </button>
+          ))}
+        </div>
+      </section>
+
+      {/* ------------------------------ 分组 + 分页 ------------------------------ */}
+      <section className="mt-3">
+        <div className="mb-2 flex items-center gap-2">
+          <h2 className="text-[13px] font-bold text-ink">
+            分组
+            {dayView && <span className="ml-1.5 font-normal text-ink3">{dayView.date}</span>}
+          </h2>
+          <span className="nums text-[11.5px] text-ink3">共 {groups.length} 组</span>
+          <span className="flex-1" />
+          {pageCount > 1 && (
+            <Pager page={page} pageCount={pageCount} onChange={setPage} />
+          )}
+        </div>
+
+        {groups.length === 0 ? (
+          <div className="py-16 text-center text-[14px] text-ink3">这个方案还没有分组</div>
+        ) : (
+          <div className="grid grid-cols-1 items-start gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            {shown.map((g, i) => (
+              <GroupCard
+                key={g.name}
+                group={g}
+                colorIndex={page * perPage + i}
+                maxTotal={maxGroupTotal}
+                step={step}
+                from={slots[page * perPage + i]?.from}
+              />
+            ))}
+          </div>
+        )}
+
+        {pageCount > 1 && (
+          <div className="mt-3 flex justify-center">
+            <Pager page={page} pageCount={pageCount} onChange={setPage} wide />
+          </div>
+        )}
+      </section>
+
+      {/* ------------------------------ 曲线图 ------------------------------ */}
+      {plan.trend && plan.trend.dates.length > 1 && (
+        <section className="mt-4 rounded-xl border border-line bg-surface px-3 py-3 shadow-card sm:px-4">
+          <div className="mb-1 flex items-center gap-1.5 px-1">
+            <TrendIcon size={14} className="text-ink3" />
+            <h2 className="text-[13px] font-bold text-ink">每日音浪曲线</h2>
+            <span className="flex-1" />
+            <span className="nums text-[11.5px] text-ink3">
+              {plan.trend.dates[0]} ~ {plan.trend.dates[plan.trend.dates.length - 1]}
+            </span>
+          </div>
+          <TrendChart trend={plan.trend} />
+        </section>
+      )}
+
+      <footer className="pb-8 pt-5 text-center text-[11px] text-ink3">
+        共 {plan.counts.players} 人 · 更新于{' '}
+        {new Date(plan.createdAt).toLocaleString('zh-CN', { hour12: false })}
+      </footer>
     </Frame>
   );
 }
 
-/* --------------------------------- 布局壳 --------------------------------- */
+/* -------------------------------- 布局壳 --------------------------------- */
 
 function Frame({ children }: { children: React.ReactNode }) {
   return (
     <div className="min-h-screen bg-canvas">
       {/* mx-auto + max-w：手机满宽、PC 居中限宽，两端都成立 */}
-      <div className="mx-auto flex max-w-[1180px] flex-col gap-0 px-4 pt-4 sm:px-5 sm:pt-6">{children}</div>
+      <div className="mx-auto flex max-w-[1180px] flex-col gap-0 px-4 pb-4 pt-4 sm:px-5 sm:pt-5">
+        {children}
+      </div>
     </div>
   );
 }
@@ -156,22 +334,22 @@ function Stat({
   label,
   value,
   accent,
-  className = '',
 }: {
   label: string;
   value: string;
   accent?: boolean;
-  className?: string;
 }) {
   return (
-    <div className={className}>
-      <dt className="text-[11px] opacity-75">{label}</dt>
-      <dd className={`nums mt-0.5 text-[17px] font-bold sm:text-[19px] ${accent ? 'text-white' : ''}`}>{value}</dd>
+    <div>
+      <dt className="text-[11px] text-white/60">{label}</dt>
+      <dd className={`nums mt-0.5 text-[17px] font-bold sm:text-[19px] ${accent ? 'text-white' : 'text-white/90'}`}>
+        {value}
+      </dd>
     </div>
   );
 }
 
-function TabButton({
+function DateChip({
   active,
   onClick,
   children,
@@ -184,8 +362,10 @@ function TabButton({
     <button
       type="button"
       onClick={onClick}
-      className={`h-7 rounded-ctl px-3 text-[12.5px] font-medium transition-colors ${
-        active ? 'bg-ink text-white' : 'text-ink2 hover:bg-subtle'
+      aria-pressed={active}
+      data-date-chip={children}
+      className={`h-7 shrink-0 rounded-ctl px-2.5 text-[12px] font-medium transition-colors ${
+        active ? 'bg-ink text-white' : 'bg-surface text-ink2 shadow-card hover:bg-subtle'
       }`}
     >
       {children}
@@ -193,45 +373,76 @@ function TabButton({
   );
 }
 
-/* --------------------------------- 分组视图 --------------------------------- */
-
-function GroupGrid({ groups }: { groups: PublicGroup[] }) {
-  if (groups.length === 0) {
-    return <div className="py-20 text-center text-[14px] text-ink3">这个方案还没有分组</div>;
-  }
-  const maxTotal = Math.max(...groups.map((g) => g.total), 1);
+function Pager({
+  page,
+  pageCount,
+  onChange,
+  wide,
+}: {
+  page: number;
+  pageCount: number;
+  onChange: (p: number) => void;
+  wide?: boolean;
+}) {
   return (
-    // 手机单列；≥640 两列；≥1024 三列 —— 不用 JS 算列数，纯 CSS 断点
-    <div className="grid grid-cols-1 items-start gap-3 py-4 sm:grid-cols-2 sm:gap-4 lg:grid-cols-3">
-      {groups.map((g, i) => (
-        <GroupCard key={i} group={g} colorIndex={i} maxTotal={maxTotal} />
-      ))}
+    <div
+      data-pager="true"
+      className={`flex items-center gap-1 ${wide ? '' : 'rounded-ctl border border-line bg-surface p-0.5 shadow-card'}`}
+    >
+      <button
+        type="button"
+        onClick={() => onChange(page - 1)}
+        disabled={page <= 0}
+        aria-label="上一页"
+        className="flex h-6 w-6 items-center justify-center rounded-md text-ink2 transition-colors hover:bg-subtle disabled:opacity-30 disabled:hover:bg-transparent"
+      >
+        <ChevronLeftIcon size={13} />
+      </button>
+      <span className="nums px-1 text-[11.5px] text-ink2">
+        {page + 1} / {pageCount}
+      </span>
+      <button
+        type="button"
+        onClick={() => onChange(page + 1)}
+        disabled={page >= pageCount - 1}
+        aria-label="下一页"
+        className="flex h-6 w-6 rotate-180 items-center justify-center rounded-md text-ink2 transition-colors hover:bg-subtle disabled:opacity-30 disabled:hover:bg-transparent"
+      >
+        <ChevronLeftIcon size={13} />
+      </button>
     </div>
   );
 }
+
+/* --------------------------------- 分组卡 --------------------------------- */
 
 function GroupCard({
   group,
   colorIndex,
   maxTotal,
+  step,
+  from,
 }: {
   group: PublicGroup;
   colorIndex: number;
   maxTotal: number;
+  step: number;
+  from?: number;
 }) {
   const color = groupColor(colorIndex);
-  const maxWave = Math.max(...group.players.map((p) => p.wave), 1);
+  const maxWave = Math.max(1, ...group.players.map((p) => p.wave));
   return (
     <section
-      className="overflow-hidden rounded-xl border-t-[5px] bg-surface shadow-card"
+      data-group-card={group.name}
+      className="overflow-hidden rounded-xl border-t-[4px] bg-surface shadow-card"
       style={{ borderTopColor: color.bar }}
     >
-      <div className="px-3.5 py-3" style={{ background: color.soft }}>
+      <div className="px-3.5 py-2.5" style={{ background: color.soft }}>
         <div className="flex items-baseline justify-between gap-2">
-          <h2 className="truncate text-[15px] font-bold" style={{ color: color.ink }}>
+          <h3 className="truncate text-[15px] font-bold" style={{ color: color.ink }}>
             {group.name}
-          </h2>
-          <span className="shrink-0 text-[15px] font-black" style={{ color: color.ink }}>
+          </h3>
+          <span className="nums shrink-0 text-[15px] font-black" style={{ color: color.ink }}>
             {formatWave(group.total)}
           </span>
         </div>
@@ -239,14 +450,16 @@ function GroupCard({
           className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-[11.5px]"
           style={{ color: color.ink, opacity: 0.85 }}
         >
-          <span className="nums flex items-center gap-1 font-medium">
-            <ClockIcon size={11} />
-            {group.slot} 开赛
-          </span>
+          {from !== undefined && (
+            <span className="nums flex items-center gap-1 font-medium">
+              <ClockIcon size={11} />
+              {fmtHm(from)}–{fmtHm(from + step)}
+            </span>
+          )}
           <span className="nums">{group.count} 人</span>
           <span className="nums">人均 {formatWave(group.count ? group.total / group.count : 0)}</span>
         </div>
-        {/* 组间音浪占比条，一眼看出哪组偏重 */}
+        {/* 组间占比条，一眼看出哪组偏重 */}
         <div className="mt-2 h-1 w-full overflow-hidden rounded-full bg-white/60">
           <div
             className="h-full rounded-full"
@@ -259,6 +472,7 @@ function GroupCard({
         {group.players.map((p) => (
           <li
             key={p.name}
+            data-player-card={p.name}
             className="flex items-center gap-2 rounded-full py-1.5 pl-1.5 pr-2.5"
             style={{ background: color.soft }}
           >
@@ -285,54 +499,5 @@ function GroupCard({
         {group.players.length === 0 && <li className="py-3 text-center text-[12px] text-ink3">暂无人员</li>}
       </ul>
     </section>
-  );
-}
-
-/* -------------------------------- 音浪排行 -------------------------------- */
-
-function Ranking({ players, total }: { players: PublicPlayer[]; total: number }) {
-  if (players.length === 0) {
-    return <div className="py-20 text-center text-[14px] text-ink3">暂无音浪数据</div>;
-  }
-  const max = Math.max(...players.map((p) => p.wave), 1);
-  return (
-    <div className="mx-auto w-full max-w-[720px] py-4">
-      <div className="overflow-hidden rounded-xl bg-surface shadow-card">
-        <div className="flex items-center gap-2 border-b border-line px-4 py-2.5 text-[12px] text-ink2">
-          <TrendIcon size={14} />
-          全场音浪排行
-          <span className="flex-1" />
-          <span className="nums">合计 {formatWave(total)}</span>
-        </div>
-        <ul className="divide-y divide-line">
-          {players.map((p, i) => (
-            <li key={`${p.name}-${i}`} className="flex items-center gap-3 px-4 py-2.5">
-              <span
-                className={`nums flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[11.5px] font-bold ${
-                  i < 3 ? 'bg-brand text-white' : 'bg-subtle text-ink2'
-                }`}
-              >
-                {p.rank}
-              </span>
-              <span className="min-w-0 flex-1">
-                <span className="flex items-baseline gap-1.5">
-                  <span className="truncate text-[13.5px] font-semibold text-ink">{p.name}</span>
-                  {p.leader && (
-                    <span className="shrink-0 text-[11px] text-ink3">师傅 {p.leader}</span>
-                  )}
-                </span>
-                <span className="mt-1 block h-1 w-full overflow-hidden rounded-full bg-subtle">
-                  <span
-                    className="block h-full rounded-full bg-brand"
-                    style={{ width: `${Math.max(3, (p.wave / max) * 100)}%` }}
-                  />
-                </span>
-              </span>
-              <span className="nums w-16 shrink-0 text-right text-[13px] font-bold text-ink">{formatWave(p.wave)}</span>
-            </li>
-          ))}
-        </ul>
-      </div>
-    </div>
   );
 }

@@ -231,20 +231,22 @@ pub async fn plan(State(st): State<std::sync::Arc<AppState>>, Path(id): Path<i64
         }
     }
 
-    /* ---- 2b. 曲线图：每组的每日音浪合计 ----
+    /* ---- 2b. 每日明细：曲线图 + 按日期切换分组明细 ----
     必须赶在清 person_id 之前算：这一步还要靠 personId 关联每日序列。
-    取不到就整块省略，前端没有 trend 就退回纯列表展示，不留空壳图表。 */
-    let trend = match repos::get_wave_series(&st, false, None).await {
+    一次查询同时喂给两处用途，不额外打库：
+    - trend：每组每日合计，画折线
+    - daily：每组每天、每人每天的明细，供展示页按「年-月-日」切换
+    取不到就两块都省略，前端退回纯列表展示，不留空壳图表。 */
+    let (trend, daily) = match repos::get_wave_series(&st, false, None).await {
         Ok(series) if !series.dates.is_empty() => {
-            let lines: Vec<_> = groups
+            let dates = series.dates;
+            let day_count = dates.len();
+            // 每个日期下标上，把组内成员的当日音浪加起来
+            let group_values: Vec<Vec<f64>> = groups
                 .iter()
                 .map(|g| {
-                    // 每个日期下标上，把组内成员的当日音浪加起来
-                    let values: Vec<f64> = series
-                        .dates
-                        .iter()
-                        .enumerate()
-                        .map(|(i, _)| {
+                    (0..day_count)
+                        .map(|i| {
                             g.players
                                 .iter()
                                 .filter_map(|p| p.person_id.as_ref())
@@ -252,16 +254,51 @@ pub async fn plan(State(st): State<std::sync::Arc<AppState>>, Path(id): Path<i64
                                 .map(|v| v[i])
                                 .sum()
                         })
-                        .collect();
-                    json!({ "name": g.name, "values": values })
+                        .collect()
                 })
                 .collect();
-            Some(json!({ "dates": series.dates, "series": lines }))
+
+            let lines: Vec<_> = groups
+                .iter()
+                .zip(&group_values)
+                .map(|(g, values)| json!({ "name": g.name, "values": values }))
+                .collect();
+
+            // 每日明细取整：音浪本来就是计数，小数位对外没有信息量，还会让响应体翻倍
+            let daily_groups: Vec<_> = groups
+                .iter()
+                .zip(&group_values)
+                .map(|(g, values)| {
+                    let players: Vec<_> = g
+                        .players
+                        .iter()
+                        .map(|p| {
+                            let values: Vec<i64> = p
+                                .person_id
+                                .as_deref()
+                                .and_then(|id| series.series.get(id))
+                                .map(|v| v.iter().map(|x| x.round() as i64).collect())
+                                .unwrap_or_else(|| vec![0; day_count]);
+                            json!({ "name": p.name, "leader": p.leader, "values": values })
+                        })
+                        .collect();
+                    json!({
+                        "name": g.name,
+                        "values": values.iter().map(|v| v.round() as i64).collect::<Vec<i64>>(),
+                        "players": players,
+                    })
+                })
+                .collect();
+
+            (
+                Some(json!({ "dates": dates.clone(), "series": lines })),
+                Some(json!({ "dates": dates, "groups": daily_groups })),
+            )
         }
-        Ok(_) => None,
+        Ok(_) => (None, None),
         Err(e) => {
-            tracing::warn!(id, error = %e, "取每日音浪序列失败，曲线图省略");
-            None
+            tracing::warn!(id, error = %e, "取每日音浪序列失败，曲线图与按日明细省略");
+            (None, None)
         }
     };
 
@@ -318,6 +355,7 @@ pub async fn plan(State(st): State<std::sync::Arc<AppState>>, Path(id): Path<i64
         "groups": groups,
         "ranking": ranking,
         "trend": trend,
+        "daily": daily,
     }))
     .into_response()
 }
