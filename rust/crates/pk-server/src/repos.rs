@@ -7,7 +7,7 @@ use sqlx::Row;
 use crate::config::wave_cache_ttl_secs;
 use crate::dialect::{dialect_of, inline_dates};
 use crate::mysql;
-use crate::state::{AnchorBrief, AppState, Cached, DateInfo, WaveInfo, WaveMap};
+use crate::state::{AnchorBrief, AppState, Cached, DateInfo, WaveInfo, WaveMap, WaveSeries};
 
 /// 主键在不同库/不同版本里可能是 BIGINT UNSIGNED / BIGINT / INT / VARCHAR，
 /// 逐个类型尝试，都不行就返回 None
@@ -144,6 +144,67 @@ pub async fn get_waves(
         dates: use_dates,
         waves: filter_ids(waves, person_ids),
     })
+}
+
+/// 每日音浪序列（展示页曲线图数据源）。
+///
+/// 与 `get_waves` 的区别：那边把区间压成一个总数，这边按 (人, 日期) 展开成
+/// 与 `dates` 等长、下标一一对应的数组，前端画折线时不用再自己对齐日期。
+///
+/// 基线日会被剔除：它记的是累计快照而不是当日增量，混进曲线会变成一根假尖峰。
+pub async fn get_wave_series(
+    st: &AppState,
+    force: bool,
+    source: Option<&str>,
+) -> anyhow::Result<WaveSeries> {
+    let id = st.source(source)?.id.clone();
+    let info = get_dates_info(st, Some(&id), force).await?;
+
+    // 只取增量日（去掉基线日），再截取最近的一段
+    let mut dates: Vec<String> = match &info.baseline {
+        Some(b) => info.dates.iter().filter(|d| *d != b).cloned().collect(),
+        None => info.dates.clone(),
+    };
+    // 点太多挤在一起反而看不清趋势，够看趋势就行
+    const MAX_POINTS: usize = 14;
+    if dates.len() > MAX_POINTS {
+        dates = dates.split_off(dates.len() - MAX_POINTS);
+    }
+    // 折线图要正序：老 → 新
+    dates.reverse();
+
+    let cache_key = format!("{id}:series:v1");
+    if !force {
+        let cache = st.cache.lock().expect("cache 锁 poisoned");
+        if let Some(hit) = cache.series.get(&cache_key).and_then(|c| c.fresh(st.wave_ttl)) {
+            return Ok(hit.clone());
+        }
+    }
+
+    let mut series: HashMap<String, Vec<f64>> = HashMap::new();
+    if !dates.is_empty() {
+        let sql = inline_dates(dialect_of(&id).series_sql, &dates)?;
+        let rows = mysql::query(&st.pools, &id, &sql).await?;
+        let index: HashMap<&str, usize> =
+            dates.iter().enumerate().map(|(i, d)| (d.as_str(), i)).collect();
+        for r in &rows {
+            let Some(pid) = read_id(r, 0) else { continue };
+            let Some(d) = r.try_get::<Option<String>, _>(1).ok().flatten() else {
+                continue;
+            };
+            let Some(&i) = index.get(d.as_str()) else { continue };
+            let v: f64 = r.try_get::<Option<f64>, _>(2).ok().flatten().unwrap_or(0.0);
+            series.entry(pid).or_insert_with(|| vec![0.0; dates.len()])[i] = v;
+        }
+    }
+
+    let out = WaveSeries { dates, series };
+    st.cache
+        .lock()
+        .expect("cache 锁 poisoned")
+        .series
+        .insert(cache_key, Cached::new(out.clone()));
+    Ok(out)
 }
 
 fn filter_ids(data: WaveMap, person_ids: Option<&[String]>) -> WaveMap {

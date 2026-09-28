@@ -231,6 +231,40 @@ pub async fn plan(State(st): State<std::sync::Arc<AppState>>, Path(id): Path<i64
         }
     }
 
+    /* ---- 2b. 曲线图：每组的每日音浪合计 ----
+    必须赶在清 person_id 之前算：这一步还要靠 personId 关联每日序列。
+    取不到就整块省略，前端没有 trend 就退回纯列表展示，不留空壳图表。 */
+    let trend = match repos::get_wave_series(&st, false, None).await {
+        Ok(series) if !series.dates.is_empty() => {
+            let lines: Vec<_> = groups
+                .iter()
+                .map(|g| {
+                    // 每个日期下标上，把组内成员的当日音浪加起来
+                    let values: Vec<f64> = series
+                        .dates
+                        .iter()
+                        .enumerate()
+                        .map(|(i, _)| {
+                            g.players
+                                .iter()
+                                .filter_map(|p| p.person_id.as_ref())
+                                .filter_map(|id| series.series.get(id))
+                                .map(|v| v[i])
+                                .sum()
+                        })
+                        .collect();
+                    json!({ "name": g.name, "values": values })
+                })
+                .collect();
+            Some(json!({ "dates": series.dates, "series": lines }))
+        }
+        Ok(_) => None,
+        Err(e) => {
+            tracing::warn!(id, error = %e, "取每日音浪序列失败，曲线图省略");
+            None
+        }
+    };
+
     /* ---- 3. 音浪定稿后统一重算：组内名次、组合计、全场名次 ----
     放在覆盖之后，是因为名次依赖音浪；而且必须无条件执行——
     早期版本把这段塞在「取到实时音浪」的分支里，结果库一挂全场名次全是 0。 */
@@ -283,6 +317,7 @@ pub async fn plan(State(st): State<std::sync::Arc<AppState>>, Path(id): Path<i64
         },
         "groups": groups,
         "ranking": ranking,
+        "trend": trend,
     }))
     .into_response()
 }

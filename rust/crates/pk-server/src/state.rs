@@ -33,6 +33,17 @@ pub struct WaveCache {
     pub waves: HashMap<String, Cached<HashMap<String, f64>>>,
     /// key = source id
     pub anchors: HashMap<String, Cached<Vec<AnchorBrief>>>,
+    /// key = `{source}:{days}`，展示页曲线图用的每日增量序列
+    pub series: HashMap<String, Cached<WaveSeries>>,
+}
+
+/// 每日音浪序列（曲线图数据源）。
+/// `dates` 正序（老 → 新），`series` 里每个人一条与 dates 等长、下标一一对应的数组；
+/// 某天没数据就补 0，这样前端可以直接按下标画折线，不用再对齐日期。
+#[derive(Clone, Debug, Default)]
+pub struct WaveSeries {
+    pub dates: Vec<String>,
+    pub series: HashMap<String, Vec<f64>>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]

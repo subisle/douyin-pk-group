@@ -138,6 +138,13 @@ export interface PublicGroup {
   players: PublicPlayer[];
 }
 
+/** 曲线图数据：每组一条每日音浪曲线（后端算好的，前端只负责画） */
+export interface PublicTrend {
+  /** 采集日期，正序（老 → 新），与每条线的 values 下标一一对应 */
+  dates: string[];
+  series: Array<{ name: string; values: number[] }>;
+}
+
 export interface PublicPlan {
   id: number;
   title: string;
@@ -153,6 +160,8 @@ export interface PublicPlan {
   counts: { groups: number; players: number; totalWave: number };
   groups: PublicGroup[];
   ranking: PublicPlayer[];
+  /** 每日音浪曲线；取不到时后端省略该字段 */
+  trend?: PublicTrend | null;
 }
 
 export const api = {

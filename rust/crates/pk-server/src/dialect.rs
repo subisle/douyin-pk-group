@@ -1,7 +1,7 @@
 //! 两个库的 SQL 方言差异集中在这里。对外统一约定：
 //! - 人员表查询返回：id / name / avatar_url / status
 //! - 日期查询返回：d（YYYY-MM-DD）
-//! - 音浪查询返回：k（人员 id）/ w（区间内音浪合计）
+//! - 音浪查询返回：k（人员 id）/ w（区间内音浪合计），序列查询多一个 d（日期）
 
 /// A：douyinxs —— person / account / daily_metric
 const ANCHORS_A: &str = "SELECT id, name, avatar_url, status FROM person
@@ -14,6 +14,11 @@ const WAVES_A: &str = "SELECT person_id AS k, CAST(SUM(wave) AS DOUBLE) AS w FRO
      WHERE wave_reliable = 1 AND DATE_FORMAT(biz_date, '%Y-%m-%d') IN (?PLACEHOLDERS?)
      GROUP BY person_id";
 
+/// A 库每日序列：展示页曲线图用。返回 k（人员 id）/ d（日期）/ w（当日音浪）
+const SERIES_A: &str = "SELECT person_id AS k, DATE_FORMAT(biz_date, '%Y-%m-%d') AS d, CAST(SUM(wave) AS DOUBLE) AS w FROM daily_metric
+     WHERE wave_reliable = 1 AND DATE_FORMAT(biz_date, '%Y-%m-%d') IN (?PLACEHOLDERS?)
+     GROUP BY person_id, d";
+
 /// B：userxs —— persons / accounts / wave_stats（anchor_id 是关联键）
 const ANCHORS_B: &str =
     "SELECT id, name, NULL AS avatar_url, 'active' AS status FROM persons ORDER BY name";
@@ -25,12 +30,19 @@ const WAVES_B: &str =
      WHERE DATE_FORMAT(ws.date, '%Y-%m-%d') IN (?PLACEHOLDERS?)
      GROUP BY a.person_id";
 
+const SERIES_B: &str = "SELECT a.person_id AS k, DATE_FORMAT(ws.date, '%Y-%m-%d') AS d, CAST(SUM(ws.wave_value) AS DOUBLE) AS w FROM wave_stats ws
+     JOIN accounts a ON a.anchor_id = ws.anchor_id
+     WHERE DATE_FORMAT(ws.date, '%Y-%m-%d') IN (?PLACEHOLDERS?)
+     GROUP BY a.person_id, d";
+
 pub struct Dialect {
     pub anchors_sql: &'static str,
     pub dates_sql: &'static str,
     /// 基线日 SQL：首日记的是累计音浪。没有这个问题的库返回 None
     pub baseline_sql: Option<&'static str>,
     pub waves_sql: &'static str,
+    /// 每日音浪序列：返回 k（人员 id）/ d（日期）/ w（当日音浪）
+    pub series_sql: &'static str,
 }
 
 pub fn dialect_of(id: &str) -> Dialect {
@@ -40,6 +52,7 @@ pub fn dialect_of(id: &str) -> Dialect {
             dates_sql: DATES_B,
             baseline_sql: None,
             waves_sql: WAVES_B,
+            series_sql: SERIES_B,
         }
     } else {
         Dialect {
@@ -47,6 +60,7 @@ pub fn dialect_of(id: &str) -> Dialect {
             dates_sql: DATES_A,
             baseline_sql: Some(BASELINE_A),
             waves_sql: WAVES_A,
+            series_sql: SERIES_A,
         }
     }
 }

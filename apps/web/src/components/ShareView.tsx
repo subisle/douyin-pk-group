@@ -4,6 +4,7 @@
  * 展示「音浪数据 + 分组」两件事：
  * - 手机：单列卡片 + 顶部吸顶汇总条，组内按音浪排
  * - PC：多列网格 + 右侧全场音浪排行
+ * - 趋势页：每组每日音浪曲线（后端算好，前端只画）
  *
  * 数据来自 /api/public/plans/:id（后端已裁掉 personId / key 等内部字段）。
  * 音浪由后端按方案口径实时取；取不到时 stale=true，页面用方案保存时的快照并标注。
@@ -11,10 +12,11 @@
 import { useEffect, useMemo, useState } from 'react';
 import { formatWave } from '@pk/shared';
 import { api, type PublicGroup, type PublicPlan, type PublicPlayer } from '../api.js';
+import { TrendChart } from './TrendChart.js';
 import { groupColor } from '../lib/board.js';
 import { AlertIcon, ClockIcon, RefreshIcon, TrendIcon } from './icons.js';
 
-type Tab = 'groups' | 'ranking';
+type Tab = 'groups' | 'ranking' | 'trend';
 
 export function ShareView({ planId }: { planId: string }) {
   const [plan, setPlan] = useState<PublicPlan | null>(null);
@@ -106,6 +108,11 @@ export function ShareView({ planId }: { planId: string }) {
           <TabButton active={tab === 'ranking'} onClick={() => setTab('ranking')}>
             音浪排行
           </TabButton>
+          {plan.trend && plan.trend.dates.length > 1 && (
+            <TabButton active={tab === 'trend'} onClick={() => setTab('trend')}>
+              趋势
+            </TabButton>
+          )}
           <span className="flex-1" />
           <span className="nums hidden text-[11.5px] text-ink3 sm:inline">
             更新于 {new Date(plan.createdAt).toLocaleString('zh-CN', { hour12: false })}
@@ -121,7 +128,13 @@ export function ShareView({ planId }: { planId: string }) {
         </div>
       </div>
 
-      {tab === 'groups' ? <GroupGrid groups={plan.groups} /> : <Ranking players={plan.ranking} total={plan.counts.totalWave} />}
+      {tab === 'groups' && <GroupGrid groups={plan.groups} />}
+      {tab === 'ranking' && <Ranking players={plan.ranking} total={plan.counts.totalWave} />}
+      {tab === 'trend' && plan.trend && (
+        <div className="py-4">
+          <TrendChart trend={plan.trend} />
+        </div>
+      )}
 
       <footer className="pb-10 pt-6 text-center text-[11px] text-ink3">只读展示页 · 数据每小时更新</footer>
     </Frame>
@@ -302,7 +315,12 @@ function Ranking({ players, total }: { players: PublicPlayer[]; total: number })
                 {p.rank}
               </span>
               <span className="min-w-0 flex-1">
-                <span className="block truncate text-[13.5px] font-semibold text-ink">{p.name}</span>
+                <span className="flex items-baseline gap-1.5">
+                  <span className="truncate text-[13.5px] font-semibold text-ink">{p.name}</span>
+                  {p.leader && (
+                    <span className="shrink-0 text-[11px] text-ink3">师傅 {p.leader}</span>
+                  )}
+                </span>
                 <span className="mt-1 block h-1 w-full overflow-hidden rounded-full bg-subtle">
                   <span
                     className="block h-full rounded-full bg-brand"
@@ -310,7 +328,6 @@ function Ranking({ players, total }: { players: PublicPlayer[]; total: number })
                   />
                 </span>
               </span>
-              {p.leader && <span className="hidden shrink-0 text-[11px] text-ink3 sm:inline">师傅 {p.leader}</span>}
               <span className="nums w-16 shrink-0 text-right text-[13px] font-bold text-ink">{formatWave(p.wave)}</span>
             </li>
           ))}
