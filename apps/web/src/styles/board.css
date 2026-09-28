@@ -1,0 +1,249 @@
+/* ---------------------------------------------------------------------------
+   PK 分组页专用样式
+   令牌、.page / .tile / .figure / .sect-head 全部复用 index.css，
+   这里只补四块：区块骨架、统计数据卡、提示条、空状态。
+   高饱和色仍然只属于组卡的九色条，本页其余部分保持中性。
+   --------------------------------------------------------------------------- */
+
+/* 入场：6px 极轻上浮 + 淡入，三档错峰；reduced-motion 下整体关闭 */
+@keyframes board-rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.board-rise {
+  animation: board-rise 0.3s cubic-bezier(0.2, 0, 0, 1) both;
+}
+.board-rise-d1 {
+  animation: board-rise 0.3s cubic-bezier(0.2, 0, 0, 1) 0.06s both;
+}
+.board-rise-d2 {
+  animation: board-rise 0.3s cubic-bezier(0.2, 0, 0, 1) 0.12s both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .board-rise,
+  .board-rise-d1,
+  .board-rise-d2 {
+    animation: none;
+  }
+}
+
+/* --------------------------------- 区块骨架 -------------------------------- */
+
+/* 每块都是「标题行 + 内容」的竖排，间距统一由这里给，不靠子元素 margin 打架 */
+.board-sect {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+/* 窄屏让标题行换行，避免右侧计数把主标题挤没 */
+.board-sect .sect-head {
+  flex-wrap: wrap;
+  row-gap: 4px;
+}
+.board-sect-id {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+.board-sect-meta {
+  flex: none;
+  font-size: 12px;
+  color: var(--color-ink3);
+  text-align: right;
+}
+
+/* 配置区：刻意不加抬升面。它是输入区，退到背景里，视线自然落到下面的看板 */
+.board-config {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* 名单折叠条：和提示条同一套圆角/内边距语言，悬停只给一层极浅抬升 */
+.board-roster-toggle {
+  transition: background-color 0.16s cubic-bezier(0.2, 0, 0, 1), box-shadow 0.16s cubic-bezier(0.2, 0, 0, 1);
+}
+.board-roster-toggle:hover {
+  box-shadow: var(--shadow-raise);
+}
+
+/* --------------------------------- 提示条 --------------------------------- */
+
+/* 未匹配 / 已排除 / error / violations：语义色不变，只统一圆角、内边距和行高 */
+/* 语义色走 data-tone，不写进 Tailwind 类：本文件是未分层样式，
+   未分层规则在层叠里优先级高于 @layer utilities，写在一起会被颜色类反覆盖。 */
+.board-note {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  /* 四条提示条统一 1px 边框位，切换时不会跳版 */
+  border: 1px solid transparent;
+  border-radius: var(--radius-card);
+  padding: 9px 14px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.board-note[data-tone='warn'] {
+  background: var(--color-warn-soft);
+  border-color: color-mix(in srgb, var(--color-warn) 22%, transparent);
+  color: var(--color-warn-ink);
+}
+.board-note[data-tone='bad'] {
+  background: var(--color-bad-soft);
+  border-color: color-mix(in srgb, var(--color-bad) 22%, transparent);
+  color: var(--color-bad);
+}
+.board-note[data-tone='neutral'] {
+  background: var(--color-subtle);
+  color: var(--color-ink2);
+}
+.board-note-tight {
+  padding: 7px 14px;
+  font-size: 12px;
+}
+.board-note-icon {
+  display: inline-flex;
+  flex: none;
+}
+.board-note-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.board-note-spacer {
+  flex: 1 1 auto;
+}
+.board-note-tags {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+/* --------------------------------- 结果区 --------------------------------- */
+
+/* 分组结果是这一页的重心：先用一条发丝线把它从配置区切出来，再给足上间距 */
+.board-sect--focus {
+  margin-top: 12px;
+  padding-top: 16px;
+  border-top: 1px solid color-mix(in srgb, var(--color-line) 75%, transparent);
+}
+.board-focus {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* 统计条外面这一层：把 StatsBar 的弹性行改成自适应数据卡网格 */
+.board-stats {
+  min-width: 0;
+}
+.board-stats > div {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(146px, 1fr));
+  gap: 10px;
+}
+.board-stats > div > div {
+  min-width: 0;
+  gap: 4px;
+  border-radius: var(--radius-card);
+  padding: 10px 12px;
+  box-shadow: var(--shadow-raise);
+  transition: border-color 0.16s cubic-bezier(0.2, 0, 0, 1), box-shadow 0.16s cubic-bezier(0.2, 0, 0, 1);
+}
+.board-stats > div > div:hover {
+  border-color: var(--color-line2);
+  box-shadow: var(--shadow-raise), var(--shadow-card);
+}
+.board-stats > div > div > span:first-child {
+  font-size: 11.5px;
+  color: var(--color-ink3);
+}
+/* 数值走 .figure 的排版口径（等宽 + 负字距 + 800），拖动时不左右跳 */
+.board-stats .nums {
+  font-size: 23px;
+  font-weight: 800;
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+}
+@media (prefers-reduced-motion: reduce) {
+  .board-stats > div > div,
+  .board-stats > div > div:hover {
+    transition: none;
+  }
+}
+
+/* --------------------------------- 空状态 --------------------------------- */
+
+.board-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 52px 24px;
+  text-align: center;
+  border: 1px dashed var(--color-line2);
+  border-radius: var(--radius-panel);
+  background: var(--color-surface);
+}
+.board-empty-icon {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  margin-bottom: 2px;
+  border-radius: var(--radius-card);
+  background: var(--color-subtle);
+  color: var(--color-ink3);
+}
+.board-empty-title {
+  font-size: 14.5px;
+  font-weight: 600;
+  color: var(--color-ink);
+}
+.board-empty-hint {
+  max-width: 44ch;
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--color-ink3);
+}
+/* 下一步：三步短句横排，窄屏自动折行，不做成三等分装饰卡 */
+.board-empty-steps {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px 8px;
+  margin-top: 4px;
+}
+.board-empty-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: var(--radius-ctl);
+  background: var(--color-subtle);
+  padding: 5px 10px;
+  font-size: 12px;
+  color: var(--color-ink2);
+}
+.board-empty-step b {
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  color: var(--color-ink3);
+}
+
+/* --------------------------------- 导出区 --------------------------------- */
+
+.board-sect--export {
+  margin-top: 4px;
+}

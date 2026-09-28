@@ -17,7 +17,13 @@ rust/crates/pk-server   HTTP 服务：axum + sqlx(MySQL 只读) + SQLite + 静�
   └─ mysql.rs           多数据源连接池 + 只读守卫
 apps/web                React + Vite + dnd-kit 拖拽 + html-to-image 导出
   ├─ components/AuthGate.tsx   登录门
-  └─ components/ShareView.tsx  对外展示页
+  ├─ components/NavBar.tsx     顶栏 + 三段导航（首页 / 主播数据 / PK 分组）
+  ├─ components/HomeView.tsx   首页：数据新鲜度 + 方案概况 + 入口
+  ├─ components/StreamerView.tsx 主播数据：排行、库检索、CSV 导出
+  ├─ components/BoardView.tsx  PK 分组：解析、拖拽、均衡、导出
+  ├─ components/ShareView.tsx  对外展示页（/s/:planId，免登录）
+  ├─ lib/nav.ts                hash 路由（刷新 / 前进后退 / 分享链接都落到同一页）
+  └─ styles/                   各页面独立样式，互不污染
 packages/shared         前端仍用的展示工具与类型（算法已全部迁到 Rust，这里只留纯函数）
 ```
 
@@ -28,8 +34,13 @@ packages/shared         前端仍用的展示工具与类型（算法已全部�
 
 | 路径 | 谁能看 | 内容 |
 | --- | --- | --- |
-| `/` | 需口令 | 管理员看板：解析、拖拽、锁定、撤销、均衡、导出、方案管理 |
-| `/s/:planId` | 任何人 | 对外只读：音浪数据 + 分组，手机单列 / 桌面多列自适应 |
+| `/#/home` | 需口令 | 首页：数据新鲜度、当前方案概况、两个子页入口 |
+| `/#/data` | 需口令 | 主播数据：音浪排行、主播库检索、CSV 导出 |
+| `/#/board` | 需口令 | PK 分组：解析、拖拽、锁定、撤销、均衡、导出、方案管理 |
+| `/s/:planId` | 任何人 | 对外只读：只给分组名单和开赛时段，**不展示音浪** |
+
+根路径 `/` 等同 `/#/home`。导航状态存在 URL hash 里，所以三页都能直接分享链接、
+刷新和浏览器前进后退都停在原页。
 
 **鉴权**（`rust/crates/pk-server/src/auth.rs`）
 

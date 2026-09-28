@@ -259,13 +259,55 @@ try {
   console.log('  ->  ' + (await shot(ws, 'share-dated.png')));
   errors.length ? bad('翻页/点时段 console 报错: ' + errors.join(' | ')) : ok('翻页/点时段无 console 报错');
 
+  /* ============ 导航：首页 / 主播数据 / PK 分组 ============ */
+  console.log('== 三页面导航 ==');
+  errors = await session(ws, { width: 1280, height: 900, mobile: false });
+  const navState = [];
+  for (const route of ['home', 'data', 'board']) {
+    await goto(ws, `${BASE}/#/${route}`);
+    await sleep(900);
+    const s2 = JSON.parse(await evaluate(ws, `JSON.stringify({
+      active: document.querySelector('.navlink[aria-current=page]')?.textContent?.trim() ?? '',
+      head: document.body.innerText.replace(/\\s+/g, ' ').slice(0, 70),
+      hScroll: document.documentElement.scrollWidth > window.innerWidth + 1,
+    })`));
+    navState.push({ route, ...s2 });
+  }
+  const expectLabel = { home: '首页', data: '主播数据', board: 'PK 分组' };
+  for (const n of navState) {
+    n.active.includes(expectLabel[n.route])
+      ? ok(`${n.route} 高亮「${n.active}」`)
+      : bad(`${n.route} 高亮不对：${n.active}`);
+    n.hScroll ? bad(`${n.route} 出现横向滚动`) : ok(`${n.route} 无横向滚动`);
+  }
+  // 根路径应落到首页
+  await goto(ws, `${BASE}/`);
+  await sleep(900);
+  const rootIsHome = await evaluate(ws, `!!document.querySelector('.navlink[aria-current=page]') && document.querySelector('.navlink[aria-current=page]').textContent.includes('首页')`);
+  rootIsHome ? ok('根路径默认落到首页') : bad('根路径没落到首页');
+  // 点导航真的能切页
+  await goto(ws, `${BASE}/#/home`);
+  await sleep(600);
+  const jumped = JSON.parse(await evaluate(ws, `(() => {
+    const b = [...document.querySelectorAll('.navlink')].find(x => x.textContent.includes('主播数据'));
+    b?.click();
+    return JSON.stringify({ clicked: !!b });
+  })()`));
+  await sleep(800);
+  const afterJump = await evaluate(ws, `document.querySelector('.navlink[aria-current=page]')?.textContent?.trim() ?? ''`);
+  jumped.clicked && afterJump.includes('主播数据')
+    ? ok(`点导航切到「${afterJump}」`)
+    : bad(`点导航没切过去：${afterJump}`);
+  errors.length ? bad('导航 console 报错: ' + errors.join(' | ')) : ok('导航无 console 报错');
+  console.log('  ->  ' + (await shot(ws, 'nav-data.png')));
+
   /* ============ 4. 管理员登录页 ============ */
   console.log('== 管理员登录页 ==');
   errors = await session(ws, { width: 1280, height: 900, mobile: false });
   // 上一轮登录的 token 还在 localStorage 里，不清掉就进不了登录页
-  await goto(ws, `${BASE}/`);
+  await goto(ws, `${BASE}/#/board`);
   await evaluate(ws, 'localStorage.clear()');
-  await goto(ws, `${BASE}/`);
+  await goto(ws, `${BASE}/#/board`);
   const login = JSON.parse(await evaluate(ws, `JSON.stringify({
     hasPassword: !!document.querySelector('input[type=password]'),
     text: document.body.innerText.slice(0, 80).replace(/\\n/g, ' / '),

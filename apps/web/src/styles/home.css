@@ -1,0 +1,243 @@
+/* ---------------------------------------------------------------------------
+   首页专用样式
+   只用 index.css 里已定义的设计令牌（颜色 / 圆角 / 阴影），不另起一套色板。
+   唯一的新增视觉是：入场微动（已在 prefers-reduced-motion 下关闭）与若干
+   细边框分隔线。不引入渐变光晕 / 外发光 / 霓虹。
+--------------------------------------------------------------------------- */
+
+/* 入场：仅 8px 的极轻微上浮 + 淡入，避免生硬；reduced-motion 下整体关闭 */
+@keyframes home-rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.home-rise {
+  animation: home-rise 0.34s cubic-bezier(0.2, 0, 0, 1) both;
+}
+.home-rise-d1 {
+  animation: home-rise 0.34s cubic-bezier(0.2, 0, 0, 1) 0.05s both;
+}
+.home-rise-d2 {
+  animation: home-rise 0.34s cubic-bezier(0.2, 0, 0, 1) 0.1s both;
+}
+.home-rise-d3 {
+  animation: home-rise 0.34s cubic-bezier(0.2, 0, 0, 1) 0.15s both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .home-rise,
+  .home-rise-d1,
+  .home-rise-d2,
+  .home-rise-d3 {
+    animation: none;
+  }
+}
+
+/* 顶部数据新鲜度横幅：左缘一条细的语义色，右侧排关键计数 */
+.home-hero {
+  position: relative;
+  overflow: hidden;
+  border-radius: var(--radius-panel);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-raise);
+}
+.home-hero::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 3px;
+  background: var(--color-line2);
+}
+.home-hero[data-tone='good']::before {
+  background: var(--color-good);
+}
+.home-hero[data-tone='warn']::before {
+  background: var(--color-warn);
+}
+.home-hero[data-tone='bad']::before {
+  background: var(--color-bad);
+}
+/* 主区：窄屏竖排、宽屏左右分栏（新鲜度叙述 ←→ 关键计数） */
+.home-hero-main {
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+@media (min-width: 640px) {
+  .home-hero-main {
+    padding: 20px 24px 12px;
+    flex-direction: row;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 24px;
+  }
+}
+
+/* 状态说明：与主区同宽、只留底部内边距，和上方数字区分开 */
+.home-hero-note {
+  padding: 0 20px 18px;
+}
+@media (min-width: 640px) {
+  .home-hero-note {
+    padding: 0 24px 20px;
+  }
+}
+
+/* 关键数字组：日期 + 两个计数（主播库 / 可用天数） */
+.home-hero-stats {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 18px 26px;
+}
+.home-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.home-stat-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--color-ink3);
+}
+.home-stat-value {
+  font-size: 15px;
+  color: var(--color-ink);
+  overflow-wrap: anywhere;
+}
+.home-stat-value.figure {
+  font-size: 20px;
+}
+
+/* 一行「标签 / 值」的说明项 */
+.home-defs {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
+  gap: 12px 20px;
+}
+.home-def {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.home-def-label {
+  font-size: 11px;
+  color: var(--color-ink3);
+}
+.home-def-value {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-ink);
+  overflow-wrap: anywhere;
+}
+
+/* 内联提示条（过期 / 断库 / 空状态说明）：克制的语义底色 */
+.home-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: var(--radius-ctl);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+.home-note[data-tone='good'] {
+  background: var(--color-good-soft);
+  color: var(--color-good-ink);
+}
+.home-note[data-tone='warn'] {
+  background: var(--color-warn-soft);
+  color: var(--color-warn-ink);
+}
+.home-note[data-tone='bad'] {
+  background: var(--color-bad-soft);
+  color: var(--color-bad);
+}
+.home-note[data-tone='neutral'] {
+  background: var(--color-subtle);
+  color: var(--color-ink2);
+}
+.home-note .home-note-icon {
+  flex: none;
+  margin-top: 2px;
+}
+
+/* 两个子页入口：内容不等重，避免「空卡横排」观感 */
+.home-entries {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+}
+@media (min-width: 720px) {
+  .home-entries {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+.home-entry {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  width: 100%;
+  padding: 16px 18px;
+  text-align: left;
+  border-radius: var(--radius-panel);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-raise);
+  transition: box-shadow 0.18s cubic-bezier(0.2, 0, 0, 1), transform 0.18s cubic-bezier(0.2, 0, 0, 1);
+}
+.home-entry:hover {
+  box-shadow: var(--shadow-float);
+  transform: translateY(-1px);
+}
+@media (prefers-reduced-motion: reduce) {
+  .home-entry,
+  .home-entry:hover {
+    transition: none;
+    transform: none;
+  }
+}
+.home-entry-icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: var(--radius-ctl);
+  background: var(--color-brand-soft);
+  color: var(--color-brand2);
+}
+.home-entry-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.home-entry-title {
+  font-size: 14.5px;
+  font-weight: 700;
+  color: var(--color-ink);
+}
+.home-entry-desc {
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--color-ink2);
+  overflow-wrap: anywhere;
+}
+.home-entry-go {
+  flex: none;
+  align-self: center;
+  color: var(--color-ink3);
+}

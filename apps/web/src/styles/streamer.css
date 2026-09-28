@@ -1,0 +1,606 @@
+/* ============================================================
+   主播数据页（只读探索页）
+   令牌、.page / .tile / .grid-table / .sect-head 全部复用 index.css，
+   这里只补三块：概览条、表格外壳、状态占位。
+   ============================================================ */
+
+/* --------------------------------- 概览条 --------------------------------- */
+
+.streamer-summary {
+  display: flex;
+  flex-direction: column;
+}
+
+.streamer-summary-main {
+  display: flex;
+  align-items: stretch;
+  gap: 18px;
+  padding: 16px 18px;
+}
+
+.streamer-metric {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.streamer-metric-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--color-ink3);
+}
+
+.streamer-metric-value {
+  font-size: 26px;
+  line-height: 1.1;
+}
+
+/* 命中数是本页最需要被一眼扫到的状态，用品牌色做唯一强调 */
+.streamer-metric-hit {
+  color: var(--color-brand2);
+}
+
+.streamer-metric-sub {
+  font-size: 11px;
+  color: var(--color-ink3);
+}
+
+.streamer-metric-scope {
+  flex: 1;
+}
+
+.streamer-scope-value {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--color-ink);
+}
+
+.streamer-scope-sub {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--color-ink3);
+}
+
+.streamer-divider {
+  width: 1px;
+  flex: none;
+  background: var(--color-line);
+}
+
+/* Top 3：一条横向窄栏，不做成三等分卡片 */
+.streamer-top3 {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 11px 18px;
+  border-top: 1px solid var(--color-line);
+  background: color-mix(in srgb, var(--color-subtle) 60%, transparent);
+}
+
+.streamer-top3-label {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--color-ink3);
+}
+
+.streamer-top3-empty {
+  font-size: 12px;
+  color: var(--color-ink3);
+}
+
+.streamer-top3-list {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.streamer-top3-item {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.streamer-top3-rank {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--color-brand2);
+}
+
+.streamer-top3-name {
+  max-width: 9rem;
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-ink);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.streamer-top3-wave {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--color-ink2);
+}
+
+/* --------------------------------- 提示条 --------------------------------- */
+
+.streamer-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 11px 14px;
+  border-radius: var(--radius-card);
+  font-size: 12px;
+}
+
+.streamer-banner-warn {
+  border: 1px solid color-mix(in srgb, var(--color-warn) 32%, transparent);
+  background: var(--color-warn-soft);
+  color: var(--color-warn-ink);
+}
+
+.streamer-banner-body {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.streamer-banner-title {
+  font-weight: 600;
+}
+
+.streamer-banner-hint {
+  color: color-mix(in srgb, var(--color-warn-ink) 78%, var(--color-ink2));
+}
+
+/* -------------------------------- 区块工具条 ------------------------------- */
+
+.streamer-sect {
+  flex-wrap: wrap;
+}
+
+.streamer-sect-sub {
+  margin: 3px 0 0;
+  font-size: 12px;
+  color: var(--color-ink3);
+}
+
+.streamer-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.streamer-search {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.streamer-search > svg {
+  position: absolute;
+  left: 8px;
+  pointer-events: none;
+  color: var(--color-ink3);
+}
+
+.streamer-search > input {
+  width: 200px;
+  padding-left: 27px;
+}
+
+.streamer-search-wide > input {
+  width: 230px;
+}
+
+.streamer-search-clear {
+  position: absolute;
+  right: 5px;
+  display: grid;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  border-radius: var(--radius-ctl);
+  color: var(--color-ink3);
+  font-size: 15px;
+  line-height: 1;
+  transition: color 0.15s linear, background-color 0.15s linear;
+}
+
+.streamer-search-clear:hover {
+  background: var(--color-subtle);
+  color: var(--color-ink);
+}
+
+/* ---------------------------------- 面板 ---------------------------------- */
+
+.streamer-panel {
+  overflow: hidden;
+}
+
+.streamer-panel-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 12px;
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--color-line);
+}
+
+.streamer-panel-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  color: var(--color-ink3);
+}
+
+/* 窄屏用容器横向滚动兜底，绝不把页面撑破 */
+.streamer-table-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+}
+
+@media (min-width: 640px) {
+  /* 竖向也交给容器，sticky 表头才真正吸住 */
+  .streamer-table-scroll {
+    max-height: min(70vh, 620px);
+    overflow-y: auto;
+  }
+}
+
+.streamer-table {
+  min-width: 600px;
+}
+
+.streamer-col-rank {
+  width: 54px;
+}
+
+.streamer-col-master {
+  width: 22%;
+}
+
+.streamer-col-wave {
+  width: 110px;
+  text-align: right;
+}
+
+.streamer-col-state {
+  width: 84px;
+}
+
+/* 前三名：整行一层极淡的品牌色底 + 排名牌着色，克制的强调 */
+.streamer-row-top td {
+  background: color-mix(in srgb, var(--color-brand) 4%, transparent);
+}
+
+.streamer-row-off td {
+  color: var(--color-ink3);
+}
+
+.streamer-row-off .streamer-wave {
+  color: var(--color-ink3);
+}
+
+.streamer-rank {
+  display: inline-grid;
+  min-width: 22px;
+  height: 22px;
+  place-items: center;
+  border-radius: var(--radius-ctl);
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--color-ink2);
+}
+
+.streamer-rank-top {
+  background: var(--color-brand-soft);
+  color: var(--color-brand2);
+}
+
+.streamer-row-top:first-child .streamer-rank-top {
+  background: var(--color-brand);
+  color: #fff;
+}
+
+/* 头像：首字打底，图片挂了就自然露出首字，不会留破图 */
+.streamer-avatar {
+  position: relative;
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--color-subtle);
+  color: var(--color-ink3);
+  font-weight: 700;
+  line-height: 1;
+}
+
+.streamer-avatar img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.streamer-name-cell {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 超长名字截断不破版，完整值走 title */
+.streamer-name,
+.streamer-master,
+.streamer-hit-name {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.streamer-name {
+  max-width: 13rem;
+  font-weight: 600;
+  color: var(--color-ink);
+}
+
+.streamer-master {
+  max-width: 9rem;
+  color: var(--color-ink2);
+}
+
+.streamer-master-empty {
+  color: var(--color-ink3);
+}
+
+.streamer-wave {
+  font-size: 13.5px;
+  font-weight: 700;
+  color: var(--color-ink);
+  text-align: right;
+}
+
+.streamer-col-state {
+  white-space: nowrap;
+}
+
+/* --------------------------------- 状态位 --------------------------------- */
+
+.streamer-state {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 26px 20px 30px;
+}
+
+.streamer-state-icon {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border-radius: var(--radius-ctl);
+  background: var(--color-subtle);
+  color: var(--color-ink2);
+}
+
+.streamer-state-icon-bad {
+  background: var(--color-bad-soft);
+  color: var(--color-bad);
+}
+
+.streamer-state-title {
+  margin: 2px 0 0;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--color-ink);
+}
+
+.streamer-state-desc {
+  margin: 0;
+  max-width: 62ch;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--color-ink2);
+}
+
+.streamer-inline-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 5px;
+  padding: 22px 4px 24px;
+}
+
+/* 库命中列表：用行分隔，不用第二张表，避免和名单表混淆 */
+.streamer-hit-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.streamer-hit {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 14px;
+}
+
+.streamer-hit + .streamer-hit {
+  border-top: 1px solid color-mix(in srgb, var(--color-line) 65%, transparent);
+}
+
+.streamer-hit:hover {
+  background: var(--color-subtle);
+}
+
+.streamer-hit-name {
+  flex: 1;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-ink);
+}
+
+/* --------------------------------- 骨架屏 --------------------------------- */
+
+.streamer-skel-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px 14px 20px;
+}
+
+.streamer-skel {
+  border-radius: 6px;
+  background: linear-gradient(90deg, var(--color-subtle) 0%, #eaeef3 50%, var(--color-subtle) 100%);
+  background-size: 200% 100%;
+  animation: streamer-sweep 1.5s linear infinite;
+}
+
+.streamer-skel-title {
+  width: 42%;
+  height: 12px;
+  margin-bottom: 4px;
+}
+
+.streamer-skel-row {
+  height: 32px;
+}
+
+@keyframes streamer-sweep {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+
+/* -------------------------------- 窄屏收敛 -------------------------------- */
+
+@media (max-width: 639px) {
+  .streamer-summary-main {
+    flex-wrap: wrap;
+    gap: 12px 16px;
+    padding: 14px;
+  }
+
+  .streamer-divider {
+    display: none;
+  }
+
+  .streamer-metric {
+    flex: 1 1 40%;
+  }
+
+  .streamer-metric-scope {
+    flex: 1 1 100%;
+  }
+
+  .streamer-metric-value {
+    font-size: 22px;
+  }
+
+  .streamer-top3 {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 11px 14px;
+  }
+
+  .streamer-top3-list {
+    flex-direction: column;
+    gap: 5px;
+  }
+
+  .streamer-top3-name {
+    max-width: 11rem;
+  }
+
+  .streamer-toolbar {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .streamer-search,
+  .streamer-search-wide {
+    flex: 1 1 100%;
+  }
+
+  .streamer-search > input,
+  .streamer-search-wide > input {
+    width: 100%;
+  }
+
+  .streamer-state {
+    padding: 22px 16px 26px;
+  }
+
+  /* 窄屏表格要横向滚，但音浪是本页最该被看到的数字：把它钉在右边缘，
+     滚名单时数值始终可见，不必先滚到它。 */
+  .streamer-table .streamer-col-wave {
+    position: sticky;
+    right: 0;
+    background: var(--color-surface);
+    box-shadow: -1px 0 0 var(--color-line);
+  }
+
+  .streamer-table thead .streamer-col-wave {
+    z-index: 2;
+  }
+
+  .streamer-table tbody td.streamer-col-wave {
+    z-index: 1;
+  }
+
+  .streamer-table tbody tr:hover .streamer-col-wave {
+    background: var(--color-subtle);
+  }
+
+  .streamer-table tbody tr.streamer-row-top .streamer-col-wave {
+    background: color-mix(in srgb, var(--color-brand) 4%, var(--color-surface));
+  }
+}
+
+/* 用户要求减少动效时，骨架屏停成静态灰块 */
+@media (prefers-reduced-motion: reduce) {
+  .streamer-skel {
+    animation: none;
+    background: var(--color-subtle);
+  }
+
+  .streamer-search-clear {
+    transition: none;
+  }
+}

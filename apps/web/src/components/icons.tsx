@@ -210,6 +210,38 @@ export function ClockIcon(p: IconProps) {
   );
 }
 
+/** 首页：屋顶 + 门洞，导航用 */
+export function HomeIcon(p: IconProps) {
+  return (
+    <Svg {...p}>
+      <path d="M2.4 7.3 8 2.9l5.6 4.4" stroke="currentColor" strokeWidth={S.width} strokeLinecap={S.linecap} strokeLinejoin={S.linejoin} />
+      <path d="M3.9 8.4v4.2a.6.6 0 0 0 .6.6h7a.6.6 0 0 0 .6-.6V8.4" stroke="currentColor" strokeWidth={S.width} strokeLinecap={S.linecap} strokeLinejoin={S.linejoin} />
+    </Svg>
+  );
+}
+
+/** 数据：两根柱子加一条基线，排行榜/明细用 */
+export function ChartIcon(p: IconProps) {
+  return (
+    <Svg {...p}>
+      <path d="M3 13.2h10" stroke="currentColor" strokeWidth={S.width} strokeLinecap={S.linecap} />
+      <path d="M4.9 13.2V8.6M8 13.2V4.4M11.1 13.2v-2.9" stroke="currentColor" strokeWidth={S.width} strokeLinecap={S.linecap} />
+    </Svg>
+  );
+}
+
+/** 分组：三个并排的方块，PK 分组页用 */
+export function GridIcon(p: IconProps) {
+  return (
+    <Svg {...p}>
+      <rect x="2.4" y="2.9" width="4.4" height="4.4" rx="1.2" stroke="currentColor" strokeWidth={S.width} />
+      <rect x="9.2" y="2.9" width="4.4" height="4.4" rx="1.2" stroke="currentColor" strokeWidth={S.width} />
+      <rect x="2.4" y="9.2" width="4.4" height="3.9" rx="1.2" stroke="currentColor" strokeWidth={S.width} />
+      <rect x="9.2" y="9.2" width="4.4" height="3.9" rx="1.2" stroke="currentColor" strokeWidth={S.width} />
+    </Svg>
+  );
+}
+
 /** 人数：两个肩并肩的轮廓，用于「N 人」这类计数前缀 */
 export function UsersIcon(p: IconProps) {
   return (
