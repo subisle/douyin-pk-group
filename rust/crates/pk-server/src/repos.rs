@@ -176,7 +176,11 @@ pub async fn get_wave_series(
     let cache_key = format!("{id}:series:v1");
     if !force {
         let cache = st.cache.lock().expect("cache 锁 poisoned");
-        if let Some(hit) = cache.series.get(&cache_key).and_then(|c| c.fresh(st.wave_ttl)) {
+        if let Some(hit) = cache
+            .series
+            .get(&cache_key)
+            .and_then(|c| c.fresh(st.wave_ttl))
+        {
             return Ok(hit.clone());
         }
     }
@@ -185,14 +189,19 @@ pub async fn get_wave_series(
     if !dates.is_empty() {
         let sql = inline_dates(dialect_of(&id).series_sql, &dates)?;
         let rows = mysql::query(&st.pools, &id, &sql).await?;
-        let index: HashMap<&str, usize> =
-            dates.iter().enumerate().map(|(i, d)| (d.as_str(), i)).collect();
+        let index: HashMap<&str, usize> = dates
+            .iter()
+            .enumerate()
+            .map(|(i, d)| (d.as_str(), i))
+            .collect();
         for r in &rows {
             let Some(pid) = read_id(r, 0) else { continue };
             let Some(d) = r.try_get::<Option<String>, _>(1).ok().flatten() else {
                 continue;
             };
-            let Some(&i) = index.get(d.as_str()) else { continue };
+            let Some(&i) = index.get(d.as_str()) else {
+                continue;
+            };
             let v: f64 = r.try_get::<Option<f64>, _>(2).ok().flatten().unwrap_or(0.0);
             series.entry(pid).or_insert_with(|| vec![0.0; dates.len()])[i] = v;
         }
