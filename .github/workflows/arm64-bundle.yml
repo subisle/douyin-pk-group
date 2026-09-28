@@ -30,6 +30,10 @@ jobs:
         with:
           context: .
           platforms: linux/arm64
+          # 必须显式打 tag：docker exporter 不会自己起名，不给 tags 的话
+          # 导出的 tar 载入后是 <none>:<none>，compose 就会去 Docker Hub 拉同名镜像。
+          # 部署机的 compose 固定引用 pk-server:arm64，两边靠这个名字对齐。
+          tags: pk-server:arm64
           # 单架构可以直接导出成可 docker load 的 tar；多架构 manifest 不行
           outputs: type=docker,dest=/tmp/pk-server-arm64.tar
           cache-from: type=gha

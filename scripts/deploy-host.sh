@@ -26,11 +26,12 @@ export HTTP_PROXY="$HTTPS_PROXY"
 
 cd "$ROOT"
 
-sha="$(git rev-parse --short HEAD)"
-echo "==> 发布提交 $sha（$ARCH → $HOST）"
+sha="$(git rev-parse HEAD)"
+short="$(git rev-parse --short HEAD)"
+echo "==> 发布提交 ${short}（${ARCH} → ${HOST}）"
 
 # 1. 等 CI 全绿：没绿就构建出坏镜像，部署完再回滚更慢
-echo "==> 等待 CI（$sha）"
+echo "==> 等待 CI（${short}）"
 for i in $(seq 1 60); do
   status="$(gh run list --commit "$sha" --workflow CI --limit 1 --json status,conclusion \
     --jq '.[0] | "\(.status)/\(.conclusion // "-")"' 2>/dev/null || echo "none/none")"
@@ -52,11 +53,11 @@ for i in $(seq 1 60); do
   rid="$1"
   if [ "$2" = "completed" ]; then
     [ "$3" = "success" ] && break
-    echo "    镜像包构建失败：run $rid"; gh run view "$rid" --log-failed; exit 1
+    echo "    镜像包构建失败：run ${rid}"; gh run view "$rid" --log-failed; exit 1
   fi
   sleep 10
 done
-echo "    镜像包就绪（run $rid）"
+echo "    镜像包就绪（run ${rid}）"
 
 # 3. 下载离线镜像包
 tmp="$(mktemp -d)"
@@ -72,6 +73,12 @@ sshpass -p "$PASS" ssh -o StrictHostKeyChecking=no "root@$HOST" "
   set -e
   docker load -i /tmp/pk-server-$ARCH.tar.gz
   rm -f /tmp/pk-server-$ARCH.tar.gz
+  # \u515c\u5e95\uff1a\u65e9\u4e8e bundle \u5de5\u4f5c\u6d41\u52a0 tags \u7684\u955c\u50cf\u5305\u8f7d\u5165\u540e\u662f <none>:<none>\uff0c
+  # compose \u5f15\u7528 pk-server:$ARCH \u4f1a\u56e0\u6b64\u53bb Docker Hub \u62c9\u540c\u540d\u955c\u50cf\u800c\u5931\u8d25\u3002
+  if ! docker image inspect pk-server:$ARCH >/dev/null 2>&1; then
+    dangling=\$(docker images -q --filter dangling=true | head -1)
+    [ -n "\$dangling" ] && docker tag "\$dangling" pk-server:$ARCH
+  fi
   cd '$DIR'
   docker compose up -d --force-recreate
   for i in \$(seq 1 30); do
