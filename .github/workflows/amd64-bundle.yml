@@ -1,0 +1,55 @@
+# 产出可直接 docker load 的 amd64 镜像包，挂到 rolling release 上。
+#
+# 为什么要单独出包而不是让部署机直接拉 ghcr：
+# ghcr 上的包默认私有，部署机没有 read:packages 凭据。与其让部署机长期持有
+# 个人 token，不如由 CI 导出一个可离线加载的镜像包，部署机 docker load 即可。
+#
+# 与 arm64-bundle.yml 的关系：两者只是 platforms 不同，逻辑一致。
+# 部署机按架构选对应的工作流：
+#   x86_64 部署机（如腾讯云 115.159.72.31）  gh workflow run amd64-bundle.yml
+#   arm64  部署机（如 rk3318 192.168.5.12）  gh workflow run arm64-bundle.yml
+#
+# 用法：
+#   gh workflow run amd64-bundle.yml
+#   gh release download amd64-bundle     # 拿到 pk-server-amd64.tar.gz
+name: amd64 镜像包
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write   # 创建/更新 release 需要
+
+jobs:
+  bundle:
+    name: 构建 amd64 镜像包
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 构建 amd64 镜像并导出为 docker 包
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          # 单架构可以直接导出成可 docker load 的 tar；多架构 manifest 不行
+          outputs: type=docker,dest=/tmp/pk-server-amd64.tar
+          cache-from: type=gha
+          cache-to: type=gha,mode=min
+
+      - name: 压缩
+        run: gzip -9 /tmp/pk-server-amd64.tar
+
+      - name: 上传到 rolling release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag=amd64-bundle
+          gh release view "$tag" >/dev/null 2>&1 || \
+            gh release create "$tag" --title "amd64 镜像包" --notes "由 amd64-bundle.yml 自动更新" --prerelease
+          gh release upload "$tag" /tmp/pk-server-amd64.tar.gz --clobber
+          echo "release $tag 已更新"

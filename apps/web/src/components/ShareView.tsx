@@ -26,6 +26,23 @@ function groupsPerPage(width: number): number {
   return 1;
 }
 
+/** 内置分组数：后端分组不足 9 组时补空组占位，把第 9 组的赛程时段 / 分页 / 配色先占好位 */
+const BUILTIN_GROUPS = 9;
+
+/**
+ * 后端返回的分组不足 9 组时，内置补空组占位。
+ * 补位组没有人员、没有音浪，只占一个赛程时段和一张卡位；等后台真的分出第 9 组，
+ * 这里的占位会被真实数据顶掉，不用改前端。
+ */
+function withBuiltinGroups(groups: PublicGroup[]): PublicGroup[] {
+  if (groups.length >= BUILTIN_GROUPS) return groups;
+  const out = groups.slice();
+  for (let i = groups.length; i < BUILTIN_GROUPS; i += 1) {
+    out.push({ name: `第 ${i + 1} 组`, slot: '', count: 0, total: 0, players: [], builtin: true });
+  }
+  return out;
+}
+
 function parseHm(s: string): number {
   const [h, m] = s.split(':').map((x) => Number(x));
   return (Number.isFinite(h) ? h : 0) * 60 + (Number.isFinite(m) ? m : 0);
@@ -143,10 +160,16 @@ export function ShareView({ planId }: { planId: string }) {
     );
   }
 
-  const groups = dayView?.groups ?? plan.groups;
+  const realGroups = dayView?.groups ?? plan.groups;
+  // 不足 9 组时内置补空组占位，第 9 组的时段和卡位先占好
+  const groups = withBuiltinGroups(realGroups);
+  const builtinCount = groups.length - realGroups.length;
   const totalWave = dayView?.total ?? plan.counts.totalWave;
   const pageCount = Math.max(1, Math.ceil(groups.length / perPage));
-  const shown = groups.slice(page * perPage, page * perPage + perPage);
+  // 夹住页码：窄屏翻到第 5 页后拉宽窗口，perPage 变小会让当前页越界，
+  // 不夹的话 slice 切出空数组，分组区会闪一帧空白
+  const safePage = Math.min(page, pageCount - 1);
+  const shown = groups.slice(safePage * perPage, safePage * perPage + perPage);
   const maxGroupTotal = Math.max(1, ...groups.map((g) => g.total));
 
   // 赛程：开赛时刻 + 每组间隔 = 每组时段；末组结束时刻 = 全程时长
@@ -160,7 +183,7 @@ export function ShareView({ planId }: { planId: string }) {
   }));
   const fullMin = groups.length * step;
 
-  const jumpTo = (i: number) => setPage(Math.floor(i / perPage));
+  const jumpTo = (i: number) => setPage(Math.min(Math.floor(i / perPage), pageCount - 1));
 
   return (
     <Frame>
@@ -195,7 +218,7 @@ export function ShareView({ planId }: { planId: string }) {
             <Stat label="总音浪" value={formatWave(totalWave)} accent />
             <Stat label="参赛人数" value={`${plan.counts.players} 人`} />
             <Stat label="分组" value={`${plan.counts.groups} 组`} />
-            <Stat label={dayView ? '当日音浪' : '统计口径'} value={dayView ? dayView.date : metricLabel} />
+            <Stat label={dayView ? '统计日期' : '统计口径'} value={dayView ? dayView.date : metricLabel} />
           </dl>
 
           {plan.stale && (
@@ -264,13 +287,16 @@ export function ShareView({ planId }: { planId: string }) {
             {dayView && <span className="ml-1.5 font-normal text-ink3">{dayView.date}</span>}
           </h2>
           <span className="nums text-[11.5px] text-ink3">共 {groups.length} 组</span>
+          {builtinCount > 0 && (
+            <span className="text-[11.5px] text-ink3">含 {builtinCount} 个内置待补位</span>
+          )}
           <span className="flex-1" />
           {pageCount > 1 && (
-            <Pager page={page} pageCount={pageCount} onChange={setPage} />
+            <Pager page={safePage} pageCount={pageCount} onChange={setPage} />
           )}
         </div>
 
-        {groups.length === 0 ? (
+        {realGroups.length === 0 ? (
           <div className="py-16 text-center text-[14px] text-ink3">这个方案还没有分组</div>
         ) : (
           <div className="grid grid-cols-1 items-start gap-3 sm:grid-cols-2 lg:grid-cols-3">
@@ -278,10 +304,10 @@ export function ShareView({ planId }: { planId: string }) {
               <GroupCard
                 key={g.name}
                 group={g}
-                colorIndex={page * perPage + i}
+                colorIndex={safePage * perPage + i}
                 maxTotal={maxGroupTotal}
                 step={step}
-                from={slots[page * perPage + i]?.from}
+                from={slots[safePage * perPage + i]?.from}
               />
             ))}
           </div>
@@ -289,7 +315,7 @@ export function ShareView({ planId }: { planId: string }) {
 
         {pageCount > 1 && (
           <div className="mt-3 flex justify-center">
-            <Pager page={page} pageCount={pageCount} onChange={setPage} wide />
+            <Pager page={safePage} pageCount={pageCount} onChange={setPage} wide />
           </div>
         )}
       </section>
@@ -434,7 +460,9 @@ function GroupCard({
   return (
     <section
       data-group-card={group.name}
-      className="overflow-hidden rounded-xl border-t-[4px] bg-surface shadow-card"
+      className={`overflow-hidden rounded-xl border-t-[4px] bg-surface shadow-card ${
+        group.builtin ? 'border-dashed border-2 border-line opacity-80' : ''
+      }`}
       style={{ borderTopColor: color.bar }}
     >
       <div className="px-3.5 py-2.5" style={{ background: color.soft }}>
@@ -443,7 +471,7 @@ function GroupCard({
             {group.name}
           </h3>
           <span className="nums shrink-0 text-[15px] font-black" style={{ color: color.ink }}>
-            {formatWave(group.total)}
+            {group.builtin ? '待补员' : formatWave(group.total)}
           </span>
         </div>
         <div
@@ -496,7 +524,11 @@ function GroupCard({
             </span>
           </li>
         ))}
-        {group.players.length === 0 && <li className="py-3 text-center text-[12px] text-ink3">暂无人员</li>}
+        {group.players.length === 0 && (
+          <li className="py-3 text-center text-[12px] text-ink3">
+            {group.builtin ? '内置占位，后台分出该组后自动填实' : '暂无人员'}
+          </li>
+        )}
       </ul>
     </section>
   );

@@ -17,6 +17,8 @@ export const GROUP_COLORS: GroupColor[] = [
   { bar: '#F43F5E', soft: '#FFE4E6', ink: '#BE123C' },
   { bar: '#3B82F6', soft: '#DBEAFE', ink: '#1D4ED8' },
   { bar: '#22C55E', soft: '#DCFCE7', ink: '#15803D' },
+  { bar: '#A855F7', soft: '#F3E8FF', ink: '#7E22CE' },
+  { bar: '#0EA5E9', soft: '#E0F2FE', ink: '#0369A1' },
 ];
 
 export function groupColor(index: number): GroupColor {

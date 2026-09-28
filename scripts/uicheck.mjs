@@ -242,7 +242,7 @@ try {
   })`));
   dated.clicked ? ok(`切到日期「${dated.label}」`) : bad('没有日期切换按钮');
   dayState.active === dated.label ? ok('日期 chip 高亮跟随') : bad(`日期 chip 高亮不对：${dayState.active}`);
-  dayState.head.includes('当日音浪') ? ok(`头部切到当日口径：${dayState.head.slice(0, 60)}`) : bad('头部没切到当日音浪');
+  dayState.head.includes('统计日期') ? ok(`头部切到按日口径：${dayState.head.slice(0, 60)}`) : bad('头部没切到统计日期');
   console.log('  ->  ' + (await shot(ws, 'share-dated.png')));
   errors.length ? bad('翻页/切日期 console 报错: ' + errors.join(' | ')) : ok('翻页/切日期无 console 报错');
 

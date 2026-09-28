@@ -136,6 +136,8 @@ export interface PublicGroup {
   /** 组内音浪合计 */
   total: number;
   players: PublicPlayer[];
+  /** true = 前端内置的空组占位，后端没有这组数据 */
+  builtin?: boolean;
 }
 
 /** 曲线图数据：每组一条每日音浪曲线（后端算好的，前端只负责画） */
