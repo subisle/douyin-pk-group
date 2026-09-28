@@ -17,7 +17,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api, type PublicGroup, type PublicPlan } from '../api.js';
 import { groupColor } from '../lib/board.js';
-import { AlertIcon, ChevronLeftIcon, ClockIcon, RefreshIcon } from './icons.js';
+import { AlertIcon, ChevronLeftIcon, ClockIcon, RefreshIcon, UsersIcon } from './icons.js';
 
 /** 一页放几组：手机一屏一组，PC 一屏三组 */
 function groupsPerPage(width: number): number {
@@ -401,15 +401,10 @@ function GroupCard({
           className="mt-1 flex items-center gap-1.5 text-[11.5px] font-medium"
           style={{ color: color.ink, opacity: 0.72 }}
         >
-          {from !== undefined && !group.builtin && (
-            <>
-              <ClockIcon size={11} />
-              <span className="nums">{fmtHm(from)} 开赛</span>
-            </>
-          )}
+          {/* 时段已经在右上角给全了，这里只补组内构成，不再重复「几点开赛」 */}
           {group.count > 0 && (
             <>
-              <span className="opacity-40">·</span>
+              <UsersIcon size={11} />
               <span className="nums">{group.count} 人</span>
             </>
           )}

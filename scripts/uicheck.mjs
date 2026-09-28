@@ -243,14 +243,19 @@ try {
   await sleep(500);
   const dayState = JSON.parse(await evaluate(ws, `JSON.stringify({
     head: document.querySelector('header')?.innerText.replace(/\s+/g, ' ').slice(0, 90) ?? '',
-    firstCard: document.querySelector('[data-group-card]')?.dataset.groupCard ?? '',
+    visible: [...document.querySelectorAll('[data-group-card]')].map(c => c.dataset.groupCard),
+    onPage: [...document.querySelectorAll('[data-group-slot][aria-current=true]')].map(b => b.dataset.groupSlot),
     pager: document.querySelector('[data-pager]')?.innerText.replace(/\s+/g, ' ') ?? '',
   })`));
   dated.clicked ? ok(`点赛程条「${dated.label}」跳到该组所在页`) : bad('赛程条没渲染');
   dated.active > 0 ? ok(`当前页 ${dated.active} 个时段高亮（${dayState.pager}）`) : bad('赛程条没有当前页高亮');
-  dayState.firstCard === dated.label
-    ? ok(`跳页正确：首张卡就是 ${dayState.firstCard}`)
-    : bad(`跳页后首张卡是 ${dayState.firstCard}，期望 ${dated.label}`);
+  // 点时段是跳到「包含该组的那一页」，不是把该组顶到第一位，所以断言该组在当前页可见
+  dayState.visible.includes(dated.label)
+    ? ok(`跳页正确：${dayState.visible.join('/')}（${dated.label} 在其中）`)
+    : bad(`跳页后是 ${dayState.visible.join('/')}，不含 ${dated.label}`);
+  dayState.onPage.includes(dated.label)
+    ? ok(`高亮跟到 ${dayState.onPage.join('/')}`)
+    : bad(`高亮没跟上：${dayState.onPage.join('/')}`);
   console.log('  ->  ' + (await shot(ws, 'share-dated.png')));
   errors.length ? bad('翻页/点时段 console 报错: ' + errors.join(' | ')) : ok('翻页/点时段无 console 报错');
 

@@ -210,6 +210,17 @@ export function ClockIcon(p: IconProps) {
   );
 }
 
+/** 人数：两个肩并肩的轮廓，用于「N 人」这类计数前缀 */
+export function UsersIcon(p: IconProps) {
+  return (
+    <Svg {...p}>
+      <circle cx="6" cy="5.6" r="2.3" stroke="currentColor" strokeWidth={S.width} />
+      <path d="M2.6 13.2c0-1.9 1.5-3.1 3.4-3.1s3.4 1.2 3.4 3.1" stroke="currentColor" strokeWidth={S.width} strokeLinecap={S.linecap} strokeLinejoin={S.linejoin} />
+      <path d="M11 3.6a2.3 2.3 0 0 1 0 4.5M12.1 10.4c1 .5 1.6 1.5 1.6 2.8" stroke="currentColor" strokeWidth={S.width} strokeLinecap={S.linecap} strokeLinejoin={S.linejoin} />
+    </Svg>
+  );
+}
+
 /** 撤销：左弯箭头 */
 export function UndoIcon(p: IconProps) {
   return (
