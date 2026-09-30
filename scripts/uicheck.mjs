@@ -396,6 +396,14 @@ try {
     await session(ws, { width: 1280, height: 900, mobile: false });
     await goto(ws, `${BASE}/#/board`);
     const ROSTER_SEL = `[data-roster-text]`;
+    // 名单编辑区默认是收起的（RosterImport 只在 view==='roster' 时挂载），先展开
+    const expanded = await evaluate(ws, `(() => {
+      if (document.querySelector('${ROSTER_SEL}')) return 'already';
+      const t = [...document.querySelectorAll('button')].find(b => b.textContent.includes('展开编辑'));
+      t?.click();
+      return t ? 'clicked' : 'no-toggle';
+    })()`);
+    if (expanded !== 'already') await sleep(600);
     const setRoster = (value) => evaluate(ws, `(() => {
       const t = document.querySelector('${ROSTER_SEL}');
       if (!t) return 'no-textarea';
@@ -406,7 +414,7 @@ try {
     })()`);
     const before = await evaluate(ws, `document.querySelector('${ROSTER_SEL}')?.value ?? null`);
     if (before === null) {
-      bad('看板里没有名单输入框');
+      bad(`看板里没有名单输入框（展开状态：${expanded}）`);
     } else {
       const MARK = '回归标记甲';
       await setRoster(before.replace(new RegExp(`${MARK}\\n?`, 'g'), '').replace(/\n$/, '') + '\n' + MARK);
