@@ -8,7 +8,7 @@ services:
     container_name: pk-server
     restart: unless-stopped
     ports:
-      - "127.0.0.1:8787:8787"   # 只监听本机，公网入口交给 Caddy
+      - "${PK_PORT:-6666}:8787" # 宿主机端口可用 PK_PORT 覆盖；容器内仍是 8787
     env_file:
       - .env
     environment:

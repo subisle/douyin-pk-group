@@ -44,6 +44,7 @@ export interface ConstraintsMeta {
   pinned: Array<{ name: string; group: number | 'last' }>;
   schedule: { start: string; intervalMin: number };
   minGap: Array<{ a: string; b: string; gap: number }>;
+  minGroup: Array<{ name: string; group: number }>;
 }
 
 export interface PolishResponse extends InspectResponse {

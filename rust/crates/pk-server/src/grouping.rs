@@ -151,6 +151,7 @@ pub async fn constraints_meta() -> GroupResult<serde_json::Value> {
         "pinned": pinned,
         "schedule": { "start": cs.schedule.start, "intervalMin": cs.schedule.interval_min },
         "minGap": cs.min_gap,
+        "minGroup": cs.min_group,
     })))
 }
 

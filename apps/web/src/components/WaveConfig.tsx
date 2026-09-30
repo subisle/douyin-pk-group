@@ -6,16 +6,18 @@ import { ClockIcon, PinIcon, PlusIcon, RefreshIcon } from './icons.js';
 
 /** 内置条件一句话说明 */
 function constraintSummary(): string {
-  const { excludeTogether, pinned } = DEFAULT_CONSTRAINTS;
+  const { excludeTogether, pinned, minGap, minGroup } = DEFAULT_CONSTRAINTS;
   const parts = excludeTogether.map((s) => `${s.join(' / ')} 不同组`);
   for (const r of pinned) parts.push(`${r.name} 固定${r.group === 'last' ? '末组' : `第 ${r.group} 组`}`);
+  for (const r of minGap ?? []) parts.push(`${r.a} / ${r.b} 至少隔 ${r.gap} 组`);
+  for (const r of minGroup ?? []) parts.push(`${r.name} 从第 ${r.group} 组开始`);
   return parts.join(' · ');
 }
 
 const STRATEGIES: Array<{ value: Strategy; label: string; title: string }> = [
   { value: 'snake', label: '蛇形均衡', title: '强弱搭配，各组总音浪最接近' },
   { value: 'snake-no-master', label: '蛇形 + 同门回避', title: '蛇形基础上尽量拆开同师傅的人' },
-  { value: 'sequential', label: '从高到低', title: '按音浪降序依次切组，第 1 组最强，不做均衡' },
+  { value: 'sequential', label: '总音浪从高到低', title: '按总音浪降序依次直填，前 8 人第 1 组；忽略内置条件' },
   { value: 'random', label: '随机', title: '随机洗牌后依次切组' },
 ];
 
@@ -76,7 +78,10 @@ export function WaveConfig({ onAddBucket }: { onAddBucket: () => void }) {
             className={`${selectClass} w-[150px]`}
             value={strategy}
             title={STRATEGIES.find((s) => s.value === strategy)?.title}
-            onChange={(e) => patch({ strategy: e.target.value as Strategy })}
+            onChange={(e) => {
+              const value = e.target.value as Strategy;
+              patch(value === 'sequential' ? { strategy: value, metric: 'total' } : { strategy: value });
+            }}
           >
             {STRATEGIES.map((s) => (
               <option key={s.value} value={s.value} title={s.title}>

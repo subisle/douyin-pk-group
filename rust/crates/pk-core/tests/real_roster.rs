@@ -1,7 +1,6 @@
 //! 真实名单 + 真实音浪的回归基线（fixture 由 TS 版 dump，2026-09-27）
-//! TS 基线：54 人 → 7 组，max 1997449 / min 1759024 / 极差 13.3%
-//! Rust 版修掉了「固定位插回撑爆末组」的 bug（TS 末组 9 人），人数全部 ≤ 8，
-//! 极差 13.4%（min 1757867），与 TS 基线仅差 0.1 个百分点。
+//! 新内置约束加入后，蛇形均衡基线从 TS 的 13.3% 放宽到 14.2%。
+//! 这是约束数量增加后的预期结果；仍低于不做均衡的梯队式分组。
 
 use pk_core::{
     auto_group, compute_balance, find_violations, slot_time, ConstraintSet, GroupOptions, Player,
@@ -51,7 +50,9 @@ fn real_roster_matches_ts_baseline() {
             .unwrap()
     };
     assert_eq!(at("啸泽"), 0, "啸泽固定第 1 组");
+    assert_eq!(at("啸阳"), 0, "啸阳固定第 1 组");
     assert_eq!(at("啸帆"), 6, "啸帆固定最后一组");
+    assert!(at("浩阳") >= 5, "浩阳必须第 6 组或更后");
 
     // 5) 最小间隔
     assert!(
@@ -69,8 +70,8 @@ fn real_roster_matches_ts_baseline() {
     let bal = compute_balance(&groups);
     assert!(bal.max > 0.0 && bal.min > 0.0);
     assert!(
-        (bal.spread - 13.3).abs() < 0.5,
-        "极差 {}% 与 TS 基线 13.3% 偏离过大（max {} / min {}）",
+        (bal.spread - 14.2).abs() < 0.5,
+        "极差 {}% 与新约束基线 14.2% 偏离过大（max {} / min {}）",
         bal.spread,
         bal.max,
         bal.min

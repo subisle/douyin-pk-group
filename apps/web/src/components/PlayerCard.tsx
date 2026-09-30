@@ -116,7 +116,8 @@ export function SortablePlayerCard({
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: player.key,
-    data: { type: 'player', bucketId: undefined },
+    // type 给 GroupBoard 的 collisionDetection 分流：只跟别的姓名卡和组落点算碰撞
+    data: { type: 'player' },
   });
   const [open, setOpen] = useState(false);
   const [tab, setTab] = useState<'move' | 'swap'>('move');
@@ -137,7 +138,11 @@ export function SortablePlayerCard({
   }, [highlight]);
 
   return (
-    <div style={{ transform: CSS.Translate.toString(transform), transition, opacity: isDragging ? 0.4 : 1 }}>
+    <div style={{
+      transform: isDragging ? undefined : CSS.Translate.toString(transform),
+      transition,
+      opacity: isDragging ? 0.35 : 1,
+    }}>
       <div
         ref={setNodeRef}
         data-player-card={player.name}

@@ -158,7 +158,10 @@ async fn main() -> anyhow::Result<()> {
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(8787);
-    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
+    let host = std::env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
+    let addr: std::net::SocketAddr = format!("{host}:{port}")
+        .parse()
+        .map_err(|_| anyhow::anyhow!("无效的监听地址: {host}:{port}"))?;
     tracing::info!("pk-server 启动 http://{addr}（管理员 /  ·  对外展示 /s/:id）");
     tracing::info!(
         auth = if st.auth.enabled() {

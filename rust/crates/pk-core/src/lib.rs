@@ -8,8 +8,9 @@ pub mod roster;
 pub mod types;
 
 pub use constraints::{
-    find_by_name, find_violations, gap_conflicts, is_pinned_name, slot_time, ConstraintSet,
-    MinGapRule, PinnedGroup, PinnedRule, PolishOptions, ScheduleRule, Violation,
+    find_by_name, find_violations, gap_conflicts, is_pinned_name, min_group_conflicts, slot_time,
+    ConstraintSet, MinGapRule, MinGroupRule, PinnedGroup, PinnedRule, PolishOptions, ScheduleRule,
+    Violation,
 };
 pub use group::{
     auto_group, compute_balance, group_count, is_valid, move_player, random_group,

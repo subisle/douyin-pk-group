@@ -358,3 +358,19 @@ export function SortIcon(p: IconProps) {
     </Svg>
   );
 }
+
+/** 组顺序拖拽手柄：两列三排圆点，和 SortIcon 一样走 currentColor */
+export function GripIcon(p: IconProps) {
+  return (
+    <Svg {...p}>
+      <g fill="currentColor">
+        <circle cx="6" cy="4" r="1.1" />
+        <circle cx="10" cy="4" r="1.1" />
+        <circle cx="6" cy="8" r="1.1" />
+        <circle cx="10" cy="8" r="1.1" />
+        <circle cx="6" cy="12" r="1.1" />
+        <circle cx="10" cy="12" r="1.1" />
+      </g>
+    </Svg>
+  );
+}

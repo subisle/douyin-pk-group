@@ -99,6 +99,12 @@ interface State {
   /* 撤销 / 重做 */
   past: Snapshot[];
   future: Snapshot[];
+  /**
+   * 拖拽事务的起点快照。onDragOver 每移动一格就会触发一次落位，
+   * 逐次 pushHistory 会把一次拖拽拆成几十条撤销记录（撤销一次没反应）。
+   * 所以拖拽期间只在 beginDrag 抓一次快照，endDrag 时确有变化才记一条。
+   */
+  dragSnapshot: Snapshot | null;
 
   /* 运行状态 */
   dbOk: boolean | null;
@@ -125,11 +131,18 @@ interface State {
   polish: () => Promise<void>;
 
   addBucket: () => void;
+  /** 把某组移动到指定组号（1 起），不影响组成员 */
+  moveBucketTo: (id: string, groupNumber: number) => void;
+  /** 拖动组列：把 id 组挪到 overId 组当前所在的位置 */
+  moveBucketOver: (id: string, overId: string) => void;
   /** 每组内部按音浪从高到低重排（不跨组移动） */
   sortBucketsByWave: () => void;
   removeBucket: (id: string) => void;
   renameBucket: (id: string, name: string) => void;
   moveCard: (activeKey: string, toBucketId: string, overKey: string | null) => void;
+  /** 拖拽事务：beginDrag 抓起点快照，endDrag 时确有变化才记一条撤销 */
+  beginDrag: () => void;
+  endDrag: () => void;
   /** 点选移动（移动端友好）：把某人放进某组末尾 */
   assignPlayer: (playerKey: string, toBucketId: string | null) => void;
   /** 交换两个人所在的组（跨组或同组） */
@@ -162,19 +175,49 @@ interface State {
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
 let inspectTimer: ReturnType<typeof setTimeout> | null = null;
 
+const normalizePlayerName = (name: string) => name.replace(/[\s\u3000]/g, '');
+
 const MAX_HISTORY = 50;
 
 const cloneBuckets = (buckets: Bucket[]): Bucket[] =>
   buckets.map((b) => ({ id: b.id, name: b.name, players: [...b.players] }));
 
+const snapshotOf = (buckets: Bucket[], unassigned: Player[]): Snapshot => ({
+  buckets: cloneBuckets(buckets),
+  unassigned: [...unassigned],
+});
+
+/**
+ * 只比「谁在第几组的第几位」，不比音浪等易变字段——拖拽只关心版式有没有动过。
+ * 没有这一步，用户把卡片在原位松手也会留下一条空撤销。
+ */
+function sameLayout(a: Snapshot, b: Snapshot): boolean {
+  if (a.buckets.length !== b.buckets.length) return false;
+  for (let i = 0; i < a.buckets.length; i++) {
+    if (a.buckets[i].id !== b.buckets[i].id) return false;
+    const x = a.buckets[i].players;
+    const y = b.buckets[i].players;
+    if (x.length !== y.length) return false;
+    for (let j = 0; j < x.length; j++) if (x[j].key !== y[j].key) return false;
+  }
+  return a.unassigned.length === b.unassigned.length
+    && a.unassigned.every((p, i) => p.key === b.unassigned[i].key);
+}
+
 export const useStore = create<State>((set, get) => {
   /** 记一次快照（调用前先拿当前状态） */
-  const pushHistory = () => {
-    const { buckets, unassigned, past } = get();
-    const snap: Snapshot = { buckets: cloneBuckets(buckets), unassigned: [...unassigned] };
-    const next = [...past, snap];
+  const pushHistory = (snap: Snapshot = snapshotOf(get().buckets, get().unassigned)) => {
+    const next = [...get().past, snap];
     if (next.length > MAX_HISTORY) next.shift();
     set({ past: next, future: [] });
+  };
+
+  /**
+   * 拖拽中的落位不再各自记历史：整段拖拽由 beginDrag/endDrag 合成一条。
+   * 非拖拽来源（菜单移动、增删组）仍旧逐次记。
+   */
+  const pushHistoryUnlessDragging = () => {
+    if (!get().dragSnapshot) pushHistory();
   };
 
   return {
@@ -212,6 +255,7 @@ export const useStore = create<State>((set, get) => {
 
     past: [],
     future: [],
+    dragSnapshot: null,
 
     dbOk: null,
     loading: false,
@@ -309,7 +353,35 @@ export const useStore = create<State>((set, get) => {
         const active = res.players.filter((p) => !p.excluded);
         if (!active.length) {
           set({ players: res.players, buckets: [], unassigned: [], balance: null, violations: [], slots: [] });
-          get().notify('名单里没有可参赛的人');
+            get().notify('名单里没有可参赛的人');
+          return;
+        }
+        const seenNames = new Map<string, string>();
+        const duplicateNames = new Set<string>();
+        for (const player of active) {
+          const key = normalizePlayerName(player.name);
+          if (seenNames.has(key)) {
+            duplicateNames.add(player.name);
+          } else {
+            seenNames.set(key, player.name);
+          }
+        }
+        if (duplicateNames.size) {
+          const names = [...duplicateNames].join('、');
+          set({
+            error: `名单存在重复人名：${names}`,
+            players: res.players,
+            unmatched: res.unmatched,
+            excluded: res.excluded,
+            aliasMap: res.aliasMap,
+            dates: res.dates,
+            buckets: [],
+            unassigned: [],
+            balance: null,
+            violations: [],
+            slots: [],
+          });
+          useStore.getState().notify(`存在重复人名：${names}`);
           return;
         }
         const arranged = await api.arrange({
@@ -435,6 +507,37 @@ export const useStore = create<State>((set, get) => {
       void get().refreshDerived();
     },
 
+    moveBucketTo: (id, groupNumber) => {
+      const { buckets } = get();
+      const fromIndex = buckets.findIndex((b) => b.id === id);
+      // Number.isFinite 这道必须有：NaN 过不了 `< 0` 判断，会一路漏到 splice(NaN)
+      if (fromIndex < 0 || !Number.isFinite(groupNumber) || buckets.length < 2) return;
+      // 组号是 1 起，夹到 [1, 组数]
+      const toIndex = Math.max(0, Math.min(buckets.length - 1, Math.round(groupNumber) - 1));
+      if (fromIndex === toIndex) return;
+      pushHistoryUnlessDragging();
+      const next = [...buckets];
+      const [moved] = next.splice(fromIndex, 1);
+      next.splice(toIndex, 0, moved);
+      set({ buckets: next });
+      void get().refreshDerived();
+    },
+
+    moveBucketOver: (id, overId) => {
+      const { buckets } = get();
+      const fromIndex = buckets.findIndex((b) => b.id === id);
+      const overIndex = buckets.findIndex((b) => b.id === overId);
+      if (fromIndex < 0 || overIndex < 0 || fromIndex === overIndex) return;
+      pushHistoryUnlessDragging();
+      const next = [...buckets];
+      const [moved] = next.splice(fromIndex, 1);
+      // 插入位必须用「移除之前」的 overIndex。用了移除之后的下标，
+      // 把第 1 组拖到第 2 组上会算成插回第 0 位 —— 等于没动。
+      next.splice(overIndex, 0, moved);
+      set({ buckets: next });
+      void get().refreshDerived();
+    },
+
     sortBucketsByWave: () => {
       const { buckets, notify } = get();
       if (buckets.every((b) => b.players.length < 2)) {
@@ -469,30 +572,50 @@ export const useStore = create<State>((set, get) => {
     },
 
     moveCard: (activeKey, toBucketId, overKey) => {
-      pushHistory();
-      set((s) => {
-        const next = s.buckets.map((b) => ({ ...b, players: [...b.players] }));
-        const from = next.find((b) => b.players.some((p) => p.key === activeKey));
-        const to = next.find((b) => b.id === toBucketId);
-        if (!from || !to) return s;
+      // 先在副本上算出结果：算完才知道有没有真的动过。
+      // 之前是无条件 pushHistory + 无条件 set，onDragOver 每触发一次就塞一条撤销，
+      // 原位松手也照塞，于是「撤销一次没反应」。
+      const next = cloneBuckets(get().buckets);
+      const from = next.find((b) => b.players.some((p) => p.key === activeKey));
+      const to = next.find((b) => b.id === toBucketId);
+      if (!from || !to) return;
 
-        if (from.id === to.id) {
-          const arr = from.players;
-          const oldIndex = arr.findIndex((p) => p.key === activeKey);
-          const newIndex = overKey ? arr.findIndex((p) => p.key === overKey) : arr.length - 1;
-          if (oldIndex < 0 || newIndex < 0 || oldIndex === newIndex) return s;
-          const [p] = arr.splice(oldIndex, 1);
-          arr.splice(newIndex, 0, p);
-        } else {
-          const idx = from.players.findIndex((p) => p.key === activeKey);
-          if (idx < 0) return s;
-          const [p] = from.players.splice(idx, 1);
-          const at = overKey ? Math.max(0, to.players.findIndex((x) => x.key === overKey)) : to.players.length;
-          to.players.splice(at, 0, p);
-        }
-        return { buckets: next };
-      });
+      if (from.id === to.id) {
+        const arr = from.players;
+        const oldIndex = arr.findIndex((p) => p.key === activeKey);
+        // over 可能就是它自己（原地松手），找不到落点就当追加到末尾
+        const landed = overKey ? arr.findIndex((p) => p.key === overKey) : arr.length - 1;
+        const newIndex = landed < 0 ? arr.length - 1 : landed;
+        if (oldIndex < 0 || oldIndex === newIndex) return;
+        const [moved] = arr.splice(oldIndex, 1);
+        arr.splice(newIndex, 0, moved);
+      } else {
+        const idx = from.players.findIndex((p) => p.key === activeKey);
+        if (idx < 0) return;
+        const [moved] = from.players.splice(idx, 1);
+        // 原来这里用 Math.max(0, -1) = 0，落点一旦失效就把人甩到目标组最前面
+        const at = overKey ? to.players.findIndex((x) => x.key === overKey) : -1;
+        to.players.splice(at < 0 ? to.players.length : at, 0, moved);
+      }
+
+      pushHistoryUnlessDragging();
+      set({ buckets: next });
       void get().refreshDerived();
+    },
+
+    beginDrag: () => {
+      // 只抓起点，不入栈；一次拖拽 = 一条撤销
+      if (get().dragSnapshot) return;
+      set({ dragSnapshot: snapshotOf(get().buckets, get().unassigned) });
+    },
+
+    endDrag: () => {
+      const snap = get().dragSnapshot;
+      if (!snap) return;
+      set({ dragSnapshot: null });
+      // 版式没动过就不留空撤销
+      if (sameLayout(snap, snapshotOf(get().buckets, get().unassigned))) return;
+      pushHistory(snap);
     },
 
     assignPlayer: (playerKey, toBucketId) => {
@@ -596,8 +719,9 @@ export const useStore = create<State>((set, get) => {
     addToBucket: async (bucketId, name) => {
       const trimmed = name.trim();
       if (!trimmed) return false;
-      const norm = (s: string) => s.replace(/[\s\u3000]/g, '');
-      const dup = get().buckets.some((b) => b.players.some((p) => norm(p.name) === norm(trimmed)));
+      const norm = normalizePlayerName;
+      const dup = [...get().buckets.flatMap((b) => b.players), ...get().unassigned]
+        .some((p) => norm(p.name) === norm(trimmed));
       if (dup) {
         get().notify(`${trimmed} 已经在分组里了`);
         return false;

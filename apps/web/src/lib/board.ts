@@ -65,3 +65,22 @@ export function gapLine(p: Player, rank: number, waveAt: (r: number) => number):
   const parts = targets.map((t) => `距前${t} ${fmt(waveAt(t) - my)}`);
   return `第${rank}名 · ${parts.join(' · ')}`;
 }
+
+/** 导出图专用：只看相邻名次差距，名字旁边单独带全局名次 */
+export function adjacentGapLine(p: Player, rank: number, waveAt: (r: number) => number): string {
+  if (rank <= 0) return '';
+  const my = p.wave;
+  const fmt = (value: number) => (value > 0 ? formatWave(value) : '同分');
+  const gapTo = (targetRank: number) => {
+    const target = waveAt(targetRank);
+    return target > my ? `距第${targetRank}名 ${fmt(target - my)}` : `领先第${targetRank}名 ${fmt(my - target)}`;
+  };
+
+  if (rank === 1) {
+    return `领先第2名 ${fmt(my - waveAt(2))}`;
+  }
+  const parts: string[] = [];
+  if (rank >= 3) parts.push(gapTo(rank - 2));
+  parts.push(gapTo(rank - 1));
+  return parts.join(' · ');
+}

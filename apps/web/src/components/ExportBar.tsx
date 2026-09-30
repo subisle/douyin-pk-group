@@ -2,7 +2,7 @@ import { formatWave, slotTime, type Player, type ScheduleRule, type WaveMetric }
 import type { Bucket } from '../types.js';
 import { useStore } from '../store.js';
 import { downloadBlob, nodeToPngBlob } from '../lib/exportImage.js';
-import { buildRankContext, gapLine, groupColor } from '../lib/board.js';
+import { adjacentGapLine, buildRankContext, groupColor } from '../lib/board.js';
 import { Button } from './ui.js';
 import { CopyIcon, DownloadIcon, RefreshIcon, SaveIcon } from './icons.js';
 
@@ -68,9 +68,11 @@ function buildExportHtml(
               <div style="display:flex;align-items:center;gap:8px;background:${c.soft};border-radius:999px;padding:7px 12px">
                 <span style="width:20px;height:20px;border-radius:50%;background:#ffffff;color:${c.ink};
                              font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex:none">${offset + i + 1}</span>
-                <span style="font-size:14px;font-weight:600;color:${INK}">${esc(p.name)}</span>
+                <span style="min-width:0;flex:0 1 auto;font-size:14px;font-weight:600;color:${INK};
+                             overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(p.name)}</span>
+                <span style="flex:none;font-size:14px;font-weight:600;color:${c.ink}">第${rank}名</span>
               </div>
-              <div style="padding:3px 8px 0 8px;font-size:10.5px;line-height:1.45;color:${INK2}">${esc(gapLine(p, rank, ctx.waveAt))}</div>
+              <div style="padding:3px 8px 0 8px;font-size:10.5px;line-height:1.45;color:${INK2}">${esc(adjacentGapLine(p, rank, ctx.waveAt))}</div>
             </div>`;
           })
           .join('');

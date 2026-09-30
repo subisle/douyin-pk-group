@@ -52,6 +52,14 @@ pub struct MinGapRule {
     pub gap: usize,
 }
 
+/// 最低组号：该人必须分到指定组号（1 起）或更后面的组
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MinGroupRule {
+    pub name: String,
+    pub group: u32,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConstraintSet {
@@ -62,15 +70,25 @@ pub struct ConstraintSet {
     /// 最小间隔（可选，向后兼容旧数据）
     #[serde(default)]
     pub min_gap: Vec<MinGapRule>,
+    /// 最低组号（可选，向后兼容旧数据）
+    #[serde(default)]
+    pub min_group: Vec<MinGroupRule>,
 }
 
 impl Default for ConstraintSet {
     fn default() -> Self {
         Self {
-            exclude_together: vec![vec!["玖玉".into(), "玖妹".into(), "玖玥".into()]],
+            exclude_together: vec![
+                vec!["玖玉".into(), "玖妹".into(), "玖玥".into()],
+                vec!["狼影".into(), "浩冬".into()],
+            ],
             pinned: vec![
                 PinnedRule {
                     name: "啸泽".into(),
+                    group: PinnedGroup::Index(1),
+                },
+                PinnedRule {
+                    name: "啸阳".into(),
                     group: PinnedGroup::Index(1),
                 },
                 PinnedRule {
@@ -86,6 +104,10 @@ impl Default for ConstraintSet {
                 a: "啸昭".into(),
                 b: "啸寻".into(),
                 gap: 4,
+            }],
+            min_group: vec![MinGroupRule {
+                name: "浩阳".into(),
+                group: 6,
             }],
         }
     }
@@ -312,6 +334,15 @@ pub fn gap_conflicts(groups: &[Vec<Player>], rules: &[MinGapRule]) -> usize {
                 (Some(ia), Some(ib)) => ia.abs_diff(ib) < r.gap,
                 _ => false,
             }
+        })
+        .count()
+}
+
+pub fn min_group_conflicts(groups: &[Vec<Player>], rules: &[MinGroupRule]) -> usize {
+    rules
+        .iter()
+        .filter(|r| {
+            group_index_of_name(groups, &r.name).is_some_and(|at| at + 1 < r.group as usize)
         })
         .count()
 }
@@ -641,6 +672,35 @@ pub fn find_violations(groups: &[Vec<Player>], cs: &ConstraintSet) -> Vec<Violat
             ),
             names: vec![rule.a.clone(), rule.b.clone()],
         });
+    }
+
+    for rule in &cs.min_group {
+        let target = (rule.group as usize).saturating_sub(1);
+        let Some(at) = group_index_of_name(groups, &rule.name) else {
+            out.push(Violation {
+                kind: "pin".into(),
+                group_index: target,
+                message: format!(
+                    "名单里没有找到「{}」（应从第 {} 组开始）",
+                    rule.name, rule.group
+                ),
+                names: vec![rule.name.clone()],
+            });
+            continue;
+        };
+        if at + 1 < rule.group as usize {
+            out.push(Violation {
+                kind: "pin".into(),
+                group_index: at,
+                message: format!(
+                    "{} 必须在第 {} 组或更后，当前在第 {} 组",
+                    rule.name,
+                    rule.group,
+                    at + 1
+                ),
+                names: vec![rule.name.clone()],
+            });
+        }
     }
 
     out

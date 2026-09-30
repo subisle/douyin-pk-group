@@ -13,11 +13,13 @@ set -euo pipefail
 
 ARCH="${2:-amd64}"
 HOST="${RK_HOST:-115.159.72.31}"
-PASS="${RK_PASS:-Shuai4444@}"
+# 口令不写死：仓库是公开的，硬编码等于把 root 口令发到 GitHub。
+PASS="${RK_PASS:?请用环境变量提供 RK_PASS，例如 RK_PASS='xxx' scripts/deploy-host.sh}"
 DIR="${RK_DIR:-/opt/pk-server}"
 IMAGE="${RK_IMAGE:-pk-server:$ARCH}"
-ADMIN="${RK_ADMIN:-pk-tx-2026}"
-BASE="http://$HOST:8787"
+# 管理口令不写死，部署完从远端 .env 读回来（uicheck 冒烟要用）
+PORT="${RK_PORT:-8888}"
+BASE="http://$HOST:$PORT"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 export PATH="/opt/homebrew/bin:$PATH"
@@ -90,6 +92,9 @@ sshpass -p "$PASS" ssh -o StrictHostKeyChecking=no "root@$HOST" "
 
 # 5. 真跑一遍渲染自检：手机 / PC / 翻页 / 切日期
 echo "==> 渲染自检"
+# 管理口令从远端 .env 读回（不落仓库）；也可 RK_ADMIN 直接指定
+ADMIN="${RK_ADMIN:-$(sshpass -p "$PASS" ssh -o StrictHostKeyChecking=no "root@$HOST" \
+  "grep '^ADMIN_PASSWORD=' '$DIR/.env' | cut -d= -f2-" 2>/dev/null)}"
 node scripts/uicheck.mjs "$BASE" "$ADMIN"
 
 echo "==> 完成：$BASE/  后台    $BASE/s/1  公布页"

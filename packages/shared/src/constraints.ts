@@ -24,6 +24,12 @@ export interface MinGapRule {
   gap: number;
 }
 
+/** 最低组号：这个人必须从指定组号开始，允许更靠后 */
+export interface MinGroupRule {
+  name: string;
+  group: number;
+}
+
 export interface ConstraintSet {
   /** 互斥组：同一数组内的人两两不能分到同一组 */
   excludeTogether: string[][];
@@ -33,6 +39,7 @@ export interface ConstraintSet {
   schedule: ScheduleRule;
   /** 最小间隔（可选，向后兼容旧调用） */
   minGap?: MinGapRule[];
+  minGroup?: MinGroupRule[];
 }
 
 /**
@@ -40,16 +47,22 @@ export interface ConstraintSet {
  * - 玖玉 / 玖妹 / 玖玥 三人两两不能同组
  * - 啸泽固定在第 1 组，啸帆固定在最后一组
  * - 啸昭和啸寻至少相隔 4 组（组号差 ≥ 4）
+ * - 浩阳必须在第 6 组或更后
  * - 第 1 组 08:15 开赛，之后每 15 分钟一组
  */
 export const DEFAULT_CONSTRAINTS: ConstraintSet = {
-  excludeTogether: [['玖玉', '玖妹', '玖玥']],
+  excludeTogether: [
+    ['玖玉', '玖妹', '玖玥'],
+    ['狼影', '浩冬'],
+  ],
   pinned: [
     { name: '啸泽', group: 1 },
+    { name: '啸阳', group: 1 },
     { name: '啸帆', group: 'last' },
   ],
   schedule: { start: '08:15', intervalMin: 15 },
   minGap: [{ a: '啸昭', b: '啸寻', gap: 4 }],
+  minGroup: [{ name: '浩阳', group: 6 }],
 };
 
 function normName(name: string): string {

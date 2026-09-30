@@ -58,8 +58,10 @@ pub fn snake_group(players: &[Player], group_size: usize) -> Vec<Vec<Player>> {
 /// 不做均衡——各组的强弱本身就是阶梯。
 pub fn sequential_group(players: &[Player], group_size: usize) -> Vec<Vec<Player>> {
     let sorted = sorted_desc(players);
-    let g = group_count(sorted.len(), group_size);
-    cut_into(&sorted, g)
+    sorted
+        .chunks(group_size.max(1))
+        .map(<[Player]>::to_vec)
+        .collect()
 }
 
 /// 随机洗牌后再切组；给 seed 可复现
@@ -227,6 +229,13 @@ pub fn auto_group(players: &[Player], options: &GroupOptions) -> Vec<Vec<Player>
         return Vec::new();
     }
 
+    // 「总音浪从高到低」是用户显式选择的最高优先级：
+    // 不抽固定位、不做互斥/间隔修复，只按当前口径降序切块。
+    // 固定位冲突仍由 HTTP 层 find_violations 返回，用于前端红色高亮。
+    if options.strategy == Strategy::Sequential {
+        return sequential_group(&active, options.group_size);
+    }
+
     let cs = options.constraints.clone().unwrap_or_default();
     let g = group_count(active.len(), options.group_size);
 
@@ -235,6 +244,12 @@ pub fn auto_group(players: &[Player], options: &GroupOptions) -> Vec<Vec<Player>
     for rule in &cs.pinned {
         if let Some(hit) = crate::constraints::find_by_name(&active, &rule.name) {
             pinned.push((hit.key.clone(), resolve_pinned_index(rule, g)));
+        }
+    }
+    for rule in &cs.min_group {
+        if let Some(hit) = crate::constraints::find_by_name(&active, &rule.name) {
+            let target = (rule.group as usize).saturating_sub(1).min(g - 1);
+            pinned.push((hit.key.clone(), target));
         }
     }
     let pinned_keys: HashSet<String> = pinned.iter().map(|(k, _)| k.clone()).collect();
@@ -281,20 +296,17 @@ pub fn auto_group(players: &[Player], options: &GroupOptions) -> Vec<Vec<Player>
         );
     }
 
-    /* 5. 均衡微调：只接受让极差变小的交换，绝不移动固定位、绝不制造新的互斥/间隔冲突。
-    从高到低（梯队式）除外——均衡会把阶梯打散，失去这种分组的意义 */
-    if options.strategy != Strategy::Sequential {
-        groups = polish_balance(
-            &groups,
-            &PolishOptions {
-                protected_keys: pinned_keys,
-                exclude_sets: cs.exclude_together.clone(),
-                avoid_master: options.strategy == Strategy::SnakeNoMaster,
-                min_gap_rules,
-                max_iter: 400,
-            },
-        );
-    }
+    /* 5. 均衡微调：只接受让极差变小的交换，绝不移动固定位、绝不制造新的互斥/间隔冲突 */
+    groups = polish_balance(
+        &groups,
+        &PolishOptions {
+            protected_keys: pinned_keys,
+            exclude_sets: cs.exclude_together.clone(),
+            avoid_master: options.strategy == Strategy::SnakeNoMaster,
+            min_gap_rules,
+            max_iter: 400,
+        },
+    );
 
     groups.retain(|g| !g.is_empty());
 
@@ -422,6 +434,52 @@ mod tests {
         let total_first: f64 = groups[0].iter().map(|p| p.wave).sum();
         let total_last: f64 = groups[3].iter().map(|p| p.wave).sum();
         assert!(total_first > total_last);
+    }
+
+    #[test]
+    fn sequential_fills_by_group_size() {
+        let list: Vec<Player> = (0..9)
+            .map(|i| Player::new(format!("p{i}"), format!("p{i}"), 1000.0 - i as f64))
+            .collect();
+        let groups = sequential_group(&list, 8);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].len(), 8);
+        assert_eq!(groups[1].len(), 1);
+        assert_eq!(groups[0][0].name, "p0");
+        assert_eq!(groups[0][7].name, "p7");
+        assert_eq!(groups[1][0].name, "p8");
+    }
+
+    #[test]
+    fn sequential_ignores_builtin_constraints() {
+        let mut list = players(&[
+            ("啸泽", 1000.0),
+            ("啸帆", 990.0),
+            ("玖玉", 980.0),
+            ("玖妹", 970.0),
+            ("玖玥", 960.0),
+            ("啸昭", 950.0),
+            ("啸寻", 940.0),
+            ("普通", 930.0),
+        ]);
+        list[0].excluded = false;
+        list[1].excluded = false;
+        let groups = auto_group(&list, &GroupOptions::new(4, Strategy::Sequential));
+        assert_eq!(groups.len(), 2);
+        assert_eq!(
+            groups[0]
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["啸泽", "啸帆", "玖玉", "玖妹"]
+        );
+        assert_eq!(
+            groups[1]
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["玖玥", "啸昭", "啸寻", "普通"]
+        );
     }
 
     #[test]
