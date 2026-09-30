@@ -57,6 +57,7 @@ export function RosterImport() {
               </Button>
             </div>
             <textarea
+              data-roster-text
               className="h-[520px] w-full resize-none rounded-ctl border border-line bg-canvas px-3.5 py-3 text-[13px] leading-6 text-ink outline-none focus:border-brand"
               value={text}
               onChange={(e) => patch({ text: e.target.value })}

@@ -131,6 +131,21 @@ async function evaluate(ws, expr) {
  * 靠这两个属性定位，避免 Tailwind 类名一改断言就失效。 */
 const GROUP_COLS_JS = `[...document.querySelectorAll('[data-group-col]')]`;
 
+/* 同一文档内改 hash 时 goto 的「就绪」判定会立刻通过（页面本来就没加载态），
+ * 睡固定时长又长短不一，于是偶尔在 React 重渲染前就去读高亮项 → 假失败。
+ * 所以这里轮询等高亮真的落到期望的那一项。 */
+async function waitActive(ws, label, tries = 24) {
+  for (let i = 0; i < tries; i++) {
+    const hit = await evaluate(
+      ws,
+      `(document.querySelector('.navlink[aria-current=page]')?.textContent ?? '').includes(${JSON.stringify(label)})`,
+    ).catch(() => false);
+    if (hit) return true;
+    await sleep(250);
+  }
+  return false;
+}
+
 async function shot(ws, name) {
   const { data } = await ws.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true });
   writeFileSync(OUT + name, Buffer.from(data, 'base64'));
@@ -293,12 +308,24 @@ try {
     console.log(`  ..  看板首屏：${board.text}`);
     errors.length ? bad('看板 console 报错: ' + errors.join(' | ')) : ok('看板无 console 报错');
 
-    /* ---- 载入已保存方案：让分组看板 / 卡片菜单用真实 54 人数据渲染 ---- */
+    /* ---- 载入已保存方案：让分组看板 / 卡片菜单用真实 54 人数据渲染 ----
+     * 必须按 #1 精确定位，不能取「第一个载入」：历史方案攒到多条之后，
+     * 第一条会随新建/删除漂移，下面的 7 组 / 54 人断言就全成了假失败。 */
     console.log('== 载入方案，渲染分组看板 ==');
     await evaluate(ws, `[...document.querySelectorAll('button')].find(b => b.textContent.includes('历史方案'))?.click()`);
     await sleep(1200);
     const loaded = await evaluate(ws, `(() => {
-      const btn = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === '载入');
+      // meta 行（#1 · …，无子元素）是方案的锚点；它和「载入」按钮是兄弟而非
+      // 祖先，所以只能从 meta 往上找到第一个含「载入」的容器，再点那行的按钮。
+      const meta = [...document.querySelectorAll('div')].find(
+        d => d.children.length === 0 && /^#1 ·/.test(d.textContent.trim())
+      );
+      if (!meta) return 'no-plan-1';
+      let row = meta;
+      while (row && ![...row.querySelectorAll('button')].some(b => b.textContent.trim() === '载入')) {
+        row = row.parentElement;
+      }
+      const btn = row && [...row.querySelectorAll('button')].find(b => b.textContent.trim() === '载入');
       if (!btn) return 'no-load-button';
       btn.click();
       return 'clicked';
@@ -360,6 +387,52 @@ try {
     expect('看板手机端无横向滚动', boardMobile.hScroll, false);
     expect('看板手机端分组列数', boardMobile.cols, 7);
     console.log('  ->  ' + (await shot(ws, 'board-mobile.png')));
+
+    /* ---- 名单持久化：改完自动落库，刷新还在 ----
+     * 只测「刷新后还在」这一条真需求：名单是手抄的，丢一次就要重抄一遍。
+     * 靠 <textarea> 的原型 setter 改 value 再派发 input，才能走到 React 的
+     * onChange；直接赋 .value 不会触发 patch，也就测不到自动保存。 */
+    console.log('== 名单持久化 ==');
+    await session(ws, { width: 1280, height: 900, mobile: false });
+    await goto(ws, `${BASE}/#/board`);
+    const ROSTER_SEL = `[data-roster-text]`;
+    const setRoster = (value) => evaluate(ws, `(() => {
+      const t = document.querySelector('${ROSTER_SEL}');
+      if (!t) return 'no-textarea';
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+      setter.call(t, ${JSON.stringify(value)});
+      t.dispatchEvent(new Event('input', { bubbles: true }));
+      return 'set';
+    })()`);
+    const before = await evaluate(ws, `document.querySelector('${ROSTER_SEL}')?.value ?? null`);
+    if (before === null) {
+      bad('看板里没有名单输入框');
+    } else {
+      const MARK = '回归标记甲';
+      await setRoster(before.replace(new RegExp(`${MARK}\\n?`, 'g'), '').replace(/\n$/, '') + '\n' + MARK);
+      let saved = false;
+      for (let i = 0; i < 24; i++) {
+        await sleep(500);
+        saved = await evaluate(ws, `document.body.innerText.includes('已保存')`);
+        if (saved) break;
+      }
+      saved ? ok('改名单后自动落库（面板显示已保存）') : bad('改名单后面板没出现「已保存」');
+
+      await goto(ws, `${BASE}/#/board`);
+      const after = await evaluate(ws, `document.querySelector('${ROSTER_SEL}')?.value ?? null`);
+      after !== null && after.includes(MARK)
+        ? ok('刷新页面后名单仍在')
+        : bad(`刷新后名单丢了：${after === null ? '输入框没了' : '标记不在'}`);
+
+      await setRoster(before);
+      for (let i = 0; i < 24; i++) {
+        await sleep(500);
+        const idle = await evaluate(ws, `!document.body.innerText.includes('保存中')`);
+        if (idle) break;
+      }
+      const restored = await evaluate(ws, `document.querySelector('${ROSTER_SEL}')?.value ?? null`);
+      expect('名单已还原', restored === before, true);
+    }
   }
 
   /* ============ 导航：首页 / 主播数据 / PK 分组 ============ */
@@ -368,7 +441,7 @@ try {
   const navState = [];
   for (const route of ['home', 'data', 'board']) {
     await goto(ws, `${BASE}/#/${route}`);
-    await sleep(900);
+    await waitActive(ws, { home: '首页', data: '主播数据', board: 'PK 分组' }[route]);
     const s2 = JSON.parse(await evaluate(ws, `JSON.stringify({
       active: document.querySelector('.navlink[aria-current=page]')?.textContent?.trim() ?? '',
       head: document.body.innerText.replace(/\\s+/g, ' ').slice(0, 70),
@@ -385,20 +458,19 @@ try {
   }
   // 根路径应落到首页
   await goto(ws, `${BASE}/`);
-  await sleep(900);
-  const rootIsHome = await evaluate(ws, `!!document.querySelector('.navlink[aria-current=page]') && document.querySelector('.navlink[aria-current=page]').textContent.includes('首页')`);
+  const rootIsHome = await waitActive(ws, '首页');
   rootIsHome ? ok('根路径默认落到首页') : bad('根路径没落到首页');
   // 点导航真的能切页
   await goto(ws, `${BASE}/#/home`);
-  await sleep(600);
+  await waitActive(ws, '首页');
   const jumped = JSON.parse(await evaluate(ws, `(() => {
     const b = [...document.querySelectorAll('.navlink')].find(x => x.textContent.includes('主播数据'));
     b?.click();
     return JSON.stringify({ clicked: !!b });
   })()`));
-  await sleep(800);
+  const jumpOk = await waitActive(ws, '主播数据');
   const afterJump = await evaluate(ws, `document.querySelector('.navlink[aria-current=page]')?.textContent?.trim() ?? ''`);
-  jumped.clicked && afterJump.includes('主播数据')
+  jumped.clicked && jumpOk
     ? ok(`点导航切到「${afterJump}」`)
     : bad(`点导航没切过去：${afterJump}`);
   errors.length ? bad('导航 console 报错: ' + errors.join(' | ')) : ok('导航无 console 报错');
