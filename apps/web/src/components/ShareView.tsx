@@ -40,6 +40,26 @@ function shortGroup(name: string): string {
   return m ? `${m[1]}组` : name;
 }
 
+/* ------------------------------ 分页路由 ------------------------------ */
+/** 模块页：hash 路由 #/rank #/daily #/groups，刷新 / 前进后退 / 分享都停在当前页 */
+type Tab = 'rank' | 'daily' | 'groups';
+
+const TAB_META: Array<{ key: Tab; label: string }> = [
+  { key: 'rank', label: '音浪排行榜' },
+  { key: 'daily', label: '每日音浪' },
+  { key: 'groups', label: 'PK 分组' },
+];
+
+function parseHashTab(): Tab | null {
+  const h = window.location.hash.replace(/^#\/?/, '');
+  return TAB_META.some((t) => t.key === h) ? (h as Tab) : null;
+}
+
+/** 当前生效的分页：hash 合法且模块开着就用它，否则回退到第一个开着的模块 */
+function pickTab(hash: Tab | null, allowed: Tab[]): Tab {
+  return hash && allowed.includes(hash) ? hash : allowed[0];
+}
+
 export function ShareView({ planId }: { planId: string }) {
   const [plan, setPlan] = useState<PublicPlan | null>(null);
   const [error, setError] = useState('');
@@ -63,6 +83,17 @@ export function ShareView({ planId }: { planId: string }) {
     const t = setInterval(() => setNonce((n) => n + 1), 60_000);
     return () => clearInterval(t);
   }, []);
+
+  // 分页路由：跟随 hashchange（浏览器前进/后退、别人发的带 hash 链接都能落对页）
+  const [hashTab, setHashTab] = useState<Tab | null>(() => parseHashTab());
+  useEffect(() => {
+    const on = () => setHashTab(parseHashTab());
+    window.addEventListener('hashchange', on);
+    return () => window.removeEventListener('hashchange', on);
+  }, []);
+  const goTab = (t: Tab) => {
+    window.location.hash = `/${t}`;
+  };
 
   // 排行榜行里要显示「组别」胶囊，ranking 本身不带组名，用分组数据建一张名字映射。
   // hooks 必须在早退分支之前调用，否则加载态 → 数据态切换时钩子数量会变（React #310）。
@@ -121,6 +152,13 @@ export function ShareView({ planId }: { planId: string }) {
   // 归一化分母必须取最大日合计；取 dayTotals[0]（最近一天）会让更高的一天顶满溢出
   const maxDay = Math.max(...dayTotals.map((x) => x.total), 1);
   const ranking = wave && display.ranking ? plan.ranking : [];
+
+  // 分页：只把「开着且真有内容」的模块放进路由；只有一个模块时不渲染切换条
+  const allowed: Tab[] = [];
+  if (wave && display.ranking && ranking.length > 0) allowed.push('rank');
+  if (wave && display.daily && dayTotals.length > 0) allowed.push('daily');
+  if (display.groups) allowed.push('groups');
+  const active = pickTab(hashTab, allowed);
 
   return (
     <div className="sh">
@@ -203,12 +241,31 @@ export function ShareView({ planId }: { planId: string }) {
           })}
         </div>
 
+        {/* ------------------------------ 分页切换（hash 路由） ------------------------------ */}
+        {allowed.length > 1 && (
+          <nav className="sh-tabs">
+            <div className="sh-seg" role="tablist">
+              {TAB_META.filter((t) => allowed.includes(t.key)).map((t) => (
+                <button
+                  key={t.key}
+                  type="button"
+                  role="tab"
+                  aria-selected={active === t.key}
+                  className={active === t.key ? 'on' : ''}
+                  onClick={() => goTab(t.key)}
+                >
+                  {t.label}
+                </button>
+              ))}
+            </div>
+          </nav>
+        )}
+
         {/* ------------------------------ 排行榜 ------------------------------ */}
-        {ranking.length > 0 && (
+        {active === 'rank' && ranking.length > 0 && (
           <section className="sh-sec">
             <div className="sh-sec-head">
-              <h2>音浪排行榜</h2>
-              <p>{metricLabel} · 全场名次</p>
+              <p>{metricLabel} · 全场名次 · 共 {ranking.length} 人</p>
             </div>
             <div className="sh-card sh-ranks">
               {ranking.map((p) => (
@@ -224,10 +281,9 @@ export function ShareView({ planId }: { planId: string }) {
         )}
 
         {/* ------------------------------ 每日音浪 ------------------------------ */}
-        {wave && display.daily && dayTotals.length > 0 && (
+        {active === 'daily' && dayTotals.length > 0 && (
           <section className="sh-sec">
             <div className="sh-sec-head">
-              <h2>每日音浪</h2>
               <p>近 {dayTotals.length} 日 · 全体参赛者合计</p>
             </div>
             <div className="sh-card sh-days">
@@ -245,11 +301,10 @@ export function ShareView({ planId }: { planId: string }) {
         )}
 
         {/* ------------------------------ PK 分组 ------------------------------ */}
-        {display.groups &&
+        {active === 'groups' &&
           (realCount > 0 ? (
             <section className="sh-sec">
               <div className="sh-sec-head">
-                <h2>PK 分组</h2>
                 <p>共 {realCount} 组{wave ? ' · 组内按音浪名次排列' : ''}</p>
               </div>
               <div className="sh-groups">
