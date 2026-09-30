@@ -10,7 +10,7 @@
  * 音浪数值关闭时：页面只剩名单和赛程，任何音浪数字都不下发（后端已清零）。
  * 数据来自 /api/public/plans/:id；榜单页开着时每分钟静默刷新一次。
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { formatWave, slotTime } from '@pk/shared';
 import { api, DEFAULT_DISPLAY, type PublicGroup, type PublicPlan } from '../api.js';
 import { groupColor } from '../lib/board.js';
@@ -40,8 +40,8 @@ function shortGroup(name: string): string {
   return m ? `${m[1]}组` : name;
 }
 
-/* ------------------------------ 分页路由 ------------------------------ */
-/** 模块页：hash 路由 #/rank #/daily #/groups，刷新 / 前进后退 / 分享都停在当前页 */
+/* ------------------------------ 页内分页 ------------------------------ */
+/** 模块页：纯组件状态切换（不动 URL），对外链接固定就是 /s/:planId */
 type Tab = 'rank' | 'daily' | 'groups';
 
 const TAB_META: Array<{ key: Tab; label: string }> = [
@@ -49,16 +49,6 @@ const TAB_META: Array<{ key: Tab; label: string }> = [
   { key: 'daily', label: '每日音浪' },
   { key: 'groups', label: 'PK 分组' },
 ];
-
-function parseHashTab(): Tab | null {
-  const h = window.location.hash.replace(/^#\/?/, '');
-  return TAB_META.some((t) => t.key === h) ? (h as Tab) : null;
-}
-
-/** 当前生效的分页：hash 合法且模块开着就用它，否则回退到第一个开着的模块 */
-function pickTab(hash: Tab | null, allowed: Tab[]): Tab {
-  return hash && allowed.includes(hash) ? hash : allowed[0];
-}
 
 export function ShareView({ planId }: { planId: string }) {
   const [plan, setPlan] = useState<PublicPlan | null>(null);
@@ -84,15 +74,15 @@ export function ShareView({ planId }: { planId: string }) {
     return () => clearInterval(t);
   }, []);
 
-  // 分页路由：跟随 hashchange（浏览器前进/后退、别人发的带 hash 链接都能落对页）
-  const [hashTab, setHashTab] = useState<Tab | null>(() => parseHashTab());
-  useEffect(() => {
-    const on = () => setHashTab(parseHashTab());
-    window.addEventListener('hashchange', on);
-    return () => window.removeEventListener('hashchange', on);
-  }, []);
+  // 页内分页：纯组件状态，URL 不变；切换时如果滚过了切换条，滚回切换条位置
+  const [tab, setTab] = useState<Tab>('rank');
+  const tabsRef = useRef<HTMLElement | null>(null);
   const goTab = (t: Tab) => {
-    window.location.hash = `/${t}`;
+    setTab(t);
+    requestAnimationFrame(() => {
+      const top = tabsRef.current?.offsetTop ?? 0;
+      if (window.scrollY > top) window.scrollTo({ top, behavior: 'smooth' });
+    });
   };
 
   // 排行榜行里要显示「组别」胶囊，ranking 本身不带组名，用分组数据建一张名字映射。
@@ -153,12 +143,13 @@ export function ShareView({ planId }: { planId: string }) {
   const maxDay = Math.max(...dayTotals.map((x) => x.total), 1);
   const ranking = wave && display.ranking ? plan.ranking : [];
 
-  // 分页：只把「开着且真有内容」的模块放进路由；只有一个模块时不渲染切换条
+  // 分页：只把「开着且真有内容」的模块放进切换条；只有一个模块时不渲染切换条
   const allowed: Tab[] = [];
   if (wave && display.ranking && ranking.length > 0) allowed.push('rank');
   if (wave && display.daily && dayTotals.length > 0) allowed.push('daily');
   if (display.groups) allowed.push('groups');
-  const active = pickTab(hashTab, allowed);
+  // 当前生效的分页：状态失效（模块被关/没数据）就回退到第一个可用的
+  const active = allowed.includes(tab) ? tab : allowed[0];
 
   return (
     <div className="sh">
@@ -241,9 +232,9 @@ export function ShareView({ planId }: { planId: string }) {
           })}
         </div>
 
-        {/* ------------------------------ 分页切换（hash 路由） ------------------------------ */}
+        {/* ------------------------------ 分页切换（页内状态，URL 不变） ------------------------------ */}
         {allowed.length > 1 && (
-          <nav className="sh-tabs">
+          <nav ref={tabsRef} className="sh-tabs">
             <div className="sh-seg" role="tablist">
               {TAB_META.filter((t) => allowed.includes(t.key)).map((t) => (
                 <button
