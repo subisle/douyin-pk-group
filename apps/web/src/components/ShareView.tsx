@@ -50,23 +50,42 @@ const TAB_META: Array<{ key: Tab; label: string }> = [
   { key: 'groups', label: 'PK 分组' },
 ];
 
-export function ShareView({ planId }: { planId: string }) {
+export function ShareView({ planId }: { planId?: string }) {
   const [plan, setPlan] = useState<PublicPlan | null>(null);
   const [error, setError] = useState('');
   const [nonce, setNonce] = useState(0);
+  /** 公告模式（不带 planId）：每次刷新都重新解析「最新上架」，链接 /st 永远指最新方案 */
+  const [latestId, setLatestId] = useState<number | null>(null);
 
   useEffect(() => {
     let alive = true;
     setError('');
-    setPlan(null);
-    api
-      .publicPlan(Number(planId))
-      .then((p) => alive && setPlan(p))
-      .catch((e) => alive && setError((e as Error).message));
+    (async () => {
+      try {
+        // 指定方案：直接取；公告模式（无 planId）：先解析最新上架，拿到 id 后再取方案
+        let id = planId ? Number(planId) : latestId;
+        if (!id) {
+          const r = await api.publicPlans();
+          const first = r.items[0];
+          if (!alive) return;
+          if (!first) {
+            setError('暂无已上架的公告，请先在管理端生成分享链接');
+            return;
+          }
+          setLatestId(first.id); // 变化后重新触发本 effect 加载方案
+          return;
+        }
+        setPlan(null);
+        const p = await api.publicPlan(id);
+        if (alive) setPlan(p);
+      } catch (e) {
+        if (alive) setError((e as Error).message);
+      }
+    })();
     return () => {
       alive = false;
     };
-  }, [planId, nonce]);
+  }, [planId, nonce, latestId]);
 
   // 榜单页长时间开着，按分钟静默刷新
   useEffect(() => {
