@@ -33,8 +33,10 @@ impl From<serde_json::Error> for ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
         let msg = self.0.to_string();
-        let bad_request =
-            msg.contains("缺少") || msg.contains("未知数据源") || msg.contains("只读连接拒绝");
+        let bad_request = msg.contains("缺少")
+            || msg.contains("未知数据源")
+            || msg.contains("只读连接拒绝")
+            || msg.contains("名单为空");
         let status = if bad_request {
             StatusCode::BAD_REQUEST
         } else {
@@ -142,6 +144,36 @@ pub async fn roster_parse(
     )
     .await?;
     Ok(Json(serde_json::to_value(payload)?))
+}
+
+/// 当前名单。前端 zustand 的 `text` 初始值是 DEFAULT_ROSTER，改完就自动存这里。
+/// 从没保存过时返回 `saved: false` + `text: null`，前端据此保留 DEFAULT_ROSTER。
+/// 这里不能返回空串：空串会被前端理解成「名单被清空了」。
+pub async fn get_roster() -> ApiResult {
+    match sqlite::load_roster() {
+        Some((text, updated_at)) => Ok(Json(
+            json!({ "saved": true, "text": text, "updatedAt": updated_at }),
+        )),
+        None => Ok(Json(
+            json!({ "saved": false, "text": null, "updatedAt": null }),
+        )),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct RosterBody {
+    pub text: Option<String>,
+}
+
+/// 覆盖保存名单。后端也拒收空名单：前端只是防手滑，真正的兜底要落在这一层，
+/// 否则任何一次空写入都会把用户攒了很久的名单永久盖掉。
+pub async fn put_roster(Json(body): Json<RosterBody>) -> ApiResult {
+    let text = body
+        .text
+        .filter(|t| !t.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("名单为空，不保存"))?;
+    let updated_at = sqlite::save_roster(&text);
+    Ok(Json(json!({ "ok": true, "updatedAt": updated_at })))
 }
 
 #[derive(Deserialize)]

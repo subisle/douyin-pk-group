@@ -68,6 +68,10 @@ interface State {
   startTime: string;
   /** 组间间隔（分钟） */
   intervalMin: number;
+  /** 名单正在防抖写入后端（UI 显示「保存中」） */
+  rosterSaving: boolean;
+  /** 最近一次成功落库的名单时间（RFC3339）；null = 还没存过 */
+  rosterSavedAt: string | null;
 
   /* 数据 */
   sourceId: string;
@@ -174,6 +178,15 @@ interface State {
 
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
 let inspectTimer: ReturnType<typeof setTimeout> | null = null;
+let rosterTimer: ReturnType<typeof setTimeout> | null = null;
+/** 名单保存的序号：只认最后一次发出的请求，挡掉慢响应把新状态盖掉 */
+let rosterSeq = 0;
+
+/**
+ * 名单自动落库的防抖间隔。名单是整份 PUT 覆盖写，每敲一个字打一次后端
+ * 纯属浪费，而且中途的半截名单会反复覆盖掉库里已经完整的名单。
+ */
+const ROSTER_SAVE_DEBOUNCE = 800;
 
 const normalizePlayerName = (name: string) => name.replace(/[\s\u3000]/g, '');
 
@@ -220,6 +233,44 @@ export const useStore = create<State>((set, get) => {
     if (!get().dragSnapshot) pushHistory();
   };
 
+  /**
+   * 把名单整份存回后端。空 / 全空白一律不存：名单是手抄出来的，
+   * 误清一次就再也找不回来，宁可让页面停在空白状态等用户自己改回来。
+   */
+  const persistRoster = async (text: string) => {
+    if (!text.trim()) {
+      set({ rosterSaving: false });
+      return;
+    }
+    const seq = ++rosterSeq;
+    set({ rosterSaving: true });
+    try {
+      const r = await api.saveRoster(text);
+      if (seq !== rosterSeq) return;
+      set({ rosterSaving: false, rosterSavedAt: r.updatedAt });
+    } catch (e) {
+      if (seq !== rosterSeq) return;
+      set({ rosterSaving: false });
+      get().notify(`名单保存失败：${(e as Error).message}`);
+    }
+  };
+
+  const scheduleRosterSave = (text: string) => {
+    if (rosterTimer) clearTimeout(rosterTimer);
+    // 输入被清空时要把待发的那次也撤掉：不然清空前敲下的半截名单
+    // 会在防抖窗口结束后照样写进库里
+    if (!text.trim()) {
+      rosterTimer = null;
+      set({ rosterSaving: false });
+      return;
+    }
+    set({ rosterSaving: true });
+    rosterTimer = setTimeout(() => {
+      rosterTimer = null;
+      void persistRoster(text);
+    }, ROSTER_SAVE_DEBOUNCE);
+  };
+
   return {
     view: 'board',
     configOpen: false,
@@ -233,6 +284,8 @@ export const useStore = create<State>((set, get) => {
     brand: 'ST-001',
     startTime: DEFAULT_CONSTRAINTS.schedule.start,
     intervalMin: DEFAULT_CONSTRAINTS.schedule.intervalMin,
+    rosterSaving: false,
+    rosterSavedAt: null,
 
     sourceId: '',
     sourceLabel: '',
@@ -266,7 +319,12 @@ export const useStore = create<State>((set, get) => {
     constraintSet: null,
 
     setView: (v) => set({ view: v }),
-    patch: (cfg) => set(cfg),
+    // 名单是唯一会自动落库的字段：走 patch 的入口统一在这里挂钩，
+    // 免得别处 set({ text }) 绕过保存逻辑
+    patch: (cfg) => {
+      set(cfg);
+      if (cfg.text !== undefined) scheduleRosterSave(cfg.text);
+    },
 
     constraints: () => {
       const { startTime, intervalMin, constraintSet } = get();
@@ -318,6 +376,16 @@ export const useStore = create<State>((set, get) => {
         set({ constraintSet: await api.constraints() });
       } catch {
         /* 拉不到就继续用本地兜底常量 */
+      }
+      // 名单落库：存过就用存的，没存过（或老后端没这个接口）就保留 DEFAULT_ROSTER
+      try {
+        const r = await api.getRoster();
+        // 只在用户还没动过 textarea 时覆盖，否则会把刚输入的名单冲掉
+        if (r.saved && r.text && get().text === DEFAULT_ROSTER) {
+          set({ text: r.text, rosterSavedAt: r.updatedAt });
+        }
+      } catch {
+        /* 老后端没有 /api/roster，保持 DEFAULT_ROSTER */
       }
     },
 

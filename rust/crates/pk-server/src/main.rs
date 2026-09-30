@@ -76,6 +76,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/sources/{id}/test", post(routes::test_source))
         .route("/api/meta", get(routes::meta))
         .route("/api/roster/parse", post(routes::roster_parse))
+        .route(
+            "/api/roster",
+            get(routes::get_roster).put(routes::put_roster),
+        )
         .route("/api/anchors", get(routes::anchors))
         .route("/api/waves", post(routes::waves))
         .route("/api/cache/refresh", post(routes::cache_refresh))

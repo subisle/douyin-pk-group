@@ -13,6 +13,8 @@ export function RosterImport() {
   const excluded = useStore((s) => s.excluded);
   const aliasMap = useStore((s) => s.aliasMap);
   const parse = useStore((s) => s.parse);
+  const rosterSaving = useStore((s) => s.rosterSaving);
+  const rosterSavedAt = useStore((s) => s.rosterSavedAt);
 
   const rows = useMemo(() => parseRoster(text, { aliases: aliasMap, exclude: DEFAULT_EXCLUDE }), [text, aliasMap]);
   const activeRows = rows.filter((r) => !r.excluded);
@@ -48,6 +50,7 @@ export function RosterImport() {
               <div className="flex items-center gap-2">
                 <span className="text-[15px] font-semibold text-ink">名单文本</span>
                 <span className="text-[12px] text-ink3">{lineCount} 行 · 接龙格式</span>
+                <RosterSaved saving={rosterSaving} savedAt={rosterSavedAt} />
               </div>
               <Button size="sm" variant="subtle" onClick={() => patch({ text: DEFAULT_ROSTER })}>
                 恢复默认
@@ -115,6 +118,17 @@ function Rule({ dot, text }: { dot: string; text: string }) {
       <span className="text-[13px] leading-5 text-ink2">{text}</span>
     </div>
   );
+}
+
+/** 名单自动落库的状态提示。空 / 全空白时后端拒收，这时明说「不会保存」，
+ * 免得用户以为清空之后还能靠自动保存找回来。 */
+function RosterSaved({ saving, savedAt }: { saving: boolean; savedAt: string | null }) {
+  const text = useStore((s) => s.text);
+  const empty = text.trim().length === 0;
+  if (empty) return <span className="text-[12px] text-bad">空白名单不会保存</span>;
+  if (saving) return <span className="text-[12px] text-ink3">保存中…</span>;
+  if (!savedAt) return null;
+  return <span className="text-[12px] text-good">已保存 {new Date(savedAt).toLocaleTimeString('zh-CN')}</span>;
 }
 
 function RowShell({ children, onClick }: { children: React.ReactNode; onClick?: () => void }) {

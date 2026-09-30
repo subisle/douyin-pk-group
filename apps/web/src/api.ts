@@ -83,6 +83,13 @@ export interface SourceList {
   items: SourceBrief[];
 }
 
+/** 当前名单的持久化状态。`saved: false` = 库里还没存过，前端保留 DEFAULT_ROSTER */
+export interface RosterState {
+  saved: boolean;
+  text: string | null;
+  updatedAt: string | null;
+}
+
 export interface PlanBrief {
   id: number;
   title: string;
@@ -203,6 +210,10 @@ export const api = {
 
   parse: (body: { text: string; metric: WaveMetric; days: number; aliases?: Record<string, string>; force?: boolean }) =>
     req<ParseResponse>('/roster/parse', { method: 'POST', body: JSON.stringify(body) }),
+
+  /** 名单持久化：改完自动存，刷新页面不用重新粘 */
+  getRoster: () => req<RosterState>('/roster'),
+  saveRoster: (text: string) => req<{ ok: boolean; updatedAt: string }>('/roster', { method: 'PUT', body: JSON.stringify({ text }) }),
 
   waves: (body: { metric: WaveMetric; days: number; personIds?: string[]; force?: boolean }) =>
     req<{ metric: WaveMetric; days: number; dates: string[]; waves: Record<string, number> }>('/waves', {
