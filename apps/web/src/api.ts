@@ -110,6 +110,8 @@ export interface SavedPlan {
   /** 对外展示页用的可选信息（老方案没有也能打开） */
   brand?: string;
   schedule?: { start: string; intervalMin: number };
+  /** 展示页模块显隐（老方案缺省全开） */
+  display?: DisplayConfig;
 }
 
 export interface PlanDetail {
@@ -123,6 +125,20 @@ export interface PlanDetail {
 }
 
 /* ---------------- 对外展示页的数据结构（后端 public.rs） ---------------- */
+
+/** 展示页模块显隐（管理端在「配置」里设置，随方案落库；老方案缺省全开） */
+export interface DisplayConfig {
+  /** 音浪数值：关掉后对外不出现任何音浪数字 */
+  wave: boolean;
+  /** 音浪排行榜 */
+  ranking: boolean;
+  /** 每日音浪（按日合计条目，无曲线图） */
+  daily: boolean;
+  /** PK 分组 */
+  groups: boolean;
+}
+
+export const DEFAULT_DISPLAY: DisplayConfig = { wave: true, ranking: true, daily: true, groups: true };
 
 export interface PublicPlayer {
   name: string;
@@ -173,6 +189,8 @@ export interface PublicPlan {
   metric: WaveMetric;
   days: number;
   schedule: { start: string; intervalMin: number };
+  /** 展示页模块显隐（老方案缺省全开） */
+  display?: DisplayConfig;
   createdAt: string;
   /** 参与统计的采集日期（倒序） */
   dates: string[];

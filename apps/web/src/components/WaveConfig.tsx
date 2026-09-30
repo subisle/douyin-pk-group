@@ -1,7 +1,7 @@
 import { DEFAULT_CONSTRAINTS, type WaveMetric } from '@pk/shared';
 import { useStore, type Strategy } from '../store.js';
 import { api } from '../api.js';
-import { Button, Field, Panel, Segmented, inputClass, selectClass } from './ui.js';
+import { Button, Field, Panel, Segmented, Toggle, inputClass, selectClass } from './ui.js';
 import { ClockIcon, PinIcon, PlusIcon, RefreshIcon } from './icons.js';
 
 /** 内置条件一句话说明 */
@@ -22,8 +22,9 @@ const STRATEGIES: Array<{ value: Strategy; label: string; title: string }> = [
 ];
 
 export function WaveConfig({ onAddBucket }: { onAddBucket: () => void }) {
-  const { metric, days, groupSize, strategy, title, brand, startTime, intervalMin, loading } = useStore();
+  const { metric, days, groupSize, strategy, title, brand, startTime, intervalMin, loading, display } = useStore();
   const patch = useStore((s) => s.patch);
+  const setDisplay = useStore((s) => s.setDisplay);
   const parse = useStore((s) => s.parse);
 
   const forceRefresh = async () => {
@@ -142,6 +143,21 @@ export function WaveConfig({ onAddBucket }: { onAddBucket: () => void }) {
           <ClockIcon size={13} />
           按顺序每 {intervalMin} 分钟一组
         </span>
+      </div>
+
+      {/* 展示页模块显隐：随方案落库，/s/:id 只渲染打开的模块 */}
+      <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-line pt-3">
+        <span className="text-[12px] font-medium text-ink">展示页显示</span>
+        <Toggle
+          label="音浪数值"
+          checked={display.wave}
+          title="关掉后展示页不出现任何音浪数字，只剩名单和赛程"
+          onChange={(v) => setDisplay({ wave: v, ...(v ? {} : { ranking: false, daily: false }) })}
+        />
+        <Toggle label="音浪排行榜" checked={display.ranking} onChange={(v) => setDisplay({ ranking: v })} />
+        <Toggle label="每日音浪" checked={display.daily} onChange={(v) => setDisplay({ daily: v })} />
+        <Toggle label="PK 分组" checked={display.groups} onChange={(v) => setDisplay({ groups: v })} />
+        <span className="text-[11px] text-ink3">保存方案或点「分享链接」后生效</span>
       </div>
     </Panel>
   );

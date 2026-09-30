@@ -110,6 +110,45 @@ export function Segmented<T extends string>({
   );
 }
 
+/* ---------------------------------- Toggle --------------------------------- */
+
+/** iOS 风格开关：展示页模块显隐这类「开 / 关」配置用 */
+export function Toggle({
+  checked,
+  onChange,
+  label,
+  title,
+}: {
+  checked: boolean;
+  onChange: (v: boolean) => void;
+  label: string;
+  title?: string;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      title={title}
+      onClick={() => onChange(!checked)}
+      className="flex items-center gap-2 text-[12.5px] text-ink2"
+    >
+      <span
+        className={`relative inline-block h-[20px] w-[34px] shrink-0 rounded-full transition-colors ${
+          checked ? 'bg-good' : 'bg-line2'
+        }`}
+      >
+        <span
+          className={`absolute top-[2px] h-[16px] w-[16px] rounded-full bg-white shadow-card transition-all ${
+            checked ? 'left-[16px]' : 'left-[2px]'
+          }`}
+        />
+      </span>
+      <span className={checked ? 'text-ink' : ''}>{label}</span>
+    </button>
+  );
+}
+
 /* --------------------------------- Surfaces -------------------------------- */
 
 export function Panel({ children, className = '' }: { children: ReactNode; className?: string }) {

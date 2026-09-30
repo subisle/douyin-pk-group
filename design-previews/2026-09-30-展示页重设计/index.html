@@ -1,0 +1,1252 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>展示页重设计 · 音浪时长 / 排行榜 / 每日音浪 / PK分组</title>
+<style>
+  *,*::before,*::after{box-sizing:border-box}
+  body{margin:0;background:#eceef1;color:#14161a;font-family:"PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;padding:0 0 80px}
+  .nums{font-variant-numeric:tabular-nums;font-feature-settings:"tnum"}
+  .note{max-width:1400px;margin:0 auto;padding:18px 24px 0}
+  .note p{margin:0;font-size:12.5px;line-height:1.75;color:#5a6270}
+  .note b{color:#14161a}
+  .band{max-width:1400px;margin:26px auto 0;padding:0 24px;display:grid;grid-template-columns:minmax(0,1fr) 384px;gap:24px;align-items:start}
+  @media (max-width:1180px){.band{grid-template-columns:minmax(0,1fr)}}
+  .stage{width:100%;overflow:hidden;background:#fff;border-radius:6px;box-shadow:0 1px 2px rgba(16,24,40,.06),0 12px 32px rgba(16,24,40,.10)}
+  .stage-cap{font-size:10.5px;letter-spacing:.08em;color:#8b93a1;margin-top:6px}
+  .side h2{margin:0 0 2px;font-size:19px;letter-spacing:-.01em}
+  .side .tag{display:inline-block;margin:0 0 10px;font-size:11px;letter-spacing:.1em;color:#6a7280;border:1px solid #d3d7de;border-radius:999px;padding:2px 9px}
+  .side dl{margin:0;font-size:12.5px;line-height:1.75;color:#3d4450}
+  .side dt{font-weight:700;color:#14161a;margin-top:9px}
+  .side dd{margin:1px 0 0}
+  .side .rec{margin-top:12px;padding:9px 11px;background:#e8f3ee;border-left:3px solid #168a5f;font-size:12.5px;line-height:1.7;color:#1d3a30}
+  .phone{width:360px;overflow:hidden;border-radius:22px;border:1px solid #d7dae0;box-shadow:0 2px 6px rgba(16,24,40,.08),0 16px 36px rgba(16,24,40,.12);margin-top:16px}
+  .phone-cap{font-size:11px;color:#8b93a1;margin-bottom:6px;letter-spacing:.06em;margin-top:16px}
+  .stage{position:relative}
+  .stage>.fitwrap{transform-origin:top left}
+</style>
+<script>
+// 桌面稿固定 1080 宽，窄视口下整体等比缩放，避免右侧被裁
+addEventListener('DOMContentLoaded', () => {
+  document.querySelectorAll('.stage').forEach((st) => {
+    const inner = st.querySelector('.fitwrap');
+    const fit = () => {
+      const s = Math.min(1, st.clientWidth / 1080);
+      inner.style.transform = 'scale(' + s + ')';
+      st.style.height = inner.offsetHeight * s + 'px';
+    };
+    fit();
+    new ResizeObserver(fit).observe(st);
+  });
+});
+</script>
+
+<style id="dir-a">
+/* ===== A 赛况直播台（深色） ===== */
+.a{width:1080px;background:#0B0F17;color:#E8ECF4;padding:26px 40px 34px;font-family:inherit}
+.a-hero{background:linear-gradient(135deg,#101828 0%,#1B2540 55%,#23304F 100%);border:1px solid rgba(255,255,255,.08);border-radius:14px;padding:22px 26px}
+.a-brand{display:flex;align-items:center;gap:12px}
+.a-brand .logo{width:38px;height:38px;border-radius:10px;background:linear-gradient(135deg,#EC4899,#8B5CF6);display:flex;align-items:center;justify-content:center;font-weight:900;font-size:15px;color:#fff}
+.a-brand b{display:block;font-size:17px;letter-spacing:.02em}
+.a-brand s{display:block;text-decoration:none;font-size:11px;color:rgba(232,236,244,.55);margin-top:2px;letter-spacing:.06em}
+.a-hero-num{display:flex;align-items:flex-end;gap:34px;margin-top:18px;flex-wrap:wrap}
+.a-big em,.a-hero-stats em{display:block;font-style:normal;font-size:10.5px;letter-spacing:.18em;color:rgba(232,236,244,.5)}
+.a-big strong{font-size:44px;font-weight:900;letter-spacing:-.01em;background:linear-gradient(90deg,#F9A8D4,#A78BFA 55%,#67E8F9);-webkit-background-clip:text;background-clip:text;color:transparent}
+.a-hero-stats{display:flex;gap:26px;flex-wrap:wrap;padding-bottom:5px}
+.a-hero-stats b{font-size:15px;font-weight:700}
+.a-slots{display:flex;gap:6px;flex-wrap:wrap;margin-top:16px;padding-top:14px;border-top:1px dashed rgba(255,255,255,.12)}
+.a-slots span{display:inline-flex;align-items:center;gap:5px;font-size:11px;color:rgba(232,236,244,.75);background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.08);border-radius:999px;padding:3px 10px}
+.a-slots i{width:6px;height:6px;border-radius:50%}
+.a-slots b{font-weight:600;color:#fff}
+.a-mod{margin-top:26px}
+.a-mod h3{display:flex;align-items:baseline;gap:10px;margin:0 0 12px;font-size:15px;font-weight:800;letter-spacing:.04em}
+.a-mod h3 span{font-size:11px;font-weight:800;color:#67E8F9;letter-spacing:.22em}
+.a-mod h3 s{text-decoration:none;font-size:11px;font-weight:500;color:rgba(232,236,244,.45);letter-spacing:.02em;margin-left:auto}
+.a-board{background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.07);border-radius:12px;padding:8px 12px}
+.a-lr{display:flex;align-items:center;gap:9px;padding:7px 8px;border-radius:8px}
+.a-lr.top{background:rgba(255,255,255,.05)}
+.a-lrn{width:22px;text-align:center;font-size:12.5px;font-weight:800;color:rgba(232,236,244,.6)}
+.a-lr.top .a-lrn{color:#FBBF24}
+.a-lrpod{width:18px;font-size:13px}
+.a-lrname{width:74px;font-size:14px;font-weight:700}
+.a-lrg{width:30px;text-align:center;font-size:10.5px;font-weight:700;border:1px solid;border-radius:5px;padding:1px 0}
+.a-lrbar{flex:1;height:7px;background:rgba(255,255,255,.06);border-radius:99px;overflow:hidden}
+.a-lrbar i{display:block;height:100%;border-radius:99px}
+.a-lrv{width:64px;text-align:right;font-size:13.5px;font-weight:800}
+.a-lrpct{width:46px;text-align:right;font-size:10.5px;color:rgba(232,236,244,.45)}
+.a-more{margin-top:10px;text-align:center;font-size:11px;color:rgba(232,236,244,.4);letter-spacing:.1em}
+.a-trend{background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.07);border-radius:12px;padding:14px 12px 8px}
+.a-daybars{display:flex;gap:8px;align-items:flex-end;margin-top:12px}
+.a-db{flex:1;text-align:center}
+.a-dbt{margin:0 auto;width:100%;max-width:74px;background:linear-gradient(180deg,#67E8F9,#3B82F6);border-radius:5px 5px 0 0;position:relative;display:flex;align-items:flex-start;justify-content:center}
+.a-dbt{color:#04121C;font-size:9.5px;font-weight:800;padding-top:3px}
+.a-db>span{display:block;margin-top:5px;font-size:9.5px;color:rgba(232,236,244,.45)}
+.a-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.a-gc{background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.07);border-top:3px solid var(--c);border-radius:12px;padding:12px 14px 8px}
+.a-gch{display:flex;align-items:baseline;gap:10px;margin-bottom:8px}
+.a-gch b{font-size:15px;font-weight:800;color:var(--c)}
+.a-gch>span{font-size:11px;color:rgba(232,236,244,.55)}
+.a-gcshare{margin-left:auto;font-size:11.5px;font-weight:700;color:rgba(232,236,244,.8)}
+.a-pl{display:flex;align-items:center;gap:8px;padding:4.5px 0;border-bottom:1px dashed rgba(255,255,255,.06)}
+.a-pl:last-child{border-bottom:0}
+.a-pn{width:17px;height:17px;border-radius:5px;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:800;color:#fff;flex:none}
+.a-pnm{width:52px;font-size:12.5px;font-weight:600}
+.a-prr{font-size:9.5px;color:rgba(232,236,244,.38);width:52px;flex:none}
+.a-plb{flex:1;height:4px;background:rgba(255,255,255,.06);border-radius:99px;overflow:hidden}
+.a-plb i{display:block;height:100%;background:var(--c);opacity:.7;border-radius:99px}
+.a-pv{width:56px;text-align:right;font-size:11.5px;font-weight:700}
+.a-ft{margin-top:26px;text-align:center;font-size:10.5px;color:rgba(232,236,244,.35);letter-spacing:.08em}
+/* 手机 A */
+.pa{width:360px;background:#0B0F17;color:#E8ECF4;padding:16px 14px 20px}
+.pa-hero{background:linear-gradient(135deg,#101828,#23304F);border:1px solid rgba(255,255,255,.08);border-radius:14px;padding:16px 16px 14px}
+.pa-hero>b{font-size:15px}
+.pa-big{margin-top:10px}
+.pa-big em{display:block;font-style:normal;font-size:10px;letter-spacing:.18em;color:rgba(232,236,244,.5)}
+.pa-big strong{font-size:32px;font-weight:900;background:linear-gradient(90deg,#F9A8D4,#67E8F9);-webkit-background-clip:text;background-clip:text;color:transparent}
+.pa-kv{margin-top:8px;font-size:10.5px;color:rgba(232,236,244,.6);line-height:1.7}
+.pa-sec{display:flex;align-items:baseline;gap:8px;margin:18px 2px 9px}
+.pa-sec h4{margin:0;font-size:13.5px;font-weight:800}
+.pa-sec s{text-decoration:none;font-size:10px;color:rgba(232,236,244,.4)}
+.pa-pod{display:grid;grid-template-columns:1fr 1fr 1fr;gap:7px}
+.pa-podc{background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:11px;padding:10px 8px;text-align:center}
+.pa-podc.first{border-color:#FBBF2466;background:rgba(251,191,36,.07)}
+.pa-podc s{text-decoration:none;font-size:16px}
+.pa-podc b{display:block;font-size:13px;margin-top:2px}
+.pa-podc span{display:block;font-size:12px;font-weight:800;margin-top:2px}
+.pa-podc em{display:block;font-style:normal;font-size:9.5px;color:rgba(232,236,244,.4);margin-top:2px}
+.pa-rows{margin-top:8px;display:flex;flex-direction:column;gap:2px}
+.pa-row{display:flex;align-items:center;gap:8px;padding:5px 4px;font-size:12px}
+.pa-row>span:first-child{width:20px;text-align:center;font-weight:800;color:rgba(232,236,244,.5);font-size:11px}
+.pa-row b{width:56px;font-weight:600}
+.pa-row i{flex:1;height:5px;border-radius:99px;opacity:.65}
+.pa-row .v{font-weight:700;font-size:11.5px}
+.pa-trend{background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.07);border-radius:11px;padding:10px 8px 4px}
+.pa-gc{background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.07);border-top:3px solid var(--c);border-radius:12px;padding:11px 13px 6px}
+.pa-gch{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:6px}
+.pa-gch b{color:var(--c);font-size:13.5px}
+.pa-gch span{font-size:10.5px;color:rgba(232,236,244,.55)}
+.pa-pl{display:flex;align-items:center;gap:8px;padding:4.5px 0;border-bottom:1px dashed rgba(255,255,255,.06);font-size:12px}
+.pa-pl span:first-child{color:rgba(232,236,244,.45);width:14px;text-align:right;font-size:10.5px}
+.pa-pl b{flex:1;font-weight:600}
+.pa-pl .v{font-weight:700;font-size:11.5px}
+.pa-more{padding:8px 0 3px;text-align:center;font-size:10.5px;color:rgba(232,236,244,.4)}
+.pa-ft{margin-top:16px;text-align:center;font-size:10px;color:rgba(232,236,244,.35)}
+</style>
+
+<style id="dir-b">
+/* ===== B 赛事简报（浅色） ===== */
+.b{width:1080px;background:#F6F7F9;color:#181B21;padding:24px 40px 34px;font-family:inherit}
+.b-mast{background:linear-gradient(135deg,#1B2430 0%,#26364A 55%,#33415A 100%);color:#fff;border-radius:14px;padding:20px 26px;box-shadow:0 10px 28px rgba(27,36,48,.22)}
+.b-brand{display:flex;align-items:baseline;gap:10px}
+.b-brand b{font-size:21px;font-weight:900;letter-spacing:.02em}
+.b-brand span{font-size:12.5px;color:rgba(255,255,255,.75)}
+.b-brand em{font-style:normal;margin-left:auto;font-size:10.5px;letter-spacing:.14em;color:#6EE7B7;border:1px solid #6EE7B755;border-radius:999px;padding:2px 9px}
+.b-stats{display:flex;gap:30px;margin:16px 0 0;flex-wrap:wrap}
+.b-stats dt{font-size:10.5px;color:rgba(255,255,255,.55);letter-spacing:.1em}
+.b-stats dd{margin:3px 0 0;font-size:17px;font-weight:800}
+.b-slots{display:flex;gap:6px;flex-wrap:wrap;margin-top:14px;padding-top:13px;border-top:1px dashed rgba(255,255,255,.16)}
+.b-slots span{font-size:11px;font-weight:600;border-radius:999px;padding:3px 10px}
+.b-slots b{font-weight:700;opacity:.75}
+.b-mod{margin-top:22px;background:#fff;border:1px solid #E5E8ED;border-radius:12px;padding:16px 20px 14px;box-shadow:0 1px 2px rgba(16,24,40,.04)}
+.b-mod h3{display:flex;align-items:baseline;gap:10px;margin:0 0 12px;font-size:14.5px;font-weight:800}
+.b-mod h3 s{text-decoration:none;font-size:11px;font-weight:500;color:#8b93a1}
+.b-mod h3 u{text-decoration:none;margin-left:auto;font-size:11px;color:#9AA0AA}
+.b-lr{display:flex;align-items:center;gap:10px;padding:6.5px 6px;border-radius:8px}
+.b-lr:nth-child(odd){background:#FAFBFC}
+.b-lrn{width:24px;text-align:center;font-size:12px;font-weight:800;color:#8b93a1}
+.b-lrn.top{color:#B45309;background:#FEF3C7;border-radius:6px;height:20px;line-height:20px}
+.b-lrname{width:74px;font-size:13.5px;font-weight:700}
+.b-lrg{font-size:10.5px;font-weight:700;border-radius:5px;padding:1.5px 7px}
+.b-lrbar{flex:1;height:8px;background:#F0F2F5;border-radius:99px;overflow:hidden}
+.b-lrbar i{display:block;height:100%;border-radius:99px}
+.b-lrv{width:70px;text-align:right;font-size:13px;font-weight:800}
+.b-trend{border:1px solid #EEF0F3;border-radius:10px;padding:12px 10px 6px;background:#FDFDFE}
+.b-dtable{width:100%;border-collapse:collapse;margin-top:10px;font-size:11.5px}
+.b-dtable td{padding:4.5px 6px;border-bottom:1px dashed #EDEFF2;color:#4b5563}
+.b-dtable td:first-child{width:60px;color:#8b93a1}
+.b-dtable td:nth-child(2){width:90px;color:#181B21}
+.b-dbar{height:7px;background:#F0F2F5;border-radius:99px;overflow:hidden}
+.b-dbar i{display:block;height:100%;background:linear-gradient(90deg,#60A5FA,#3B82F6);border-radius:99px}
+.b-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px}
+.b-gc{border:1px solid #E5E8ED;border-radius:10px;overflow:hidden;background:#fff}
+.b-gch{display:flex;align-items:baseline;gap:8px;border-top:3px solid;padding:9px 12px 7px;background:#FAFBFC}
+.b-gch b{font-size:13.5px}
+.b-gch>span{font-size:10.5px;color:#8b93a1}
+.b-gct{margin-left:auto;font-size:12px;font-weight:800;color:#181B21}
+.b-pl{display:flex;align-items:center;gap:8px;padding:5px 12px;border-bottom:1px dashed #F0F2F5}
+.b-pl:last-child{border-bottom:0}
+.b-pn{width:17px;height:17px;border-radius:5px;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:800;flex:none}
+.b-pnm{width:50px;font-size:12.5px;font-weight:600}
+.b-prr{font-size:9.5px;color:#B0B6BF;width:44px;flex:none}
+.b-pv{margin-left:auto;font-size:11.5px;font-weight:700}
+.b-ft{margin-top:20px;text-align:center;font-size:10.5px;color:#A6ACB6}
+/* 手机 B */
+.pb{width:360px;background:#F6F7F9;color:#181B21;padding:14px 12px 20px}
+.pb-mast{background:linear-gradient(135deg,#1B2430,#33415A);color:#fff;border-radius:13px;padding:14px 16px}
+.pb-mast b{font-size:16px;font-weight:900}
+.pb-mast>span{font-size:10.5px;color:rgba(255,255,255,.65);margin-left:6px}
+.pb-mast dl{display:flex;gap:22px;margin:12px 0 0}
+.pb-mast dt{font-size:9.5px;color:rgba(255,255,255,.5)}
+.pb-mast dd{margin:2px 0 0;font-size:14px;font-weight:800}
+.pb-tabs{display:flex;gap:5px;margin:12px 0 9px;background:#ECEEF2;border-radius:9px;padding:3px}
+.pb-tabs span{flex:1;text-align:center;font-size:11.5px;padding:5px 0;border-radius:7px;color:#6a7280;font-weight:600}
+.pb-tabs .on{background:#fff;color:#181B21;font-weight:800;box-shadow:0 1px 3px rgba(16,24,40,.12)}
+.pb-row{display:flex;align-items:center;gap:8px;padding:6px 8px;border-bottom:1px dashed #EDEFF2;font-size:12.5px;background:#fff}
+.pb-row:first-child{border-radius:8px 8px 0 0}
+.pb-row .rn{width:20px;text-align:center;font-weight:800;color:#8b93a1;font-size:11px}
+.pb-row .rn.top{color:#B45309}
+.pb-row b{flex:1;font-weight:600}
+.pb-row em{font-style:normal;font-size:9.5px;font-weight:700;border-radius:4px;padding:1px 5px}
+.pb-row .v{font-weight:800;font-size:11.5px}
+.pb-sec{display:flex;align-items:baseline;gap:8px;margin:16px 2px 8px}
+.pb-sec b{font-size:13px;font-weight:800}
+.pb-sec s{text-decoration:none;font-size:10px;color:#9AA0AA}
+.pb-trend{background:#fff;border:1px solid #E5E8ED;border-radius:10px;padding:9px 7px 3px}
+.pb-gc{background:#fff;border:1px solid #E5E8ED;border-radius:10px;overflow:hidden}
+.pb-gch{display:flex;align-items:baseline;gap:8px;border-top:3px solid;background:#FAFBFC;padding:8px 12px 6px;font-size:12.5px}
+.pb-gch b{font-weight:800}
+.pb-gch span{font-size:10px;color:#8b93a1}
+.pb-gch .t{margin-left:auto;font-weight:800;font-size:11.5px;color:#181B21}
+.pb-pl{display:flex;align-items:center;gap:8px;padding:5px 12px;border-bottom:1px dashed #F0F2F5;font-size:12px}
+.pb-pl span:first-child{width:16px;height:16px;border-radius:5px;display:flex;align-items:center;justify-content:center;font-size:9.5px;font-weight:800}
+.pb-pl b{flex:1;font-weight:600}
+.pb-pl .v{font-weight:700;font-size:11px}
+.pb-more{padding:8px 0;text-align:center;font-size:10.5px;color:#9AA0AA}
+.pb-ft{margin-top:14px;text-align:center;font-size:10px;color:#A6ACB6}
+</style>
+</head>
+<body>
+  <div class="note">
+    <p><b>展示页重设计 · 两方向样机</b> — 信息结构固定为四块：<b>① 音浪 · 时长</b>（总音浪 / 人数 / 组数 / 开赛与全程时长）→ <b>② 排行榜</b>（全场名次）→ <b>③ 每日音浪</b>（近 8 日趋势，已剔除 09-21 基线日的累计基数）→ <b>④ PK 分组</b>（组内按音浪降序）。数据为线上真实方案（8 组 58 人 · 总音浪 1734.3 万）。选定方向后进入正式实现；也可以混搭，例如「A 的深色大屏头部 + B 的浅色分组卡」。</p>
+  </div>
+
+  <div class="band">
+    <div>
+      <div class="stage"><div class="fitwrap" style="width:1080px">
+<div class="a">
+  <div class="a-hero">
+    <div class="a-brand"><span class="logo">声浪</span><div><b>星嗨艺创 · PK 挑战赛</b><s>音浪总榜与分组 · 数据实时更新</s></div></div>
+    <div class="a-hero-num">
+      <div class="a-big"><em>总音浪</em><strong class="nums">1734万</strong></div>
+      <div class="a-hero-stats">
+        <div><em>参赛</em><b class="nums">58 人</b></div>
+        <div><em>分组</em><b class="nums">8 组</b></div>
+        <div><em>开赛</em><b class="nums">08:15</b></div>
+        <div><em>每组间隔</em><b class="nums">15 分钟</b></div>
+        <div><em>赛程时长</em><b class="nums">全程 2 小时（至 10:15）</b></div>
+      </div>
+    </div>
+    <div class="a-slots"><span><i style="background:#EC4899"></i>第 1 组 <b class="nums">08:15–08:30</b></span><span><i style="background:#8B5CF6"></i>第 2 组 <b class="nums">08:30–08:45</b></span><span><i style="background:#06B6D4"></i>第 3 组 <b class="nums">08:45–09:00</b></span><span><i style="background:#F59E0B"></i>第 4 组 <b class="nums">09:00–09:15</b></span><span><i style="background:#10B981"></i>第 5 组 <b class="nums">09:15–09:30</b></span><span><i style="background:#F43F5E"></i>第 6 组 <b class="nums">09:30–09:45</b></span><span><i style="background:#3B82F6"></i>第 7 组 <b class="nums">09:45–10:00</b></span><span><i style="background:#22C55E"></i>第 8 组 <b class="nums">10:00–10:15</b></span></div>
+  </div>
+
+  <div class="a-mod"><h3><span>02</span>音浪排行榜<s>全场名次 · 同分并列</s></h3>
+    <div class="a-board"><div class="a-lr top">
+      <span class="a-lrn nums">1</span>
+      <span class="a-lrpod">🥇</span>
+      <span class="a-lrname">浩龙</span>
+      <span class="a-lrg" style="color:#8B5CF6;border-color:#8B5CF655">2</span>
+      <span class="a-lrbar"><i style="width:100%;background:linear-gradient(90deg,#8B5CF666,#8B5CF6)"></i></span>
+      <span class="a-lrv nums">224万</span>
+      <span class="a-lrpct nums">12.9%</span>
+    </div><div class="a-lr top">
+      <span class="a-lrn nums">2</span>
+      <span class="a-lrpod">🥈</span>
+      <span class="a-lrname">玖玉</span>
+      <span class="a-lrg" style="color:#06B6D4;border-color:#06B6D455">3</span>
+      <span class="a-lrbar"><i style="width:82.95010394917624%;background:linear-gradient(90deg,#06B6D466,#06B6D4)"></i></span>
+      <span class="a-lrv nums">186万</span>
+      <span class="a-lrpct nums">10.7%</span>
+    </div><div class="a-lr top">
+      <span class="a-lrn nums">3</span>
+      <span class="a-lrpod">🥉</span>
+      <span class="a-lrname">浩冬</span>
+      <span class="a-lrg" style="color:#06B6D4;border-color:#06B6D455">3</span>
+      <span class="a-lrbar"><i style="width:42.587881565319755%;background:linear-gradient(90deg,#06B6D466,#06B6D4)"></i></span>
+      <span class="a-lrv nums">95.4万</span>
+      <span class="a-lrpct nums">5.5%</span>
+    </div><div class="a-lr ">
+      <span class="a-lrn nums">4</span>
+      <span class="a-lrpod"></span>
+      <span class="a-lrname">狼兴</span>
+      <span class="a-lrg" style="color:#8B5CF6;border-color:#8B5CF655">2</span>
+      <span class="a-lrbar"><i style="width:36.64138181230781%;background:linear-gradient(90deg,#8B5CF666,#8B5CF6)"></i></span>
+      <span class="a-lrv nums">82.1万</span>
+      <span class="a-lrpct nums">4.7%</span>
+    </div><div class="a-lr ">
+      <span class="a-lrn nums">5</span>
+      <span class="a-lrpod"></span>
+      <span class="a-lrname">狼澈</span>
+      <span class="a-lrg" style="color:#F59E0B;border-color:#F59E0B55">4</span>
+      <span class="a-lrbar"><i style="width:35.98363943937503%;background:linear-gradient(90deg,#F59E0B66,#F59E0B)"></i></span>
+      <span class="a-lrv nums">80.6万</span>
+      <span class="a-lrpct nums">4.6%</span>
+    </div><div class="a-lr ">
+      <span class="a-lrn nums">6</span>
+      <span class="a-lrpod"></span>
+      <span class="a-lrname">浩哲</span>
+      <span class="a-lrg" style="color:#10B981;border-color:#10B98155">5</span>
+      <span class="a-lrbar"><i style="width:30.534507155067896%;background:linear-gradient(90deg,#10B98166,#10B981)"></i></span>
+      <span class="a-lrv nums">68.4万</span>
+      <span class="a-lrpct nums">3.9%</span>
+    </div><div class="a-lr ">
+      <span class="a-lrn nums">7</span>
+      <span class="a-lrpod"></span>
+      <span class="a-lrname">玖玥</span>
+      <span class="a-lrg" style="color:#F43F5E;border-color:#F43F5E55">6</span>
+      <span class="a-lrbar"><i style="width:26.870560852548348%;background:linear-gradient(90deg,#F43F5E66,#F43F5E)"></i></span>
+      <span class="a-lrv nums">60.2万</span>
+      <span class="a-lrpct nums">3.5%</span>
+    </div><div class="a-lr ">
+      <span class="a-lrn nums">8</span>
+      <span class="a-lrpod"></span>
+      <span class="a-lrname">南方楠</span>
+      <span class="a-lrg" style="color:#3B82F6;border-color:#3B82F655">7</span>
+      <span class="a-lrbar"><i style="width:24.6069275354429%;background:linear-gradient(90deg,#3B82F666,#3B82F6)"></i></span>
+      <span class="a-lrv nums">55.1万</span>
+      <span class="a-lrpct nums">3.2%</span>
+    </div><div class="a-lr ">
+      <span class="a-lrn nums">9</span>
+      <span class="a-lrpod"></span>
+      <span class="a-lrname">浩雨</span>
+      <span class="a-lrg" style="color:#3B82F6;border-color:#3B82F655">7</span>
+      <span class="a-lrbar"><i style="width:20.468728455479006%;background:linear-gradient(90deg,#3B82F666,#3B82F6)"></i></span>
+      <span class="a-lrv nums">45.9万</span>
+      <span class="a-lrpct nums">2.6%</span>
+    </div><div class="a-lr ">
+      <span class="a-lrn nums">10</span>
+      <span class="a-lrpod"></span>
+      <span class="a-lrname">玖柒</span>
+      <span class="a-lrg" style="color:#10B981;border-color:#10B98155">5</span>
+      <span class="a-lrbar"><i style="width:19.138161150451204%;background:linear-gradient(90deg,#10B98166,#10B981)"></i></span>
+      <span class="a-lrv nums">42.9万</span>
+      <span class="a-lrpct nums">2.5%</span>
+    </div></div>
+    <div class="a-more">完整榜单共 58 人 · 下滑查看分组明细 ▾</div>
+  </div>
+
+  <div class="a-mod"><h3><span>03</span>每日音浪<s>近 8 日 · 各组合计（万）</s></h3>
+    <div class="a-trend"><svg viewBox="0 0 1000 190" width="100%" style="display:block"><line x1="44" y1="168" x2="990" y2="168" stroke="rgba(255,255,255,.07)" stroke-width="1"/><text x="38" y="171.5" text-anchor="end" font-size="9.5" fill="rgba(232,236,244,.4)">0万</text><line x1="44" y1="129" x2="990" y2="129" stroke="rgba(255,255,255,.07)" stroke-width="1"/><text x="38" y="132.5" text-anchor="end" font-size="9.5" fill="rgba(232,236,244,.4)">15万</text><line x1="44" y1="90" x2="990" y2="90" stroke="rgba(255,255,255,.07)" stroke-width="1"/><text x="38" y="93.5" text-anchor="end" font-size="9.5" fill="rgba(232,236,244,.4)">30万</text><line x1="44" y1="51" x2="990" y2="51" stroke="rgba(255,255,255,.07)" stroke-width="1"/><text x="38" y="54.5" text-anchor="end" font-size="9.5" fill="rgba(232,236,244,.4)">45万</text><line x1="44" y1="12" x2="990" y2="12" stroke="rgba(255,255,255,.07)" stroke-width="1"/><text x="38" y="15.5" text-anchor="end" font-size="9.5" fill="rgba(232,236,244,.4)">60万</text><text x="44" y="184" text-anchor="middle" font-size="9.5" fill="rgba(232,236,244,.4)">09-22</text><text x="179.14285714285714" y="184" text-anchor="middle" font-size="9.5" fill="rgba(232,236,244,.4)">09-23</text><text x="314.2857142857143" y="184" text-anchor="middle" font-size="9.5" fill="rgba(232,236,244,.4)">09-24</text><text x="449.4285714285714" y="184" text-anchor="middle" font-size="9.5" fill="rgba(232,236,244,.4)">09-25</text><text x="584.5714285714286" y="184" text-anchor="middle" font-size="9.5" fill="rgba(232,236,244,.4)">09-26</text><text x="719.7142857142858" y="184" text-anchor="middle" font-size="9.5" fill="rgba(232,236,244,.4)">09-27</text><text x="854.8571428571428" y="184" text-anchor="middle" font-size="9.5" fill="rgba(232,236,244,.4)">09-28</text><text x="990" y="184" text-anchor="middle" font-size="9.5" fill="rgba(232,236,244,.4)">09-29</text><polyline points="44.0,162.9 179.1,161.2 314.3,162.9 449.4,167.2 584.6,166.2 719.7,163.8 854.9,153.6 990.0,150.2" fill="none" stroke="#EC4899" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" opacity="0.92"/><circle cx="990" cy="150.24380608115672" r="2.6" fill="#EC4899"/><polyline points="44.0,111.7 179.1,143.2 314.3,149.5 449.4,119.6 584.6,140.0 719.7,125.3 854.9,12.0 990.0,124.4" fill="none" stroke="#8B5CF6" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" opacity="0.92"/><circle cx="990" cy="124.37896066921515" r="2.6" fill="#8B5CF6"/><polyline points="44.0,130.4 179.1,143.1 314.3,147.5 449.4,149.5 584.6,146.4 719.7,149.7 854.9,94.2 990.0,90.6" fill="none" stroke="#06B6D4" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" opacity="0.92"/><circle cx="990" cy="90.55143071927833" r="2.6" fill="#06B6D4"/><polyline points="44.0,152.5 179.1,150.4 314.3,141.6 449.4,148.9 584.6,153.6 719.7,155.3 854.9,95.9 990.0,131.2" fill="none" stroke="#F59E0B" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" opacity="0.92"/><circle cx="990" cy="131.21788679003856" r="2.6" fill="#F59E0B"/><polyline points="44.0,139.9 179.1,142.0 314.3,159.2 449.4,157.3 584.6,149.7 719.7,160.0 854.9,140.4 990.0,112.5" fill="none" stroke="#10B981" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" opacity="0.92"/><circle cx="990" cy="112.48421330432974" r="2.6" fill="#10B981"/><polyline points="44.0,152.9 179.1,147.3 314.3,152.4 449.4,150.4 584.6,146.7 719.7,152.3 854.9,119.9 990.0,129.5" fill="none" stroke="#F43F5E" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" opacity="0.92"/><circle cx="990" cy="129.48125429855568" r="2.6" fill="#F43F5E"/><polyline points="44.0,148.7 179.1,113.1 314.3,165.1 449.4,149.7 584.6,162.9 719.7,155.9 854.9,138.2 990.0,127.8" fill="none" stroke="#3B82F6" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" opacity="0.92"/><circle cx="990" cy="127.77269237536188" r="2.6" fill="#3B82F6"/><polyline points="44.0,157.6 179.1,158.9 314.3,157.2 449.4,154.9 584.6,146.9 719.7,153.5 854.9,134.8 990.0,139.8" fill="none" stroke="#22C55E" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" opacity="0.92"/><circle cx="990" cy="139.77785064218423" r="2.6" fill="#22C55E"/></svg></div>
+    <div class="a-daybars"><div class="a-db"><div class="a-dbt nums" style="height:38px">60.1万</div><span>09-22</span></div><div class="a-db"><div class="a-dbt nums" style="height:37px">59.2万</div><span>09-23</span></div><div class="a-db"><div class="a-dbt nums" style="height:22px">34.8万</div><span>09-24</span></div><div class="a-db"><div class="a-dbt nums" style="height:30px">47万</div><span>09-25</span></div><div class="a-db"><div class="a-dbt nums" style="height:27px">42.2万</div><span>09-26</span></div><div class="a-db"><div class="a-dbt nums" style="height:26px">41.1万</div><span>09-27</span></div><div class="a-db"><div class="a-dbt nums" style="height:92px">146万</div><span>09-28</span></div><div class="a-db"><div class="a-dbt nums" style="height:68px">108万</div><span>09-29</span></div></div>
+  </div>
+
+  <div class="a-mod"><h3><span>04</span>PK 分组<s>组内按音浪降序 · 共 8 组 58 人</s></h3>
+    <div class="a-grid"><div class="a-gc" style="--c:#EC4899;--cs:#EC48991f">
+      <div class="a-gch">
+        <b>第 1 组</b>
+        <span class="nums">08:15–08:30</span>
+        <span class="a-gcshare nums">58.2万 · 占3.4%</span>
+      </div>
+      <div class="a-pl">
+      <span class="a-pn nums" style="background:#EC4899">1</span>
+      <span class="a-pnm">狼仔</span>
+      <span class="a-prr nums">全场第15</span>
+      <span class="a-plb"><i style="width:100%"></i></span>
+      <span class="a-pv nums">31.9万</span>
+    </div><div class="a-pl">
+      <span class="a-pn nums" style="background:#EC4899">2</span>
+      <span class="a-pnm">啸泽</span>
+      <span class="a-prr nums">全场第39</span>
+      <span class="a-plb"><i style="width:38.83385438246262%"></i></span>
+      <span class="a-pv nums">12.4万</span>
+    </div><div class="a-pl">
+      <span class="a-pn nums" style="background:#EC4899">3</span>
+      <span class="a-pnm">浩延</span>
+      <span class="a-prr nums">全场第53</span>
+      <span class="a-plb"><i style="width:15.116074679523397%"></i></span>
+      <span class="a-pv nums">4.8万</span>
+    </div><div class="a-pl">
+      <span class="a-pn nums" style="background:#EC4899">4</span>
+      <span class="a-pnm">啸燃</span>
+      <span class="a-prr nums">全场第54</span>
+      <span class="a-plb"><i style="width:14.93339359925672%"></i></span>
+      <span class="a-pv nums">4.8万</span>
+    </div><div class="a-pl">
+      <span class="a-pn nums" style="background:#EC4899">5</span>
+      <span class="a-pnm">啸弘</span>
+      <span class="a-prr nums">全场第56</span>
+      <span class="a-plb"><i style="width:9.452019536203498%"></i></span>
+      <span class="a-pv nums">3万</span>
+    </div><div class="a-pl">
+      <span class="a-pn nums" style="background:#EC4899">6</span>
+      <span class="a-pnm">狼途</span>
+      <span class="a-prr nums">全场第57</span>
+      <span class="a-plb"><i style="width:4.360804550077216%"></i></span>
+      <span class="a-pv nums">1.4万</span>
+    </div><div class="a-pl">
+      <span class="a-pn nums" style="background:#EC4899">7</span>
+      <span class="a-pnm">狼雨</span>
+      <span class="a-prr nums">全场第58</span>
+      <span class="a-plb"><i style="width:3%"></i></span>
+      <span class="a-pv nums">0</span>
+    </div>
+    </div><div class="a-gc" style="--c:#8B5CF6;--cs:#8B5CF61f">
+      <div class="a-gch">
+        <b>第 2 组</b>
+        <span class="nums">08:30–08:45</span>
+        <span class="a-gcshare nums">399万 · 占23.0%</span>
+      </div>
+      <div class="a-pl">
+      <span class="a-pn nums" style="background:#8B5CF6">1</span>
+      <span class="a-pnm">浩龙</span>
+      <span class="a-prr nums">全场第1</span>
+      <span class="a-plb"><i style="width:100%"></i></span>
+      <span class="a-pv nums">224万</span>
+    </div><div class="a-pl">
+      <span class="a-pn nums" style="background:#8B5CF6">2</span>
+      <span class="a-pnm">狼兴</span>
+      <span class="a-prr nums">全场第4</span>
+      <span class="a-plb"><i style="width:36.64138181230781%"></i></span>
+      <span class="a-pv nums">82.1万</span>
+    </div><div class="a-pl">
+      <span class="a-pn nums" style="background:#8B5CF6">3</span>
+      <span class="a-pnm">啸安</span>
+      <span class="a-prr nums">全场第16</span>
+      <span class="a-plb"><i style="width:14.174928235130851%"></i></span>
+      <span class="a-pv nums">31.8万</span>
+    </div><div class="a-pl">
+      <span class="a-pn nums" style="background:#8B5CF6">4</span>
+      <span class="a-pnm">狼辰</span>
+      <span class="a-prr nums">全场第21</span>
+      <span class="a-plb"><i style="width:11.76988477014046%"></i></span>
+      <span class="a-pv nums">26.4万</span>
+    </div><div class="a-pl">
+      <span class="a-pn nums" style="background:#8B5CF6">5</span>
+      <span class="a-pnm">狼耀</span>
+      <span class="a-prr nums">全场第37</span>
+      <span class="a-plb"><i style="width:5.760689763806231%"></i></span>
+      <span class="a-pv nums">12.9万</span>
+    </div><div class="a-pl">
+      <span class="a-pn nums" style="background:#8B5CF6">6</span>
+      <span class="a-pnm">狼轩</span>
+      <span class="a-prr nums">全场第48</span>
+      <span class="a-plb"><i style="width:3.4860345765437644%"></i></span>
+      <span class="a-pv nums">7.8万</span>
+    </div><div class="a-pl">
+      <span class="a-pn nums" style="background:#8B5CF6">7</span>
+      <span class="a-pnm">啸强</span>
+      <span class="a-prr nums">全场第49</span>
+      <span class="a-plb"><i style="width:3.2922370781959294%"></i></span>
+      <span class="a-pv nums">7.4万</span>
+    </div><div class="a-pl">
+      <span class="a-pn nums" style="background:#8B5CF6">8</span>
+      <span class="a-pnm">狼征</span>
+      <span class="a-prr nums">全场第52</span>
+      <span class="a-plb"><i style="width:3%"></i></span>
+      <span class="a-pv nums">6.6万</span>
+    </div>
+    </div><div class="a-gc" style="--c:#06B6D4;--cs:#06B6D41f">
+      <div class="a-gch">
+        <b>第 3 组</b>
+        <span class="nums">08:45–09:00</span>
+        <span class="a-gcshare nums">376万 · 占21.7%</span>
+      </div>
+      <div class="a-pl">
+      <span class="a-pn nums" style="background:#06B6D4">1</span>
+      <span class="a-pnm">玖玉</span>
+      <span class="a-prr nums">全场第2</span>
+      <span class="a-plb"><i style="width:100%"></i></span>
+      <span class="a-pv nums">186万</span>
+    </div><div class="a-pl">
+      <span class="a-pn nums" style="background:#06B6D4">2</span>
+      <span class="a-pnm">浩冬</span>
+      <span class="a-prr nums">全场第3</span>
+      <span class="a-plb"><i style="width:51.34156503458207%"></i></span>
+      <span class="a-pv nums">95.4万</span>
+    </div><div class="a-pl">
+      <span class="a-pn nums" style="background:#06B6D4">3</span>
+      <span class="a-pnm">啸森</span>
+      <span class="a-prr nums">全场第18</span>
+      <span class="a-plb"><i style="width:16.151015298742113%"></i></span>
+      <span class="a-pv nums">30万</span>
+    </div><div class="a-pl">
+      <span class="a-pn nums" style="background:#06B6D4">4</span>
+      <span class="a-pnm">狼哲</span>
+      <span class="a-prr nums">全场第19</span>
+      <span class="a-plb"><i style="width:14.48251153497935%"></i></span>
+      <span class="a-pv nums">26.9万</span>
+    </div><div class="a-pl">
+      <span class="a-pn nums" style="background:#06B6D4">5</span>
+      <span class="a-pnm">浩辰</span>
+      <span class="a-prr nums">全场第29</span>
+      <span class="a-plb"><i style="width:9.746566672637904%"></i></span>
+      <span class="a-pv nums">18.1万</span>
+    </div><div class="a-pl">
+      <span class="a-pn nums" style="background:#06B6D4">6</span>
+      <span class="a-pnm">浩运</span>
+      <span class="a-prr nums">全场第38</span>
+      <span class="a-plb"><i style="width:6.715544746359563%"></i></span>
+      <span class="a-pv nums">12.5万</span>
+    </div><div class="a-pl">
+      <span class="a-pn nums" style="background:#06B6D4">7</span>
+      <span class="a-pnm">啸寻</span>
+      <span class="a-prr nums">全场第51</span>
+      <span class="a-plb"><i style="width:3.5869925994305265%"></i></span>
+      <span class="a-pv nums">6.7万</span>
+    </div>
+    </div><div class="a-gc" style="--c:#F59E0B;--cs:#F59E0B1f">
+      <div class="a-gch">
+        <b>第 4 组</b>
+        <span class="nums">09:00–09:15</span>
+        <span class="a-gcshare nums">201万 · 占11.6%</span>
+      </div>
+      <div class="a-pl">
+      <span class="a-pn nums" style="background:#F59E0B">1</span>
+      <span class="a-pnm">狼澈</span>
+      <span class="a-prr nums">全场第5</span>
+      <span class="a-plb"><i style="width:100%"></i></span>
+      <span class="a-pv nums">80.6万</span>
+    </div><div class="a-pl">
+      <span class="a-pn nums" style="background:#F59E0B">2</span>
+      <span class="a-pnm">浩鸣</span>
+      <span class="a-prr nums">全场第14</span>
+      <span class="a-plb"><i style="width:40.27837543232643%"></i></span>
+      <span class="a-pv nums">32.5万</span>
+    </div><div class="a-pl">
+      <span class="a-pn nums" style="background:#F59E0B">3</span>
+      <span class="a-pnm">浩玟</span>
+      <span class="a-prr nums">全场第20</span>
+      <span class="a-plb"><i style="width:32.849739519068244%"></i></span>
+      <span class="a-pv nums">26.5万</span>
+    </div><div class="a-pl">
+      <span class="a-pn nums" style="background:#F59E0B">4</span>
+      <span class="a-pnm">狼赫</span>
+      <span class="a-prr nums">全场第27</span>
+      <span class="a-plb"><i style="width:23.856605898116676%"></i></span>
+      <span class="a-pv nums">19.2万</span>
+    </div><div class="a-pl">
+      <span class="a-pn nums" style="background:#F59E0B">5</span>
+      <span class="a-pnm">狼泽</span>
+      <span class="a-prr nums">全场第36</span>
+      <span class="a-plb"><i style="width:16.03833366609085%"></i></span>
+      <span class="a-pv nums">12.9万</span>
+    </div><div class="a-pl">
+      <span class="a-pn nums" style="background:#F59E0B">6</span>
+      <span class="a-pnm">浩阳</span>
+      <span class="a-prr nums">全场第40</span>
+      <span class="a-plb"><i style="width:14.915928089653557%"></i></span>
+      <span class="a-pv nums">12万</span>
+    </div><div class="a-pl">
+      <span class="a-pn nums" style="background:#F59E0B">7</span>
+      <span class="a-pnm">浩杰</span>
+      <span class="a-prr nums">全场第42</span>
+      <span class="a-plb"><i style="width:12.349685575147602%"></i></span>
+      <span class="a-pv nums">10万</span>
+    </div><div class="a-pl">
+      <span class="a-pn nums" style="background:#F59E0B">8</span>
+      <span class="a-pnm">浩艺</span>
+      <span class="a-prr nums">全场第50</span>
+      <span class="a-plb"><i style="width:8.629911221947612%"></i></span>
+      <span class="a-pv nums">7万</span>
+    </div>
+    </div><div class="a-gc" style="--c:#10B981;--cs:#10B9811f">
+      <div class="a-gch">
+        <b>第 5 组</b>
+        <span class="nums">09:15–09:30</span>
+        <span class="a-gcshare nums">182万 · 占10.5%</span>
+      </div>
+      <div class="a-pl">
+      <span class="a-pn nums" style="background:#10B981">1</span>
+      <span class="a-pnm">浩哲</span>
+      <span class="a-prr nums">全场第6</span>
+      <span class="a-plb"><i style="width:100%"></i></span>
+      <span class="a-pv nums">68.4万</span>
+    </div><div class="a-pl">
+      <span class="a-pn nums" style="background:#10B981">2</span>
+      <span class="a-pnm">玖柒</span>
+      <span class="a-prr nums">全场第10</span>
+      <span class="a-plb"><i style="width:62.677157529542086%"></i></span>
+      <span class="a-pv nums">42.9万</span>
+    </div><div class="a-pl">
+      <span class="a-pn nums" style="background:#10B981">3</span>
+      <span class="a-pnm">玖雪</span>
+      <span class="a-prr nums">全场第24</span>
+      <span class="a-plb"><i style="width:32.29447680621034%"></i></span>
+      <span class="a-pv nums">22.1万</span>
+    </div><div class="a-pl">
+      <span class="a-pn nums" style="background:#10B981">4</span>
+      <span class="a-pnm">狼俊</span>
+      <span class="a-prr nums">全场第28</span>
+      <span class="a-plb"><i style="width:27.185734452956257%"></i></span>
+      <span class="a-pv nums">18.6万</span>
+    </div><div class="a-pl">
+      <span class="a-pn nums" style="background:#10B981">5</span>
+      <span class="a-pnm">玖妹</span>
+      <span class="a-prr nums">全场第41</span>
+      <span class="a-plb"><i style="width:16.532315813163656%"></i></span>
+      <span class="a-pv nums">11.3万</span>
+    </div><div class="a-pl">
+      <span class="a-pn nums" style="background:#10B981">6</span>
+      <span class="a-pnm">啸宇</span>
+      <span class="a-prr nums">全场第43</span>
+      <span class="a-plb"><i style="width:14.424108330240049%"></i></span>
+      <span class="a-pv nums">9.9万</span>
+    </div><div class="a-pl">
+      <span class="a-pn nums" style="background:#10B981">7</span>
+      <span class="a-pnm">狼艺</span>
+      <span class="a-prr nums">全场第46</span>
+      <span class="a-plb"><i style="width:12.165231090287866%"></i></span>
+      <span class="a-pv nums">8.3万</span>
+    </div>
+    </div><div class="a-gc" style="--c:#F43F5E;--cs:#F43F5E1f">
+      <div class="a-gch">
+        <b>第 6 组</b>
+        <span class="nums">09:30–09:45</span>
+        <span class="a-gcshare nums">215万 · 占12.4%</span>
+      </div>
+      <div class="a-pl">
+      <span class="a-pn nums" style="background:#F43F5E">1</span>
+      <span class="a-pnm">玖玥</span>
+      <span class="a-prr nums">全场第7</span>
+      <span class="a-plb"><i style="width:100%"></i></span>
+      <span class="a-pv nums">60.2万</span>
+    </div><div class="a-pl">
+      <span class="a-pn nums" style="background:#F43F5E">2</span>
+      <span class="a-pnm">狼小宝</span>
+      <span class="a-prr nums">全场第11</span>
+      <span class="a-plb"><i style="width:69.59308765479459%"></i></span>
+      <span class="a-pv nums">41.9万</span>
+    </div><div class="a-pl">
+      <span class="a-pn nums" style="background:#F43F5E">3</span>
+      <span class="a-pnm">狼影</span>
+      <span class="a-prr nums">全场第13</span>
+      <span class="a-plb"><i style="width:61.311359435640156%"></i></span>
+      <span class="a-pv nums">36.9万</span>
+    </div><div class="a-pl">
+      <span class="a-pn nums" style="background:#F43F5E">4</span>
+      <span class="a-pnm">狼九</span>
+      <span class="a-prr nums">全场第17</span>
+      <span class="a-plb"><i style="width:50.29368831673501%"></i></span>
+      <span class="a-pv nums">30.3万</span>
+    </div><div class="a-pl">
+      <span class="a-pn nums" style="background:#F43F5E">5</span>
+      <span class="a-pnm">狼明</span>
+      <span class="a-prr nums">全场第22</span>
+      <span class="a-plb"><i style="width:37.742062444263986%"></i></span>
+      <span class="a-pv nums">22.7万</span>
+    </div><div class="a-pl">
+      <span class="a-pn nums" style="background:#F43F5E">6</span>
+      <span class="a-pnm">狼辉</span>
+      <span class="a-prr nums">全场第32</span>
+      <span class="a-plb"><i style="width:25.256364907525956%"></i></span>
+      <span class="a-pv nums">15.2万</span>
+    </div><div class="a-pl">
+      <span class="a-pn nums" style="background:#F43F5E">7</span>
+      <span class="a-pnm">浩宁</span>
+      <span class="a-prr nums">全场第47</span>
+      <span class="a-plb"><i style="width:13.160425063395826%"></i></span>
+      <span class="a-pv nums">7.9万</span>
+    </div>
+    </div><div class="a-gc" style="--c:#3B82F6;--cs:#3B82F61f">
+      <div class="a-gch">
+        <b>第 7 组</b>
+        <span class="nums">09:45–10:00</span>
+        <span class="a-gcshare nums">185万 · 占10.7%</span>
+      </div>
+      <div class="a-pl">
+      <span class="a-pn nums" style="background:#3B82F6">1</span>
+      <span class="a-pnm">南方楠</span>
+      <span class="a-prr nums">全场第8</span>
+      <span class="a-plb"><i style="width:100%"></i></span>
+      <span class="a-pv nums">55.1万</span>
+    </div><div class="a-pl">
+      <span class="a-pn nums" style="background:#3B82F6">2</span>
+      <span class="a-pnm">浩雨</span>
+      <span class="a-prr nums">全场第9</span>
+      <span class="a-plb"><i style="width:83.18278836720519%"></i></span>
+      <span class="a-pv nums">45.9万</span>
+    </div><div class="a-pl">
+      <span class="a-pn nums" style="background:#3B82F6">3</span>
+      <span class="a-pnm">啸辰</span>
+      <span class="a-prr nums">全场第25</span>
+      <span class="a-plb"><i style="width:39.5532794986227%"></i></span>
+      <span class="a-pv nums">21.8万</span>
+    </div><div class="a-pl">
+      <span class="a-pn nums" style="background:#3B82F6">4</span>
+      <span class="a-pnm">浩启</span>
+      <span class="a-prr nums">全场第26</span>
+      <span class="a-plb"><i style="width:38.25867137191467%"></i></span>
+      <span class="a-pv nums">21.1万</span>
+    </div><div class="a-pl">
+      <span class="a-pn nums" style="background:#3B82F6">5</span>
+      <span class="a-pnm">狼岳</span>
+      <span class="a-prr nums">全场第30</span>
+      <span class="a-plb"><i style="width:32.43121204263012%"></i></span>
+      <span class="a-pv nums">17.9万</span>
+    </div><div class="a-pl">
+      <span class="a-pn nums" style="background:#3B82F6">6</span>
+      <span class="a-pnm">浩月</span>
+      <span class="a-prr nums">全场第34</span>
+      <span class="a-plb"><i style="width:25.522222685654494%"></i></span>
+      <span class="a-pv nums">14.1万</span>
+    </div><div class="a-pl">
+      <span class="a-pn nums" style="background:#3B82F6">7</span>
+      <span class="a-pnm">狼腾</span>
+      <span class="a-prr nums">全场第44</span>
+      <span class="a-plb"><i style="width:17.198032065080398%"></i></span>
+      <span class="a-pv nums">9.5万</span>
+    </div>
+    </div><div class="a-gc" style="--c:#22C55E;--cs:#22C55E1f">
+      <div class="a-gch">
+        <b>第 8 组</b>
+        <span class="nums">10:00–10:15</span>
+        <span class="a-gcshare nums">119万 · 占6.8%</span>
+      </div>
+      <div class="a-pl">
+      <span class="a-pn nums" style="background:#22C55E">1</span>
+      <span class="a-pnm">啸帆</span>
+      <span class="a-prr nums">全场第12</span>
+      <span class="a-plb"><i style="width:100%"></i></span>
+      <span class="a-pv nums">38.2万</span>
+    </div><div class="a-pl">
+      <span class="a-pn nums" style="background:#22C55E">2</span>
+      <span class="a-pnm">凤九</span>
+      <span class="a-prr nums">全场第23</span>
+      <span class="a-plb"><i style="width:58.98608459247735%"></i></span>
+      <span class="a-pv nums">22.5万</span>
+    </div><div class="a-pl">
+      <span class="a-pn nums" style="background:#22C55E">3</span>
+      <span class="a-pnm">啸恒</span>
+      <span class="a-prr nums">全场第31</span>
+      <span class="a-plb"><i style="width:43.29779181628414%"></i></span>
+      <span class="a-pv nums">16.5万</span>
+    </div><div class="a-pl">
+      <span class="a-pn nums" style="background:#22C55E">4</span>
+      <span class="a-pnm">玖豆</span>
+      <span class="a-prr nums">全场第33</span>
+      <span class="a-plb"><i style="width:38.05797169774257%"></i></span>
+      <span class="a-pv nums">14.5万</span>
+    </div><div class="a-pl">
+      <span class="a-pn nums" style="background:#22C55E">5</span>
+      <span class="a-pnm">狼佑</span>
+      <span class="a-prr nums">全场第35</span>
+      <span class="a-plb"><i style="width:36.48073503104972%"></i></span>
+      <span class="a-pv nums">13.9万</span>
+    </div><div class="a-pl">
+      <span class="a-pn nums" style="background:#22C55E">6</span>
+      <span class="a-pnm">啸阳</span>
+      <span class="a-prr nums">全场第45</span>
+      <span class="a-plb"><i style="width:22.019240087269225%"></i></span>
+      <span class="a-pv nums">8.4万</span>
+    </div><div class="a-pl">
+      <span class="a-pn nums" style="background:#22C55E">7</span>
+      <span class="a-pnm">啸昭</span>
+      <span class="a-prr nums">全场第55</span>
+      <span class="a-plb"><i style="width:12.079925197809365%"></i></span>
+      <span class="a-pv nums">4.6万</span>
+    </div>
+    </div></div>
+  </div>
+  <footer class="a-ft">更新于 2026-09-30 09:00 · 星嗨艺创 · 内部数据请勿外传</footer>
+</div></div></div>
+      <div class="stage-cap">方向 A · 赛况直播台 · 桌面 1080px</div>
+    </div>
+    <aside class="side">
+      <span class="tag">方向 A</span>
+      <h2>赛况直播台（深色）</h2>
+      <dl>
+        <dt>气质</dt><dd>深色底 + 渐变大数字，像直播间挂的赛况屏。适合投屏、直播间悬浮窗、群里围观氛围。</dd>
+        <dt>音浪·时长</dt><dd>总音浪做视觉锚点（44px 渐变字），赛程时长拆成「开赛 / 间隔 / 全程」三段，时段胶囊一排 8 个。</dd>
+        <dt>排行榜</dt><dd>前三名金框高亮，进度条用组色，右列给「占总额比」，运营一眼看出头部贡献。</dd>
+        <dt>每日音浪</dt><dd>折线（各组趋势）+ 柱条（全场每日合计）双视角，柱顶标数值。</dd>
+        <dt>PK 分组</dt><dd>双列卡，组头带组色顶条 + 时段 + 组总音浪与占比，组内每人有组内序号 / 全场名次 / 占组内首位的比例条。</dd>
+        <dt>代价</dt><dd>深色在强光环境与低档手机上可读性略差；打印/截图进文档不友好。</dd>
+      </dl>
+      <div class="rec">推荐场景：主要给粉丝和主播在手机上看，追求「赛事感」和氛围。</div>
+      <div class="phone-cap">手机 360px · 同方向真实窄屏布局</div>
+      <div class="phone">
+<div class="pa">
+  <div class="pa-hero">
+    <b>星嗨艺创 · PK 挑战赛</b>
+    <div class="pa-big"><em>总音浪</em><strong class="nums">1734万</strong></div>
+    <div class="pa-kv nums">58 人 · 8 组 · 08:15 开赛 · 每组 15 分钟 · 全程 2 小时</div>
+  </div>
+  <div class="pa-sec"><h4>音浪排行榜</h4></div>
+  <div class="pa-pod"><div class="pa-podc first"><s>🥇</s><b>浩龙</b><span class="nums">224万</span><em>第 2 组</em></div><div class="pa-podc "><s>🥈</s><b>玖玉</b><span class="nums">186万</span><em>第 3 组</em></div><div class="pa-podc "><s>🥉</s><b>浩冬</b><span class="nums">95.4万</span><em>第 3 组</em></div></div>
+  <div class="pa-rows"><div class="pa-row"><span class="nums">4</span><b>狼兴</b><i style="background:#8B5CF6"></i><span class="nums v">82.1万</span></div><div class="pa-row"><span class="nums">5</span><b>狼澈</b><i style="background:#F59E0B"></i><span class="nums v">80.6万</span></div><div class="pa-row"><span class="nums">6</span><b>浩哲</b><i style="background:#10B981"></i><span class="nums v">68.4万</span></div><div class="pa-row"><span class="nums">7</span><b>玖玥</b><i style="background:#F43F5E"></i><span class="nums v">60.2万</span></div><div class="pa-row"><span class="nums">8</span><b>南方楠</b><i style="background:#3B82F6"></i><span class="nums v">55.1万</span></div></div>
+  <div class="pa-sec"><h4>每日音浪</h4><s>近 8 日合计</s></div>
+  <div class="pa-trend"><svg viewBox="0 0 312 120" width="100%" style="display:block"><line x1="44" y1="98" x2="302" y2="98" stroke="rgba(255,255,255,.07)" stroke-width="1"/><text x="38" y="101.5" text-anchor="end" font-size="9.5" fill="rgba(232,236,244,.4)">0万</text><line x1="44" y1="76.5" x2="302" y2="76.5" stroke="rgba(255,255,255,.07)" stroke-width="1"/><text x="38" y="80" text-anchor="end" font-size="9.5" fill="rgba(232,236,244,.4)">15万</text><line x1="44" y1="55" x2="302" y2="55" stroke="rgba(255,255,255,.07)" stroke-width="1"/><text x="38" y="58.5" text-anchor="end" font-size="9.5" fill="rgba(232,236,244,.4)">30万</text><line x1="44" y1="33.5" x2="302" y2="33.5" stroke="rgba(255,255,255,.07)" stroke-width="1"/><text x="38" y="37" text-anchor="end" font-size="9.5" fill="rgba(232,236,244,.4)">45万</text><line x1="44" y1="12" x2="302" y2="12" stroke="rgba(255,255,255,.07)" stroke-width="1"/><text x="38" y="15.5" text-anchor="end" font-size="9.5" fill="rgba(232,236,244,.4)">60万</text><text x="44" y="114" text-anchor="middle" font-size="9.5" fill="rgba(232,236,244,.4)">09-22</text><text x="80.85714285714286" y="114" text-anchor="middle" font-size="9.5" fill="rgba(232,236,244,.4)">09-23</text><text x="117.71428571428571" y="114" text-anchor="middle" font-size="9.5" fill="rgba(232,236,244,.4)">09-24</text><text x="154.57142857142856" y="114" text-anchor="middle" font-size="9.5" fill="rgba(232,236,244,.4)">09-25</text><text x="191.42857142857142" y="114" text-anchor="middle" font-size="9.5" fill="rgba(232,236,244,.4)">09-26</text><text x="228.28571428571428" y="114" text-anchor="middle" font-size="9.5" fill="rgba(232,236,244,.4)">09-27</text><text x="265.1428571428571" y="114" text-anchor="middle" font-size="9.5" fill="rgba(232,236,244,.4)">09-28</text><text x="302" y="114" text-anchor="middle" font-size="9.5" fill="rgba(232,236,244,.4)">09-29</text><polyline points="44.0,95.2 80.9,94.2 117.7,95.2 154.6,97.6 191.4,97.0 228.3,95.7 265.1,90.1 302.0,88.2" fill="none" stroke="#EC4899" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" opacity="0.92"/><circle cx="302" cy="88.2113289934582" r="2.6" fill="#EC4899"/><polyline points="44.0,67.0 80.9,84.3 117.7,87.8 154.6,71.3 191.4,82.5 228.3,74.5 265.1,12.0 302.0,74.0" fill="none" stroke="#8B5CF6" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" opacity="0.92"/><circle cx="302" cy="73.9525039586699" r="2.6" fill="#8B5CF6"/><polyline points="44.0,77.3 80.9,84.3 117.7,86.7 154.6,87.8 191.4,86.1 228.3,87.9 265.1,57.3 302.0,55.3" fill="none" stroke="#06B6D4" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" opacity="0.92"/><circle cx="302" cy="55.30399385806369" r="2.6" fill="#06B6D4"/><polyline points="44.0,89.5 80.9,88.3 117.7,83.5 154.6,87.5 191.4,90.1 228.3,91.0 265.1,58.3 302.0,77.7" fill="none" stroke="#F59E0B" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" opacity="0.92"/><circle cx="302" cy="77.72268117912381" r="2.6" fill="#F59E0B"/><polyline points="44.0,82.5 80.9,83.7 117.7,93.1 154.6,92.1 191.4,87.9 228.3,93.6 265.1,82.8 302.0,67.4" fill="none" stroke="#10B981" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" opacity="0.92"/><circle cx="302" cy="67.39514323187409" r="2.6" fill="#10B981"/><polyline points="44.0,89.7 80.9,86.6 117.7,89.4 154.6,88.3 191.4,86.3 228.3,89.3 265.1,71.5 302.0,76.8" fill="none" stroke="#F43F5E" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" opacity="0.92"/><circle cx="302" cy="76.76530685689607" r="2.6" fill="#F43F5E"/><polyline points="44.0,87.3 80.9,67.7 117.7,96.4 154.6,87.9 191.4,95.2 228.3,91.3 265.1,81.6 302.0,75.8" fill="none" stroke="#3B82F6" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" opacity="0.92"/><circle cx="302" cy="75.82340733513539" r="2.6" fill="#3B82F6"/><polyline points="44.0,92.3 80.9,93.0 117.7,92.0 154.6,90.8 191.4,86.3 228.3,90.0 265.1,79.7 302.0,82.4" fill="none" stroke="#22C55E" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" opacity="0.92"/><circle cx="302" cy="82.4416356104349" r="2.6" fill="#22C55E"/></svg></div>
+  <div class="pa-sec"><h4>PK 分组</h4><s>8 组 58 人</s></div>
+  <div class="pa-gc" style="--c:#8B5CF6">
+    <div class="pa-gch"><b>第 2 组</b><span class="nums">08:30–08:45 · 399万</span></div>
+    <div class="pa-pl"><span class="nums">1</span><b>浩龙</b><span class="nums v">224万</span></div><div class="pa-pl"><span class="nums">2</span><b>狼兴</b><span class="nums v">82.1万</span></div><div class="pa-pl"><span class="nums">3</span><b>啸安</b><span class="nums v">31.8万</span></div><div class="pa-pl"><span class="nums">4</span><b>狼辰</b><span class="nums v">26.4万</span></div>
+    <div class="pa-more">还有 4 人 · 上滑查看全部 8 组</div>
+  </div>
+  <footer class="pa-ft">更新于 2026-09-30 09:00</footer>
+</div></div>
+    </aside>
+  </div>
+
+  <div class="band">
+    <div>
+      <div class="stage"><div class="fitwrap" style="width:1080px">
+<div class="b">
+  <div class="b-mast">
+    <div class="b-brand"><b>星嗨艺创</b><span>PK 挑战赛 · 分组与音浪公示</span><em>实时</em></div>
+    <dl class="b-stats">
+      <div><dt>总音浪</dt><dd class="nums">1734万</dd></div>
+      <div><dt>参赛人数</dt><dd class="nums">58 人</dd></div>
+      <div><dt>分组</dt><dd class="nums">8 组</dd></div>
+      <div><dt>开赛</dt><dd class="nums">08:15</dd></div>
+      <div><dt>赛程时长</dt><dd class="nums">每组 15 分钟 · 全程 2 小时（至 10:15）</dd></div>
+    </dl>
+    <div class="b-slots"><span style="border-color:#EC4899;color:#BE185D;background:#FCE7F3">第 1 组 <b class="nums">08:15–08:30</b></span><span style="border-color:#8B5CF6;color:#6D28D9;background:#EDE9FE">第 2 组 <b class="nums">08:30–08:45</b></span><span style="border-color:#06B6D4;color:#0E7490;background:#CFFAFE">第 3 组 <b class="nums">08:45–09:00</b></span><span style="border-color:#F59E0B;color:#B45309;background:#FEF3C7">第 4 组 <b class="nums">09:00–09:15</b></span><span style="border-color:#10B981;color:#047857;background:#D1FAE5">第 5 组 <b class="nums">09:15–09:30</b></span><span style="border-color:#F43F5E;color:#BE123C;background:#FFE4E6">第 6 组 <b class="nums">09:30–09:45</b></span><span style="border-color:#3B82F6;color:#1D4ED8;background:#DBEAFE">第 7 组 <b class="nums">09:45–10:00</b></span><span style="border-color:#22C55E;color:#15803D;background:#DCFCE7">第 8 组 <b class="nums">10:00–10:15</b></span></div>
+  </div>
+
+  <section class="b-mod"><h3>音浪排行榜<s>全场名次 · TOP 10</s><u>完整榜单见分组明细</u></h3>
+    <div class="b-board"><div class="b-lr">
+      <span class="b-lrn nums top">1</span>
+      <span class="b-lrname">浩龙</span>
+      <span class="b-lrg" style="color:#6D28D9;background:#EDE9FE">2组</span>
+      <span class="b-lrbar"><i style="width:100%;background:#8B5CF6"></i></span>
+      <span class="b-lrv nums">224万</span>
+    </div><div class="b-lr">
+      <span class="b-lrn nums top">2</span>
+      <span class="b-lrname">玖玉</span>
+      <span class="b-lrg" style="color:#0E7490;background:#CFFAFE">3组</span>
+      <span class="b-lrbar"><i style="width:82.95010394917624%;background:#06B6D4"></i></span>
+      <span class="b-lrv nums">186万</span>
+    </div><div class="b-lr">
+      <span class="b-lrn nums top">3</span>
+      <span class="b-lrname">浩冬</span>
+      <span class="b-lrg" style="color:#0E7490;background:#CFFAFE">3组</span>
+      <span class="b-lrbar"><i style="width:42.587881565319755%;background:#06B6D4"></i></span>
+      <span class="b-lrv nums">95.4万</span>
+    </div><div class="b-lr">
+      <span class="b-lrn nums ">4</span>
+      <span class="b-lrname">狼兴</span>
+      <span class="b-lrg" style="color:#6D28D9;background:#EDE9FE">2组</span>
+      <span class="b-lrbar"><i style="width:36.64138181230781%;background:#8B5CF6"></i></span>
+      <span class="b-lrv nums">82.1万</span>
+    </div><div class="b-lr">
+      <span class="b-lrn nums ">5</span>
+      <span class="b-lrname">狼澈</span>
+      <span class="b-lrg" style="color:#B45309;background:#FEF3C7">4组</span>
+      <span class="b-lrbar"><i style="width:35.98363943937503%;background:#F59E0B"></i></span>
+      <span class="b-lrv nums">80.6万</span>
+    </div><div class="b-lr">
+      <span class="b-lrn nums ">6</span>
+      <span class="b-lrname">浩哲</span>
+      <span class="b-lrg" style="color:#047857;background:#D1FAE5">5组</span>
+      <span class="b-lrbar"><i style="width:30.534507155067896%;background:#10B981"></i></span>
+      <span class="b-lrv nums">68.4万</span>
+    </div><div class="b-lr">
+      <span class="b-lrn nums ">7</span>
+      <span class="b-lrname">玖玥</span>
+      <span class="b-lrg" style="color:#BE123C;background:#FFE4E6">6组</span>
+      <span class="b-lrbar"><i style="width:26.870560852548348%;background:#F43F5E"></i></span>
+      <span class="b-lrv nums">60.2万</span>
+    </div><div class="b-lr">
+      <span class="b-lrn nums ">8</span>
+      <span class="b-lrname">南方楠</span>
+      <span class="b-lrg" style="color:#1D4ED8;background:#DBEAFE">7组</span>
+      <span class="b-lrbar"><i style="width:24.6069275354429%;background:#3B82F6"></i></span>
+      <span class="b-lrv nums">55.1万</span>
+    </div><div class="b-lr">
+      <span class="b-lrn nums ">9</span>
+      <span class="b-lrname">浩雨</span>
+      <span class="b-lrg" style="color:#1D4ED8;background:#DBEAFE">7组</span>
+      <span class="b-lrbar"><i style="width:20.468728455479006%;background:#3B82F6"></i></span>
+      <span class="b-lrv nums">45.9万</span>
+    </div><div class="b-lr">
+      <span class="b-lrn nums ">10</span>
+      <span class="b-lrname">玖柒</span>
+      <span class="b-lrg" style="color:#047857;background:#D1FAE5">5组</span>
+      <span class="b-lrbar"><i style="width:19.138161150451204%;background:#10B981"></i></span>
+      <span class="b-lrv nums">42.9万</span>
+    </div></div>
+  </section>
+
+  <section class="b-mod"><h3>每日音浪<s>近 8 日 · 参赛者合计</s></h3>
+    <div class="b-trend"><svg viewBox="0 0 1000 180" width="100%" style="display:block"><line x1="44" y1="158" x2="990" y2="158" stroke="#EEF0F3" stroke-width="1"/><text x="38" y="161.5" text-anchor="end" font-size="9.5" fill="#9AA0AA">0万</text><line x1="44" y1="121.5" x2="990" y2="121.5" stroke="#EEF0F3" stroke-width="1"/><text x="38" y="125" text-anchor="end" font-size="9.5" fill="#9AA0AA">15万</text><line x1="44" y1="85" x2="990" y2="85" stroke="#EEF0F3" stroke-width="1"/><text x="38" y="88.5" text-anchor="end" font-size="9.5" fill="#9AA0AA">30万</text><line x1="44" y1="48.5" x2="990" y2="48.5" stroke="#EEF0F3" stroke-width="1"/><text x="38" y="52" text-anchor="end" font-size="9.5" fill="#9AA0AA">45万</text><line x1="44" y1="12" x2="990" y2="12" stroke="#EEF0F3" stroke-width="1"/><text x="38" y="15.5" text-anchor="end" font-size="9.5" fill="#9AA0AA">60万</text><text x="44" y="174" text-anchor="middle" font-size="9.5" fill="#9AA0AA">09-22</text><text x="179.14285714285714" y="174" text-anchor="middle" font-size="9.5" fill="#9AA0AA">09-23</text><text x="314.2857142857143" y="174" text-anchor="middle" font-size="9.5" fill="#9AA0AA">09-24</text><text x="449.4285714285714" y="174" text-anchor="middle" font-size="9.5" fill="#9AA0AA">09-25</text><text x="584.5714285714286" y="174" text-anchor="middle" font-size="9.5" fill="#9AA0AA">09-26</text><text x="719.7142857142858" y="174" text-anchor="middle" font-size="9.5" fill="#9AA0AA">09-27</text><text x="854.8571428571428" y="174" text-anchor="middle" font-size="9.5" fill="#9AA0AA">09-28</text><text x="990" y="174" text-anchor="middle" font-size="9.5" fill="#9AA0AA">09-29</text><polyline points="44.0,153.2 179.1,151.6 314.3,153.3 449.4,157.3 584.6,156.3 719.7,154.1 854.9,144.5 990.0,141.4" fill="none" stroke="#EC4899" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" opacity="0.85"/><circle cx="990" cy="141.38202364005693" r="2.6" fill="#EC4899"/><polyline points="44.0,105.3 179.1,134.8 314.3,140.7 449.4,112.7 584.6,131.8 719.7,118.1 854.9,12.0 990.0,117.2" fill="none" stroke="#8B5CF6" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" opacity="0.85"/><circle cx="990" cy="117.17518113913725" r="2.6" fill="#8B5CF6"/><polyline points="44.0,122.8 179.1,134.7 314.3,138.8 449.4,140.6 584.6,137.8 719.7,140.9 854.9,88.9 990.0,85.5" fill="none" stroke="#06B6D4" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" opacity="0.85"/><circle cx="990" cy="85.51608259624766" r="2.6" fill="#06B6D4"/><polyline points="44.0,143.5 179.1,141.5 314.3,133.3 449.4,140.2 584.6,144.6 719.7,146.1 854.9,90.6 990.0,123.6" fill="none" stroke="#F59E0B" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" opacity="0.85"/><circle cx="990" cy="123.57571455990788" r="2.6" fill="#F59E0B"/><polyline points="44.0,131.7 179.1,133.6 314.3,149.7 449.4,148.0 584.6,140.9 719.7,150.5 854.9,132.1 990.0,106.0" fill="none" stroke="#10B981" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" opacity="0.85"/><circle cx="990" cy="106.04291757969322" r="2.6" fill="#10B981"/><polyline points="44.0,143.9 179.1,138.7 314.3,143.4 449.4,141.5 584.6,138.1 719.7,143.3 854.9,112.9 990.0,122.0" fill="none" stroke="#F43F5E" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" opacity="0.85"/><circle cx="990" cy="121.95040466403289" r="2.6" fill="#F43F5E"/><polyline points="44.0,139.9 179.1,106.6 314.3,155.3 449.4,140.9 584.6,153.3 719.7,146.7 854.9,130.1 990.0,120.4" fill="none" stroke="#3B82F6" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" opacity="0.85"/><circle cx="990" cy="120.35136594104381" r="2.6" fill="#3B82F6"/><polyline points="44.0,148.3 179.1,149.5 314.3,147.9 449.4,145.7 584.6,138.2 719.7,144.4 854.9,126.9 990.0,131.6" fill="none" stroke="#22C55E" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" opacity="0.85"/><circle cx="990" cy="131.58696278050576" r="2.6" fill="#22C55E"/></svg></div>
+    <table class="b-dtable"><tr><td class="nums">09-22</td><td class="nums"><b>60.1万</b></td><td><div class="b-dbar"><i style="width:120.1%"></i></div></td></tr><tr><td class="nums">09-23</td><td class="nums"><b>59.2万</b></td><td><div class="b-dbar"><i style="width:118.4%"></i></div></td></tr><tr><td class="nums">09-24</td><td class="nums"><b>34.8万</b></td><td><div class="b-dbar"><i style="width:69.7%"></i></div></td></tr><tr><td class="nums">09-25</td><td class="nums"><b>47万</b></td><td><div class="b-dbar"><i style="width:93.9%"></i></div></td></tr><tr><td class="nums">09-26</td><td class="nums"><b>42.2万</b></td><td><div class="b-dbar"><i style="width:84.3%"></i></div></td></tr><tr><td class="nums">09-27</td><td class="nums"><b>41.1万</b></td><td><div class="b-dbar"><i style="width:82.2%"></i></div></td></tr><tr><td class="nums">09-28</td><td class="nums"><b>146万</b></td><td><div class="b-dbar"><i style="width:291.7%"></i></div></td></tr><tr><td class="nums">09-29</td><td class="nums"><b>108万</b></td><td><div class="b-dbar"><i style="width:216.7%"></i></div></td></tr></table>
+  </section>
+
+  <section class="b-mod"><h3>PK 分组<s>组内按音浪降序 · 8 组 58 人</s></h3>
+    <div class="b-grid"><div class="b-gc">
+      <div class="b-gch" style="border-top-color:#EC4899">
+        <b style="color:#BE185D">第 1 组</b>
+        <span class="nums">08:15–08:30 · 7人</span>
+        <span class="b-gct nums">58.2万</span>
+      </div>
+      <div class="b-pl">
+      <span class="b-pn nums" style="background:#FCE7F3;color:#BE185D">1</span>
+      <span class="b-pnm">狼仔</span>
+      <span class="b-prr nums">全场15</span>
+      <span class="b-pv nums">31.9万</span>
+    </div><div class="b-pl">
+      <span class="b-pn nums" style="background:#FCE7F3;color:#BE185D">2</span>
+      <span class="b-pnm">啸泽</span>
+      <span class="b-prr nums">全场39</span>
+      <span class="b-pv nums">12.4万</span>
+    </div><div class="b-pl">
+      <span class="b-pn nums" style="background:#FCE7F3;color:#BE185D">3</span>
+      <span class="b-pnm">浩延</span>
+      <span class="b-prr nums">全场53</span>
+      <span class="b-pv nums">4.8万</span>
+    </div><div class="b-pl">
+      <span class="b-pn nums" style="background:#FCE7F3;color:#BE185D">4</span>
+      <span class="b-pnm">啸燃</span>
+      <span class="b-prr nums">全场54</span>
+      <span class="b-pv nums">4.8万</span>
+    </div><div class="b-pl">
+      <span class="b-pn nums" style="background:#FCE7F3;color:#BE185D">5</span>
+      <span class="b-pnm">啸弘</span>
+      <span class="b-prr nums">全场56</span>
+      <span class="b-pv nums">3万</span>
+    </div><div class="b-pl">
+      <span class="b-pn nums" style="background:#FCE7F3;color:#BE185D">6</span>
+      <span class="b-pnm">狼途</span>
+      <span class="b-prr nums">全场57</span>
+      <span class="b-pv nums">1.4万</span>
+    </div><div class="b-pl">
+      <span class="b-pn nums" style="background:#FCE7F3;color:#BE185D">7</span>
+      <span class="b-pnm">狼雨</span>
+      <span class="b-prr nums">全场58</span>
+      <span class="b-pv nums">0</span>
+    </div>
+    </div><div class="b-gc">
+      <div class="b-gch" style="border-top-color:#8B5CF6">
+        <b style="color:#6D28D9">第 2 组</b>
+        <span class="nums">08:30–08:45 · 8人</span>
+        <span class="b-gct nums">399万</span>
+      </div>
+      <div class="b-pl">
+      <span class="b-pn nums" style="background:#EDE9FE;color:#6D28D9">1</span>
+      <span class="b-pnm">浩龙</span>
+      <span class="b-prr nums">全场1</span>
+      <span class="b-pv nums">224万</span>
+    </div><div class="b-pl">
+      <span class="b-pn nums" style="background:#EDE9FE;color:#6D28D9">2</span>
+      <span class="b-pnm">狼兴</span>
+      <span class="b-prr nums">全场4</span>
+      <span class="b-pv nums">82.1万</span>
+    </div><div class="b-pl">
+      <span class="b-pn nums" style="background:#EDE9FE;color:#6D28D9">3</span>
+      <span class="b-pnm">啸安</span>
+      <span class="b-prr nums">全场16</span>
+      <span class="b-pv nums">31.8万</span>
+    </div><div class="b-pl">
+      <span class="b-pn nums" style="background:#EDE9FE;color:#6D28D9">4</span>
+      <span class="b-pnm">狼辰</span>
+      <span class="b-prr nums">全场21</span>
+      <span class="b-pv nums">26.4万</span>
+    </div><div class="b-pl">
+      <span class="b-pn nums" style="background:#EDE9FE;color:#6D28D9">5</span>
+      <span class="b-pnm">狼耀</span>
+      <span class="b-prr nums">全场37</span>
+      <span class="b-pv nums">12.9万</span>
+    </div><div class="b-pl">
+      <span class="b-pn nums" style="background:#EDE9FE;color:#6D28D9">6</span>
+      <span class="b-pnm">狼轩</span>
+      <span class="b-prr nums">全场48</span>
+      <span class="b-pv nums">7.8万</span>
+    </div><div class="b-pl">
+      <span class="b-pn nums" style="background:#EDE9FE;color:#6D28D9">7</span>
+      <span class="b-pnm">啸强</span>
+      <span class="b-prr nums">全场49</span>
+      <span class="b-pv nums">7.4万</span>
+    </div><div class="b-pl">
+      <span class="b-pn nums" style="background:#EDE9FE;color:#6D28D9">8</span>
+      <span class="b-pnm">狼征</span>
+      <span class="b-prr nums">全场52</span>
+      <span class="b-pv nums">6.6万</span>
+    </div>
+    </div><div class="b-gc">
+      <div class="b-gch" style="border-top-color:#06B6D4">
+        <b style="color:#0E7490">第 3 组</b>
+        <span class="nums">08:45–09:00 · 7人</span>
+        <span class="b-gct nums">376万</span>
+      </div>
+      <div class="b-pl">
+      <span class="b-pn nums" style="background:#CFFAFE;color:#0E7490">1</span>
+      <span class="b-pnm">玖玉</span>
+      <span class="b-prr nums">全场2</span>
+      <span class="b-pv nums">186万</span>
+    </div><div class="b-pl">
+      <span class="b-pn nums" style="background:#CFFAFE;color:#0E7490">2</span>
+      <span class="b-pnm">浩冬</span>
+      <span class="b-prr nums">全场3</span>
+      <span class="b-pv nums">95.4万</span>
+    </div><div class="b-pl">
+      <span class="b-pn nums" style="background:#CFFAFE;color:#0E7490">3</span>
+      <span class="b-pnm">啸森</span>
+      <span class="b-prr nums">全场18</span>
+      <span class="b-pv nums">30万</span>
+    </div><div class="b-pl">
+      <span class="b-pn nums" style="background:#CFFAFE;color:#0E7490">4</span>
+      <span class="b-pnm">狼哲</span>
+      <span class="b-prr nums">全场19</span>
+      <span class="b-pv nums">26.9万</span>
+    </div><div class="b-pl">
+      <span class="b-pn nums" style="background:#CFFAFE;color:#0E7490">5</span>
+      <span class="b-pnm">浩辰</span>
+      <span class="b-prr nums">全场29</span>
+      <span class="b-pv nums">18.1万</span>
+    </div><div class="b-pl">
+      <span class="b-pn nums" style="background:#CFFAFE;color:#0E7490">6</span>
+      <span class="b-pnm">浩运</span>
+      <span class="b-prr nums">全场38</span>
+      <span class="b-pv nums">12.5万</span>
+    </div><div class="b-pl">
+      <span class="b-pn nums" style="background:#CFFAFE;color:#0E7490">7</span>
+      <span class="b-pnm">啸寻</span>
+      <span class="b-prr nums">全场51</span>
+      <span class="b-pv nums">6.7万</span>
+    </div>
+    </div><div class="b-gc">
+      <div class="b-gch" style="border-top-color:#F59E0B">
+        <b style="color:#B45309">第 4 组</b>
+        <span class="nums">09:00–09:15 · 8人</span>
+        <span class="b-gct nums">201万</span>
+      </div>
+      <div class="b-pl">
+      <span class="b-pn nums" style="background:#FEF3C7;color:#B45309">1</span>
+      <span class="b-pnm">狼澈</span>
+      <span class="b-prr nums">全场5</span>
+      <span class="b-pv nums">80.6万</span>
+    </div><div class="b-pl">
+      <span class="b-pn nums" style="background:#FEF3C7;color:#B45309">2</span>
+      <span class="b-pnm">浩鸣</span>
+      <span class="b-prr nums">全场14</span>
+      <span class="b-pv nums">32.5万</span>
+    </div><div class="b-pl">
+      <span class="b-pn nums" style="background:#FEF3C7;color:#B45309">3</span>
+      <span class="b-pnm">浩玟</span>
+      <span class="b-prr nums">全场20</span>
+      <span class="b-pv nums">26.5万</span>
+    </div><div class="b-pl">
+      <span class="b-pn nums" style="background:#FEF3C7;color:#B45309">4</span>
+      <span class="b-pnm">狼赫</span>
+      <span class="b-prr nums">全场27</span>
+      <span class="b-pv nums">19.2万</span>
+    </div><div class="b-pl">
+      <span class="b-pn nums" style="background:#FEF3C7;color:#B45309">5</span>
+      <span class="b-pnm">狼泽</span>
+      <span class="b-prr nums">全场36</span>
+      <span class="b-pv nums">12.9万</span>
+    </div><div class="b-pl">
+      <span class="b-pn nums" style="background:#FEF3C7;color:#B45309">6</span>
+      <span class="b-pnm">浩阳</span>
+      <span class="b-prr nums">全场40</span>
+      <span class="b-pv nums">12万</span>
+    </div><div class="b-pl">
+      <span class="b-pn nums" style="background:#FEF3C7;color:#B45309">7</span>
+      <span class="b-pnm">浩杰</span>
+      <span class="b-prr nums">全场42</span>
+      <span class="b-pv nums">10万</span>
+    </div><div class="b-pl">
+      <span class="b-pn nums" style="background:#FEF3C7;color:#B45309">8</span>
+      <span class="b-pnm">浩艺</span>
+      <span class="b-prr nums">全场50</span>
+      <span class="b-pv nums">7万</span>
+    </div>
+    </div><div class="b-gc">
+      <div class="b-gch" style="border-top-color:#10B981">
+        <b style="color:#047857">第 5 组</b>
+        <span class="nums">09:15–09:30 · 7人</span>
+        <span class="b-gct nums">182万</span>
+      </div>
+      <div class="b-pl">
+      <span class="b-pn nums" style="background:#D1FAE5;color:#047857">1</span>
+      <span class="b-pnm">浩哲</span>
+      <span class="b-prr nums">全场6</span>
+      <span class="b-pv nums">68.4万</span>
+    </div><div class="b-pl">
+      <span class="b-pn nums" style="background:#D1FAE5;color:#047857">2</span>
+      <span class="b-pnm">玖柒</span>
+      <span class="b-prr nums">全场10</span>
+      <span class="b-pv nums">42.9万</span>
+    </div><div class="b-pl">
+      <span class="b-pn nums" style="background:#D1FAE5;color:#047857">3</span>
+      <span class="b-pnm">玖雪</span>
+      <span class="b-prr nums">全场24</span>
+      <span class="b-pv nums">22.1万</span>
+    </div><div class="b-pl">
+      <span class="b-pn nums" style="background:#D1FAE5;color:#047857">4</span>
+      <span class="b-pnm">狼俊</span>
+      <span class="b-prr nums">全场28</span>
+      <span class="b-pv nums">18.6万</span>
+    </div><div class="b-pl">
+      <span class="b-pn nums" style="background:#D1FAE5;color:#047857">5</span>
+      <span class="b-pnm">玖妹</span>
+      <span class="b-prr nums">全场41</span>
+      <span class="b-pv nums">11.3万</span>
+    </div><div class="b-pl">
+      <span class="b-pn nums" style="background:#D1FAE5;color:#047857">6</span>
+      <span class="b-pnm">啸宇</span>
+      <span class="b-prr nums">全场43</span>
+      <span class="b-pv nums">9.9万</span>
+    </div><div class="b-pl">
+      <span class="b-pn nums" style="background:#D1FAE5;color:#047857">7</span>
+      <span class="b-pnm">狼艺</span>
+      <span class="b-prr nums">全场46</span>
+      <span class="b-pv nums">8.3万</span>
+    </div>
+    </div><div class="b-gc">
+      <div class="b-gch" style="border-top-color:#F43F5E">
+        <b style="color:#BE123C">第 6 组</b>
+        <span class="nums">09:30–09:45 · 7人</span>
+        <span class="b-gct nums">215万</span>
+      </div>
+      <div class="b-pl">
+      <span class="b-pn nums" style="background:#FFE4E6;color:#BE123C">1</span>
+      <span class="b-pnm">玖玥</span>
+      <span class="b-prr nums">全场7</span>
+      <span class="b-pv nums">60.2万</span>
+    </div><div class="b-pl">
+      <span class="b-pn nums" style="background:#FFE4E6;color:#BE123C">2</span>
+      <span class="b-pnm">狼小宝</span>
+      <span class="b-prr nums">全场11</span>
+      <span class="b-pv nums">41.9万</span>
+    </div><div class="b-pl">
+      <span class="b-pn nums" style="background:#FFE4E6;color:#BE123C">3</span>
+      <span class="b-pnm">狼影</span>
+      <span class="b-prr nums">全场13</span>
+      <span class="b-pv nums">36.9万</span>
+    </div><div class="b-pl">
+      <span class="b-pn nums" style="background:#FFE4E6;color:#BE123C">4</span>
+      <span class="b-pnm">狼九</span>
+      <span class="b-prr nums">全场17</span>
+      <span class="b-pv nums">30.3万</span>
+    </div><div class="b-pl">
+      <span class="b-pn nums" style="background:#FFE4E6;color:#BE123C">5</span>
+      <span class="b-pnm">狼明</span>
+      <span class="b-prr nums">全场22</span>
+      <span class="b-pv nums">22.7万</span>
+    </div><div class="b-pl">
+      <span class="b-pn nums" style="background:#FFE4E6;color:#BE123C">6</span>
+      <span class="b-pnm">狼辉</span>
+      <span class="b-prr nums">全场32</span>
+      <span class="b-pv nums">15.2万</span>
+    </div><div class="b-pl">
+      <span class="b-pn nums" style="background:#FFE4E6;color:#BE123C">7</span>
+      <span class="b-pnm">浩宁</span>
+      <span class="b-prr nums">全场47</span>
+      <span class="b-pv nums">7.9万</span>
+    </div>
+    </div><div class="b-gc">
+      <div class="b-gch" style="border-top-color:#3B82F6">
+        <b style="color:#1D4ED8">第 7 组</b>
+        <span class="nums">09:45–10:00 · 7人</span>
+        <span class="b-gct nums">185万</span>
+      </div>
+      <div class="b-pl">
+      <span class="b-pn nums" style="background:#DBEAFE;color:#1D4ED8">1</span>
+      <span class="b-pnm">南方楠</span>
+      <span class="b-prr nums">全场8</span>
+      <span class="b-pv nums">55.1万</span>
+    </div><div class="b-pl">
+      <span class="b-pn nums" style="background:#DBEAFE;color:#1D4ED8">2</span>
+      <span class="b-pnm">浩雨</span>
+      <span class="b-prr nums">全场9</span>
+      <span class="b-pv nums">45.9万</span>
+    </div><div class="b-pl">
+      <span class="b-pn nums" style="background:#DBEAFE;color:#1D4ED8">3</span>
+      <span class="b-pnm">啸辰</span>
+      <span class="b-prr nums">全场25</span>
+      <span class="b-pv nums">21.8万</span>
+    </div><div class="b-pl">
+      <span class="b-pn nums" style="background:#DBEAFE;color:#1D4ED8">4</span>
+      <span class="b-pnm">浩启</span>
+      <span class="b-prr nums">全场26</span>
+      <span class="b-pv nums">21.1万</span>
+    </div><div class="b-pl">
+      <span class="b-pn nums" style="background:#DBEAFE;color:#1D4ED8">5</span>
+      <span class="b-pnm">狼岳</span>
+      <span class="b-prr nums">全场30</span>
+      <span class="b-pv nums">17.9万</span>
+    </div><div class="b-pl">
+      <span class="b-pn nums" style="background:#DBEAFE;color:#1D4ED8">6</span>
+      <span class="b-pnm">浩月</span>
+      <span class="b-prr nums">全场34</span>
+      <span class="b-pv nums">14.1万</span>
+    </div><div class="b-pl">
+      <span class="b-pn nums" style="background:#DBEAFE;color:#1D4ED8">7</span>
+      <span class="b-pnm">狼腾</span>
+      <span class="b-prr nums">全场44</span>
+      <span class="b-pv nums">9.5万</span>
+    </div>
+    </div><div class="b-gc">
+      <div class="b-gch" style="border-top-color:#22C55E">
+        <b style="color:#15803D">第 8 组</b>
+        <span class="nums">10:00–10:15 · 7人</span>
+        <span class="b-gct nums">119万</span>
+      </div>
+      <div class="b-pl">
+      <span class="b-pn nums" style="background:#DCFCE7;color:#15803D">1</span>
+      <span class="b-pnm">啸帆</span>
+      <span class="b-prr nums">全场12</span>
+      <span class="b-pv nums">38.2万</span>
+    </div><div class="b-pl">
+      <span class="b-pn nums" style="background:#DCFCE7;color:#15803D">2</span>
+      <span class="b-pnm">凤九</span>
+      <span class="b-prr nums">全场23</span>
+      <span class="b-pv nums">22.5万</span>
+    </div><div class="b-pl">
+      <span class="b-pn nums" style="background:#DCFCE7;color:#15803D">3</span>
+      <span class="b-pnm">啸恒</span>
+      <span class="b-prr nums">全场31</span>
+      <span class="b-pv nums">16.5万</span>
+    </div><div class="b-pl">
+      <span class="b-pn nums" style="background:#DCFCE7;color:#15803D">4</span>
+      <span class="b-pnm">玖豆</span>
+      <span class="b-prr nums">全场33</span>
+      <span class="b-pv nums">14.5万</span>
+    </div><div class="b-pl">
+      <span class="b-pn nums" style="background:#DCFCE7;color:#15803D">5</span>
+      <span class="b-pnm">狼佑</span>
+      <span class="b-prr nums">全场35</span>
+      <span class="b-pv nums">13.9万</span>
+    </div><div class="b-pl">
+      <span class="b-pn nums" style="background:#DCFCE7;color:#15803D">6</span>
+      <span class="b-pnm">啸阳</span>
+      <span class="b-prr nums">全场45</span>
+      <span class="b-pv nums">8.4万</span>
+    </div><div class="b-pl">
+      <span class="b-pn nums" style="background:#DCFCE7;color:#15803D">7</span>
+      <span class="b-pnm">啸昭</span>
+      <span class="b-prr nums">全场55</span>
+      <span class="b-pv nums">4.6万</span>
+    </div>
+    </div></div>
+  </section>
+  <footer class="b-ft">更新于 2026-09-30 09:00 · 共 58 人 · 数据口径：总音浪（含基线）</footer>
+</div></div></div>
+      <div class="stage-cap">方向 B · 赛事简报 · 桌面 1080px</div>
+    </div>
+    <aside class="side">
+      <span class="tag">方向 B</span>
+      <h2>赛事简报（浅色）</h2>
+      <dl>
+        <dt>气质</dt><dd>沿用产品现有浅色工具风 + 深蓝渐变报头，像每天发群里的赛事简报。信息密度高，长图导出、打印、微信转发都稳。</dd>
+        <dt>音浪·时长</dt><dd>报头一行五个汇总位，赛程时长直接给结论「每组 15 分钟 · 全程 2 小时（至 10:15）」，下面跟 8 个时段胶囊。</dd>
+        <dt>排行榜</dt><dd>紧凑条形榜，前三名次号带金色底，隔行浅灰底提高扫读性。</dd>
+        <dt>每日音浪</dt><dd>折线图下附一张按日合计小表，图文双轨——截图到群里没图也能读数。</dd>
+        <dt>PK 分组</dt><dd>三列窄卡，组头「组名 / 时段 · 人数 / 组总音浪」，行更密，一屏能放下更多组。</dd>
+        <dt>代价</dt><dd>氛围感弱于 A，头部主播的「高光感」靠名次号和组色撑，没有领奖台。</dd>
+      </dl>
+      <div class="rec">推荐场景：页面主要用途是「查自己在哪组 + 看数据」，需要经常导出长图发群。</div>
+      <div class="phone-cap">手机 360px · 同方向真实窄屏布局</div>
+      <div class="phone">
+<div class="pb">
+  <div class="pb-mast">
+    <b>星嗨艺创</b><span>PK 挑战赛 · 公示</span>
+    <dl><div><dt>总音浪</dt><dd class="nums">1734万</dd></div><div><dt>赛程</dt><dd class="nums">08:15 起 · 全程 2 小时</dd></div></dl>
+  </div>
+  <div class="pb-tabs"><span class="on">排行榜</span><span>每日音浪</span><span>PK 分组</span></div>
+  <div class="pb-rows"><div class="pb-row"><span class="nums rn top">1</span><b>浩龙</b><em style="color:#6D28D9;background:#EDE9FE">2组</em><span class="nums v">224万</span></div><div class="pb-row"><span class="nums rn top">2</span><b>玖玉</b><em style="color:#0E7490;background:#CFFAFE">3组</em><span class="nums v">186万</span></div><div class="pb-row"><span class="nums rn top">3</span><b>浩冬</b><em style="color:#0E7490;background:#CFFAFE">3组</em><span class="nums v">95.4万</span></div><div class="pb-row"><span class="nums rn ">4</span><b>狼兴</b><em style="color:#6D28D9;background:#EDE9FE">2组</em><span class="nums v">82.1万</span></div><div class="pb-row"><span class="nums rn ">5</span><b>狼澈</b><em style="color:#B45309;background:#FEF3C7">4组</em><span class="nums v">80.6万</span></div><div class="pb-row"><span class="nums rn ">6</span><b>浩哲</b><em style="color:#047857;background:#D1FAE5">5组</em><span class="nums v">68.4万</span></div><div class="pb-row"><span class="nums rn ">7</span><b>玖玥</b><em style="color:#BE123C;background:#FFE4E6">6组</em><span class="nums v">60.2万</span></div><div class="pb-row"><span class="nums rn ">8</span><b>南方楠</b><em style="color:#1D4ED8;background:#DBEAFE">7组</em><span class="nums v">55.1万</span></div></div>
+  <div class="pb-sec"><b>每日音浪</b><s>近 8 日</s></div>
+  <div class="pb-trend"><svg viewBox="0 0 312 110" width="100%" style="display:block"><line x1="44" y1="88" x2="302" y2="88" stroke="#EEF0F3" stroke-width="1"/><text x="38" y="91.5" text-anchor="end" font-size="9.5" fill="#9AA0AA">0万</text><line x1="44" y1="69" x2="302" y2="69" stroke="#EEF0F3" stroke-width="1"/><text x="38" y="72.5" text-anchor="end" font-size="9.5" fill="#9AA0AA">15万</text><line x1="44" y1="50" x2="302" y2="50" stroke="#EEF0F3" stroke-width="1"/><text x="38" y="53.5" text-anchor="end" font-size="9.5" fill="#9AA0AA">30万</text><line x1="44" y1="31" x2="302" y2="31" stroke="#EEF0F3" stroke-width="1"/><text x="38" y="34.5" text-anchor="end" font-size="9.5" fill="#9AA0AA">45万</text><line x1="44" y1="12" x2="302" y2="12" stroke="#EEF0F3" stroke-width="1"/><text x="38" y="15.5" text-anchor="end" font-size="9.5" fill="#9AA0AA">60万</text><text x="44" y="104" text-anchor="middle" font-size="9.5" fill="#9AA0AA">09-22</text><text x="80.85714285714286" y="104" text-anchor="middle" font-size="9.5" fill="#9AA0AA">09-23</text><text x="117.71428571428571" y="104" text-anchor="middle" font-size="9.5" fill="#9AA0AA">09-24</text><text x="154.57142857142856" y="104" text-anchor="middle" font-size="9.5" fill="#9AA0AA">09-25</text><text x="191.42857142857142" y="104" text-anchor="middle" font-size="9.5" fill="#9AA0AA">09-26</text><text x="228.28571428571428" y="104" text-anchor="middle" font-size="9.5" fill="#9AA0AA">09-27</text><text x="265.1428571428571" y="104" text-anchor="middle" font-size="9.5" fill="#9AA0AA">09-28</text><text x="302" y="104" text-anchor="middle" font-size="9.5" fill="#9AA0AA">09-29</text><polyline points="44.0,85.5 80.9,84.7 117.7,85.5 154.6,87.6 191.4,87.1 228.3,85.9 265.1,81.0 302.0,79.3" fill="none" stroke="#EC4899" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" opacity="0.85"/><circle cx="302" cy="79.3495465523584" r="2.6" fill="#EC4899"/><polyline points="44.0,60.6 80.9,75.9 117.7,79.0 154.6,64.4 191.4,74.3 228.3,67.2 265.1,12.0 302.0,66.7" fill="none" stroke="#8B5CF6" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" opacity="0.85"/><circle cx="302" cy="66.748724428592" r="2.6" fill="#8B5CF6"/><polyline points="44.0,69.7 80.9,75.9 117.7,78.0 154.6,79.0 191.4,77.5 228.3,79.1 265.1,52.0 302.0,50.3" fill="none" stroke="#06B6D4" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" opacity="0.85"/><circle cx="302" cy="50.26864573503303" r="2.6" fill="#06B6D4"/><polyline points="44.0,80.5 80.9,79.4 117.7,75.1 154.6,78.7 191.4,81.0 228.3,81.8 265.1,52.9 302.0,70.1" fill="none" stroke="#F59E0B" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" opacity="0.85"/><circle cx="302" cy="70.08050894899314" r="2.6" fill="#F59E0B"/><polyline points="44.0,74.3 80.9,75.3 117.7,83.7 154.6,82.8 191.4,79.1 228.3,84.1 265.1,74.5 302.0,61.0" fill="none" stroke="#10B981" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" opacity="0.85"/><circle cx="302" cy="60.95384750723757" r="2.6" fill="#10B981"/><polyline points="44.0,80.6 80.9,77.9 117.7,80.4 154.6,79.4 191.4,77.6 228.3,80.3 265.1,64.5 302.0,69.2" fill="none" stroke="#F43F5E" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" opacity="0.85"/><circle cx="302" cy="69.23445722237328" r="2.6" fill="#F43F5E"/><polyline points="44.0,78.6 80.9,61.3 117.7,86.6 154.6,79.1 191.4,85.5 228.3,82.1 265.1,73.5 302.0,68.4" fill="none" stroke="#3B82F6" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" opacity="0.85"/><circle cx="302" cy="68.40208090081732" r="2.6" fill="#3B82F6"/><polyline points="44.0,82.9 80.9,83.6 117.7,82.7 154.6,81.6 191.4,77.7 228.3,80.9 265.1,71.8 302.0,74.3" fill="none" stroke="#22C55E" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" opacity="0.85"/><circle cx="302" cy="74.25074774875642" r="2.6" fill="#22C55E"/></svg></div>
+  <div class="pb-sec"><b>PK 分组</b><s>组内按音浪降序</s></div>
+  <div class="pb-gc">
+    <div class="pb-gch" style="border-top-color:#8B5CF6;color:#6D28D9"><b>第 2 组</b><span class="nums">08:30–08:45</span><span class="nums t">399万</span></div>
+    <div class="pb-pl"><span class="nums" style="background:#EDE9FE;color:#6D28D9">1</span><b>浩龙</b><span class="nums v">224万</span></div><div class="pb-pl"><span class="nums" style="background:#EDE9FE;color:#6D28D9">2</span><b>狼兴</b><span class="nums v">82.1万</span></div><div class="pb-pl"><span class="nums" style="background:#EDE9FE;color:#6D28D9">3</span><b>啸安</b><span class="nums v">31.8万</span></div><div class="pb-pl"><span class="nums" style="background:#EDE9FE;color:#6D28D9">4</span><b>狼辰</b><span class="nums v">26.4万</span></div>
+    <div class="pb-more">上滑查看全部 8 组</div>
+  </div>
+  <footer class="pb-ft">更新于 2026-09-30 09:00</footer>
+</div></div>
+    </aside>
+  </div>
+</body>
+</html>

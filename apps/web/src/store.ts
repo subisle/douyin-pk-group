@@ -11,7 +11,9 @@ import {
 import {
   api,
   setToken,
+  DEFAULT_DISPLAY,
   UNAUTHORIZED_EVENT,
+  type DisplayConfig,
   type PlanBrief,
   type SourceBrief,
   type SourceList,
@@ -45,6 +47,9 @@ export type Patchable = Pick<
   'text' | 'metric' | 'days' | 'groupSize' | 'strategy' | 'title' | 'brand' | 'startTime' | 'intervalMin'
 >;
 
+/** 更新展示页模块显隐（部分字段） */
+export type DisplayPatch = Partial<DisplayConfig>;
+
 /** 一份看板快照，用于撤销/重做 */
 interface Snapshot {
   buckets: Bucket[];
@@ -64,6 +69,8 @@ interface State {
   title: string;
   /** 导出长图顶部的公会 / 品牌名 */
   brand: string;
+  /** 对外展示页模块显隐（保存方案时随 payload 落库） */
+  display: DisplayConfig;
   /** 第 1 组开赛时间 */
   startTime: string;
   /** 组间间隔（分钟） */
@@ -122,6 +129,7 @@ interface State {
   /* 动作 */
   setView: (v: View) => void;
   patch: (cfg: Partial<Patchable>) => void;
+  setDisplay: (cfg: DisplayPatch) => void;
   notify: (msg: string | null) => void;
   constraints: () => ConstraintSet;
   /** 只把开赛时间发给后端，互斥/固定位/间隔由后端内置条件权威决定 */
@@ -282,6 +290,7 @@ export const useStore = create<State>((set, get) => {
     strategy: 'snake',
     title: 'PK 挑战赛分组',
     brand: 'ST-001',
+    display: DEFAULT_DISPLAY,
     startTime: DEFAULT_CONSTRAINTS.schedule.start,
     intervalMin: DEFAULT_CONSTRAINTS.schedule.intervalMin,
     rosterSaving: false,
@@ -325,6 +334,8 @@ export const useStore = create<State>((set, get) => {
       set(cfg);
       if (cfg.text !== undefined) scheduleRosterSave(cfg.text);
     },
+
+    setDisplay: (cfg) => set((s) => ({ display: { ...s.display, ...cfg } })),
 
     constraints: () => {
       const { startTime, intervalMin, constraintSet } = get();
@@ -823,7 +834,7 @@ export const useStore = create<State>((set, get) => {
     },
 
     makeShareLink: async () => {
-      const { title, metric, days, buckets, brand, startTime, intervalMin, notify } = get();
+      const { title, metric, days, buckets, brand, display, startTime, intervalMin, notify } = get();
       if (!buckets.length) {
         notify('还没有分组结果');
         return null;
@@ -838,6 +849,7 @@ export const useStore = create<State>((set, get) => {
             metric,
             days,
             brand,
+            display,
             schedule: { start: startTime, intervalMin },
             buckets: buckets.map((b) => ({ name: b.name, players: b.players })),
           },
@@ -912,7 +924,7 @@ export const useStore = create<State>((set, get) => {
     },
 
     savePlanNow: async () => {
-      const { title, metric, days, buckets, brand, startTime, intervalMin, notify } = get();
+      const { title, metric, days, buckets, brand, display, startTime, intervalMin, notify } = get();
       if (!buckets.length) {
         notify('还没有分组结果');
         return;
@@ -927,6 +939,7 @@ export const useStore = create<State>((set, get) => {
             metric,
             days,
             brand,
+            display,
             schedule: { start: startTime, intervalMin },
             buckets: buckets.map((b) => ({ name: b.name, players: b.players })),
           },
@@ -958,6 +971,7 @@ export const useStore = create<State>((set, get) => {
           title: p.payload.title || p.title,
           metric: p.payload.metric ?? 'lastN',
           days: p.payload.days ?? 3,
+          display: { ...DEFAULT_DISPLAY, ...(p.payload.display ?? {}) },
           buckets: (p.payload.buckets ?? []).map((b) => ({
             id: bucketId(),
             name: b.name,

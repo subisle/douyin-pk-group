@@ -111,6 +111,34 @@ fn as_f64(v: &serde_json::Value, key: &str) -> f64 {
     v.get(key).and_then(|x| x.as_f64()).unwrap_or(0.0)
 }
 
+/// 展示页模块显隐，来自方案 payload 的 `display` 字段（管理端可配）。
+/// 老方案没有这个字段时全部按 true 处理，行为与旧版一致。
+#[derive(serde::Serialize, Clone, Copy)]
+struct DisplayConfig {
+    wave: bool,
+    ranking: bool,
+    daily: bool,
+    groups: bool,
+}
+
+impl Default for DisplayConfig {
+    fn default() -> Self {
+        Self { wave: true, ranking: true, daily: true, groups: true }
+    }
+}
+
+impl DisplayConfig {
+    fn from_payload(v: &serde_json::Value) -> Self {
+        let flag = |key: &str| v.get("display").and_then(|d| d.get(key)).and_then(|x| x.as_bool());
+        Self {
+            wave: flag("wave").unwrap_or(true),
+            ranking: flag("ranking").unwrap_or(true),
+            daily: flag("daily").unwrap_or(true),
+            groups: flag("groups").unwrap_or(true),
+        }
+    }
+}
+
 /// `GET /api/public/plans/{id}`：单个方案的公开展示数据
 pub async fn plan(State(st): State<std::sync::Arc<AppState>>, Path(id): Path<i64>) -> Response {
     let Some(row) = sqlite::get_published_plan(id) else {
@@ -133,6 +161,7 @@ pub async fn plan(State(st): State<std::sync::Arc<AppState>>, Path(id): Path<i64
         .get("days")
         .and_then(|d| d.as_i64())
         .unwrap_or(row.days);
+    let display = DisplayConfig::from_payload(&payload);
     let start = payload
         .get("schedule")
         .and_then(|s| s.get("start"))
@@ -208,9 +237,10 @@ pub async fn plan(State(st): State<std::sync::Arc<AppState>>, Path(id): Path<i64
     /* ---- 2. 实时音浪覆盖快照；查库失败降级为快照并标记 stale ---- */
     // 没人可查（全是未匹配主播）时本来就取不到实时音浪；
     // 这时候库要是还连不上，更不能让页面假装数据是实时的。
+    // 管理端关掉「音浪数值」时整个跳过：不查库、也不把音浪带给前端。
     let mut stale = !st.pools.any_available();
     let mut dates: Vec<String> = Vec::new();
-    if !person_ids.is_empty() {
+    if display.wave && !person_ids.is_empty() {
         match repos::get_waves(&st, &metric, days, Some(&person_ids), false, None).await {
             Ok(info) => {
                 dates = info.dates;
@@ -231,13 +261,11 @@ pub async fn plan(State(st): State<std::sync::Arc<AppState>>, Path(id): Path<i64
         }
     }
 
-    /* ---- 2b. 每日明细：曲线图 + 按日期切换分组明细 ----
-    必须赶在清 person_id 之前算：这一步还要靠 personId 关联每日序列。
-    一次查询同时喂给两处用途，不额外打库：
-    - trend：每组每日合计，画折线
-    - daily：每组每天、每人每天的明细，供展示页按「年-月-日」切换
-    取不到就两块都省略，前端退回纯列表展示，不留空壳图表。 */
-    let (trend, daily) = match repos::get_wave_series(&st, false, None).await {
+    /* ---- 2b. 每日明细：按日期切换分组明细 ----
+    管理端关掉「每日音浪」或「音浪数值」时直接省略（每日明细本质也是音浪数据）。
+    取不到就省略，前端退回纯列表展示，不留空壳。 */
+    let (trend, daily) = if display.daily && display.wave {
+        match repos::get_wave_series(&st, false, None).await {
         Ok(series) if !series.dates.is_empty() => {
             let dates = series.dates;
             let day_count = dates.len();
@@ -297,9 +325,12 @@ pub async fn plan(State(st): State<std::sync::Arc<AppState>>, Path(id): Path<i64
         }
         Ok(_) => (None, None),
         Err(e) => {
-            tracing::warn!(id, error = %e, "取每日音浪序列失败，曲线图与按日明细省略");
+            tracing::warn!(id, error = %e, "取每日音浪序列失败，按日明细省略");
             (None, None)
         }
+        }
+    } else {
+        (None, None)
     };
 
     /* ---- 3. 音浪定稿后统一重算：组内名次、组合计、全场名次 ----
@@ -327,7 +358,9 @@ pub async fn plan(State(st): State<std::sync::Arc<AppState>>, Path(id): Path<i64
         g.players.sort_by_key(|p| p.group_rank);
     }
 
-    let ranking: Vec<_> = {
+    // 管理端关掉「音浪数值」：数字一律不外泄——音浪清零、全场排行省略、组合计清零。
+    // 组内序号保留，它只反映组内顺序，公布页本来就在用。
+    let ranking: Vec<_> = if display.wave {
         let mut r = all_players;
         r.sort_by(|a, b| {
             a.rank
@@ -335,6 +368,15 @@ pub async fn plan(State(st): State<std::sync::Arc<AppState>>, Path(id): Path<i64
                 .then_with(|| a.group_rank.cmp(&b.group_rank))
         });
         r
+    } else {
+        for g in groups.iter_mut() {
+            for p in g.players.iter_mut() {
+                p.wave = 0.0;
+                p.rank = 0;
+            }
+            g.total = 0.0;
+        }
+        Vec::new()
     };
 
     Json(json!({
@@ -344,13 +386,14 @@ pub async fn plan(State(st): State<std::sync::Arc<AppState>>, Path(id): Path<i64
         "metric": metric,
         "days": days,
         "schedule": { "start": start, "intervalMin": interval },
+        "display": display,
         "createdAt": row.created_at,
         "dates": dates,
         "stale": stale,
         "counts": {
             "groups": groups.len(),
-            "players": ranking.len(),
-            "totalWave": ranking.iter().map(|p| p.wave).sum::<f64>(),
+            "players": if display.wave { ranking.len() } else { groups.iter().map(|g| g.count).sum() },
+            "totalWave": if display.wave { ranking.iter().map(|p| p.wave).sum::<f64>() } else { 0.0 },
         },
         "groups": groups,
         "ranking": ranking,
