@@ -170,7 +170,7 @@ export interface PublicTrend {
   series: Array<{ name: string; values: number[] }>;
 }
 
-/** 按日期明细：每组每天、每人每天的音浪（后端 trend 同一份查询里一起算出） */
+/** 按日期明细：每组每天、每人每天的音浪与开播状态 */
 export interface PublicDaily {
   /** 采集日期，正序（老 → 新） */
   dates: string[];
@@ -178,7 +178,13 @@ export interface PublicDaily {
     name: string;
     /** 该组每日合计，与 trend.series 同源 */
     values: number[];
-    players: Array<{ name: string; leader?: string; values: number[] }>;
+    players: Array<{
+      name: string;
+      leader?: string;
+      values: number[];
+      /** 每天是否开播（daily_metric.is_live），与 values 下标一一对应；1=开播 0=未开播 */
+      live?: number[];
+    }>;
   }>;
 }
 
@@ -191,6 +197,8 @@ export interface PublicPlan {
   schedule: { start: string; intervalMin: number };
   /** 展示页模块显隐（老方案缺省全开） */
   display?: DisplayConfig;
+  /** true = 最新采集日就是今天（比赛日）；PK 分组页只在比赛日展示 */
+  matchDay?: boolean;
   createdAt: string;
   /** 参与统计的采集日期（倒序） */
   dates: string[];

@@ -307,7 +307,14 @@ pub async fn plan(State(st): State<std::sync::Arc<AppState>>, Path(id): Path<i64
                                 .and_then(|id| series.series.get(id))
                                 .map(|v| v.iter().map(|x| x.round() as i64).collect())
                                 .unwrap_or_else(|| vec![0; day_count]);
-                            json!({ "name": p.name, "leader": p.leader, "values": values })
+                            // 当天是否开播（daily_metric.is_live），与 values 下标一一对应
+                            let live: Vec<i8> = p
+                                .person_id
+                                .as_deref()
+                                .and_then(|id| series.live.get(id))
+                                .cloned()
+                                .unwrap_or_else(|| vec![0; day_count]);
+                            json!({ "name": p.name, "leader": p.leader, "values": values, "live": live })
                         })
                         .collect();
                     json!({
@@ -379,6 +386,11 @@ pub async fn plan(State(st): State<std::sync::Arc<AppState>>, Path(id): Path<i64
         Vec::new()
     };
 
+    // 比赛日 = 最新采集日就是今天（+08:00）。分组页只在比赛日展示——
+    // 非比赛日没有对局，名单挂出去只会让人困惑；这是「后端支持显示和不显示」的那一刀。
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let match_day = dates.first().map(|d| d == &today).unwrap_or(false);
+
     Json(json!({
         "id": row.id,
         "title": row.title,
@@ -387,6 +399,7 @@ pub async fn plan(State(st): State<std::sync::Arc<AppState>>, Path(id): Path<i64
         "days": days,
         "schedule": { "start": start, "intervalMin": interval },
         "display": display,
+        "matchDay": match_day,
         "createdAt": row.created_at,
         "dates": dates,
         "stale": stale,

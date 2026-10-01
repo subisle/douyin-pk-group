@@ -37,13 +37,15 @@ pub struct WaveCache {
     pub series: HashMap<String, Cached<WaveSeries>>,
 }
 
-/// 每日音浪序列（曲线图数据源）。
+/// 每日音浪序列（展示页每日排名 / 曲线数据源）。
 /// `dates` 正序（老 → 新），`series` 里每个人一条与 dates 等长、下标一一对应的数组；
 /// 某天没数据就补 0，这样前端可以直接按下标画折线，不用再对齐日期。
+/// `live` 与 series 同构，1 = 当天开播、0 = 未开播（B 库没有该字段，恒为 0）。
 #[derive(Clone, Debug, Default)]
 pub struct WaveSeries {
     pub dates: Vec<String>,
     pub series: HashMap<String, Vec<f64>>,
+    pub live: HashMap<String, Vec<i8>>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]

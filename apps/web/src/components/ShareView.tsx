@@ -1,13 +1,13 @@
 /**
- * 对外展示页（只读、无需口令）：/s/:planId · 苹果风
+ * 对外展示页（只读、无需口令）：/s/:planId 与 /st 公告页 · 苹果风
  *
- * 信息结构四块，每块都由管理端「展示页显示」开关控制（随方案落库）：
- *   1. 头部汇总  品牌 + 方案名 + 总音浪大数字 + 人数 / 组数 / 赛程时长
- *   2. 排行榜    全场名次（音浪关闭时后端直接不返回，模块整体消失）
- *   3. 每日音浪  按日合计圆角横条（不做曲线图）
- *   4. PK 分组   组卡 + 组内名单（组内按音浪名次排）
+ * 导航栏置顶，页面内三个分页（纯组件状态切换，URL 固定不变）：
+ *   1. 每日音浪  支持选择日期的当日排名，每行带 开播 / 未开播 状态（daily_metric.is_live）
+ *   2. PK 分组   只在比赛日展示（后端 matchDay：最新采集日 == 今天），组内按音浪名次排
+ *   3. 总音浪    全场累计排名，同样带开播状态（最新一天）
  *
- * 音浪数值关闭时：页面只剩名单和赛程，任何音浪数字都不下发（后端已清零）。
+ * 管理端「展示页显示」开关继续生效；音浪数值关闭时后端不下发任何数字，
+ * 每日/总榜模块随之消失，页面只剩分组名单。
  * 数据来自 /api/public/plans/:id；榜单页开着时每分钟静默刷新一次。
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
@@ -29,25 +29,19 @@ function withBuiltinGroups(groups: PublicGroup[]): PublicGroup[] {
   return out;
 }
 
-function fmtDuration(min: number): string {
-  const h = Math.floor(min / 60);
-  const m = min % 60;
-  return h ? (m ? `${h} 小时 ${m} 分` : `${h} 小时`) : `${m} 分钟`;
-}
-
 function shortGroup(name: string): string {
   const m = name.match(/(\d+)/);
   return m ? `${m[1]}组` : name;
 }
 
 /* ------------------------------ 页内分页 ------------------------------ */
-/** 模块页：纯组件状态切换（不动 URL），对外链接固定就是 /s/:planId */
-type Tab = 'rank' | 'daily' | 'groups';
+/** 模块页：纯组件状态切换（不动 URL），对外链接固定就是 /s/:planId 或 /st */
+type Tab = 'daily' | 'groups' | 'total';
 
 const TAB_META: Array<{ key: Tab; label: string }> = [
-  { key: 'rank', label: '音浪排行榜' },
   { key: 'daily', label: '每日音浪' },
   { key: 'groups', label: 'PK 分组' },
+  { key: 'total', label: '总音浪' },
 ];
 
 export function ShareView({ planId }: { planId?: string }) {
@@ -94,7 +88,9 @@ export function ShareView({ planId }: { planId?: string }) {
   }, []);
 
   // 页内分页：纯组件状态，URL 不变；切换时如果滚过了切换条，滚回切换条位置
-  const [tab, setTab] = useState<Tab>('rank');
+  const [tab, setTab] = useState<Tab>('daily');
+  /** 选中的日期下标；-1 = 默认最新一天（数据刷新日期变多后自动跟上） */
+  const [dayIdx, setDayIdx] = useState(-1);
   const tabsRef = useRef<HTMLElement | null>(null);
   const goTab = (t: Tab) => {
     setTab(t);
@@ -104,23 +100,46 @@ export function ShareView({ planId }: { planId?: string }) {
     });
   };
 
-  // 排行榜行里要显示「组别」胶囊，ranking 本身不带组名，用分组数据建一张名字映射。
-  // hooks 必须在早退分支之前调用，否则加载态 → 数据态切换时钩子数量会变（React #310）。
-  const groupOf = useMemo(() => {
-    const m = new Map<string, PublicGroup>();
-    if (plan) for (const g of plan.groups) for (const p of g.players) m.set(p.name, g);
-    return m;
+  /* ---- 数据派生（hooks 必须全部在早退 return 之前，否则加载态切换会炸 React #310） ---- */
+
+  // 每日明细扁平化：所有参赛者的每日音浪 + 开播标记
+  const dailyPlayers = useMemo(() => {
+    if (!plan?.daily) return [];
+    const out: Array<{ name: string; leader?: string; values: number[]; live: number[] }> = [];
+    for (const g of plan.daily.groups) {
+      for (const p of g.players) {
+        out.push({ name: p.name, leader: p.leader, values: p.values, live: p.live ?? [] });
+      }
+    }
+    return out;
   }, [plan]);
 
-  // 每日合计：各组当天音浪加总（后端已剔除基线日），最近一天的排最上
-  const dayTotals = useMemo(() => {
-    if (!plan?.daily) return [];
-    const { dates, groups: gs } = plan.daily;
-    return dates
-      .map((d, i) => ({ date: d, total: gs.reduce((a, g) => a + (g.values[i] ?? 0), 0) }))
-      .filter((x) => x.total > 0)
-      .reverse();
-  }, [plan]);
+  const dayDates = plan?.daily?.dates ?? [];
+  // 选中的日期下标：默认最新一天；数据刷新（日期变多）后夹回有效范围
+  const safeDayIdx = dayDates.length ? Math.min(dayIdx < 0 ? dayDates.length - 1 : dayIdx, dayDates.length - 1) : 0;
+
+  // 总榜带开播状态（取每日序列里最新一天的 is_live）
+  const totalRanking = useMemo(() => {
+    if (!plan || !(plan.display ?? DEFAULT_DISPLAY).ranking) return [];
+    const liveOf = new Map(dailyPlayers.map((p) => [p.name, p.live[p.live.length - 1] ?? 0]));
+    return plan.ranking.map((p) => ({ ...p, live: liveOf.get(p.name) ?? 0 }));
+  }, [plan, dailyPlayers]);
+
+  // 当日排名：按选中日期的音浪降序，同分并列（并列后跳号）
+  const dayRanking = useMemo(() => {
+    if (!dailyPlayers.length) return [];
+    const sorted = dailyPlayers
+      .map((p) => ({ name: p.name, leader: p.leader, wave: p.values[safeDayIdx] ?? 0, live: p.live[safeDayIdx] ?? 0 }))
+      .sort((a, b) => b.wave - a.wave || a.name.localeCompare(b.name, 'zh-Hans-CN'));
+    let lastWave = Number.NaN;
+    let lastRank = 0;
+    return sorted.map((p, i) => {
+      const rank = p.wave === lastWave ? lastRank : i + 1;
+      lastWave = p.wave;
+      lastRank = rank;
+      return { ...p, rank };
+    });
+  }, [dailyPlayers, safeDayIdx]);
 
   if (error) {
     return (
@@ -152,32 +171,37 @@ export function ShareView({ planId }: { planId?: string }) {
   const realCount = plan.groups.length;
   const step = Math.max(1, plan.schedule.intervalMin);
   const wave = display.wave;
-  const metricLabel = plan.metric === 'total' ? '总音浪' : `近 ${plan.days} 天音浪`;
-  const playerCount = wave
-    ? plan.counts.players
-    : plan.groups.reduce((a, g) => a + g.count, 0);
-
-  const fullMin = groups.length * step;
-  // 归一化分母必须取最大日合计；取 dayTotals[0]（最近一天）会让更高的一天顶满溢出
-  const maxDay = Math.max(...dayTotals.map((x) => x.total), 1);
-  const ranking = wave && display.ranking ? plan.ranking : [];
 
   // 分页：只把「开着且真有内容」的模块放进切换条；只有一个模块时不渲染切换条
   const allowed: Tab[] = [];
-  if (wave && display.ranking && ranking.length > 0) allowed.push('rank');
-  if (wave && display.daily && dayTotals.length > 0) allowed.push('daily');
-  if (display.groups) allowed.push('groups');
-  // 当前生效的分页：状态失效（模块被关/没数据）就回退到第一个可用的
+  if (wave && display.daily && dailyPlayers.length > 0) allowed.push('daily');
+  // 分组页只在比赛日展示（后端 matchDay：最新采集日 == 今天）
+  if (display.groups && plan.matchDay) allowed.push('groups');
+  if (wave && display.ranking && totalRanking.length > 0) allowed.push('total');
   const active = allowed.includes(tab) ? tab : allowed[0];
+  // 选中日期切到别的页再回来还保持原选择；数据缺失时夹回最新
+  const selIdx = Math.min(safeDayIdx, Math.max(0, dayDates.length - 1));
+
+  const renderRankRow = (p: { rank: number; name: string; wave: number; live: number }, showBadge: boolean) => (
+    <div key={p.name} className="sh-rank">
+      <span className={`sh-rank-n ${p.rank <= 3 ? `m${p.rank}` : ''}`}>{p.rank}</span>
+      <span className="sh-rank-name">{p.name}</span>
+      {showBadge && (
+        <span className={`sh-live ${p.live ? 'on' : 'off'}`}>{p.live ? '开播' : '未开播'}</span>
+      )}
+      <span className="sh-rank-v nums">{formatWave(p.wave)}</span>
+    </div>
+  );
 
   return (
     <div className="sh">
-      {/* ------------------------------ 毛玻璃顶栏 ------------------------------ */}
+      {/* ------------------------------ 导航栏（头部） ------------------------------ */}
       <nav className="sh-nav">
         <div className="sh-nav-in">
           <span className="sh-nav-brand">{plan.brand || 'PK 挑战赛'}</span>
           <span className="sh-nav-title">{plan.title}</span>
           <span className="flex-1" />
+          {plan.stale && <span className="sh-badge sh-badge-warn" style={{ marginTop: 0 }}>快照数据</span>}
           <button type="button" className="sh-btn sh-btn-ghost" onClick={() => setNonce((n) => n + 1)} aria-label="刷新">
             <RefreshIcon size={14} />
           </button>
@@ -185,72 +209,6 @@ export function ShareView({ planId }: { planId?: string }) {
       </nav>
 
       <div className="sh-wrap">
-        {/* ------------------------------ 头部：音浪 · 时长 ------------------------------ */}
-        <header className="sh-hero">
-          <p className="sh-eyebrow">{plan.brand || 'PK 挑战赛'}</p>
-          <h1 className="sh-h1">{plan.title}</h1>
-          {wave && (
-            <>
-              <div className="sh-figure nums">{formatWave(plan.counts.totalWave)}</div>
-              <p className="sh-cap">
-                {metricLabel}
-                {plan.dates[0] ? ` · 数据截至 ${plan.dates[0]}` : ''}
-              </p>
-            </>
-          )}
-          {plan.stale && <span className="sh-badge sh-badge-warn">实时数据暂不可用 · 显示方案快照</span>}
-        </header>
-
-        {/* 汇总条：音浪关掉时只剩赛程信息 */}
-        <dl className="sh-strip">
-          {wave && (
-            <div className="sh-cell">
-              <dt>{metricLabel}</dt>
-              <dd className="nums">{formatWave(plan.counts.totalWave)}</dd>
-            </div>
-          )}
-          <div className="sh-cell">
-            <dt>参赛人数</dt>
-            <dd className="nums">
-              {playerCount}
-              <small>人</small>
-            </dd>
-          </div>
-          <div className="sh-cell">
-            <dt>分组</dt>
-            <dd className="nums">
-              {realCount}
-              <small>组</small>
-            </dd>
-          </div>
-          <div className="sh-cell">
-            <dt>赛程时长</dt>
-            <dd className="nums">
-              {fmtDuration(fullMin)}
-              <small>
-                · {plan.schedule.start} 起 · {step} 分/组 · 至 {slotTime(groups.length, plan.schedule)}
-              </small>
-            </dd>
-          </div>
-        </dl>
-
-        {/* 赛程胶囊条 */}
-        <div className="sh-slots hide-scrollbar">
-          {groups.map((g, i) => {
-            const c = groupColor(i);
-            return (
-              <span key={g.name} className="sh-slot">
-                <i style={{ background: c.bar }} />
-                <b>{g.name}</b>
-                <span className="nums">
-                  {slotTime(i, plan.schedule)}–{slotTime(i + 1, plan.schedule)}
-                </span>
-                {g.builtin && <span style={{ color: 'var(--sh-ink3)' }}>待补员</span>}
-              </span>
-            );
-          })}
-        </div>
-
         {/* ------------------------------ 分页切换（页内状态，URL 不变） ------------------------------ */}
         {allowed.length > 1 && (
           <nav ref={tabsRef} className="sh-tabs">
@@ -271,51 +229,42 @@ export function ShareView({ planId }: { planId?: string }) {
           </nav>
         )}
 
-        {/* ------------------------------ 排行榜 ------------------------------ */}
-        {active === 'rank' && ranking.length > 0 && (
-          <section className="sh-sec">
+        {/* ------------------------------ 第一页：每日音浪排名 ------------------------------ */}
+        {active === 'daily' && dayDates.length > 0 && (
+          <section className="sh-sec sh-sec-first">
             <div className="sh-sec-head">
-              <p>{metricLabel} · 全场名次 · 共 {ranking.length} 人</p>
+              <p>{dayDates[selIdx]} 音浪排名 · 点日期切换</p>
+            </div>
+            <div className="sh-slots hide-scrollbar" style={{ marginTop: 0 }}>
+              {dayDates.map((d, i) => (
+                <button
+                  key={d}
+                  type="button"
+                  className={`sh-slot sh-daychip ${i === selIdx ? 'on' : ''}`}
+                  onClick={() => setDayIdx(i)}
+                >
+                  {i === selIdx ? '● ' : ''}
+                  {d}
+                </button>
+              ))}
             </div>
             <div className="sh-card sh-ranks">
-              {ranking.map((p) => (
-                <div key={p.name} className="sh-rank">
-                  <span className={`sh-rank-n ${p.rank <= 3 ? `m${p.rank}` : ''}`}>{p.rank}</span>
-                  <span className="sh-rank-name">{p.name}</span>
-                  <span className="sh-rank-g">{shortGroup(groupOf.get(p.name)?.name ?? '')}</span>
-                  <span className="sh-rank-v nums">{formatWave(p.wave)}</span>
-                </div>
-              ))}
+              {dayRanking.map((p) => renderRankRow(p, true))}
             </div>
           </section>
         )}
 
-        {/* ------------------------------ 每日音浪 ------------------------------ */}
-        {active === 'daily' && dayTotals.length > 0 && (
-          <section className="sh-sec">
-            <div className="sh-sec-head">
-              <p>近 {dayTotals.length} 日 · 全体参赛者合计</p>
-            </div>
-            <div className="sh-card sh-days">
-              {dayTotals.map((d) => (
-                <div key={d.date} className="sh-day">
-                  <span className="sh-day-d">{d.date.slice(5)}</span>
-                  <span className="sh-day-track">
-                    <i style={{ width: `${Math.max(4, (d.total / maxDay) * 100)}%` }} />
-                  </span>
-                  <span className="sh-day-v nums">{formatWave(d.total)}</span>
-                </div>
-              ))}
-            </div>
-          </section>
-        )}
-
-        {/* ------------------------------ PK 分组 ------------------------------ */}
+        {/* ------------------------------ 第二页：PK 分组（仅比赛日） ------------------------------ */}
         {active === 'groups' &&
           (realCount > 0 ? (
-            <section className="sh-sec">
+            <section className="sh-sec sh-sec-first">
               <div className="sh-sec-head">
-                <p>共 {realCount} 组{wave ? ' · 组内按音浪名次排列' : ''}</p>
+                <p>
+                  共 {realCount} 组{wave ? ' · 组内按音浪名次排列' : ''}
+                  {' · '}
+                  {plan.schedule.start} 起 · 每组 {step} 分钟 · 全程 {Math.floor((groups.length * step) / 60)} 小时
+                  {(groups.length * step) % 60 ? ` ${(groups.length * step) % 60} 分` : ''}
+                </p>
               </div>
               <div className="sh-groups">
                 {groups.map((g, i) => {
@@ -351,15 +300,26 @@ export function ShareView({ planId }: { planId?: string }) {
               </div>
             </section>
           ) : (
-            <section className="sh-sec">
+            <section className="sh-sec sh-sec-first">
               <div className="sh-card sh-empty">这个方案还没有分组</div>
             </section>
           ))}
 
+        {/* ------------------------------ 第三页：总音浪 ------------------------------ */}
+        {active === 'total' && totalRanking.length > 0 && (
+          <section className="sh-sec sh-sec-first">
+            <div className="sh-sec-head">
+              <p>累计总音浪 · 全场名次 · 共 {totalRanking.length} 人 · 开播状态取最新一天</p>
+            </div>
+            <div className="sh-card sh-ranks">
+              {totalRanking.map((p) => renderRankRow(p, true))}
+            </div>
+          </section>
+        )}
+
         <footer className="sh-ft">
           更新于 {new Date(plan.createdAt).toLocaleString('zh-CN', { hour12: false })}
-          <br />
-          {wave ? '音浪数据实时读取 · 请勿外传' : '名单仅供参考 · 按组名找到自己那一组，按组头时段开赛'}
+          {plan.dates[0] ? ` · 数据截至 ${plan.dates[0]}` : ''}
         </footer>
       </div>
     </div>

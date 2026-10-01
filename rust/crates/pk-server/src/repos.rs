@@ -173,7 +173,7 @@ pub async fn get_wave_series(
     // 折线图要正序：老 → 新
     dates.reverse();
 
-    let cache_key = format!("{id}:series:v1");
+    let cache_key = format!("{id}:series:v2-live");
     if !force {
         let cache = st.cache.lock().expect("cache 锁 poisoned");
         if let Some(hit) = cache
@@ -186,6 +186,7 @@ pub async fn get_wave_series(
     }
 
     let mut series: HashMap<String, Vec<f64>> = HashMap::new();
+    let mut live: HashMap<String, Vec<i8>> = HashMap::new();
     if !dates.is_empty() {
         let sql = inline_dates(dialect_of(&id).series_sql, &dates)?;
         let rows = mysql::query(&st.pools, &id, &sql).await?;
@@ -203,11 +204,14 @@ pub async fn get_wave_series(
                 continue;
             };
             let v: f64 = r.try_get::<Option<f64>, _>(2).ok().flatten().unwrap_or(0.0);
-            series.entry(pid).or_insert_with(|| vec![0.0; dates.len()])[i] = v;
+            // MAX(is_live) 聚出来的可能是 i8/int；解析不了按未开播处理
+            let l: i8 = r.try_get::<Option<i8>, _>(3).ok().flatten().unwrap_or(0);
+            series.entry(pid.clone()).or_insert_with(|| vec![0.0; dates.len()])[i] = v;
+            live.entry(pid).or_insert_with(|| vec![0; dates.len()])[i] = l;
         }
     }
 
-    let out = WaveSeries { dates, series };
+    let out = WaveSeries { dates, series, live };
     st.cache
         .lock()
         .expect("cache 锁 poisoned")

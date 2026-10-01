@@ -14,8 +14,8 @@ const WAVES_A: &str = "SELECT person_id AS k, CAST(SUM(wave) AS DOUBLE) AS w FRO
      WHERE wave_reliable = 1 AND DATE_FORMAT(biz_date, '%Y-%m-%d') IN (?PLACEHOLDERS?)
      GROUP BY person_id";
 
-/// A 库每日序列：展示页曲线图用。返回 k（人员 id）/ d（日期）/ w（当日音浪）
-const SERIES_A: &str = "SELECT person_id AS k, DATE_FORMAT(biz_date, '%Y-%m-%d') AS d, CAST(SUM(wave) AS DOUBLE) AS w FROM daily_metric
+/// A 库每日序列：展示页每日排名用。返回 k（人员 id）/ d（日期）/ w（当日音浪）/ live（当日是否开播）
+const SERIES_A: &str = "SELECT person_id AS k, DATE_FORMAT(biz_date, '%Y-%m-%d') AS d, CAST(SUM(wave) AS DOUBLE) AS w, MAX(is_live) AS live FROM daily_metric
      WHERE wave_reliable = 1 AND DATE_FORMAT(biz_date, '%Y-%m-%d') IN (?PLACEHOLDERS?)
      GROUP BY person_id, d";
 
@@ -30,7 +30,7 @@ const WAVES_B: &str =
      WHERE DATE_FORMAT(ws.date, '%Y-%m-%d') IN (?PLACEHOLDERS?)
      GROUP BY a.person_id";
 
-const SERIES_B: &str = "SELECT a.person_id AS k, DATE_FORMAT(ws.date, '%Y-%m-%d') AS d, CAST(SUM(ws.wave_value) AS DOUBLE) AS w FROM wave_stats ws
+const SERIES_B: &str = "SELECT a.person_id AS k, DATE_FORMAT(ws.date, '%Y-%m-%d') AS d, CAST(SUM(ws.wave_value) AS DOUBLE) AS w, 0 AS live FROM wave_stats ws
      JOIN accounts a ON a.anchor_id = ws.anchor_id
      WHERE DATE_FORMAT(ws.date, '%Y-%m-%d') IN (?PLACEHOLDERS?)
      GROUP BY a.person_id, d";

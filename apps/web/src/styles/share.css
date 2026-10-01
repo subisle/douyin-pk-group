@@ -288,6 +288,41 @@
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 4px 14px rgba(0, 0, 0, 0.04);
 }
 
+/* 开播 / 未开播状态徽标（daily_metric.is_live） */
+.sh-live {
+  flex: none;
+  font-size: 10.5px;
+  font-weight: 700;
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+.sh-live.on {
+  background: #e8f8ee;
+  color: #027a48;
+}
+.sh-live.off {
+  background: rgba(0, 0, 0, 0.05);
+  color: var(--sh-ink3);
+}
+
+/* 每日音浪的日期切换胶囊 */
+.sh-daychip {
+  cursor: pointer;
+  border: none;
+  font-family: inherit;
+  transition: background 0.15s ease, box-shadow 0.15s ease, color 0.15s ease;
+}
+.sh-daychip:hover {
+  color: var(--sh-ink);
+}
+.sh-daychip.on {
+  background: var(--sh-blue);
+  color: #fff;
+}
+.sh-daychip.on:hover {
+  color: #fff;
+}
+
 /* 排行榜 */
 .sh-ranks {
   display: grid;
