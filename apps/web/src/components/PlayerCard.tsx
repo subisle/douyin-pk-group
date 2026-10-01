@@ -254,14 +254,17 @@ export function DragPreview({
   color,
   index,
   pinned,
+  width,
 }: {
   player: Player;
   color: GroupColor;
   index: number;
   pinned?: boolean;
+  /** 原卡片的实测宽度。缺省时回落到 CARD_SHELL 自己的 w-full */
+  width?: number;
 }) {
   return (
-    <div className={`${CARD_SHELL} shadow-drag ring-2 ring-brand`} style={{ background: color.soft }}>
+    <div className={`${CARD_SHELL} shadow-drag ring-2 ring-brand`} style={{ background: color.soft, width }}>
       <CardContent player={player} color={color} index={index} pinned={pinned} />
     </div>
   );

@@ -102,6 +102,15 @@ export function GroupBoard({
   const locked = useStore((s) => s.locked);
   const toggleLock = useStore((s) => s.toggleLock);
   const [active, setActive] = useState<ActiveDrag | null>(null);
+  /**
+   * 拖拽中 overlay 的尺寸，必须和原节点一致。
+   *
+   * overlay 挂在 DndContext 根下的 fixed 容器里，那个容器是 shrink-to-fit 的，
+   * 所以 CARD_SHELL 的 w-full 在这里退化成内容宽度。原卡片是撑满组列的，
+   * 一旦 overlay 变窄，从卡片右侧抓起时光标就落到框外了——看着像「鼠标离框很远」，
+   * 而且 pointerWithin 按光标判命中，光标和看到的框错位，投递也跟着偏远。
+   */
+  const [activeSize, setActiveSize] = useState<number | null>(null);
   const cs = useMemo(() => constraints(), [constraints]);
   const schedule = { start: startTime, intervalMin };
 
@@ -196,6 +205,7 @@ export function GroupBoard({
   };
 
   const onDragStart = (e: DragStartEvent) => {
+    setActiveSize(e.active.rect.current?.initial?.width ?? null);
     setActive({ kind: e.active.data.current?.type === 'group' ? 'group' : 'player', id: String(e.active.id) });
     beginDrag();
   };
@@ -205,11 +215,13 @@ export function GroupBoard({
     if (e.over) applyDrop(String(e.active.id), String(e.over.id), e.active.data.current?.type === 'group' ? 'group' : 'player');
     endDrag();
     setActive(null);
+    setActiveSize(null);
   };
 
   const onDragCancel = () => {
     endDrag();
     setActive(null);
+    setActiveSize(null);
   };
 
   const activeId = active?.id ?? null;
@@ -258,7 +270,10 @@ export function GroupBoard({
       </SortableContext>
       <DragOverlay>
         {activeBucket ? (
-          <div className="rounded-panel border-t-[5px] bg-surface p-3 shadow-drag" style={{ borderTopColor: groupColor(activeBucketIndex).bar }}>
+          <div
+            className="rounded-panel border-t-[5px] bg-surface p-3 shadow-drag"
+            style={{ borderTopColor: groupColor(activeBucketIndex).bar, width: activeSize ?? undefined }}
+          >
             <div className="rounded-2xl px-3.5 py-2.5" style={{ background: groupColor(activeBucketIndex).soft }}>
               <div className="truncate text-[15px] font-bold leading-5" style={{ color: groupColor(activeBucketIndex).ink }}>
                 {activeBucket.name}
@@ -274,6 +289,7 @@ export function GroupBoard({
             color={groupColor(buckets.findIndex((b) => b.players.some((p) => p.key === activePlayer.key)))}
             index={activeIndex + 1}
             pinned={Boolean(isPinnedName(activePlayer.name, cs))}
+            width={activeSize ?? undefined}
           />
         ) : null}
       </DragOverlay>
