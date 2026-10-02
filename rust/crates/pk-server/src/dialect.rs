@@ -10,14 +10,32 @@ const ANCHORS_A: &str = "SELECT id, name, avatar_url, status FROM person
 const DATES_A: &str =
     "SELECT DATE_FORMAT(biz_date, '%Y-%m-%d') AS d FROM daily_metric GROUP BY d ORDER BY d DESC";
 const BASELINE_A: &str = "SELECT DATE_FORMAT(MIN(biz_date), '%Y-%m-%d') AS d FROM daily_metric";
-const WAVES_A: &str = "SELECT person_id AS k, CAST(SUM(wave) AS DOUBLE) AS w FROM daily_metric
-     WHERE wave_reliable = 1 AND DATE_FORMAT(biz_date, '%Y-%m-%d') IN (?PLACEHOLDERS?)
-     GROUP BY person_id";
+const WAVES_A: &str = "SELECT k, CAST(SUM(w) AS DOUBLE) AS w FROM (
+     SELECT person_id AS k, SUM(wave) AS w FROM daily_metric
+      WHERE wave_reliable = 1 AND DATE_FORMAT(biz_date, '%Y-%m-%d') IN (?PLACEHOLDERS?)
+      GROUP BY person_id
+     UNION ALL
+     SELECT ws.person_id AS k, SUM(ws.wave_value) AS w
+      FROM wave_snapshot ws JOIN account a ON a.anchor_id = ws.anchor_id AND a.is_primary = 0
+      WHERE DATE_FORMAT(ws.biz_date, '%Y-%m-%d') IN (?PLACEHOLDERS?)
+      GROUP BY ws.person_id
+   ) t GROUP BY k";
 
-/// A 库每日序列：展示页每日排名用。返回 k（人员 id）/ d（日期）/ w（当日音浪）/ live（当日是否开播）
-const SERIES_A: &str = "SELECT person_id AS k, DATE_FORMAT(biz_date, '%Y-%m-%d') AS d, CAST(SUM(wave) AS DOUBLE) AS w, MAX(is_live) AS live FROM daily_metric
-     WHERE wave_reliable = 1 AND DATE_FORMAT(biz_date, '%Y-%m-%d') IN (?PLACEHOLDERS?)
-     GROUP BY person_id, d";
+/// A 库每日序列：展示页每日排名用。返回 k（人员 id）/ d（日期）/ w（当日音浪）/ live（当日是否开播）。
+/// 一人多号：daily_metric 每人每天一行（主号口径），副号音浪从 wave_snapshot（is_primary=0）并进来。
+/// wave_snapshot.wave_value 是当日值语义（已验证：主号快照与 daily_metric.wave 962 对中 958 相等）。
+const SERIES_A: &str = "SELECT k, d, CAST(SUM(w) AS DOUBLE) AS w, MAX(live) AS live FROM (
+     SELECT person_id AS k, DATE_FORMAT(biz_date, '%Y-%m-%d') AS d, SUM(wave) AS w, MAX(is_live) AS live
+      FROM daily_metric
+      WHERE wave_reliable = 1 AND DATE_FORMAT(biz_date, '%Y-%m-%d') IN (?PLACEHOLDERS?)
+      GROUP BY person_id, d
+     UNION ALL
+     SELECT ws.person_id AS k, DATE_FORMAT(ws.biz_date, '%Y-%m-%d') AS d, SUM(ws.wave_value) AS w,
+            CASE WHEN SUM(ws.wave_value) > 0 THEN 1 ELSE 0 END AS live
+      FROM wave_snapshot ws JOIN account a ON a.anchor_id = ws.anchor_id AND a.is_primary = 0
+      WHERE DATE_FORMAT(ws.biz_date, '%Y-%m-%d') IN (?PLACEHOLDERS?)
+      GROUP BY ws.person_id, d
+   ) t GROUP BY k, d";
 
 /// B：userxs —— persons / accounts / wave_stats（anchor_id 是关联键）
 const ANCHORS_B: &str =
@@ -46,7 +64,15 @@ pub struct Dialect {
 }
 
 pub fn dialect_of(id: &str) -> Dialect {
-    if id == "B" {
+    if id == "LOCAL" {
+        Dialect {
+            anchors_sql: ANCHORS_A,
+            dates_sql: DATES_A,
+            baseline_sql: Some(BASELINE_A),
+            waves_sql: WAVES_A,
+            series_sql: SERIES_A,
+        }
+    } else if id == "B" {
         Dialect {
             anchors_sql: ANCHORS_B,
             dates_sql: DATES_B,
@@ -78,4 +104,17 @@ pub fn inline_dates(sql: &str, dates: &[String]) -> anyhow::Result<String> {
         quoted.push(format!("'{d}'"));
     }
     Ok(sql.replace("?PLACEHOLDERS?", &quoted.join(",")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_uses_douyin_schema() {
+        let dialect = dialect_of("LOCAL");
+        assert!(dialect.anchors_sql.contains("FROM person"));
+        assert!(dialect.waves_sql.contains("FROM daily_metric"));
+        assert!(dialect.baseline_sql.is_some());
+    }
 }

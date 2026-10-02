@@ -101,7 +101,7 @@ pub async fn get_waves(
         info.dates.clone()
     };
 
-    let cache_key = format!("{id}:{metric}:{days}");
+    let cache_key = format!("{id}:v3-merge:{metric}:{days}");
     let cached: Option<WaveMap> = {
         let cache = st.cache.lock().expect("cache 锁 poisoned");
         if force {
@@ -173,7 +173,7 @@ pub async fn get_wave_series(
     // 折线图要正序：老 → 新
     dates.reverse();
 
-    let cache_key = format!("{id}:series:v2-live");
+    let cache_key = format!("{id}:series:v3-merge");
     if !force {
         let cache = st.cache.lock().expect("cache 锁 poisoned");
         if let Some(hit) = cache
@@ -206,12 +206,18 @@ pub async fn get_wave_series(
             let v: f64 = r.try_get::<Option<f64>, _>(2).ok().flatten().unwrap_or(0.0);
             // MAX(is_live) 聚出来的可能是 i8/int；解析不了按未开播处理
             let l: i8 = r.try_get::<Option<i8>, _>(3).ok().flatten().unwrap_or(0);
-            series.entry(pid.clone()).or_insert_with(|| vec![0.0; dates.len()])[i] = v;
+            series
+                .entry(pid.clone())
+                .or_insert_with(|| vec![0.0; dates.len()])[i] = v;
             live.entry(pid).or_insert_with(|| vec![0; dates.len()])[i] = l;
         }
     }
 
-    let out = WaveSeries { dates, series, live };
+    let out = WaveSeries {
+        dates,
+        series,
+        live,
+    };
     st.cache
         .lock()
         .expect("cache 锁 poisoned")

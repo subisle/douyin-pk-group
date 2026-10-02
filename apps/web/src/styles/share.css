@@ -305,6 +305,25 @@
   color: var(--sh-ink3);
 }
 
+/* 名次升降：涨红跌绿（国内口径） */
+.sh-mv {
+  flex: none;
+  width: 34px;
+  font-size: 10.5px;
+  font-weight: 700;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.sh-mv.up {
+  color: #d92d20;
+}
+.sh-mv.down {
+  color: #027a48;
+}
+.sh-mv.flat {
+  color: #b0b6bf;
+}
+
 /* 每日音浪的日期切换胶囊 */
 .sh-daychip {
   cursor: pointer;

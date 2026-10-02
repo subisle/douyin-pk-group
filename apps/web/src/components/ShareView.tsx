@@ -141,6 +141,57 @@ export function ShareView({ planId }: { planId?: string }) {
     });
   }, [dailyPlayers, safeDayIdx]);
 
+  // 某一天的名次表（同分并列，与 dayRanking 同一套规则）
+  const ranksAt = useMemo(() => {
+    const byIdx = new Map<number, Map<string, number>>();
+    const dayCount = dailyPlayers[0]?.values.length ?? 0;
+    for (let idx = 0; idx < dayCount; idx++) {
+      const sorted = dailyPlayers
+        .map((p) => ({ name: p.name, w: p.values[idx] ?? 0 }))
+        .sort((a, b) => b.w - a.w || a.name.localeCompare(b.name, 'zh-Hans-CN'));
+      const m = new Map<string, number>();
+      let lastWave = Number.NaN;
+      let lastRank = 0;
+      sorted.forEach((p, i) => {
+        const rank = p.w === lastWave ? lastRank : i + 1;
+        lastWave = p.w;
+        lastRank = rank;
+        m.set(p.name, rank);
+      });
+      byIdx.set(idx, m);
+    }
+    return byIdx;
+  }, [dailyPlayers]);
+
+  // 每日页的升降：当日名次 - 前一日名次（正=上升）。第一天没有对比，不显示。
+  const dayMoves = useMemo(() => {
+    const cur = ranksAt.get(safeDayIdx);
+    const prev = ranksAt.get(safeDayIdx - 1);
+    if (!cur || !prev) return new Map<string, number>();
+    return new Map([...cur.entries()].map(([name, rank]) => [name, (prev.get(name) ?? prev.size + 1) - rank]));
+  }, [ranksAt, safeDayIdx]);
+
+  // 总榜的升降：当前累计名次 vs 前一日累计名次。
+  // 基数必须用「当前总量 − 最新一天增量」——直接用每日序列累加会漏掉基线日，
+  // 排出来的"昨日名次"整个是错的。
+  const totalMoves = useMemo(() => {
+    if (!plan?.ranking?.length || !dailyPlayers.length) return new Map<string, number>();
+    const last = (dailyPlayers[0]?.values.length ?? 1) - 1;
+    const curWave = new Map(plan.ranking.map((p) => [p.name, p.wave]));
+    const prevTotal = new Map(
+      dailyPlayers.map((p) => {
+        const cur = curWave.get(p.name) ?? 0;
+        return [p.name, cur - (p.values[last] ?? 0)];
+      }),
+    );
+    const prevRank = new Map(
+      [...prevTotal.entries()]
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], 'zh-Hans-CN'))
+        .map(([n], i) => [n, i + 1]),
+    );
+    return new Map(plan.ranking.map((p) => [p.name, (prevRank.get(p.name) ?? prevRank.size + 1) - p.rank]));
+  }, [plan, dailyPlayers]);
+
   if (error) {
     return (
       <div className="sh">
@@ -182,13 +233,24 @@ export function ShareView({ planId }: { planId?: string }) {
   // 选中日期切到别的页再回来还保持原选择；数据缺失时夹回最新
   const selIdx = Math.min(safeDayIdx, Math.max(0, dayDates.length - 1));
 
-  const renderRankRow = (p: { rank: number; name: string; wave: number; live: number }, showBadge: boolean) => (
+  /** 名次升降徽标：涨红跌绿（docs/07 国内口径）；undefined 不显示，0 显示平 */
+  const moveBadge = (mv?: number) => {
+    if (mv === undefined) return null;
+    if (mv > 0) return <span className="sh-mv up">▲{mv}</span>;
+    if (mv < 0) return <span className="sh-mv down">▼{-mv}</span>;
+    return <span className="sh-mv flat">—</span>;
+  };
+
+  const renderRankRow = (
+    p: { rank: number; name: string; wave: number; live: number },
+    showBadge: boolean,
+    mv?: number,
+  ) => (
     <div key={p.name} className="sh-rank">
       <span className={`sh-rank-n ${p.rank <= 3 ? `m${p.rank}` : ''}`}>{p.rank}</span>
+      {moveBadge(mv)}
       <span className="sh-rank-name">{p.name}</span>
-      {showBadge && (
-        <span className={`sh-live ${p.live ? 'on' : 'off'}`}>{p.live ? '开播' : '未开播'}</span>
-      )}
+      {showBadge && <span className={`sh-live ${p.live ? 'on' : 'off'}`}>{p.live ? '开播' : '未开播'}</span>}
       <span className="sh-rank-v nums">{formatWave(p.wave)}</span>
     </div>
   );
@@ -249,7 +311,7 @@ export function ShareView({ planId }: { planId?: string }) {
               ))}
             </div>
             <div className="sh-card sh-ranks">
-              {dayRanking.map((p) => renderRankRow(p, true))}
+              {dayRanking.map((p) => renderRankRow(p, true, dayMoves.get(p.name)))}
             </div>
           </section>
         )}
@@ -309,10 +371,10 @@ export function ShareView({ planId }: { planId?: string }) {
         {active === 'total' && totalRanking.length > 0 && (
           <section className="sh-sec sh-sec-first">
             <div className="sh-sec-head">
-              <p>累计总音浪 · 全场名次 · 共 {totalRanking.length} 人 · 开播状态取最新一天</p>
+              <p>累计总音浪 · 全场名次 · 共 {totalRanking.length} 人 · 升降对比前一日 · 开播状态取最新一天</p>
             </div>
             <div className="sh-card sh-ranks">
-              {totalRanking.map((p) => renderRankRow(p, true))}
+              {totalRanking.map((p) => renderRankRow(p, true, totalMoves.get(p.name)))}
             </div>
           </section>
         )}
