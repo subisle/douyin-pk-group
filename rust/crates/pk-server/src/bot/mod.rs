@@ -634,6 +634,8 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
         // 文件名优先：运营命名习惯 `2026-10-07-男团.csv`，日期和团别能直接读出来，
         // 就不必再让机器人多问一句；读不出来才按数据行推断团别。
         let (file_date, file_team) = hints_from_filename(&filename);
+        // 日期来源要留着报给运营看（file_date 下面会被 unwrap 消耗）
+        let date_from_file = file_date.is_some();
         let biz_date = file_date.unwrap_or_else(default_biz_date);
         let team: Option<String> = match file_team {
             Some(t) => Some(t.to_string()),
@@ -664,10 +666,13 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
                 &format!("机器人·{filename}"),
             )
             .await;
-            return Some(Outbound::to(
-                &inbound.conversation_id,
-                format_report(&filename, &biz_date, &team, report),
-            ));
+            let mut reply = format_report(&filename, &biz_date, &team, report);
+            // 业务日期规则（用户口径 2026-10-10）：默认「收到日 − 1」；
+            // 文件名里带日期时按文件名走（补录旧数据用），这时要显式说明来源，避免错一天看不出来
+            if date_from_file {
+                reply.push_str("\n（业务日期取自文件名；不带日期的文件默认按「收到日 − 1」）");
+            }
+            return Some(Outbound::to(&inbound.conversation_id, reply));
         }
         pending_put(
             key.clone(),
@@ -735,6 +740,12 @@ fn format_report(
         Ok(r) => {
             let team_label = if team == "female" { "女团" } else { "男团" };
             let mut out = format!("✅ {biz_date} {team_label} 导入成功 {} 行", r.ok_rows);
+            if r.unchanged > 0 {
+                out.push_str(&format!(
+                    "（另有 {} 行音浪值与库里相同，未覆盖）",
+                    r.unchanged
+                ));
+            }
             if !r.failures.is_empty() {
                 out.push_str(&format!("，失败 {} 行：", r.failures.len()));
                 for f in r.failures.iter().take(10) {

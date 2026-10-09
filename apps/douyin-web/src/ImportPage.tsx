@@ -15,6 +15,8 @@ type CommitReport = {
   batchId: number
   total: number
   okRows: number
+  /** 库里已有该人该日、值完全一样 → 没动它（相同不覆盖，不同才覆盖） */
+  unchanged?: number
   failedRows: number
   failures: { name: string; reason: string }[]
   missing: string[]
@@ -59,6 +61,8 @@ export default function ImportPage() {
   const [mode, setMode] = useState('merge')
   const [busy, setBusy] = useState(false)
   const [parsing, setParsing] = useState(false)
+  /** 业务日期是从文件名推出来的（不是默认的前一天），弹窗里要标出来 */
+  const [dateFromFile, setDateFromFile] = useState(false)
   const [error, setError] = useState('')
   const [report, setReport] = useState<CommitReport | null>(null)
   const [batches, setBatches] = useState<any[]>([])
@@ -116,6 +120,7 @@ export default function ImportPage() {
     reset()
     // 文件名带日期/团别就直接带上（2026-10-07-男团.csv 这类），不用再手选
     const hints = hintsFromFilename(file.name)
+    setDateFromFile(!!hints.date)
     if (hints.date) setBizDate(hints.date)
     if (hints.team) setTeam(hints.team)
     const fd = new FormData()
@@ -323,6 +328,11 @@ export default function ImportPage() {
         {report && (
           <div className="alert good">
             导入完成：成功 {report.okRows} 行，失败 {report.failedRows} 行（批次 #{report.batchId}）
+            {!!report.unchanged && (
+              <div>
+                ♻️ 另有 {report.unchanged} 行音浪值与库里完全相同，未覆盖（改过的值才会覆盖）
+              </div>
+            )}
             {report.failures.map((f, i) => (
               <div key={i}>
                 · {f.name}：{f.reason}
@@ -402,7 +412,15 @@ export default function ImportPage() {
               </label>
               <label>
                 业务日期{' '}
-                <input type="date" value={bizDate} onChange={(e) => setBizDate(e.target.value)} />
+                <input
+                  type="date"
+                  value={bizDate}
+                  onChange={(e) => {
+                    setBizDate(e.target.value)
+                    setDateFromFile(false)
+                  }}
+                />
+                {dateFromFile && <span className="hint">（取自文件名）</span>}
               </label>
               <label>
                 模式{' '}

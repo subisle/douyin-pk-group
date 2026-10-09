@@ -885,6 +885,7 @@ pub async fn import_commit(State(st): State<ArcState>, Json(body): Json<ImportBo
         "batchId": report.batch_id,
         "total": report.total,
         "okRows": report.ok_rows,
+        "unchanged": report.unchanged,
         "failedRows": report.failures.len(),
         "failures": report.failures,
         "missing": report.missing,
@@ -896,6 +897,8 @@ pub struct CommitReport {
     pub batch_id: u64,
     pub total: usize,
     pub ok_rows: u32,
+    /// 库里已有该人该日、且值完全一样 → 没动它（用户口径 2026-10-10：相同不覆盖，不同才覆盖）
+    pub unchanged: u32,
     pub failures: Vec<Value>,
     /// 团内当天还没有数据的主播（完整度报告，docs：统一日期所有抖音号都要导入）
     pub missing: Vec<String>,
@@ -982,9 +985,11 @@ pub async fn commit_import(
     let batch_id = batch.last_insert_id();
 
     let mut ok_count: u32 = 0;
+    let mut unchanged: u32 = 0;
     for r in &ok_rows {
         match write_daily_row(&mut tx, batch_id, biz_date, date, r).await {
-            Ok(()) => ok_count += 1,
+            Ok(WriteOutcome::Written) => ok_count += 1,
+            Ok(WriteOutcome::Unchanged) => unchanged += 1,
             Err(e) => failures.push(json!({ "name": r.raw.name, "reason": e.to_string() })),
         }
     }
@@ -1002,10 +1007,15 @@ pub async fn commit_import(
     crate::events::emit(
         crate::events::SCOPE_IMPORT,
         format!(
-            "{} {} 导入 {} 行{}",
+            "{} {} 导入 {} 行{}{}",
             if team == "female" { "女团" } else { "男团" },
             biz_date,
             ok_count,
+            if unchanged > 0 {
+                format!("（{unchanged} 行值相同未改动）")
+            } else {
+                String::new()
+            },
             if filename.is_empty() {
                 String::new()
             } else {
@@ -1032,6 +1042,7 @@ pub async fn commit_import(
         batch_id,
         total: resolved.len(),
         ok_rows: ok_count,
+        unchanged,
         failures,
         missing,
     })
@@ -1052,13 +1063,51 @@ fn failures_summary(failures: &[Value]) -> Option<String> {
 /// - 给了 cumulativeWave → 与上一业务日快照差分；无上一日 = 基线日语义，wave=累计值且 reliable=0
 /// - 只给 wave → 直接采用（trusted）；累计值回填 prev + wave（拿不到 prev 就 0）
 /// - 差分跨天 > 1（漏采）或为负（回退）→ wave_reliable=0
+/// 单行写入结果：真写/覆盖了，还是库里已经有一样的值（没动）
+enum WriteOutcome {
+    Written,
+    Unchanged,
+}
+
+/// 已有行的当前值（比对用）
+async fn existing_day_row(
+    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
+    person_id: u64,
+    biz_date: &str,
+) -> anyhow::Result<Option<(i64, i64, i64, i8)>> {
+    let row = sqlx::query(
+        "SELECT wave, cumulative_wave, minutes, is_live FROM daily_metric
+         WHERE person_id = ? AND biz_date = ?",
+    )
+    .bind(person_id as i64)
+    .bind(biz_date)
+    .map(|row: sqlx::mysql::MySqlRow| {
+        let num = |col: &str| -> i64 {
+            row.try_get::<Option<i64>, _>(col)
+                .ok()
+                .flatten()
+                .or_else(|| row.try_get::<f64, _>(col).ok().map(|v| v as i64))
+                .unwrap_or(0)
+        };
+        (
+            num("wave"),
+            num("cumulative_wave"),
+            num("minutes"),
+            row.try_get::<i8, _>("is_live").unwrap_or(0),
+        )
+    })
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(row)
+}
+
 async fn write_daily_row(
     tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
     batch_id: u64,
     biz_date: &str,
     date: NaiveDate,
     r: &ResolvedRow,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<WriteOutcome> {
     let person_id = r.person_id.expect("调用前已保证 matched");
     let prev: Option<(f64, String)> = sqlx::query(dialect::PREV_CUMULATIVE_SQL)
         .bind(person_id as i64)
@@ -1119,6 +1168,11 @@ async fn write_daily_row(
 
     // 时长-only 行（时长 CSV）：只更新 minutes/is_live，不把已导入的音浪覆盖成 0
     if r.raw.wave.is_none() && r.raw.cumulative_wave.is_none() {
+        if let Some((_, _, m, live)) = existing_day_row(tx, person_id, biz_date).await? {
+            if m == minutes && live == is_live {
+                return Ok(WriteOutcome::Unchanged);
+            }
+        }
         sqlx::query(
             "INSERT INTO daily_metric
                  (person_id, anchor_id, biz_date, minutes, is_live, source_batch_id)
@@ -1135,7 +1189,14 @@ async fn write_daily_row(
         .bind(batch_id as i64)
         .execute(&mut **tx)
         .await?;
-        return Ok(());
+        return Ok(WriteOutcome::Written);
+    }
+
+    // 库里已有该人该日、且算出来的值与库里完全一致 → 不动它（幂等：同一天重复发同一个文件不产生任何写入）
+    if let Some((w, c, m, live)) = existing_day_row(tx, person_id, biz_date).await? {
+        if w == wave && c == cumulative && m == minutes && live == is_live {
+            return Ok(WriteOutcome::Unchanged);
+        }
     }
 
     sqlx::query(
@@ -1162,7 +1223,7 @@ async fn write_daily_row(
     .bind(batch_id as i64)
     .execute(&mut **tx)
     .await?;
-    Ok(())
+    Ok(WriteOutcome::Written)
 }
 
 /// GET /api/admin/import/day-status?bizDate=YYYY-MM-DD&team=male

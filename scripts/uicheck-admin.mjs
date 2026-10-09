@@ -534,6 +534,19 @@ try {
     3,
   )
   if (!popped) throw new Error('预览弹窗没弹出来，后面没法继续（看上面的诊断）')
+  // 本地时区的「昨天」：后端 default_biz_date() 也是本地时区，别用 toISOString（UTC 会差一天）
+  const ymd = (d) =>
+    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+  const yesterday = ymd(new Date(Date.now() - 24 * 3600 * 1000))
+  expect(
+    '不带日期的文件 → 业务日期默认「昨天」(N-1)',
+    await evaluate(ws, `document.querySelector('.import-pop input[type=date]').value`),
+    yesterday,
+  )
+  truthy(
+    '默认日期不标「取自文件名」',
+    !(await evaluate(ws, `document.querySelector('.import-pop').innerText`)).includes('取自文件名'),
+  )
   const popText = await evaluate(ws, `document.querySelector('.import-pop').innerText`)
   truthy(`预览里带文件名（pk-admin-uicheck.csv）`, popText.includes('pk-admin-uicheck.csv'))
   truthy(`预览第一行是 ${names[0]}`, popText.includes(names[0]))
@@ -560,6 +573,28 @@ try {
     nativeVirtualKeyCode: 27,
   })
   truthy('Esc 关掉预览', await waitFor(ws, `!document.querySelector('.import-pop')`))
+
+  /* 文件名带日期 = 显式指定业务日期（补录旧数据），弹窗要标明来源 */
+  await uploadFile(ws, '2019-01-05-男团.csv', csv)
+  await waitFor(ws, `document.querySelector('.import-pop')`)
+  const dated = JSON.parse(
+    await evaluate(
+      ws,
+      `(() => { const p = document.querySelector('.import-pop')
+        return JSON.stringify({ date: p.querySelector('input[type=date]').value, team: p.querySelector('select').value, marked: p.innerText.includes('取自文件名') }) })()`,
+    ),
+  )
+  expect('文件名里的日期 → 业务日期', dated.date, '2019-01-05')
+  expect('文件名里的团别 → 男团', dated.team, 'male')
+  truthy('弹窗标明「业务日期取自文件名」', dated.marked)
+  await ws.send('Input.dispatchKeyEvent', {
+    type: 'keyDown',
+    key: 'Escape',
+    code: 'Escape',
+    windowsVirtualKeyCode: 27,
+    nativeVirtualKeyCode: 27,
+  })
+  truthy('再按 Esc 关掉预览', await waitFor(ws, `!document.querySelector('.import-pop')`))
 
   /* ---------- 7. 真入库 → 批次列表 → 删掉当天数据 ---------- */
   console.log(`== 7. 入库 / 清理（业务日期 ${TEST_DATE}）==`)
@@ -590,6 +625,19 @@ try {
 
   const after = await apiGet(`/api/admin/import/day-status?bizDate=${TEST_DATE}&team=male`)
   expect('库里当天有 3 行', after.rows, 3)
+
+  /* 同一个文件再导一次：值相同 → 一行都不覆盖（用户口径：相同不覆盖，不同才覆盖） */
+  await uploadFile(ws, 'pk-admin-uicheck.csv', csv)
+  await waitFor(ws, `document.querySelector('.import-pop')`)
+  await clickByText(ws, '确认导入')
+  truthy('重复导入出现完成提示', await waitText(ws, '导入完成', 60))
+  const againText = await evaluate(ws, `document.querySelector('.alert.good').innerText`)
+  truthy(
+    `重复导入一行未覆盖（${againText.split('\n')[0]}）`,
+    againText.includes('成功 0 行') && againText.includes('3 行音浪值与库里完全相同'),
+  )
+  const stillThree = await apiGet(`/api/admin/import/day-status?bizDate=${TEST_DATE}&team=male`)
+  expect('重复导入后仍是 3 行', stillThree.rows, 3)
   truthy(
     '批次列表出现该业务日期',
     await waitText(ws, TEST_DATE, 30),
