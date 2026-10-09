@@ -90,6 +90,15 @@ fn writer_pool(st: &AppState) -> Result<&MySqlPool, ApiError> {
     })
 }
 
+/// 「不分男女团」导入：team 传 auto / mixed / 空 都走自动 ——
+/// 团别按主播档案逐行判定（一个文件里男女混着也能导），不再要求运营分两个文件。
+pub fn is_auto_team(team: &str) -> bool {
+    matches!(
+        team.trim().to_ascii_lowercase().as_str(),
+        "" | "auto" | "mixed" | "mix" | "all"
+    )
+}
+
 fn valid_team(team: &str) -> anyhow::Result<()> {
     anyhow::ensure!(
         matches!(team, "male" | "female"),
@@ -865,10 +874,8 @@ pub async fn import_commit(State(st): State<ArcState>, Json(body): Json<ImportBo
         .biz_date
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("缺少业务日期 bizDate"))?;
-    let team = body
-        .team
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("缺少团别 team（male / female）"))?;
+    // 不分男女团是默认：team 不传 / 传 auto 都按主播档案逐行归属
+    let team = body.team.as_deref().unwrap_or("auto");
     let mode = body.mode.as_deref().unwrap_or("merge");
     let rows = body_rows(&body.text, &body.rows).await?;
     let report = commit_import(
@@ -924,7 +931,12 @@ pub async fn commit_import(
         )
     })?;
     let date = valid_biz_date(biz_date)?;
-    valid_team(team)?;
+    let auto_team = is_auto_team(team);
+    if !auto_team {
+        valid_team(team)?;
+    }
+    // 批次审计里的团别列：自动导入记 mixed（库列注释本来就支持 male/female/mixed）
+    let team_col = if auto_team { "mixed" } else { team };
     anyhow::ensure!(
         mode == "merge" || mode == "reject",
         "mode 只能是 merge / reject"
@@ -933,9 +945,11 @@ pub async fn commit_import(
 
     let ctx = load_match_ctx(st).await?;
     let aliases = merged_aliases(st).await;
+    // 自动模式不做团别冲突校验：谁是哪个团由主播档案说了算
+    let team_filter = if auto_team { None } else { Some(team) };
     let resolved: Vec<ResolvedRow> = rows
         .iter()
-        .map(|r| resolve_row(r, &ctx, &aliases, Some(team)))
+        .map(|r| resolve_row(r, &ctx, &aliases, team_filter))
         .collect();
 
     let mut failures: Vec<Value> = Vec::new();
@@ -958,15 +972,20 @@ pub async fn commit_import(
     let mut tx = pool.begin().await?;
 
     if mode == "reject" {
-        let cnt: i64 = sqlx::query(dialect::TEAM_DATE_COUNT_SQL)
-            .bind(biz_date)
-            .bind(team)
+        let cnt: i64 = sqlx::query(if auto_team {
+            dialect::DATE_COUNT_SQL
+        } else {
+            dialect::TEAM_DATE_COUNT_SQL
+        })
+        .bind(biz_date)
+        .bind(team)
             .map(|r: sqlx::mysql::MySqlRow| r.try_get::<i64, _>(0).unwrap_or(0))
             .fetch_one(&mut *tx)
             .await?;
         if cnt > 0 {
             anyhow::bail!(
-                "reject 模式：{team} 团 {biz_date} 已有 {cnt} 行数据，请改用 merge（幂等覆盖）或先处理旧数据"
+                "reject 模式：{} {biz_date} 已有 {cnt} 行数据，请改用 merge（幂等覆盖）或先处理旧数据",
+                if auto_team { "该日" } else { team }
             );
         }
     }
@@ -977,7 +996,7 @@ pub async fn commit_import(
     )
     .bind(filename)
     .bind(biz_date)
-    .bind(team)
+    .bind(team_col)
     .bind(resolved.len() as i64)
     .bind(failures_summary(&failures))
     .execute(&mut *tx)
@@ -1008,7 +1027,13 @@ pub async fn commit_import(
         crate::events::SCOPE_IMPORT,
         format!(
             "{} {} 导入 {} 行{}{}",
-            if team == "female" { "女团" } else { "男团" },
+            if auto_team {
+                "不分男女团"
+            } else if team == "female" {
+                "女团"
+            } else {
+                "男团"
+            },
             biz_date,
             ok_count,
             if unchanged > 0 {
@@ -1026,13 +1051,23 @@ pub async fn commit_import(
 
     // 完整度报告：该团当天还没有数据的主播（同日多文件导入时逐步收敛，
     // 全部到齐则 missing 为空）
-    let missing = sqlx::query(dialect::MISSING_SQL)
-        .bind(biz_date)
-        .bind(team)
-        .map(|r: sqlx::mysql::MySqlRow| r.try_get::<String, _>(0).unwrap_or_default())
-        .fetch_all(pool)
-        .await
-        .unwrap_or_default();
+    let missing = if auto_team {
+        // 不分团：该日还没数据的在册主播（男女一起算）
+        sqlx::query(dialect::MISSING_ALL_SQL)
+            .bind(biz_date)
+            .map(|r: sqlx::mysql::MySqlRow| r.try_get::<String, _>(0).unwrap_or_default())
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default()
+    } else {
+        sqlx::query(dialect::MISSING_SQL)
+            .bind(biz_date)
+            .bind(team)
+            .map(|r: sqlx::mysql::MySqlRow| r.try_get::<String, _>(0).unwrap_or_default())
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default()
+    };
 
     // 「我的」页微信推送（2026-10-09）：数据入库后算追分目标 + 每日报告，
     // 后台异步发送，不阻塞导入响应（渠道没配 / 没人绑定就什么都不做）
@@ -1249,24 +1284,41 @@ pub async fn import_day_status(
     require_local(&st)?;
     let biz_date = q.biz_date.as_deref().map(str::trim).unwrap_or_default();
     let team = q.team.as_deref().map(str::trim).unwrap_or_default();
-    if biz_date.is_empty() || team.is_empty() {
+    if biz_date.is_empty() {
         return Ok(Json(json!({ "checked": false })));
     }
-    valid_team(&team)?;
+    let auto_team = is_auto_team(&team);
+    if !auto_team {
+        valid_team(&team)?;
+    }
     valid_biz_date(biz_date)?;
     let pool = writer_pool(&st)?;
-    let rows: i64 = sqlx::query(dialect::TEAM_DATE_COUNT_SQL)
-        .bind(biz_date)
-        .bind(team)
-        .map(|r: sqlx::mysql::MySqlRow| r.try_get::<i64, _>(0).unwrap_or(0))
-        .fetch_one(pool)
-        .await?;
-    let last = sqlx::query(
+    let rows: i64 = if auto_team {
+        sqlx::query(dialect::DATE_COUNT_SQL)
+            .bind(biz_date)
+            .map(|r: sqlx::mysql::MySqlRow| r.try_get::<i64, _>(0).unwrap_or(0))
+            .fetch_one(pool)
+            .await?
+    } else {
+        sqlx::query(dialect::TEAM_DATE_COUNT_SQL)
+            .bind(biz_date)
+            .bind(&team)
+            .map(|r: sqlx::mysql::MySqlRow| r.try_get::<i64, _>(0).unwrap_or(0))
+            .fetch_one(pool)
+            .await?
+    };
+    let last_sql = if auto_team {
         "SELECT filename, DATE_FORMAT(created_at, '%Y-%m-%d %H:%i') AS ts
-         FROM import_batch WHERE biz_date = ? AND team = ? ORDER BY id DESC LIMIT 1",
-    )
-    .bind(biz_date)
-    .bind(team)
+         FROM import_batch WHERE biz_date = ? ORDER BY id DESC LIMIT 1"
+    } else {
+        "SELECT filename, DATE_FORMAT(created_at, '%Y-%m-%d %H:%i') AS ts
+         FROM import_batch WHERE biz_date = ? AND team = ? ORDER BY id DESC LIMIT 1"
+    };
+    let mut last_q = sqlx::query(last_sql).bind(biz_date);
+    if !auto_team {
+        last_q = last_q.bind(&team);
+    }
+    let last = last_q
     .map(|r: sqlx::mysql::MySqlRow| {
         json!({
             "filename": r.try_get::<String, _>("filename").unwrap_or_default(),
@@ -1278,7 +1330,7 @@ pub async fn import_day_status(
     Ok(Json(json!({
         "checked": true,
         "bizDate": biz_date,
-        "team": team,
+        "team": if auto_team { "auto" } else { team },
         "rows": rows,
         "lastBatch": last,
     })))
@@ -1323,33 +1375,58 @@ pub async fn import_day_delete(
 ) -> ApiResult {
     require_local(&st)?;
     let team = q.team.trim();
-    valid_team(team)?;
+    let auto_team = is_auto_team(team);
+    if !auto_team {
+        valid_team(team)?;
+    }
     valid_biz_date(&q.biz_date)?;
     let pool = writer_pool(&st)?;
     let mut tx = pool.begin().await?;
-    let metrics = sqlx::query(
-        "DELETE d FROM daily_metric d \
-         JOIN person p ON p.id = d.person_id \
-         WHERE DATE_FORMAT(d.biz_date, '%Y-%m-%d') = ? AND p.gender = ?",
-    )
-    .bind(&q.biz_date)
-    .bind(team)
-    .execute(&mut *tx)
-    .await?
-    .rows_affected();
-    let batches = sqlx::query("DELETE FROM import_batch WHERE biz_date = ? AND team = ?")
+    let metrics = if auto_team {
+        sqlx::query("DELETE FROM daily_metric WHERE DATE_FORMAT(biz_date, '%Y-%m-%d') = ?")
+            .bind(&q.biz_date)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+    } else {
+        sqlx::query(
+            "DELETE d FROM daily_metric d \
+             JOIN person p ON p.id = d.person_id \
+             WHERE DATE_FORMAT(d.biz_date, '%Y-%m-%d') = ? AND p.gender = ?",
+        )
         .bind(&q.biz_date)
         .bind(team)
         .execute(&mut *tx)
         .await?
-        .rows_affected();
+        .rows_affected()
+    };
+    let batches = if auto_team {
+        sqlx::query("DELETE FROM import_batch WHERE biz_date = ?")
+            .bind(&q.biz_date)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+    } else {
+        sqlx::query("DELETE FROM import_batch WHERE biz_date = ? AND team = ?")
+            .bind(&q.biz_date)
+            .bind(team)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+    };
     tx.commit().await?;
     crate::events::emit(
         crate::events::SCOPE_IMPORT,
         format!(
             "已删除「{}」{} 的音浪数据（{} 条）",
             q.biz_date,
-            if team == "male" { "男团" } else { "女团" },
+            if auto_team {
+                "全部团别"
+            } else if team == "male" {
+                "男团"
+            } else {
+                "女团"
+            },
             metrics
         ),
     );

@@ -38,17 +38,13 @@ const yesterday = () => {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
 }
 
-/** 从文件名读日期与团别（运营习惯：2026-10-07-男团.csv）——读出来自动填表单 */
-function hintsFromFilename(name: string): { date?: string; team?: string } {
-  const out: { date?: string; team?: string } = {}
+/** 从文件名读业务日期（运营习惯：2026-10-07-男团.csv）
+ *  只读日期：导入不分男女团（团别按主播档案逐行归属），文件名里的团别不再当筛选条件。 */
+function dateFromFilename(name: string): string | undefined {
   const m = name.match(/(\d{4})-(\d{2})-(\d{2})/)
-  if (m) {
-    const cand = `${m[1]}-${m[2]}-${m[3]}`
-    if (!Number.isNaN(new Date(cand).getTime())) out.date = cand
-  }
-  if (/男团|male/i.test(name)) out.team = 'male'
-  else if (/女团|female/i.test(name)) out.team = 'female'
-  return out
+  if (!m) return undefined
+  const cand = `${m[1]}-${m[2]}-${m[3]}`
+  return Number.isNaN(new Date(cand).getTime()) ? undefined : cand
 }
 
 /** 导入页：只认文件（拖拽 / 选文件），解析结果走弹窗预览，确认后才入库。
@@ -56,7 +52,7 @@ function hintsFromFilename(name: string): { date?: string; team?: string } {
 export default function ImportPage() {
   const [rows, setRows] = useState<Row[]>([])
   const [filename, setFilename] = useState('')
-  const [team, setTeam] = useState('male')
+  const [team, setTeam] = useState('auto')
   const [bizDate, setBizDate] = useState(yesterday())
   const [mode, setMode] = useState('merge')
   const [busy, setBusy] = useState(false)
@@ -118,11 +114,11 @@ export default function ImportPage() {
 
   async function uploadFile(file: File) {
     reset()
-    // 文件名带日期/团别就直接带上（2026-10-07-男团.csv 这类），不用再手选
-    const hints = hintsFromFilename(file.name)
-    setDateFromFile(!!hints.date)
-    if (hints.date) setBizDate(hints.date)
-    if (hints.team) setTeam(hints.team)
+    // 文件名带业务日期就直接带上（2026-10-07-男团.csv 这类），不用再手选；
+    // 团别不看文件名 —— 一个文件里男女混着也能导
+    const fileDate = dateFromFilename(file.name)
+    setDateFromFile(!!fileDate)
+    if (fileDate) setBizDate(fileDate)
     const fd = new FormData()
     fd.append('file', file)
     fd.append('filename', file.name)
@@ -165,7 +161,7 @@ export default function ImportPage() {
   }
 
   async function deleteDay() {
-    const label = `${bizDate} ${team === 'female' ? '女团' : '男团'}`
+    const label = `${bizDate} ${team === 'auto' ? '全部团别' : team === 'female' ? '女团' : '男团'}`
     if (!confirm(`确认删除 ${label} 的音浪数据？对应导入批次也会删除，操作不可恢复。`)) return
     setBusy(true)
     reset()
@@ -223,6 +219,7 @@ export default function ImportPage() {
 
   const errorBox = error ? <div className="alert bad">{error}</div> : null
 
+  const teamWord = team === 'auto' ? '' : team === 'female' ? '女团' : '男团'
   const dayHint = (() => {
     if (!dayStatus.checked || dayStatus.rows == null) return null
     const n = dayStatus.rows
@@ -231,12 +228,12 @@ export default function ImportPage() {
     if (n === 0)
       return (
         <span className="alert good" style={{ flex: 1 }}>
-          📭 {bizDate} {team === 'female' ? '女团' : '男团'}还没有数据，这次导入是<b>新增</b>
+          📭 {bizDate} {teamWord}还没有数据，这次导入是<b>新增</b>
         </span>
       )
     return (
       <span className="alert warn" style={{ flex: 1 }}>
-        ⚠️ {bizDate} {team === 'female' ? '女团' : '男团'}已有 <b>{n}</b> 行数据{lastTxt}
+        ⚠️ {bizDate} {teamWord}已有 <b>{n}</b> 行数据{lastTxt}
         {mode === 'merge' ? (
           <>
             ，这次导入会<b>覆盖</b>同名主播的行（以新数据为准）
@@ -321,9 +318,13 @@ export default function ImportPage() {
         {errorBox}
         <div className="row">
           <button className="danger" disabled={!canDelete} onClick={deleteDay}>
-            删除当前日期 / 团别数据
+            {team === 'auto' ? '删除当前日期数据（不限团别）' : '删除当前日期 / 团别数据'}
           </button>
-          <span className="hint">按上方业务日期和团别删除已入库的音浪数据；没有解析中的文件也可以操作。</span>
+          <span className="hint">
+            {team === 'auto'
+              ? '删除该业务日期的全部音浪数据（男女团一起）；没有解析中的文件也可以操作。'
+              : '按上方业务日期和团别删除已入库的音浪数据；没有解析中的文件也可以操作。'}
+          </span>
         </div>
         {report && (
           <div className="alert good">
@@ -406,8 +407,9 @@ export default function ImportPage() {
               <label>
                 团别{' '}
                 <select value={team} onChange={(e) => setTeam(e.target.value)}>
-                  <option value="male">男团</option>
-                  <option value="female">女团</option>
+                  <option value="auto">自动（不分男女团）</option>
+                  <option value="male">只按男团校验</option>
+                  <option value="female">只按女团校验</option>
                 </select>
               </label>
               <label>

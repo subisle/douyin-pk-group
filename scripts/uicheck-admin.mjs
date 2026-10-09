@@ -261,7 +261,7 @@ const apiGet = async (path) =>
   (await fetch(BASE + path, { headers: { Authorization: `Bearer ${token}` } })).json()
 
 /* 上一次跑崩了可能把测试日留下：开跑前先清一遍，保证断言从干净状态出发 */
-const stale = await apiGet(`/api/admin/import/day-status?bizDate=${TEST_DATE}&team=male`)
+const stale = await apiGet(`/api/admin/import/day-status?bizDate=${TEST_DATE}&team=auto`)
 if ((stale.rows ?? 0) > 0) {
   const del = await (
     await fetch(`${BASE}/api/admin/import/day?bizDate=${TEST_DATE}&team=male`, {
@@ -585,7 +585,7 @@ try {
     ),
   )
   expect('文件名里的日期 → 业务日期', dated.date, '2019-01-05')
-  expect('文件名里的团别 → 男团', dated.team, 'male')
+  expect('团别默认「自动（不分男女团）」', dated.team, 'auto')
   truthy('弹窗标明「业务日期取自文件名」', dated.marked)
   await ws.send('Input.dispatchKeyEvent', {
     type: 'keyDown',
@@ -598,7 +598,7 @@ try {
 
   /* ---------- 7. 真入库 → 批次列表 → 删掉当天数据 ---------- */
   console.log(`== 7. 入库 / 清理（业务日期 ${TEST_DATE}）==`)
-  const before = await apiGet(`/api/admin/import/day-status?bizDate=${TEST_DATE}&team=male`)
+  const before = await apiGet(`/api/admin/import/day-status?bizDate=${TEST_DATE}&team=auto`)
   expect('测试日期入库前没有数据', before.rows ?? 0, 0)
 
   await uploadFile(ws, 'pk-admin-uicheck.csv', csv)
@@ -623,7 +623,7 @@ try {
   truthy(`报告成功 3 行（${doneText.split('\n')[0]}）`, doneText.includes('成功 3 行'))
   truthy('预览弹窗已关闭', !(await evaluate(ws, `!!document.querySelector('.import-pop')`)))
 
-  const after = await apiGet(`/api/admin/import/day-status?bizDate=${TEST_DATE}&team=male`)
+  const after = await apiGet(`/api/admin/import/day-status?bizDate=${TEST_DATE}&team=auto`)
   expect('库里当天有 3 行', after.rows, 3)
 
   /* 同一个文件再导一次：值相同 → 一行都不覆盖（用户口径：相同不覆盖，不同才覆盖） */
@@ -636,7 +636,7 @@ try {
     `重复导入一行未覆盖（${againText.split('\n')[0]}）`,
     againText.includes('成功 0 行') && againText.includes('3 行音浪值与库里完全相同'),
   )
-  const stillThree = await apiGet(`/api/admin/import/day-status?bizDate=${TEST_DATE}&team=male`)
+  const stillThree = await apiGet(`/api/admin/import/day-status?bizDate=${TEST_DATE}&team=auto`)
   expect('重复导入后仍是 3 行', stillThree.rows, 3)
   truthy(
     '批次列表出现该业务日期',
@@ -658,7 +658,7 @@ try {
   truthy('删除结果提示出现', await waitText(ws, '已删除', 60))
   const delText = await evaluate(ws, `document.body.innerText.match(/已删除[^\\n]*/)?.[0] ?? ''`)
   truthy(`删除报告：${delText}`, /已删除\s*3\s*条音浪数据/.test(delText))
-  const cleaned = await apiGet(`/api/admin/import/day-status?bizDate=${TEST_DATE}&team=male`)
+  const cleaned = await apiGet(`/api/admin/import/day-status?bizDate=${TEST_DATE}&team=auto`)
   expect('清理后当天 0 行', cleaned.rows ?? 0, 0)
 
   /* ---------- 8. 全程没有 console 报错 ---------- */

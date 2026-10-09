@@ -150,28 +150,94 @@ async fn csv_attachment_with_date_and_team_hints_is_imported() {
     clean_date(&st, "2019-03-13").await;
 }
 
-/// 文件名没有团别、数据行也认不出团别 → 收下文件并追问团别（不落库）。
+/// 用户口径（2026-10-10）：先发「10.1」报业务日期 → 再发 CSV，**不分男女团**，
+/// 一个文件里男女混着也能导；两个文件都按报过的日期入库（日期黏住，不用每个文件都报）。
 #[tokio::test]
-async fn csv_attachment_without_hints_asks_back() {
+async fn report_date_then_two_files_import_team_agnostic() {
     let Some(st) = setup().await else { return };
-    let cfg = cfg_with("CSV-USER-B");
-    let Some(url) = serve_text("查无此人甲,123\n查无此人乙,456\n").await else {
+    let Some(pool) = st.writer.clone() else { return };
+    let date = "2019-03-16";
+    clean_date(&st, date).await;
+
+    // 从真名册里挑一男一女，验证同一文件里混合团别
+    let pick = |gender: &'static str| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query("SELECT name FROM person WHERE deleted_at IS NULL AND gender = ? AND status <> 'left' ORDER BY id LIMIT 1")
+                .bind(gender)
+                .map(|r: sqlx::mysql::MySqlRow| sqlx::Row::try_get::<String, _>(&r, "name").unwrap_or_default())
+                .fetch_optional(&pool)
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_default()
+        }
+    };
+    let male = pick("male").await;
+    let female = pick("female").await;
+    assert!(!male.is_empty() && !female.is_empty(), "名册里要有一男一女");
+
+    let cfg = cfg_with("CSV-USER-D");
+
+    // ① 报日期（「10.1」这种写法）→ 机器人记下来
+    let mut msg = inbound(date);
+    msg.conversation_id = "CSV-USER-D".into();
+    let ack = bot::BotRouter::handle(&st, &cfg, msg).await.expect("报日期应有回复");
+    assert!(ack.text.contains("已记下业务日期"), "实际：{}", ack.text);
+    assert!(ack.text.contains(date), "实际：{}", ack.text);
+
+    // ② 第一个文件（文件名不带任何提示；男女混在一个文件里）
+    let Some(url1) = serve_text(Box::leak(format!("{male},111111\n{female},222222\n").into_boxed_str())).await else {
         return;
     };
-    let out = bot::BotRouter::handle(&st, &cfg, inbound_from("CSV-USER-B", "export.csv", &url))
+    let out1 = bot::BotRouter::handle(&st, &cfg, inbound_from("CSV-USER-D", "export.csv", &url1))
         .await
-        .expect("应回复追问团别");
-    assert!(out.text.contains("认不出团别"), "实际：{}", out.text);
+        .expect("文件导入应有回复");
+    assert!(out1.text.contains("导入成功 2 行"), "实际：{}", out1.text);
+    let head = out1.text.lines().next().unwrap_or_default();
+    assert!(
+        !head.contains("男团") && !head.contains("女团"),
+        "不分男女团时标题不该带团别：{head}"
+    );
+    assert!(out1.text.contains(date), "回复要回显业务日期：{}", out1.text);
 
-    // 追问后回复「男团 日期」即可完成入库（这两个名字不在名册里，应全部失败并回报）
-    let mut confirm = inbound("男团 2026-10-07");
-    confirm.conversation_id = "CSV-USER-B".into();
-    let done = bot::BotRouter::handle(&st, &cfg, confirm)
+    // ③ 第二个文件：日期要黏住（不用再报一次）
+    let Some(url2) = serve_text(Box::leak(format!("{male},333333\n").into_boxed_str())).await else {
+        return;
+    };
+    let out2 = bot::BotRouter::handle(&st, &cfg, inbound_from("CSV-USER-D", "export2.csv", &url2))
         .await
-        .expect("确认后应有回复");
-    assert!(done.text.contains("导入成功 0 行"), "实际：{}", done.text);
-    assert!(done.text.contains("失败 2 行"), "实际：{}", done.text);
-    clean_date(&st, "2026-10-07").await;
+        .expect("第二个文件也应有回复");
+    assert!(out2.text.contains("导入成功 1 行"), "实际：{}", out2.text);
+
+    // ④ 两个文件都落在报过的日期上，团别是 mixed，男女都进了
+    let (rows, genders, team): (i64, i64, String) = (
+        sqlx::query("SELECT COUNT(*) AS n FROM daily_metric WHERE DATE_FORMAT(biz_date,'%Y-%m-%d') = ?")
+            .bind(date)
+            .map(|r: sqlx::mysql::MySqlRow| sqlx::Row::try_get::<i64, _>(&r, "n").unwrap_or(0))
+            .fetch_one(&pool)
+            .await
+            .unwrap_or(0),
+        sqlx::query("SELECT COUNT(DISTINCT p.gender) AS n FROM daily_metric d JOIN person p ON p.id = d.person_id WHERE DATE_FORMAT(d.biz_date,'%Y-%m-%d') = ?")
+            .bind(date)
+            .map(|r: sqlx::mysql::MySqlRow| sqlx::Row::try_get::<i64, _>(&r, "n").unwrap_or(0))
+            .fetch_one(&pool)
+            .await
+            .unwrap_or(0),
+        sqlx::query("SELECT team FROM import_batch WHERE DATE_FORMAT(biz_date,'%Y-%m-%d') = ? ORDER BY id LIMIT 1")
+            .bind(date)
+            .map(|r: sqlx::mysql::MySqlRow| sqlx::Row::try_get::<String, _>(&r, "team").unwrap_or_default())
+            .fetch_optional(&pool)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default(),
+    );
+    assert_eq!(rows, 2, "两个人两个文件共 2 行（同一人重复导入只更新）");
+    assert_eq!(genders, 2, "男女混在一个文件里都要入库");
+    assert_eq!(team, "mixed", "批次审计记 mixed");
+
+    clean_date(&st, date).await;
 }
 
 /// 下载失败要明确回报，不能让用户以为导过了。

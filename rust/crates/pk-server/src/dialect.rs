@@ -160,6 +160,17 @@ pub const TEAM_DATE_COUNT_SQL: &str = "SELECT COUNT(*) FROM daily_metric d
      JOIN person p ON p.id = d.person_id
      WHERE DATE_FORMAT(d.biz_date, '%Y-%m-%d') = ? AND p.gender = ?";
 
+/// 不分男女团：该业务日已入库多少行（导入不分团别时用）
+pub const DATE_COUNT_SQL: &str =
+    "SELECT COUNT(*) FROM daily_metric WHERE DATE_FORMAT(biz_date, '%Y-%m-%d') = ?";
+
+/// 不分男女团：该业务日还没有数据的在册主播（跨男/女团）
+pub const MISSING_ALL_SQL: &str = "SELECT p.name FROM person p
+     LEFT JOIN daily_metric d ON d.person_id = p.id
+       AND DATE_FORMAT(d.biz_date, '%Y-%m-%d') = ?
+     WHERE p.deleted_at IS NULL AND d.id IS NULL
+     ORDER BY p.name";
+
 /// 导入批次列表（最近 50 条）
 pub const BATCH_LIST_SQL: &str = "SELECT id, source, filename,
        DATE_FORMAT(biz_date, '%Y-%m-%d') AS bd, team, imported_rows, ok_rows, failed_rows, note,

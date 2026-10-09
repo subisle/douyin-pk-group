@@ -131,33 +131,61 @@ impl RateLimiter {
 
 static LIMITER: std::sync::OnceLock<RateLimiter> = std::sync::OnceLock::new();
 
-/* --------------------------- 导入会话（主动询问） --------------------------- */
+/* --------------------------- 导入会话（不用再问团别） --------------------------- */
 
-/// 待确认的导入内容：管理员直接发文件（不带命令）时暂存，
-/// 机器人主动追问日期与团别，下一条「男团 2026-10-04」确认入库。
-#[derive(Clone)]
-struct PendingImport {
-    text: String,
-    filename: String,
-    at: Instant,
-}
+/* ---- 运营先发「10.1」再发 CSV：这个业务日期要黏住（两个文件都按它入库）---- */
 
-static PENDING: std::sync::OnceLock<Mutex<HashMap<String, PendingImport>>> =
+/// 黏性业务日期：key = 渠道:会话，值 = (业务日期, 设置时间)。
+/// 12 小时有效（当天报一次，当天发的文件都用它）；再发一个日期就覆盖。
+static PENDING_DATES: std::sync::OnceLock<Mutex<HashMap<String, (String, Instant)>>> =
     std::sync::OnceLock::new();
+const PENDING_DATE_TTL: Duration = Duration::from_secs(12 * 3600);
 
-fn pending_map() -> &'static Mutex<HashMap<String, PendingImport>> {
-    PENDING.get_or_init(|| Mutex::new(HashMap::new()))
+fn pending_dates() -> &'static Mutex<HashMap<String, (String, Instant)>> {
+    PENDING_DATES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn pending_put(key: String, p: PendingImport) {
-    let mut m = pending_map().lock().expect("pending 锁 poisoned");
-    m.retain(|_, v| v.at.elapsed() < Duration::from_secs(600)); // 10 分钟过期
-    m.insert(key, p);
+fn pending_date_put(key: &str, date: &str) {
+    let mut m = pending_dates().lock().expect("pending_date 锁 poisoned");
+    m.retain(|_, (_, at)| at.elapsed() < PENDING_DATE_TTL);
+    m.insert(key.to_string(), (date.to_string(), Instant::now()));
 }
 
-fn pending_take(key: &str) -> Option<PendingImport> {
-    let mut m = pending_map().lock().expect("pending 锁 poisoned");
-    m.remove(key)
+fn pending_date_get(key: &str) -> Option<String> {
+    let mut m = pending_dates().lock().expect("pending_date 锁 poisoned");
+    match m.get(key) {
+        Some((d, at)) if at.elapsed() < PENDING_DATE_TTL => Some(d.clone()),
+        Some(_) => {
+            m.remove(key);
+            None
+        }
+        None => None,
+    }
+}
+
+/// 运营报日期的写法都收：「10.1」「10-1」「10/1」「10月1日」「10月1号」「2026-10-01」。
+/// 只给月日 → 当年（例：10.1 = 2026-10-01）。
+pub fn parse_short_date(s: &str) -> Option<String> {
+    let t = s.trim();
+    if valid_date(t) {
+        return Some(t.to_string());
+    }
+    let norm: String = t
+        .trim_end_matches(['号', '日'])
+        .chars()
+        .map(|c| if matches!(c, '.' | '/' | '月' | '-') { '-' } else { c })
+        .collect();
+    let parts: Vec<&str> = norm.split('-').filter(|p| !p.is_empty()).collect();
+    if parts.len() == 2 {
+        let m: u32 = parts[0].parse().ok()?;
+        let d: u32 = parts[1].parse().ok()?;
+        let year = chrono::Local::now().format("%Y").to_string();
+        let cand = format!("{year}-{m:02}-{d:02}");
+        if valid_date(&cand) {
+            return Some(cand);
+        }
+    }
+    None
 }
 
 /// 路由入口（渠道适配器调用）。命令实现全部是确定性纯逻辑。
@@ -623,6 +651,20 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
             }
         }
     }
+    // 运营先发「10.1」这种纯日期：记下来，接下来发的 CSV 文件都按这个业务日期入库。
+    // （两个文件只报一次日期就够；再发一个日期可以改）
+    if attachment_text.is_empty() && !text.is_empty() {
+        if let Some(d) = parse_short_date(&text) {
+            pending_date_put(&key, &d);
+            return Some(Outbound::to(
+                &inbound.conversation_id,
+                format!(
+                    "已记下业务日期 {d}。把 CSV 文件发过来就按这个日期入库（不分男女团，团别按主播档案归属）；\n再发一个日期可以改，发「帮助」看全部命令。"
+                ),
+            ));
+        }
+    }
+
     if !attachment_text.is_empty() {
         let rows = admin::parse_any_text(&attachment_text);
         let filename = inbound
@@ -631,16 +673,20 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
             .map(|a| a.file_name.clone())
             .unwrap_or_else(|| "文件".into());
 
-        // 文件名优先：运营命名习惯 `2026-10-07-男团.csv`，日期和团别能直接读出来，
-        // 就不必再让机器人多问一句；读不出来才按数据行推断团别。
-        let (file_date, file_team) = hints_from_filename(&filename);
-        // 日期来源要留着报给运营看（file_date 下面会被 unwrap 消耗）
-        let date_from_file = file_date.is_some();
-        let biz_date = file_date.unwrap_or_else(default_biz_date);
-        let team: Option<String> = match file_team {
-            Some(t) => Some(t.to_string()),
-            None => admin::infer_team(st, &rows).await,
+        // 业务日期优先级：本条消息里带的日期 > 之前报过的日期（12h 内）> 文件名里的日期 > 收到日 − 1
+        let (file_date, _file_team) = hints_from_filename(&filename);
+        let msg_date = parse_short_date(&text);
+        let sticky = pending_date_get(&key);
+        let (biz_date, date_src) = match (&msg_date, &sticky, &file_date) {
+            (Some(d), _, _) => (d.clone(), "本条消息指定"),
+            (None, Some(d), _) => (d.clone(), "沿用你报的日期"),
+            (None, None, Some(d)) => (d.clone(), "文件名里的日期（补录）"),
+            (None, None, None) => (default_biz_date(), "默认「收到日 − 1」（数据半夜才更新）"),
         };
+        if msg_date.is_some() {
+            // 同一条消息里带了日期：黏住，后面那个文件不用再报
+            pending_date_put(&key, &biz_date);
+        }
 
         if rows.is_empty() {
             return Some(Outbound::to(
@@ -649,78 +695,32 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
             ));
         }
 
-        if let Some(team) = team {
-            tracing::info!(
-                file = %filename,
-                team = %team,
-                biz_date = %biz_date,
-                rows = rows.len(),
-                "机器人自动导入"
-            );
-            let report = admin::commit_import(
-                st,
-                &team,
-                &biz_date,
-                rows,
-                "merge",
-                &format!("机器人·{filename}"),
-            )
-            .await;
-            let mut reply = format_report(&filename, &biz_date, &team, report);
-            // 业务日期规则（用户口径 2026-10-10）：默认「收到日 − 1」；
-            // 文件名里带日期时按文件名走（补录旧数据用），这时要显式说明来源，避免错一天看不出来
-            if date_from_file {
-                reply.push_str("\n（业务日期取自文件名；不带日期的文件默认按「收到日 − 1」）");
-            }
-            return Some(Outbound::to(&inbound.conversation_id, reply));
-        }
-        pending_put(
-            key.clone(),
-            PendingImport {
-                text: attachment_text,
-                filename,
-                at: Instant::now(),
-            },
+        // 不分男女团（用户口径 2026-10-10）：一个文件里男女混着也能导，团别按主播档案逐行归属
+        tracing::info!(
+            file = %filename,
+            biz_date = %biz_date,
+            date_src = %date_src,
+            rows = rows.len(),
+            "机器人文件导入（不分男女团）"
         );
-        return Some(Outbound::to(
-            &inbound.conversation_id,
-            format!(
-                "收到文件，解析到 {} 行数据，但认不出团别。\n默认导入到 {}（前一天）。请回复团别：\n男团 或 女团\n（也可带日期覆盖，如：男团 2026-10-03；同日重复导入后发的覆盖先发的。\n文件名里带「男团/女团」和日期（如 2026-10-07-男团.csv）就可以直接入库，不用再回这一句）",
-                rows.len(),
-                biz_date
-            ),
+        let report = admin::commit_import(
+            st,
+            "auto",
+            &biz_date,
+            rows,
+            "merge",
+            &format!("机器人·{filename}"),
+        )
+        .await;
+        let mut reply = format_report(&filename, &biz_date, "auto", report);
+        reply.push_str(&format!(
+            "\n（业务日期 {biz_date} · {date_src}；不分男女团，团别按主播档案归属）"
         ));
+        return Some(Outbound::to(&inbound.conversation_id, reply));
     }
 
     if text.is_empty() {
         return None;
-    }
-
-    // 有待确认导入且本条消息是「男团/女团 [日期]」确认 → 完成导入
-    if let Some(p) = pending_take(&key) {
-        let toks: Vec<&str> = text.split_whitespace().collect();
-        if let Some(team) = toks.first().and_then(|t| team_of(t)) {
-            let biz_date = match toks.get(1) {
-                Some(d) if valid_date(d) => d.to_string(),
-                _ => default_biz_date(),
-            };
-            let rows = admin::parse_any_text(&p.text);
-            let report = admin::commit_import(
-                st,
-                team,
-                &biz_date,
-                rows,
-                "merge",
-                &format!("机器人·{}", p.filename),
-            )
-            .await;
-            return Some(Outbound::to(
-                &inbound.conversation_id,
-                format_report(&p.filename, &biz_date, team, report),
-            ));
-        }
-        // 不是确认消息：把 pending 放回去，继续走命令路由
-        pending_put(key.clone(), p);
     }
 
     let reply = route_command(st, cfg, &inbound, &text).await;
@@ -738,8 +738,13 @@ fn format_report(
     let _ = filename; // 文案精简：不再回显文件名
     match report {
         Ok(r) => {
-            let team_label = if team == "female" { "女团" } else { "男团" };
-            let mut out = format!("✅ {biz_date} {team_label} 导入成功 {} 行", r.ok_rows);
+            // auto（不分男女团）时不带团别字样，回复更短
+            let mut out = if crate::admin::is_auto_team(team) {
+                format!("✅ {biz_date} 导入成功 {} 行", r.ok_rows)
+            } else {
+                let team_label = if team == "female" { "女团" } else { "男团" };
+                format!("✅ {biz_date} {team_label} 导入成功 {} 行", r.ok_rows)
+            };
             if r.unchanged > 0 {
                 out.push_str(&format!(
                     "（另有 {} 行音浪值与库里相同，未覆盖）",
@@ -805,7 +810,9 @@ fn help_text() -> String {
      总榜 —— 累计音浪榜\n\
      查询 <主播名> —— 查某人数据\n\
      导出 今日|YYYY-MM-DD|总榜 —— CSV 文本回复\n\
-     导入 <男团|女团> [YYYY-MM-DD] + 数据行/CSV文件 —— 幂等导入\n\
+     发「10.1」= 指定业务日期 2026-10-01（之后发的 CSV 都按它入库，不用带团别）\n\
+     发 CSV 文件 = 直接入库（不分男女团，团别按主播档案归属；同一天重复导，值相同不覆盖）\n\
+     导入 [男团|女团] [2026-10-01|10.1] + 数据行 —— 需要按团校验时才带团别\n\
      分组 —— 当前已上架分组方案\n\
      \n默认日期为前一天（数据晚一天）；同日重复导入，后发的覆盖先发的。"
         .to_string()
@@ -992,13 +999,26 @@ async fn csv_of(st: &Arc<AppState>, metric: &str, days: i64, label: &str) -> Str
 
 /// 导入：<男团|女团> [YYYY-MM-DD]，数据行跟在命令后或作为附件（CSV）
 async fn cmd_import(st: &Arc<AppState>, inbound: &Inbound, args: &[&str]) -> String {
-    let Some(team) = args.first().and_then(|a| team_of(a)) else {
-        return "用法：导入 <男团|女团> [YYYY-MM-DD]，数据行跟在后面或附上 CSV 文件。".into();
-    };
-    let biz_date = match args.get(1) {
-        Some(d) if valid_date(d) => d.to_string(),
-        Some(_) => return "日期格式应为 YYYY-MM-DD。".into(),
-        None => default_biz_date(),
+    let mut args: Vec<&str> = args.to_vec();
+    // 团别可不写：默认「不分男女团」（按主播档案逐行归属）；写了男团/女团就按团校验
+    let mut team = "auto";
+    if let Some(t) = args.first().and_then(|a| team_of(a)) {
+        team = t;
+        args.remove(0);
+    } else if args.first().is_some_and(|a| crate::admin::is_auto_team(a)) {
+        args.remove(0);
+    }
+    let key = format!("{}:{}", inbound.channel, inbound.conversation_id);
+    // 日期支持 2026-10-01 / 10.1；不写就用你刚报过的日期，再没有就默认「收到日 − 1」
+    let biz_date = match args.first() {
+        Some(d) => match parse_short_date(d) {
+            Some(x) => {
+                pending_date_put(&key, &x);
+                x
+            }
+            None => return "日期格式应为 2026-10-01 或 10.1。".into(),
+        },
+        None => pending_date_get(&key).unwrap_or_else(default_biz_date),
     };
 
     // 数据来源：附件优先，其次命令文本剩余部分
@@ -1235,6 +1255,22 @@ mod tests {
         assert!(valid_date("2026-10-04"));
         assert!(!valid_date("10-04"));
         assert!(!valid_date("2026/10/04"));
+    }
+
+    /// 运营报日期的写法：「10.1」「10-1」「10/1」「10月1日」都指当年 10 月 1 日
+    #[test]
+    fn short_dates_parsed() {
+        let year = chrono::Local::now().format("%Y").to_string();
+        let want = format!("{year}-10-01");
+        for s in ["10.1", "10-1", "10/1", "10月1日", "10月1号", "10.01"] {
+            assert_eq!(parse_short_date(s), Some(want.clone()), "解析失败：{s}");
+        }
+        // 完整日期原样返回
+        assert_eq!(parse_short_date("2026-10-01"), Some("2026-10-01".into()));
+        // 认不出的不当日期（别把随便一句话当日期）
+        for s in ["", "今天", "10", "13.1", "2.30", "帮助"] {
+            assert_eq!(parse_short_date(s), None, "不该认成日期：{s}");
+        }
     }
 
     #[test]
