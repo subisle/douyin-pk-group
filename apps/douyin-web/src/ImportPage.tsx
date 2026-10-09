@@ -190,16 +190,27 @@ export default function ImportPage() {
     setFilename('')
   }
 
-  /* 拖拽：整个「导入音浪数据」卡片都是投放区，拖进来就高亮，松手就解析 + 弹预览 */
+  /* 投放区：拖进来（dragenter/over 高亮，drop 解析）或点一下选文件。
+     全页只有这一个入口 —— 没有粘贴框，也没有第二个上传按钮。 */
   function onDrop(e: React.DragEvent) {
     e.preventDefault()
     setDragOver(false)
     const f = e.dataTransfer.files?.[0]
     if (f) void uploadFile(f)
   }
+  function onDragEnter(e: React.DragEvent) {
+    e.preventDefault()
+    if (e.dataTransfer.types.includes('Files')) setDragOver(true)
+  }
   function onDragOver(e: React.DragEvent) {
     e.preventDefault()
     if (e.dataTransfer.types.includes('Files')) setDragOver(true)
+  }
+  function onDragLeave(e: React.DragEvent) {
+    if (!e.currentTarget.contains(e.relatedTarget as Node)) setDragOver(false)
+  }
+  function pickFile() {
+    if (!parsing) fileInputRef.current?.click()
   }
 
   const canCommit = rows.length > 0 && !!team && !!bizDate && !busy
@@ -234,39 +245,73 @@ export default function ImportPage() {
 
   return (
     <div className="page">
-      <section
-        className={'card' + (dragOver ? ' import-drag' : '')}
-        onDragOver={onDragOver}
-        onDragLeave={(e) => {
-          if (!e.currentTarget.contains(e.relatedTarget as Node)) setDragOver(false)
-        }}
-        onDrop={onDrop}
-      >
+      <section className="card">
         <h2>导入音浪数据</h2>
-        <p className="hint">
-          <b>把 CSV / TSV / 文本文件直接拖进这张卡片</b>，松手就开始识别解析，解析完弹出预览，
-          <b>确认后才入库</b>；也可以点按钮选择文件。列序不严格：名字必填，数字按
-          「当日音浪 → 累计音浪 → 分钟」依次识别，开播 / 未开播自动识别。
-          <b>默认归属前一天（数据晚一天）；文件名带日期和团别（如 2026-10-07-男团.csv）会自动填好。</b>
-        </p>
-        <div className="row">
-          <label className="file-btn">
-            {parsing ? '解析中…' : '选择文件上传'}
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".csv,.tsv,.txt"
-              style={{ display: 'none' }}
-              disabled={parsing}
-              onChange={(e) => {
-                const f = e.target.files?.[0]
-                if (f) void uploadFile(f)
-                e.target.value = ''
-              }}
-            />
-          </label>
-          <span className="hint">支持 .csv / .tsv / .txt；一次一个文件，按日期 + 团别整批导入。</span>
+
+        {/* 全页唯一入口：拖到这里，或点这里选文件 */}
+        <div
+          className={'dropzone' + (dragOver ? ' is-over' : '') + (parsing ? ' is-busy' : '')}
+          role="button"
+          tabIndex={0}
+          aria-label="拖入或点击选择音浪数据文件（CSV / TSV / 文本）"
+          aria-busy={parsing}
+          onClick={pickFile}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault()
+              pickFile()
+            }
+          }}
+          onDragEnter={onDragEnter}
+          onDragOver={onDragOver}
+          onDragLeave={onDragLeave}
+          onDrop={onDrop}
+        >
+          <svg
+            className="dz-icon"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.6"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M12 16V4" />
+            <path d="m7 9 5-5 5 5" />
+            <path d="M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3" />
+          </svg>
+          <b className="dz-title">
+            {parsing
+              ? '正在解析文件…'
+              : dragOver
+                ? '松手就开始解析'
+                : '把 CSV / TSV 文件拖到这里'}
+          </b>
+          <span className="dz-sub">
+            {parsing
+              ? '解析完弹出预览，确认后才入库'
+              : '或点击这里选择文件 · 一次一个文件 · .csv / .tsv / .txt'}
+          </span>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".csv,.tsv,.txt"
+            hidden
+            disabled={parsing}
+            onChange={(e) => {
+              const f = e.target.files?.[0]
+              if (f) void uploadFile(f)
+              e.target.value = ''
+            }}
+          />
         </div>
+
+        <p className="hint">
+          列序不严格：名字必填，数字按「当日音浪 → 累计音浪 → 分钟」依次识别，开播 / 未开播自动识别。
+          <b>默认归属前一天（数据晚一天）；文件名带日期和团别（如 2026-10-07-男团.csv）会自动填好。</b>
+          解析结果先在弹窗里逐行核对，确认才入库。
+        </p>
 
         {errorBox}
         <div className="row">

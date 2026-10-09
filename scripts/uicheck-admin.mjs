@@ -221,6 +221,23 @@ async function uploadFile(ws, name, content) {
   if (process.env.UPLOAD_DEBUG) console.log('    [上传诊断] ' + info)
 }
 
+/** 模拟真实拖放：dragenter/dragover 应亮起投放区，drop 后开始解析。
+    React 的 onDrop 读的是 e.dataTransfer.files，所以用 DataTransfer 造一个真 File。 */
+async function dropFile(ws, name, content) {
+  return evaluate(
+    ws,
+    `(() => {
+      const zone = document.querySelector('.dropzone')
+      if (!zone) return JSON.stringify({ found: false })
+      const dt = new DataTransfer()
+      dt.items.add(new File([${JSON.stringify(content)}], ${JSON.stringify(name)}, { type: 'text/csv' }))
+      const fire = (type) => zone.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: dt }))
+      fire('dragenter'); fire('dragover')
+      return JSON.stringify({ found: true, types: [...dt.types], over: zone.className.includes('is-over') })
+    })()`,
+  )
+}
+
 async function shot(ws, name) {
   const { data } = await ws.send('Page.captureScreenshot', { format: 'png' })
   writeFileSync(OUT + name, Buffer.from(data, 'base64'))
@@ -427,8 +444,68 @@ try {
     await evaluate(ws, `document.querySelectorAll('.page textarea').length`),
     0,
   )
+  truthy('只有一个投放区', await evaluate(ws, `document.querySelectorAll('.dropzone').length === 1`))
+  truthy(
+    '投放区含文件选择框（.csv/.tsv/.txt）',
+    await evaluate(
+      ws,
+      `document.querySelector('.dropzone input[type=file]')?.getAttribute('accept') === '.csv,.tsv,.txt'`,
+    ),
+  )
+  truthy(
+    '投放区文案：拖到这里',
+    (await evaluate(ws, `document.querySelector('.dropzone').innerText`)).includes('拖到这里'),
+  )
+  /* 投放区得是个像样的目标（我在无图环境下靠尺寸/溢出判断版式，截图留给人工看） */
+  const dz = JSON.parse(
+    await evaluate(
+      ws,
+      `(() => { const r = document.querySelector('.dropzone').getBoundingClientRect()
+        return JSON.stringify({ w: Math.round(r.width), h: Math.round(r.height), vw: innerWidth,
+          hScroll: document.documentElement.scrollWidth > innerWidth + 1 }) })()`,
+    ),
+  )
+  truthy(`投放区够大（${dz.w}×${dz.h}px）`, dz.w > 400 && dz.h >= 96)
+  truthy('投放区不引起横向滚动', !dz.hScroll)
+  /* 手机宽度也得能用：管理端偶尔在手机上开，投放区不能撑出横向滚动 */
+  await ws.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true })
+  await sleep(400)
+  const mobile = JSON.parse(
+    await evaluate(
+      ws,
+      `(() => { const z = document.querySelector('.dropzone').getBoundingClientRect()
+        return JSON.stringify({ w: Math.round(z.width), vw: innerWidth, hScroll: document.documentElement.scrollWidth > innerWidth + 1 }) })()`,
+    ),
+  )
+  truthy(`手机端投放区不撑屏（${mobile.w}≤${mobile.vw}）`, mobile.w <= mobile.vw && !mobile.hScroll)
+  await ws.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false })
+  await sleep(300)
+  /* 点击投放区 = 打开选文件（这里只断言它真的触发了隐藏 input 的 click，原生弹窗测不了） */
+  truthy(
+    '点击投放区触发选文件',
+    await evaluate(
+      ws,
+      `(() => {
+        const input = document.querySelector('.dropzone input[type=file]')
+        const orig = input.click.bind(input)
+        let hit = false
+        input.click = () => { hit = true; }
+        document.querySelector('.dropzone').click()
+        input.click = orig
+        return hit
+      })()`,
+    ),
+  )
 
-  await uploadFile(ws, 'pk-admin-uicheck.csv', csv)
+  /* 拖放路径：dragenter/dragover 高亮 → drop 解析 → 弹预览 */
+  const dnd = JSON.parse(await dropFile(ws, 'pk-admin-uicheck.csv', csv))
+  truthy('拖放命中投放区', dnd.found)
+  truthy('拖入时投放区高亮', await waitFor(ws, `document.querySelector('.dropzone').className.includes('is-over')`))
+  truthy(
+    '高亮时文案变成「松手就开始解析」',
+    (await evaluate(ws, `document.querySelector('.dropzone').innerText`)).includes('松手就开始解析'),
+  )
+  await evaluate(ws, `document.querySelector('.dropzone').dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: (() => { const dt = new DataTransfer(); dt.items.add(new File([${JSON.stringify(csv)}], 'pk-admin-uicheck.csv', { type: 'text/csv' })); return dt })() }))`)
 
   const popped = await waitFor(ws, `document.querySelector('.import-pop')`)
   if (!popped) {
