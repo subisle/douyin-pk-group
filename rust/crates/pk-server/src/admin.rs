@@ -1137,8 +1137,24 @@ async fn write_daily_row(
         .unwrap_or_default();
 
     let (wave, cumulative, prev_date, span, reliable): (i64, i64, Option<String>, i16, i8) =
-        match (r.raw.cumulative_wave, r.raw.wave) {
-            (Some(cum), _) => match &prev {
+        match (r.raw.wave, r.raw.cumulative_wave) {
+            // 两个都给了：以「当日音浪」为准（运营文件里这一列就是当天值），累计只当快照。
+            // 否则清库/新部署后的第一天没有前一天快照，会被算成「累计值」当成当日音浪（踩过）。
+            (Some(w), Some(cum)) => (
+                w as i64,
+                cum as i64,
+                prev.as_ref().map(|(_, d)| d.clone()),
+                1,
+                1,
+            ),
+            (Some(w), None) => (
+                w as i64,
+                prev.as_ref().map(|(p, _)| p + w).unwrap_or(0.0) as i64,
+                prev.as_ref().map(|(_, d)| d.clone()),
+                1,
+                1,
+            ),
+            (None, Some(cum)) => match &prev {
                 Some((pcum, pd)) => {
                     let diff = (cum - pcum) as i64;
                     let days = NaiveDate::parse_from_str(pd, "%Y-%m-%d")
@@ -1150,16 +1166,6 @@ async fn write_daily_row(
                 }
                 None => (cum as i64, cum as i64, None, 1, 0), // 基线日：只记累计
             },
-            (None, Some(w)) => {
-                let cum = prev.as_ref().map(|(p, _)| p + w).unwrap_or(0.0);
-                (
-                    w as i64,
-                    cum as i64,
-                    prev.as_ref().map(|(_, d)| d.clone()),
-                    1,
-                    1,
-                )
-            }
             (None, None) => anyhow::bail!("没有音浪数据"),
         };
 

@@ -9,7 +9,11 @@ const ANCHORS_A: &str = "SELECT id, name, avatar_url, status FROM person
      ORDER BY name";
 const DATES_A: &str =
     "SELECT DATE_FORMAT(biz_date, '%Y-%m-%d') AS d FROM daily_metric GROUP BY d ORDER BY d DESC";
-const BASELINE_A: &str = "SELECT DATE_FORMAT(MIN(biz_date), '%Y-%m-%d') AS d FROM daily_metric";
+/// 基线日 = 最早那个「累计快照日」（wave_reliable=0：首日没有前一天可比，只能记累计）。
+/// 不能直接用 MIN(biz_date)：2026-10-10 清空音浪数据后重新开始导入时，第一天是正常的
+/// 当日音浪，却会被当成基线从趋势图 / 导出里剔掉（自检 export 用例踩过）。
+const BASELINE_A: &str =
+    "SELECT DATE_FORMAT(MIN(biz_date), '%Y-%m-%d') AS d FROM daily_metric WHERE wave_reliable = 0";
 const WAVES_A: &str = "SELECT k, CAST(SUM(w) AS DOUBLE) AS w FROM (
      SELECT person_id AS k, SUM(wave) AS w FROM daily_metric
       WHERE wave_reliable = 1 AND DATE_FORMAT(biz_date, '%Y-%m-%d') IN (?PLACEHOLDERS?)

@@ -113,11 +113,27 @@ async fn serve_text(body: &'static str) -> Option<String> {
     Some(format!("http://{addr}/data.csv"))
 }
 
+/// 清掉某个业务日期的测试数据：这些用例写的是真库，用固定日期，重复跑必须幂等，
+/// 否则「值相同不覆盖」会让第二次跑变成「导入 0 行」，断言就假失败。
+async fn clean_date(st: &Arc<AppState>, date: &str) {
+    if let Some(pool) = st.writer.as_ref() {
+        let _ = sqlx::query("DELETE FROM daily_metric WHERE biz_date = ?")
+            .bind(date)
+            .execute(pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM import_batch WHERE biz_date = ?")
+            .bind(date)
+            .execute(pool)
+            .await;
+    }
+}
+
 /// 私聊发 CSV 文件 + 文件名带日期与团别 → 直接入库，不用再回一句话确认。
-/// 用 2026-10-06（开发库里本来没有这一天，跑完可整日期清理）。
+/// 用独立的 2019-03-13 当业务日期（不碰真实数据），开跑先清干净 → 可反复跑。
 #[tokio::test]
 async fn csv_attachment_with_date_and_team_hints_is_imported() {
     let Some(st) = setup().await else { return };
+    clean_date(&st, "2019-03-13").await;
     let cfg = cfg_with("CSV-USER-A");
     let Some(url) = serve_text("浩龙,77777\n南方楠,66666\n").await else {
         return;
@@ -125,12 +141,13 @@ async fn csv_attachment_with_date_and_team_hints_is_imported() {
     let out = bot::BotRouter::handle(
         &st,
         &cfg,
-        inbound_from("CSV-USER-A", "2026-10-06-男团.csv", &url),
+        inbound_from("CSV-USER-A", "2019-03-13-男团.csv", &url),
     )
     .await
     .expect("附件导入应有回复");
     assert!(out.text.contains("导入成功 2 行"), "实际：{}", out.text);
     assert!(out.text.starts_with('✅'), "实际：{}", out.text);
+    clean_date(&st, "2019-03-13").await;
 }
 
 /// 文件名没有团别、数据行也认不出团别 → 收下文件并追问团别（不落库）。
@@ -154,6 +171,7 @@ async fn csv_attachment_without_hints_asks_back() {
         .expect("确认后应有回复");
     assert!(done.text.contains("导入成功 0 行"), "实际：{}", done.text);
     assert!(done.text.contains("失败 2 行"), "实际：{}", done.text);
+    clean_date(&st, "2026-10-07").await;
 }
 
 /// 下载失败要明确回报，不能让用户以为导过了。
@@ -198,21 +216,24 @@ async fn help_and_status_reply() {
 #[tokio::test]
 async fn import_with_explicit_date() {
     let Some(st) = setup().await else { return };
+    clean_date(&st, "2019-03-14").await;
     let cfg = cfg();
-    let text = "导入 男团 2026-10-06\n南方楠 88888";
+    let text = "导入 男团 2019-03-14\n南方楠 88888";
     let out = bot::BotRouter::handle(&st, &cfg, inbound(text))
         .await
         .expect("导入应有回复");
     // 2026-10-07 起导入文案精简为「✅ 日期 男团 导入成功 N 行」
     assert!(out.text.contains("导入成功 1 行"), "实际：{}", out.text);
+    clean_date(&st, "2019-03-14").await;
 }
 
 #[tokio::test]
 async fn export_csv_by_date() {
     let Some(st) = setup().await else { return };
+    clean_date(&st, "2019-03-15").await;
     let cfg = cfg();
     // 先导入一行确定的数据再按显式日期导出，不依赖库里是否已有「今天」的真实数据
-    let seeded = bot::BotRouter::handle(&st, &cfg, inbound("导入 男团 2026-10-06\n浩龙 77777"))
+    let seeded = bot::BotRouter::handle(&st, &cfg, inbound("导入 男团 2019-03-15\n浩龙 77777"))
         .await
         .expect("导入应有回复");
     assert!(
@@ -220,12 +241,13 @@ async fn export_csv_by_date() {
         "实际：{}",
         seeded.text
     );
-    let out = bot::BotRouter::handle(&st, &cfg, inbound("导出 2026-10-06"))
+    let out = bot::BotRouter::handle(&st, &cfg, inbound("导出 2019-03-15"))
         .await
         .expect("导出应有回复");
     assert!(out.text.starts_with("名字,"), "实际：{}", out.text);
     // CSV 是机器格式：数值不带千分位逗号（否则一行会被拆成三列）
     assert!(out.text.contains("浩龙,77777"), "实际：{}", out.text);
+    clean_date(&st, "2019-03-15").await;
 }
 
 #[tokio::test]
@@ -269,4 +291,54 @@ async fn unknown_command_gets_hint_reply() {
         .await
         .expect("未知命令应回复提示");
     assert!(out.text.contains("不认识"), "实际：{}", out.text);
+}
+
+/// 回归（2026-10-10 清库后第一天）：文件里同时有「当日音浪」和「累计音浪」时，
+/// 必须用当日音浪入库（累计只当快照）。以前走「累计差分」，清库后没有前一天快照，
+/// 会把累计值当成当日音浪；而且 MIN(biz_date) 会让首日被误判成基线日，从趋势/导出里消失。
+#[tokio::test]
+async fn first_import_uses_explicit_daily_wave_and_is_exportable() {
+    let Some(st) = setup().await else { return };
+    let cfg = cfg();
+    let date = "2019-03-11"; // 专用测试日，结束即清理
+    let text = format!("导入 男团 {date}\n浩龙 123456 9999999");
+    let out = bot::BotRouter::handle(&st, &cfg, inbound(&text))
+        .await
+        .expect("导入应有回复");
+    assert!(out.text.contains("导入成功 1 行"), "实际：{}", out.text);
+
+    let pool = st.writer.as_ref().expect("需要写池");
+    let row = sqlx::query(
+        "SELECT d.wave, d.cumulative_wave, d.wave_reliable FROM daily_metric d
+         JOIN person p ON p.id = d.person_id
+         WHERE d.biz_date = ? AND p.name = '浩龙'",
+    )
+    .bind(date)
+    .fetch_one(pool)
+    .await
+    .expect("应查到刚导入的行");
+    let wave: i64 = sqlx::Row::try_get(&row, "wave").unwrap_or_default();
+    let cum: i64 = sqlx::Row::try_get(&row, "cumulative_wave").unwrap_or_default();
+    assert_eq!(wave, 123456, "当日音浪要用显式值，不能被算成累计值");
+    assert_eq!(cum, 9999999, "累计音浪要留作快照，供后一天差分");
+
+    // 首日不是基线日：导出能查到（基线日会被 get_wave_series 剔除）
+    let out = bot::BotRouter::handle(&st, &cfg, inbound(&format!("导出 {date}")))
+        .await
+        .expect("导出应有回复");
+    assert!(
+        out.text.contains("浩龙,123456"),
+        "清库后第一天必须能导出，实际：{}",
+        out.text
+    );
+
+    // 清理
+    let _ = sqlx::query("DELETE FROM daily_metric WHERE biz_date = ?")
+        .bind(date)
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("DELETE FROM import_batch WHERE biz_date = ?")
+        .bind(date)
+        .execute(pool)
+        .await;
 }
