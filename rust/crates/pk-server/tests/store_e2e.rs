@@ -236,6 +236,43 @@ async fn my_account_login_and_admin_flag() {
     );
 }
 
+/// 内置展示端账号：跟着代码走（换库 / 全新部署都在），启动补齐且幂等。
+/// 幂等这块是重点：运营自己改过密码后重启，不能被内置值冲掉。
+#[tokio::test]
+async fn builtin_my_account_seeded_and_idempotent() {
+    let Some(st) = setup().await else { return };
+    if !need_writer(&st) {
+        return;
+    }
+    store::ensure_builtin_my_accounts(&st).await;
+    for (name, pass) in store::BUILTIN_MY_ACCOUNTS {
+        assert!(
+            store::my_account_is_admin(&st, name).await,
+            "内置账号 {name} 必须是管理员观看账号（台账里没有同名主播也能登录）"
+        );
+        assert_eq!(
+            store::my_account_check_login(&st, name, pass)
+                .await
+                .as_deref(),
+            Some(name),
+            "内置账号 {name}/{pass} 要能登录"
+        );
+    }
+    // 再跑一次：不重复创建、不改密码
+    let (created_again, _) = store::ensure_builtin_my_accounts(&st).await;
+    assert_eq!(created_again, 0, "第二次启动不应重复创建内置账号");
+    for (name, pass) in store::BUILTIN_MY_ACCOUNTS {
+        assert_eq!(
+            store::my_account_check_login(&st, name, pass)
+                .await
+                .as_deref(),
+            Some(name),
+            "补齐逻辑不能改掉已有密码"
+        );
+    }
+    // 内置账号是长期资产，测试不删（生产也靠它兜底）
+}
+
 #[tokio::test]
 async fn anchor_claim_roundtrip() {
     let Some(st) = setup().await else { return };

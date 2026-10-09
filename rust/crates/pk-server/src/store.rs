@@ -645,6 +645,89 @@ pub async fn my_account_is_admin(st: &AppState, name: &str) -> bool {
     )
 }
 
+/* ------------------------- 内置展示端账号 ------------------------- */
+
+/// 内置展示端账号：账号与密码相同，`is_admin=1`（管理员观看账号：台账里没有同名主播也放行，
+/// 全站看得到、个人数据页为空）。跟着代码走，不依赖任何一份库 dump —— 生产换库、
+/// 全新部署、库被清空后重启，这几个账号都还在。
+pub const BUILTIN_MY_ACCOUNTS: [(&str, &str); 1] = [("shuai", "shuai")];
+
+/// 启动时补齐内置账号（幂等）：
+/// - 同名账号已存在 → 只把 `is_admin` 拉回 1，**密码保持运营自己设置的样子**，不覆盖
+/// - 密码被别的姓名占用（`uk_my_pass` 1:1 唯一键）→ 跳过并告警，不能顶掉别人的登录
+/// - 表还不存在（没跑过 migrate）→ 告警后跳过，不影响服务启动
+///
+/// 返回 (新建数, 跳过数)。
+pub async fn ensure_builtin_my_accounts(st: &AppState) -> (usize, usize) {
+    let Ok(pool) = w(st) else {
+        tracing::warn!("内置展示端账号未写入：写库不可用（douyin_writer 未配置）");
+        return (0, BUILTIN_MY_ACCOUNTS.len());
+    };
+    let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let mut created = 0usize;
+    let mut skipped = 0usize;
+
+    for (name, pass) in BUILTIN_MY_ACCOUNTS {
+        let exists = match sqlx::query("SELECT name FROM my_accounts WHERE name = ?")
+            .bind(name)
+            .fetch_optional(pool)
+            .await
+        {
+            Ok(row) => row.is_some(),
+            Err(e) => {
+                tracing::warn!(error = %e, name, "内置展示端账号查不到（表还没建？先跑 pk-server migrate）");
+                skipped += 1;
+                continue;
+            }
+        };
+        if exists {
+            if let Err(e) = sqlx::query("UPDATE my_accounts SET is_admin = 1 WHERE name = ?")
+                .bind(name)
+                .execute(pool)
+                .await
+            {
+                tracing::warn!(error = %e, name, "内置展示端账号管理员标记更新失败");
+                skipped += 1;
+            }
+            continue;
+        }
+
+        // 密码 1:1：已被别的姓名占用就不能插（否则会顶掉那个人的登录）
+        let pass_taken = sqlx::query("SELECT name FROM my_accounts WHERE pass = ?")
+            .bind(pass)
+            .fetch_optional(pool)
+            .await
+            .map(|r| r.is_some())
+            .unwrap_or(false);
+        if pass_taken {
+            tracing::warn!(name, "内置展示端账号未创建：密码已被其它姓名占用，请先改那个账号的密码");
+            skipped += 1;
+            continue;
+        }
+
+        match sqlx::query(
+            "INSERT INTO my_accounts (name, phone, pass, is_admin, created_at)
+             VALUES (?, '', ?, 1, ?)",
+        )
+        .bind(name)
+        .bind(pass)
+        .bind(&now)
+        .execute(pool)
+        .await
+        {
+            Ok(_) => {
+                created += 1;
+                tracing::info!(name, "已写入内置展示端账号（管理员观看账号）");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, name, "内置展示端账号写入失败");
+                skipped += 1;
+            }
+        }
+    }
+    (created, skipped)
+}
+
 /// 手机号归一化：去空格 / 横线 / 点，与 my_account_set 的写入口径一致
 pub fn normalize_phone(v: &str) -> String {
     v.chars()

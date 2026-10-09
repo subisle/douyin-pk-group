@@ -112,6 +112,16 @@ async fn main() -> anyhow::Result<()> {
     /* 内置主播名册：person 表为空（全新部署）时自动装载 105 人种子数据 */
     roster_seed::seed_if_empty(&st).await;
 
+    /* 内置展示端账号（shuai/shuai，账号=密码、管理员观看账号）：每次启动补齐。
+    换库 / 全新部署 / 库被清空都不怕；已有同名账号只补 is_admin，不动运营改过的密码。 */
+    let (builtin_created, builtin_skipped) = store::ensure_builtin_my_accounts(&st).await;
+    if builtin_created > 0 {
+        tracing::info!(created = builtin_created, "内置展示端账号已写入");
+    }
+    if builtin_skipped > 0 {
+        tracing::warn!(skipped = builtin_skipped, "有内置展示端账号没写成功，原因见上面的日志");
+    }
+
     /* 机器人模块（E 阶段）：配置了凭据的服务启动即自动连接（用户要求：启动 QQ 机器人都要启动）。
     QQ：AppID/Secret 齐 → 自动连 gateway；微信：SQLite 有登录 token → 自动恢复轮询，
     无 token 停在等待扫码（不影响启动）。失败只告警，服务照常起。 */
