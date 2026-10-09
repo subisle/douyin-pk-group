@@ -834,7 +834,7 @@ export const useStore = create<State>((set, get) => {
     },
 
     makeShareLink: async () => {
-      const { title, metric, days, buckets, brand, display, startTime, intervalMin, notify } = get();
+      const { title, metric, days, strategy, buckets, brand, display, startTime, intervalMin, notify } = get();
       if (!buckets.length) {
         notify('还没有分组结果');
         return null;
@@ -848,6 +848,7 @@ export const useStore = create<State>((set, get) => {
             title,
             metric,
             days,
+            strategy,
             brand,
             display,
             schedule: { start: startTime, intervalMin },
@@ -924,7 +925,7 @@ export const useStore = create<State>((set, get) => {
     },
 
     savePlanNow: async () => {
-      const { title, metric, days, buckets, brand, display, startTime, intervalMin, notify } = get();
+      const { title, metric, days, strategy, buckets, brand, display, startTime, intervalMin, notify } = get();
       if (!buckets.length) {
         notify('还没有分组结果');
         return;
@@ -938,6 +939,7 @@ export const useStore = create<State>((set, get) => {
             title,
             metric,
             days,
+            strategy,
             brand,
             display,
             schedule: { start: startTime, intervalMin },
@@ -971,6 +973,7 @@ export const useStore = create<State>((set, get) => {
           title: p.payload.title || p.title,
           metric: p.payload.metric ?? 'lastN',
           days: p.payload.days ?? 3,
+          strategy: p.payload.strategy ?? 'snake',
           display: { ...DEFAULT_DISPLAY, ...(p.payload.display ?? {}) },
           buckets: (p.payload.buckets ?? []).map((b) => ({
             id: bucketId(),

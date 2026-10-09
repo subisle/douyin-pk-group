@@ -1,0 +1,272 @@
+//! 机器人端到端集成测试：真实 AppState + 真库（需要 DB_LOCAL_* / DB_WRITER_* 环境变量）。
+//! 未配置数据库时自动跳过（本地单测不依赖库）。
+//!
+//! 覆盖：非管理员静默、帮助、状态、导入（带指定日期）、导出 CSV、排行、日报、缺数据。
+
+use std::sync::Arc;
+
+use pk_server::bot::{self, BotConfig, Inbound};
+use pk_server::{config, mysql, state::AppState};
+
+async fn setup() -> Option<Arc<AppState>> {
+    if std::env::var("DB_LOCAL_HOST").is_err() {
+        eprintln!("跳过：未配置 DB_LOCAL_*（此测试需要真实测试库）");
+        return None;
+    }
+    let sources = config::load_sources().expect("sources");
+    let pools = mysql::build_pools(&sources).await.expect("建池失败");
+    let writer = match config::load_writer() {
+        Ok(ep) => pk_server::writer::connect(&ep).await.ok(),
+        Err(_) => None,
+    };
+    let active = sources
+        .iter()
+        .find(|s| s.id == "LOCAL")
+        .or_else(|| sources.first())
+        .expect("at least one source")
+        .id
+        .clone();
+    Some(Arc::new(AppState {
+        auth: Arc::new(pk_server::auth::Auth::from_env()),
+        wave_ttl: std::time::Duration::from_secs(600),
+        sources,
+        pools,
+        writer,
+        active: std::sync::Mutex::new(active),
+        cache: std::sync::Mutex::new(Default::default()),
+        bots: std::sync::OnceLock::new(),
+    }))
+}
+
+fn cfg() -> BotConfig {
+    BotConfig {
+        qq_app_id: "test".into(),
+        qq_app_secret: "test".into(),
+        wechat_token: String::new(),
+        qq_admins: vec!["ADMIN-CHAT".into()],
+        wechat_admins: vec![],
+        rate_limit_per_min: 100,
+    }
+}
+
+fn inbound(text: &str) -> Inbound {
+    Inbound {
+        channel: "qq",
+        conversation_id: "ADMIN-CHAT".into(),
+        is_group: false,
+        text: text.into(),
+        attachments: vec![],
+    }
+}
+
+fn inbound_stranger(text: &str) -> Inbound {
+    Inbound {
+        channel: "qq",
+        conversation_id: "STRANGER-1".into(),
+        is_group: true,
+        text: text.into(),
+        attachments: vec![],
+    }
+}
+
+/// 单独的会话 ID，避免和文本导入用例抢同一个待确认导入槽位（PENDING 是全局的）。
+fn cfg_with(chat: &str) -> BotConfig {
+    let mut c = cfg();
+    c.qq_admins.push(chat.to_string());
+    c
+}
+
+fn inbound_from(chat: &str, file: &str, url: &str) -> Inbound {
+    Inbound {
+        channel: "qq",
+        conversation_id: chat.into(),
+        is_group: false,
+        text: String::new(),
+        attachments: vec![bot::Attachment {
+            url: url.into(),
+            file_name: file.into(),
+        }],
+    }
+}
+
+/// 起一个极小 HTTP 服务，模拟 QQ 附件直链（下载附件走的是一次普通 GET）。
+async fn serve_text(body: &'static str) -> Option<String> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.ok()?;
+    let addr = listener.local_addr().ok()?;
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/csv; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.flush().await;
+                let _ = sock.shutdown().await;
+            });
+        }
+    });
+    Some(format!("http://{addr}/data.csv"))
+}
+
+/// 私聊发 CSV 文件 + 文件名带日期与团别 → 直接入库，不用再回一句话确认。
+/// 用 2026-10-06（开发库里本来没有这一天，跑完可整日期清理）。
+#[tokio::test]
+async fn csv_attachment_with_date_and_team_hints_is_imported() {
+    let Some(st) = setup().await else { return };
+    let cfg = cfg_with("CSV-USER-A");
+    let Some(url) = serve_text("浩龙,77777\n南方楠,66666\n").await else {
+        return;
+    };
+    let out = bot::BotRouter::handle(
+        &st,
+        &cfg,
+        inbound_from("CSV-USER-A", "2026-10-06-男团.csv", &url),
+    )
+    .await
+    .expect("附件导入应有回复");
+    assert!(out.text.contains("导入成功 2 行"), "实际：{}", out.text);
+    assert!(out.text.starts_with('✅'), "实际：{}", out.text);
+}
+
+/// 文件名没有团别、数据行也认不出团别 → 收下文件并追问团别（不落库）。
+#[tokio::test]
+async fn csv_attachment_without_hints_asks_back() {
+    let Some(st) = setup().await else { return };
+    let cfg = cfg_with("CSV-USER-B");
+    let Some(url) = serve_text("查无此人甲,123\n查无此人乙,456\n").await else {
+        return;
+    };
+    let out = bot::BotRouter::handle(&st, &cfg, inbound_from("CSV-USER-B", "export.csv", &url))
+        .await
+        .expect("应回复追问团别");
+    assert!(out.text.contains("认不出团别"), "实际：{}", out.text);
+
+    // 追问后回复「男团 日期」即可完成入库（这两个名字不在名册里，应全部失败并回报）
+    let mut confirm = inbound("男团 2026-10-07");
+    confirm.conversation_id = "CSV-USER-B".into();
+    let done = bot::BotRouter::handle(&st, &cfg, confirm)
+        .await
+        .expect("确认后应有回复");
+    assert!(done.text.contains("导入成功 0 行"), "实际：{}", done.text);
+    assert!(done.text.contains("失败 2 行"), "实际：{}", done.text);
+}
+
+/// 下载失败要明确回报，不能让用户以为导过了。
+#[tokio::test]
+async fn attachment_download_failure_is_reported() {
+    let Some(st) = setup().await else { return };
+    let cfg = cfg_with("CSV-USER-C");
+    // 指向一个没人监听的端口
+    let out = bot::BotRouter::handle(
+        &st,
+        &cfg,
+        inbound_from("CSV-USER-C", "x.csv", "http://127.0.0.1:9/nothing.csv"),
+    )
+    .await
+    .expect("应回复下载失败");
+    assert!(out.text.contains("附件下载失败"), "实际：{}", out.text);
+}
+
+#[tokio::test]
+async fn non_admin_is_silently_ignored() {
+    let Some(st) = setup().await else { return };
+    let cfg = cfg();
+    assert!(bot::BotRouter::handle(&st, &cfg, inbound_stranger("帮助"))
+        .await
+        .is_none());
+}
+
+#[tokio::test]
+async fn help_and_status_reply() {
+    let Some(st) = setup().await else { return };
+    let cfg = cfg();
+    let help = bot::BotRouter::handle(&st, &cfg, inbound("帮助"))
+        .await
+        .expect("帮助应有回复");
+    assert!(help.text.contains("可用命令"), "实际：{}", help.text);
+    let status = bot::BotRouter::handle(&st, &cfg, inbound("状态"))
+        .await
+        .expect("状态应有回复");
+    assert!(status.text.contains("数据状态"), "实际：{}", status.text);
+}
+
+#[tokio::test]
+async fn import_with_explicit_date() {
+    let Some(st) = setup().await else { return };
+    let cfg = cfg();
+    let text = "导入 男团 2026-10-06\n南方楠 88888";
+    let out = bot::BotRouter::handle(&st, &cfg, inbound(text))
+        .await
+        .expect("导入应有回复");
+    // 2026-10-07 起导入文案精简为「✅ 日期 男团 导入成功 N 行」
+    assert!(out.text.contains("导入成功 1 行"), "实际：{}", out.text);
+}
+
+#[tokio::test]
+async fn export_csv_by_date() {
+    let Some(st) = setup().await else { return };
+    let cfg = cfg();
+    // 先导入一行确定的数据再按显式日期导出，不依赖库里是否已有「今天」的真实数据
+    let seeded = bot::BotRouter::handle(&st, &cfg, inbound("导入 男团 2026-10-06\n浩龙 77777"))
+        .await
+        .expect("导入应有回复");
+    assert!(
+        seeded.text.contains("导入成功 1 行"),
+        "实际：{}",
+        seeded.text
+    );
+    let out = bot::BotRouter::handle(&st, &cfg, inbound("导出 2026-10-06"))
+        .await
+        .expect("导出应有回复");
+    assert!(out.text.starts_with("名字,"), "实际：{}", out.text);
+    // CSV 是机器格式：数值不带千分位逗号（否则一行会被拆成三列）
+    assert!(out.text.contains("浩龙,77777"), "实际：{}", out.text);
+}
+
+#[tokio::test]
+async fn rank_and_daily_report() {
+    let Some(st) = setup().await else { return };
+    let cfg = cfg();
+    let rank = bot::BotRouter::handle(&st, &cfg, inbound("排行 5"))
+        .await
+        .expect("排行应有回复");
+    assert!(rank.text.contains("音浪榜"), "实际：{}", rank.text);
+    let report = bot::BotRouter::handle(&st, &cfg, inbound("日报 男团"))
+        .await
+        .expect("日报应有回复");
+    assert!(report.text.contains("日报（"), "实际：{}", report.text);
+    assert!(
+        report.text.contains("未开播") || report.text.contains("⚠️"),
+        "实际：{}",
+        report.text
+    );
+}
+
+#[tokio::test]
+async fn missing_data_check() {
+    let Some(st) = setup().await else { return };
+    let cfg = cfg();
+    let out = bot::BotRouter::handle(&st, &cfg, inbound("缺数据 男团 2026-10-06"))
+        .await
+        .expect("缺数据应有回复");
+    assert!(
+        out.text.contains("数据已齐") || out.text.contains("缺数据"),
+        "实际：{}",
+        out.text
+    );
+}
+
+#[tokio::test]
+async fn unknown_command_gets_hint_reply() {
+    let Some(st) = setup().await else { return };
+    let cfg = cfg();
+    let out = bot::BotRouter::handle(&st, &cfg, inbound("blahblah"))
+        .await
+        .expect("未知命令应回复提示");
+    assert!(out.text.contains("不认识"), "实际：{}", out.text);
+}

@@ -1,0 +1,2073 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<title>主播数据</title>
+<style>
+/* ===== Obsidian & Slate 展示端 token（零外部依赖，弱网可用） ===== */
+:root {
+  --masthead-bg:#0B0F17; --masthead-surface:#161E2E; --hairline-dark:#1E293B;
+  --canvas-bg:#F8F9FA; --card-bg:#FFFFFF; --hairline:#E5E7EB;
+  --on-surface:#0b1c30; --on-surface-variant:#434655; --ink3:#94a3b8;
+  --primary:#2563EB; --on-primary:#fff; --highlight-bg:#EFF6FF; --highlight-line:#BFDBFE;
+  --up:#EF4444; --up-bg:#FEF2F2; --down:#10B981; --live:#22C55E;
+  --gold-bg:#FEF3C7; --gold-tx:#92400E; --silver-bg:#F1F5F9; --silver-tx:#475569;
+  --bronze-bg:#FFEDD5; --bronze-tx:#9A3412;
+  --r-lg:16px; --r-md:12px; --r-sm:8px; --r-full:9999px;
+}
+* { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+body { margin:0; background:var(--canvas-bg); color:var(--on-surface);
+  font:14px/1.5 -apple-system,BlinkMacSystemFont,'SF Pro Text','PingFang SC','Hiragino Sans GB',sans-serif; }
+button { font:inherit; cursor:pointer; }
+.hidden { display:none !important; }
+
+/* ===== Masthead ===== */
+.masthead { background:var(--masthead-bg); color:#fff;
+  padding:calc(env(safe-area-inset-top,0px) + 12px) 16px 0;
+  /* 顶部导航固定不动（2026-10-10）：滚动时标题+导航钉在顶部，内容从底下穿过 */
+  position:sticky; top:0; z-index:30; overflow:hidden;
+  box-shadow:0 2px 14px rgba(11,15,23,.22); }
+.masthead::before { content:''; position:absolute; inset:0; pointer-events:none;
+  background:radial-gradient(circle at 50% -20%, rgba(59,130,246,.18), transparent 70%); }
+.mh-top { display:flex; align-items:center; gap:10px; position:relative; }
+.mh-badge { width:36px; height:36px; border-radius:11px; background:var(--masthead-surface);
+  border:1px solid var(--hairline-dark); display:grid; place-items:center; font-weight:800;
+  font-size:15px; color:#b4c5ff; flex:none; }
+.mh-title { flex:1; min-width:0; }
+.mh-title .t { font-weight:800; font-size:17px; letter-spacing:-.01em; }
+.mh-title .s { font-size:11px; color:#8ea0bf; font-family:Menlo,monospace;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+/* 主导航（每日报告 / 分组 / 族谱）+ 分组子导航（按赛事类型拆页） */
+.nav-row { display:flex; gap:2px; margin-top:12px; position:relative; }
+.nav-row button { flex:1; height:38px; border:none; background:transparent; color:#8ea0bf;
+  font-size:14px; border-bottom:2px solid transparent; }
+.nav-row button.on { color:#fff; font-weight:700; border-bottom-color:var(--primary); }
+.subnav { display:flex; gap:6px; margin-top:10px; overflow-x:auto; padding-bottom:12px;
+  -webkit-overflow-scrolling:touch; scrollbar-width:none;
+  mask-image:linear-gradient(to right,#000 94%,transparent 100%); position:relative; }
+.subnav::-webkit-scrollbar { display:none; }
+.subnav button { flex:none; height:30px; padding:0 13px; border-radius:var(--r-full);
+  background:var(--masthead-surface); border:1px solid var(--hairline-dark); color:#8ea0bf;
+  font-size:12.5px; }
+.subnav button.on { background:var(--primary); border-color:var(--primary); color:#fff; font-weight:600; }
+
+/* 工具栏（口径 + 日期 + 搜索 + 字段） */
+.toolbar { position:sticky; top:var(--mh-h, 112px); z-index:8; background:rgba(248,249,250,.92);
+  backdrop-filter:blur(10px); border-bottom:1px solid var(--hairline);
+  padding:8px 12px; }
+.tools { max-width:560px; margin:0 auto; }
+.seg { display:flex; background:#eef1f5; border-radius:var(--r-full); padding:3px; }
+.seg button { flex:1; height:32px; border:none; border-radius:var(--r-full); background:transparent;
+  color:var(--on-surface-variant); font-size:13px; }
+.seg button.on { background:#fff; color:var(--on-surface); font-weight:700;
+  box-shadow:0 1px 2px rgb(16 24 40 / 12%); }
+.seg button:disabled { color:#c2c8d2; cursor:not-allowed; }
+.line2 { display:flex; align-items:center; gap:8px; margin-top:8px; }
+.dates { display:flex; gap:8px; overflow-x:auto; flex:1; padding-bottom:2px;
+  -webkit-overflow-scrolling:touch; scrollbar-width:none;
+  mask-image:linear-gradient(to right,#000 88%,transparent 100%); }
+.dates::-webkit-scrollbar { display:none; }
+.dates button { flex:none; height:32px; padding:0 14px; border-radius:var(--r-full);
+  background:#fff; border:1px solid var(--hairline); color:var(--on-surface-variant);
+  font-size:12.5px; font-family:Menlo,monospace; }
+.dates button.on { background:var(--primary); border-color:var(--primary); color:#fff; font-weight:600; }
+.stepper { display:flex; align-items:center; gap:4px; flex:1; min-width:0; }
+.stepper button { width:34px; height:32px; border-radius:var(--r-sm); background:#fff;
+  border:1px solid var(--hairline); color:var(--on-surface-variant); line-height:1; }
+.stepper .now { flex:1; text-align:center; font-family:Menlo,monospace; font-size:14px; font-weight:600; }
+.icon-btn { width:34px; height:32px; border-radius:var(--r-sm); background:#fff;
+  border:1px solid var(--hairline); display:grid; place-items:center; color:var(--on-surface-variant); flex:none; }
+.icon-btn.on { border-color:var(--primary); color:var(--primary); background:var(--highlight-bg); }
+.search { display:flex; align-items:center; gap:6px; margin-top:8px; background:#fff;
+  border:1px solid var(--hairline); border-radius:var(--r-sm); padding:0 10px; height:34px; }
+.search input { flex:1; border:none; outline:none; font:inherit; background:transparent; color:var(--on-surface); }
+.search input::placeholder { color:var(--ink3); }
+
+/* ===== 内容 ===== */
+.wrap { padding:14px 14px 32px; max-width:560px; margin:0 auto; }
+.section { animation:fade .18s ease-out; }
+@keyframes fade { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:none; } }
+.card { background:var(--card-bg); border:1px solid var(--hairline); border-radius:var(--r-lg); }
+.card + .card { margin-top:12px; }
+.card-pad { padding:14px 16px; }
+h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
+  letter-spacing:.04em; display:flex; align-items:center; justify-content:space-between; }
+
+/* ===== 排行榜（对齐参考设计：TOP3 领奖台 + 简洁排名列表） ===== */
+.lb-card { overflow:hidden; }
+/* 领奖台：2nd / 1st / 3rd，第一名居中大号 */
+.lb-pod { display:grid; grid-template-columns:1fr 1.25fr 1fr; align-items:end; gap:4px;
+  padding:20px 12px 14px; border-bottom:1px solid var(--hairline);
+  background:linear-gradient(180deg,#EFF5FF 0%,#FFFFFF 88%); }
+.pod { text-align:center; min-width:0; }
+.pod .av { border-radius:50%; display:grid; place-items:center; color:#fff; font-weight:800;
+  margin:0 auto; box-shadow:0 4px 10px rgb(16 24 40 / 14%); }
+.pod.p1 .av { width:66px; height:66px; font-size:26px; border:3px solid #FDE68A; }
+.pod.p2 .av, .pod.p3 .av { width:50px; height:50px; font-size:19px; }
+.pod .rb { width:20px; height:20px; border-radius:var(--r-full); margin:6px auto 0; display:grid;
+  place-items:center; font-size:10.5px; font-weight:800; font-family:Menlo,monospace; }
+.pod.p1 .rb { background:var(--gold-bg); color:var(--gold-tx); }
+.pod.p2 .rb { background:var(--silver-bg); color:var(--silver-tx); }
+.pod.p3 .rb { background:var(--bronze-bg); color:var(--bronze-tx); }
+.pod .nm { margin-top:5px; font-weight:700; font-size:12.5px; overflow:hidden;
+  text-overflow:ellipsis; white-space:nowrap; }
+.pod.p1 .nm { font-size:14px; }
+.pod .wv { font-weight:800; font-size:14px; font-variant-numeric:tabular-nums;
+  letter-spacing:-.02em; margin-top:1px; }
+.pod.p1 .wv { font-size:17px; }
+/* 列表：名次 / 头像 / 名字 …… 右侧涨跌 + 音浪 */
+.lb-row { display:flex; align-items:center; gap:10px; padding:9px 14px;
+  border-bottom:.5px solid var(--hairline); cursor:pointer; }
+.lb-row:last-child { border-bottom:none; }
+.lb-row:active { background:#F4F6FA; }
+.lb-row .rk { width:20px; text-align:center; font-family:Menlo,monospace; font-size:12.5px;
+  font-weight:700; color:var(--ink3); flex:none; font-variant-numeric:tabular-nums; }
+.rk.g { color:var(--gold-tx); } .rk.s { color:var(--silver-tx); } .rk.b { color:var(--bronze-tx); }
+.lb-row .av { width:38px; height:38px; border-radius:50%; display:grid; place-items:center;
+  color:#fff; font-weight:700; font-size:15px; flex:none; }
+.lb-row .nm { flex:none; min-width:0; max-width:34vw; font-weight:600; font-size:13.5px; overflow:hidden;
+  text-overflow:ellipsis; white-space:nowrap; }
+.lb-row .mid { flex:1; min-width:0; font-size:10.5px; line-height:1.45; color:var(--ink3);
+  font-weight:500; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; padding-left:2px; }
+.lb-row.off .av { background:#CBD5E1 !important; }
+.lb-row.off .nm { color:var(--ink3); font-weight:500; }
+.lb-row .val { flex:none; text-align:right; }
+.lb-row .val .d { display:block; font-size:10px; line-height:1.25; min-height:13px; font-weight:700; }
+.lb-row .val .w { display:block; font-weight:800; font-size:15px; font-variant-numeric:tabular-nums;
+  letter-spacing:-.02em; }
+.lb-row.off .val .w { font-size:11px; font-weight:600; }
+.delta { font-size:10.5px; font-weight:700; }
+.d-up { color:var(--up); } .d-down { color:var(--down); } .d-flat { color:var(--ink3); }
+.pill-off { font-size:10px; font-weight:600; color:#D92D20; background:#FEE4E2;
+  border-radius:var(--r-full); padding:1px 8px; }
+.tag-off { font-size:10px; color:var(--ink3); border:1px solid var(--hairline);
+  border-radius:var(--r-full); padding:0 6px; }
+.link { background:none; border:none; color:var(--ink3); font-size:12px; padding:8px 4px; }
+/* 骨架屏 */
+.sk { background:linear-gradient(90deg,#eef1f5 25%,#f7f9fc 37%,#eef1f5 63%);
+  background-size:400% 100%; animation:shimmer 1.2s ease-in-out infinite; border-radius:6px; }
+@keyframes shimmer { 0% { background-position:100% 50%; } 100% { background-position:0 50%; } }
+.sk-row { height:44px; margin:8px 14px; }
+
+/* 分组页（与导出长图同版式：渐变头部卡 + 彩色分组卡 + 成员胶囊，成员单列） */
+.gx-head { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;
+  background:linear-gradient(120deg,#ff9a3d 0%,#ff6a5e 55%,#ff4d94 100%);
+  border-radius:18px; padding:16px; color:#fff; margin-bottom:14px; }
+.gx-head .l { min-width:0; flex:1 1 100%; }
+.gx-head .bl { font-size:10px; letter-spacing:2px; opacity:.85; font-family:Menlo,monospace; }
+.gx-head .tt { margin-top:5px; font-size:19px; font-weight:800; letter-spacing:.02em; }
+.gx-head .mt { margin-top:6px; font-size:11.5px; opacity:.95; }
+.gx-pills { display:flex; gap:8px; flex:none; margin-left:auto; }
+.gx-pill { min-width:50px; text-align:center; border-radius:14px; padding:7px 12px; }
+.gx-pill.ghost { background:rgba(255,255,255,.28); }
+.gx-pill.solid { background:#fff; color:#f4573d; }
+.gx-pill .n { font-size:18px; font-weight:800; line-height:1.15; font-variant-numeric:tabular-nums; }
+.gx-pill .l { font-size:9.5px; opacity:.85; margin-top:1px; }
+.gx-card { border:2px solid; border-radius:16px; padding:13px 13px 12px; margin-bottom:14px; }
+.gx-card .g { font-size:16px; font-weight:800; }
+.gx-card .s { margin-top:2px; font-size:11.5px; color:#7b8494; }
+.gx-mem { background:rgba(255,255,255,.8); border-radius:10px; padding:8px 10px; margin-top:8px; }
+.gx-mem .top { font-size:13.5px; line-height:19px; color:#1f2937; display:flex;
+  align-items:center; gap:6px; min-width:0; }
+.gx-mem .top .r { font-weight:800; flex:none; font-family:Menlo,monospace; }
+.gx-mem .top b { font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.gx-mem .st { margin-top:2px; font-size:10.5px; line-height:15px; color:#8590a2;
+  font-variant-numeric:tabular-nums; }
+.gx-foot { text-align:center; color:#98a2b3; font-size:11px; margin-top:4px; }
+
+/* 族谱画布（无底部导航后撑满剩余视口，视觉接近全屏；双击/按钮可进原生全屏） */
+.lineage-wrap { position:relative; height:calc(100vh - 150px); min-height:430px;
+  background:var(--canvas-bg); border:1px solid var(--hairline); border-radius:var(--r-lg);
+  overflow:hidden; touch-action:none; cursor:grab; }
+.lineage-wrap:active { cursor:grabbing; }
+.lineage-wrap svg { width:100%; height:100%; display:block; }
+.ln-hint { position:absolute; top:8px; left:10px; right:10px; display:flex; gap:8px;
+  align-items:center; pointer-events:none; z-index:2; }
+.ln-hint .tip { background:rgba(11,15,23,.72); color:#fff; font-size:11px;
+  padding:4px 10px; border-radius:var(--r-full); }
+.ln-hint input { pointer-events:auto; margin-left:auto; width:132px; height:26px;
+  border:1px solid var(--hairline); border-radius:var(--r-full); padding:0 12px;
+  font-size:12px; background:#fff; color:var(--on-surface); }
+.ln-hint input:focus { outline:none; border-color:var(--primary); }
+.ln-hint .qinfo { background:rgba(11,15,23,.72); color:#fff; font-size:11px;
+  padding:4px 8px; border-radius:var(--r-full); display:none; white-space:nowrap; }
+.ln-ctl { position:absolute; right:10px; bottom:12px; z-index:2; display:flex;
+  flex-direction:column; gap:6px; }
+.ln-ctl button { width:32px; height:32px; padding:0; border-radius:10px;
+  background:#fff; border:1px solid var(--hairline); font-size:16px; line-height:1;
+  color:var(--on-surface-variant); box-shadow:0 1px 3px rgb(0 0 0 / 8%);
+  display:grid; place-items:center; }
+.ln-ctl button:active { background:var(--highlight-bg); }
+/* 全屏：原生 Fullscreen API 走 :fullscreen；iPhone 上不支持时退到 .ln-fs 铺满视口 */
+.lineage-wrap:fullscreen, .lineage-wrap:-webkit-full-screen {
+  height:100vh; border:0; border-radius:0; background:var(--canvas-bg); }
+.lineage-wrap.ln-fs { position:fixed; inset:0; z-index:60; height:100vh;
+  border:0; border-radius:0; background:var(--canvas-bg); }
+.ln-edge { fill:none; stroke:#C3CDDC; stroke-width:1.5; }
+.ln-edge.hot { stroke:var(--primary); stroke-width:2.5; }
+.ln-edge.dim { opacity:.25; }
+.ln-node rect { fill:var(--card-bg); stroke:var(--hairline); stroke-width:1; }
+.ln-node text { text-anchor:middle; fill:var(--on-surface); pointer-events:none; }
+.ln-node .ln-name { font-size:13px; font-weight:700; }
+.ln-node .ln-sub { font-size:10px; fill:var(--ink3); }
+.ln-node.off { opacity:.45; }
+.ln-node.off .ln-name { font-weight:500; }
+.ln-node.sel rect { stroke:var(--primary); fill:var(--highlight-bg); }
+.ln-node.anc rect { stroke:var(--primary); stroke-width:1.5; }
+.ln-node.dim2 { opacity:.22; }
+.ln-node.hit rect { stroke:#f79009; stroke-width:2; }
+.ln-node.hit.dim2 { opacity:.6; }
+.ln-node .ln-tag { font-size:9px; fill:var(--up); }
+
+.err { background:#ffdad6; color:#93000a; border-radius:var(--r-md); padding:10px 13px; margin:10px 0; font-size:13px; }
+.empty { text-align:center; color:var(--ink3); padding:34px 16px; font-size:13px; line-height:1.9; }
+.empty .big { font-size:30px; display:block; margin-bottom:6px; }
+.note { text-align:center; color:var(--ink3); font-size:11.5px; margin-top:18px; line-height:1.7; }
+
+#toast { position:fixed; left:50%; bottom:calc(env(safe-area-inset-bottom,0px) + 18px);
+  transform:translateX(-50%) translateY(16px); background:#0f172a; color:#fff; padding:9px 16px;
+  border-radius:var(--r-full); font-size:13px; opacity:0; transition:all .2s; pointer-events:none;
+  z-index:40; display:flex; align-items:center; gap:6px; white-space:nowrap; max-width:90vw; }
+#toast.show { opacity:1; transform:translateX(-50%) translateY(0); }
+#toast svg { color:var(--live); flex:none; }
+.stale { background:#FFF7E6; color:#B54708; border-radius:var(--r-sm); padding:7px 12px;
+  font-size:12px; margin-bottom:10px; text-align:center; }
+
+/* ===== 我的（姓名+手机号登录 · 无注册，账号由管理员手动添加） ===== */
+.my-login { max-width:360px; margin:30px auto 0; text-align:center; }
+.my-login .card-pad { padding:26px 22px; }
+.my-login .big-av { width:64px; height:64px; border-radius:50%; display:grid; place-items:center;
+  margin:0 auto 10px; color:#fff; font-size:24px; font-weight:800; }
+.my-login h3 { margin:0 0 4px; font-size:16px; }
+.my-login .tip { margin:0 0 16px; color:var(--ink3); font-size:12px; line-height:1.7; }
+.my-login input { width:100%; height:42px; border:1px solid var(--hairline); border-radius:var(--r-md);
+  padding:0 12px; font-size:15px; margin-bottom:10px; background:#fff; color:var(--on-surface); }
+.my-login input:focus { outline:none; border-color:var(--primary); }
+.my-login .form-err { color:#D92D20; font-size:12px; margin:-2px 0 8px; text-align:left; }
+.my-login .btn-main { width:100%; height:42px; border:none; border-radius:var(--r-md);
+  background:var(--primary); color:var(--on-primary); font-size:15px; font-weight:700; }
+.my-login .btn-main:disabled { opacity:.45; }
+
+.my-head { display:flex; align-items:center; gap:12px; padding:16px; }
+.my-head .av { width:54px; height:54px; border-radius:50%; display:grid; place-items:center;
+  color:#fff; font-size:22px; font-weight:800; flex:none; }
+.my-head .nm { font-size:18px; font-weight:800; }
+.my-head .sub { margin-top:3px; font-size:12px; color:var(--ink3); }
+.my-head .rk { margin-left:auto; text-align:right; flex:none; }
+.my-head .rk .n { font-size:20px; font-weight:800; color:var(--primary); font-variant-numeric:tabular-nums; }
+.my-head .rk .l { font-size:10.5px; color:var(--ink3); }
+.my-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:12px; }
+.my-stat { background:var(--card-bg); border:1px solid var(--hairline); border-radius:var(--r-lg);
+  padding:13px 15px; }
+.my-stat .l { font-size:11px; color:var(--ink3); font-weight:600; }
+.my-stat .w { margin-top:3px; font-size:20px; font-weight:800; font-variant-numeric:tabular-nums;
+  letter-spacing:-.02em; }
+.my-stat .m { margin-top:1px; font-size:10.5px; color:var(--ink3); }
+.my-trend { padding:13px 15px; margin-top:12px; }
+.my-trend .bars { display:flex; align-items:flex-end; gap:4px; height:88px; margin-top:10px; }
+.my-trend .bars .b { flex:1; min-width:3px; background:var(--primary); border-radius:3px 3px 0 0;
+  opacity:.85; min-height:3px; }
+.my-trend .bars .b.off { background:#CBD5E1; }
+.my-trend .xs { display:flex; gap:4px; margin-top:5px; font-size:9.5px; color:var(--ink3);
+  font-family:Menlo,monospace; }
+.my-trend .xs span { flex:1; overflow:hidden; white-space:nowrap; }
+.my-logout { margin-top:14px; width:100%; height:40px; border:1px solid var(--hairline);
+  border-radius:var(--r-md); background:#fff; color:var(--on-surface-variant); font-size:13.5px; }
+
+/* ===== 登录门（2026-10-10）：整站要先登录；登录后全屏艺名水印 ===== */
+#gate { position:fixed; inset:0; z-index:90; background:#F4F5F7; display:flex;
+  align-items:flex-start; justify-content:center; overflow:auto; }
+#gate.hidden { display:none; }
+.gate-box { max-width:360px; width:100%; margin:max(60px, 12vh) 16px 0; text-align:center; }
+.gate-box .card-pad { padding:28px 22px; }
+.gate-box .big-av { width:64px; height:64px; border-radius:50%; display:grid; place-items:center;
+  margin:0 auto 10px; color:#fff; font-size:24px; font-weight:800; }
+.gate-box h3 { margin:0 0 4px; font-size:17px; }
+.gate-box .tip { margin:0 0 16px; color:var(--ink3); font-size:12px; line-height:1.7; }
+.gate-box input { width:100%; height:44px; border:1px solid var(--hairline); border-radius:var(--r-md);
+  padding:0 12px; font-size:15px; margin-bottom:10px; background:#fff; color:var(--on-surface); }
+.gate-box input:focus { outline:none; border-color:var(--primary); }
+.gate-box .form-err { color:#D92D20; font-size:12px; margin:-2px 0 8px; text-align:left; }
+.gate-box .btn-main { width:100%; height:44px; border:none; border-radius:var(--r-md);
+  background:var(--primary); color:var(--on-primary); font-size:15px; font-weight:700; }
+.gate-box .btn-main:disabled { opacity:.45; }
+#wm { position:fixed; inset:0; z-index:70; pointer-events:none; background-repeat:repeat; }
+#wm[hidden] { display:none; }
+
+/* 我的页 · 绑定抖音号卡片 */
+.my-claim { padding:13px 15px; margin-top:12px; text-align:left; }
+.my-claim .row { font-size:13px; margin-top:8px; display:flex; align-items:center; gap:8px; }
+.my-claim .st { font-weight:700; }
+.my-claim .st.ok { color:#067647; }
+.my-claim .st.wait { color:#B54708; }
+.my-claim .st.bad { color:#D92D20; }
+.my-claim .sub { font-size:11px; color:var(--ink3); }
+.my-claim input { width:100%; height:40px; border:1px solid var(--hairline); border-radius:var(--r-md);
+  padding:0 12px; font-size:14px; margin-top:8px; background:#fff; color:var(--on-surface); }
+.my-claim input:focus { outline:none; border-color:var(--primary); }
+.my-claim .pick { display:flex; gap:10px; align-items:center; margin-top:10px; }
+.my-claim .shot { width:64px; height:86px; border-radius:8px; border:1px solid var(--hairline);
+  object-fit:cover; background:#F1F2F4; flex:none; }
+.my-claim .pickbtn { flex:1; height:40px; border:1px dashed var(--hairline); border-radius:var(--r-md);
+  background:#fff; color:var(--ink3); font-size:12.5px; }
+.my-claim .go { margin-top:10px; width:100%; height:40px; border:none; border-radius:var(--r-md);
+  background:var(--primary); color:var(--on-primary); font-size:14px; font-weight:700; }
+.my-claim .go:disabled { opacity:.45; }
+.my-claim .why { font-size:11.5px; color:#B54708; background:#FFF7E6; border-radius:8px;
+  padding:7px 10px; margin-top:8px; line-height:1.6; }
+
+/* 我的页 · 微信推送卡片（2026-10-09） */
+.my-push { padding:13px 15px; margin-top:12px; text-align:left; }
+.my-push .row { font-size:13px; margin-top:8px; display:flex; align-items:center; gap:8px; }
+.my-push .st { font-weight:700; }
+.my-push .st.ok { color:#067647; }
+.my-push .st.bad { color:#D92D20; }
+.my-push .sub { font-size:11px; color:var(--ink3); }
+.my-push b { color:var(--on-surface); }
+.my-push .qrcode { width:170px; height:170px; display:block; margin:10px auto 4px;
+  border:1px solid var(--hairline); border-radius:10px; object-fit:contain; background:#fff; }
+.my-push .code { margin:10px 0 2px; text-align:center; font:800 27px/1.15 var(--mono, monospace);
+  letter-spacing:4px; color:var(--primary); }
+.my-push .go { margin-top:10px; width:100%; height:40px; border:none; border-radius:var(--r-md);
+  background:var(--primary); color:var(--on-primary); font-size:14px; font-weight:700; }
+.my-push .go:disabled { opacity:.45; }
+.my-push .go.gray { background:#F2F4F7; color:#344054; }
+.my-push .sw { display:flex; align-items:center; gap:8px; margin-top:11px; font-size:13px; }
+.my-push .sw input { width:18px; height:18px; accent-color:var(--primary); flex:none; }
+.my-push .hint { font-size:11.5px; color:#B54708; background:#FFF7E6; border-radius:8px;
+  padding:7px 10px; margin-top:8px; line-height:1.6; }
+.my-push .tgt { display:flex; align-items:center; gap:8px; padding:10px 0;
+  border-top:1px solid var(--hairline); font-size:13px; }
+.my-push .tgt .x { margin-left:auto; flex:none; border:none; background:none; color:var(--ink3);
+  font-size:15px; padding:2px 4px; }
+.my-push .tabs2 { display:flex; gap:6px; margin-top:10px; }
+.my-push .tabs2 button { flex:1; height:32px; border-radius:8px; font-size:12.5px;
+  border:1px solid var(--hairline); background:#fff; color:var(--ink3); }
+.my-push .tabs2 button.on { background:var(--primary); color:#fff; border-color:var(--primary); }
+.my-push .sr { position:relative; }
+.my-push input { width:100%; height:40px; border:1px solid var(--hairline); border-radius:var(--r-md);
+  padding:0 12px; font-size:14px; margin-top:8px; background:#fff; color:var(--on-surface); }
+.my-push input:focus { outline:none; border-color:var(--primary); }
+.my-push .sr-list { position:absolute; left:0; right:0; top:100%; z-index:6; background:#fff;
+  border:1px solid var(--hairline); border-radius:10px; box-shadow:0 10px 26px rgba(16,24,40,.10);
+  max-height:196px; overflow:auto; }
+.my-push .sr-list div { padding:10px 12px; font-size:13px; border-bottom:1px solid var(--hairline); }
+.my-push .sr-list div:last-child { border-bottom:none; }
+.my-push .sr-list .none { color:var(--ink3); font-size:12px; }
+</style>
+</head>
+<body>
+
+<div class="stale hidden" id="stale">网络不太顺，显示的可能不是最新数据</div>
+
+<header class="masthead">
+  <div class="mh-top">
+    <div class="mh-badge" id="mhBadge">1</div>
+    <div class="mh-title">
+      <div class="t" id="mhTitle">男团数据榜</div>
+      <div class="s" id="mhSub">LOADING</div>
+    </div>
+  </div>
+  <div class="nav-row" id="navRow">
+    <button data-v="data" class="on">每日报告</button>
+    <button data-v="group" id="navGroup">分组</button>
+    <button data-v="lineage" id="navLineage">族谱</button>
+    <button data-v="my" id="navMy">我的</button>
+  </div>
+  <div class="subnav hidden" id="subnav">
+    <button data-g="junior">初级小组赛</button>
+    <button data-g="mid">中级小组赛</button>
+    <button data-g="final">月终争霸赛</button>
+    <button data-g="junior-promo">初级晋级赛</button>
+    <button data-g="mid-promo">中级晋级赛</button>
+  </div>
+</header>
+
+<div class="toolbar hidden" id="toolbar">
+  <div class="tools">
+    <div class="seg" id="seg">
+      <button data-p="daily" class="on">每日</button>
+      <button data-p="monthly">每月</button>
+      <button data-p="yearly">每年</button>
+    </div>
+    <div class="line2">
+      <div class="dates" id="dates"></div>
+      <div class="stepper hidden" id="stepper">
+        <button id="pPrev">‹</button>
+        <span class="now" id="pNow">—</span>
+        <button id="pNext">›</button>
+      </div>
+      <button class="icon-btn" id="btnSearch" title="搜名字">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+      </button>
+    </div>
+    <div class="search hidden" id="searchBox">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+      <input id="q" placeholder="搜名字，找自己或队友" autocomplete="off">
+      <button class="link" id="qClear">清空</button>
+    </div>
+  </div>
+</div>
+
+<main class="wrap">
+  <div class="err hidden" id="err"></div>
+  <div id="view"></div>
+  <div class="note" id="foot">数据每晚 24:00 后更新前一天 · 仅供内部参考 · 请勿外传</div>
+</main>
+
+<div id="toast">
+  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6 9 17l-5-5"/></svg>
+  <span id="toastTx"></span>
+</div>
+
+<!-- 登录门（未登录时盖住整页）+ 登录后全屏艺名水印 -->
+<div id="gate" class="hidden"></div>
+<div id="wm" hidden></div>
+
+<script>
+/* ==================== 路由与全局状态 ==================== */
+/* /1 男团 /0 女团；/st/m、/st/f 为别名。链接即团别，页内不提供切换。
+   子路径 history 路由（2026-10-09）：
+     /st/m             → 每日报告（首页默认）
+     /st/m/report      → 每日报告（别名）
+     /st/m/group/<key> → 按赛事类型的分组页
+     /st/m/lineage     → 族谱
+     /st/m/my          → 我的数据（姓名+手机号登录，无注册）
+   刷新/直接分享子路径链接都能落到正确视图（后端对子路径渲染同一 HTML）。 */
+const P = location.pathname;
+/* 路径第一段是团别：/0、/f、/st/0、/st/f（可带子路径）= 女团，其余 = 男团 */
+const TEAM = /^\/(?:st\/)?(?:0|f)(?:\/|$)/.test(P) ? 'female' : 'male';
+const LABEL = TEAM === 'male' ? '男团' : '女团';
+const CODE = TEAM === 'male' ? '1' : '0';
+const $ = (id) => document.getElementById(id);
+
+/* 分组子页：key 进 URL，type 对应方案 eventType（与后端 EVENT_TYPES 一致），label 是页面标题 */
+const GROUP_PAGES = [
+  { key: 'junior',       type: '初级争霸赛小组赛', label: '初级争霸赛小组赛' },
+  { key: 'mid',          type: '中级争霸赛小组赛', label: '中级争霸赛小组赛' },
+  { key: 'final',        type: '月终争霸赛',       label: '月终争霸赛' },
+  { key: 'junior-promo', type: '初级争霸赛晋级赛', label: '初级争霸赛晋级赛' },
+  { key: 'mid-promo',    type: '中级争霸赛晋级赛', label: '中级争霸赛晋级赛' },
+];
+
+let site = null;         // 站点配置（含后台级显隐开关）
+let period = 'daily';    // daily | monthly | yearly
+let view = 'data';       // data | group | lineage | my
+let curGroup = GROUP_PAGES[0].key;  // 分组子页当前 key
+let curDate = null;      // 每日口径当前日期
+let curPeriod = null;    // 月/年口径当前周期
+let plans = [];          // 已上架分组方案（各类型独立互斥，每类型最多一场）
+let planByType = {};     // 分组子页 key → 正在看的方案 id（同类型多个上架时页内切换用）
+let searchOpen = false;
+let q = '';
+let consecutiveFail = 0;
+let timer = null;
+
+/* ==================== URL 路由（history，子路径 = 视图） ==================== */
+/** 当前 pathname → 视图描述。识别不了的子路径一律落回每日报告（首页默认数据页）。 */
+function parseRoute() {
+  const rest = location.pathname
+    .replace(/^\/(?:st\/)?(?:m|f|1|0)/, '')
+    .replace(/^\/+|\/+$/g, '');
+  if (rest === '' || rest === 'report') return { view: 'data' };
+  if (rest === 'lineage') return { view: 'lineage' };
+  if (rest === 'my') return { view: 'my' };
+  const gm = rest.match(/^group\/([a-z-]+)$/);
+  if (gm && GROUP_PAGES.some(p => p.key === gm[1])) return { view: 'group', group: gm[1] };
+  return { view: 'data' };
+}
+/** 当前视图对应的规范路径（用 /st/m 别名前缀：后端对 /st/{team}/{*rest} 渲染本页，
+    直接刷新/分享子路径链接都不会 404；/1、/0 只是入口短链） */
+function routePath() {
+  const base = '/st/' + (TEAM === 'male' ? 'm' : 'f');
+  if (view === 'lineage') return base + '/lineage';
+  if (view === 'my') return base + '/my';
+  if (view === 'group') return base + '/group/' + curGroup;
+  return base + '/report';
+}
+function pushRoute(replace) {
+  const path = routePath();
+  if (location.pathname === path) return;
+  if (replace) history.replaceState(null, '', path);
+  else history.pushState(null, '', path);
+}
+
+/* ==================== 小工具 ==================== */
+const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const pad2 = (n) => String(n).padStart(2, '0');
+/** 328500 → 32万8500；不足一万原样返回 */
+const wan = (n) => {
+  n = Math.round(Number(n) || 0);
+  if (n < 10000) return String(n);
+  const w = Math.floor(n / 10000), r = n % 10000;
+  return r === 0 ? w + '万' : w + '万' + pad2safe(r);
+};
+const pad2safe = (r) => String(r).padStart(4, '0');
+const iso = (d) => d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+const todayStr = () => iso(new Date());
+/** 数据每晚 24 点后入库前一天，所以「最新一天数据」落在昨天：
+    展示页默认就站到昨天，而不是等到今天的数据到达才跳过去。 */
+const refStr = () => { const d = new Date(); d.setDate(d.getDate() - 1); return iso(d); };
+const nowPeriod = (p) => {
+  // 与默认日期同一个参照日（昨天），否则月末切月会把新一天先算进本月
+  const r = refStr();
+  return p === 'monthly' ? r.slice(0, 7) : r.slice(0, 4);
+};
+const shiftMonth = (p, n) => {
+  const y = +p.slice(0, 4), m = +p.slice(5, 7) - 1;
+  const d = new Date(y, m + n, 1);
+  return d.getFullYear() + '-' + pad2(d.getMonth() + 1);
+};
+const show = (el, on) => $(el).classList.toggle('hidden', !on);
+let toastTimer;
+function toast(msg) {
+  $('toastTx').textContent = msg;
+  $('toast').classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => $('toast').classList.remove('show'), 1800);
+}
+async function api(p) {
+  /* 登录门（2026-10-10）：团数据接口自动带上我的 token；401 → 弹登录门 */
+  let url = p;
+  const t = myToken();
+  if (t && url.indexOf('/api/public/teams/' + TEAM) === 0 &&
+      url.indexOf('access_token=') < 0 && url.indexOf('?token=') < 0) {
+    url += (url.indexOf('?') >= 0 ? '&' : '?') + 'access_token=' + encodeURIComponent(t);
+  }
+  const r = await fetch(url);
+  if (r.status === 401) { sessionExpired(); throw new Error('请先登录'); }
+  let d = {};
+  try { d = await r.json(); } catch (_) {}
+  if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+  return d;
+}
+
+/* ==================== 登录门 + 全屏水印 ==================== */
+let gateResolve = null;   // 登录成功后 resolve({name,...})
+
+function showGate() {
+  const g = $('gate');
+  g.classList.remove('hidden');
+  g.innerHTML = '<div class="gate-box"><div class="card card-pad">' +
+    '<div class="big-av" style="background:' + avColor(LABEL) + '">' + esc(LABEL.charAt(0)) + '</div>' +
+    '<h3>' + esc(LABEL) + '数据榜</h3>' +
+    '<p class="tip">需要登录后查看<br>使用管理员登记的「手机号 + 密码」（姓名也可以）</p>' +
+    '<input id="gateAcct" placeholder="手机号 / 姓名" autocomplete="off">' +
+    '<input id="gatePass" placeholder="密码" inputmode="numeric" autocomplete="off">' +
+    '<div class="form-err hidden" id="gateErr"></div>' +
+    '<button class="btn-main" id="gateGo">登 录</button>' +
+    '</div></div>';
+  const go = async () => {
+    const acct = $('gateAcct').value.trim(), pw = $('gatePass').value.trim();
+    const errEl = $('gateErr');
+    if (!acct || !pw) {
+      errEl.textContent = '请输入账号和密码';
+      errEl.classList.remove('hidden');
+      return;
+    }
+    const btn = $('gateGo');
+    btn.disabled = true; btn.textContent = '登录中…';
+    errEl.classList.add('hidden');
+    try {
+      const r = await fetch('/api/public/teams/' + TEAM + '/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ account: acct, pass: pw }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+      if (!d.ok) throw new Error('账号或密码不对，或账号还没开通');
+      localStorage.setItem(MY_KEY, d.token);
+      localStorage.setItem(MY_NAME_KEY, d.name || acct);
+      toast('登录成功');
+      g.classList.add('hidden');
+      g.innerHTML = '';
+      const fn = gateResolve; gateResolve = null;
+      if (fn) fn({ name: d.name || acct, personId: d.personId });
+    } catch (e) {
+      btn.disabled = false; btn.textContent = '登 录';
+      errEl.textContent = e.message || '登录失败，稍后再试';
+      errEl.classList.remove('hidden');
+    }
+  };
+  $('gateGo').onclick = go;
+  $('gateAcct').onkeydown = (e) => { if (e.key === 'Enter') $('gatePass').focus(); };
+  $('gatePass').onkeydown = (e) => { if (e.key === 'Enter') go(); };
+  setTimeout(() => { const el = $('gateAcct'); if (el) el.focus(); }, 50);
+}
+
+/* 会话失效（接口 401）：清 token 回登录门；登录门已开着就不动 */
+function sessionExpired() {
+  myLogout();
+  removeWatermark();
+  if (gateResolve) return;            // 登录门已在
+  gateResolve = () => location.reload();
+  showGate();
+}
+
+/* 启动前置：有 token 先验身份（轻量 who）；没有/失效 → 弹登录门等人登录 */
+async function ensureLogin() {
+  const t = myToken();
+  if (t) {
+    try {
+      const who = await fetch('/api/public/teams/' + TEAM + '/my/who?token=' +
+        encodeURIComponent(t)).then((r) => r.json());
+      if (who && who.ok) return who;
+    } catch (_) { /* 网络问题也走重新登录，登录卡会给出报错 */ }
+    myLogout();
+  }
+  return new Promise((resolve) => {
+    gateResolve = resolve;
+    showGate();
+  });
+}
+
+/* 全屏艺名水印：平铺斜排、极低透明度、pointer-events none，不影响任何操作 */
+function applyWatermark(name) {
+  const wm = $('wm');
+  const nm = String(name || '').trim();
+  if (!nm) { wm.hidden = true; return; }
+  const tile = '<svg xmlns="http://www.w3.org/2000/svg" width="240" height="150">' +
+    '<text x="120" y="80" font-size="14" fill="#0F1728" fill-opacity="0.10" text-anchor="middle" ' +
+    'transform="rotate(-22 120 80)">' + esc(nm) + ' · ' + esc(nm) + '</text></svg>';
+  wm.style.backgroundImage = 'url("data:image/svg+xml,' + encodeURIComponent(tile) + '")';
+  wm.hidden = false;
+}
+function removeWatermark() { const wm = $('wm'); if (wm) { wm.hidden = true; wm.style.backgroundImage = ''; } }
+
+/* ==================== 榜单 ==================== */
+/* 版式严格对齐排行榜参考设计：TOP3 领奖台 + 名次/头像/名字/数值 的简洁列表。
+   涨红跌绿是本项目固定口径：名次升 = 红 ↑，降 = 绿 ↓。 */
+function deltaChip(it) {
+  if (!it.delta) return '';
+  const d = it.delta;
+  if (d.dir === 'up') return '<span class="delta d-up">↑' + d.n + '</span>';
+  if (d.dir === 'down') return '<span class="delta d-down">↓' + d.n + '</span>';
+  return '<span class="delta d-flat">—</span>';
+}
+
+/* 头像：没有照片，用名字首字 + 按名字哈希取稳定底色（同一个人颜色不变） */
+const AV_COLORS = ['#F59E0B', '#10B981', '#3B82F6', '#8B5CF6', '#EC4899', '#14B8A6'];
+function avColor(name) {
+  let h = 0;
+  const s = String(name || '');
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+  return AV_COLORS[h % AV_COLORS.length];
+}
+const avHtml = (name) =>
+  '<span class="av" style="background:' + avColor(name) + '">' +
+  esc(String(name || '?').charAt(0)) + '</span>';
+
+/** 领奖台：按 [第2名, 第1名, 第3名] 排布，第一名居中大号；缺位留空。
+    后台关掉「音浪数值」时接口不下发数字（wave=null），显示 —。 */
+function podHtml(items) {
+  const pick = (r) => items.find(x => x.hasData !== false && x.rank === r);
+  const order = [pick(2), pick(1), pick(3)];
+  if (!order.some(Boolean)) return '';
+  return '<div class="lb-pod">' + order.map(it => {
+    if (!it) return '<div class="pod"></div>';
+    return '<div class="pod p' + it.rank + '" data-n="' + esc(it.name) + '" data-w="' + (it.wave == null ? '' : it.wave) + '">' +
+      avHtml(it.name) +
+      '<div class="rb">' + it.rank + '</div>' +
+      '<div class="nm">' + esc(it.name) + '</div>' +
+      '<div class="wv">' + (it.wave == null ? '—' : wan(it.wave)) + '</div>' +
+      '</div>';
+  }).join('') + '</div>';
+}
+
+/** 榜单行：名次 / 头像 / 名字 / 行中段（本月累计 & 未播天数）… 右侧（名次变动 + 音浪）。
+    未开播口径（2026-10-09 用户定）：当日音浪 < 3 = 未开播；中段「本月」= 当月累计音浪，
+    「未播 N 天」= 当月音浪 < 3 的天数（后端 absentDays / totalWave）。 */
+function lbRowHtml(it) {
+  const noData = it.hasData === false;
+  const hideWave = it.wave == null;
+  const off = noData || (!hideWave && it.wave < 3);
+  const rc = it.rank === 1 ? ' g' : it.rank === 2 ? ' s' : it.rank === 3 ? ' b' : '';
+  const absent = it.absentDays == null ? 0 : it.absentDays;
+  const main = off
+    ? '<span class="pill-off">未播 ' + absent + ' 天</span>'
+    : '<span class="d">' + (it.delta ? deltaChip(it) : '') + '</span>' +
+      '<span class="w">' + (hideWave ? '—' : wan(it.wave)) + '</span>';
+  const mid = it.periodic
+    ? ''
+    : '<span class="mid">本月 ' + (it.totalWave == null ? '—' : wan(it.totalWave)) +
+      ' · 未播 ' + absent + ' 天</span>';
+  return '<div class="lb-row' + (off ? ' off' : '') + '" data-n="' + esc(it.name) +
+    '" data-w="' + (off || hideWave ? '' : it.wave) + '">' +
+    '<span class="rk' + rc + '">' + (off ? '—' : (it.rank || '—')) + '</span>' +
+    avHtml(it.name) +
+    '<span class="nm">' + esc(it.name) + '</span>' +
+    mid +
+    '<span class="val">' + main + '</span>' +
+    '</div>';
+}
+
+let listAll = [];
+/** 参与渲染的行：搜索过滤（未开播的人始终显示，置灰） */
+function visibleRows() {
+  const key = q.trim();
+  return listAll.filter(it => !key || String(it.name).indexOf(key) >= 0);
+}
+function renderList() {
+  const key = q.trim();
+  /* 搜索时收起领奖台：命中的人（含前三）全部在列表里找得到；
+     平时列表从第 4 名起，前三只在领奖台上出现一次（严格对齐参考设计） */
+  const pod = key ? '' : podHtml(listAll);
+  const rows = pod ? visibleRows().filter(it => !(it.rank >= 1 && it.rank <= 3)) : visibleRows();
+  /* 只有前三名有数据时：领奖台照常，列表部分留个说明行而不是空态 */
+  const body = rows.length === 0 && !pod
+    ? '<div class="empty">' + (key ? '没有匹配「' + esc(key) + '」的主播<br>换个名字试试'
+        : '<span class="big">📺</span>这个' + (period === 'daily' ? '日期' : '周期') + '没有可显示的主播<br>换个日期试试') + '</div>'
+    : (pod || rows.length
+        ? '<div class="card lb-card">' + pod +
+          (rows.length ? rows.map(lbRowHtml).join('') : '<div class="empty" style="padding:18px">其余人今天还没有数据</div>') + '</div>'
+        : '');
+  $('view').innerHTML = '<div class="section">' + body + '</div>';
+  bindRows();
+}
+
+function copyText(t) {
+  if (navigator.clipboard) navigator.clipboard.writeText(t).catch(() => {});
+  toast('已复制 ' + t);
+}
+
+/* 点人/长按 = 复制「名字 · 音浪」；音浪隐藏时只复制名字 */
+function bindRows() {
+  const copy = (el) => copyText(el.dataset.w === ''
+    ? el.dataset.n
+    : el.dataset.n + ' · ' + wan(Number(el.dataset.w || 0)) + ' 音浪');
+  document.querySelectorAll('#view .lb-row, #view .pod').forEach(el => {
+    let lp;
+    el.onclick = () => copy(el);
+    el.oncontextmenu = (e) => { e.preventDefault(); copy(el); };
+    el.ontouchstart = () => { lp = setTimeout(() => copy(el), 520); };
+    el.ontouchend = el.ontouchmove = () => clearTimeout(lp);
+  });
+}
+
+/* ==================== 加载：数据页 ==================== */
+async function loadData() {
+  if (period === 'daily') {
+    const d = await api('/api/public/teams/' + TEAM + '/daily' + (curDate ? '?date=' + curDate : ''));
+    curDate = d.date;
+    listAll = d.items || [];
+    $('mhSub').textContent = 'DATA ' + (curDate || '').replaceAll('-', '.') +
+      ' · ' + (d.liveCount || 0) + '/' + (d.teamSize || listAll.length) + ' 有数据';
+    renderDates();
+  } else {
+    const url = '/api/public/teams/' + TEAM + '/' + period + (curPeriod ? '?period=' + curPeriod : '');
+    const d = await api(url);
+    curPeriod = d.period;
+    /* periodic：月/年榜行没有 absentDays/totalWave 概念，榜单行不渲染「本月/未播」副行 */
+    listAll = (d.items || []).map(x => ({ ...x, hasData: true, periodic: true }));
+    $('mhSub').textContent = (period === 'monthly' ? 'MONTH ' : 'YEAR ') + curPeriod;
+    $('pNow').textContent = period === 'monthly'
+      ? curPeriod.slice(0, 4) + '年' + (+curPeriod.slice(5, 7)) + '月'
+      : curPeriod + '年';
+  }
+  renderList();
+}
+
+function renderDates() {
+  const dates = (site && site.dates) || [];
+  $('dates').innerHTML = dates.map(d => {
+    let label = d.slice(5).replace('-', '.');
+    if (d === todayStr()) label = '今天';
+    else if (d === refStr()) label = '昨天';
+    return '<button data-d="' + d + '" class="' + (d === curDate ? 'on' : '') + '">' + label + '</button>';
+  }).join('');
+  document.querySelectorAll('#dates button').forEach(b => b.onclick = () => {
+    curDate = b.dataset.d;
+    document.querySelectorAll('#dates button').forEach(x => x.classList.remove('on'));
+    b.classList.add('on');
+    b.scrollIntoView({ inline: 'center', block: 'nearest', behavior: 'smooth' });
+    go();
+  });
+}
+
+function shimmerList() {
+  return '<div class="card">' + [0, 0, 0, 0, 0, 0].map(() => '<div class="sk sk-row"></div>').join('') + '</div>';
+}
+
+/* ==================== 族谱画布（男团：鹏先生为祖师爷的师门树） ==================== */
+let lineageNodes = [];   // /lineage 的扁平节点
+let lineageSel = null;   // 点击选中的节点 id（高亮祖师→自己整条链）
+let lnView = { x: 0, y: 0, s: 1 };
+let lnById = new Map();  // id → 布局节点（渲染后供搜索/定位用）
+let lineageQ = '';       // 搜索词
+let lnHitIdx = 0;        // 回车在命中之间循环
+
+/* 与分组长图同源的 8 色循环：每个师门一种颜色， trunk（祖师+各大支支头）上色 */
+const LN_THEMES = [
+  { bg:'#fdeaf1', bd:'#f6a8c5', tc:'#e04f8a' },
+  { bg:'#f0ecfd', bd:'#b3a1f2', tc:'#7a58e0' },
+  { bg:'#e4f7fb', bd:'#7fd0e2', tc:'#189db8' },
+  { bg:'#fdf3dd', bd:'#f4c46a', tc:'#dd8f1d' },
+  { bg:'#e7f7ec', bd:'#82cb9b', tc:'#2f9e5d' },
+  { bg:'#fdebe9', bd:'#f19a97', tc:'#dd4f4c' },
+  { bg:'#e9eefc', bd:'#98aaee', tc:'#4c63d6' },
+  { bg:'#e6f6f1', bd:'#74c7ab', tc:'#1c9b77' },
+];
+
+async function loadLineage() {
+  const d = await api('/api/public/teams/' + TEAM + '/lineage');
+  lineageNodes = d.nodes || [];
+  $('mhSub').textContent = 'LINEAGE ' + lineageNodes.length + ' 人';
+  lineageQ = ''; lnHitIdx = 0;
+  renderLineage(false);
+}
+
+/** 树布局（横向，从左到右）：祖师在最左，一代向右一列；同层按子树大小排，
+    父节点纵向居中于最上/最下子节点之间。叶节点各占一行。 */
+function layoutLineage() {
+  const byId = new Map(lineageNodes.map(n => [n.id, Object.assign({}, n, { kids: [], th: null, depth: 0, x: 0, y: 0 })]));
+  const roots = [];
+  for (const n of byId.values()) {
+    if (n.masterId != null && byId.has(n.masterId)) byId.get(n.masterId).kids.push(n);
+    else roots.push(n);
+  }
+  /* 没师傅又没徒弟的散人不上树（有徒弟的师门根保留：那是每棵树的头）。
+     注意只从 byId 里摘掉，lineageNodes 原样保留，导出图底部的名单还要用。 */
+  for (const n of [...byId.values()]) {
+    if (n.masterId == null && n.kids.length === 0) byId.delete(n.id);
+  }
+  const visRoots = roots.filter(r => byId.has(r.id));
+  const size = (n) => 1 + n.kids.reduce((s, k) => s + size(k), 0);
+  const sortRec = (n) => {
+    n.kids.sort((a, b) => size(b) - size(a) || a.name.localeCompare(b.name, 'zh-Hans-CN'));
+    n.kids.forEach(sortRec);
+  };
+  roots.sort((a, b) => size(b) - size(a) || a.name.localeCompare(b.name, 'zh-Hans-CN'));
+  roots.forEach(sortRec);
+  const COL = 132, ROW = 62, PAD = 48;
+  let cursor = PAD, maxDepth = 0;
+  const place = (n, depth, th) => {
+    n.depth = depth; n.th = th;
+    maxDepth = Math.max(maxDepth, depth);
+    if (!n.kids.length) { n.y = cursor + ROW / 2; cursor += ROW; }
+    else { n.kids.forEach(k => place(k, depth + 1, th)); n.y = (n.kids[0].y + n.kids[n.kids.length - 1].y) / 2; }
+    n.x = PAD + depth * COL;
+  };
+  visRoots.forEach((r, i) => place(r, 0, LN_THEMES[i % LN_THEMES.length]));
+  return { byId, roots: visRoots, width: PAD * 2 + maxDepth * COL + 88, height: Math.max(cursor + PAD, 300) };
+}
+
+/** 祖师 → 自己 的链上所有人 */
+function chainSet(byId, id) {
+  const s = new Set();
+  let cur = id, guard = 0;
+  while (cur != null && byId.has(cur) && guard++ < 60) { s.add(cur); cur = byId.get(cur).masterId; }
+  return s;
+}
+
+/* ---- 画布视图：平移/缩放/定位（顶层函数，按钮和手势共用） ---- */
+function lnApply() {
+  const vp = $('lnVp');
+  if (vp) vp.setAttribute('transform', 'translate(' + lnView.x + ',' + lnView.y + ') scale(' + lnView.s + ')');
+}
+function lnZoomAt(px, py, k) {
+  const v = lnView;
+  const ns = Math.min(2.5, Math.max(0.22, v.s * k));
+  const real = ns / v.s;
+  v.x = px - (px - v.x) * real;
+  v.y = py - (py - v.y) * real;
+  v.s = ns;
+  lnApply();
+}
+/** 把某人带到画布正中（搜索定位用），必要时稍微放大 */
+function lnFocus(id) {
+  const wrap = $('lnWrap');
+  const n = lnById.get(id);
+  if (!wrap || !n) return;
+  const w = wrap.clientWidth, h = wrap.clientHeight;
+  lnView.s = Math.max(lnView.s, 0.85);
+  lnView.x = w / 2 - n.x * lnView.s;
+  lnView.y = h / 2 - n.y * lnView.s;
+  lnApply();
+}
+
+/* ---- 全屏：桌面/安卓走原生 Fullscreen API，iPhone 不支持元素全屏时退到 CSS 铺满 ---- */
+const LN_FS_EXPAND = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3"/></svg>';
+const LN_FS_COLLAPSE = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 3v3a2 2 0 0 1-2 2H3M16 3v3a2 2 0 0 0 2 2h3M8 21v-3a2 2 0 0 0-2-2H3M16 21v-3a2 2 0 0 1 2-2h3"/></svg>';
+let lnFsCss = false;   // CSS 兜底全屏（iPhone）
+function lnInFs() { return !!document.fullscreenElement || lnFsCss; }
+function lnSyncFsIcon() {
+  const b = $('lnFull');
+  if (!b) return;
+  const on = lnInFs();
+  b.innerHTML = on ? LN_FS_COLLAPSE : LN_FS_EXPAND;
+  b.title = on ? '退出全屏' : '全屏';
+}
+function lnToggleFs() {
+  const wrap = $('lnWrap');
+  if (!wrap) return;
+  if (document.fullscreenElement) { document.exitFullscreen().catch(() => {}); return; }
+  if (lnFsCss) { lnFsCss = false; wrap.classList.remove('ln-fs'); lnSyncFsIcon(); lnApply(); return; }
+  const req = wrap.requestFullscreen || wrap.webkitRequestFullscreen;
+  if (req) Promise.resolve(req.call(wrap)).catch(() => { lnFsCss = true; wrap.classList.add('ln-fs'); lnSyncFsIcon(); lnApply(); });
+  else { lnFsCss = true; wrap.classList.add('ln-fs'); lnSyncFsIcon(); lnApply(); }
+}
+document.addEventListener('fullscreenchange', () => { lnSyncFsIcon(); lnApply(); });
+document.addEventListener('webkitfullscreenchange', () => { lnSyncFsIcon(); lnApply(); });
+
+/* ---- 导出族谱图片：按布局数据现拼独立 SVG（内联属性，不依赖页面 CSS）→ Canvas → PNG ---- */
+const LN_PNG_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 19h16"/></svg>';
+const LN_FONT = "-apple-system,BlinkMacSystemFont,'PingFang SC','Hiragino Sans GB',sans-serif";
+const LN_ROW = 62, LN_PAD = 48, LN_HALF_W = 44, LN_HEAD = 132, LN_FOOT = 64;
+
+/** 名字列表按可用宽度折行（中文按 1 字宽、ASCII 按 0.55 估） */
+function lnWrapNames(names, maxW, fontPx) {
+  fontPx = fontPx || 12;
+  const wOf = (s) => [...s].reduce((w, ch) => w + (/[\x00-\xff]/.test(ch) ? fontPx * 0.55 : fontPx), 0);
+  const lines = [];
+  let cur = '';
+  for (const n of names) {
+    const candidate = cur ? cur + '、' + n : n;
+    if (cur && wOf(candidate) > maxW) { lines.push(cur); cur = n; }
+    else cur = candidate;
+  }
+  if (cur) lines.push(cur);
+  return lines;
+}
+
+/** 拼一张整族谱的独立 SVG：每棵师门树先算包围盒，再贪心装列（目标是接近方形，别出细长条） */
+function lnBuildSvg() {
+  const all = [...lnById.values()];
+  if (!all.length) return null;
+  /* 布局节点上已带 th（门色）与 kids（子树），直接用，保证与画布同色同层级 */
+  const roots = all.filter(n => n.masterId == null || !lnById.has(n.masterId));
+  const boxes = roots.map(root => {
+    const nodes = [], edges = [];
+    const walk = (n) => {
+      nodes.push(n);
+      (n.kids || []).forEach(k => { edges.push([n, k]); walk(k); });
+    };
+    walk(root);
+    const minX = Math.min.apply(null, nodes.map(n => n.x)) - LN_HALF_W;
+    const minY = Math.min.apply(null, nodes.map(n => n.y)) - 26;
+    const maxX = Math.max.apply(null, nodes.map(n => n.x)) + LN_HALF_W;
+    const maxY = Math.max.apply(null, nodes.map(n => n.y)) + 26;
+    return { nodes: nodes, edges: edges, minX: minX, minY: minY, w: maxX - minX, h: maxY - minY, x: 0, y: 0 };
+  });
+  const GAP_X = 56, GAP_Y = 44;
+  const colW = Math.max.apply(null, boxes.map(b => b.w).concat([320]));
+  const sumH = boxes.reduce((s, b) => s + b.h + GAP_Y, 0);
+  const targetH = Math.max(Math.max.apply(null, boxes.map(b => b.h)), Math.sqrt(sumH * colW));
+  const cols = [];
+  let cur = { boxes: [], w: 0, h: 0 };
+  for (const b of boxes) {
+    if (cur.boxes.length && cur.h + b.h + GAP_Y > targetH) { cols.push(cur); cur = { boxes: [], w: 0, h: 0 }; }
+    cur.boxes.push(b);
+    cur.w = Math.max(cur.w, b.w);
+    cur.h += b.h + (cur.boxes.length > 1 ? GAP_Y : 0);
+  }
+  if (cur.boxes.length) cols.push(cur);
+  let cx = LN_PAD, bodyH = 0;
+  for (const c of cols) {
+    let cy = 0;
+    for (const b of c.boxes) { b.x = cx; b.y = cy; cy += b.h + GAP_Y; }
+    bodyH = Math.max(bodyH, c.h);
+    cx += c.w + GAP_X;
+  }
+  const width = Math.max(cx - GAP_X + LN_PAD, 640);
+  /* 没有师傅的人：图底部再补一份文字名单。用原始数据（lineageNodes）而不是上树的节点，
+     因为「没师傅又没徒弟」的散人已经不画在树里了，得在这一行里留个记录 */
+  const orphans = lineageNodes.filter(n => n.masterId == null).map(n => n.name);
+  const listLines = orphans.length ? lnWrapNames(orphans, width - LN_PAD * 2) : [];
+  const listH = orphans.length ? 50 + listLines.length * 20 : 0;
+  const listTop = LN_HEAD + bodyH;
+  const height = LN_HEAD + bodyH + listH + LN_FOOT;
+  const px = (b, n) => b.x + (n.x - b.minX);
+  const py = (b, n) => b.y + (n.y - b.minY) + LN_HEAD;
+
+  let edges = '', cells = '';
+  for (const b of boxes) {
+    for (const e of b.edges) {
+      const p = e[0], n = e[1];
+      const stroke = n.depth === 1 && n.th ? n.th.bd : '#C3CDDC';
+      const x1 = px(b, p) + LN_HALF_W, x2 = px(b, n) - LN_HALF_W, mx = (x1 + x2) / 2;
+      edges += '<path d="M' + x1 + ',' + py(b, p) + ' H' + mx + ' V' + py(b, n) + ' H' + x2 +
+        '" fill="none" stroke="' + stroke + '" stroke-width="1.5"/>';
+    }
+    for (const n of b.nodes) {
+      const off = n.status === 'left';
+      const th = n.th;
+      const fill = n.depth === 0 && th ? th.bg : '#FFFFFF';
+      const stroke = th ? th.bd : '#E5E7EB';
+      const nameFill = th && !off ? th.tc : '#0b1c30';
+      const sub = n.disciples > 0 ? n.disciples + ' 徒'
+        : (off ? '已离团' : '第 ' + ((n.generation != null ? n.generation : n.depth) + 1) + ' 代');
+      const nx = px(b, n), ny = py(b, n);
+      cells += '<g opacity="' + (off ? 0.45 : 1) + '">' +
+        '<rect x="' + (nx - LN_HALF_W) + '" y="' + (ny - 26) + '" width="' + (LN_HALF_W * 2) + '" height="52" rx="11" fill="' + fill +
+        '" stroke="' + stroke + '" stroke-width="' + (n.depth === 0 ? 1.5 : 1) + '"/>' +
+        '<text x="' + nx + '" y="' + (ny - 3) + '" text-anchor="middle" font-family="' + LN_FONT +
+        '" font-size="13" font-weight="700" fill="' + nameFill + '">' + esc(n.name) + '</text>' +
+        '<text x="' + nx + '" y="' + (ny + 16) + '" text-anchor="middle" font-family="' + LN_FONT +
+        '" font-size="10" fill="#94a3b8">' + esc(sub) + '</text></g>';
+    }
+  }
+  const maxDepth = all.reduce((m, n) => Math.max(m, n.depth), 0);
+  const name = todayStr().split('-');
+  const title = LABEL + ' · 族谱';
+  const sub2 = '师门 ' + roots.length + ' 支 · 上树 ' + all.length + ' 人 · 最深 ' + (maxDepth + 1) + ' 代';
+  const foot = '抖音PK分组 · 生成于 ' + (+name[0]) + '年' + (+name[1]) + '月' + (+name[2]) + '日';
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + width + '" height="' + height +
+    '" viewBox="0 0 ' + width + ' ' + height + '">' +
+    '<rect width="' + width + '" height="' + height + '" fill="#ffffff"/>' +
+    '<rect width="' + width + '" height="' + LN_HEAD + '" fill="#F8FAFF"/>' +
+    '<text x="' + LN_PAD + '" y="56" font-family="' + LN_FONT + '" font-size="26" font-weight="800" fill="#0b1c30">' + esc(title) + '</text>' +
+    '<text x="' + LN_PAD + '" y="84" font-family="' + LN_FONT + '" font-size="13" fill="#64748b">' + esc(sub2) + '</text>' +
+    '<line x1="0" y1="' + LN_HEAD + '" x2="' + width + '" y2="' + LN_HEAD + '" stroke="#E5E7EB" stroke-width="1"/>' +
+    edges + cells +
+    (listH
+      ? '<line x1="0" y1="' + (listTop + 6) + '" x2="' + width + '" y2="' + (listTop + 6) + '" stroke="#E5E7EB" stroke-width="1"/>' +
+        '<text x="' + LN_PAD + '" y="' + (listTop + 32) + '" font-family="' + LN_FONT + '" font-size="13" font-weight="700" fill="#475467">没有师傅（' + orphans.length + ' 人）</text>' +
+        listLines.map((ln, i) =>
+          '<text x="' + LN_PAD + '" y="' + (listTop + 54 + i * 20) + '" font-family="' + LN_FONT +
+          '" font-size="12" fill="#64748b">' + esc(ln) + '</text>').join('')
+      : '') +
+    '<line x1="0" y1="' + (height - LN_FOOT + 12) + '" x2="' + width + '" y2="' + (height - LN_FOOT + 12) + '" stroke="#E5E7EB" stroke-width="1"/>' +
+    '<text x="' + (width / 2) + '" y="' + (height - 24) + '" text-anchor="middle" font-family="' + LN_FONT +
+    '" font-size="12" fill="#94a3b8">' + esc(foot) + '</text></svg>';
+  return { svg: svg, width: width, height: height };
+}
+async function lnExportPng() {
+  try {
+    const t = lnBuildSvg();
+    if (!t) { toast('还没有可导出的族谱'); return; }
+    toast('正在生成图片…');
+    const img = new Image();
+    img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(t.svg);
+    await img.decode();
+    /* 太长（近百人 ≈ 7000px）时降倍率，别撞 canvas 尺寸上限 */
+    const s = Math.max(1, Math.min(2, 15000 / t.height));
+    const cv = document.createElement('canvas');
+    cv.width = Math.round(t.width * s);
+    cv.height = Math.round(t.height * s);
+    const ctx = cv.getContext('2d');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, cv.width, cv.height);
+    ctx.drawImage(img, 0, 0, cv.width, cv.height);
+    const blob = await new Promise((res, rej) =>
+      cv.toBlob(b => (b ? res(b) : rej(new Error('canvas 转 PNG 失败'))), 'image/png'));
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = LABEL + '族谱-' + todayStr() + '.png';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+    toast('已导出族谱图片 ' + cv.width + '×' + cv.height);
+  } catch (e) {
+    toast('导出失败：' + (e && e.message ? e.message : e));
+  }
+}
+
+/** 搜索：不重建画布，只切换 hit 类 + 计数 + 定位（避免每次按键丢输入框焦点） */
+function lineageHitIds() {
+  const q = lineageQ.trim();
+  if (!q) return [];
+  const out = [];
+  for (const n of lnById.values()) if (n.name.indexOf(q) >= 0) out.push(n.id);
+  return out;
+}
+function lineageUpdateHits() {
+  const ids = lineageHitIds();
+  const set = new Set(ids);
+  document.querySelectorAll('.ln-node').forEach(g => {
+    g.classList.toggle('hit', set.has(Number(g.dataset.id)));
+  });
+  const qi = $('lnQInfo');
+  if (ids.length) {
+    if (lnHitIdx >= ids.length) lnHitIdx = 0;
+    qi.style.display = '';
+    qi.textContent = (lnHitIdx + 1) + '/' + ids.length;
+    lnFocus(ids[lnHitIdx]);
+  } else if (qi) {
+    qi.style.display = 'none';
+  }
+}
+
+function renderLineage(keepView) {
+  const t = layoutLineage();
+  const { byId } = t;
+  lnById = byId;
+  const anc = lineageSel != null ? chainSet(byId, lineageSel) : null;
+  const inChain = (id) => anc != null && anc.has(id);
+  const q = lineageQ.trim();
+  const hits = q ? new Set([...byId.values()].filter(n => n.name.indexOf(q) >= 0).map(n => n.id)) : null;
+  let edges = '';
+  for (const n of byId.values()) {
+    if (n.masterId == null || !byId.has(n.masterId)) continue;
+    const p = byId.get(n.masterId);
+    /* 横向：父节点右缘 → 子节点左缘，中间走一段竖线 */
+    const x1 = p.x + 44, x2 = n.x - 44, mx = (x1 + x2) / 2;
+    const hot = anc != null && inChain(n.id) && anc.has(p.id);
+    const cls = 'ln-edge' + (hot ? ' hot' : (anc ? ' dim' : ''));
+    /* 主干（祖师→各大支支头）用本门颜色，深处的连线保持灰 */
+    const trunk = n.depth === 1 && n.th ? ' style="stroke:' + n.th.bd + '"' : '';
+    edges += '<path class="' + cls + '"' + trunk + ' d="M' + x1 + ',' + p.y + ' H' + mx + ' V' + n.y + ' H' + x2 + '"/>';
+  }
+  let nodes = '';
+  for (const n of byId.values()) {
+    const off = n.status === 'left';
+    const cls = 'ln-node' + (off ? ' off' : '') + (lineageSel === n.id ? ' sel' : '') +
+      (anc != null && inChain(n.id) && lineageSel !== n.id ? ' anc' : '') +
+      (anc != null && !inChain(n.id) ? ' dim2' : '') +
+      (hits != null && hits.has(n.id) ? ' hit' : '');
+    const sub = n.disciples > 0 ? n.disciples + ' 徒'
+      : (off ? '已离团' : '第 ' + ((n.generation != null ? n.generation : n.depth) + 1) + ' 代');
+    /* 祖师 + 各大支支头（depth≤1）上本门颜色；搜索命中强制橙圈（写在 style 里，晚声明覆盖） */
+    let st = '';
+    if (n.depth === 0 && n.th) st = 'fill:' + n.th.bg + ';stroke:' + n.th.bd + ';stroke-width:1.5;';
+    else if (n.depth === 1 && n.th) st = 'stroke:' + n.th.bd + ';';
+    if (hits != null && hits.has(n.id)) st += 'stroke:#f79009;stroke-width:2;';
+    const nameSt = n.depth <= 1 && n.th && !off ? ' style="fill:' + n.th.tc + '"' : '';
+    nodes += '<g class="' + cls + '" data-id="' + n.id + '" transform="translate(' + n.x + ',' + n.y + ')">' +
+      '<rect x="-44" y="-25" width="88" height="50" rx="11"' + (st ? ' style="' + st + '"' : '') + '/>' +
+      '<text class="ln-name" y="-3"' + nameSt + '>' + esc(n.name) + '</text>' +
+      '<text class="ln-sub" y="15">' + esc(sub) + '</text>' +
+      '</g>';
+  }
+  $('view').innerHTML =
+    '<div class="section"><div class="lineage-wrap" id="lnWrap">' +
+    '<div class="ln-hint"><span class="tip">拖动查看 · 点人看师门链 · 双击全屏</span>' +
+    '<span class="qinfo" id="lnQInfo"' + (q ? '' : ' style="display:none"') + '></span>' +
+    '<input id="lnQ" placeholder="搜主播" value="' + esc(q) + '"></div>' +
+    '<div class="ln-ctl">' +
+    '<button id="lnZin" title="放大">+</button>' +
+    '<button id="lnZout" title="缩小">−</button>' +
+    '<button id="lnFit" title="复位">⌖</button>' +
+    '<button id="lnPng" title="导出图片">' + LN_PNG_ICON + '</button>' +
+    '<button id="lnFull" title="全屏"></button>' +
+    '</div>' +
+    '<svg><g id="lnVp" transform="translate(0,0) scale(1)">' + edges + nodes + '</g></svg>' +
+    '</div></div>';
+  bindLineage(t, keepView);
+}
+
+function bindLineage(t, keepView) {
+  const wrap = $('lnWrap');
+  const fit = () => {
+    // 横向树：祖师贴左边、纵向居中到最大师门（一代向右一列）
+    const w = wrap.clientWidth || 360;
+    const h = wrap.clientHeight || 400;
+    const root = t.roots[0];
+    lnView.s = Math.max(0.55, Math.min(0.95, (w - 24) / 460));
+    lnView.x = 16;
+    lnView.y = h / 2 - root.y * lnView.s;
+    lnApply();
+  };
+  $('lnFit').onclick = fit;
+  $('lnZin').onclick = () => lnZoomAt(wrap.clientWidth / 2, wrap.clientHeight / 2, 1.25);
+  $('lnZout').onclick = () => lnZoomAt(wrap.clientWidth / 2, wrap.clientHeight / 2, 0.8);
+  $('lnFull').onclick = lnToggleFs;
+  $('lnPng').onclick = lnExportPng;
+  /* 双击画布 = 全屏切换（拖动/点人不受影响：双击才触发） */
+  wrap.addEventListener('dblclick', (e) => {
+    if (e.target.closest && e.target.closest('.ln-ctl, .ln-hint')) return;
+    lnToggleFs();
+  });
+  if (lnFsCss) wrap.classList.add('ln-fs');   // 全屏中切视图/重渲染，状态不丢
+  lnSyncFsIcon();
+  const qInput = $('lnQ');
+  qInput.oninput = () => { lineageQ = qInput.value; lnHitIdx = 0; lineageUpdateHits(); };
+  qInput.onkeydown = (e) => {
+    if (e.key !== 'Enter') return;
+    const ids = lineageHitIds();
+    if (!ids.length) return;
+    lnHitIdx = (lnHitIdx + 1) % ids.length;
+    lineageUpdateHits();
+  };
+  const pts = new Map();
+  let pinchD = 0, moved = 0, onCtl = false;
+  /* 手势坐标 → 画布内坐标的换算 */
+  const rel = (cx, cy) => {
+    const r = wrap.getBoundingClientRect();
+    return [cx - r.left, cy - r.top];
+  };
+  wrap.addEventListener('pointerdown', (e) => {
+    /* 控件（缩放/全屏/搜索框）交给原生 click：一旦抢了指针或重建 DOM，
+       按钮的 click 就不触发了（真实点击踩过，合成 .click() 测不出来） */
+    if (e.target.closest && e.target.closest('.ln-ctl, .ln-hint')) { onCtl = true; return; }
+    wrap.setPointerCapture(e.pointerId);
+    pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pts.size === 1) moved = 0;
+    if (pts.size === 2) {
+      const [a, b] = [...pts.values()];
+      pinchD = Math.hypot(a.x - b.x, a.y - b.y);
+    }
+  });
+  wrap.addEventListener('pointermove', (e) => {
+    if (!pts.has(e.pointerId)) return;
+    const prev = pts.get(e.pointerId);
+    pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pts.size === 1) {
+      moved += Math.abs(e.clientX - prev.x) + Math.abs(e.clientY - prev.y);
+      lnView.x += e.clientX - prev.x;
+      lnView.y += e.clientY - prev.y;
+      lnApply();
+    } else if (pts.size === 2) {
+      const [a, b] = [...pts.values()];
+      const d = Math.hypot(a.x - b.x, a.y - b.y);
+      if (pinchD > 0) {
+        const [px, py] = rel((a.x + b.x) / 2, (a.y + b.y) / 2);
+        lnZoomAt(px, py, d / pinchD);
+      }
+      pinchD = d;
+    }
+  });
+  const up = (e) => {
+    if (onCtl) { onCtl = false; return; }
+    const wasTap = pts.size === 1 && moved < 6;
+    pts.delete(e.pointerId);
+    pinchD = 0;
+    if (wasTap) {
+      const el = document.elementFromPoint(e.clientX, e.clientY);
+      const g = el && el.closest ? el.closest('.ln-node') : null;
+      const id = g ? +g.dataset.id : null;
+      lineageSel = id != null && lineageSel !== id ? id : null;
+      renderLineage(true);
+    }
+  };
+  wrap.addEventListener('pointerup', up);
+  wrap.addEventListener('pointercancel', (e) => { onCtl = false; pts.delete(e.pointerId); pinchD = 0; });
+  wrap.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const [px, py] = rel(e.clientX, e.clientY);
+    lnZoomAt(px, py, e.deltaY < 0 ? 1.12 : 0.89);
+  }, { passive: false });
+  if (keepView) lnApply(); else fit();
+}
+
+/* ==================== 分组（按赛事类型拆页：初级/中级小组赛、月终争霸赛、两级晋级赛） ==================== */
+async function loadPlans() {
+  try {
+    const d = await api('/api/public/plans');
+    plans = d.items || [];
+  } catch (_) { plans = []; }
+}
+
+async function loadGroup() {
+  const page = GROUP_PAGES.find(p => p.key === curGroup) || GROUP_PAGES[0];
+  curGroup = page.key;
+  $('mhSub').textContent = page.label;
+  /* 展示端按类型各占一页：上架互斥也是按类型（同类型一场，不同类型互不影响） */
+  const list = plans.filter(p => (p.eventType || '') === page.type);
+  if (!list.length) {
+    $('view').innerHTML = '<div class="empty"><span class="big">📺</span>' +
+      esc(page.label) + '暂未公布<br>上架后这里会自动出现</div>';
+    return;
+  }
+  if (!list.some(p => p.id === planByType[curGroup])) planByType[curGroup] = list[0].id;
+  const pid = planByType[curGroup];
+  $('view').innerHTML = '<div class="section">' + shimmerList() + '</div>';
+  try {
+    const d = await api('/api/public/plans/' + pid);
+    $('mhSub').textContent = page.label;
+    $('view').innerHTML = groupHtml(d, page, list);
+  } catch (e) {
+    $('view').innerHTML = '<div class="empty"><span class="big">📺</span>取不到分组数据<br>' + esc(e.message) + '</div>';
+  }
+}
+
+function groupHtml(d, page, list) {
+  const showWave = !d.display || d.display.wave !== false;
+  const showGroups = !d.display || d.display.groups !== false;
+  const groups = d.groups || [];
+  /* 与导出长图同款配色循环（粉/紫/青/橙/绿/红/蓝/青绿） */
+  const THEMES = [
+    { bg:'#fdeaf1', bd:'#f6a8c5', tc:'#e04f8a' },
+    { bg:'#f0ecfd', bd:'#b3a1f2', tc:'#7a58e0' },
+    { bg:'#e4f7fb', bd:'#7fd0e2', tc:'#189db8' },
+    { bg:'#fdf3dd', bd:'#f4c46a', tc:'#dd8f1d' },
+    { bg:'#e7f7ec', bd:'#82cb9b', tc:'#2f9e5d' },
+    { bg:'#fdebe9', bd:'#f19a97', tc:'#dd4f4c' },
+    { bg:'#e9eefc', bd:'#98aaee', tc:'#4c63d6' },
+    { bg:'#e6f6f1', bd:'#74c7ab', tc:'#1c9b77' },
+  ];
+  /* 90.3万 一位小数，不足一万原样（与导出长图一致） */
+  const wanDec = (n) => {
+    n = Math.round(Number(n) || 0);
+    return n < 10000 ? String(n) : (n / 10000).toFixed(1).replace(/\.0$/, '') + '万';
+  };
+  const mLabel = (d.metric === 'lastN' ? '近 ' + d.days + ' 天'
+    : d.metric === 'last1' ? '最近 1 天'
+    : d.metric === 'month' ? '本月累计' : '累计') + '音浪';
+
+  let html = '';
+  if (d.stale) html += '<div class="stale">分组用的是快照数据，可能不是最新</div>';
+
+  /* 渐变头部卡：品牌行 + 标题 + 场次信息 + 组数/人数胶囊 */
+  const sched = d.schedule || {};
+  const nPlayers = d.counts ? d.counts.players : groups.reduce((s, g) => s + (g.count || 0), 0);
+  const nGroups = d.counts ? d.counts.groups : groups.length;
+  const day = (d.dates && d.dates[0]) || String(d.createdAt || '').slice(0, 10);
+  const meta = [
+    d.eventType || '',
+    '共 ' + nPlayers + ' 人',
+    sched.start ? sched.start + ' 后 / 间隔 ' + (sched.intervalMin || 15) + ' 分' : '',
+  ].filter(Boolean).join(' · ');
+  html += '<div class="gx-head">' +
+    '<div class="l">' +
+      '<div class="bl">' + esc(page.label) + (day ? ' · ' + esc(day) : '') + '</div>' +
+      '<div class="tt">' + esc(d.title || page.label) + '</div>' +
+      (meta ? '<div class="mt">' + esc(meta) + '</div>' : '') +
+    '</div>' +
+    '<div class="gx-pills">' +
+      '<div class="gx-pill ghost"><div class="n">' + nGroups + '</div><div class="l">组</div></div>' +
+      '<div class="gx-pill solid"><div class="n">' + nPlayers + '</div><div class="l">人</div></div>' +
+    '</div>' +
+  '</div>';
+
+  if (!showGroups) {
+    return html + '<div class="empty">名单尚未开放<br>开赛时间如上</div>';
+  }
+  if (!groups.length) {
+    return html + '<div class="empty"><span class="big">📺</span>暂无分组数据</div>';
+  }
+  /* 彩色分组卡：成员单列胶囊（组内名次徽标 + 姓名 + 全场名次/音浪统计行） */
+  html += groups.map((g, gi) => {
+    const t = THEMES[gi % THEMES.length];
+    const mems = (g.players || []).map(p =>
+      '<div class="gx-mem">' +
+      '<div class="top"><span class="r" style="color:' + t.tc + '">' + (p.group_rank || 0) + '</span>' +
+      '<b>' + esc(p.name) + '</b>' +
+      (p.leader ? '<span class="tag-off">' + esc(p.leader) + '</span>' : '') + '</div>' +
+      (showWave ? '<div class="st">第' + (p.group_rank || 0) + '位 · 全场第' + (p.rank || 0) + '位 · ' +
+        esc(mLabel) + ' ' + wanDec(p.wave) + '</div>' : '') +
+      '</div>').join('');
+    return '<div class="gx-card" style="background:' + t.bg + ';border-color:' + t.bd + '">' +
+      '<div class="g" style="color:' + t.tc + '">' + esc(g.name) + '</div>' +
+      '<div class="s">' + esc(g.slot ? g.slot + ' 开赛' : '') +
+        (g.count ? (g.slot ? ' · ' : '') + g.count + ' 人' : '') + '</div>' +
+      (mems || '<div class="s" style="margin-top:8px">空组</div>') +
+    '</div>';
+  }).join('');
+  html += '<div class="gx-foot">' +
+    esc((d.title || 'PK 分组') + (d.eventType ? ' · ' + d.eventType : '') + ' | ' + todayStr()) + '</div>';
+
+  if (list.length > 1) {
+    /* 兼容历史数据：按类型互斥后这里通常只剩一个；老库同类型还挂着多个时仍可切换 */
+    html += '<div class="card card-pad"><h2 class="card-t">切换「' + esc(page.label) + '」已上架方案</h2><div class="dates">' +
+      list.map(p => '<button data-pid="' + p.id + '" class="' + (p.id === planByType[curGroup] ? 'on' : '') + '">' +
+        esc(p.title || ('方案 ' + p.id)) + '</button>').join('') + '</div></div>';
+    setTimeout(() => document.querySelectorAll('[data-pid]').forEach(b => b.onclick = () => {
+      planByType[curGroup] = Number(b.dataset.pid); loadGroup();
+    }), 0);
+  }
+  return html;
+}
+
+/* ==================== 我的（姓名+密码登录 · 无注册） ==================== */
+/* 账号由管理员在后台手动添加（一个姓名对应一个纯数字密码），这里只做验证和个人数据展示。
+   token 存 localStorage，24 小时有效；服务重启会失效，失效自动退回登录卡。 */
+const MY_KEY = 'myToken_' + TEAM;
+const MY_NAME_KEY = 'myName_' + TEAM;
+
+function myToken() { return localStorage.getItem(MY_KEY) || ''; }
+function myLogout() { localStorage.removeItem(MY_KEY); localStorage.removeItem(MY_NAME_KEY); }
+
+async function loadMy() {
+  const t = myToken();
+  if (!t) { sessionExpired(); return; }
+  $('mhSub').textContent = 'MY';
+  try {
+    const d = await api('/api/public/teams/' + TEAM + '/my?token=' + encodeURIComponent(t));
+    let series = null;
+    try {
+      series = await api('/api/public/teams/' + TEAM + '/my/series?token=' + encodeURIComponent(t) + '&days=14');
+    } catch (_) { /* 趋势图失败不挡主数据 */ }
+    let claim = null, bound = [];
+    try {
+      const c = await api('/api/public/teams/' + TEAM + '/my/claim?token=' + encodeURIComponent(t));
+      claim = c.claim; bound = c.bound || [];
+    } catch (_) { /* 绑定状态失败不挡主数据 */ }
+    let push = null;
+    try {
+      push = await api('/api/public/teams/' + TEAM + '/my/push?token=' + encodeURIComponent(t));
+    } catch (_) { /* 推送状态失败不挡主数据 */ }
+    renderMy(d, series, claim, bound, push);
+  } catch (e) {
+    /* token 过期/没验证过 → 回登录门；其它错误照常显示错误态 */
+    const m = String(e.message || '');
+    if (m.indexOf('过期') >= 0 || m.indexOf('缺少') >= 0 || m.indexOf('请先登录') >= 0) {
+      sessionExpired();
+    } else {
+      $('view').innerHTML = '<div class="empty"><span class="big">📵</span>取不到个人数据<br>' + esc(m) + '</div>';
+    }
+  }
+}
+
+function renderMyLogin() {
+  /* 全站有登录门后这里只是兜底（正常到不了）；文案保持与登录门一致 */
+  const name = localStorage.getItem(MY_NAME_KEY) || '';
+  $('mhSub').textContent = 'MY';
+  $('view').innerHTML = '<div class="section my-login">' +
+    '<div class="card card-pad">' +
+    '<div class="big-av" style="background:' + avColor(LABEL) + '">' + esc(LABEL.charAt(0)) + '</div>' +
+    '<h3>' + esc(LABEL) + ' · 我的数据</h3>' +
+    '<p class="tip">没有注册，账号由管理员统一添加<br>手机号或姓名 + 密码登录</p>' +
+    '<input id="myName" placeholder="手机号 / 姓名" value="' + esc(name) + '" autocomplete="off">' +
+    '<input id="myPass" placeholder="密码" inputmode="numeric" autocomplete="off">' +
+    '<div class="form-err hidden" id="myErr"></div>' +
+    '<button class="btn-main" id="myGo">查看我的数据</button>' +
+    '</div></div>';
+  const go = async () => {
+    const nm = $('myName').value.trim(), pw = $('myPass').value.trim();
+    const errEl = $('myErr');
+    if (!nm || !pw) {
+      errEl.textContent = '请输入账号和密码';
+      errEl.classList.remove('hidden');
+      return;
+    }
+    const btn = $('myGo');
+    btn.disabled = true; btn.textContent = '验证中…';
+    errEl.classList.add('hidden');
+    try {
+      const r = await fetch('/api/public/teams/' + TEAM + '/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ account: nm, pass: pw }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+      if (!d.ok) throw new Error('账号或密码不对，或账号还没开通');
+      localStorage.setItem(MY_KEY, d.token);
+      localStorage.setItem(MY_NAME_KEY, d.name || nm);
+      toast('验证通过');
+      loadMy();
+    } catch (e) {
+      btn.disabled = false; btn.textContent = '查看我的数据';
+      errEl.textContent = e.message || '验证失败，稍后再试';
+      errEl.classList.remove('hidden');
+    }
+  };
+  $('myGo').onclick = go;
+  $('myName').onkeydown = (e) => { if (e.key === 'Enter') $('myPass').focus(); };
+  $('myPass').onkeydown = (e) => { if (e.key === 'Enter') go(); };
+}
+
+function renderMy(d, series, claim, bound, push) {
+  if (d.name) {
+    localStorage.setItem(MY_NAME_KEY, d.name);
+    applyWatermark(d.name);   // 以台账艺名为准刷新水印
+  }
+  pushState = push || null;
+  const minText = (v) => v == null ? '' : '时长 ' + (v >= 60
+    ? Math.floor(v / 60) + '小时' + (v % 60 ? (v % 60) + '分' : '')
+    : v + '分钟');
+  const stat = (label, o) => '<div class="my-stat"><div class="l">' + label + '</div>' +
+    '<div class="w">' + (o.wave == null ? '—' : wan(o.wave)) + '</div>' +
+    (o.minutes == null ? '' : '<div class="m">' + minText(o.minutes) + '</div>') + '</div>';
+  /* 未播口径与榜单一致：当日音浪 < 3 = 未开播 */
+  const offToday = d.daily && d.daily.wave != null && d.daily.wave < 3;
+  const rankHtml = d.teamRank > 0
+    ? '<div class="rk"><div class="n">第 ' + d.teamRank + '</div>' +
+      '<div class="l">团内名次 · 共 ' + (d.teamSize || '—') + ' 人</div></div>'
+    : '';
+  /* 近 14 个业务日趋势：条形图，未播（<3）置灰 */
+  let trend = '';
+  const waves = series && series.waves;
+  if (Array.isArray(waves) && waves.length) {
+    const max = Math.max.apply(null, waves.concat([1]));
+    const bars = waves.map((w, i) =>
+      '<div class="b' + (w < 3 ? ' off' : '') + '" style="height:' +
+      Math.max(4, Math.round(w / max * 100)) + '%" title="' +
+      esc((series.dates[i] || '').slice(5)) + ' · ' + wan(w) + '"></div>').join('');
+    const xs = '<span>' + esc((series.dates[0] || '').slice(5)) + '</span>' +
+      '<span></span>'.repeat(Math.max(0, waves.length - 2)) +
+      '<span style="text-align:right">' + esc((series.dates[waves.length - 1] || '').slice(5)) + '</span>';
+    trend = '<div class="card my-trend"><h2 class="card-t">近 ' + waves.length + ' 个业务日音浪</h2>' +
+      '<div class="bars">' + bars + '</div><div class="xs">' + xs + '</div></div>';
+  }
+  $('view').innerHTML = '<div class="section">' +
+    '<div class="card my-head">' +
+      '<div class="av" style="background:' + avColor(d.name) + '">' + esc(String(d.name || '?').charAt(0)) + '</div>' +
+      '<div><div class="nm">' + esc(d.name || '—') + '</div>' +
+      '<div class="sub">' + esc(d.date || '') + (offToday ? ' · 最近一个业务日未开播' : '') + '</div></div>' +
+      rankHtml +
+    '</div>' +
+    '<div class="my-grid">' + stat('今日音浪', d.daily || {}) + stat('本月累计', d.monthly || {}) +
+      stat('本年累计', d.yearly || {}) + stat('累计音浪', d.total || {}) + '</div>' +
+    trend +
+    (d.admin
+      ? '<div class="card my-claim"><h2 class="card-t">抖音号</h2>' +
+        '<div class="sub" style="margin-top:6px;line-height:1.7">当前登录的是管理员观看账号，' +
+        '不绑定抖音号。主播账号在「我的」页提交绑定申请，管理端审计通过后音浪自动落账。</div></div>'
+      : claimCard(claim, bound)) +
+    (push ? pushCard(push) : '') +
+    '<button class="my-logout" id="myOut">退出登录</button>' +
+    '</div>';
+  $('myOut').onclick = () => {
+    myLogout();
+    removeWatermark();
+    location.reload();   // 回登录门
+  };
+  bindClaimCard(claim);
+  if (push) renderPushBox(push);
+}
+
+/* ==================== 绑定抖音号（提交 + 截图 → 管理端审计） ==================== */
+function claimCard(claim, bound) {
+  let status = '';
+  if (claim && claim.status === 'pending') {
+    status = '<div class="row"><span class="st wait">审核中</span>' +
+      '<span class="sub">' + esc(claim.douyinNo || '') + ' · ' + esc(claim.createdAt || '') + '</span></div>' +
+      '<div class="sub" style="margin-top:6px">管理员通过后，你的音浪会自动记到这个抖音号上</div>';
+  } else if (claim && claim.status === 'rejected') {
+    status = '<div class="row"><span class="st bad">未通过</span>' +
+      '<span class="sub">' + esc(claim.douyinNo || '') + '</span></div>' +
+      (claim.rejectReason ? '<div class="why">管理员：' + esc(claim.rejectReason) + '</div>' : '');
+  }
+  const boundRows = (bound || []).map((b) =>
+    '<div class="row"><span class="st ok">✓</span>' +
+    '<span>' + esc(b.douyinNo) + '</span>' +
+    (b.primary ? '<span class="sub">主号</span>' : '') + '</div>').join('');
+  const form = (claim && claim.status === 'pending')
+    ? ''
+    : '<input id="clNo" placeholder="你的抖音号（字母/数字/下划线/点）" autocomplete="off">' +
+      '<div class="pick"><img id="clPrev" class="shot" alt="">' +
+      '<button class="pickbtn" id="clPick">选择抖音主页截图\n（截图里要能看到抖音号）</button></div>' +
+      '<input type="file" id="clFile" accept="image/*" hidden>' +
+      '<div class="form-err hidden" id="clErr" style="color:#D92D20;font-size:12px;margin-top:6px;text-align:left"></div>' +
+      '<button class="go" id="clGo">提交绑定申请</button>';
+  return '<div class="card my-claim"><h2 class="card-t">绑定抖音号</h2>' +
+    boundRows + status + form +
+    '<div class="sub" style="margin-top:8px;line-height:1.6">音浪按抖音号对号入座：绑定并通过审计后，' +
+    '之后导入的数据里这个抖音号的音浪都会算到你名下。信息只给管理员审计用。</div></div>';
+}
+
+/* 压缩截图：最长边 1280、JPEG 0.82，一般 100~300KB，审计够看 */
+function compressShot(file) {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onerror = () => reject(new Error('读图失败'));
+    fr.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error('图片读不出来，换一张试试'));
+      img.onload = () => {
+        const max = 1280;
+        const ratio = Math.min(1, max / Math.max(img.width, img.height));
+        const cv = document.createElement('canvas');
+        cv.width = Math.round(img.width * ratio);
+        cv.height = Math.round(img.height * ratio);
+        cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
+        resolve(cv.toDataURL('image/jpeg', 0.82));
+      };
+      img.src = fr.result;
+    };
+    fr.readAsDataURL(file);
+  });
+}
+
+function bindClaimCard(claim) {
+  const pickBtn = $('clPick'), fileEl = $('clFile');
+  if (!pickBtn) return;   // 审核中：没有表单
+  let dataUrl = '';
+  pickBtn.onclick = () => fileEl.click();
+  fileEl.onchange = async () => {
+    const f = fileEl.files && fileEl.files[0];
+    if (!f) return;
+    const errEl = $('clErr');
+    errEl.classList.add('hidden');
+    try {
+      dataUrl = await compressShot(f);
+      $('clPrev').src = dataUrl;
+      pickBtn.textContent = '已选截图，点此可换';
+    } catch (e) {
+      errEl.textContent = e.message || '图片处理失败';
+      errEl.classList.remove('hidden');
+    }
+  };
+  $('clGo').onclick = async () => {
+    const no = ($('clNo').value || '').trim();
+    const errEl = $('clErr');
+    errEl.classList.add('hidden');
+    if (!no) { errEl.textContent = '请输入你的抖音号'; errEl.classList.remove('hidden'); return; }
+    if (!dataUrl) { errEl.textContent = '请上传抖音主页截图'; errEl.classList.remove('hidden'); return; }
+    if (dataUrl.length > 2_000_000) {
+      errEl.textContent = '截图太大，请截小一点再传';
+      errEl.classList.remove('hidden');
+      return;
+    }
+    const btn = $('clGo');
+    btn.disabled = true; btn.textContent = '提交中…';
+    try {
+      await fetch('/api/public/teams/' + TEAM + '/my/claim', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: myToken(), douyinNo: no, screenshot: dataUrl }),
+      }).then(async (r) => {
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+      });
+      toast('已提交，等管理员审核');
+      loadMy();
+    } catch (e) {
+      btn.disabled = false; btn.textContent = '提交绑定申请';
+      errEl.textContent = e.message || '提交失败，稍后再试';
+      errEl.classList.remove('hidden');
+    }
+  };
+}
+
+/* ==================== 微信推送（绑定机器人 + 追分目标） ==================== */
+/* 2026-10-09：数据导入完成后由微信机器人私聊推送，两类内容各自开关：
+   · 追分提醒 —— 设置本月要追的人（或自定目标），追上/还差多少都推给你
+   · 每日报告 —— 当天音浪排行榜
+   绑定：页面出二维码 + 6 位绑定码，用户扫码加机器人后把码发过去即完成绑定。 */
+let pushState = null;
+let pushSrTimer = null;
+
+function pushCard(p) {
+  return '<div class="card my-push"><h2 class="card-t">微信推送</h2>' +
+    '<div class="sub" style="margin-top:2px">数据更新后由微信机器人私聊推给你</div>' +
+    '<div id="pushBox"></div></div>';
+}
+
+async function fetchPush() {
+  const p = await api('/api/public/teams/' + TEAM + '/my/push?token=' + encodeURIComponent(myToken()));
+  pushState = p;
+  return p;
+}
+
+async function refreshPush() {
+  try {
+    renderPushBox(await fetchPush());
+  } catch (e) {
+    toast(e.message || '刷新失败');
+  }
+}
+
+function renderPushBox(p) {
+  const box = $('pushBox');
+  if (!box) return;
+  box.innerHTML = !p.channelConfigured ? pushNotReady()
+    : p.bound ? pushBoundHtml(p) : pushUnboundHtml(p);
+  bindPushBox(p);
+}
+
+function pushNotReady() {
+  return '<div class="sub" style="margin-top:6px;line-height:1.7">' +
+    '微信推送暂未开放（管理员还没连接微信机器人），稍后再看。</div>';
+}
+
+function pushUnboundHtml(p) {
+  let h = '<div class="sub" style="margin-top:8px;line-height:1.75">' +
+    '扫码添加微信机器人，把下面的<b>绑定码</b>发给它，就能收到追分提醒和每日报告。' +
+    '<br>绑定是你个人的，只有你自己能设置和接收。</div>';
+  if (p.hasQr) {
+    h += '<img class="qrcode" alt="微信机器人二维码" src="/api/public/teams/' + TEAM +
+      '/my/push/qr?access_token=' + encodeURIComponent(myToken()) + '">';
+  }
+  if (p.code) {
+    h += '<div class="code">' + esc(p.code) + '</div>' +
+      '<div class="sub" style="text-align:center">' +
+      (p.codeExpires ? esc(p.codeExpires.slice(11, 16)) + ' 之前有效 · ' : '') +
+      '把 6 位码发给机器人即可</div>' +
+      '<button class="go" id="pushNewCode">换一个码</button>';
+  } else {
+    h += '<button class="go" id="pushNewCode">获取绑定码</button>';
+  }
+  return h;
+}
+
+function pushBoundHtml(p) {
+  let h = '<div class="row"><span class="st ok">✓ 已绑定微信</span>' +
+    '<span class="sub">' + esc(p.boundAt || '') + '</span></div>';
+  h += '<label class="sw"><input type="checkbox" id="swTarget"' +
+    (p.notifyTarget ? ' checked' : '') + (p.admin ? ' disabled' : '') +
+    '> 追分提醒（追上 / 还差多少）</label>';
+  h += '<label class="sw"><input type="checkbox" id="swDaily"' +
+    (p.dailyReport ? ' checked' : '') + '> 每日报告（当天音浪排行榜）</label>';
+  if (!p.notifyTarget && !p.dailyReport) {
+    h += '<div class="hint">两个开关都关着，现在不会给你推任何东西，先开一个。</div>';
+  }
+  if (p.lastError) {
+    h += '<div class="hint">上次推送没成功：' + esc(p.lastError) +
+      '<br>让对方给机器人发一条消息后再试（微信要求先有对话）</div>';
+  }
+  if (p.admin) {
+    h += '<div class="sub" style="margin-top:10px;line-height:1.7">管理员观看账号没有自己的音浪，' +
+      '不能设置追分目标，只能收每日报告。</div>';
+  } else {
+    const list = p.targets || [];
+    h += '<div class="card-t" style="margin:14px 0 2px;font-size:13px">追谁（最多 ' +
+      (p.maxTargets || 5) + ' 个）</div>';
+    if (!list.length) {
+      h += '<div class="sub" style="padding:6px 0">还没设置。加一个，追上或差多少都会推给你。</div>';
+    }
+    h += list.map((t) => {
+      const label = t.kind === 'value' ? '🎯 本月目标 ' + wan(t.targetValue) : '🏃 ' + esc(t.targetName);
+      const state = t.hit ? '<span class="st ok">已追上</span>'
+        : (t.lastGap > 0 ? '<span class="sub">还差 ' + wan(t.lastGap) + '</span>' : '');
+      return '<div class="tgt"><span>' + label + '</span>' +
+        '<span style="margin-left:auto">' + state + '</span>' +
+        '<button class="x" data-del="' + t.id + '">✕</button></div>';
+    }).join('');
+    if (list.length < (p.maxTargets || 5)) h += pushAddHtml();
+  }
+  h += '<button class="go gray" id="pushUnbind">解除绑定</button>';
+  return h;
+}
+
+function pushAddHtml() {
+  return '<div class="tabs2"><button class="on" data-tk="person">追主播</button>' +
+    '<button data-tk="value">定目标</button></div>' +
+    '<div id="tkPerson"><div class="sr">' +
+    '<input id="tkQ" placeholder="搜本团主播名字" autocomplete="off">' +
+    '<div class="sr-list hidden" id="tkList"></div></div>' +
+    '<button class="go" id="tkAdd" disabled>添加</button></div>' +
+    '<div id="tkValue" class="hidden">' +
+    '<input id="tkVal" inputmode="decimal" placeholder="本月音浪目标（万），例如 50">' +
+    '<button class="go" id="tkValAdd">添加目标</button></div>';
+}
+
+function bindPushBox(p) {
+  const getCode = $('pushNewCode');
+  if (getCode) {
+    getCode.onclick = async () => {
+      getCode.disabled = true;
+      getCode.textContent = '生成中…';
+      try {
+        await fetch('/api/public/teams/' + TEAM + '/my/push/code', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token: myToken() }),
+        }).then(async (r) => {
+          const d = await r.json().catch(() => ({}));
+          if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+        });
+        await refreshPush();
+      } catch (e) {
+        getCode.disabled = false;
+        getCode.textContent = '获取绑定码';
+        toast(e.message || '生成失败');
+      }
+    };
+  }
+
+  const swT = $('swTarget'), swD = $('swDaily');
+  const saveFlags = async () => {
+    try {
+      await fetch('/api/public/teams/' + TEAM + '/my/push/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          token: myToken(),
+          notifyTarget: !!(swT && swT.checked),
+          dailyReport: !!(swD && swD.checked),
+        }),
+      }).then(async (r) => {
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+      });
+      toast('已保存');
+    } catch (e) {
+      toast(e.message || '保存失败');
+      refreshPush();
+    }
+  };
+  if (swT) swT.onchange = saveFlags;
+  if (swD) swD.onchange = saveFlags;
+
+  const unbind = $('pushUnbind');
+  if (unbind) {
+    unbind.onclick = async () => {
+      if (!confirm('解除绑定后不再收到推送，确定吗？')) return;
+      unbind.disabled = true;
+      try {
+        await fetch('/api/public/teams/' + TEAM + '/my/push/unbind', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token: myToken() }),
+        }).then(async (r) => {
+          const d = await r.json().catch(() => ({}));
+          if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+        });
+        toast('已解除绑定');
+        await refreshPush();
+      } catch (e) {
+        unbind.disabled = false;
+        toast(e.message || '操作失败');
+      }
+    };
+  }
+
+  document.querySelectorAll('#pushBox [data-del]').forEach((b) => {
+    b.onclick = async () => {
+      try {
+        await fetch('/api/public/teams/' + TEAM + '/my/push/targets/delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token: myToken(), id: Number(b.dataset.del) }),
+        }).then(async (r) => {
+          const d = await r.json().catch(() => ({}));
+          if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+        });
+        toast('已删除');
+        await refreshPush();
+      } catch (e) {
+        toast(e.message || '删除失败');
+      }
+    };
+  });
+
+  /* 追主播 / 定目标 两个子面板 */
+  let picked = null;
+  document.querySelectorAll('#pushBox .tabs2 button').forEach((b) => {
+    b.onclick = () => {
+      document.querySelectorAll('#pushBox .tabs2 button').forEach((x) => x.classList.toggle('on', x === b));
+      show('tkPerson', b.dataset.tk === 'person');
+      show('tkValue', b.dataset.tk === 'value');
+    };
+  });
+  const q = $('tkQ'), listEl = $('tkList'), addBtn = $('tkAdd');
+  if (q) {
+    q.oninput = () => {
+      picked = null;
+      if (addBtn) addBtn.disabled = true;
+      const key = q.value.trim();
+      clearTimeout(pushSrTimer);
+      if (!key) { listEl.classList.add('hidden'); listEl.innerHTML = ''; return; }
+      pushSrTimer = setTimeout(async () => {
+        try {
+          const d = await api('/api/public/teams/' + TEAM + '/my/push/search?token=' +
+            encodeURIComponent(myToken()) + '&q=' + encodeURIComponent(key));
+          const items = d.items || [];
+          listEl.innerHTML = items.length
+            ? items.map((a) => '<div data-pid="' + a.personId + '">' + esc(a.name) + '</div>').join('')
+            : '<div class="none">本团没搜到这个人</div>';
+          listEl.classList.remove('hidden');
+          listEl.querySelectorAll('[data-pid]').forEach((row) => {
+            row.onclick = () => {
+              picked = { id: Number(row.dataset.pid), name: row.textContent };
+              q.value = picked.name;
+              listEl.classList.add('hidden');
+              addBtn.disabled = false;
+            };
+          });
+        } catch (e) {
+          listEl.innerHTML = '<div class="none">' + esc(e.message || '搜索失败') + '</div>';
+          listEl.classList.remove('hidden');
+        }
+      }, 220);
+    };
+    q.onblur = () => setTimeout(() => listEl.classList.add('hidden'), 180);
+  }
+  if (addBtn) {
+    addBtn.onclick = async () => {
+      if (!picked) return;
+      addBtn.disabled = true;
+      addBtn.textContent = '添加中…';
+      try {
+        await postPush('/my/push/targets', { kind: 'person', personId: picked.id });
+        toast('已添加');
+        await refreshPush();
+      } catch (e) {
+        addBtn.disabled = false;
+        addBtn.textContent = '添加';
+        toast(e.message || '添加失败');
+      }
+    };
+  }
+  const valAdd = $('tkValAdd');
+  if (valAdd) {
+    valAdd.onclick = async () => {
+      const v = parseFloat($('tkVal').value);
+      if (!(v > 0)) { toast('请输入大于 0 的目标（万）'); return; }
+      valAdd.disabled = true;
+      valAdd.textContent = '添加中…';
+      try {
+        await postPush('/my/push/targets', { kind: 'value', valueWan: v });
+        toast('已添加');
+        await refreshPush();
+      } catch (e) {
+        valAdd.disabled = false;
+        valAdd.textContent = '添加目标';
+        toast(e.message || '添加失败');
+      }
+    };
+  }
+}
+
+/** 推送设置的写接口（统一带 token 与错误处理） */
+async function postPush(path, extra) {
+  const r = await fetch('/api/public/teams/' + TEAM + path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(Object.assign({ token: myToken() }, extra)),
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+  return d;
+}
+
+/* ==================== 视图切换 ==================== */
+/* 顶部导航 sticky 后，工具条吸顶位置要跟头部实际高度走（分组页多一条子导航） */
+function syncHeaderOffset() {
+  const h = document.querySelector('.masthead')?.offsetHeight || 0;
+  if (h) document.documentElement.style.setProperty('--mh-h', h + 'px');
+}
+window.addEventListener('resize', syncHeaderOffset);
+
+function switchView(v, opts) {
+  opts = opts || {};
+  view = v;
+  document.querySelectorAll('[data-v]').forEach(b => b.classList.toggle('on', b.dataset.v === v));
+  document.querySelectorAll('#subnav button').forEach(b => b.classList.toggle('on', b.dataset.g === curGroup));
+  show('toolbar', v === 'data');
+  show('subnav', v === 'group');
+  show('foot', v !== 'lineage');
+  syncHeaderOffset();
+  $('view').innerHTML = '';
+  if (opts.push !== false) pushRoute(opts.replace === true);
+  go();
+}
+
+function setPeriod(p) {
+  period = p;
+  document.querySelectorAll('#seg button').forEach(b => b.classList.toggle('on', b.dataset.p === p));
+  show('dates', p === 'daily');
+  show('stepper', p !== 'daily');
+  curPeriod = nowPeriod(p);
+  go();
+}
+
+async function go() {
+  show('err', false);
+  const optimistic = () => {
+    if (view === 'data') $('view').innerHTML = '<div class="section">' + shimmerList() + '</div>';
+  };
+  if (view === 'data' && !listAll.length) optimistic();
+  try {
+  if (view === 'data') await loadData();
+  else if (view === 'lineage') await loadLineage();
+  else if (view === 'my') await loadMy();
+  else await loadGroup();
+    consecutiveFail = 0;
+    show('stale', false);
+  } catch (e) {
+    consecutiveFail++;
+    if (consecutiveFail >= 2) show('stale', true);
+    $('mhSub').textContent = 'NETWORK';
+    $('view').innerHTML = '<div class="empty"><span class="big">📶</span>暂时取不到数据<br>' +
+      esc(e.message) + '</div>';
+  }
+}
+
+/* ==================== 静默刷新 ==================== */
+/* 每分钟后台刷新，客户端加 ±10s 抖动：不加抖动的话所有人整点一起请求，服务端会尖峰 */
+function scheduleRefresh() {
+  clearTimeout(timer);
+  const jitter = 60000 + (Math.random() * 20000 - 10000);
+  timer = setTimeout(() => {
+    /* lineage / my 不参与静默刷新：lineage 重建画布会丢缩放位置；
+       my 是个人数据页，低频变化，且重建会打断用户正在输入的表单 */
+    Promise.resolve(view === 'data' ? loadData()
+      : (view === 'lineage' || view === 'my') ? null : loadGroup())
+      .then(() => { consecutiveFail = 0; show('stale', false); })
+      .catch(() => { consecutiveFail++; if (consecutiveFail >= 2) show('stale', true); })
+      .finally(scheduleRefresh);
+  }, jitter);
+}
+
+/* ==================== 导航显隐 ==================== */
+/* 分组（按类型拆页）常驻；族谱：只在男团展示（女团不开放）；底部导航已整体移除 */
+function syncNav() {
+  const lin = TEAM === 'male';
+  show('navLineage', lin);
+}
+
+/* ==================== 启动 ==================== */
+(async function boot() {
+  $('mhBadge').textContent = CODE;
+  $('mhTitle').textContent = LABEL + '数据榜';
+  document.title = LABEL + '每日报告';
+
+  /* 展示端登录门（2026-10-10）：先登录（手机号/姓名 + 密码）再看任何数据；
+     登录后挂上全屏艺名水印。 */
+  const me = await ensureLogin();
+  applyWatermark(me.name);
+  syncHeaderOffset();
+
+  /* 主导航 + 分组子导航 + 前进/后退 */
+  document.querySelectorAll('[data-v]').forEach(b => b.onclick = () => switchView(b.dataset.v));
+  document.querySelectorAll('#subnav button').forEach(b =>
+    b.onclick = () => { curGroup = b.dataset.g; switchView('group'); });
+  window.addEventListener('popstate', () => {
+    const r = parseRoute();
+    if (r.view === 'group' && r.group) curGroup = r.group;
+    switchView(r.view, { push: false });
+  });
+  document.querySelectorAll('#seg button').forEach(b => b.onclick = () => setPeriod(b.dataset.p));
+  $('btnSearch').onclick = () => {
+    searchOpen = !searchOpen;
+    show('searchBox', searchOpen);
+    $('btnSearch').classList.toggle('on', searchOpen);
+    if (searchOpen) $('q').focus();
+  };
+  $('q').oninput = (e) => { q = e.target.value; renderList(); };
+  $('qClear').onclick = () => { q = ''; $('q').value = ''; renderList(); };
+  $('pPrev').onclick = () => shiftStep(-1);
+  $('pNext').onclick = () => shiftStep(1);
+
+  function shiftStep(n) {
+    curPeriod = period === 'monthly' ? shiftMonth(curPeriod, n) : String(+curPeriod + n);
+    go();
+  }
+
+  try {
+    site = await api('/api/public/teams/' + TEAM);
+  } catch (e) {
+    document.body.innerHTML = '<div class="empty" style="padding-top:120px"><span class="big">📡</span>' +
+      '连不上服务，稍后再试试</div>';
+    return;
+  }
+  if (!site.published) {
+    document.body.innerHTML = '<div class="empty" style="padding-top:120px"><span class="big">📺</span>' +
+      '<b>' + LABEL + '数据暂未公布</b><br>请等管理员发布</div>';
+    return;
+  }
+
+  // 后台级开关：关掉的口径直接从界面消失（后端也不下发）
+  const s = site.settings || {};
+  const segs = { daily: s.daily !== false, monthly: s.monthly !== false, yearly: s.yearly !== false };
+  document.querySelectorAll('#seg button').forEach(b => {
+    b.disabled = !segs[b.dataset.p];
+    if (!segs[b.dataset.p]) b.textContent = b.textContent + '（已关）';
+  });
+  if (!segs.daily && segs.monthly) period = 'monthly';
+  else if (!segs.daily && segs.yearly) period = 'yearly';
+  document.querySelectorAll('#seg button').forEach(b => b.classList.toggle('on', b.dataset.p === period));
+
+  /* 默认站在昨天：数据每晚 24 点后才补前一天，今天那条一来就想看往往还没有。
+     昨天万一还没入库（延迟或停采），退回库里最新那天，别把页面留在空状态。 */
+  const dates0 = site.dates || [];
+  curDate = dates0.includes(refStr()) ? refStr() : site.latestDate;
+  curPeriod = nowPeriod(period);
+  show('dates', period === 'daily');
+  show('stepper', period !== 'daily');
+  $('pNow').textContent = period === 'monthly'
+    ? curPeriod.slice(0, 4) + '年' + (+curPeriod.slice(5, 7)) + '月'
+    : curPeriod + '年';
+
+  await loadPlans();
+  syncNav();
+
+  /* 首页 = 每日报告：/st/m 直开时保留路径不跳转；带子路径（/group/xxx、/lineage）时
+     按子路径落到对应视图，分享/刷新都不丢。 */
+  const r0 = parseRoute();
+  if (r0.view === 'group' && r0.group) curGroup = r0.group;
+  switchView(r0.view, { push: false });
+  scheduleRefresh();
+})();
+
+/* 字段面板已随「严格按排行榜版式」移除：显示内容固定，后台级开关仍在后端生效。 */
+</script>
+</body>
+</html>

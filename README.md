@@ -1,8 +1,9 @@
 # PK 挑战赛分组程序
 
-只读接入 `douyinxs` 数据库，按音浪高低做均衡分组，支持手动拖拽调整与导出图片。
-**后端已全量迁移到 Rust**（axum + sqlx/MySQL + SQLite），前端保留 React 只做界面与拖拽，
-所有分组算法都在 `pk-core`（Rust）里算，浏览器不再跑第二份算法。
+后端是**全 Rust 单技术栈**（axum + sqlx/MySQL + SQLite）：主数据源 `douyinxs`（只读）
+与本地 MariaDB（`LOCAL`）都作为数据源接入，按音浪高低做均衡分组，支持手动拖拽调整
+与导出图片。前端保留 React 只做界面与拖拽，所有分组算法都在 `pk-core`（Rust）里算，
+浏览器不再跑第二份算法。采集 / 导入 / 机器人等数据管理职责同样以 `pk-server` 模块承载。
 
 ## 架构
 
@@ -13,9 +14,19 @@ rust/crates/pk-server   HTTP 服务：axum + sqlx(MySQL 只读) + SQLite + 静�
   ├─ public.rs          对外只读展示数据（裁剪字段 + 实时音浪）
   ├─ grouping.rs        /api/group/*：arrange / inspect / polish / constraints
   ├─ matching.rs        名单 -> 主播匹配 + read_id（BIGINT UNSIGNED 兼容）
-  ├─ dialect.rs         A/B 库 SQL 方言 + 日期白名单内联
-  └─ mysql.rs           多数据源连接池 + 只读守卫
-apps/web                React + Vite + dnd-kit 拖拽 + html-to-image 导出
+  ├─ dialect.rs         LOCAL / A / B 库 SQL 方言 + 日期白名单内联
+  ├─ mysql.rs           多数据源连接池 + 只读守卫（读 / 写分池）
+  ├─ admin.rs           数据管理 API（/dy/*）：采集 / 导入 / 主播台账
+  ├─ bot/               机器人：QQ / 微信 iLink，确定性命令路由
+  └─ import/            CSV / 粘贴 / 补录，字段映射 + 校验报告
+apps/douyin-web          现役运营后台（React + Vite，history 路由挂在 /admin 下）
+  ├─ src/lib/router.ts       路由表 + popstate：/admin/data|import|streamers|claims|lineage|group|bots
+  ├─ src/DashboardPage.tsx   数据页：概况 KPI / Top10 / 未播预警 / 团别趋势
+  ├─ src/ImportPage.tsx      数据导入：拖拽或选文件 → 弹窗预览 → 确认入库 → 批次列表
+  ├─ src/StreamerPage.tsx    主播台账（右键：编辑 / 师傅 / 抖音号 / 我的账号 / 合并 / 删除）
+  ├─ src/LineagePage.tsx     族谱画布；src/BotPage.tsx 机器人（QQ/微信）配置
+  └─ src/pk/GroupPage.tsx    PK 分组看板（拖拽、约束、方案、导出）
+apps/web                旧管理端（hash 路由 /#/…，已冻结只做兼容）
   ├─ components/AuthGate.tsx   登录门
   ├─ components/NavBar.tsx     顶栏 + 三段导航（首页 / 主播数据 / PK 分组）
   ├─ components/HomeView.tsx   首页：数据新鲜度 + 方案概况 + 入口
@@ -32,15 +43,25 @@ packages/shared         前端仍用的展示工具与类型（算法已全部�
 
 ## 管理员后台 vs 对外展示
 
+现役后台是 `apps/douyin-web`，history 路由统一挂在 `/admin` 下（`spa.rs` 剥前缀后
+按 dist 解析，深层链接刷新也回退到 index.html）：
+
 | 路径 | 谁能看 | 内容 |
 | --- | --- | --- |
-| `/#/home` | 需口令 | 首页：数据新鲜度、当前方案概况、两个子页入口 |
-| `/#/data` | 需口令 | 主播数据：音浪排行、主播库检索、CSV 导出 |
-| `/#/board` | 需口令 | PK 分组：解析、拖拽、锁定、撤销、均衡、导出、方案管理 |
+| `/admin/data` | 需口令 | 数据页：概况 KPI、Top10、未播预警、团别趋势 |
+| `/admin/import` | 需口令 | 导入：拖拽/选文件 → 弹窗预览 → 确认入库 → 批次列表（无粘贴入口） |
+| `/admin/streamers` | 需口令 | 主播台账：检索、新建、别名、师傅、抖音号、「我的」账号 |
+| `/admin/claims` | 需口令 | 抖音号绑定审计（展示端「我的」提交的申请） |
+| `/admin/lineage` | 需口令 | 族谱画布 |
+| `/admin/group` | 需口令 | PK 分组：解析、拖拽、锁定、撤销、均衡、导出、方案管理 |
+| `/admin/bots` | 需口令 | 机器人（QQ / 微信）与会话、公开站点设置 |
+| `/` | 任何人 | 对外展示页（与 `/st/m` 同一份页面） |
 | `/s/:planId` | 任何人 | 对外只读：只给分组名单和开赛时段，**不展示音浪** |
 
-根路径 `/` 等同 `/#/home`。导航状态存在 URL hash 里，所以三页都能直接分享链接、
-刷新和浏览器前进后退都停在原页。
+导航项是真链接，刷新、前进后退、分享链接都停在同一页；认不出的路径 replace 回
+`/admin/data`。开发态（`pnpm --filter @pk/douyin-web dev`，5173）不带前缀，base 自动识别。
+
+旧管理端 `apps/web` 的 hash 路由 `/#/home`、`/#/data`、`/#/board` 已冻结，只做兼容。
 
 **鉴权**（`rust/crates/pk-server/src/auth.rs`）
 

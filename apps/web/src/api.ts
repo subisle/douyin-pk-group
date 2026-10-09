@@ -1,4 +1,4 @@
-import type { AnchorBrief, ParsedRow, Player, WaveMetric } from '@pk/shared';
+import type { AnchorBrief, GroupOptions, ParsedRow, Player, WaveMetric } from '@pk/shared';
 import type { ArrangeResponse, ConstraintsMeta, InspectResponse, PolishResponse } from './types.js';
 
 const BASE = '/api';
@@ -106,6 +106,8 @@ export interface SavedPlan {
   title: string;
   metric: WaveMetric;
   days: number;
+  /** 老方案未保存该字段时，载入时回退到默认策略 */
+  strategy?: GroupOptions['strategy'];
   buckets: Array<{ name: string; players: Player[] }>;
   /** 对外展示页用的可选信息（老方案没有也能打开） */
   brand?: string;

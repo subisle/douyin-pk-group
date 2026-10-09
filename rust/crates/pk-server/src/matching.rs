@@ -6,7 +6,6 @@ use pk_core::{default_aliases, default_exclude, normalize_name, parse_roster, Pa
 use serde::Serialize;
 
 use crate::repos;
-use crate::sqlite;
 use crate::state::{AnchorBrief, AppState};
 
 #[derive(Serialize, Clone, Debug)]
@@ -25,6 +24,8 @@ pub struct MatchPayload {
     pub dates: Vec<String>,
     pub metric: String,
     pub days: i64,
+    /// 名单里带分数的行数 > 0 说明音浪来自名单（晋级赛名单格式），前端据此换口径文案
+    pub scored: i64,
 }
 
 pub struct MatchOptions<'a> {
@@ -69,7 +70,7 @@ fn uniq_candidates(name: &str, anchors: &[AnchorBrief]) -> Vec<AnchorBrief> {
 pub async fn match_roster(st: &AppState, opts: MatchOptions<'_>) -> anyhow::Result<MatchPayload> {
     let exclude = opts.exclude.unwrap_or_else(default_exclude);
     let mut alias_map = default_aliases();
-    alias_map.extend(sqlite::list_aliases());
+    alias_map.extend(crate::store::list_aliases(st).await);
     if let Some(a) = opts.aliases {
         alias_map.extend(a);
     }
@@ -91,6 +92,8 @@ pub async fn match_roster(st: &AppState, opts: MatchOptions<'_>) -> anyhow::Resu
     }
 
     let mut players: Vec<Player> = Vec::new();
+    // 该行的音浪是否来自「名单自带分数」（是的话不要被库里的音浪覆盖）
+    let mut from_roster: Vec<bool> = Vec::new();
     let mut unmatched: Vec<UnmatchedItem> = Vec::new();
     let mut excluded: Vec<ParsedRow> = Vec::new();
 
@@ -105,6 +108,7 @@ pub async fn match_roster(st: &AppState, opts: MatchOptions<'_>) -> anyhow::Resu
                 .and_then(|v| v.first().copied())
         });
         let key = format!("{}#{}", row.name, i);
+        let scored = row.score.is_some();
         match hit {
             Some(h) => players.push(Player {
                 key,
@@ -113,7 +117,7 @@ pub async fn match_roster(st: &AppState, opts: MatchOptions<'_>) -> anyhow::Resu
                 leader: row.leader,
                 person_id: Some(h.person_id.clone()),
                 matched: true,
-                wave: 0.0,
+                wave: row.score.unwrap_or(0.0),
                 avatar: h.avatar.clone(),
                 excluded: false,
             }),
@@ -126,17 +130,22 @@ pub async fn match_roster(st: &AppState, opts: MatchOptions<'_>) -> anyhow::Resu
                     leader: row.leader.clone(),
                     person_id: None,
                     matched: false,
-                    wave: 0.0,
+                    wave: row.score.unwrap_or(0.0),
                     avatar: None,
                     excluded: false,
                 });
                 unmatched.push(UnmatchedItem { row, candidates });
             }
         }
+        from_roster.push(scored);
     }
 
     let wave_info = repos::get_waves(st, opts.metric, opts.days, None, opts.force, None).await?;
-    for p in &mut players {
+    for (i, p) in players.iter_mut().enumerate() {
+        // 名单自带分数的行保持原值（晋级赛名单就是这么发的，库里没有这个数）
+        if from_roster.get(i).copied().unwrap_or(false) {
+            continue;
+        }
         p.wave = p
             .person_id
             .as_ref()
@@ -153,5 +162,6 @@ pub async fn match_roster(st: &AppState, opts: MatchOptions<'_>) -> anyhow::Resu
         dates: wave_info.dates,
         metric: opts.metric.to_string(),
         days: opts.days,
+        scored: from_roster.iter().filter(|x| **x).count() as i64,
     })
 }

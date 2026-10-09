@@ -178,6 +178,9 @@ impl std::fmt::Debug for Auth {
 /// - `/api/auth/login` 换 token 本身
 /// - `/api/health` 探活
 const OPEN_PREFIXES: &[&str] = &[
+    "/st",
+    "/1", // 对外展示页：/1 男团 /0 女团
+    "/0",
     "/api/public",
     "/api/auth/session",
     "/api/auth/login",
@@ -200,7 +203,18 @@ pub async fn require_admin(
         return next.run(req).await;
     }
 
-    let ok = Auth::token_of(req.headers()).is_some_and(|t| auth.verify(&t));
+    let mut ok = Auth::token_of(req.headers()).is_some_and(|t| auth.verify(&t));
+    // <img src> 无法带 Authorization 头：允许 ?access_token= 传 token（日报图等场景）
+    if !ok {
+        if let Ok(q) = req.uri().query().map(|q| q.to_string()).ok_or(()) {
+            for pair in q.split('&') {
+                if let Some(v) = pair.strip_prefix("access_token=") {
+                    ok = auth.verify(v);
+                    break;
+                }
+            }
+        }
+    }
     if ok {
         return next.run(req).await;
     }

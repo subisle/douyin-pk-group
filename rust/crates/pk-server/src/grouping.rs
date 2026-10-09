@@ -23,6 +23,9 @@ pub struct ConstraintInput {
     /// 完整覆盖（可选）：前端一般不传，用后端内置条件
     #[serde(default)]
     pub full: Option<ConstraintSet>,
+    /// 强度位次（可选）：独立于 full，前端只开关位次时不用重发整套内置条件
+    #[serde(default, rename = "strengthOrder")]
+    pub strength_order: Option<pk_core::StrengthOrder>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
@@ -30,6 +33,9 @@ pub struct ScheduleInput {
     pub start: String,
     #[serde(rename = "intervalMin")]
     pub interval_min: i64,
+    /// 加长休息点（可选）：如第 3 组后隔 20 分钟
+    #[serde(default)]
+    pub breaks: Option<Vec<pk_core::BreakRule>>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
@@ -72,12 +78,16 @@ fn default_group_size() -> usize {
 
 /// 合并前端可配项与后端内置条件
 pub fn resolve_constraints(input: Option<&ConstraintInput>) -> ConstraintSet {
-    let base = input.and_then(|c| c.full.clone()).unwrap_or_default();
+    let mut base = input.and_then(|c| c.full.clone()).unwrap_or_default();
+    if let Some(so) = input.and_then(|c| c.strength_order.as_ref()) {
+        base.strength_order = Some(so.clone());
+    }
     match input.and_then(|c| c.schedule.as_ref()) {
         Some(s) => ConstraintSet {
             schedule: pk_core::ScheduleRule {
                 start: s.start.clone(),
                 interval_min: s.interval_min,
+                breaks: s.breaks.clone().unwrap_or_default(),
             },
             ..base
         },

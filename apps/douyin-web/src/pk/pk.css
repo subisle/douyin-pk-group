@@ -1,0 +1,407 @@
+/* PK 分组工作台：沿用后台的冷灰纸面 + 靛蓝主色，只补看板特有的一层 */
+.pk .pk-roster {
+  width: 100%;
+  min-height: 150px;
+  font: 13px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--ink);
+  resize: vertical;
+}
+.pk .pk-roster:focus {
+  outline: 2px solid color-mix(in srgb, var(--brand) 45%, transparent);
+  outline-offset: 1px;
+  border-color: var(--brand);
+}
+
+.pk .pk-spread {
+  float: right;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ink3);
+  font-variant-numeric: tabular-nums;
+}
+.pk .pk-tag {
+  margin-left: 6px;
+  font-size: 10px;
+  color: var(--brand);
+  border: 1px solid var(--brand);
+  border-radius: 999px;
+  padding: 0 6px;
+}
+
+.pk .pk-meta {
+  margin-top: 10px;
+  font-size: 12.5px;
+  color: var(--ink2);
+}
+.pk .pk-meta summary {
+  cursor: pointer;
+  color: var(--brand);
+}
+.pk .pk-meta-body {
+  margin-top: 6px;
+  display: grid;
+  gap: 3px;
+}
+
+.pk .pk-alert {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.pk .pk-alert button {
+  flex: none;
+}
+
+/* 看板：自适应网格，每组一张卡 */
+.pk .pk-board {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(236px, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
+.pk .pk-group {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fcfcfd;
+  display: flex;
+  flex-direction: column;
+  min-height: 96px;
+}
+.pk .pk-group.bad {
+  border-color: var(--bad);
+  background: var(--bad-bg);
+}
+.pk .pk-group.drop-active {
+  border-color: var(--brand);
+  background: color-mix(in srgb, var(--brand) 4%, #fcfcfd);
+}
+.pk .pk-group-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--line);
+}
+.pk .pk-group-head .pk-slot {
+  color: var(--brand);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.pk .pk-group-head .pk-total {
+  margin-left: auto;
+  font-size: 11.5px;
+  color: var(--ink3);
+  font-variant-numeric: tabular-nums;
+}
+.pk .pk-list {
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.pk .pk-empty {
+  padding: 14px 8px;
+  text-align: center;
+  color: var(--ink3);
+  font-size: 12px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+}
+
+.pk .pk-card {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px 6px 2px;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  cursor: grab;
+  font-size: 13px;
+}
+.pk .pk-card:active {
+  cursor: grabbing;
+}
+/* 触屏抓手：只有这里 touch-action:none。
+   整张卡片都设的话手指一碰卡片就不能滚页面，十几组的看板等于滚不动。 */
+.pk .pk-grip {
+  flex: none;
+  width: 16px;
+  text-align: center;
+  font-size: 11px;
+  letter-spacing: -2px;
+  color: #c2c8d2;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+.pk .pk-card:hover .pk-grip {
+  color: var(--brand);
+}
+.pk .pk-card.bad {
+  border-color: var(--bad);
+  background: #fff5f4;
+}
+.pk .pk-card.locked {
+  border-color: var(--brand);
+}
+.pk .pk-card.dragging {
+  opacity: 0.32;
+}
+/* 插入线画在哪，人就落在哪：上半=插在卡片上方，下半=下方 */
+.pk .pk-card.drop-before {
+  box-shadow: inset 0 2px 0 var(--brand);
+}
+.pk .pk-card.drop-after {
+  box-shadow: inset 0 -2px 0 var(--brand);
+}
+.pk .pk-card .pk-idx {
+  font-size: 11px;
+  color: var(--ink3);
+  font-variant-numeric: tabular-nums;
+  flex: none;
+}
+.pk .pk-card .pk-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pk .pk-card .pk-leader {
+  margin-left: 5px;
+  font-size: 11px;
+  color: var(--ink3);
+}
+.pk .pk-card .pk-leader.warn {
+  color: var(--bad);
+}
+.pk .pk-card .pk-wave {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  flex: none;
+}
+/* 操作收进单个 ⋯ 按钮（原版 PlayerCard 做法）：按钮常驻但只占 ~20px，
+   姓名区域 flex:1 就有空间完整显示；点击弹出菜单做锁/移组/移出。 */
+.pk .pk-card .pk-ops {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: none;
+}
+.pk .pk-ico {
+  padding: 2px 5px;
+  font-size: 11px;
+  line-height: 1.4;
+  border-radius: 6px;
+}
+.pk .pk-ico.more {
+  font-size: 14px;
+  line-height: 1;
+  padding: 2px 6px;
+  color: var(--ink3);
+  letter-spacing: 1px;
+}
+.pk .pk-ico.more:hover {
+  color: var(--ink);
+  background: #f1f3f7;
+}
+.pk .pk-ico.on {
+  border-color: var(--brand);
+}
+/* ⋯ 弹出菜单 */
+.pk .pk-menu {
+  position: absolute;
+  right: 0;
+  top: 100%;
+  z-index: 30;
+  margin-top: 4px;
+  display: block;
+  width: 148px;
+  padding: 4px;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(31, 41, 61, 0.14);
+  text-align: left;
+  cursor: default;
+}
+.pk .pk-menu button {
+  display: block;
+  width: 100%;
+  padding: 5px 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: left;
+  color: var(--ink);
+  background: none;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.pk .pk-menu button:hover {
+  background: #f1f3f7;
+}
+.pk .pk-menu button.cur {
+  color: var(--brand);
+  font-weight: 600;
+}
+.pk .pk-menu button.danger {
+  color: var(--bad);
+}
+.pk .pk-menu .pk-menu-label {
+  display: block;
+  padding: 5px 8px 2px;
+  font-size: 11px;
+  color: var(--ink3);
+}
+.pk .pk-menu .pk-menu-groups {
+  display: block;
+  max-height: 168px;
+  overflow-y: auto;
+}
+
+/* 强度位次开关行 */
+.pk .pk-strength {
+  margin-top: 8px;
+  align-items: center;
+  gap: 8px;
+}
+.pk .pk-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+}
+.pk .pk-check input {
+  margin: 0;
+  cursor: pointer;
+}
+
+.pk .pk-unassigned {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+}
+.pk .pk-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #fff;
+  font-size: 12.5px;
+}
+.pk .pk-chip select {
+  font-size: 11px;
+  border: none;
+  background: transparent;
+  color: var(--brand);
+}
+.pk .pk-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+}
+
+/* 跟手的幽灵卡片 + 拖拽期间的全局禁选 */
+.pk-ghost {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 100;
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 240px;
+  max-width: 60vw;
+  padding: 7px 10px;
+  background: #fff;
+  border: 1px solid var(--brand);
+  border-radius: 8px;
+  box-shadow: 0 8px 20px rgb(16 24 40 / 16%);
+  font-size: 13px;
+  font-weight: 600;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.pk-ghost .pk-wave {
+  margin-left: auto;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink2);
+  font-variant-numeric: tabular-nums;
+}
+body.pk-dragging {
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: grabbing;
+}
+body.pk-dragging .pk-card {
+  cursor: grabbing;
+}
+
+/* 「识别不到」逐行列表：原始行 + 可点击的候选名（点一下记成别名并重新分组） */
+.pk .pk-unmatched {
+  display: grid;
+  gap: 4px;
+}
+.pk .pk-unmatched-list {
+  display: grid;
+  gap: 5px;
+  margin-top: 4px;
+}
+.pk .pk-unmatched-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 12.5px;
+}
+.pk .pk-unmatched-raw {
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  padding: 1px 7px;
+  border-radius: 6px;
+  border: 1px dashed currentColor;
+  background: rgb(255 255 255 / 65%);
+}
+.pk .pk-unmatched-row .hint {
+  color: inherit;
+  opacity: 0.8;
+}
+.pk .pk-cand {
+  padding: 1px 9px;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  background: #fff;
+  color: inherit;
+  cursor: pointer;
+}
+.pk .pk-cand:hover {
+  background: var(--brand);
+  border-color: var(--brand);
+  color: #fff;
+}
+.pk .pk-cand:disabled {
+  opacity: 0.5;
+  cursor: default;
+}

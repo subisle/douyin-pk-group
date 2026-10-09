@@ -16,8 +16,8 @@ use axum::Json;
 use serde_json::json;
 
 use crate::repos;
-use crate::sqlite;
 use crate::state::AppState;
+use crate::store;
 
 fn not_found() -> Response {
     (
@@ -83,8 +83,24 @@ fn rank_within(players: &mut [PublicPlayer], assign: fn(&mut PublicPlayer, usize
     players.sort_by_key(|p| p.order);
 }
 
-/// "08:15" + n * interval；起止时间非法就退回第 1 组时间
-fn slot_time(index: usize, start: &str, interval_min: i64) -> String {
+fn parse_breaks(v: &serde_json::Value) -> Vec<(usize, i64)> {
+    v.get("breaks")
+        .and_then(|b| b.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|b| {
+                    let after = b.get("afterGroup").and_then(|x| x.as_u64())? as usize;
+                    let min = b.get("minutes").and_then(|x| x.as_i64()).unwrap_or(15);
+                    Some((after, min))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// "08:15" + 逐段间隔；中间可能插了加长休息（第 3 组后 20 分钟）。
+/// 起止时间非法就退回第 1 组时间。
+fn slot_time(index: usize, start: &str, interval_min: i64, breaks: &[(usize, i64)]) -> String {
     let parsed = start
         .trim()
         .split_once(':')
@@ -92,7 +108,15 @@ fn slot_time(index: usize, start: &str, interval_min: i64) -> String {
     let Some((h, m)) = parsed else {
         return start.to_string();
     };
-    let total = h * 60 + m + index as i64 * interval_min.max(1);
+    let mut total = h * 60 + m;
+    for i in 0..index {
+        let step = breaks
+            .iter()
+            .find(|(after, _)| *after == i + 1)
+            .map(|(_, min)| *min)
+            .unwrap_or(interval_min);
+        total += step.max(0);
+    }
     format!(
         "{:02}:{:02}",
         total.div_euclid(60).rem_euclid(24),
@@ -123,13 +147,22 @@ struct DisplayConfig {
 
 impl Default for DisplayConfig {
     fn default() -> Self {
-        Self { wave: true, ranking: true, daily: true, groups: true }
+        Self {
+            wave: true,
+            ranking: true,
+            daily: true,
+            groups: true,
+        }
     }
 }
 
 impl DisplayConfig {
     fn from_payload(v: &serde_json::Value) -> Self {
-        let flag = |key: &str| v.get("display").and_then(|d| d.get(key)).and_then(|x| x.as_bool());
+        let flag = |key: &str| {
+            v.get("display")
+                .and_then(|d| d.get(key))
+                .and_then(|x| x.as_bool())
+        };
         Self {
             wave: flag("wave").unwrap_or(true),
             ranking: flag("ranking").unwrap_or(true),
@@ -141,7 +174,7 @@ impl DisplayConfig {
 
 /// `GET /api/public/plans/{id}`：单个方案的公开展示数据
 pub async fn plan(State(st): State<std::sync::Arc<AppState>>, Path(id): Path<i64>) -> Response {
-    let Some(row) = sqlite::get_published_plan(id) else {
+    let Some(row) = store::get_published_plan(&st, id).await else {
         return not_found();
     };
     let Ok(payload) = serde_json::from_str::<serde_json::Value>(&row.payload) else {
@@ -173,6 +206,10 @@ pub async fn plan(State(st): State<std::sync::Arc<AppState>>, Path(id): Path<i64
         .and_then(|s| s.get("intervalMin"))
         .and_then(|v| v.as_i64())
         .unwrap_or(15);
+    let breaks = payload
+        .get("schedule")
+        .map(parse_breaks)
+        .unwrap_or_default();
 
     /* ---- 1. 按快照音浪把结构搭起来，同时收集 personId ---- */
     let mut groups: Vec<PublicGroup> = Vec::with_capacity(buckets.len());
@@ -227,7 +264,7 @@ pub async fn plan(State(st): State<std::sync::Arc<AppState>>, Path(id): Path<i64
         all_players.extend(group_players.iter().cloned());
         groups.push(PublicGroup {
             name,
-            slot: slot_time(gi, &start, interval),
+            slot: slot_time(gi, &start, interval, &breaks),
             count: group_players.len(),
             total,
             players: group_players,
@@ -266,34 +303,34 @@ pub async fn plan(State(st): State<std::sync::Arc<AppState>>, Path(id): Path<i64
     取不到就省略，前端退回纯列表展示，不留空壳。 */
     let (trend, daily) = if display.daily && display.wave {
         match repos::get_wave_series(&st, false, None).await {
-        Ok(series) if !series.dates.is_empty() => {
-            let dates = series.dates;
-            let day_count = dates.len();
-            // 每个日期下标上，把组内成员的当日音浪加起来
-            let group_values: Vec<Vec<f64>> = groups
-                .iter()
-                .map(|g| {
-                    (0..day_count)
-                        .map(|i| {
-                            g.players
-                                .iter()
-                                .filter_map(|p| p.person_id.as_ref())
-                                .filter_map(|id| series.series.get(id))
-                                .map(|v| v[i])
-                                .sum()
-                        })
-                        .collect()
-                })
-                .collect();
+            Ok(series) if !series.dates.is_empty() => {
+                let dates = series.dates;
+                let day_count = dates.len();
+                // 每个日期下标上，把组内成员的当日音浪加起来
+                let group_values: Vec<Vec<f64>> = groups
+                    .iter()
+                    .map(|g| {
+                        (0..day_count)
+                            .map(|i| {
+                                g.players
+                                    .iter()
+                                    .filter_map(|p| p.person_id.as_ref())
+                                    .filter_map(|id| series.series.get(id))
+                                    .map(|v| v[i])
+                                    .sum()
+                            })
+                            .collect()
+                    })
+                    .collect();
 
-            let lines: Vec<_> = groups
-                .iter()
-                .zip(&group_values)
-                .map(|(g, values)| json!({ "name": g.name, "values": values }))
-                .collect();
+                let lines: Vec<_> = groups
+                    .iter()
+                    .zip(&group_values)
+                    .map(|(g, values)| json!({ "name": g.name, "values": values }))
+                    .collect();
 
-            // 每日明细取整：音浪本来就是计数，小数位对外没有信息量，还会让响应体翻倍
-            let daily_groups: Vec<_> = groups
+                // 每日明细取整：音浪本来就是计数，小数位对外没有信息量，还会让响应体翻倍
+                let daily_groups: Vec<_> = groups
                 .iter()
                 .zip(&group_values)
                 .map(|(g, values)| {
@@ -325,16 +362,16 @@ pub async fn plan(State(st): State<std::sync::Arc<AppState>>, Path(id): Path<i64
                 })
                 .collect();
 
-            (
-                Some(json!({ "dates": dates.clone(), "series": lines })),
-                Some(json!({ "dates": dates, "groups": daily_groups })),
-            )
-        }
-        Ok(_) => (None, None),
-        Err(e) => {
-            tracing::warn!(id, error = %e, "取每日音浪序列失败，按日明细省略");
-            (None, None)
-        }
+                (
+                    Some(json!({ "dates": dates.clone(), "series": lines })),
+                    Some(json!({ "dates": dates, "groups": daily_groups })),
+                )
+            }
+            Ok(_) => (None, None),
+            Err(e) => {
+                tracing::warn!(id, error = %e, "取每日音浪序列失败，按日明细省略");
+                (None, None)
+            }
         }
     } else {
         (None, None)
@@ -395,6 +432,7 @@ pub async fn plan(State(st): State<std::sync::Arc<AppState>>, Path(id): Path<i64
         "id": row.id,
         "title": row.title,
         "brand": as_str(&payload, "brand").unwrap_or_default(),
+        "eventType": row.event_type,
         "metric": metric,
         "days": days,
         "schedule": { "start": start, "intervalMin": interval },
@@ -417,8 +455,9 @@ pub async fn plan(State(st): State<std::sync::Arc<AppState>>, Path(id): Path<i64
 }
 
 /// `GET /api/public/plans`：已发布方案的轻量列表
-pub async fn plans(_state: State<std::sync::Arc<AppState>>) -> Response {
-    let items: Vec<_> = sqlite::list_plans()
+pub async fn plans(State(st): State<std::sync::Arc<AppState>>) -> Response {
+    let items: Vec<_> = store::list_plans(&st)
+        .await
         .into_iter()
         .filter(|p| p.published)
         .map(|p| {
@@ -427,6 +466,7 @@ pub async fn plans(_state: State<std::sync::Arc<AppState>>) -> Response {
                 "title": p.title,
                 "metric": p.metric,
                 "days": p.days,
+                "eventType": p.event_type,
                 "createdAt": p.created_at,
             })
         })
@@ -457,7 +497,7 @@ mod tests {
 
     #[test]
     fn slot_time_advances_by_interval() {
-        let s = |i: usize| slot_time(i, "08:15", 15);
+        let s = |i: usize| slot_time(i, "08:15", 15, &[]);
         assert_eq!(s(0), "08:15");
         assert_eq!(s(1), "08:30");
         assert_eq!(s(3), "09:00");
@@ -466,9 +506,9 @@ mod tests {
     #[test]
     fn slot_time_handles_bad_input_and_midnight() {
         // 起止时间不合法就原样返回，别把页面搞崩
-        assert_eq!(slot_time(2, "abc", 15), "abc");
+        assert_eq!(slot_time(2, "abc", 15, &[]), "abc");
         // 跨过午夜要回绕，不能出现 25:00
-        assert_eq!(slot_time(1, "23:55", 15), "00:10");
+        assert_eq!(slot_time(1, "23:55", 15, &[]), "00:10");
     }
 
     #[test]

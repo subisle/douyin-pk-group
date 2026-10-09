@@ -95,8 +95,27 @@ pub async fn get_waves(
         Some(b) => info.dates.iter().filter(|d| *d != b).cloned().collect(),
         None => info.dates.clone(),
     };
-    let use_dates: Vec<String> = if metric == "lastN" {
-        delta_dates.into_iter().take(days.max(1) as usize).collect()
+    let use_dates: Vec<String> = if metric == "lastN" || metric == "last1" {
+        // last1 = 最近 1 个有效业务日（等价于 lastN 天数填 1，单独给个名字方便前端下拉）
+        let n: usize = if metric == "last1" {
+            1
+        } else {
+            days.max(1) as usize
+        };
+        delta_dates.into_iter().take(n).collect()
+    } else if metric == "month" {
+        // 本月累计：只取「最新数据所在自然月」的增量日。
+        // 基线日已排除（它记的是累计快照，算进来会把整月数据翻一倍）。
+        match delta_dates.first() {
+            Some(d) => {
+                let prefix = d[..d.len().min(7)].to_string(); // YYYY-MM
+                delta_dates
+                    .into_iter()
+                    .filter(|x| x.starts_with(&prefix))
+                    .collect()
+            }
+            None => Vec::new(),
+        }
     } else {
         info.dates.clone()
     };
@@ -165,10 +184,11 @@ pub async fn get_wave_series(
         Some(b) => info.dates.iter().filter(|d| *d != b).cloned().collect(),
         None => info.dates.clone(),
     };
-    // 点太多挤在一起反而看不清趋势，够看趋势就行
+    // 点太多挤在一起反而看不清趋势，够看趋势就行。
+    // dates 此时是倒序（新 → 旧），截断必须保留头部；split_off 取尾部会把最新一天丢掉
     const MAX_POINTS: usize = 14;
     if dates.len() > MAX_POINTS {
-        dates = dates.split_off(dates.len() - MAX_POINTS);
+        dates.truncate(MAX_POINTS);
     }
     // 折线图要正序：老 → 新
     dates.reverse();

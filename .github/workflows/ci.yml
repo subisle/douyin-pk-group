@@ -20,6 +20,22 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  go:
+    name: Go 测试
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: server-go/go.mod
+          cache-dependency-path: server-go/go.sum
+      - name: 单元测试
+        working-directory: server-go
+        run: go test ./...
+      - name: Vet
+        working-directory: server-go
+        run: go vet ./...
+
   rust:
     name: Rust 测试（pk-core + pk-server）
     runs-on: ubuntu-latest
@@ -61,7 +77,7 @@ jobs:
 
   docker:
     name: 构建镜像（${{ inputs.platforms || 'linux/amd64' }}）
-    needs: [rust, web]
+    needs: [go, rust, web]
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -92,10 +108,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 构建并推送
+      - name: 构建并推送 pk-server
         uses: docker/build-push-action@v6
         with:
           context: .
+          file: Dockerfile
           push: ${{ github.event_name != 'pull_request' }}
           tags: |
             ghcr.io/${{ github.repository }}:latest
@@ -103,5 +120,18 @@ jobs:
           platforms: ${{ inputs.platforms || 'linux/amd64' }}
           # mode=max 会把每层都存一遍，仓库 artifact 配额有限（曾经撞满导致缓存上传失败），
           # 这里只保留中间层，体积小很多，命中率和耗时基本不变。
+          cache-from: type=gha
+          cache-to: type=gha,mode=min
+
+      - name: 构建并推送 douyin-server
+        uses: docker/build-push-action@v6
+        with:
+          context: ./server-go
+          file: server-go/Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            ghcr.io/${{ github.repository }}/douyin-server:latest
+            ghcr.io/${{ github.repository }}/douyin-server:${{ github.sha }}
+          platforms: ${{ inputs.platforms || 'linux/amd64' }}
           cache-from: type=gha
           cache-to: type=gha,mode=min

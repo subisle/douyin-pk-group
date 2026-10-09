@@ -4,6 +4,8 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use std::sync::Arc;
+
 use crate::auth::Auth;
 use crate::config::SourceConfig;
 use crate::mysql::Pools;
@@ -69,10 +71,15 @@ pub struct AppState {
     pub auth: std::sync::Arc<Auth>,
     pub sources: Vec<SourceConfig>,
     pub pools: Pools,
+    /// douyin_writer 业务写池（B 阶段：导入 / 主播台账写路径）。
+    /// None = 写库账号未配置或连不上：管理写接口返回 503，只读功能照常。
+    pub writer: Option<sqlx::MySqlPool>,
     /// 当前数据源 id（切换后缓存整体失效）
     pub active: Mutex<String>,
     pub cache: Mutex<WaveCache>,
     pub wave_ttl: Duration,
+    /// 机器人模块（E 阶段）。AppState 先建，BotManager 后挂（它反向持有 AppState）。
+    pub bots: std::sync::OnceLock<Arc<crate::bot::BotManager>>,
 }
 
 impl AppState {
@@ -102,6 +109,7 @@ impl AppState {
         c.waves.clear();
         c.dates.clear();
         c.anchors.clear();
+        c.series.clear();
     }
 }
 

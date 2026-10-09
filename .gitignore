@@ -20,5 +20,20 @@ deploy/data/
 .workbuddy/
 *.tsbuildinfo
 
+# 凭据备份（.env.local-backup 这类手抄件）
+.env.local*
+
+# 本地运行时库（根 data/ 是本机 SQLite，含口令与账号数据）
+/data/
+
+# 浏览器自检 / Playwright 的页面 dump 与临时快照
+.playwright-cli/
+home*.yaml
+login.yaml
+after-login
+pkpage
+__pycache__/
+*.pyc
+
 # uicheck 的截图产物
 .uicheck/

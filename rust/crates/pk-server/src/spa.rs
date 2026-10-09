@@ -110,6 +110,22 @@ pub async fn handler(
 ) -> Response {
     let path = uri.path();
 
+    // 对外展示页（2026-10-10）：根路径 = 男团数据榜（与 /st/m 同一份页面，
+    // 页内路由按当前路径自动落在男团），管理后台挪到 /admin。
+    if path == "/" {
+        return crate::public_teams::st_m().await;
+    }
+
+    // 管理后台：/admin 与 /admin/* —— 剥掉前缀后按 dist 解析
+    // （/admin → index.html；/admin/assets/x.js → dist/assets/x.js）
+    if let Some(rest) = path.strip_prefix("/admin") {
+        let new_path = match rest {
+            "" | "/" => "/",
+            p => p,
+        };
+        return serve_dist(&dist_dir, index, new_path).await;
+    }
+
     // API 没命中路由：给前端一个能解析的 JSON 404
     if path.starts_with("/api/") {
         return (
@@ -119,8 +135,13 @@ pub async fn handler(
             .into_response();
     }
 
+    serve_dist(&dist_dir, index, path).await
+}
+
+/// 按 dist 解析：真实文件 → 静态资源 404 → index.html 回退
+async fn serve_dist(dist_dir: &PathBuf, index: Index, path: &str) -> Response {
     // 真实文件
-    if let Some(file) = resolve(&dist_dir, path) {
+    if let Some(file) = resolve(dist_dir, path) {
         if let Ok(bytes) = tokio::fs::read(&file).await {
             let ct = content_type(&file);
             return Response::builder()
@@ -306,6 +327,58 @@ mod tests {
             StatusCode::NOT_FOUND,
             "缺失的构建产物必须 404，不能回退成 HTML"
         );
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// 管理后台挂在 /admin：`/admin` 与 `/admin/*` 都要剥前缀后按 dist 解析，
+    /// 否则管理端一刷新深层链接（/admin/import、/admin/group）就 404。
+    #[tokio::test]
+    async fn admin_prefix_serves_spa_and_assets() {
+        use std::str::FromStr;
+
+        let dir = std::env::temp_dir().join(format!("pk-spa-admin-{}", std::process::id()));
+        tokio::fs::create_dir_all(dir.join("assets")).await.unwrap();
+        tokio::fs::write(dir.join("index.html"), b"<html>admin</html>")
+            .await
+            .unwrap();
+        tokio::fs::write(dir.join("assets/index-new.js"), b"console.log(1)")
+            .await
+            .unwrap();
+
+        for path in ["/admin", "/admin/", "/admin/import", "/admin/group"] {
+            let res = handler(
+                axum::extract::State((dir.clone(), load_index(&dir).await)),
+                Uri::from_str(path).unwrap(),
+            )
+            .await;
+            assert_eq!(res.status(), StatusCode::OK, "{path} 应回退到 index.html");
+            let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            assert_eq!(String::from_utf8_lossy(&body), "<html>admin</html>");
+        }
+
+        // 构建产物：/admin/assets/x.js 要能拿到真文件，缺文件时 404 而不是 HTML
+        let res = handler(
+            axum::extract::State((dir.clone(), load_index(&dir).await)),
+            Uri::from_str("/admin/assets/index-new.js").unwrap(),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(
+            res.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("text/javascript; charset=utf-8")
+        );
+
+        let res = handler(
+            axum::extract::State((dir.clone(), load_index(&dir).await)),
+            Uri::from_str("/admin/assets/index-gone.js").unwrap(),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }

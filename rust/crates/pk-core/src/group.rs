@@ -3,8 +3,9 @@
 use std::collections::HashSet;
 
 use crate::constraints::{
-    gap_conflicts, norm_name, place_pinned, polish_balance, resolve_exclusions, resolve_min_gaps,
-    resolve_pinned_index, sum_wave, ConstraintSet, PolishOptions,
+    default_strength_order, gap_conflicts, norm_name, order_by_strength, place_pinned,
+    place_top_seeds, polish_balance, resolve_exclusions, resolve_min_gaps, resolve_pinned_index,
+    sum_wave, ConstraintSet, PolishOptions, SeedOptions, StrengthMode, StrengthOptions,
 };
 use crate::types::{BalanceStat, GroupOptions, GroupStat, Player, Strategy};
 
@@ -44,14 +45,22 @@ fn cut_into(sorted: &[Player], groups: usize) -> Vec<Vec<Player>> {
 pub fn snake_group(players: &[Player], group_size: usize) -> Vec<Vec<Player>> {
     let sorted = sorted_desc(players);
     let g = group_count(sorted.len(), group_size);
-    let mut groups: Vec<Vec<Player>> = vec![Vec::new(); g];
-    for (i, p) in sorted.into_iter().enumerate() {
+    snake_deal(&sorted, g)
+}
+
+/// 蛇形分配到**指定组数**（auto_group 用：组数必须按总人数算，
+/// 不能按抽出固定位后的剩余人数算——后者恰好整除时会铺不满 g 组，
+/// 空组最后只接得住固定位挤出来的溢出人员，出现 8×11+3 式失衡）。
+fn snake_deal(sorted: &[Player], groups: usize) -> Vec<Vec<Player>> {
+    let g = groups.max(1);
+    let mut out: Vec<Vec<Player>> = vec![Vec::new(); g];
+    for (i, p) in sorted.iter().enumerate() {
         let round = i / g;
         let idx = i % g;
         let target = if round % 2 == 0 { idx } else { g - 1 - idx };
-        groups[target].push(p);
+        out[target].push(p.clone());
     }
-    groups
+    out
 }
 
 /// 梯队式：按音浪降序依次切组，第 1 组全是最高的一档，最后一组最低。
@@ -221,23 +230,28 @@ fn fix_overflow(
 }
 
 /// 自动分组 + 内置条件。
+/// **内置条件永远优先**（2026-10-07 用户拍板：无论选哪种策略、哪种强度位次，
+/// 固定位 / 互斥 / 最小间隔 / 至少第 N 组起 都必须先满足）。
 /// 顺序：固定位的人先抽出来 → 其余人按策略分 → 固定位插回指定组
-/// → 互斥修复 → 最小间隔修复 → 均衡微调。
+/// → 互斥修复 → 最小间隔修复 → 均衡微调（梯队式跳过）→ 强度位次（梯队式跳过）。
 pub fn auto_group(players: &[Player], options: &GroupOptions) -> Vec<Vec<Player>> {
     let active: Vec<Player> = players.iter().filter(|p| !p.excluded).cloned().collect();
     if active.is_empty() {
         return Vec::new();
     }
 
-    // 「总音浪从高到低」是用户显式选择的最高优先级：
-    // 不抽固定位、不做互斥/间隔修复，只按当前口径降序切块。
-    // 固定位冲突仍由 HTTP 层 find_violations 返回，用于前端红色高亮。
-    if options.strategy == Strategy::Sequential {
-        return sequential_group(&active, options.group_size);
-    }
-
     let cs = options.constraints.clone().unwrap_or_default();
     let g = group_count(active.len(), options.group_size);
+
+    /* 梯队式（Sequential / SequentialLastN）：底子仍是「按音浪降序切块」，
+    但内置条件照样优先——固定位照样抽出来插回去、互斥/最小间隔照样修。
+    只跳过两件会把阶梯抹平的事：均衡微调（polish_balance）与强度位次
+    （梯队本身就是位次：第 1 组最强，与「第 3 组最强」的位次表天然冲突，
+    前端对梯队策略也把位次下拉禁掉了）。 */
+    let ladder = matches!(
+        options.strategy,
+        Strategy::Sequential | Strategy::SequentialLastN
+    );
 
     /* 1. 固定位 */
     let mut pinned: Vec<(String, usize)> = Vec::new();
@@ -259,11 +273,21 @@ pub fn auto_group(players: &[Player], options: &GroupOptions) -> Vec<Vec<Player>
         .cloned()
         .collect();
 
-    /* 2. 其余人按策略分组（保证组数与固定位解析时一致） */
+    /* 2. 其余人按策略分组：组数一律用 g（按总人数算出的组数），
+    不能按 group_count(rest) 算——抽出固定位后剩余人数恰好整除时
+    （如 88 人 / 每组 8 人 = 11 组），按 rest 算会铺不满 g 组，
+    空组最后只接得住固定位插回挤出的溢出人员，出现 8×11+3 式失衡。
+    各策略内部语义不变，只是把「切几份」统一成 g。 */
     let mut groups = match options.strategy {
-        Strategy::Random => random_group(&rest, options.group_size, None),
-        Strategy::Sequential => sequential_group(&rest, options.group_size),
-        Strategy::Snake | Strategy::SnakeNoMaster => snake_group(&rest, options.group_size),
+        Strategy::Random => {
+            use rand::seq::SliceRandom;
+            let mut arr = rest.clone();
+            arr.shuffle(&mut rand::thread_rng());
+            arr.sort_by(by_wave_desc);
+            cut_into(&arr, g)
+        }
+        Strategy::Sequential | Strategy::SequentialLastN => cut_into(&sorted_desc(&rest), g),
+        Strategy::Snake | Strategy::SnakeNoMaster => snake_deal(&sorted_desc(&rest), g),
     };
     if options.strategy == Strategy::SnakeNoMaster {
         groups = resolve_master_conflicts(&groups, 400);
@@ -296,17 +320,95 @@ pub fn auto_group(players: &[Player], options: &GroupOptions) -> Vec<Vec<Player>
         );
     }
 
-    /* 5. 均衡微调：只接受让极差变小的交换，绝不移动固定位、绝不制造新的互斥/间隔冲突 */
-    groups = polish_balance(
-        &groups,
-        &PolishOptions {
-            protected_keys: pinned_keys,
-            exclude_sets: cs.exclude_together.clone(),
-            avoid_master: options.strategy == Strategy::SnakeNoMaster,
-            min_gap_rules,
-            max_iter: 400,
-        },
-    );
+    /* 5. 均衡微调：只接受让极差变小的交换，绝不移动固定位、绝不制造新的互斥/间隔冲突。
+    梯队式跳过——微调会把「第 1 组最强」的阶梯抹平。 */
+    if !ladder {
+        groups = polish_balance(
+            &groups,
+            &PolishOptions {
+                protected_keys: pinned_keys.clone(),
+                exclude_sets: cs.exclude_together.clone(),
+                avoid_master: options.strategy == Strategy::SnakeNoMaster,
+                min_gap_rules: min_gap_rules.clone(),
+                max_iter: 400,
+            },
+        );
+    }
+
+    /* 5.5 强度位次：强制条件与均衡都处理完，最后再把各组实力摆成指定顺序
+    （默认第 3 组最强、第 4 组次强、第 1 组最弱）。
+    只做跨组对调，绝不移动固定位、绝不新增互斥/间隔冲突。
+    梯队式跳过：阶梯本身就是位次，套位次表等于把策略废掉。 */
+    if let Some(so) = cs.strength_order.as_ref().filter(|s| s.enabled && !ladder) {
+        let base_order = if so.order.is_empty() {
+            default_strength_order(groups.len())
+        } else {
+            so.order.clone()
+        };
+        match so.mode {
+            /* 每组一个最强：先把前 N 名（N = 组数）按位次表一人一组铺开当头牌，
+            再把头牌锁住做均衡——这样每组都有一个能打的，且第 3 组的头牌最强。 */
+            StrengthMode::Top => {
+                groups = place_top_seeds(
+                    &groups,
+                    &SeedOptions {
+                        order: base_order.clone(),
+                        protected_keys: pinned_keys.clone(),
+                        exclude_sets: cs.exclude_together.clone(),
+                        min_gap_rules: min_gap_rules.clone(),
+                    },
+                );
+                // 头牌不能被后来的微调挪走，否则位次白排
+                let mut protect = pinned_keys.clone();
+                for g in &groups {
+                    if let Some(top) = g.iter().max_by(|a, b| {
+                        a.wave
+                            .partial_cmp(&b.wave)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    }) {
+                        protect.insert(top.key.clone());
+                    }
+                }
+                groups = polish_balance(
+                    &groups,
+                    &PolishOptions {
+                        protected_keys: protect,
+                        exclude_sets: cs.exclude_together.clone(),
+                        avoid_master: options.strategy == Strategy::SnakeNoMaster,
+                        min_gap_rules: min_gap_rules.clone(),
+                        max_iter: 400,
+                    },
+                );
+                groups = order_by_strength(
+                    &groups,
+                    &StrengthOptions {
+                        order: base_order,
+                        mode: StrengthMode::Top,
+                        protected_keys: pinned_keys.clone(),
+                        exclude_sets: cs.exclude_together.clone(),
+                        min_gap_rules: min_gap_rules.clone(),
+                        avoid_master: options.strategy == Strategy::SnakeNoMaster,
+                        max_iter: 200,
+                    },
+                );
+            }
+            /* 集中：约束与均衡都处理完之后，再按组总音浪把实力摆成指定顺序 */
+            StrengthMode::Total => {
+                groups = order_by_strength(
+                    &groups,
+                    &StrengthOptions {
+                        order: base_order,
+                        mode: StrengthMode::Total,
+                        protected_keys: pinned_keys.clone(),
+                        exclude_sets: cs.exclude_together.clone(),
+                        min_gap_rules: min_gap_rules.clone(),
+                        avoid_master: options.strategy == Strategy::SnakeNoMaster,
+                        max_iter: 400,
+                    },
+                );
+            }
+        }
+    }
 
     groups.retain(|g| !g.is_empty());
 
@@ -400,6 +502,7 @@ pub fn is_valid(groups: &[Vec<Player>], cs: &ConstraintSet) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::constraints::find_violations;
 
     fn players(names: &[(&str, f64)]) -> Vec<Player> {
         names.iter().map(|(n, w)| Player::new(*n, *n, *w)).collect()
@@ -450,35 +553,152 @@ mod tests {
         assert_eq!(groups[1][0].name, "p8");
     }
 
+    /// 内置条件优先（2026-10-07 用户拍板）：梯队式也必须满足固定位 / 互斥 / 最小间隔 /
+    /// 至少第 N 组起——它只是不做均衡微调、不套强度位次（那两件事会把阶梯抹平）。
+    /// 10 组布局：40 人每组 4 人，约束相关的人给低音浪，填充的人组成清晰阶梯。
+    fn builtin_fixture() -> Vec<Player> {
+        let mut items: Vec<(String, f64)> = vec![
+            ("啸泽".into(), 300.0),
+            ("啸阳".into(), 290.0),
+            ("啸帆".into(), 280.0),
+            ("浩森".into(), 270.0),
+            ("浩泽".into(), 260.0),
+            ("浩阳".into(), 250.0),
+            ("啸昭".into(), 240.0),
+            ("啸寻".into(), 230.0),
+            ("狼佑".into(), 220.0),
+            ("玖安".into(), 210.0),
+            ("玖玉".into(), 200.0),
+            ("玖妹".into(), 190.0),
+            ("玖玥".into(), 180.0),
+            ("狼影".into(), 170.0),
+            ("浩冬".into(), 160.0),
+        ];
+        for i in 0..25 {
+            items.push((format!("填充{i:02}"), 1000.0 - i as f64 * 10.0));
+        }
+        items
+            .iter()
+            .map(|(n, w)| Player::new(n.clone(), n.clone(), *w))
+            .collect()
+    }
+
+    fn group_at(groups: &[Vec<Player>], name: &str) -> usize {
+        groups
+            .iter()
+            .position(|g| g.iter().any(|p| p.name == name))
+            .unwrap_or_else(|| panic!("找不到 {name}"))
+    }
+
     #[test]
-    fn sequential_ignores_builtin_constraints() {
-        let mut list = players(&[
-            ("啸泽", 1000.0),
-            ("啸帆", 990.0),
-            ("玖玉", 980.0),
-            ("玖妹", 970.0),
-            ("玖玥", 960.0),
-            ("啸昭", 950.0),
-            ("啸寻", 940.0),
-            ("普通", 930.0),
-        ]);
-        list[0].excluded = false;
-        list[1].excluded = false;
-        let groups = auto_group(&list, &GroupOptions::new(4, Strategy::Sequential));
-        assert_eq!(groups.len(), 2);
-        assert_eq!(
-            groups[0]
+    fn sequential_respects_builtin_constraints() {
+        let list = builtin_fixture();
+        let cs = ConstraintSet::default();
+        for strategy in [Strategy::Sequential, Strategy::SequentialLastN] {
+            let groups = auto_group(&list, &GroupOptions::new(4, strategy));
+            assert_eq!(groups.len(), 10, "{strategy:?} 组数不对");
+            let bad = find_violations(&groups, &cs);
+            assert!(bad.is_empty(), "{strategy:?} 违反内置条件: {bad:?}");
+            assert_eq!(
+                gap_conflicts(&groups, &cs.min_gap),
+                0,
+                "{strategy:?} 间隔没满足"
+            );
+            // 固定位
+            assert_eq!(
+                group_at(&groups, "啸泽"),
+                groups.len() - 1,
+                "啸泽应最后一组"
+            );
+            assert_eq!(group_at(&groups, "啸帆"), 1, "啸帆应第 2 组");
+            assert_eq!(group_at(&groups, "浩森"), 0, "浩森应第 1 组");
+            assert_eq!(
+                group_at(&groups, "浩泽"),
+                groups.len() - 1,
+                "浩泽应最后一组"
+            );
+            assert!(group_at(&groups, "浩阳") >= 5, "浩阳应从第 6 组起");
+            // 互斥：狼影/浩冬 不同组；玖玉/玖妹/玖玥 不能全挤一组
+            assert_ne!(group_at(&groups, "狼影"), group_at(&groups, "浩冬"));
+            let jiu: HashSet<usize> = ["玖玉", "玖妹", "玖玥"]
                 .iter()
+                .map(|n| group_at(&groups, n))
+                .collect();
+            assert!(jiu.len() >= 2, "玖玉/玖妹/玖玥 挤在同一组了");
+            // 阶梯还在：第 1 组明显强于最后一组（微调/位次都没跑）
+            let first: f64 = groups[0].iter().map(|p| p.wave).sum();
+            let last: f64 = groups[groups.len() - 1].iter().map(|p| p.wave).sum();
+            assert!(first > last, "阶梯被抹平了: {first} vs {last}");
+        }
+    }
+
+    /// 用户拍板的红线：**无论策略 / 强度位次怎么选，内置条件都必须满足**。
+    #[test]
+    fn every_strategy_and_strength_keeps_builtin_constraints() {
+        let list = builtin_fixture();
+        let cs = ConstraintSet::default();
+        for strategy in [
+            Strategy::Snake,
+            Strategy::SnakeNoMaster,
+            Strategy::Sequential,
+            Strategy::SequentialLastN,
+            Strategy::Random,
+        ] {
+            for mode in [None, Some(StrengthMode::Top), Some(StrengthMode::Total)] {
+                let mut c = cs.clone();
+                c.strength_order = mode.map(|m| crate::constraints::StrengthOrder {
+                    enabled: true,
+                    mode: m,
+                    order: Vec::new(),
+                });
+                let groups = auto_group(
+                    &list,
+                    &GroupOptions {
+                        group_size: 4,
+                        strategy,
+                        constraints: Some(c),
+                    },
+                );
+                let bad = find_violations(&groups, &cs);
+                assert!(
+                    bad.is_empty(),
+                    "{strategy:?} / {mode:?} 违反内置条件: {bad:?}"
+                );
+                assert_eq!(
+                    gap_conflicts(&groups, &cs.min_gap),
+                    0,
+                    "{strategy:?} / {mode:?} 最小间隔没满足"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sequential_last_n_matches_sequential_but_pins_metric_semantics() {
+        // 名单顺序故意与音浪顺序相反：验证只认 wave，不认名单先后
+        let list = players(&[("丁", 100.0), ("丙", 300.0), ("乙", 200.0), ("甲", 400.0)]);
+        fn names_of(gs: &[Vec<Player>]) -> Vec<&str> {
+            gs.iter()
+                .flat_map(|g| g.iter())
                 .map(|p| p.name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["啸泽", "啸帆", "玖玉", "玖妹"]
-        );
+                .collect()
+        }
+
+        let by_last_n = auto_group(&list, &GroupOptions::new(2, Strategy::SequentialLastN));
+        assert_eq!(names_of(&by_last_n), vec!["甲", "丙", "乙", "丁"]);
+
+        // 算法与 Sequential 完全相同，区别只在调用方必须填 lastN 口径的 wave
+        let by_total = auto_group(&list, &GroupOptions::new(2, Strategy::Sequential));
+        assert_eq!(names_of(&by_total), names_of(&by_last_n));
+    }
+
+    #[test]
+    fn sequential_last_n_serde_name_is_kebab() {
+        let s: Strategy = serde_json::from_str("\"sequential-last-n\"").unwrap();
+        assert_eq!(s, Strategy::SequentialLastN);
         assert_eq!(
-            groups[1]
-                .iter()
-                .map(|p| p.name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["玖玥", "啸昭", "啸寻", "普通"]
+            serde_json::to_value(s).unwrap(),
+            serde_json::json!("sequential-last-n")
         );
     }
 
@@ -506,8 +726,42 @@ mod tests {
                 .position(|g| g.iter().any(|p| p.name == n))
                 .unwrap()
         };
-        assert_eq!(at("啸泽"), 0);
-        assert_eq!(at("啸帆"), groups.len() - 1);
+        // 2026-10-07 深夜：啸泽改固定最后一组、啸帆改固定第 2 组
+        assert_eq!(at("啸泽"), groups.len() - 1);
+        assert_eq!(at("啸帆"), 1);
+    }
+
+    /// 回归：抽出固定位后剩余人数恰好整除（88/8=11 组）时，
+    /// 必须仍按总人数的组数（12）蛇形铺满，不能让末组只接住溢出的固定位。
+    /// 91 人（含 3 个固定位相关人）每组 8 人 → 12 组，人数应为 8×4+7×8 量级的均衡态，
+    /// 绝不允许出现「11 组满员 + 末组 3 人」。
+    #[test]
+    fn auto_group_balances_when_rest_exactly_divisible() {
+        // 91 人：啸泽/啸帆/浩阳 参与固定位与最低组号，其余 88 人恰好 11×8
+        let mut items: Vec<(&str, f64)> = vec![("啸泽", 294.0), ("啸帆", 6852.0), ("浩阳", 1786.0)];
+        for i in 0..88 {
+            items.push((
+                Box::leak(format!("填充{i:02}").into_boxed_str()),
+                40000.0 - i as f64 * 100.0,
+            ));
+        }
+        let list = players(&items);
+        let groups = auto_group(&list, &GroupOptions::new(8, Strategy::Snake));
+        assert_eq!(groups.len(), 12);
+        let sizes: Vec<usize> = groups.iter().map(|g| g.len()).collect();
+        assert!(
+            sizes.iter().max().unwrap() - sizes.iter().min().unwrap() <= 1,
+            "组人数失衡: {sizes:?}"
+        );
+        let at = |n: &str| {
+            groups
+                .iter()
+                .position(|g| g.iter().any(|p| p.name == n))
+                .unwrap()
+        };
+        assert_eq!(at("啸泽"), 11, "啸泽固定最后一组");
+        assert_eq!(at("啸帆"), 1, "啸帆固定第 2 组");
+        assert!(at("浩阳") >= 5);
     }
 
     #[test]
@@ -599,6 +853,7 @@ mod intra_group_order_tests {
             Strategy::Snake,
             Strategy::SnakeNoMaster,
             Strategy::Sequential,
+            Strategy::SequentialLastN,
             Strategy::Random,
         ] {
             let groups = auto_group(&players, &GroupOptions::new(4, strategy));

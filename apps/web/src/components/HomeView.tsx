@@ -14,12 +14,20 @@ import '../styles/home.css';
 
 type Tone = 'good' | 'warn' | 'bad' | 'neutral';
 
-const STRATEGY_LABEL: Record<Strategy, string> = {
-  snake: '蛇形均衡',
-  'snake-no-master': '蛇形 + 同门回避',
-  sequential: '从高到低',
-  random: '随机',
-};
+function strategyLabel(strategy: Strategy, days: number): string {
+  switch (strategy) {
+    case 'snake':
+      return '蛇形均衡';
+    case 'snake-no-master':
+      return '蛇形 + 同门回避';
+    case 'sequential':
+      return '总音浪从高到低';
+    case 'sequential-last-n':
+      return `近 ${days} 天从高到低`;
+    case 'random':
+      return '随机';
+  }
+}
 
 function metricLabel(metric: WaveMetric, days: number): string {
   return metric === 'lastN' ? `近 ${days} 天` : '总音浪';
@@ -189,7 +197,7 @@ export function HomeView() {
             </div>
             <div className="home-def">
               <span className="home-def-label">分组策略</span>
-              <span className="home-def-value">{STRATEGY_LABEL[strategy]}</span>
+              <span className="home-def-value">{strategyLabel(strategy, days)}</span>
             </div>
             <div className="home-def">
               <span className="home-def-label">第 1 组开赛</span>

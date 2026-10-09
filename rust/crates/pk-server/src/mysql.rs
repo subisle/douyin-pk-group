@@ -51,7 +51,7 @@ pub async fn build_pools(sources: &[SourceConfig]) -> anyhow::Result<Pools> {
     let mut map = HashMap::new();
     let mut errors = HashMap::new();
     for s in sources {
-        let pool = match connect(s).await {
+        let pool = match connect_pool(s).await {
             Ok(p) => {
                 tracing::info!(source = %s.id, host = %s.host, database = %s.database, "数据源已连接");
                 Some(p)
@@ -68,7 +68,7 @@ pub async fn build_pools(sources: &[SourceConfig]) -> anyhow::Result<Pools> {
     Ok(Pools { map, errors })
 }
 
-async fn connect(s: &SourceConfig) -> anyhow::Result<MySqlPool> {
+pub async fn connect_pool(s: &SourceConfig) -> anyhow::Result<MySqlPool> {
     let opts: MySqlConnectOptions = s
         .url()
         .parse()
@@ -110,6 +110,11 @@ fn readonly_guard(sql: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// 取某数据源的池句柄（写库/聚合等需要直接 sqlx 调用的场景）
+pub fn pool_of(pools: &Pools, source_id: &str) -> anyhow::Result<MySqlPool> {
+    pools.get(source_id).cloned()
+}
+
 pub async fn query(
     pools: &Pools,
     source_id: &str,
@@ -118,6 +123,24 @@ pub async fn query(
     readonly_guard(sql)?;
     let pool = pools.get(source_id)?;
     let rows = sqlx::query(sql).fetch_all(pool).await?;
+    Ok(rows)
+}
+
+/// 带参数的只读查询：SQL 仍需过只读守卫，参数由调用方 bind
+pub async fn query_with_binds<F>(
+    pools: &Pools,
+    source_id: &str,
+    sql: &str,
+    bind: F,
+) -> anyhow::Result<Vec<sqlx::mysql::MySqlRow>>
+where
+    F: FnOnce(
+        sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments>,
+    ) -> sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments>,
+{
+    readonly_guard(sql)?;
+    let pool = pools.get(source_id)?;
+    let rows = bind(sqlx::query(sql)).fetch_all(pool).await?;
     Ok(rows)
 }
 

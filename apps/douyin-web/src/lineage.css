@@ -1,0 +1,511 @@
+/* 族谱页：树图（SVG 画布）/ 列表（缩进树）双视图 + 右侧详情。 */
+
+/* ---------- 统计小卡 ---------- */
+.lin-stats {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 10px 0 12px;
+}
+.lin-stat {
+  flex: 1;
+  min-width: 104px;
+  position: relative;
+  overflow: hidden;
+  background: var(--canvas);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 9px 12px 8px;
+  display: grid;
+  gap: 0;
+}
+.lin-stat::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2.5px;
+  background: var(--brand);
+  opacity: 0.75;
+}
+.lin-stat:nth-child(2)::before {
+  background: var(--violet);
+}
+.lin-stat:nth-child(3)::before {
+  background: #12b76a;
+}
+.lin-stat:nth-child(4)::before {
+  background: #f79009;
+}
+.lin-stat.s-hit::before {
+  background: var(--warn);
+}
+.lin-stat b {
+  font-size: 21px;
+  font-weight: 700;
+  line-height: 1.3;
+  font-variant-numeric: tabular-nums;
+}
+.lin-stat span {
+  font-size: 11.5px;
+  color: var(--ink3);
+}
+.lin-stat.s-hit b {
+  color: var(--warn);
+}
+
+/* ---------- 工具行：搜索 / 团别 / 视图切换 ---------- */
+.lin-tools {
+  align-items: center;
+}
+.lin-viewseg {
+  display: inline-flex;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-ctl);
+  overflow: hidden;
+  flex: none;
+}
+.lin-viewseg button {
+  border: none;
+  border-radius: 0;
+  padding: 7px 16px;
+  background: transparent;
+  color: var(--ink2);
+  font-size: 13px;
+}
+.lin-viewseg button + button {
+  border-left: 1px solid var(--line-strong);
+}
+.lin-viewseg button.on {
+  background: var(--brand-soft);
+  color: var(--brand);
+  font-weight: 700;
+}
+
+.lin-wrap {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: 16px;
+  align-items: start;
+}
+@media (max-width: 1100px) {
+  .lin-wrap {
+    grid-template-columns: 1fr;
+  }
+}
+
+.lin-main {
+  display: grid;
+  gap: 16px;
+  align-content: start;
+  min-width: 0;
+}
+
+/* 没有师傅的人：文字列表，点一下定位到画布 */
+.lin-orphans {
+  padding: 12px 14px;
+}
+.lin-orphans .lin-sec-t {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.lin-orphans .lin-chips {
+  max-height: 148px;
+  overflow: auto;
+}
+.lin-chip.on {
+  border-color: var(--brand);
+  background: var(--brand-soft);
+  color: var(--brand);
+  font-weight: 700;
+}
+
+.lin-tree {
+  padding: 12px 14px;
+}
+.lin-tree.tree-mode {
+  padding: 10px;
+}
+
+/* ---------- 树图画布 ---------- */
+.lin-canvas {
+  position: relative;
+  height: clamp(460px, calc(100vh - 400px), 760px);
+  background:
+    radial-gradient(color-mix(in srgb, var(--ink) 7%, transparent) 1px, transparent 1px) var(--canvas);
+  background-size: 18px 18px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+  touch-action: none;
+  cursor: grab;
+}
+.lin-canvas:active {
+  cursor: grabbing;
+}
+.lin-canvas svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.lcn-tip {
+  position: absolute;
+  top: 8px;
+  left: 10px;
+  z-index: 2;
+  pointer-events: none;
+  background: color-mix(in srgb, var(--ink) 62%, transparent);
+  color: #fff;
+  font-size: 11px;
+  padding: 4px 10px;
+  border-radius: 999px;
+}
+.lcn-ctl {
+  position: absolute;
+  right: 10px;
+  bottom: 12px;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.lcn-ctl button {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border-radius: 9px;
+  font-size: 16px;
+  line-height: 1;
+  background: #fff;
+  box-shadow: var(--shadow-card);
+  display: grid;
+  place-items: center;
+}
+/* 全屏：原生 API 走 :fullscreen；不支持时退到 .fs 盖住整个视口 */
+.lin-canvas:fullscreen {
+  height: 100vh;
+  border: none;
+  border-radius: 0;
+}
+.lin-canvas.fs {
+  position: fixed;
+  inset: 16px;
+  z-index: 70;
+  height: auto;
+  border-radius: 12px;
+  box-shadow: var(--shadow-pop);
+}
+.lcn-edge {
+  fill: none;
+  stroke: #c3cddc;
+  stroke-width: 1.5;
+}
+.lcn-edge.hot {
+  stroke: var(--brand);
+  stroke-width: 2.5;
+}
+.lcn-edge.dim {
+  opacity: 0.25;
+}
+.lcn-node rect {
+  fill: #fff;
+  stroke: var(--line-strong);
+  stroke-width: 1;
+}
+.lcn-node text {
+  text-anchor: middle;
+  pointer-events: none;
+}
+.lcn-node .lcn-name {
+  font-size: 13px;
+  font-weight: 700;
+  fill: var(--ink);
+}
+.lcn-node .lcn-sub {
+  font-size: 10px;
+  fill: var(--ink3);
+}
+.lcn-node .lcn-dot {
+  fill: #3b5bdb;
+}
+.lcn-node.f .lcn-dot {
+  fill: var(--pink);
+}
+.lcn-node.off {
+  opacity: 0.45;
+}
+.lcn-node.off .lcn-name {
+  font-weight: 500;
+}
+.lcn-node.sel rect {
+  stroke: var(--brand);
+  stroke-width: 1.5;
+  fill: var(--brand-soft);
+}
+.lcn-node.anc rect {
+  stroke: color-mix(in srgb, var(--brand) 45%, transparent);
+}
+.lcn-node.dim2 {
+  opacity: 0.22;
+}
+.lcn-node.hit rect {
+  stroke: #f79009;
+  stroke-width: 2;
+}
+.lcn-node.hit.dim2 {
+  opacity: 0.6;
+}
+.lcn-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--ink3);
+  font-size: 13px;
+}
+
+.lin-node {
+  position: relative;
+}
+
+.lin-children {
+  margin-left: 11px;
+  padding-left: 12px;
+  border-left: 1px dashed var(--line-strong);
+}
+
+.lin-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 6px;
+  border-radius: 8px;
+  min-height: 30px;
+  transition: background var(--ease), box-shadow var(--ease);
+}
+.lin-row:hover {
+  background: color-mix(in srgb, var(--ink) 4%, transparent);
+}
+.lin-row.cur {
+  background: var(--brand-soft);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--brand) 35%, transparent);
+}
+
+.lin-caret {
+  width: 20px;
+  height: 20px;
+  flex: none;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--ink3);
+  border-color: transparent;
+  background: transparent;
+}
+.lin-caret:hover:not(:disabled) {
+  color: var(--brand);
+  border-color: transparent;
+  background: transparent;
+}
+.lin-caret:disabled {
+  opacity: 1;
+  cursor: default;
+}
+
+.lin-name {
+  padding: 1px 6px;
+  border-color: transparent;
+  background: transparent;
+  font-weight: 700;
+  font-size: 14px;
+  color: var(--ink);
+}
+.lin-name:hover:not(:disabled) {
+  border-color: transparent;
+  color: var(--brand);
+  background: transparent;
+}
+.lin-row.hit .lin-name {
+  background: var(--warn-bg);
+  border-radius: 6px;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--warn) 35%, transparent);
+}
+
+.lin-team {
+  flex: none;
+  font-size: 10.5px;
+  line-height: 16px;
+  padding: 0 6px;
+  border-radius: 999px;
+  color: #3b5bdb;
+  background: #eaefff;
+}
+.lin-team.f {
+  color: var(--pink);
+  background: #fdeaf3;
+}
+
+.lin-badge {
+  flex: none;
+  font-size: 10.5px;
+  line-height: 16px;
+  padding: 0 6px;
+  border-radius: 999px;
+  color: var(--brand);
+  background: var(--brand-soft);
+  font-variant-numeric: tabular-nums;
+}
+.lin-badge.sm {
+  margin-left: 6px;
+}
+
+.lin-gen,
+.lin-left {
+  flex: none;
+  font-size: 11px;
+  color: var(--ink3);
+  font-variant-numeric: tabular-nums;
+}
+.lin-left {
+  color: var(--warn);
+}
+
+/* ---------- 右侧详情 ---------- */
+.lin-detail {
+  position: sticky;
+  top: 16px;
+  display: grid;
+  gap: 10px;
+  align-content: start;
+}
+.lin-detail h3 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.lin-kv {
+  display: grid;
+  grid-template-columns: 68px minmax(0, 1fr);
+  gap: 4px 8px;
+  font-size: 12.5px;
+}
+.lin-kv span {
+  color: var(--ink3);
+}
+.lin-kv b {
+  font-weight: 600;
+  word-break: break-all;
+}
+
+.lin-sec {
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+.lin-sec-t {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ink2);
+  margin-bottom: 6px;
+}
+
+.lin-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.lin-chain-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.lin-arrow {
+  color: var(--ink3);
+  font-size: 12px;
+}
+.lin-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  font-size: 12.5px;
+  border-radius: 999px;
+  border: 1px solid var(--line-strong);
+  background: #fff;
+}
+.lin-chip.ghost {
+  color: var(--brand);
+  border-color: color-mix(in srgb, var(--brand) 40%, transparent);
+  background: var(--brand-soft);
+}
+.lin-chip.danger {
+  color: var(--bad);
+  border-color: color-mix(in srgb, var(--bad) 35%, transparent);
+}
+
+/* ===== 批量登记师门弹层 ===== */
+.batch-pop {
+  width: 520px;
+}
+.batch-pop textarea {
+  font: inherit;
+  padding: 8px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-ctl);
+  resize: vertical;
+  min-height: 140px;
+  font-family: inherit;
+  line-height: 1.6;
+}
+.batch-pop textarea:focus {
+  outline: none;
+  border-color: var(--brand);
+  box-shadow: var(--ring);
+}
+.batch-opt {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--ink-2, #556);
+  cursor: pointer;
+}
+.batch-result {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 240px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-ctl);
+  font-size: 13px;
+}
+.batch-item {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 6px 10px;
+  border-bottom: 0.5px solid var(--line);
+  flex-wrap: wrap;
+}
+.batch-item:last-child {
+  border-bottom: none;
+}
+.batch-item .hint {
+  margin-left: auto;
+}
+.batch-item.error {
+  background: color-mix(in srgb, #d92d20 8%, transparent);
+  color: #b42318;
+}
+.batch-item.create {
+  color: #175cd3;
+}
+.batch-item.unchanged,
+.batch-item.skip {
+  color: var(--ink-3, #98a2b3);
+}

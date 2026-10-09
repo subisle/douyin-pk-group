@@ -8,8 +8,10 @@ pub mod roster;
 pub mod types;
 
 pub use constraints::{
-    find_by_name, find_violations, gap_conflicts, is_pinned_name, min_group_conflicts, slot_time,
-    ConstraintSet, MinGapRule, MinGroupRule, PinnedGroup, PinnedRule, PolishOptions, ScheduleRule,
+    default_strength_order, find_by_name, find_violations, gap_after, gap_conflicts,
+    group_strength, is_pinned_name, min_group_conflicts, order_by_strength, place_top_seeds,
+    slot_time, BreakRule, ConstraintSet, MinGapRule, MinGroupRule, PinnedGroup, PinnedRule,
+    PolishOptions, ScheduleRule, SeedOptions, StrengthMode, StrengthOptions, StrengthOrder,
     Violation,
 };
 pub use group::{

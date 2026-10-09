@@ -120,6 +120,8 @@ export function ExportBar({ buckets }: { buckets: Bucket[] }) {
     snake: '蛇形均衡',
     'snake-no-master': '蛇形 + 同门回避',
     sequential: '从高到低',
+    // 导出图的 period 已经写了口径，这里不再重复天数
+    'sequential-last-n': '从高到低',
     random: '随机分组',
   };
 

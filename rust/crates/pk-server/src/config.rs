@@ -104,6 +104,13 @@ fn read_source(id: &str) -> Result<SourceConfig> {
         })?,
         None => return Err(anyhow!("数据源 {id} 未配置 DB_{id}_HOST")),
     };
+    if id == "LOCAL" {
+        anyhow::ensure!(
+            env_or(&format!("DB_{id}_READONLY"), "1") != "0",
+            "数据源 LOCAL 必须保持只读：DB_LOCAL_READONLY 不能设为 0"
+        );
+    }
+
     Ok(SourceConfig {
         id: id.to_string(),
         label: env_or(&format!("DB_{id}_LABEL"), &format!("数据源 {id}")),
@@ -124,9 +131,9 @@ fn read_source(id: &str) -> Result<SourceConfig> {
     })
 }
 
-/// 读出全部数据源；A 缺失直接报错，B 缺失就跳过
+/// 读出全部数据源；LOCAL/A/B 都可按环境变量启用，至少需要一个
 pub fn load_sources() -> Result<Vec<SourceConfig>> {
-    let mut list: Vec<SourceConfig> = ["A", "B"]
+    let mut list: Vec<SourceConfig> = ["LOCAL", "A", "B"]
         .iter()
         .filter_map(|id| read_source(id).ok())
         .collect();
@@ -147,4 +154,98 @@ pub fn sqlite_path() -> String {
 
 pub fn wave_cache_ttl_secs() -> u64 {
     env_or("WAVE_CACHE_TTL", "600").parse().unwrap_or(600)
+}
+
+/* --------------------------- 写库 / 迁移账号（B 阶段） --------------------------- */
+
+/// 写库 / 迁移库的连接端点（与只读数据源 SourceConfig 分开，职责不同）
+#[derive(Clone, Debug)]
+pub struct DbEndpoint {
+    pub id: String,
+    pub host: String,
+    pub port: u16,
+    pub user: String,
+    pub password: String,
+    pub database: String,
+    pub pool_limit: u32,
+}
+
+impl DbEndpoint {
+    /// 拼 sqlx 连接串（复用 SourceConfig 的 percent-encode 规则）
+    pub fn url(&self) -> String {
+        SourceConfig {
+            id: self.id.clone(),
+            label: String::new(),
+            note: String::new(),
+            host: self.host.clone(),
+            port: self.port,
+            user: self.user.clone(),
+            password: self.password.clone(),
+            database: self.database.clone(),
+            pool_limit: self.pool_limit,
+            exclude_baseline: false,
+        }
+        .url()
+    }
+}
+
+fn base_host_port_name() -> (Option<String>, u16, String) {
+    // 业务库位置默认跟随 LOCAL 数据源（都是同一台 MariaDB，账号不同而已）
+    let host = env("DB_WRITER_HOST")
+        .or_else(|| env("DB_LOCAL_HOST"))
+        .or_else(|| env("DB_A_HOST"))
+        .or_else(|| env("DB_HOST"));
+    let port_str = env("DB_WRITER_PORT")
+        .or_else(|| env("DB_LOCAL_PORT"))
+        .unwrap_or_else(|| "3306".into());
+    let port = port_str.parse().unwrap_or(3306);
+    let database = env("DB_WRITER_NAME")
+        .or_else(|| env("DB_LOCAL_NAME"))
+        .or_else(|| env("DB_A_NAME"))
+        .unwrap_or_else(|| "douyin".into());
+    (host, port, database)
+}
+
+/// douyin_writer：业务写账号（SELECT/INSERT/UPDATE/DELETE，永不持有 DDL）。
+/// 写库端点缺失不致命：管理写接口会返回明确的 503，只读功能照常。
+pub fn load_writer() -> anyhow::Result<DbEndpoint> {
+    let (host, port, database) = base_host_port_name();
+    let host =
+        host.ok_or_else(|| anyhow!("写库未配置：请设置 DB_WRITER_HOST（或 DB_LOCAL_HOST）"))?;
+    Ok(DbEndpoint {
+        id: "writer".into(),
+        host,
+        port,
+        user: env_or("DB_WRITER_USER", "douyin_writer"),
+        password: env("DB_WRITER_PASSWORD").unwrap_or_default(),
+        database,
+        pool_limit: env_or("DB_WRITER_POOL_LIMIT", "4").parse().unwrap_or(4),
+    })
+}
+
+/// douyin_migrator：DDL 专用账号，仅在显式 migrate 时使用。
+/// DB_MIGRATOR_HOST/PORT/NAME 优先，未配置的部分回落到 writer/LOCAL 的库位置。
+pub fn load_migrator() -> anyhow::Result<DbEndpoint> {
+    let (base_host, base_port, base_database) = base_host_port_name();
+    let host = env("DB_MIGRATOR_HOST")
+        .or(base_host)
+        .ok_or_else(|| anyhow!("迁移库未配置：请设置 DB_MIGRATOR_HOST（或 DB_LOCAL_HOST）"))?;
+    let port = env("DB_MIGRATOR_PORT")
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(base_port);
+    Ok(DbEndpoint {
+        id: "migrator".into(),
+        host,
+        port,
+        user: env_or("DB_MIGRATOR_USER", "douyin_migrator"),
+        password: env("DB_MIGRATOR_PASSWORD").unwrap_or_default(),
+        database: env("DB_MIGRATOR_NAME").unwrap_or(base_database),
+        pool_limit: 1,
+    })
+}
+
+/// 是否在启动时执行迁移。**默认关闭**（docs/00 §4 决策：DDL 不随启动自动跑）。
+/// 仅在明确设置 MIGRATE_ON_BOOT=true 时启用，且需要 migrator 账号。
+pub fn migrate_on_boot() -> bool {
+    env("MIGRATE_ON_BOOT").as_deref() == Some("true")
 }

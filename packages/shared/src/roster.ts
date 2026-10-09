@@ -1,6 +1,9 @@
 import type { ParsedRow } from './types.js';
 
-const LEADING_INDEX = /^\s*\d+\s*[.、)．·]\s*/;
+// 序号：半角/全角数字 + 「.、)．·）」均可（微信里粘出来常是全角 `１５．`）
+const LEADING_INDEX = /^\s*[0-9０-９]+\s*[.、)．·）]\s*/;
+// 整个 token 都是数字 = 序号（没有主播叫纯数字），如没跟序号符的 `15 浩龙`
+const ALL_DIGITS = /^[0-9０-９]+$/;
 const SEPARATORS = /[\s\u3000\uFF0B+➕＋（(（—–\-_~,，、/]+/;
 
 export interface ParseOptions {
@@ -42,8 +45,12 @@ export function parseRoster(text: string, options: ParseOptions = {}): ParsedRow
     const tokens = body.split(SEPARATORS).filter(Boolean);
     if (tokens.length === 0) continue;
 
-    const first = tokens[0];
-    const rest = tokens.slice(1).filter((t) => normalizeName(t) !== normalizeName(first));
+    // 首个 token 是纯数字 = 序号没跟序号符（`15 浩龙` / `16）玖柒`），跳过它再取人名；
+    // `名字 师傅`（用在册主播填充生成的格式）不受影响——人名不是纯数字。
+    const start = tokens.length > 1 && ALL_DIGITS.test(tokens[0]) ? 1 : 0;
+    const first = tokens[start];
+    if (!first) continue;
+    const rest = tokens.slice(start + 1).filter((t) => normalizeName(t) !== normalizeName(first));
     const { name, aliasApplied } = applyAlias(first, aliases);
 
     rows.push({

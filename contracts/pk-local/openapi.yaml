@@ -1,0 +1,405 @@
+openapi: 3.1.0
+info:
+  name: PK Local Integration Contract
+  version: 0.1.0
+paths:
+  /api/health:
+    get:
+      operationId: getHealth
+      description: "状态：已实现（pk-server）"
+      responses:
+        "200":
+          description: Service health
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+  /api/public/plans/{planId}:
+    get:
+      operationId: getPublicPlan
+      description: "状态：已实现（pk-server）"
+      parameters:
+        - name: planId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Published read-only plan
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublicPlan"
+  /dy/api/health:
+    get:
+      operationId: getDouyinHealth
+      description: "状态：已实现（Go 过渡服务；迁移完成后由 pk-server 承接，兼容期保留路径）"
+      responses:
+        "200":
+          description: Service health
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+  /dy/api/robot/commands:
+    post:
+      operationId: dispatchRobotCommand
+      description: "状态：计划中（Go 过渡代码已有；Rust bot/ 模块迁入后以此契约为准）"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RobotCommand"
+      responses:
+        "200":
+          description: Deterministic robot result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RobotResponse"
+        "400":
+          description: Invalid command
+  /api/admin/streamers:
+    get:
+      operationId: listStreamers
+      description: "状态：已实现（B 阶段）。查询参数 q（名字模糊）、team（male/female）。"
+      responses:
+        "200":
+          description: Streamer roster with primary account and aliases
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StreamerList"
+    post:
+      operationId: createStreamer
+      description: "状态：已实现（B 阶段）。name+team 必填；douyinNo 全局唯一，重复返回 400。"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StreamerUpsert"
+      responses:
+        "200":
+          description: Created person id
+  /api/admin/streamers/{id}:
+    put:
+      operationId: updateStreamer
+      description: "状态：已实现（B 阶段）。部分更新；masterId=0 表示清空师傅。"
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StreamerUpsert"
+      responses:
+        "200":
+          description: Updated
+    delete:
+      operationId: deleteStreamer
+      description: "状态：已实现（B 阶段）。软删（deleted_at）。"
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Soft-deleted
+  /api/admin/import/upload:
+    post:
+      operationId: uploadImport
+      description: "状态：已实现。multipart 文件上传（CSV/TSV/文本），解析返回行预览；确认后走 commit。"
+      responses:
+        "200":
+          description: Parsed rows
+  /api/admin/import/preview:
+    post:
+      operationId: previewImport
+      description: "状态：已实现（B 阶段）。解析粘贴文本/结构化行并匹配主播，不落库。"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImportPreview"
+      responses:
+        "200":
+          description: Parsed rows with match status and team conflicts
+  /api/admin/import/commit:
+    post:
+      operationId: commitImport
+      description: "状态：已实现（B 阶段）。事务写 daily_metric（merge 幂等覆盖 / reject 拒绝重复）+ import_batch 审计。"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImportPreview"
+      responses:
+        "200":
+          description: Batch id with ok/failed rows
+        "400":
+          description: reject 模式下当日已有数据，或参数非法
+  /api/admin/import/batches:
+    get:
+      operationId: listImportBatches
+      description: "状态：已实现（B 阶段）。最近 50 条导入批次审计。"
+      responses:
+        "200":
+          description: Import batch list
+  /api/public/teams/{team}:
+    get:
+      operationId: publicTeamSite
+      description: "状态：已实现（阶段 D）。团别站点配置 + 最新日期；链接关闭时 published=false。"
+      responses:
+        "200":
+          description: Site config
+  /api/public/teams/{team}/daily:
+    get:
+      operationId: publicTeamDaily
+      description: "状态：已实现（阶段 D）。每日榜，DTO 白名单绝无抖音号。"
+      responses:
+        "200":
+          description: Daily ranking
+  /api/public/teams/{team}/monthly:
+    get:
+      operationId: publicTeamMonthly
+      description: "状态：已实现（阶段 D）。月榜。"
+      responses:
+        "200":
+          description: Monthly ranking
+  /api/public/teams/{team}/yearly:
+    get:
+      operationId: publicTeamYearly
+      description: "状态：已实现（阶段 D）。年榜。"
+      responses:
+        "200":
+          description: Yearly ranking
+  /api/public/teams/{team}/verify:
+    post:
+      operationId: publicTeamVerify
+      description: "状态：已实现（阶段 D）。抖音号验证，统一失败文案不给候选；IP 限流 5 次/分钟。"
+      responses:
+        "200":
+          description: Verify result with personal token
+  /api/public/teams/{team}/my:
+    get:
+      operationId: publicTeamMy
+      description: "状态：已实现（阶段 D）。个人数据（日/月/年/累计/团内名次），token 鉴权。"
+      responses:
+        "200":
+          description: Personal metrics
+  /api/admin/dashboard:
+    get:
+      operationId: dashboard
+      description: "状态：已实现（3328 移植）。KPI + 团别趋势 + 未播预警 + TopN。参数 date/days(7-90)/top。"
+      responses:
+        "200":
+          description: Dashboard aggregate
+  /api/admin/metrics/monthly:
+    get:
+      operationId: monthlyMetrics
+      description: "状态：已实现（3328 移植）。月度聚合榜（wave/minutes/liveDays/dataDays）。参数 period=YYYY-MM、team。"
+      responses:
+        "200":
+          description: Monthly aggregate rows
+  /api/admin/metrics/yearly:
+    get:
+      operationId: yearlyMetrics
+      description: "状态：已实现（3328 移植）。年度聚合榜。参数 period=YYYY、team。"
+      responses:
+        "200":
+          description: Yearly aggregate rows
+  /api/admin/streamers/duplicates:
+    get:
+      operationId: duplicateStreamers
+      description: "状态：已实现（3328 移植）。同名 / 同抖音号重复检测。"
+      responses:
+        "200":
+          description: Duplicate groups
+  /api/admin/streamers/{id}/detail:
+    get:
+      operationId: streamerDetail
+      description: "状态：已实现（3328 移植）。主播详情含全部账号。"
+      responses:
+        "200":
+          description: Streamer detail with accounts
+  /api/admin/streamers/{id}/accounts:
+    post:
+      operationId: bindAccount
+      description: "状态：已实现（3328 移植）。绑定账号（anchor_id 唯一，主号可换绑）。"
+      responses:
+        "200":
+          description: Bound
+  /api/admin/bots/sessions:
+    get:
+      operationId: botSessions
+      description: "状态：已实现。机器人见过的会话列表（群聊/私聊 + 管理员标记）。"
+      responses:
+        "200":
+          description: Session list
+  /api/admin/bots/sessions/admin:
+    post:
+      operationId: setBotSessionAdmin
+      description: "状态：已实现。勾选/取消会话的管理员身份（群聊与私聊独立）。"
+      responses:
+        "200":
+          description: Updated
+  /api/admin/bots/status:
+    get:
+      operationId: botsStatus
+      description: "状态：已实现（E 阶段）。QQ / 微信渠道连接状态汇总。"
+      responses:
+        "200":
+          description: Channel statuses
+  /api/admin/bots/qq/start:
+    post:
+      operationId: startQqBot
+      description: "状态：已实现（E 阶段）。启动 QQ gateway WebSocket 连接循环。"
+      responses:
+        "200":
+          description: Started
+  /api/admin/bots/qq/stop:
+    post:
+      operationId: stopQqBot
+      description: "状态：已实现（E 阶段）。"
+      responses:
+        "200":
+          description: Stopped
+  /api/admin/bots/weixin/start:
+    post:
+      operationId: startWeixinBot
+      description: "状态：已实现（E 阶段）。未登录时 400 提示先扫码。"
+      responses:
+        "200":
+          description: Started
+        "400":
+          description: Not logged in
+  /api/admin/bots/weixin/stop:
+    post:
+      operationId: stopWeixinBot
+      description: "状态：已实现（E 阶段）。"
+      responses:
+        "200":
+          description: Stopped
+  /api/admin/bots/weixin/qrcode:
+    get:
+      operationId: weixinQrCode
+      description: "状态：已实现（E 阶段）。从 iLink 拉取登录二维码。"
+      responses:
+        "200":
+          description: QR code id and url
+  /api/admin/bots/weixin/qrcode/check:
+    post:
+      operationId: weixinQrCheck
+      description: "状态：已实现（E 阶段）。轮询扫码状态；扫码成功自动保存 token 到 SQLite。"
+      responses:
+        "200":
+          description: Scan status (wait / scanned / confirmed)
+  /api/admin/bots/weixin/token:
+    post:
+      operationId: weixinToken
+      description: "状态：已实现（E 阶段）。手工粘贴登录 token（不走扫码）。"
+      responses:
+        "200":
+          description: Token saved
+components:
+  schemas:
+    Health:
+      type: object
+      required: [server, ok]
+      properties:
+        server:
+          type: string
+        ok:
+          type: boolean
+    PublicPlan:
+      type: object
+      required: [id, published]
+      properties:
+        id:
+          type: string
+        published:
+          type: boolean
+    RobotCommand:
+      type: object
+      required: [command, args]
+      additionalProperties: false
+      properties:
+        command:
+          type: string
+          enum: [help, query, rank, group]
+        args:
+          type: array
+          items:
+            type: string
+          maxItems: 20
+    RobotResponse:
+      type: object
+      required: [text]
+      properties:
+        text:
+          type: string
+    StreamerList:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Streamer"
+        total:
+          type: integer
+    Streamer:
+      type: object
+      properties:
+        personId: { type: string }
+        name: { type: string }
+        team: { type: string, enum: [male, female, unknown] }
+        masterId: { type: [string, "null"] }
+        generation: { type: [integer, "null"] }
+        groupName: { type: [string, "null"] }
+        status: { type: string, enum: [active, left, paused] }
+        douyinNo: { type: [string, "null"] }
+        aliases: { type: array, items: { type: string } }
+    StreamerUpsert:
+      type: object
+      properties:
+        name: { type: string }
+        team: { type: string, enum: [male, female] }
+        douyinNo: { type: string }
+        anchorId: { type: string }
+        masterId: { type: integer }
+        generation: { type: integer }
+        groupName: { type: string }
+        status: { type: string, enum: [active, left, paused] }
+        joinedAt: { type: string }
+    ImportPreview:
+      type: object
+      properties:
+        text: { type: string, description: "粘贴文本（每行一人，tab/逗号/空格分隔）" }
+        rows:
+          type: array
+          description: "结构化行（与 text 二选一）"
+          items:
+            type: object
+            properties:
+              name: { type: string }
+              douyinNo: { type: string }
+              wave: { type: number }
+              cumulativeWave: { type: number }
+              minutes: { type: number }
+              isLive: { type: boolean }
+        bizDate: { type: string, pattern: '^\d{4}-\d{2}-\d{2}$' }
+        team: { type: string, enum: [male, female] }
+        mode: { type: string, enum: [merge, reject] }
+        filename: { type: string }

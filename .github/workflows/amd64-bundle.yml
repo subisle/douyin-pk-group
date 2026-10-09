@@ -11,7 +11,7 @@
 #
 # 用法：
 #   gh workflow run amd64-bundle.yml
-#   gh release download amd64-bundle     # 拿到 pk-server-amd64.tar.gz
+#   gh release download amd64-bundle     # 拿到 pk-server + douyin-server 两个 tar.gz
 name: amd64 镜像包
 
 on:
@@ -30,22 +30,35 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
-      - name: 构建 amd64 镜像并导出为 docker 包
+      - name: 构建 pk-server amd64 镜像并导出
         uses: docker/build-push-action@v6
         with:
           context: .
+          file: Dockerfile
           platforms: linux/amd64
           # 必须显式打 tag：docker exporter 不会自己起名，不给 tags 的话
           # 导出的 tar 载入后是 <none>:<none>，compose 就会去 Docker Hub 拉同名镜像。
           # 部署机的 compose 固定引用 pk-server:amd64，两边靠这个名字对齐。
           tags: pk-server:amd64
-          # 单架构可以直接导出成可 docker load 的 tar；多架构 manifest 不行
           outputs: type=docker,dest=/tmp/pk-server-amd64.tar
           cache-from: type=gha
           cache-to: type=gha,mode=min
 
+      - name: 构建 douyin-server amd64 镜像并导出
+        uses: docker/build-push-action@v6
+        with:
+          context: ./server-go
+          file: server-go/Dockerfile
+          platforms: linux/amd64
+          tags: douyin-server:amd64
+          outputs: type=docker,dest=/tmp/douyin-server-amd64.tar
+          cache-from: type=gha
+          cache-to: type=gha,mode=min
+
       - name: 压缩
-        run: gzip -9 /tmp/pk-server-amd64.tar
+        run: |
+          gzip -9 /tmp/pk-server-amd64.tar
+          gzip -9 /tmp/douyin-server-amd64.tar
 
       - name: 上传到 rolling release
         env:
@@ -55,5 +68,5 @@ jobs:
           tag=amd64-bundle
           gh release view "$tag" >/dev/null 2>&1 || \
             gh release create "$tag" --title "amd64 镜像包" --notes "由 amd64-bundle.yml 自动更新" --prerelease
-          gh release upload "$tag" /tmp/pk-server-amd64.tar.gz --clobber
+          gh release upload "$tag" /tmp/pk-server-amd64.tar.gz /tmp/douyin-server-amd64.tar.gz --clobber
           echo "release $tag 已更新"

@@ -17,7 +17,12 @@ function constraintSummary(): string {
 const STRATEGIES: Array<{ value: Strategy; label: string; title: string }> = [
   { value: 'snake', label: '蛇形均衡', title: '强弱搭配，各组总音浪最接近' },
   { value: 'snake-no-master', label: '蛇形 + 同门回避', title: '蛇形基础上尽量拆开同师傅的人' },
-  { value: 'sequential', label: '总音浪从高到低', title: '按总音浪降序依次直填，前 8 人第 1 组；忽略内置条件' },
+  { value: 'sequential', label: '总音浪从高到低', title: '按累计总音浪降序依次直填，前 8 人第 1 组；忽略内置条件' },
+  {
+    value: 'sequential-last-n',
+    label: '近 N 天从高到低',
+    title: '按最近 N 天音浪合计降序依次直填，天数沿用左侧「统计天数」；忽略内置条件',
+  },
   { value: 'random', label: '随机', title: '随机洗牌后依次切组' },
 ];
 
@@ -47,7 +52,15 @@ export function WaveConfig({ onAddBucket }: { onAddBucket: () => void }) {
               { value: 'total', label: '总音浪' },
             ]}
             value={metric}
-            onChange={(v) => patch({ metric: v })}
+            onChange={(v) =>
+              // 口径决定「从高到低」按哪一列排序，两个策略各绑定一种口径，
+              // 手动切口径时把策略一起换掉，免得出现「近 N 天从高到低 + 总音浪」这种自相矛盾的组合
+              patch(
+                v === 'total' && strategy === 'sequential-last-n'
+                  ? { metric: v, strategy: 'sequential' }
+                  : { metric: v },
+              )
+            }
           />
         </Field>
 
@@ -76,17 +89,20 @@ export function WaveConfig({ onAddBucket }: { onAddBucket: () => void }) {
 
         <Field label="分组策略">
           <select
-            className={`${selectClass} w-[150px]`}
+            className={`${selectClass} w-[164px]`}
             value={strategy}
             title={STRATEGIES.find((s) => s.value === strategy)?.title}
             onChange={(e) => {
               const value = e.target.value as Strategy;
-              patch(value === 'sequential' ? { strategy: value, metric: 'total' } : { strategy: value });
+              // 「从高到低」的排序依据就是音浪口径，选策略时把口径一起钉死
+              if (value === 'sequential') patch({ strategy: value, metric: 'total' });
+              else if (value === 'sequential-last-n') patch({ strategy: value, metric: 'lastN' });
+              else patch({ strategy: value });
             }}
           >
             {STRATEGIES.map((s) => (
               <option key={s.value} value={s.value} title={s.title}>
-                {s.label}
+                {s.value === 'sequential-last-n' ? `近 ${days} 天从高到低` : s.label}
               </option>
             ))}
           </select>

@@ -64,13 +64,20 @@ ls -lh "$tmp"
 
 # 4. 传到机器、导入、重启
 echo "==> 部署到 $HOST"
-sshpass -p "$PASS" scp -o StrictHostKeyChecking=no "$tmp/pk-server-arm64.tar.gz" "root@$HOST:/tmp/"
+sshpass -p "$PASS" scp -o StrictHostKeyChecking=no \
+  "$tmp/pk-server-arm64.tar.gz" "$tmp/douyin-server-arm64.tar.gz" \
+  "root@$HOST:/tmp/"
 sshpass -p "$PASS" ssh -o StrictHostKeyChecking=no "root@$HOST" "
   set -e
   docker load -i /tmp/pk-server-arm64.tar.gz
-  rm -f /tmp/pk-server-arm64.tar.gz
+  docker load -i /tmp/douyin-server-arm64.tar.gz
+  rm -f /tmp/pk-server-arm64.tar.gz /tmp/douyin-server-arm64.tar.gz
   cd '$DIR'
   docker compose up -d --force-recreate
+  sleep 3
+  if ! curl -fsS -o /dev/null 'http://127.0.0.1:8080/dy/api/health'; then
+    echo '    douyin-server 健康检查失败，请检查 .env 里的数据库密码'
+  fi
   for i in \$(seq 1 30); do
     if curl -fsS -o /dev/null '$BASE/api/health'; then echo '    服务已就绪'; break; fi
     sleep 2

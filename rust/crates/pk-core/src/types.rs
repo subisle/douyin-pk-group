@@ -2,11 +2,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::constraints::ConstraintSet;
 
-/// 音浪口径：lastN = 近 N 天增量；total = 累计总音浪（含基线日快照）
+/// 音浪口径：lastN = 近 N 天增量；total = 累计总音浪（含基线日快照）；
+/// month = 最新数据所在自然月的增量合计（本月累计）
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum WaveMetric {
     LastN,
+    /// 最近 1 个有效业务日（等价于 lastN + days=1）
+    Last1,
+    /// 本月累计
+    Month,
     #[default]
     Total,
 }
@@ -60,7 +65,8 @@ impl Player {
 }
 
 /// 接龙名单解析出来的一行
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// （`Eq` 去掉了：`score` 是 f64，只有 PartialEq）
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ParsedRow {
     pub raw: String,
@@ -70,6 +76,10 @@ pub struct ParsedRow {
     /// 命中了别名表时的映射结果，如 阿楠 → 南方楠
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alias_applied: Option<String>,
+    /// 名单自带的分数（`狼哲 71259` 这种「名字 + 分数」格式）。
+    /// 有值时直接当音浪用、不去查库——晋级赛名单就是这么发的。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score: Option<f64>,
     #[serde(default)]
     pub excluded: bool,
 }
@@ -108,6 +118,11 @@ pub enum Strategy {
     SnakeNoMaster,
     /// 梯队式（高到低切组，不做均衡）
     Sequential,
+    /// 梯队式 · 近 N 天口径：按最近 N 天音浪合计降序依次直填。
+    /// 与 Sequential 的算法完全一致（都按 `wave` 降序切块），
+    /// 区别只在语义：调用方用这个变体时，`wave` 必须用 lastN 口径填充。
+    #[serde(rename = "sequential-last-n")]
+    SequentialLastN,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

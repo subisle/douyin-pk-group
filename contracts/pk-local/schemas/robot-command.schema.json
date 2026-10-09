@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pk.local/contracts/robot-command.schema.json",
+  "title": "RobotCommand",
+  "type": "object",
+  "required": ["command", "args"],
+  "additionalProperties": false,
+  "properties": {
+    "command": {
+      "type": "string",
+      "enum": ["help", "query", "rank", "group"]
+    },
+    "args": {
+      "type": "array",
+      "items": { "type": "string" },
+      "maxItems": 20
+    }
+  }
+}

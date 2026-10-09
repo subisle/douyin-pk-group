@@ -41,7 +41,7 @@ export interface BalanceStat {
 
 export interface GroupOptions {
   groupSize: number;
-  strategy: 'snake' | 'random' | 'snake-no-master' | 'sequential';
+  strategy: 'snake' | 'random' | 'snake-no-master' | 'sequential' | 'sequential-last-n';
   /** 内置条件：互斥 / 固定位 / 开赛时间。缺省用 DEFAULT_CONSTRAINTS */
   constraints?: ConstraintSet;
 }
