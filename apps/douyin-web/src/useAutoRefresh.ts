@@ -62,6 +62,22 @@ function closeConnection() {
   sourceToken = ''
 }
 
+/* 离开页面（含进 bfcache）就断开 SSE，回来再连。
+ *
+ * 为什么必须断：浏览器对同一个源（HTTP/1.1）只有 6 条并发连接，每条 SSE 长连接占一条。
+ * 后台要在 7 个页面之间来回切，旧文档若被 bfcache 留着、连接没关，连接数很快被占满 ——
+ * 表现是「切几个页面后再导入，点确认毫无反应」：请求排在队里发不出去，页面也不报错。
+ * 生产走 HTTPS/HTTP2 能多路复用，但本地 dev（http/1.1）和没上 h2 的代理都会踩。 */
+if (typeof window !== 'undefined') {
+  window.addEventListener('pagehide', () => closeConnection())
+  window.addEventListener('pageshow', (e) => {
+    // bfcache 恢复：上面已把连接关掉，按当前登录态补连
+    if (!e.persisted) return
+    const token = sessionStorage.getItem('pk_token')
+    if (token && listeners.size > 0) ensureConnection(token)
+  })
+}
+
 /**
  * 订阅数据变更。返回退订函数。
  * 供 App 层做全局提示用；页面级自动刷新请用 useAutoRefresh。

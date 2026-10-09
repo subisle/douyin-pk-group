@@ -80,6 +80,9 @@ export function useRoute(): { route: RouteKey; go: (key: RouteKey) => void } {
     const now = `${window.location.pathname}${window.location.search}`
     if (now !== href) window.history.pushState(null, '', href)
     setRoute(key)
+    /* pushState 自己不触发 popstate：页面里可能不止一个 useRoute（例如数据页空状态里的
+       「去导入」按钮），补发一发，让所有实例都跟着地址走，避免「地址变了页面没换」。 */
+    window.dispatchEvent(new PopStateEvent('popstate'))
     window.scrollTo(0, 0)
   }, [])
 

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api } from './api'
 import { useAutoRefresh } from './useAutoRefresh'
+import { routeHref, useRoute } from './lib/router'
 
 const fmt = (n: number) => (n >= 10000 ? `${(n / 10000).toFixed(1)} 万` : String(n))
 
@@ -10,16 +11,22 @@ export default function DashboardPage() {
   const [error, setError] = useState('')
   const [team, setTeam] = useState('male')
   const [reportUrl, setReportUrl] = useState('')
+  const { go } = useRoute()
 
   const load = useCallback(async () => {
     setError('')
     try {
       const d = await api(`/api/admin/dashboard?days=${days}&top=10`)
       setData(d)
-      const token = sessionStorage.getItem('pk_token') ?? ''
-      setReportUrl(
-        `/api/admin/report/daily.svg?date=${d.summary.date}&team=${team}&access_token=${token}`,
-      )
+      // 空库（全新部署 / 刚清空音浪数据）没有基准日，日报 SVG 也没得画
+      if (d?.summary?.date) {
+        const token = sessionStorage.getItem('pk_token') ?? ''
+        setReportUrl(
+          `/api/admin/report/daily.svg?date=${d.summary.date}&team=${team}&access_token=${token}`,
+        )
+      } else {
+        setReportUrl('')
+      }
     } catch (e: any) {
       setError(e.message ?? String(e))
     }
@@ -39,6 +46,33 @@ export default function DashboardPage() {
         <div className="empty">加载中…</div>
       </div>
     )
+
+  /* 空库：还没有任何采集日期（全新部署 / 音浪数据被清空）。
+     不显示假 KPI、不报红，直接引导去导入第一批数据。 */
+  if (data.empty) {
+    return (
+      <div className="page">
+        <section className="card">
+          <h2>数据概况</h2>
+          <div className="empty">
+            还没有采集到任何日期 · 台账里已有 {data.summary?.personCount ?? 0} 人在册，
+            <a
+              className="linkish"
+              href={routeHref('import')}
+              onClick={(e) => {
+                if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return
+                e.preventDefault()
+                go('import')
+              }}
+            >
+              去「数据导入」
+            </a>
+            导入第一批音浪数据
+          </div>
+        </section>
+      </div>
+    )
+  }
 
   const s = data.summary
 

@@ -39,7 +39,8 @@ const CSV = '/tmp/pk-admin-uicheck.csv'
 const TEST_DATE = '2019-01-01'
 
 const PAGES = [
-  { path: '/data', label: '数据概况', marker: '当日总音浪' },
+  // 数据页两种状态都算合格：有音浪看 KPI，清空/全新库看空状态（且不能报红）
+  { path: '/data', label: '数据概况', marker: ['当日总音浪', '还没有采集到任何日期'] },
   { path: '/import', label: '数据导入', marker: '导入音浪数据' },
   { path: '/streamers', label: '主播管理', marker: '主播台账' },
   { path: '/claims', label: '抖音号审计', marker: '抖音号绑定审计' },
@@ -169,6 +170,15 @@ async function waitFor(ws, expr, tries = 40) {
 
 const waitText = (ws, text, tries) =>
   waitFor(ws, `document.body.innerText.includes(${JSON.stringify(text)})`, tries)
+/** marker 支持数组：命中任意一个即可（页面在不同数据状态下文案不同） */
+const waitMarker = (ws, marker, tries) =>
+  Array.isArray(marker)
+    ? waitFor(
+        ws,
+        marker.map((m) => `document.body.innerText.includes(${JSON.stringify(m)})`).join(' || '),
+        tries,
+      )
+    : waitText(ws, marker, tries)
 const pathname = (ws) => evaluate(ws, 'location.pathname')
 const activeTab = (ws) =>
   evaluate(ws, `document.querySelector('a.tab.active')?.textContent?.trim() ?? ''`)
@@ -178,7 +188,7 @@ async function clickByText(ws, text) {
   const hit = await evaluate(
     ws,
     `(() => {
-      const el = [...document.querySelectorAll('a.tab, button, a.file-btn')]
+      const el = [...document.querySelectorAll('a.tab, a.linkish, button, a.file-btn')]
         .find((x) => x.textContent.trim().includes(${JSON.stringify(text)}))
       if (!el) return false
       el.click()
@@ -186,6 +196,29 @@ async function clickByText(ws, text) {
     })()`,
   )
   if (!hit) throw new Error(`没找到可点元素：${text}`)
+}
+
+/** 在页面里构造 File + 触发 change，等价于用户选文件。
+    不用 CDP 的 DOM.setFileInputFiles：长会话里它的 objectId 会失效，表现是
+    「没报错、页面也没反应」，非常难查（本项目踩过一次）。 */
+async function uploadFile(ws, name, content) {
+  const info = await evaluate(
+    ws,
+    `(() => {
+      const el = document.querySelector('.page input[type=file]')
+      if (!el) return JSON.stringify({ found: false })
+      const react = Object.keys(el).filter((k) => k.startsWith('__react')).length
+      const dt = new DataTransfer()
+      dt.items.add(new File([${JSON.stringify(content)}], ${JSON.stringify(name)}, { type: 'text/csv' }))
+      el.files = dt.files
+      const set = el.files.length
+      el.dispatchEvent(new Event('change', { bubbles: true }))
+      return JSON.stringify({ found: true, react, set, afterDispatch: el.files.length, disabled: el.disabled })
+    })()`,
+  )
+  const d = JSON.parse(info)
+  if (!d.found) throw new Error('找不到文件输入框')
+  if (process.env.UPLOAD_DEBUG) console.log('    [上传诊断] ' + info)
 }
 
 async function shot(ws, name) {
@@ -287,12 +320,17 @@ try {
   })
 
   let errors = []
+  const allErrors = []
   ws.on((msg) => {
     if (msg.method === 'Runtime.exceptionThrown') {
-      errors.push(msg.params.exceptionDetails?.exception?.description ?? '未知异常')
+      const t = msg.params.exceptionDetails?.exception?.description ?? '未知异常'
+      errors.push(t)
+      allErrors.push(t)
     }
     if (msg.method === 'Runtime.consoleAPICalled' && msg.params.type === 'error') {
-      errors.push(msg.params.args.map((a) => a.value ?? a.description ?? '').join(' '))
+      const t = msg.params.args.map((a) => a.value ?? a.description ?? '').join(' ')
+      errors.push(t)
+      allErrors.push(t)
     }
   })
 
@@ -314,15 +352,30 @@ try {
   for (const p of PAGES) {
     errors = []
     await goto(ws, `${BASE}${PREFIX}${p.path}`)
-    const ready = await waitText(ws, p.marker, 60)
-    truthy(`/${p.path} 渲染出「${p.marker}」`, ready)
+    const ready = await waitMarker(ws, p.marker, 60)
+    truthy(`/${p.path} 渲染出「${[].concat(p.marker).join(' / ')}」`, ready)
     expect(`${PREFIX}${p.path} 地址不变`, await pathname(ws), `${PREFIX}${p.path}`)
     expect(`/${p.path} 导航高亮`, await activeTab(ws), p.label)
     if (errors.length) bad(`/${p.path} console 报错：${errors.join(' | ')}`)
   }
 
   await goto(ws, `${BASE}${PREFIX}/data`)
-  await waitText(ws, '当日总音浪')
+  await waitMarker(ws, ['当日总音浪', '还没有采集到任何日期'])
+  truthy(
+    '数据页没有红色报错',
+    !(await evaluate(ws, `!!document.querySelector('.page .alert.bad')`)),
+  )
+  const emptyState = await evaluate(ws, `document.body.innerText.includes('还没有采集到任何日期')`)
+  if (emptyState) {
+    // 空库引导：点「去数据导入」应走 SPA 跳转（地址变 /import，marker 还在）
+    await evaluate(ws, 'window.__emptyNav = 1')
+    await clickByText(ws, '去「数据导入」')
+    truthy('空状态能跳到导入页', await waitText(ws, '导入音浪数据'))
+    expect('跳转后地址', await pathname(ws), `${PREFIX}/import`)
+    expect('空状态跳转没整页刷新', await evaluate(ws, 'window.__emptyNav'), 1)
+    await goto(ws, `${BASE}${PREFIX}/data`)
+    await waitMarker(ws, ['当日总音浪', '还没有采集到任何日期'])
+  }
   await shot(ws, 'admin-data.png')
 
   /* ---------- 3. 点导航 = pushState（不整页刷新） ---------- */
@@ -360,7 +413,7 @@ try {
   console.log('== 5. 未知路径兜底 ==')
   await goto(ws, `${BASE}${PREFIX}/nope`)
   truthy(`未知路径归位 ${PREFIX}/data`, await waitFor(ws, `location.pathname === '${PREFIX}/data'`))
-  await waitText(ws, '当日总音浪')
+  await waitMarker(ws, ['当日总音浪', '还没有采集到任何日期'])
 
   /* ---------- 6. 导入页：没有粘贴入口 + 上传弹预览 ---------- */
   console.log('== 6. 导入页无粘贴 + 预览弹窗 ==')
@@ -375,18 +428,35 @@ try {
     0,
   )
 
-  const input = await ws.send('Runtime.evaluate', {
-    expression: `document.querySelector('input[type=file]')`,
-  })
-  if (!input.result?.objectId) throw new Error('找不到文件输入框')
-  await ws.send('DOM.setFileInputFiles', { files: [CSV], objectId: input.result.objectId })
+  await uploadFile(ws, 'pk-admin-uicheck.csv', csv)
 
-  truthy('弹出预览弹窗', await waitFor(ws, `document.querySelector('.import-pop')`))
+  const popped = await waitFor(ws, `document.querySelector('.import-pop')`)
+  if (!popped) {
+    console.log(
+      `    [诊断] 页面提示：${await evaluate(ws, `[...document.querySelectorAll('.alert')].map((a) => a.className + ': ' + a.innerText.slice(0, 120)).join(' || ') || '(无)'`)}`,
+    )
+    console.log(`    [诊断] 控制台(本段)：${errors.join(' | ') || '(无)'}`)
+    console.log(`    [诊断] 控制台(全程)：${allErrors.join(' | ') || '(无)'}`)
+    console.log(
+      `    [诊断] 页面里再发一次请求：${await evaluate(
+        ws,
+        `Promise.race([
+           fetch('/api/health').then((r) => 'ok ' + r.status),
+           new Promise((res) => setTimeout(() => res('超时 5s（浏览器连接被占满？）'), 5000)),
+         ])`,
+      )}`,
+    )
+    console.log(
+      `    [诊断] 已发出的请求数：${await evaluate(ws, `performance.getEntriesByType('resource').filter((r) => r.name.includes('/api/')).length`)}`,
+    )
+  }
+  truthy('弹出预览弹窗', popped)
   expect(
     '预览行数',
     await evaluate(ws, `document.querySelectorAll('.import-pop tbody tr').length`),
     3,
   )
+  if (!popped) throw new Error('预览弹窗没弹出来，后面没法继续（看上面的诊断）')
   const popText = await evaluate(ws, `document.querySelector('.import-pop').innerText`)
   truthy(`预览里带文件名（pk-admin-uicheck.csv）`, popText.includes('pk-admin-uicheck.csv'))
   truthy(`预览第一行是 ${names[0]}`, popText.includes(names[0]))
@@ -419,10 +489,7 @@ try {
   const before = await apiGet(`/api/admin/import/day-status?bizDate=${TEST_DATE}&team=male`)
   expect('测试日期入库前没有数据', before.rows ?? 0, 0)
 
-  const input2 = await ws.send('Runtime.evaluate', {
-    expression: `document.querySelector('input[type=file]')`,
-  })
-  await ws.send('DOM.setFileInputFiles', { files: [CSV], objectId: input2.result.objectId })
+  await uploadFile(ws, 'pk-admin-uicheck.csv', csv)
   await waitFor(ws, `document.querySelector('.import-pop')`)
 
   /* 改业务日期：React 受控 input 要走原生 setter + input 事件 */
@@ -475,7 +542,12 @@ try {
 } finally {
   ws?.close()
   chrome.kill('SIGKILL')
-  rmSync(PROFILE, { recursive: true, force: true })
+  await sleep(300) // 等 Chrome 真的退出，否则 profile 目录还占着，rmSync 抛 ENOTEMPTY
+  try {
+    rmSync(PROFILE, { recursive: true, force: true })
+  } catch {
+    /* 清不掉就算了（临时目录），别把真正的失败原因顶掉 */
+  }
 }
 
 console.log(failed === 0 ? '\n全部通过 ✅' : `\n${failed} 项失败 ❌`)

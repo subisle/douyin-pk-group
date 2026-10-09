@@ -80,7 +80,28 @@ pub async fn dashboard(State(st): State<ArcState>, Query(q): Query<DashboardQuer
             .unwrap_or_default(),
     };
     if date.is_empty() {
-        return Err(anyhow::anyhow!("还没有采集到任何日期").into());
+        /* 全新库 / 刚清空音浪数据：不是错误 —— 给数据页一个空状态（docs/06 §7：
+           「还没有采集到任何日期」+ 去导入，不显示假进度）。在册人数照常给，
+           台账还在，只是没有音浪。 */
+        let person_count = mysql::query(&st.pools, "LOCAL", dialect::ACTIVE_PERSON_COUNT_SQL)
+            .await?
+            .first()
+            .map(|r| read_u64(r, "n"))
+            .unwrap_or(0) as usize;
+        return Ok(Json(json!({
+            "empty": true,
+            "summary": {
+                "date": Value::Null,
+                "totalWave": 0,
+                "maleWave": 0,
+                "femaleWave": 0,
+                "liveCount": 0,
+                "personCount": person_count,
+            },
+            "trend": [],
+            "absent": [],
+            "top": [],
+        })));
     }
     let days = q.days.unwrap_or(30).clamp(7, 90) as i64;
     let top_n = q.top.unwrap_or(5).clamp(1, 50) as i64;
@@ -205,6 +226,7 @@ pub async fn dashboard(State(st): State<ArcState>, Query(q): Query<DashboardQuer
     absent.sort_by_key(|v| -v.get("days").and_then(|d| d.as_i64()).unwrap_or(0));
 
     Ok(Json(json!({
+        "empty": false,
         "summary": {
             "date": date,
             "totalWave": total_wave,
