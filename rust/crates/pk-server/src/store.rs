@@ -29,6 +29,7 @@ fn w(st: &AppState) -> Result<&MySqlPool> {
 /// - 初级争霸赛小组赛（月初）、中级争霸赛小组赛（月中）—— 白天的分组赛，第 N 组后打一场 20 分钟复活赛
 /// - 月终争霸赛（月末）—— 只分组，没有小组赛 / 复活赛 / 晋级赛流程
 /// - 初级争霸赛晋级赛 / 中级争霸赛晋级赛 —— 晚上晋级赛，按级别拆两页
+///
 /// 值直接用中文落库，前后端共用同一套字符串，避免 key/文案两套映射各错各的。
 pub const EVENT_TYPES: [&str; 5] = [
     "初级争霸赛小组赛",
@@ -239,7 +240,7 @@ pub async fn get_plan(st: &AppState, id: i64) -> Option<PlanRow> {
         Ok(Some(r)) => r,
         _ => return None,
     };
-    Some(map_plan(&row).ok()?)
+    map_plan(&row).ok()
 }
 
 /// 发布 / 取消发布。未发布时对外展示页返回 404。
@@ -359,7 +360,7 @@ pub async fn session_upsert(
         .bind(channel)
         .bind(conversation_id)
         .bind(kind)
-        .bind(&last_text.chars().take(100).collect::<String>())
+        .bind(last_text.chars().take(100).collect::<String>())
         .bind(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string())
         .execute(pool)
         .await?;
@@ -1669,7 +1670,7 @@ pub async fn push_touch(st: &AppState, name: &str, error: &str) {
         let _ =
             sqlx::query("UPDATE push_bindings SET last_push = ?, last_error = ? WHERE name = ?")
                 .bind(now_str())
-                .bind(&error.chars().take(200).collect::<String>())
+                .bind(error.chars().take(200).collect::<String>())
                 .bind(name.trim())
                 .execute(pool)
                 .await;
@@ -2314,8 +2315,8 @@ pub async fn carry_legacy_sqlite(pool: &MySqlPool, sqlite_path: &str) -> Result<
                 "INSERT INTO aliases (alias, real_name) VALUES (?, ?)
                  ON DUPLICATE KEY UPDATE real_name = VALUES(real_name)",
             )
-            .bind(&a)
-            .bind(&rn)
+            .bind(a)
+            .bind(rn)
             .execute(pool)
             .await?;
         }
@@ -2334,9 +2335,9 @@ pub async fn carry_legacy_sqlite(pool: &MySqlPool, sqlite_path: &str) -> Result<
                 "INSERT INTO roster_state (event_type, body, updated_at) VALUES (?, ?, ?)
                  ON DUPLICATE KEY UPDATE body = VALUES(body), updated_at = VALUES(updated_at)",
             )
-            .bind(&et)
-            .bind(&body)
-            .bind(&at)
+            .bind(et)
+            .bind(body)
+            .bind(at)
             .execute(pool)
             .await?;
         }
@@ -2358,8 +2359,8 @@ pub async fn carry_legacy_sqlite(pool: &MySqlPool, sqlite_path: &str) -> Result<
                 "INSERT INTO config (cfg_key, cfg_value, updated_at) VALUES (?, ?, ?)
                  ON DUPLICATE KEY UPDATE cfg_value = VALUES(cfg_value), updated_at = VALUES(updated_at)",
             )
-            .bind(&k)
-            .bind(&v)
+            .bind(k)
+            .bind(v)
             .bind(&now)
             .execute(pool)
             .await?;
@@ -2392,11 +2393,11 @@ pub async fn carry_legacy_sqlite(pool: &MySqlPool, sqlite_path: &str) -> Result<
                  ON DUPLICATE KEY UPDATE kind = VALUES(kind), last_text = VALUES(last_text),
                    last_seen = VALUES(last_seen), is_admin = VALUES(is_admin)",
             )
-            .bind(&c)
-            .bind(&cid)
-            .bind(&kind)
-            .bind(&lt)
-            .bind(&ls)
+            .bind(c)
+            .bind(cid)
+            .bind(kind)
+            .bind(lt)
+            .bind(ls)
             .bind(*adm as i8)
             .execute(pool)
             .await?;
@@ -2418,7 +2419,8 @@ pub async fn carry_legacy_sqlite(pool: &MySqlPool, sqlite_path: &str) -> Result<
             "SELECT id, title, metric, days, payload, created_at, 0, '' FROM plans".to_string()
         };
         let mut stmt = conn.prepare(&sql)?;
-        let rows: Vec<(i64, String, String, i64, String, String, i64, String)> = stmt
+        type PlanRowTuple = (i64, String, String, i64, String, String, i64, String);
+        let rows: Vec<PlanRowTuple> = stmt
             .query_map([], |r| {
                 Ok((
                     r.get(0)?,
@@ -2442,13 +2444,13 @@ pub async fn carry_legacy_sqlite(pool: &MySqlPool, sqlite_path: &str) -> Result<
                    published = VALUES(published), event_type = VALUES(event_type)",
             )
             .bind(id)
-            .bind(&title)
-            .bind(&metric)
+            .bind(title)
+            .bind(metric)
             .bind(days)
-            .bind(&payload)
-            .bind(&created)
+            .bind(payload)
+            .bind(created)
             .bind(*published as i8)
-            .bind(&et)
+            .bind(et)
             .execute(pool)
             .await?;
         }
@@ -2477,11 +2479,11 @@ pub async fn carry_legacy_sqlite(pool: &MySqlPool, sqlite_path: &str) -> Result<
                  ON DUPLICATE KEY UPDATE phone = VALUES(phone), pass = VALUES(pass),
                    is_admin = VALUES(is_admin), created_at = VALUES(created_at)",
             )
-            .bind(&name)
-            .bind(&phone)
-            .bind(&hash_my_password(pass))
+            .bind(name)
+            .bind(phone)
+            .bind(hash_my_password(pass))
             .bind(*is_admin as i8)
-            .bind(&created)
+            .bind(created)
             .execute(pool)
             .await?;
         }
@@ -2495,7 +2497,7 @@ pub async fn carry_legacy_sqlite(pool: &MySqlPool, sqlite_path: &str) -> Result<
                     IFNULL(reject_reason,''), created_at, IFNULL(decided_at,''), IFNULL(decided_by,'')
              FROM anchor_claims",
         )?;
-        let rows: Vec<(
+        type AnchorClaimRowTuple = (
             i64,
             i64,
             String,
@@ -2508,7 +2510,8 @@ pub async fn carry_legacy_sqlite(pool: &MySqlPool, sqlite_path: &str) -> Result<
             String,
             String,
             String,
-        )> = stmt
+        );
+        let rows: Vec<AnchorClaimRowTuple> = stmt
             .query_map([], |r| {
                 Ok((
                     r.get(0)?,

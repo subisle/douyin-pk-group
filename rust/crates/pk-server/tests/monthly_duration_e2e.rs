@@ -69,7 +69,7 @@ async fn cleanup(st: &AppState) {
         ),
         format!("DELETE FROM account WHERE anchor_id = '{ANCHOR_ID}'"),
         format!("DELETE FROM person WHERE name = '{NAME}'"),
-        format!("DELETE FROM import_batch WHERE filename LIKE '__e2e_month%'"),
+        "DELETE FROM import_batch WHERE filename LIKE '__e2e_month%'".to_string(),
     ] {
         let _ = sqlx::query(&sql).execute(pool).await;
     }

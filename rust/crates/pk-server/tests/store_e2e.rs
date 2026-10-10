@@ -80,10 +80,9 @@ async fn alias_roundtrip() {
     store::delete_alias(&st, "__e2e_alias__")
         .await
         .expect("删别名");
-    assert!(store::list_aliases(&st)
+    assert!(!store::list_aliases(&st)
         .await
-        .get("__e2e_alias__")
-        .is_none());
+        .contains_key("__e2e_alias__"));
 }
 
 #[tokio::test]
@@ -463,13 +462,10 @@ async fn anchor_claim_roundtrip() {
         store::anchor_claim_mine(&st, PID).await.unwrap()["douyinNo"],
         "e2e_dy01"
     );
-    assert_eq!(
-        store::anchor_claim_list(&st, "pending", 200)
-            .await
-            .iter()
-            .any(|r| r["id"] == id),
-        true
-    );
+    assert!(store::anchor_claim_list(&st, "pending", 200)
+        .await
+        .iter()
+        .any(|r| r["id"] == id));
     // 截图本体
     let (bytes, mime) = store::anchor_claim_image(&st, id).await.expect("截图存在");
     assert_eq!(bytes, shot);
@@ -745,14 +741,14 @@ async fn count_i64(st: &AppState, sql: &str) -> i64 {
 async fn cleanup_admin_e2e(st: &AppState) {
     let pool = st.writer.as_ref().expect("writer");
     for sql in [
-        format!("DELETE FROM daily_metric WHERE biz_date BETWEEN '2999-01-01' AND '2999-12-31'"),
-        format!("DELETE FROM wave_snapshot WHERE biz_date BETWEEN '2999-01-01' AND '2999-12-31'"),
+        "DELETE FROM daily_metric WHERE biz_date BETWEEN '2999-01-01' AND '2999-12-31'".to_string(),
+        "DELETE FROM wave_snapshot WHERE biz_date BETWEEN '2999-01-01' AND '2999-12-31'".to_string(),
         format!(
             "DELETE d FROM daily_metric d JOIN person p ON p.id = d.person_id WHERE p.name LIKE '{MERGE_PREFIX}%'"
         ),
         format!("DELETE FROM account WHERE anchor_id LIKE '{MERGE_PREFIX}%' OR douyin_no LIKE '{MERGE_PREFIX}%'"),
         format!("DELETE FROM import_pending WHERE name LIKE '{MERGE_PREFIX}%' OR douyin_no LIKE '{MERGE_PREFIX}%'"),
-        format!("DELETE FROM import_batch WHERE filename LIKE '__e2e_%'"),
+        "DELETE FROM import_batch WHERE filename LIKE '__e2e_%'".to_string(),
         format!("DELETE FROM person WHERE name LIKE '{MERGE_PREFIX}%'"),
     ] {
         let _ = sqlx::query(&sql).execute(pool).await;

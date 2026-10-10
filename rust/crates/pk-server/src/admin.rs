@@ -1512,6 +1512,7 @@ fn batch_note(failures: &[Value], pending: usize, skipped: &[String]) -> Option<
 /// - 给了 cumulativeWave → 与上一业务日快照差分；无上一日 = 基线日语义，wave=累计值且 reliable=0
 /// - 只给 wave → 直接采用（trusted）；累计值回填 prev + wave（拿不到 prev 就 0）
 /// - 差分跨天 > 1（漏采）或为负（回退）→ wave_reliable=0
+///
 /// 单行写入结果：真写/覆盖了，还是库里已经有一样的值（没动）
 enum WriteOutcome {
     Written,
@@ -1628,7 +1629,7 @@ async fn write_daily_row(
 
     // P2-11 收敛：有账号但无主号（生产 1000001/1000004）时 PRIMARY_ANCHOR_SQL 取不到，
     // 先把最早的号提为主号再取（幂等，正常情况零开销）。
-    ensure_primary(&mut **tx, person_id).await;
+    ensure_primary(tx, person_id).await;
 
     let anchor: String = sqlx::query(dialect::PRIMARY_ANCHOR_SQL)
         .bind(person_id as i64)
@@ -1962,9 +1963,9 @@ pub async fn import_day_status(
     if biz_date.is_empty() {
         return Ok(Json(json!({ "checked": false })));
     }
-    let auto_team = is_auto_team(&team);
+    let auto_team = is_auto_team(team);
     if !auto_team {
-        valid_team(&team)?;
+        valid_team(team)?;
     }
     valid_biz_date(biz_date)?;
     let pool = writer_pool(&st)?;
@@ -1977,7 +1978,7 @@ pub async fn import_day_status(
     } else {
         sqlx::query(dialect::TEAM_DATE_COUNT_SQL)
             .bind(biz_date)
-            .bind(&team)
+            .bind(team)
             .map(|r: sqlx::mysql::MySqlRow| r.try_get::<i64, _>(0).unwrap_or(0))
             .fetch_one(pool)
             .await?
@@ -1991,7 +1992,7 @@ pub async fn import_day_status(
     };
     let mut last_q = sqlx::query(last_sql).bind(biz_date);
     if !auto_team {
-        last_q = last_q.bind(&team);
+        last_q = last_q.bind(team);
     }
     let last = last_q
         .map(|r: sqlx::mysql::MySqlRow| {
@@ -3267,7 +3268,7 @@ pub async fn master_batch(
             }
             "create" => {
                 // 先保证师傅在（不在则新建），再保证徒弟在（不在则建并挂上；在则补一次挂接）
-                let master_res: anyhow::Result<u64> = (|| async {
+                let master_res: anyhow::Result<u64> = async {
                     if let Some(id) = p.master.as_deref().and_then(|m| id_by_name.get(m)) {
                         return Ok(*id);
                     }
@@ -3280,14 +3281,11 @@ pub async fn master_batch(
                     .execute(pool)
                     .await?;
                     Ok(r.last_insert_id())
-                })()
+                }
                 .await;
                 let mid = match master_res {
                     Ok(id) => {
-                        if id_by_name
-                            .get(p.master.as_deref().unwrap_or_default())
-                            .is_none()
-                        {
+                        if !id_by_name.contains_key(p.master.as_deref().unwrap_or_default()) {
                             created += 1;
                             name_of.insert(id, p.master.clone().unwrap_or_default());
                             gen_of.insert(id, None);
@@ -3307,7 +3305,7 @@ pub async fn master_batch(
                 };
                 let gen = gen_of.get(&mid).copied().flatten().map(|g| g + 1);
                 // 徒弟：在册 → 补一次 UPDATE；不在册 → INSERT
-                let me_known = p.person_known && id_by_name.get(&p.name).is_some();
+                let me_known = p.person_known && id_by_name.contains_key(&p.name);
                 let res = if me_known {
                     let pid = id_by_name[&p.name];
                     sqlx::query(

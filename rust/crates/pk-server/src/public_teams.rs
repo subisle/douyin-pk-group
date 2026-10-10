@@ -783,7 +783,7 @@ pub async fn yearly(
 }
 
 async fn period_public(st: &Arc<AppState>, team: &str, q: &ListQuery, is_month: bool) -> ApiResult {
-    let s = PublicSettings::load(&st).await;
+    let s = PublicSettings::load(st).await;
     if !s.team_enabled(team) {
         return Ok(Json(json!({ "published": false })));
     }
@@ -1489,14 +1489,15 @@ pub async fn my(
     /* 数值显隐（与每日报告同一套后台开关）：关「音浪数值」→ wave=null；
     关「直播时长」→ minutes=null。名次/人数不是数值，照常下发。 */
     let mut daily = daily;
-    for v in [&mut daily, &mut monthly, &mut yearly] {
-        if let Some(v) = v {
-            if !s.wave {
-                v["wave"] = Value::Null;
-            }
-            if !s.duration {
-                v["minutes"] = Value::Null;
-            }
+    for v in [&mut daily, &mut monthly, &mut yearly]
+        .into_iter()
+        .flatten()
+    {
+        if !s.wave {
+            v["wave"] = Value::Null;
+        }
+        if !s.duration {
+            v["minutes"] = Value::Null;
         }
     }
     if !s.wave {
@@ -1753,7 +1754,7 @@ pub async fn my_claim_post(
 async fn person_name_of(st: &AppState, person_id: u64) -> anyhow::Result<String> {
     let sql = "SELECT name FROM person WHERE id = ? AND deleted_at IS NULL";
     let rows =
-        mysql::query_with_binds(&st.pools, &sid(&st), sql, |q| q.bind(person_id as i64)).await?;
+        mysql::query_with_binds(&st.pools, &sid(st), sql, |q| q.bind(person_id as i64)).await?;
     Ok(rows
         .first()
         .and_then(|r| r.try_get::<String, _>("name").ok())

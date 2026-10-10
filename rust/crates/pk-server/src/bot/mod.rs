@@ -95,7 +95,6 @@ impl BotConfig {
     /// 凭据齐即可连接：管理员 openid 要先收到消息才能发现（日志里抓），
     /// 所以白名单不作为连接前提，只作为命令放行条件。
     // （has_qq 已被 resolve_qq_credentials 取代：QQ 凭据现在支持后台页面保存）
-
     pub fn has_wechat(&self) -> bool {
         !self.wechat_admins.is_empty()
     }
@@ -400,10 +399,10 @@ pub async fn qq_save_credentials(
         return Err(anyhow::anyhow!("appId / appSecret 至少填一个").into());
     }
     if let Some(id) = &app_id {
-        crate::store::config_set(&st, "bot_qq_app_id", &id).await;
+        crate::store::config_set(&st, "bot_qq_app_id", id).await;
     }
     if let Some(sec) = &app_secret {
-        crate::store::config_set(&st, "bot_qq_app_secret", &sec).await;
+        crate::store::config_set(&st, "bot_qq_app_secret", sec).await;
     }
     let (id, secret, source) = resolve_qq_credentials(&st).await;
     if id.is_empty() || secret.is_empty() {
@@ -778,7 +777,7 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
         _ => &cfg.wechat_admins,
     };
     let is_admin = env_admins.contains(&inbound.conversation_id)
-        || crate::store::session_is_admin(st, &inbound.channel, &inbound.conversation_id).await;
+        || crate::store::session_is_admin(st, inbound.channel, &inbound.conversation_id).await;
     if !is_admin {
         tracing::warn!(
             channel = inbound.channel,

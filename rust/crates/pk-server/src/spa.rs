@@ -139,7 +139,7 @@ pub async fn handler(
 }
 
 /// 按 dist 解析：真实文件 → 静态资源 404 → index.html 回退
-async fn serve_dist(dist_dir: &PathBuf, index: Index, path: &str) -> Response {
+async fn serve_dist(dist_dir: &Path, index: Index, path: &str) -> Response {
     // 真实文件
     if let Some(file) = resolve(dist_dir, path) {
         if let Ok(bytes) = tokio::fs::read(&file).await {

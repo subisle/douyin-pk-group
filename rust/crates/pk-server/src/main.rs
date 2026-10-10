@@ -163,7 +163,8 @@ async fn main() -> anyhow::Result<()> {
     QQ：AppID/Secret 齐 → 自动连 gateway；微信：SQLite 有登录 token → 自动恢复轮询，
     无 token 停在等待扫码（不影响启动）。失败只告警，服务照常起。 */
     let bot_manager = Arc::new(bot::BotManager::from_env(st.clone()).await);
-    if let Some(qq) = bot_manager.qq.read().expect("qq 锁 poisoned").clone() {
+    let qq = bot_manager.qq.read().expect("qq 锁 poisoned").clone();
+    if let Some(qq) = qq {
         if let Err(e) = Arc::clone(&qq).start().await {
             tracing::warn!(error = %e, "QQ 机器人自动启动失败");
         }
