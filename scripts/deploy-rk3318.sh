@@ -74,6 +74,8 @@ sshpass -p "$PASS" ssh -o StrictHostKeyChecking=accept-new "root@$HOST" "
   rm -f /tmp/pk-server-arm64.tar.gz /tmp/douyin-server-arm64.tar.gz
   cd '$DIR'
   docker compose up -d --force-recreate
+  echo '==> 数据库迁移（douyin_migrator，按 schema_migrations 幂等；失败即中断）'
+  docker compose exec -T pk-server /usr/local/bin/pk-server migrate
   sleep 3
   if ! curl -fsS -o /dev/null 'http://127.0.0.1:8080/dy/api/health'; then
     echo '    douyin-server 健康检查失败，请检查 .env 里的数据库密码'

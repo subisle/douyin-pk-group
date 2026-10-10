@@ -153,7 +153,7 @@ PK147_PASS='<root 口令>' scripts/deploy-147.sh
 一条命令发布到 rk3318（备用）：
 
 ```bash
-scripts/deploy-rk3318.sh     # 等 CI → 下载 arm64 镜像包 → docker load → compose up → 只读自检
+scripts/deploy-rk3318.sh     # 等 CI → 下载 arm64 镜像包 → docker load → compose up → pk-server migrate → 只读自检
 ```
 
 通用 compose（`deploy/docker-compose.yml`）：
@@ -302,15 +302,19 @@ person 的行先合并再入库**（`admin::merge_rows_by_person`），合并口
   db-ip-demo 等）**全部并行查询、投票合并**：任一来源识别出河南 / 安徽即放行；都没识别出来
   或全部失败一律拒绝（**fail-closed**，外部接口集体故障时不放水）。
 - **缓存与表**：归属结果落 MySQL `ip_geo_cache`，**缓存 7 天**；表结构与日志表同属迁移
-  `011_ip_geo`（部署前跑一次 `pk-server migrate`）。loopback / 私网 IP 不发外部查询，记为「内网」。
+  `011_ip_geo`（147 发布脚本会自动跑 `pk-server migrate`，rk3318 需手动）。loopback / 私网 IP
+  不发外部查询，记为「内网」。
 - **拦截位置**：中间件 `ip_gate_mw` 挂在 `/api/public/*` 这一层；**HTML 页面本身不拦** —— 外省
   访客页面照常打开，第一个数据接口返回 403 `{"error":"当前地区暂不支持访问"}`，前端整页显示
   该提示（**不是掉登录**，不清 token、不弹登录门）。
-- **访问日志**（表 `access_logs`）：`kind=api` 同 IP + 同路径 **5 分钟去重**，`kind=login` 记每次
-  登录尝试（带账号与成败）；登录了带账号（token 解析），没登录只记 IP；**外省被拒的访问也入库**。
+- **访问日志**（表 `access_logs`）：`kind=api` 同 IP + 同路径 **5 分钟对齐桶去重**（非滑动窗口），
+  `kind=login` 记每次登录尝试（带账号与成败）；登录了带账号（token 解析），没登录只记 IP；
+  **外省被拒的访问也入库**。
 - **后台**：「访客日志」页 `/admin/visits`（导航同名），接口 `GET /api/admin/visits`
   （`limit` / `q` / `kind` / `blocked`，返回 `items` + 今日访问 / 独立 IP / 放行 / 拦截 / 登录）。
 - **本地开发**：环境变量 `IP_GATE_DISABLED=1` 关闭地区拦截（**访问日志照记**）；生产留空。
+- **本地自检**：本机不在豫 / 皖时，跑 `scripts/uicheck-register.mjs` 等直连 `/api/public/*`
+  的自检要用 `IP_GATE_DISABLED=1` 的服务，否则接口 403 会让自检误判。
 
 ## 已知事项
 
