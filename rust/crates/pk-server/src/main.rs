@@ -472,7 +472,9 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/api/admin/collect/status", get(admin::collect_status))
         // 访客日志（2026-10-10）：展示端访问 / 登录记录，含外省被拒的
-        .route("/api/admin/visits", get(ipinfo::admin_visits));
+        .route("/api/admin/visits", get(ipinfo::admin_visits))
+        // IP 归属地现场查询（2026-10-11，诊断用）：走 IP_QUERY_SOURCES 集，绕过 ip_geo_cache
+        .route("/api/admin/ip-lookup", get(ipinfo::admin_ip_lookup));
 
     // 鉴权：ADMIN_PASSWORD 配了就拦，没配等于本地开发全放行。
     // 公开端点、登录、探活接口在 auth.rs 的白名单里。

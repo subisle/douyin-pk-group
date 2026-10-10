@@ -292,15 +292,23 @@ person 的行先合并再入库**（`admin::merge_rows_by_person`），合并口
   几个文件都到齐，避免推半成品榜单。后台「机器人」页有推送队列表格和「立即推送」按钮。
 - 两个开关都关着的人**不推**。
 
+
+| 角色 | 可用命令 |
+| --- | --- |
+| 普通用户（微信私聊已完成推送绑定） | `每日报告`（daily）/ `个人报告`（me、my）/ `暂停接收每日推送`（暂停推送、pause）/ `开启接收每日推送`（开启推送、resume）/ `帮助`（help） |
+| 管理员（QQ 全部会话 + 微信白名单 / 会话提权） | 以上 5 条 + 状态 / 分组 / 总榜 / 排行 [N] / 查询 <主播名> / 导出 今日\|YYYY-MM-DD\|总榜 / 日报 [男团\|女团] [日期] / 缺数据 / 导入（含黏住日期、CSV 附件） |
+
+未绑定的微信私聊完全静默；普通用户发管理员命令会被拒绝并提示发「帮助」。完整口径（判定顺序、
+
 ## 访客地域门禁 + 访问日志（2026-10-10）
 
 - **规则**：展示端只对**河南 / 安徽**访客开放，判定全在后端做（**不用 Cloudflare 规则**）；
   本地先开发测试，改完再部署生产 147（`pk.subisle.com`）。
-- **数据源与判定**：用 ihmily/ip-info-api（<https://github.com/ihmily/ip-info-api>）收集的免费
-  接口（pconline(GBK) / baidu / ip9 / ip-api / ip.sb / geojs / ipwhois / db-ip / ipinfo / ipquery /
-  ipdata.info / ip2location / freeipapi / nc.gy / ipwtf / realip.cc / geolocation-db / ipapi.co /
-  db-ip-demo 等）**全部并行查询、投票合并**：任一来源识别出河南 / 安徽即放行；都没识别出来
-  或全部失败一律拒绝（**fail-closed**，外部接口集体故障时不放水）。
+- **数据源与判定**：来源是 ihmily/ip-info-api（<https://github.com/ihmily/ip-info-api>）收集的
+  免费接口，共 19 个可选；**默认各只打 3 个** —— 门禁用 pconline / baidu / ip9（`IP_GATE_SOURCES`
+  可配），后台 IP 查询用 ip.sb / ip2location / ipwhois（`IP_QUERY_SOURCES` 可配；每个列表除默认 3 个
+  外还有 16 个仍可选）。逗号分隔、未知名忽略、留空回默认；选中的源**并行查询、投票合并**：
+  任一来源识别出河南 / 安徽即放行；都没识别出来或全部失败一律拒绝（**fail-closed**）。
 - **缓存与表**：归属结果落 MySQL `ip_geo_cache`，**缓存 7 天**；表结构与日志表同属迁移
   `011_ip_geo`（147 发布脚本会自动跑 `pk-server migrate`，rk3318 需手动）。loopback / 私网 IP
   不发外部查询，记为「内网」且**默认拒绝**（本机调试用 `IP_GATE_DISABLED=1`）。
@@ -311,7 +319,8 @@ person 的行先合并再入库**（`admin::merge_rows_by_person`），合并口
   `kind=login` 记每次登录尝试（带账号与成败）；登录了带账号（token 解析），没登录只记 IP；
   **外省被拒的访问也入库**。
 - **后台**：「访客日志」页 `/admin/visits`（导航同名），接口 `GET /api/admin/visits`
-  （`limit` / `q` / `kind` / `blocked`，返回 `items` + 今日访问 / 独立 IP / 放行 / 拦截 / 登录）。
+  （`limit` / `q` / `kind` / `blocked`，返回 `items` + 今日访问 / 独立 IP / 放行 / 拦截 / 登录）；
+  同页新增「IP 查询」面板：`GET /api/admin/ip-lookup?ip=…` 手动查归属地（不读不写缓存）。
 - **本地开发**：环境变量 `IP_GATE_DISABLED=1` 关闭地区拦截（**访问日志照记**）；生产留空。
 - **本地自检**：本机不在豫 / 皖时，跑 `scripts/uicheck-register.mjs` 等直连 `/api/public/*`
   的自检要用 `IP_GATE_DISABLED=1` 的服务，否则接口 403 会让自检误判。

@@ -8,6 +8,13 @@
 //!
 //! 访问日志（access_logs）：页面访问记 kind=api（同 IP + 同路径 5 分钟去重），
 //! 登录尝试记 kind=login（带账号与成败）；外省被拒的访问同样入库，后台「访客日志」页可查。
+//!
+//! 数据源集合可配置（逗号分隔，忽略未知名字，解析后为空回默认）：
+//! - `IP_GATE_SOURCES`：门禁（访客检查）用源，默认 pconline,baidu,ip9（中文源）；
+//! - `IP_QUERY_SOURCES`：IP 查询用源，默认 ip.sb,ip2location,ipwhois（ip.sb / ip2location
+//!   实测 ~1s 稳定，ipinfo 的 demo 端点 6s 超时不稳定，不作为默认）。
+//! 合法名字即下面 `ALL_SOURCE_NAMES` 的 19 个；`GET /api/admin/ip-lookup` 诊断接口
+//! 走 Query 集且不读不写 ip_geo_cache。
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -50,6 +57,101 @@ pub fn gate_disabled() -> bool {
         std::env::var("IP_GATE_DISABLED").as_deref(),
         Ok("1") | Ok("true") | Ok("yes")
     )
+}
+
+/* ------------------------------ 数据源集合 ------------------------------ */
+
+/// 19 个数据源的规范名（顺序 = 源表顺序；后台诊断接口按这个顺序稳定输出）。
+const ALL_SOURCE_NAMES: [&str; 19] = [
+    "pconline",
+    "baidu",
+    "ip9",
+    "ip-api",
+    "ip.sb",
+    "geojs",
+    "ipwhois",
+    "db-ip",
+    "ipinfo",
+    "ipquery",
+    "ipdata.info",
+    "ip2location",
+    "freeipapi",
+    "nc.gy",
+    "ipwtf",
+    "realip.cc",
+    "geolocation-db",
+    "ipapi.co",
+    "db-ip-demo",
+];
+
+/// 数据源用途：Gate=访客门禁检查，Query=IP 查询（后台诊断）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SourceSet {
+    Gate,
+    Query,
+}
+
+impl SourceSet {
+    fn env_key(self) -> &'static str {
+        match self {
+            SourceSet::Gate => "IP_GATE_SOURCES",
+            SourceSet::Query => "IP_QUERY_SOURCES",
+        }
+    }
+
+    fn default_names(self) -> &'static [&'static str] {
+        match self {
+            /* 门禁默认全用中文源：省份 / 城市 / 运营商准，判定不中英混排。
+            只放行河南 / 安徽，3 个中文源足够且省外部配额。 */
+            SourceSet::Gate => &["pconline", "baidu", "ip9"],
+            /* IP 查询默认三源：实测 ip.sb ~1.0-1.2s、ip2location ~1.02s、ipwhois ~1.0s；
+            ipinfo 的 demo 端点 6s 超时不稳，弃用。 */
+            SourceSet::Query => &["ip.sb", "ip2location", "ipwhois"],
+        }
+    }
+
+    /// 打印 / 排查用的短名
+    pub fn label(self) -> &'static str {
+        match self {
+            SourceSet::Gate => "gate",
+            SourceSet::Query => "query",
+        }
+    }
+}
+
+/// 解析逗号分隔的数据源名：去空白、忽略未知名字、去重（保留输入顺序）；
+/// 解析后为空（没配 / 空串 / 全是未知名字）回退到该集合的默认源。
+fn parse_source_names(raw: Option<&str>, defaults: &[&'static str]) -> Vec<&'static str> {
+    let mut out: Vec<&'static str> = Vec::new();
+    for part in raw.unwrap_or_default().split(',') {
+        let name = part.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let canon = ALL_SOURCE_NAMES
+            .iter()
+            .copied()
+            .find(|n| n.eq_ignore_ascii_case(name));
+        let Some(canon) = canon else { continue };
+        if !out.contains(&canon) {
+            out.push(canon);
+        }
+    }
+    if out.is_empty() {
+        defaults.to_vec()
+    } else {
+        out
+    }
+}
+
+/// 纯函数版：显式传入原始配置串（单测用，不读环境）。
+fn source_names_for(set: SourceSet, raw: Option<&str>) -> Vec<&'static str> {
+    parse_source_names(raw, set.default_names())
+}
+
+/// 当前配置下某个用途实际要用的源（读环境变量，未配置 / 全未知名字走默认）。
+pub fn source_names(set: SourceSet) -> Vec<&'static str> {
+    source_names_for(set, std::env::var(set.env_key()).ok().as_deref())
 }
 
 /* ------------------------------- 请求 IP ------------------------------- */
@@ -174,6 +276,39 @@ struct Source {
     parse: fn(&Value) -> RawGeo,
 }
 
+/// 并行查询一批源（3s 超时）：返回 (源名, 结果)；HTTP 失败 / 解析失败 = None。
+/// 门禁（geo_for_ip）与后台诊断接口（admin_ip_lookup）共用，保证两边口径一致。
+async fn query_sources(sources: Vec<Source>) -> Vec<(&'static str, Option<RawGeo>)> {
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(LOOKUP_TIMEOUT)
+        .user_agent("pk-server-ip-gate/1.0 (+https://pk.subisle.com)")
+        .build()
+    else {
+        return sources.into_iter().map(|s| (s.name, None)).collect();
+    };
+    let futures = sources.into_iter().map(|s| {
+        let client = client.clone();
+        async move { (s.name, fetch_source(&client, &s).await) }
+    });
+    join_all(futures).await
+}
+
+/// 单源取数：HTTP 成功 + JSON 可解析才算拿到结果（省份可能为空，交给 merge 判定）。
+async fn fetch_source(client: &reqwest::Client, s: &Source) -> Option<RawGeo> {
+    let resp = client.get(&s.url).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let bytes = resp.bytes().await.ok()?;
+    let text = if s.gbk {
+        encoding_rs::GBK.decode(&bytes).0.into_owned()
+    } else {
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
+    let json: Value = serde_json::from_str(text.trim()).ok()?;
+    Some((s.parse)(&json))
+}
+
 /// 缓存放 MySQL：查过的 IP 7 天内不再打外部接口
 pub async fn geo_for_ip(st: &ArcState, ip: &str) -> anyhow::Result<IpGeo> {
     let parsed: IpAddr = ip.trim().parse()?;
@@ -213,30 +348,11 @@ pub async fn geo_for_ip(st: &ArcState, ip: &str) -> anyhow::Result<IpGeo> {
         }
     }
 
-    let client = reqwest::Client::builder()
-        .timeout(LOOKUP_TIMEOUT)
-        .user_agent("pk-server-ip-gate/1.0 (+https://pk.subisle.com)")
-        .build()?;
-    let sources = sources_for(&parsed.to_string());
-    let futures = sources.into_iter().map(|s| {
-        let client = client.clone();
-        async move {
-            let resp = client.get(&s.url).send().await.ok()?;
-            if !resp.status().is_success() {
-                return None;
-            }
-            let bytes = resp.bytes().await.ok()?;
-            let text = if s.gbk {
-                encoding_rs::GBK.decode(&bytes).0.into_owned()
-            } else {
-                String::from_utf8_lossy(&bytes).into_owned()
-            };
-            let json: Value = serde_json::from_str(text.trim()).ok()?;
-            Some((s.name, (s.parse)(&json)))
-        }
-    });
-    let results = join_all(futures).await;
-    let raws: Vec<(&str, RawGeo)> = results.into_iter().flatten().collect();
+    let probes = query_sources(sources_for(&parsed.to_string(), SourceSet::Gate)).await;
+    let raws: Vec<(&str, RawGeo)> = probes
+        .into_iter()
+        .filter_map(|(name, geo)| geo.map(|g| (name, g)))
+        .collect();
     let geo = merge(&raws);
     if geo.province.is_empty() {
         anyhow::bail!("所有 IP 归属接口都没返回省份");
@@ -260,9 +376,9 @@ pub async fn geo_for_ip(st: &ArcState, ip: &str) -> anyhow::Result<IpGeo> {
     Ok(geo)
 }
 
-/// 全部数据源（ihmily/ip-info-api 里支持「指定 IP 查询」的免费接口）。
+/// 全部 19 个数据源（ihmily/ip-info-api 里支持「指定 IP 查询」的免费接口），顺序固定。
 /// 中文源放前面：合并时城市 / 运营商优先取中文源，前端展示不中英混排。
-fn sources_for(ip: &str) -> Vec<Source> {
+fn all_sources(ip: &str) -> Vec<Source> {
     let s = |name: &'static str, url: String, parse: fn(&Value) -> RawGeo| Source {
         name,
         url,
@@ -355,6 +471,19 @@ fn sources_for(ip: &str) -> Vec<Source> {
             parse_dbip_demo,
         ),
     ]
+}
+
+/// 按名字过滤源表（保留源表顺序；未知名字自然被忽略）。
+fn sources_named(ip: &str, names: &[&str]) -> Vec<Source> {
+    all_sources(ip)
+        .into_iter()
+        .filter(|s| names.contains(&s.name))
+        .collect()
+}
+
+/// 当前配置下某个用途实际要用的源（Gate=门禁 / Query=IP 查询，见 SourceSet）。
+fn sources_for(ip: &str, set: SourceSet) -> Vec<Source> {
+    sources_named(ip, &source_names(set))
 }
 
 /// 合并：省份投票（票数最多者展示；并列优先河南 / 安徽），
@@ -957,6 +1086,75 @@ pub async fn admin_visits(
     })))
 }
 
+#[derive(serde::Deserialize)]
+pub struct IpLookupQuery {
+    ip: Option<String>,
+}
+
+/// `GET /api/admin/ip-lookup?ip=1.2.3.4` —— IP 归属地现场查询（诊断用）：
+/// 走 `IP_QUERY_SOURCES` 集，实时打外部接口，**不读也不写** `ip_geo_cache`；
+/// 每个源的成败都返回（ok=false 时三字段空串），合并结论平铺在顶层
+/// （province / city / isp / source / allowed，判定口径与门禁完全一致）。
+/// 内网 IP 直接返回「内网」且不打外部接口。
+pub async fn admin_ip_lookup(
+    Query(q): Query<IpLookupQuery>,
+) -> Result<axum::Json<Value>, crate::routes::ApiError> {
+    let raw = q.ip.unwrap_or_default();
+    let parsed: IpAddr = raw
+        .trim()
+        .parse()
+        .map_err(|_| crate::routes::ApiError::bad_request("IP 格式不对"))?;
+    let ip = parsed.to_string();
+
+    if is_internal(&parsed) {
+        return Ok(axum::Json(serde_json::json!({
+            "ip": ip,
+            "province": "内网",
+            "city": "",
+            "isp": "",
+            "source": "local",
+            "allowed": false,
+            "sources": [],
+        })));
+    }
+
+    let probes = query_sources(sources_for(&ip, SourceSet::Query)).await;
+    let mut raws: Vec<(&str, RawGeo)> = Vec::new();
+    let mut sources = Vec::new();
+    for (name, geo) in probes {
+        match geo {
+            Some(g) if !g.province.trim().is_empty() || !g.city.trim().is_empty() => {
+                sources.push(serde_json::json!({
+                    "name": name,
+                    "ok": true,
+                    "province": g.province,
+                    "city": g.city,
+                    "isp": g.isp,
+                }));
+                raws.push((name, RawGeo::new(&g.province, &g.city, &g.isp)));
+            }
+            _ => sources.push(serde_json::json!({
+                "name": name,
+                "ok": false,
+                "province": "",
+                "city": "",
+                "isp": "",
+            })),
+        }
+    }
+
+    let merged = merge(&raws);
+    Ok(axum::Json(serde_json::json!({
+        "ip": ip,
+        "province": merged.province,
+        "city": merged.city,
+        "isp": merged.isp,
+        "source": merged.source,
+        "allowed": merged.allowed,
+        "sources": sources,
+    })))
+}
+
 /* ------------------------------- 工具 ------------------------------- */
 
 fn pack_ip(ip: IpAddr) -> Vec<u8> {
@@ -1100,6 +1298,69 @@ mod tests {
     }
 
     #[test]
+    fn source_sets_use_documented_defaults() {
+        for (set, want) in [
+            (SourceSet::Gate, vec!["pconline", "baidu", "ip9"]),
+            (SourceSet::Query, vec!["ip.sb", "ip2location", "ipwhois"]),
+        ] {
+            assert_eq!(source_names_for(set, None), want, "set = {set:?}");
+            assert_eq!(source_names_for(set, Some("")), want, "空串应回默认");
+            assert_eq!(source_names_for(set, Some("   ")), want);
+            assert_eq!(source_names_for(set, Some("foo,bar")), want, "全未知名字应回默认");
+        }
+    }
+
+    #[test]
+    fn source_names_trim_dedupe_and_ignore_unknown() {
+        assert_eq!(
+            source_names_for(SourceSet::Gate, Some("baidu, unknown ,ip9,baidu")),
+            vec!["baidu", "ip9"]
+        );
+        assert_eq!(
+            source_names_for(SourceSet::Query, Some("IP.SB, db-ip-demo, ip2location ")),
+            vec!["ip.sb", "db-ip-demo", "ip2location"],
+            "大小写不敏感，写回规范名，保留输入顺序"
+        );
+    }
+
+    #[test]
+    fn sources_named_filters_the_table_preserving_table_order() {
+        assert_eq!(ALL_SOURCE_NAMES.len(), 19);
+        assert_eq!(all_sources("1.2.3.4").len(), 19);
+        let got: Vec<&str> = sources_named("1.2.3.4", &["ipwhois", "ip.sb", "nope"])
+            .iter()
+            .map(|s| s.name)
+            .collect();
+        assert_eq!(got, vec!["ip.sb", "ipwhois"], "输出保持源表顺序");
+        let only = sources_named("1.2.3.4", &["pconline"]);
+        assert_eq!(only.len(), 1);
+        assert!(only[0].url.contains("1.2.3.4"));
+        assert!(only[0].gbk, "pconline 是 GBK 源，过滤后属性不能丢");
+    }
+
+    /// 内网 IP 不打外部接口（离线也应稳定返回「内网」）；非法 IP 在 Live 实测里校验 400 响应体。
+    #[tokio::test]
+    async fn ip_lookup_internal_short_circuits() {
+        let ok = match admin_ip_lookup(Query(IpLookupQuery {
+            ip: Some("127.0.0.1".into()),
+        }))
+        .await
+        {
+            Ok(v) => v,
+            Err(_) => panic!("内网 IP 应返回结果"),
+        };
+        assert_eq!(ok.0["province"], "内网");
+        assert_eq!(ok.0["allowed"], false);
+        assert_eq!(ok.0["sources"].as_array().map(Vec::len), Some(0));
+
+        let err = admin_ip_lookup(Query(IpLookupQuery {
+            ip: Some("abc".into()),
+        }))
+        .await;
+        assert!(err.is_err(), "非法 IP 应报错");
+    }
+
+    #[test]
     fn request_ip_prefers_forwarded_headers_only_from_internal() {
         use axum::http::HeaderMap;
         let mut h = HeaderMap::new();
@@ -1130,8 +1391,9 @@ mod tests {
     }
 
     /// 现场检查（默认跳过，会发真实网络请求）：对 `IPCHECK`（逗号分隔）里的每个 IP
-    /// 打全部 19 个数据源，逐条打印各源返回与合并结论——用来核对门禁判定与上游接口
-    /// 的真实结果是否一致（数据源 / 解析 / 合并都复用生产同一套代码）。
+    /// 逐源打印返回与合并结论——默认打 `IP_QUERY_SOURCES` 集（同后台 ip-lookup 接口），
+    /// `IPCHECK_ALL=1` 时打全部 19 个源。用来核对门禁判定与上游接口的真实结果是否一致
+    /// （数据源 / 解析 / 合并都复用生产同一套代码）。
     ///
     ///     IPCHECK=42.239.96.128,123.15.57.1 \
     ///       cargo test -p pk-server --lib -- --ignored --nocapture live_ip_lookup
@@ -1140,6 +1402,19 @@ mod tests {
     async fn live_ip_lookup() {
         let ips = std::env::var("IPCHECK")
             .unwrap_or_else(|_| "123.15.57.1,218.22.0.1,121.8.215.106".into());
+        let all = matches!(
+            std::env::var("IPCHECK_ALL").as_deref(),
+            Ok("1") | Ok("true") | Ok("yes")
+        );
+        if all {
+            println!("数据源集合：all（IPCHECK_ALL=1，全部 19 个源）");
+        } else {
+            println!(
+                "数据源集合：{}（{}）",
+                SourceSet::Query.label(),
+                source_names(SourceSet::Query).join(",")
+            );
+        }
         let client = reqwest::Client::builder()
             .timeout(LOOKUP_TIMEOUT)
             .user_agent("pk-server-ip-gate/1.0 (check)")
@@ -1148,7 +1423,12 @@ mod tests {
         for ip in ips.split(',').map(str::trim).filter(|s| !s.is_empty()) {
             let parsed: IpAddr = ip.parse().expect("IPCHECK 里必须是合法 IP");
             println!("\n==== {ip} ====");
-            let futures = sources_for(&parsed.to_string()).into_iter().map(|s| {
+            let sources = if all {
+                all_sources(&parsed.to_string())
+            } else {
+                sources_for(&parsed.to_string(), SourceSet::Query)
+            };
+            let futures = sources.into_iter().map(|s| {
                 let client = client.clone();
                 async move {
                     let result = match client.get(&s.url).send().await {
