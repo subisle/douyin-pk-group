@@ -1,7 +1,8 @@
 //! 机器人端到端集成测试：真实 AppState + 真库（需要 DB_LOCAL_* / DB_WRITER_* 环境变量）。
 //! 未配置数据库时自动跳过（本地单测不依赖库）。
 //!
-//! 覆盖：QQ 免管理员、微信内置口令提权/非管理员静默、帮助、状态、导入（带指定日期）、导出 CSV、排行、日报、缺数据。
+//! 覆盖：QQ 免管理员、微信内置口令提权/非管理员静默、帮助、状态、导入（带指定日期）、导出 CSV、排行、日报、缺数据、
+//! 已绑定普通用户权限矩阵（帮助只列 5 条 / 管理员命令与附件、日期被拒 / 推送开关只动 daily_report）。
 
 use std::sync::Arc;
 
@@ -168,6 +169,45 @@ async fn clean_date(st: &Arc<AppState>, date: &str) {
     }
 }
 
+/// 某业务日的 daily_metric 行数（权限用例断言「没落库」用）
+async fn metric_rows(pool: &sqlx::MySqlPool, date: &str) -> i64 {
+    sqlx::query(
+        "SELECT COUNT(*) AS n FROM daily_metric WHERE DATE_FORMAT(biz_date, '%Y-%m-%d') = ?",
+    )
+    .bind(date)
+    .map(|r: sqlx::mysql::MySqlRow| sqlx::Row::try_get::<i64, _>(&r, "n").unwrap_or(0))
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0)
+}
+
+/// 某业务日的 import_batch 行数（权限用例断言「没导入」用）
+async fn batch_rows(pool: &sqlx::MySqlPool, date: &str) -> i64 {
+    sqlx::query(
+        "SELECT COUNT(*) AS n FROM import_batch WHERE DATE_FORMAT(biz_date, '%Y-%m-%d') = ?",
+    )
+    .bind(date)
+    .map(|r: sqlx::mysql::MySqlRow| sqlx::Row::try_get::<i64, _>(&r, "n").unwrap_or(0))
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0)
+}
+
+/// push_bindings 的两个开关（(daily_report, notify_target)，i8 便于和 1/0 直接比）
+async fn push_flags(pool: &sqlx::MySqlPool, name: &str) -> (i8, i8) {
+    sqlx::query("SELECT daily_report, notify_target FROM push_bindings WHERE name = ?")
+        .bind(name)
+        .map(|r: sqlx::mysql::MySqlRow| {
+            (
+                sqlx::Row::try_get::<i8, _>(&r, "daily_report").unwrap_or(-1),
+                sqlx::Row::try_get::<i8, _>(&r, "notify_target").unwrap_or(-1),
+            )
+        })
+        .fetch_one(pool)
+        .await
+        .expect("应能查到 push_bindings 行")
+}
+
 /// 私聊发 CSV 文件 + 文件名带日期与团别 → 直接入库，不用再回一句话确认。
 /// 用独立的 2019-03-13 当业务日期（不碰真实数据），开跑先清干净 → 可反复跑。
 #[tokio::test]
@@ -324,6 +364,208 @@ async fn qq_does_not_require_admin_and_wechat_stranger_is_ignored() {
             .await
             .is_none()
     );
+}
+
+/// 2026-10-10 权限分层 e2e：已绑定的微信私聊 = 普通用户（docs/09 §2 权限矩阵）。
+/// 直写真库 `push_bindings` 构造「已绑定」（唯一 name / conversation_id，不走绑定流程），
+/// 覆盖：未绑定静默 → 帮助只列 5 条 → 管理员命令（中文名 / 英文别名大小写 / 导入命令）
+/// 一律被拒且不落库 → 纯日期与 CSV 附件只回「管理员功能」→ 暂停 / 开启只动 daily_report。
+/// 收尾清理自己写的 push_bindings / bot_sessions / 业务数据行，可反复跑。
+#[tokio::test]
+async fn wechat_bound_user_permission_matrix() {
+    let Some(st) = setup().await else { return };
+    let Some(pool) = st.writer.clone() else {
+        eprintln!("跳过：未配置写池（此用例需要真库写权限）");
+        return;
+    };
+    let cfg = cfg();
+    let stamp = chrono::Utc::now().timestamp_millis();
+    let name = format!("__e2e_user_{stamp}");
+    let conversation_id = format!("WECHAT-USER-{stamp}");
+    let date_attach = "2019-02-25";
+    let date_text = "2019-02-26";
+    clean_date(&st, date_attach).await;
+    clean_date(&st, date_text).await;
+
+    let conv = conversation_id.clone();
+    let user_msg = move |text: &str| Inbound {
+        channel: "weixin",
+        conversation_id: conv.clone(),
+        is_group: false,
+        text: text.into(),
+        attachments: vec![],
+    };
+
+    // ① 未绑定：连「帮助」都完全静默（角色只由 push_bindings 命中决定）
+    assert!(
+        bot::BotRouter::handle(&st, &cfg, user_msg("帮助"))
+            .await
+            .is_none(),
+        "未绑定的微信私聊「帮助」应静默"
+    );
+
+    // ② 构造绑定：notify_target 先开着，用来验证「暂停」不会把追分提醒一起清零
+    sqlx::query(
+        "INSERT INTO push_bindings
+           (name, team, person_id, conversation_id, notify_target, daily_report, updated_at)
+         VALUES (?, 'male', 0, ?, 1, 1, ?)",
+    )
+    .bind(&name)
+    .bind(&conversation_id)
+    .bind(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string())
+    .execute(&pool)
+    .await
+    .expect("写入测试绑定行");
+
+    // ③ 帮助：只列普通用户 5 条，不出现管理员命令名（独立断言，不依赖正面文案）
+    let help = bot::BotRouter::handle(&st, &cfg, user_msg("帮助"))
+        .await
+        .expect("已绑定用户发「帮助」应有回复");
+    assert!(help.text.contains("可用命令"), "实际：{}", help.text);
+    assert!(help.text.contains("每日报告"), "实际：{}", help.text);
+    assert!(
+        !help.text.contains("排行"),
+        "普通用户帮助不该出现「排行」：{}",
+        help.text
+    );
+    assert!(
+        !help.text.contains("导入"),
+        "普通用户帮助不该出现「导入」：{}",
+        help.text
+    );
+
+    // ④ 管理员命令：中文名 / 英文别名大小写 / 文本导入命令 → 拒绝，且拒绝不执行
+    for (text, marker) in [
+        ("状态", "「状态」"),
+        ("RANK", "「排行」"),
+        ("导入 男团 2019-02-26\n南方楠 55555", "「导入」"),
+    ] {
+        let out = bot::BotRouter::handle(&st, &cfg, user_msg(text))
+            .await
+            .unwrap_or_else(|| panic!("「{text}」应有拒绝回复"));
+        assert!(
+            out.text.contains("管理员命令"),
+            "「{text}」实际：{}",
+            out.text
+        );
+        assert!(
+            out.text.contains("没有权限"),
+            "「{text}」实际：{}",
+            out.text
+        );
+        assert!(out.text.contains(marker), "「{text}」实际：{}", out.text);
+    }
+    assert_eq!(
+        batch_rows(&pool, date_text).await,
+        0,
+        "被拒的文本导入不能产生 import_batch"
+    );
+    assert_eq!(
+        metric_rows(&pool, date_text).await,
+        0,
+        "被拒的文本导入不能落 daily_metric"
+    );
+
+    // ⑤ 纯日期黏住（如「10.1」）是管理员流程：只回提示，不设置业务日期
+    let date_msg = bot::BotRouter::handle(&st, &cfg, user_msg("10.1"))
+        .await
+        .expect("纯日期应回管理员功能提示");
+    assert!(
+        date_msg.text.contains("管理员功能"),
+        "实际：{}",
+        date_msg.text
+    );
+    assert!(
+        date_msg.text.contains("没有权限"),
+        "实际：{}",
+        date_msg.text
+    );
+
+    // ⑥ CSV 附件：提示管理员功能，不下载、不导入（附件直链可访问，导入没发生才算过）
+    let Some(url) = serve_text("南方楠,55555\n").await else {
+        return;
+    };
+    let attach = Inbound {
+        channel: "weixin",
+        conversation_id: conversation_id.clone(),
+        is_group: false,
+        text: String::new(),
+        attachments: vec![bot::Attachment {
+            url,
+            file_name: "2019-02-25-男团.csv".into(),
+        }],
+    };
+    let attach_out = bot::BotRouter::handle(&st, &cfg, attach)
+        .await
+        .expect("普通用户发附件应回管理员功能提示");
+    assert!(
+        attach_out.text.contains("管理员功能"),
+        "实际：{}",
+        attach_out.text
+    );
+    assert_eq!(
+        batch_rows(&pool, date_attach).await,
+        0,
+        "普通用户的附件不能被导入"
+    );
+    assert_eq!(
+        metric_rows(&pool, date_attach).await,
+        0,
+        "普通用户的附件不能落 daily_metric"
+    );
+
+    // ⑦ 暂停 / 开启接收每日推送：只动 daily_report，notify_target 原值保持
+    let pause = bot::BotRouter::handle(&st, &cfg, user_msg("暂停接收每日推送"))
+        .await
+        .expect("暂停应有回复");
+    assert!(pause.text.contains("已暂停"), "实际：{}", pause.text);
+    assert_eq!(
+        push_flags(&pool, &name).await,
+        (0, 1),
+        "暂停只关 daily_report，不能连带清零 notify_target"
+    );
+
+    let resume = bot::BotRouter::handle(&st, &cfg, user_msg("开启接收每日推送"))
+        .await
+        .expect("开启应有回复");
+    assert!(resume.text.contains("已开启"), "实际：{}", resume.text);
+    assert_eq!(
+        push_flags(&pool, &name).await,
+        (1, 1),
+        "开启恢复 daily_report，notify_target 仍不受影响"
+    );
+
+    // ⑧ 报告类命令可用：数据口径不断言（测试库可能没有数据），
+    //    只要求回复非空且不是权限 / 未知命令话术
+    for text in ["每日报告", "个人报告"] {
+        let out = bot::BotRouter::handle(&st, &cfg, user_msg(text))
+            .await
+            .unwrap_or_else(|| panic!("「{text}」应有回复"));
+        assert!(!out.text.is_empty(), "「{text}」回复不能为空");
+        assert!(
+            !out.text.contains("没有权限"),
+            "「{text}」不该被拒：{}",
+            out.text
+        );
+        assert!(
+            !out.text.contains("没认出"),
+            "「{text}」不该是未知命令：{}",
+            out.text
+        );
+    }
+
+    // 收尾：清掉本用例写的业务数据 / 绑定行 / 会话登记
+    clean_date(&st, date_attach).await;
+    clean_date(&st, date_text).await;
+    let _ = sqlx::query("DELETE FROM push_bindings WHERE name = ?")
+        .bind(&name)
+        .execute(&pool)
+        .await;
+    let _ =
+        sqlx::query("DELETE FROM bot_sessions WHERE channel = 'weixin' AND conversation_id = ?")
+            .bind(&conversation_id)
+            .execute(&pool)
+            .await;
 }
 
 #[tokio::test]

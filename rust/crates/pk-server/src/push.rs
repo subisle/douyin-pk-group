@@ -257,7 +257,7 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
             if last == date {
                 tracing::debug!(account = %b.name, date = %date, "每日报告同日已推过，跳过");
             } else {
-                let text = report_text(team, date, &rank_items, b.person_id);
+                let text = daily_report_text(team, date, &rank_items, b.person_id);
                 tracing::info!(account = %b.name, text = %text.replace('\n', " | "), "推送·每日报告");
                 match wx.send_proactive(&b.conversation_id, &text).await {
                     Ok(()) => {
@@ -341,7 +341,7 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
 
 /// 本月累计音浪：person_id → wave（只算在册且对外可见的人，与榜单口径一致）
 /// P1-7：只聚合可信行（wave_reliable=1）。
-async fn month_wave_map(st: &AppState, team: &str, month: &str) -> HashMap<u64, i64> {
+pub(crate) async fn month_wave_map(st: &AppState, team: &str, month: &str) -> HashMap<u64, i64> {
     let sql = "SELECT p.id AS person_id, CAST(COALESCE(SUM(d.wave), 0) AS SIGNED) AS wave \
           FROM person p \
           LEFT JOIN daily_metric d ON d.person_id = p.id \
@@ -378,7 +378,11 @@ async fn month_wave_map(st: &AppState, team: &str, month: &str) -> HashMap<u64, 
 /// 本月团内排名（(person_id, 名字, 音浪)，按音浪降序）。追名次目标用。
 /// 口径与月榜一致：在册 + 未离团 + 不隐藏；本月完全没有数据的不进榜。
 /// P1-7：只聚合可信行（wave_reliable=1）。P1-6：日期参数化（不再内联）。
-async fn month_rank_list(st: &AppState, team: &str, month: &str) -> Vec<(u64, String, i64)> {
+pub(crate) async fn month_rank_list(
+    st: &AppState,
+    team: &str,
+    month: &str,
+) -> Vec<(u64, String, i64)> {
     let sql = "SELECT p.id AS person_id, p.name, CAST(COALESCE(SUM(d.wave), 0) AS SIGNED) AS wave \
          FROM person p \
          JOIN daily_metric d ON d.person_id = p.id \
@@ -419,7 +423,7 @@ async fn month_rank_list(st: &AppState, team: &str, month: &str) -> Vec<(u64, St
 /// 在册 + 未离团 + 不隐藏（hide_in_daily_report=0），当日音浪低于
 /// [`crate::dialect::NOT_LIVE_WAVE_THRESHOLD`]（2）视为未开播（不计入榜）。
 /// P1-7：只聚合可信行（wave_reliable=1）。P1-6：日期参数化（不再内联 SQL）。
-async fn daily_rank(st: &AppState, team: &str, date: &str) -> Vec<(u64, String, i64)> {
+pub(crate) async fn daily_rank(st: &AppState, team: &str, date: &str) -> Vec<(u64, String, i64)> {
     let sql = "SELECT p.id AS person_id, p.name, CAST(COALESCE(SUM(d.wave), 0) AS SIGNED) AS wave \
          FROM person p \
          JOIN daily_metric d ON d.person_id = p.id \
@@ -466,7 +470,7 @@ async fn daily_rank(st: &AppState, team: &str, date: &str) -> Vec<(u64, String, 
 ///   - `label` 目标名（「本月第 3 名」/「本月目标 50 万」/ 主播名）
 ///   - `detail` 我的当前值（「你第 5 名」/「你 30 万」/「你 30 万 / TA 40 万」）
 ///   - `gap_text` 差距的人话（「2 名」/「20 万」/「本月还没开播」）
-fn eval_target(
+pub(crate) fn eval_target(
     t: &crate::store::PushTarget,
     my: i64,
     rival: i64,
@@ -513,7 +517,12 @@ fn eval_target(
 }
 
 /// 每日报告文案：TOP10 + 我的名次
-fn report_text(team: &str, date: &str, items: &[(u64, String, i64)], me: u64) -> String {
+pub(crate) fn daily_report_text(
+    team: &str,
+    date: &str,
+    items: &[(u64, String, i64)],
+    me: u64,
+) -> String {
     let label = if team == "female" { "女团" } else { "男团" };
     let mut out = format!(
         "📊 {} {} 音浪榜（{} 人开播）",
@@ -652,18 +661,18 @@ mod tests {
     }
 
     #[test]
-    fn report_text_marks_my_rank() {
+    fn daily_report_text_marks_my_rank() {
         let items = vec![
             (1u64, "阿甲".to_string(), 1_200_000),
             (2u64, "阿乙".to_string(), 900_000),
             (3u64, "阿丙".to_string(), 100_000),
         ];
-        let t = report_text("male", "2026-10-08", &items, 3);
+        let t = daily_report_text("male", "2026-10-08", &items, 3);
         assert!(t.contains("男团 10-08 音浪榜"), "{t}");
         assert!(t.contains("1. 阿甲 120 万"), "{t}");
         assert!(t.contains("我：第 3 名"), "{t}");
 
-        let t2 = report_text("female", "2026-10-08", &items, 9);
+        let t2 = daily_report_text("female", "2026-10-08", &items, 9);
         assert!(t2.contains("今天还没开播"), "{t2}");
     }
 }

@@ -2,12 +2,16 @@
 //!
 //! 边界（docs/00 §9、docs/06 §4.4）：
 //! - QQ 收到即可服务（2026-10-10 用户口径：不需要管理员白名单）；
-//!   微信私聊发送内置口令可成为管理员，未授权会话静默忽略（日志留痕，不回复）
+//!   微信私聊发送内置口令可成为管理员；已完成推送绑定的主播私聊 = 普通用户
+//!   （只有「每日报告 / 个人报告 / 暂停·开启接收每日推送 / 帮助」5 条，见 [`commands`]）；
+//!   未绑定会话静默忽略（日志留痕，不回复）
 //! - 命令路由确定性：同命令同输入同输出，不调用任何模型
 //! - 限流 10 条/分钟/会话；写类命令（导入）走 douyin_writer，与 HTTP 端同一套校验
 
 pub mod qq;
 pub mod weixin;
+
+mod commands;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
@@ -19,6 +23,7 @@ use sqlx::Row as _;
 
 use crate::admin;
 use crate::state::AppState;
+use commands::{CmdId, Role};
 use qq::QqTransport;
 use weixin::WxTransport;
 
@@ -563,7 +568,7 @@ pub async fn weixin_add_qr_set(
 async fn try_bind_weixin(st: &Arc<AppState>, inbound: &Inbound) -> Option<Outbound> {
     let conversation = inbound.conversation_id.clone();
     let text = inbound.text.trim();
-    // 解绑：这条会话确实绑过才回应（否则静默，免得对任何陌生消息都回话）
+    // 解绑：任何微信私聊都可以发；没绑过也回一句解释（绑定流程本身对未绑定会话开放）
     let lower = text.to_lowercase();
     if matches!(lower.as_str(), "解绑" | "取消绑定" | "unbind") {
         let name = crate::store::push_unbind_by_conversation(st, &conversation).await;
@@ -787,21 +792,58 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
     if let Some(out) = try_promote_weixin(st, &inbound).await {
         return Some(out);
     }
-    let is_admin = inbound.channel == "qq"
+    // 角色判定（2026-10-10 用户口径）：
+    // - Admin：QQ 全部会话 / 微信白名单 / 会话表标记过管理员 —— 拥有全部命令
+    // - User：微信私聊且 push_bindings 命中的已绑定主播 —— 只允许 5 条命令
+    // - 其余：完全静默（不回复任何内容），日志留痕
+    let role = if inbound.channel == "qq"
         || cfg.wechat_admins.contains(&inbound.conversation_id)
-        || crate::store::session_is_admin(st, inbound.channel, &inbound.conversation_id).await;
-    if !is_admin {
+        || crate::store::session_is_admin(st, inbound.channel, &inbound.conversation_id).await
+    {
+        Role::Admin
+    } else if inbound.channel == "weixin"
+        && !inbound.is_group
+        && crate::store::push_binding_by_conversation(st, &inbound.conversation_id)
+            .await
+            .is_some()
+    {
+        Role::User
+    } else {
         tracing::warn!(
             channel = inbound.channel,
             conversation = %inbound.conversation_id,
             kind = if inbound.is_group { "group" } else { "private" },
             text = %inbound.text,
-            "非管理员会话消息，静默忽略（微信可在管理端会话列表勾选管理员）"
+            "未授权 / 未绑定会话消息，静默忽略（微信可在管理端勾选管理员，或先绑定推送）"
         );
         return None;
-    }
+    };
 
     let text = inbound.text.trim().to_string();
+
+    // 附件导入与纯日期黏住都是管理员流程：普通用户发这两类消息时给权限提示，
+    // 不静默、不下载附件、不落库。
+    if role == Role::User {
+        if !inbound.attachments.is_empty() {
+            return Some(Outbound::to(
+                &inbound.conversation_id,
+                "导入是管理员功能，你没有权限。\n发「帮助」看你能用的命令。",
+            ));
+        }
+        if !text.is_empty() && parse_short_date(&text).is_some() {
+            return Some(Outbound::to(
+                &inbound.conversation_id,
+                "指定导入日期是管理员功能，你没有权限。\n发「帮助」看你能用的命令。",
+            ));
+        }
+        if text.is_empty() {
+            return None;
+        }
+        let reply = route_command(st, cfg, &inbound, &text, role).await;
+        return Some(Outbound::to(&inbound.conversation_id, reply));
+    }
+
+    // —— 以下为管理员流程（附件下载 / 日期黏住 / 命令路由）——
 
     // 附件：即时下载（QQ CDN 直链带 rkey，有时效），存为待确认导入
     let mut attachment_text = String::new();
@@ -945,7 +987,7 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
         return None;
     }
 
-    let reply = route_command(st, cfg, &inbound, &text).await;
+    let reply = route_command(st, cfg, &inbound, &text, role).await;
     Some(Outbound::to(&inbound.conversation_id, reply))
 }
 
@@ -986,52 +1028,212 @@ async fn route_command(
     _cfg: &BotConfig,
     inbound: &Inbound,
     text: &str,
+    role: Role,
 ) -> String {
-    let lower = text.to_lowercase();
-    let tokens: Vec<&str> = text.split_whitespace().collect();
-
-    match lower.as_str() {
-        "帮助" | "help" => return help_text(),
-        "状态" | "status" => return cmd_status(st).await,
-        "分组" | "group" => return cmd_plan(st).await,
-        "总榜" => return cmd_rank(st, "total", 0, "总音浪榜").await,
-        _ => {}
+    // 命令注册表是唯一事实来源：解析不到 → 管理员沿用原提示，普通用户引导看「帮助」
+    let Some((id, args)) = commands::parse(text) else {
+        return match role {
+            Role::User => "没认出这条命令。发「帮助」看你能用的命令。".to_string(),
+            Role::Admin => format!("不认识这条命令。发「帮助」看用法。\n你发的是：{text}"),
+        };
+    };
+    // 权限门控：不够权限只说这一句，绝不执行
+    if !role.allows(id.required_role()) {
+        return format!(
+            "「{}」是管理员命令，你没有权限。\n发「帮助」看你能用的命令。",
+            id.spec().name
+        );
     }
 
-    match tokens[0] {
-        "排行" | "rank" => {
-            let n: i64 = tokens.get(1).and_then(|t| t.parse().ok()).unwrap_or(10);
+    // 命令行字符串参数（日报 / 缺数据 / 导入沿用 &[&str] 接口）
+    let args_ref: Vec<&str> = args.iter().map(String::as_str).collect();
+
+    match id {
+        CmdId::Help => commands::help_for(role),
+        CmdId::DailyReport => match current_binding(st, inbound).await {
+            Some(b) => cmd_daily_report_user(st, &b).await,
+            None => NO_BINDING_HINT.to_string(),
+        },
+        CmdId::MyReport => match current_binding(st, inbound).await {
+            Some(b) => cmd_my_report_user(st, &b).await,
+            None => NO_BINDING_HINT.to_string(),
+        },
+        CmdId::PushPause => match current_binding(st, inbound).await {
+            Some(b) => cmd_push_pause_user(st, &b).await,
+            None => NO_BINDING_HINT.to_string(),
+        },
+        CmdId::PushResume => match current_binding(st, inbound).await {
+            Some(b) => cmd_push_resume_user(st, &b).await,
+            None => NO_BINDING_HINT.to_string(),
+        },
+        CmdId::Status => cmd_status(st).await,
+        CmdId::Plan => cmd_plan(st).await,
+        CmdId::TotalRank => cmd_rank(st, "total", 0, "总音浪榜").await,
+        CmdId::Rank => {
+            let n: i64 = args.first().and_then(|t| t.parse().ok()).unwrap_or(10);
             cmd_rank(st, "lastN", n.clamp(1, 100), &format!("近 {n} 日音浪榜")).await
         }
-        "查询" | "query" => {
-            let name = tokens.get(1..).map(|t| t.join(" ")).unwrap_or_default();
+        CmdId::Query => {
+            let name = args.join(" ");
             if name.is_empty() {
                 "用法：查询 <主播名>".into()
             } else {
                 cmd_query(st, &name).await
             }
         }
-        "导出" | "export" => cmd_export(st, tokens.get(1).copied().unwrap_or("今日")).await,
-        "日报" => cmd_daily_report(st, tokens.get(1..).unwrap_or(&[])).await,
-        "缺数据" => cmd_missing(st, tokens.get(1..).unwrap_or(&[])).await,
-        "导入" | "import" => cmd_import(st, inbound, tokens.get(1..).unwrap_or(&[])).await,
-        _ => format!("不认识这条命令。发「帮助」看用法。\n你发的是：{text}"),
+        CmdId::Export => cmd_export(st, args.first().map(String::as_str).unwrap_or("今日")).await,
+        CmdId::DailySquadReport => cmd_daily_report(st, &args_ref).await,
+        CmdId::MissingData => cmd_missing(st, &args_ref).await,
+        CmdId::Import => cmd_import(st, inbound, &args_ref).await,
     }
 }
 
-fn help_text() -> String {
-    "可用命令（仅管理员）：\n\
-     状态 —— 数据新鲜度与机器人状态\n\
-     排行 [N] —— 近 N 日音浪榜（默认 10）\n\
-     总榜 —— 累计音浪榜\n\
-     查询 <主播名> —— 查某人数据\n\
-     导出 今日|YYYY-MM-DD|总榜 —— CSV 文本回复\n\
-     发「10.1」= 指定业务日期 2026-10-01（之后发的 CSV 都按它入库，不用带团别）\n\
-     发 CSV 文件 = 直接入库（不分男女团，团别按主播档案归属；同一天重复导，值相同不覆盖）\n\
-     导入 [男团|女团] [2026-10-01|10.1] + 数据行 —— 需要按团校验时才带团别\n\
-     分组 —— 当前已上架分组方案\n\
-     \n默认日期为前一天（数据晚一天）；同日重复导入，后发的覆盖先发的。"
-        .to_string()
+/* ------------------------- 普通用户命令（已绑定主播） ------------------------- */
+
+/// User 命令取绑定失败时的兜底（理论上 handle 已按绑定放行，这里防解绑竞态）
+const NO_BINDING_HINT: &str =
+    "没有找到你的推送绑定。\n打开展示端「我的」页 →「推送设置」重新绑定，或发「帮助」。";
+
+/// 当前会话的推送绑定（User 命令专用）
+async fn current_binding(
+    st: &Arc<AppState>,
+    inbound: &Inbound,
+) -> Option<crate::store::PushBinding> {
+    crate::store::push_binding_by_conversation(st, &inbound.conversation_id).await
+}
+
+/// 最新业务日（当日报告的「今天」口径：最近一个可用日期）
+async fn latest_biz_date(st: &Arc<AppState>) -> Option<String> {
+    crate::repos::get_available_dates(st, Some("LOCAL"), false)
+        .await
+        .ok()
+        .and_then(|d| d.first().cloned())
+}
+
+/// 绑定行的团别；为空时回台账反查（建档晚于绑定会留空，与绑定路径同一修复口径）
+async fn binding_team(st: &Arc<AppState>, b: &crate::store::PushBinding) -> Option<String> {
+    if !b.team.is_empty() {
+        return Some(b.team.clone());
+    }
+    crate::store::person_team_of_name(st, &b.name).await
+}
+
+/// 普通用户「每日报告」：最新业务日 TOP10 + 我的名次（与推送同一份文案）
+async fn cmd_daily_report_user(st: &Arc<AppState>, b: &crate::store::PushBinding) -> String {
+    let Some(date) = latest_biz_date(st).await else {
+        return "还没有可用的业务数据，等运营导入后再来看。".into();
+    };
+    let Some(team) = binding_team(st, b).await else {
+        return "还没有查到你的团别归属，稍后再试；一直这样请联系管理员。".into();
+    };
+    let items = crate::push::daily_rank(st, &team, &date).await;
+    if items.is_empty() {
+        return format!("{date} 还没有音浪数据，等运营导入后再来看。");
+    }
+    crate::push::daily_report_text(&team, &date, &items, b.person_id)
+}
+
+/// 普通用户「个人报告」：今日名次/音浪 + 本月累计/名次 + 追分目标进度
+async fn cmd_my_report_user(st: &Arc<AppState>, b: &crate::store::PushBinding) -> String {
+    let Some(date) = latest_biz_date(st).await else {
+        return "还没有可用的业务数据，等运营导入后再来看。".into();
+    };
+    let Some(team) = binding_team(st, b).await else {
+        return "还没有查到你的团别归属，稍后再试；一直这样请联系管理员。".into();
+    };
+    let month = date.get(..7).unwrap_or(&date).to_string();
+    // 今日：当日榜里的名次与音浪
+    let day_items = crate::push::daily_rank(st, &team, &date).await;
+    let day_pos = day_items
+        .iter()
+        .position(|(pid, _, _)| *pid == b.person_id)
+        .map(|i| (i + 1, day_items[i].2));
+    // 本月：累计音浪 + 团内名次（与追分口径一致：可信行聚合）
+    let month_map = crate::push::month_wave_map(st, &team, &month).await;
+    let month_rank = crate::push::month_rank_list(st, &team, &month).await;
+    let my_month = month_map.get(&b.person_id).copied().unwrap_or(0);
+    let month_pos = month_rank
+        .iter()
+        .position(|(pid, _, _)| *pid == b.person_id)
+        .map(|i| i + 1);
+    // 追分目标：逐条折算成「还差多少」/「已追上」
+    let targets = crate::store::targets_for_push(st, &b.name).await;
+    let target_lines: Vec<(String, String, String, i64)> = targets
+        .iter()
+        .map(|t| {
+            let rival = month_map.get(&t.target_person_id).copied().unwrap_or(0);
+            let (gap, label, detail, gap_text) =
+                crate::push::eval_target(t, my_month, rival, Some(&month_rank), b.person_id);
+            (label, detail, gap_text, gap)
+        })
+        .collect();
+    render_my_report(&b.name, &date, day_pos, month_pos, my_month, &target_lines)
+}
+
+/// 「我的报告」排版（纯函数，好测）。
+/// gap：≤ 0 已达成；i64::MAX = 追名次但本月还没进榜（没有可比的差距）
+fn render_my_report(
+    name: &str,
+    date: &str,
+    day: Option<(usize, i64)>,
+    month_pos: Option<usize>,
+    my_month: i64,
+    targets: &[(String, String, String, i64)],
+) -> String {
+    let mut out = format!("📈 我的报告（{name}）");
+    match day {
+        Some((pos, wave)) => out.push_str(&format!(
+            "\n今日（{date}）：{} · 团内第 {pos} 名",
+            crate::push::fmt_wan(wave)
+        )),
+        None => out.push_str(&format!("\n今日（{date}）：今天还没开播（榜上还没有你）")),
+    }
+    match month_pos {
+        Some(pos) => out.push_str(&format!(
+            "\n本月累计：{} · 团内第 {pos} 名",
+            crate::push::fmt_wan(my_month)
+        )),
+        None => out.push_str(&format!(
+            "\n本月累计：{} · 本月还没开播",
+            crate::push::fmt_wan(my_month)
+        )),
+    }
+    if targets.is_empty() {
+        out.push_str("\n追分目标：还没有设置。到展示端「我的」页可以加（最多 5 个）。");
+        return out;
+    }
+    out.push_str("\n追分目标：");
+    for (label, detail, gap_text, gap) in targets {
+        if *gap <= 0 {
+            out.push_str(&format!("\n· ✅ 已追上「{label}」"));
+        } else if *gap == i64::MAX {
+            // 追名次但本月没进榜：gap 是哨兵值，只报现状不报假差距
+            out.push_str(&format!("\n· {label}：{detail}"));
+        } else {
+            out.push_str(&format!("\n· {label}：{detail}，还差 {gap_text}"));
+        }
+    }
+    out
+}
+
+/// 普通用户「暂停接收每日推送」：只关 daily_report 开关
+async fn cmd_push_pause_user(st: &Arc<AppState>, b: &crate::store::PushBinding) -> String {
+    if crate::store::push_set_daily_report(st, &b.name, false).await {
+        "已暂停「每日报告」推送 ✅\n\n· 只影响每日报告；追分提醒不受影响\n· 想改回来发「开启接收每日推送」，也可以到展示端「我的」页设置"
+            .into()
+    } else {
+        "操作没成功（写库暂时不可用？），稍后再试。".into()
+    }
+}
+
+/// 普通用户「开启接收每日推送」：只开 daily_report 开关
+async fn cmd_push_resume_user(st: &Arc<AppState>, b: &crate::store::PushBinding) -> String {
+    if crate::store::push_set_daily_report(st, &b.name, true).await {
+        "已开启「每日报告」推送 ✅\n\n· 数据入库后约 30 分钟会给你推当天榜\n· 追分提醒的开关也在展示端「我的」页"
+            .into()
+    } else {
+        "操作没成功（写库暂时不可用？），稍后再试。".into()
+    }
 }
 
 async fn cmd_status(st: &Arc<AppState>) -> String {
@@ -1625,6 +1827,58 @@ mod tests {
         // route_command 的兜底分支：不含关键字时不 panic，返回提示
         // （完整路由需要 AppState，这里只验证纯函数层）
         assert!(team_of("女团").is_some());
+    }
+
+    /* ---- 普通用户「我的报告」排版（2026-10-10 权限分层） ---- */
+
+    #[test]
+    fn my_report_renders_day_month_and_targets() {
+        let targets = vec![
+            (
+                "本月第 3 名".to_string(),
+                "你第 5 名".to_string(),
+                "2 名".to_string(),
+                2i64,
+            ),
+            (
+                "浩冬".to_string(),
+                "你 30 万 / TA 20 万".to_string(),
+                "0".to_string(),
+                -100,
+            ),
+            (
+                "本月第 1 名".to_string(),
+                "你还没进本月榜".to_string(),
+                "本月还没开播".to_string(),
+                i64::MAX,
+            ),
+        ];
+        let t = render_my_report(
+            "小美",
+            "2026-10-09",
+            Some((4, 50_000)),
+            Some(5),
+            300_000,
+            &targets,
+        );
+        assert!(t.contains("📈 我的报告（小美）"), "{t}");
+        assert!(t.contains("今日（2026-10-09）：5 万 · 团内第 4 名"), "{t}");
+        assert!(t.contains("本月累计：30 万 · 团内第 5 名"), "{t}");
+        assert!(t.contains("· 本月第 3 名：你第 5 名，还差 2 名"), "{t}");
+        assert!(t.contains("· ✅ 已追上「浩冬」"), "{t}");
+        assert!(t.contains("· 本月第 1 名：你还没进本月榜"), "{t}");
+        assert!(
+            !t.contains("还差 本月还没开播"),
+            "哨兵值不该拼出别扭文案：{t}"
+        );
+    }
+
+    #[test]
+    fn my_report_without_data_is_friendly() {
+        let none = render_my_report("小美", "2026-10-09", None, None, 0, &[]);
+        assert!(none.contains("今天还没开播"), "{none}");
+        assert!(none.contains("本月还没开播"), "{none}");
+        assert!(none.contains("追分目标：还没有设置"), "{none}");
     }
 
     /* ---- 手机号绑定识别（2026-10-10） ---- */

@@ -1627,6 +1627,71 @@ pub async fn push_set_flags(
         .unwrap_or(false))
 }
 
+/// 只改「每日报告」开关（机器人里的「暂停 / 开启接收每日推送」）。
+/// 注意不要用 [`push_set_flags`] 代替：那个会把 notify_target 一起写掉。
+pub async fn push_set_daily_report(st: &AppState, name: &str, on: bool) -> bool {
+    let Ok(pool) = w(st) else {
+        return false;
+    };
+    let name = name.trim();
+    let changed =
+        sqlx::query("UPDATE push_bindings SET daily_report = ?, updated_at = ? WHERE name = ?")
+            .bind(if on { 1i8 } else { 0i8 })
+            .bind(now_str())
+            .bind(name)
+            .execute(pool)
+            .await
+            .map(|r| r.rows_affected() > 0)
+            .unwrap_or(false);
+    if changed {
+        return true;
+    }
+    // 值没变时 MySQL 的 affected rows = 0（同一秒内重复发同一条命令），
+    // 不是失败：确认这行还在就按幂等成功回执。
+    sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM push_bindings WHERE name = ?")
+        .bind(name)
+        .fetch_one(pool)
+        .await
+        .map(|n| n > 0)
+        .unwrap_or(false)
+}
+
+/// 按微信会话查绑定（机器人角色判定 + 普通用户命令取姓名 / person_id / 团别）
+pub async fn push_binding_by_conversation(
+    st: &AppState,
+    conversation_id: &str,
+) -> Option<PushBinding> {
+    let pool = w(st).ok()?;
+    let row = sqlx::query(
+        "SELECT name, team, person_id, conversation_id, notify_target, daily_report
+         FROM push_bindings WHERE conversation_id = ? LIMIT 1",
+    )
+    .bind(conversation_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()?;
+    Some(binding_from_row(&row))
+}
+
+/// push_bindings → PushBinding 的统一映射（列固定：name/team/person_id/
+/// conversation_id/notify_target/daily_report，两处查询共用）
+fn binding_from_row(r: &sqlx::mysql::MySqlRow) -> PushBinding {
+    PushBinding {
+        name: r.try_get::<String, _>("name").unwrap_or_default(),
+        team: r.try_get::<String, _>("team").unwrap_or_default(),
+        person_id: r
+            .try_get::<u64, _>("person_id")
+            .or_else(|_| r.try_get::<i64, _>("person_id").map(|v| v as u64))
+            .unwrap_or(0),
+        conversation_id: r
+            .try_get::<String, _>("conversation_id")
+            .unwrap_or_default(),
+        notify_target: r.try_get::<i8, _>("notify_target").unwrap_or(0) == 1,
+        daily_report: r.try_get::<i8, _>("daily_report").unwrap_or(0) == 1,
+    }
+}
+
 /// 某团已绑定且至少开了一个推送开关的账号（推送引擎用）
 pub async fn push_bindings_for_team(st: &AppState, team: &str) -> Vec<PushBinding> {
     let Ok(pool) = w(st) else {
@@ -1641,22 +1706,7 @@ pub async fn push_bindings_for_team(st: &AppState, team: &str) -> Vec<PushBindin
     .fetch_all(pool)
     .await
     {
-        Ok(rows) => rows
-            .iter()
-            .map(|r| PushBinding {
-                name: r.try_get::<String, _>("name").unwrap_or_default(),
-                team: r.try_get::<String, _>("team").unwrap_or_default(),
-                person_id: r
-                    .try_get::<u64, _>("person_id")
-                    .or_else(|_| r.try_get::<i64, _>("person_id").map(|v| v as u64))
-                    .unwrap_or(0),
-                conversation_id: r
-                    .try_get::<String, _>("conversation_id")
-                    .unwrap_or_default(),
-                notify_target: r.try_get::<i8, _>("notify_target").unwrap_or(0) == 1,
-                daily_report: r.try_get::<i8, _>("daily_report").unwrap_or(0) == 1,
-            })
-            .collect(),
+        Ok(rows) => rows.iter().map(binding_from_row).collect(),
         Err(e) => {
             tracing::error!(error = %e, "查推送绑定失败");
             Vec::new()
