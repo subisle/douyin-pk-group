@@ -292,6 +292,26 @@ person 的行先合并再入库**（`admin::merge_rows_by_person`），合并口
   几个文件都到齐，避免推半成品榜单。后台「机器人」页有推送队列表格和「立即推送」按钮。
 - 两个开关都关着的人**不推**。
 
+## 访客地域门禁 + 访问日志（2026-10-10）
+
+- **规则**：展示端只对**河南 / 安徽**访客开放，判定全在后端做（**不用 Cloudflare 规则**）；
+  本地先开发测试，改完再部署生产 147（`pk.subisle.com`）。
+- **数据源与判定**：用 ihmily/ip-info-api（<https://github.com/ihmily/ip-info-api>）收集的免费
+  接口（pconline(GBK) / baidu / ip9 / ip-api / ip.sb / geojs / ipwhois / db-ip / ipinfo / ipquery /
+  ipdata.info / ip2location / freeipapi / nc.gy / ipwtf / realip.cc / geolocation-db / ipapi.co /
+  db-ip-demo 等）**全部并行查询、投票合并**：任一来源识别出河南 / 安徽即放行；都没识别出来
+  或全部失败一律拒绝（**fail-closed**，外部接口集体故障时不放水）。
+- **缓存与表**：归属结果落 MySQL `ip_geo_cache`，**缓存 7 天**；表结构与日志表同属迁移
+  `011_ip_geo`（部署前跑一次 `pk-server migrate`）。loopback / 私网 IP 不发外部查询，记为「内网」。
+- **拦截位置**：中间件 `ip_gate_mw` 挂在 `/api/public/*` 这一层；**HTML 页面本身不拦** —— 外省
+  访客页面照常打开，第一个数据接口返回 403 `{"error":"当前地区暂不支持访问"}`，前端整页显示
+  该提示（**不是掉登录**，不清 token、不弹登录门）。
+- **访问日志**（表 `access_logs`）：`kind=api` 同 IP + 同路径 **5 分钟去重**，`kind=login` 记每次
+  登录尝试（带账号与成败）；登录了带账号（token 解析），没登录只记 IP；**外省被拒的访问也入库**。
+- **后台**：「访客日志」页 `/admin/visits`（导航同名），接口 `GET /api/admin/visits`
+  （`limit` / `q` / `kind` / `blocked`，返回 `items` + 今日访问 / 独立 IP / 放行 / 拦截 / 登录）。
+- **本地开发**：环境变量 `IP_GATE_DISABLED=1` 关闭地区拦截（**访问日志照记**）；生产留空。
+
 ## 已知事项
 
 - 免费库对 prepared statement 兼容性不好（报 1835），所以日期参数是**校验后内联**进 SQL 的（只允许 `YYYY-MM-DD`）
