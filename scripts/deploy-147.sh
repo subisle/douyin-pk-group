@@ -35,11 +35,15 @@ for arg in "$@"; do
   case "$arg" in
     --no-migrate) MIGRATE=0 ;;
     --skip-ci)    SKIP_CI=1 ;;
-    *) echo "未知参数：$arg（可用：--no-migrate / --skip-ci）" >&2; exit 2 ;;
+    *) echo "未知参数：${arg}（可用：--no-migrate / --skip-ci）" >&2; exit 2 ;;
   esac
 done
 
 export PATH="/opt/homebrew/bin:$PATH"
+# bash 在非 UTF-8 locale 下会把紧跟 $VAR 的中文字节当成变量名（$short（ → 未定义变量），
+# 所以这里显式固定 locale，脚本里的中文提示才不会把变量展开弄坏。
+export LANG="${LANG:-en_US.UTF-8}"
+export LC_ALL="${LC_ALL:-en_US.UTF-8}"
 export HTTPS_PROXY="${HTTPS_PROXY:-http://127.0.0.1:7890}"
 export HTTP_PROXY="$HTTPS_PROXY"
 
@@ -54,7 +58,7 @@ cd "$ROOT"
 sha="$(git rev-parse HEAD)"
 short="$(git rev-parse --short HEAD)"
 branch="$(git rev-parse --abbrev-ref HEAD)"
-echo "==> 发布提交 $short（$ARCH → $HOST，$DIR）"
+echo "==> 发布提交 ${short}（${ARCH} → ${HOST}，${DIR}）"
 
 if [ -n "$(git status --porcelain)" ]; then
   echo "    本地有未提交改动：GitHub 构建的是远端提交，先 commit + push 再发布" >&2
@@ -63,7 +67,7 @@ fi
 
 if [ "$SKIP_CI" = 0 ]; then
   # 1. 等 CI 全绿：没绿就构建出坏镜像，部署完再回滚更慢
-  echo "==> 等待 CI（$short）"
+  echo "==> 等待 CI（${short}）"
   for i in $(seq 1 60); do
     status="$(gh run list --commit "$sha" --workflow CI --limit 1 --json status,conclusion \
       --jq '.[0] | "\(.status)/\(.conclusion // "-")"' 2>/dev/null || echo "none/none")"
@@ -93,7 +97,7 @@ if [ "$SKIP_CI" = 0 ]; then
     sleep 10
   done
   [ -n "$rid" ] || { echo "    镜像包超时" >&2; exit 1; }
-  echo "    镜像包就绪（run $rid）"
+  echo "    镜像包就绪（run ${rid}）"
 fi
 
 # 3. 下载离线镜像包
@@ -131,11 +135,11 @@ grep -q 'assets/' /tmp/pk-new/web/index.html || { echo "    镜像里没有前�
 
 cd "$DIR"
 cp -a pk-server "pk-server.bak-\$ts"
-[ -d web ] && mv web "web.bak-\$ts"
+if [ -d web ]; then mv web "web.bak-\$ts"; fi
 install -m 0755 /tmp/pk-new/pk-server pk-server
 mv /tmp/pk-new/web web
 rm -rf /tmp/pk-new
-echo "    已替换（旧版本备份：pk-server.bak-\$ts / web.bak-\$ts）"
+echo "    已替换（旧版本备份：pk-server.bak-\${ts} / web.bak-\${ts}）"
 REMOTE
 
 # 5. 迁移（DDL 只由 douyin_migrator 跑，schema_migrations 幂等）
