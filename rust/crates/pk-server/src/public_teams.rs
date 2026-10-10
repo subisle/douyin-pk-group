@@ -932,6 +932,10 @@ pub async fn verify(
         .to_string();
     if !crate::ipinfo::gate_disabled() && !geo.allowed {
         crate::ipinfo::log_login(&st, &client_ip, &geo, &team, &account_input, false).await;
+        tracing::info!(
+            ip = %client_ip, team = %team, province = %geo.province,
+            "展示端登录尝试被地区规则拒绝"
+        );
         return Err(ApiError::forbidden("当前地区暂不支持访问"));
     }
     let limiter_ok = public_write_allow(&client_ip_for_limit(addr, &headers));

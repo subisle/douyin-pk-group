@@ -99,15 +99,18 @@ pub async fn ip_gate_mw(
 ) -> Response {
     let ip = request_ip(addr, req.headers());
     let path = req.uri().path().to_string();
+    /* verify 交由 handler 自己过门禁：那里能读到请求体里的 account，被拦下的外省
+       尝试也要落一条登录日志（后台「访客日志」看得到谁在门外试了什么账号），
+       所以中间件对 verify 直接放行——不拦、也不记重复的 api 条目 */
+    if path.ends_with("/verify") {
+        return next.run(req).await;
+    }
     let query = req.uri().query().unwrap_or_default().to_string();
     let team = team_from_path(&path);
     let account = account_from_query(&query);
     let geo = geo_for_ip(&st, &ip).await.unwrap_or_default();
     let allowed = gate_disabled() || geo.allowed;
-    /* verify 自己记登录日志（带账号 + 成败），这里不再记重复的 api 条目 */
-    if !path.ends_with("/verify") {
-        log_access(&st, "api", &ip, &geo, &team, &path, &account, allowed, false).await;
-    }
+    log_access(&st, "api", &ip, &geo, &team, &path, &account, allowed, false).await;
     if !allowed {
         tracing::info!(
             ip = %ip, team = %team, province = %geo.province, path = %path,
