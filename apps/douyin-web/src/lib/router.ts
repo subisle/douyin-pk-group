@@ -18,6 +18,7 @@ export type RouteKey =
   | 'import'
   | 'streamers'
   | 'claims'
+  | 'visits'
   | 'lineage'
   | 'group'
   | 'bots'
@@ -30,6 +31,7 @@ export const ROUTES: { key: RouteKey; path: string; label: string }[] = [
   { key: 'import', path: '/import', label: '数据导入' },
   { key: 'streamers', path: '/streamers', label: '主播管理' },
   { key: 'claims', path: '/claims', label: '抖音号审计' },
+  { key: 'visits', path: '/visits', label: '访客日志' },
   { key: 'lineage', path: '/lineage', label: '族谱' },
   { key: 'group', path: '/group', label: 'PK 分组' },
   { key: 'bots', path: '/bots', label: '机器人' },

@@ -1333,6 +1333,7 @@ dependencies = [
  "base64 0.22.1",
  "calamine",
  "chrono",
+ "encoding_rs",
  "futures-util",
  "pk-core",
  "reqwest",

@@ -8,6 +8,7 @@ pub mod csvparse;
 pub mod dialect;
 pub mod events;
 pub mod grouping;
+pub mod ipinfo;
 pub mod matching;
 pub mod metrics;
 pub mod migrate;

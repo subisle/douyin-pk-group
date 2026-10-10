@@ -28,6 +28,11 @@ impl ApiError {
     pub fn bad_request(msg: impl Into<String>) -> Self {
         Self(anyhow::anyhow!(msg.into()), Some(StatusCode::BAD_REQUEST))
     }
+
+    /// 地区 / 访问限制：前端不应把 403 当作“需要重新登录”处理
+    pub fn forbidden(msg: impl Into<String>) -> Self {
+        Self(anyhow::anyhow!(msg.into()), Some(StatusCode::FORBIDDEN))
+    }
 }
 
 impl From<anyhow::Error> for ApiError {

@@ -6,6 +6,7 @@ import DashboardPage from './DashboardPage'
 import ImportPage from './ImportPage'
 import StreamerPage from './StreamerPage'
 import ClaimPage from './ClaimPage'
+import VisitPage from './VisitPage'
 import LineagePage from './LineagePage'
 import BotPage from './BotPage'
 import GroupPage from './pk/GroupPage'
@@ -126,6 +127,7 @@ export default function App() {
       {route === 'import' && <ImportPage />}
       {route === 'streamers' && <StreamerPage />}
       {route === 'claims' && <ClaimPage />}
+      {route === 'visits' && <VisitPage />}
       {route === 'lineage' && <LineagePage />}
       {route === 'group' && <GroupPage />}
       {route === 'bots' && <BotPage />}

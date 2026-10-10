@@ -673,6 +673,8 @@ async function api(p) {
   if (r.status === 401) { sessionExpired(); throw new Error('请先登录'); }
   let d = {};
   try { d = await r.json(); } catch (_) {}
+  /* 地区门禁（2026-10-10）：非河南/安徽访客后端统一 403，不清 token、不弹登录门 */
+  if (r.status === 403) { regionBlocked(d.error || '当前地区暂不支持访问'); throw new Error(d.error || '当前地区暂不支持访问'); }
   if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
   return d;
 }
@@ -967,6 +969,15 @@ function sessionExpired() {
   if (gateResolve) return;            // 登录门已在
   gateResolve = () => location.reload();
   showGate();
+}
+
+/* 地区门禁（2026-10-10）：非河南/安徽访客的整页提示（连不上服务之外的另一种终止态） */
+let regionBlockedShown = false;
+function regionBlocked(msg) {
+  if (regionBlockedShown) return;
+  regionBlockedShown = true;
+  document.body.innerHTML = '<div class="empty" style="padding-top:120px"><span class="big">📍</span><b>' +
+    esc(msg) + '</b><br>本展示页仅对河南 / 安徽开放</div>';
 }
 
 /* 启动前置：有 token 先验身份（轻量 who）；没有/失效 → 弹登录门等人登录 */
@@ -2732,6 +2743,7 @@ async function bootRest() {
         return fetchSite();
       });
   } catch (e) {
+    if (regionBlockedShown) return;   // 已展示地区门禁整页提示，别覆盖成「连不上服务」
     document.body.innerHTML = '<div class="empty" style="padding-top:120px"><span class="big">📡</span>' +
       '连不上服务，稍后再试试</div>';
     return;

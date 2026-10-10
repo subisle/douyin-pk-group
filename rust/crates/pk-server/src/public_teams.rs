@@ -416,6 +416,12 @@ fn my_token_take(token: &str) -> Option<(u64, String, String)> {
         .map(|(pid, team, name, _)| (*pid, team.clone(), name.clone()))
 }
 
+/// 只读一眼 token 对应的账号（不消费）：公开 API 中间件用它给访问日志带账号。
+/// 未登录的访客返回 None，日志就只记 IP。
+pub(crate) fn my_token_peek(token: &str) -> Option<(u64, String, String)> {
+    my_token_take(token)
+}
+
 /// 展示端登录门（2026-10-10）：/st/{team} 的数据接口一律要求「我的」登录态，
 /// 未登录只给一张登录卡。token 走 ?access_token=（fetch/img 通用）或 X-My-Token 头。
 /// 校验通过返回 person_id；token 与路径团别不符也拒绝。
@@ -911,6 +917,23 @@ pub async fn verify(
     if !s.team_enabled(&team) {
         return Ok(Json(json!({ "published": false })));
     }
+    /* 地区门禁：公开 API 层的中间件已经统一拦了，这里再过一遍是因为 verify
+    要按「登录尝试」记日志——外省被拒的尝试也进 access_logs，后台访客日志能看到
+    谁在门外试了什么账号（IP_GATE_DISABLED=1 的本地开发直接放行）。 */
+    let client_ip = crate::ipinfo::request_ip(addr, &headers);
+    let geo = crate::ipinfo::geo_for_ip(&st, &client_ip)
+        .await
+        .unwrap_or_default();
+    let account_input = body
+        .get("account")
+        .or_else(|| body.get("name"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    if !crate::ipinfo::gate_disabled() && !geo.allowed {
+        crate::ipinfo::log_login(&st, &client_ip, &geo, &team, &account_input, false).await;
+        return Err(ApiError::forbidden("当前地区暂不支持访问"));
+    }
     let limiter_ok = public_write_allow(&client_ip_for_limit(addr, &headers));
     if !limiter_ok {
         return Err(anyhow::anyhow!("尝试太频繁，请稍后再试").into());
@@ -941,8 +964,10 @@ pub async fn verify(
 
     /* 1. 账号校验：手机号+密码 或 姓名+密码（my_accounts 名单，管理员手动维护 / 手机号自助注册） */
     let Some(account_name) = crate::store::my_account_check_login(&st, &acct, &pass).await else {
+        crate::ipinfo::log_login(&st, &client_ip, &geo, &team, &acct, false).await;
         return Ok(Json(json!({ "ok": false }))); // 统一失败，不区分「账号不存在/密码错」
     };
+    crate::ipinfo::log_login(&st, &client_ip, &geo, &team, &account_name, true).await;
 
     /* 1.5 手机号自助注册还没绑主播的账号：先放进来（personId=0），登录后「我的」页
     会强制让用户绑定主播——不绑定看不到个人数据，也无从套用别人的姓名。 */

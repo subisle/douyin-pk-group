@@ -184,7 +184,9 @@ async fn main() -> anyhow::Result<()> {
     let scheduler = tokio::spawn(push::scheduler_loop(st.clone()));
 
     /* 对外公开的只读端点：不要鉴权，单独一层 */
-    let public = Router::new()
+    /* 展示端公开 API（2026-10-10 门禁）：只有河南 / 安徽访客放行，
+       放行 / 拒绝都写访问日志（access_logs，后台「访客日志」页）。 */
+    let public_api = Router::new()
         .route("/api/public/plans", get(public::plans))
         .route("/api/public/plans/{id}", get(public::plan))
         // 阶段 D：团别公开站点（/st/m、/st/f 的数据接口）
@@ -274,6 +276,13 @@ async fn main() -> anyhow::Result<()> {
             get(public_teams::my_bind_search),
         )
         .route("/api/public/my/bind", post(public_teams::my_bind))
+        .layer(axum::middleware::from_fn_with_state(
+            st.clone(),
+            ipinfo::ip_gate_mw,
+        ));
+    /* HTML 页面不拦：外省访客打开页面后，第一个数据接口拿 403，
+       前端显示「当前地区暂不支持访问」，比直接甩一个 403 页面友好。 */
+    let public_pages = Router::new()
         // 对外展示页（静态 HTML，粉丝/主播手机直开）：/ 为唯一入口（男女共用，
         // 进页由前端弹团别选择卡），/1、/0、/st/m、/st/f 为兼容旧链接的别名；
         // 子路径（/report、/lineage、/my、/group/*）也是同一页，前端 history 路由接管
@@ -286,7 +295,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/1", get(public_teams::st_m))
         .route("/0", get(public_teams::st_0))
         .route("/st/{team}", get(public_teams::st_page))
-        .route("/st/{team}/{*rest}", get(public_teams::st_page_sub))
+        .route("/st/{team}/{*rest}", get(public_teams::st_page_sub));
+
+    let public = public_api
+        .merge(public_pages)
         // 抖音号绑定截图走 JSON dataURL，放宽请求体上限（axum 默认 2MB）
         .layer(axum::extract::DefaultBodyLimit::max(4 * 1024 * 1024));
 
@@ -458,7 +470,9 @@ async fn main() -> anyhow::Result<()> {
             "/api/admin/anchor-claims/{id}/decide",
             post(public_teams::admin_anchor_claim_decide),
         )
-        .route("/api/admin/collect/status", get(admin::collect_status));
+        .route("/api/admin/collect/status", get(admin::collect_status))
+        // 访客日志（2026-10-10）：展示端访问 / 登录记录，含外省被拒的
+        .route("/api/admin/visits", get(ipinfo::admin_visits));
 
     // 鉴权：ADMIN_PASSWORD 配了就拦，没配等于本地开发全放行。
     // 公开端点、登录、探活接口在 auth.rs 的白名单里。

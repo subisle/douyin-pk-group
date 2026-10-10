@@ -27,3 +27,5 @@ futures-util = { workspace = true }
 # P1-4：管理口令哈希改 argon2id（替代自造 FNV 变体）
 argon2 = "0.5"
 calamine = "0.30"
+# pconline 的 IP 接口返回 GBK，归属地解析要转码
+encoding_rs = "0.8"
