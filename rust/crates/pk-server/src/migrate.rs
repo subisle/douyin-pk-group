@@ -107,7 +107,11 @@ pub async fn run_with(pool: &MySqlPool) -> anyhow::Result<Vec<String>> {
             continue;
         }
         for stmt in split_statements(sql) {
-            if let Err(e) = sqlx::query(&stmt).execute(pool).await {
+            // 走 raw_sql（COM_QUERY 文本协议）而不是 query()：MariaDB 不允许在
+            // 预处理语句协议里执行 `PREPARE ... FROM @var`（1295 prepared statement
+            // protocol yet），010_my_pass_hash 的动态 DROP INDEX 会挂在第 4 条。
+            // 迁移脚本没有任何绑定参数，文本协议也支持 DDL / 多语句。
+            if let Err(e) = sqlx::raw_sql(&stmt).execute(pool).await {
                 anyhow::bail!("迁移 {version} 执行失败: {e}\n语句: {stmt}");
             }
         }
