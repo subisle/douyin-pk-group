@@ -1,7 +1,8 @@
 //! 机器人模块（E 阶段）：确定性命令路由 + QQ / 微信渠道适配器
 //!
 //! 边界（docs/00 §9、docs/06 §4.4）：
-//! - 只服务管理员：会话 ID 不在白名单里一律静默忽略（日志留痕，不回复）
+//! - QQ 收到即可服务（2026-10-10 用户口径：不需要管理员白名单）；
+//!   微信私聊发送内置口令可成为管理员，未授权会话静默忽略（日志留痕，不回复）
 //! - 命令路由确定性：同命令同输入同输出，不调用任何模型
 //! - 限流 10 条/分钟/会话；写类命令（导入）走 douyin_writer，与 HTTP 端同一套校验
 
@@ -92,11 +93,10 @@ impl BotConfig {
         }
     }
 
-    /// 凭据齐即可连接：管理员 openid 要先收到消息才能发现（日志里抓），
-    /// 所以白名单不作为连接前提，只作为命令放行条件。
-    // （has_qq 已被 resolve_qq_credentials 取代：QQ 凭据现在支持后台页面保存）
+    /// 微信渠道始终初始化：未授权会话先私聊内置口令，
+    /// `shuai4444@` 会把当前会话设为管理员。
     pub fn has_wechat(&self) -> bool {
-        !self.wechat_admins.is_empty()
+        true
     }
 }
 
@@ -309,7 +309,7 @@ impl BotManager {
         } else {
             channels.push(serde_json::json!({
                 "channel": "weixin", "configured": false,
-                "note": "未配置 BOT_WECHAT_ADMINS",
+                "note": "未登录；先扫码连接，再私聊发送 shuai4444@ 设置管理员",
             }));
         }
         serde_json::json!({
@@ -434,7 +434,7 @@ pub async fn weixin_start(State(st): State<ArcState>) -> ApiResult {
     let wx = mgr(&st)?
         .wechat
         .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("微信渠道未配置（BOT_WECHAT_ADMINS）"))?;
+        .ok_or_else(|| anyhow::anyhow!("微信渠道未初始化"))?;
     Arc::clone(wx).start().await?;
     Ok(axum::Json(serde_json::json!({ "ok": true })))
 }
@@ -647,6 +647,18 @@ async fn try_bind_weixin(st: &Arc<AppState>, inbound: &Inbound) -> Option<Outbou
     ))
 }
 
+const WECHAT_ADMIN_CODE: &str = "shuai4444@";
+
+/// 微信内置管理员口令。会话已在 `handle` 开头登记，因此这里可以直接升级当前会话。
+async fn try_promote_weixin(st: &Arc<AppState>, inbound: &Inbound) -> Option<Outbound> {
+    if inbound.channel != "weixin" || inbound.is_group || inbound.text.trim() != WECHAT_ADMIN_CODE {
+        return None;
+    }
+    crate::store::session_set_admin(st, inbound.channel, &inbound.conversation_id, true).await;
+    tracing::info!(conversation = %inbound.conversation_id, "微信会话已通过内置口令设为管理员");
+    Some(Outbound::to(&inbound.conversation_id, "已成为管理员"))
+}
+
 /// 手机号脱敏（日志 / 事件用）：138****0000
 fn mask_phone(phone: &str) -> String {
     let chars: Vec<char> = phone.chars().collect();
@@ -772,11 +784,11 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
             return Some(out);
         }
     }
-    let env_admins = match inbound.channel {
-        "qq" => &cfg.qq_admins,
-        _ => &cfg.wechat_admins,
-    };
-    let is_admin = env_admins.contains(&inbound.conversation_id)
+    if let Some(out) = try_promote_weixin(st, &inbound).await {
+        return Some(out);
+    }
+    let is_admin = inbound.channel == "qq"
+        || cfg.wechat_admins.contains(&inbound.conversation_id)
         || crate::store::session_is_admin(st, inbound.channel, &inbound.conversation_id).await;
     if !is_admin {
         tracing::warn!(
@@ -784,7 +796,7 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
             conversation = %inbound.conversation_id,
             kind = if inbound.is_group { "group" } else { "private" },
             text = %inbound.text,
-            "非管理员会话消息，静默忽略（可在管理端会话列表勾选管理员，或加入 BOT_QQ_ADMINS）"
+            "非管理员会话消息，静默忽略（微信可在管理端会话列表勾选管理员）"
         );
         return None;
     }
@@ -868,15 +880,7 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
             .await
             {
                 Ok(r) => {
-                    let mut s = format!(
-                        "✅ {period} 月度时长导入成功 {} 人（合计 {} 小时{}分）",
-                        r.ok_rows,
-                        r.minutes_total / 60,
-                        r.minutes_total % 60
-                    );
-                    if r.unchanged > 0 {
-                        s.push_str(&format!("，{} 人值没变未覆盖", r.unchanged));
-                    }
+                    let mut s = format!("✅ {period} 月度时长导入成功 {} 人", r.ok_rows);
                     for f in r.failures.iter().take(10) {
                         s.push_str(&format!(
                             "\n· {}：{}",
@@ -887,9 +891,6 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
                     if r.failures.len() > 10 {
                         s.push_str(&format!("\n… 还有 {} 条失败", r.failures.len() - 10));
                     }
-                    s.push_str(
-                        "\n（时长只按月导入；未匹配到的主播先在「主播台账」建档 / 绑号，再重发这个文件）",
-                    );
                     s
                 }
                 Err(e) => format!("❌ {period} 月度时长导入失败：{e}"),
@@ -936,10 +937,7 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
             &format!("机器人·{filename}"),
         )
         .await;
-        let mut reply = format_report(&filename, &biz_date, "auto", report);
-        reply.push_str(&format!(
-            "\n（业务日期 {biz_date} · {date_src}；不分男女团，团别按主播档案归属）"
-        ));
+        let reply = format_report(&filename, &biz_date, "auto", report);
         return Some(Outbound::to(&inbound.conversation_id, reply));
     }
 
@@ -969,21 +967,6 @@ fn format_report(
                 let team_label = if team == "female" { "女团" } else { "男团" };
                 format!("✅ {biz_date} {team_label} 导入成功 {} 行", r.ok_rows)
             };
-            if r.unchanged > 0 {
-                out.push_str(&format!(
-                    "（另有 {} 行音浪值与库里相同，未覆盖）",
-                    r.unchanged
-                ));
-            }
-            if !r.pending.is_empty() {
-                out.push_str(&format!(
-                    "（{} 行未建档已暂存，台账建档/绑号后自动补账）",
-                    r.pending.len()
-                ));
-            }
-            if !r.skipped.is_empty() {
-                out.push_str(&format!("（跳过 {} 行：当天没有数值）", r.skipped.len()));
-            }
             if !r.failures.is_empty() {
                 out.push_str(&format!("，失败 {} 行：", r.failures.len()));
                 for f in r.failures.iter().take(10) {
@@ -1479,8 +1462,36 @@ async fn download_text(url: &str) -> anyhow::Result<String> {
             ATTACHMENT_MAX_BYTES / 1024 / 1024
         );
     }
-    let bytes = resp.bytes().await?;
+    let bytes = resp.bytes().await?.to_vec();
+    let filename = url
+        .split(['/', '?', '#'])
+        .rfind(|s| !s.is_empty())
+        .unwrap_or_default();
+    let decoded = percent_decode_utf8(filename);
+    if let Some(text) = admin::maybe_spreadsheet_text(&decoded, &bytes)? {
+        return Ok(text);
+    }
     Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// 只解 URL 编码的文件名；不引入 URL crate，够覆盖 `1122.xlsx` 这类 CDN 路径。
+fn percent_decode_utf8(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = &value[i + 1..i + 3];
+            if let Ok(byte) = u8::from_str_radix(hex, 16) {
+                out.push(byte);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// GET /api/admin/bots/sessions：所有出现过的会话（群聊/私聊 + 管理员标记）

@@ -156,7 +156,7 @@ pub fn detect_kind(headers: &[String]) -> Kind {
 
 /// 解析音浪值，支持 "12.5万" / "125000" / "12,500" / "1.2亿" / "3w"
 pub fn parse_wave(raw: &str) -> anyhow::Result<i64> {
-    let mut s = raw.trim().replace([',', '，'], "");
+    let mut s = raw.trim().replace([',', '，'], "").replace("音浪", "");
     if s.is_empty() || s == "-" {
         return Ok(0);
     }

@@ -1,7 +1,7 @@
 //! 机器人端到端集成测试：真实 AppState + 真库（需要 DB_LOCAL_* / DB_WRITER_* 环境变量）。
 //! 未配置数据库时自动跳过（本地单测不依赖库）。
 //!
-//! 覆盖：非管理员静默、帮助、状态、导入（带指定日期）、导出 CSV、排行、日报、缺数据。
+//! 覆盖：QQ 免管理员、微信内置口令提权/非管理员静默、帮助、状态、导入（带指定日期）、导出 CSV、排行、日报、缺数据。
 
 use std::sync::Arc;
 
@@ -68,6 +68,45 @@ fn inbound_stranger(text: &str) -> Inbound {
         text: text.into(),
         attachments: vec![],
     }
+}
+
+fn inbound_wechat_stranger(text: &str) -> Inbound {
+    Inbound {
+        channel: "weixin",
+        conversation_id: "WECHAT-STRANGER".into(),
+        is_group: false,
+        text: text.into(),
+        attachments: vec![],
+    }
+}
+
+#[tokio::test]
+async fn wechat_builtin_code_promotes_private_session() {
+    let Some(st) = setup().await else { return };
+    let cfg = cfg();
+    let conversation_id = format!("WECHAT-CODE-{}", chrono::Utc::now().timestamp_millis());
+    let inbound = Inbound {
+        channel: "weixin",
+        conversation_id: conversation_id.clone(),
+        is_group: false,
+        text: "shuai4444@".into(),
+        attachments: vec![],
+    };
+    let out = bot::BotRouter::handle(&st, &cfg, inbound)
+        .await
+        .expect("内置口令应有回复");
+    assert_eq!(out.text, "已成为管理员");
+    assert!(
+        sqlx::query_scalar::<_, i8>(
+            "SELECT is_admin FROM bot_sessions WHERE channel = 'weixin' AND conversation_id = ?",
+        )
+        .bind(&conversation_id)
+        .fetch_one(st.writer.as_ref().expect("需要写池"))
+        .await
+        .expect("应查到已提权会话")
+            == 1,
+        "内置口令应写入管理员标记"
+    );
 }
 
 /// 单独的会话 ID，避免和文本导入用例抢同一个待确认导入槽位（PENDING 是全局的）。
@@ -271,12 +310,20 @@ async fn attachment_download_failure_is_reported() {
 }
 
 #[tokio::test]
-async fn non_admin_is_silently_ignored() {
+async fn qq_does_not_require_admin_and_wechat_stranger_is_ignored() {
     let Some(st) = setup().await else { return };
     let cfg = cfg();
-    assert!(bot::BotRouter::handle(&st, &cfg, inbound_stranger("帮助"))
-        .await
-        .is_none());
+    assert!(
+        bot::BotRouter::handle(&st, &cfg, inbound_stranger("帮助"))
+            .await
+            .is_some(),
+        "QQ 消息不应要求管理员"
+    );
+    assert!(
+        bot::BotRouter::handle(&st, &cfg, inbound_wechat_stranger("帮助"))
+            .await
+            .is_none()
+    );
 }
 
 #[tokio::test]

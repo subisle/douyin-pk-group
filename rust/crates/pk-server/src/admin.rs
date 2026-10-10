@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
 use axum::Json;
+use calamine::{open_workbook_auto_from_rs, Reader};
 use chrono::NaiveDate;
 use pk_core::roster::{parse_roster, ParseOptions};
 use pk_core::types::ParsedRow;
@@ -27,6 +28,41 @@ use crate::writer;
 
 type ApiResult = Result<Json<Value>, ApiError>;
 type ArcState = Arc<AppState>;
+
+/// `.xlsx` / `.xls` → TSV，交给现有 CSV / 文本解析器。
+/// 运营经常直接转发 Excel 附件；按 UTF-8 读二进制会产生乱码行，必须在解析前转成表格文本。
+pub fn spreadsheet_to_text(bytes: &[u8]) -> anyhow::Result<String> {
+    let mut workbook = open_workbook_auto_from_rs(std::io::Cursor::new(bytes))
+        .map_err(|e| anyhow::anyhow!("无法读取 Excel 文件：{e}"))?;
+    let first = workbook
+        .worksheet_range_at(0)
+        .ok_or_else(|| anyhow::anyhow!("Excel 文件里没有工作表"))?
+        .map_err(|e| anyhow::anyhow!("无法读取 Excel 工作表：{e}"))?;
+    let mut out = String::new();
+    for row in first.rows() {
+        let cells: Vec<String> = row
+            .iter()
+            .map(|cell: &calamine::Data| cell.to_string().replace(['\n', '\r', '\t'], " "))
+            .collect();
+        out.push_str(&cells.join("\t"));
+        out.push('\n');
+    }
+    anyhow::ensure!(out.trim().len() < 16 * 1024 * 1024, "Excel 转文本后过大");
+    Ok(out)
+}
+
+pub fn maybe_spreadsheet_text(filename: &str, bytes: &[u8]) -> anyhow::Result<Option<String>> {
+    let is_xlsx = bytes.len() >= 4 && bytes[..4] == [0x50, 0x4b, 0x03, 0x04];
+    let ext = filename
+        .rsplit('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if is_xlsx || matches!(ext.as_str(), "xlsx" | "xlsm" | "xls") {
+        return spreadsheet_to_text(bytes).map(Some);
+    }
+    Ok(None)
+}
 
 /* ------------------------------- 公共小工具 ------------------------------- */
 
@@ -3636,7 +3672,10 @@ pub async fn import_upload(
                     .bytes()
                     .await
                     .map_err(|e| anyhow::anyhow!("读取文件失败: {e}"))?;
-                text = String::from_utf8_lossy(&bytes).into_owned();
+                text = match maybe_spreadsheet_text(&filename, &bytes)? {
+                    Some(text) => text,
+                    None => String::from_utf8_lossy(&bytes).into_owned(),
+                };
             }
             _ => {
                 let _ = field.text().await;
@@ -4377,5 +4416,35 @@ mod master_batch_tests {
         counts2.insert("阿楠".to_string(), 0); // 阿楠 是别名，不在册
         let rows = plan("阿楠 南方楠", &mut g2, &counts2, false);
         assert_eq!(rows[0].action, "error", "别名归一后的自指必须拦下");
+    }
+}
+
+#[cfg(test)]
+mod spreadsheet_tests {
+    use super::{parse_any_text, spreadsheet_to_text};
+
+    #[test]
+    fn xlsx_keeps_chinese_names() {
+        let path = std::env::var("XLSX_TEST_FILE").unwrap_or_default();
+        if path.is_empty() || !std::path::Path::new(&path).exists() {
+            return;
+        }
+        let bytes = std::fs::read(path).expect("read xlsx");
+        let text = spreadsheet_to_text(&bytes).expect("convert xlsx");
+        let rows = parse_any_text(&text);
+        eprintln!("converted_rows={}", rows.len());
+        for row in rows.iter().take(5) {
+            eprintln!("name={:?}, wave={:?}", row.name, row.wave);
+        }
+        assert!(!rows.is_empty(), "Excel 内容应解析出数据行");
+        assert!(
+            rows.iter().any(|r| r.wave.is_some()),
+            "至少应解析出一个音浪值"
+        );
+        assert!(
+            rows.iter()
+                .all(|r| r.name.chars().any(|c| !c.is_ascii_control())),
+            "姓名不应是二进制乱码"
+        );
     }
 }

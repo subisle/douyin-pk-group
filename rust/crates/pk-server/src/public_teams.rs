@@ -1979,7 +1979,7 @@ fn mask_phone(p: &str) -> String {
     }
 }
 
-/// 微信渠道是否可用（配了 BOT_WECHAT_ADMINS 才有实例）。没配时前端提示「暂未开放」。
+/// 微信渠道是否可用（进程里已有微信实例）。没配时前端提示「暂未开放」。
 fn channel_ready(st: &AppState) -> bool {
     st.bots.get().map(|m| m.wechat.is_some()).unwrap_or(false)
 }

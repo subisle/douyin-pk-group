@@ -263,10 +263,7 @@ impl WxTransport {
         if task.is_some() {
             return Ok(());
         }
-        anyhow::ensure!(
-            self.configured(),
-            "请先配置 BOT_WECHAT_ADMINS（管理员会话）"
-        );
+        anyhow::ensure!(self.configured(), "微信渠道未初始化");
         if self.token.lock().await.is_empty() {
             self.inner.lock().await.phase = "awaiting_scan".into();
             anyhow::bail!("微信未登录：请先通过 /api/admin/bots/weixin/qrcode 扫码连接");
@@ -414,7 +411,7 @@ impl WxTransport {
     /// 内存里没有也能发（服务重启过 / 用户上次发言在另一个进程周期）。
     /// 会话 id = 私聊的 from_user_id，与 to_user_id 相同。
     pub async fn send_proactive(&self, conversation_id: &str, text: &str) -> anyhow::Result<()> {
-        anyhow::ensure!(self.configured(), "微信渠道未配置 BOT_WECHAT_ADMINS");
+        anyhow::ensure!(self.configured(), "微信渠道未初始化");
         let (to_user, token) = match crate::store::wx_session_get(&self.st, conversation_id).await {
             Some(v) => v,
             None => {
