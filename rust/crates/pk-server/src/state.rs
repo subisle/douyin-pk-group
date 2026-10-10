@@ -80,6 +80,9 @@ pub struct AppState {
     pub wave_ttl: Duration,
     /// 机器人模块（E 阶段）。AppState 先建，BotManager 后挂（它反向持有 AppState）。
     pub bots: std::sync::OnceLock<Arc<crate::bot::BotManager>>,
+    /// WorkBuddy 网关客户端（2026-10-10 手机号注册用）：没配 WORKBUDDY_PANEL_PASSWORD 就是空的，
+    /// 注册页据此隐藏「添加账号 (OAuth)」步骤，其余注册照常。
+    pub wb: std::sync::OnceLock<Arc<crate::wbgateway::WbGateway>>,
 }
 
 impl AppState {

@@ -1,14 +1,20 @@
 # 部署到 64：镜像由 GitHub Actions 构建（ghcr.io/subisle/douyin-pk-group）
 # 用法：
-#   cp .env.example .env   # 至少要填 ADMIN_PASSWORD 和 DB_A_* 只读账号
+#   cp .env.example .env   # 至少要填 ADMIN_PASSWORD
 #   docker compose -f deploy/docker-compose.yml up -d
+#
+# ⚠️ 监听地址：compose 里端口发布固定绑 127.0.0.1（公网入口走 Caddy 反代）。
+#    容器内 pk-server 的 HOST 默认 127.0.0.1 时只能容器内自连 —— 若 compose
+#    healthcheck 或容器外直连探活，需要显式在 .env 配 HOST=0.0.0.0（容器内监听
+#    全部地址没问题：宿主侧端口只绑 127.0.0.1，公网仍然进不来）。
 services:
   pk-server:
     image: ghcr.io/subisle/douyin-pk-group:latest
     container_name: pk-server
     restart: unless-stopped
     ports:
-      - "${PK_PORT:-6666}:8787" # 宿主机端口可用 PK_PORT 覆盖；容器内仍是 8787
+      # 只绑 127.0.0.1：公网入口交给 Caddy 反代，别把 8787 裸奔到 0.0.0.0
+      - "127.0.0.1:${PK_PORT:-6666}:8787"
     env_file:
       - .env
     environment:

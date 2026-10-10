@@ -19,6 +19,30 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ),
     ("003_runtime", include_str!("migrations/003_runtime.sql")),
     ("004_push", include_str!("migrations/004_push.sql")),
+    (
+        "005_push_delay",
+        include_str!("migrations/005_push_delay.sql"),
+    ),
+    (
+        "006_import_pending",
+        include_str!("migrations/006_import_pending.sql"),
+    ),
+    (
+        "007_monthly_duration",
+        include_str!("migrations/007_monthly_duration.sql"),
+    ),
+    (
+        "008_my_register",
+        include_str!("migrations/008_my_register.sql"),
+    ),
+    (
+        "009_anchor_convergence",
+        include_str!("migrations/009_anchor_convergence.sql"),
+    ),
+    (
+        "010_my_pass_hash",
+        include_str!("migrations/010_my_pass_hash.sql"),
+    ),
 ];
 
 /// 迁移建连（migrator 账号；同样关语句缓存）
@@ -118,7 +142,12 @@ mod tests {
             for s in &stmts {
                 let upper = s.to_ascii_uppercase();
                 assert!(
-                    upper.starts_with("CREATE") || upper.starts_with("ALTER"),
+                    upper.starts_with("CREATE")
+                        || upper.starts_with("ALTER")
+                        || upper.starts_with("SET")
+                        || upper.starts_with("PREPARE")
+                        || upper.starts_with("EXECUTE")
+                        || upper.starts_with("DEALLOCATE"),
                     "{version} 里出现意外语句: {s}"
                 );
             }

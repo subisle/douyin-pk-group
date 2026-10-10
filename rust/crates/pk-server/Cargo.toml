@@ -24,3 +24,5 @@ sqlx = { workspace = true }
 reqwest = { workspace = true }
 tokio-tungstenite = { workspace = true }
 futures-util = { workspace = true }
+# P1-4：管理口令哈希改 argon2id（替代自造 FNV 变体）
+argon2 = "0.5"

@@ -17,7 +17,7 @@ if [ -z "$ADMIN" ]; then
   ADMIN="$(openssl rand -hex 12)"
 fi
 
-SSH_OPTS=(-o StrictHostKeyChecking=no -o ConnectTimeout=15)
+SSH_OPTS=(-o StrictHostKeyChecking=accept-new -o ConnectTimeout=15)
 run_remote() {
   sshpass -p "$PASS" ssh "${SSH_OPTS[@]}" "root@$HOST" "$1"
 }

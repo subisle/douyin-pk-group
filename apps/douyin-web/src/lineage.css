@@ -448,6 +448,90 @@
 }
 
 /* ===== 批量登记师门弹层 ===== */
+/* ---------- 字辈视图 ---------- */
+.lin-gen-groups {
+  display: grid;
+  gap: 12px;
+}
+.lin-gen-group {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--canvas);
+  overflow: hidden;
+}
+.lin-gen-head {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 12px;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  text-align: left;
+  cursor: pointer;
+}
+.lin-gen-head:hover {
+  background: color-mix(in srgb, var(--ink) 4%, transparent);
+}
+.lin-gen-char {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+  background: var(--brand-soft);
+  color: var(--brand);
+  font-size: 17px;
+  font-weight: 700;
+}
+.lin-gen-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--ink);
+}
+.lin-gen-head .lin-badge.sm {
+  margin-left: 0;
+}
+.lin-gen-caret {
+  margin-left: auto;
+  color: var(--ink3);
+  font-size: 12px;
+}
+.lin-gen-people {
+  padding: 4px 12px 12px;
+}
+
+/* 手机适配：字辈头更紧凑，统计卡两列一行 */
+@media (max-width: 640px) {
+  .lin-stats {
+    gap: 8px;
+  }
+  .lin-stat {
+    min-width: calc(50% - 4px);
+    padding: 7px 10px 6px;
+  }
+  .lin-stat b {
+    font-size: 18px;
+  }
+  .lin-gen-head {
+    padding: 8px 10px;
+  }
+  .lin-gen-char {
+    width: 28px;
+    height: 28px;
+    font-size: 15px;
+  }
+  .lin-gen-people {
+    padding: 2px 10px 10px;
+  }
+  .lin-gen-people .lin-chip {
+    padding: 5px 12px;
+    font-size: 13.5px;
+  }
+}
+
 .batch-pop {
   width: 520px;
 }

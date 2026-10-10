@@ -1,5 +1,12 @@
 name: douyin-pk-suite
 
+# ⚠️ 监听地址（P1-5）：宿主端口发布一律绑 127.0.0.1，公网入口交给宿主机
+#    Nginx/Caddy 反代，绝不能把 8787/8080 直接裸到 0.0.0.0。
+#    容器内 pk-server 的 HOST 默认为 127.0.0.1 时 healthcheck 之外无法直连；
+#    若需要容器外直连探活，必须显式在 .env 配 HOST=0.0.0.0（宿主侧仍只绑
+#    127.0.0.1，公网进不来）。生产目前走「服务间容器网络互访（mariadb/pk-server）
+#    + 宿主反代」，两个应用服务不发布端口，属预期状态。
+
 services:
   pk-server:
     image: pk-server:arm64

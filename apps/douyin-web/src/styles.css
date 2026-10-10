@@ -800,3 +800,95 @@ th.num {
 .master-list button.sel {
   outline: 2px solid var(--brand);
 }
+
+/* ---------------- 开关布局（2026-10-10）：/admin/bots 公开站点设置 ---------------- */
+/* iOS 风格滑动开关：checkbox.switch 零依赖实现 */
+input.switch {
+  appearance: none;
+  -webkit-appearance: none;
+  flex: none;
+  width: 40px;
+  height: 24px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ink) 16%, transparent);
+  position: relative;
+  cursor: pointer;
+  transition: background var(--ease);
+  outline: none;
+}
+input.switch::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgb(16 24 40 / 25%);
+  transition: transform var(--ease);
+}
+input.switch:checked {
+  background: var(--brand);
+}
+input.switch:checked::after {
+  transform: translateX(16px);
+}
+input.switch:focus-visible {
+  box-shadow: var(--ring);
+}
+
+/* 开关行：说明在左，开关在右；整行可点 */
+.flag-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-ctl);
+  background: #fff;
+  cursor: pointer;
+  transition: border-color var(--ease), background var(--ease);
+}
+.flag-row:hover {
+  border-color: color-mix(in srgb, var(--ink) 22%, transparent);
+}
+.flag-row:has(input.switch:checked) {
+  border-color: color-mix(in srgb, var(--brand) 35%, transparent);
+  background: color-mix(in srgb, var(--brand) 3%, transparent);
+}
+.flag-text {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+.flag-label {
+  font-weight: 500;
+  color: var(--ink);
+}
+.flag-hint {
+  font-size: 12px;
+  color: var(--ink3);
+  line-height: 1.5;
+}
+
+/* 开关网格：说明类开关两列，纯标签开关三列（窄屏自动降列） */
+.flag-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 8px;
+  margin: 8px 0 4px;
+}
+.flag-grid-compact {
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+}
+.flag-grid-compact .flag-row {
+  padding: 8px 12px;
+}
+.flag-title {
+  margin: 16px 0 2px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink2);
+}

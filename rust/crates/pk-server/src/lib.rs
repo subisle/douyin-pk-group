@@ -22,4 +22,5 @@ pub mod routes;
 pub mod spa;
 pub mod state;
 pub mod store;
+pub mod wbgateway;
 pub mod writer;

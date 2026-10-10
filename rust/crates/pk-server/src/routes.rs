@@ -23,6 +23,11 @@ impl ApiError {
     pub fn auth(msg: impl Into<String>) -> Self {
         Self(anyhow::anyhow!(msg.into()), Some(StatusCode::UNAUTHORIZED))
     }
+
+    /// 明确的 400（功能没开之类）：不靠中文关键词推断，文案可以随便写
+    pub fn bad_request(msg: impl Into<String>) -> Self {
+        Self(anyhow::anyhow!(msg.into()), Some(StatusCode::BAD_REQUEST))
+    }
 }
 
 impl From<anyhow::Error> for ApiError {
@@ -77,9 +82,32 @@ impl IntoResponse for ApiError {
     }
 }
 
+/// `GET /api/health`：探活。P2-21 增强 —— 除了只读库连通性，还探写池与调度器：
+/// - `db`：当前数据源（只读池）连通性（沿用原口径，连不上不 500）
+/// - `writer`：douyin_writer 写池连通性；未配置/连不上时 ok=false 并带原因
+/// - `scheduler.lastRun`：延迟推送调度器最近一轮扫描时间；一轮都没跑过标 null
 pub async fn health(State(st): State<std::sync::Arc<AppState>>) -> ApiResult {
     let db = mysql::health_check(&st.pools, &st.active_id()).await;
-    Ok(Json(json!({ "server": "ok", "db": db })))
+    let writer = match &st.writer {
+        Some(pool) => {
+            let ok = sqlx::query_scalar::<_, i64>("SELECT 1")
+                .fetch_one(pool)
+                .await
+                .is_ok();
+            json!({ "ok": ok, "configured": true })
+        }
+        None => json!({ "ok": false, "configured": false, "error": "写库未配置或启动时连接失败" }),
+    };
+    let scheduler = json!({
+        "running": true,
+        "lastRun": crate::push::scheduler_last_run(),
+    });
+    Ok(Json(json!({
+        "server": "ok",
+        "db": json!({ "ok": db.ok }),
+        "writer": writer,
+        "scheduler": scheduler,
+    })))
 }
 
 pub async fn sources(State(st): State<std::sync::Arc<AppState>>) -> ApiResult {
@@ -122,7 +150,7 @@ pub async fn test_source(
         anchor_count = repos::load_anchors(&st, Some(&id), true).await?.len();
     }
     Ok(Json(
-        json!({ "id": id, "ok": db.ok, "version": db.version, "error": db.error, "latestDate": latest, "anchorCount": anchor_count }),
+        json!({ "id": id, "ok": db.ok, "error": db.error, "latestDate": latest, "anchorCount": anchor_count }),
     ))
 }
 

@@ -10,7 +10,7 @@
     "build": "pnpm -F @pk/web build && cd rust && cargo build --release -p pk-server",
     "test": "pnpm test:go && cd rust && cargo test --workspace",
     "test:go": "cd server-go && go test ./... && go vet ./...",
-    "check:compose": "cd deploy/rk3318 && MARIADB_ROOT_PASSWORD=x DOUYIN_WRITER_PASSWORD=x PK_READER_PASSWORD=x docker compose config --quiet",
+    "check:compose": "if docker compose version >/dev/null 2>&1; then DC='docker compose'; else DC=docker-compose; fi; TD=$(mktemp -d) && : > \"$TD/.env\"; rc=0; MARIADB_ROOT_PASSWORD=x DOUYIN_WRITER_PASSWORD=x PK_READER_PASSWORD=x DOUYIN_MIGRATOR_PASSWORD=x $DC -f deploy/rk3318/docker-compose.yml config > /dev/null || rc=1; $DC -f deploy/docker-compose.yml --project-directory \"$TD\" config > /dev/null || rc=1; rm -rf \"$TD\"; [ \"$rc\" = 0 ] && echo 'compose 配置可解析 ✓'; exit $rc",
     "typecheck": "pnpm -F @pk/web exec tsc --noEmit && pnpm -F @pk/douyin-web exec tsc --noEmit"
   },
   "devDependencies": {

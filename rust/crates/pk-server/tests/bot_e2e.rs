@@ -35,6 +35,7 @@ async fn setup() -> Option<Arc<AppState>> {
         active: std::sync::Mutex::new(active),
         cache: std::sync::Mutex::new(Default::default()),
         bots: std::sync::OnceLock::new(),
+        wb: std::sync::OnceLock::new(),
     }))
 }
 
@@ -155,7 +156,9 @@ async fn csv_attachment_with_date_and_team_hints_is_imported() {
 #[tokio::test]
 async fn report_date_then_two_files_import_team_agnostic() {
     let Some(st) = setup().await else { return };
-    let Some(pool) = st.writer.clone() else { return };
+    let Some(pool) = st.writer.clone() else {
+        return;
+    };
     let date = "2019-03-16";
     clean_date(&st, date).await;
 
@@ -182,12 +185,18 @@ async fn report_date_then_two_files_import_team_agnostic() {
     // ① 报日期（「10.1」这种写法）→ 机器人记下来
     let mut msg = inbound(date);
     msg.conversation_id = "CSV-USER-D".into();
-    let ack = bot::BotRouter::handle(&st, &cfg, msg).await.expect("报日期应有回复");
+    let ack = bot::BotRouter::handle(&st, &cfg, msg)
+        .await
+        .expect("报日期应有回复");
     assert!(ack.text.contains("已记下业务日期"), "实际：{}", ack.text);
     assert!(ack.text.contains(date), "实际：{}", ack.text);
 
     // ② 第一个文件（文件名不带任何提示；男女混在一个文件里）
-    let Some(url1) = serve_text(Box::leak(format!("{male},111111\n{female},222222\n").into_boxed_str())).await else {
+    let Some(url1) = serve_text(Box::leak(
+        format!("{male},111111\n{female},222222\n").into_boxed_str(),
+    ))
+    .await
+    else {
         return;
     };
     let out1 = bot::BotRouter::handle(&st, &cfg, inbound_from("CSV-USER-D", "export.csv", &url1))
@@ -199,10 +208,15 @@ async fn report_date_then_two_files_import_team_agnostic() {
         !head.contains("男团") && !head.contains("女团"),
         "不分男女团时标题不该带团别：{head}"
     );
-    assert!(out1.text.contains(date), "回复要回显业务日期：{}", out1.text);
+    assert!(
+        out1.text.contains(date),
+        "回复要回显业务日期：{}",
+        out1.text
+    );
 
     // ③ 第二个文件：日期要黏住（不用再报一次）
-    let Some(url2) = serve_text(Box::leak(format!("{male},333333\n").into_boxed_str())).await else {
+    let Some(url2) = serve_text(Box::leak(format!("{male},333333\n").into_boxed_str())).await
+    else {
         return;
     };
     let out2 = bot::BotRouter::handle(&st, &cfg, inbound_from("CSV-USER-D", "export2.csv", &url2))

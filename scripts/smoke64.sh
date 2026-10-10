@@ -6,10 +6,10 @@
 set -euo pipefail
 
 HOST="${PK64_HOST:-64.188.8.149}"
-PASS="${PK64_PASS:-47uUAB24ybLN3s6lMx}"
+PASS="${PK64_PASS:?请用环境变量提供 PK64_PASS}"
 REMOTE="${PK64_DIR:-/opt/it/douyin-pk-group}"
 
-sshpass -p "$PASS" ssh -o StrictHostKeyChecking=no "root@$HOST" bash -s -- "$REMOTE" <<'REMOTE_SCRIPT'
+sshpass -p "$PASS" ssh -o StrictHostKeyChecking=accept-new "root@$HOST" bash -s -- "$REMOTE" <<'REMOTE_SCRIPT'
 set -uo pipefail
 REMOTE="$1"
 PORT=18788

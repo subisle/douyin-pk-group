@@ -15,15 +15,23 @@
  *   环境变量 PREFIX 覆盖地址前缀（默认 /admin）。验 vite dev 的无前缀形态：
  *     BASE=http://localhost:5173 PREFIX= node scripts/uicheck-admin.mjs
  *
+ * 只读模式：UICHECK_READONLY=1 时**跳过第 7 段**「写 2019-01-01 测试日入库 / 删除」，
+ * 只跑路由与渲染断言（1~6 段 + 8 段 console 清洁度）。部署脚本默认用只读模式
+ * （UICHECK_READONLY=1），避免发布自检污染生产库；全量自检（含入库/删除回环）
+ * 请在测试环境手动跑：UICHECK_READONLY= node scripts/uicheck-admin.mjs。
+ *
  * 只用 Node 内置能力（Node 22+ 自带 WebSocket）+ 本机 Chrome，不需要 puppeteer。
  *
- * ⚠️ 第 7 段会往库里写一个 2019-01-01 的测试业务日，并在同一次运行里删掉；
- *    只对本地 / 测试实例跑，别对着生产跑。
+ * ⚠️ 非只读模式（默认全量）的第 7 段会往库里写一个 2019-01-01 的测试业务日，
+ *    并在同一次运行里删掉；只对本地 / 测试实例跑，别对着生产跑。
  */
 import { execSync, spawn } from 'node:child_process'
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { setTimeout as sleep } from 'node:timers/promises'
+
+/** 只读模式：部署自检 / 对生产实例跑时用，跳过一切写库（测试日入库/删除） */
+const READONLY = process.env.UICHECK_READONLY === '1'
 
 const BASE = (process.argv[2] ?? process.env.BASE ?? 'http://127.0.0.1:8787').replace(
   /\/+$/,
@@ -41,7 +49,7 @@ const TEST_DATE = '2019-01-01'
 const PAGES = [
   // 数据页两种状态都算合格：有音浪看 KPI，清空/全新库看空状态（且不能报红）
   { path: '/data', label: '数据概况', marker: ['当日总音浪', '还没有采集到任何日期'] },
-  { path: '/import', label: '数据导入', marker: '导入音浪数据' },
+  { path: '/import', label: '数据导入', marker: '导入数据' },
   { path: '/streamers', label: '主播管理', marker: '主播台账' },
   { path: '/claims', label: '抖音号审计', marker: '抖音号绑定审计' },
   { path: '/lineage', label: '族谱', marker: '师门关系' },
@@ -245,7 +253,7 @@ async function shot(ws, name) {
 }
 
 /* ------------------------------- 开始 ------------------------------- */
-console.log(`== 管理端路由自检 · BASE=${BASE} ==`)
+console.log(`== 管理端路由自检 · BASE=${BASE}${READONLY ? ' · 只读模式（跳过写库用例）' : ''} ==`)
 
 const loginResp = await fetch(`${BASE}/api/auth/login`, {
   method: 'POST',
@@ -260,16 +268,19 @@ const { token } = await loginResp.json()
 const apiGet = async (path) =>
   (await fetch(BASE + path, { headers: { Authorization: `Bearer ${token}` } })).json()
 
-/* 上一次跑崩了可能把测试日留下：开跑前先清一遍，保证断言从干净状态出发 */
-const stale = await apiGet(`/api/admin/import/day-status?bizDate=${TEST_DATE}&team=auto`)
-if ((stale.rows ?? 0) > 0) {
-  const del = await (
-    await fetch(`${BASE}/api/admin/import/day?bizDate=${TEST_DATE}&team=male`, {
-      method: 'DELETE',
-      headers: { Authorization: `Bearer ${token}` },
-    })
-  ).json()
-  console.log(`（清掉上次残留：${TEST_DATE} ${del.metrics} 条音浪 / ${del.batches} 个批次）`)
+/* 上一次跑崩了可能把测试日留下：开跑前先清一遍，保证断言从干净状态出发。
+   只读模式跳过（不写库，也不需要——第 7 段不会跑）。 */
+if (!READONLY) {
+  const stale = await apiGet(`/api/admin/import/day-status?bizDate=${TEST_DATE}&team=auto`)
+  if ((stale.rows ?? 0) > 0) {
+    const del = await (
+      await fetch(`${BASE}/api/admin/import/day?bizDate=${TEST_DATE}&team=male`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      })
+    ).json()
+    console.log(`（清掉上次残留：${TEST_DATE} ${del.metrics} 条音浪 / ${del.batches} 个批次）`)
+  }
 }
 
 /* 导入用例用真主播名（否则匹配不上，导入全失败） */
@@ -279,8 +290,10 @@ if (names.length < 3) {
   console.error('男团主播不足 3 人，无法构造导入用例')
   process.exit(2)
 }
-const csv = ['主播名,音浪', ...names.map((n, i) => `${n},${(i + 1) * 111000}`)].join('\n') + '\n'
-writeFileSync(CSV, csv)
+if (!READONLY) {
+  const csv = ['主播名,音浪', ...names.map((n, i) => `${n},${(i + 1) * 111000}`)].join('\n') + '\n'
+  writeFileSync(CSV, csv)
+}
 
 /* 干净的浏览器：杀掉占着调试端口的僵尸实例 + 清 profile（否则会恢复上一轮标签页，
    /json/list 里混进旧页面，断言可能读到别的页面） */
@@ -387,7 +400,7 @@ try {
     // 空库引导：点「去数据导入」应走 SPA 跳转（地址变 /import，marker 还在）
     await evaluate(ws, 'window.__emptyNav = 1')
     await clickByText(ws, '去「数据导入」')
-    truthy('空状态能跳到导入页', await waitText(ws, '导入音浪数据'))
+    truthy('空状态能跳到导入页', await waitText(ws, '导入数据'))
     expect('跳转后地址', await pathname(ws), `${PREFIX}/import`)
     expect('空状态跳转没整页刷新', await evaluate(ws, 'window.__emptyNav'), 1)
     await goto(ws, `${BASE}${PREFIX}/data`)
@@ -409,7 +422,7 @@ try {
   )
   await evaluate(ws, 'window.__pkNavMarker = 1')
   await clickByText(ws, '数据导入')
-  truthy('切到导入页', await waitText(ws, '导入音浪数据'))
+  truthy('切到导入页', await waitText(ws, '导入数据'))
   expect(`地址变成 ${PREFIX}/import`, await pathname(ws), `${PREFIX}/import`)
   expect('没整页刷新（marker 还在）', await evaluate(ws, 'window.__pkNavMarker'), 1)
 
@@ -421,7 +434,7 @@ try {
   console.log('== 4. 前进后退 ==')
   await evaluate(ws, 'history.back()')
   truthy(`后退回到 ${PREFIX}/import`, await waitFor(ws, `location.pathname === '${PREFIX}/import'`))
-  await waitText(ws, '导入音浪数据')
+  await waitText(ws, '导入数据')
   await evaluate(ws, 'history.forward()')
   truthy(`前进回到 ${PREFIX}/bots`, await waitFor(ws, `location.pathname === '${PREFIX}/bots'`))
   await waitText(ws, 'QQ 机器人')
@@ -432,11 +445,13 @@ try {
   truthy(`未知路径归位 ${PREFIX}/data`, await waitFor(ws, `location.pathname === '${PREFIX}/data'`))
   await waitMarker(ws, ['当日总音浪', '还没有采集到任何日期'])
 
-  /* ---------- 6. 导入页：没有粘贴入口 + 上传弹预览 ---------- */
+  /* ---------- 6. 导入页：没有粘贴入口 + 上传弹预览 ----------
+     只读模式跑到这里为止：拖放预览走的是「先解析、不落库」的 preview 接口，
+     本身不写库；但第 7 段会真入库，只读模式直接收尾。 */
   console.log('== 6. 导入页无粘贴 + 预览弹窗 ==')
   errors = []
   await goto(ws, `${BASE}${PREFIX}/import`)
-  await waitText(ws, '导入音浪数据')
+  await waitText(ws, '导入数据')
   const importText = await evaluate(ws, 'document.body.innerText')
   truthy('页面上没有「粘贴」字样', !importText.includes('粘贴'))
   expect(
@@ -596,7 +611,10 @@ try {
   })
   truthy('再按 Esc 关掉预览', await waitFor(ws, `!document.querySelector('.import-pop')`))
 
-  /* ---------- 7. 真入库 → 批次列表 → 删掉当天数据 ---------- */
+  /* ---------- 7. 真入库 → 批次列表 → 删掉当天数据（只读模式跳过） ---------- */
+  if (READONLY) {
+    console.log('== 7. 入库 / 清理：只读模式跳过（UICHECK_READONLY=1）==')
+  } else {
   console.log(`== 7. 入库 / 清理（业务日期 ${TEST_DATE}）==`)
   const before = await apiGet(`/api/admin/import/day-status?bizDate=${TEST_DATE}&team=auto`)
   expect('测试日期入库前没有数据', before.rows ?? 0, 0)
@@ -655,11 +673,17 @@ try {
   }
   truthy('删除按钮可用', btnOk)
   await clickByText(ws, '删除当前日期')
-  truthy('删除结果提示出现', await waitText(ws, '已删除', 60))
-  const delText = await evaluate(ws, `document.body.innerText.match(/已删除[^\\n]*/)?.[0] ?? ''`)
-  truthy(`删除报告：${delText}`, /已删除\s*3\s*条音浪数据/.test(delText))
+  /* 只看页面里的结果提示：这次删除同时会发 SSE（右下角 toast 也带「已删除」）并且可能先到，
+     用 body.innerText 会随机读到 toast → 断言假失败（踩过）。 */
+  truthy(
+    '删除结果提示出现（页面内）',
+    await waitFor(ws, `document.querySelector('.page .alert')?.innerText.includes('已删除')`, 60),
+  )
+  const delText = await evaluate(ws, `document.querySelector('.page .alert')?.innerText ?? ''`)
+  truthy(`删除报告：${delText.replace(/\n/g, ' ')}`, /已删除\s*3\s*条音浪数据/.test(delText))
   const cleaned = await apiGet(`/api/admin/import/day-status?bizDate=${TEST_DATE}&team=auto`)
   expect('清理后当天 0 行', cleaned.rows ?? 0, 0)
+  } /* end: 第 7 段（只读模式跳过） */
 
   /* ---------- 8. 全程没有 console 报错 ---------- */
   console.log('== 8. console 清洁度 ==')

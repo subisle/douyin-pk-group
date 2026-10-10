@@ -13,8 +13,12 @@ use axum::Router;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Docker HEALTHCHECK 用：探活自身，不连数据库
+    // Docker HEALTHCHECK 用：探活自身，不连数据库（P2-21：打一条日志便于排查误用）
     if std::env::args().any(|a| a == "--health-check") {
+        tracing_subscriber::fmt()
+            .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()))
+            .init();
+        tracing::info!("--health-check：进程可运行（按约定不连库，返回即成功）");
         return Ok(());
     }
 
@@ -26,6 +30,24 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()))
         .init();
+
+    /* P1-5：无 ADMIN_PASSWORD 时拒绝启动。
+    之前的行为是「整个 /api 不鉴权只打日志」，一旦按仓库资产部署（HOST=0.0.0.0
+    + compose 直接发布端口），管理 API 就裸奔在公网。现在默认拒绝启动；
+    本地开发确实不想配口令时，显式设 ALLOW_NO_ADMIN_PASSWORD=1 放行。 */
+    if !auth::Auth::password_configured()
+        && std::env::var("ALLOW_NO_ADMIN_PASSWORD").as_deref() != Ok("1")
+    {
+        eprintln!(
+            "拒绝启动：未设置 ADMIN_PASSWORD（管理 API 将完全无鉴权）。\n\
+             - 正常部署：在 .env / 环境里配置 ADMIN_PASSWORD\n\
+             - 本地开发确实不需要口令：显式设 ALLOW_NO_ADMIN_PASSWORD=1"
+        );
+        anyhow::bail!("未设置 ADMIN_PASSWORD（设置 ALLOW_NO_ADMIN_PASSWORD=1 可显式放行）");
+    }
+    if !auth::Auth::password_configured() {
+        tracing::warn!("ALLOW_NO_ADMIN_PASSWORD=1：本次启动 /api 不鉴权（仅限本地开发）");
+    }
 
     /* 显式迁移子命令：`pk-server migrate`（docs/00 §4 决策：DDL 不随启动自动跑） */
     if std::env::args().any(|a| a == "migrate") {
@@ -107,7 +129,19 @@ async fn main() -> anyhow::Result<()> {
         active: Mutex::new(active),
         cache: Mutex::new(Default::default()),
         bots: std::sync::OnceLock::new(),
+        wb: std::sync::OnceLock::new(),
     });
+    /* WorkBuddy 网关（注册用「添加账号 OAuth」）：配了 WORKBUDDY_PANEL_PASSWORD 才有；
+    没配只打一条提示，注册页自动隐藏 OAuth 步骤。 */
+    match wbgateway::WbGateway::from_env() {
+        Some(wb) => {
+            tracing::info!(panel = wb.base(), "WorkBuddy 网关注册授权已启用");
+            let _ = st.wb.set(wb);
+        }
+        None => tracing::info!(
+            "WorkBuddy 网关未配置（WORKBUDDY_PANEL_PASSWORD 空）：注册页不显示 OAuth 步骤"
+        ),
+    }
 
     /* 内置主播名册：person 表为空（全新部署）时自动装载 105 人种子数据 */
     roster_seed::seed_if_empty(&st).await;
@@ -119,7 +153,10 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!(created = builtin_created, "内置展示端账号已写入");
     }
     if builtin_skipped > 0 {
-        tracing::warn!(skipped = builtin_skipped, "有内置展示端账号没写成功，原因见上面的日志");
+        tracing::warn!(
+            skipped = builtin_skipped,
+            "有内置展示端账号没写成功，原因见上面的日志"
+        );
     }
 
     /* 机器人模块（E 阶段）：配置了凭据的服务启动即自动连接（用户要求：启动 QQ 机器人都要启动）。
@@ -139,6 +176,11 @@ async fn main() -> anyhow::Result<()> {
     st.bots
         .set(bot_manager)
         .map_err(|_| anyhow::anyhow!("bots 重复初始化"))?;
+
+    /* 延迟推送调度器（2026-10-10）：每 60 秒扫一次 push_jobs，把到点的任务推出去。
+    写库不可用时 push_job_take 直接返回 None，循环空转，不影响服务。
+    P1-20：调度循环监听全局 shutdown token，graceful shutdown 时随之退出。 */
+    let scheduler = tokio::spawn(push::scheduler_loop(st.clone()));
 
     /* 对外公开的只读端点：不要鉴权，单独一层 */
     let public = Router::new()
@@ -206,8 +248,40 @@ async fn main() -> anyhow::Result<()> {
             "/api/public/teams/{team}/my/push/qr",
             get(public_teams::my_push_qr),
         )
-        // 对外展示页（静态 HTML，粉丝/主播手机直开）：/1 男团、/0 女团（好记），/st/m、/st/f 为别名
-        // 子路径（/report、/group/junior、/lineage…）也是同一页，前端 history 路由接管
+        // 展示端手机号注册（2026-10-10）：手机号=账号、验证码=密码；
+        // 注册同时调 WorkBuddy 网关「添加账号 (OAuth)」，注册完提示绑定主播。
+        // 这几个接口不带团别：注册时还不知道主播属于哪个团。
+        .route(
+            "/api/public/my/register/config",
+            get(public_teams::my_register_config),
+        )
+        .route(
+            "/api/public/my/register/oauth/start",
+            post(public_teams::my_register_oauth_start),
+        )
+        .route(
+            "/api/public/my/register/oauth/poll",
+            get(public_teams::my_register_oauth_poll),
+        )
+        .route(
+            "/api/public/my/register/oauth/cancel",
+            post(public_teams::my_register_oauth_cancel),
+        )
+        .route("/api/public/my/register", post(public_teams::my_register))
+        .route(
+            "/api/public/my/bind/search",
+            get(public_teams::my_bind_search),
+        )
+        .route("/api/public/my/bind", post(public_teams::my_bind))
+        // 对外展示页（静态 HTML，粉丝/主播手机直开）：/ 为唯一入口（男女共用，
+        // 进页由前端弹团别选择卡），/1、/0、/st/m、/st/f 为兼容旧链接的别名；
+        // 子路径（/report、/lineage、/my、/group/*）也是同一页，前端 history 路由接管
+        .route("/", get(public_teams::st_root))
+        .route("/report", get(public_teams::st_root))
+        .route("/lineage", get(public_teams::st_root))
+        .route("/my", get(public_teams::st_root))
+        .route("/group", get(public_teams::st_root))
+        .route("/group/{key}", get(public_teams::st_root))
         .route("/1", get(public_teams::st_m))
         .route("/0", get(public_teams::st_0))
         .route("/st/{team}", get(public_teams::st_page))
@@ -270,6 +344,28 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/api/admin/import/batches", get(admin::import_batches))
         .route("/api/admin/import/day", delete(admin::import_day_delete))
+        // 月度时长（平台月报整月导入：每日不能导入时长，只有月时长）
+        .route(
+            "/api/admin/import/month/preview",
+            post(admin::import_month_preview),
+        )
+        .route(
+            "/api/admin/import/month/commit",
+            post(admin::import_month_commit),
+        )
+        .route(
+            "/api/admin/import/month-status",
+            get(admin::import_month_status),
+        )
+        .route(
+            "/api/admin/import/month",
+            delete(admin::import_month_delete),
+        )
+        // 暂存区：有抖音号/ID 但还没建档的导入行（不进榜单和统计，建档/绑号后自动补账）
+        .route(
+            "/api/admin/import/pending",
+            get(admin::import_pending_list).delete(admin::import_pending_delete),
+        )
         // E 阶段机器人：状态 / 启停 / 微信扫码登录
         .route("/api/admin/bots/status", get(bot::bots_status))
         .route("/api/admin/bots/qq/start", post(bot::qq_start))
@@ -292,6 +388,9 @@ async fn main() -> anyhow::Result<()> {
             get(bot::weixin_add_qr_get).post(bot::weixin_add_qr_set),
         )
         .route("/api/admin/bots/sessions", get(bot::bots_sessions))
+        // 延迟推送队列（2026-10-10）：查看排队情况 + 立刻催一次
+        .route("/api/admin/push/jobs", get(bot::push_jobs))
+        .route("/api/admin/push/run", post(bot::push_run_now))
         .route(
             "/api/admin/bots/sessions/admin",
             post(bot::bots_session_admin),
@@ -307,6 +406,10 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/admin/streamers/{id}/accounts",
             post(admin::bind_account),
+        )
+        .route(
+            "/api/admin/streamers/{id}/accounts/{accountId}",
+            axum::routing::delete(admin::unbind_account),
         )
         .route(
             "/api/admin/streamers/{id}/detail",
@@ -335,6 +438,11 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/admin/my-accounts/{name}",
             get(public_teams::admin_my_account_get).delete(public_teams::admin_my_account_delete),
+        )
+        // 管理员改绑主播（用户自己不能解绑/换绑）
+        .route(
+            "/api/admin/my-accounts/{name}/bind",
+            post(public_teams::admin_my_account_bind),
         )
         // 抖音号绑定审计（展示端提交 + 截图凭证 → 管理端裁决）
         .route(
@@ -413,11 +521,13 @@ async fn main() -> anyhow::Result<()> {
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(8787);
-    let host = std::env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
+    // P1-5：默认只听回环地址。生产要对外时必须显式设 HOST=0.0.0.0
+    //（且正常情况下公网入口由 Caddy 反代收口，后端不该直接暴露）。
+    let host = std::env::var("HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
     let addr: std::net::SocketAddr = format!("{host}:{port}")
         .parse()
         .map_err(|_| anyhow::anyhow!("无效的监听地址: {host}:{port}"))?;
-    tracing::info!("pk-server 启动 http://{addr}（管理员 /  ·  对外展示 /s/:id）");
+    tracing::info!("pk-server 启动 http://{addr}（管理员 /admin  ·  对外展示 /）");
     tracing::info!(
         auth = if st.auth.enabled() {
             "已开启（需口令）"
@@ -427,10 +537,50 @@ async fn main() -> anyhow::Result<()> {
         "管理员鉴权状态"
     );
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(
+
+    /* P1-20：优雅退出 —— SIGTERM / Ctrl+C 后停止接受新连接，等在途请求结束
+    （含 SSE；axum graceful wait 有限流，不会永远等）再退出。调度循环由
+    shutdown token 通知退出。systemctl restart / compose recreate 时不再硬断。 */
+    let shutdown = async {
+        let ctrl_c = async {
+            let _ = tokio::signal::ctrl_c().await;
+        };
+        #[cfg(unix)]
+        let terminate = async {
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(mut sig) => {
+                    sig.recv().await;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "SIGTERM 监听失败（优雅退出仅剩 Ctrl+C）");
+                    std::future::pending::<()>().await;
+                }
+            }
+        };
+        #[cfg(not(unix))]
+        let terminate = std::future::pending::<()>();
+        tokio::select! {
+            _ = ctrl_c => tracing::info!("收到 Ctrl+C，开始优雅退出"),
+            _ = terminate => tracing::info!("收到 SIGTERM，开始优雅退出"),
+        }
+        // 通知调度循环退出（它最多在当前 tick 收尾后停止）
+        push::shutdown_token().cancel();
+    };
+
+    let serve = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-    .await?;
-    Ok(())
+    .with_graceful_shutdown(shutdown);
+
+    match serve.await {
+        Ok(()) => {
+            tracing::info!("HTTP 服务已停止接受连接，等待后台任务退出…");
+            // 调度循环收到 token 后退出（最多等一轮 tick 的收尾时间）
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(10), scheduler).await;
+            tracing::info!("pk-server 已退出");
+            Ok(())
+        }
+        Err(e) => Err(e.into()),
+    }
 }

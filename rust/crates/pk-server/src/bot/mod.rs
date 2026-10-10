@@ -119,8 +119,13 @@ impl RateLimiter {
     fn allow(&self, key: &str) -> bool {
         let mut hits = self.hits.lock().expect("限流锁 poisoned");
         let now = Instant::now();
+        // P2-15（2026-10-10 审计）：每次都全表 retain——先把过期时间戳清掉，
+        // 空了的会话一并移除，map 不随历史会话数无界增长（对照 my_tokens 的写法）。
+        hits.retain(|_, list| {
+            list.retain(|t| now.duration_since(*t) < Duration::from_secs(60));
+            !list.is_empty()
+        });
         let list = hits.entry(key.to_string()).or_default();
-        list.retain(|t| now.duration_since(*t) < Duration::from_secs(60));
         if list.len() >= self.limit as usize {
             return false;
         }
@@ -164,7 +169,8 @@ fn pending_date_get(key: &str) -> Option<String> {
 }
 
 /// 运营报日期的写法都收：「10.1」「10-1」「10/1」「10月1日」「10月1号」「2026-10-01」。
-/// 只给月日 → 当年（例：10.1 = 2026-10-01）。
+/// 只给月日 → 就近取年（P2-12，2026-10-10 审计）：与「今天」差超过约 6 个月就取相邻年份，
+/// 1 月初发「12.31」算去年、12 月底发「1.1」算今年。
 pub fn parse_short_date(s: &str) -> Option<String> {
     let t = s.trim();
     if valid_date(t) {
@@ -173,16 +179,37 @@ pub fn parse_short_date(s: &str) -> Option<String> {
     let norm: String = t
         .trim_end_matches(['号', '日'])
         .chars()
-        .map(|c| if matches!(c, '.' | '/' | '月' | '-') { '-' } else { c })
+        .map(|c| {
+            if matches!(c, '.' | '/' | '月' | '-') {
+                '-'
+            } else {
+                c
+            }
+        })
         .collect();
     let parts: Vec<&str> = norm.split('-').filter(|p| !p.is_empty()).collect();
     if parts.len() == 2 {
         let m: u32 = parts[0].parse().ok()?;
         let d: u32 = parts[1].parse().ok()?;
-        let year = chrono::Local::now().format("%Y").to_string();
-        let cand = format!("{year}-{m:02}-{d:02}");
-        if valid_date(&cand) {
-            return Some(cand);
+        let today = chrono::Local::now().date_naive();
+        // 两种年份候选里取离今天更近的那个（约 6 个月内必然是正确年份）
+        let this_year = format!("{}-{m:02}-{d:02}", today.format("%Y"));
+        let last_year = format!(
+            "{}-{m:02}-{d:02}",
+            (today - chrono::Duration::days(365)).format("%Y")
+        );
+        let pick = |cand: &str| valid_date(cand).then(|| cand.to_string());
+        match (pick(&this_year), pick(&last_year)) {
+            (Some(a), Some(b)) => {
+                let da = chrono::NaiveDate::parse_from_str(&a, "%Y-%m-%d").ok()?;
+                let db = chrono::NaiveDate::parse_from_str(&b, "%Y-%m-%d").ok()?;
+                let da_gap = (da - today).num_days().abs();
+                let db_gap = (db - today).num_days().abs();
+                return Some(if da_gap <= db_gap { a } else { b });
+            }
+            (Some(a), None) => return Some(a),
+            (None, Some(b)) => return Some(b),
+            (None, None) => return None,
         }
     }
     None
@@ -523,58 +550,193 @@ pub async fn weixin_add_qr_set(
     ))
 }
 
-/// 微信推送绑定（展示端「我的」页生成绑定码 → 用户发给机器人）。
+/// 微信推送绑定（2026-10-10 审计 P1-1 改二要素：手机号 + 「我的」页 6 位绑定码）。
 /// 命中返回回复文案，没命中返回 None（继续走管理员判定）。
+///
+/// 消息格式（给 Lead 写文档用）：
+/// - 一条消息：「绑定 13800000000 123456」（绑定/bind/bd + 手机号 + 6 位码）
+/// - 分两条：先发「绑定 13800000000」（或只发手机号），30 秒内再发 6 位码即可黏合成一条
+/// - 只发手机号（旧口径）→ 不再直接绑定，回复提示需要绑定码（不泄露该号是否登记过）
+///
+/// 安全口径：绑定码 = 「我的」页 push_set_code 生成的 30 分钟一次性码；错误文案统一，
+/// 不区分「手机号没登记」「码不对」「码过期」，避免枚举已登记手机号。
+/// 绑定成功回复不带姓名（审计要求：机器人会话可能被截图外传）。
 async fn try_bind_weixin(st: &Arc<AppState>, inbound: &Inbound) -> Option<Outbound> {
     let conversation = inbound.conversation_id.clone();
+    let text = inbound.text.trim();
     // 解绑：这条会话确实绑过才回应（否则静默，免得对任何陌生消息都回话）
-    let lower = inbound.text.trim().to_lowercase();
+    let lower = text.to_lowercase();
     if matches!(lower.as_str(), "解绑" | "取消绑定" | "unbind") {
         let name = crate::store::push_unbind_by_conversation(st, &conversation).await;
         return Some(Outbound::to(
             &conversation,
             match name {
-                Some(n) => format!(
-                    "已解绑 {n}，不会再收到推送。\n要重新绑定，回「我的」页面获取新的绑定码。"
-                ),
+                Some(_) => "已解绑，不会再收到推送。\n要重新绑定，在展示端「我的」页生成 6 位绑定码，\n再发「绑定 你的手机号 绑定码」即可。".to_string(),
                 None => "这条会话还没有绑定过，不用解绑。".to_string(),
             },
         ));
     }
-    let code = extract_bind_code(&inbound.text)?;
-    let (name, _team) =
-        crate::store::push_bind_by_code(st, &code, &conversation, &conversation).await?;
-    tracing::info!(account = %name, conversation = %conversation, "微信推送绑定成功");
-    crate::events::emit(crate::events::SCOPE_BOT, format!("微信推送已绑定：{name}"));
+
+    // ① 二要素绑定：手机号 + 6 位绑定码。两种写法：
+    //    一条消息「绑定 13800000000 123456」，或先发手机号再发码（PENDING_PHONE 黏合）。
+    let phone = extract_phone(text);
+    let code = extract_bind_code(text);
+    let (phone, code) = match (&phone, &code) {
+        (Some(p), Some(c)) => (p.clone(), c.clone()),
+        (Some(p), None) => {
+            // 只有手机号：先黏住等 30 秒内的第二条（6 位码），不查库、不回是否登记
+            pending_phone_put(&conversation, p);
+            return Some(Outbound::to(
+                &conversation,
+                "收到手机号。为保护账号安全，还需要一个 6 位绑定码：\n\
+                 打开展示端 → 「我的」页 → 「推送设置」→ 点「生成绑定码」，\n\
+                 30 分钟内把码发给我（例：绑定 13800000000 123456）。",
+            ));
+        }
+        (None, Some(c)) => {
+            // 只有码：看是不是上一条的另一半
+            match pending_phone_take(&conversation) {
+                Some(p) => (p, c.clone()),
+                None => return None, // 不带手机号的孤立码：静默（避免对聊天里的 6 位串回话）
+            }
+        }
+        (None, None) => return None, // 不是绑定消息：继续走管理员判定
+    };
+
+    let bind =
+        crate::store::push_bind_by_phone_code(st, &phone, &code, &conversation, &conversation)
+            .await;
+    let (name, team_opt) = match bind {
+        Some(pair) => pair,
+        None => {
+            // 统一文案：不泄露手机号是否登记过、码是否过期（P1-1 审计口径）
+            tracing::warn!(
+                conversation = %conversation,
+                "微信绑定失败（手机号未登记 / 码不对 / 码过期），统一回复"
+            );
+            return Some(Outbound::to(
+                &conversation,
+                "绑定没有成功：手机号和绑定码要配对使用。\n\
+                 打开展示端 → 「我的」页 → 「推送设置」→ 点「生成绑定码」，\n\
+                 再发「绑定 你的手机号 绑定码」（码 30 分钟内有效，用一次就作废）。",
+            ));
+        }
+    };
+
+    // 绑定行团别为空（台账建档晚于绑定）会导致推送按团捞不到这个人、
+    // 永远收不到推送。这里回查一次台账补上（沿用绑定码路径的修复）。
+    if team_opt.is_empty() {
+        if let Some(t) = crate::store::person_team_of_name(st, &name).await {
+            crate::store::push_set_team(st, &name, &t).await;
+            tracing::info!(account = %name, team = %t, "绑定后回填团别");
+        }
+    }
+    // 只记内部日志（姓名可能敏感），回复不带姓名（P1-1）
+    tracing::info!(conversation = %conversation, "微信推送绑定成功（手机号+绑定码）");
+    crate::events::emit(
+        crate::events::SCOPE_BOT,
+        format!("微信推送已绑定（{}）", mask_phone(&phone)),
+    );
     Some(Outbound::to(
         &conversation,
-        format!(
-            "✅ 绑定成功，{name}\n\n\
-             之后数据更新（每晚入库后）会给你推送：\n\
-             · 追分提醒 —— 追上对手 / 还差多少\n\
-             · 每日报告 —— 当天的音浪排行榜\n\n\
-             要开哪一项、要追谁，回到「我的」页面里设置。\n\
-             回复「解绑」可以断开。"
-        ),
+        "✅ 绑定成功\n\n\
+         之后每天数据入库约 30 分钟后会给你推送：\n\
+         · 追分提醒 —— 追上对手 / 还差多少\n\
+         · 每日报告 —— 当天的音浪排行榜\n\n\
+         要开哪一项、要追谁，到「我的」页面里设置（两个开关默认关着）。\n\
+         回复「解绑」可以断开。",
     ))
 }
 
-/// 从消息里认绑定码：`绑定 ABC234` / `bind abc234` / 直接发 `ABC234`（六位，码表排除易混字符）
+/// 手机号脱敏（日志 / 事件用）：138****0000
+fn mask_phone(phone: &str) -> String {
+    let chars: Vec<char> = phone.chars().collect();
+    if chars.len() < 7 {
+        return "****".into();
+    }
+    format!(
+        "{}****{}",
+        chars[..3].iter().collect::<String>(),
+        chars[chars.len() - 4..].iter().collect::<String>()
+    )
+}
+
+/// 从消息里认手机号（P1-1 二要素）：`绑定 13800000000 123456` / `bd 13800000000` /
+/// 单独一串数字。只认 7~15 位纯数字，带关键词时后面第二段如果是 6 位码不算（那是码）。
+/// 不带关键词时必须只有一段，避免把「查 3 月数据」这类文本误判成绑定。
+fn extract_phone(text: &str) -> Option<String> {
+    let mut toks = text.split_whitespace();
+    let first = toks.next()?;
+    let has_kw = matches!(first.to_lowercase().as_str(), "绑定" | "bind" | "bd");
+    let cand = if has_kw { toks.next()? } else { first };
+    // 不带关键词时不许有第二段；带关键词时第二段只可能是码（交给码提取器处理）
+    if !has_kw && toks.next().is_some() {
+        return None;
+    }
+    let digits: String = cand.chars().filter(|c| c.is_ascii_digit()).collect();
+    let original_is_digits = cand.chars().all(|c| c.is_ascii_digit());
+    if !original_is_digits || !(7..=15).contains(&digits.len()) {
+        return None;
+    }
+    Some(digits)
+}
+
+/// 从消息里认绑定码（P1-1 二要素）：`绑定 13800000000 ABC234` 里的第三段 / `bind ABC234`
+/// 里的第二段 / 单独一串 6 位码。码表排除易混字符（0/O/1/I），手机号不会被当成码。
 fn extract_bind_code(text: &str) -> Option<String> {
     let mut toks = text.split_whitespace();
     let first = toks.next()?;
     let has_kw = matches!(first.to_lowercase().as_str(), "绑定" | "bind" | "bd");
+    // 带关键词时：跳过手机号段（7~15 位纯数字），码可能是第二或第三段；
+    // 不带关键词时：只有一段且像码才认，避免把正常聊天误判成绑定码
     let cand = if has_kw {
-        toks.next()?
+        let mut next = toks.next()?;
+        if next.chars().all(|c| c.is_ascii_digit()) && next.len() >= 7 && next.len() <= 15 {
+            next = toks.next()?;
+        }
+        next
     } else {
-        // 不带关键词时必须只有一段，避免把正常聊天误判成绑定码
         if toks.next().is_some() {
             return None;
         }
         first
     };
+    // 带关键词时后面再有多段不认（「绑定 13800000000 ABC234 备注」这种不算）
+    if has_kw && toks.next().is_some() {
+        return None;
+    }
     let code = cand.trim().to_ascii_uppercase();
     crate::push::looks_like_bind_code(&code).then_some(code)
+}
+
+/* ------------------- 二要素绑定：手机号黏合（P1-1） ------------------- */
+
+/// 先发手机号再发码的分两条场景：手机号先黏住 30 秒，等码到了合成一条。
+/// key = 会话 id，值 = (手机号, 时间)；到点没等到码就丢（无副作用，纯内存）。
+static PENDING_PHONES: std::sync::OnceLock<Mutex<HashMap<String, (String, Instant)>>> =
+    std::sync::OnceLock::new();
+const PENDING_PHONE_TTL: Duration = Duration::from_secs(30);
+
+fn pending_phones() -> &'static Mutex<HashMap<String, (String, Instant)>> {
+    PENDING_PHONES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn pending_phone_put(conversation: &str, phone: &str) {
+    let mut m = pending_phones().lock().expect("pending_phone 锁 poisoned");
+    m.retain(|_, (_, at)| at.elapsed() < PENDING_PHONE_TTL);
+    m.insert(
+        conversation.to_string(),
+        (phone.to_string(), Instant::now()),
+    );
+}
+
+fn pending_phone_take(conversation: &str) -> Option<String> {
+    let mut m = pending_phones().lock().expect("pending_phone 锁 poisoned");
+    match m.remove(conversation) {
+        Some((p, at)) if at.elapsed() < PENDING_PHONE_TTL => Some(p),
+        Some(_) => None,
+        None => None,
+    }
 }
 
 /// 处理一条入站消息。返回 None = 静默忽略（非管理员 / 空消息）。
@@ -593,8 +755,19 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
         crate::events::SCOPE_BOT,
         format!("{} 收到消息", inbound.channel),
     );
-    // 展示端「我的」页微信绑定（2026-10-09）：用户扫码加机器人后把绑定码发过来。
-    // 必须在管理员白名单之前处理——来绑定的都是普通主播，不是管理员。
+    // 限流（P1-1 审计：必须前置到绑定分支之前，否则绑定路径不限速可暴力试码）。
+    // 对所有渠道所有会话生效（含绑定/管理员）。
+    let limiter = LIMITER.get_or_init(|| RateLimiter::new(cfg.rate_limit_per_min));
+    let key = format!("{}:{}", inbound.channel, inbound.conversation_id);
+    if !limiter.allow(&key) {
+        return Some(Outbound::to(
+            &inbound.conversation_id,
+            "消息太频繁了，稍后再试（限流 10 条/分钟）",
+        ));
+    }
+    // 展示端「我的」页微信绑定（2026-10-10 审计 P1-1 改二要素：手机号 + 绑定码）。
+    // 必须在管理员白名单之前处理——来绑定的都是普通主播，不是管理员；
+    // 限流已经在上一步生效，绑定码暴力尝试会被限流挡住。
     if inbound.channel == "weixin" && !inbound.is_group {
         if let Some(out) = try_bind_weixin(st, &inbound).await {
             return Some(out);
@@ -615,15 +788,6 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
             "非管理员会话消息，静默忽略（可在管理端会话列表勾选管理员，或加入 BOT_QQ_ADMINS）"
         );
         return None;
-    }
-
-    let limiter = LIMITER.get_or_init(|| RateLimiter::new(cfg.rate_limit_per_min));
-    let key = format!("{}:{}", inbound.channel, inbound.conversation_id);
-    if !limiter.allow(&key) {
-        return Some(Outbound::to(
-            &inbound.conversation_id,
-            "消息太频繁了，稍后再试（限流 10 条/分钟）",
-        ));
     }
 
     let text = inbound.text.trim().to_string();
@@ -672,6 +836,67 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
             .first()
             .map(|a| a.file_name.clone())
             .unwrap_or_else(|| "文件".into());
+
+        /* 月度时长文件（2026-10-10 用户口径：每日不能导入时长，只有月时长）：
+        只有「时长」列、没有音浪列的附件不能按日导 —— 那会「成功 0 行」，看着像成功其实什么都没进。
+        文件名带月份（9月份时长.csv）就直接按那个月导；没带月份让运营改名或去管理端选月份。 */
+        let month_rows = admin::parse_month_duration_text(&attachment_text);
+        if admin::is_month_duration_file(&month_rows, &rows) {
+            let Some((y, m)) = crate::csvparse::month_from_filename(&filename) else {
+                return Some(Outbound::to(
+                    &inbound.conversation_id,
+                    format!(
+                        "文件「{filename}」看着是月度时长（只有时长列、没有音浪列），但文件名里没有月份。\n\
+                         把文件名改成「9月份时长.csv」这样再发，或到管理端「数据导入」页选年份 + 月份导入。"
+                    ),
+                ));
+            };
+            let period = format!("{y}-{m:02}");
+            tracing::info!(
+                file = %filename,
+                period = %period,
+                rows = month_rows.len(),
+                "机器人月度时长导入"
+            );
+            let reply = match admin::commit_month_duration(
+                st,
+                &period,
+                "auto",
+                month_rows,
+                "merge",
+                &format!("机器人·{filename}"),
+            )
+            .await
+            {
+                Ok(r) => {
+                    let mut s = format!(
+                        "✅ {period} 月度时长导入成功 {} 人（合计 {} 小时{}分）",
+                        r.ok_rows,
+                        r.minutes_total / 60,
+                        r.minutes_total % 60
+                    );
+                    if r.unchanged > 0 {
+                        s.push_str(&format!("，{} 人值没变未覆盖", r.unchanged));
+                    }
+                    for f in r.failures.iter().take(10) {
+                        s.push_str(&format!(
+                            "\n· {}：{}",
+                            f.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+                            f.get("reason").and_then(|v| v.as_str()).unwrap_or("")
+                        ));
+                    }
+                    if r.failures.len() > 10 {
+                        s.push_str(&format!("\n… 还有 {} 条失败", r.failures.len() - 10));
+                    }
+                    s.push_str(
+                        "\n（时长只按月导入；未匹配到的主播先在「主播台账」建档 / 绑号，再重发这个文件）",
+                    );
+                    s
+                }
+                Err(e) => format!("❌ {period} 月度时长导入失败：{e}"),
+            };
+            return Some(Outbound::to(&inbound.conversation_id, reply));
+        }
 
         // 业务日期优先级：本条消息里带的日期 > 之前报过的日期（12h 内）> 文件名里的日期 > 收到日 − 1
         let (file_date, _file_team) = hints_from_filename(&filename);
@@ -750,6 +975,15 @@ fn format_report(
                     "（另有 {} 行音浪值与库里相同，未覆盖）",
                     r.unchanged
                 ));
+            }
+            if !r.pending.is_empty() {
+                out.push_str(&format!(
+                    "（{} 行未建档已暂存，台账建档/绑号后自动补账）",
+                    r.pending.len()
+                ));
+            }
+            if !r.skipped.is_empty() {
+                out.push_str(&format!("（跳过 {} 行：当天没有数值）", r.skipped.len()));
             }
             if !r.failures.is_empty() {
                 out.push_str(&format!("，失败 {} 行：", r.failures.len()));
@@ -1183,8 +1417,48 @@ fn fmt_num(w: f64) -> String {
     }
 }
 
-/// 下载附件文本（QQ CDN 直链 / 微信文件）
+/// 附件下载大小上限（P2-16，2026-10-10 审计）：8MB。CSV/文本导入远用不到这么大，
+/// 超限一律拒绝——rk3318 部署 mem_limit 160m，无上限下载必然 OOM。
+const ATTACHMENT_MAX_BYTES: usize = 8 * 1024 * 1024;
+/// 附件下载主机白名单（P2-16）：只允许 QQ 开放平台官方 CDN 域名。
+/// 附件 URL 由平台下发，但白名单兜底 SSRF——就算平台回显用户可控 URL 也出不了这个圈。
+/// 需要接微信文件消息时在这里加域名。
+const ATTACHMENT_HOSTS: &[&str] = &[
+    "multimedia.nt.qq.com.cn",
+    "multimedia.qq.com.cn",
+    "groupfile.qq.com",
+    "qq.com",
+];
+
+/// 下载 URL 主机校验：解析 host，必须与白名单域名相等或以其为后缀（`.qq.com`）。
+fn attachment_host_allowed(url: &str) -> bool {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url);
+    let host = rest
+        .split(['/', ':', '?', '#'])
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if host.is_empty() {
+        return false;
+    }
+    ATTACHMENT_HOSTS
+        .iter()
+        .any(|h| host == *h || host.ends_with(&format!(".{h}")))
+}
+
+/// 下载附件文本（QQ CDN 直链 / 微信文件）。
+/// P2-16：主机白名单 + 8MB 大小上限，超限拒绝并告警（防 OOM / SSRF）。
 async fn download_text(url: &str) -> anyhow::Result<String> {
+    if !attachment_host_allowed(url) {
+        tracing::warn!(
+            url_head = %url.chars().take(80).collect::<String>(),
+            "附件下载被拒：主机不在白名单"
+        );
+        anyhow::bail!("附件链接的域名不受支持（只接受 QQ 开放平台官方 CDN）");
+    }
     let resp = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()?
@@ -1192,6 +1466,20 @@ async fn download_text(url: &str) -> anyhow::Result<String> {
         .send()
         .await?
         .error_for_status()?;
+    // 大小上限：看 Content-Length。缺失时也拒绝（QQ CDN 直链必带头，
+    // 没头的来源不可信——不把未知大小读进 160m 的容器内存）。
+    let len = resp.content_length().ok_or_else(|| {
+        tracing::warn!("附件响应没有 Content-Length，拒绝下载（P2-16 大小上限兜底）");
+        anyhow::anyhow!("附件服务器没有返回大小信息，拒绝下载")
+    })?;
+    if len as usize > ATTACHMENT_MAX_BYTES {
+        tracing::warn!(len, max = ATTACHMENT_MAX_BYTES, "附件超大，拒绝下载");
+        anyhow::bail!(
+            "附件太大（{} MB，上限 {} MB）",
+            len / 1024 / 1024,
+            ATTACHMENT_MAX_BYTES / 1024 / 1024
+        );
+    }
     let bytes = resp.bytes().await?;
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
@@ -1201,6 +1489,37 @@ pub async fn bots_sessions(State(st): State<ArcState>) -> ApiResult {
     mgr(&st)?;
     Ok(axum::Json(
         serde_json::json!({ "items": crate::store::session_list(&st).await }),
+    ))
+}
+
+/// GET /api/admin/push/jobs：最近的延迟推送任务（运营看队列有没有推出去）
+pub async fn push_jobs(State(st): State<ArcState>) -> ApiResult {
+    Ok(axum::Json(serde_json::json!({
+        "items": crate::store::push_job_list(&st, 30).await,
+        "stats": crate::store::push_stats(&st).await,
+        "delayMinutes": crate::push::delay_minutes(),
+    })))
+}
+
+/// POST /api/admin/push/run?team=&bizDate=：立刻推一次（不等到点）
+/// 运营想马上看到推送效果时用。
+/// P1-6（2026-10-10 审计）：team/bizDate 在进 push.rs 前先过白名单——
+/// 复用 admin::valid_team / admin::valid_biz_date，格式不对直接 400，
+/// 不给内联 SQL 拼接留任何注入面。
+pub async fn push_run_now(
+    State(st): State<ArcState>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> ApiResult {
+    let team = q.get("team").cloned().unwrap_or_default();
+    let date = q.get("bizDate").cloned().unwrap_or_default();
+    if team.is_empty() || date.is_empty() {
+        return Err(anyhow::anyhow!("缺少 team 或 bizDate").into());
+    }
+    admin::valid_team(&team).map_err(|e| anyhow::anyhow!("{e}"))?;
+    admin::valid_biz_date(&date).map_err(|e| anyhow::anyhow!("{e}"))?;
+    crate::push::run(&st, &team, &date).await?;
+    Ok(axum::Json(
+        serde_json::json!({ "ok": true, "team": team, "bizDate": date }),
     ))
 }
 
@@ -1296,6 +1615,42 @@ mod tests {
         // route_command 的兜底分支：不含关键字时不 panic，返回提示
         // （完整路由需要 AppState，这里只验证纯函数层）
         assert!(team_of("女团").is_some());
+    }
+
+    /* ---- 手机号绑定识别（2026-10-10） ---- */
+
+    #[test]
+    fn phone_extracted_from_bind_messages() {
+        assert_eq!(extract_phone("13800138000").as_deref(), Some("13800138000"));
+        assert_eq!(
+            extract_phone("绑定 13800138000").as_deref(),
+            Some("13800138000")
+        );
+        assert_eq!(
+            extract_phone("bd 13800138000").as_deref(),
+            Some("13800138000")
+        );
+        assert_eq!(
+            extract_phone("绑定 138 0013 8000"),
+            None,
+            "带空格的不认，避免误判"
+        );
+    }
+
+    #[test]
+    fn phone_not_confused_with_other_messages() {
+        // 短数字 / 非纯数字 / 多段文本都不该被当成绑定手机号
+        for s in ["3", "查 3 月数据", "帮助", "2026-10-01", "1380013800012345"] {
+            assert_eq!(extract_phone(s), None, "不该认成手机号：{s}");
+        }
+    }
+
+    #[test]
+    fn bind_code_still_works_as_fallback() {
+        assert_eq!(extract_bind_code("ABC234").as_deref(), Some("ABC234"));
+        assert_eq!(extract_bind_code("绑定 ABC234").as_deref(), Some("ABC234"));
+        // 手机号格式不会被当成绑定码（码表里没有纯数字组合里的小写，且长度固定 6）
+        assert_eq!(extract_bind_code("13800138000"), None);
     }
 
     #[test]

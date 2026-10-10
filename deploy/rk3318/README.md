@@ -11,10 +11,15 @@
 入口复用宿主机现有 Nginx，不额外常驻网关：
 
 ```text
-/dy/*  → 127.0.0.1:8080  douyin-server
+/dy/*  → 127.0.0.1:8080  douyin-server（Go 过渡服务，退役倒计时；pk-server 无此路由）
 /s/*   → 127.0.0.1:8787  pk-server
 /      → 127.0.0.1:8787  pk-server
 ```
+
+> 端口说明（P1-5）：该 compose 两个应用服务**不发布宿主端口**——容器间走内部网络
+> （pk-server 直连 `mariadb:3306`），宿主机 Nginx 反代到容器 IP/宿主地址。若未来给
+> 服务加 `ports:`，一律绑 `127.0.0.1:` 前缀；容器内 pk-server 若需要容器外直连探活，
+> 必须显式在 `.env` 配 `HOST=0.0.0.0`（Rust 端默认 `127.0.0.1` 的改动由后端侧负责）。
 
 两个服务各出一个离线镜像包（`pk-server-arm64.tar.gz` + `douyin-server-arm64.tar.gz`），
 由 `scripts/deploy-rk3318.sh` 一次性下载并 `docker load`，然后一起 `compose up`。
@@ -71,7 +76,7 @@ GET  /api/admin/import/batches        最近导入批次
 BOT_QQ_APP_ID=
 BOT_QQ_APP_SECRET=
 BOT_QQ_ADMINS=          # 管理员会话 openid，逗号分隔
-# 微信 iLink（扫码后 token 自动落 SQLite，也可手工粘贴）
+# 微信 iLink（扫码后会话 token 落 MySQL bot_sessions，单库化后不再落 SQLite；也可手工粘贴）
 BOT_WECHAT_ADMINS=
 # BOT_AUTOSTART 已废弃：配置了凭据的渠道随服务启动自动连接
 BOT_RATE_LIMIT=10       # 每会话每分钟消息上限

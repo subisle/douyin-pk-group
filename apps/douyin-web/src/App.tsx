@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { hasToken, login, logout } from './api'
+import { hasToken, login, logout, UNAUTHORIZED_EVENT } from './api'
 import { subscribeChanges } from './useAutoRefresh'
 import { ROUTES, routeHref, useRoute } from './lib/router'
 import DashboardPage from './DashboardPage'
@@ -37,6 +37,19 @@ export default function App() {
       if (timer != null) window.clearTimeout(timer)
     }
   }, [authed])
+
+  /** token 失效（401）时整站切回登录门（P1-11）：
+   *  任何一页的请求收到 401，api() 都会广播这个事件，这里把登录态清掉，
+   *  不再让用户面对满屏红字还要手动点「退出」。 */
+  useEffect(() => {
+    const onUnauthorized = () => {
+      setAuthed(false)
+      setPassword('')
+      setError('')
+    }
+    window.addEventListener(UNAUTHORIZED_EVENT, onUnauthorized)
+    return () => window.removeEventListener(UNAUTHORIZED_EVENT, onUnauthorized)
+  }, [])
 
   async function doLogin() {
     setError('')

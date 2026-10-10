@@ -10,7 +10,7 @@
 set -euo pipefail
 
 HOST="${RK_HOST:-192.168.5.12}"
-PASS="${RK_PASS:-shuai}"
+PASS="${RK_PASS:?请用环境变量提供 RK_PASS}"
 DIR="${RK_DIR:-/opt/pk-server}"
 IMAGE="${RK_IMAGE:-pk-server:arm64}"
 ADMIN="${RK_ADMIN:-pk-rk3318-2026}"
@@ -64,10 +64,10 @@ ls -lh "$tmp"
 
 # 4. 传到机器、导入、重启
 echo "==> 部署到 $HOST"
-sshpass -p "$PASS" scp -o StrictHostKeyChecking=no \
+sshpass -p "$PASS" scp -o StrictHostKeyChecking=accept-new \
   "$tmp/pk-server-arm64.tar.gz" "$tmp/douyin-server-arm64.tar.gz" \
   "root@$HOST:/tmp/"
-sshpass -p "$PASS" ssh -o StrictHostKeyChecking=no "root@$HOST" "
+sshpass -p "$PASS" ssh -o StrictHostKeyChecking=accept-new "root@$HOST" "
   set -e
   docker load -i /tmp/pk-server-arm64.tar.gz
   docker load -i /tmp/douyin-server-arm64.tar.gz
@@ -85,8 +85,11 @@ sshpass -p "$PASS" ssh -o StrictHostKeyChecking=no "root@$HOST" "
   docker compose ps
 "
 
-# 5. 真跑一遍渲染自检：手机 / PC / 翻页 / 切日期
-echo "==> 渲染自检"
-node scripts/uicheck.mjs "$BASE" "$ADMIN"
+# 5. 真跑一遍渲染自检：路由深链 / 导航 / 弹窗（只读模式，不写库）
+echo "==> 渲染自检（uicheck-admin，只读模式）"
+# 部署自检默认只读（UICHECK_READONLY=1）：只跑路由与渲染断言，不写 2019-01-01 测试日。
+# 全量自检（含入库/删除回环）请在测试环境手动跑：UICHECK_READONLY= node scripts/uicheck-admin.mjs。
+UICHECK_READONLY="${UICHECK_READONLY:-1}" \
+PREFIX=/admin node scripts/uicheck-admin.mjs "$BASE" "$ADMIN"
 
-echo "==> 完成：$BASE/  后台    $BASE/s/1  公布页"
+echo "==> 完成：$BASE/admin/data  管理后台    $BASE/  展示端"

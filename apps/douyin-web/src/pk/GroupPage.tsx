@@ -15,12 +15,15 @@ import {
 import { buildExportNode, disposeExportNode, downloadBlob, nodeToPngBlob } from './exportImage';
 import { REVIVAL_MINUTES, revivalAfterGroup, rulesOf } from './rules';
 import { useAutoRefresh } from '../useAutoRefresh';
+import { isoLocal } from '../lib/date';
+import { registerLeaveGuard } from '../lib/router';
 import type {
   BalanceStat,
   BreakRule,
   Bucket,
   ConstraintsMeta,
   DisplayConfig,
+  InspectResponse,
   PlanBrief,
   Player,
   Strategy,
@@ -158,6 +161,28 @@ export default function GroupPage() {
     return () => document.removeEventListener('click', close);
   }, [menuFor]);
 
+  /* P1-12：未保存的看板在切页前确认。看板上有分组内容就算「未保存」
+     （拖半小时的成果不该被一次切页清零）；保存过方案也只是防手滑，确认一次即可。
+     守卫在 App 的路由跳转（go）里生效；浏览器刷新/关标签另有 beforeunload。 */
+  useEffect(() => {
+    const unregister = registerLeaveGuard(() => {
+      if (buckets.length === 0) return null;
+      return 'PK 分组看板上有未保存的分组';
+    });
+    return unregister;
+  }, [buckets.length]);
+
+  /* P1-12：浏览器直接刷新 / 关标签也拦一道（SPA 内 confirm 管不到这两条路径） */
+  useEffect(() => {
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (buckets.length === 0) return;
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
+    return () => window.removeEventListener('beforeunload', onBeforeUnload);
+  }, [buckets.length]);
+
   /* 加长停留点：小组赛是复活赛（20 分钟，位置随组数走），其余赛事是第 3 组后的可调休息。 */
   /** 本赛事有没有复活赛（初级/中级争霸赛小组赛），跟有没有分组无关 */
   const revivalEvent = REVIVAL_EVENTS.includes(eventType);
@@ -190,21 +215,39 @@ export default function GroupPage() {
   );
 
   /* ---------------- 体检（拖拽后重算均衡与冲突） ---------------- */
+  /** P1-13：inspect 并发序号。连拖两次会并发两个请求，旧请求后到就会把组头
+   *  开赛时间刷回旧分组的 slots（还会被印进导出长图）。自增序号只认最后一次
+   *  发出的请求；in-flight 的 promise 留给导出长图等它完成。 */
+  const inspectSeqRef = useRef(0);
+  const inspectInflightRef = useRef<Promise<InspectResponse | null> | null>(null);
+
   async function inspectNow(next: Bucket[]) {
     if (!next.length) {
+      inspectSeqRef.current += 1;
+      inspectInflightRef.current = null;
       setBalance(null);
       setViolations([]);
       setSlots([]);
       return;
     }
-    try {
-      const r = await pk.inspect({ groups: next.map((b) => b.players), constraints: scheduleInput() });
-      setBalance(r.balance);
-      setViolations(r.violations || []);
-      setSlots(r.slots || []);
-    } catch (e) {
-      setError((e as Error).message);
-    }
+    const seqAtRequest = ++inspectSeqRef.current;
+    const req = pk
+      .inspect({ groups: next.map((b) => b.players), constraints: scheduleInput() })
+      .then((r): InspectResponse => r)
+      .catch((e) => {
+        // 只有最新的那次才允许往页面上报错；被更新的拖拽盖掉的旧响应静默丢弃
+        if (seqAtRequest === inspectSeqRef.current) setError((e as Error).message);
+        return null;
+      })
+      .finally(() => {
+        if (inspectInflightRef.current === req) inspectInflightRef.current = null;
+      });
+    inspectInflightRef.current = req;
+    const r = await req;
+    if (r == null || seqAtRequest !== inspectSeqRef.current) return; // 过期响应：丢弃
+    setBalance(r.balance);
+    setViolations(r.violations || []);
+    setSlots(r.slots || []);
   }
 
   const pushHistory = useCallback((snap?: Snapshot) => {
@@ -232,7 +275,7 @@ export default function GroupPage() {
         setIntervalMin(m.schedule?.intervalMin || 15);
       })
       .catch(() => {});
-    void loadPlans();
+    // 方案列表由下面的 [eventType] effect 拉（P1-14 过滤需要跟着赛事类型走）
   }, []);
 
   /* 方案在别处（另一个页签/设备）被保存、上架、删除时自动刷新列表。
@@ -240,6 +283,14 @@ export default function GroupPage() {
   useAutoRefresh(() => {
     void loadPlans();
   }, ['plans']);
+
+  /* P1-14：切赛事类型后重拉方案列表（loadPlans 按 eventType 过滤）。
+     eventType 变化时函数式组件已重新渲染，直接在这里重拉即可。 */
+  useEffect(() => {
+    void loadPlans();
+    // loadPlans 引用每次渲染都变，只跟 eventType 走
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [eventType]);
 
   /* 名单草稿按赛事类型各存一份：切类型就换名单，没存过则清空输入框重填。
      坑：拉草稿是异步的，用户可能在返回前就已经粘贴了新名单——那种情况绝不能用
@@ -291,8 +342,15 @@ export default function GroupPage() {
   async function loadPlans() {
     try {
       const r = await pk.listPlans();
-      setPlans(r.items || []);
-    } catch (_) { /* 没登录或后端不可用时静默 */ }
+      // P1-14：方案列表按当前赛事类型过滤（后端 /api/plans 无 type 参数，前端过滤；
+      // eventType 为空的老方案不归类，不在任何赛事页出现，避免跨赛事载入/上架）
+      setPlans((r.items || []).filter((p) => p.eventType === eventType));
+    } catch (e) {
+      // P2-5：方案列表加载失败不再静默 —— 显示出来（载入/上架按钮全会没数据）
+      console.error('方案列表加载失败', e);
+      setError((e as Error).message);
+      setPlans([]);
+    }
   }
 
   /* ---------------- 名单 ---------------- */
@@ -366,7 +424,7 @@ export default function GroupPage() {
         `已解析 ${active.length} 人，分成 ${arranged.groups.length} 组` +
           (res.unmatched.length ? ` · ${res.unmatched.length} 行识别不到（见下面红框）` : ''),
       );
-      if (!title) setTitle(`${eventType} · PK 分组 ${(res.dates?.[0]) || new Date().toISOString().slice(0, 10)}`);
+      if (!title) setTitle(`${eventType} · PK 分组 ${(res.dates?.[0]) || isoLocal()}`);
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -651,9 +709,14 @@ export default function GroupPage() {
     }
     setBusy('export');
     try {
+      // P1-13：导出前强制等最新的 inspect 落地 —— 拖完立刻点导出时，
+      // slots 可能还是上一次分组的开赛时间，错的时间会被印进长图发到群里。
+      if (inspectInflightRef.current) {
+        await inspectInflightRef.current;
+      }
       const node = buildExportNode({
         title: title.trim() || 'PK 分组',
-        brandLine: `PK GROUP · ${dates[0] || new Date().toISOString().slice(0, 10)}`,
+        brandLine: `PK GROUP · ${dates[0] || isoLocal()}`,
         metaLine: `${eventType} · 共 ${buckets.reduce((s, b) => s + b.players.length, 0)} 人 · ${startTime} 后 / 间隔 ${intervalMin} 分${restOn ? ` · 第 ${restAfterGroup} 组后${revivalEvent ? '复活赛' : '休息'} ${restMin} 分` : ''}`,
         groups: buckets.map((b, i) => ({
           name: b.name,
@@ -663,7 +726,7 @@ export default function GroupPage() {
         hideWave: !display.wave,
         metricLabel: waveLabel,
         rules: eventRule,
-        footer: `${title.trim() || 'PK 分组'} · ${eventType} | ${new Date().toISOString().slice(0, 10)}`,
+        footer: `${title.trim() || 'PK 分组'} · ${eventType} | ${isoLocal()}`,
       });
       try {
         const blob = await nodeToPngBlob(node, { scale: 2 });

@@ -64,25 +64,22 @@ pub async fn dashboard(State(st): State<ArcState>, Query(q): Query<DashboardQuer
         .to_string();
     let date = match q.date.as_deref() {
         Some(d) if valid_date(d) => d.to_string(),
+        // P1-8：默认基准日不再刻意跳过基线日 —— 基线日整天都是不可信的累计快照行，
+        // 行级过滤后聚合值为 0，把它当默认基准日会让 KPI 显示 0。所以默认仍选
+        // 「≤ 自然昨天的最新采集日」，但失败链最后一环不再排除基线日（清库后
+        // 只剩基线日一天时，页面照样能打开看空数据）。
         _ => dates
             .iter()
             .filter(|d| Some(d.as_str()) != baseline.as_deref() && d.as_str() <= yesterday.as_str())
             .max()
             .cloned()
-            .or_else(|| {
-                dates
-                    .iter()
-                    .filter(|d| Some(d.as_str()) != baseline.as_deref())
-                    .max()
-                    .cloned()
-            })
             .or_else(|| dates.first().cloned())
             .unwrap_or_default(),
     };
     if date.is_empty() {
         /* 全新库 / 刚清空音浪数据：不是错误 —— 给数据页一个空状态（docs/06 §7：
-           「还没有采集到任何日期」+ 去导入，不显示假进度）。在册人数照常给，
-           台账还在，只是没有音浪。 */
+        「还没有采集到任何日期」+ 去导入，不显示假进度）。在册人数照常给，
+        台账还在，只是没有音浪。 */
         let person_count = mysql::query(&st.pools, "LOCAL", dialect::ACTIVE_PERSON_COUNT_SQL)
             .await?
             .first()
@@ -130,8 +127,10 @@ pub async fn dashboard(State(st): State<ArcState>, Query(q): Query<DashboardQuer
             .or_default()
             .insert(pid, (wave, minutes, live, name, gender));
     }
-    // 只保留有效采集日并剔除基线快照日（09-21 基线 1490 万会污染趋势/预警）
-    per_day.retain(|d, _| dates.contains(d) && Some(d.as_str()) != baseline.as_deref());
+    // P1-8：基线日不再整天剔除 —— trend_sql 已按行过滤 wave_reliable=1，
+    // 基线日（全是不可信的累计快照行）自然聚合出 0，其它日期不受影响。
+    // 只保留有效采集日；某天全部行不可信时趋势里显示为 0 而不是凭空消失。
+    per_day.retain(|d, _| dates.contains(d));
 
     // KPI：基准日当天
     let today_rows = per_day.get(&date);
@@ -285,8 +284,18 @@ async fn period_metrics(st: &AppState, q: MetricsQuery, is_month: bool) -> ApiRe
         return Err(anyhow::anyhow!("team 只能是 male / female").into());
     }
 
-    let sql = dialect::period_metrics_sql(&format!("{period}%"), team);
-    let rows = mysql::query(&st.pools, "LOCAL", &sql).await?;
+    // 月 / 年口径：时长优先用导入的整月值（monthly_duration），没有才日明细求和；
+    // 库没跑 007 迁移时 query_period 自动退回日明细口径。
+    let rows = dialect::query_period(
+        &st.pools,
+        "LOCAL",
+        dialect::ADMIN_PERIOD_SELECT,
+        &format!("{period}%"),
+        team,
+        "",
+        "wave DESC",
+    )
+    .await?;
     let items: Vec<Value> = rows
         .iter()
         .map(|r| {
@@ -308,24 +317,30 @@ async fn period_metrics(st: &AppState, q: MetricsQuery, is_month: bool) -> ApiRe
             for it in &items {
                 let pid = it.get("personId").and_then(|v| v.as_u64()).unwrap_or(0);
                 let wave = it.get("wave").and_then(|v| v.as_i64()).unwrap_or(0);
-                let minutes = it.get("minutes").and_then(|v| v.as_i64()).unwrap_or(0);
                 let live_days = it.get("liveDays").and_then(|v| v.as_i64()).unwrap_or(0);
                 if pid == 0 {
                     continue;
                 }
-                let _ = sqlx::query(
+                // P2-8：monthly_metric 表（002 迁移）没有 minutes 列 —— 原来这条
+                // ON DUPLICATE 里引用 VALUES(minutes) 每次都报错又被 `let _ =` 吞掉，
+                // 落库永远 0 行。表结构没有该列，不再写 minutes；整月时长已由
+                // monthly_duration 表单独承载，不需要在 monthly_metric 里冗余一份。
+                // 失败改为记 warn 日志（便于发现），仍不阻断接口返回。
+                if let Err(e) = sqlx::query(
                     "INSERT INTO monthly_metric (person_id, period, wave, live_days, recomputed_at)
                      VALUES (?,?,?,?,NOW(3))
                      ON DUPLICATE KEY UPDATE wave = VALUES(wave), live_days = VALUES(live_days),
-                       minutes = VALUES(minutes), recomputed_at = NOW(3)",
+                       recomputed_at = NOW(3)",
                 )
                 .bind(pid as i64)
                 .bind(&period)
                 .bind(wave)
                 .bind(live_days as i32)
-                .bind(minutes)
                 .execute(&pool)
-                .await;
+                .await
+                {
+                    tracing::warn!(period = %period, person = pid, error = %e, "monthly_metric 落库失败");
+                }
             }
         }
     }

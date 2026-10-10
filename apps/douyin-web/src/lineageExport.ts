@@ -10,6 +10,7 @@
 
 import { layoutForest, W, PAD, type CanvasRow, type CNode } from './LineageCanvas'
 import { downloadBlob } from './pk/exportImage'
+import { isoLocal } from './lib/date'
 
 /* 与展示端画布同源的 8 色循环（改配色要三处同步：这里、pk/exportImage.ts、st_page.html） */
 const THEMES = [
@@ -241,6 +242,7 @@ export async function exportLineagePng(
   const blob = await new Promise<Blob>((resolve, reject) =>
     canvas.toBlob((b) => (b ? resolve(b) : reject(new Error('canvas 转 PNG 失败'))), 'image/png'),
   )
-  downloadBlob(blob, `${meta.title.replace(/[\\/:*?"<>|\s]+/g, '')}-${new Date().toISOString().slice(0, 10)}.png`)
+  /* 文件名日期用本地时区（P2-6）：toISOString 是 UTC，早 8 点前导出文件名会差一天 */
+  downloadBlob(blob, `${meta.title.replace(/[\\/:*?"<>|\s]+/g, '')}-${isoLocal()}.png`)
   return { width: canvas.width, height: canvas.height, bytes: blob.size }
 }

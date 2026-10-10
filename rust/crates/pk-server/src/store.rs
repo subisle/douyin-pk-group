@@ -469,12 +469,41 @@ pub fn validate_my_account(
     }
     let pass = pass.trim();
     if pass.is_empty() {
-        return Err("密码不能为空".into());
+        return Err("密码不能为空；已有账号要保留原密码请传当前密码".into());
     }
     if !pass.chars().all(|c| c.is_ascii_alphanumeric()) || pass.len() < 4 || pass.len() > 20 {
         return Err("密码必须是 4~20 位字母或数字".into());
     }
     Ok((name.to_string(), pass.to_string()))
+}
+
+/// 展示端账号密码哈希：argon2id。验证码 / 手工密码都只落哈希，不再存明文。
+fn hash_my_password(pass: &str) -> String {
+    crate::auth::hash_password(pass)
+}
+
+fn verify_my_password(pass: &str, stored: &str) -> bool {
+    if stored.starts_with("$argon2") {
+        return crate::auth::verify_password(pass, stored);
+    }
+    // 老库存量明文：只支持一次性兼容校验；调用方校验成功后必须立即升级为 argon2id。
+    stored == pass
+}
+
+/// 登录命中后把老明文密码就地升级为 argon2id。
+/// 升级失败不阻断登录；下一次成功登录会重试。
+async fn upgrade_my_password_if_plain(pool: &MySqlPool, name: &str, stored: &str, pass: &str) {
+    if stored.starts_with("$argon2") {
+        return;
+    }
+    if let Err(e) = sqlx::query("UPDATE my_accounts SET pass = ? WHERE name = ?")
+        .bind(hash_my_password(pass))
+        .bind(name)
+        .execute(pool)
+        .await
+    {
+        tracing::warn!(error = %e, name, "展示端老明文密码升级为 argon2id 失败");
+    }
 }
 
 /// 手机号归一化（选填）：去空格横线后须为 5~20 位纯数字；空串 = 未设置
@@ -493,13 +522,15 @@ fn validate_my_phone(phone: &str) -> std::result::Result<String, String> {
     Ok(p)
 }
 
-/// 全部账号（管理端列表用），按添加时间倒序
+/// 全部账号（管理端列表用），按添加时间倒序。
+/// `bound`/`source` 来自 008 迁移；老库没迁移时退回老查询（一律视为已绑定）。
 pub async fn my_account_list(st: &AppState) -> Vec<serde_json::Value> {
     let Ok(pool) = w(st) else {
         return Vec::new();
     };
-    match sqlx::query(
-        "SELECT name, phone, pass, is_admin, created_at FROM my_accounts ORDER BY created_at DESC, name ASC",
+    let rows = match sqlx::query(
+        "SELECT name, phone, is_admin, created_at, bound, bound_at, source \
+         FROM my_accounts ORDER BY created_at DESC, name ASC",
     )
     .fetch_all(pool)
     .await
@@ -510,17 +541,41 @@ pub async fn my_account_list(st: &AppState) -> Vec<serde_json::Value> {
                 serde_json::json!({
                     "name": r.try_get::<String, _>(0).unwrap_or_default(),
                     "phone": r.try_get::<String, _>(1).unwrap_or_default(),
-                    "pass": r.try_get::<String, _>(2).unwrap_or_default(),
-                    "isAdmin": r.try_get::<i8, _>(3).unwrap_or(0) == 1,
-                    "createdAt": r.try_get::<String, _>(4).unwrap_or_default(),
+                    "isAdmin": r.try_get::<i8, _>(2).unwrap_or(0) == 1,
+                    "createdAt": r.try_get::<String, _>(3).unwrap_or_default(),
+                    "bound": r.try_get::<i8, _>(4).unwrap_or(1) == 1,
+                    "boundAt": r.try_get::<String, _>(5).unwrap_or_default(),
+                    "source": r.try_get::<String, _>(6).unwrap_or_default(),
                 })
             })
-            .collect(),
-        Err(e) => {
+            .collect::<Vec<_>>(),
+        Err(_) => sqlx::query(
+            "SELECT name, phone, is_admin, created_at \
+             FROM my_accounts ORDER BY created_at DESC, name ASC",
+        )
+        .fetch_all(pool)
+        .await
+        .map(|rows| {
+            rows.iter()
+                .map(|r| {
+                    serde_json::json!({
+                        "name": r.try_get::<String, _>(0).unwrap_or_default(),
+                        "phone": r.try_get::<String, _>(1).unwrap_or_default(),
+                        "isAdmin": r.try_get::<i8, _>(2).unwrap_or(0) == 1,
+                        "createdAt": r.try_get::<String, _>(3).unwrap_or_default(),
+                        "bound": true,
+                        "boundAt": "",
+                        "source": "admin",
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|e| {
             tracing::error!(error = %e, "查展示端账号失败");
             Vec::new()
-        }
-    }
+        }),
+    };
+    rows
 }
 
 /// 手动设置账号（右键主播 / 管理端卡片）：存在则覆盖更新手机号+密码，不存在则新建。
@@ -542,17 +597,6 @@ async fn my_account_set_pool(
 ) -> std::result::Result<(), String> {
     let (name, pass) = validate_my_account(name, pass)?;
     let phone = validate_my_phone(phone)?;
-    // 密码 1:1：不允许两个姓名共用一个密码（自己更新自己不算冲突）
-    let dup_pass: bool = sqlx::query("SELECT 1 FROM my_accounts WHERE pass = ? AND name != ?")
-        .bind(&pass)
-        .bind(&name)
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| format!("查重失败：{e}"))?
-        .is_some();
-    if dup_pass {
-        return Err("密码已存在（已绑定其它姓名）".into());
-    }
     if !phone.is_empty() {
         let dup_phone: bool =
             sqlx::query("SELECT 1 FROM my_accounts WHERE phone = ? AND name != ? AND phone != ''")
@@ -566,47 +610,82 @@ async fn my_account_set_pool(
             return Err("手机号已存在（已绑定其它姓名）".into());
         }
     }
+    let pass_hash = hash_my_password(&pass);
     sqlx::query(
         "INSERT INTO my_accounts (name, phone, pass, is_admin, created_at) VALUES (?, ?, ?, 0, ?)
          ON DUPLICATE KEY UPDATE phone = VALUES(phone), pass = VALUES(pass)",
     )
     .bind(&name)
     .bind(&phone)
-    .bind(&pass)
+    .bind(&pass_hash)
     .bind(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string())
     .execute(pool)
     .await
     .map_err(|e| {
         let msg = e.to_string();
-        if msg.contains("Duplicate entry") && msg.contains("uk_my_pass") {
-            "密码已存在（已绑定其它姓名）".into()
-        } else {
-            format!("写入失败：{msg}")
-        }
+        format!("写入失败：{msg}")
     })?;
     Ok(())
 }
 
-/// 单个账号（右键弹窗回填用）；没有则 None
+/// 某账号登记的手机号（没登记 = 空串）。展示端用来判断能不能走「发手机号」绑定。
+pub async fn my_account_phone(st: &AppState, name: &str) -> String {
+    let Ok(pool) = w(st) else {
+        return String::new();
+    };
+    sqlx::query("SELECT phone FROM my_accounts WHERE name = ?")
+        .bind(name.trim())
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|r| r.try_get::<String, _>("phone").ok())
+        .unwrap_or_default()
+}
+
+/// 单个账号（右键弹窗回填用）；没有则 None。
+/// 额外带 `bound`/`source`（008 迁移）：管理端据此显示「已绑主播 / 待绑定」。
 pub async fn my_account_get(st: &AppState, name: &str) -> Option<serde_json::Value> {
     let pool = w(st).ok()?;
-    let row = match sqlx::query(
-        "SELECT name, phone, pass, is_admin, created_at FROM my_accounts WHERE name = ?",
+    let key = name.trim();
+    let row = sqlx::query(
+        "SELECT name, phone, is_admin, created_at, bound, bound_at, source \
+         FROM my_accounts WHERE name = ?",
     )
-    .bind(name.trim())
+    .bind(key)
     .fetch_optional(pool)
     .await
-    {
-        Ok(Some(r)) => r,
-        _ => return None,
-    };
+    .ok()
+    .flatten();
+    if let Some(row) = row {
+        let name = row.try_get::<String, _>("name").ok()?;
+        return Some(serde_json::json!({
+            "name": name,
+            "phone": row.try_get::<String, _>("phone").unwrap_or_default(),
+            "isAdmin": row.try_get::<i8, _>("is_admin").unwrap_or(0) == 1,
+            "createdAt": row.try_get::<String, _>("created_at").unwrap_or_default(),
+            "bound": row.try_get::<i8, _>("bound").unwrap_or(1) == 1,
+            "boundAt": row.try_get::<String, _>("bound_at").unwrap_or_default(),
+            "source": row.try_get::<String, _>("source").unwrap_or_default(),
+        }));
+    }
+    // 老库兜底（没跑 008）
+    let row =
+        sqlx::query("SELECT name, phone, is_admin, created_at FROM my_accounts WHERE name = ?")
+            .bind(key)
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten()?;
     let name = row.try_get::<String, _>("name").ok()?;
     Some(serde_json::json!({
         "name": name,
         "phone": row.try_get::<String, _>("phone").unwrap_or_default(),
-        "pass": row.try_get::<String, _>("pass").unwrap_or_default(),
         "isAdmin": row.try_get::<i8, _>("is_admin").unwrap_or(0) == 1,
         "createdAt": row.try_get::<String, _>("created_at").unwrap_or_default(),
+        "bound": true,
+        "boundAt": "",
+        "source": "admin",
     }))
 }
 
@@ -647,10 +726,34 @@ pub async fn my_account_is_admin(st: &AppState, name: &str) -> bool {
 
 /* ------------------------- 内置展示端账号 ------------------------- */
 
-/// 内置展示端账号：账号与密码相同，`is_admin=1`（管理员观看账号：台账里没有同名主播也放行，
-/// 全站看得到、个人数据页为空）。跟着代码走，不依赖任何一份库 dump —— 生产换库、
-/// 全新部署、库被清空后重启，这几个账号都还在。
-pub const BUILTIN_MY_ACCOUNTS: [(&str, &str); 1] = [("shuai", "shuai")];
+/// 内置展示端账号改从环境变量读（P1-2 修，2026-10-10）：
+/// `BUILTIN_MY_ACCOUNTS="name:pass,name2:pass2"`（账号与密码一样时写 `name:` 即可，
+/// 密码缺省 = 账号本身）。`is_admin=1`（管理员观看账号：台账里没有同名主播也放行，
+/// 全站看得到、个人数据页为空）。
+///
+/// **未配置环境变量时一个账号都不创建**（默认安全）：以前硬编码 shuai/shuai 随启动重建，
+/// 口令公开可猜 → 展示端登录门形同虚设。库里的存量账号不受影响，删除走管理端。
+pub fn builtin_my_accounts_from_env() -> Vec<(String, String)> {
+    let raw = std::env::var("BUILTIN_MY_ACCOUNTS").unwrap_or_default();
+    let mut out = Vec::new();
+    for pair in raw.split(',') {
+        let pair = pair.trim();
+        if pair.is_empty() {
+            continue;
+        }
+        let (name, pass) = match pair.split_once(':') {
+            Some((n, p)) => (n.trim(), p.trim()),
+            None => (pair, ""),
+        };
+        if name.is_empty() {
+            continue;
+        }
+        // 密码没写 = 账号密码相同（历史行为），但空密码不行（my_accounts.pass 非空）
+        let pass = if pass.is_empty() { name } else { pass };
+        out.push((name.to_string(), pass.to_string()));
+    }
+    out
+}
 
 /// 启动时补齐内置账号（幂等）：
 /// - 同名账号已存在 → 只把 `is_admin` 拉回 1，**密码保持运营自己设置的样子**，不覆盖
@@ -659,15 +762,24 @@ pub const BUILTIN_MY_ACCOUNTS: [(&str, &str); 1] = [("shuai", "shuai")];
 ///
 /// 返回 (新建数, 跳过数)。
 pub async fn ensure_builtin_my_accounts(st: &AppState) -> (usize, usize) {
+    let accounts = builtin_my_accounts_from_env();
+    if accounts.is_empty() {
+        tracing::info!(
+            "未配置 BUILTIN_MY_ACCOUNTS：不创建内置展示端账号（登录门账号由管理端维护）"
+        );
+        return (0, 0);
+    }
     let Ok(pool) = w(st) else {
         tracing::warn!("内置展示端账号未写入：写库不可用（douyin_writer 未配置）");
-        return (0, BUILTIN_MY_ACCOUNTS.len());
+        return (0, accounts.len());
     };
     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     let mut created = 0usize;
     let mut skipped = 0usize;
 
-    for (name, pass) in BUILTIN_MY_ACCOUNTS {
+    for (name, pass) in &accounts {
+        let name = name.as_str();
+        let pass = pass.as_str();
         let exists = match sqlx::query("SELECT name FROM my_accounts WHERE name = ?")
             .bind(name)
             .fetch_optional(pool)
@@ -693,24 +805,12 @@ pub async fn ensure_builtin_my_accounts(st: &AppState) -> (usize, usize) {
         }
 
         // 密码 1:1：已被别的姓名占用就不能插（否则会顶掉那个人的登录）
-        let pass_taken = sqlx::query("SELECT name FROM my_accounts WHERE pass = ?")
-            .bind(pass)
-            .fetch_optional(pool)
-            .await
-            .map(|r| r.is_some())
-            .unwrap_or(false);
-        if pass_taken {
-            tracing::warn!(name, "内置展示端账号未创建：密码已被其它姓名占用，请先改那个账号的密码");
-            skipped += 1;
-            continue;
-        }
-
         match sqlx::query(
             "INSERT INTO my_accounts (name, phone, pass, is_admin, created_at)
              VALUES (?, '', ?, 1, ?)",
         )
         .bind(name)
-        .bind(pass)
+        .bind(hash_my_password(pass))
         .bind(&now)
         .execute(pool)
         .await
@@ -752,29 +852,339 @@ pub async fn my_account_check_login(st: &AppState, account: &str, pass: &str) ->
     let phone = normalize_phone(acct);
     let as_phone = phone.chars().all(|c| c.is_ascii_digit()) && (5..=20).contains(&phone.len());
     if as_phone {
-        let hit = sqlx::query("SELECT name FROM my_accounts WHERE phone = ? AND pass = ?")
+        if let Some(row) = sqlx::query("SELECT name, pass FROM my_accounts WHERE phone = ? LIMIT 1")
             .bind(&phone)
-            .bind(pass)
             .fetch_optional(pool)
             .await
             .ok()
             .flatten()
-            .and_then(|r| r.try_get::<String, _>(0).ok());
-        if hit.is_some() {
-            return hit;
+        {
+            let stored: String = row.try_get("pass").ok()?;
+            let name: String = row.try_get("name").ok()?;
+            if verify_my_password(pass, &stored) {
+                upgrade_my_password_if_plain(pool, &name, &stored, pass).await;
+                return Some(name);
+            }
         }
     }
-    // 2) 姓名路径（兼容老的姓名+密码登录）
-    sqlx::query("SELECT name FROM my_accounts WHERE name = ? AND pass = ?")
+    if let Some(row) = sqlx::query("SELECT name, pass FROM my_accounts WHERE name = ? LIMIT 1")
         .bind(acct)
-        .bind(pass)
         .fetch_optional(pool)
         .await
         .ok()
         .flatten()
-        .and_then(|r| r.try_get::<String, _>(0).ok())
-        .filter(|_| !acct.is_empty())
-        .map(|_| acct.to_string())
+    {
+        let stored: String = row.try_get("pass").ok()?;
+        let name: String = row.try_get("name").ok()?;
+        if verify_my_password(pass, &stored) {
+            upgrade_my_password_if_plain(pool, &name, &stored, pass).await;
+            return Some(name);
+        }
+    }
+    None
+}
+
+/* ------------------- 手机号自助注册 + 绑定主播（2026-10-10 用户口径） ------------------- */
+
+/// 展示端账号的绑定态。`name` 既是登录名也是主播姓名：
+/// 注册出来的账号还没绑主播，`name` 先是手机号占位（PRIMARY KEY 不能为空），绑定时改写。
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct MyAccountInfo {
+    pub name: String,
+    pub phone: String,
+    pub is_admin: bool,
+    /// 1 = 已绑定主播（管理员手建的老账号默认 1）
+    pub bound: bool,
+    pub bound_at: String,
+    /// admin（后台手建）/ register（手机号自助注册）
+    pub source: String,
+}
+
+impl MyAccountInfo {
+    /// 没绑主播时别把手机号当姓名下发（水印/我的页都按这个判）
+    pub fn bind_name(&self) -> String {
+        if self.bound {
+            self.name.clone()
+        } else {
+            String::new()
+        }
+    }
+}
+
+/// 短信验证码 = 密码：4~20 位纯数字（用户口径「验证码数字就是密码」）
+pub fn validate_my_code(code: &str) -> std::result::Result<String, String> {
+    let c = code.trim();
+    if c.is_empty() {
+        return Err("请输入短信验证码".into());
+    }
+    if !c.chars().all(|ch| ch.is_ascii_digit()) || c.len() < 4 || c.len() > 20 {
+        return Err("验证码格式不对：应为 4~20 位数字（验证码就是密码）".into());
+    }
+    Ok(c.to_string())
+}
+
+/// 查账号信息（登录名或手机号都认）。老库还没跑 008 迁移时退回老查询：
+/// 老行都是管理员手建的 → 一律视为「已绑定」，登录/我的页照常，只有新注册用不了。
+pub async fn my_account_info(st: &AppState, key: &str) -> Option<MyAccountInfo> {
+    let pool = w(st).ok()?;
+    let key = key.trim();
+    if key.is_empty() {
+        return None;
+    }
+    let sql = "SELECT name, phone, is_admin, bound, bound_at, source FROM my_accounts \
+               WHERE name = ? OR (phone <> '' AND phone = ?) LIMIT 1";
+    if let Ok(Some(r)) = sqlx::query(sql)
+        .bind(key)
+        .bind(key)
+        .fetch_optional(pool)
+        .await
+    {
+        return Some(MyAccountInfo {
+            name: r.try_get::<String, _>("name").unwrap_or_default(),
+            phone: r.try_get::<String, _>("phone").unwrap_or_default(),
+            is_admin: r.try_get::<i8, _>("is_admin").unwrap_or(0) == 1,
+            bound: r.try_get::<i8, _>("bound").unwrap_or(1) == 1,
+            bound_at: r.try_get::<String, _>("bound_at").unwrap_or_default(),
+            source: r.try_get::<String, _>("source").unwrap_or_default(),
+        });
+    }
+    let sql = "SELECT name, phone, is_admin FROM my_accounts \
+               WHERE name = ? OR (phone <> '' AND phone = ?) LIMIT 1";
+    sqlx::query(sql)
+        .bind(key)
+        .bind(key)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .map(|r| MyAccountInfo {
+            name: r.try_get::<String, _>("name").unwrap_or_default(),
+            phone: r.try_get::<String, _>("phone").unwrap_or_default(),
+            is_admin: r.try_get::<i8, _>("is_admin").unwrap_or(0) == 1,
+            bound: true,
+            bound_at: String::new(),
+            source: "admin".to_string(),
+        })
+}
+
+/// 展示端自助注册：**手机号 = 账号，短信验证码 = 密码**。返回登录名（= 手机号）。
+///
+/// 规则：
+/// - 手机号 / 验证码都是纯数字；手机号 5~20 位、验证码 4~20 位
+/// - 手机号已存在（管理员手建或已注册）→ 拒绝，引导去登录
+/// - 验证码撞上别人已有的密码（`uk_my_pass` 1:1 唯一键）→ 拒绝，让用户重新获取验证码
+/// - 新账号 `bound=0`：登录后必须绑定一位主播（绑定后用户自己不能解绑）
+pub async fn my_account_register(
+    st: &AppState,
+    phone: &str,
+    code: &str,
+    wb_state: &str,
+) -> std::result::Result<String, String> {
+    let pool = w(st).map_err(|e| e.to_string())?;
+    let phone = validate_my_phone(phone)?;
+    if phone.is_empty() {
+        return Err("请输入手机号".into());
+    }
+    let code = validate_my_code(code)?;
+
+    let dup_phone =
+        sqlx::query("SELECT name FROM my_accounts WHERE phone <> '' AND phone = ? LIMIT 1")
+            .bind(&phone)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| format!("查重失败：{e}"))?
+            .is_some();
+    if dup_phone {
+        return Err("该手机号已存在（已注册），请直接登录；忘记密码请联系管理员".into());
+    }
+    let dup_name = sqlx::query("SELECT 1 FROM my_accounts WHERE name = ?")
+        .bind(&phone)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| format!("查重失败：{e}"))?
+        .is_some();
+    if dup_name {
+        return Err("该手机号已存在（已注册），请直接登录".into());
+    }
+    let pass_hash = hash_my_password(&code);
+    sqlx::query(
+        "INSERT INTO my_accounts (name, phone, pass, is_admin, created_at, bound, bound_at, source, wb_state)
+         VALUES (?, ?, ?, 0, ?, 0, '', 'register', ?)",
+    )
+    .bind(&phone)
+    .bind(&phone)
+    .bind(&pass_hash)
+    .bind(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string())
+    .bind(wb_state.trim())
+    .execute(pool)
+    .await
+    .map_err(|e| {
+        let m = e.to_string();
+        if m.contains("Duplicate entry") {
+            "该手机号已存在（已注册），请直接登录".into()
+        } else if m.contains("Unknown column") {
+            "缺少数据库迁移 008（先跑一次 pk-server migrate）".to_string()
+        } else {
+            format!("写入失败：{m}")
+        }
+    })?;
+    Ok(phone)
+}
+
+/// 绑定结果：绑定后的主播身份（前端拿它重新发 token / 换团）
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct MyBindResult {
+    pub name: String,
+    pub team: String,
+    pub person_id: i64,
+}
+
+/// 用户自助绑定主播（**只允许一次**）：账号必须还是 `bound=0`。
+/// 绑定后 `name` 从手机号占位改写成主播姓名，展示端水印/我的页都按它走。
+pub async fn my_account_bind(
+    st: &AppState,
+    login_name: &str,
+    person_id: i64,
+) -> std::result::Result<MyBindResult, String> {
+    bind_inner(st, login_name.trim(), person_id, false).await
+}
+
+/// 管理员改绑（用户自己改不了）：已绑定的账号也能改到另一位主播。
+pub async fn my_account_admin_bind(
+    st: &AppState,
+    login_name: &str,
+    person_id: i64,
+) -> std::result::Result<MyBindResult, String> {
+    bind_inner(st, login_name.trim(), person_id, true).await
+}
+
+async fn bind_inner(
+    st: &AppState,
+    login_name: &str,
+    person_id: i64,
+    admin: bool,
+) -> std::result::Result<MyBindResult, String> {
+    let pool = w(st).map_err(|e| e.to_string())?;
+    if login_name.is_empty() {
+        return Err("请先登录".into());
+    }
+    let row = sqlx::query("SELECT name, bound FROM my_accounts WHERE name = ? LIMIT 1")
+        .bind(login_name)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| {
+            if e.to_string().contains("Unknown column") {
+                "缺少数据库迁移 008（先跑一次 pk-server migrate）".to_string()
+            } else {
+                format!("查账号失败：{e}")
+            }
+        })?
+        .ok_or_else(|| "账号不存在，请重新登录".to_string())?;
+    let bound = row.try_get::<i8, _>("bound").unwrap_or(1) == 1;
+    if bound && !admin {
+        return Err("该账号已绑定主播，不能自行更改（需要改绑请联系管理员）".into());
+    }
+
+    let p = crate::mysql::query_with_binds(
+        &st.pools,
+        &st.active_id(),
+        "SELECT id, name, gender, status FROM person WHERE id = ? AND deleted_at IS NULL LIMIT 1",
+        |q| q.bind(person_id),
+    )
+    .await
+    .map_err(|e| format!("查主播失败：{e}"))?
+    .into_iter()
+    .next()
+    .ok_or_else(|| "该主播不存在或已删除".to_string())?;
+    let person_name = p.try_get::<String, _>("name").unwrap_or_default();
+    let team = p.try_get::<String, _>("gender").unwrap_or_default();
+    let status = p.try_get::<String, _>("status").unwrap_or_default();
+    if person_name.is_empty() {
+        return Err("该主播不存在或已删除".to_string());
+    }
+    if status == "left" {
+        return Err("该主播已离团，不能绑定".into());
+    }
+
+    let taken = sqlx::query("SELECT name FROM my_accounts WHERE name = ? AND name <> ? LIMIT 1")
+        .bind(&person_name)
+        .bind(login_name)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| format!("查重失败：{e}"))?
+        .is_some();
+    if taken {
+        return Err("该主播已存在绑定的账号，请联系管理员".into());
+    }
+
+    let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let affected = sqlx::query(
+        "UPDATE my_accounts SET name = ?, bound = 1, bound_at = ? WHERE name = ? AND bound = 0",
+    )
+    .bind(&person_name)
+    .bind(&now)
+    .bind(login_name)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("绑定失败：{e}"))?
+    .rows_affected();
+    if affected == 0 && !admin {
+        // 并发下被别人先绑走了：用户侧不允许覆盖
+        return Err("该账号已绑定主播，不能自行更改（需要改绑请联系管理员）".into());
+    }
+    if affected == 0 {
+        sqlx::query("UPDATE my_accounts SET name = ?, bound = 1, bound_at = ? WHERE name = ?")
+            .bind(&person_name)
+            .bind(&now)
+            .bind(login_name)
+            .execute(pool)
+            .await
+            .map_err(|e| format!("绑定失败：{e}"))?;
+    }
+    Ok(MyBindResult {
+        name: person_name,
+        team,
+        person_id,
+    })
+}
+
+/// 绑定页搜索：全台账按名字模糊搜（注册出来的账号还没有团别，不能只搜本团）
+pub async fn all_anchor_search(
+    st: &AppState,
+    source: &str,
+    q: &str,
+    limit: i64,
+) -> Vec<serde_json::Value> {
+    let key = q.trim();
+    if key.is_empty() {
+        return Vec::new();
+    }
+    let sql = "SELECT id, name, gender FROM person \
+               WHERE deleted_at IS NULL AND status <> 'left' AND name LIKE ? \
+               ORDER BY CASE WHEN name = ? THEN 0 ELSE 1 END, name LIMIT ?";
+    let like = format!("%{key}%");
+    match crate::mysql::query_with_binds(&st.pools, source, sql, |qb| {
+        qb.bind(like.clone()).bind(key.to_string()).bind(limit)
+    })
+    .await
+    {
+        Ok(rows) => rows
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "personId": r.try_get::<u64, _>("id")
+                        .or_else(|_| r.try_get::<i64, _>("id").map(|v| v as u64))
+                        .unwrap_or(0),
+                    "name": r.try_get::<String, _>("name").unwrap_or_default(),
+                    "team": r.try_get::<String, _>("gender").unwrap_or_default(),
+                })
+            })
+            .collect(),
+        Err(e) => {
+            tracing::error!(error = %e, "全台账主播搜索失败");
+            Vec::new()
+        }
+    }
 }
 
 /* --------------------- 抖音号绑定申请（展示端提交 → 管理端审计） --------------------- */
@@ -1110,6 +1520,19 @@ pub async fn push_bind_by_code(
     }
     let name: String = row.try_get::<String, _>("name").ok()?;
     let team: String = row.try_get::<String, _>("team").unwrap_or_default();
+    // 会话抢占（2026-10-10 审计补）：绑定码路径与手机号路径口径一致——
+    // 同一个微信会话只挂一个账号，先把占着这个会话的其它绑定清掉，
+    // 否则换号 / 误发码会让两个账号同时往一个微信号推。
+    let _ = sqlx::query(
+        "UPDATE push_bindings SET conversation_id = '', to_user_id = '', bound_at = '',
+           bind_code = '', code_expires = '', updated_at = ?
+         WHERE conversation_id = ? AND name <> ?",
+    )
+    .bind(now_str())
+    .bind(conversation_id)
+    .bind(&name)
+    .execute(pool)
+    .await;
     let res = sqlx::query(
         "UPDATE push_bindings SET conversation_id = ?, to_user_id = ?, nickname = ?,
            bind_code = '', code_expires = '', bound_at = ?, last_error = '', updated_at = ?
@@ -1128,6 +1551,20 @@ pub async fn push_bind_by_code(
         return None;
     }
     Some((name, team))
+}
+
+/// 补写绑定行的团别（绑定码路径：台账建档晚于绑定码生成时团别为空，
+/// 推送按团捞绑定会漏掉这个人——绑定成功后由机器人回查台账补上）
+pub async fn push_set_team(st: &AppState, name: &str, team: &str) -> bool {
+    matches!(w(st), Ok(pool) if sqlx::query(
+        "UPDATE push_bindings SET team = ?, updated_at = ? WHERE name = ?")
+        .bind(team)
+        .bind(now_str())
+        .bind(name.trim())
+        .execute(pool)
+        .await
+        .map(|r| r.rows_affected() > 0)
+        .unwrap_or(false))
 }
 
 /// 解绑（保留目标配置，只断开微信）
@@ -1161,6 +1598,12 @@ pub async fn push_unbind_by_conversation(st: &AppState, conversation_id: &str) -
     .bind(&name)
     .execute(pool)
     .await;
+    // 顺带清掉这个会话的 iLink 上下文（2026-10-10 审计）：context_token 留着无害
+    // 但会积累脏数据；删掉后换人重绑时由新入站消息重建。
+    let _ = sqlx::query("DELETE FROM wx_sessions WHERE conversation_id = ?")
+        .bind(conversation_id)
+        .execute(pool)
+        .await;
     Some(name)
 }
 
@@ -1230,6 +1673,340 @@ pub async fn push_touch(st: &AppState, name: &str, error: &str) {
                 .bind(name.trim())
                 .execute(pool)
                 .await;
+    }
+}
+
+/// 每日报告去重：上次推过的业务日。同一天不再重复推同一份日报
+/// （延迟队列只保证同一 (团, 日) 排一队，运营隔几小时补数据会再排一次）。
+pub async fn push_last_report_date(st: &AppState, name: &str) -> String {
+    let Ok(pool) = w(st) else {
+        return String::new();
+    };
+    sqlx::query("SELECT last_report_date FROM push_bindings WHERE name = ?")
+        .bind(name.trim())
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|r| r.try_get::<String, _>("last_report_date").ok())
+        .unwrap_or_default()
+}
+
+pub async fn push_set_last_report_date(st: &AppState, name: &str, date: &str) {
+    if let Ok(pool) = w(st) {
+        let _ = sqlx::query("UPDATE push_bindings SET last_report_date = ? WHERE name = ?")
+            .bind(date)
+            .bind(name.trim())
+            .execute(pool)
+            .await;
+    }
+}
+
+/* --------------------- 微信绑定：手机号（2026-10-10） --------------------- */
+/*
+   旧口径是「页面出 6 位码 → 用户把码发给机器人」。改成扫码加好友后**直接发手机号**绑定：
+   手机号在 my_accounts 里本来就是一个手机号只绑一个姓名，拿到手机号就能确定账号，
+   用户不用再回页面抄码。「我的」页仍保留绑定码入口作为兜底（没登记手机号时用）。
+
+   2026-10-10 审计 P1-1：只发手机号就能绑定 = 知道手机号即可冒绑 + 枚举登记状态。
+   机器人侧已改回二要素（手机号 + 6 位绑定码），本文件补 push_bind_by_phone_code：
+   my_accounts 查手机号 → push_bindings 校验绑定码（一次性 + 30 分钟有效）→ 绑定。
+   旧 push_bind_by_phone 保留但已无调用方，等「我的」页文案同步后可删。
+*/
+
+/// 二要素绑定（P1-1）：手机号（my_accounts 里登记过的）+ 6 位一次性绑定码
+/// （「我的」页 push_set_code 生成的，30 分钟有效）。两条都命中才绑，码用掉即清。
+/// 任一环节不匹配返回 None，调用方统一文案、不区分具体原因。
+pub async fn push_bind_by_phone_code(
+    st: &AppState,
+    phone: &str,
+    code: &str,
+    conversation_id: &str,
+    to_user_id: &str,
+) -> Option<(String, String)> {
+    let pool = w(st).ok()?;
+    let phone = normalize_phone(phone);
+    if phone.is_empty() || !phone.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    // ① 手机号 → 账号姓名（没登记 = None，与码校验失败同一返回值，不泄露差异）
+    let row = sqlx::query("SELECT name FROM my_accounts WHERE phone = ?")
+        .bind(&phone)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()?;
+    let name: String = row.try_get::<String, _>("name").ok()?;
+    if name.trim().is_empty() {
+        return None;
+    }
+    // ② 绑定码校验：复用 push_bind_by_code 的查码 + 过期判断 + 会话抢占 + 码清空。
+    //    它按码找行，这里还要确认那行就是手机号对应的账号，防止「甲的码绑乙的号」。
+    let (code_name, team) = push_bind_by_code(st, code, conversation_id, to_user_id).await?;
+    if code_name != name {
+        // 码是对的但属于别的账号：把刚接过去的会话撤掉（该账号回到未绑定态，
+        // 与「码用掉即清」一致），对外仍统一回复失败，不泄露两账号关系。
+        let _ = sqlx::query(
+            "UPDATE push_bindings SET conversation_id = '', to_user_id = '', bound_at = '',
+               updated_at = ? WHERE name = ?",
+        )
+        .bind(now_str())
+        .bind(&code_name)
+        .execute(pool)
+        .await;
+        return None;
+    }
+    Some((name, team))
+}
+
+/// 按手机号绑定微信会话。返回 Some((账号姓名, 团别))。
+/// 【2026-10-10 审计 P1-1 后已废弃】单凭手机号即可绑定 = 冒绑/枚举漏洞，
+/// 机器人改走 push_bind_by_phone_code（手机号 + 绑定码二要素）。
+/// 函数暂时保留供回滚，等「我的」页提示文案同步后删除。
+#[allow(dead_code)]
+pub async fn push_bind_by_phone(
+    st: &AppState,
+    phone: &str,
+    conversation_id: &str,
+    to_user_id: &str,
+) -> Option<(String, String)> {
+    let pool = w(st).ok()?;
+    let phone = normalize_phone(phone);
+    if phone.is_empty() || !phone.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let row = sqlx::query("SELECT name FROM my_accounts WHERE phone = ?")
+        .bind(&phone)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()?;
+    let name: String = row.try_get::<String, _>("name").ok()?;
+    if name.trim().is_empty() {
+        return None;
+    }
+    // my_accounts 只有姓名：团别要回台账反查（台账里没这个人 = 管理员观看账号，团别留空）
+    let team = person_team_of_name(st, &name).await.unwrap_or_default();
+    push_bind_account(st, &name, &team, conversation_id, to_user_id).await;
+    Some((name, team))
+}
+
+/// 台账里查这个姓名属于哪个团（person.gender）；查不到返回 None
+pub async fn person_team_of_name(st: &AppState, name: &str) -> Option<String> {
+    let rows = crate::mysql::query_with_binds(
+        &st.pools,
+        "LOCAL",
+        "SELECT gender FROM person WHERE deleted_at IS NULL AND name = ? LIMIT 1",
+        |q| q.bind(name.trim().to_string()),
+    )
+    .await
+    .ok()?;
+    let g = rows
+        .first()
+        .and_then(|r| r.try_get::<String, _>("gender").ok())
+        .unwrap_or_default();
+    match g.as_str() {
+        "male" | "female" => Some(g),
+        _ => None,
+    }
+}
+
+/// 把已存在的展示端账号接到微信会话上（手机号 / 绑定码两条路共用）
+pub async fn push_bind_account(
+    st: &AppState,
+    name: &str,
+    team: &str,
+    conversation_id: &str,
+    to_user_id: &str,
+) {
+    let Ok(pool) = w(st) else {
+        return;
+    };
+    // 同一个微信会话只能绑一个账号：先把占着这个会话的旧绑定清掉，
+    // 否则换号后旧账号还在收推送。
+    let _ = sqlx::query(
+        "UPDATE push_bindings SET conversation_id = '', to_user_id = '', bound_at = '',
+           bind_code = '', code_expires = '', updated_at = ?
+         WHERE conversation_id = ? AND name <> ?",
+    )
+    .bind(now_str())
+    .bind(conversation_id)
+    .bind(name.trim())
+    .execute(pool)
+    .await;
+    let _ = sqlx::query(
+        "INSERT INTO push_bindings (name, team, conversation_id, to_user_id, bound_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE team = IF(VALUES(team) <> '', VALUES(team), team),
+           conversation_id = VALUES(conversation_id), to_user_id = VALUES(to_user_id),
+           bound_at = VALUES(bound_at), bind_code = '', code_expires = '',
+           last_error = '', updated_at = VALUES(updated_at)",
+    )
+    .bind(name.trim())
+    .bind(team)
+    .bind(conversation_id)
+    .bind(to_user_id)
+    .bind(now_str())
+    .bind(now_str())
+    .execute(pool)
+    .await;
+}
+
+/* --------------------- 延迟推送队列（2026-10-10） --------------------- */
+/*
+   运营一次导入往往连着发好几个文件（男女团分开、一人多号分开），入库就推会把
+   半成品榜单推给用户。改成：导入只「排队」，到点（默认 30 分钟后）再统一推一次。
+   同一 (team, biz_date) 只排一队 —— 重复导入只刷新队列，不叠加。
+*/
+
+/// 排队一次推送。run_at = 到点时刻（本地时间 "YYYY-MM-DD HH:MM:SS"）。
+/// 同一 (team, biz_date) 已有 pending 任务 → 只返回 id，不新排。
+pub async fn push_job_enqueue(st: &AppState, team: &str, biz_date: &str, run_at: &str) -> u64 {
+    let Ok(pool) = w(st) else {
+        return 0;
+    };
+    let res = sqlx::query(
+        "INSERT INTO push_jobs (team, biz_date, run_at, status, created_at)
+         VALUES (?, ?, ?, 'pending', ?)
+         ON DUPLICATE KEY UPDATE status = 'pending', run_at = VALUES(run_at),
+           done_at = '', note = ''",
+    )
+    .bind(team)
+    .bind(biz_date)
+    .bind(run_at)
+    .bind(now_str())
+    .execute(pool)
+    .await;
+    match res {
+        Ok(r) if r.last_insert_id() > 0 => r.last_insert_id(),
+        Ok(_) => sqlx::query("SELECT id FROM push_jobs WHERE team = ? AND biz_date = ?")
+            .bind(team)
+            .bind(biz_date)
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|r| r.try_get::<u64, _>("id").ok())
+            .unwrap_or(0),
+        Err(e) => {
+            tracing::warn!(error = %e, "推送任务排队失败");
+            0
+        }
+    }
+}
+
+/// 取一条到点的 pending 任务并立刻标成 running（抢占，多实例也只推一次）
+pub async fn push_job_take(st: &AppState, now: &str) -> Option<(u64, String, String)> {
+    let pool = w(st).ok()?;
+    let row = sqlx::query(
+        "SELECT id, team, biz_date FROM push_jobs
+         WHERE (status = 'pending' AND run_at <= ?)
+            OR (status = 'running' AND done_at = '' AND run_at <= ?
+                AND created_at <> '' AND created_at < DATE_SUB(?, INTERVAL 5 MINUTE))
+         ORDER BY run_at LIMIT 1",
+    )
+    .bind(now)
+    .bind(now)
+    .bind(now)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()?;
+    let id = row
+        .try_get::<u64, _>("id")
+        .or_else(|_| row.try_get::<i64, _>("id").map(|v| v as u64))
+        .unwrap_or(0);
+    let team: String = row.try_get::<String, _>("team").unwrap_or_default();
+    let biz_date: String = row.try_get::<String, _>("biz_date").unwrap_or_default();
+    if id == 0 {
+        return None;
+    }
+    let taken = sqlx::query(
+        "UPDATE push_jobs SET status = 'running'
+         WHERE id = ? AND (status = 'pending' OR (status = 'running' AND done_at = ''))",
+    )
+    .bind(id)
+    .execute(pool)
+    .await
+    .map(|r| r.rows_affected() > 0)
+    .unwrap_or(false);
+    if !taken {
+        return None;
+    }
+    Some((id, team, biz_date))
+}
+
+/// 最近推送任务（后台「机器人」页查看队列用）
+pub async fn push_job_list(st: &AppState, limit: i64) -> Vec<serde_json::Value> {
+    let Ok(pool) = w(st) else {
+        return Vec::new();
+    };
+    match sqlx::query(
+        "SELECT id, team, biz_date, run_at, status, created_at, done_at, note
+         FROM push_jobs ORDER BY id DESC LIMIT ?",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "id": r.try_get::<u64, _>("id")
+                        .or_else(|_| r.try_get::<i64, _>("id").map(|v| v as u64))
+                        .unwrap_or(0),
+                    "team": r.try_get::<String, _>("team").unwrap_or_default(),
+                    "bizDate": r.try_get::<String, _>("biz_date").unwrap_or_default(),
+                    "runAt": r.try_get::<String, _>("run_at").unwrap_or_default(),
+                    "status": r.try_get::<String, _>("status").unwrap_or_default(),
+                    "createdAt": r.try_get::<String, _>("created_at").unwrap_or_default(),
+                    "doneAt": r.try_get::<String, _>("done_at").unwrap_or_default(),
+                    "note": r.try_get::<String, _>("note").unwrap_or_default(),
+                })
+            })
+            .collect(),
+        Err(e) => {
+            tracing::error!(error = %e, "查推送队列失败");
+            Vec::new()
+        }
+    }
+}
+
+/// 已绑定微信的账号数 + 开了推送开关的人数（后台概览用）
+pub async fn push_stats(st: &AppState) -> serde_json::Value {
+    let Ok(pool) = w(st) else {
+        return serde_json::json!({ "bound": 0, "enabled": 0 });
+    };
+    let bound: i64 =
+        sqlx::query("SELECT COUNT(*) AS n FROM push_bindings WHERE conversation_id <> ''")
+            .fetch_one(pool)
+            .await
+            .ok()
+            .and_then(|r| r.try_get::<i64, _>("n").ok())
+            .unwrap_or(0);
+    let enabled: i64 = sqlx::query(
+        "SELECT COUNT(*) AS n FROM push_bindings \
+         WHERE conversation_id <> '' AND (notify_target = 1 OR daily_report = 1)",
+    )
+    .fetch_one(pool)
+    .await
+    .ok()
+    .and_then(|r| r.try_get::<i64, _>("n").ok())
+    .unwrap_or(0);
+    serde_json::json!({ "bound": bound, "enabled": enabled })
+}
+
+/// 任务结束（成功 / 失败都记一笔，失败原因写 note 供后台查看）
+pub async fn push_job_finish(st: &AppState, id: u64, ok: bool, note: &str) {
+    if let Ok(pool) = w(st) {
+        let _ = sqlx::query("UPDATE push_jobs SET status = ?, done_at = ?, note = ? WHERE id = ?")
+            .bind(if ok { "done" } else { "failed" })
+            .bind(now_str())
+            .bind(note.chars().take(200).collect::<String>())
+            .bind(id)
+            .execute(pool)
+            .await;
     }
 }
 
@@ -1702,7 +2479,7 @@ pub async fn carry_legacy_sqlite(pool: &MySqlPool, sqlite_path: &str) -> Result<
             )
             .bind(&name)
             .bind(&phone)
-            .bind(&pass)
+            .bind(&hash_my_password(pass))
             .bind(*is_admin as i8)
             .bind(&created)
             .execute(pool)
@@ -1852,5 +2629,57 @@ mod tests {
         );
         assert!(validate_my_account("", "13312345678").is_err());
         assert!(validate_my_account("啸帆", "").is_err());
+    }
+}
+
+#[cfg(test)]
+mod register_tests {
+    use super::*;
+
+    /// 注册密码 = 短信验证码：必须是 4~20 位纯数字（用户口径「验证码数字就是密码」）
+    #[test]
+    fn my_code_is_digits_only() {
+        assert_eq!(validate_my_code("246810").unwrap(), "246810");
+        assert_eq!(validate_my_code(" 1357 ").unwrap(), "1357");
+        assert!(validate_my_code("").is_err(), "空验证码不给过");
+        assert!(validate_my_code("123").is_err(), "太短不给过");
+        assert!(
+            validate_my_code("123456789012345678901").is_err(),
+            "太长不给过"
+        );
+        assert!(
+            validate_my_code("12a4").is_err(),
+            "字母不给过（手机验证码是数字）"
+        );
+    }
+
+    /// 手机号：5~20 位数字，允许空格/横线（归一化后）——与管理员手建账号同一套口径
+    #[test]
+    fn my_phone_normalizes_like_admin_path() {
+        assert_eq!(validate_my_phone("199 0000 0001").unwrap(), "19900000001");
+        assert_eq!(validate_my_phone("199-0000-0001").unwrap(), "19900000001");
+        assert_eq!(validate_my_phone("").unwrap(), "", "空串 = 没填手机号");
+        assert!(validate_my_phone("1234").is_err(), "少于 5 位不给过");
+        assert!(validate_my_phone("199abc").is_err(), "非数字不给过");
+    }
+
+    /// 没绑主播时不要把手机号当姓名下发（水印/我的页按 bind_name 判）
+    #[test]
+    fn bind_name_hides_phone_placeholder() {
+        let unbound = MyAccountInfo {
+            name: "19900000001".into(),
+            phone: "19900000001".into(),
+            is_admin: false,
+            bound: false,
+            bound_at: String::new(),
+            source: "register".into(),
+        };
+        assert_eq!(unbound.bind_name(), "");
+        let bound = MyAccountInfo {
+            name: "啸帆".into(),
+            bound: true,
+            ..unbound
+        };
+        assert_eq!(bound.bind_name(), "啸帆");
     }
 }

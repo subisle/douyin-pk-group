@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { Component, useCallback, useEffect, useState, type ReactNode } from 'react'
 import { api } from './api'
 import { useAutoRefresh } from './useAutoRefresh'
 
@@ -30,6 +30,41 @@ const ST_BADGE: Record<string, { text: string; cls: string }> = {
   pending: { text: '待审核', cls: 'badge b-paused' },
   approved: { text: '已通过', cls: 'badge b-active' },
   rejected: { text: '已驳回', cls: 'badge b-left' },
+}
+
+/** 未知 status 的兜底（P2-4）：后端将来加新状态 / 脏数据时不能整页白屏 */
+const ST_BADGE_FALLBACK: { text: string; cls: string } = {
+  text: '未知状态',
+  cls: 'badge',
+}
+const badgeOf = (status: string) => ST_BADGE[status] ?? ST_BADGE_FALLBACK
+
+/** 组件级 ErrorBoundary（P2-4）：渲染抛错只打倒这一页的卡片区域，
+ *  显示错误 + 重载按钮，不再白屏。 */
+class ClaimErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
+  state = { error: null as Error | null }
+
+  static getDerivedStateFromError(error: Error) {
+    return { error }
+  }
+
+  componentDidCatch(error: Error) {
+    console.error('抖音号审计页渲染出错', error)
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="card">
+          <div className="alert bad">
+            ⚠️ 页面渲染出错：{this.state.error.message}
+          </div>
+          <button onClick={() => this.setState({ error: null })}>重试</button>
+        </div>
+      )
+    }
+    return this.props.children
+  }
 }
 
 const kb = (n: number) => `${Math.max(1, Math.round(n / 1024))} KB`
@@ -129,7 +164,8 @@ export default function ClaimPage() {
       {error && <div className="alert bad">{error}</div>}
       {msg && <div className="alert">{msg}</div>}
 
-      <div className="card">
+      <ClaimErrorBoundary>
+        <div className="card">
         {items.length === 0 ? (
           <p className="hint">没有{FILTERS.find((f) => f.key === filter)?.label ?? ''}的申请。</p>
         ) : (
@@ -147,7 +183,7 @@ export default function ClaimPage() {
             </thead>
             <tbody>
               {items.map((c) => {
-                const badge = ST_BADGE[c.status]
+                const badge = badgeOf(c.status)
                 return (
                   <tr key={c.id}>
                     <td className="num" style={{ whiteSpace: 'nowrap' }}>
@@ -207,7 +243,8 @@ export default function ClaimPage() {
             </tbody>
           </table>
         )}
-      </div>
+        </div>
+      </ClaimErrorBoundary>
 
       {shot && (
         <div

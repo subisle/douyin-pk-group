@@ -30,6 +30,16 @@ export default function StreamerPage() {
   /** 「我的」页面账号弹窗（右键主播 → 设置手机号/密码；主播用 姓名+密码 登录） */
   const [myAccPop, setMyAccPop] = useState<{ name: string; phone: string; pass: string; exists: boolean } | null>(null)
 
+  /** 导入暂存区：有抖音号/ID 但台账还没建档的行（不进榜单/统计，建档后自动补账） */
+  const [pending, setPending] = useState<any[]>([])
+
+  const loadPending = useCallback(() => {
+    // 线上没跑 006 迁移时接口会 404/500：静默忽略，不影响台账页
+    api('/api/admin/import/pending')
+      .then((d) => setPending(d.items ?? []))
+      .catch(() => setPending([]))
+  }, [])
+
   const load = useCallback(() => {
     const qs = new URLSearchParams()
     if (q) qs.set('q', q)
@@ -37,7 +47,8 @@ export default function StreamerPage() {
     api(`/api/admin/streamers?${qs}`)
       .then((d) => setItems(d.items ?? []))
       .catch((e) => setError(e.message ?? String(e)))
-  }, [q, team])
+    loadPending()
+  }, [q, team, loadPending])
 
   useEffect(load, [load])
 
@@ -66,14 +77,38 @@ export default function StreamerPage() {
     setError('')
     setMsg('')
     try {
-      await api('/api/admin/streamers', {
+      const d = await api<{ personId: number; absorbed?: number }>('/api/admin/streamers', {
         method: 'POST',
         body: JSON.stringify({ name, team: newTeam, douyinNo: douyinNo || undefined }),
       })
-      setMsg(`已建档：${name}`)
+      setMsg(
+        `已建档：${name}` +
+          (d.absorbed
+            ? `（已把暂存区里该抖音号的 ${d.absorbed} 行数据补账入库，现在开始出现在榜单里）`
+            : ''),
+      )
       setName('')
       setDouyinNo('')
       load()
+    } catch (e: any) {
+      setError(e.message ?? String(e))
+    }
+  }
+
+  /** 暂存行「建档」：把名字 / 抖音号填进上面的新建表单，运营补团别后点建档 */
+  function prefillArchive(p: any) {
+    setName(p.name ?? '')
+    setDouyinNo(p.douyinNo ?? '')
+    setMsg(`已填入：${p.name}（抖音号 ${p.douyinNo}）—— 选好团别点「建档」，暂存数据会自动补账`)
+    window.scrollTo({ top: 0, behavior: 'smooth' })
+  }
+
+  async function discardPending(p: any) {
+    if (!confirm(`丢弃暂存行「${p.name}（${p.douyinNo}）」？该行数据不入库。`)) return
+    try {
+      await api(`/api/admin/import/pending?id=${p.id}`, { method: 'DELETE' })
+      loadPending()
+      setMsg(`已丢弃暂存行：${p.name}`)
     } catch (e: any) {
       setError(e.message ?? String(e))
     }
@@ -102,7 +137,7 @@ export default function StreamerPage() {
       setMyAccPop({
         name,
         phone: d.found ? d.phone ?? '' : '',
-        pass: d.found ? d.pass ?? '' : '',
+        pass: '',
         exists: !!d.found,
       })
     } catch (e: any) {
@@ -120,7 +155,7 @@ export default function StreamerPage() {
         body: JSON.stringify({
           name: myAccPop.name,
           phone: myAccPop.phone.trim(),
-          pass: myAccPop.pass.trim(),
+          ...(myAccPop.pass.trim() ? { pass: myAccPop.pass.trim() } : {}),
         }),
       })
       setMsg(`已保存「${myAccPop.name}」的我的页面账号`)
@@ -210,20 +245,67 @@ export default function StreamerPage() {
     }
   }
 
+  /** 绑定抖音号（2026-10-10：只填抖音号也能绑，采集 ID 选填；一人可挂多个，导入合并音浪） */
   async function bindAccount() {
+    if (!detail) return
+    setError('')
+    try {
+      const bound = await api<{ absorbed?: number }>(
+        `/api/admin/streamers/${detail.personId}/accounts`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            douyinNo: bindDouyinNo.trim(),
+            anchorId: bindAnchorId.trim() || undefined,
+          }),
+        },
+      )
+      setBindAnchorId('')
+      setBindDouyinNo('')
+      const d = await api(`/api/admin/streamers/${detail.personId}/detail`)
+      setDetail(d)
+      setMsg(
+        `已给「${detail.name}」绑定抖音号` +
+          (bound.absorbed ? `（暂存区 ${bound.absorbed} 行数据已补账入库）` : ''),
+      )
+      setTimeout(() => setMsg(''), 2000)
+      load()
+    } catch (e: any) {
+      setError(e.message ?? String(e))
+    }
+  }
+
+  /** 解绑一个抖音号（主号解绑后自动把剩下的第一个提为主号） */
+  async function unbindAccount(accountId: number, douyinNo: string) {
+    if (!detail) return
+    if (!confirm(`确认解绑「${detail.name}」的抖音号 ${douyinNo}？该号之后的音浪不再并入 TA 名下。`))
+      return
+    setError('')
+    try {
+      await api(`/api/admin/streamers/${detail.personId}/accounts/${accountId}`, {
+        method: 'DELETE',
+      })
+      const d = await api(`/api/admin/streamers/${detail.personId}/detail`)
+      setDetail(d)
+      load()
+    } catch (e: any) {
+      setError(e.message ?? String(e))
+    }
+  }
+
+  /** 设为主号（导入回填 anchor_id 用它） */
+  async function setPrimary(accountId: number) {
     if (!detail) return
     setError('')
     try {
       await api(`/api/admin/streamers/${detail.personId}/accounts`, {
         method: 'POST',
         body: JSON.stringify({
-          anchorId: bindAnchorId,
-          douyinNo: bindDouyinNo || undefined,
+          // 复用绑定接口做幂等 upsert：传原号 + isPrimary=true
+          douyinNo: (detail.accounts ?? []).find((a: any) => a.id === accountId)?.douyinNo,
           isPrimary: true,
         }),
       })
-      setBindAnchorId('')
-      setBindDouyinNo('')
       const d = await api(`/api/admin/streamers/${detail.personId}/detail`)
       setDetail(d)
       load()
@@ -323,6 +405,52 @@ export default function StreamerPage() {
         {msg && <div className="alert good">{msg}</div>}
       </section>
 
+      {/* 导入暂存区：导入时有抖音号/ID、但台账还没有这个主播的行。
+          它们不进台账 / 榜单 / 统计，只有在这里建档或绑定该抖音号之后才会补账显示。 */}
+      {pending.length > 0 && (
+        <section className="card">
+          <h2>导入暂存（{pending.length} 行，未建档）</h2>
+          <p className="hint">
+            这些行来自导入文件：<b>有抖音号/ID，但台账里还没有这个主播</b>。它们
+            <b>不显示在台账、榜单和任何统计里</b>；点「建档」填好团别建档（或在上面建档时填上同样的抖音号），
+            数据会自动补账入库，从那一刻起才显示。
+          </p>
+          <table>
+            <thead>
+              <tr>
+                <th>名字</th>
+                <th>抖音号 / 采集 ID</th>
+                <th>业务日期</th>
+                <th>当日音浪</th>
+                <th>时长(分)</th>
+                <th>来源批次</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {pending.map((p) => (
+                <tr key={p.id}>
+                  <td>{p.name}</td>
+                  <td className="hint">{p.douyinNo}</td>
+                  <td className="hint">{p.bizDate ?? '—'}</td>
+                  <td className="num">{p.wave ?? '—'}</td>
+                  <td className="num">{p.minutes ?? '—'}</td>
+                  <td className="hint">#{p.batchId ?? '—'}</td>
+                  <td>
+                    <button className="primary" onClick={() => prefillArchive(p)}>
+                      建档
+                    </button>
+                    <button className="danger" style={{ marginLeft: 6 }} onClick={() => discardPending(p)}>
+                      丢弃
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
+      )}
+
       <section className="card">
         <h2>主播台账（{items.length} 人）</h2>
         <p className="hint">
@@ -362,6 +490,9 @@ export default function StreamerPage() {
                 <th>师傅</th>
                 <th>抖音号</th>
                 <th>状态</th>
+                <th title="是否绑定了微信机器人并开启推送（数据入库约 30 分钟后会私聊推给他）">
+                  微信推送
+                </th>
                 <th title="是否出现在对外展示的每日报告/月榜/年榜里">对外</th>
                 <th>别名</th>
                 <th></th>
@@ -409,6 +540,25 @@ export default function StreamerPage() {
                       {s.status === 'left' ? '已离开' : s.status === 'paused' ? '暂停' : '在职'}
                     </span>
                   </td>
+                  <td
+                    title={
+                      s.wechatBound
+                        ? s.wechatPush
+                          ? '已绑定微信机器人，推送开着（数据入库约 30 分钟后私聊推送）'
+                          : '已绑定微信机器人，但两个推送开关都关着，不会收到任何推送'
+                        : '未绑定微信机器人（主播在展示端「我的」页扫码后发手机号绑定）'
+                    }
+                  >
+                    {s.wechatBound ? (
+                      s.wechatPush ? (
+                        <span className="badge b-active">已推送</span>
+                      ) : (
+                        <span className="badge b-paused">已绑·未开</span>
+                      )
+                    ) : (
+                      <span className="hint">未绑定</span>
+                    )}
+                  </td>
                   <td title={s.hideInDailyReport ? '已隐藏：对外榜单不下发此人' : '对外显示：出现在每日报告/月榜/年榜'}>
                     <input
                       type="checkbox"
@@ -445,39 +595,77 @@ export default function StreamerPage() {
               关闭
             </button>
           </h2>
+          <p className="hint">
+            一个主播可以挂<b>多个抖音号</b>：导入时这些号的音浪会<b>合并</b>记到 TA 名下
+            （当日音浪求和、累计取最大、时长求和）。抖音号全局唯一，已被别人占用的号绑不上。
+          </p>
           <table>
             <thead>
               <tr>
-                <th>采集 ID</th>
                 <th>抖音号</th>
-                <th>主号</th>
+                <th>采集 ID</th>
+                <th title="导入时 daily_metric.anchor_id 回填用这个号">主号</th>
                 <th>状态</th>
+                <th></th>
               </tr>
             </thead>
             <tbody>
               {(detail.accounts ?? []).map((a: any) => (
                 <tr key={a.id}>
-                  <td>{a.anchorId}</td>
-                  <td>{a.douyinNo}</td>
-                  <td>{a.isPrimary ? '✓' : ''}</td>
+                  <td>{a.douyinNo || '—'}</td>
+                  <td className="hint">{a.anchorId}</td>
+                  <td>
+                    {a.isPrimary ? (
+                      <span className="badge b-active">主号</span>
+                    ) : (
+                      <button
+                        className="linkish"
+                        title="设为主号（导入回填 anchor_id 用它）"
+                        onClick={() => setPrimary(a.id)}
+                      >
+                        设为主号
+                      </button>
+                    )}
+                  </td>
                   <td>{a.status}</td>
+                  <td>
+                    <button
+                      className="danger"
+                      onClick={() => unbindAccount(a.id, a.douyinNo)}
+                    >
+                      解绑
+                    </button>
+                  </td>
                 </tr>
               ))}
+              {!(detail.accounts ?? []).length && (
+                <tr>
+                  <td colSpan={5} className="hint">
+                    还没绑定抖音号
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
           <div className="row">
             <input
-              placeholder="采集 ID（anchorId，必填）"
-              value={bindAnchorId}
-              onChange={(e) => setBindAnchorId(e.target.value)}
-            />
-            <input
-              placeholder="抖音号（可选）"
+              placeholder="抖音号（必填，6~20 位字母数字_.）"
               value={bindDouyinNo}
               onChange={(e) => setBindDouyinNo(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && bindDouyinNo.trim() && bindAccount()}
             />
-            <button disabled={!bindAnchorId.trim()} onClick={bindAccount}>
-              绑定为 {detail.accounts?.length ? '账号' : '主号'}
+            <input
+              placeholder="采集 ID（选填，没有就同抖音号）"
+              value={bindAnchorId}
+              onChange={(e) => setBindAnchorId(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && bindDouyinNo.trim() && bindAccount()}
+            />
+            <button
+              className="primary"
+              disabled={!bindDouyinNo.trim()}
+              onClick={bindAccount}
+            >
+              {detail.accounts?.length ? '再加一个号' : '绑定为主号'}
             </button>
           </div>
         </section>
@@ -664,7 +852,9 @@ export default function StreamerPage() {
               placeholder="未设置"
               onChange={(e) => setMyAccPop({ ...myAccPop, phone: e.target.value })}
             />
-            <label className="hint" style={{ display: 'block', marginTop: 8 }}>密码（纯数字，4~20 位）</label>
+            <label className="hint" style={{ display: 'block', marginTop: 8 }}>
+              {myAccPop.exists ? '新密码（纯数字，4~20 位；留空 = 不修改）' : '密码（纯数字，4~20 位）'}
+            </label>
             <input
               value={myAccPop.pass}
               inputMode="numeric"
@@ -673,7 +863,7 @@ export default function StreamerPage() {
             />
             <div className="hint" style={{ marginTop: 8 }}>
               保存后主播在展示端「我的」页用 姓名 + 密码 登录看自己的数据；没有注册，账号只在这里设置。
-              {myAccPop.exists ? ' 该主播已有账号，保存=覆盖更新。' : ''}
+              {myAccPop.exists ? ' 该主播已有账号：新密码留空则保持原密码，填写后覆盖更新。' : ''}
             </div>
             <div className="row" style={{ marginTop: 10 }}>
               {myAccPop.exists && (

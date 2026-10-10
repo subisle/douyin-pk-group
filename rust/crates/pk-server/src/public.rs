@@ -455,11 +455,15 @@ pub async fn plan(State(st): State<std::sync::Arc<AppState>>, Path(id): Path<i64
 }
 
 /// `GET /api/public/plans`：已发布方案的轻量列表
+/// 2026-10-10 起受公开站点设置约束：「分组」页关掉 → 全部不下发；
+/// 某赛事类型子页关掉 → 该类型方案按未上架处理。
 pub async fn plans(State(st): State<std::sync::Arc<AppState>>) -> Response {
+    let s = crate::public_teams::PublicSettings::load(&st).await;
     let items: Vec<_> = store::list_plans(&st)
         .await
         .into_iter()
         .filter(|p| p.published)
+        .filter(|p| crate::public_teams::plan_visible_by_settings(&s, &p.event_type))
         .map(|p| {
             json!({
                 "id": p.id,

@@ -77,9 +77,14 @@ pub async fn get_baseline_date(
     Ok(get_dates_info(st, source, force).await?.baseline)
 }
 
-/// 音浪口径：
-/// - total：全部日期求和 = 基线日累计快照 + 之后每日增量 ≈ 真实累计总音浪
-/// - lastN：最近 N 个「增量日」求和（排除基线日，避免把累计快照算进近几日）
+/// 音浪口径（P1-7/P1-8，2026-10-10 修订）：
+/// - 行级过滤：所有聚合 SQL（WAVES_A/SERIES_A 等）统一 `wave_reliable = 1`，
+///   一天里个别不可信行被剔除，**不再整天消失**。
+/// - total：包含基线日。基线日（wave_reliable=0 的最早一天）记的是「累计快照」，
+///   是后续差分的累计基数；SUM 里那天的 wave 本身是 0（不可信行被行级过滤掉），
+///   但日期要保留在 dates 里，否则「累计总音浪」会少算基线日的基数 ——
+///   与 WAVES_A「可靠行求和」口径保持一致。
+/// - lastN / month：只取「增量日」（排除基线日），避免把累计快照翻倍算进近几日。
 pub async fn get_waves(
     st: &AppState,
     metric: &str,
@@ -90,7 +95,7 @@ pub async fn get_waves(
 ) -> anyhow::Result<WaveInfo> {
     let id = st.source(source)?.id.clone();
     let info = get_dates_info(st, Some(&id), force).await?;
-    // lastN 只在增量日里取近 N 天；total 用全部日期（含基线日累计基数）
+    // lastN 只在增量日里取近 N 天；total 用全部日期（含基线日，见函数头口径说明）
     let delta_dates: Vec<String> = match &info.baseline {
         Some(b) => info.dates.iter().filter(|d| *d != b).cloned().collect(),
         None => info.dates.clone(),
@@ -170,7 +175,11 @@ pub async fn get_waves(
 /// 与 `get_waves` 的区别：那边把区间压成一个总数，这边按 (人, 日期) 展开成
 /// 与 `dates` 等长、下标一一对应的数组，前端画折线时不用再自己对齐日期。
 ///
-/// 基线日会被剔除：它记的是累计快照而不是当日增量，混进曲线会变成一根假尖峰。
+/// 基线日（P1-8 修订）：**不再按日期整列剔除**。日期轴保留基线日，
+/// 值由 series_sql 的行级 `wave_reliable = 1` 过滤决定 —— 基线日全天不可信时
+/// 自然聚合出 0，个别行不可信时只丢那一行，整天数据不再消失。
+/// （基线日那天记的是累计快照而不是当日增量，SQL 的 reliable 过滤会把它归零，
+/// 曲线上不会出现假尖峰。）
 pub async fn get_wave_series(
     st: &AppState,
     force: bool,
@@ -179,11 +188,8 @@ pub async fn get_wave_series(
     let id = st.source(source)?.id.clone();
     let info = get_dates_info(st, Some(&id), force).await?;
 
-    // 只取增量日（去掉基线日），再截取最近的一段
-    let mut dates: Vec<String> = match &info.baseline {
-        Some(b) => info.dates.iter().filter(|d| *d != b).cloned().collect(),
-        None => info.dates.clone(),
-    };
+    // 日期轴含基线日（P1-8：行级 reliable 过滤代替整天剔除），再截取最近的一段
+    let mut dates: Vec<String> = info.dates.clone();
     // 点太多挤在一起反而看不清趋势，够看趋势就行。
     // dates 此时是倒序（新 → 旧），截断必须保留头部；split_off 取尾部会把最新一天丢掉
     const MAX_POINTS: usize = 14;

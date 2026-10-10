@@ -3,6 +3,17 @@
 //! - 日期查询返回：d（YYYY-MM-DD）
 //! - 音浪查询返回：k（人员 id）/ w（区间内音浪合计），序列查询多一个 d（日期）
 
+/// 未播口径（2026-10-09 用户定；2026-10-10 统一三处实现，P1-10）：
+/// 「当日导入音浪 < NOT_LIVE_WAVE_THRESHOLD」= 未开播。此前 report.rs（日报）按
+/// is_live 标记、public_teams.rs（展示端）按 wave<3、push.rs（推送榜）按 wave>=3，
+/// 三套口径同一个人会得出不同的「未播」结论。现在日报 / 展示端 / 推送一律引用这里。
+pub const NOT_LIVE_WAVE_THRESHOLD: i64 = 3;
+
+/// 统一的未播判定：当日音浪 < 3 = 未播（report 日报 / public_teams 榜单 / push 推送共用）
+pub fn is_live_wave(wave: i64) -> bool {
+    wave >= NOT_LIVE_WAVE_THRESHOLD
+}
+
 /// A：douyinxs —— person / account / daily_metric
 const ANCHORS_A: &str = "SELECT id, name, avatar_url, status FROM person
      WHERE deleted_at IS NULL AND (status IS NULL OR status <> 'left')
@@ -115,14 +126,20 @@ pub fn inline_dates(sql: &str, dates: &[String]) -> anyhow::Result<String> {
 // 与 A/B 采集源无关。日期一律 DATE_FORMAT 成字符串透传（同上 1835 兼容原因，
 // 值经 bind 绑定，字符串拼进来的只有日期白名单校验后的字面量）。
 
-/// 主播台账（含主号账号信息）；aliases 在 SQLite，代码层合并
+/// 主播台账（含主号账号信息）；aliases 在 SQLite，代码层合并。
+/// wechat_bound / wechat_push 来自 push_bindings（按姓名 1:1）：运营在台账里
+/// 一眼看出谁绑了微信机器人、谁开了推送，不用去「机器人」页翻会话列表。
 pub const STREAMERS_SQL: &str = "SELECT p.id, p.name, p.gender, p.master_id, p.generation,
        p.group_name, p.avatar_url, p.status, p.hide_in_daily_report,
        DATE_FORMAT(p.joined_at, '%Y-%m-%d') AS joined,
        a.anchor_id, a.douyin_no, a.anchor_name, m.name AS master_name,
        (SELECT COUNT(*) FROM person c WHERE c.master_id = p.id AND c.deleted_at IS NULL) AS disciple_count,
        (SELECT GROUP_CONCAT(a2.douyin_no ORDER BY a2.is_primary DESC, a2.id SEPARATOR ' / ')
-          FROM account a2 WHERE a2.person_id = p.id AND a2.douyin_no <> '') AS all_douyin_nos
+          FROM account a2 WHERE a2.person_id = p.id AND a2.douyin_no <> '') AS all_douyin_nos,
+       (SELECT pb.conversation_id <> '' FROM push_bindings pb WHERE pb.name = p.name
+          LIMIT 1) AS wechat_bound,
+       (SELECT pb.notify_target = 1 OR pb.daily_report = 1 FROM push_bindings pb
+          WHERE pb.name = p.name LIMIT 1) AS wechat_push
      FROM person p
      LEFT JOIN account a ON a.person_id = p.id AND a.is_primary = 1
      LEFT JOIN person m ON m.id = p.master_id
@@ -164,11 +181,14 @@ pub const TEAM_DATE_COUNT_SQL: &str = "SELECT COUNT(*) FROM daily_metric d
 pub const DATE_COUNT_SQL: &str =
     "SELECT COUNT(*) FROM daily_metric WHERE DATE_FORMAT(biz_date, '%Y-%m-%d') = ?";
 
-/// 不分男女团：该业务日还没有数据的在册主播（跨男/女团）
+/// 不分男女团：该业务日还没有数据的在职主播（跨男/女团）。
+/// 已离开（status='left'，如狼宸 / 狼森）不再要求当天有数据 —— 否则每天都被报「缺数据」。
+/// 榜单隐藏（hide_in_daily_report=1，P2-14）的也不报 —— 完整度只看会出现在日报里的人。
 pub const MISSING_ALL_SQL: &str = "SELECT p.name FROM person p
      LEFT JOIN daily_metric d ON d.person_id = p.id
        AND DATE_FORMAT(d.biz_date, '%Y-%m-%d') = ?
-     WHERE p.deleted_at IS NULL AND d.id IS NULL
+     WHERE p.deleted_at IS NULL AND p.status <> 'left' AND p.hide_in_daily_report = 0
+       AND d.id IS NULL
      ORDER BY p.name";
 
 /// 导入批次列表（最近 50 条）
@@ -184,29 +204,108 @@ pub fn trend_sql(start: &str, end: &str) -> String {
          DATE_FORMAT(d.biz_date, '%Y-%m-%d') AS d, \
          CAST(SUM(d.wave) AS SIGNED) AS w, CAST(SUM(d.minutes) AS SIGNED) AS m, MAX(d.is_live) AS live \
          FROM daily_metric d JOIN person p ON p.id = d.person_id \
-         WHERE p.deleted_at IS NULL AND d.biz_date BETWEEN '{start}' AND '{end}' \
+         WHERE p.deleted_at IS NULL AND d.wave_reliable = 1 \
+           AND d.biz_date BETWEEN '{start}' AND '{end}' \
          GROUP BY p.id, p.name, p.gender, d ORDER BY d"
     )
 }
 
-/// 月度 / 年度聚合（like = '2026-10%' 或 '2026%'，已过字符白名单）
-pub fn period_metrics_sql(like: &str, team: &str) -> String {
+/// 月 / 年聚合的公共骨架（2026-10-10 月度时长导入）。
+///
+/// 时长口径（用户口径）：某月**有导入的整月时长**（monthly_duration，平台月报）就用它，
+/// 没有（历史月份 / 只有日明细）才回落到 daily_metric 求和 —— 所以必须先把日明细聚合到
+/// 「每人每月」中间表 t，再按人合计；直接 SUM(d.minutes) 会把月报口径丢掉。
+///
+/// 中间表 t 的列：pid / m（YYYY-MM）/ w（音浪合计）/ dm（日明细时长求和）/
+/// live（开播天数）/ days（有数据天数）。
+///
+/// - `select`：要吐出的列；时长那一列写 `{minutes}` 占位，由本函数决定口径
+///   （with_monthly = true → `COALESCE(md.minutes, t.dm)`，false → `t.dm`）
+/// - `like`：`2026-09%`（月）或 `2026%`（年），调用前已过字符白名单
+/// - `team`：male / female / 空（空 = 不限团别）
+/// - `extra_where`：额外过滤（如公开端的 `AND p.status <> 'left'`），已内联
+/// - `order_by`：排序键（后面固定跟 `ORDER BY`），一般写 `wave DESC`
+/// - `with_monthly`：是否带上 monthly_duration（库没跑 007 迁移时只能 false）
+pub fn period_rollup_sql(
+    select: &str,
+    like: &str,
+    team: &str,
+    extra_where: &str,
+    order_by: &str,
+    with_monthly: bool,
+) -> String {
     let team_clause = if team.is_empty() {
-        ""
+        String::new()
     } else {
-        " AND p.gender = '{team}'"
+        format!(" AND p.gender = '{team}'")
     };
+    let (minutes_expr, monthly_join) = if with_monthly {
+        (
+            "COALESCE(md.minutes, t.dm)",
+            " \
+         LEFT JOIN monthly_duration md ON md.person_id = t.pid AND md.period = t.m",
+        )
+    } else {
+        ("t.dm", "")
+    };
+    let select = select.replace("{minutes}", minutes_expr);
     format!(
-        "SELECT p.id AS person_id, p.name, p.gender, \
-         CAST(SUM(d.wave) AS SIGNED) AS wave, CAST(SUM(d.minutes) AS SIGNED) AS minutes, \
-         CAST(SUM(CASE WHEN d.is_live = 1 THEN 1 ELSE 0 END) AS SIGNED) AS live_days, \
-         CAST(COUNT(DISTINCT d.biz_date) AS SIGNED) AS data_days \
-         FROM daily_metric d JOIN person p ON p.id = d.person_id \
-         WHERE p.deleted_at IS NULL AND DATE_FORMAT(d.biz_date, '%Y-%m') LIKE '{like}' \
-         {team_clause} \
-         GROUP BY p.id, p.name, p.gender ORDER BY wave DESC"
+        "SELECT {select} FROM ( \
+           SELECT d.person_id AS pid, DATE_FORMAT(d.biz_date, '%Y-%m') AS m, \
+             SUM(d.wave) AS w, SUM(d.minutes) AS dm, \
+             SUM(CASE WHEN d.is_live = 1 THEN 1 ELSE 0 END) AS live, \
+             COUNT(DISTINCT d.biz_date) AS days \
+           FROM daily_metric d \
+           WHERE d.wave_reliable = 1 \
+             AND DATE_FORMAT(d.biz_date, '%Y-%m') LIKE '{like}' \
+           GROUP BY pid, m \
+         ) t \
+         JOIN person p ON p.id = t.pid{monthly_join} \
+         WHERE p.deleted_at IS NULL{team_clause}{extra_where} \
+         GROUP BY p.id, p.name, p.gender \
+         ORDER BY {order_by}"
     )
-    .replace("{team}", team)
+}
+
+/// 管理端月 / 年聚合要吐的列（`{minutes}` 由 period_rollup_sql 按口径替换）
+pub const ADMIN_PERIOD_SELECT: &str = "p.id AS person_id, p.name, p.gender, \
+     CAST(SUM(t.w) AS SIGNED) AS wave, \
+     CAST(SUM({minutes}) AS SIGNED) AS minutes, \
+     CAST(SUM(t.live) AS SIGNED) AS live_days, \
+     CAST(SUM(t.days) AS SIGNED) AS data_days";
+
+/// 错误是不是「monthly_duration 表不存在」（库还没跑 007 迁移）
+pub fn is_missing_month_table(e: &anyhow::Error) -> bool {
+    let m = e.to_string();
+    m.contains("monthly_duration")
+        || m.contains("doesn't exist")
+        || m.contains("does not exist")
+        || m.contains("Unknown table")
+}
+
+/// 月 / 年聚合查询：先按「导入的整月时长优先」查，库还没建 monthly_duration（007 迁移没跑）时
+/// 退回纯日明细口径 —— 别让少一张表把整个展示页/数据页打不开。
+pub async fn query_period(
+    pools: &crate::mysql::Pools,
+    source: &str,
+    select: &str,
+    like: &str,
+    team: &str,
+    extra_where: &str,
+    order_by: &str,
+) -> anyhow::Result<Vec<sqlx::mysql::MySqlRow>> {
+    let sql = period_rollup_sql(select, like, team, extra_where, order_by, true);
+    match crate::mysql::query(pools, source, &sql).await {
+        Ok(rows) => Ok(rows),
+        Err(e) if is_missing_month_table(&e) => {
+            tracing::warn!(
+                "monthly_duration 表不存在，月/年时长按日明细口径回落（请先跑 pk-server migrate）"
+            );
+            let sql = period_rollup_sql(select, like, team, extra_where, order_by, false);
+            crate::mysql::query(pools, source, &sql).await
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// 某主播的全部账号（详情页）
@@ -226,11 +325,12 @@ pub const DUP_DOUYIN_SQL: &str = "SELECT a.douyin_no, COUNT(*) AS n,
      WHERE p.deleted_at IS NULL AND a.douyin_no <> ''
      GROUP BY a.douyin_no HAVING n > 1";
 
-/// 团内当天缺数据的主播（导入完整度报告）
+/// 团内当天缺数据的主播（导入完整度报告）；已离开 / 榜单隐藏的不报（与 MISSING_ALL_SQL 同口径）
 pub const MISSING_SQL: &str = "SELECT p.name FROM person p
      LEFT JOIN daily_metric d ON d.person_id = p.id
        AND DATE_FORMAT(d.biz_date, '%Y-%m-%d') = ?
-     WHERE p.deleted_at IS NULL AND p.gender = ? AND d.id IS NULL
+     WHERE p.deleted_at IS NULL AND p.status <> 'left' AND p.hide_in_daily_report = 0 \
+       AND p.gender = ? AND d.id IS NULL
      ORDER BY p.name";
 
 /// 沿师傅链向上走（防环校验用）
@@ -244,6 +344,30 @@ pub const SET_MASTER_SQL: &str =
 /// 抖音号 → person 映射（导入按抖音号匹配；一人多账号多号归一）
 pub const ACCOUNT_DOUYIN_MAP_SQL: &str =
     "SELECT person_id, douyin_no FROM account WHERE douyin_no <> ''";
+
+/// 采集 ID（anchor_id）→ person 映射。运营文件里的「主播id / uid / anchor_id」列
+/// 走这条路认人（用户口径 2026-10-10：只要有抖音号或者 id 都能认）。
+pub const ACCOUNT_ANCHOR_MAP_SQL: &str =
+    "SELECT person_id, anchor_id FROM account WHERE anchor_id <> ''";
+
+/// 暂存区列表（未认领的导入行）。不进任何榜单/统计，只给管理端处理用。
+pub const PENDING_LIST_SQL: &str = "SELECT id, name, douyin_no,
+       DATE_FORMAT(biz_date, '%Y-%m-%d') AS bd, wave, cumulative_wave, minutes, is_live,
+       source_batch_id, DATE_FORMAT(created_at, '%Y-%m-%d %H:%i') AS ts
+     FROM import_pending WHERE absorbed_at IS NULL
+     ORDER BY biz_date DESC, id DESC LIMIT 300";
+
+/// 某个主播名下（按抖音号或采集 ID 命中）还没认领的暂存行 —— 建档 / 绑号后补账用
+pub const PENDING_FOR_PERSON_SQL: &str = "SELECT id, name, douyin_no,
+       DATE_FORMAT(biz_date, '%Y-%m-%d') AS bd, wave, cumulative_wave, minutes, is_live,
+       source_batch_id
+     FROM import_pending
+     WHERE absorbed_at IS NULL
+       AND (douyin_no IN (SELECT a.douyin_no FROM account a
+                            WHERE a.person_id = ? AND a.douyin_no <> '')
+         OR douyin_no IN (SELECT a.anchor_id FROM account a
+                            WHERE a.person_id = ? AND a.anchor_id <> ''))
+     ORDER BY biz_date, id";
 
 /// 在册主播总数（未删除且未离开）
 pub const ACTIVE_PERSON_COUNT_SQL: &str =

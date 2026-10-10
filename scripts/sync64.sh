@@ -12,11 +12,11 @@
 set -euo pipefail
 
 HOST="${PK64_HOST:-64.188.8.149}"
-PASS="${PK64_PASS:-47uUAB24ybLN3s6lMx}"
+PASS="${PK64_PASS:?请用环境变量提供 PK64_PASS}"
 REMOTE="${PK64_DIR:-/opt/it/douyin-pk-group}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
-SSH=(sshpass -p "$PASS" ssh -o StrictHostKeyChecking=no "root@$HOST")
+SSH=(sshpass -p "$PASS" ssh -o StrictHostKeyChecking=accept-new "root@$HOST")
 
 echo "==> 同步 $ROOT -> $HOST:$REMOTE"
 # 排除：VCS、构建产物、本机依赖、以及 64 上的运行时配置与数据
@@ -32,7 +32,7 @@ rsync -rlz --delete \
   --exclude='.env' \
   --exclude='deploy/.env' \
   --exclude='deploy/data/' \
-  -e "sshpass -p '$PASS' ssh -o StrictHostKeyChecking=no" \
+  -e "sshpass -p '$PASS' ssh -o StrictHostKeyChecking=accept-new" \
   "$ROOT/" "root@$HOST:$REMOTE/"
 
 if [ "${1:-}" = "--check" ]; then

@@ -138,8 +138,10 @@ export default function LineagePage() {
   const [items, setItems] = useState<Row[]>([])
   const [q, setQ] = useState('')
   const [team, setTeam] = useState('')
-  const [view, setView] = useState<'tree' | 'list'>('tree')
+  const [view, setView] = useState<'tree' | 'list' | 'gen'>('tree')
   const [expanded, setExpanded] = useState<Set<number>>(new Set())
+  /** 字辈视图里收起的字辈（存首字） */
+  const [genFolded, setGenFolded] = useState<Set<string>>(new Set())
   const [sel, setSel] = useState<number | null>(null)
   const [error, setError] = useState('')
   const [msg, setMsg] = useState('')
@@ -241,7 +243,26 @@ export default function LineagePage() {
   const searching = norm(q).length > 0
   const visible = searching ? forest.filter((n) => n.branchHit) : forest
 
+  /** 字辈视图：按名字第一个字分组（如「浩」→ 浩字辈） */
+  const genGroups = useMemo(() => {
+    const map = new Map<string, Row[]>()
+    for (const r of shown) {
+      const c = norm(r.name).charAt(0)
+      if (!c) continue
+      const arr = map.get(c)
+      if (arr) arr.push(r)
+      else map.set(c, [r])
+    }
+    return [...map.entries()]
+      .map(([char, people]) => ({ char, people }))
+      .sort(
+        (a, b) =>
+          b.people.length - a.people.length || a.char.localeCompare(b.char, 'zh-Hans-CN'),
+      )
+  }, [shown])
+
   const stats = useMemo(() => {
+
     const all = flatten(forest)
     return {
       schools: forest.length,
@@ -361,6 +382,9 @@ export default function LineagePage() {
             <button className={view === 'list' ? 'on' : ''} onClick={() => setView('list')}>
               列表
             </button>
+            <button className={view === 'gen' ? 'on' : ''} onClick={() => setView('gen')}>
+              字辈
+            </button>
           </div>
           {view === 'list' && (
             <>
@@ -390,6 +414,53 @@ export default function LineagePage() {
           <section className={`card lin-tree${view === 'tree' ? ' tree-mode' : ''}`}>
             {view === 'tree' ? (
               <LineageCanvas rows={treeRows} selId={sel} onSelect={setSel} query={q} focusReq={focusReq} />
+            ) : view === 'gen' ? (
+              genGroups.length === 0 ? (
+                <p className="hint">没有可显示的主播</p>
+              ) : (
+                <div className="lin-gen-groups">
+                  {genGroups.map((g) => {
+                    const folded = genFolded.has(g.char)
+                    const people = g.people.filter((p) => !searching || norm(p.name).includes(norm(q)))
+                    if (searching && people.length === 0) return null
+                    return (
+                      <div key={g.char} className="lin-gen-group">
+                        <button
+                          className="lin-gen-head"
+                          onClick={() =>
+                            setGenFolded((prev) => {
+                              const next = new Set(prev)
+                              if (next.has(g.char)) next.delete(g.char)
+                              else next.add(g.char)
+                              return next
+                            })
+                          }
+                        >
+                          <span className="lin-gen-char">{g.char}</span>
+                          <span className="lin-gen-title">{g.char}字辈</span>
+                          <span className="lin-badge sm">{g.people.length} 人</span>
+                          <span className="lin-gen-caret">{folded ? '▸' : '▾'}</span>
+                        </button>
+                        {!folded && (
+                          <div className="lin-chips lin-gen-people">
+                            {people.map((p) => (
+                              <button
+                                key={p.personId}
+                                className={`lin-chip${sel === p.personId ? ' on' : ''}${p.status === 'left' ? ' dim' : ''}`}
+                                title={p.masterName ? `师傅：${p.masterName}` : '没有师傅'}
+                                onClick={() => focusOn(p.personId, true)}
+                              >
+                                {p.name}
+                                {p.disciples > 0 && <span className="lin-badge sm">{p.disciples} 徒</span>}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              )
             ) : visible.length === 0 ? (
               <p className="hint">{searching ? `没有找到「${q}」` : '没有可显示的主播'}</p>
             ) : (

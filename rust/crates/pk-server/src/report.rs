@@ -49,28 +49,36 @@ fn fmt_wan(v: i64) -> String {
 
 /// 拉取日报数据。date/team 已由调用方校验。
 pub async fn build(st: &Arc<AppState>, date: &str, team: &str) -> anyhow::Result<DailyReport> {
-    // 当日指标
+    use crate::dialect::{is_live_wave, NOT_LIVE_WAVE_THRESHOLD};
+    // 当日指标（P1-7：与榜单一致，只聚合可信行 wave_reliable=1）
     let today_sql = format!(
         "SELECT person_id, CAST(SUM(wave) AS SIGNED) AS wave, \
          CAST(SUM(minutes) AS SIGNED) AS m, MAX(is_live) AS live \
-         FROM daily_metric WHERE DATE_FORMAT(biz_date, '%Y-%m-%d') = '{date}' GROUP BY person_id"
+         FROM daily_metric WHERE wave_reliable = 1 \
+           AND DATE_FORMAT(biz_date, '%Y-%m-%d') = '{date}' GROUP BY person_id"
     );
-    // 当月未播天数（有数据行中 is_live=0 的天数）
+    // 当月未播天数（有数据行中；P1-7 只算可信行，P1-10 统一口径：当日音浪 < 3 = 未播，
+    // 与 public_teams.rs 展示端 / push.rs 推送榜同一把尺子，见 dialect::NOT_LIVE_WAVE_THRESHOLD）
     let month = &date[..7];
     let month_sql = format!(
-        "SELECT person_id, CAST(SUM(CASE WHEN is_live = 0 THEN 1 ELSE 0 END) AS SIGNED) AS n \
-         FROM daily_metric WHERE DATE_FORMAT(biz_date, '%Y-%m') = '{month}' GROUP BY person_id"
+        "SELECT person_id, CAST(SUM(CASE WHEN wave < {NOT_LIVE_WAVE_THRESHOLD} THEN 1 ELSE 0 END) AS SIGNED) AS n \
+         FROM daily_metric WHERE wave_reliable = 1 \
+           AND DATE_FORMAT(biz_date, '%Y-%m') = '{month}' GROUP BY person_id"
     );
-    // 累计音浪（≤ date 的全部增量求和）
+    // 累计音浪（≤ date 的全部增量求和；P1-7 total 口径与 WAVES_A 一致：只算可靠行。
+    // 基线日 wave_reliable=0 记的是累计基数，其 wave 值本来就是 0/不可信，
+    // 排除它不会少算当日口径的累计 —— 「累计总音浪」列展示的是当日口径累计）。
     let total_sql = format!(
         "SELECT person_id, CAST(SUM(wave) AS SIGNED) AS total \
-         FROM daily_metric WHERE DATE_FORMAT(biz_date, '%Y-%m-%d') <= '{date}' GROUP BY person_id"
+         FROM daily_metric WHERE wave_reliable = 1 \
+           AND DATE_FORMAT(biz_date, '%Y-%m-%d') <= '{date}' GROUP BY person_id"
     );
-    // 名册（含师傅）
+    // 名册（含师傅；P1-10：隐藏/离职的主播不进日报 —— 对外 SVG 不该再出现他们）
     let roster_sql = format!(
         "SELECT p.id, p.name, m.name AS master_name FROM person p \
          LEFT JOIN person m ON m.id = p.master_id \
-         WHERE p.deleted_at IS NULL AND p.gender = '{team}'"
+         WHERE p.deleted_at IS NULL AND p.gender = '{team}' \
+           AND p.hide_in_daily_report = 0 AND p.status <> 'left'"
     );
 
     let mut wave_map: HashMap<u64, i64> = Default::default();
@@ -102,10 +110,12 @@ pub async fn build(st: &Arc<AppState>, date: &str, team: &str) -> anyhow::Result
             .ok()
             .flatten()
             .unwrap_or_default();
-        let is_live = live_map.get(&pid).copied().unwrap_or(false);
         let wave = wave_map.get(&pid).copied().unwrap_or(0);
         let total = total_map.get(&pid).copied().unwrap_or(0);
         let absent = absent_map.get(&pid).copied().unwrap_or(0);
+        // P1-10：未播 = 当日音浪 < 3（与展示端 / 推送榜共用 dialect::is_live_wave），
+        // is_live 标记只作参考，不再单独作为判定依据
+        let is_live = is_live_wave(wave);
         rows.push(ReportRow {
             name: name.clone(),
             wave,

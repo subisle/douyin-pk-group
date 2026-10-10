@@ -34,6 +34,9 @@ button { font:inherit; cursor:pointer; }
 .mh-badge { width:36px; height:36px; border-radius:11px; background:var(--masthead-surface);
   border:1px solid var(--hairline-dark); display:grid; place-items:center; font-weight:800;
   font-size:15px; color:#b4c5ff; flex:none; }
+/* 徽标兼「换团」按钮：点一下回团别选择卡 */
+.mh-badge.mh-switch { cursor:pointer; font-size:13px; }
+.mh-badge.mh-switch:active { transform:scale(.94); }
 .mh-title { flex:1; min-width:0; }
 .mh-title .t { font-weight:800; font-size:17px; letter-spacing:-.01em; }
 .mh-title .s { font-size:11px; color:#8ea0bf; font-family:Menlo,monospace;
@@ -72,6 +75,9 @@ button { font:inherit; cursor:pointer; }
   background:#fff; border:1px solid var(--hairline); color:var(--on-surface-variant);
   font-size:12.5px; font-family:Menlo,monospace; }
 .dates button.on { background:var(--primary); border-color:var(--primary); color:#fff; font-weight:600; }
+.dates button.nodata { color:#C2C8D2; }
+.dates .mgap { flex:none; align-self:center; font-size:10px; color:var(--ink3);
+  font-weight:700; padding-left:2px; }
 .stepper { display:flex; align-items:center; gap:4px; flex:1; min-width:0; }
 .stepper button { width:34px; height:32px; border-radius:var(--r-sm); background:#fff;
   border:1px solid var(--hairline); color:var(--on-surface-variant); line-height:1; }
@@ -83,6 +89,67 @@ button { font:inherit; cursor:pointer; }
   border:1px solid var(--hairline); border-radius:var(--r-sm); padding:0 10px; height:34px; }
 .search input { flex:1; border:none; outline:none; font:inherit; background:transparent; color:var(--on-surface); }
 .search input::placeholder { color:var(--ink3); }
+
+/* ===== 点击即时反馈（2026-10-10）：RTT≈260ms，点了必须先有反应再等数据 ===== */
+/* manipulation：去掉移动端双击缩放判定，点按立刻生效；高亮由下面的 :active 出 */
+button { touch-action:manipulation; user-select:none; -webkit-user-select:none; }
+.lb-row, .pod, .gx-mem { touch-action:manipulation; user-select:none; -webkit-user-select:none; }
+.nav-row button:active, #subnav button:active, .seg button:active { opacity:.55; }
+.dates button:active, .stepper button:active, .icon-btn:active,
+.ln-ctl button:active { background:#EDF0F5; transform:scale(.93); }
+.pod:active, .lb-row:active { opacity:.72; }
+.gx-mem:active { background:rgba(255,255,255,.55); }
+.my-logout:active, .my-push .go:active, .my-claim .go:active,
+.gate-box .btn-main:active, .team-pick .pick-btn:active { opacity:.7; }
+/* 请求在途：标题旁小菊花 + 内容轻微压暗（不清空已看内容，数据回来直接换） */
+#mhSpin { display:none; width:12px; height:12px; flex:none;
+  border:2px solid rgba(142,160,191,.35); border-top-color:#8ea0bf; border-radius:50%;
+  animation:spin .7s linear infinite; }
+body.busy #mhSpin { display:inline-block; }
+@keyframes spin { to { transform:rotate(360deg); } }
+#view { transition:opacity .12s; }
+body.busy #view { opacity:.62; }
+@media (hover:hover) {
+  .nav-row button:hover { color:#fff; background:rgba(255,255,255,.06); }
+  #subnav button:hover { background:#1E293B; color:#fff; }
+  .dates button:hover, .stepper button:hover, .icon-btn:hover { background:#F4F6FA; }
+  .lb-row:hover { background:#F8FAFD; }
+  .seg button:not(.on):hover { color:var(--on-surface); }
+}
+
+/* ===== 日期日历（2026-10-10）：横向日期条太长时点 📅 弹日历挑日期 ===== */
+.cal-btn { flex:none; }
+.cal-pop { position:fixed; inset:0; z-index:50; display:flex; align-items:flex-end;
+  justify-content:center; background:rgba(11,15,23,.45); animation:fade .15s ease-out; }
+.cal-pop.hidden { display:none; }
+.cal-card { background:#fff; border-radius:18px 18px 0 0; padding:14px 14px
+  calc(env(safe-area-inset-bottom,0px) + 14px); width:100%; max-width:400px;
+  box-shadow:0 -8px 32px rgba(11,15,23,.22); animation:calUp .18s ease-out; }
+@keyframes calUp { from { transform:translateY(40px); opacity:.6; } to { transform:none; opacity:1; } }
+@media (min-width:640px) {
+  .cal-pop { align-items:center; }
+  .cal-card { border-radius:18px; }
+}
+.cal-head { display:flex; align-items:center; gap:8px; margin-bottom:10px; }
+.cal-head .ttl { flex:1; text-align:center; font-weight:800; font-size:15px; font-variant-numeric:tabular-nums; }
+.cal-head button { width:34px; height:32px; border-radius:var(--r-sm); background:#fff;
+  border:1px solid var(--hairline); color:var(--on-surface-variant); line-height:1; }
+.cal-head .close { border:none; background:none; font-size:17px; color:var(--ink3); width:30px; }
+.cal-grid { display:grid; grid-template-columns:repeat(7,1fr); gap:2px; }
+.cal-grid .wd { text-align:center; font-size:10.5px; color:var(--ink3); padding:4px 0 6px; }
+.cal-grid .wd.wkend { color:#D92D20; }
+.cal-d { height:40px; border:none; background:none; border-radius:10px;
+  font-size:13.5px; color:var(--on-surface); font-variant-numeric:tabular-nums;
+  display:grid; place-items:center; position:relative; }
+.cal-d:disabled { color:#C9CFDA; }
+.cal-d.dim { color:#98A2B3; }           /* 非本月 */
+.cal-d.today::after { content:''; position:absolute; bottom:5px; left:50%;
+  transform:translateX(-50%); width:4px; height:4px; border-radius:50%; background:var(--primary); }
+.cal-d.has::before { content:''; position:absolute; top:6px; right:8px;
+  width:5px; height:5px; border-radius:50%; background:#10B981; }  /* 有数据的日期 */
+.cal-d.on { background:var(--primary); color:#fff; font-weight:700; }
+.cal-d:active { background:#EDF0F5; }
+.cal-d.on:active { background:#1D4ED8; }
 
 /* ===== 内容 ===== */
 .wrap { padding:14px 14px 32px; max-width:560px; margin:0 auto; }
@@ -234,7 +301,7 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .stale { background:#FFF7E6; color:#B54708; border-radius:var(--r-sm); padding:7px 12px;
   font-size:12px; margin-bottom:10px; text-align:center; }
 
-/* ===== 我的（姓名+手机号登录 · 无注册，账号由管理员手动添加） ===== */
+/* ===== 我的（手机号+密码登录 / 手机号自助注册，账号也可由管理员手动添加） ===== */
 .my-login { max-width:360px; margin:30px auto 0; text-align:center; }
 .my-login .card-pad { padding:26px 22px; }
 .my-login .big-av { width:64px; height:64px; border-radius:50%; display:grid; place-items:center;
@@ -289,6 +356,15 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
   padding:0 12px; font-size:15px; margin-bottom:10px; background:#fff; color:var(--on-surface); }
 .gate-box input:focus { outline:none; border-color:var(--primary); }
 .gate-box .form-err { color:#D92D20; font-size:12px; margin:-2px 0 8px; text-align:left; }
+/* 团别选择卡（男女共用一个网址） */
+.team-pick .pick-title { font-weight:800; font-size:17px; margin-bottom:16px; }
+.team-pick .pick-row { display:flex; gap:12px; }
+.team-pick .pick-btn { flex:1; height:96px; border:1px solid var(--hairline); border-radius:14px;
+  background:#fff; font-size:15px; font-weight:700; color:var(--on-surface);
+  display:flex; flex-direction:column; align-items:center; justify-content:center; gap:8px; }
+.team-pick .pick-btn:active { transform:scale(.97); background:#f3f5f9; }
+.team-pick .pick-av { width:40px; height:40px; border-radius:50%; color:#fff; font-size:17px;
+  font-weight:800; display:grid; place-items:center; }
 .gate-box .btn-main { width:100%; height:44px; border:none; border-radius:var(--r-md);
   background:var(--primary); color:var(--on-primary); font-size:15px; font-weight:700; }
 .gate-box .btn-main:disabled { opacity:.45; }
@@ -355,22 +431,69 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .my-push .sr-list div { padding:10px 12px; font-size:13px; border-bottom:1px solid var(--hairline); }
 .my-push .sr-list div:last-child { border-bottom:none; }
 .my-push .sr-list .none { color:var(--ink3); font-size:12px; }
+
+/* ===== 注册（2026-10-10：手机号注册 + WorkBuddy 网关「添加账号 OAuth」+ 绑定主播） ===== */
+.gate-tabs { display:flex; margin:0 0 14px; border:1px solid var(--hairline);
+  border-radius:var(--r-md); overflow:hidden; background:#fff; }
+.gate-tabs button { flex:1; height:36px; border:none; background:transparent; cursor:pointer;
+  font:inherit; font-size:13.5px; color:var(--on-surface-variant); }
+.gate-tabs button.on { background:var(--primary); color:#fff; font-weight:700; }
+.gate-box .reg-step { display:flex; gap:9px; text-align:left; margin:0 0 10px; }
+.gate-box .reg-step .n { flex:none; width:19px; height:19px; border-radius:50%; background:#F1F5F9;
+  color:var(--on-surface-variant); font-size:11px; font-weight:700; display:grid; place-items:center;
+  margin-top:1px; }
+.gate-box .reg-step.done .n { background:#DCFCE7; color:#067647; }
+.gate-box .reg-step .t { font-size:12px; color:var(--on-surface-variant); line-height:1.6; }
+.gate-box .reg-link { display:block; word-break:break-all; font-size:12px; color:var(--primary);
+  text-align:left; margin:0 0 10px; line-height:1.6; }
+.gate-box .reg-state { font-size:12px; text-align:left; margin:-4px 0 10px; line-height:1.6; }
+.gate-box .reg-state.ok { color:#067647; }
+.gate-box .reg-state.wait { color:#B54708; }
+.gate-box .reg-skip { background:none; border:none; color:var(--ink3); font-size:12px;
+  text-decoration:underline; cursor:pointer; padding:0; margin:0 0 12px; }
+.gate-box .btn-sec { width:100%; height:40px; border:1px solid var(--hairline); border-radius:var(--r-md);
+  background:#fff; color:var(--on-surface); font-size:14px; font-weight:600; margin-bottom:10px; }
+.gate-box .btn-sec:disabled { opacity:.45; }
+.gate-box .reg-note { font-size:11.5px; color:var(--ink3); text-align:left; line-height:1.7;
+  margin:12px 0 0; }
+/* 我的页 · 绑定主播卡片 */
+.my-bind { padding:16px 16px 14px; text-align:left; }
+.my-bind .sub { font-size:12px; color:var(--ink3); line-height:1.7; }
+.my-bind .warn { font-size:12px; color:#B54708; background:#FFF7E6; border-radius:8px;
+  padding:8px 10px; margin-top:10px; line-height:1.6; }
+.my-bind input { width:100%; height:42px; border:1px solid var(--hairline); border-radius:var(--r-md);
+  padding:0 12px; font-size:14px; margin-top:10px; background:#fff; color:var(--on-surface); }
+.my-bind input:focus { outline:none; border-color:var(--primary); }
+.my-bind .hit { display:flex; align-items:center; justify-content:space-between; gap:8px;
+  padding:10px 2px; border-bottom:1px solid var(--hairline); font-size:14px; }
+.my-bind .hit:last-child { border-bottom:none; }
+.my-bind .hit .tag { font-size:11px; color:var(--ink3); margin-left:6px; }
+.my-bind .hit button { flex:none; height:30px; padding:0 14px; border:none; border-radius:var(--r-full);
+  background:var(--primary); color:#fff; font-size:12.5px; font-weight:700; }
+.my-bind .none { color:var(--ink3); font-size:12px; padding:10px 2px; }
+/* 未绑定主播的顶部提醒条 */
+.bindbar { display:flex; align-items:center; justify-content:center; gap:8px;
+  padding:8px 14px; background:#FFF7E6; color:#B54708; font-size:12.5px; }
+.bindbar span.link { font-weight:700; text-decoration:underline; cursor:pointer; }
+.bindbar[hidden] { display:none; }
 </style>
 </head>
 <body>
 
 <div class="stale hidden" id="stale">网络不太顺，显示的可能不是最新数据</div>
+<!-- 手机号注册了但还没绑主播：全站提醒（点「去绑定」进「我的」） -->
+<div class="bindbar" id="bindBar" hidden>你还没有绑定主播姓名，绑定后才能真正使用个人数据<span class="link" id="bindBarGo">去绑定</span></div>
 
 <header class="masthead">
   <div class="mh-top">
-    <div class="mh-badge" id="mhBadge">1</div>
+    <button class="mh-badge mh-switch" id="btnTeam" title="换团">1</button>
     <div class="mh-title">
       <div class="t" id="mhTitle">男团数据榜</div>
-      <div class="s" id="mhSub">LOADING</div>
+      <div class="s"><span id="mhSub">LOADING</span><span id="mhSpin" aria-hidden="true"></span></div>
     </div>
   </div>
   <div class="nav-row" id="navRow">
-    <button data-v="data" class="on">每日报告</button>
+    <button data-v="data" id="navData" class="on">每日报告</button>
     <button data-v="group" id="navGroup">分组</button>
     <button data-v="lineage" id="navLineage">族谱</button>
     <button data-v="my" id="navMy">我的</button>
@@ -393,6 +516,9 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
     </div>
     <div class="line2">
       <div class="dates" id="dates"></div>
+      <button class="icon-btn cal-btn" id="btnCal" title="日历挑日期">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="5" width="18" height="16" rx="2.5"/><path d="M8 3v4M16 3v4M3 10h18"/></svg>
+      </button>
       <div class="stepper hidden" id="stepper">
         <button id="pPrev">‹</button>
         <span class="now" id="pNow">—</span>
@@ -433,13 +559,15 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
      /st/m/report      → 每日报告（别名）
      /st/m/group/<key> → 按赛事类型的分组页
      /st/m/lineage     → 族谱
-     /st/m/my          → 我的数据（姓名+手机号登录，无注册）
+     /st/m/my          → 我的数据（手机号+密码登录；没账号可在登录门「注册」）
    刷新/直接分享子路径链接都能落到正确视图（后端对子路径渲染同一 HTML）。 */
-const P = location.pathname;
-/* 路径第一段是团别：/0、/f、/st/0、/st/f（可带子路径）= 女团，其余 = 男团 */
-const TEAM = /^\/(?:st\/)?(?:0|f)(?:\/|$)/.test(P) ? 'female' : 'male';
-const LABEL = TEAM === 'male' ? '男团' : '女团';
-const CODE = TEAM === 'male' ? '1' : '0';
+/* 团别（2026-10-10 起男女共用一个网址）：不再从 URL 推断，
+   进页先弹「男团 / 女团」选择卡，选完存 localStorage，之后直开记住上次选择。
+   只有顶部「换团」按钮能换团（换团 = 重选，清掉记住的团别）。 */
+let TEAM = null;         // 'male' | 'female'，进页选择后才有值
+const TEAM_KEY = 'teamChoice';
+const LABEL = () => TEAM === 'male' ? '男团' : '女团';
+const CODE = () => TEAM === 'male' ? '1' : '0';
 const $ = (id) => document.getElementById(id);
 
 /* 分组子页：key 进 URL，type 对应方案 eventType（与后端 EVENT_TYPES 一致），label 是页面标题 */
@@ -463,12 +591,19 @@ let searchOpen = false;
 let q = '';
 let consecutiveFail = 0;
 let timer = null;
+let loadSeq = 0;         // 请求序号：RTT≈260ms，快速连点时只认最后一次的结果
+
+/* 请求在途的即时反馈：标题旁小菊花 + 内容轻微压暗。
+   在 go() 里开、请求落地后关；静默刷新不经过这里，不打扰正常浏览。 */
+function busyOn() { document.body.classList.add('busy'); }
+function busyOff() { document.body.classList.remove('busy'); }
 
 /* ==================== URL 路由（history，子路径 = 视图） ==================== */
-/** 当前 pathname → 视图描述。识别不了的子路径一律落回每日报告（首页默认数据页）。 */
+/** 当前 pathname → 视图描述。识别不了的子路径一律落回每日报告（首页默认数据页）。
+    兼容旧链接：/st/m/lineage、/1/report 这类带团别前缀的老路径剥掉前缀照常落视图。 */
 function parseRoute() {
   const rest = location.pathname
-    .replace(/^\/(?:st\/)?(?:m|f|1|0)/, '')
+    .replace(/^\/(?:st\/)?(?:m|f|1|0)(?=\/|$)/, '')
     .replace(/^\/+|\/+$/g, '');
   if (rest === '' || rest === 'report') return { view: 'data' };
   if (rest === 'lineage') return { view: 'lineage' };
@@ -477,14 +612,12 @@ function parseRoute() {
   if (gm && GROUP_PAGES.some(p => p.key === gm[1])) return { view: 'group', group: gm[1] };
   return { view: 'data' };
 }
-/** 当前视图对应的规范路径（用 /st/m 别名前缀：后端对 /st/{team}/{*rest} 渲染本页，
-    直接刷新/分享子路径链接都不会 404；/1、/0 只是入口短链） */
+/** 当前视图对应的规范路径（根路径 + 子页路径；男女共用一个网址，团别不进 URL） */
 function routePath() {
-  const base = '/st/' + (TEAM === 'male' ? 'm' : 'f');
-  if (view === 'lineage') return base + '/lineage';
-  if (view === 'my') return base + '/my';
-  if (view === 'group') return base + '/group/' + curGroup;
-  return base + '/report';
+  if (view === 'lineage') return '/lineage';
+  if (view === 'my') return '/my';
+  if (view === 'group') return '/group/' + curGroup;
+  return '/report';
 }
 function pushRoute(replace) {
   const path = routePath();
@@ -519,7 +652,8 @@ const shiftMonth = (p, n) => {
   const d = new Date(y, m + n, 1);
   return d.getFullYear() + '-' + pad2(d.getMonth() + 1);
 };
-const show = (el, on) => $(el).classList.toggle('hidden', !on);
+/* show 传 id 或元素都行（syncNav 里对子导航按钮直接传元素） */
+const show = (el, on) => (typeof el === 'string' ? $(el) : el).classList.toggle('hidden', !on);
 let toastTimer;
 function toast(msg) {
   $('toastTx').textContent = msg;
@@ -545,19 +679,86 @@ async function api(p) {
 
 /* ==================== 登录门 + 全屏水印 ==================== */
 let gateResolve = null;   // 登录成功后 resolve({name,...})
+let meState = null;       // 当前登录身份（who 的结果，带 bound / needBind）
+let regCfg = null;        // 注册页能力探测：{oauth: 网关配没配}
+let regWbState = '';      // WorkBuddy 授权流水号（第 ① 步申请到的）
+let regOauthDone = false; // 授权是否已完成（账号已加入账号池）
+let regSkipped = false;   // 用户明确跳过「加入账号池」
+let regTimer = null;      // 授权结果轮询
+
+/** 手机号打码：水印/提示里不出现完整号码 */
+const maskPhone = (p) => {
+  const s = String(p || '');
+  return s.length >= 7 ? s.slice(0, 3) + '****' + s.slice(-4) : s;
+};
+
+/** 登录/注册成功后统一收口：水印 + 未绑定提醒条 */
+function applyLoginState(me) {
+  meState = me || null;
+  const needBind = !!(me && me.needBind);
+  /* 提醒条用 hidden 属性控制（CSS 写的是 .bindbar[hidden]），不是 class="hidden" */
+  const bar = $('bindBar');
+  if (bar) bar.hidden = !needBind;
+  applyWatermark(needBind ? '未绑定主播' : (me && me.name));
+  return me;
+}
+
+/** 关登录门 + 落地登录态 */
+function closeGate(me) {
+  stopRegPoll();
+  const g = $('gate');
+  g.classList.add('hidden');
+  g.innerHTML = '';
+  const fn = gateResolve; gateResolve = null;
+  applyLoginState(me);
+  if (fn) fn(me);
+}
 
 function showGate() {
+  stopRegPoll();
+  regCfg = null;   // 每次弹门重新探测：后台可能刚开/刚关注册
   const g = $('gate');
   g.classList.remove('hidden');
   g.innerHTML = '<div class="gate-box"><div class="card card-pad">' +
-    '<div class="big-av" style="background:' + avColor(LABEL) + '">' + esc(LABEL.charAt(0)) + '</div>' +
-    '<h3>' + esc(LABEL) + '数据榜</h3>' +
-    '<p class="tip">需要登录后查看<br>使用管理员登记的「手机号 + 密码」（姓名也可以）</p>' +
-    '<input id="gateAcct" placeholder="手机号 / 姓名" autocomplete="off">' +
-    '<input id="gatePass" placeholder="密码" inputmode="numeric" autocomplete="off">' +
-    '<div class="form-err hidden" id="gateErr"></div>' +
-    '<button class="btn-main" id="gateGo">登 录</button>' +
+    '<div class="big-av" style="background:' + avColor(LABEL()) + '">' + esc(LABEL().charAt(0)) + '</div>' +
+    '<h3>' + esc(LABEL()) + '数据榜</h3>' +
+    '<div class="gate-tabs">' +
+      '<button id="tabLogin" class="on">登录</button><button id="tabReg" hidden>注册</button>' +
+    '</div>' +
+    '<div id="paneLogin"><p class="tip">使用「手机号 + 密码」登录（姓名也可以）</p>' +
+      '<input id="gateAcct" placeholder="手机号 / 姓名" autocomplete="off">' +
+      '<input id="gatePass" placeholder="密码" inputmode="numeric" autocomplete="off">' +
+      '<div class="form-err hidden" id="gateErr"></div>' +
+      '<button class="btn-main" id="gateGo">登 录</button></div>' +
+    '<div id="paneReg" class="hidden"></div>' +
     '</div></div>';
+  $('tabLogin').onclick = () => gateTab('login');
+  $('tabReg').onclick = () => gateTab('reg');
+  bindLoginPane();
+  bindRegPane();
+  gateTab('login');
+  /* 注册是后台开关（2026-10-10 用户口径「注册先不开」，默认关）：
+     探测到开着才把「注册」页签露出来，关着时登录门跟以前一模一样 */
+  probeRegConfig().then((cfg) => {
+    const tab = $('tabReg');
+    if (tab) tab.hidden = !cfg.open;
+  });
+}
+
+function gateTab(tab) {
+  const login = tab === 'login';
+  if (!login && regCfg && !regCfg.open) return;   // 注册没开：不进注册页签
+  $('tabLogin').classList.toggle('on', login);
+  $('tabReg').classList.toggle('on', !login);
+  show('paneLogin', login);
+  show('paneReg', !login);
+  if (login) stopRegPoll();
+  else prepareRegPane();
+  setTimeout(() => { const el = login ? $('gateAcct') : $('regPhone'); if (el) el.focus(); }, 30);
+}
+
+/* ------------------------------ 登录页签 ------------------------------ */
+function bindLoginPane() {
   const go = async () => {
     const acct = $('gateAcct').value.trim(), pw = $('gatePass').value.trim();
     const errEl = $('gateErr');
@@ -578,13 +779,10 @@ function showGate() {
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
       if (!d.ok) throw new Error('账号或密码不对，或账号还没开通');
-      localStorage.setItem(MY_KEY, d.token);
-      localStorage.setItem(MY_NAME_KEY, d.name || acct);
-      toast('登录成功');
-      g.classList.add('hidden');
-      g.innerHTML = '';
-      const fn = gateResolve; gateResolve = null;
-      if (fn) fn({ name: d.name || acct, personId: d.personId });
+      sessionStorage.setItem(MY_KEY(), d.token);
+      localStorage.setItem(MY_NAME_KEY(), d.name || acct);
+      toast(d.needBind ? '登录成功，请绑定主播姓名' : '登录成功');
+      closeGate({ name: d.name || acct, personId: d.personId, bound: d.bound !== false, needBind: !!d.needBind });
     } catch (e) {
       btn.disabled = false; btn.textContent = '登 录';
       errEl.textContent = e.message || '登录失败，稍后再试';
@@ -594,7 +792,172 @@ function showGate() {
   $('gateGo').onclick = go;
   $('gateAcct').onkeydown = (e) => { if (e.key === 'Enter') $('gatePass').focus(); };
   $('gatePass').onkeydown = (e) => { if (e.key === 'Enter') go(); };
-  setTimeout(() => { const el = $('gateAcct'); if (el) el.focus(); }, 50);
+}
+
+/* ------------------------------ 注册页签 ------------------------------
+   用户口径（2026-10-10）：手机号 = 账号，短信验证码数字 = 密码；
+   注册同时调用 WorkBuddy 网关「添加账号 (OAuth)」（那张授权页本身就是手机号登录），
+   注册完提醒绑定主播姓名，绑定后用户自己不能解绑。 */
+function bindRegPane() {
+  $('paneReg').innerHTML =
+    '<p class="tip">手机号就是账号，短信验证码数字就是密码</p>' +
+    '<div id="regOauth" class="hidden">' +
+      '<div class="reg-step" id="regStep1"><div class="n">1</div>' +
+        '<div class="t">把 WorkBuddy 账号加进账号池：点下面的按钮拿授权链接，' +
+        '在打开的页面用<b>手机号</b>登录（会收到短信验证码）</div></div>' +
+      '<div style="display:flex;gap:8px;align-items:center;margin:0 0 10px">' +
+        '<select id="regRealm" style="flex:1;height:40px;border:1px solid var(--hairline);' +
+          'border-radius:var(--r-md);padding:0 10px;font-size:14px;background:#fff;color:var(--on-surface)">' +
+          '<option value="cn">国内版（copilot.tencent.com）</option>' +
+          '<option value="intl">国际版（workbuddy.ai）</option></select>' +
+        '<button class="btn-sec" id="regAuth" style="flex:none;width:auto;padding:0 14px;margin:0">获取授权链接</button>' +
+      '</div>' +
+      '<div id="regLinkBox"></div>' +
+      '<div class="reg-state wait hidden" id="regState"></div>' +
+      '<button class="reg-skip" id="regSkip">跳过这一步（不加入 WorkBuddy 账号池）</button>' +
+    '</div>' +
+    '<div class="reg-step"><div class="n">2</div>' +
+      '<div class="t">填手机号和刚收到的验证码，完成注册</div></div>' +
+    '<input id="regPhone" placeholder="手机号" inputmode="numeric" autocomplete="off">' +
+    '<input id="regCode" placeholder="短信验证码（= 密码）" inputmode="numeric" autocomplete="off">' +
+    '<div class="form-err hidden" id="regErr"></div>' +
+    '<button class="btn-main" id="regGo">完成注册</button>' +
+    '<p class="reg-note">注册后请绑定你的主播姓名（艺名）；绑定之后不能自行解绑，' +
+    '填错了需要联系管理员改绑。</p>';
+  $('regAuth').onclick = startRegOauth;
+  $('regGo').onclick = doRegister;
+  $('regCode').onkeydown = (e) => { if (e.key === 'Enter') doRegister(); };
+  $('regSkip').onclick = () => {
+    if (!confirm('跳过授权后，本次注册不会把 WorkBuddy 账号加进账号池。确定跳过吗？')) return;
+    regSkipped = true;
+    stopRegPoll();
+    setRegState('已跳过授权：本次注册不加入账号池', 'wait');
+  };
+}
+
+function setRegState(text, kind) {
+  const el = $('regState');
+  if (!el) return;
+  el.className = 'reg-state' + (kind ? ' ' + kind : '');
+  el.textContent = text;
+  el.classList.remove('hidden');
+}
+
+/** 探测注册能力：功能开没开（后台开关，默认关）+ 网关配没配 */
+async function probeRegConfig() {
+  if (regCfg === null) {
+    try {
+      regCfg = await fetch('/api/public/my/register/config').then((r) => r.json());
+    } catch (_) {
+      regCfg = { open: false, oauth: false };
+    }
+  }
+  return regCfg || { open: false, oauth: false };
+}
+
+/** 进注册页签时的收尾：功能关着不让进；开着时按网关配置决定显不显示授权步骤 */
+async function prepareRegPane() {
+  const cfg = await probeRegConfig();
+  if (!cfg.open) { gateTab('login'); return; }
+  show('regOauth', !!cfg.oauth);
+}
+
+async function startRegOauth() {
+  const btn = $('regAuth');
+  btn.disabled = true; btn.textContent = '申请中…';
+  $('regLinkBox').innerHTML = '';
+  regWbState = ''; regOauthDone = false; regSkipped = false;
+  stopRegPoll();
+  try {
+    const r = await fetch('/api/public/my/register/oauth/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ realm: ($('regRealm') || {}).value || 'cn' }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+    regWbState = d.state || '';
+    $('regLinkBox').innerHTML =
+      '<a class="reg-link" href="' + esc(d.authUrl) + '" target="_blank" rel="noopener">' + esc(d.authUrl) + '</a>' +
+      '<div class="reg-note" style="margin:-6px 0 10px">点上面的链接，用<b>手机号</b>登录并授权；' +
+      '登录完成后这个窗口会自动检测到，不用手动刷新。</div>';
+    setRegState('等待授权完成…', 'wait');
+    btn.disabled = false; btn.textContent = '重新生成链接';
+    try { window.open(d.authUrl, '_blank', 'noopener'); } catch (_) { /* 拦截了就点链接 */ }
+    startRegPoll();
+  } catch (e) {
+    btn.disabled = false; btn.textContent = '获取授权链接';
+    setRegState('申请失败：' + (e.message || '稍后再试'), 'wait');
+  }
+}
+
+function stopRegPoll() {
+  if (regTimer) { clearInterval(regTimer); regTimer = null; }
+}
+
+function startRegPoll() {
+  stopRegPoll();
+  let tries = 0;
+  regTimer = setInterval(async () => {
+    tries += 1;
+    if (tries > 120) {   // 5 分钟没结果就别再轮了
+      stopRegPoll();
+      setRegState('授权检测超时：可以点「重新生成链接」再来一次', 'wait');
+      return;
+    }
+    if (!regWbState) return;
+    try {
+      const d = await fetch('/api/public/my/register/oauth/poll?state=' + encodeURIComponent(regWbState))
+        .then((r) => r.json());
+      const s = String(d.status || '');
+      if (s === 'ok') {
+        stopRegPoll();
+        regOauthDone = true;
+        const step = $('regStep1');
+        if (step) step.classList.add('done');
+        setRegState('✓ 已加入账号池' + (d.nickname ? '（' + d.nickname + '）' : '') + '，请继续第 ② 步', 'ok');
+      } else if (s === 'error' || s === 'expired' || s === 'unknown') {
+        stopRegPoll();
+        setRegState('授权失败或已过期：请点「重新生成链接」重试', 'wait');
+      }
+    } catch (_) { /* 网络抖动继续轮询 */ }
+  }, 2500);
+}
+
+async function doRegister() {
+  const phone = ($('regPhone').value || '').trim().replace(/[\s-]/g, '');
+  const code = ($('regCode').value || '').trim();
+  const errEl = $('regErr');
+  const fail = (m) => {
+    errEl.textContent = m;
+    errEl.classList.remove('hidden');
+  };
+  errEl.classList.add('hidden');
+  if (!/^\d{5,20}$/.test(phone)) return fail('请输入 5~20 位数字手机号');
+  if (!/^\d{4,20}$/.test(code)) return fail('验证码应为 4~20 位数字（验证码就是密码）');
+  if (regCfg && regCfg.oauth && !regSkipped) {
+    if (!regWbState) return fail('请先做第 ① 步：点「获取授权链接」并用手机号登录授权（不想加账号池可点「跳过这一步」）');
+    if (!regOauthDone) return fail('授权还没完成（账号还没进账号池），等状态变成「已加入账号池」再点完成注册');
+  }
+  const btn = $('regGo');
+  btn.disabled = true; btn.textContent = '注册中…';
+  try {
+    const r = await fetch('/api/public/my/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ phone, code, team: TEAM, wbState: regOauthDone ? regWbState : '' }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+    if (!d.ok) throw new Error('注册失败，稍后再试');
+    sessionStorage.setItem(MY_KEY(), d.token);
+    localStorage.setItem(MY_NAME_KEY(), d.name || phone);
+    toast('注册成功，请绑定主播姓名');
+    closeGate({ name: d.name || phone, personId: 0, bound: false, needBind: true });
+  } catch (e) {
+    btn.disabled = false; btn.textContent = '完成注册';
+    fail(e.message || '注册失败，稍后再试');
+  }
 }
 
 /* 会话失效（接口 401）：清 token 回登录门；登录门已开着就不动 */
@@ -771,18 +1134,109 @@ async function loadData() {
 
 function renderDates() {
   const dates = (site && site.dates) || [];
+  let prevM = '';
   $('dates').innerHTML = dates.map(d => {
     let label = d.slice(5).replace('-', '.');
     if (d === todayStr()) label = '今天';
     else if (d === refStr()) label = '昨天';
-    return '<button data-d="' + d + '" class="' + (d === curDate ? 'on' : '') + '">' + label + '</button>';
+    /* 跨月时插一条「10月」分隔，长条里不迷路 */
+    const m = d.slice(0, 7);
+    const gap = prevM && m !== prevM ? '<span class="mgap">' + (+m.slice(5, 7)) + '月</span>' : '';
+    prevM = m;
+    const noData = calMonths && !calMonths.has(d.slice(0, 7)) ? '' :
+      (calDays && !calDays.has(d) ? ' nodata' : '');
+    return gap + '<button data-d="' + d + '" class="' + (d === curDate ? 'on' : '') + noData + '">' + label + '</button>';
   }).join('');
-  document.querySelectorAll('#dates button').forEach(b => b.onclick = () => {
-    curDate = b.dataset.d;
-    document.querySelectorAll('#dates button').forEach(x => x.classList.remove('on'));
-    b.classList.add('on');
-    b.scrollIntoView({ inline: 'center', block: 'nearest', behavior: 'smooth' });
-    go();
+  document.querySelectorAll('#dates button').forEach(b => b.onclick = () => pickDate(b.dataset.d));
+}
+
+/* 点日期（日期条 / 日历共用）：先本地高亮（点了立刻有反应），再拉数据 */
+function pickDate(d) {
+  if (!d || d === curDate) return;
+  curDate = d;
+  document.querySelectorAll('#dates button').forEach(x =>
+    x.classList.toggle('on', x.dataset.d === d));
+  const on = document.querySelector('#dates button.on');
+  if (on) on.scrollIntoView({ inline: 'center', block: 'nearest', behavior: 'smooth' });
+  go();
+}
+
+/* ==================== 日期日历（点 📅 弹出，底部抽屉 / PC 居中卡） ==================== */
+/* 数据分布（有数据的天）：curDate 所在月拉不到就把整段 dates 摊进日历 */
+let calDays = null;      // Set('YYYY-MM-DD') 有数据的日子；null = 未知（不标点）
+let calMonths = null;    // Set('YYYY-MM') 有数据的月份（哪些月缺数据）
+
+function calBuildDays() {
+  const dates = (site && site.dates) || [];
+  calDays = new Set(dates);
+  calMonths = new Set(dates.map(d => d.slice(0, 7)));
+}
+
+let calY = 0, calM = 0;   // 日历当前显示的年月（calM: 0-11）
+
+function calShow() {
+  if (!(site && site.dates && site.dates.length)) { toast('还没有可选的日期'); return; }
+  if (!calDays) calBuildDays();
+  const ref = curDate || refStr();
+  calY = +ref.slice(0, 4);
+  calM = +ref.slice(5, 7) - 1;
+  if ($('calPop')) { $('calPop').classList.remove('hidden'); calRender(); return; }
+  const pop = document.createElement('div');
+  pop.id = 'calPop';
+  pop.className = 'cal-pop';
+  pop.innerHTML = '<div class="cal-card">' +
+    '<div class="cal-head">' +
+    '<button id="calPrev" title="上一个月">‹</button>' +
+    '<div class="ttl" id="calTitle">—</div>' +
+    '<button id="calNext" title="下一个月">›</button>' +
+    '<button class="close" id="calClose" title="关闭">✕</button>' +
+    '</div>' +
+    '<div class="cal-grid" id="calGrid"></div>' +
+    '<div class="note" style="margin:10px 0 0">绿点 = 有数据的日子 · 只能选有数据的日期</div>' +
+    '</div>';
+  document.body.appendChild(pop);
+  pop.addEventListener('click', (e) => { if (e.target === pop) calHide(); });
+  $('calClose').onclick = calHide;
+  $('calPrev').onclick = () => { calM--; if (calM < 0) { calM = 11; calY--; } calRender(); };
+  $('calNext').onclick = () => { calM++; if (calM > 11) { calM = 0; calY++; } calRender(); };
+  calRender();
+}
+
+function calHide() {
+  const p = $('calPop');
+  if (p) p.classList.add('hidden');
+}
+
+function calRender() {
+  $('calTitle').textContent = calY + ' 年 ' + (calM + 1) + ' 月';
+  const first = new Date(calY, calM, 1);
+  const lead = first.getDay();                       // 0=周日
+  const dim = new Date(calY, calM + 1, 0).getDate(); // 本月天数
+  const prevDim = new Date(calY, calM, 0).getDate();
+  const tStr = todayStr();
+  let html = '';
+  ['日', '一', '二', '三', '四', '五', '六'].forEach((w, i) => {
+    html += '<div class="wd' + (i === 0 || i === 6 ? ' wkend' : '') + '">' + w + '</div>';
+  });
+  for (let i = lead - 1; i >= 0; i--) {
+    html += '<button class="cal-d dim" disabled>' + (prevDim - i) + '</button>';
+  }
+  for (let d = 1; d <= dim; d++) {
+    const ds = calY + '-' + pad2(calM + 1) + '-' + pad2(d);
+    const has = calDays && calDays.has(ds);
+    const cls = 'cal-d' + (has ? ' has' : '') + (ds === tStr ? ' today' : '') + (ds === curDate ? ' on' : '');
+    html += '<button class="' + cls + '" data-d="' + ds + '"' + (has ? '' : ' disabled') + '>' + d + '</button>';
+  }
+  const tail = (7 - (lead + dim) % 7) % 7;
+  for (let d = 1; d <= tail; d++) {
+    html += '<button class="cal-d dim" disabled>' + d + '</button>';
+  }
+  $('calGrid').innerHTML = html;
+  $('calGrid').querySelectorAll('.cal-d[data-d]').forEach(b => {
+    b.onclick = () => {
+      calHide();
+      pickDate(b.dataset.d);   // 本地先高亮，数据回来再换内容
+    };
   });
 }
 
@@ -1010,7 +1464,7 @@ function lnBuildSvg() {
   }
   const maxDepth = all.reduce((m, n) => Math.max(m, n.depth), 0);
   const name = todayStr().split('-');
-  const title = LABEL + ' · 族谱';
+  const title = LABEL() + ' · 族谱';
   const sub2 = '师门 ' + roots.length + ' 支 · 上树 ' + all.length + ' 人 · 最深 ' + (maxDepth + 1) + ' 代';
   const foot = '抖音PK分组 · 生成于 ' + (+name[0]) + '年' + (+name[1]) + '月' + (+name[2]) + '日';
   const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + width + '" height="' + height +
@@ -1055,7 +1509,7 @@ async function lnExportPng() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = LABEL + '族谱-' + todayStr() + '.png';
+    a.download = LABEL() + '族谱-' + todayStr() + '.png';
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -1362,20 +1816,37 @@ function groupHtml(d, page, list) {
   return html;
 }
 
-/* ==================== 我的（姓名+密码登录 · 无注册） ==================== */
-/* 账号由管理员在后台手动添加（一个姓名对应一个纯数字密码），这里只做验证和个人数据展示。
-   token 存 localStorage，24 小时有效；服务重启会失效，失效自动退回登录卡。 */
-const MY_KEY = 'myToken_' + TEAM;
-const MY_NAME_KEY = 'myName_' + TEAM;
+/* ==================== 我的（手机号+密码登录 / 自助注册） ==================== */
+/* 账号来源：管理员后台手动添加，或登录门「注册」（手机号=账号、短信验证码=密码）。
+   注册出来的账号要先绑定主播，才有个人的音浪数据。
+   token 存 sessionStorage，关闭浏览器后需重新登录；服务重启或失效自动退回登录卡。 */
+const MY_KEY = () => 'myToken_' + TEAM;
+const MY_NAME_KEY = () => 'myName_' + TEAM;
 
-function myToken() { return localStorage.getItem(MY_KEY) || ''; }
-function myLogout() { localStorage.removeItem(MY_KEY); localStorage.removeItem(MY_NAME_KEY); }
+function myToken() {
+  const token = sessionStorage.getItem(MY_KEY());
+  if (token) return token;
+  const legacyToken = localStorage.getItem(MY_KEY());
+  if (legacyToken) {
+    sessionStorage.setItem(MY_KEY(), legacyToken);
+    localStorage.removeItem(MY_KEY());
+  }
+  return legacyToken || '';
+}
+function myLogout() {
+  sessionStorage.removeItem(MY_KEY());
+  localStorage.removeItem(MY_KEY());
+  localStorage.removeItem(MY_NAME_KEY());
+}
 
 async function loadMy() {
   const t = myToken();
   if (!t) { sessionExpired(); return; }
   $('mhSub').textContent = 'MY';
   try {
+    /* 手机号注册了但还没绑主播：这里只有一张绑定卡（绑定后才有个人的音浪数据） */
+    const who = await api('/api/public/teams/' + TEAM + '/my/who?token=' + encodeURIComponent(t));
+    if (who && who.needBind) { applyLoginState(who); renderBindCard(who); return; }
     const d = await api('/api/public/teams/' + TEAM + '/my?token=' + encodeURIComponent(t));
     let series = null;
     try {
@@ -1402,15 +1873,98 @@ async function loadMy() {
   }
 }
 
+/* ==================== 绑定主播（注册后一次性；用户自己不能解绑） ====================
+   用户口径（2026-10-10）：注册出来只有手机号，登录后提醒绑定主播姓名；绑定后
+   不支持（自行）解绑，改绑只能走管理员。 */
+let bindTimer = null;
+
+function renderBindCard(who) {
+  $('view').innerHTML = '<div class="section">' +
+    '<div class="card my-bind">' +
+      '<h2 class="card-t">绑定主播姓名</h2>' +
+      '<div class="sub">账号已绑定手机号 <b>' + esc(maskPhone(who.phone || who.name || '')) +
+        '</b>，还没有对应主播。<br>绑定后「我的」数据、水印、榜单名次都按这位主播算。</div>' +
+      '<div class="warn">绑定之后不能自行解绑或换绑；名字填错了请联系管理员改绑。</div>' +
+      '<input id="bindQ" placeholder="输入你的主播姓名（艺名）" autocomplete="off">' +
+      '<div id="bindHits"></div>' +
+      '<div class="form-err hidden" id="bindErr"></div>' +
+    '</div>' +
+    '<button class="my-logout" id="myOut">退出登录</button></div>';
+  $('myOut').onclick = () => { myLogout(); removeWatermark(); location.reload(); };
+  $('bindQ').oninput = () => { clearTimeout(bindTimer); bindTimer = setTimeout(searchBind, 280); };
+  $('bindQ').onkeydown = (e) => { if (e.key === 'Enter') { clearTimeout(bindTimer); searchBind(); } };
+  setTimeout(() => { const el = $('bindQ'); if (el) el.focus(); }, 60);
+}
+
+async function searchBind() {
+  const box = $('bindHits');
+  const key = ($('bindQ').value || '').trim();
+  const errEl = $('bindErr');
+  errEl.classList.add('hidden');
+  if (!key) { box.innerHTML = ''; return; }
+  box.innerHTML = '<div class="none">搜索中…</div>';
+  try {
+    const d = await fetch('/api/public/my/bind/search?token=' + encodeURIComponent(myToken()) +
+      '&q=' + encodeURIComponent(key)).then((r) => r.json());
+    if (d.error) throw new Error(d.error);
+    const items = d.items || [];
+    if (!items.length) {
+      box.innerHTML = '<div class="none">没有找到这个名字，换个写法试试（可以只打一个字）</div>';
+      return;
+    }
+    box.innerHTML = items.map((it) =>
+      '<div class="hit"><div>' + esc(it.name) +
+      '<span class="tag">' + (it.team === 'male' ? '男团' : it.team === 'female' ? '女团' : '') + '</span></div>' +
+      '<button data-pid="' + esc(it.personId) + '" data-name="' + esc(it.name) + '">绑定</button></div>').join('');
+    box.querySelectorAll('button[data-pid]').forEach((b) => {
+      b.onclick = () => doBind(b.dataset.pid, b.dataset.name);
+    });
+  } catch (e) {
+    box.innerHTML = '';
+    errEl.textContent = e.message || '搜索失败，稍后再试';
+    errEl.classList.remove('hidden');
+  }
+}
+
+async function doBind(personId, name) {
+  if (!confirm('确认绑定到「' + name + '」吗？\n绑定之后不能自行解绑或换绑，填错了需要联系管理员。')) return;
+  const errEl = $('bindErr');
+  errEl.classList.add('hidden');
+  try {
+    const r = await fetch('/api/public/my/bind', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: myToken(), personId: Number(personId) }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+    if (!d.ok) throw new Error('绑定失败，稍后再试');
+    sessionStorage.setItem(MY_KEY(), d.token);
+    localStorage.setItem(MY_NAME_KEY(), d.name || name);
+    applyLoginState({ name: d.name, personId: d.personId, bound: true, needBind: false });
+    toast('已绑定主播：' + (d.name || name));
+    if (d.team && d.team !== TEAM) {
+      /* 主播在另一个团：记住团别后整页重开（链接即团别，页内不换团） */
+      localStorage.setItem(TEAM_KEY, d.team);
+      setTimeout(() => location.reload(), 700);
+    } else {
+      loadMy();
+    }
+  } catch (e) {
+    errEl.textContent = e.message || '绑定失败，稍后再试';
+    errEl.classList.remove('hidden');
+  }
+}
+
 function renderMyLogin() {
   /* 全站有登录门后这里只是兜底（正常到不了）；文案保持与登录门一致 */
-  const name = localStorage.getItem(MY_NAME_KEY) || '';
+  const name = localStorage.getItem(MY_NAME_KEY()) || '';
   $('mhSub').textContent = 'MY';
   $('view').innerHTML = '<div class="section my-login">' +
     '<div class="card card-pad">' +
-    '<div class="big-av" style="background:' + avColor(LABEL) + '">' + esc(LABEL.charAt(0)) + '</div>' +
-    '<h3>' + esc(LABEL) + ' · 我的数据</h3>' +
-    '<p class="tip">没有注册，账号由管理员统一添加<br>手机号或姓名 + 密码登录</p>' +
+    '<div class="big-av" style="background:' + avColor(LABEL()) + '">' + esc(LABEL().charAt(0)) + '</div>' +
+    '<h3>' + esc(LABEL()) + ' · 我的数据</h3>' +
+    '<p class="tip">账号由管理员添加，或回登录门用手机号注册<br>手机号或姓名 + 密码登录</p>' +
     '<input id="myName" placeholder="手机号 / 姓名" value="' + esc(name) + '" autocomplete="off">' +
     '<input id="myPass" placeholder="密码" inputmode="numeric" autocomplete="off">' +
     '<div class="form-err hidden" id="myErr"></div>' +
@@ -1436,8 +1990,8 @@ function renderMyLogin() {
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
       if (!d.ok) throw new Error('账号或密码不对，或账号还没开通');
-      localStorage.setItem(MY_KEY, d.token);
-      localStorage.setItem(MY_NAME_KEY, d.name || nm);
+      sessionStorage.setItem(MY_KEY(), d.token);
+      localStorage.setItem(MY_NAME_KEY(), d.name || nm);
       toast('验证通过');
       loadMy();
     } catch (e) {
@@ -1453,7 +2007,7 @@ function renderMyLogin() {
 
 function renderMy(d, series, claim, bound, push) {
   if (d.name) {
-    localStorage.setItem(MY_NAME_KEY, d.name);
+    localStorage.setItem(MY_NAME_KEY(), d.name);
     applyWatermark(d.name);   // 以台账艺名为准刷新水印
   }
   pushState = push || null;
@@ -1616,10 +2170,11 @@ function bindClaimCard(claim) {
 }
 
 /* ==================== 微信推送（绑定机器人 + 追分目标） ==================== */
-/* 2026-10-09：数据导入完成后由微信机器人私聊推送，两类内容各自开关：
-   · 追分提醒 —— 设置本月要追的人（或自定目标），追上/还差多少都推给你
+/* 2026-10-10：数据入库约 30 分钟后由微信机器人私聊推送，两类内容各自开关（都关着就不推）：
+   · 追分提醒 —— 追主播 / 定音浪目标 / 追名次（一律比本月累计），追上/还差多少都推给你
    · 每日报告 —— 当天音浪排行榜
-   绑定：页面出二维码 + 6 位绑定码，用户扫码加机器人后把码发过去即完成绑定。 */
+   绑定（2026-10-10 改手机号）：扫机器人名片码加好友 → 把自己的手机号发给机器人 → 绑定完成。
+   没登记手机号的人走兜底：页面出 6 位绑定码，发给机器人同样能绑。 */
 let pushState = null;
 let pushSrTimer = null;
 
@@ -1657,20 +2212,34 @@ function pushNotReady() {
 }
 
 function pushUnboundHtml(p) {
+  /* 主口径：扫码加好友 → 把手机号发给机器人。
+     手机号没登记的人（hasPhone=false）才给 6 位绑定码兜底。 */
   let h = '<div class="sub" style="margin-top:8px;line-height:1.75">' +
-    '扫码添加微信机器人，把下面的<b>绑定码</b>发给它，就能收到追分提醒和每日报告。' +
+    '<b>1.</b> 用微信扫下面的码，添加机器人好友（长按识别 / 截图后扫一扫）。<br>' +
+    '<b>2.</b> 把你的<b>手机号</b>' + (p.phoneMasked ? '（' + esc(p.phoneMasked) + '）' : '') +
+    '发给机器人，收到「绑定成功」就完成。' +
     '<br>绑定是你个人的，只有你自己能设置和接收。</div>';
   if (p.hasQr) {
     h += '<img class="qrcode" alt="微信机器人二维码" src="/api/public/teams/' + TEAM +
       '/my/push/qr?access_token=' + encodeURIComponent(myToken()) + '">';
+  } else {
+    h += '<div class="hint" style="margin-top:8px">管理员还没上传机器人二维码，' +
+      '先在后台「机器人」页上传机器人的微信名片码。</div>';
   }
-  if (p.code) {
+  if (p.hasPhone) {
+    h += '<div class="code" style="font:700 17px/1.5 var(--mono, monospace);letter-spacing:.5px">' +
+      esc(p.phoneMasked || '') + '</div>' +
+      '<div class="sub" style="text-align:center">把这个手机号发给机器人即可</div>';
+    h += '<button class="go gray" id="pushNewCode">用绑定码代替（换号时用）</button>';
+  } else if (p.code) {
+    h += '<div class="sub" style="margin-top:8px">你的账号还没登记手机号，用<b>绑定码</b>绑定：</div>';
     h += '<div class="code">' + esc(p.code) + '</div>' +
       '<div class="sub" style="text-align:center">' +
       (p.codeExpires ? esc(p.codeExpires.slice(11, 16)) + ' 之前有效 · ' : '') +
       '把 6 位码发给机器人即可</div>' +
       '<button class="go" id="pushNewCode">换一个码</button>';
   } else {
+    h += '<div class="sub" style="margin-top:8px">你的账号还没登记手机号，用<b>绑定码</b>绑定：</div>';
     h += '<button class="go" id="pushNewCode">获取绑定码</button>';
   }
   return h;
@@ -1696,15 +2265,19 @@ function pushBoundHtml(p) {
       '不能设置追分目标，只能收每日报告。</div>';
   } else {
     const list = p.targets || [];
-    h += '<div class="card-t" style="margin:14px 0 2px;font-size:13px">追谁（最多 ' +
-      (p.maxTargets || 5) + ' 个）</div>';
+    h += '<div class="card-t" style="margin:14px 0 2px;font-size:13px">追分目标（最多 ' +
+      (p.maxTargets || 5) + ' 个 · 一律比本月累计）</div>';
     if (!list.length) {
       h += '<div class="sub" style="padding:6px 0">还没设置。加一个，追上或差多少都会推给你。</div>';
     }
     h += list.map((t) => {
-      const label = t.kind === 'value' ? '🎯 本月目标 ' + wan(t.targetValue) : '🏃 ' + esc(t.targetName);
-      const state = t.hit ? '<span class="st ok">已追上</span>'
-        : (t.lastGap > 0 ? '<span class="sub">还差 ' + wan(t.lastGap) + '</span>' : '');
+      const label = t.kind === 'value' ? '🎯 本月音浪 ' + wan(t.targetValue)
+        : t.kind === 'rank' ? '🏅 本月第 ' + t.targetValue + ' 名'
+        : '🏃 ' + esc(t.targetName);
+      const state = t.hit ? '<span class="st ok">已达成</span>'
+        : t.kind === 'rank'
+          ? (t.lastGap > 0 ? '<span class="sub">还差 ' + t.lastGap + ' 名</span>' : '<span class="sub">未进榜</span>')
+          : (t.lastGap > 0 ? '<span class="sub">还差 ' + wan(t.lastGap) + '</span>' : '');
       return '<div class="tgt"><span>' + label + '</span>' +
         '<span style="margin-left:auto">' + state + '</span>' +
         '<button class="x" data-del="' + t.id + '">✕</button></div>';
@@ -1717,14 +2290,17 @@ function pushBoundHtml(p) {
 
 function pushAddHtml() {
   return '<div class="tabs2"><button class="on" data-tk="person">追主播</button>' +
-    '<button data-tk="value">定目标</button></div>' +
+    '<button data-tk="value">定音浪</button><button data-tk="rank">追名次</button></div>' +
     '<div id="tkPerson"><div class="sr">' +
     '<input id="tkQ" placeholder="搜本团主播名字" autocomplete="off">' +
     '<div class="sr-list hidden" id="tkList"></div></div>' +
     '<button class="go" id="tkAdd" disabled>添加</button></div>' +
     '<div id="tkValue" class="hidden">' +
     '<input id="tkVal" inputmode="decimal" placeholder="本月音浪目标（万），例如 50">' +
-    '<button class="go" id="tkValAdd">添加目标</button></div>';
+    '<button class="go" id="tkValAdd">添加目标</button></div>' +
+    '<div id="tkRank" class="hidden">' +
+    '<input id="tkRankVal" inputmode="numeric" placeholder="想进本月第几名，例如 3">' +
+    '<button class="go" id="tkRankAdd">添加名次目标</button></div>';
 }
 
 function bindPushBox(p) {
@@ -1817,13 +2393,14 @@ function bindPushBox(p) {
     };
   });
 
-  /* 追主播 / 定目标 两个子面板 */
+  /* 追主播 / 定音浪 / 追名次 三个子面板 */
   let picked = null;
   document.querySelectorAll('#pushBox .tabs2 button').forEach((b) => {
     b.onclick = () => {
       document.querySelectorAll('#pushBox .tabs2 button').forEach((x) => x.classList.toggle('on', x === b));
       show('tkPerson', b.dataset.tk === 'person');
       show('tkValue', b.dataset.tk === 'value');
+      show('tkRank', b.dataset.tk === 'rank');
     };
   });
   const q = $('tkQ'), listEl = $('tkList'), addBtn = $('tkAdd');
@@ -1893,6 +2470,25 @@ function bindPushBox(p) {
       }
     };
   }
+  const rankAdd = $('tkRankAdd');
+  if (rankAdd) {
+    rankAdd.onclick = async () => {
+      const n = parseInt($('tkRankVal').value, 10);
+      if (!(n > 0)) { toast('请输入要追的名次（如 3）'); return; }
+      if (n > 999) { toast('名次太大了'); return; }
+      rankAdd.disabled = true;
+      rankAdd.textContent = '添加中…';
+      try {
+        await postPush('/my/push/targets', { kind: 'rank', targetRank: n });
+        toast('已添加');
+        await refreshPush();
+      } catch (e) {
+        rankAdd.disabled = false;
+        rankAdd.textContent = '添加名次目标';
+        toast(e.message || '添加失败');
+      }
+    };
+  }
 }
 
 /** 推送设置的写接口（统一带 token 与错误处理） */
@@ -1917,6 +2513,16 @@ window.addEventListener('resize', syncHeaderOffset);
 
 function switchView(v, opts) {
   opts = opts || {};
+  /* 后台关掉的页面不许进（popstate / 深链兜底）：改道到还开着的第一个页 */
+  const s = (site && site.settings) || {};
+  if (v === 'data' && s.dataEnabled === false) v = 'group';
+  if (v === 'group') {
+    const sub = [...document.querySelectorAll('#subnav button')].find(b => !b.disabled);
+    if (s.groupEnabled === false || !sub) v = 'lineage';
+    else if (!sub.classList.contains('on')) curGroup = sub.dataset.g;
+  }
+  if (v === 'lineage' && (TEAM !== 'male' || s.lineageEnabled === false)) v = 'data';
+  if (v === 'my' && s.loginRequired === false) v = 'data';
   view = v;
   document.querySelectorAll('[data-v]').forEach(b => b.classList.toggle('on', b.dataset.v === v));
   document.querySelectorAll('#subnav button').forEach(b => b.classList.toggle('on', b.dataset.g === curGroup));
@@ -1934,29 +2540,39 @@ function setPeriod(p) {
   document.querySelectorAll('#seg button').forEach(b => b.classList.toggle('on', b.dataset.p === p));
   show('dates', p === 'daily');
   show('stepper', p !== 'daily');
+  show('btnCal', p === 'daily');   // 日历只属于「每日」口径
+  if (p === 'daily') calHide();    // 月/年切换时把开着的日历收掉
   curPeriod = nowPeriod(p);
   go();
 }
 
 async function go() {
   show('err', false);
+  /* 立刻给反馈：小菊花 + 内容压暗（数据没到不清空，到了再换）。
+     乐观骨架只在内容为空时上，避免已看内容被闪没。 */
+  const seq = ++loadSeq;
+  busyOn();
   const optimistic = () => {
-    if (view === 'data') $('view').innerHTML = '<div class="section">' + shimmerList() + '</div>';
+    if (view === 'data' && !listAll.length) $('view').innerHTML = '<div class="section">' + shimmerList() + '</div>';
   };
-  if (view === 'data' && !listAll.length) optimistic();
+  optimistic();
   try {
   if (view === 'data') await loadData();
   else if (view === 'lineage') await loadLineage();
   else if (view === 'my') await loadMy();
   else await loadGroup();
+    if (seq !== loadSeq) return;          // 期间用户又点了别的：过期响应作废
     consecutiveFail = 0;
     show('stale', false);
   } catch (e) {
+    if (seq !== loadSeq) return;          // 过期失败的报错也不许盖住新内容
     consecutiveFail++;
     if (consecutiveFail >= 2) show('stale', true);
     $('mhSub').textContent = 'NETWORK';
     $('view').innerHTML = '<div class="empty"><span class="big">📶</span>暂时取不到数据<br>' +
       esc(e.message) + '</div>';
+  } finally {
+    if (seq === loadSeq) busyOff();
   }
 }
 
@@ -1977,28 +2593,104 @@ function scheduleRefresh() {
 }
 
 /* ==================== 导航显隐 ==================== */
-/* 分组（按类型拆页）常驻；族谱：只在男团展示（女团不开放）；底部导航已整体移除 */
+/* 页面级显隐（2026-10-10）：每日报告 / 分组 / 族谱 / 分组子页都由后台开关控制，
+   关掉的导航整体消失（接口也不下发，不是前端藏）；族谱仍是男团专属。
+   分组子导航按赛事类型逐个显隐；全部子页都关时「分组」主导航也藏起来。 */
 function syncNav() {
-  const lin = TEAM === 'male';
-  show('navLineage', lin);
+  const s = (site && site.settings) || {};
+  const dataOn = s.dataEnabled !== false;
+  const groupOn = s.groupEnabled !== false;
+  const linOn = TEAM === 'male' && s.lineageEnabled !== false;
+  /* 子导航：把后台关掉的赛事类型按钮摘掉 */
+  const gt = s.groupTypes || {};
+  document.querySelectorAll('#subnav button').forEach(b => {
+    const page = GROUP_PAGES.find(p => p.key === b.dataset.g);
+    const on = groupOn && (!page || gt[page.type] !== false);
+    b.disabled = !on;
+    show(b, on);
+  });
+  /* 分组子页全关 → 分组主导航也没了 */
+  const anySub = [...document.querySelectorAll('#subnav button')].some(b => !b.disabled);
+  show('navGroup', groupOn && anySub);
+  show('navData', dataOn);
+  show('navLineage', linOn);
+  show('navMy', s.loginRequired !== false);   // 关登录 = 全面开放，没有「我的」页
 }
 
 /* ==================== 启动 ==================== */
-(async function boot() {
-  $('mhBadge').textContent = CODE;
-  $('mhTitle').textContent = LABEL + '数据榜';
-  document.title = LABEL + '每日报告';
+/* 团别选择卡（男女共用一个网址）：进页先选男团/女团；选完记住，下次直开默认进上次团，
+   顶部「换团」随时可重选。
+   点之前就把男女两团的站点配置都预取（sitePrefetch），选中后直接用现成结果，
+   不用等接口往返 —— 选团秒进。 */
+let sitePrefetch = {};   // 'male'/'female' → Promise<site 配置>
 
-  /* 展示端登录门（2026-10-10）：先登录（手机号/姓名 + 密码）再看任何数据；
-     登录后挂上全屏艺名水印。 */
-  const me = await ensureLogin();
-  applyWatermark(me.name);
-  syncHeaderOffset();
+function prefetchSites() {
+  ['male', 'female'].forEach((t) => {
+    if (sitePrefetch[t]) return;   // 只预取一次
+    sitePrefetch[t] = fetch('/api/public/teams/' + t)
+      .then((r) => r.json().then((d) => ({ ok: r.ok, data: d })));
+  });
+}
+
+function showTeamPicker() {
+  prefetchSites();
+  const g = $('gate');
+  g.classList.remove('hidden');
+  g.innerHTML = '<div class="gate-box"><div class="card card-pad team-pick">' +
+    '<div class="pick-title">选择要查看的团队</div>' +
+    '<div class="pick-row">' +
+    '<button class="pick-btn" id="pickM"><span class="pick-av" style="background:#3B82F6">男</span>男团</button>' +
+    '<button class="pick-btn" id="pickF"><span class="pick-av" style="background:#EC4899">女</span>女团</button>' +
+    '</div></div></div>';
+  const pick = (team) => {
+    TEAM = team;
+    localStorage.setItem(TEAM_KEY, team);
+    applyTeam();
+    g.classList.add('hidden');
+    g.innerHTML = '';
+    bootRest();
+  };
+  $('pickM').onclick = () => pick('male');
+  $('pickF').onclick = () => pick('female');
+}
+
+/* 选定团别后刷新页面上所有团相关显示（标题、徽标、标题栏、导航）。
+   徽标元素 id 是 btnTeam（兼「换团」按钮），不是旧的 mhBadge。 */
+function applyTeam() {
+  const badge = $('btnTeam');
+  if (badge) badge.textContent = CODE();
+  $('mhTitle').textContent = LABEL() + '数据榜';
+  document.title = LABEL() + '每日报告';
+  const linBtn = document.getElementById('navLineage');
+  if (linBtn) linBtn.style.display = TEAM === 'male' ? '' : 'none';
+}
+
+/* 换团：清掉记住的团别 + 我的登录态，回团别选择卡 */
+function switchTeam() {
+  localStorage.removeItem(TEAM_KEY);
+  myLogout();
+  TEAM = null;
+  showTeamPicker();
+}
+
+(async function boot() {
+  /* 先定团别：记住过的直接进，没记住的弹选择卡等人点（选完走 bootRest） */
+  const saved = localStorage.getItem(TEAM_KEY);
+  if (saved === 'male' || saved === 'female') { TEAM = saved; applyTeam(); }
+  else { showTeamPicker(); return; }   // showTeamPicker 里会预取两团配置
+  prefetchSites();                     // 直进场景也立刻预取，bootRest 不用干等
+  bootRest();
+})();
+
+async function bootRest() {
+
+  /* 换团按钮（徽标）：回团别选择卡 */
+  $('btnTeam').onclick = switchTeam;
 
   /* 主导航 + 分组子导航 + 前进/后退 */
   document.querySelectorAll('[data-v]').forEach(b => b.onclick = () => switchView(b.dataset.v));
   document.querySelectorAll('#subnav button').forEach(b =>
-    b.onclick = () => { curGroup = b.dataset.g; switchView('group'); });
+    b.onclick = () => { if (!b.disabled) { curGroup = b.dataset.g; switchView('group'); } });
   window.addEventListener('popstate', () => {
     const r = parseRoute();
     if (r.view === 'group' && r.group) curGroup = r.group;
@@ -2015,14 +2707,30 @@ function syncNav() {
   $('qClear').onclick = () => { q = ''; $('q').value = ''; renderList(); };
   $('pPrev').onclick = () => shiftStep(-1);
   $('pNext').onclick = () => shiftStep(1);
+  $('btnCal').onclick = calShow;
 
   function shiftStep(n) {
     curPeriod = period === 'monthly' ? shiftMonth(curPeriod, n) : String(+curPeriod + n);
     go();
   }
 
+  /* 先拿站点配置：登录开关在 settings 里，关登录时根本不用弹登录门。
+     选择卡弹出来时就已经把男女两团配置预取了（sitePrefetch），这里直接等
+     本团的预取结果 —— 通常早已返回，选中即渲染，不再等接口往返。
+     预取失败/没预取（老缓存）就现拉一次。401（要登录）→ 弹登录门重试。 */
+  const fetchSite = () => api('/api/public/teams/' + TEAM);
   try {
-    site = await api('/api/public/teams/' + TEAM);
+    site = await (sitePrefetch[TEAM] || Promise.resolve({ ok: false, data: null }))
+      .then((p) => {
+        if (p && p.ok) return p.data;
+        return fetchSite();
+      })
+      .catch(async (e) => {
+        if (String(e.message || '').indexOf('登录') < 0) throw e;
+        const me = await ensureLogin();
+        applyLoginState(me);
+        return fetchSite();
+      });
   } catch (e) {
     document.body.innerHTML = '<div class="empty" style="padding-top:120px"><span class="big">📡</span>' +
       '连不上服务，稍后再试试</div>';
@@ -2030,9 +2738,19 @@ function syncNav() {
   }
   if (!site.published) {
     document.body.innerHTML = '<div class="empty" style="padding-top:120px"><span class="big">📺</span>' +
-      '<b>' + LABEL + '数据暂未公布</b><br>请等管理员发布</div>';
+      '<b>' + LABEL() + '数据暂未公布</b><br>请等管理员发布</div>';
     return;
   }
+
+  /* 展示端登录门（2026-10-10）：后台「开启登录」开着 → 先登录再看（fetchSite 401 时已经弹过门）；
+     关掉 → 全面开放：不弹登录、不挂水印、没有「我的」页签。 */
+  const loginRequired = (site.settings || {}).loginRequired !== false;
+  if (loginRequired) {
+    await ensureLogin().then(applyLoginState);
+  }
+  /* 未绑定主播的提醒条：点「去绑定」直接进「我的」绑定卡 */
+  $('bindBarGo').onclick = () => switchView('my');
+  syncHeaderOffset();
 
   // 后台级开关：关掉的口径直接从界面消失（后端也不下发）
   const s = site.settings || {};
@@ -2045,6 +2763,20 @@ function syncNav() {
   else if (!segs.daily && segs.yearly) period = 'yearly';
   document.querySelectorAll('#seg button').forEach(b => b.classList.toggle('on', b.dataset.p === period));
 
+  /* 每日报告页被关掉时首页落到分组（分组也关则落到族谱）；深链指到被关的页也一样改道 */
+  const firstOn = (v, fb) => {
+    if (v === 'data' && s.dataEnabled === false) return fb;
+    if (v === 'group' && (s.groupEnabled === false ||
+        !document.querySelector('#subnav button:not([disabled])'))) return fb;
+    if (v === 'lineage' && (TEAM !== 'male' || s.lineageEnabled === false)) return fb;
+    if (v === 'my' && s.loginRequired === false) return fb;
+    return v;
+  };
+  const fallbackView = s.groupEnabled !== false &&
+    document.querySelector('#subnav button:not([disabled])') ? 'group'
+    : (s.dataEnabled !== false ? 'data' : 'lineage');
+  view = firstOn(view, fallbackView);
+
   /* 默认站在昨天：数据每晚 24 点后才补前一天，今天那条一来就想看往往还没有。
      昨天万一还没入库（延迟或停采），退回库里最新那天，别把页面留在空状态。 */
   const dates0 = site.dates || [];
@@ -2052,6 +2784,7 @@ function syncNav() {
   curPeriod = nowPeriod(period);
   show('dates', period === 'daily');
   show('stepper', period !== 'daily');
+  show('btnCal', period === 'daily');   // 日历只管「按日」口径；月/年走 ‹ › 步进
   $('pNow').textContent = period === 'monthly'
     ? curPeriod.slice(0, 4) + '年' + (+curPeriod.slice(5, 7)) + '月'
     : curPeriod + '年';
@@ -2060,12 +2793,18 @@ function syncNav() {
   syncNav();
 
   /* 首页 = 每日报告：/st/m 直开时保留路径不跳转；带子路径（/group/xxx、/lineage）时
-     按子路径落到对应视图，分享/刷新都不丢。 */
+     按子路径落到对应视图，分享/刷新都不丢。深链指到被后台关掉的页时改道到首页兜底。 */
   const r0 = parseRoute();
   if (r0.view === 'group' && r0.group) curGroup = r0.group;
-  switchView(r0.view, { push: false });
+  view = firstOn(r0.view, fallbackView);
+  if (view === 'group' && r0.view === 'group' && r0.group) {
+    const sub = document.querySelector('#subnav button[data-g="' + r0.group + '"]');
+    if (sub && sub.disabled) curGroup = GROUP_PAGES.find(p => !document
+      .querySelector('#subnav button[data-g="' + p.key + '"]').disabled)?.key || curGroup;
+  }
+  switchView(view, { push: false });
   scheduleRefresh();
-})();
+}
 
 /* 字段面板已随「严格按排行榜版式」移除：显示内容固定，后台级开关仍在后端生效。 */
 </script>

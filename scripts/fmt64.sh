@@ -7,14 +7,14 @@
 set -euo pipefail
 
 HOST="${PK64_HOST:-64.188.8.149}"
-PASS="${PK64_PASS:-47uUAB24ybLN3s6lMx}"
+PASS="${PK64_PASS:?请用环境变量提供 PK64_PASS}"
 REMOTE="${PK64_DIR:-/opt/it/douyin-pk-group}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 "$ROOT/scripts/sync64.sh" >/dev/null
-sshpass -p "$PASS" ssh -o StrictHostKeyChecking=no "root@$HOST" \
+sshpass -p "$PASS" ssh -o StrictHostKeyChecking=accept-new "root@$HOST" \
   "export PATH=\$HOME/.cargo/bin:\$PATH; cargo fmt --manifest-path '$REMOTE/rust/Cargo.toml' --all && echo '64 上 fmt 完成'"
 rsync -az --delete --exclude='target/' \
-  -e "sshpass -p '$PASS' ssh -o StrictHostKeyChecking=no" \
+  -e "sshpass -p '$PASS' ssh -o StrictHostKeyChecking=accept-new" \
   "root@$HOST:$REMOTE/rust/" "$ROOT/rust/"
 echo "已拉回本地"

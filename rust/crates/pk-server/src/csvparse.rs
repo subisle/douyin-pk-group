@@ -29,14 +29,26 @@ pub struct CsvRow {
     pub err: String,
 }
 
-/// 去掉空格、下划线、括号、点，统一小写后比较
+/// 去掉空格、下划线、括号、点，统一小写后比较。
+/// 顺带丢掉 UTF-8 BOM（\u{feff}）：抖音后台导出的 CSV 首行带 BOM，
+/// 不处理的话「主播ID」列永远精确匹配不上，会退到「抖音号」列（踩过）。
 fn normalize_header(s: &str) -> String {
     s.chars()
         .filter(|r| {
             !r.is_whitespace()
                 && !matches!(
                     r,
-                    '_' | '-' | '(' | ')' | '（' | '）' | '[' | ']' | '【' | '】' | '.'
+                    '_' | '-'
+                        | '('
+                        | ')'
+                        | '（'
+                        | '）'
+                        | '['
+                        | ']'
+                        | '【'
+                        | '】'
+                        | '.'
+                        | '\u{feff}'
                 )
         })
         .flat_map(char::to_lowercase)
@@ -78,6 +90,29 @@ const DUR_HEADERS: [&str; 7] = [
 ];
 const RANK_HEADERS: [&str; 2] = ["排名", "rank"];
 const DOUYIN_HEADERS: [&str; 3] = ["抖音号", "抖音id", "douyinno"];
+
+/// 含这些词的列不是音浪列：「分成比-直播音浪收益」这种比例列一旦被当成音浪，
+/// 月度时长文件里每个人的当日音浪会变成分成比（35 / 40 / 50），榜单直接失真。
+const WAVE_HEADER_EXCLUDE: [&str; 4] = ["分成", "比例", "占比", "系数"];
+
+/// 找音浪列：精确匹配优先；包含匹配时跳过分成比 / 占比这类「带音浪字样的比例列」。
+fn find_wave_column(headers: &[String]) -> i32 {
+    for c in WAVE_HEADERS {
+        for (i, n) in headers.iter().enumerate() {
+            if n == c {
+                return i as i32;
+            }
+        }
+    }
+    for c in WAVE_HEADERS {
+        for (i, n) in headers.iter().enumerate() {
+            if n.contains(c) && !WAVE_HEADER_EXCLUDE.iter().any(|x| n.contains(x)) {
+                return i as i32;
+            }
+        }
+    }
+    -1
+}
 
 /// 在表头里找第一个命中的列下标；先精确匹配，再包含匹配（应对"主播ID（必填）"）
 fn find_column(headers: &[String], candidates: &[&str]) -> i32 {
@@ -264,7 +299,7 @@ pub fn parse(text: &str) -> anyhow::Result<(Kind, Vec<CsvRow>)> {
 
     let id_col = find_column(&headers, &ID_HEADERS);
     let name_col = find_column(&headers, &NAME_HEADERS);
-    let wave_col = find_column(&headers, &WAVE_HEADERS);
+    let wave_col = find_wave_column(&headers);
     let dur_col = find_column(&headers, &DUR_HEADERS);
     let rank_col = find_column(&headers, &RANK_HEADERS);
     let douyin_col = find_column(&headers, &DOUYIN_HEADERS);
@@ -311,6 +346,81 @@ pub fn parse(text: &str) -> anyhow::Result<(Kind, Vec<CsvRow>)> {
         rows.push(row);
     }
     Ok((kind, rows))
+}
+
+/// 月度时长文件解析：只保留「时长」列有值的行，绝不把音浪列当数据。
+///
+/// 抖音公会后台导出的月度文件（如「9月份时长.csv」）表头是
+/// `主播ID,主播昵称,抖音号,…,分成比-直播音浪收益,开播有效时长,主播标签`：
+/// 里面有「分成比-直播音浪收益」这种含「音浪」字样的比例列，按音浪解析会把这个
+/// 比例（35 / 40 / 50）当成每人的音浪值，所以月度时长走独立入口，只取时长。
+pub fn parse_duration_only(text: &str) -> Vec<CsvRow> {
+    match parse(text) {
+        Ok((_, rows)) => rows
+            .into_iter()
+            .filter(|r| r.minutes.is_some() && !r.name.is_empty())
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// 从 `i` 开始读连续数字，返回（结束下标, 值, 位数）
+fn read_digits(cs: &[char], i: usize) -> (usize, i64, usize) {
+    let mut end = i;
+    let mut v: i64 = 0;
+    while end < cs.len() && cs[end].is_ascii_digit() && end - i < 9 {
+        v = v * 10 + (cs[end] as u8 - b'0') as i64;
+        end += 1;
+    }
+    (end, v, end - i)
+}
+
+/// 从文件名读业务月份，返回 (年, 月)。
+///
+/// 运营命名习惯：「9月份时长.csv」（只写月份 → 年份补当前年）、
+/// 「2026年9月份时长.csv」、「2026-09-时长.csv」都认。
+/// 读不出来返回 None，由调用方用当前月兜底（前端还会让运营在弹窗里改）。
+pub fn month_from_filename(name: &str) -> Option<(i32, u32)> {
+    let cs: Vec<char> = name.chars().collect();
+    let now_year = chrono::Local::now()
+        .format("%Y")
+        .to_string()
+        .parse::<i32>()
+        .unwrap_or(2026);
+    // 模式 1：年份 + 分隔符 + 月份（2026年9月 / 2026-09 / 2026_09 / 2026.09 / 2026/9）
+    let mut i = 0;
+    while i < cs.len() {
+        if !cs[i].is_ascii_digit() {
+            i += 1;
+            continue;
+        }
+        let (end, y, n) = read_digits(&cs, i);
+        if n == 4 && (1970..=2999).contains(&y) {
+            if let Some(&sep) = cs.get(end) {
+                if matches!(sep, '年' | '-' | '_' | '/' | '.') {
+                    let (_, m, mn) = read_digits(&cs, end + 1);
+                    if mn >= 1 && (1..=12).contains(&m) {
+                        return Some((y as i32, m as u32));
+                    }
+                }
+            }
+        }
+        i = end.max(i + 1);
+    }
+    // 模式 2：只写月份（「9月份时长.csv」）→ 年份补当前年
+    let mut i = 0;
+    while i < cs.len() {
+        if !cs[i].is_ascii_digit() {
+            i += 1;
+            continue;
+        }
+        let (end, m, n) = read_digits(&cs, i);
+        if n <= 2 && (1..=12).contains(&m) && cs.get(end) == Some(&'月') {
+            return Some((now_year, m as u32));
+        }
+        i = end.max(i + 1);
+    }
+    None
 }
 
 #[cfg(test)]
@@ -373,5 +483,70 @@ mod tests {
         let (_, rows) = parse(csv).unwrap();
         assert_eq!(rows[0].name, "浩龙,团队");
         assert_eq!(rows[0].wave, Some(12500.0));
+    }
+
+    /// 抖音公会后台的月度时长文件（9月份时长.csv 的真实表头）。
+    /// 里面「分成比-直播音浪收益」含「音浪」二字：以前包含匹配会把 35 当成人人一万的当日音浪。
+    const MONTH_CSV: &str =
+        "主播ID,主播昵称,抖音号,粉丝数,签约类型,分成比-直播音浪收益,开播有效时长,主播标签\n\
+         2436948398193464,浩龙🎹,cyl765,19526,金牌主播,35,75小时29分钟41秒,\n\
+         7616689691311686705,玖玉🎹🎤,37181712726,4702,普通主播,35,120小时45分钟1秒,\n";
+
+    #[test]
+    fn ratio_column_is_not_wave() {
+        let (kind, rows) = parse(MONTH_CSV).unwrap();
+        assert_eq!(kind, Kind::Duration);
+        assert_eq!(rows[0].wave, None, "分成比不是音浪，不能读成 35");
+        assert_eq!(rows[1].wave, None);
+        assert_eq!(
+            rows[0].minutes,
+            Some((75 * 60 + 29) as f64),
+            "75小时29分钟41秒"
+        );
+        assert_eq!(rows[1].minutes, Some((120 * 60 + 45) as f64));
+        assert_eq!(rows[0].anchor_id, "2436948398193464");
+        assert_eq!(rows[0].douyin_no, "cyl765");
+    }
+
+    #[test]
+    fn duration_only_keeps_rows_with_minutes() {
+        let rows = parse_duration_only(MONTH_CSV);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].name, "浩龙🎹");
+        assert_eq!(rows[0].minutes, Some(4529.0));
+        // 没有时长列 / 空文件：解析不出行，调用方据此提示「不是月度时长文件」
+        assert!(parse_duration_only("主播名,音浪\n浩龙,1000\n").is_empty());
+        assert!(parse_duration_only("").is_empty());
+    }
+
+    /// 抖音后台导出的 CSV 带 UTF-8 BOM：不能让「主播ID」列因此认不出来
+    /// （认不出来就会退到「抖音号」列，主播 ID 语义就错了）。
+    #[test]
+    fn bom_header_still_finds_anchor_id_column() {
+        let csv = "\u{feff}主播ID,主播昵称,抖音号,开播有效时长\n\
+                   2436948398193464,浩龙🎹,cyl765,75小时29分钟41秒\n";
+        let (_, rows) = parse(csv).unwrap();
+        assert_eq!(rows[0].anchor_id, "2436948398193464");
+        assert_eq!(rows[0].douyin_no, "cyl765");
+        assert_eq!(rows[0].name, "浩龙🎹");
+    }
+
+    #[test]
+    fn month_from_filename_patterns() {
+        let now_year: i32 = chrono::Local::now()
+            .format("%Y")
+            .to_string()
+            .parse()
+            .unwrap();
+        assert_eq!(month_from_filename("9月份时长.csv"), Some((now_year, 9)));
+        assert_eq!(month_from_filename("12月时长.csv"), Some((now_year, 12)));
+        assert_eq!(month_from_filename("2026年9月份时长.csv"), Some((2026, 9)));
+        assert_eq!(month_from_filename("2026-09-时长.csv"), Some((2026, 9)));
+        assert_eq!(month_from_filename("时长_2026_10.csv"), Some((2026, 10)));
+        // 读不出月份：交给前端 / 当前月兜底
+        assert_eq!(month_from_filename("时长.csv"), None);
+        // 带完整日期的文件名取到年月（只有内容真是时长表才会走月度导入）
+        assert_eq!(month_from_filename("2026-10-07-男团.csv"), Some((2026, 10)));
+        assert_eq!(month_from_filename("13月份时长.csv"), None);
     }
 }

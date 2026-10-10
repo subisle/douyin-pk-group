@@ -110,10 +110,10 @@ pub async fn handler(
 ) -> Response {
     let path = uri.path();
 
-    // 对外展示页（2026-10-10）：根路径 = 男团数据榜（与 /st/m 同一份页面，
-    // 页内路由按当前路径自动落在男团），管理后台挪到 /admin。
+    // 对外展示页（2026-10-10）：根路径 = 展示页（男女共用，页内弹团别选择卡），
+    // 管理后台挪到 /admin。
     if path == "/" {
-        return crate::public_teams::st_m().await;
+        return crate::public_teams::st_root().await;
     }
 
     // 管理后台：/admin 与 /admin/* —— 剥掉前缀后按 dist 解析

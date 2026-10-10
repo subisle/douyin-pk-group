@@ -66,6 +66,28 @@ function resolveRoute(): RouteKey {
 }
 
 /** 当前路由 + 跳转。跳转走 pushState，所以浏览器前进后退能原样回到上一页。 */
+
+/* ---------------- 切页守卫（P1-12） ----------------
+ * 页面（PK 分组看板）可以注册一个守卫：切走前有未保存的变更就返回提示文案，
+ * 由 useRoute 的 go() 在真正跳转前 confirm。没有确认就卸载，拖半小时的看板会归零。
+ * 只拦「本应用内的导航点击」；浏览器刷新/关标签用 beforeunload（页面自己挂）。 */
+type LeaveGuard = () => string | null;
+const leaveGuards = new Set<LeaveGuard>();
+
+/** 注册切页守卫，返回注销函数。守卫返回提示文案 = 有未保存变更需要确认。 */
+export function registerLeaveGuard(guard: LeaveGuard): () => void {
+  leaveGuards.add(guard);
+  return () => leaveGuards.delete(guard);
+}
+
+function confirmLeave(): boolean {
+  for (const guard of leaveGuards) {
+    const msg = guard();
+    if (msg && !window.confirm(`${msg}\n\n确定要离开吗？未保存的内容会丢失。`)) return false;
+  }
+  return true;
+}
+
 export function useRoute(): { route: RouteKey; go: (key: RouteKey) => void } {
   const [route, setRoute] = useState<RouteKey>(() => resolveRoute())
 
@@ -76,6 +98,7 @@ export function useRoute(): { route: RouteKey; go: (key: RouteKey) => void } {
   }, [])
 
   const go = useCallback((key: RouteKey) => {
+    if (!confirmLeave()) return;
     const href = routeHref(key)
     const now = `${window.location.pathname}${window.location.search}`
     if (now !== href) window.history.pushState(null, '', href)

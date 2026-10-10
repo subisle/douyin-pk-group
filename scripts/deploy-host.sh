@@ -70,8 +70,8 @@ ls -lh "$tmp"
 
 # 4. 传到机器、导入、重启
 echo "==> 部署到 $HOST"
-sshpass -p "$PASS" scp -o StrictHostKeyChecking=no "$tmp/pk-server-$ARCH.tar.gz" "root@$HOST:/tmp/"
-sshpass -p "$PASS" ssh -o StrictHostKeyChecking=no "root@$HOST" "
+sshpass -p "$PASS" scp -o StrictHostKeyChecking=accept-new "$tmp/pk-server-$ARCH.tar.gz" "root@$HOST:/tmp/"
+sshpass -p "$PASS" ssh -o StrictHostKeyChecking=accept-new "root@$HOST" "
   set -e
   docker load -i /tmp/pk-server-$ARCH.tar.gz
   rm -f /tmp/pk-server-$ARCH.tar.gz
@@ -90,11 +90,14 @@ sshpass -p "$PASS" ssh -o StrictHostKeyChecking=no "root@$HOST" "
   docker compose ps
 "
 
-# 5. 真跑一遍渲染自检：手机 / PC / 翻页 / 切日期
-echo "==> 渲染自检"
+# 5. 真跑一遍渲染自检：路由深链 / 导航 / 弹窗（只读模式，不写库）
+echo "==> 渲染自检（uicheck-admin，只读模式）"
 # 管理口令从远端 .env 读回（不落仓库）；也可 RK_ADMIN 直接指定
-ADMIN="${RK_ADMIN:-$(sshpass -p "$PASS" ssh -o StrictHostKeyChecking=no "root@$HOST" \
+ADMIN="${RK_ADMIN:-$(sshpass -p "$PASS" ssh -o StrictHostKeyChecking=accept-new "root@$HOST" \
   "grep '^ADMIN_PASSWORD=' '$DIR/.env' | cut -d= -f2-" 2>/dev/null)}"
-node scripts/uicheck.mjs "$BASE" "$ADMIN"
+# 部署自检默认只读（UICHECK_READONLY=1）：只跑路由与渲染断言，不写 2019-01-01 测试日。
+# 全量自检（含入库/删除回环）请在测试环境手动跑：UICHECK_READONLY= node scripts/uicheck-admin.mjs。
+UICHECK_READONLY="${UICHECK_READONLY:-1}" \
+PREFIX=/admin node scripts/uicheck-admin.mjs "$BASE" "$ADMIN"
 
-echo "==> 完成：$BASE/  后台    $BASE/s/1  公布页"
+echo "==> 完成：$BASE/admin/data  管理后台    $BASE/  展示端"

@@ -31,6 +31,47 @@ export default function BotPage() {
   const [addQrSet, setAddQrSet] = useState(false)
   const [addQrMsg, setAddQrMsg] = useState('')
   const addQrFileRef = useRef<HTMLInputElement | null>(null)
+  /** 延迟推送队列（运营查有没有推出去 / 立刻催一次） */
+  const [pushJobs, setPushJobs] = useState<any>(null)
+  const [pushMsg, setPushMsg] = useState('')
+  /** 推送队列加载失败（P2-5）：不再渲染成「还没有推送任务」的假空态 */
+  const [pushError, setPushError] = useState('')
+  const [pushBusy, setPushBusy] = useState<string | null>(null)
+
+  const loadPushJobs = useCallback(() => {
+    api('/api/admin/push/jobs')
+      .then(setPushJobs)
+      .catch((e) => {
+        // P2-5：失败显示出来（空态文案会在下面提示「还没有推送任务」，加一条错误态避免误导）
+        console.error('推送队列加载失败', e)
+        setPushJobs(null)
+        setPushMsg('')
+        setPushError(String(e?.message ?? e))
+      })
+  }, [])
+
+  useEffect(() => {
+    loadPushJobs()
+    const t = setInterval(loadPushJobs, 30000)
+    return () => clearInterval(t)
+  }, [loadPushJobs])
+
+  async function runPushNow(team: string, bizDate: string) {
+    setPushBusy(`${team}:${bizDate}`)
+    setPushMsg('')
+    try {
+      await api(
+        `/api/admin/push/run?team=${encodeURIComponent(team)}&bizDate=${encodeURIComponent(bizDate)}`,
+        { method: 'POST' },
+      )
+      setPushMsg(`已立即推送：${team === 'female' ? '女团' : '男团'} ${bizDate}`)
+      loadPushJobs()
+    } catch (e: any) {
+      setPushMsg(e.message ?? String(e))
+    } finally {
+      setPushBusy(null)
+    }
+  }
 
   const load = useCallback(async () => {
     try {
@@ -47,6 +88,7 @@ export default function BotPage() {
       // 已保存过的 AppID 带出来（Secret 不回传，placeholder 显示「已设置」）
       setQqAppId((cur) => cur || cred.appId)
     } catch (e: any) {
+      console.error('机器人状态加载失败', e)
       setError(e.message ?? String(e))
     }
   }, [])
@@ -153,17 +195,30 @@ export default function BotPage() {
           )
           if (r.tokenSaved) {
             if (pollRef.current) clearInterval(pollRef.current)
+            pollRef.current = null
             setQr(null)
             load()
           }
-        } catch {
-          /* 过期等错误下一次轮询再看 */
+        } catch (e) {
+          // P2-5：不再完全静默 —— 过期等错误下一次轮询会重试，但要留痕到控制台
+          console.error('扫码状态轮询失败', e)
         }
       }, 3000)
     } catch (e: any) {
       setError(e.message ?? String(e))
     }
   }
+
+  /* P2-3：扫码轮询的定时器要随组件卸载清掉 —— 之前只靠「扫完自动停」，
+     切到别的页面（或 401 回登录门）后每 3s 的 POST 会一直打下去。 */
+  useEffect(() => {
+    return () => {
+      if (pollRef.current) {
+        clearInterval(pollRef.current)
+        pollRef.current = null
+      }
+    }
+  }, [])
 
   async function saveToken() {
     setError('')
@@ -299,9 +354,8 @@ export default function BotPage() {
       <section className="card">
         <h2>微信推送 · 加好友二维码</h2>
         <p className="hint">
-          主播在「我的」页绑定推送时，扫的就是这张码：把<b>机器人的微信名片二维码</b>传上来
-          （微信里打开机器人账号 → 右上角 →「二维码名片」保存即可）。绑定后数据一入库就会私聊推送
-          追分提醒 / 每日报告。
+          主播扫这张码加机器人后，<b>把自己的手机号发给机器人</b>即完成绑定（手机号要在下面
+          「我的」页面账号里登记过）。没登记手机号的人走兜底：「我的」页出 6 位绑定码，发给机器人同样能绑。
         </p>
         <div className="row">
           <button onClick={() => addQrFileRef.current?.click()}>
@@ -331,6 +385,87 @@ export default function BotPage() {
           </div>
         )}
         {addQrMsg && <div className="alert good">{addQrMsg}</div>}
+      </section>
+
+      <section className="card">
+        <h2>推送队列（入库后 {pushJobs?.delayMinutes ?? 30} 分钟推）</h2>
+        <p className="hint">
+          数据入库不立刻推，先排队等一轮导入的几个文件（男女团 / 多抖音号）都到齐，到点统一推一次。
+          同一团同一业务日只排一队，重复导入只刷新不叠加。
+          {pushJobs?.stats && (
+            <>
+              {' '}
+              当前：<b>{pushJobs.stats.bound}</b> 人已绑定微信，其中{' '}
+              <b>{pushJobs.stats.enabled}</b> 人开了推送开关。
+            </>
+          )}
+        </p>
+        {pushJobs?.items?.length ? (
+          <table>
+            <thead>
+              <tr>
+                <th>团别</th>
+                <th>业务日</th>
+                <th>计划推送时间</th>
+                <th>状态</th>
+                <th>完成时间</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {pushJobs.items.map((j: any) => (
+                <tr key={j.id}>
+                  <td>{j.team === 'female' ? '女团' : j.team === 'male' ? '男团' : j.team}</td>
+                  <td>{j.bizDate}</td>
+                  <td className="hint">{j.runAt?.slice(11, 16) || j.runAt}</td>
+                  <td>
+                    <span
+                      className={
+                        j.status === 'done'
+                          ? 'badge b-active'
+                          : j.status === 'failed'
+                            ? 'badge b-left'
+                            : j.status === 'running'
+                              ? 'badge b-paused'
+                              : 'badge'
+                      }
+                    >
+                      {j.status === 'done'
+                        ? '已推送'
+                        : j.status === 'failed'
+                          ? '失败'
+                          : j.status === 'running'
+                            ? '推送中'
+                            : '排队中'}
+                    </span>
+                  </td>
+                  <td className="hint">{j.doneAt || '—'}</td>
+                  <td>
+                    <button
+                      disabled={pushBusy === `${j.team}:${j.bizDate}`}
+                      onClick={() => runPushNow(j.team, j.bizDate)}
+                    >
+                      {pushBusy === `${j.team}:${j.bizDate}` ? '推送中…' : '立即推送'}
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : pushError ? (
+          <div className="alert warn">
+            ⚠️ 推送队列加载失败：{pushError}（会随轮询自动重试）
+          </div>
+        ) : (
+          <p className="hint">还没有推送任务：导入一轮数据后这里会出现。</p>
+        )}
+        {pushJobs?.items?.some((j: any) => j.status === 'failed' && j.note) && (
+          <div className="alert bad">
+            失败原因：
+            {pushJobs.items.find((j: any) => j.status === 'failed' && j.note)?.note}
+          </div>
+        )}
+        {pushMsg && <div className="alert good">{pushMsg}</div>}
       </section>
 
       <PublicSettingsCard />
@@ -381,11 +516,18 @@ export default function BotPage() {
 function PublicSettingsCard() {
   const [settings, setSettings] = useState<any>(null)
   const [msg, setMsg] = useState('')
+  /** 设置加载失败（P2-5）：显示出来，别停在「加载中…」 */
+  const [loadError, setLoadError] = useState('')
 
   const load = useCallback(() => {
     api('/api/admin/public/settings')
       .then(setSettings)
-      .catch(() => {})
+      .catch((e) => {
+        // P2-5：设置加载失败不再渲染成「加载中…」的永久假态
+        console.error('公开站点设置加载失败', e)
+        setSettings(null)
+        setLoadError(String(e?.message ?? e))
+      })
   }, [])
 
   useEffect(() => {
@@ -417,29 +559,111 @@ function PublicSettingsCard() {
     ['wave', '音浪数值（每日报告）'],
   ]
 
+  /** 页面级显隐（2026-10-10）：关掉的主导航在展示端整体消失 */
+  const PAGE_FLAGS: [string, string][] = [
+    ['dataEnabled', '每日报告页'],
+    ['groupEnabled', '分组页'],
+    ['lineageEnabled', '族谱页（男团）'],
+  ]
+
+  /** 分组子页显隐：key = 赛事类型（与展示端子导航一一对应） */
+  const GROUP_TYPE_FLAGS: [string, string][] = [
+    ['初级争霸赛小组赛', '初级小组赛'],
+    ['中级争霸赛小组赛', '中级小组赛'],
+    ['月终争霸赛', '月终争霸赛'],
+    ['初级争霸赛晋级赛', '初级晋级赛'],
+    ['中级争霸赛晋级赛', '中级晋级赛'],
+  ]
+
+  async function toggleGroupType(key: string, on: boolean) {
+    const cur = (settings?.groupTypes ?? {}) as Record<string, boolean>
+    try {
+      const d = await api('/api/admin/public/settings', {
+        method: 'POST',
+        body: JSON.stringify({ groupTypes: { ...cur, [key]: on } }),
+      })
+      setSettings(d.settings)
+      setMsg('已保存')
+      setTimeout(() => setMsg(''), 1500)
+    } catch (e: any) {
+      setMsg(e.message ?? String(e))
+    }
+  }
+
+  /** 开关行：label + iOS 风格滑动开关（2026-10-10 优化布局） */
+  function FlagRow({ label, hint, checked, onChange }: { label: string; hint?: string; checked: boolean; onChange: (v: boolean) => void }) {
+    return (
+      <label className="flag-row">
+        <span className="flag-text">
+          <span className="flag-label">{label}</span>
+          {hint && <span className="flag-hint">{hint}</span>}
+        </span>
+        <input type="checkbox" className="switch" checked={checked} onChange={(e) => onChange(e.target.checked)} />
+      </label>
+    )
+  }
+
   return (
     <section className="card">
-      <h2>公开站点设置（/st/m · /st/f）</h2>
+      <h2>公开站点设置（pk.subisle.com）</h2>
       <p className="hint">
         后端级开关：关闭后接口不下发对应数据（不是前端藏）。链接关闭时访问一律「暂未公布」。
+        <b>关掉「开启登录门」则全面开放</b>：打开就能看榜单和分组，但没有「我的」页签。
+        男女已共用一个网址，进页先选「男团 / 女团」。
       </p>
       {settings ? (
-        <table>
-          <tbody>
-            {FLAGS.map(([key, label]) => (
-              <tr key={key}>
-                <td>{label}</td>
-                <td>
-                  <input
-                    type="checkbox"
-                    checked={!!settings[key]}
-                    onChange={(e) => toggle(key, e.target.checked)}
-                  />
-                </td>
-              </tr>
+        <>
+          <h3 className="flag-title">访问与页面</h3>
+          <div className="flag-grid">
+            <FlagRow
+              label="开启登录门"
+              hint="关 = 任何人直接看；开 = 要姓名/手机号 + 密码"
+              checked={!!settings.loginRequired}
+              onChange={(v) => toggle('loginRequired', v)}
+            />
+            <FlagRow
+              label="开放手机号注册"
+              hint="开 = 登录门显示「注册」（手机号 = 账号、短信验证码 = 密码，同步走 WorkBuddy 网关授权）；默认关"
+              checked={!!settings.myRegister}
+              onChange={(v) => toggle('myRegister', v)}
+            />
+            {PAGE_FLAGS.map(([key, label]) => (
+              <FlagRow
+                key={key}
+                label={label}
+                hint="主导航显隐"
+                checked={!!settings[key]}
+                onChange={(v) => toggle(key, v)}
+              />
             ))}
-          </tbody>
-        </table>
+          </div>
+
+          <h3 className="flag-title">分组子页显隐（按赛事类型）</h3>
+          <div className="flag-grid flag-grid-compact">
+            {GROUP_TYPE_FLAGS.map(([key, label]) => (
+              <FlagRow
+                key={key}
+                label={label}
+                checked={settings.groupTypes?.[key] !== false}
+                onChange={(v) => toggleGroupType(key, v)}
+              />
+            ))}
+          </div>
+
+          <h3 className="flag-title">数据字段</h3>
+          <div className="flag-grid flag-grid-compact">
+            {FLAGS.map(([key, label]) => (
+              <FlagRow key={key} label={label} checked={!!settings[key]} onChange={(v) => toggle(key, v)} />
+            ))}
+          </div>
+        </>
+      ) : loadError ? (
+        <div className="alert warn">
+          ⚠️ 设置加载失败：{loadError}
+          <button style={{ marginLeft: 8 }} onClick={load}>
+            重试
+          </button>
+        </div>
       ) : (
         <p className="hint">加载中…</p>
       )}
@@ -449,10 +673,11 @@ function PublicSettingsCard() {
 }
 
 /** 我的页面账号（2026-10-10）：展示端「我的」页的登录账号。
-    没有注册：账号在这里手动设置（也可在主播管理右键单个主播设置），
-    一个姓名对应一个纯数字密码（1:1），手机号选填。
-    主播在 /st/m、/st/f 的「我的」页输入 姓名+密码 验证后看自己的数据；
-    姓名已存在时保存 = 覆盖更新。 */
+    两种来源：① 管理员在这里手动设置（也能在主播管理右键单个主播设置）；
+    ② 主播在展示端登录门「注册」自助创建（手机号 = 账号、短信验证码 = 密码，
+    注册时同时把 WorkBuddy 账号加进用量看板的账号池）。
+    自助注册出来的账号 name 先是手机号占位、bound=0，等绑定主播后 name = 主播姓名；
+    绑定后用户自己不能解绑，只有这里能改绑。 */
 function MyAccountsCard() {
   const [items, setItems] = useState<any[]>([])
   const [name, setName] = useState('')
@@ -460,11 +685,19 @@ function MyAccountsCard() {
   const [pass, setPass] = useState('')
   const [msg, setMsg] = useState('')
   const [err, setErr] = useState('')
+  const [rebindFor, setRebindFor] = useState('')
+  const [rebindQ, setRebindQ] = useState('')
+  const [rebindHits, setRebindHits] = useState<any[]>([])
 
   const load = useCallback(() => {
     api('/api/admin/my-accounts')
       .then((d) => setItems(d.items ?? []))
-      .catch(() => {})
+      .catch((e) => {
+        // P2-5：失败显示出来（别渲染成「还没有账号」的假空态）
+        console.error('「我的」账号列表加载失败', e)
+        setItems([])
+        setErr(String(e?.message ?? e))
+      })
   }, [])
 
   useEffect(() => {
@@ -503,12 +736,50 @@ function MyAccountsCard() {
     }
   }
 
+  /** 改绑/绑定主播：展示端用户自己改不了，只有管理员能改（用户口径 2026-10-10） */
+  async function searchRebind(key: string) {
+    setRebindQ(key)
+    if (!key.trim()) {
+      setRebindHits([])
+      return
+    }
+    try {
+      const d = await api<{ items: any[] }>(`/api/admin/streamers?q=${encodeURIComponent(key.trim())}`)
+      setRebindHits((d.items ?? []).slice(0, 8))
+    } catch (e) {
+      console.error('主播搜索失败', e)
+      setRebindHits([])
+    }
+  }
+
+  async function doRebind(account: string, personId: number, anchorName: string) {
+    setErr('')
+    setMsg('')
+    try {
+      await api(`/api/admin/my-accounts/${encodeURIComponent(account)}/bind`, {
+        method: 'POST',
+        body: JSON.stringify({ personId }),
+      })
+      setMsg(`「${account}」已绑定主播「${anchorName}」`)
+      setRebindFor('')
+      setRebindQ('')
+      setRebindHits([])
+      load()
+    } catch (e: any) {
+      setErr(e.message ?? String(e))
+    }
+  }
+
   return (
     <section className="card">
       <h2>「我的」页面账号（/st/m · /st/f）</h2>
       <p className="hint">
-        没有注册：主播在展示端「我的」页输入 姓名 + 密码（纯数字）验证后查看自己的数据。
-        账号在这里手动设置（手机号选填），姓名要跟主播台账里的一致；姓名已存在时保存 = 覆盖更新。
+        账号来源两种：<b>这里手动设置</b>（姓名要跟主播台账里的一致，姓名已存在时保存 = 覆盖更新），
+        或主播在展示端登录门点「注册」自助创建（手机号 = 账号、短信验证码 = 密码）。
+        <b>手机号不只是登录方式，也是微信绑定的凭证</b>：填了手机号，主播加机器人后发手机号就能绑定推送；
+        没填就只能用「我的」页的 6 位绑定码。
+        自助注册的账号是「待绑定」状态：主播在「我的」页绑定主播姓名后才能看个人数据，
+        <b>绑定后主播自己不能解绑，只有这里能改绑</b>。
       </p>
       <div className="row">
         <input
@@ -525,8 +796,7 @@ function MyAccountsCard() {
           onKeyDown={(e) => e.key === 'Enter' && name.trim() && pass.trim() && add()}
         />
         <input
-          placeholder="密码（纯数字）"
-          inputMode="numeric"
+          placeholder="密码（4~20 位字母或数字）"
           value={pass}
           onChange={(e) => setPass(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && name.trim() && pass.trim() && add()}
@@ -539,9 +809,10 @@ function MyAccountsCard() {
         <table>
           <thead>
             <tr>
-              <th>姓名</th>
+              <th>账号 / 姓名</th>
               <th>手机号</th>
-              <th>密码</th>
+              <th>来源</th>
+              <th>绑定状态</th>
               <th>添加时间</th>
               <th></th>
             </tr>
@@ -551,9 +822,25 @@ function MyAccountsCard() {
               <tr key={a.name}>
                 <td>{a.name}</td>
                 <td className="hint">{a.phone}</td>
-                <td className="hint">{a.pass}</td>
+                <td className="hint">{a.source === 'register' ? '自助注册' : '后台添加'}</td>
+                <td className="hint">
+                  {a.bound ? (
+                    a.isAdmin ? (
+                      '管理员账号'
+                    ) : (
+                      <span className="badge b-active">已绑主播</span>
+                    )
+                  ) : (
+                    <span className="badge b-paused">待绑定</span>
+                  )}
+                </td>
                 <td className="hint">{a.createdAt}</td>
                 <td>
+                  {a.isAdmin ? null : (
+                    <button onClick={() => setRebindFor(rebindFor === a.name ? '' : a.name)}>
+                      {a.bound ? '改绑' : '绑定主播'}
+                    </button>
+                  )}{' '}
                   <button className="danger" onClick={() => remove(a.name)}>
                     删除
                   </button>
@@ -564,6 +851,36 @@ function MyAccountsCard() {
         </table>
       ) : (
         <p className="hint">还没有账号。添加后主播才能登录「我的」页。</p>
+      )}
+      {rebindFor && (
+        <div className="row" style={{ alignItems: 'flex-start', flexWrap: 'wrap' }}>
+          <div style={{ flex: 1, minWidth: 220 }}>
+            <input
+              placeholder={`「${rebindFor}」改绑到哪位主播？输入名字搜索`}
+              value={rebindQ}
+              onChange={(e) => searchRebind(e.target.value)}
+              style={{ width: '100%' }}
+            />
+            {rebindHits.length ? (
+              <div className="hint" style={{ marginTop: 6 }}>
+                {rebindHits.map((h) => (
+                  <button
+                    key={h.personId}
+                    style={{ marginRight: 6, marginBottom: 6 }}
+                    onClick={() => doRebind(rebindFor, h.personId, h.name)}
+                  >
+                    {h.name}（{h.team === 'male' ? '男团' : '女团'}）
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <div className="hint" style={{ marginTop: 6 }}>
+                输入主播姓名开始搜索；改绑后账号名会跟着变成主播姓名，登录仍可用手机号。
+              </div>
+            )}
+          </div>
+          <button onClick={() => { setRebindFor(''); setRebindQ(''); setRebindHits([]) }}>取消</button>
+        </div>
       )}
       {msg && <div className="alert good">{msg}</div>}
       {err && <div className="alert bad">{err}</div>}
