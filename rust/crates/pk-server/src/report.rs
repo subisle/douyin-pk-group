@@ -57,7 +57,7 @@ pub async fn build(st: &Arc<AppState>, date: &str, team: &str) -> anyhow::Result
          FROM daily_metric WHERE wave_reliable = 1 \
            AND DATE_FORMAT(biz_date, '%Y-%m-%d') = '{date}' GROUP BY person_id"
     );
-    // 当月未播天数（有数据行中；P1-7 只算可信行，P1-10 统一口径：当日音浪 < 3 = 未播，
+    // 当月未播天数（有数据行中；P1-7 只算可信行，P1-10 统一口径：当日音浪 < 2 = 未播，
     // 与 public_teams.rs 展示端 / push.rs 推送榜同一把尺子，见 dialect::NOT_LIVE_WAVE_THRESHOLD）
     let month = &date[..7];
     let month_sql = format!(
@@ -113,7 +113,7 @@ pub async fn build(st: &Arc<AppState>, date: &str, team: &str) -> anyhow::Result
         let wave = wave_map.get(&pid).copied().unwrap_or(0);
         let total = total_map.get(&pid).copied().unwrap_or(0);
         let absent = absent_map.get(&pid).copied().unwrap_or(0);
-        // P1-10：未播 = 当日音浪 < 3（与展示端 / 推送榜共用 dialect::is_live_wave），
+        // P1-10：未播 = 当日音浪 < 2（与展示端 / 推送榜共用 dialect::is_live_wave），
         // is_live 标记只作参考，不再单独作为判定依据
         let is_live = is_live_wave(wave);
         rows.push(ReportRow {

@@ -556,7 +556,7 @@ pub async fn daily(
         "SELECT p.id AS person_id, p.name, \
          CAST(COALESCE(SUM(d.wave), 0) AS SIGNED) AS wave, \
          CAST(COALESCE(SUM(d.minutes), 0) AS SIGNED) AS minutes, \
-         COALESCE(MAX(d.is_live), 0) AS live, \
+         CASE WHEN COALESCE(SUM(d.wave), 0) >= 2 THEN 1 ELSE 0 END AS live, \
          COUNT(d.id) AS nrow \
          FROM person p \
          LEFT JOIN daily_metric d ON d.person_id = p.id \
@@ -571,7 +571,7 @@ pub async fn daily(
 
     // 当月未播天数 + 当月累计音浪 + 前一日名次（内存 join）
     // 未播口径（2026-10-09 用户定；2026-10-10 P1-10 统一引用 dialect::NOT_LIVE_WAVE_THRESHOLD）：
-    // 当天导入音浪 < 3 = 未开播；
+    // 当天导入音浪 < 2 = 未开播；
     // totalWave 从「历史累计」改为「当月累计」（榜单副行显示的就是本月总音浪）。
     // P1-7：三处聚合都只算可信行（wave_reliable=1），与 WAVES_A / 月年榜口径一致。
     let month = &date[..7];

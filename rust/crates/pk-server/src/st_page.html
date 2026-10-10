@@ -1040,12 +1040,12 @@ function podHtml(items) {
 }
 
 /** 榜单行：名次 / 头像 / 名字 / 行中段（本月累计 & 未播天数）… 右侧（名次变动 + 音浪）。
-    未开播口径（2026-10-09 用户定）：当日音浪 < 3 = 未开播；中段「本月」= 当月累计音浪，
-    「未播 N 天」= 当月音浪 < 3 的天数（后端 absentDays / totalWave）。 */
+    未开播口径（2026-10-10 用户定）：当日音浪 < 2 = 未开播；中段「本月」= 当月累计音浪，
+    「未播 N 天」= 当月音浪 < 2 的天数（后端 absentDays / totalWave）。 */
 function lbRowHtml(it) {
   const noData = it.hasData === false;
   const hideWave = it.wave == null;
-  const off = noData || (!hideWave && it.wave < 3);
+  const off = noData || (!hideWave && it.wave < 2);
   const rc = it.rank === 1 ? ' g' : it.rank === 2 ? ' s' : it.rank === 3 ? ' b' : '';
   const absent = it.absentDays == null ? 0 : it.absentDays;
   const main = off
@@ -2017,8 +2017,8 @@ function renderMy(d, series, claim, bound, push) {
   const stat = (label, o) => '<div class="my-stat"><div class="l">' + label + '</div>' +
     '<div class="w">' + (o.wave == null ? '—' : wan(o.wave)) + '</div>' +
     (o.minutes == null ? '' : '<div class="m">' + minText(o.minutes) + '</div>') + '</div>';
-  /* 未播口径与榜单一致：当日音浪 < 3 = 未开播 */
-  const offToday = d.daily && d.daily.wave != null && d.daily.wave < 3;
+  /* 未播口径与榜单一致：当日音浪 < 2 = 未开播 */
+  const offToday = d.daily && d.daily.wave != null && d.daily.wave < 2;
   const rankHtml = d.teamRank > 0
     ? '<div class="rk"><div class="n">第 ' + d.teamRank + '</div>' +
       '<div class="l">团内名次 · 共 ' + (d.teamSize || '—') + ' 人</div></div>'
@@ -2029,7 +2029,7 @@ function renderMy(d, series, claim, bound, push) {
   if (Array.isArray(waves) && waves.length) {
     const max = Math.max.apply(null, waves.concat([1]));
     const bars = waves.map((w, i) =>
-      '<div class="b' + (w < 3 ? ' off' : '') + '" style="height:' +
+      '<div class="b' + (w < 2 ? ' off' : '') + '" style="height:' +
       Math.max(4, Math.round(w / max * 100)) + '%" title="' +
       esc((series.dates[i] || '').slice(5)) + ' · ' + wan(w) + '"></div>').join('');
     const xs = '<span>' + esc((series.dates[0] || '').slice(5)) + '</span>' +

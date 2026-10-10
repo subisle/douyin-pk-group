@@ -417,7 +417,7 @@ async fn month_rank_list(st: &AppState, team: &str, month: &str) -> Vec<(u64, St
 
 /// 当日榜（(person_id, 名字, 音浪)），口径与展示端每日榜一致：
 /// 在册 + 未离团 + 不隐藏（hide_in_daily_report=0），当日音浪低于
-/// [`crate::dialect::NOT_LIVE_WAVE_THRESHOLD`]（3）视为未开播（不计入榜）。
+/// [`crate::dialect::NOT_LIVE_WAVE_THRESHOLD`]（2）视为未开播（不计入榜）。
 /// P1-7：只聚合可信行（wave_reliable=1）。P1-6：日期参数化（不再内联 SQL）。
 async fn daily_rank(st: &AppState, team: &str, date: &str) -> Vec<(u64, String, i64)> {
     let sql = "SELECT p.id AS person_id, p.name, CAST(COALESCE(SUM(d.wave), 0) AS SIGNED) AS wave \

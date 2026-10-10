@@ -7,9 +7,9 @@
 /// 「当日导入音浪 < NOT_LIVE_WAVE_THRESHOLD」= 未开播。此前 report.rs（日报）按
 /// is_live 标记、public_teams.rs（展示端）按 wave<3、push.rs（推送榜）按 wave>=3，
 /// 三套口径同一个人会得出不同的「未播」结论。现在日报 / 展示端 / 推送一律引用这里。
-pub const NOT_LIVE_WAVE_THRESHOLD: i64 = 3;
+pub const NOT_LIVE_WAVE_THRESHOLD: i64 = 2;
 
-/// 统一的未播判定：当日音浪 < 3 = 未播（report 日报 / public_teams 榜单 / push 推送共用）
+/// 统一的未播判定：当日音浪 < 2 = 未播（report 日报 / public_teams 榜单 / push 推送共用）
 pub fn is_live_wave(wave: i64) -> bool {
     wave >= NOT_LIVE_WAVE_THRESHOLD
 }
@@ -39,7 +39,8 @@ const WAVES_A: &str = "SELECT k, CAST(SUM(w) AS DOUBLE) AS w FROM (
 /// A 库每日序列：展示页每日排名用。返回 k（人员 id）/ d（日期）/ w（当日音浪）/ live（当日是否开播）。
 /// 一人多号：daily_metric 每人每天一行（主号口径），副号音浪从 wave_snapshot（is_primary=0）并进来。
 /// wave_snapshot.wave_value 是当日值语义（已验证：主号快照与 daily_metric.wave 962 对中 958 相等）。
-const SERIES_A: &str = "SELECT k, d, CAST(SUM(w) AS DOUBLE) AS w, MAX(live) AS live FROM (
+const SERIES_A: &str = "SELECT k, d, CAST(SUM(w) AS DOUBLE) AS w, \
+     CASE WHEN SUM(w) >= 2 THEN 1 ELSE 0 END AS live FROM (
      SELECT person_id AS k, DATE_FORMAT(biz_date, '%Y-%m-%d') AS d, SUM(wave) AS w, MAX(is_live) AS live
       FROM daily_metric
       WHERE wave_reliable = 1 AND DATE_FORMAT(biz_date, '%Y-%m-%d') IN (?PLACEHOLDERS?)
@@ -202,7 +203,8 @@ pub fn trend_sql(start: &str, end: &str) -> String {
     format!(
         "SELECT p.id AS person_id, p.name, p.gender, \
          DATE_FORMAT(d.biz_date, '%Y-%m-%d') AS d, \
-         CAST(SUM(d.wave) AS SIGNED) AS w, CAST(SUM(d.minutes) AS SIGNED) AS m, MAX(d.is_live) AS live \
+         CAST(SUM(d.wave) AS SIGNED) AS w, CAST(SUM(d.minutes) AS SIGNED) AS m, \
+         CASE WHEN SUM(d.wave) >= 2 THEN 1 ELSE 0 END AS live \
          FROM daily_metric d JOIN person p ON p.id = d.person_id \
          WHERE p.deleted_at IS NULL AND d.wave_reliable = 1 \
            AND d.biz_date BETWEEN '{start}' AND '{end}' \
@@ -253,7 +255,7 @@ pub fn period_rollup_sql(
         "SELECT {select} FROM ( \
            SELECT d.person_id AS pid, DATE_FORMAT(d.biz_date, '%Y-%m') AS m, \
              SUM(d.wave) AS w, SUM(d.minutes) AS dm, \
-             SUM(CASE WHEN d.is_live = 1 THEN 1 ELSE 0 END) AS live, \
+             SUM(CASE WHEN d.wave >= 2 THEN 1 ELSE 0 END) AS live, \
              COUNT(DISTINCT d.biz_date) AS days \
            FROM daily_metric d \
            WHERE d.wave_reliable = 1 \
