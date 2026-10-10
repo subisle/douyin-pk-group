@@ -80,9 +80,7 @@ async fn alias_roundtrip() {
     store::delete_alias(&st, "__e2e_alias__")
         .await
         .expect("删别名");
-    assert!(!store::list_aliases(&st)
-        .await
-        .contains_key("__e2e_alias__"));
+    assert!(!store::list_aliases(&st).await.contains_key("__e2e_alias__"));
 }
 
 #[tokio::test]
