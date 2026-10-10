@@ -7,7 +7,7 @@
     "dev": "concurrently -n api,web -c blue,green \"pnpm -F @pk/api dev\" \"pnpm -F @pk/web dev\"",
     "dev:api": "pnpm -F @pk/api dev",
     "dev:web": "pnpm -F @pk/web dev",
-    "build": "pnpm -F @pk/web build && cd rust && cargo build --release -p pk-server",
+    "build": "pnpm -F @pk/web build && pnpm -F @pk/douyin-web build && cd rust && cargo build --release -p pk-server",
     "test": "pnpm test:go && cd rust && cargo test --workspace",
     "test:go": "cd server-go && go test ./... && go vet ./...",
     "check:compose": "if docker compose version >/dev/null 2>&1; then DC='docker compose'; else DC=docker-compose; fi; TD=$(mktemp -d) && : > \"$TD/.env\"; rc=0; MARIADB_ROOT_PASSWORD=x DOUYIN_WRITER_PASSWORD=x PK_READER_PASSWORD=x DOUYIN_MIGRATOR_PASSWORD=x $DC -f deploy/rk3318/docker-compose.yml config > /dev/null || rc=1; $DC -f deploy/docker-compose.yml --project-directory \"$TD\" config > /dev/null || rc=1; rm -rf \"$TD\"; [ \"$rc\" = 0 ] && echo 'compose 配置可解析 ✓'; exit $rc",

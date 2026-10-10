@@ -71,9 +71,9 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - name: 类型检查
-        run: pnpm --filter @pk/web exec tsc --noEmit
-      - name: 构建
-        run: pnpm --filter @pk/web build
+        run: pnpm --filter @pk/web exec tsc --noEmit && pnpm --filter @pk/douyin-web exec tsc --noEmit
+      - name: 构建（含镜像里要用的现役管理端 douyin-web）
+        run: pnpm --filter @pk/web build && pnpm --filter @pk/douyin-web build
 
   docker:
     name: 构建镜像（${{ inputs.platforms || 'linux/amd64' }}）

@@ -511,7 +511,7 @@ async fn main() -> anyhow::Result<()> {
             api.fallback_service(spa_router)
         }
         false => {
-            tracing::warn!(dir = %dist_dir.display(), "没有前端构建产物，仅提供 API（先跑 pnpm --filter @pk/web build）");
+            tracing::warn!(dir = %dist_dir.display(), "没有前端构建产物，仅提供 API（先跑 pnpm --filter @pk/douyin-web build）");
             api
         }
     };

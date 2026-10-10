@@ -121,15 +121,36 @@ pnpm install && pnpm -F @pk/douyin-web dev  # 5173，/api 代理到 8787
 
 ## 构建与部署
 
-> **部署目标以 rk3318（aarch64 Docker，`/opt/pk-server`）为准**；64（x86_64）与 147
-> 的历史流程仅作参考，不是现役上线路径。上线数据流见 `scripts/upload-db-rk3318.sh`。
+> **现役生产是 147**（`147.90.235.187` / Debian 12 x86_64，`/opt/pk-server`，
+> 对外 `https://pk.subisle.com`）。rk3318（aarch64 Docker）是备用目标，
+> 64 / 115 的历史流程仅作参考。数据上线见 `scripts/upload-db-vps147.sh`
+> （本机 `douyin_dev` 整体 dump → 灌进 147 的 `pk-mariadb`）。
 
-构建全部走 GitHub Actions（`.github/workflows/ci.yml`）：
+构建全部走 GitHub Actions（`.github/workflows/ci.yml`），本地不产出部署物：
 - `rust` job：`cargo test` / `cargo clippy -D warnings` / `cargo fmt --check`
-- `web` job：`tsc --noEmit` + `vite build`
-- `docker` job：构建镜像（pk-server / douyin-server 的 arm64 离线包）
+- `web` job：`tsc --noEmit` + `vite build`（`@pk/web` 与现役 `@pk/douyin-web` 都构建）
+- `docker` job：构建并推 ghcr 镜像（`pk-server` / `douyin-server`），默认 amd64；
+  `arm64-bundle.yml` / `amd64-bundle.yml` 另出「可 `docker load` 的离线包」挂 rolling release
 
-一条命令发布到 rk3318：
+镜像里的前端固定是 `apps/douyin-web`（现役统一后台，history 路由挂 `/admin`）；
+`apps/web` 已冻结，只在 Dockerfile 的 install 阶段用于对齐 pnpm-lock，不再打进镜像。
+
+一条命令发布到 147：
+
+```bash
+PK147_PASS='<root 口令>' scripts/deploy-147.sh
+# 等 CI 绿灯 → 触发 amd64 镜像包 → scp → docker load → 从镜像里取二进制 + 前端
+# → 备份替换 /opt/pk-server/{pk-server,web} → pk-server migrate → systemctl restart → 只读自检
+```
+
+147 的形态（与容器部署不同，别混用）：pk-server 是 systemd 服务
+`/etc/systemd/system/pk-server.service`，进程就是 `/opt/pk-server/pk-server`，
+环境变量在 `/opt/pk-server/pk.env`（`WEB_DIST=/opt/pk-server/web`，监听 `127.0.0.1:8787`），
+数据库是本机容器 `pk-mariadb`，公网入口是 Caddy。旧的二进制/前端留在
+`/opt/pk-server/pk-server.bak-<时间戳>` 与 `web.bak-<时间戳>`，回滚就是换回去再重启。
+升级前会跑 `pk-server migrate`（只由 `douyin_migrator` 执行 DDL，按 `schema_migrations` 幂等）。
+
+一条命令发布到 rk3318（备用）：
 
 ```bash
 scripts/deploy-rk3318.sh     # 等 CI → 下载 arm64 镜像包 → docker load → compose up → 只读自检

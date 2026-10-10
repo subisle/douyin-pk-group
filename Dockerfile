@@ -19,12 +19,16 @@ WORKDIR /app
 RUN npm install -g pnpm@10.33.0
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY apps/web/package.json apps/web/
+COPY apps/douyin-web/package.json apps/douyin-web/
 COPY apps/server/package.json apps/server/
 COPY packages/shared/package.json packages/shared/
 RUN pnpm install --frozen-lockfile
 COPY packages/shared packages/shared
-COPY apps/web apps/web
-RUN pnpm --filter @pk/web build
+# 镜像里的前端 = 现役管理端 apps/douyin-web（统一后台，history 路由挂 /admin）。
+# apps/web 已冻结（旧 hash 路由，见 docs/00 §7），只在 install 阶段留着对齐 pnpm-lock 的 importer，
+# 不再打进镜像 —— 否则 147 / rk3318 会拿到一套过时的界面。
+COPY apps/douyin-web apps/douyin-web
+RUN pnpm --filter @pk/douyin-web build
 
 # ---------- 阶段 2：交叉编译 Rust 后端 ----------
 FROM --platform=$BUILDPLATFORM rust:1-bookworm AS api
@@ -65,7 +69,7 @@ WORKDIR /app
 COPY --from=base /etc/ssl/certs /etc/ssl/certs
 COPY --from=base /usr/share/zoneinfo /usr/share/zoneinfo
 COPY --from=api /out/pk-server /usr/local/bin/pk-server
-COPY --from=web /app/apps/web/dist /app/web
+COPY --from=web /app/apps/douyin-web/dist /app/web
 ENV WEB_DIST=/app/web \
     PORT=8787 \
     SQLITE_PATH=/app/data/app.db
