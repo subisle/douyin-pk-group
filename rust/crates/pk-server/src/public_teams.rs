@@ -15,7 +15,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::Row;
 
-use crate::dialect::{self, is_live_wave, NOT_LIVE_WAVE_THRESHOLD};
+use crate::dialect::{self, is_live_wave};
 use crate::mysql;
 use crate::routes::ApiError;
 use crate::state::AppState;
@@ -68,6 +68,9 @@ pub struct PublicSettings {
     /// 想开时在管理端「公开站点设置 → 开放手机号注册」打开即可。
     #[serde(default)]
     pub my_register: bool,
+    /// 徒弟提成显示开关（1.0.1）：关 = /my 一律不下发 commission（金额关了防止反推音浪）。
+    #[serde(default = "default_true")]
+    pub commission_enabled: bool,
 }
 
 fn default_true() -> bool {
@@ -107,6 +110,31 @@ mod settings_tests {
         s.group_types.insert("月终争霸赛".into(), true);
         assert!(plan_visible_by_settings(&s, "初级争霸赛小组赛"));
     }
+
+    #[test]
+    fn commission_settings_defaults_are_total_rate_ten() {
+        let c: CommissionSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(c.wave_per_yuan, 10.0);
+        assert!(c.excluded_master_ids.is_empty());
+        // 老格式（只有比例）也能读
+        let c: CommissionSettings = serde_json::from_str(r#"{"wavePerYuan":8}"#).unwrap();
+        assert_eq!(c.wave_per_yuan, 8.0);
+        assert!(c.excluded_master_ids.is_empty());
+    }
+
+    #[test]
+    fn commission_payload_json_shape_roundtrip() {
+        let c = CommissionSettings {
+            wave_per_yuan: 12.5,
+            excluded_master_ids: vec![1027, 7],
+        };
+        let j = c.to_json();
+        assert_eq!(j["wavePerYuan"], 12.5);
+        assert_eq!(j["excludedMasterIds"][0], 1027);
+        let back: CommissionSettings = serde_json::from_value(j).unwrap();
+        assert_eq!(back.wave_per_yuan, 12.5);
+        assert_eq!(back.excluded_master_ids, vec![1027, 7]);
+    }
 }
 
 impl Default for PublicSettings {
@@ -127,6 +155,8 @@ impl Default for PublicSettings {
             login_required: true,
             // 注册默认关（用户口径 2026-10-10「注册先不开」）
             my_register: false,
+            // 提成显示默认开（比例/排除名单另存 commission_settings）
+            commission_enabled: true,
         }
     }
 }
@@ -198,6 +228,7 @@ impl PublicSettings {
             "groupTypes": self.group_types,
             "loginRequired": self.login_required,
             "myRegister": self.my_register,
+            "commissionEnabled": self.commission_enabled,
         })
     }
 }
@@ -227,6 +258,7 @@ pub async fn update_settings(State(st): State<ArcState>, Json(body): Json<Value>
     s.lineage_enabled = flag("lineageEnabled", s.lineage_enabled);
     s.login_required = flag("loginRequired", s.login_required);
     s.my_register = flag("myRegister", s.my_register);
+    s.commission_enabled = flag("commissionEnabled", s.commission_enabled);
     // 分组子页：传了 groupTypes（对象）就整包替换；没传保持原样。
     // 未知类型直接存下来也没关系 —— group_type_enabled 对没配置的类型按开处理，
     // 存 false 的才关。
@@ -239,6 +271,99 @@ pub async fn update_settings(State(st): State<ArcState>, Json(body): Json<Value>
     s.save(&st).await;
     crate::events::emit(crate::events::SCOPE_SETTINGS, "公开站点设置已更新");
     Ok(Json(json!({ "ok": true, "settings": s.to_json() })))
+}
+
+/* --------------------- 徒弟提成设置（1.0.1） --------------------- */
+
+/// 提成配置（config 表 cfg_key = commission_settings）：
+/// 音浪:人民币 折算比例 + 不参与提成的师傅名单（按 person.id）。
+/// 每次计算现读（一次主键查询），后台改完即时生效；**不追溯**：
+/// 改比例后按当前比例对全部口径现算，历史不落账。
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct CommissionSettings {
+    /// 多少音浪折 1 元（默认 10）
+    #[serde(rename = "wavePerYuan", default = "default_wave_per_yuan")]
+    pub wave_per_yuan: f64,
+    /// 不参与提成的师傅 person.id（鹏先生等）：他们的直系徒弟音浪不计入其提成
+    #[serde(rename = "excludedMasterIds", default)]
+    pub excluded_master_ids: Vec<u64>,
+}
+
+fn default_wave_per_yuan() -> f64 {
+    10.0
+}
+
+impl Default for CommissionSettings {
+    fn default() -> Self {
+        Self {
+            wave_per_yuan: default_wave_per_yuan(),
+            excluded_master_ids: Vec::new(),
+        }
+    }
+}
+
+impl CommissionSettings {
+    pub async fn load(st: &AppState) -> Self {
+        crate::store::config_get(st, "commission_settings")
+            .await
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    pub async fn save(&self, st: &AppState) {
+        if let Ok(s) = serde_json::to_string(self) {
+            crate::store::config_set(st, "commission_settings", &s).await;
+        }
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "wavePerYuan": self.wave_per_yuan,
+            "excludedMasterIds": self.excluded_master_ids,
+        })
+    }
+}
+
+/// GET /api/admin/commission/settings
+pub async fn get_commission_settings(State(st): State<ArcState>) -> ApiResult {
+    Ok(Json(CommissionSettings::load(&st).await.to_json()))
+}
+
+/// POST /api/admin/commission/settings：缺省键 = 保留现值。
+/// 排除名单的 id 不在保存时校验存在性——人员后来删除了也只是匹配不到，接口不能因此挂。
+pub async fn update_commission_settings(
+    State(st): State<ArcState>,
+    Json(body): Json<Value>,
+) -> ApiResult {
+    let mut c = CommissionSettings::load(&st).await;
+    if let Some(v) = body.get("wavePerYuan") {
+        let n = v
+            .as_f64()
+            .ok_or_else(|| anyhow::anyhow!("提成比例必须是大于 0 的数字"))?;
+        if !n.is_finite() || n <= 0.0 || n > 1_000_000.0 {
+            return Err(anyhow::anyhow!("提成比例必须是大于 0 的数字").into());
+        }
+        c.wave_per_yuan = n;
+    }
+    if let Some(v) = body.get("excludedMasterIds") {
+        let arr = v
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("排除名单格式不正确"))?;
+        let mut ids = Vec::with_capacity(arr.len());
+        for x in arr {
+            let id = x
+                .as_u64()
+                .ok_or_else(|| anyhow::anyhow!("排除名单格式不正确"))?;
+            ids.push(id);
+        }
+        ids.sort_unstable();
+        ids.dedup();
+        c.excluded_master_ids = ids;
+    }
+    c.save(&st).await;
+    crate::events::emit(crate::events::SCOPE_SETTINGS, "徒弟提成设置已更新");
+    Ok(Json(json!({ "ok": true, "settings": c.to_json() })))
 }
 
 /* --------------------- 我的页面账号（管理端手动添加） --------------------- */
@@ -329,6 +454,9 @@ static VERIFY_LIMITER: std::sync::OnceLock<VerifyLimiter> = std::sync::OnceLock:
 /// 注册类接口限流：每 IP 每分钟 12 次（一次注册本来就要「申请授权 → 重新生成 → 提交」好几下，
 /// 跟登录撞库不是一回事，单独一档更宽松；仍然防脚本刷）
 static REGISTER_LIMITER: std::sync::OnceLock<VerifyLimiter> = std::sync::OnceLock::new();
+/// 授权轮询限流：每 IP 每分钟 120 次（前端 2.5s 一次，正常 24 次/分；
+/// 单独一档防止脚本拿轮询接口猛打网关面板 —— 审计 2026-10-11）
+static REGISTER_POLL_LIMITER: std::sync::OnceLock<VerifyLimiter> = std::sync::OnceLock::new();
 
 struct VerifyLimiter {
     hits: std::sync::Mutex<HashMap<String, Vec<Instant>>>,
@@ -449,7 +577,9 @@ fn gate_team(
     // 有 token 就先验（开关关着时也认，访客拿旧 token 仍能看「我的」）
     if let Some(t) = token.as_deref().filter(|s| !s.is_empty()) {
         if let Some((pid, my_team, _)) = my_token_take(t) {
-            if my_team == team {
+            // 团别为空 = 免团别登录口（/api/public/my/login）发的「任意团」token：
+            // 管理员观看账号 / 没绑主播的账号，两个团都放行
+            if my_team == team || my_team.is_empty() {
                 return Ok(pid);
             }
             // token 团别不符：开着登录门时报错；关了就按游客放行（别把路人拦在门外）
@@ -581,11 +711,8 @@ pub async fn daily(
     // totalWave 从「历史累计」改为「当月累计」（榜单副行显示的就是本月总音浪）。
     // P1-7：三处聚合都只算可信行（wave_reliable=1），与 WAVES_A / 月年榜口径一致。
     let month = &date[..7];
-    let absent_sql = format!(
-        "SELECT person_id, CAST(SUM(CASE WHEN wave < {NOT_LIVE_WAVE_THRESHOLD} THEN 1 ELSE 0 END) AS SIGNED) AS n \
-         FROM daily_metric WHERE wave_reliable = 1 \
-           AND DATE_FORMAT(biz_date, '%Y-%m') = '{month}' GROUP BY person_id"
-    );
+    // 与日报共用 dialect::month_absent_sql（唯一口径：有数据行且音浪 < 2 才算未播）
+    let absent_sql = crate::dialect::month_absent_sql(month);
     let total_sql = format!(
         "SELECT person_id, CAST(SUM(wave) AS SIGNED) AS total \
          FROM daily_metric WHERE wave_reliable = 1 \
@@ -1038,6 +1165,184 @@ pub async fn verify(
  * 分工：面板密码只在服务端，浏览器只拿 state + authUrl（`wbgateway` 模块）。
  */
 
+/* --------------- 免团别登录口（/api/public/my/login）---------------
+ *
+ * 前端登录门在「团别待定」时（首页直接登录，不知道访客看男团还是女团）调这里，
+ * 由账号反推团别。与 verify 的区别只有「团别从哪来」：
+ * - verify：路径上带着团别（/api/public/teams/{team}/verify）
+ * - my_login：账号在 my_accounts 里绑定了主播 → 用主播所在团；
+ *   管理员观看账号（is_admin=1）→ 不落团，token 挂 MY_ANY_KEY，两个团都能用。
+ *
+ * 曾长期只有前端调用而路由没注册（main.rs 漏了），登录门在首页一直「接口不存在」；
+ * 2026-10-11 补齐。 */
+
+pub async fn my_login(
+    State(st): State<ArcState>,
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
+    axum::Json(body): axum::Json<Value>,
+) -> ApiResult {
+    let s = PublicSettings::load(&st).await;
+    // 登录门默认关（login_required=false）时这个口没有意义，但也不该报错——照常验，
+    // 有账号就给 token；没有公开站点时直接拒绝，避免空跑。
+    if !s.team_enabled("male") && !s.team_enabled("female") {
+        return Ok(Json(json!({ "published": false })));
+    }
+    /* 地区门禁同 verify：handler 自己过一遍，被拒的尝试也要进 access_logs。 */
+    let client_ip = crate::ipinfo::request_ip(addr, &headers);
+    let geo = crate::ipinfo::geo_for_ip(&st, &client_ip)
+        .await
+        .unwrap_or_default();
+    let account_input = body
+        .get("account")
+        .or_else(|| body.get("name"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    if !crate::ipinfo::gate_disabled() && !geo.allowed {
+        // 团别待定，team 记空串（log_login_path 的语义：待定传空）
+        crate::ipinfo::log_login_path(
+            &st,
+            &client_ip,
+            &geo,
+            "",
+            "/api/public/my/login",
+            &account_input,
+            false,
+        )
+        .await;
+        tracing::info!(
+            ip = %client_ip, province = %geo.province,
+            "免团别登录尝试被地区规则拒绝"
+        );
+        return Err(ApiError::forbidden("当前地区暂不支持访问"));
+    }
+    let limiter_ok = public_write_allow(&client_ip_for_limit(addr, &headers));
+    if !limiter_ok {
+        return Err(anyhow::anyhow!("尝试太频繁，请稍后再试").into());
+    }
+    let acct = body
+        .get("account")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .or_else(|| {
+            body.get("name")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+        })
+        .unwrap_or_default();
+    let pass = body
+        .get("pass")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    if acct.is_empty() || pass.trim().is_empty() {
+        return Err(anyhow::anyhow!("请输入账号和密码").into());
+    }
+
+    /* 1. 账号校验（与 verify 同一套 my_accounts） */
+    let Some(account_name) = crate::store::my_account_check_login(&st, &acct, &pass).await else {
+        crate::ipinfo::log_login_path(
+            &st,
+            &client_ip,
+            &geo,
+            "",
+            "/api/public/my/login",
+            &acct,
+            false,
+        )
+        .await;
+        return Ok(Json(json!({ "ok": false })));
+    };
+    /* 1.5 账号没绑主播：两个团都放行，token 挂 MY_ANY_KEY（登录后强制绑定） */
+    if let Some(info) = crate::store::my_account_info(&st, &account_name).await {
+        if !info.bound && !info.is_admin {
+            crate::ipinfo::log_login_path(
+                &st,
+                &client_ip,
+                &geo,
+                "",
+                "/api/public/my/login",
+                &account_name,
+                true,
+            )
+            .await;
+            let token = my_token_put(0, String::new(), account_name.clone());
+            return Ok(Json(json!({
+                "ok": true, "personId": 0, "name": account_name,
+                "token": token, "bound": false, "needBind": true,
+            })));
+        }
+    }
+    /* 2. 反查主播所在团：账号名命中的主播可能是男团也可能是女团，都查一遍。 */
+    let mut found: Option<(u64, String, String)> = None; // (person_id, name, team)
+    for team in ["male", "female"] {
+        let sql = format!(
+            "SELECT p.id, p.name FROM person p \
+             WHERE p.deleted_at IS NULL AND p.gender = '{team}' AND p.name = ? \
+             ORDER BY CASE WHEN p.status = 'left' THEN 1 ELSE 0 END, p.id \
+             LIMIT 1"
+        );
+        let rows =
+            mysql::query_with_binds(&st.pools, &sid(&st), &sql, |q| q.bind(account_name.clone()))
+                .await?;
+        if let Some(row) = rows.into_iter().next() {
+            let pid = row
+                .try_get::<i64, _>("id")
+                .map(|v| v as u64)
+                .or_else(|_| row.try_get::<u64, _>("id"))
+                .unwrap_or(0);
+            let name: String = row.try_get::<String, _>("name").unwrap_or_default();
+            found = Some((pid, name, team.to_string()));
+            break;
+        }
+    }
+    match found {
+        Some((pid, name, team)) => {
+            crate::ipinfo::log_login_path(
+                &st,
+                &client_ip,
+                &geo,
+                &team,
+                "/api/public/my/login",
+                &name,
+                true,
+            )
+            .await;
+            let token = my_token_put(pid, team.clone(), name.clone());
+            Ok(Json(json!({
+                "ok": true, "personId": pid, "name": name, "team": team,
+                "token": token, "bound": true
+            })))
+        }
+        None => {
+            /* 3. 管理员观看账号：两个团都放行（token 挂 MY_ANY_KEY），「我的」数据页为空 */
+            if !crate::store::my_account_is_admin(&st, &account_name).await {
+                return Ok(Json(json!({ "ok": false })));
+            }
+            crate::ipinfo::log_login_path(
+                &st,
+                &client_ip,
+                &geo,
+                "",
+                "/api/public/my/login",
+                &account_name,
+                true,
+            )
+            .await;
+            let token = my_token_put(0, String::new(), account_name.clone());
+            Ok(Json(json!({
+                "ok": true, "personId": 0, "name": account_name,
+                "token": token, "admin": true, "bound": true
+            })))
+        }
+    }
+}
+
 /// 登录验证限流：每 IP 每分钟 5 次（登录门撞库防护）
 fn public_write_allow(ip: &str) -> bool {
     VERIFY_LIMITER
@@ -1049,6 +1354,13 @@ fn public_write_allow(ip: &str) -> bool {
 fn public_register_allow(ip: &str) -> bool {
     REGISTER_LIMITER
         .get_or_init(|| VerifyLimiter::new(12))
+        .allow(ip)
+}
+
+/// 授权轮询限流：每 IP 每分钟 120 次（前端 2.5s 轮一次 ≈ 24 次/分，余量给重试）
+fn public_poll_allow(ip: &str) -> bool {
+    REGISTER_POLL_LIMITER
+        .get_or_init(|| VerifyLimiter::new(120))
         .allow(ip)
 }
 
@@ -1110,11 +1422,24 @@ pub struct OauthPollQuery {
     pub state: Option<String>,
 }
 
+/// 姓名校验查询串：`?q=主播姓名`
+#[derive(Deserialize)]
+pub struct NameQuery {
+    pub q: Option<String>,
+}
+
 /// GET /api/public/my/register/oauth/poll?state=：轮询授权结果（原样转发网关状态）
 pub async fn my_register_oauth_poll(
     State(st): State<ArcState>,
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
     Query(q): Query<OauthPollQuery>,
 ) -> ApiResult {
+    /* 审计 2026-10-11：轮询接口会代打 WorkBuddy 网关面板，加一档宽松限流
+    （前端 2.5s 一次，正常远低于 120/分） */
+    if !public_poll_allow(&client_ip_for_limit(addr, &headers)) {
+        return Err(anyhow::anyhow!("尝试太频繁，请稍后再试").into());
+    }
     let state = q.state.unwrap_or_default();
     let state = state.trim();
     if state.is_empty() || state.len() > 128 {
@@ -1166,9 +1491,43 @@ pub async fn my_register_oauth_cancel(
     Ok(Json(json!({ "ok": true })))
 }
 
-/// POST /api/public/my/register {phone, code, team, wbState?}
-/// **手机号 = 账号，验证码 = 密码**；注册成功直接发登录 token（personId=0，bound=false），
-/// 前端进站后强制提示绑定主播。
+/// GET /api/public/my/register/check-name?q=：注册页实时校验主播姓名（免 token）。
+/// 返回 `{ok, name, team, personId}`；查不到 → `{ok:false, error}`。
+/// 只在「开放手机号注册」开着时可用（关着时不泄露台账姓名）。
+pub async fn my_register_check_name(
+    State(st): State<ArcState>,
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
+    Query(q): Query<NameQuery>,
+) -> ApiResult {
+    ensure_register_open(&st).await?;
+    /* 审计 2026-10-11：姓名校验是免 token 的精确匹配查询，不限流就能被脚本拿来做
+    「某个艺名在不在册」的枚举，和注册接口共用同一档限流。 */
+    if !public_register_allow(&client_ip_for_limit(addr, &headers)) {
+        return Err(anyhow::anyhow!("尝试太频繁，请稍后再试").into());
+    }
+    let key = q.q.clone().unwrap_or_default();
+    let key = key.trim();
+    if key.is_empty() {
+        return Ok(Json(json!({ "ok": false, "error": "请输入主播姓名" })));
+    }
+    match crate::store::anchor_lookup_by_name(&st, key).await {
+        Ok(Some((pid, name, team))) => Ok(Json(json!({
+            "ok": true, "name": name, "personId": pid,
+            "team": if team == "male" || team == "female" { team } else { String::new() },
+        }))),
+        Ok(None) => Ok(Json(json!({
+            "ok": false,
+            "error": format!("主播库里没有「{key}」这个姓名，请核对艺名"),
+        }))),
+        Err(e) => Ok(Json(json!({ "ok": false, "error": e }))),
+    }
+}
+
+/// POST /api/public/my/register {phone, code, name, team?, wbState?}
+/// **手机号 = 账号，验证码 = 密码，name = 主播姓名（必须在台账里）**。
+/// 2026-10-11 口径：注册即绑定 —— 校验通过直接以主播姓名建号（bound=1），
+/// 不再「注册完再绑一次」。
 pub async fn my_register(
     State(st): State<ArcState>,
     axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
@@ -1187,27 +1546,82 @@ pub async fn my_register(
         .get("code")
         .and_then(|v| v.as_str())
         .unwrap_or_default();
-    let wb_state = body
-        .get("wbState")
+    let anchor = body
+        .get("name")
         .and_then(|v| v.as_str())
         .unwrap_or_default();
-    // 团别：注册还没有主播，token 先挂在当前这个团（绑定成功后按主播所在团换团）
-    let team = normalize_team(body.get("team").and_then(|v| v.as_str()).unwrap_or(""));
+    /* wb_state 落库列是 VARCHAR(64)：超长会写成 500「写入失败」，这里先截断到 64 字符
+    （审计 2026-10-11；正常网关 state 是 36 位 UUID，截断只影响伪造/异常入参） */
+    let wb_state: String = body
+        .get("wbState")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .trim()
+        .chars()
+        .take(64)
+        .collect();
 
-    let name = crate::store::my_account_register(&st, phone, code, wb_state)
-        .await
-        .map_err(|e| anyhow::anyhow!(e))?;
-    let token = my_token_put(0, team.clone(), name.clone());
-    tracing::info!(phone = %name, team = %team, "展示端手机号注册成功");
+    let (name, person_id, anchor_team) =
+        crate::store::my_account_register(&st, phone, code, anchor, &wb_state)
+            .await
+            .map_err(|e| {
+                /* 审计 2026-10-11：注册失败都是用户可修复的问题（姓名不在台账 / 已注册 /
+                格式不对）→ 400；只有底层库故障才留 500。 */
+                if e.starts_with("查主播失败")
+                    || e.starts_with("查重失败")
+                    || e.starts_with("写入失败")
+                {
+                    ApiError::from(anyhow::anyhow!(e))
+                } else {
+                    ApiError::bad_request(e)
+                }
+            })?;
+    /* 团别以台账为准（主播姓名决定男女团），前端传的 team 只作兜底 */
+    let team = if anchor_team == "male" || anchor_team == "female" {
+        anchor_team
+    } else {
+        normalize_team(body.get("team").and_then(|v| v.as_str()).unwrap_or(""))
+    };
+    let token = my_token_put(person_id.max(0) as u64, team.clone(), name.clone());
+    tracing::info!(phone = %mask_phone(phone), anchor = %name, person = person_id, team = %team, "展示端手机号注册成功（已绑定主播）");
     Ok(Json(json!({
         "ok": true,
         "token": token,
         "name": name,
         "team": team,
-        "personId": 0,
-        "bound": false,
-        "needBind": true,
+        "personId": person_id,
+        "bound": true,
+        "needBind": false,
     })))
+}
+
+/// POST /api/public/my/password/reset {phone}
+/// 忘记密码：把自助注册账号密码重置为手机号后四位。
+pub async fn my_password_reset(
+    State(st): State<ArcState>,
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
+    axum::Json(body): axum::Json<Value>,
+) -> ApiResult {
+    if !public_register_allow(&client_ip_for_limit(addr, &headers)) {
+        return Err(anyhow::anyhow!("尝试太频繁，请稍后再试").into());
+    }
+    let phone = body
+        .get("phone")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let password = crate::store::my_account_reset_password_to_phone_suffix(&st, phone)
+        .await
+        .map_err(|e| {
+            /* 与注册同口径：业务拒绝 400，库层故障 500（审计 2026-10-11） */
+            if e.starts_with("查询账号失败") || e.starts_with("重置失败") {
+                ApiError::from(anyhow::anyhow!(e))
+            } else {
+                ApiError::bad_request(e)
+            }
+        })?;
+    tracing::info!(phone = %mask_phone(phone), "展示端账号密码已重置为手机号后四位");
+    Ok(Json(json!({ "ok": true, "password": password })))
 }
 
 #[derive(Deserialize)]
@@ -1252,7 +1666,19 @@ pub async fn my_bind(State(st): State<ArcState>, axum::Json(body): axum::Json<Va
     };
     let r = crate::store::my_account_bind(&st, &token_name, person_id)
         .await
-        .map_err(|e| anyhow::anyhow!(e))?;
+        .map_err(|e| {
+            /* 与注册/重置同口径（审计 2026-10-11）：已绑定 / 主播不存在 / 已离团
+            都是用户可修的业务拒绝 → 400；库层故障才 500 */
+            if e.starts_with("查账号失败")
+                || e.starts_with("查主播失败")
+                || e.starts_with("查重失败")
+                || e.starts_with("绑定失败")
+            {
+                ApiError::from(anyhow::anyhow!(e))
+            } else {
+                ApiError::bad_request(e)
+            }
+        })?;
     let new_token = my_token_put(r.person_id.max(0) as u64, r.team.clone(), r.name.clone());
     tracing::info!(account = %token_name, anchor = %r.name, team = %r.team, "展示端账号绑定主播");
     crate::events::emit(
@@ -1287,7 +1713,78 @@ pub struct MyQuery {
 
 /* --------------------- 个人页时长口径（2026-10-10 月度时长导入） --------------------- */
 
-/// 个人时长统计的三种窗口
+/// 同期对照的三个「上期」窗口（1.0.1）：昨日 / 上月 / 去年同期（去年 YTD 至同日）。
+/// 集中成结构便于单测校验 SQL 形状（wave_reliable / 窗口口径）。
+pub struct PrevPeriods {
+    /// 上一业务日（来自 get_available_dates，非自然日）
+    pub day: Option<String>,
+    /// 上一个自然月（YYYY-MM）
+    pub month: String,
+    /// 去年（YYYY），同期 = 去年年初至去年今天（闰日安全：2/29 → None 则取整年）
+    pub year: String,
+    /// 去年今天（YYYY-MM-DD）；闰日无对应时为 None（按整年算）
+    pub year_until: Option<String>,
+}
+
+/// 由最新业务日推出三个上期窗口。today 为空（库里没数据）→ 全 None/空，前端显示 —。
+pub fn prev_periods_of(today: &str) -> PrevPeriods {
+    use chrono::Datelike as _;
+    let parsed = chrono::NaiveDate::parse_from_str(today, "%Y-%m-%d").ok();
+    let month = parsed
+        .map(|d| d.format("%Y-%m").to_string())
+        .or_else(|| today.get(..7).map(str::to_string))
+        .unwrap_or_default();
+    let prev_month = parsed.and_then(|d| d.checked_sub_months(chrono::Months::new(1)));
+    let today_last_year = parsed.and_then(|d| d.checked_sub_months(chrono::Months::new(12)));
+    PrevPeriods {
+        day: None, // 由调用方用 dates[1] 填
+        month: prev_month
+            .map(|d| d.format("%Y-%m").to_string())
+            .unwrap_or(month),
+        year: (parsed.map(|d| d.year() - 1).unwrap_or_default()).to_string(),
+        year_until: today_last_year.map(|d| d.format("%Y-%m-%d").to_string()),
+    }
+}
+
+/// 本人三个上期音浪（一条 SQL 条件聚合）。零行 / 无数据 → 对应项 NULL（显示 —，区别于真 0）。
+pub fn self_prev_wave_sql(p: &PrevPeriods) -> String {
+    let day_clause = match &p.day {
+        Some(d) => format!(
+            "CAST(SUM(CASE WHEN DATE_FORMAT(biz_date, '%Y-%m-%d') = '{d}' THEN wave END) AS SIGNED) AS pd"
+        ),
+        None => "CAST(NULL AS SIGNED) AS pd".to_string(),
+    };
+    let until = p
+        .year_until
+        .as_ref()
+        .map(|u| format!(" AND biz_date <= '{u}'"))
+        .unwrap_or_default();
+    format!(
+        "SELECT {day_clause}, \
+         CAST(SUM(CASE WHEN DATE_FORMAT(biz_date, '%Y-%m') = '{m}' THEN wave END) AS SIGNED) AS pm, \
+         CAST(SUM(CASE WHEN DATE_FORMAT(biz_date, '%Y') = '{y}'{until} THEN wave END) AS SIGNED) AS py \
+         FROM daily_metric WHERE person_id = {{pid}} AND wave_reliable = 1",
+        m = p.month,
+        y = p.year,
+    )
+}
+
+/// 直系徒弟的日/月/年音浪（一条 SQL 条件聚合）。
+/// 口径与 my() 自身卡片一致：只过滤 deleted_at（软删的不算），不过滤 status（离队的音浪照算，
+/// 与「本人自身统计不看 status」一致），不合并副号 wave_snapshot（已知边界，docs/10 §6）。
+pub fn disciple_wave_sql(person_id: u64) -> String {
+    format!(
+        "SELECT \
+         CAST(SUM(CASE WHEN DATE_FORMAT(d.biz_date, '%Y-%m-%d') = '{{today}}' THEN d.wave END) AS SIGNED) AS d_wave, \
+         CAST(SUM(CASE WHEN DATE_FORMAT(d.biz_date, '%Y-%m') = '{{month}}' THEN d.wave END) AS SIGNED) AS m_wave, \
+         CAST(SUM(CASE WHEN DATE_FORMAT(d.biz_date, '%Y') = '{{year}}' THEN d.wave END) AS SIGNED) AS y_wave \
+         FROM daily_metric d \
+         WHERE d.wave_reliable = 1 \
+         AND d.person_id IN (SELECT id FROM person WHERE master_id = {person_id} AND deleted_at IS NULL)"
+    )
+}
+
+/// 个人页时长统计的三种窗口
 pub enum MinutesScope<'a> {
     Month(&'a str),
     Year(&'a str),
@@ -1407,11 +1904,16 @@ pub async fn my(
         .map(str::to_string)
         .unwrap_or_else(|| chrono::Local::now().format("%Y").to_string());
 
+    /* 同期对照（1.0.1）：昨日 = 上一业务日（与日榜名次变动同口径）、上月、去年同期。 */
+    let prev = prev_periods_of(&today);
+    let mut prev = prev;
+    prev.day = dates.get(1).cloned();
+
     /* 个人各口径音浪（P1-7：与榜单口径一致，只聚合可信行 wave_reliable=1；
     total 的口径选择见 repos::get_waves 注释 —— 含基线日，但基线日行本身
     wave_reliable=0 不可信，被行级过滤后不影响数值，只保留在日期轴上）。 */
     let zero = || json!({ "wave": 0, "minutes": 0 });
-    let daily = if s.daily && !today.is_empty() {
+    let mut daily = if s.daily && !today.is_empty() {
         Some(
             one(
                 &st,
@@ -1478,6 +1980,47 @@ pub async fn my(
     }
     total["minutes"] = json!(my_minutes(&st, person_id, &MinutesScope::Total).await?);
 
+    /* 同期对照（1.0.1）：本人三个上期音浪，一条 SQL。上期没数据 → NULL → 前端不显示差值。 */
+    let mut prev_wave_map: HashMap<&str, Option<i64>> = HashMap::new();
+    if s.wave && !today.is_empty() {
+        let sql = self_prev_wave_sql(&prev).replace("{pid}", &person_id.to_string());
+        let source = sid(&st);
+        if let Some(r) = mysql::query(&st.pools, &source, &sql)
+            .await?
+            .into_iter()
+            .next()
+        {
+            let get = |col: &str| -> Option<i64> {
+                r.try_get::<i64, _>(col)
+                    .ok()
+                    .or_else(|| r.try_get::<Option<i64>, _>(col).ok().flatten())
+            };
+            prev_wave_map.insert("daily", get("pd"));
+            prev_wave_map.insert("monthly", get("pm"));
+            prev_wave_map.insert("yearly", get("py"));
+        }
+    }
+    let attach_prev = |v: &mut Value, key: &str| {
+        if let Some(o) = v.as_object_mut() {
+            o.insert(
+                "prevWave".into(),
+                match prev_wave_map.get(key) {
+                    Some(Some(n)) => json!(n),
+                    _ => Value::Null,
+                },
+            );
+        }
+    };
+    if let Some(v) = daily.as_mut() {
+        attach_prev(v, "daily");
+    }
+    if let Some(v) = monthly.as_mut() {
+        attach_prev(v, "monthly");
+    }
+    if let Some(v) = yearly.as_mut() {
+        attach_prev(v, "yearly");
+    }
+
     let source = sid(&st);
     // 团内名次（按累计）。口径与 daily 榜单对齐：离队的不占名次，
     // 否则粉丝页显示的名次会和榜单差几个人，对不上。
@@ -1517,7 +2060,6 @@ pub async fn my(
 
     /* 数值显隐（与每日报告同一套后台开关）：关「音浪数值」→ wave=null；
     关「直播时长」→ minutes=null。名次/人数不是数值，照常下发。 */
-    let mut daily = daily;
     for v in [&mut daily, &mut monthly, &mut yearly]
         .into_iter()
         .flatten()
@@ -1535,6 +2077,76 @@ pub async fn my(
     if !s.duration {
         total["minutes"] = Value::Null;
     }
+    if !s.wave {
+        // 音浪数值都隐藏了，同期对照也不能给（可反推）
+        for v in [&mut daily, &mut monthly, &mut yearly]
+            .into_iter()
+            .flatten()
+        {
+            if let Some(o) = v.as_object_mut() {
+                o.insert("prevWave".into(), Value::Null);
+            }
+        }
+    }
+
+    /* 徒弟提成（1.0.1）：直系徒弟可信音浪 ÷ 比例。只在有直系徒弟时下发；
+    排除名单里的师傅（鹏先生等）拿不到；管理员视角（personId=0）没有。 */
+    let commission = if s.commission_enabled && s.wave && person_id > 0 && !today.is_empty() {
+        let c = CommissionSettings::load(&st).await;
+        let excluded = c.excluded_master_ids.contains(&person_id);
+        let source = sid(&st);
+        let count = if excluded {
+            0
+        } else {
+            mysql::query(
+                &st.pools,
+                &source,
+                format!(
+                    "SELECT COUNT(*) AS n FROM person \
+                     WHERE master_id = {person_id} AND deleted_at IS NULL"
+                )
+                .as_str(),
+            )
+            .await?
+            .into_iter()
+            .next()
+            .map(|r| row_i64(&r, "n"))
+            .unwrap_or(0)
+        };
+        if excluded || count <= 0 {
+            Value::Null
+        } else {
+            let sql = disciple_wave_sql(person_id)
+                .replace("{today}", &today)
+                .replace("{month}", &month)
+                .replace("{year}", &year);
+            let r = mysql::query(&st.pools, &source, &sql)
+                .await?
+                .into_iter()
+                .next();
+            // 无行/NULL 都按 0 折算（徒弟都在册但没音浪 = ¥0，卡片仍显示）
+            let g = |col: &str| -> i64 {
+                r.as_ref()
+                    .and_then(|row| {
+                        row.try_get::<i64, _>(col)
+                            .ok()
+                            .or_else(|| row.try_get::<Option<i64>, _>(col).ok().flatten())
+                    })
+                    .unwrap_or(0)
+            };
+            let rate = c.wave_per_yuan;
+            let yuan = |w: i64| ((w as f64 / rate) * 100.0).round() / 100.0;
+            json!({
+                "rate": rate,
+                "discipleCount": count,
+                "daily":   { "wave": g("d_wave"), "yuan": yuan(g("d_wave")) },
+                "monthly": { "wave": g("m_wave"), "yuan": yuan(g("m_wave")) },
+                "yearly":  { "wave": g("y_wave"), "yuan": yuan(g("y_wave")) },
+            })
+        }
+    } else {
+        Value::Null
+    };
 
     Ok(Json(json!({
         "published": true,
@@ -1545,6 +2157,7 @@ pub async fn my(
         "monthly": monthly,
         "yearly": yearly,
         "total": total,
+        "commission": commission,
         "teamRank": team_rank,
         "teamSize": team_size,
         // 管理员观看账号（personId=0）：前端据此隐藏「绑定抖音号」表单

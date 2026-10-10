@@ -7,11 +7,45 @@
 /// 「当日导入音浪 < NOT_LIVE_WAVE_THRESHOLD」= 未开播。此前 report.rs（日报）按
 /// is_live 标记、public_teams.rs（展示端）按 wave<3、push.rs（推送榜）按 wave>=3，
 /// 三套口径同一个人会得出不同的「未播」结论。现在日报 / 展示端 / 推送一律引用这里。
+///
+/// ⚠️ 口径边界（2026-10-11 用户确认，别当 bug 修）：**当天没有导入行的，就是「没导入」**，
+/// 不算未播天。所有未播聚合都只扫 `daily_metric` 里**存在**的行：
+/// - 有行且 `wave < 2`  → 未播天 +1
+/// - 有行且 `wave >= 2` → 已播
+/// - **完全没有行**      → 不参与统计，既不加也不判
+///
+/// 所以 `absentDays` 的准确语义是「当月**有数据行**且音浪 < 2 的天数」，
+/// 不是「当月日历天里没播的天数」。缺采的日子不算进去，这是有意的：
+/// 漏采集 ≠ 没开播，把两者混在一起会让"运营忘了导"看起来像"主播没播"。
 pub const NOT_LIVE_WAVE_THRESHOLD: i64 = 2;
 
 /// 统一的未播判定：当日音浪 < 2 = 未播（report 日报 / public_teams 榜单 / push 推送共用）
 pub fn is_live_wave(wave: i64) -> bool {
     wave >= NOT_LIVE_WAVE_THRESHOLD
+}
+
+/// 「当月未播天数」的唯一 SQL 模板：`{month}` 占位为 `YYYY-MM`。
+///
+/// 日报（report.rs）与展示端榜单（public_teams.rs）以前各抄一份、逐字符相同。
+/// 抄两份就等于埋两颗雷：哪天有人只改一处，同一个人的未播天数在两个页面
+/// 就不一样了。抽成常量后，口径只有这一处，改哪边都跟着动。
+///
+/// 语义严格对应上面的口径注释：**只扫存在的行**。所以是
+/// `SUM(CASE WHEN wave < 阈值 THEN 1 ELSE 0 END)`，不按日历天补零。
+pub const MONTH_ABSENT_SQL: &str =
+    "SELECT person_id, CAST(SUM(CASE WHEN wave < {NOT_LIVE_WAVE_THRESHOLD} THEN 1 ELSE 0 END) AS SIGNED) AS n \
+     FROM daily_metric WHERE wave_reliable = 1 \
+       AND DATE_FORMAT(biz_date, '%Y-%m') = '{month}' GROUP BY person_id";
+
+/// 生成「当月未播天数」的 SQL。month 必须是 `YYYY-MM`（调用方已过 `valid_date_*`），
+/// 这里只做字符串替换，不拼任何外部输入。
+pub fn month_absent_sql(month: &str) -> String {
+    MONTH_ABSENT_SQL
+        .replace(
+            "{NOT_LIVE_WAVE_THRESHOLD}",
+            &NOT_LIVE_WAVE_THRESHOLD.to_string(),
+        )
+        .replace("{month}", month)
 }
 
 /// A：douyinxs —— person / account / daily_metric
@@ -393,5 +427,70 @@ mod tests {
         assert!(STREAMERS_SQL.contains("gender"));
         assert!(PREV_CUMULATIVE_SQL.contains("cumulative_wave"));
         assert!(BATCH_LIST_SQL.contains("ok_rows"), "002 迁移后的审计字段");
+    }
+
+    // ---- 未播口径（2026-10-09 用户定：当日音浪 < 2 = 未播）----
+    // 这三处曾经各用各的判据，导致同一个人被判出不同结论。测试守住常量和边界，
+    // 让任何人想改口径都必须先改这里。
+
+    #[test]
+    fn not_live_threshold_is_two() {
+        assert_eq!(NOT_LIVE_WAVE_THRESHOLD, 2, "业务口径：当日音浪 < 2 = 未播");
+    }
+
+    #[test]
+    fn is_live_wave_boundary() {
+        // 严格小于 2 才算未播：1 未播，2 播了
+        assert!(!is_live_wave(0), "0 未播");
+        assert!(!is_live_wave(1), "1 未播（阈值边界）");
+        assert!(is_live_wave(2), "2 已播（阈值边界）");
+        assert!(is_live_wave(3), "3 已播");
+        assert!(is_live_wave(1_000_000), "大额音浪已播");
+    }
+
+    #[test]
+    fn is_live_wave_handles_negative() {
+        // 表里 wave 是有符号整型；脏数据（负数）不该被当成「已播」
+        assert!(!is_live_wave(-1), "负数视为未播");
+        assert!(!is_live_wave(i64::MIN), "极小值视为未播");
+    }
+
+    #[test]
+    fn is_live_wave_matches_threshold_constant() {
+        // 防止有人只改常量不改函数（或反过来），两边必须始终自洽
+        assert!(!is_live_wave(NOT_LIVE_WAVE_THRESHOLD - 1));
+        assert!(is_live_wave(NOT_LIVE_WAVE_THRESHOLD));
+    }
+
+    /// 「当天没导入行 = 没导入，不算未播天」是定稿口径，用测试钉住，
+    /// 免得后来人看见「缺采的日子没算进去」当成 bug 好心改掉。
+    ///
+    /// 聚合只扫 `daily_metric` 存在的行：有行且 wave<2 → 未播 +1；无行 → 不参与。
+    /// 这里直接断言 SQL 的形状：必须是「按人按月 SUM(CASE WHEN wave < 阈值)」，
+    /// 且不能出现把「无行」折算成天数的写法（比如按日历天补零）。
+    #[test]
+    fn absent_days_only_counts_existing_rows() {
+        let month_sql = month_absent_sql("2999-01");
+        assert!(
+            month_sql.contains("SUM(CASE WHEN wave < 2"),
+            "月未播天数必须按「有数据行且音浪低于阈值」累加：{month_sql}"
+        );
+        assert!(
+            month_sql.contains("wave_reliable = 1"),
+            "月未播天数只算可信行：{month_sql}"
+        );
+        assert!(
+            month_sql.contains("DATE_FORMAT(biz_date"),
+            "月份过滤要带年份，否则跨年会串月：{month_sql}"
+        );
+        // 不允许按日历天补零——那会把「没导入」算成「未播」
+        for bad in ["COALESCE", "GENERATE_SERIES", "calendar"] {
+            assert!(
+                !month_sql
+                    .to_ascii_lowercase()
+                    .contains(&bad.to_ascii_lowercase()),
+                "月未播天数不得按日历天补零（缺采 ≠ 未播）：{month_sql}"
+            );
+        }
     }
 }

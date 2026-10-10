@@ -20,24 +20,18 @@ rust/crates/pk-server   HTTP 服务：axum + sqlx(MySQL) + 静态托管
   ├─ admin.rs           数据管理 API（/api/admin/*）：导入 / 主播台账 / 采集
   ├─ bot/               机器人：QQ / 微信 iLink，确定性命令路由
   └─ import/            CSV / 粘贴 / 补录，字段映射 + 校验报告
-apps/douyin-web          现役运营后台（React + Vite，history 路由挂在 /admin 下）
+apps/douyin-web      现役运营后台（React + Vite，history 路由挂在 /admin 下）—— 唯一前端
   ├─ src/lib/router.ts       路由表 + popstate：/admin/data|import|streamers|claims|lineage|group|bots
   ├─ src/DashboardPage.tsx   数据页：概况 KPI / Top10 / 未播预警 / 团别趋势
   ├─ src/ImportPage.tsx      数据导入：拖拽或选文件 → 弹窗预览 → 确认入库 → 批次列表
   ├─ src/StreamerPage.tsx    主播台账（右键：编辑 / 师傅 / 抖音号 / 我的账号 / 合并 / 删除）
   ├─ src/LineagePage.tsx     族谱画布；src/BotPage.tsx 机器人（QQ/微信）配置
   └─ src/pk/GroupPage.tsx    PK 分组看板（拖拽、约束、方案、导出）
-apps/web                旧管理端（hash 路由 /#/…，已冻结只做兼容）
-  ├─ components/AuthGate.tsx   登录门
-  ├─ components/NavBar.tsx     顶栏 + 三段导航（首页 / 主播数据 / PK 分组）
-  ├─ components/HomeView.tsx   首页：数据新鲜度 + 方案概况 + 入口
-  ├─ components/StreamerView.tsx 主播数据：排行、库检索、CSV 导出
-  ├─ components/BoardView.tsx  PK 分组：解析、拖拽、均衡、导出
-  ├─ components/ShareView.tsx  对外展示页（/s/:planId，免登录）
-  ├─ lib/nav.ts                hash 路由（刷新 / 前进后退 / 分享链接都落到同一页）
-  └─ styles/                   各页面独立样式，互不污染
-packages/shared         前端仍用的展示工具与类型（算法已全部迁到 Rust，这里只留纯函数）
+apps/server          pk-server (Rust) 的 pnpm 包装：`pnpm dev:api` 直接跑 cargo
 ```
+
+> 2026-10 收敛：旧管理端 `apps/web`（hash 路由）、`packages/shared`、`server-go`
+> 过渡服务已全部删除。前端只剩 `apps/douyin-web`，后端只剩 Rust `pk-server`。
 
 数据流：前端把 players 发到 `/api/group/arrange`（自动分组）或 `/api/group/inspect`（拖拽后体检），
 后端返回分组结果 + 均衡度 + 约束冲突，前端只负责展示。这样算法只有一份实现，不会前后端不一致。
@@ -62,28 +56,33 @@ packages/shared         前端仍用的展示工具与类型（算法已全部�
 导航项是真链接，刷新、前进后退、分享链接都停在同一页；认不出的路径 replace 回
 `/admin/data`。开发态（`pnpm --filter @pk/douyin-web dev`，5173）不带前缀，base 自动识别。
 
-旧管理端 `apps/web` 的 hash 路由 `/#/home`、`/#/data`、`/#/board` 已冻结，只做兼容。
+~~旧管理端 `apps/web` 的 hash 路由~~ 已于 2026-10 删除，前端只有 `apps/douyin-web` 一套。
 
 **鉴权**（`rust/crates/pk-server/src/auth.rs`）
 
-- `.env` 里设了 `ADMIN_PASSWORD` → `/api/*` 全部要口令，`Authorization: Bearer <token>`
+- `/api/*` 需要管理员口令，`Authorization: Bearer <token>`
 - 只有 `/api/public/*`、`/api/auth/login`、`/api/health` 免鉴权
 - 口令换 token 走 `POST /api/auth/login`，token 只存内存，进程重启即失效，空闲 8 小时自动清理
-- **没设 `ADMIN_PASSWORD` 时后端完全不鉴权**（本地开发方便），启动日志会打警告；生产务必配上
+- 管理员口令优先读 `ADMIN_PASSWORD`（可轮换、不用重编二进制）；没配时回落到内置兜底口令并打 WARN，生产请在 `.env` 里配置
 - CORS 默认只允许同源（前后端同端口），跨域时用 `CORS_ORIGINS` 显式放行
 
 **展示端「我的」账号与注册**（`public_teams.rs` + `store.rs` + `wbgateway.rs`）
 
 - 登录：手机号（或姓名）+ 密码；账号在后台「机器人 → 我的页面账号」维护，也可由主播自助注册
-- **手机号注册（2026-10-10，默认关闭）**：登录门「注册」页签 —— 手机号 = 账号、短信验证码数字 = 密码；
-  注册时同时调 WorkBuddy 用量看板的「添加账号 (OAuth)」把本人账号加进账号池
-  （授权页本身就是手机号登录，所以不需要自建短信通道）
-- 注册出来的账号 `bound=0`：进站后提醒**绑定主播**，绑定成功后账号名改写成主播姓名（登录仍可用手机号）；
+- **手机号注册（2026-10-10 起，默认关闭；2026-10-11 改为注册即绑定）**：登录门「注册」页签 ——
+  手机号 = 账号、短信验证码数字 = 密码，**注册时还要填主播姓名，且必须在主播台账里查得到**
+  （姓名框失焦即实时校验，查不到的名字无法注册）；注册时同时调 WorkBuddy 用量看板的
+  「添加账号 (OAuth)」把本人账号加进账号池（授权页本身就是手机号登录，所以不需要自建短信通道）
+- 姓名校验通过即**注册即绑定**：账号名 = 台账主播姓名、`bound=1`、团别按台账走，**不用再绑一次**；
+  手机号另存 `phone` 列，所以手机号和姓名都能登录
   **绑定后用户自己不能解绑/换绑，只有管理员能在后台「我的页面账号 → 改绑」**
 - 开关：后台「公开站点设置 → 开放手机号注册」（`myRegister`，**默认关**；关着时登录门与以前完全一样）
-- 网关配置（.env，只在服务端，不下发浏览器）：`WORKBUDDY_PANEL_URL`（默认 `http://147.90.235.187:8788`）、
+- 网关配置（.env，只在服务端，不下发浏览器）：`WORKBUDDY_PANEL_URL`
+  （默认 `http://64.188.8.149:8788`）、
   `WORKBUDDY_PANEL_PASSWORD`（不填 = 注册页隐藏授权步骤）
-- 自检：`node scripts/uicheck-register.mjs [BASE] [管理员口令]`（会写一个随机手机号测试账号并在跑完删掉）
+- 忘记密码：登录门输入注册手机号后点「忘记密码？」，密码重置为手机号后四位；
+  手动账号若没登记手机号仍由管理员在后台重置
+- 自检：`node scripts/check/uicheck-register.mjs [BASE] [管理员口令]`（会写一个随机手机号测试账号并在跑完删掉）
 
 **对外展示页**（`rust/crates/pk-server/src/public.rs`）
 
@@ -99,23 +98,24 @@ packages/shared         前端仍用的展示工具与类型（算法已全部�
 
 ```bash
 # 后端（Rust）
-cd rust && cargo run -p pk-server          # 默认 8787，读 ../apps/server/.env
+cd rust && cargo run -p pk-server          # 默认 8787，读 rust/.env
 
 # 前端（现役管理端 douyin-web）
 pnpm install && pnpm -F @pk/douyin-web dev  # 5173，/api 代理到 8787
 ```
 
-数据库凭据在 `apps/server/.env`（不要提交到仓库）。Rust 端自己解析 `.env`（值里有中文和空格，dotenvy 会报错）。
+数据库凭据在 `rust/.env`（不要提交到仓库；部署态放在 `deploy/.env`，可从
+`deploy/.env.example` 复制）。Rust 端自己解析 `.env`（值里有中文和空格，dotenvy 会报错）。
 
 ## 本地自检命令清单
 
 | 命令 | 用途 | 是否写库 |
 | --- | --- | --- |
 | `cd rust && cargo test --workspace` | pk-core / pk-server 全部单元与集成测试 | 不写（测试自建/自清测试数据） |
-| `node scripts/uicheck-admin.mjs [BASE] [口令]` | 管理端（apps/douyin-web）路由与渲染自检：深链、刷新、导航、导入预览弹窗 | **默认会写**：第 7 段写 2019-01-01 测试日并当场删除；`UICHECK_READONLY=1` 时跳过该段，只跑路由与渲染断言（部署脚本默认只读） |
-| `node scripts/uicheck-register.mjs [BASE] [口令]` | 展示端「手机号注册」链路自检：注册 → WorkBuddy 授权 → 绑定主播 | **会写**一行 my_accounts（随机手机号），跑完用管理员接口删掉；只对测试/本机环境跑 |
+| `node scripts/check/uicheck-admin.mjs [BASE] [口令]` | 管理端（apps/douyin-web）路由与渲染自检：深链、刷新、导航、导入预览弹窗 | **默认会写**：第 7 段写 2019-01-01 测试日并当场删除；`UICHECK_READONLY=1` 时跳过该段，只跑路由与渲染断言（部署脚本默认只读） |
+| `node scripts/check/uicheck-register.mjs [BASE] [口令]` | 展示端「手机号注册」链路自检：WorkBuddy 授权 → 姓名校验 → 注册即绑定 → 手机号回登录 | **会写**一行 my_accounts（随机手机号），跑完用管理员接口删掉；只对测试/本机环境跑 |
 
-部署自检走的是只读形态：`scripts/deploy-host.sh` / `scripts/deploy-rk3318.sh` 内部以
+部署自检走的是只读形态：`scripts/deploy/host.sh` / `scripts/deploy/rk3318.sh` 内部以
 `UICHECK_READONLY=1 PREFIX=/admin` 调 `uicheck-admin.mjs`；全量自检（含入库回环）
 请在测试环境手动跑。
 
@@ -123,22 +123,21 @@ pnpm install && pnpm -F @pk/douyin-web dev  # 5173，/api 代理到 8787
 
 > **现役生产是 147**（`147.90.235.187` / Debian 12 x86_64，`/opt/pk-server`，
 > 对外 `https://pk.subisle.com`）。rk3318（aarch64 Docker）是备用目标，
-> 64 / 115 的历史流程仅作参考。数据上线见 `scripts/upload-db-vps147.sh`
+> 64 / 115 的历史流程仅作参考。数据上线见 `scripts/deploy/upload-db-vps147.sh`
 > （本机 `douyin_dev` 整体 dump → 灌进 147 的 `pk-mariadb`）。
 
 构建全部走 GitHub Actions（`.github/workflows/ci.yml`），本地不产出部署物：
 - `rust` job：`cargo test` / `cargo clippy -D warnings` / `cargo fmt --check`
-- `web` job：`tsc --noEmit` + `vite build`（`@pk/web` 与现役 `@pk/douyin-web` 都构建）
-- `docker` job：构建并推 ghcr 镜像（`pk-server` / `douyin-server`），默认 amd64；
+- `web` job：`tsc --noEmit` + `vite build`（只构建现役 `@pk/douyin-web`）
+- `docker` job：构建并推 ghcr 镜像（只有 `pk-server`），默认 amd64；
   `arm64-bundle.yml` / `amd64-bundle.yml` 另出「可 `docker load` 的离线包」挂 rolling release
 
-镜像里的前端固定是 `apps/douyin-web`（现役统一后台，history 路由挂 `/admin`）；
-`apps/web` 已冻结，只在 Dockerfile 的 install 阶段用于对齐 pnpm-lock，不再打进镜像。
+镜像里的前端固定是 `apps/douyin-web`（现役统一后台，history 路由挂 `/admin`）。
 
 一条命令发布到 147：
 
 ```bash
-PK147_PASS='<root 口令>' scripts/deploy-147.sh
+PK147_PASS='<root 口令>' scripts/deploy/147.sh
 # 等 CI 绿灯 → 触发 amd64 镜像包 → scp → docker load → 从镜像里取二进制 + 前端
 # → 备份替换 /opt/pk-server/{pk-server,web} → pk-server migrate → systemctl restart → 只读自检
 ```
@@ -153,14 +152,14 @@ PK147_PASS='<root 口令>' scripts/deploy-147.sh
 一条命令发布到 rk3318（备用）：
 
 ```bash
-scripts/deploy-rk3318.sh     # 等 CI → 下载 arm64 镜像包 → docker load → compose up → pk-server migrate → 只读自检
+scripts/deploy/rk3318.sh     # 等 CI → 下载 arm64 镜像包 → docker load → compose up → pk-server migrate → 只读自检
 ```
 
 通用 compose（`deploy/docker-compose.yml`）：
 
 ```bash
 cd deploy
-cp .env.example .env   # 至少填 ADMIN_PASSWORD
+cp .env.example .env
 docker compose -f docker-compose.yml up -d
 ```
 
@@ -198,7 +197,7 @@ caddy reload
 
 约束在 Rust 端权威实现（`pk-core/src/constraints.rs`），前端启动时从
 `GET /api/group/constraints` 拉同一份副本用于高亮展示，不自己再抄一份
-（`packages/shared/src/constraints.ts` 里的常量只作后端连不上时的兜底）。
+（后端连不上时用 `apps/douyin-web/src/pk/rules.ts` 里的常量兜底）。
 
 组数不足以满足时**不会静默失败**，而是在看板上明确报出未满足的约束。
 
@@ -233,8 +232,30 @@ caddy reload
 「sqlpub douyinxs 远程源库 + 64 连不上 MySQL」是单库决策（2026-10-09，docs/00 §4）之前的
 问题：现在业务与运行时状态统一在 MySQL（本机 `douyin_dev` / 生产 MariaDB `douyin`），
 不再从 sqlpub 同步，生产不配 `DB_A_*` 远程源，`sync.rs` 与「同步主播」命令均已删除。
-上线 = `scripts/upload-db-rk3318.sh` 把本机库整体 dump → scp → 恢复进生产 MariaDB
+上线 = `scripts/deploy/upload-db-rk3318.sh` 把本机库整体 dump → scp → 恢复进生产 MariaDB
 （灌库前会先在目标机备份，见脚本头注释）。
+
+### 远程备份库（2026-10-11）
+
+生产库仍是 MySQL/MariaDB 唯一事实源；另有远程 MySQL/MariaDB 备份库。147 部署会安装
+`/opt/pk-server/backup-to-remote.sh`，每次导入成功后异步把生产库 dump 并导入远程备份库。
+脚本带 `flock` 并发去重和数据指纹去重；备份失败只记录日志，不影响导入结果。
+
+在 `/opt/pk-server/backup.env` 配置远程库（权限 `0600`）：
+
+```bash
+DB_BACKUP_HOST=backup.example.com
+DB_BACKUP_PORT=3306
+DB_BACKUP_USER=douyin_backup
+DB_BACKUP_PASSWORD='...'
+DB_BACKUP_NAME=douyin_backup
+DB_BACKUP_CONTAINER=pk-mariadb
+DB_BACKUP_CREATE=0
+```
+
+先在远程库执行 `CREATE DATABASE douyin_backup CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;`，
+并给账号目标库的 `SELECT/INSERT/UPDATE/DELETE/CREATE/DROP/ALTER/INDEX/LOCK TABLES` 权限。
+手动备份执行 `/opt/pk-server/backup-to-remote.sh`。
 
 ## 导入格式：音浪按日 / 时长按月
 
@@ -324,7 +345,7 @@ person 的行先合并再入库**（`admin::merge_rows_by_person`），合并口
   （`limit` / `q` / `kind` / `blocked`，返回 `items` + 今日访问 / 独立 IP / 放行 / 拦截 / 登录）；
   同页新增「IP 查询」面板：`GET /api/admin/ip-lookup?ip=…` 手动查归属地（不读不写缓存）。
 - **本地开发**：环境变量 `IP_GATE_DISABLED=1` 关闭地区拦截（**访问日志照记**）；生产留空。
-- **本地自检**：本机不在豫 / 皖时，跑 `scripts/uicheck-register.mjs` 等直连 `/api/public/*`
+- **本地自检**：本机不在豫 / 皖时，跑 `scripts/check/uicheck-register.mjs` 等直连 `/api/public/*`
   的自检要用 `IP_GATE_DISABLED=1` 的服务，否则接口 403 会让自检误判。
 
 ## 已知事项

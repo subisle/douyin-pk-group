@@ -75,6 +75,9 @@ impl IntoResponse for ApiError {
             || msg.contains("reject 模式");
         let status = if msg.contains("写库不可用") {
             StatusCode::SERVICE_UNAVAILABLE
+        } else if msg.contains("太频繁") {
+            // 审计 2026-10-11：限流被拒语义是 429，不是 500（也不该记 error 日志）
+            StatusCode::TOO_MANY_REQUESTS
         } else if bad_request {
             StatusCode::BAD_REQUEST
         } else {

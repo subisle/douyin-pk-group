@@ -284,8 +284,8 @@ fn is_blank(rec: &[String]) -> bool {
     rec.iter().all(|f| f.trim().is_empty())
 }
 
-/// 解析整个 CSV。返回类型 + 行。
-pub fn parse(text: &str) -> anyhow::Result<(Kind, Vec<CsvRow>)> {
+/// 解析整个 CSV。返回类型 + 行（含表头里时长列是否存在，见 [`ParseOut`]）。
+pub fn parse(text: &str) -> anyhow::Result<(Kind, ParseOut)> {
     let mut lines = text.lines().filter(|l| !l.trim().is_empty());
     let Some(header_line) = lines.next() else {
         anyhow::bail!("CSV 是空的");
@@ -345,7 +345,32 @@ pub fn parse(text: &str) -> anyhow::Result<(Kind, Vec<CsvRow>)> {
         }
         rows.push(row);
     }
-    Ok((kind, rows))
+    Ok((
+        kind,
+        ParseOut {
+            rows,
+            has_dur_col: dur_col >= 0,
+        },
+    ))
+}
+
+/// [`parse`] 的结果：解析出的行 + 表头里有没有时长列。
+///
+/// 为什么要把 `has_dur_col` 带出来：月度时长入口靠它区分两种「这一行没有时长」——
+/// 文件压根没有时长列（不是月时长文件，应整体判空，让前端提示换文件）vs
+/// 有时长列但这一行写坏了（必须报出来，否则那个人整月时长在月榜上是 0 且无提示）。
+pub struct ParseOut {
+    pub rows: Vec<CsvRow>,
+    pub has_dur_col: bool,
+}
+
+// 让 `parse(...)` 的结果能像以前那样直接当行的集合用（len / 下标 / 迭代），
+// 需要「有没有时长列」这个新增信息时再走 `.has_dur_col`。
+impl std::ops::Deref for ParseOut {
+    type Target = Vec<CsvRow>;
+    fn deref(&self) -> &Self::Target {
+        &self.rows
+    }
 }
 
 /// 月度时长文件解析：只保留「时长」列有值的行，绝不把音浪列当数据。
@@ -356,10 +381,20 @@ pub fn parse(text: &str) -> anyhow::Result<(Kind, Vec<CsvRow>)> {
 /// 比例（35 / 40 / 50）当成每人的音浪值，所以月度时长走独立入口，只取时长。
 pub fn parse_duration_only(text: &str) -> Vec<CsvRow> {
     match parse(text) {
-        Ok((_, rows)) => rows
-            .into_iter()
-            .filter(|r| r.minutes.is_some() && !r.name.is_empty())
-            .collect(),
+        Ok((_, out)) => {
+            if !out.has_dur_col {
+                // 没有时长列 → 不是月度时长文件，整体判空（前端据此提示换文件 / 切回按日）
+                return Vec::new();
+            }
+            out.rows
+                .into_iter()
+                // 有名字/认人信息就行：时长解析失败的行保留，err 里带着原因，
+                // 由上层计进 skipped 报告——否则整人静默消失，月榜上显示为 0。
+                .filter(|r| {
+                    !r.name.is_empty() || !r.anchor_id.is_empty() || !r.douyin_no.is_empty()
+                })
+                .collect()
+        }
         Err(_) => Vec::new(),
     }
 }

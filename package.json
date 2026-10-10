@@ -1,17 +1,16 @@
 {
   "name": "douyin-pk-group",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
-  "description": "抖音 PK 挑战赛均衡分组程序（Rust 后端，只读接入 douyinxs 数据库）",
+  "description": "抖音 PK 挑战赛均衡分组程序（Rust 后端 axum + sqlx，MySQL/MariaDB 为唯一事实源）",
   "scripts": {
-    "dev": "concurrently -n api,web -c blue,green \"pnpm -F @pk/api dev\" \"pnpm -F @pk/web dev\"",
+    "dev": "concurrently -n api,web -c blue,green \"pnpm -F @pk/api dev\" \"pnpm -F @pk/douyin-web dev\"",
     "dev:api": "pnpm -F @pk/api dev",
-    "dev:web": "pnpm -F @pk/web dev",
-    "build": "pnpm -F @pk/web build && pnpm -F @pk/douyin-web build && cd rust && cargo build --release -p pk-server",
-    "test": "pnpm test:go && cd rust && cargo test --workspace",
-    "test:go": "cd server-go && go test ./... && go vet ./...",
+    "dev:web": "pnpm -F @pk/douyin-web dev",
+    "build": "pnpm -F @pk/douyin-web build && cd rust && cargo build --release -p pk-server",
+    "test": "bash scripts/check/contract.sh && cd rust && cargo test --workspace",
     "check:compose": "if docker compose version >/dev/null 2>&1; then DC='docker compose'; else DC=docker-compose; fi; TD=$(mktemp -d) && : > \"$TD/.env\"; rc=0; MARIADB_ROOT_PASSWORD=x DOUYIN_WRITER_PASSWORD=x PK_READER_PASSWORD=x DOUYIN_MIGRATOR_PASSWORD=x $DC -f deploy/rk3318/docker-compose.yml config > /dev/null || rc=1; $DC -f deploy/docker-compose.yml --project-directory \"$TD\" config > /dev/null || rc=1; rm -rf \"$TD\"; [ \"$rc\" = 0 ] && echo 'compose 配置可解析 ✓'; exit $rc",
-    "typecheck": "pnpm -F @pk/web exec tsc --noEmit && pnpm -F @pk/douyin-web exec tsc --noEmit"
+    "typecheck": "pnpm -F @pk/douyin-web exec tsc --noEmit"
   },
   "devDependencies": {
     "concurrently": "^9.1.2",

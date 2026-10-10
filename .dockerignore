@@ -1,10 +1,13 @@
 node_modules
 **/node_modules
 rust/target
-apps/web/dist
 apps/douyin-web/dist
 **/tsconfig.tsbuildinfo
-apps/server/data
 .git
 *.db
 .workbuddy
+.local-assets
+*.png
+*.jpg
+*.jpeg
+*.xlsx

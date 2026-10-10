@@ -18,7 +18,19 @@ export default function BotPage() {
   const [status, setStatus] = useState<any>(null)
   const [sessions, setSessions] = useState<any[]>([])
   const [error, setError] = useState('')
-  const [qr, setQr] = useState<{ qrcode: string; url: string } | null>(null)
+  const [qr, setQr] = useState<{ qrcode: string; imgContent?: string; url?: string } | null>(null)
+  const [qrStatus, setQrStatus] = useState<string>('')
+  const [needVerify, setNeedVerify] = useState(false)
+  const [verifyCode, setVerifyCode] = useState('')
+  /** 轮询闭包里读的最新值（state 在 setInterval 闭包里是旧值） */
+  const needVerifyRef = useRef(false)
+  const verifyCodeRef = useRef('')
+  useEffect(() => {
+    needVerifyRef.current = needVerify
+  }, [needVerify])
+  useEffect(() => {
+    verifyCodeRef.current = verifyCode
+  }, [verifyCode])
   const [manualToken, setManualToken] = useState('')
   const pollRef = useRef<number | null>(null)
   /** QQ 机器人凭据（AppID 明文回显，Secret 只回是否已设置） */
@@ -182,21 +194,38 @@ export default function BotPage() {
 
   async function fetchQr() {
     setError('')
+    setQrStatus('')
+    setNeedVerify(false)
+    setVerifyCode('')
     try {
-      const d = await api<{ qrcode: string; url: string }>('/api/admin/bots/weixin/qrcode')
+      const d = await api<{ qrcode: string; imgContent?: string; url?: string }>(
+        '/api/admin/bots/weixin/qrcode',
+      )
       setQr(d)
-      // 轮询扫码状态，扫完自动停
+      // 轮询扫码状态，扫完自动停（1.0.1 全状态机：need_verifycode 出验证码框带 verifyCode 重轮）
       if (pollRef.current) clearInterval(pollRef.current)
       pollRef.current = setInterval(async () => {
         try {
           const r = await api<{ status: string; tokenSaved: boolean; nickname: string }>(
             '/api/admin/bots/weixin/qrcode/check',
-            { method: 'POST', body: JSON.stringify({ qrcode: d.qrcode }) },
+            {
+              method: 'POST',
+              body: JSON.stringify({
+                qrcode: d.qrcode,
+                ...(needVerifyRef.current && verifyCodeRef.current
+                  ? { verifyCode: verifyCodeRef.current }
+                  : {}),
+              }),
+            },
           )
+          setQrStatus(r.status)
+          if (r.status === 'need_verifycode') setNeedVerify(true)
           if (r.tokenSaved) {
             if (pollRef.current) clearInterval(pollRef.current)
             pollRef.current = null
             setQr(null)
+            setNeedVerify(false)
+            setQrStatus('')
             load()
           }
         } catch (e) {
@@ -326,15 +355,34 @@ export default function BotPage() {
             {qr && (
               <div className="qr-box">
                 <p>请用微信扫描（登录后自动保存，无需其他操作）：</p>
+                {qr.imgContent ? (
+                  <img
+                    alt="微信登录二维码"
+                    src={qr.imgContent.startsWith('data:') ? qr.imgContent : `data:image/png;base64,${qr.imgContent}`}
+                    style={{ maxWidth: 240, borderRadius: 8 }}
+                  />
+                ) : qr.url ? (
+                  <p>
+                    <a href={qr.url} target="_blank" rel="noreferrer">
+                      打开二维码链接
+                    </a>
+                  </p>
+                ) : null}
                 <p className="hint">
                   二维码标识：{qr.qrcode}
-                  {qr.url && (
-                    <>
-                      {' '}
-                      · <a href={qr.url} target="_blank" rel="noreferrer">打开二维码链接</a>
-                    </>
-                  )}
+                  {qrStatus && <> · 状态：{qrStatus}</>}
                 </p>
+                {needVerify && (
+                  <div className="row">
+                    <input
+                      placeholder="微信发来的验证码"
+                      value={verifyCode}
+                      onChange={(e) => setVerifyCode(e.target.value)}
+                      style={{ maxWidth: 200 }}
+                    />
+                    <span className="hint">输入后轮询会自动带上重新校验</span>
+                  </div>
+                )}
               </div>
             )}
             <div className="row">
@@ -470,6 +518,8 @@ export default function BotPage() {
 
       <PublicSettingsCard />
 
+      <CommissionSettingsCard />
+
       <MyAccountsCard />
 
       <section className="card">
@@ -558,6 +608,7 @@ function PublicSettingsCard() {
     ['duration', '直播时长'],
     ['trend', '涨跌/对照'],
     ['wave', '音浪数值（每日报告）'],
+    ['commissionEnabled', '徒弟提成（「我的」页）'],
   ]
 
   /** 页面级显隐（2026-10-10）：关掉的主导航在展示端整体消失 */
@@ -624,7 +675,7 @@ function PublicSettingsCard() {
             />
             <FlagRow
               label="开放手机号注册"
-              hint="开 = 登录门显示「注册」（手机号 = 账号、短信验证码 = 密码，同步走 WorkBuddy 网关授权）；默认关"
+              hint="开 = 登录门显示「注册」（手机号 = 账号、短信验证码 = 密码、姓名须在主播台账里，注册即绑定，同步走 WorkBuddy 网关授权）；默认关"
               checked={!!settings.myRegister}
               onChange={(v) => toggle('myRegister', v)}
             />
@@ -669,6 +720,175 @@ function PublicSettingsCard() {
         <p className="hint">加载中…</p>
       )}
       {msg && <div className="alert good">{msg}</div>}
+    </section>
+  )
+}
+
+/** 徒弟提成设置（1.0.1）：折算比例（音浪:人民币）+ 排除名单（师傅不参与提成统计）。
+    比例改完即时生效、不追溯（历史按当前比例现算）。排除名单按 person.id 存，
+    添加时按姓名搜索台账（与「我的」账号改绑同一交互）。 */
+function CommissionSettingsCard() {
+  const [wavePerYuan, setWavePerYuan] = useState<string>('')
+  const [rate, setRate] = useState<number | null>(null)
+  const [excluded, setExcluded] = useState<{ id: number; name: string }[]>([])
+  const [msg, setMsg] = useState('')
+  const [err, setErr] = useState('')
+  const [q, setQ] = useState('')
+  const [hits, setHits] = useState<{ personId: number; name: string }[]>([])
+
+  const load = useCallback(() => {
+    api<{ wavePerYuan: number; excludedMasterIds: number[] }>('/api/admin/commission/settings')
+      .then((d) => {
+        setRate(d.wavePerYuan)
+        setWavePerYuan(String(d.wavePerYuan))
+        // 排除名单只有 id：批量台账里捞名字（一次拉全量，150 人规模没问题）
+        const ids = d.excludedMasterIds ?? []
+        if (!ids.length) {
+          setExcluded([])
+          return
+        }
+        api<{ items: { personId: number; name: string }[] }>('/api/admin/streamers')
+          .then((s) => {
+            const byId = new Map((s.items ?? []).map((it: any) => [it.personId, it.name]))
+            setExcluded(ids.map((id) => ({ id, name: byId.get(id) ?? `#${id}` })))
+          })
+          .catch(() => setExcluded(ids.map((id) => ({ id, name: `#${id}` }))))
+      })
+      .catch((e) => setErr(e.message ?? String(e)))
+  }, [])
+
+  useEffect(() => {
+    load()
+  }, [load])
+
+  async function saveRate() {
+    setErr('')
+    setMsg('')
+    const n = Number(wavePerYuan)
+    if (!Number.isFinite(n) || n <= 0) {
+      setErr('提成比例必须是大于 0 的数字')
+      return
+    }
+    try {
+      const d = await api<{ settings: { wavePerYuan: number } }>('/api/admin/commission/settings', {
+        method: 'POST',
+        body: JSON.stringify({ wavePerYuan: n }),
+      })
+      setRate(d.settings.wavePerYuan)
+      setWavePerYuan(String(d.settings.wavePerYuan))
+      setMsg('已保存，个人页即时生效')
+      setTimeout(() => setMsg(''), 1500)
+    } catch (e: any) {
+      setErr(e.message ?? String(e))
+    }
+  }
+
+  async function saveExcluded(ids: number[]) {
+    setErr('')
+    setMsg('')
+    try {
+      const d = await api<{ settings: { excludedMasterIds: number[] } }>('/api/admin/commission/settings', {
+        method: 'POST',
+        body: JSON.stringify({ excludedMasterIds: ids }),
+      })
+      // 用返回的权威列表回填名字（保持前后端一致）
+      const ids2 = d.settings.excludedMasterIds ?? []
+      api<{ items: { personId: number; name: string }[] }>('/api/admin/streamers')
+        .then((s) => {
+          const byId = new Map((s.items ?? []).map((it: any) => [it.personId, it.name]))
+          setExcluded(ids2.map((id) => ({ id, name: byId.get(id) ?? `#${id}` })))
+        })
+        .catch(() => setExcluded(ids2.map((id) => ({ id, name: `#${id}` }))))
+      setMsg('已保存')
+      setTimeout(() => setMsg(''), 1500)
+    } catch (e: any) {
+      setErr(e.message ?? String(e))
+    }
+  }
+
+  async function search(key: string) {
+    setQ(key)
+    if (!key.trim()) {
+      setHits([])
+      return
+    }
+    try {
+      const d = await api<{ items: { personId: number; name: string }[] }>(
+        `/api/admin/streamers?q=${encodeURIComponent(key.trim())}`,
+      )
+      setHits((d.items ?? []).slice(0, 8))
+    } catch {
+      setHits([])
+    }
+  }
+
+  return (
+    <section className="card">
+      <h2>徒弟提成设置</h2>
+      <p className="hint">
+        「我的」页给<b>有直系徒弟</b>的主播显示提成卡：徒弟（只算直系，徒孙不计）的音浪按
+        音浪:人民币 比例折算成金额。改比例即时生效、<b>不追溯</b>（按当前比例现算）。
+        「不参与提成」的师傅（如鹏先生）个人页不显示提成卡，其徒弟音浪不计入。
+      </p>
+      <div className="row">
+        <span className="hint" style={{ whiteSpace: 'nowrap' }}>
+          音浪:人民币
+        </span>
+        <input
+          inputMode="decimal"
+          placeholder="10"
+          style={{ maxWidth: 120 }}
+          value={wavePerYuan}
+          onChange={(e) => setWavePerYuan(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && saveRate()}
+        />
+        <span className="hint">: 1</span>
+        <button disabled={wavePerYuan === String(rate)} onClick={saveRate}>
+          保存比例
+        </button>
+      </div>
+      <div className="row" style={{ alignItems: 'flex-start', flexWrap: 'wrap', marginTop: 8 }}>
+        <span className="hint" style={{ whiteSpace: 'nowrap' }}>
+          不参与提成的师傅：
+        </span>
+        {excluded.length === 0 && <span className="hint">（无）</span>}
+        {excluded.map((x) => (
+          <span key={x.id} className="badge" style={{ marginRight: 6, marginBottom: 4 }}>
+            {x.name}{' '}
+            <button
+              style={{ border: 'none', background: 'none', cursor: 'pointer', padding: 0 }}
+              title="移除"
+              onClick={() => saveExcluded(excluded.filter((y) => y.id !== x.id).map((y) => y.id))}
+            >
+              ×
+            </button>
+          </span>
+        ))}
+      </div>
+      <div className="row" style={{ alignItems: 'flex-start', flexWrap: 'wrap' }}>
+        <input
+          placeholder="输入师傅姓名搜索后加入排除名单"
+          value={q}
+          onChange={(e) => search(e.target.value)}
+          style={{ maxWidth: 280 }}
+        />
+      </div>
+      {hits.length > 0 && (
+        <div className="hint" style={{ marginTop: 6 }}>
+          {hits.map((h) => (
+            <button
+              key={h.personId}
+              style={{ marginRight: 6, marginBottom: 6 }}
+              disabled={excluded.some((x) => x.id === h.personId)}
+              onClick={() => saveExcluded([...excluded.map((x) => x.id), h.personId])}
+            >
+              {h.name}
+            </button>
+          ))}
+        </div>
+      )}
+      {msg && <div className="alert good">{msg}</div>}
+      {err && <div className="alert bad">{err}</div>}
     </section>
   )
 }

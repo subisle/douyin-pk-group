@@ -1,6 +1,6 @@
 {
   "name": "@pk/api",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "pk-server (Rust) 的 pnpm 包装：真正的后端在 rust/crates/pk-server",
   "scripts": {

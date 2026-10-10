@@ -1,6 +1,5 @@
 node_modules/
 dist/
-apps/server/data/
 *.log
 .DS_Store
 .env.local
@@ -8,7 +7,7 @@ apps/server/data/
 # Rust 构建产物
 rust/target/
 
-# 本地跑 Rust 端时用的 SQLite，与 apps/server/data 同性质
+# 本地跑 Rust 端时用的 SQLite（唯一保留的一处；apps/server/data 与根 data/ 已移除）
 rust/data/
 
 # 部署时的运行时密钥与数据（镜像由 GitHub Actions 构建）
@@ -23,9 +22,6 @@ deploy/data/
 # 凭据备份（.env.local-backup 这类手抄件）
 .env.local*
 
-# 本地运行时库（根 data/ 是本机 SQLite，含口令与账号数据）
-/data/
-
 # 浏览器自检 / Playwright 的页面 dump 与临时快照
 .playwright-cli/
 home*.yaml
@@ -35,5 +31,16 @@ pkpage
 __pycache__/
 *.pyc
 
-# uicheck 的截图产物
+# 一次性现场产物（截图 / 名单 / 参考脚本），保留在磁盘但不入库
+.local-assets/
+design-previews/
+*.xlsx
+微信图片_*.jpg
+display-*.png
+pk-board.png
+
+# 运营数据（含抖音号/音浪，不进公开仓库）
+音浪数据/
+
+# uicheck 截图产物
 .uicheck/

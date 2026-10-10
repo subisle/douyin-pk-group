@@ -517,7 +517,13 @@ async fn anchor_claim_roundtrip() {
 
 /// 展示端手机号注册 → 绑定主播 → 管理员改绑（2026-10-10 用户口径）：
 /// 手机号 = 账号、短信验证码 = 密码；绑定一次后用户自己不能解绑/换绑，只有管理员能改。
-/// 用随机手机号 + 随机验证码，跑完把自己建的行删干净（不碰真实账号）。
+/// 用随机手机号 + 随机验证码 + 台账主播姓名，跑完把自己建的行删干净（不碰真实账号）。
+///
+/// 2026-10-11 口径：注册时就要填主播姓名，姓名必须在台账里查得到，**注册即绑定**
+/// （不再「注册完再绑一次」）。这里同时验证：
+/// - 姓名不在台账 → 拒绝注册
+/// - 注册后 bound=1、name = 主播姓名、手机号照样能登录
+/// - 用户自己不能改绑，管理员可以改绑
 #[tokio::test]
 async fn my_register_bind_and_admin_rebind() {
     let Some(st) = setup().await else { return };
@@ -530,110 +536,104 @@ async fn my_register_bind_and_admin_rebind() {
         .as_nanos();
     let phone = format!("199{:08}", nanos % 100_000_000);
 
-    // 验证码撞上别人已有的密码（uk_my_pass 1:1）就换一个再试
+    /* 挑两个还没被占用的主播：第一个用于注册，第二个给管理员改绑 */
+    let anchors = store::all_anchor_search(&st, &st.active_id(), "啸", 10).await;
+    let free: Vec<(i64, String)> = anchors
+        .iter()
+        .filter_map(|a| {
+            let pid = a.get("personId").and_then(|v| v.as_i64()).unwrap_or(0);
+            let name = a
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let team = a.get("team").and_then(|v| v.as_str()).unwrap_or_default();
+            // 注册护栏只放行 male/female（gender=unknown 的会被拒，见下面的用例）
+            (pid > 0 && !name.is_empty() && (team == "male" || team == "female"))
+                .then_some((pid, name))
+        })
+        .collect();
+    let Some((pid, anchor_name)) = free.first().cloned() else {
+        eprintln!("跳过：台账里没有可用于注册的主播（库为空）");
+        return;
+    };
+
+    /* 姓名不在台账 → 拒绝注册（先于建号，不会留下脏数据） */
+    let bogus = format!("__e2e不存在{}", nanos % 100_000);
+    let bad = store::my_account_register(&st, &phone, "246810", &bogus, "").await;
+    assert!(bad.is_err(), "姓名不在台账时应当拒绝注册");
+    assert!(
+        bad.unwrap_err().contains("没有"),
+        "错误文案要说明是姓名查不到"
+    );
+
+    /* 正常注册：手机号 = 账号、验证码 = 密码、姓名 = 台账主播 */
     let mut registered = None;
     for i in 0..3u128 {
         let code = format!("{:06}", (nanos / 7 + i) % 1_000_000);
-        match store::my_account_register(&st, &phone, &code, "e2e-state").await {
-            Ok(name) => {
-                registered = Some((name, code));
+        match store::my_account_register(&st, &phone, &code, &anchor_name, "e2e-state").await {
+            Ok(v) => {
+                registered = Some((v, code));
                 break;
             }
             Err(e) if e.contains("验证码") => continue,
             Err(e) => panic!("注册应当成功，却失败：{e}"),
         }
     }
-    let Some((login_name, code)) = registered else {
+    let Some(((login_name, got_pid, team), code)) = registered else {
         eprintln!("跳过：三次随机验证码都被占用（极小概率）");
         return;
     };
 
-    // 注册瞬间 name 先占位成手机号、bound=0
-    assert_eq!(login_name, phone);
-    let info = store::my_account_info(&st, &phone)
-        .await
-        .expect("按手机号查得到");
-    assert!(!info.bound, "刚注册还没绑主播");
-    assert_eq!(info.source, "register");
-    assert_eq!(info.bind_name(), "", "没绑主播时不把手机号当姓名下发");
-    assert_eq!(
-        store::my_account_check_login(&st, &phone, &code)
-            .await
-            .as_deref(),
-        Some(phone.as_str()),
-        "手机号 + 验证码可以登录"
+    /* 注册即绑定：登录名 = 主播姓名，不是手机号 */
+    assert_eq!(login_name, anchor_name, "注册即绑定：账号名就是主播姓名");
+    assert_eq!(got_pid, pid, "返回台账里的 personId");
+    assert!(
+        team == "male" || team == "female",
+        "团别来自台账，实际：{team}"
     );
-
-    // 同手机号不能重复注册
-    let dup = store::my_account_register(&st, &phone, "135790", "").await;
-    assert!(dup.is_err(), "同手机号重复注册应当被拒");
-
-    // 台账里挑两个还没被占用的主播：第一个给用户自助绑定，第二个给管理员改绑
-    let anchors = store::all_anchor_search(&st, &st.active_id(), "啸", 10).await;
-    let mut bind_anchor: Option<(i64, String)> = None;
-    for a in &anchors {
-        let pid = a.get("personId").and_then(|v| v.as_i64()).unwrap_or(0);
-        let name = a
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
-        if pid <= 0 || name.is_empty() {
-            continue;
-        }
-        if store::my_account_bind(&st, &phone, pid).await.is_ok() {
-            bind_anchor = Some((pid, name));
-            break;
-        }
-    }
-    let Some((_pid, anchor_name)) = bind_anchor else {
-        eprintln!("跳过：台账里没有可用于绑定的主播（候选都被占用或库为空）");
-        store::my_account_delete(&st, &phone).await;
-        return;
-    };
-    let info2 = store::my_account_info(&st, &phone)
+    let info = store::my_account_info(&st, &anchor_name)
         .await
-        .expect("绑定后按手机号仍能查到");
-    assert!(info2.bound, "绑定后 bound=1");
-    assert!(!info2.bound_at.is_empty(), "记了绑定时间");
-    assert_eq!(info2.name, anchor_name, "账号名改写成主播姓名");
+        .expect("按姓名查得到");
+    assert!(info.bound, "注册即绑定：bound=1");
+    assert!(!info.bound_at.is_empty(), "记了绑定时间");
+    assert_eq!(info.source, "register");
+    assert_eq!(info.phone, phone, "手机号另存一份");
     assert_eq!(
         store::my_account_check_login(&st, &phone, &code)
             .await
             .as_deref(),
         Some(anchor_name.as_str()),
-        "绑定后手机号照样能登录"
+        "手机号 + 验证码可以登录"
+    );
+    assert_eq!(
+        store::my_account_check_login(&st, &anchor_name, &code)
+            .await
+            .as_deref(),
+        Some(anchor_name.as_str()),
+        "姓名 + 验证码也可以登录"
     );
 
-    // 用户自己再绑一次 → 拒
-    let mut rebound_admin: Option<(i64, String)> = None;
-    for a in &anchors {
-        let pid = a.get("personId").and_then(|v| v.as_i64()).unwrap_or(0);
-        let name = a
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
-        if pid <= 0 || name == anchor_name {
-            continue;
-        }
-        let again = store::my_account_bind(&st, &anchor_name, pid).await;
-        assert!(
-            again.is_err(),
-            "已绑定主播的账号，用户自己不能再改（{name}）"
-        );
-        assert!(again.unwrap_err().contains("已绑定"));
-        // 管理员改绑到同一个目标 → 允许
-        if let Ok(r) = store::my_account_admin_bind(&st, &anchor_name, pid).await {
-            rebound_admin = Some((pid, r.name));
-            break;
-        }
-    }
-    let Some((_pid2, anchor2)) = rebound_admin else {
+    /* 同手机号不能重复注册 */
+    let dup = store::my_account_register(&st, &phone, "135790", &anchor_name, "").await;
+    assert!(dup.is_err(), "同手机号重复注册应当被拒");
+
+    /* 用户自己再绑一次 → 拒；管理员改绑 → 允许 */
+    let Some((pid2, anchor2)) = free.get(1).cloned() else {
         eprintln!("跳过管理员改绑断言：没有第二个可用主播");
         store::my_account_delete(&st, &anchor_name).await;
         return;
     };
+    let again = store::my_account_bind(&st, &anchor_name, pid2).await;
+    assert!(again.is_err(), "已绑定主播的账号，用户自己不能再改");
+    assert!(again.unwrap_err().contains("已绑定"));
+
+    let Ok(r) = store::my_account_admin_bind(&st, &anchor_name, pid2).await else {
+        eprintln!("跳过：管理员改绑失败（主播可能已被占用）");
+        store::my_account_delete(&st, &anchor_name).await;
+        return;
+    };
+    assert_eq!(r.name, anchor2, "管理员改绑生效");
     assert_eq!(
         store::my_account_check_login(&st, &phone, &code)
             .await
@@ -642,7 +642,7 @@ async fn my_register_bind_and_admin_rebind() {
         "改绑后按手机号登录拿到新主播"
     );
 
-    // 清理：账号名可能落在任何一次绑定后的名字上
+    /* 清理：账号名可能落在任何一次绑定后的名字上（person 台账行不动，那是真实数据） */
     store::my_account_delete(&st, &anchor2).await;
     store::my_account_delete(&st, &anchor_name).await;
     store::my_account_delete(&st, &phone).await;
@@ -650,6 +650,134 @@ async fn my_register_bind_and_admin_rebind() {
         store::my_account_info(&st, &phone).await.is_none(),
         "测试账号已清理"
     );
+}
+
+/// 台账护栏（审计 2026-10-11 修复）：
+/// - 台账里有**同名两行** → 拒绝注册（绝不静默取 id 最小那行，避免绑错人 / 串数据）；
+/// - 主播**团别不是 male/female**（如新建师傅/徒弟的默认 unknown）→ 拒绝，
+///   否则会「注册当场成功、token 过期后永远登不上」且手机号已被占，用户死局。
+#[tokio::test]
+async fn my_register_rejects_ambiguous_and_teamless_anchors() {
+    let Some(st) = setup().await else { return };
+    if !need_writer(&st) {
+        return;
+    }
+    let pool = st.writer.as_ref().expect("writer");
+    let uniq = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("系统时间")
+        .as_nanos()
+        % 1_000_000;
+    let dup_name = format!("__e2e同名人{uniq}");
+    let no_team_name = format!("__e2e无团人{uniq}");
+    let phone = format!("199{:08}", (uniq * 7) % 100_000_000);
+
+    // 两行同名主播（都 active、未删除）
+    for _ in 0..2 {
+        sqlx::query("INSERT INTO person (name, gender, status) VALUES (?, 'male', 'active')")
+            .bind(&dup_name)
+            .execute(pool)
+            .await
+            .expect("建同名主播");
+    }
+    // 一个没设团别的主播（gender 显式 unknown）
+    sqlx::query("INSERT INTO person (name, gender, status) VALUES (?, 'unknown', 'active')")
+        .bind(&no_team_name)
+        .execute(pool)
+        .await
+        .expect("建无团主播");
+
+    let dup = store::my_account_register(&st, &phone, "246810", &dup_name, "").await;
+    assert!(dup.is_err(), "同名两行应拒绝注册");
+    assert!(
+        dup.unwrap_err().contains("不止一位"),
+        "文案要说明台账有同名主播"
+    );
+
+    let no_team = store::my_account_register(&st, &phone, "246810", &no_team_name, "").await;
+    assert!(no_team.is_err(), "没设团别的主播应拒绝注册");
+    assert!(
+        no_team.unwrap_err().contains("团别"),
+        "文案要说明是团别缺失"
+    );
+
+    // 两次都该在写号之前被挡下：没有留下任何测试账号
+    assert!(store::my_account_info(&st, &phone).await.is_none());
+
+    let _ = sqlx::query("DELETE FROM person WHERE name IN (?, ?)")
+        .bind(&dup_name)
+        .bind(&no_team_name)
+        .execute(pool)
+        .await;
+}
+
+/// 忘记密码只认普通账号（审计 2026-10-11）：
+/// is_admin=1 的观看账号即便登记了手机号也不能被「手机号 → 后四位」重置，
+/// 否则知道号码的人就能接管后台视角账号。
+#[tokio::test]
+async fn password_reset_skips_admin_accounts() {
+    let Some(st) = setup().await else { return };
+    if !need_writer(&st) {
+        return;
+    }
+    let pool = st.writer.as_ref().expect("writer");
+    let uniq = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("系统时间")
+        .as_nanos()
+        % 1_000_000;
+    let admin_name = format!("__e2e观看{uniq}");
+    let user_name = format!("__e2e普通{uniq}");
+    let admin_phone = format!("199{:08}", (uniq * 13) % 100_000_000);
+    let user_phone = format!("199{:08}", (uniq * 29) % 100_000_000);
+
+    store::my_account_set(&st, &admin_name, &admin_phone, "135790")
+        .await
+        .expect("建管理员观看账号");
+    sqlx::query("UPDATE my_accounts SET is_admin = 1 WHERE name = ?")
+        .bind(&admin_name)
+        .execute(pool)
+        .await
+        .expect("标记 is_admin");
+
+    let denied = store::my_account_reset_password_to_phone_suffix(&st, &admin_phone).await;
+    assert!(denied.is_err(), "管理员账号不能被手机号重置");
+    assert!(
+        denied.unwrap_err().contains("还没有注册"),
+        "文案不区分管理员账号（不泄露台账）"
+    );
+
+    store::my_account_set(&st, &user_name, &user_phone, "246810")
+        .await
+        .expect("建普通账号");
+    let ok = store::my_account_reset_password_to_phone_suffix(&st, &user_phone)
+        .await
+        .expect("普通账号可以重置");
+    assert_eq!(ok, user_phone[user_phone.len() - 4..].to_string());
+
+    store::my_account_delete(&st, &admin_name).await;
+    store::my_account_delete(&st, &user_name).await;
+}
+
+/// 注册时姓名校验的纯函数部分：空姓名 / 超长姓名在入库前就被挡掉。
+#[tokio::test]
+async fn my_register_rejects_bad_anchor_name() {
+    let Some(st) = setup().await else { return };
+    if !need_writer(&st) {
+        return;
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("系统时间")
+        .as_nanos();
+    let phone = format!("199{:08}", nanos % 100_000_000);
+
+    let empty = store::my_account_register(&st, &phone, "246810", "   ", "").await;
+    assert!(empty.is_err(), "空姓名应当被拒");
+
+    let long = "测".repeat(21);
+    let too_long = store::my_account_register(&st, &phone, "246810", &long, "").await;
+    assert!(too_long.is_err(), "超长姓名应当被拒");
 }
 
 /* ==================== 管理端数据域 e2e（P1-9 / P2-10 / P2-11，2026-10-10） ==================== */

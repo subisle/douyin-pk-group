@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use axum::extract::State;
+use futures_util::TryStreamExt as _;
 use serde_json::Value;
 use sqlx::Row as _;
 
@@ -68,6 +69,10 @@ pub struct BotConfig {
     /// 微信 iLink token（空 = 未登录，需要扫码；扫码成功后持久化到 SQLite）
     pub wechat_token: String,
     /// 管理员会话白名单（逗号分隔会话 ID / openid）
+    ///
+    /// ⚠️ 当前**只用于微信**渠道（见 [`BotRouter::handle`] 的角色判定）。
+    /// QQ 渠道按定稿口径是**无条件 Admin**（任何能私聊到该 QQ 的人都有全量权限），
+    /// 因此此处的值**不影响 QQ**。保留字段只为将来 QQ 若改分级时可直接接上。
     pub qq_admins: Vec<String>,
     pub wechat_admins: Vec<String>,
     /// 每会话限流（条/分钟）
@@ -285,7 +290,14 @@ impl BotManager {
             ))
         }));
         let wechat = if config.has_wechat() {
-            match WxTransport::new(st.clone(), config.clone(), wechat_token) {
+            // 1.0.1：confirmed 可能下发过 baseurl / ilink_user_id，重启后接着用
+            let wx_base = crate::store::config_get(&st, "wechat_baseurl")
+                .await
+                .unwrap_or_default();
+            let wx_uid = crate::store::config_get(&st, "wechat_ilink_user_id")
+                .await
+                .unwrap_or_default();
+            match WxTransport::new(st.clone(), config.clone(), wechat_token, wx_base, wx_uid) {
                 Ok(t) => Some(Arc::new(t)),
                 Err(e) => {
                     tracing::warn!(error = %e, "微信渠道初始化失败，渠道不可用");
@@ -462,10 +474,17 @@ pub async fn weixin_qrcode(State(st): State<ArcState>) -> ApiResult {
     Ok(axum::Json(qr))
 }
 
-/// POST /api/admin/bots/weixin/qrcode/check {qrcode}：查扫码状态，成功自动保存 token
+/// POST /api/admin/bots/weixin/qrcode/check {qrcode, verifyCode?}：
+/// 查扫码状态，成功自动保存 token。1.0.1 对齐 openclaw-weixin 全状态机：
+/// need_verifycode 时前端出验证码输入框，下次轮询带 verifyCode；
+/// scaned_but_redirect / binded_redirect 时后端自动切 redirect_host 继续轮。
 #[derive(serde::Deserialize)]
 pub struct QrCheckBody {
     pub qrcode: Option<String>,
+    pub verify_code: Option<String>,
+    /// camelCase 兼容（前端统一传 verifyCode）
+    #[serde(rename = "verifyCode")]
+    pub verify_code_camel: Option<String>,
 }
 
 pub async fn weixin_qrcode_check(
@@ -477,7 +496,11 @@ pub async fn weixin_qrcode_check(
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("微信渠道未配置"))?;
     let qrcode = body.qrcode.ok_or_else(|| anyhow::anyhow!("缺少 qrcode"))?;
-    let out = wx.check_qrcode(&qrcode).await?;
+    let verify = body
+        .verify_code
+        .or(body.verify_code_camel)
+        .filter(|s| !s.trim().is_empty());
+    let out = wx.check_qrcode(&qrcode, verify.as_deref()).await?;
     Ok(axum::Json(out))
 }
 
@@ -792,10 +815,14 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
     if let Some(out) = try_promote_weixin(st, &inbound).await {
         return Some(out);
     }
-    // 角色判定（2026-10-10 用户口径）：
+    // 角色判定（2026-10-10 用户口径，2026-10-11 复核确认）：
     // - Admin：QQ 全部会话 / 微信白名单 / 会话表标记过管理员 —— 拥有全部命令
     // - User：微信私聊且 push_bindings 命中的已绑定主播 —— 只允许 5 条命令
     // - 其余：完全静默（不回复任何内容），日志留痕
+    //
+    // QQ 是**无条件** Admin：不看 cfg.qq_admins。这是刻意的选择（QQ 号由运营
+    // 自己持有、不对外开放），不是漏配。要收口就得在这里加判定，而不是去配
+    // BOT_QQ_ADMINS——那个环境变量当前对 QQ 不生效，配了也不会生效。
     let role = if inbound.channel == "qq"
         || cfg.wechat_admins.contains(&inbound.conversation_id)
         || crate::store::session_is_admin(st, inbound.channel, &inbound.conversation_id).await
@@ -853,7 +880,9 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
             url_head = %att.url.chars().take(80).collect::<String>(),
             "机器人收到附件，开始下载"
         );
-        match download_text(&att.url).await {
+        // 传平台给的真实文件名：CDN URL 推不出扩展名时 xlsx 会被当文本，
+        // 二进制垃圾直接进暂存区（批次 #287 就是这么来的）
+        match download_text(&att.url, Some(&att.file_name)).await {
             Ok(body) => {
                 tracing::info!(file = %att.file_name, bytes = body.len(), "附件下载完成");
                 attachment_text.push_str(&body);
@@ -1442,7 +1471,9 @@ async fn cmd_import(st: &Arc<AppState>, inbound: &Inbound, args: &[&str]) -> Str
     // 数据来源：附件优先，其次命令文本剩余部分
     let mut text = String::new();
     for att in &inbound.attachments {
-        match download_text(&att.url).await {
+        // 传平台给的真实文件名：CDN URL 推不出扩展名时 xlsx 会被当文本，
+        // 二进制垃圾直接进暂存区（批次 #287 就是这么来的）
+        match download_text(&att.url, Some(&att.file_name)).await {
             Ok(body) => text.push_str(&body),
             Err(e) => return format!("附件下载失败（{}）：{e}", att.file_name),
         }
@@ -1604,17 +1635,34 @@ fn fmt_num(w: f64) -> String {
 /// 附件下载大小上限（P2-16，2026-10-10 审计）：8MB。CSV/文本导入远用不到这么大，
 /// 超限一律拒绝——rk3318 部署 mem_limit 160m，无上限下载必然 OOM。
 const ATTACHMENT_MAX_BYTES: usize = 8 * 1024 * 1024;
-/// 附件下载主机白名单（P2-16）：只允许 QQ 开放平台官方 CDN 域名。
+/// 附件下载主机白名单（P2-16）：默认只允许 QQ 开放平台官方 CDN 域名。
 /// 附件 URL 由平台下发，但白名单兜底 SSRF——就算平台回显用户可控 URL 也出不了这个圈。
-/// 需要接微信文件消息时在这里加域名。
+/// 需要接微信文件消息时在这里加域名，或用 `BOT_ATTACHMENT_HOSTS` 追加（逗号分隔）。
+/// 1.0.1：微信 iLink 媒体走 novac2c CDN，把官方微信 CDN 域名一并放行。
 const ATTACHMENT_HOSTS: &[&str] = &[
     "multimedia.nt.qq.com.cn",
     "multimedia.qq.com.cn",
     "groupfile.qq.com",
     "qq.com",
+    "weixin.qq.com",
 ];
 
+/// `BOT_ATTACHMENT_HOSTS` 追加的域名（逗号分隔，忽略空白与空项）。
+///
+/// 为什么需要：QQ 开放平台历史上换过附件 CDN 域名（gchat.qpic.qq.com、
+/// file.ws.qq.com 等），白名单硬编码时一旦平台换域，导入会 100% 失败且
+/// 只有改代码才能恢复。留一个 env 口子，出问题可以当场放行而不必重发版本。
+fn extra_attachment_hosts() -> Vec<String> {
+    std::env::var("BOT_ATTACHMENT_HOSTS")
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
 /// 下载 URL 主机校验：解析 host，必须与白名单域名相等或以其为后缀（`.qq.com`）。
+/// e2e / 本机联调用 `BOT_ATTACHMENT_HOSTS=127.0.0.1,localhost` 放行测试服务器。
 fn attachment_host_allowed(url: &str) -> bool {
     let rest = url
         .strip_prefix("https://")
@@ -1631,11 +1679,19 @@ fn attachment_host_allowed(url: &str) -> bool {
     ATTACHMENT_HOSTS
         .iter()
         .any(|h| host == *h || host.ends_with(&format!(".{h}")))
+        || extra_attachment_hosts()
+            .iter()
+            .any(|h| host == *h || host.ends_with(&format!(".{h}")))
 }
 
 /// 下载附件文本（QQ CDN 直链 / 微信文件）。
 /// P2-16：主机白名单 + 8MB 大小上限，超限拒绝并告警（防 OOM / SSRF）。
-async fn download_text(url: &str) -> anyhow::Result<String> {
+///
+/// `file_name` 用平台下发的真实文件名（QQ 的 `attachments[].filename`）优先，
+/// 没有再从 URL 推。只靠 URL 推不稳：CDN 链接常是
+/// `.../download?appid=..&fileid=..` 这种，按 ? 切完最后一段是查询参数不是文件名，
+/// 扩展名判据失效 → xlsx 被当纯文本 → 二进制垃圾进暂存区（批次 #287 就是这么来的）。
+async fn download_text(url: &str, file_name: Option<&str>) -> anyhow::Result<String> {
     if !attachment_host_allowed(url) {
         tracing::warn!(
             url_head = %url.chars().take(80).collect::<String>(),
@@ -1643,7 +1699,10 @@ async fn download_text(url: &str) -> anyhow::Result<String> {
         );
         anyhow::bail!("附件链接的域名不受支持（只接受 QQ 开放平台官方 CDN）");
     }
+    // 不跟随重定向（P2-16）：白名单只在首跳生效，跟随会把「qq.com 已放行」当成
+    // 跳进内网任意地址的通行证。QQ CDN 直链本来就是最终地址，不需要跟随。
     let resp = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(30))
         .build()?
         .get(url)
@@ -1664,12 +1723,33 @@ async fn download_text(url: &str) -> anyhow::Result<String> {
             ATTACHMENT_MAX_BYTES / 1024 / 1024
         );
     }
-    let bytes = resp.bytes().await?.to_vec();
-    let filename = url
-        .split(['/', '?', '#'])
-        .rfind(|s| !s.is_empty())
-        .unwrap_or_default();
-    let decoded = percent_decode_utf8(filename);
+    // 按声明长度读，但边读边累计：声明不可信，实际超过就中止（防 OOM）。
+    let mut bytes: Vec<u8> = Vec::with_capacity(len.min(ATTACHMENT_MAX_BYTES as u64) as usize);
+    let mut stream = resp.bytes_stream();
+    let mut total: usize = 0;
+    while let Some(chunk) = stream.try_next().await? {
+        total = total.saturating_add(chunk.len());
+        if total > ATTACHMENT_MAX_BYTES {
+            tracing::warn!(
+                total,
+                max = ATTACHMENT_MAX_BYTES,
+                "附件实际超过上限，中止下载"
+            );
+            anyhow::bail!(
+                "附件实际大小超过上限（{} MB）",
+                ATTACHMENT_MAX_BYTES / 1024 / 1024
+            );
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    let decoded = match file_name.filter(|n| !n.trim().is_empty()) {
+        Some(n) => n.trim().to_string(),
+        None => percent_decode_utf8(
+            url.split(['/', '?', '#'])
+                .rfind(|s| !s.is_empty())
+                .unwrap_or_default(),
+        ),
+    };
     if let Some(text) = admin::maybe_spreadsheet_text(&decoded, &bytes)? {
         return Ok(text);
     }
@@ -1950,5 +2030,78 @@ mod tests {
             find_date("男团数据-2026-10-07-导出.csv").as_deref(),
             Some("2026-10-07")
         );
+    }
+
+    // ---- 附件域名白名单（防 SSRF）----
+    // 白名单是导入链路的唯一入口守门人；一旦它把合法 CDN 挡掉，导入会 100% 失败，
+    // 而失败现象（「域名不受支持」）离根因很远。这些断言不需要数据库，CI 一定跑得到。
+    //
+    // env 是进程级全局，这几个用例都要读写它 —— 并发跑会互相踩，统一串行化。
+
+    /// 保护 `BOT_ATTACHMENT_HOSTS` 的读写（env 是进程全局的）
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    const KEY: &str = "BOT_ATTACHMENT_HOSTS";
+
+    #[test]
+    fn attachment_whitelist_allows_qq_cdn() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved = std::env::var(KEY).ok();
+        std::env::remove_var(KEY);
+        for u in [
+            "https://multimedia.nt.qq.com.cn/a/b.csv",
+            "http://multimedia.qq.com.cn/x.csv",
+            "https://groupfile.qq.com/f.csv",
+            "https://gchat.qpic.qq.com/whatever", // 子域后缀匹配
+            "https://cdn.qq.com/a.csv",
+        ] {
+            assert!(attachment_host_allowed(u), "应放行：{u}");
+        }
+        match saved {
+            Some(v) => std::env::set_var(KEY, v),
+            None => std::env::remove_var(KEY),
+        }
+    }
+
+    #[test]
+    fn attachment_whitelist_blocks_foreign_and_internal() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved = std::env::var(KEY).ok();
+        std::env::remove_var(KEY);
+        for u in [
+            "http://169.254.169.254/latest/meta-data/", // 云元数据
+            "http://10.0.0.5/internal",
+            "http://evil.com/steal.csv",
+            "https://evil.com/steal.csv",
+            "http://qq.com.evil.com/x.csv", // 后缀伪装
+            "file:///etc/passwd",
+        ] {
+            assert!(!attachment_host_allowed(u), "应拒绝：{u}");
+        }
+        // 默认态（不设 env）本机也要拒绝：放行必须走显式配置。
+        assert!(!attachment_host_allowed("http://127.0.0.1:8787/"));
+        assert!(!attachment_host_allowed("http://localhost/data.csv"));
+        match saved {
+            Some(v) => std::env::set_var(KEY, v),
+            None => std::env::remove_var(KEY),
+        }
+    }
+
+    #[test]
+    fn attachment_whitelist_env_adds_host() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // 平台换 CDN 域名时靠这个口子应急；这里验证它真的生效而不是摆设。
+        let saved = std::env::var(KEY).ok();
+        std::env::set_var(KEY, "127.0.0.1, localhost ,");
+        assert!(
+            attachment_host_allowed("http://127.0.0.1:8080/data.csv"),
+            "env 追加后本机应放行（e2e 依赖这条）"
+        );
+        assert!(attachment_host_allowed("http://localhost/data.csv"));
+        // 追加不得削弱原有防护
+        assert!(!attachment_host_allowed("http://169.254.169.254/"));
+        match saved {
+            Some(v) => std::env::set_var(KEY, v),
+            None => std::env::remove_var(KEY),
+        }
     }
 }

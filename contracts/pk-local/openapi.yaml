@@ -31,10 +31,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/PublicPlan"
+  # ---- 以下两条是已退役 Go 服务（douyin-server）的历史路径，2026-10 起不再存在 ----
+  # 保留在此仅为追溯调用方；pk-server 不提供 /dy/* 前缀。
   /dy/api/health:
     get:
       operationId: getDouyinHealth
-      description: "状态：已实现（Go 过渡服务；迁移完成后由 pk-server 承接，兼容期保留路径）"
+      description: "状态：已删除（原 Go 过渡服务 douyin-server 已于 2026-10 移除，该路径不再存在）"
       responses:
         "200":
           description: Service health
@@ -45,7 +47,7 @@ paths:
   /dy/api/robot/commands:
     post:
       operationId: dispatchRobotCommand
-      description: "状态：计划中（Go 过渡代码已有；Rust bot/ 模块迁入后以此契约为准）"
+      description: "状态：已删除（原 Go 过渡代码随服务移除；机器人命令路由现由 Rust bot/ 模块实现）"
       requestBody:
         required: true
         content:
@@ -118,7 +120,7 @@ paths:
   /api/admin/import/upload:
     post:
       operationId: uploadImport
-      description: "状态：已实现。multipart 文件上传（CSV/TSV/文本），解析返回行预览；确认后走 commit。"
+      description: "状态：已实现（multipart 文件上传）（CSV/TSV/文本），解析返回行预览；确认后走 commit。"
       responses:
         "200":
           description: Parsed rows
@@ -195,7 +197,7 @@ paths:
   /api/public/teams/{team}/my:
     get:
       operationId: publicTeamMy
-      description: "状态：已实现（阶段 D）。个人数据（日/月/年/累计/团内名次），token 鉴权。"
+      description: "状态：已实现（1.0.1）。个人数据（日/月/年/累计/团内名次）+ 日/月/年同期对照（prevWave）+ 徒弟提成 commission（仅直系徒弟、排除名单内师傅为 null）。token 鉴权。"
       responses:
         "200":
           description: Personal metrics
@@ -206,6 +208,19 @@ paths:
       responses:
         "200":
           description: Dashboard aggregate
+  /api/admin/commission/settings:
+    get:
+      operationId: adminCommissionSettingsGet
+      description: "状态：已实现（1.0.1）。读徒弟提成设置（折算比例 + 排除名单）。"
+      responses:
+        "200":
+          description: Commission settings
+    post:
+      operationId: adminCommissionSettingsUpdate
+      description: "状态：已实现（1.0.1）。保存徒弟提成设置（缺省键保留现值；比例必须 > 0）。"
+      responses:
+        "200":
+          description: Commission settings saved
   /api/admin/metrics/monthly:
     get:
       operationId: monthlyMetrics
@@ -244,14 +259,14 @@ paths:
   /api/admin/bots/sessions:
     get:
       operationId: botSessions
-      description: "状态：已实现。机器人见过的会话列表（群聊/私聊 + 管理员标记）。"
+      description: "状态：已实现（机器人见过的会话列表）（群聊/私聊 + 管理员标记）。"
       responses:
         "200":
           description: Session list
   /api/admin/bots/sessions/admin:
     post:
       operationId: setBotSessionAdmin
-      description: "状态：已实现。勾选/取消会话的管理员身份（群聊与私聊独立）。"
+      description: "状态：已实现（勾选/取消会话的管理员身份）（群聊与私聊独立）。"
       responses:
         "200":
           description: Updated
@@ -295,17 +310,17 @@ paths:
   /api/admin/bots/weixin/qrcode:
     get:
       operationId: weixinQrCode
-      description: "状态：已实现（E 阶段）。从 iLink 拉取登录二维码。"
+      description: "状态：已实现（1.0.1，对齐 openclaw-weixin）。POST get_bot_qrcode?bot_type=3（带 local_token_list），返回 qrcode + imgContent（base64 图）。"
       responses:
         "200":
-          description: QR code id and url
+          description: QR code id and image content
   /api/admin/bots/weixin/qrcode/check:
     post:
       operationId: weixinQrCheck
-      description: "状态：已实现（E 阶段）。轮询扫码状态；扫码成功自动保存 token 到 SQLite。"
+      description: "状态：已实现（1.0.1，对齐 openclaw-weixin）。全状态机 wait/scaned/confirmed/expired/need_verifycode/verify_code_blocked/scaned_but_redirect/binded_redirect；need_verifycode 带可选 verifyCode 重轮；confirmed 自动保存 bot_token + baseurl。"
       responses:
         "200":
-          description: Scan status (wait / scanned / confirmed)
+          description: Scan status vocabulary per protocol
   /api/admin/bots/weixin/token:
     post:
       operationId: weixinToken

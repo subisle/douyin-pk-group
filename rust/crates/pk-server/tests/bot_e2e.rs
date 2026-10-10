@@ -117,6 +117,23 @@ fn cfg_with(chat: &str) -> BotConfig {
     c
 }
 
+/// 附件白名单只放行 QQ CDN 域名，本地测试服务在 127.0.0.1 —— 跑之前追加放行。
+/// 进程内 env 是全局的，多个测试各调一次无副作用。
+fn allow_local_attachment_host() {
+    let key = "BOT_ATTACHMENT_HOSTS";
+    let cur = std::env::var(key).unwrap_or_default();
+    for h in ["127.0.0.1", "localhost"] {
+        if !cur.split(',').any(|s| s.trim() == h) {
+            let next = if cur.is_empty() {
+                h.to_string()
+            } else {
+                format!("{cur},{h}")
+            };
+            std::env::set_var(key, next);
+        }
+    }
+}
+
 fn inbound_from(chat: &str, file: &str, url: &str) -> Inbound {
     Inbound {
         channel: "qq",
@@ -132,6 +149,9 @@ fn inbound_from(chat: &str, file: &str, url: &str) -> Inbound {
 
 /// 起一个极小 HTTP 服务，模拟 QQ 附件直链（下载附件走的是一次普通 GET）。
 async fn serve_text(body: &'static str) -> Option<String> {
+    // 测试服务器在本机，而下载白名单只放行 QQ CDN 域名 —— 一律追加放行，
+    // 否则所有走附件的用例都会被 download_text 挡在门外（假失败）。
+    allow_local_attachment_host();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.ok()?;
     let addr = listener.local_addr().ok()?;
     tokio::spawn(async move {
@@ -210,9 +230,13 @@ async fn push_flags(pool: &sqlx::MySqlPool, name: &str) -> (i8, i8) {
 
 /// 私聊发 CSV 文件 + 文件名带日期与团别 → 直接入库，不用再回一句话确认。
 /// 用独立的 2019-03-13 当业务日期（不碰真实数据），开跑先清干净 → 可反复跑。
+///
+/// 附件下载有域名白名单（防 SSRF），测试服务器是 127.0.0.1，必须显式放行，
+/// 否则 download_text 直接拒绝 —— 2026-10-10 白名单上线后这个用例就一直是假失败。
 #[tokio::test]
 async fn csv_attachment_with_date_and_team_hints_is_imported() {
     let Some(st) = setup().await else { return };
+    allow_local_attachment_host();
     clean_date(&st, "2019-03-13").await;
     let cfg = cfg_with("CSV-USER-A");
     let Some(url) = serve_text("浩龙,77777\n南方楠,66666\n").await else {

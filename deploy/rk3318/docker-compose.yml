@@ -1,11 +1,12 @@
 name: douyin-pk-suite
 
 # ⚠️ 监听地址（P1-5）：宿主端口发布一律绑 127.0.0.1，公网入口交给宿主机
-#    Nginx/Caddy 反代，绝不能把 8787/8080 直接裸到 0.0.0.0。
+#    Nginx/Caddy 反代，绝不能把 8787 直接裸到 0.0.0.0。
 #    容器内 pk-server 的 HOST 默认为 127.0.0.1 时 healthcheck 之外无法直连；
 #    若需要容器外直连探活，必须显式在 .env 配 HOST=0.0.0.0（宿主侧仍只绑
-#    127.0.0.1，公网进不来）。生产目前走「服务间容器网络互访（mariadb/pk-server）
-#    + 宿主反代」，两个应用服务不发布端口，属预期状态。
+#    127.0.0.1，公网进不来）。
+#    目前只有 mariadb + pk-server 两个服务：应用服务不发布端口，
+#    走「容器网络互访 + 宿主反代」，属预期状态。
 
 services:
   pk-server:
@@ -38,6 +39,11 @@ services:
       DB_MIGRATOR_NAME: douyin
       DB_MIGRATOR_USER: ${DOUYIN_MIGRATOR_USER:-douyin_migrator}
       DB_MIGRATOR_PASSWORD: ${DOUYIN_MIGRATOR_PASSWORD:?set DOUYIN_MIGRATOR_PASSWORD}
+      # WorkBuddy 用量看板（展示端注册的「添加账号 OAuth」，见 wbgateway.rs）。
+      # 不填 / 留空 = 注册页隐藏授权步骤（手机号注册本身照常可用）。
+      # 审计 2026-10-11：这里原来没有透传，宿主机 .env 里配了也进不了容器。
+      WORKBUDDY_PANEL_URL: ${WORKBUDDY_PANEL_URL:-}
+      WORKBUDDY_PANEL_PASSWORD: ${WORKBUDDY_PANEL_PASSWORD:-}
     volumes:
       - pk-data:/app/data
     mem_limit: 160m
@@ -45,27 +51,6 @@ services:
       test: ["CMD", "/usr/local/bin/pk-server", "--health-check"]
       interval: 30s
       timeout: 5s
-      retries: 3
-
-  douyin-server:
-    image: douyin-server:arm64
-    restart: unless-stopped
-    depends_on:
-      mariadb:
-        condition: service_healthy
-    environment:
-      DOUYIN_HTTP_ADDR: :8080
-      # 与 mariadb 的 MARIADB_USER / MARIADB_PASSWORD 联动，避免 .env 里双份密码改漏
-      DOUYIN_DATABASE_DSN: ${DOUYIN_WRITER_USER:-douyin_writer}:${DOUYIN_WRITER_PASSWORD:?set DOUYIN_WRITER_PASSWORD}@tcp(mariadb:3306)/douyin?charset=utf8mb4
-      DOUYIN_MIGRATE: "1"
-    volumes:
-      - bot-state:/var/lib/douyin
-    mem_limit: 256m
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/dy/api/health"]
-      interval: 30s
-      timeout: 5s
-      start_period: 15s
       retries: 3
 
   mariadb:
@@ -95,5 +80,4 @@ services:
 
 volumes:
   pk-data:
-  bot-state:
   mariadb-data:

@@ -18,15 +18,10 @@ WORKDIR /app
 # 显式装与 CI 一致的版本，构建结果可复现。
 RUN npm install -g pnpm@10.33.0
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-COPY apps/web/package.json apps/web/
 COPY apps/douyin-web/package.json apps/douyin-web/
 COPY apps/server/package.json apps/server/
-COPY packages/shared/package.json packages/shared/
 RUN pnpm install --frozen-lockfile
-COPY packages/shared packages/shared
 # 镜像里的前端 = 现役管理端 apps/douyin-web（统一后台，history 路由挂 /admin）。
-# apps/web 已冻结（旧 hash 路由，见 docs/00 §7），只在 install 阶段留着对齐 pnpm-lock 的 importer，
-# 不再打进镜像 —— 否则 147 / rk3318 会拿到一套过时的界面。
 COPY apps/douyin-web apps/douyin-web
 RUN pnpm --filter @pk/douyin-web build
 

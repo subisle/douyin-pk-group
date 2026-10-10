@@ -2,13 +2,29 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://pk.local/contracts/robot-command.schema.json",
   "title": "RobotCommand",
+  "description": "机器人入口允许出现的指令载荷。命令名与别名以 rust/crates/pk-server/src/bot/commands.rs 的 COMMANDS 注册表为唯一事实源，此处枚举需与之保持一致（CI 会校验）。",
   "type": "object",
   "required": ["command", "args"],
   "additionalProperties": false,
   "properties": {
     "command": {
       "type": "string",
-      "enum": ["help", "query", "rank", "group"]
+      "enum": [
+        "帮助", "help",
+        "每日报告", "daily",
+        "个人报告", "me", "my",
+        "暂停接收每日推送", "暂停推送", "pause",
+        "开启接收每日推送", "开启推送", "resume",
+        "状态", "status",
+        "分组", "group",
+        "总榜",
+        "排行", "rank",
+        "查询", "query",
+        "导出", "export",
+        "日报",
+        "缺数据",
+        "导入", "import"
+      ]
     },
     "args": {
       "type": "array",

@@ -22,10 +22,32 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // .env 值里带空格和中文（`主库 · douyinxs`），shell source 和 dotenvy 都处理不了，自己解析
+    // .env 值里带空格和中文（`主库 · douyinxs`），shell source 和 dotenvy 都处理不了，自己解析。
+    // apps/server/.env 随过渡期退役了，现在按顺序找第一个存在的文件：
+    // 显式 ENV_FILE / DOTENV_PATH → rust/.env（cargo run 就在 rust/ 下）→ 仓库根 → /app/.env（容器）
     let env_path = std::env::var("ENV_FILE")
         .or_else(|_| std::env::var("DOTENV_PATH"))
-        .unwrap_or_else(|_| "../apps/server/.env".to_string());
+        .ok()
+        .filter(|p| !p.is_empty())
+        .or_else(|| {
+            [
+                ".env",
+                "../.env",
+                "/app/.env",
+                "../deploy/.env",
+                "deploy/.env",
+            ]
+            .iter()
+            .map(PathBuf::from)
+            .find(|p| p.exists())
+            .map(|p| p.display().to_string())
+        })
+        .unwrap_or_else(|| ".env".to_string());
+    if let Ok(p) = std::fs::canonicalize(&env_path) {
+        tracing::info!(path = %p.display(), "已加载 .env");
+    } else {
+        tracing::info!(path = %env_path, "没有找到 .env，全部配置走环境变量");
+    }
     config::load_dotenv(&env_path);
     tracing_subscriber::fmt()
         .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()))
@@ -185,7 +207,7 @@ async fn main() -> anyhow::Result<()> {
 
     /* 对外公开的只读端点：不要鉴权，单独一层 */
     /* 展示端公开 API（2026-10-10 门禁）：只有河南 / 安徽访客放行，
-       放行 / 拒绝都写访问日志（access_logs，后台「访客日志」页）。 */
+    放行 / 拒绝都写访问日志（access_logs，后台「访客日志」页）。 */
     let public_api = Router::new()
         .route("/api/public/plans", get(public::plans))
         .route("/api/public/plans/{id}", get(public::plan))
@@ -258,6 +280,11 @@ async fn main() -> anyhow::Result<()> {
             "/api/public/my/register/config",
             get(public_teams::my_register_config),
         )
+        // 注册页实时校验主播姓名（免 token；注册开关关着时不泄露台账）
+        .route(
+            "/api/public/my/register/check-name",
+            get(public_teams::my_register_check_name),
+        )
         .route(
             "/api/public/my/register/oauth/start",
             post(public_teams::my_register_oauth_start),
@@ -270,7 +297,12 @@ async fn main() -> anyhow::Result<()> {
             "/api/public/my/register/oauth/cancel",
             post(public_teams::my_register_oauth_cancel),
         )
+        .route("/api/public/my/login", post(public_teams::my_login))
         .route("/api/public/my/register", post(public_teams::my_register))
+        .route(
+            "/api/public/my/password/reset",
+            post(public_teams::my_password_reset),
+        )
         .route(
             "/api/public/my/bind/search",
             get(public_teams::my_bind_search),
@@ -281,7 +313,7 @@ async fn main() -> anyhow::Result<()> {
             ipinfo::ip_gate_mw,
         ));
     /* HTML 页面不拦：外省访客打开页面后，第一个数据接口拿 403，
-       前端显示「当前地区暂不支持访问」，比直接甩一个 403 页面友好。 */
+    前端显示「当前地区暂不支持访问」，比直接甩一个 403 页面友好。 */
     let public_pages = Router::new()
         // 对外展示页（静态 HTML，粉丝/主播手机直开）：/ 为唯一入口（男女共用，
         // 进页由前端弹团别选择卡），/1、/0、/st/m、/st/f 为兼容旧链接的别名；
@@ -443,6 +475,12 @@ async fn main() -> anyhow::Result<()> {
             "/api/admin/public/settings",
             get(public_teams::get_settings).post(public_teams::update_settings),
         )
+        // 徒弟提成设置（1.0.1）：折算比例 + 排除名单（鹏先生等不参与提成统计的师傅）
+        .route(
+            "/api/admin/commission/settings",
+            get(public_teams::get_commission_settings)
+                .post(public_teams::update_commission_settings),
+        )
         // 展示端「我的」页面账号（手动设置：姓名 + 纯数字密码，手机号选填）
         .route(
             "/api/admin/my-accounts",
@@ -511,9 +549,12 @@ async fn main() -> anyhow::Result<()> {
     /* 前端静态资源 + SPA 回退（生产单端口模式）。
     启动时只判断 index.html 在不在，内容由 spa::handler 每次回退时现读，
     这样前端重新构建不用重启服务。 */
+    // apps/web（旧 hash 路由后台）已随 2026-10 的收敛退役，镜像里只有
+    // apps/douyin-web/dist；默认值跟着改，本地 `cargo run` 不再 mount 一个
+    // 永远不存在的 ../../web/dist。
     let dist_dir = std::env::var("WEB_DIST")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("../../web/dist"));
+        .unwrap_or_else(|_| PathBuf::from("../../apps/douyin-web/dist"));
     let index = spa::load_index(&dist_dir).await;
 
     let app = match index {

@@ -44,6 +44,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         include_str!("migrations/010_my_pass_hash.sql"),
     ),
     ("011_ip_geo", include_str!("migrations/011_ip_geo.sql")),
+    (
+        "012_my_phone_unique",
+        include_str!("migrations/012_my_phone_unique.sql"),
+    ),
 ];
 
 /// 迁移建连（migrator 账号；同样关语句缓存）

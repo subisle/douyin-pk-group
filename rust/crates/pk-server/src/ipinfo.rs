@@ -13,6 +13,7 @@
 //! - `IP_GATE_SOURCES`：门禁（访客检查）用源，默认 pconline,baidu,ip9（中文源）；
 //! - `IP_QUERY_SOURCES`：IP 查询用源，默认 ip.sb,ip2location,ipwhois（ip.sb / ip2location
 //!   实测 ~1s 稳定，ipinfo 的 demo 端点 6s 超时不稳定，不作为默认）。
+//!
 //! 合法名字即下面 `ALL_SOURCE_NAMES` 的 19 个；`GET /api/admin/ip-lookup` 诊断接口
 //! 走 Query 集且不读不写 ip_geo_cache。
 
@@ -201,10 +202,10 @@ pub async fn ip_gate_mw(
 ) -> Response {
     let ip = request_ip(addr, req.headers());
     let path = req.uri().path().to_string();
-    /* verify 交由 handler 自己过门禁：那里能读到请求体里的 account，被拦下的外省
-       尝试也要落一条登录日志（后台「访客日志」看得到谁在门外试了什么账号），
-       所以中间件对 verify 直接放行——不拦、也不记重复的 api 条目 */
-    if path.ends_with("/verify") {
+    /* verify 与团别无关登录口 /my/login 都交由 handler 自己过门禁：那里能读到请求体里的
+    account，被拦下的外省尝试也要落一条登录日志（后台「访客日志」看得到谁在门外
+    试了什么账号），所以中间件对这两个口直接放行——不拦、也不记重复的 api 条目 */
+    if path.ends_with("/verify") || path.ends_with("/my/login") {
         return next.run(req).await;
     }
     let query = req.uri().query().unwrap_or_default().to_string();
@@ -212,7 +213,20 @@ pub async fn ip_gate_mw(
     let account = account_from_query(&query);
     let geo = geo_for_ip(&st, &ip).await.unwrap_or_default();
     let allowed = gate_disabled() || geo.allowed;
-    log_access(&st, "api", &ip, &geo, &team, &path, &account, allowed, false).await;
+    log_access(
+        &st,
+        AccessLog {
+            kind: "api",
+            ip: &ip,
+            geo: &geo,
+            team: &team,
+            path: &path,
+            account: &account,
+            allowed,
+            login_ok: false,
+        },
+    )
+    .await;
     if !allowed {
         tracing::info!(
             ip = %ip, team = %team, province = %geo.province, path = %path,
@@ -239,7 +253,9 @@ fn team_from_path(path: &str) -> String {
 /// my token 是登录态唯一的凭据：能从 query 里认出来就把账号带进访问日志
 fn account_from_query(query: &str) -> String {
     for pair in query.split('&') {
-        let Some((k, v)) = pair.split_once('=') else { continue };
+        let Some((k, v)) = pair.split_once('=') else {
+            continue;
+        };
         if k == "token" || k == "access_token" {
             if let Some((_, _, name)) = crate::public_teams::my_token_peek(v) {
                 return name;
@@ -400,10 +416,16 @@ fn all_sources(ip: &str) -> Vec<Source> {
         s("ip9", format!("https://ip9.com.cn/get?ip={ip}"), parse_ip9),
         s(
             "ip-api",
-            format!("http://ip-api.com/json/{ip}?lang=zh-CN&fields=status,country,regionName,city,isp"),
+            format!(
+                "http://ip-api.com/json/{ip}?lang=zh-CN&fields=status,country,regionName,city,isp"
+            ),
             parse_ip_api,
         ),
-        s("ip.sb", format!("https://api.ip.sb/geoip/{ip}"), parse_ip_sb),
+        s(
+            "ip.sb",
+            format!("https://api.ip.sb/geoip/{ip}"),
+            parse_ip_sb,
+        ),
         s(
             "geojs",
             format!("https://get.geojs.io/v1/ip/geo/{ip}.json"),
@@ -444,7 +466,11 @@ fn all_sources(ip: &str) -> Vec<Source> {
             format!("https://freeipapi.com/api/json/{ip}"),
             parse_freeipapi,
         ),
-        s("nc.gy", format!("https://ip.nc.gy/json?ip={ip}"), parse_ncgy),
+        s(
+            "nc.gy",
+            format!("https://ip.nc.gy/json?ip={ip}"),
+            parse_ncgy,
+        ),
         s(
             "ipwtf",
             format!("https://ipwtf.com/api/whois/{ip}"),
@@ -608,7 +634,13 @@ pub fn normalize_province(raw: &str) -> String {
     }
     let lower = t.to_lowercase().replace(['.', '_'], " ");
     let mut lower = lower.trim().to_string();
-    for suffix in [" province", " sheng", " shi", " municipality", " autonomous region"] {
+    for suffix in [
+        " province",
+        " sheng",
+        " shi",
+        " municipality",
+        " autonomous region",
+    ] {
         if let Some(stripped) = lower.strip_suffix(suffix) {
             lower = stripped.trim().to_string();
         }
@@ -695,14 +727,23 @@ fn trim_city(raw: &str) -> String {
 }
 
 fn parse_pconline(v: &Value) -> RawGeo {
-    if !v.get("err").and_then(Value::as_str).unwrap_or("").is_empty() {
+    if !v
+        .get("err")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .is_empty()
+    {
         return RawGeo::default();
     }
     let addr = text(v, &["addr"]);
     RawGeo {
         province: text(v, &["pro"]),
         city: text(v, &["city"]),
-        isp: addr.split_whitespace().last().unwrap_or_default().to_string(),
+        isp: addr
+            .split_whitespace()
+            .last()
+            .unwrap_or_default()
+            .to_string(),
     }
 }
 
@@ -718,11 +759,7 @@ fn parse_baidu(v: &Value) -> RawGeo {
 
 fn parse_ip9(v: &Value) -> RawGeo {
     let d = v.get("data").unwrap_or(&Value::Null);
-    RawGeo::new(
-        text(d, &["prov"]),
-        text(d, &["city"]),
-        text(d, &["isp"]),
-    )
+    RawGeo::new(text(d, &["prov"]), text(d, &["city"]), text(d, &["isp"]))
 }
 
 fn parse_ip_api(v: &Value) -> RawGeo {
@@ -781,11 +818,7 @@ fn parse_db_ip(v: &Value) -> RawGeo {
 
 fn parse_ipinfo_widget(v: &Value) -> RawGeo {
     let d = v.get("data").unwrap_or(&Value::Null);
-    RawGeo::new(
-        text(d, &["region"]),
-        text(d, &["city"]),
-        text(d, &["org"]),
-    )
+    RawGeo::new(text(d, &["region"]), text(d, &["city"]), text(d, &["org"]))
 }
 
 fn parse_ipquery(v: &Value) -> RawGeo {
@@ -822,11 +855,7 @@ fn parse_ip2location(v: &Value) -> RawGeo {
 }
 
 fn parse_freeipapi(v: &Value) -> RawGeo {
-    RawGeo::new(
-        text(v, &["regionName"]),
-        text(v, &["cityName"]),
-        "",
-    )
+    RawGeo::new(text(v, &["regionName"]), text(v, &["cityName"]), "")
 }
 
 fn parse_ncgy(v: &Value) -> RawGeo {
@@ -871,11 +900,7 @@ fn parse_geolocation_db(v: &Value) -> RawGeo {
 }
 
 fn parse_ipapi_co(v: &Value) -> RawGeo {
-    RawGeo::new(
-        text(v, &["region"]),
-        text(v, &["city"]),
-        text(v, &["org"]),
-    )
+    RawGeo::new(text(v, &["region"]), text(v, &["city"]), text(v, &["org"]))
 }
 
 fn parse_dbip_demo(v: &Value) -> RawGeo {
@@ -889,18 +914,30 @@ fn parse_dbip_demo(v: &Value) -> RawGeo {
 
 /* ------------------------------- 访问日志 ------------------------------- */
 
+/// 记一条访问日志所需的全部上下文。
+///
+/// 收敛成结构体而不是 9 个位置参数：调用点散在门禁中间件与两个登录口，
+/// 位置参数很容易把 `allowed` / `login_ok` 传反，而这两个字段都是 bool，
+/// 编译器查不出来。
+pub struct AccessLog<'a> {
+    pub kind: &'a str,
+    pub ip: &'a str,
+    pub geo: &'a IpGeo,
+    pub team: &'a str,
+    pub path: &'a str,
+    pub account: &'a str,
+    pub allowed: bool,
+    pub login_ok: bool,
+}
+
 /// 记一条访问日志：登录事件（kind=login）每次都写；普通接口访问 5 分钟内同 IP + 同路径去重。
-pub async fn log_access(
-    st: &ArcState,
-    kind: &str,
-    ip: &str,
-    geo: &IpGeo,
-    team: &str,
-    path: &str,
-    account: &str,
-    allowed: bool,
-    login_ok: bool,
-) {
+pub async fn log_access(st: &ArcState, e: AccessLog<'_>) {
+    let kind = e.kind;
+    let ip = e.ip;
+    let geo = e.geo;
+    let team = e.team;
+    let path = e.path;
+    let login_ok = e.login_ok;
     let Some(pool) = st.writer.as_ref() else {
         return;
     };
@@ -908,7 +945,8 @@ pub async fn log_access(
         return;
     };
     let packed = pack_ip(parsed);
-    let account = truncate_name(account);
+    let account = truncate_name(e.account);
+    let allowed = e.allowed;
     let result = if kind == "login" {
         sqlx::query(
             "INSERT INTO access_logs \
@@ -962,17 +1000,37 @@ pub async fn log_access(
 }
 
 /// 登录尝试（verify）专用：带账号与成败，每次都记
-pub async fn log_login(
+pub async fn log_login(st: &ArcState, ip: &str, geo: &IpGeo, team: &str, account: &str, ok: bool) {
+    let path = format!("/api/public/teams/{team}/verify");
+    log_login_path(st, ip, geo, team, &path, account, ok).await;
+}
+
+/// 同上，但日志里记真实请求路径（团别无关的登录口 /api/public/my/login 用）。
+/// team 传账号最终归属的团；团别待定（管理员观看 / 还没绑主播）传空串。
+pub async fn log_login_path(
     st: &ArcState,
     ip: &str,
     geo: &IpGeo,
     team: &str,
+    path: &str,
     account: &str,
     ok: bool,
 ) {
-    let path = format!("/api/public/teams/{team}/verify");
     let allowed = gate_disabled() || geo.allowed;
-    log_access(st, "login", ip, geo, team, &path, account, allowed, ok).await;
+    log_access(
+        st,
+        AccessLog {
+            kind: "login",
+            ip,
+            geo,
+            team,
+            path,
+            account,
+            allowed,
+            login_ok: ok,
+        },
+    )
+    .await;
 }
 
 /* ------------------------------- 后台查询 ------------------------------- */
@@ -1011,12 +1069,11 @@ pub async fn admin_visits(
     if q.blocked.as_deref() == Some("1") {
         sql.push_str(" AND allowed = 0");
     }
-    let search = q
-        .q
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|s| format!("%{s}%"));
+    let search =
+        q.q.as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| format!("%{s}%"));
     if search.is_some() {
         sql.push_str(" AND (INET6_NTOA(ip) LIKE ? OR account_name LIKE ?)");
     }
@@ -1252,22 +1309,35 @@ mod tests {
         let p = parse_pconline(&serde_json::json!({
             "ip": "123.15.57.1", "pro": "河南省", "city": "郑州市", "addr": "河南省郑州市 联通", "err": ""
         }));
-        assert_eq!((p.province.as_str(), p.city.as_str(), p.isp.as_str()), ("河南省", "郑州市", "联通"));
+        assert_eq!(
+            (p.province.as_str(), p.city.as_str(), p.isp.as_str()),
+            ("河南省", "郑州市", "联通")
+        );
 
         let b = parse_baidu(&serde_json::json!({
             "data": [{ "location": "安徽省合肥市 电信" }]
         }));
-        assert_eq!((b.province.as_str(), b.city.as_str(), b.isp.as_str()), ("安徽", "合肥", "电信"));
+        assert_eq!(
+            (b.province.as_str(), b.city.as_str(), b.isp.as_str()),
+            ("安徽", "合肥", "电信")
+        );
 
         let i = parse_ip9(&serde_json::json!({
             "ret": 200, "data": { "prov": "河南", "city": "郑州", "isp": "中国联通" }
         }));
-        assert_eq!((i.province.as_str(), i.city.as_str(), i.isp.as_str()), ("河南", "郑州", "中国联通"));
+        assert_eq!(
+            (i.province.as_str(), i.city.as_str(), i.isp.as_str()),
+            ("河南", "郑州", "中国联通")
+        );
 
-        let s = parse_ip_sb(&serde_json::json!({ "region": "Henan", "city": "Zhengzhou", "isp": "China Unicom" }));
+        let s = parse_ip_sb(
+            &serde_json::json!({ "region": "Henan", "city": "Zhengzhou", "isp": "China Unicom" }),
+        );
         assert_eq!(s.province, "Henan");
 
-        let w = parse_ipwhois(&serde_json::json!({ "success": true, "region": "Henan Sheng", "city": "Zhengzhou", "isp": "Unicom" }));
+        let w = parse_ipwhois(
+            &serde_json::json!({ "success": true, "region": "Henan Sheng", "city": "Zhengzhou", "isp": "Unicom" }),
+        );
         assert_eq!(normalize_province(&w.province), "河南");
 
         let d = parse_db_ip(&serde_json::json!({ "stateProv": "Anhui", "city": "Hefei" }));
@@ -1282,19 +1352,29 @@ mod tests {
         let t = parse_ipwtf(&serde_json::json!({
             "ipv4": { "regionName": "Henan", "cityName": "Zhengzhou", "as": "Unicom" }
         }));
-        assert_eq!((t.province.as_str(), t.city.as_str(), t.isp.as_str()), ("Henan", "Zhengzhou", "Unicom"));
+        assert_eq!(
+            (t.province.as_str(), t.city.as_str(), t.isp.as_str()),
+            ("Henan", "Zhengzhou", "Unicom")
+        );
 
         let q = parse_ipquery(&serde_json::json!({
             "location": { "state": "Henan", "city": "Zhengzhou" },
             "isp": { "isp": "China Unicom" }
         }));
-        assert_eq!((q.province.as_str(), q.isp.as_str()), ("Henan", "China Unicom"));
+        assert_eq!(
+            (q.province.as_str(), q.isp.as_str()),
+            ("Henan", "China Unicom")
+        );
 
         // 限流 / 失效响应不能当成省份
         assert!(parse_dbip_demo(&serde_json::json!({
             "status": "ok", "demoInfo": { "errorCode": "OVER_QUERY_LIMIT" }
-        })).province.is_empty());
-        assert!(parse_ipwhois(&serde_json::json!({ "success": false })).province.is_empty());
+        }))
+        .province
+        .is_empty());
+        assert!(parse_ipwhois(&serde_json::json!({ "success": false }))
+            .province
+            .is_empty());
     }
 
     #[test]
@@ -1306,7 +1386,11 @@ mod tests {
             assert_eq!(source_names_for(set, None), want, "set = {set:?}");
             assert_eq!(source_names_for(set, Some("")), want, "空串应回默认");
             assert_eq!(source_names_for(set, Some("   ")), want);
-            assert_eq!(source_names_for(set, Some("foo,bar")), want, "全未知名字应回默认");
+            assert_eq!(
+                source_names_for(set, Some("foo,bar")),
+                want,
+                "全未知名字应回默认"
+            );
         }
     }
 
@@ -1432,11 +1516,8 @@ mod tests {
                 let client = client.clone();
                 async move {
                     let result = match client.get(&s.url).send().await {
-                        Ok(resp) if resp.status().is_success() => resp
-                            .bytes()
-                            .await
-                            .ok()
-                            .and_then(|bytes| {
+                        Ok(resp) if resp.status().is_success() => {
+                            resp.bytes().await.ok().and_then(|bytes| {
                                 let text = if s.gbk {
                                     encoding_rs::GBK.decode(&bytes).0.into_owned()
                                 } else {
@@ -1445,7 +1526,8 @@ mod tests {
                                 serde_json::from_str::<Value>(text.trim())
                                     .ok()
                                     .map(|v| (s.parse)(&v))
-                            }),
+                            })
+                        }
                         Ok(resp) => {
                             println!("  {:<14} HTTP {}", s.name, resp.status());
                             None

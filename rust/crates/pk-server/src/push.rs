@@ -112,6 +112,27 @@ pub fn delay_minutes() -> i64 {
         .unwrap_or(30)
 }
 
+/* --------------------- 1.0.1：分批推送（150 人规模） --------------------- */
+
+/// 每批推送人数（WX_PUSH_BATCH_SIZE，默认 20）。iLink 是私聊被动形态，
+/// 连环群发容易触发频控；分批 + 批间隔把 150 人的推送摊平到一分多钟。
+pub fn batch_size() -> usize {
+    std::env::var("WX_PUSH_BATCH_SIZE")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|v| (1..=200).contains(v))
+        .unwrap_or(20)
+}
+
+/// 批间隔秒数（WX_PUSH_BATCH_INTERVAL_SECS，默认 3）。
+pub fn batch_interval_secs() -> u64 {
+    std::env::var("WX_PUSH_BATCH_INTERVAL_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|v| *v <= 300)
+        .unwrap_or(3)
+}
+
 /* --------------------- P1-20 / P2-21：调度器生命周期与健康状态 --------------------- */
 
 /// 调度循环的退出信号：main.rs 在 graceful shutdown 时 cancel()，循环尽快退出。
@@ -248,7 +269,7 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
         Vec::new()
     };
 
-    for b in &bindings {
+    for (idx, b) in bindings.iter().enumerate() {
         let mut sent_any = false;
 
         // ① 每日报告（同一业务日只推一次：补数据重排队列时不再重复推）
@@ -332,6 +353,22 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
 
         if sent_any {
             crate::store::push_touch(st, &b.name, "").await;
+        }
+        /* 1.0.1 分批节拍：150 人规模下连环群发容易触发 iLink 频控。
+        每发完 batch_size() 个人停 batch_interval_secs() 秒（env 可调）；
+        批内单人失败照常记日志继续，不影响整批节奏。最后一人不停。 */
+        let batch = batch_size().max(1);
+        if (idx + 1) % batch == 0 && idx + 1 < bindings.len() {
+            let interval = batch_interval_secs();
+            if interval > 0 {
+                tracing::debug!(
+                    sent = idx + 1,
+                    total = bindings.len(),
+                    interval,
+                    "推送分批：本批发完，暂停"
+                );
+                tokio::time::sleep(Duration::from_secs(interval)).await;
+            }
         }
     }
     Ok(())

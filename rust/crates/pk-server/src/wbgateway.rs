@@ -4,7 +4,7 @@
 //! 面板 `?tab=gateway` 上那个「+ 添加账号 (OAuth)」按钮走的就是这套接口，
 //! 用户在授权页用**手机号 + 短信验证码**登录，登录完成后账号自动入池。
 //!
-//! 实测契约（2026-10-10，http://147.90.235.187:8788，wb-proxy/1.6.17）：
+//! 实测契约（2026-10-10，wb-proxy/1.6.17）：
 //!   POST /panel/login {password}                  → {ok, token}          （免 token）
 //!   POST /accounts/login/start {platform, realm}  → {state, authUrl}     （要 X-Panel-Token）
 //!   GET  /accounts/login/poll?state=<state>       → {status, message, account?}
@@ -12,7 +12,7 @@
 //!   status: pending（等授权）| ok（已入池）| error | expired | unknown
 //!
 //! 配置（.env）：
-//!   WORKBUDDY_PANEL_URL       面板地址，默认 <http://147.90.235.187:8788>
+//!   WORKBUDDY_PANEL_URL       面板地址，默认 <http://64.188.8.149:8788>
 //!   WORKBUDDY_PANEL_PASSWORD  面板密码；**没配 = 注册页不显示 OAuth 步骤**，其余注册照常
 //!
 //! 安全：面板密码只留在服务端（环境变量 + 内存里的 token），`/panel/*` 一律不转发给浏览器；
@@ -23,8 +23,8 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-/// 默认面板地址（用户 2026-10-10 给的口径：147 上的 WorkBuddy 用量看板）
-pub const DEFAULT_PANEL_URL: &str = "http://147.90.235.187:8788";
+/// 默认面板地址（用户 2026-10-11 给的口径）
+pub const DEFAULT_PANEL_URL: &str = "http://64.188.8.149:8788";
 
 const UA: &str = "pk-server/1.0 (+workbuddy-register)";
 
@@ -102,7 +102,9 @@ impl WbGateway {
         if let Some(t) = self
             .token
             .lock()
-            .expect("wb token 锁 poisoned")
+            /* 审计 2026-10-11：某次 panic 毒化锁后，expect 会让之后每个请求连锁 panic，
+            这里取回中毒锁里的值继续用（token 本身就是可重建的缓存） */
+            .unwrap_or_else(|e| e.into_inner())
             .clone()
             .filter(|t| !t.is_empty())
         {
@@ -124,7 +126,7 @@ impl WbGateway {
         }
         let token =
             str_field(&v, "token").ok_or_else(|| "网关面板登录没有返回 token".to_string())?;
-        *self.token.lock().expect("wb token 锁 poisoned") = Some(token.clone());
+        *self.token.lock().unwrap_or_else(|e| e.into_inner()) = Some(token.clone());
         Ok(token)
     }
 
@@ -167,7 +169,7 @@ impl WbGateway {
     }
 
     fn forget_token(&self) {
-        *self.token.lock().expect("wb token 锁 poisoned") = None;
+        *self.token.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     /// 一次 HTTP 往返：返回 (状态码, JSON)。网络层错误直接 Err（文案给用户看）

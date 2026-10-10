@@ -924,6 +924,43 @@ pub fn validate_my_code(code: &str) -> std::result::Result<String, String> {
     Ok(c.to_string())
 }
 
+/// 忘记密码：把已登记手机号的账号密码重置为手机号后四位。
+pub async fn my_account_reset_password_to_phone_suffix(
+    st: &AppState,
+    phone: &str,
+) -> std::result::Result<String, String> {
+    let phone = validate_my_phone(phone)?;
+    if phone.is_empty() {
+        return Err("请输入注册手机号".into());
+    }
+    if phone.len() < 4 {
+        return Err("手机号不足 4 位，无法重置".into());
+    }
+    let pool = w(st).map_err(|e| e.to_string())?;
+    /* 只认「自助注册的普通账号」（is_admin=0）：管理员观看账号不参与重置，
+    否则知道手机号的人就能接管后台视角账号（审计 2026-10-11 修复）。
+    文案不区分「没登记」和「管理员账号」，避免泄露台账。 */
+    let exists = sqlx::query(
+        "SELECT 1 FROM my_accounts WHERE phone = ? AND phone <> '' AND is_admin = 0 LIMIT 1",
+    )
+    .bind(&phone)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("查询账号失败：{e}"))?
+    .is_some();
+    if !exists {
+        return Err("该手机号还没有注册或未登记".into());
+    }
+    let new_pass = phone[phone.len() - 4..].to_string();
+    sqlx::query("UPDATE my_accounts SET pass = ? WHERE phone = ? AND phone <> '' AND is_admin = 0")
+        .bind(hash_my_password(&new_pass))
+        .bind(&phone)
+        .execute(pool)
+        .await
+        .map_err(|e| format!("重置失败：{e}"))?;
+    Ok(new_pass)
+}
+
 /// 查账号信息（登录名或手机号都认）。老库还没跑 008 迁移时退回老查询：
 /// 老行都是管理员手建的 → 一律视为「已绑定」，登录/我的页照常，只有新注册用不了。
 pub async fn my_account_info(st: &AppState, key: &str) -> Option<MyAccountInfo> {
@@ -968,19 +1005,23 @@ pub async fn my_account_info(st: &AppState, key: &str) -> Option<MyAccountInfo> 
         })
 }
 
-/// 展示端自助注册：**手机号 = 账号，短信验证码 = 密码**。返回登录名（= 手机号）。
+/// 展示端自助注册（2026-10-11 口径）：**手机号 = 账号，短信验证码 = 密码，注册时直接填主播姓名**。
 ///
 /// 规则：
 /// - 手机号 / 验证码都是纯数字；手机号 5~20 位、验证码 4~20 位
+/// - **主播姓名必须能在台账（person 表）里精确查到**，查不到直接拒绝（避免随便填个名字就进站）
 /// - 手机号已存在（管理员手建或已注册）→ 拒绝，引导去登录
-/// - 验证码撞上别人已有的密码（`uk_my_pass` 1:1 唯一键）→ 拒绝，让用户重新获取验证码
-/// - 新账号 `bound=0`：登录后必须绑定一位主播（绑定后用户自己不能解绑）
+/// - 该姓名已经有账号了 → 拒绝（一人一号）
+/// - 注册即绑定：新账号 `bound=1`、`name` = 台账姓名，不用再走一遍「绑定主播」
+///
+/// 返回 `(登录名, personId, 团别)`。登录名 = 主播姓名，手机号也能登录（`phone` 列另存一份）。
 pub async fn my_account_register(
     st: &AppState,
     phone: &str,
     code: &str,
+    anchor_name: &str,
     wb_state: &str,
-) -> std::result::Result<String, String> {
+) -> std::result::Result<(String, i64, String), String> {
     let pool = w(st).map_err(|e| e.to_string())?;
     let phone = validate_my_phone(phone)?;
     if phone.is_empty() {
@@ -988,48 +1029,75 @@ pub async fn my_account_register(
     }
     let code = validate_my_code(code)?;
 
-    let dup_phone =
-        sqlx::query("SELECT name FROM my_accounts WHERE phone <> '' AND phone = ? LIMIT 1")
-            .bind(&phone)
-            .fetch_optional(pool)
-            .await
-            .map_err(|e| format!("查重失败：{e}"))?
-            .is_some();
-    if dup_phone {
-        return Err("该手机号已存在（已注册），请直接登录；忘记密码请联系管理员".into());
+    /* 主播姓名：必须在台账里（全台账搜，注册时还不知道团别） */
+    let anchor = anchor_name.trim();
+    if anchor.is_empty() {
+        return Err("请输入主播姓名（艺名）".into());
     }
-    let dup_name = sqlx::query("SELECT 1 FROM my_accounts WHERE name = ?")
-        .bind(&phone)
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| format!("查重失败：{e}"))?
-        .is_some();
-    if dup_name {
-        return Err("该手机号已存在（已注册），请直接登录".into());
+    if anchor.chars().count() > 20 {
+        return Err("姓名太长（最多 20 字）".into());
+    }
+    let Some((person_id, person_name, team)) = anchor_lookup_by_name(st, anchor).await? else {
+        return Err(format!(
+            "主播库里没有「{anchor}」这个姓名，请核对艺名；确认无误请联系管理员先加进台账"
+        ));
+    };
+    /* 一次查询覆盖三种占用（少两次往返）：同名主播已占号 / 手机号已占 / 历史「手机号占位名」。
+    真正的唯一性由主键(name) + uk_my_phone_uniq(phone) 兜底，这里只为给出准确文案。 */
+    let clashes = sqlx::query(
+        "SELECT name, phone FROM my_accounts \
+         WHERE name IN (?, ?) OR (phone <> '' AND phone = ?) LIMIT 5",
+    )
+    .bind(&person_name)
+    .bind(&phone)
+    .bind(&phone)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("查重失败：{e}"))?;
+    for row in &clashes {
+        let row_name: String = row.try_get("name").unwrap_or_default();
+        let row_phone: String = row.try_get("phone").unwrap_or_default();
+        if !row_phone.is_empty() && row_phone == phone {
+            return Err("该手机号已存在（已注册），请直接登录；忘记密码请联系管理员".into());
+        }
+        if row_name == person_name {
+            return Err("该主播已经有账号了，请直接登录；忘记密码可点「忘记密码？」重置".into());
+        }
+        if row_name == phone {
+            return Err("该手机号已存在（已注册），请直接登录".into());
+        }
     }
     let pass_hash = hash_my_password(&code);
+    let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    /* 注册即绑定：name 直接写台账姓名、bound=1 —— 省掉「注册完再绑一次」这一步 */
     sqlx::query(
         "INSERT INTO my_accounts (name, phone, pass, is_admin, created_at, bound, bound_at, source, wb_state)
-         VALUES (?, ?, ?, 0, ?, 0, '', 'register', ?)",
+         VALUES (?, ?, ?, 0, ?, 1, ?, 'register', ?)",
     )
-    .bind(&phone)
+    .bind(&person_name)
     .bind(&phone)
     .bind(&pass_hash)
-    .bind(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string())
+    .bind(&now)
+    .bind(&now)
     .bind(wb_state.trim())
     .execute(pool)
     .await
     .map_err(|e| {
         let m = e.to_string();
         if m.contains("Duplicate entry") {
-            "该手机号已存在（已注册），请直接登录".into()
+            /* 并发穿过上面的预检：按冲突的键给文案（PRIMARY = name，其余 = 手机号唯一键） */
+            if m.contains("PRIMARY") {
+                "该主播已经有账号了，请直接登录；忘记密码可点「忘记密码？」重置".to_string()
+            } else {
+                "该手机号已存在（已注册），请直接登录；忘记密码请联系管理员".to_string()
+            }
         } else if m.contains("Unknown column") {
             "缺少数据库迁移 008（先跑一次 pk-server migrate）".to_string()
         } else {
             format!("写入失败：{m}")
         }
     })?;
-    Ok(phone)
+    Ok((person_name, person_id, team))
 }
 
 /// 绑定结果：绑定后的主播身份（前端拿它重新发 token / 换团）
@@ -1147,6 +1215,66 @@ async fn bind_inner(
         team,
         person_id,
     })
+}
+
+/// 注册时按姓名精确查主播（2026-10-11 用户口径：注册要填主播姓名，并且必须在台账里）。
+///
+/// 口径与「绑定主播」保持一致：
+/// - 全台账搜，不限团别（注册时还不知道团别）
+/// - `deleted_at IS NULL`（已删除的不算）
+/// - `status <> 'left'`（已离团的不算）
+///
+/// 返回 (person_id, 台账姓名, 团别)；查不到 → Ok(None)。
+///
+/// 两类会被显式拒绝的情况（审计 2026-10-11 修复）：
+/// - **同名多行**：`LIMIT 2` 拿到第二行就报错，绝不静默取 id 最小那行（同名会串数据/串人）；
+/// - **团别不是 male/female**（如台账新建师傅/徒弟的默认 `unknown`）：
+///   登录按团别查人（`verify` 用 `p.gender = team`），用这种建号会「注册当场成功、
+///   token 过期后永远登不上」，且手机号已被占不能重注册 —— 必须在这里挡住并让人去补台账。
+pub async fn anchor_lookup_by_name(
+    st: &AppState,
+    name: &str,
+) -> std::result::Result<Option<(i64, String, String)>, String> {
+    let key = name.trim();
+    if key.is_empty() {
+        return Ok(None);
+    }
+    let rows = crate::mysql::query_with_binds(
+        &st.pools,
+        &st.active_id(),
+        "SELECT id, name, gender FROM person \
+         WHERE deleted_at IS NULL AND status <> 'left' AND name = ? \
+         ORDER BY id LIMIT 2",
+        |q| q.bind(key.to_string()),
+    )
+    .await
+    .map_err(|e| format!("查主播失败：{e}"))?;
+    if rows.len() > 1 {
+        return Err(format!(
+            "台账里有不止一位叫「{key}」的主播，为避免绑错人，请联系管理员先区分艺名"
+        ));
+    }
+    let Some(r) = rows.into_iter().next() else {
+        return Ok(None);
+    };
+    let pid = r
+        .try_get::<i64, _>("id")
+        .or_else(|_| r.try_get::<u64, _>("id").map(|v| v as i64))
+        .unwrap_or(0);
+    if pid <= 0 {
+        return Ok(None);
+    }
+    let team: String = r.try_get("gender").unwrap_or_default();
+    if team != "male" && team != "female" {
+        return Err(format!(
+            "主播「{key}」在台账里还没设置团别（男团 / 女团），请联系管理员设置后再注册"
+        ));
+    }
+    Ok(Some((
+        pid,
+        r.try_get::<String, _>("name").unwrap_or_default(),
+        team,
+    )))
 }
 
 /// 绑定页搜索：全台账按名字模糊搜（注册出来的账号还没有团别，不能只搜本团）

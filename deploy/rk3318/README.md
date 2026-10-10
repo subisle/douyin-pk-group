@@ -75,7 +75,9 @@ GET  /api/admin/import/batches        最近导入批次
 # QQ 官方机器人（开放平台）
 BOT_QQ_APP_ID=
 BOT_QQ_APP_SECRET=
-BOT_QQ_ADMINS=          # 管理员会话 openid，逗号分隔
+# ⚠️ 不需要配管理员名单：QQ 渠道是无条件管理员（任何能私聊到这个 QQ 号的人
+# 都有导入 / 导出 / 查任意主播的全部权限）。BOT_QQ_ADMINS 当前对 QQ 不生效，
+# 配了也不起作用——想收口只能改代码里的角色判定。所以：这个 QQ 号不要公开。
 # 微信 iLink（扫码后会话 token 落 MySQL bot_sessions，单库化后不再落 SQLite；也可手工粘贴）
 BOT_WECHAT_ADMINS=
 # BOT_AUTOSTART 已废弃：配置了凭据的渠道随服务启动自动连接

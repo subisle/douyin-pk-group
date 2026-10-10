@@ -49,7 +49,7 @@ fn fmt_wan(v: i64) -> String {
 
 /// 拉取日报数据。date/team 已由调用方校验。
 pub async fn build(st: &Arc<AppState>, date: &str, team: &str) -> anyhow::Result<DailyReport> {
-    use crate::dialect::{is_live_wave, NOT_LIVE_WAVE_THRESHOLD};
+    use crate::dialect::is_live_wave;
     // 当日指标（P1-7：与榜单一致，只聚合可信行 wave_reliable=1）
     let today_sql = format!(
         "SELECT person_id, CAST(SUM(wave) AS SIGNED) AS wave, \
@@ -57,14 +57,10 @@ pub async fn build(st: &Arc<AppState>, date: &str, team: &str) -> anyhow::Result
          FROM daily_metric WHERE wave_reliable = 1 \
            AND DATE_FORMAT(biz_date, '%Y-%m-%d') = '{date}' GROUP BY person_id"
     );
-    // 当月未播天数（有数据行中；P1-7 只算可信行，P1-10 统一口径：当日音浪 < 2 = 未播，
-    // 与 public_teams.rs 展示端 / push.rs 推送榜同一把尺子，见 dialect::NOT_LIVE_WAVE_THRESHOLD）
+    // 当月未播天数：与展示端榜单共用 dialect::MONTH_ABSENT_SQL（只有一份口径，
+    // 见那里的注释：只算有数据行，缺采的日子不算未播）。
     let month = &date[..7];
-    let month_sql = format!(
-        "SELECT person_id, CAST(SUM(CASE WHEN wave < {NOT_LIVE_WAVE_THRESHOLD} THEN 1 ELSE 0 END) AS SIGNED) AS n \
-         FROM daily_metric WHERE wave_reliable = 1 \
-           AND DATE_FORMAT(biz_date, '%Y-%m') = '{month}' GROUP BY person_id"
-    );
+    let month_sql = crate::dialect::month_absent_sql(month);
     // 累计音浪（≤ date 的全部增量求和；P1-7 total 口径与 WAVES_A 一致：只算可靠行。
     // 基线日 wave_reliable=0 记的是累计基数，其 wave 值本来就是 0/不可信，
     // 排除它不会少算当日口径的累计 —— 「累计总音浪」列展示的是当日口径累计）。

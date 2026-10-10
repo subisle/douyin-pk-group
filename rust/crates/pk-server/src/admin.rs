@@ -542,6 +542,13 @@ pub struct ImportRow {
     pub minutes: Option<f64>,
     #[serde(rename = "isLive")]
     pub is_live: Option<bool>,
+    /// 解析失败的原因（时长/音浪列有值但解析不过）。
+    ///
+    /// 月度时长导入里这个字段必须活到落库阶段：以前 `parse_duration_only` 直接把
+    /// 解析失败的行 `filter` 掉，运营只见「预览少了一个人」却没有任何线索可查，
+    /// 而漏一个人 = 他整月时长在月榜上是 0。现在带原因进 skipped 报告。
+    #[serde(skip_deserializing)]
+    pub err: Option<String>,
 }
 
 /// 审计/暂存文本列宽（UTF-8 字符数）。import_batch.note VARCHAR(512)、
@@ -847,10 +854,36 @@ fn resolve_row(
 }
 
 /// 统一解析入口：带表头的运营 CSV（别名/单位）走 csvparse，否则回落裸列序解析
+/// 文本里是不是明显混进了二进制（xlsx / zip / 老 xls / 其它压缩流）。
+///
+/// 为什么需要：xlsx 转文本漏判时，整段 ZIP 流会被当成「名字 / 抖音号」塞进
+/// import_pending，后台暂存区显示成一屏乱码，且**每一个乱码都会变成一个待建档主播**。
+/// 判据是控制字符密度——正常名单文本里几乎不会有 0x00-0x08 这类字节。
+pub fn looks_like_binary(text: &str) -> bool {
+    let sample: &[u8] = &text.as_bytes()[..text.len().min(4096)];
+    if sample.is_empty() {
+        return false;
+    }
+    // ZIP/xlsx 的文件头，见到直接判死
+    if sample.len() >= 4 && sample[..4] == [0x50, 0x4b, 0x03, 0x04] {
+        return true;
+    }
+    let bad = sample
+        .iter()
+        .filter(|&&b| b < 0x09 || (0x0e..0x20).contains(&b))
+        .count();
+    bad * 100 / sample.len() > 5
+}
+
 pub fn parse_any_text(text: &str) -> Vec<ImportRow> {
-    if let Ok((kind, rows)) = crate::csvparse::parse(text) {
-        if kind != crate::csvparse::Kind::Unknown && !rows.is_empty() {
-            let mapped: Vec<ImportRow> = rows
+    // 二进制护栏：宁可整批解析不出让运营重发，也不让一屏乱码变成一批待建档主播
+    if looks_like_binary(text) {
+        return Vec::new();
+    }
+    if let Ok((kind, out)) = crate::csvparse::parse(text) {
+        if kind != crate::csvparse::Kind::Unknown && !out.rows.is_empty() {
+            let mapped: Vec<ImportRow> = out
+                .rows
                 .into_iter()
                 .map(|r| ImportRow {
                     name: if r.name.is_empty() {
@@ -865,6 +898,7 @@ pub fn parse_any_text(text: &str) -> Vec<ImportRow> {
                     douyin_no: (!r.douyin_no.is_empty()).then_some(r.douyin_no),
                     // 「主播id / uid / anchor_id」列也留着认人（用户口径：有 id 就导入）
                     anchor_id: (!r.anchor_id.is_empty()).then_some(r.anchor_id),
+                    err: None,
                 })
                 .filter(|r| !r.name.is_empty())
                 .collect();
@@ -890,6 +924,9 @@ pub fn parse_any_text(text: &str) -> Vec<ImportRow> {
 /// 不回落裸列序解析：月度文件里数字多（粉丝数 / 分成比 / 时间），
 /// 按列序猜会把粉丝数当成音浪、分成比当成累计，宁可解析不出让运营换文件。
 pub fn parse_month_duration_text(text: &str) -> Vec<ImportRow> {
+    if looks_like_binary(text) {
+        return Vec::new();
+    }
     crate::csvparse::parse_duration_only(text)
         .into_iter()
         .map(|r| ImportRow {
@@ -901,6 +938,9 @@ pub fn parse_month_duration_text(text: &str) -> Vec<ImportRow> {
             douyin_no: (!r.douyin_no.is_empty()).then_some(r.douyin_no),
             anchor_id: (!r.anchor_id.is_empty()).then_some(r.anchor_id),
             minutes: r.minutes,
+            // CsvRow.err 是 String（空串 = 没问题），转成 Option 好让上层区分
+            // 「没填时长」和「填了但解析不过」——后者是运营要立刻知道的数据问题。
+            err: (!r.err.is_empty()).then_some(r.err),
             ..Default::default()
         })
         .filter(|r| !r.name.is_empty())
@@ -1871,6 +1911,7 @@ pub async fn absorb_pending(st: &AppState, person_id: u64) -> anyhow::Result<u32
                             cumulative_wave: p.cumulative_wave.map(|v| v as f64),
                             minutes: p.minutes.map(|v| v as f64),
                             is_live: p.is_live.map(|v| v != 0),
+                            err: None,
                         },
                         person_id: Some(person_id),
                         name: p.name.clone(),
@@ -2112,19 +2153,25 @@ pub async fn import_day_delete(
         .await?
         .rows_affected()
     };
+    // 只删按日导入的批次：月度时长批次也用当月 1 号当 biz_date 占位，
+    // 少了 source 过滤，删「某一天」会连坐删掉整月的月报审计记录（审计栈断裂）。
     let batches = if auto_team {
-        sqlx::query("DELETE FROM import_batch WHERE biz_date = ?")
-            .bind(&q.biz_date)
-            .execute(&mut *tx)
-            .await?
-            .rows_affected()
+        sqlx::query(
+            "DELETE FROM import_batch WHERE source <> 'admin-import-month' AND biz_date = ?",
+        )
+        .bind(&q.biz_date)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
     } else {
-        sqlx::query("DELETE FROM import_batch WHERE biz_date = ? AND team = ?")
-            .bind(&q.biz_date)
-            .bind(team)
-            .execute(&mut *tx)
-            .await?
-            .rows_affected()
+        sqlx::query(
+            "DELETE FROM import_batch WHERE source <> 'admin-import-month' AND biz_date = ? AND team = ?",
+        )
+        .bind(&q.biz_date)
+        .bind(team)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
     };
     tx.commit().await?;
     crate::events::emit(
@@ -2397,7 +2444,15 @@ pub async fn commit_month_duration(
             continue;
         }
         if r.raw.minutes.is_none() {
-            skipped.push(truncate_chars(&r.raw.name, 64));
+            // 时长列有值但解析失败（如「未开播」「1.5h」「abc」）时 row.err 里带着原因，
+            // 一并报出来——否则运营只见预览人数少了一个，没有任何线索可查。
+            skipped.push(truncate_chars(
+                &match r.raw.err.as_deref().filter(|e| !e.is_empty()) {
+                    Some(e) => format!("{}（{}）", r.raw.name, e),
+                    None => format!("{}（时长列为空）", r.raw.name),
+                },
+                96,
+            ));
             continue;
         }
         ok_rows.push(r);
@@ -3761,6 +3816,7 @@ mod tests {
                 cumulative_wave: cum,
                 minutes,
                 is_live: Some(true),
+                err: None,
             },
             person_id: pid,
             name: "某人".into(),
@@ -3913,6 +3969,36 @@ mod tests {
         assert_eq!(rows[0].anchor_id.as_deref(), Some("2436948398193464"));
         // 没有时长列的文件解析不出行：前端据此提示「换个文件 / 切回按日」
         assert!(parse_month_duration_text("主播昵称,音浪\n浩龙,1000\n").is_empty());
+    }
+
+    /// 二进制护栏：xlsx 转文本漏判时，ZIP 流会被当成名字塞进暂存区，
+    /// 后台显示成一屏乱码、每个乱码还变成一个「待建档主播」。这里守住两件事：
+    /// 二进制一律解析不出，正常中文/emoji 一律不被误伤。
+    #[test]
+    fn binary_content_is_rejected_not_imported() {
+        // 真实 xlsx 的 ZIP 头 + 后续压缩流
+        let zip =
+            "\u{50}\u{4b}\u{3}\u{4}\u{14}\u{0}\u{2}\u{8}\u{8}\u{0}\u{75}\u{0}\u{0}\u{0}\u{0}\u{0}";
+        assert!(looks_like_binary(zip), "xlsx 二进制必须被识别");
+        assert!(parse_any_text(zip).is_empty(), "二进制绝不能解析出待导入行");
+        assert!(
+            parse_month_duration_text(zip).is_empty(),
+            "月度入口同样拒绝二进制"
+        );
+    }
+
+    #[test]
+    fn normal_text_is_not_flagged_as_binary() {
+        // 中文 + emoji + 括号 + 下划线：都不能被控制字符判据误伤
+        for s in [
+            "浩龙🎹,55555\n南方楠,66666\n",
+            "（解绑留档）__e2e合并_no_unbind 副号快照 2 条",
+            "主播昵称,开播有效时长\n玖玉🎹,75小时29分钟41秒\n",
+            "名字,当日音浪,累计,开播\n张三,1000,2000,开播\n",
+        ] {
+            assert!(!looks_like_binary(s), "正常文本不该被判为二进制：{s}");
+            assert!(!parse_any_text(s).is_empty(), "正常文本要能解析出行：{s}");
+        }
     }
 
     #[test]

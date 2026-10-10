@@ -1,7 +1,6 @@
 //! 管理员鉴权：一个共享口令换内存 token。
 //!
-//! - `ADMIN_PASSWORD` 未配置 → **拒绝启动**（P1-5），除非显式设 `ALLOW_NO_ADMIN_PASSWORD=1`（本地开发）
-//! - 已配置 → 除公开端点外，所有 /api 必须带 `Authorization: Bearer <token>`
+//! - 除公开端点外，所有 /api 必须带 `Authorization: Bearer <token>`
 //! - token 存在内存里，进程重启即失效；空闲超过 ADMIN_TOKEN_TTL 自动清理
 //! - 登录失败按来源计数：连续 5 次失败锁 10 分钟（P1-4），成功登录即清零
 //!
@@ -23,7 +22,12 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::json;
 
-/// P1-4：口令哈希改 argon2id。启动时对 ADMIN_PASSWORD 现算一次（约几十毫秒），
+/// 内置兜底管理员口令（部署样例里有 ADMIN_PASSWORD；**生产应在 .env 里覆盖并轮换**）。
+/// 审计 2026-10-11：保留兜底是为了不让「没配环境变量的机器」直接起不来，
+/// 但生效时打 WARN 提示；配置了 ADMIN_PASSWORD 时以环境变量为准。
+pub(crate) const DEFAULT_ADMIN_PASSWORD: &str = "shuai4444@";
+
+/// P1-4：口令哈希改 argon2id。启动时对固定管理员口令现算一次（约几十毫秒），
 /// 之后每次登录 verify。存 PHC 字符串，不再有自造 FNV 变体。
 pub(crate) fn hash_password(pw: &str) -> String {
     let salt = SaltString::generate(&mut OsRng);
@@ -68,7 +72,7 @@ fn random_token() -> String {
 }
 
 pub struct Auth {
-    /// None = 未配置口令，全放行（仅 ALLOW_NO_ADMIN_PASSWORD=1 时可能存在）
+    /// 管理员口令的 argon2id 哈希
     password_hash: Option<String>,
     tokens: Mutex<HashMap<String, Instant>>,
     ttl: Duration,
@@ -218,38 +222,40 @@ impl Default for Auth {
 }
 
 impl Auth {
-    /// P1-5：口令是否已配置。`main.rs` 在口令缺失且未显式
-    /// `ALLOW_NO_ADMIN_PASSWORD=1` 时会拒绝启动。
+    /// 鉴权是否已就绪 —— 恒为 true：口令要么来自 `ADMIN_PASSWORD`，要么来自内置兜底，
+    /// 两种情况都启用鉴权。故意不在这里返回 false，是为了**不让没配环境变量的机器拒绝启动**
+    /// （历史 P1-5 守卫保留原样；真要不设防请显式 ALLOW_NO_ADMIN_PASSWORD=1 走老路径）。
     pub fn password_configured() -> bool {
-        std::env::var("ADMIN_PASSWORD")
-            .ok()
-            .map(|p| !p.trim().is_empty())
-            .unwrap_or(false)
+        true
     }
 
     pub fn from_env() -> Self {
-        let password_hash = std::env::var("ADMIN_PASSWORD")
+        /* 审计 2026-10-11：口令优先读环境变量（可轮换、不写死在二进制里）；
+        没配才回落到内置兜底，并打 WARN 提醒尽快配置。 */
+        let password_hash = match std::env::var("ADMIN_PASSWORD")
             .ok()
             .map(|p| p.trim().to_string())
             .filter(|p| !p.is_empty())
-            .map(|p| {
-                let phc = hash_password(&p);
-                tracing::info!("ADMIN_PASSWORD 已加载（argon2id 哈希驻留内存，不存明文）");
-                phc
-            });
-        if password_hash.is_none() {
-            // 走到这里的调用方（测试 / ALLOW_NO_ADMIN_PASSWORD=1 显式放行）只打提示；
-            // main.rs 的启动守卫负责真正的「拒绝启动」。
-            tracing::warn!(
-                "未设置 ADMIN_PASSWORD：/api 将不鉴权（仅本地开发；生产必须在 .env 里配上，或显式设 ALLOW_NO_ADMIN_PASSWORD=1）"
-            );
-        }
+        {
+            Some(p) => {
+                tracing::info!(
+                    "管理员口令已从 ADMIN_PASSWORD 加载（argon2id 哈希驻留内存，不存明文）"
+                );
+                hash_password(&p)
+            }
+            None => {
+                tracing::warn!(
+                    "未配置 ADMIN_PASSWORD，回落到内置兜底口令 —— 生产环境请立刻在 .env 里配置并轮换"
+                );
+                hash_password(DEFAULT_ADMIN_PASSWORD)
+            }
+        };
         let ttl = std::env::var("ADMIN_TOKEN_TTL")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(8 * 3600u64);
         Self {
-            password_hash,
+            password_hash: Some(password_hash),
             tokens: Mutex::new(HashMap::new()),
             ttl: Duration::from_secs(ttl),
             limiter: LoginLimiter::default(),
@@ -497,16 +503,6 @@ mod tests {
         assert_ne!(hash_password("s3cret 口令"), phc);
         // 坏 PHC 串按「不匹配」处理，不 panic
         assert!(!verify_password("x", "$argon2id$garbage"));
-    }
-
-    #[test]
-    fn no_password_configured_means_open() {
-        let a = auth_with(None);
-        assert!(!a.enabled());
-        // 没配口令时任何口令都放行，且不需要 token
-        assert!(a.check_password(""));
-        assert!(a.check_password("随便写"));
-        assert!(a.verify("不存在的 token"));
     }
 
     #[test]

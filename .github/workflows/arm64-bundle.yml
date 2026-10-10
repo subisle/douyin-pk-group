@@ -6,7 +6,7 @@
 #
 # 用法：
 #   gh workflow run arm64-bundle.yml
-#   gh release download arm64-bundle     # 拿到 pk-server + douyin-server 两个 tar.gz
+#   gh release download arm64-bundle     # 拿到 pk-server 的 tar.gz
 name: arm64 镜像包
 
 on:
@@ -39,21 +39,9 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=min
 
-      - name: 构建 douyin-server arm64 镜像并导出
-        uses: docker/build-push-action@v6
-        with:
-          context: ./server-go
-          file: server-go/Dockerfile
-          platforms: linux/arm64
-          tags: douyin-server:arm64
-          outputs: type=docker,dest=/tmp/douyin-server-arm64.tar
-          cache-from: type=gha
-          cache-to: type=gha,mode=min
-
       - name: 压缩
         run: |
           gzip -9 /tmp/pk-server-arm64.tar
-          gzip -9 /tmp/douyin-server-arm64.tar
 
       - name: 上传到 rolling release
         env:
@@ -63,5 +51,5 @@ jobs:
           tag=arm64-bundle
           gh release view "$tag" >/dev/null 2>&1 || \
             gh release create "$tag" --title "arm64 镜像包" --notes "由 arm64-bundle.yml 自动更新" --prerelease
-          gh release upload "$tag" /tmp/pk-server-arm64.tar.gz /tmp/douyin-server-arm64.tar.gz --clobber
+          gh release upload "$tag" /tmp/pk-server-arm64.tar.gz --clobber
           echo "release $tag 已更新"

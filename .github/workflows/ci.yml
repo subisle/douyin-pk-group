@@ -20,22 +20,6 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  go:
-    name: Go 测试
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: server-go/go.mod
-          cache-dependency-path: server-go/go.sum
-      - name: 单元测试
-        working-directory: server-go
-        run: go test ./...
-      - name: Vet
-        working-directory: server-go
-        run: go vet ./...
-
   rust:
     name: Rust 测试（pk-core + pk-server）
     runs-on: ubuntu-latest
@@ -57,6 +41,9 @@ jobs:
         working-directory: rust
         run: cargo fmt --all -- --check
 
+      - name: 契约一致性检查
+        run: bash scripts/check/contract.sh
+
   web:
     name: 前端类型检查 + 构建
     runs-on: ubuntu-latest
@@ -71,13 +58,13 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - name: 类型检查
-        run: pnpm --filter @pk/web exec tsc --noEmit && pnpm --filter @pk/douyin-web exec tsc --noEmit
-      - name: 构建（含镜像里要用的现役管理端 douyin-web）
-        run: pnpm --filter @pk/web build && pnpm --filter @pk/douyin-web build
+        run: pnpm --filter @pk/douyin-web exec tsc --noEmit
+      - name: 构建（镜像里要用的现役管理端 douyin-web）
+        run: pnpm --filter @pk/douyin-web build
 
   docker:
     name: 构建镜像（${{ inputs.platforms || 'linux/amd64' }}）
-    needs: [go, rust, web]
+    needs: [rust, web]
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -120,18 +107,5 @@ jobs:
           platforms: ${{ inputs.platforms || 'linux/amd64' }}
           # mode=max 会把每层都存一遍，仓库 artifact 配额有限（曾经撞满导致缓存上传失败），
           # 这里只保留中间层，体积小很多，命中率和耗时基本不变。
-          cache-from: type=gha
-          cache-to: type=gha,mode=min
-
-      - name: 构建并推送 douyin-server
-        uses: docker/build-push-action@v6
-        with:
-          context: ./server-go
-          file: server-go/Dockerfile
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: |
-            ghcr.io/${{ github.repository }}/douyin-server:latest
-            ghcr.io/${{ github.repository }}/douyin-server:${{ github.sha }}
-          platforms: ${{ inputs.platforms || 'linux/amd64' }}
           cache-from: type=gha
           cache-to: type=gha,mode=min

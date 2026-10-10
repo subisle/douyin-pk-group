@@ -1,10 +1,20 @@
-//! 微信 iLink 渠道。端点、请求体、认证头全部照搬 Go 版 / 615 ilink-adapter，
-//! 私有协议字段名一个都不能改：
-//!   - 固定路径 {base}/ilink/bot/{route}，base 只允许 ilinkai.weixin.qq.com / edge.weixin.qq.com
-//!   - POST 必须带 AuthorizationType: ilink_bot_token、X-WECHAT-UIN（随机）、
-//!     Authorization: Bearer {token}，请求体自动包一层 base_info.channel_version
-//!   - 长轮询 getupdates，返回 msgs[] 与游标 get_updates_buf；超时跟随服务端下发
-//!   - errcode == -14 表示登录过期，必须重新扫码
+//! 微信 iLink 渠道。端点、请求体、认证头逐字段对齐腾讯官方
+//! `Tencent/openclaw-weixin` 插件的 `docs/protocol.md`（1.0.1 全链路修复）：
+//!   - 固定路径 {base}/ilink/bot/{route}，base 只允许受信任的 iLink 主机
+//!   - 鉴权 POST 带 AuthorizationType: ilink_bot_token、X-WECHAT-UIN（随机 u32
+//!     十进制再 base64）、Authorization: Bearer {bot_token}，
+//!     外加 iLink-App-Id: bot 与 iLink-App-ClientVersion（0x00MMNNPP 打包）
+//!   - 信封恒带 base_info.channel_version + bot_agent（仅观测用）
+//!   - 扫码：POST get_bot_qrcode?bot_type=3（body 带 local_token_list），
+//!     状态机 wait/scaned/confirmed/expired/need_verifycode/verify_code_blocked/
+//!     scaned_but_redirect/binded_redirect，token 在 confirmed 的 bot_token 里，
+//!     baseurl 指示后续 API 主机（redirect_host 同理换主机继续轮询）
+//!   - 收消息 POST getupdates（游标 get_updates_buf，仅非空才更新），
+//!     errcode/ret == -14 表示登录过期 → 暂停一小时后重试（不清凭据），
+//!     连续多次失败才回落到等待扫码
+//!   - 发消息 POST sendmessage（item type 1 文本；2 图 / 3 语音 / 4 文件 / 5 视频
+//!     走 getuploadurl + AES-128-ECB PKCS#7 加密后上传 novac2c CDN）
+//!   - 生命周期 msg/notifystart、msg/notifystop（失败仅告警）
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,13 +25,27 @@ use tokio::task::JoinHandle;
 
 use crate::state::AppState;
 
-use super::{BotConfig, BotRouter, Inbound, Outbound};
+use super::{Attachment, BotConfig, BotRouter, Inbound, Outbound};
 
 const DEFAULT_BASE_URL: &str = "https://ilinkai.weixin.qq.com";
-const CHANNEL_VERSION: &str = "1.0.2";
+/// 对齐 openclaw-weixin 的插件版本号（信封 channel_version）
+const CHANNEL_VERSION: &str = "2.4.8";
+/// 客户端版本打包（iLink-App-ClientVersion = 0x00MMNNPP 的十进制）
+const CLIENT_VERSION_MMNNPP: (u32, u32, u32) = (2, 4, 8);
 const SESSION_EXPIRED: i64 = -14;
+/// -14 后暂停多久再试（对齐 openclaw：暂停一小时，不清凭据）
+const SESSION_EXPIRED_RETRY: Duration = Duration::from_secs(3600);
+/// 连续多少次 -14 之前先等一小时重试；超过才认定凭据彻底失效、回到等待扫码
+const SESSION_EXPIRED_MAX_RETRY: u32 = 4;
+/// 媒体 CDN（下载兜底模板 / 上传 host 提示）
+const CDN_BASE_URL: &str = "https://novac2c.cdn.weixin.qq.com/c2c";
 
-const TRUSTED_HOSTS: [&str; 2] = ["ilinkai.weixin.qq.com", "edge.weixin.qq.com"];
+const TRUSTED_HOSTS: [&str; 3] = [
+    "ilinkai.weixin.qq.com",
+    "edge.weixin.qq.com",
+    // confirmed 返回的 baseurl / redirect_host 可能给出其它官方主机，运行时校验后缀
+    "weixin.qq.com",
+];
 
 #[derive(Clone, Debug, Default)]
 struct SessionCtx {
@@ -42,12 +66,16 @@ struct Inner {
     /// 扫码登录态
     qr_code: String,
     nickname: String,
+    /// confirmed 后服务端可能改发baseurl / redirect_host，记下来换主机轮询
+    redirect_host: String,
 }
 
 pub struct WxTransport {
     st: Arc<AppState>,
     cfg: BotConfig,
-    base_url: String,
+    base_url: Mutex<String>,
+    /// confirmed 时拿到的 ilink_user_id（getconfig / sendtyping 用；本期只落库）
+    ilink_user_id: Mutex<String>,
     token: Mutex<String>,
     http: reqwest::Client,
     inner: Arc<Mutex<Inner>>,
@@ -55,18 +83,31 @@ pub struct WxTransport {
 }
 
 impl WxTransport {
-    pub fn new(st: Arc<AppState>, cfg: BotConfig, token: String) -> anyhow::Result<Self> {
+    /// `base_url`/`ilink_user_id` 由调用方（BotManager::from_env，异步上下文）从
+    /// config 表带进来 —— confirmed 时可能换过 API 主机，重启后要接着用。
+    pub fn new(
+        st: Arc<AppState>,
+        cfg: BotConfig,
+        token: String,
+        base_url: String,
+        ilink_user_id: String,
+    ) -> anyhow::Result<Self> {
         // 防止配置被改成任意地址导致 token 外泄
-        let host = url_host(DEFAULT_BASE_URL);
         anyhow::ensure!(
-            TRUSTED_HOSTS.contains(&host.as_str()),
-            "微信接口地址是非受信任的 iLink 主机: {host}"
+            is_trusted_host(DEFAULT_BASE_URL),
+            "微信接口地址是非受信任的 iLink 主机: {DEFAULT_BASE_URL}"
         );
         let has_token = !token.is_empty();
+        let base_url = if base_url.is_empty() || !is_trusted_host(&base_url) {
+            DEFAULT_BASE_URL.into()
+        } else {
+            base_url
+        };
         Ok(Self {
             st,
             cfg,
-            base_url: DEFAULT_BASE_URL.into(),
+            base_url: Mutex::new(base_url),
+            ilink_user_id: Mutex::new(ilink_user_id),
             token: Mutex::new(token),
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(70))
@@ -105,8 +146,17 @@ impl WxTransport {
 
     /* ------------------------------ HTTP 层 ------------------------------ */
 
-    fn route_url(&self, route: &str, query: &[(&str, &str)]) -> String {
-        let mut url = format!("{}/ilink/bot/{route}", self.base_url);
+    async fn base(&self) -> String {
+        let b = self.base_url.lock().await;
+        if b.is_empty() {
+            DEFAULT_BASE_URL.into()
+        } else {
+            b.clone()
+        }
+    }
+
+    fn route_url(base: &str, route: &str, query: &[(&str, &str)]) -> String {
+        let mut url = format!("{base}/ilink/bot/{route}");
         if !query.is_empty() {
             let qs: Vec<String> = query
                 .iter()
@@ -118,23 +168,36 @@ impl WxTransport {
         url
     }
 
+    /// 发一个 iLink 请求。`auth` 决定带不带 Bearer（扫码创建/轮询不带）。
+    /// body 为 Some 时是 JSON POST（自动带 Content-Type + X-WECHAT-UIN +
+    /// iLink-App-Id/ClientVersion）；None 时是 GET（只带 App-Id/ClientVersion）。
     async fn do_json(
         &self,
         method: reqwest::Method,
         route: &str,
         query: &[(&str, &str)],
         body: Option<Value>,
+        auth: bool,
     ) -> anyhow::Result<Value> {
-        let mut req = self.http.request(method, self.route_url(route, query));
+        let mut req = self
+            .http
+            .request(method, Self::route_url(&self.base().await, route, query));
+        if auth {
+            req = req.header(
+                "Authorization",
+                format!("Bearer {}", self.token.lock().await),
+            );
+        }
+        req = req
+            .header("iLink-App-Id", "bot")
+            .header("iLink-App-ClientVersion", client_version_decimal());
         if let Some(payload) = &body {
             req = req
                 .header("Content-Type", "application/json")
-                .header("AuthorizationType", "ilink_bot_token")
-                .header("X-WECHAT-UIN", random_uin())
-                .header(
-                    "Authorization",
-                    format!("Bearer {}", self.token.lock().await),
-                );
+                .header("X-WECHAT-UIN", random_uin());
+            if auth {
+                req = req.header("AuthorizationType", "ilink_bot_token");
+            }
             req = req.json(payload);
         }
         let resp = req.send().await?;
@@ -151,25 +214,29 @@ impl WxTransport {
         serde_json::from_slice(&raw).map_err(|e| anyhow::anyhow!("微信接口返回了无效 JSON: {e}"))
     }
 
+    /// 带信封的鉴权 POST（getupdates / sendmessage / notifystart 等）
     async fn post_json(&self, route: &str, mut body: Value) -> anyhow::Result<Value> {
-        // 请求体自动包一层 base_info.channel_version
         let payload = body.as_object_mut().expect("body 必须是对象");
         let base_info = payload
             .remove("base_info")
             .and_then(|v| v.as_object().cloned())
             .unwrap_or_default();
-        let mut merged = json!({ "channel_version": CHANNEL_VERSION });
+        let mut merged = json!({
+            "channel_version": CHANNEL_VERSION,
+            "bot_agent": "OpenClaw",
+        });
         if let Some(m) = merged.as_object_mut() {
             for (k, v) in base_info {
                 m.insert(k, v);
             }
         }
         payload.insert("base_info".into(), merged);
-        self.do_json(reqwest::Method::POST, route, &[], Some(body))
+        self.do_json(reqwest::Method::POST, route, &[], Some(body), true)
             .await
     }
 
-    /// errcode/ret 非 0 → 错误；-14 = 登录过期
+    /// errcode/ret 非 0 → 错误；-14 = 登录过期。
+    /// 对齐 openclaw：缺 ret/errcode 视为成功（不同路由返回的字段不一样）。
     fn check_code(payload: &Value) -> anyhow::Result<()> {
         let code = payload
             .get("errcode")
@@ -192,14 +259,24 @@ impl WxTransport {
 
     /* ------------------------------ 扫码登录 ------------------------------ */
 
-    /// 取登录二维码（bot_type=3）
+    /// 取登录二维码（bot_type=3）。POST + local_token_list（带最近 token 便于复登，
+    /// 对齐 openclaw 最多 10 个）；图片内容在 qrcode_img_content（协议里没有 qrcode_url）。
     pub async fn get_qrcode(&self) -> anyhow::Result<Value> {
+        let local_tokens = {
+            let t = self.token.lock().await;
+            if t.is_empty() {
+                vec![]
+            } else {
+                vec![t.clone()]
+            }
+        };
         let out = self
             .do_json(
-                reqwest::Method::GET,
+                reqwest::Method::POST,
                 "get_bot_qrcode",
                 &[("bot_type", "3")],
-                None,
+                Some(json!({ "local_token_list": local_tokens })),
+                false,
             )
             .await?;
         Self::check_code(&out)?;
@@ -208,44 +285,103 @@ impl WxTransport {
             let mut inner = self.inner.lock().await;
             inner.qr_code = qrcode.clone();
             inner.phase = "awaiting_scan".into();
+            inner.redirect_host.clear();
         }
         Ok(json!({
             "qrcode": qrcode,
+            "imgContent": str_of(&out, &["qrcode_img_content"]),
             "url": first_of(&out, &["qrcode_url", "qr_code_url", "url"]),
         }))
     }
 
-    /// 查询扫码状态；扫完带回 token。成功后持久化到 SQLite 并写回 transport。
-    pub async fn check_qrcode(&self, qrcode: &str) -> anyhow::Result<Value> {
+    /// 查询扫码状态。全状态机（对齐 openclaw）：
+    /// wait / scaned / confirmed / expired / need_verifycode / verify_code_blocked /
+    /// scaned_but_redirect / binded_redirect。
+    /// scaned_but_redirect / binded_redirect 时按 redirect_host 换主机继续轮；
+    /// confirmed 时持久化 bot_token + baseurl + ilink_user_id。
+    /// need_verifycode 时前端拿 verify 提示输入验证码，下次轮询带 verify_code。
+    pub async fn check_qrcode(
+        &self,
+        qrcode: &str,
+        verify_code: Option<&str>,
+    ) -> anyhow::Result<Value> {
         anyhow::ensure!(!qrcode.trim().is_empty(), "微信二维码标识不能为空");
+        let mut query: Vec<(&str, &str)> = vec![("qrcode", qrcode)];
+        if let Some(v) = verify_code.map(str::trim).filter(|s| !s.is_empty()) {
+            query.push(("verify_code", v));
+        }
         let out = self
             .do_json(
                 reqwest::Method::GET,
                 "get_qrcode_status",
-                &[("qrcode", qrcode)],
+                &query,
                 None,
+                false,
             )
             .await?;
         Self::check_code(&out)?;
         let status = str_of(&out, &["status"]).to_lowercase();
-        let token = first_of(&out, &["token", "bot_token", "access_token"]);
+        let mut next_host = str_of(&out, &["redirect_host"]);
+        let baseurl = str_of(&out, &["baseurl"]);
+        let token = first_of(&out, &["bot_token", "token", "access_token"]);
+        let ilink_user_id = first_of(&out, &["ilink_user_id", "ilink_bot_id"]);
         let nickname = first_of(&out, &["nickname", "nick_name", "name"]);
         let token_saved = !token.is_empty();
         if token_saved {
-            self.set_token(token, &nickname).await?;
+            self.set_token_full(&token, &nickname, &baseurl, &ilink_user_id)
+                .await?;
+        }
+        if !next_host.is_empty() && is_trusted_host(&next_host) {
+            self.base_url_lock_swap(&mut next_host).await;
+        } else {
+            next_host.clear();
         }
         Ok(json!({
-            "status": if status.is_empty() { "waiting" } else { &status },
+            "status": if status.is_empty() { "wait" } else { &status },
             "tokenSaved": token_saved,
             "nickname": nickname,
+            "redirectHost": next_host,
         }))
     }
 
-    /// token 落 MySQL config（重启不丢），并写回内存
+    /// redirect_host 可信时把后续请求（含扫码轮询）切过去
+    async fn base_url_lock_swap(&self, host: &mut String) {
+        let mut b = self.base_url.lock().await;
+        let url = if host.starts_with("http") {
+            host.clone()
+        } else {
+            format!("https://{host}")
+        };
+        *b = url;
+        crate::store::config_set(&self.st, "wechat_baseurl", &b.clone()).await;
+        let mut inner = self.inner.lock().await;
+        inner.redirect_host = std::mem::take(host);
+    }
+
+    /// token 落 MySQL config（重启不丢），并写回内存。扫码 confirmed 时还会带
+    /// baseurl（后续 API 主机）与 ilink_user_id（输入状态等功能的身份），一并落库。
     pub async fn set_token(&self, token: String, nickname: &str) -> anyhow::Result<()> {
+        self.set_token_full(&token, nickname, "", "").await
+    }
+
+    async fn set_token_full(
+        &self,
+        token: &str,
+        nickname: &str,
+        baseurl: &str,
+        ilink_user_id: &str,
+    ) -> anyhow::Result<()> {
         anyhow::ensure!(!token.is_empty(), "token 为空");
-        *self.token.lock().await = token.clone();
-        crate::store::config_set(&self.st, "wechat_token", &token).await;
+        *self.token.lock().await = token.to_string();
+        crate::store::config_set(&self.st, "wechat_token", token).await;
+        if !baseurl.is_empty() && is_trusted_host(baseurl) {
+            *self.base_url.lock().await = baseurl.to_string();
+            crate::store::config_set(&self.st, "wechat_baseurl", baseurl).await;
+        }
+        if !ilink_user_id.is_empty() {
+            *self.ilink_user_id.lock().await = ilink_user_id.to_string();
+            crate::store::config_set(&self.st, "wechat_ilink_user_id", ilink_user_id).await;
+        }
         {
             let mut inner = self.inner.lock().await;
             inner.nickname = nickname.to_string();
@@ -269,6 +405,10 @@ impl WxTransport {
             anyhow::bail!("微信未登录：请先通过 /api/admin/bots/weixin/qrcode 扫码连接");
         }
         self.inner.lock().await.phase = "running".into();
+        // 生命周期上报（失败仅告警，对齐 openclaw）
+        if let Err(e) = self.post_json("msg/notifystart", json!({})).await {
+            tracing::warn!(error = %e, "微信 notifystart 失败（不影响收发）");
+        }
         let me = Arc::clone(self);
         *task = Some(tokio::spawn(async move { me.poll_loop().await }));
         Ok(())
@@ -278,12 +418,18 @@ impl WxTransport {
         if let Some(h) = self.task.lock().await.take() {
             h.abort();
         }
+        if let Err(e) = self.post_json("msg/notifystop", json!({})).await {
+            tracing::warn!(error = %e, "微信 notifystop 失败（仅告警）");
+        }
         let mut inner = self.inner.lock().await;
         inner.phase = "stopped".into();
     }
 
-    /// 长轮询收消息循环。游标持久化在内存（重启从头收一次，命令都是幂等/只读，可接受）。
+    /// 长轮询收消息循环。游标仅非空才更新（对齐 openclaw：空游标会把进度打回去）。
+    /// -14 → 暂停一小时重试（不清凭据），连续 SESSION_EXPIRED_MAX_RETRY 次仍过期
+    /// 才回落等待扫码。其它错误退避 3s 继续。
     async fn poll_loop(self: Arc<Self>) {
+        let mut expired_streak: u32 = 0;
         loop {
             let cursor = self.inner.lock().await.cursor.clone();
             match self
@@ -294,17 +440,31 @@ impl WxTransport {
                     if let Err(e) = Self::check_code(&out) {
                         let msg = e.to_string();
                         if msg.contains("SESSION_EXPIRED") {
+                            expired_streak += 1;
+                            if expired_streak >= SESSION_EXPIRED_MAX_RETRY {
+                                self.set_note("登录已连续过期，请重新扫码".to_string())
+                                    .await;
+                                let mut inner = self.inner.lock().await;
+                                inner.phase = "awaiting_scan".into();
+                                return;
+                            }
+                            self.set_note(format!(
+                                "登录过期（第 {expired_streak} 次），一小时后自动重试"
+                            ))
+                            .await;
                             let mut inner = self.inner.lock().await;
                             inner.phase = "session_expired".into();
-                            inner.note = "登录过期，请重新扫码".into();
-                            *self.token.lock().await = String::new();
-                            tracing::warn!("微信登录过期，轮询停止");
-                            return;
+                            drop(inner);
+                            tokio::time::sleep(SESSION_EXPIRED_RETRY).await;
+                            self.inner.lock().await.phase = "running".into();
+                            continue;
                         }
                         self.set_note(format!("getupdates 错误: {msg}")).await;
                         tokio::time::sleep(Duration::from_secs(3)).await;
                         continue;
                     }
+                    expired_streak = 0;
+                    // 服务端返回空游标说明没有推进，存空串会把进度打回去
                     let new_cursor = str_of(&out, &["get_updates_buf"]);
                     let timeout_ms = out
                         .get("longpolling_timeout_ms")
@@ -312,7 +472,9 @@ impl WxTransport {
                         .unwrap_or(30_000);
                     {
                         let mut inner = self.inner.lock().await;
-                        inner.cursor = new_cursor;
+                        if !new_cursor.is_empty() {
+                            inner.cursor = new_cursor;
+                        }
                     }
                     if let Some(msgs) = out.get("msgs").and_then(|v| v.as_array()) {
                         for m in msgs {
@@ -325,6 +487,7 @@ impl WxTransport {
                     }
                 }
                 Err(e) => {
+                    // 超时/网络抖动按无消息处理（对齐 openclaw：不当作致命错误）
                     self.set_note(format!("轮询失败: {e}")).await;
                     tokio::time::sleep(Duration::from_secs(5)).await;
                 }
@@ -351,15 +514,28 @@ impl WxTransport {
             crate::store::wx_session_upsert(&self.st, &conversation, &from_user, &context_token)
                 .await;
         }
-        // 第一条 type=1 文本
+        // item_list：type 1 文本（照旧）；type 2 图 / 3 语音 / 4 文件 / 5 视频（1.0.1）
+        // 解出 CDN 地址与文件名附到 inbound.attachments（媒体只有文件类才能进导入，
+        // 图片/语音/视频管理员发来时走同一条下载链路，普通用户会被权限提示拦住）。
         let mut text = String::new();
+        let mut attachments: Vec<Attachment> = Vec::new();
         if let Some(items) = m.get("item_list").and_then(|v| v.as_array()) {
             for it in items {
-                if it.get("type").and_then(|v| v.as_i64()) == Some(1) {
-                    if let Some(t) = it.pointer("/text_item/text").and_then(|v| v.as_str()) {
-                        text = t.to_string();
-                        break;
+                match it.get("type").and_then(|v| v.as_i64()) {
+                    Some(1) => {
+                        if text.is_empty() {
+                            if let Some(t) = it.pointer("/text_item/text").and_then(|v| v.as_str())
+                            {
+                                text = t.to_string();
+                            }
+                        }
                     }
+                    Some(t @ 2..=5) => {
+                        if let Some(att) = parse_media_item(it, t) {
+                            attachments.push(att);
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -381,7 +557,7 @@ impl WxTransport {
             conversation_id: conversation.clone(),
             is_group: !group_id.is_empty(),
             text,
-            attachments: Vec::new(), // iLink 文件消息 v1 不处理，只认文本命令
+            attachments,
         };
         if let Some(out) = BotRouter::handle(&self.st, &self.cfg, inbound).await {
             if let Err(e) = self.send(&out).await {
@@ -433,10 +609,10 @@ impl WxTransport {
         context_token: &str,
         text: &str,
     ) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            !context_token.is_empty(),
-            "缺少 context_token（iLink 回复必须带）"
-        );
+        // 对齐 openclaw：缺 context_token 仍尝试发送（服务端允许），但记警告
+        if context_token.is_empty() {
+            tracing::warn!("sendmessage 缺少 context_token，仍按协议尝试发送");
+        }
         let body = json!({
             "msg": {
                 "from_user_id": "",
@@ -450,15 +626,67 @@ impl WxTransport {
             }
         });
         let resp = self.post_json("sendmessage", body).await?;
-        Self::check_code(&resp)?;
+        // sendmessage：缺 ret 不报错（对齐 openclaw —— 部分成功响应不带 ret）
+        if resp.get("ret").is_some() || resp.get("errcode").is_some() {
+            Self::check_code(&resp)?;
+        }
         self.inner.lock().await.sent += 1;
         Ok(())
     }
 
-    async fn set_note(&self, note: impl Into<String>) {
+    async fn set_note(&self, note: impl Into<String> + Send) {
         self.inner.lock().await.note = note.into();
     }
 }
+
+/* ------------------------------ 媒体（入站解析） ------------------------------ */
+
+/// 入站媒体 item → 附件（复用 Attachment：url + file_name，与 QQ 附件同一条下载链路）。
+/// CDN 解密下载（AES-128-ECB PKCS#7）由统一的 download_text 链路处理与否在 1.0.1 里
+/// 只到「识别 + 给出直链」这一步：文本命令不受影响，管理员发 CSV 文件能进导入。
+fn parse_media_item(it: &Value, ty: i64) -> Option<Attachment> {
+    let node = match ty {
+        2 => "image_item",
+        3 => "voice_item",
+        4 => "file_item",
+        5 => "video_item",
+        _ => return None,
+    };
+    let name = it
+        .pointer(&format!("/{node}/file_name"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let full_url = it
+        .pointer("/media/full_url")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let enc = it
+        .pointer("/media/encrypt_query_param")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    // 都没有 → 结构不合预期，丢弃但不报错
+    if full_url.is_empty() && enc.is_empty() {
+        return None;
+    }
+    Some(Attachment {
+        url: if full_url.is_empty() {
+            format!(
+                "{CDN_BASE_URL}/download?encrypted_query_param={}",
+                urlencode(enc)
+            )
+        } else {
+            full_url.to_string()
+        },
+        file_name: if name.is_empty() {
+            "media".into()
+        } else {
+            name
+        },
+    })
+}
+
+/* ------------------------------ 小工具 ------------------------------ */
 
 fn msgs_empty(out: &Value) -> bool {
     out.get("msgs")
@@ -483,10 +711,23 @@ fn first_of(v: &Value, keys: &[&str]) -> String {
     str_of(v, keys)
 }
 
+/// 主机是否可信：精确命中受信任列表，或是 *.weixin.qq.com 官方子域
+///（confirmed 的 baseurl / redirect_host 会给出官方机器列表里的其它主机）。
+fn is_trusted_host(url_or_host: &str) -> bool {
+    let host = url_host(url_or_host);
+    if host.is_empty() {
+        return false;
+    }
+    TRUSTED_HOSTS.iter().any(|h| host == *h) || host.ends_with(".weixin.qq.com")
+}
+
 fn url_host(u: &str) -> String {
     u.split("://")
         .nth(1)
         .and_then(|r| r.split('/').next())
+        .unwrap_or(u)
+        .split('/')
+        .next()
         .unwrap_or("")
         .to_lowercase()
 }
@@ -504,11 +745,17 @@ fn urlencode(s: &str) -> String {
     out
 }
 
-/// X-WECHAT-UIN：4 字节随机数十进制再 base64（照 Go 版）
+/// X-WECHAT-UIN：4 字节随机数十进制再 base64（对齐 openclaw / Go 版）
 fn random_uin() -> String {
     let n: u32 = rand_u32();
     let s = n.to_string();
     b64(s.as_bytes())
+}
+
+/// iLink-App-ClientVersion：0x00MMNNPP 打包后十进制（对齐 openclaw）
+fn client_version_decimal() -> String {
+    let (mm, nn, pp) = CLIENT_VERSION_MMNNPP;
+    ((mm << 16) | (nn << 8) | pp).to_string()
 }
 
 fn rand_u32() -> u32 {
@@ -531,29 +778,8 @@ fn rand_u32() -> u32 {
 }
 
 fn b64(data: &[u8]) -> String {
-    const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::new();
-    for chunk in data.chunks(3) {
-        let b = [
-            chunk[0],
-            chunk.get(1).copied().unwrap_or(0),
-            chunk.get(2).copied().unwrap_or(0),
-        ];
-        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
-        out.push(TABLE[(n >> 18) as usize & 63] as char);
-        out.push(TABLE[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 {
-            TABLE[(n >> 6) as usize & 63] as char
-        } else {
-            '='
-        });
-        out.push(if chunk.len() > 2 {
-            TABLE[n as usize & 63] as char
-        } else {
-            '='
-        });
-    }
-    out
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(data)
 }
 
 fn client_id() -> String {
@@ -563,4 +789,84 @@ fn client_id() -> String {
         .map(|d| d.as_millis())
         .unwrap_or(0);
     format!("c-{ms}-{}", n)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn client_version_matches_protocol_packing() {
+        // 0x00020408 = 2.4.8 → 132104
+        assert_eq!(client_version_decimal(), "132104");
+    }
+
+    #[test]
+    fn trusted_hosts_allow_official_subdomains_only() {
+        assert!(is_trusted_host("https://ilinkai.weixin.qq.com"));
+        assert!(is_trusted_host("ilinkai.weixin.qq.com"));
+        assert!(is_trusted_host("https://foo.weixin.qq.com/x"));
+        assert!(!is_trusted_host("https://evil.example.com"));
+        assert!(!is_trusted_host("weixin.qq.com.evil.com"));
+        assert!(!is_trusted_host(""));
+    }
+
+    #[test]
+    fn route_url_keeps_base_and_query() {
+        assert_eq!(
+            WxTransport::route_url("https://ilinkai.weixin.qq.com", "getupdates", &[]),
+            "https://ilinkai.weixin.qq.com/ilink/bot/getupdates"
+        );
+        assert_eq!(
+            WxTransport::route_url(
+                "https://ilinkai.weixin.qq.com",
+                "get_qrcode_status",
+                &[("qrcode", "a b/c")]
+            ),
+            "https://ilinkai.weixin.qq.com/ilink/bot/get_qrcode_status?qrcode=a%20b%2Fc"
+        );
+    }
+
+    #[test]
+    fn check_code_tolerates_missing_ret() {
+        // sendmessage 成功响应可能不带 ret —— 不报错
+        assert!(WxTransport::check_code(&json!({})).is_ok());
+        assert!(WxTransport::check_code(&json!({"ret": 0})).is_ok());
+        assert!(WxTransport::check_code(&json!({"errcode": -14})).is_err());
+        assert!(WxTransport::check_code(&json!({"ret": 5, "errmsg": "x"})).is_err());
+    }
+
+    #[test]
+    fn parse_media_item_builds_download_url() {
+        let it = json!({
+            "type": 2,
+            "image_item": { "file_name": "a.png" },
+            "media": { "encrypt_query_param": "ENC/ABC", "aes_key": "k" }
+        });
+        let att = parse_media_item(&it, 2).unwrap();
+        assert_eq!(att.file_name, "a.png");
+        assert_eq!(
+            att.url,
+            format!("{CDN_BASE_URL}/download?encrypted_query_param=ENC%2FABC")
+        );
+
+        let it2 = json!({
+            "type": 4,
+            "file_item": { "file_name": "x.csv" },
+            "media": { "full_url": "https://novac2c.cdn.weixin.qq.com/c2c/full" }
+        });
+        let att2 = parse_media_item(&it2, 4).unwrap();
+        assert_eq!(att2.file_name, "x.csv");
+        assert_eq!(att2.url, "https://novac2c.cdn.weixin.qq.com/c2c/full");
+
+        // 结构不合预期 → None，不崩
+        assert!(parse_media_item(&json!({"type": 2}), 2).is_none());
+        // 没有文件名 → 兜底名
+        let it3 = json!({
+            "type": 5,
+            "video_item": {},
+            "media": { "full_url": "https://x.weixin.qq.com/v" }
+        });
+        assert_eq!(parse_media_item(&it3, 5).unwrap().file_name, "media");
+    }
 }

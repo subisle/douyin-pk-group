@@ -1,6 +1,6 @@
 # 部署到 64：镜像由 GitHub Actions 构建（ghcr.io/subisle/douyin-pk-group）
 # 用法：
-#   cp .env.example .env   # 至少要填 ADMIN_PASSWORD
+#   cp .env.example .env
 #   docker compose -f deploy/docker-compose.yml up -d
 #
 # ⚠️ 监听地址：compose 里端口发布固定绑 127.0.0.1（公网入口走 Caddy 反代）。
@@ -22,7 +22,7 @@ services:
       WEB_DIST: /app/web
       SQLITE_PATH: /app/data/app.db
       WAVE_CACHE_TTL: "600"
-      # ADMIN_PASSWORD / CORS_ORIGINS 等一律走 .env，不在 compose 里写死
+      # CORS_ORIGINS 等一律走 .env；管理员口令内置于 pk-server
     volumes:
       - ./data:/app/data        # SQLite（方案 + 别名）持久化
     healthcheck:
