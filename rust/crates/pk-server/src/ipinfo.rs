@@ -1128,4 +1128,73 @@ mod tests {
         assert_eq!(team_from_path("/api/public/plans"), "");
         assert_eq!(account_from_query("a=1&token=unknown"), "");
     }
+
+    /// 现场检查（默认跳过，会发真实网络请求）：对 `IPCHECK`（逗号分隔）里的每个 IP
+    /// 打全部 19 个数据源，逐条打印各源返回与合并结论——用来核对门禁判定与上游接口
+    /// 的真实结果是否一致（数据源 / 解析 / 合并都复用生产同一套代码）。
+    ///
+    ///     IPCHECK=42.239.96.128,123.15.57.1 \
+    ///       cargo test -p pk-server --lib -- --ignored --nocapture live_ip_lookup
+    #[tokio::test]
+    #[ignore]
+    async fn live_ip_lookup() {
+        let ips = std::env::var("IPCHECK")
+            .unwrap_or_else(|_| "123.15.57.1,218.22.0.1,121.8.215.106".into());
+        let client = reqwest::Client::builder()
+            .timeout(LOOKUP_TIMEOUT)
+            .user_agent("pk-server-ip-gate/1.0 (check)")
+            .build()
+            .expect("build client");
+        for ip in ips.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            let parsed: IpAddr = ip.parse().expect("IPCHECK 里必须是合法 IP");
+            println!("\n==== {ip} ====");
+            let futures = sources_for(&parsed.to_string()).into_iter().map(|s| {
+                let client = client.clone();
+                async move {
+                    let result = match client.get(&s.url).send().await {
+                        Ok(resp) if resp.status().is_success() => resp
+                            .bytes()
+                            .await
+                            .ok()
+                            .and_then(|bytes| {
+                                let text = if s.gbk {
+                                    encoding_rs::GBK.decode(&bytes).0.into_owned()
+                                } else {
+                                    String::from_utf8_lossy(&bytes).into_owned()
+                                };
+                                serde_json::from_str::<Value>(text.trim())
+                                    .ok()
+                                    .map(|v| (s.parse)(&v))
+                            }),
+                        Ok(resp) => {
+                            println!("  {:<14} HTTP {}", s.name, resp.status());
+                            None
+                        }
+                        Err(e) => {
+                            println!("  {:<14} 请求失败：{e}", s.name);
+                            None
+                        }
+                    };
+                    (s.name, result)
+                }
+            });
+            let results = join_all(futures).await;
+            let mut raws: Vec<(&str, RawGeo)> = Vec::new();
+            for (name, geo) in &results {
+                match geo {
+                    Some(g) if !g.province.is_empty() || !g.city.is_empty() => {
+                        println!("  {:<14} {:<10} {:<8} {}", name, g.province, g.city, g.isp);
+                        raws.push((name, RawGeo::new(&g.province, &g.city, &g.isp)));
+                    }
+                    Some(_) => println!("  {name:<14} （返回了但没解析出省份/城市）"),
+                    None => {}
+                }
+            }
+            let merged = merge(&raws);
+            println!(
+                "  => 合并：{} {}（source={}） 放行={}",
+                merged.province, merged.city, merged.source, merged.allowed
+            );
+        }
+    }
 }
