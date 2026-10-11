@@ -173,10 +173,38 @@ pub struct StreamerQuery {
     pub team: Option<String>,
 }
 
+/// 台账行查询：016 起带 `phone` / `has_account`，库没跑 016（甚至 015）时自动退回
+/// [`dialect::STREAMERS_SQL_LEGACY`]。
+///
+/// 为什么不直接改 SQL 让迁移强制跑：生产 RK3318 的迁移由 `pk-server migrate` 显式触发，
+/// 服务先于迁移重启是常态（docs/12 §6.2 的 G0~G2 灰度），台账页是运营**唯一**的入口页面，
+/// 一条 Unknown column 就整页打不开了。两套 SQL 差异只在列清单，行序与过滤条件完全一致。
+async fn streamer_rows(st: &AppState) -> anyhow::Result<Vec<sqlx::mysql::MySqlRow>> {
+    match mysql::query(&st.pools, "LOCAL", dialect::STREAMERS_SQL).await {
+        Ok(rows) => Ok(rows),
+        Err(e) if is_missing_phone_column(&e) => {
+            tracing::warn!(
+                "person.phone / my_accounts.person_id 列不存在（016/015 未跑），台账按旧列清单返回"
+            );
+            mysql::query(&st.pools, "LOCAL", dialect::STREAMERS_SQL_LEGACY).await
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// 错误是不是「016/015 的列还没有」（与 dialect::is_missing_month_table 同款判定）
+fn is_missing_phone_column(e: &anyhow::Error) -> bool {
+    let m = e.to_string();
+    m.contains("Unknown column")
+        || m.contains("doesn't exist")
+        || m.contains("does not exist")
+        || m.contains("Unknown table")
+}
+
 /// GET /api/admin/streamers?q=&team=：主播台账（含主号账号 + 业务库别名合并）
 pub async fn streamers(State(st): State<ArcState>, Query(q): Query<StreamerQuery>) -> ApiResult {
     require_local(&st)?;
-    let rows = mysql::query(&st.pools, "LOCAL", dialect::STREAMERS_SQL).await?;
+    let rows = streamer_rows(&st).await?;
     let alias_map = merged_aliases(&st).await;
     let mut items: Vec<Value> = Vec::with_capacity(rows.len());
     for r in &rows {
@@ -216,6 +244,10 @@ pub async fn streamers(State(st): State<ArcState>, Query(q): Query<StreamerQuery
             "douyinNo": read_opt_str(r, "douyin_no"),
             "douyinNos": read_opt_str(r, "all_douyin_nos"),
             "anchorName": read_opt_str(r, "anchor_name"),
+            // 主播手机号（016 起；老库没这列 = 空串，前端照常显示"未登记"）
+            "phone": read_opt_str(r, "phone").unwrap_or_default(),
+            // 是否已开「展示端登录账号」（docs/13：104 人里现在只有 1 人有号）
+            "hasAccount": read_u64(r, "has_account").unwrap_or(0) > 0,
             // 微信机器人绑定状态（push_bindings 按姓名 1:1；没绑过 = false）
             "wechatBound": read_opt_i64(r, "wechat_bound").unwrap_or(0) != 0,
             "wechatPush": read_opt_i64(r, "wechat_push").unwrap_or(0) != 0,
@@ -241,6 +273,9 @@ pub struct StreamerBody {
     pub status: Option<String>,
     #[serde(rename = "joinedAt")]
     pub joined_at: Option<String>,
+    /// 主播手机号（016 起，选填）。运营在台账里登记，是批量开号的默认来源。
+    /// 库没跑 016 时写入会被拒（person_set_phone 翻成「先跑迁移」提示）。
+    pub phone: Option<String>,
     /// 每日报告显隐（2026-10-09）：true = 不出现在对外榜单（接口不下发这个人）
     #[serde(rename = "hideInDailyReport")]
     pub hide_in_daily_report: Option<bool>,
@@ -291,6 +326,29 @@ pub async fn create_streamer(
         .filter(|s| !s.is_empty());
     check_douyin_no_free(&st, douyin_no.as_deref(), None).await?;
 
+    // 手机号先校验（格式 + 占用），不合法在建档前就拒掉，别建了人再报错
+    let phone = body
+        .phone
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    if let Some(p) = phone.as_deref() {
+        crate::store::validate_my_phone(p).map_err(|e| anyhow::anyhow!(e))?;
+        // 016 没跑时这条查询会报 Unknown column：当「查不到冲突」处理。
+        // 建档失败比"手机号没存上"严重得多（运营要重录一遍），不能让少跑的迁移挡住建档。
+        let taken =
+            mysql::query_with_binds(&st.pools, "LOCAL", dialect::PERSON_PHONE_TAKEN_SQL, |q| {
+                q.bind(p.to_string()).bind(0i64)
+            })
+            .await
+            .unwrap_or_default();
+        if let Some(row) = taken.into_iter().next() {
+            let owner = read_str(&row, "name");
+            return Err(anyhow::anyhow!("手机号已被在职主播「{owner}」登记").into());
+        }
+    }
+
     let mut tx = pool.begin().await?;
     let res = sqlx::query(
         "INSERT INTO person (name, gender, master_id, generation, group_name, status, joined_at)
@@ -332,6 +390,14 @@ pub async fn create_streamer(
         .map_err(|e| map_account_err(e, &anchor_id))?;
     }
     tx.commit().await?;
+
+    /* 手机号单独写（016 才有的列）：库没跑迁移时只 warn，不回滚已建成的主播 ——
+    建档失败会让运营丢一遍录入，比"手机号没存上"严重得多。 */
+    if let Some(p) = phone.as_deref() {
+        if let Err(e) = crate::store::person_set_phone(&st, person_id, p).await {
+            tracing::warn!(person_id, error = %e, "建档后写手机号失败（016 迁移没跑？）");
+        }
+    }
 
     // 建档后把暂存区里这个抖音号 / 采集 ID 的行补账进 daily_metric（「建档后才显示」）
     let absorbed = absorb_pending_best_effort(&st, person_id, "create_streamer").await;
@@ -457,6 +523,9 @@ pub async fn update_streamer(
         sets.push("hide_in_daily_report = ?");
         binds.push(Bind::I(Some(v as i64)));
     }
+    /* 手机号不走上面的 SET 拼接：它要过格式校验 + 两侧查重 + 「016 没跑」的中文提示，
+    单独在下面调 person_set_phone（失败 = 整条编辑失败，运营要看见原因）。 */
+    let phone_in = body.phone.clone();
     if !sets.is_empty() {
         let sql = format!("UPDATE person SET {} WHERE id = ?", sets.join(", "));
         writer::write_guard(&sql)?;
@@ -465,6 +534,12 @@ pub async fn update_streamer(
             query = b.into_query(query);
         }
         query.bind(id as i64).execute(pool).await?;
+    }
+
+    if let Some(p) = phone_in.as_deref() {
+        crate::store::person_set_phone(&st, id, p)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
     }
 
     // 抖音号：upsert 到主号账号行
@@ -725,7 +800,7 @@ struct LocalStreamer {
 
 /// LOCAL 主播名册（导入匹配 + 团别冲突判断的数据源）
 async fn load_local_streamers(st: &AppState) -> anyhow::Result<Vec<LocalStreamer>> {
-    let rows = mysql::query(&st.pools, "LOCAL", dialect::STREAMERS_SQL).await?;
+    let rows = streamer_rows(st).await?;
     Ok(rows
         .iter()
         .map(|r| LocalStreamer {
@@ -2680,17 +2755,36 @@ pub async fn import_month_delete(
 
 /* --------------------------------- 单测 --------------------------------- */
 
+/// 按主键取主播行：016 起带 `phone`，库没跑 016 时退回
+/// [`dialect::STREAMER_BY_ID_SQL_LEGACY`]（与 [`streamer_rows`] 同一套兜底思路）。
+/// 详情页 / 设师傅都在用它 —— 一条 Unknown column 会让编辑弹窗直接打不开。
+async fn streamer_row_by_id(st: &AppState, id: u64) -> anyhow::Result<sqlx::mysql::MySqlRow> {
+    let rows = match mysql::query_with_binds(&st.pools, "LOCAL", dialect::STREAMER_BY_ID_SQL, |q| {
+        q.bind(id as i64)
+    })
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) if is_missing_phone_column(&e) => {
+            mysql::query_with_binds(
+                &st.pools,
+                "LOCAL",
+                dialect::STREAMER_BY_ID_SQL_LEGACY,
+                |q| q.bind(id as i64),
+            )
+            .await?
+        }
+        Err(e) => return Err(e),
+    };
+    rows.into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("主播不存在或已删除"))
+}
+
 /// GET /api/admin/streamers/{id}/detail：主播详情（含全部账号）
 pub async fn streamer_detail(State(st): State<ArcState>, Path(id): Path<u64>) -> ApiResult {
     require_local(&st)?;
-    let base = mysql::query_with_binds(&st.pools, "LOCAL", dialect::STREAMER_BY_ID_SQL, |q| {
-        q.bind(id as i64)
-    })
-    .await?;
-    let row = base
-        .into_iter()
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("主播不存在或已删除"))?;
+    let row = streamer_row_by_id(&st, id).await?;
     let accounts =
         mysql::query_with_binds(&st.pools, "LOCAL", dialect::ACCOUNTS_BY_PERSON_SQL, |q| {
             q.bind(id as i64)
@@ -2718,6 +2812,7 @@ pub async fn streamer_detail(State(st): State<ArcState>, Path(id): Path<u64>) ->
         "generation": read_opt_i64(&row, "generation"),
         "groupName": read_opt_str(&row, "group_name"),
         "status": read_opt_str(&row, "status").unwrap_or_else(|| "active".into()),
+        "phone": read_opt_str(&row, "phone").unwrap_or_default(),
         "accounts": accounts,
     })))
 }
@@ -2732,6 +2827,155 @@ pub struct BindAccountBody {
     pub anchor_name: Option<String>,
     #[serde(rename = "isPrimary")]
     pub is_primary: Option<bool>,
+}
+
+/* ------------------------ 批量开号（016，docs/13 §3） ------------------------ */
+
+#[derive(Deserialize)]
+pub struct BatchAccountsBody {
+    /// `[{ personId, phone? }]`；phone 留空 = 沿用台账上已登记的手机号
+    pub items: Option<Vec<BatchAccountItem>>,
+    /// 全部条目的兜底口令：某个人既没手机号、台账也没登记时用它当初始密码。
+    /// 不传 = 这类人直接 skipped（不强行开一个登不进去的号）
+    #[serde(rename = "defaultPass")]
+    pub default_pass: Option<String>,
+    /// true = 已存在的账号也把密码重置成初始密码（补开号 / 全量重置场景）。
+    /// **默认 false**：重跑一遍批量不该把 104 个人的密码全刷掉。
+    #[serde(rename = "forceReset")]
+    pub force_reset: Option<bool>,
+    /// true = 只算账不写库（运营先看清"会开几个、谁会失败"再提交）
+    pub dry_run: Option<bool>,
+}
+
+#[derive(Deserialize)]
+pub struct BatchAccountItem {
+    #[serde(rename = "personId")]
+    pub person_id: Option<u64>,
+    pub phone: Option<String>,
+}
+
+/// POST /api/admin/my-accounts/batch：给一批主播开「展示端登录账号」。
+///
+/// 为什么必须有这个接口（docs/13 §3）：104 个在职主播只有 1 个有登录账号，
+/// 单条 `POST /api/admin/my-accounts` 要运营点 104 次、每次手打姓名 + 手机号 + 密码，
+/// 而且单条接口**不带 person_id**（015 之前的模型），开出来的人改名就失联。
+///
+/// 与单条接口的关系：**单条接口一行不改**（向后兼容，前端 BotPage / StreamerPage 照常）。
+/// 本接口只是把同样的写入逻辑批量化，并补上 person_id 锚点。
+///
+/// 返回 `{ ok, created, updated, skipped, failed, items[] }` —— items 逐条给结论与原因，
+/// 前端直接渲染成结果表（运营要把初始密码抄给主播）。
+pub async fn batch_my_accounts(
+    State(st): State<ArcState>,
+    Json(body): Json<BatchAccountsBody>,
+) -> ApiResult {
+    require_local(&st)?;
+    let items = body.items.unwrap_or_default();
+    if items.is_empty() {
+        return Err(anyhow::anyhow!("名单为空：至少选一个主播").into());
+    }
+    if items.len() > crate::store::BATCH_ACCOUNT_MAX {
+        return Err(anyhow::anyhow!(
+            "一次最多开 {} 个账号（本次 {} 个，请分批提交）",
+            crate::store::BATCH_ACCOUNT_MAX,
+            items.len()
+        )
+        .into());
+    }
+    let inputs: Vec<crate::store::BatchAccountInput> = items
+        .iter()
+        .filter_map(|i| {
+            let pid = i.person_id?;
+            (pid > 0).then(|| crate::store::BatchAccountInput {
+                person_id: pid,
+                phone: i
+                    .phone
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string),
+            })
+        })
+        .collect();
+    if inputs.is_empty() {
+        return Err(anyhow::anyhow!("名单里没有有效的主播 id").into());
+    }
+
+    /* dry-run：不写库，只回一条"会怎么走"的汇总（打开页面时的预览）。
+    真跑一次再回滚是不可接受的（密码已经换了），所以预览必须真的不写。 */
+    if body.dry_run.unwrap_or(false) {
+        let total = inputs.len();
+        return Ok(Json(json!({
+            "ok": true, "dryRun": true, "total": total,
+            "note": format!("预览：将对 {total} 个主播开号（初始密码 = 手机号后四位；无手机号时用 defaultPass）"),
+        })));
+    }
+
+    let rows = crate::store::my_accounts_batch_open(
+        &st,
+        &inputs,
+        body.default_pass.as_deref(),
+        body.force_reset.unwrap_or(false),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!(e))?;
+
+    let (mut created, mut updated, mut skipped, mut failed) = (0usize, 0usize, 0usize, 0usize);
+    for r in &rows {
+        match r.status {
+            "created" => created += 1,
+            "updated" => updated += 1,
+            "skipped" => skipped += 1,
+            _ => failed += 1,
+        }
+    }
+    tracing::info!(
+        created,
+        updated,
+        skipped,
+        failed,
+        "批量开号完成（source=batch）"
+    );
+    crate::events::emit(
+        crate::events::SCOPE_ROSTER,
+        format!("批量开号：新增 {created} 个、更新 {updated} 个（失败 {failed}）"),
+    );
+    Ok(Json(json!({
+        "ok": true,
+        "created": created,
+        "updated": updated,
+        "skipped": skipped,
+        "failed": failed,
+        "items": rows,
+    })))
+}
+
+/// PUT /api/admin/streamers/{id}/phone：只改主播手机号（台账编辑弹窗里单独一项）。
+///
+/// 单独开口子的原因：手机号要过「格式 + 台账查重 + 登录账号查重」三道校验，
+/// 失败要给出准确原因（"被谁占了"），混在 PUT /api/admin/streamers/{id} 里只能
+/// 返回一句通用的"保存失败"。
+#[derive(Deserialize)]
+pub struct PersonPhoneBody {
+    pub phone: Option<String>,
+}
+
+pub async fn set_person_phone(
+    State(st): State<ArcState>,
+    Path(id): Path<u64>,
+    Json(body): Json<PersonPhoneBody>,
+) -> ApiResult {
+    require_local(&st)?;
+    ensure(id > 0, "无效的主播 id")?;
+    let phone = body
+        .phone
+        .ok_or_else(|| anyhow::anyhow!("缺少 phone 字段"))?;
+    crate::store::person_set_phone(&st, id, &phone)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))?;
+    Ok(Json(
+        json!({ "ok": true, "personId": id, "phone": phone.trim() }),
+    ))
 }
 
 /// POST /api/admin/streamers/{id}/accounts：绑定抖音号（一人可挂多个）
@@ -3003,14 +3247,7 @@ pub async fn set_master(
     let master_id = body.master_id.filter(|m| *m > 0);
 
     // 本人必须存在（顺带取名字做回显/报错）
-    let me = mysql::query_with_binds(&st.pools, "LOCAL", dialect::STREAMER_BY_ID_SQL, |q| {
-        q.bind(id as i64)
-    })
-    .await?;
-    let me = me
-        .into_iter()
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("主播不存在或已删除"))?;
+    let me = streamer_row_by_id(&st, id).await?;
     let me_name = read_str(&me, "name");
 
     let mut master_name: Option<String> = None;
@@ -4123,6 +4360,61 @@ mod tests {
         let r = resolve_row(&raw, &ctx, &HashMap::new(), None);
         assert_eq!(r.person_id, Some(7));
         assert!(!r.matched_by_douyin, "按名字命中不算号码命中");
+    }
+
+    /* ---------------------- 批量开号入参（016，docs/13） ---------------------- */
+
+    /// 前端传的 items 里可能混着 personId=0 / 缺失 / 空手机号，解析层要全部收敛掉，
+    /// 不能让它们变成一条 `INSERT ... person_id = 0`（那是"管理员观看账号"的哨兵值）。
+    #[test]
+    fn batch_items_drop_invalid_person_ids() {
+        let body: BatchAccountsBody = serde_json::from_str(
+            r#"{"items":[{"personId":1027,"phone":"13354463148"},
+                          {"personId":0,"phone":"13900000000"},
+                          {"phone":"13900000001"},
+                          {"personId":1028,"phone":"  "}]}"#,
+        )
+        .expect("解析批量开号入参");
+        let inputs: Vec<crate::store::BatchAccountInput> = body
+            .items
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|i| {
+                let pid = i.person_id?;
+                (pid > 0).then(|| crate::store::BatchAccountInput {
+                    person_id: pid,
+                    phone: i
+                        .phone
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string),
+                })
+            })
+            .collect();
+        assert_eq!(inputs.len(), 2, "personId=0 / 缺失的条目必须被丢弃");
+        assert_eq!(inputs[0].person_id, 1027);
+        assert_eq!(inputs[0].phone.as_deref(), Some("13354463148"));
+        assert_eq!(
+            inputs[1].phone, None,
+            "纯空格手机号 == 没填（走「沿用台账手机号」分支）"
+        );
+    }
+
+    /// forceReset 默认 false：重跑一遍批量不能把 104 个人的密码全刷掉
+    #[test]
+    fn batch_force_reset_defaults_to_false() {
+        let body: BatchAccountsBody =
+            serde_json::from_str(r#"{"items":[{"personId":1}]}"#).unwrap();
+        assert!(!body.force_reset.unwrap_or(false));
+        assert!(!body.dry_run.unwrap_or(false));
+        assert!(body.default_pass.is_none());
+        let forced: BatchAccountsBody = serde_json::from_str(
+            r#"{"items":[{"personId":1}],"forceReset":true,"defaultPass":"6688"}"#,
+        )
+        .unwrap();
+        assert!(forced.force_reset.unwrap_or(false));
+        assert_eq!(forced.default_pass.as_deref(), Some("6688"));
     }
 
     #[test]

@@ -136,7 +136,31 @@ pub fn inline_dates(sql: &str, dates: &[String]) -> anyhow::Result<String> {
 /// 主播台账（含主号账号信息）；aliases 在业务库里，代码层合并。
 /// wechat_bound / wechat_push 来自 push_bindings（按姓名 1:1）：运营在台账里
 /// 一眼看出谁绑了微信机器人、谁开了推送，不用去「机器人」页翻会话列表。
+/// ⚠️ 016 迁移后新增 `p.phone` 与 `a.has_account`。库**没跑 016** 时这两列不存在 →
+/// 查询报 Unknown column，`admin::streamers` 会退回 [`STREAMERS_SQL_LEGACY`]（同 admin.rs:728
+/// 的导入匹配路径，`load_local_streamers` 也要用同一套兜底）。改这里务必同步改 LEGACY 版本。
 pub const STREAMERS_SQL: &str = "SELECT p.id, p.name, p.gender, p.master_id, p.generation,
+       p.group_name, p.avatar_url, p.status, p.hide_in_daily_report, p.phone,
+       DATE_FORMAT(p.joined_at, '%Y-%m-%d') AS joined,
+       (SELECT COUNT(*) FROM my_accounts ma WHERE ma.person_id = p.id) AS has_account,
+       a.anchor_id, a.douyin_no, a.anchor_name, m.name AS master_name,
+       (SELECT COUNT(*) FROM person c WHERE c.master_id = p.id AND c.deleted_at IS NULL) AS disciple_count,
+       (SELECT GROUP_CONCAT(a2.douyin_no ORDER BY a2.is_primary DESC, a2.id SEPARATOR ' / ')
+          FROM account a2 WHERE a2.person_id = p.id AND a2.douyin_no <> '') AS all_douyin_nos,
+       (SELECT pb.conversation_id <> '' FROM push_bindings pb WHERE pb.name = p.name
+          LIMIT 1) AS wechat_bound,
+       (SELECT pb.notify_target = 1 OR pb.daily_report = 1 FROM push_bindings pb
+          WHERE pb.name = p.name LIMIT 1) AS wechat_push
+     FROM person p
+     LEFT JOIN account a ON a.person_id = p.id AND a.is_primary = 1
+     LEFT JOIN person m ON m.id = p.master_id
+     WHERE p.deleted_at IS NULL
+     ORDER BY p.name";
+
+/// 016 / 015 未跑时的兜底：列清单逐项对齐 [`STREAMERS_SQL`]，少 `p.phone` 与 `has_account`
+/// （`my_accounts.person_id` 是 015 加的）。台账页在这套库上只是看不到手机号 / 开号状态，
+/// 其余字段与今天完全一致（这是 015 定下的"向后兼容：老库一行代码不改也能跑"口径）。
+pub const STREAMERS_SQL_LEGACY: &str = "SELECT p.id, p.name, p.gender, p.master_id, p.generation,
        p.group_name, p.avatar_url, p.status, p.hide_in_daily_report,
        DATE_FORMAT(p.joined_at, '%Y-%m-%d') AS joined,
        a.anchor_id, a.douyin_no, a.anchor_name, m.name AS master_name,
@@ -154,8 +178,17 @@ pub const STREAMERS_SQL: &str = "SELECT p.id, p.name, p.gender, p.master_id, p.g
      ORDER BY p.name";
 
 /// 按主键找主播（详情页）
+/// 016 起带 `phone`；库没跑 016 时用 [`STREAMER_BY_ID_SQL_LEGACY`]（admin.rs 两处详情/设师傅共用）
 pub const STREAMER_BY_ID_SQL: &str = "SELECT id, name, gender, master_id, generation,
-       group_name, avatar_url, status, DATE_FORMAT(joined_at, '%Y-%m-%d') AS joined
+       group_name, avatar_url, status, phone,
+       DATE_FORMAT(joined_at, '%Y-%m-%d') AS joined
+     FROM person WHERE deleted_at IS NULL AND id = ? LIMIT 1";
+
+/// 016 未跑（person 表还没有 phone 列）时的兜底：列清单与 STREAMER_BY_ID_SQL 逐项对齐，
+/// 只少 phone —— 调用方 read_opt_str(row,"phone") 取不到就当"未登记"，行为与空串一致。
+pub const STREAMER_BY_ID_SQL_LEGACY: &str = "SELECT id, name, gender, master_id, generation,
+       group_name, avatar_url, status,
+       DATE_FORMAT(joined_at, '%Y-%m-%d') AS joined
      FROM person WHERE deleted_at IS NULL AND id = ? LIMIT 1";
 
 /// 按名字精确找主播（含团别，导入匹配用）
@@ -382,6 +415,28 @@ pub const PENDING_FOR_PERSON_SQL: &str = "SELECT id, name, douyin_no,
 pub const ACTIVE_PERSON_COUNT_SQL: &str =
     "SELECT COUNT(*) AS n FROM person WHERE deleted_at IS NULL AND status <> 'left'";
 
+/* --------------------- 主播手机号 + 批量开号（016，docs/13） --------------------- */
+
+/// 手机号被别的在职主播占了？返回抢占者的 id / name（排自己）。
+/// 与 `uk_person_phone_uniq`（016 生成的软唯一索引）互补：索引兜底，这条只为给出"被谁占了"的中文文案。
+/// `deleted_at IS NULL` 与台账页主查询同口径（已离职的人不再占位，手机号可以给新人）。
+pub const PERSON_PHONE_TAKEN_SQL: &str = "SELECT id, name FROM person
+     WHERE phone <> '' AND phone = ? AND deleted_at IS NULL AND id <> ? LIMIT 1";
+
+/// 批量开号前的在职主播快照：只要 person_id + 姓名 + 手机号 + 团别。
+/// 手机号为空也能开（登录名 = 姓名，密码必须显式给），只是开了之后不能走"手机号登录 / 忘记密码"。
+/// `status <> 'left'` 与导入完整度报告同口径：已离团的不给开号（开了也登不进来，见 store::bind_inner）。
+pub const PERSON_ROSTER_FOR_ACCOUNTS_SQL: &str = "SELECT id, name, gender, phone FROM person
+      WHERE deleted_at IS NULL AND status <> 'left' AND name <> ''
+      ORDER BY name";
+
+/// 016 没跑（`person.phone` 不存在）时的兜底：少 phone 一列，其余逐项对齐。
+/// 批量开号在这套库上仍可用（手机号一律当"未登记"，靠 `defaultPass` 开号），
+/// 只是台账上的手机号没法自动带出来 —— 迁移只铺路、不强依赖。
+pub const PERSON_ROSTER_FOR_ACCOUNTS_SQL_LEGACY: &str = "SELECT id, name, gender FROM person
+      WHERE deleted_at IS NULL AND status <> 'left' AND name <> ''
+      ORDER BY name";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -400,6 +455,78 @@ mod tests {
         assert!(STREAMERS_SQL.contains("gender"));
         assert!(PREV_CUMULATIVE_SQL.contains("cumulative_wave"));
         assert!(BATCH_LIST_SQL.contains("ok_rows"), "002 迁移后的审计字段");
+    }
+
+    /// 016：台账 SQL 与它的兜底版必须**逐列同构** —— 只差 `p.phone` 与 `has_account`。
+    /// 有人在 016 版里加了一列（比如新加个 wechat_openid）却忘了同步 LEGACY，
+    /// 生产库没跑迁移时台账页就会因为这个字段 500，而不是"少显示一列"。
+    #[test]
+    fn streamers_legacy_sql_is_a_subset_of_016() {
+        for must_have in [
+            "p.id",
+            "p.name",
+            "p.gender",
+            "p.master_id",
+            "p.generation",
+            "p.group_name",
+            "p.avatar_url",
+            "p.status",
+            "p.hide_in_daily_report",
+            "a.anchor_id",
+            "a.douyin_no",
+            "a.anchor_name",
+            "master_name",
+            "disciple_count",
+            "all_douyin_nos",
+            "wechat_bound",
+            "wechat_push",
+            "FROM person p",
+            "WHERE p.deleted_at IS NULL",
+            "ORDER BY p.name",
+        ] {
+            assert!(STREAMERS_SQL.contains(must_have), "016 版缺 {must_have}");
+            assert!(
+                STREAMERS_SQL_LEGACY.contains(must_have),
+                "LEGACY 版缺 {must_have}（016 未跑时的兜底必须同构）"
+            );
+        }
+        assert!(STREAMERS_SQL.contains("p.phone"), "016 版要带手机号");
+        assert!(STREAMERS_SQL.contains("has_account"), "016 版要带开号状态");
+        assert!(
+            !STREAMERS_SQL_LEGACY.contains("p.phone"),
+            "LEGACY 版不能带 phone（person 表没这列）"
+        );
+    }
+
+    /// PERSON_ROSTER_FOR_ACCOUNTS_SQL 必须过只读守卫（它走 pk_reader 只读池）
+    #[test]
+    fn batch_open_sql_is_readonly_and_scoped() {
+        assert!(PERSON_ROSTER_FOR_ACCOUNTS_SQL.contains("deleted_at IS NULL"));
+        assert!(
+            PERSON_ROSTER_FOR_ACCOUNTS_SQL.contains("status <> 'left'"),
+            "已离团的不给开号（登不进来，见 store::bind_inner）"
+        );
+        assert!(PERSON_PHONE_TAKEN_SQL.contains("deleted_at IS NULL"));
+        // LEGACY 版只少 phone，其余与 016 版逐字一致（改一处必须改两处）
+        for must_have in [
+            "SELECT id, name, gender",
+            "FROM person",
+            "deleted_at IS NULL",
+            "status <> 'left'",
+            "name <> ''",
+            "ORDER BY name",
+        ] {
+            assert!(
+                PERSON_ROSTER_FOR_ACCOUNTS_SQL.contains(must_have),
+                "016 版缺 {must_have}"
+            );
+            assert!(
+                PERSON_ROSTER_FOR_ACCOUNTS_SQL_LEGACY.contains(must_have),
+                "LEGACY 版缺 {must_have}"
+            );
+        }
+        assert!(PERSON_ROSTER_FOR_ACCOUNTS_SQL.contains("phone"));
+        assert!(!PERSON_ROSTER_FOR_ACCOUNTS_SQL_LEGACY.contains("phone"));
     }
 
     // ---- 未播口径（2026-10-09 用户定：当日音浪 < 2 = 未播）----

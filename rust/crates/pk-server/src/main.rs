@@ -200,8 +200,10 @@ async fn main() -> anyhow::Result<()> {
         .set(bot_manager)
         .map_err(|_| anyhow::anyhow!("bots 重复初始化"))?;
 
-    /* 用户自助扫码的微信推送通道（2026-10-11，多账号）：恢复每个已扫码账号的长轮询。 */
+    /* 用户自助扫码的微信推送通道（2026-10-11，多账号）：恢复每个已扫码账号的长轮询，
+    并起一条 supervisor 每 30 秒扫表补拉（任务 panic / 异常退出会被重新拉起）。 */
     crate::wxpush::bootstrap(&st).await;
+    let wxpush_supervisor = tokio::spawn(crate::wxpush::supervisor_loop(st.clone()));
 
     /* 延迟推送调度器（2026-10-10）：每 60 秒扫一次 push_jobs，把到点的任务推出去。
     写库不可用时 push_job_take 直接返回 None，循环空转，不影响服务。
@@ -504,6 +506,17 @@ async fn main() -> anyhow::Result<()> {
             "/api/admin/my-accounts/{name}/bind",
             post(public_teams::admin_my_account_bind),
         )
+        // 批量开号（2026-10-11 docs/13）：一次给多个在职主播开「展示端登录账号」，
+        // 初始密码 = 手机号后四位；单条 /api/admin/my-accounts 保持原样（向后兼容）
+        .route(
+            "/api/admin/my-accounts/batch",
+            post(admin::batch_my_accounts),
+        )
+        // 主播手机号单独改（016 起 person.phone；要过三道查重，失败给准确原因）
+        .route(
+            "/api/admin/streamers/{id}/phone",
+            axum::routing::put(admin::set_person_phone),
+        )
         // 抖音号绑定审计（展示端提交 + 截图凭证 → 管理端裁决）
         .route(
             "/api/admin/anchor-claims",
@@ -659,6 +672,10 @@ async fn main() -> anyhow::Result<()> {
             tracing::info!("HTTP 服务已停止接受连接，等待后台任务退出…");
             // 调度循环收到 token 后退出（最多等一轮 tick 的收尾时间）
             let _ = tokio::time::timeout(std::time::Duration::from_secs(10), scheduler).await;
+            // wxpush supervisor 收到同一个 token 后退出；不等它，轮询任务自己会在
+            // 等待点退出并把 cursor flush 落库（硬超时兜底 10 秒）。
+            let _ =
+                tokio::time::timeout(std::time::Duration::from_secs(10), wxpush_supervisor).await;
             tracing::info!("pk-server 已退出");
             Ok(())
         }

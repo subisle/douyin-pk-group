@@ -60,6 +60,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "015_identity_unify",
         include_str!("migrations/015_identity_unify.sql"),
     ),
+    (
+        "016_streamer_phone",
+        include_str!("migrations/016_streamer_phone.sql"),
+    ),
 ];
 
 /// 迁移建连（migrator 账号；同样关语句缓存）

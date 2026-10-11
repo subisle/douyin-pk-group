@@ -34,9 +34,9 @@ const CHANNEL_VERSION: &str = "2.4.10";
 const CLIENT_VERSION_MMNNPP: (u32, u32, u32) = (2, 4, 10);
 const SESSION_EXPIRED: i64 = -14;
 /// -14 后暂停多久再试（对齐 openclaw：暂停一小时，不清凭据）
-const SESSION_EXPIRED_RETRY: Duration = Duration::from_secs(3600);
+pub(crate) const SESSION_EXPIRED_RETRY: Duration = Duration::from_secs(3600);
 /// 连续多少次 -14 之前先等一小时重试；超过才认定凭据彻底失效、回到等待扫码
-const SESSION_EXPIRED_MAX_RETRY: u32 = 4;
+pub(crate) const SESSION_EXPIRED_MAX_RETRY: u32 = 4;
 /// 媒体 CDN（下载兜底模板 / 上传 host 提示）
 const CDN_BASE_URL: &str = "https://novac2c.cdn.weixin.qq.com/c2c";
 
@@ -71,11 +71,31 @@ pub fn qr_svg_data_url(content: &str) -> Option<String> {
     ))
 }
 
+/* 连接池（2026-10-11 多 bot 扩容）：100+ 个扫码账号共用这一个 `reqwest::Client`
+ * 跑 getupdates 长轮询。默认值是「每 host 空闲连接上限 usize::MAX / 90 秒回收」，
+ * 看着够用，但池子是全局共享的——高频账号会把空闲连接占满并让低频账号的连接
+ * 在 90 秒后被回收，长轮询正好卡在这个窗口上被断开。这里显式给一个明确的池：
+ *   - pool_max_idle_per_host: 每个 host 最多缓存的空闲连接数（>= 并发 bot 数）
+ *   - pool_idle_timeout: 空闲连接保留时长，长轮询一轮最长 35 秒，给足余量
+ * 并发上限用环境变量 WX_POOL_MAX_IDLE_PER_HOST 调（默认 128）。 */
+fn pool_max_idle_per_host() -> usize {
+    std::env::var("WX_POOL_MAX_IDLE_PER_HOST")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|v| (1..=4096).contains(v))
+        .unwrap_or(128)
+}
+
+/// 空闲连接保留时长（长轮询一轮 <= 35 秒，90 秒默认值对抖动后的复用偏紧）
+const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+
 fn shared_http() -> &'static reqwest::Client {
     static HTTP: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
     HTTP.get_or_init(|| {
         reqwest::Client::builder()
             .timeout(Duration::from_secs(75))
+            .pool_max_idle_per_host(pool_max_idle_per_host())
+            .pool_idle_timeout(POOL_IDLE_TIMEOUT)
             .build()
             .expect("构造微信 HTTP 客户端失败")
     })

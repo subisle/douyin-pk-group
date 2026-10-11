@@ -508,7 +508,10 @@ async fn upgrade_my_password_if_plain(pool: &MySqlPool, name: &str, stored: &str
 }
 
 /// 手机号归一化（选填）：去空格横线后须为 5~20 位纯数字；空串 = 未设置
-fn validate_my_phone(phone: &str) -> std::result::Result<String, String> {
+///
+/// pub 的原因：主播档案（person.phone）与登录账号（my_accounts.phone）两套手机号
+/// **必须同一套格式口径**，否则会出现"台账里能存、开号时被拒"的割裂（docs/13 §2.2）。
+pub fn validate_my_phone(phone: &str) -> std::result::Result<String, String> {
     let p: String = phone
         .trim()
         .chars()
@@ -623,8 +626,21 @@ async fn my_account_set_pool(
     .execute(pool)
     .await
     .map_err(|e| {
-        let msg = e.to_string();
-        format!("写入失败：{msg}")
+        let m = e.to_string();
+        /* docs/12 §P6 记过的不一致：唯一索引已经能挡住重复手机号，但错误一直是
+        一句 `写入失败：Duplicate entry ...`，运营看不出是手机号还是姓名撞了。
+        这里与注册路径（store.rs 的 my_account_register）翻成同一套中文文案。 */
+        if m.contains("Duplicate entry") {
+            if m.contains("PRIMARY") {
+                format!("账号名「{name}」已存在（同名主播？先在台账里改名）")
+            } else {
+                format!("手机号 {phone} 已存在（已绑在另一个账号上）")
+            }
+        } else if m.contains("Unknown column") {
+            "缺少数据库迁移 008（先跑一次 pk-server migrate）".to_string()
+        } else {
+            format!("写入失败：{m}")
+        }
     })?;
     Ok(())
 }
@@ -709,6 +725,510 @@ pub async fn my_account_set_admin(st: &AppState, name: &str, admin: bool) -> boo
         .await
         .map(|r| r.rows_affected() > 0)
         .unwrap_or(false))
+}
+
+/* ------------------- 主播手机号 + 批量开号（016，docs/13） ------------------- */
+
+/// 后台写手机号时被哪类对象占了。两种都拒绝，但文案不同（运营要靠它判断去哪改）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PhoneClash {
+    /// 别的在职主播档案（person.phone）上已经登记了这个号
+    Person,
+    /// 别的展示端账号（my_accounts.phone）已经用这个号登录
+    Account,
+}
+
+impl PhoneClash {
+    pub fn message(self, phone: &str) -> String {
+        match self {
+            Self::Person => format!("手机号 {phone} 已被其它在职主播登记"),
+            Self::Account => format!("手机号 {phone} 已绑在另一个展示端账号上"),
+        }
+    }
+}
+
+/// 手机号后四位当初始密码。
+///
+/// 与「忘记密码」重置口径**必须同款**（`my_account_reset_password_to_phone_suffix` 取后四位）：
+/// 运营按重置流程改过之后，批量开号再跑一遍不该又把密码变成另一个值。
+/// 手机号不足 4 位（台账脏数据 / 空号）→ None：这种号本来也重置不了密码，
+/// 给它开号等于造一个永远登不进去的账号。
+pub fn phone_suffix_pass(phone: &str) -> Option<String> {
+    let p: String = phone.chars().filter(|c| c.is_ascii_digit()).collect();
+    if p.len() < 4 {
+        return None;
+    }
+    Some(p[p.len() - 4..].to_string())
+}
+
+/// 写入主播档案手机号（`person.phone`，016 迁移新增列）。
+///
+/// 016 没跑时 `person` 表没有该列 → UPDATE 报 Unknown column，这里翻成明确的
+/// 「先跑迁移」提示，不让运营看见一条 `Unknown column 'phone'`。
+/// 手机号留空 = 清空（运营登记错了要撤掉）。
+pub async fn person_set_phone(
+    st: &AppState,
+    person_id: u64,
+    phone: &str,
+) -> std::result::Result<(), String> {
+    if person_id == 0 {
+        return Err("无效的主播 id".into());
+    }
+    let phone = validate_my_phone(phone)?;
+    let pool = w(st).map_err(|e| e.to_string())?;
+    if !phone.is_empty() {
+        let taken_person = sqlx::query(crate::dialect::PERSON_PHONE_TAKEN_SQL)
+            .bind(&phone)
+            .bind(person_id as i64)
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten()
+            .is_some();
+        if taken_person {
+            return Err(PhoneClash::Person.message(&phone));
+        }
+        let taken_account =
+            sqlx::query("SELECT 1 FROM my_accounts WHERE phone <> '' AND phone = ? LIMIT 1")
+                .bind(&phone)
+                .fetch_optional(pool)
+                .await
+                .ok()
+                .flatten()
+                .is_some();
+        if taken_account {
+            return Err(PhoneClash::Account.message(&phone));
+        }
+    }
+    sqlx::query("UPDATE person SET phone = ? WHERE id = ? AND deleted_at IS NULL")
+        .bind(&phone)
+        .bind(person_id as i64)
+        .execute(pool)
+        .await
+        .map_err(|e| {
+            let m = e.to_string();
+            if m.contains("Unknown column") {
+                "主播手机号功能未启用：请先跑一次 pk-server migrate（016_streamer_phone）".into()
+            } else if m.contains("Duplicate entry") {
+                format!("手机号 {phone} 已被其它主播登记")
+            } else {
+                format!("写入失败：{m}")
+            }
+        })?;
+    Ok(())
+}
+
+/// 批量开号单条结果（前端按它渲染「谁成了、谁没成、为什么」）
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct BatchAccountRow {
+    #[serde(rename = "personId")]
+    pub person_id: u64,
+    /// 登录名 = 台账姓名
+    pub name: String,
+    /// 实际写进登录账号的手机号（空 = 只能姓名登录）
+    pub phone: String,
+    /// created = 新开号 / updated = 已存在（补 person_id，密码看 forceReset）
+    /// / skipped = 定不了初始密码 / failed = 见 note
+    pub status: &'static str,
+    pub note: String,
+    /// 本次生成的初始密码（created 一定下发；updated 只在 forceReset 时下发）
+    #[serde(rename = "initialPass", skip_serializing_if = "Option::is_none")]
+    pub initial_pass: Option<String>,
+}
+
+/// 批量开号的入参：person_id 必填；phone 留空 = 沿用台账上已登记的手机号。
+#[derive(Clone, Debug)]
+pub struct BatchAccountInput {
+    pub person_id: u64,
+    pub phone: Option<String>,
+}
+
+/// 一次批量开号最多处理多少人。104 个主播一次开完是 104 行，留到 500 给合并/扩容冗余，
+/// 同时防误传一份几万行的名单把写池拖成长事务。
+pub const BATCH_ACCOUNT_MAX: usize = 500;
+
+/// 给一批主播开「展示端登录账号」（`POST /api/admin/my-accounts/batch`，docs/13 §3）。
+///
+/// 逐条独立判定 —— **一条失败不影响其它条**：104 人一次提交，不能因为第 3 个人手机号
+/// 重号就让剩下 101 个都开不成。
+///
+/// - `person_id` 必须对应在职主播（`deleted_at IS NULL AND status <> 'left'`）且姓名非空
+/// - 手机号优先级：**入参 phone > 台账 person.phone > 空**
+/// - 初始密码：**手机号后四位**；没有手机号时退回 `default_pass`（运营统一口令）
+/// - 已存在账号（按 person_id 优先、name 兜底）→ 更新：补 person_id / 手机号，**默认不动密码**
+///   （重跑一遍批量不会把 104 个人的密码全刷掉）；`force_reset = true` 才重置
+/// - source 一律标 `batch`（与管理端手建的 `admin`、自助注册的 `register` 区分，便于事后审计）
+pub async fn my_accounts_batch_open(
+    st: &AppState,
+    inputs: &[BatchAccountInput],
+    default_pass: Option<&str>,
+    force_reset: bool,
+) -> std::result::Result<Vec<BatchAccountRow>, String> {
+    let pool = w(st).map_err(|e| e.to_string())?;
+    if inputs.is_empty() {
+        return Err("名单为空".into());
+    }
+    if inputs.len() > BATCH_ACCOUNT_MAX {
+        return Err(format!(
+            "一次最多开 {} 个账号（本次 {} 个，请分批提交）",
+            BATCH_ACCOUNT_MAX,
+            inputs.len()
+        ));
+    }
+    /* 016 没跑时 person.phone 不存在 → 退回 LEGACY 列清单（手机号一律当"未登记"）。
+    批量开号是 104 人的唯一入口，不能因为少跑一次迁移就整个不可用。 */
+    let roster_rows = match crate::mysql::query(
+        &st.pools,
+        "LOCAL",
+        crate::dialect::PERSON_ROSTER_FOR_ACCOUNTS_SQL,
+    )
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e)
+            if {
+                let m = e.to_string();
+                m.contains("Unknown column") || m.contains("doesn't exist")
+            } =>
+        {
+            tracing::warn!("person.phone 列不存在（016 未跑），批量开号按无手机号口径继续");
+            crate::mysql::query(
+                &st.pools,
+                "LOCAL",
+                crate::dialect::PERSON_ROSTER_FOR_ACCOUNTS_SQL_LEGACY,
+            )
+            .await
+            .map_err(|e| format!("读取主播台账失败：{e}"))?
+        }
+        Err(e) => return Err(format!("读取主播台账失败：{e}")),
+    };
+    let roster: Vec<(u64, String, String)> = roster_rows
+        .iter()
+        .map(|r| {
+            (
+                r.try_get::<u64, _>("id").unwrap_or(0),
+                r.try_get::<String, _>("name").unwrap_or_default(),
+                r.try_get::<String, _>("phone").unwrap_or_default(),
+            )
+        })
+        .collect();
+
+    /* 三次查询把占用情况捞全，避免逐条 SELECT（104 人 × 2 次会明显拖慢接口）。
+    016 没跑时 person.phone 不存在 → 台账侧直接当「都没登记」，手机号只按 my_accounts 判重。 */
+    let mut person_phone_dup: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if let Ok(rows) = sqlx::query(
+        "SELECT phone FROM person WHERE phone <> '' AND deleted_at IS NULL
+          GROUP BY phone HAVING COUNT(*) > 1",
+    )
+    .fetch_all(pool)
+    .await
+    {
+        for r in &rows {
+            if let Ok(p) = r.try_get::<String, _>("phone") {
+                person_phone_dup.insert(p);
+            }
+        }
+    }
+    // 台账上「谁的号」：手机号 → person_id（用来判断撞的到底是别人还是自己）
+    let mut person_phone_owner: std::collections::HashMap<String, u64> =
+        std::collections::HashMap::new();
+    if let Ok(rows) = sqlx::query(
+        "SELECT phone, id FROM person WHERE phone <> '' AND deleted_at IS NULL
+          GROUP BY phone, id",
+    )
+    .fetch_all(pool)
+    .await
+    {
+        for r in &rows {
+            if let (Ok(p), Ok(id)) = (r.try_get::<String, _>("phone"), r.try_get::<u64, _>("id")) {
+                person_phone_owner.insert(p, id);
+            }
+        }
+    }
+    // 登录账号侧：手机号 → 账号名（含 person_id，用于「改名后 name 对不上」的判定）
+    let mut account_phone: Vec<(String, String, u64)> = Vec::new();
+    if let Ok(rows) = sqlx::query(
+        "SELECT name, phone, IFNULL(person_id, 0) AS pid FROM my_accounts WHERE phone <> ''",
+    )
+    .fetch_all(pool)
+    .await
+    {
+        for r in &rows {
+            if let (Ok(n), Ok(p)) = (
+                r.try_get::<String, _>("name"),
+                r.try_get::<String, _>("phone"),
+            ) {
+                let pid = r.try_get::<u64, _>("pid").unwrap_or(0);
+                account_phone.push((n, p, pid));
+            }
+        }
+    }
+    // 已开号的主播：person_id → (账号名, 手机号)
+    let mut account_by_person: std::collections::HashMap<u64, (String, String)> =
+        std::collections::HashMap::new();
+    if let Ok(rows) = sqlx::query(
+        "SELECT name, phone, person_id FROM my_accounts
+          WHERE person_id > 0 ORDER BY person_id, name",
+    )
+    .fetch_all(pool)
+    .await
+    {
+        for r in &rows {
+            if let (Ok(n), Ok(p), Ok(pid)) = (
+                r.try_get::<String, _>("name"),
+                r.try_get::<String, _>("phone"),
+                r.try_get::<u64, _>("person_id"),
+            ) {
+                account_by_person.entry(pid).or_insert((n, p));
+            }
+        }
+    }
+    /* ⚠️ 上面 `account_phone` 只捞了 `phone <> ''` 的行 —— **没登记手机号的账号捞不到**。
+    「这个主播/这个姓名有没有账号」必须看全部账号行，否则：
+    无手机号的已开号主播（批量开号第一批里没填号的人）再跑一次会走到 INSERT，
+    PRIMARY KEY(name) 直接撞车 → 该条报 failed，运营看到"已存在"却开不了号。 */
+    let mut account_by_name: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    if let Ok(rows) = sqlx::query("SELECT name, phone FROM my_accounts")
+        .fetch_all(pool)
+        .await
+    {
+        for r in &rows {
+            if let (Ok(n), Ok(p)) = (
+                r.try_get::<String, _>("name"),
+                r.try_get::<String, _>("phone"),
+            ) {
+                account_by_name.insert(n, p);
+            }
+        }
+    }
+
+    let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let mut out = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        let pid = input.person_id;
+        let Some((_, name, person_phone)) = roster.iter().find(|(id, _, _)| *id == pid) else {
+            out.push(BatchAccountRow {
+                person_id: pid,
+                name: String::new(),
+                phone: String::new(),
+                status: "failed",
+                note: "主播不存在、已删除或已离团（先生效再开号）".into(),
+                initial_pass: None,
+            });
+            continue;
+        };
+        let name = name.clone();
+        if name.is_empty() {
+            out.push(BatchAccountRow {
+                person_id: pid,
+                name,
+                phone: String::new(),
+                status: "failed",
+                note: "台账姓名为空，无法作为登录名".into(),
+                initial_pass: None,
+            });
+            continue;
+        }
+
+        /* 手机号：入参优先，其次台账已登记的 */
+        let want_phone = match input
+            .phone
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(p) => match validate_my_phone(p) {
+                Ok(p) => p,
+                Err(e) => {
+                    out.push(BatchAccountRow {
+                        person_id: pid,
+                        name,
+                        phone: String::new(),
+                        status: "failed",
+                        note: e,
+                        initial_pass: None,
+                    });
+                    continue;
+                }
+            },
+            None => person_phone.clone(),
+        };
+
+        /* 初始密码：手机号后四位 > 统一兜底口令 */
+        let Some(pass) = phone_suffix_pass(&want_phone).or_else(|| {
+            default_pass
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        }) else {
+            out.push(BatchAccountRow {
+                person_id: pid,
+                name,
+                phone: want_phone,
+                status: "skipped",
+                note: "既没有手机号、也没给统一口令，定不了初始密码".into(),
+                initial_pass: None,
+            });
+            continue;
+        };
+        if let Err(e) = validate_my_account(&name, &pass) {
+            out.push(BatchAccountRow {
+                person_id: pid,
+                name,
+                phone: want_phone,
+                status: "failed",
+                note: e,
+                initial_pass: None,
+            });
+            continue;
+        }
+
+        /* 手机号占用：撞台账（别人的档案）/ 撞登录账号（别人的号）都拒绝 */
+        if !want_phone.is_empty() {
+            let dup_in_person = person_phone_dup.contains(&want_phone);
+            let owned_by_other = person_phone_owner
+                .get(&want_phone)
+                .is_some_and(|owner| *owner != pid);
+            if dup_in_person || owned_by_other {
+                out.push(BatchAccountRow {
+                    person_id: pid,
+                    name,
+                    phone: want_phone.clone(),
+                    status: "failed",
+                    note: PhoneClash::Person.message(&want_phone),
+                    initial_pass: None,
+                });
+                continue;
+            }
+            let clash_account = account_phone
+                .iter()
+                .find(|(_, p, apid)| *p == want_phone && *apid != pid)
+                .map(|(n, _, _)| n.clone());
+            if let Some(owner) = clash_account {
+                if account_by_name.get(&name).map(|p| p.as_str()) != Some(want_phone.as_str()) {
+                    out.push(BatchAccountRow {
+                        person_id: pid,
+                        name,
+                        phone: want_phone.clone(),
+                        status: "failed",
+                        note: format!("手机号 {want_phone} 已绑在「{owner}」的账号上"),
+                        initial_pass: None,
+                    });
+                    continue;
+                }
+            }
+        }
+
+        let pass_hash = hash_my_password(&pass);
+        /* 已存在账号？person_id 优先（015 锚点口径），name 兜底（未回填 / 015 没跑） */
+        let existing = account_by_person.get(&pid).cloned().or_else(|| {
+            account_by_name
+                .get(&name)
+                .map(|p| (name.clone(), p.clone()))
+        });
+        match existing {
+            Some((old_name, old_phone)) => {
+                let keep_phone = if want_phone.is_empty() {
+                    old_phone
+                } else {
+                    want_phone.clone()
+                };
+                // 已存在：默认**不动密码**（重跑批量不该把所有人密码刷掉），
+                // 只有 force_reset 才重置；手机号 / person_id 一律补齐。
+                let sql = if force_reset {
+                    "UPDATE my_accounts SET phone = ?, pass = ?, person_id = ?, bound = 1
+                     WHERE name = ?"
+                } else {
+                    "UPDATE my_accounts SET phone = ?, person_id = ?, bound = 1 WHERE name = ?"
+                };
+                let mut q = sqlx::query(sql).bind(&keep_phone);
+                if force_reset {
+                    q = q.bind(&pass_hash);
+                }
+                q = q.bind(pid as i64).bind(&old_name);
+                match q.execute(pool).await {
+                    Ok(_) => out.push(BatchAccountRow {
+                        person_id: pid,
+                        name: old_name,
+                        phone: keep_phone,
+                        status: "updated",
+                        note: if force_reset {
+                            "已存在账号：已补 person_id 并重置初始密码".into()
+                        } else {
+                            "已存在账号：已补 person_id（密码未改动）".into()
+                        },
+                        initial_pass: force_reset.then_some(pass),
+                    }),
+                    Err(e) => {
+                        let m = e.to_string();
+                        out.push(BatchAccountRow {
+                            person_id: pid,
+                            name: old_name,
+                            phone: keep_phone.clone(),
+                            status: "failed",
+                            note: if m.contains("Duplicate entry") {
+                                format!("手机号 {keep_phone} 已被占用")
+                            } else {
+                                format!("写入失败：{m}")
+                            },
+                            initial_pass: None,
+                        })
+                    }
+                }
+            }
+            None => {
+                /* 新建：开号即绑定（bound=1、name = 台账姓名、person_id 锚定），
+                与 my_account_register 同口径 —— 主播拿到号就能登，不用再绑一次。 */
+                let res = sqlx::query(
+                    "INSERT INTO my_accounts
+                       (name, phone, pass, is_admin, created_at, bound, bound_at, source, person_id)
+                     VALUES (?, ?, ?, 0, ?, 1, ?, 'batch', ?)",
+                )
+                .bind(&name)
+                .bind(&want_phone)
+                .bind(&pass_hash)
+                .bind(&now)
+                .bind(&now)
+                .bind(pid as i64)
+                .execute(pool)
+                .await;
+                match res {
+                    Ok(_) => out.push(BatchAccountRow {
+                        person_id: pid,
+                        name,
+                        phone: want_phone,
+                        status: "created",
+                        note: String::new(),
+                        initial_pass: Some(pass),
+                    }),
+                    Err(e) => {
+                        let m = e.to_string();
+                        let note = if m.contains("Duplicate entry") {
+                            if m.contains("PRIMARY") {
+                                format!("账号名「{name}」已存在（同名主播？先改名或走单人改绑）")
+                            } else {
+                                format!("手机号 {want_phone} 已被占用")
+                            }
+                        } else if m.contains("Unknown column") {
+                            "缺少数据库迁移 008/015（先跑一次 pk-server migrate）".into()
+                        } else {
+                            format!("写入失败：{m}")
+                        };
+                        out.push(BatchAccountRow {
+                            person_id: pid,
+                            name,
+                            phone: want_phone,
+                            status: "failed",
+                            note,
+                            initial_pass: None,
+                        })
+                    }
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// 是否展示端管理员账号（verify 在台账里找不到同名主播时据此放行）
@@ -2999,6 +3519,50 @@ mod register_tests {
         assert_eq!(validate_my_phone("").unwrap(), "", "空串 = 没填手机号");
         assert!(validate_my_phone("1234").is_err(), "少于 5 位不给过");
         assert!(validate_my_phone("199abc").is_err(), "非数字不给过");
+    }
+
+    /* ---------------- 手机号 + 批量开号（016，docs/13）---------------- */
+
+    /// 初始密码 = 手机号后四位，必须与「忘记密码」重置口径一致
+    /// （my_account_reset_password_to_phone_suffix 取后四位）
+    #[test]
+    fn phone_suffix_pass_takes_last_four() {
+        assert_eq!(phone_suffix_pass("13354463148").as_deref(), Some("3148"));
+        assert_eq!(phone_suffix_pass("199 0000 0001").as_deref(), Some("0001"));
+        assert_eq!(phone_suffix_pass("13800138000").as_deref(), Some("8000"));
+        // 不足 4 位 / 空号 → 不给过：这种号也重置不了密码，开号等于造个登不进的账号
+        assert_eq!(phone_suffix_pass(""), None);
+        assert_eq!(phone_suffix_pass("123"), None);
+    }
+
+    /// 台账手机号与登录账号手机号必须同一套格式口径（docs/13 §2.2）
+    #[test]
+    fn person_phone_uses_same_validator_as_account() {
+        assert_eq!(validate_my_phone("13354463148").unwrap(), "13354463148");
+        assert!(validate_my_phone("133").is_err(), "太短");
+        assert!(validate_my_phone("1335446314a").is_err(), "非数字");
+        // 空串 = 清空手机号（运营登记错了要能撤）
+        assert_eq!(validate_my_phone("").unwrap(), "");
+    }
+
+    /// 一次批量要装得下全量在职主播（生产实测 104 人），又不能大到拖垮写池
+    #[test]
+    fn batch_account_max_fits_full_roster() {
+        // 写在 const 块里：这是编译期就能定的性质（clippy::assertions_on_constants）
+        const {
+            assert!(BATCH_ACCOUNT_MAX >= 104);
+            assert!(BATCH_ACCOUNT_MAX <= 2000);
+        }
+    }
+
+    /// 占用文案要能区分「撞台账」和「撞登录账号」——运营靠它判断去哪改
+    #[test]
+    fn phone_clash_messages_are_distinct() {
+        let p = PhoneClash::Person.message("13354463148");
+        let a = PhoneClash::Account.message("13354463148");
+        assert!(p.contains("其它在职主播"));
+        assert!(a.contains("另一个展示端账号"));
+        assert_ne!(p, a);
     }
 
     /// 没绑主播时不要把手机号当姓名下发（水印/我的页按 bind_name 判）

@@ -15,7 +15,7 @@ rust/crates/pk-server   HTTP 服务：axum + sqlx(MySQL) + 静态托管
   ├─ public.rs          对外只读展示数据（裁剪字段 + 实时音浪）
   ├─ grouping.rs        /api/group/*：arrange / inspect / polish / constraints
   ├─ matching.rs        名单 -> 主播匹配 + read_id（BIGINT UNSIGNED 兼容）
-  ├─ dialect.rs         LOCAL / A / B 库 SQL 方言 + 日期白名单内联
+  ├─ dialect.rs         LOCAL / A 库 SQL 方言 + 日期白名单内联
   ├─ mysql.rs           多数据源连接池 + 只读守卫（读 / 写分池）
   ├─ admin.rs           数据管理 API（/api/admin/*）：导入 / 主播台账 / 采集
   ├─ bot/               机器人：QQ / 微信 iLink，确定性命令路由
@@ -121,10 +121,15 @@ pnpm install && pnpm -F @pk/douyin-web dev  # 5173，/api 代理到 8787
 
 ## 构建与部署
 
-> **现役生产是 147**（`147.90.235.187` / Debian 12 x86_64，`/opt/pk-server`，
-> 对外 `https://pk.subisle.com`）。rk3318 已废弃（2026-10-11），
-> 64 / 115 的历史流程仅作参考。数据上线见 `scripts/deploy/upload-db-vps147.sh`
-> （本机 `douyin_dev` 整体 dump → 灌进 147 的 `pk-mariadb`）。
+> **现役生产有两处（2026-10-11）**：
+>
+> - **147**（`147.90.235.187` / Debian 12 x86_64，systemd 服务 `/opt/pk-server`，
+>   对外 `https://pk.subisle.com`）—— 对外主生产；一键脚本 `scripts/deploy/147.sh`，
+>   数据上线 `scripts/deploy/upload-db-vps147.sh`（本机 `douyin_dev` 整体 dump → 灌进 147 的 `pk-mariadb`）。
+> - **rk3318**（arm64 / Docker，`/opt/pk-server`）—— arm64 生产，一键脚本 `scripts/deploy-rk3318.sh`
+>   （GitHub Actions 出 arm64 镜像包 → scp → `docker load` → 重启容器）。
+>
+> 64 / 115 的历史流程仅作参考。
 
 构建全部走 GitHub Actions（`.github/workflows/ci.yml`），本地不产出部署物：
 - `rust` job：`cargo test` / `cargo clippy -D warnings` / `cargo fmt --check`
@@ -332,13 +337,16 @@ person 的行先合并再入库**（`admin::merge_rows_by_person`），合并口
 
 ## 访客地域门禁 + 访问日志（2026-10-10）
 
-- **规则**：展示端只对**河南 / 安徽**访客开放，判定全在后端做（**不用 Cloudflare 规则**）；
-  本地先开发测试，改完再部署生产 147（`pk.subisle.com`）。
+- **规则**：展示端只对**河南 / 安徽**（省级）+ **江苏徐州**（城市级白名单，萧县 IP 归属地常落徐州）
+  访客开放，判定全在后端做（**不用 Cloudflare 规则**）；本地先开发测试，改完再部署生产 147（`pk.subisle.com`）。
+- **例外通道**：不在上述地区的固定 IP 可单独放行 —— 环境变量 `IP_GATE_ALLOWLIST=1.2.3.4,10.0.0.0/24`
+  （精确 IP 或 CIDR），或写进 `ip_allowlist` 表（迁移 `014_ip_allowlist`，后台「访客日志」页可增删）；
+  两处命中即放行，访问日志照记。
 - **数据源与判定**：来源是 ihmily/ip-info-api（<https://github.com/ihmily/ip-info-api>）收集的
   免费接口，共 19 个可选；**默认各只打 3 个** —— 门禁用 pconline / baidu / ip9（`IP_GATE_SOURCES`
   可配），后台 IP 查询用 ip.sb / ip2location / ipwhois（`IP_QUERY_SOURCES` 可配；每个列表除默认 3 个
   外还有 16 个仍可选）。逗号分隔、未知名忽略、留空回默认；选中的源**并行查询、投票合并**：
-  任一来源识别出河南 / 安徽即放行；都没识别出来或全部失败一律拒绝（**fail-closed**）。
+  任一来源识别出河南 / 安徽 / 江苏徐州即放行；都没识别出来或全部失败一律拒绝（**fail-closed**）。
 - **缓存与表**：归属结果落 MySQL `ip_geo_cache`，**缓存 7 天**；表结构与日志表同属迁移
   `011_ip_geo`（147 发布脚本会自动跑 `pk-server migrate`）。loopback / 私网 IP
   不发外部查询，记为「内网」且**默认拒绝**（本机调试用 `IP_GATE_DISABLED=1`）。

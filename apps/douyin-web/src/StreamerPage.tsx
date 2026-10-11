@@ -21,14 +21,17 @@ export default function StreamerPage() {
   const [savingMaster, setSavingMaster] = useState(false)
   /** 表格行右键菜单：坐标 + 目标主播 */
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; person: any } | null>(null)
-  /** 编辑资料弹窗（名字 / 团别 / 主抖音号） */
-  const [editPop, setEditPop] = useState<{ personId: number; name: string; team: string; douyinNo: string } | null>(null)
+  /** 编辑资料弹窗（名字 / 团别 / 主抖音号 / 手机号） */
+  const [editPop, setEditPop] = useState<{ personId: number; name: string; team: string; douyinNo: string; phone: string } | null>(null)
   const [savingEdit, setSavingEdit] = useState(false)
   /** 合并弹窗：把「别人」并进 target（保留 target，账号与历史数据都归到 TA 名下） */
   const [mergePop, setMergePop] = useState<{ targetId: number; targetName: string; sourceId: number | null; q: string } | null>(null)
   const [merging, setMerging] = useState(false)
   /** 「我的」页面账号弹窗（右键主播 → 设置手机号/密码；主播用 姓名+密码 登录） */
   const [myAccPop, setMyAccPop] = useState<{ name: string; phone: string; pass: string; exists: boolean } | null>(null)
+  /** 批量开号弹窗：给勾选的主播批量建展示端登录账号（result 非空 = 展示结果表） */
+  const [batchAcc, setBatchAcc] = useState<{ defaultPass: string; forceReset: boolean; result: any | null } | null>(null)
+  const [batchAccBusy, setBatchAccBusy] = useState(false)
 
   /** 导入暂存区：有抖音号/ID 但台账还没建档的行（不进榜单/统计，建档后自动补账） */
   const [pending, setPending] = useState<any[]>([])
@@ -178,7 +181,7 @@ export default function StreamerPage() {
     }
   }
 
-  /** 编辑资料：改名 / 团别 / 主抖音号（PUT /api/admin/streamers/{id}） */
+  /** 编辑资料：改名 / 团别 / 主抖音号 / 手机号（PUT /api/admin/streamers/{id}，空手机号 = 清除登记） */
   async function saveEdit() {
     if (!editPop || savingEdit) return
     setSavingEdit(true)
@@ -191,6 +194,7 @@ export default function StreamerPage() {
           name: editPop.name.trim() || undefined,
           team: editPop.team,
           douyinNo: editPop.douyinNo.trim() || undefined,
+          phone: editPop.phone.trim(),
         }),
       })
       setMsg(`已保存「${editPop.name}」的资料`)
@@ -338,6 +342,41 @@ export default function StreamerPage() {
     setSelected(next)
   }
 
+  /** 批量开号：给指定主播批量建展示端登录账号（有手机号的初始密码=手机号后四位，没有的用统一口令） */
+  async function submitBatchAcc(ids: number[]) {
+    if (!batchAcc || batchAccBusy || ids.length === 0) return
+    setBatchAccBusy(true)
+    setError('')
+    setMsg('')
+    try {
+      const d = await api('/api/admin/my-accounts/batch', {
+        method: 'POST',
+        body: JSON.stringify({
+          items: ids.map((personId) => ({ personId })),
+          defaultPass: batchAcc.defaultPass.trim() || undefined,
+          forceReset: batchAcc.forceReset,
+        }),
+      })
+      setBatchAcc({ ...batchAcc, result: d })
+      load()
+    } catch (e: any) {
+      setError(e.message ?? String(e))
+    } finally {
+      setBatchAccBusy(false)
+    }
+  }
+
+  /** 复制初始密码（运营抄给主播用） */
+  function copyPass(pass: string) {
+    navigator.clipboard?.writeText(pass).then(
+      () => {
+        setMsg('已复制初始密码')
+        setTimeout(() => setMsg(''), 2000)
+      },
+      () => setError('复制失败，请手动选中复制'),
+    )
+  }
+
   async function remove(personId: number, streamerName: string) {
     if (!confirm(`确认删除主播「${streamerName}」？（软删，历史数据保留）`)) return
     setError('')
@@ -456,7 +495,7 @@ export default function StreamerPage() {
       <section className="card">
         <h2>主播台账（{items.length} 人）</h2>
         <p className="hint">
-          <b>右键点任意一行</b>：编辑资料（名字 / 团别 / 抖音号）、设置师傅、查看多抖音号、
+          <b>右键点任意一行</b>：编辑资料（名字 / 团别 / 抖音号 / 手机号）、设置师傅、查看多抖音号、
           设置「我的」页面账号（手机号 / 密码）、合并他人、删除。一个主播可以挂多个抖音号（详情里绑定），
           两个号其实是同一个人时用「合并」。
           <b>「对外」列</b>：取消勾选 = 该主播从对外展示的每日报告/月榜/年榜里消失（接口不下发，不占名次）。
@@ -472,6 +511,12 @@ export default function StreamerPage() {
         <div className="row">
           <button disabled={selected.size === 0} onClick={batchDelete}>
             批量删除（已选 {selected.size}）
+          </button>
+          <button
+            disabled={selected.size === 0}
+            onClick={() => setBatchAcc({ defaultPass: '', forceReset: false, result: null })}
+          >
+            批量开号（已选 {selected.size}）
           </button>
           {dupes && (dupes.sameName?.length > 0 || dupes.sameDouyinNo?.length > 0) && (
             <span className="alert bad" style={{ flex: 1 }}>
@@ -492,6 +537,7 @@ export default function StreamerPage() {
                   <th>团别</th>
                 <th>师傅</th>
                 <th>抖音号</th>
+                <th title="主播手机号（展示端登录用）；已开号 = 已有登录账号">手机号</th>
                 <th>状态</th>
                 <th title="是否绑定了微信机器人并开启推送（数据入库约 30 分钟后会私聊推给他）">
                   微信推送
@@ -529,6 +575,35 @@ export default function StreamerPage() {
                   </td>
                   <td className="hint" title="主号在前；详情可绑定多账号">
                     {s.douyinNos ?? s.douyinNo ?? '—'}
+                  </td>
+                  <td>
+                    {s.phone ? (
+                      <>
+                        {s.phone}
+                        {s.hasAccount && (
+                          <span
+                            className="badge b-active"
+                            style={{ marginLeft: 6 }}
+                            title="已开展示端登录账号"
+                          >
+                            已开号
+                          </span>
+                        )}
+                      </>
+                    ) : (
+                      <span className="hint">
+                        未登记
+                        {s.hasAccount && (
+                          <span
+                            className="badge b-paused"
+                            style={{ marginLeft: 6 }}
+                            title="已开号但没登记手机号：只能姓名登录，用不了「忘记密码」和微信绑定"
+                          >
+                            已开号
+                          </span>
+                        )}
+                      </span>
+                    )}
                   </td>
                   <td>
                     <span
@@ -744,11 +819,11 @@ export default function StreamerPage() {
           <button
             onClick={() => {
               const s = ctxMenu.person
-              setEditPop({ personId: s.personId, name: s.name, team: s.team === 'female' ? 'female' : 'male', douyinNo: s.douyinNo ?? '' })
+              setEditPop({ personId: s.personId, name: s.name, team: s.team === 'female' ? 'female' : 'male', douyinNo: s.douyinNo ?? '', phone: s.phone ?? '' })
               setCtxMenu(null)
             }}
           >
-            ✏️ 编辑资料（名字 / 团别 / 抖音号）
+            ✏️ 编辑资料（名字 / 团别 / 抖音号 / 手机号）
           </button>
           <button
             onClick={() => {
@@ -826,6 +901,15 @@ export default function StreamerPage() {
               placeholder="抖音号；留空 = 不修改"
               value={editPop.douyinNo}
               onChange={(e) => setEditPop({ ...editPop, douyinNo: e.target.value })}
+            />
+            <label className="hint" style={{ display: 'block', marginTop: 8 }}>
+              手机号（展示端登录与批量开号用；清空 = 取消登记）
+            </label>
+            <input
+              inputMode="numeric"
+              placeholder="未登记"
+              value={editPop.phone}
+              onChange={(e) => setEditPop({ ...editPop, phone: e.target.value })}
             />
             <div className="row" style={{ marginTop: 10 }}>
               <button className="primary" disabled={savingEdit || !editPop.name.trim()} onClick={saveEdit}>
@@ -948,6 +1032,140 @@ export default function StreamerPage() {
                 取消
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* 批量开号弹窗：给勾选的主播批量建展示端登录账号，结果表里的初始密码要抄给主播 */}
+      {batchAcc && (
+        <div className="mask" onClick={() => !batchAccBusy && setBatchAcc(null)}>
+          <div className="master-pop" onClick={(e) => e.stopPropagation()}>
+            <h2 style={{ marginBottom: 0 }}>
+              批量开号 · 已选 {selected.size} 人
+              <button className="linkish" style={{ float: 'right' }} onClick={() => setBatchAcc(null)}>
+                关闭
+              </button>
+            </h2>
+            {!batchAcc.result ? (
+              <>
+                <label className="hint" style={{ display: 'block', marginTop: 8 }}>
+                  统一初始口令（选填）
+                </label>
+                <input
+                  autoFocus
+                  inputMode="numeric"
+                  placeholder="无手机号的主播用此口令；有手机号的初始密码 = 手机号后四位"
+                  value={batchAcc.defaultPass}
+                  onChange={(e) => setBatchAcc({ ...batchAcc, defaultPass: e.target.value })}
+                />
+                <label className="hint" style={{ display: 'block', marginTop: 8 }}>
+                  <input
+                    type="checkbox"
+                    checked={batchAcc.forceReset}
+                    onChange={(e) => setBatchAcc({ ...batchAcc, forceReset: e.target.checked })}
+                  />{' '}
+                  同时重置已有账号的密码
+                </label>
+                <div className="row" style={{ marginTop: 10 }}>
+                  <button
+                    className="primary"
+                    disabled={batchAccBusy}
+                    onClick={() => submitBatchAcc([...selected])}
+                  >
+                    {batchAccBusy ? '开号中…' : `确认开号（${selected.size} 人）`}
+                  </button>
+                  <button disabled={batchAccBusy} onClick={() => setBatchAcc(null)}>
+                    取消
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <p className="hint" style={{ marginTop: 8 }}>
+                  结果：新开 {batchAcc.result.created ?? 0} · 更新 {batchAcc.result.updated ?? 0} ·
+                  跳过 {batchAcc.result.skipped ?? 0} · 失败 {batchAcc.result.failed ?? 0}。
+                  初始密码只在这里显示一次，请复制抄给主播。
+                </p>
+                <div className="table-scroll">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>姓名</th>
+                        <th>手机号</th>
+                        <th>状态</th>
+                        <th>原因</th>
+                        <th>初始密码</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(batchAcc.result.items ?? []).map((r: any) => (
+                        <tr key={r.personId}>
+                          <td>{r.name}</td>
+                          <td className="hint">{r.phone || '—'}</td>
+                          <td>
+                            <span
+                              className={
+                                r.status === 'created'
+                                  ? 'badge b-active'
+                                  : r.status === 'updated'
+                                    ? 'badge b-paused'
+                                    : r.status === 'skipped'
+                                      ? 'badge'
+                                      : 'badge b-left'
+                              }
+                            >
+                              {r.status === 'created'
+                                ? '新开'
+                                : r.status === 'updated'
+                                  ? '更新'
+                                  : r.status === 'skipped'
+                                    ? '跳过'
+                                    : '失败'}
+                            </span>
+                          </td>
+                          <td className="hint">{r.note || '—'}</td>
+                          <td>
+                            {r.initialPass ? (
+                              <>
+                                {r.initialPass}
+                                <button
+                                  className="linkish"
+                                  style={{ marginLeft: 6 }}
+                                  onClick={() => copyPass(r.initialPass)}
+                                >
+                                  复制
+                                </button>
+                              </>
+                            ) : (
+                              '—'
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <div className="row" style={{ marginTop: 10 }}>
+                  {(batchAcc.result.failed ?? 0) > 0 && (
+                    <button
+                      disabled={batchAccBusy}
+                      onClick={() =>
+                        submitBatchAcc(
+                          (batchAcc.result.items ?? [])
+                            .filter((r: any) => r.status === 'failed')
+                            .map((r: any) => r.personId),
+                        )
+                      }
+                    >
+                      {batchAccBusy ? '重试中…' : `只重试失败项（${batchAcc.result.failed}）`}
+                    </button>
+                  )}
+                  <button className="primary" disabled={batchAccBusy} onClick={() => setBatchAcc(null)}>
+                    完成
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}
