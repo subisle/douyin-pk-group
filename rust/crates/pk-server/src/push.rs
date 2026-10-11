@@ -153,10 +153,6 @@ impl ShutdownToken {
     pub fn cancel(&self) {
         let _ = self.inner.send(true);
     }
-    /// 是否已取消
-    pub fn is_cancelled(&self) -> bool {
-        *self.inner.borrow()
-    }
     /// 等待取消信号（已取消则立即返回）
     pub async fn cancelled(&self) {
         let mut rx = self.inner.subscribe();

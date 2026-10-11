@@ -1155,7 +1155,7 @@ fn row_i64(r: &sqlx::mysql::MySqlRow, col: &str) -> i64 {
 /* ------------------------------- 我的（验证 + 个人数据） ------------------------------- */
 
 /// POST /api/public/teams/{team}/verify {account, pass}（account = 手机号或姓名；兼容旧 {name, pass}）
-/// 没有注册：账号由管理员在后台手动添加（SQLite my_accounts，密码纯数字，手机号选填）。
+/// 没有注册：账号由管理员在后台手动添加（my_accounts 表，密码纯数字，手机号选填）。
 /// 验证通过后在本团主播台账里按姓名找人（同名时在团者优先）；只返回「成功 + token」
 /// 或统一失败 {ok:false}，绝不下发候选名单。
 pub async fn verify(
@@ -2386,7 +2386,7 @@ pub async fn my_claim_get(
 }
 
 /// POST /api/public/teams/{team}/my/claim {token, douyinNo, screenshot}
-/// screenshot = dataURL（data:image/jpeg;base64,…），服务端解码后存 SQLite 待审计。
+/// screenshot = dataURL（data:image/jpeg;base64,…），服务端解码后入库待审计（anchor_claims）。
 pub async fn my_claim_post(
     State(st): State<ArcState>,
     Path(team): Path<String>,

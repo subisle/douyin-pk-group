@@ -173,7 +173,7 @@ pub struct StreamerQuery {
     pub team: Option<String>,
 }
 
-/// GET /api/admin/streamers?q=&team=：主播台账（含主号账号 + SQLite 别名合并）
+/// GET /api/admin/streamers?q=&team=：主播台账（含主号账号 + 业务库别名合并）
 pub async fn streamers(State(st): State<ArcState>, Query(q): Query<StreamerQuery>) -> ApiResult {
     require_local(&st)?;
     let rows = mysql::query(&st.pools, "LOCAL", dialect::STREAMERS_SQL).await?;
@@ -3527,7 +3527,7 @@ pub async fn batch_delete(
 }
 
 /// POST /api/admin/streamers/{id}/merge {sourceId}：把 source 并入 target
-/// ——账号改绑、日指标按日期求和并入（同日冲突求和）、别名留 SQLite、source 软删
+/// ——账号改绑、日指标按日期求和并入（同日冲突求和）、别名留在 aliases 表、source 软删
 #[derive(Deserialize)]
 pub struct MergeBody {
     #[serde(rename = "sourceId")]

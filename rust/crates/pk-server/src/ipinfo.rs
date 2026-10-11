@@ -666,7 +666,8 @@ fn sources_for(ip: &str, set: SourceSet) -> Vec<Source> {
 }
 
 /// 合并：省份投票（票数最多者展示；并列优先河南 / 安徽），
-/// 放行判定 = 任一数据源识别出河南 / 安徽（原口径：宁可对属地的误报放行，也别把真人挡在门外）。
+/// 放行判定 = 任一数据源识别出河南 / 安徽，或命中城市级白名单（目前仅江苏徐州）。
+/// 口径：宁可对属地的误报放行，也别把真人挡在门外。
 /// 城市 / 运营商取「说中最终省份」的第一个来源（中文源在列表前面）。
 fn merge(raws: &[(&str, RawGeo)]) -> IpGeo {
     let mut votes: HashMap<String, i64> = HashMap::new();
@@ -741,7 +742,8 @@ fn merge(raws: &[(&str, RawGeo)]) -> IpGeo {
 
 /* ------------------------------- 省份归一 ------------------------------- */
 
-/// 中英文省名 → 中文简称。英文源（ip.sb / geojs / db-ip…）返回 "Henan Sheng" 这类值。
+/// 中英文省名 → 中文简称（全部省级行政区，非白名单）。英文源（ip.sb / geojs / db-ip…）
+/// 返回 "Henan Sheng" 这类值。表里含江苏，但门禁只放行江苏徐州（见 [`allowed_city`]）。
 const PROVINCE_EN: &[(&str, &str)] = &[
     ("北京", "beijing"),
     ("天津", "tianjin"),
@@ -1553,7 +1555,8 @@ mod tests {
         // 江苏徐州放行（2026-10-11 用户口径）
         assert!(allowed_city("江苏", "徐州市"));
         assert!(allowed_city("江苏", "徐州"));
-        assert!(allowed_city("Jiangsu", "Xuzhou") == false); // 英文省名不走 normalize_province 的中文映射也能过？
+        // 英文省名归一到「江苏」，但城市名没做中英归一（"Xuzhou" ≠ 徐州）→ 不放行
+        assert!(!allowed_city("Jiangsu", "Xuzhou"));
         // 江苏其他城市不放
         assert!(!allowed_city("江苏", "南京市"));
         assert!(!allowed_city("江苏", "苏州"));

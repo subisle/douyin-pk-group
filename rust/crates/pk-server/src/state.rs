@@ -1,4 +1,4 @@
-//! 全局状态：数据源、连接池、SQLite、查询缓存
+//! 全局状态：数据源（LOCAL / A）、连接池、写池、查询缓存
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -42,7 +42,7 @@ pub struct WaveCache {
 /// 每日音浪序列（展示页每日排名 / 曲线数据源）。
 /// `dates` 正序（老 → 新），`series` 里每个人一条与 dates 等长、下标一一对应的数组；
 /// 某天没数据就补 0，这样前端可以直接按下标画折线，不用再对齐日期。
-/// `live` 与 series 同构，1 = 当天开播、0 = 未开播（B 库没有该字段，恒为 0）。
+/// `live` 与 series 同构，1 = 当天开播、0 = 未开播（源里没有该字段时恒为 0）。
 #[derive(Clone, Debug, Default)]
 pub struct WaveSeries {
     pub dates: Vec<String>,
@@ -54,7 +54,7 @@ pub struct WaveSeries {
 pub struct DateInfo {
     /// 全部采集日期，倒序；含基线日（它是累计基数，total 口径必须计入）
     pub dates: Vec<String>,
-    /// 基线日 = 最早那个采集日（限 A 库）。那天 wave 记的是累计音浪而非当日增量
+    /// 基线日 = 最早那个采集日。那天 wave 记的是累计音浪而非当日增量
     pub baseline: Option<String>,
 }
 

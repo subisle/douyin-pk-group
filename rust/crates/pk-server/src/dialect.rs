@@ -1,7 +1,11 @@
-//! 两个库的 SQL 方言差异集中在这里。对外统一约定：
+//! SQL 方言集中地：业务只读查询（person / daily_metric）一套，管理端（LOCAL）一套。
+//! 对外统一约定：
 //! - 人员表查询返回：id / name / avatar_url / status
 //! - 日期查询返回：d（YYYY-MM-DD）
 //! - 音浪查询返回：k（人员 id）/ w（区间内音浪合计），序列查询多一个 d（日期）
+//!
+//! 数据源只剩 LOCAL（本地 MariaDB）与 A（douyinxs 远程），两者 schema 一致，
+//! 共用同一套只读 SQL（B 数据源 2026-10-11 已废弃删除）。
 
 /// 未播口径（2026-10-09 用户定；2026-10-10 统一三处实现，P1-10）：
 /// 「当日导入音浪 < NOT_LIVE_WAVE_THRESHOLD」= 未开播。此前 report.rs（日报）按
@@ -97,8 +101,8 @@ pub struct Dialect {
     pub series_sql: &'static str,
 }
 
-/// 方言统一（2026-10-11）：B 数据源已废弃，LOCAL 与 A 的 schema 一致
-/// （person / daily_metric），共用同一套 SQL。
+/// 数据源 → 方言。LOCAL 与 A 的 schema 一致（person / daily_metric），共用同一套 SQL；
+/// 参数 `_id` 保留只为日志与将来分叉，当前两个源返回同一份常量。
 pub fn dialect_of(_id: &str) -> Dialect {
     Dialect {
         anchors_sql: ANCHORS_A,
@@ -126,10 +130,10 @@ pub fn inline_dates(sql: &str, dates: &[String]) -> anyhow::Result<String> {
 
 /* ------------------------- 管理端 SQL（LOCAL 专用） ------------------------- */
 // 管理端读写在同一台本地 MariaDB（读走 pk_reader 池、写走 douyin_writer 池），
-// 与 A/B 采集源无关。日期一律 DATE_FORMAT 成字符串透传（同上 1835 兼容原因，
+// 与采集源 A 无关。日期一律 DATE_FORMAT 成字符串透传（同上 1835 兼容原因，
 // 值经 bind 绑定，字符串拼进来的只有日期白名单校验后的字面量）。
 
-/// 主播台账（含主号账号信息）；aliases 在 SQLite，代码层合并。
+/// 主播台账（含主号账号信息）；aliases 在业务库里，代码层合并。
 /// wechat_bound / wechat_push 来自 push_bindings（按姓名 1:1）：运营在台账里
 /// 一眼看出谁绑了微信机器人、谁开了推送，不用去「机器人」页翻会话列表。
 pub const STREAMERS_SQL: &str = "SELECT p.id, p.name, p.gender, p.master_id, p.generation,

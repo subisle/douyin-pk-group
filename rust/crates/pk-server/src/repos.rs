@@ -279,7 +279,7 @@ pub async fn load_anchors(
     let rows = mysql::query(&st.pools, &id, dialect_of(&id).anchors_sql).await?;
     let mut brief: Vec<AnchorBrief> = Vec::with_capacity(rows.len());
     for r in &rows {
-        // id 在 A 库是 BIGINT、B 库是 INT，统一按 i64 读再转字符串；万一变 VARCHAR 也兜得住
+        // id 在不同库可能是 BIGINT / INT，统一按 i64 读再转字符串；万一变 VARCHAR 也兜得住
         let Some(person_id) = read_id(r, 0) else {
             continue;
         };

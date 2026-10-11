@@ -1,8 +1,8 @@
 //! 运行时状态存储（2026-10-10 单库化，并入 MySQL）：别名 / 分组方案 / 名单草稿 /
 //! 配置 / 机器人会话 / 展示端账号 / 抖音号绑定审计。
 //!
-//! 历史上这批表放在本地 SQLite（rusqlite 同步 API）。单库决策后统一并入业务库
-//! （本机 douyin_dev / 生产 douyin），与业务事实源同库——部署时 `upload-db` 一次带全，
+//! 这批表早期放在本地 SQLite（rusqlite 同步 API），单库决策（2026-10-10）后统一并入
+//! 业务库（本机 douyin_dev / 生产 douyin），与业务事实源同库——部署时 `upload-db` 一次带全，
 //! 生产不再需要单独维护运行时数据。
 //!
 //! - 读走 douyin_writer 写池（表都很小，读写分离没有意义；writer 缺失时读返回空、写报错）
@@ -39,8 +39,8 @@ pub const EVENT_TYPES: [&str; 5] = [
     "中级争霸赛晋级赛",
 ];
 
-/// 老赛事类型 → 新赛事类型（2026-10-09 改名前落库的值）。
-/// 万一漏网，`normalize_event_type` 会在读取侧归一（老库升级已在搬家时处理）。
+/// 改名前的赛事类型 → 现用赛事类型（2026-10-09 改名，改名前列的值要认）。
+/// 万一漏网，`normalize_event_type` 会在读取侧归一。
 pub const LEGACY_EVENT_RENAMES: [(&str, &str); 6] = [
     ("初级", "初级争霸赛小组赛"),
     ("中级争霸赛", "中级争霸赛小组赛"),
@@ -319,7 +319,7 @@ pub async fn config_get(st: &AppState, key: &str) -> Option<String> {
         .and_then(|r| r.try_get::<String, _>(0).ok())
 }
 
-/// 写配置项（出错只记日志，与旧 SQLite 行为一致——配置写失败不应打断主流程）
+/// 写配置项（出错只记日志——配置写失败不应打断主流程）
 pub async fn config_set(st: &AppState, key: &str, value: &str) {
     let res = async {
         let pool = w(st)?;
@@ -487,7 +487,7 @@ fn verify_my_password(pass: &str, stored: &str) -> bool {
     if stored.starts_with("$argon2") {
         return crate::auth::verify_password(pass, stored);
     }
-    // 老库存量明文：只支持一次性兼容校验；调用方校验成功后必须立即升级为 argon2id。
+    // 存量明文口令：只支持一次性兼容校验；调用方校验成功后必须立即升级为 argon2id。
     stored == pass
 }
 
@@ -524,7 +524,7 @@ fn validate_my_phone(phone: &str) -> std::result::Result<String, String> {
 }
 
 /// 全部账号（管理端列表用），按添加时间倒序。
-/// `bound`/`source` 来自 008 迁移；老库没迁移时退回老查询（一律视为已绑定）。
+/// `bound`/`source` 来自 008 迁移；表还没跑到 008 时退回不带这两列的查询（一律视为已绑定）。
 pub async fn my_account_list(st: &AppState) -> Vec<serde_json::Value> {
     let Ok(pool) = w(st) else {
         return Vec::new();
@@ -670,7 +670,7 @@ pub async fn my_account_get(st: &AppState, name: &str) -> Option<serde_json::Val
             "source": row.try_get::<String, _>("source").unwrap_or_default(),
         }));
     }
-    // 老库兜底（没跑 008）
+    // 兜底：表还没跑 008 迁移（没有 bound/source 列）时退回老查询
     let row =
         sqlx::query("SELECT name, phone, is_admin, created_at FROM my_accounts WHERE name = ?")
             .bind(key)
@@ -961,7 +961,7 @@ pub async fn my_account_reset_password_to_phone_suffix(
     Ok(new_pass)
 }
 
-/// 查账号信息（登录名或手机号都认）。老库还没跑 008 迁移时退回老查询：
+/// 查账号信息（登录名或手机号都认）。表还没跑 008 迁移时退回老查询：
 /// 老行都是管理员手建的 → 一律视为「已绑定」，登录/我的页照常，只有新注册用不了。
 pub async fn my_account_info(st: &AppState, key: &str) -> Option<MyAccountInfo> {
     let pool = w(st).ok()?;
@@ -1888,9 +1888,8 @@ pub async fn push_set_last_report_date(st: &AppState, name: &str, date: &str) {
    用户不用再回页面抄码。「我的」页仍保留绑定码入口作为兜底（没登记手机号时用）。
 
    2026-10-10 审计 P1-1：只发手机号就能绑定 = 知道手机号即可冒绑 + 枚举登记状态。
-   机器人侧已改回二要素（手机号 + 6 位绑定码），本文件补 push_bind_by_phone_code：
+   机器人侧已改成二要素（手机号 + 6 位绑定码），本文件提供 push_bind_by_phone_code：
    my_accounts 查手机号 → push_bindings 校验绑定码（一次性 + 30 分钟有效）→ 绑定。
-   旧 push_bind_by_phone 保留但已无调用方，等「我的」页文案同步后可删。
 */
 
 /// 二要素绑定（P1-1）：手机号（my_accounts 里登记过的）+ 6 位一次性绑定码
@@ -1938,10 +1937,10 @@ pub async fn push_bind_by_phone_code(
     Some((name, team))
 }
 
-/// 按手机号绑定微信会话。返回 Some((账号姓名, 团别))。
-/// 【2026-10-10 审计 P1-1 后已废弃】单凭手机号即可绑定 = 冒绑/枚举漏洞，
+/// 按手机号绑定微信会话（单要素）。返回 Some((账号姓名, 团别))。
+/// 【2026-10-10 审计 P1-1 后线上路径不再用它】单凭手机号即可绑定 = 冒绑/枚举漏洞，
 /// 机器人改走 push_bind_by_phone_code（手机号 + 绑定码二要素）。
-/// 函数暂时保留供回滚，等「我的」页提示文案同步后删除。
+/// 保留原因：集成测试 store_e2e.rs 仍在直接调用它覆盖绑定表读写。
 #[allow(dead_code)]
 pub async fn push_bind_by_phone(
     st: &AppState,
@@ -2741,7 +2740,7 @@ pub async fn carry_legacy_sqlite(pool: &MySqlPool, sqlite_path: &str) -> Result<
         tracing::info!(n = rows.len(), "搬家：bot_sessions");
     }
 
-    // 6. plans（published 列在老库里可能没有）
+    // 6. plans（published 列在老版本的 plans 表里可能没有）
     if has_table("plans") {
         let pub_col = has_col("plans", "published");
         let et_col = has_col("plans", "event_type");

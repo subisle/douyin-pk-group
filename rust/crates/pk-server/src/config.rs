@@ -1,4 +1,4 @@
-//! 运行配置：数据源 A/B（都来自 .env，密钥不进仓库）
+//! 运行配置：数据源 LOCAL + A（都来自 .env，密钥不进仓库）
 
 use anyhow::{anyhow, Result};
 
@@ -132,13 +132,13 @@ fn read_source(id: &str) -> Result<SourceConfig> {
 }
 
 /// 读出全部数据源；LOCAL/A 可按环境变量启用，至少需要一个。
-/// B（userxs 老库）已废弃（2026-10-11）：A（douyinxs）作为备份保留。
+/// 只认这两个：B（userxs 老库）2026-10-11 已废弃删除，A（douyinxs）是远程备份源。
 pub fn load_sources() -> Result<Vec<SourceConfig>> {
     let mut list: Vec<SourceConfig> = ["LOCAL", "A"]
         .iter()
         .filter_map(|id| read_source(id).ok())
         .collect();
-    // 去重（DB_HOST 兜底可能让 A/B 指向同一个库）
+    // 去重（DB_HOST 兜底可能让两个源指向同一个库）
     let mut seen = std::collections::HashSet::new();
     list.retain(|s| seen.insert(s.id.clone()));
     if list.is_empty() {

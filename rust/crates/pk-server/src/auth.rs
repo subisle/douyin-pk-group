@@ -8,7 +8,7 @@
 //! 的常数时间比较，避免逐字节提前返回泄露前缀。
 
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use argon2::password_hash::{
@@ -207,12 +207,6 @@ fn login_source_key(
         }
     }
     direct
-}
-
-/// P1-4：登录限流器单例（每进程一份，测试里也用 Auth 自带的那份）
-static LOGIN_LIMITER: OnceLock<LoginLimiter> = OnceLock::new();
-pub fn login_limiter() -> &'static LoginLimiter {
-    LOGIN_LIMITER.get_or_init(LoginLimiter::default)
 }
 
 impl Default for Auth {

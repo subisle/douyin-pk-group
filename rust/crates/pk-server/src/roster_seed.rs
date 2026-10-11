@@ -70,10 +70,6 @@ fn parse() -> &'static Seed {
 }
 
 /// 表行数（出错按 None 处理，调用方跳过装载）
-pub async fn person_count_public(pool: &sqlx::MySqlPool) -> Option<i64> {
-    person_count(pool).await
-}
-
 async fn person_count(pool: &sqlx::MySqlPool) -> Option<i64> {
     sqlx::query("SELECT COUNT(*) AS n FROM person")
         .fetch_one(pool)

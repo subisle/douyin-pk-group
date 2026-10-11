@@ -182,7 +182,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     /* 机器人模块（E 阶段）：配置了凭据的服务启动即自动连接（用户要求：启动 QQ 机器人都要启动）。
-    QQ：AppID/Secret 齐 → 自动连 gateway；微信：SQLite 有登录 token → 自动恢复轮询，
+    QQ：AppID/Secret 齐 → 自动连 gateway；微信：库里有登录 token → 自动恢复轮询，
     无 token 停在等待扫码（不影响启动）。失败只告警，服务照常起。 */
     let bot_manager = Arc::new(bot::BotManager::from_env(st.clone()).await);
     let qq = bot_manager.qq.read().expect("qq 锁 poisoned").clone();
