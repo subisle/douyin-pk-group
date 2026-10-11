@@ -1,0 +1,44 @@
+# 产出可直接 docker load 的 arm64 镜像包，挂到 arm64-bundle release 上。
+# rk3318（aarch64）离线部署用：部署机 docker load 即可，不需要 ghcr 凭据。
+name: arm64 镜像包
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  bundle:
+    name: 构建 arm64 镜像包
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 构建 pk-server arm64 镜像并导出
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/arm64
+          tags: pk-server:arm64
+          outputs: type=docker,dest=/tmp/pk-server-arm64.tar
+          cache-from: type=gha
+          cache-to: type=gha,mode=min
+
+      - name: 压缩
+        run: gzip -9 /tmp/pk-server-arm64.tar
+
+      - name: 上传到 rolling release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag=arm64-bundle
+          gh release view "$tag" >/dev/null 2>&1 || \
+            gh release create "$tag" --title "arm64 镜像包" --notes "由 arm64-bundle.yml 自动更新" --prerelease
+          gh release upload "$tag" /tmp/pk-server-arm64.tar.gz --clobber
+          echo "release $tag 已更新"
