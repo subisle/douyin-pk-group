@@ -84,7 +84,10 @@ fn ip_matches_entry(entry: &str, parsed: &IpAddr) -> bool {
             _ => false,
         }
     } else {
-        entry.parse::<IpAddr>().map(|a| a == *parsed).unwrap_or(false)
+        entry
+            .parse::<IpAddr>()
+            .map(|a| a == *parsed)
+            .unwrap_or(false)
     }
 }
 
@@ -1168,7 +1171,8 @@ pub async fn log_login_path(
     account: &str,
     ok: bool,
 ) {
-    let allowed = gate_disabled() || geo.allowed || ip_in_allowlist(ip) || ip_in_db_allowlist(st, ip).await;
+    let allowed =
+        gate_disabled() || geo.allowed || ip_in_allowlist(ip) || ip_in_db_allowlist(st, ip).await;
     log_access(
         st,
         AccessLog {

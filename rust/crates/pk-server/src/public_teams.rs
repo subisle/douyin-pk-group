@@ -308,10 +308,7 @@ pub async fn get_announcement(State(st): State<ArcState>) -> ApiResult {
 }
 
 /// POST /api/admin/announcement {enabled?, steps?: [{title, content}]}
-pub async fn update_announcement(
-    State(st): State<ArcState>,
-    Json(body): Json<Value>,
-) -> ApiResult {
+pub async fn update_announcement(State(st): State<ArcState>, Json(body): Json<Value>) -> ApiResult {
     let mut a = Announcement::load(&st).await;
     if let Some(v) = body.get("enabled").and_then(|v| v.as_bool()) {
         a.enabled = v;
@@ -338,7 +335,6 @@ pub async fn update_announcement(
     a.save(&st).await;
     Ok(Json(json!({ "ok": true, "announcement": a.to_json() })))
 }
-
 
 /* --------------------- 我的页面账号（管理端手动添加） --------------------- */
 
@@ -1896,7 +1892,6 @@ pub fn self_prev_wave_sql(p: &PrevPeriods) -> String {
         y = p.year,
     )
 }
-
 
 /// 个人页时长统计的三种窗口
 pub enum MinutesScope<'a> {
