@@ -1165,12 +1165,11 @@ pub async fn verify(
 
     /* 2. 台账里按姓名找本团的人。找不到 = 管理员加了账号但台账还没有这个人
     （或名字打错了），同样返回统一失败。绑定用 bind，姓名是用户输入不能拼 SQL。 */
-    let sql = format!(
-        "SELECT p.id, p.name, p.gender FROM person p \
+    let sql = "SELECT p.id, p.name, p.gender FROM person p \
          WHERE p.deleted_at IS NULL AND p.name = ? \
          ORDER BY CASE WHEN p.status = 'left' THEN 1 ELSE 0 END, p.id \
          LIMIT 1"
-    );
+        .to_string();
     let rows =
         mysql::query_with_binds(&st.pools, &sid(&st), &sql, |q| q.bind(account_name.clone()))
             .await?;
@@ -2072,17 +2071,15 @@ pub async fn my(
     // 团内名次（按累计）。口径与 daily 榜单对齐：离队的不占名次，
     // 否则粉丝页显示的名次会和榜单差几个人，对不上。
     // P1-7：只聚合可信行（wave_reliable=1）。
-    let rank_sql = format!(
-        "SELECT person_id FROM (SELECT p.id AS person_id, SUM(d.wave) AS tw \
+    let rank_sql = "SELECT person_id FROM (SELECT p.id AS person_id, SUM(d.wave) AS tw \
          FROM daily_metric d JOIN person p ON p.id = d.person_id \
          WHERE p.deleted_at IS NULL \
            AND d.wave_reliable = 1 \
          GROUP BY p.id ORDER BY tw DESC) t"
-    );
-    let size_sql = format!(
-        "SELECT COUNT(*) AS n FROM person \
+        .to_string();
+    let size_sql = "SELECT COUNT(*) AS n FROM person \
          WHERE deleted_at IS NULL AND status <> 'left'"
-    );
+        .to_string();
     let ranks = mysql::query(&st.pools, &source, &rank_sql).await?;
     let team_rank = ranks
         .iter()
@@ -2693,9 +2690,11 @@ fn mask_phone(p: &str) -> String {
  * 落 wx_push_accounts 并拉起该账号的 getupdates 长轮询；用户首次给机器人
  * 发消息时留下 context_token，随后推送走该账号自己的 token。 */
 
-fn pending_wx_logins() -> &'static Mutex<HashMap<String, (String, u64, String, String, Instant)>> {
-    static M: OnceLock<Mutex<HashMap<String, (String, u64, String, String, Instant)>>> =
-        OnceLock::new();
+type PendingWxLogin = (String, u64, String, String, Instant);
+type PendingWxLoginMap = HashMap<String, PendingWxLogin>;
+
+fn pending_wx_logins() -> &'static Mutex<PendingWxLoginMap> {
+    static M: OnceLock<Mutex<PendingWxLoginMap>> = OnceLock::new();
     M.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
