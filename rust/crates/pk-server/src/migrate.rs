@@ -56,6 +56,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "014_ip_allowlist",
         include_str!("migrations/014_ip_allowlist.sql"),
     ),
+    (
+        "015_identity_unify",
+        include_str!("migrations/015_identity_unify.sql"),
+    ),
 ];
 
 /// 迁移建连（migrator 账号；同样关语句缓存）
