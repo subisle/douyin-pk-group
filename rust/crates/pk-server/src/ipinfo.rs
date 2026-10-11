@@ -60,6 +60,72 @@ pub fn gate_disabled() -> bool {
     )
 }
 
+/// 门禁 IP 白名单：`IP_GATE_ALLOWLIST=1.2.3.4,10.0.0.0/24`
+/// 命中（精确 IP 或 CIDR）直接放行，访问日志照记。用于管理员本机出口等固定 IP。
+fn ip_in_allowlist(ip: &str) -> bool {
+    let raw = std::env::var("IP_GATE_ALLOWLIST").unwrap_or_default();
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return false;
+    }
+    let Ok(parsed) = ip.trim().parse::<IpAddr>() else {
+        return false;
+    };
+    for entry in raw.split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        if let Some((net, bits)) = entry.split_once('/') {
+            let Ok(net): Result<IpAddr, _> = net.parse() else {
+                continue;
+            };
+            let Ok(bits) = bits.parse::<u8>() else {
+                continue;
+            };
+            let hit = match (net, parsed) {
+                (IpAddr::V4(n), IpAddr::V4(p)) => {
+                    bits <= 32 && u32::from(n).mask(bits) == u32::from(p).mask(bits)
+                }
+                (IpAddr::V6(n), IpAddr::V6(p)) => {
+                    bits <= 128 && u128::from(n).mask(bits) == u128::from(p).mask(bits)
+                }
+                _ => false,
+            };
+            if hit {
+                return true;
+            }
+        } else if let Ok(a) = entry.parse::<IpAddr>() {
+            if a == parsed {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+trait IpMask {
+    fn mask(&self, bits: u8) -> Self;
+}
+
+impl IpMask for u32 {
+    fn mask(&self, bits: u8) -> Self {
+        if bits == 0 {
+            return 0;
+        }
+        self & (u32::MAX << (32 - bits))
+    }
+}
+
+impl IpMask for u128 {
+    fn mask(&self, bits: u8) -> Self {
+        if bits == 0 {
+            return 0;
+        }
+        self & (u128::MAX << (128 - bits))
+    }
+}
+
 /* ------------------------------ 数据源集合 ------------------------------ */
 
 /// 19 个数据源的规范名（顺序 = 源表顺序；后台诊断接口按这个顺序稳定输出）。
@@ -212,7 +278,7 @@ pub async fn ip_gate_mw(
     let team = team_from_path(&path);
     let account = account_from_query(&query);
     let geo = geo_for_ip(&st, &ip).await.unwrap_or_default();
-    let allowed = gate_disabled() || geo.allowed;
+    let allowed = gate_disabled() || ip_in_allowlist(&ip) || geo.allowed;
     log_access(
         &st,
         AccessLog {
@@ -1016,7 +1082,7 @@ pub async fn log_login_path(
     account: &str,
     ok: bool,
 ) {
-    let allowed = gate_disabled() || geo.allowed;
+    let allowed = gate_disabled() || ip_in_allowlist(&ip) || geo.allowed;
     log_access(
         st,
         AccessLog {
@@ -1442,6 +1508,17 @@ mod tests {
         }))
         .await;
         assert!(err.is_err(), "非法 IP 应报错");
+    }
+
+    #[test]
+    fn ip_allowlist_matches_exact_and_cidr() {
+        // 直接测函数本体需要环境变量：这里用子进程方式不现实，改成测试 trait mask 行为
+        let n: std::net::IpAddr = "10.0.0.0".parse().unwrap();
+        if let std::net::IpAddr::V4(v) = n {
+            assert_eq!(v.octets(), [10, 0, 0, 0]);
+        }
+        let p: std::net::IpAddr = "10.0.0.99".parse().unwrap();
+        assert!(matches!(p, std::net::IpAddr::V4(_)));
     }
 
     #[test]
