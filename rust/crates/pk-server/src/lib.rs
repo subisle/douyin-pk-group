@@ -25,3 +25,4 @@ pub mod state;
 pub mod store;
 pub mod wbgateway;
 pub mod writer;
+pub mod wxpush;

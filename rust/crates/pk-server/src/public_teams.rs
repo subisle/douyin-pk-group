@@ -5,7 +5,7 @@
 //! - 公开 API 一律 DTO 白名单，绝不下发密码、抖音号、全量候选名单
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use axum::extract::{Path, Query, State};
@@ -86,6 +86,19 @@ pub fn plan_visible_by_settings(s: &PublicSettings, event_type: &str) -> bool {
 #[cfg(test)]
 mod settings_tests {
     use super::*;
+
+    #[test]
+    fn unified_display_is_enabled_when_any_legacy_team_is_enabled() {
+        let mut s = PublicSettings::default();
+        assert!(s.team_enabled("all"));
+
+        s.male_enabled = false;
+        assert!(s.team_enabled("all"));
+
+        s.female_enabled = false;
+        assert!(!s.team_enabled("all"));
+        assert!(!s.team_enabled("unknown"));
+    }
 
     #[test]
     fn plan_visibility_follows_page_and_type_switches() {
@@ -200,8 +213,9 @@ impl PublicSettings {
 
     fn team_enabled(&self, team: &str) -> bool {
         match team {
-            "male" => self.male_enabled,
-            "female" => self.female_enabled,
+            // 2026-10-11 起首页是不分男女的展示端：all 一次读全量数据。
+            // male/female 保留兼容旧链接，但同样不再按性别裁剪数据。
+            "all" | "male" | "female" => self.male_enabled || self.female_enabled,
             _ => false,
         }
     }
@@ -579,7 +593,7 @@ fn gate_team(
         if let Some((pid, my_team, _)) = my_token_take(t) {
             // 团别为空 = 免团别登录口（/api/public/my/login）发的「任意团」token：
             // 管理员观看账号 / 没绑主播的账号，两个团都放行
-            if my_team == team || my_team.is_empty() {
+            if my_team == team || my_team.is_empty() || team == "all" {
                 return Ok(pid);
             }
             // token 团别不符：开着登录门时报错；关了就按游客放行（别把路人拦在门外）
@@ -595,6 +609,33 @@ fn gate_team(
         return Ok(0);
     }
     Err(ApiError::auth("请先登录"))
+}
+
+/// 从 token 里取账号所属团别；游客 / 任意团账号返回空串（统一入口按全量展示）。
+fn token_team(token: Option<&str>, headers: &HeaderMap) -> String {
+    let t = token.map(str::trim).filter(|s| !s.is_empty()).or_else(|| {
+        headers
+            .get("x-my-token")
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    });
+    t.and_then(my_token_take)
+        .map(|(_, team, _)| team)
+        .filter(|team| team == "male" || team == "female")
+        .unwrap_or_default()
+}
+
+/// 统一入口 `/api/public/teams/all` 的数据口径：
+/// - 管理员观看 / 未绑定账号 / 开放游客：看全量；
+/// - 绑定男团主播：只看男团；
+/// - 绑定女团主播：只看女团。
+fn data_team<'a>(path_team: &'a str, token_team: &'a str) -> &'a str {
+    if path_team == "all" {
+        token_team
+    } else {
+        path_team
+    }
 }
 
 /// 各数据接口共用的查询参数：登录门 token 可以跟在任意子接口的 URL 上
@@ -619,11 +660,12 @@ pub async fn site(
     if !s.team_enabled(&team) {
         return Ok(Json(json!({ "published": false })));
     }
+    let query_team = data_team(&team, &token_team(g.access_token.as_deref(), &headers)).to_string();
     gate_team(s.login_required, &team, g.access_token.as_deref(), &headers)?;
     let dates = crate::repos::get_available_dates(&st, None, false).await?;
     Ok(Json(json!({
         "published": true,
-        "team": team,
+        "team": query_team,
         "latestDate": dates.first(),
         "dates": dates,
         "settings": {
@@ -663,6 +705,7 @@ pub async fn daily(
     if !s.team_enabled(&team) {
         return Ok(Json(json!({ "published": false })));
     }
+    let query_team = data_team(&team, &token_team(q.access_token.as_deref(), &headers)).to_string();
     gate_team(s.login_required, &team, q.access_token.as_deref(), &headers)?;
     if !s.daily {
         return Ok(Json(json!({ "published": true, "dailyEnabled": false })));
@@ -698,26 +741,25 @@ pub async fn daily(
          LEFT JOIN daily_metric d ON d.person_id = p.id \
            AND DATE_FORMAT(d.biz_date, '%Y-%m-%d') = '{date}' \
            AND d.wave_reliable = 1 \
-         WHERE p.deleted_at IS NULL AND p.gender = '{team}' AND p.status <> 'left' \
+         WHERE p.deleted_at IS NULL \
+         AND ('{query_team}' = '' OR p.gender = '{query_team}') \
          AND p.hide_in_daily_report = 0 \
          GROUP BY p.id, p.name \
          ORDER BY nrow DESC, wave DESC, p.name ASC"
     );
     let rows = mysql::query(&st.pools, &source, &sql).await?;
 
-    // 当月未播天数 + 当月累计音浪 + 前一日名次（内存 join）
+    // 当月未播天数 + 历史累计总音浪 + 前一日名次（内存 join）
     // 未播口径（2026-10-09 用户定；2026-10-10 P1-10 统一引用 dialect::NOT_LIVE_WAVE_THRESHOLD）：
     // 当天导入音浪 < 2 = 未开播；
-    // totalWave 从「历史累计」改为「当月累计」（榜单副行显示的就是本月总音浪）。
-    // P1-7：三处聚合都只算可信行（wave_reliable=1），与 WAVES_A / 月年榜口径一致。
+    // totalWave = 历史累计总音浪（2026-10-11 用户口径，展示页列「累计总音浪」）。
+    // P1-7：只聚合可信行（wave_reliable=1），与 WAVES_A / 月年榜口径一致。
     let month = &date[..7];
     // 与日报共用 dialect::month_absent_sql（唯一口径：有数据行且音浪 < 2 才算未播）
     let absent_sql = crate::dialect::month_absent_sql(month);
-    let total_sql = format!(
-        "SELECT person_id, CAST(SUM(wave) AS SIGNED) AS total \
-         FROM daily_metric WHERE wave_reliable = 1 \
-           AND DATE_FORMAT(biz_date, '%Y-%m') = '{month}' GROUP BY person_id"
-    );
+    let total_sql = "SELECT person_id, CAST(SUM(wave) AS SIGNED) AS total \
+         FROM daily_metric WHERE wave_reliable = 1 GROUP BY person_id"
+        .to_string();
     let mut absent_map: HashMap<u64, i64> = Default::default();
     for r in mysql::query(&st.pools, &source, &absent_sql).await? {
         absent_map.insert(row_pid(&r, "person_id"), row_i64(&r, "n"));
@@ -731,7 +773,8 @@ pub async fn daily(
         let psql = format!(
             "SELECT p.id AS person_id \
              FROM daily_metric d JOIN person p ON p.id = d.person_id \
-             WHERE p.deleted_at IS NULL AND p.gender = '{team}' \
+             WHERE p.deleted_at IS NULL \
+             AND ('{query_team}' = '' OR p.gender = '{query_team}') \
              AND p.hide_in_daily_report = 0 AND d.wave_reliable = 1 \
              AND DATE_FORMAT(d.biz_date, '%Y-%m-%d') = '{pd}' \
              GROUP BY p.id, p.name ORDER BY SUM(d.wave) DESC"
@@ -838,6 +881,7 @@ pub async fn lineage(
     if !s.lineage_enabled {
         return Ok(Json(json!({ "published": true, "lineageEnabled": false })));
     }
+    let query_team = data_team(&team, &token_team(g.access_token.as_deref(), &headers)).to_string();
     gate_team(s.login_required, &team, g.access_token.as_deref(), &headers)?;
     /* 族谱只显示有师门归属的人（2026-10-09 规则）：没有师傅且没有徒弟的孤立节点
     不下发（画布和导出图的「没有师傅」名单自动联动）。
@@ -847,7 +891,8 @@ pub async fn lineage(
         "SELECT p.id, p.name, p.master_id, m.name AS master_name, p.status, p.generation, \
          (SELECT COUNT(*) FROM person k WHERE k.master_id = p.id AND k.deleted_at IS NULL) AS disciples \
          FROM person p LEFT JOIN person m ON m.id = p.master_id \
-         WHERE p.deleted_at IS NULL AND p.gender = '{team}' \
+         WHERE p.deleted_at IS NULL \
+         AND ('{query_team}' = '' OR p.gender = '{query_team}') \
          AND (p.master_id IS NOT NULL \
               OR EXISTS(SELECT 1 FROM person k WHERE k.master_id = p.id AND k.deleted_at IS NULL))"
     );
@@ -900,8 +945,9 @@ pub async fn monthly(
     headers: HeaderMap,
 ) -> ApiResult {
     let s = PublicSettings::load(&st).await;
+    let query_team = data_team(&team, &token_team(q.access_token.as_deref(), &headers)).to_string();
     gate_team(s.login_required, &team, q.access_token.as_deref(), &headers)?;
-    period_public(&st, &team, &q, true).await
+    period_public(&st, &query_team, &q, true).await
 }
 
 pub async fn yearly(
@@ -911,8 +957,9 @@ pub async fn yearly(
     headers: HeaderMap,
 ) -> ApiResult {
     let s = PublicSettings::load(&st).await;
+    let query_team = data_team(&team, &token_team(q.access_token.as_deref(), &headers)).to_string();
     gate_team(s.login_required, &team, q.access_token.as_deref(), &headers)?;
-    period_public(&st, &team, &q, false).await
+    period_public(&st, &query_team, &q, false).await
 }
 
 async fn period_public(st: &Arc<AppState>, team: &str, q: &ListQuery, is_month: bool) -> ApiResult {
@@ -1119,8 +1166,8 @@ pub async fn verify(
     /* 2. 台账里按姓名找本团的人。找不到 = 管理员加了账号但台账还没有这个人
     （或名字打错了），同样返回统一失败。绑定用 bind，姓名是用户输入不能拼 SQL。 */
     let sql = format!(
-        "SELECT p.id, p.name FROM person p \
-         WHERE p.deleted_at IS NULL AND p.gender = '{team}' AND p.name = ? \
+        "SELECT p.id, p.name, p.gender FROM person p \
+         WHERE p.deleted_at IS NULL AND p.name = ? \
          ORDER BY CASE WHEN p.status = 'left' THEN 1 ELSE 0 END, p.id \
          LIMIT 1"
     );
@@ -1134,7 +1181,8 @@ pub async fn verify(
                 .map(|v| v as u64)
                 .or_else(|_| row.try_get::<u64, _>("id"))
                 .unwrap_or(0);
-            let token = my_token_put(pid, team, account_name.clone());
+            let token_team = row.try_get::<String, _>("gender").unwrap_or_default();
+            let token = my_token_put(pid, token_team.clone(), account_name.clone());
             Ok(Json(json!({
                 "ok": true, "personId": pid, "name": account_name, "token": token, "bound": true
             })))
@@ -1280,13 +1328,12 @@ pub async fn my_login(
     }
     /* 2. 反查主播所在团：账号名命中的主播可能是男团也可能是女团，都查一遍。 */
     let mut found: Option<(u64, String, String)> = None; // (person_id, name, team)
-    for team in ["male", "female"] {
-        let sql = format!(
-            "SELECT p.id, p.name FROM person p \
-             WHERE p.deleted_at IS NULL AND p.gender = '{team}' AND p.name = ? \
+    {
+        let sql = "SELECT p.id, p.name, p.gender FROM person p \
+             WHERE p.deleted_at IS NULL AND p.name = ? \
              ORDER BY CASE WHEN p.status = 'left' THEN 1 ELSE 0 END, p.id \
              LIMIT 1"
-        );
+            .to_string();
         let rows =
             mysql::query_with_binds(&st.pools, &sid(&st), &sql, |q| q.bind(account_name.clone()))
                 .await?;
@@ -1297,8 +1344,8 @@ pub async fn my_login(
                 .or_else(|_| row.try_get::<u64, _>("id"))
                 .unwrap_or(0);
             let name: String = row.try_get::<String, _>("name").unwrap_or_default();
-            found = Some((pid, name, team.to_string()));
-            break;
+            let team: String = row.try_get::<String, _>("gender").unwrap_or_default();
+            found = Some((pid, name, team));
         }
     }
     match found {
@@ -1871,7 +1918,7 @@ pub async fn my(
     let Some((person_id, my_team, _)) = my_token_take(&token) else {
         return Err(anyhow::anyhow!("验证已过期，请重新验证").into());
     };
-    if my_team != team {
+    if my_team != team && team != "all" {
         return Err(anyhow::anyhow!("该账号不属于本团").into());
     }
 
@@ -2028,13 +2075,13 @@ pub async fn my(
     let rank_sql = format!(
         "SELECT person_id FROM (SELECT p.id AS person_id, SUM(d.wave) AS tw \
          FROM daily_metric d JOIN person p ON p.id = d.person_id \
-         WHERE p.deleted_at IS NULL AND p.gender = '{team}' AND p.status <> 'left' \
+         WHERE p.deleted_at IS NULL \
            AND d.wave_reliable = 1 \
          GROUP BY p.id ORDER BY tw DESC) t"
     );
     let size_sql = format!(
         "SELECT COUNT(*) AS n FROM person \
-         WHERE deleted_at IS NULL AND gender = '{team}' AND status <> 'left'"
+         WHERE deleted_at IS NULL AND status <> 'left'"
     );
     let ranks = mysql::query(&st.pools, &source, &rank_sql).await?;
     let team_rank = ranks
@@ -2184,7 +2231,7 @@ pub async fn my_series(
     let Some((person_id, my_team, _)) = my_token_take(&token) else {
         return Err(anyhow::anyhow!("验证已过期，请重新验证").into());
     };
-    if my_team != team {
+    if my_team != team && team != "all" {
         return Err(anyhow::anyhow!("该账号不属于本团").into());
     }
     let days = q.days.unwrap_or(14).clamp(1, 30);
@@ -2242,7 +2289,7 @@ pub async fn my_who(
     let Some((person_id, my_team, token_name)) = my_token_take(token.trim()) else {
         return Err(ApiError::auth("登录已过期，请重新登录"));
     };
-    if my_team != team {
+    if my_team != team && team != "all" {
         return Err(ApiError::auth("该账号不属于本团"));
     }
     // personId=0 有两种：管理员观看账号（is_admin=1，姓名直接来自登录账号），
@@ -2251,19 +2298,19 @@ pub async fn my_who(
         if let Some(info) = crate::store::my_account_info(&st, &token_name).await {
             if !info.bound && !info.is_admin {
                 return Ok(Json(json!({
-                    "ok": true, "personId": 0, "name": info.phone, "team": team,
+                    "ok": true, "personId": 0, "name": info.phone, "team": my_team,
                     "phone": info.phone, "admin": false, "bound": false, "needBind": true,
                 })));
             }
             if info.is_admin {
                 return Ok(Json(json!({
-                    "ok": true, "personId": 0, "name": token_name, "team": team,
+                    "ok": true, "personId": 0, "name": token_name, "team": my_team,
                     "admin": true, "bound": true,
                 })));
             }
         }
         return Ok(Json(json!({
-            "ok": true, "personId": 0, "name": token_name, "team": team,
+            "ok": true, "personId": 0, "name": token_name, "team": my_team,
             "admin": true, "bound": true,
         })));
     }
@@ -2278,7 +2325,7 @@ pub async fn my_who(
         return Err(ApiError::auth("账号不存在或已离团，请联系管理员"));
     }
     Ok(Json(
-        json!({ "ok": true, "personId": person_id, "name": name, "team": team, "bound": true }),
+        json!({ "ok": true, "personId": person_id, "name": name, "team": my_team, "bound": true }),
     ))
 }
 
@@ -2295,7 +2342,7 @@ pub async fn my_claim_get(
     let Some((person_id, my_team, _)) = my_token_take(token.trim()) else {
         return Err(ApiError::auth("登录已过期，请重新登录"));
     };
-    if my_team != team {
+    if my_team != team && team != "all" {
         return Err(ApiError::auth("该账号不属于本团"));
     }
     let bound = mysql::query_with_binds(
@@ -2337,7 +2384,7 @@ pub async fn my_claim_post(
     let Some((person_id, my_team, _)) = my_token_take(token.trim()) else {
         return Err(ApiError::auth("登录已过期，请重新登录"));
     };
-    if my_team != team {
+    if my_team != team && team != "all" {
         return Err(ApiError::auth("该账号不属于本团"));
     }
     if person_id == 0 {
@@ -2565,7 +2612,7 @@ fn my_ident(team: &str, token: &str) -> Result<(u64, String, String), ApiError> 
     let Some((pid, my_team, name)) = my_token_take(token) else {
         return Err(ApiError::auth("登录已过期，请重新登录"));
     };
-    if my_team != team {
+    if my_team != team && team != "all" {
         return Err(ApiError::auth("该账号不属于本团"));
     }
     Ok((pid, my_team, name))
@@ -2592,7 +2639,24 @@ pub async fn my_push(
         obj.insert("personId".into(), json!(person_id));
         // 管理员观看账号（personId=0）没有自己的音浪，追分对比没有意义
         obj.insert("admin".into(), json!(person_id == 0));
-        obj.insert("channelConfigured".into(), json!(channel_ready(&st)));
+        obj.insert("channelConfigured".into(), json!(true));
+        // 用户自助扫码（2026-10-11）：凭证已保存 = 可推送；等待首次消息才有会话上下文
+        let wxacct = crate::store::wx_push_account_get(&st, &name).await;
+        obj.insert("scanBound".into(), json!(wxacct.is_some()));
+        obj.insert(
+            "needActivate".into(),
+            json!(wxacct
+                .as_ref()
+                .map(|a| a.conversation_id.is_empty())
+                .unwrap_or(false)),
+        );
+        obj.insert(
+            "scanNickname".into(),
+            json!(wxacct
+                .as_ref()
+                .map(|a| a.nickname.clone())
+                .unwrap_or_default()),
+        );
         // 手机号绑定（2026-10-10）：登记过手机号就走「发手机号」路径；
         // 只回显脱敏手机号（138****8000），不全量下发，避免页面被别人瞄到就能拿走号。
         let phone = crate::store::my_account_phone(&st, &name).await;
@@ -2621,9 +2685,203 @@ fn mask_phone(p: &str) -> String {
     }
 }
 
-/// 微信渠道是否可用（进程里已有微信实例）。没配时前端提示「暂未开放」。
-fn channel_ready(st: &AppState) -> bool {
-    st.bots.get().map(|m| m.wechat.is_some()).unwrap_or(false)
+/* ------------------ 用户自助扫码绑定微信推送（2026-10-11，多账号） ------------------
+ *
+ * 官方协议：POST get_bot_qrcode 取账号登录二维码；用户扫码确认后
+ * get_qrcode_status 返回 bot_token / ilink_bot_id / ilink_user_id / baseurl。
+ * 我们把二维码会话与当前「我的」登录账号绑定（qrcode → name），确认后
+ * 落 wx_push_accounts 并拉起该账号的 getupdates 长轮询；用户首次给机器人
+ * 发消息时留下 context_token，随后推送走该账号自己的 token。 */
+
+fn pending_wx_logins() -> &'static Mutex<HashMap<String, (String, u64, String, String, Instant)>> {
+    static M: OnceLock<Mutex<HashMap<String, (String, u64, String, String, Instant)>>> =
+        OnceLock::new();
+    M.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn pending_wx_put(qrcode: &str, name: &str, person_id: u64, team: &str) {
+    let mut m = pending_wx_logins()
+        .lock()
+        .expect("pending wx login 锁 poisoned");
+    m.retain(|_, (_, _, _, _, at)| at.elapsed() < Duration::from_secs(5 * 60));
+    m.insert(
+        qrcode.to_string(),
+        (
+            name.to_string(),
+            person_id,
+            team.to_string(),
+            String::new(),
+            Instant::now(),
+        ),
+    );
+}
+
+/// 读一次未过期的扫码会话（保留在 map 里，轮询可重复调用）；
+/// 返回 (person_id, team, 轮询用的 base_url)。
+fn pending_wx_take(qrcode: &str, name: &str) -> Option<(u64, String, String)> {
+    let mut m = pending_wx_logins()
+        .lock()
+        .expect("pending wx login 锁 poisoned");
+    m.retain(|_, (_, _, _, _, at)| at.elapsed() < Duration::from_secs(5 * 60));
+    match m.get(qrcode) {
+        Some((n, pid, team, base, _)) if n == name => Some((*pid, team.clone(), base.clone())),
+        _ => None,
+    }
+}
+
+/// `scaned_but_redirect`：记下服务端给出的官方主机，下一轮换过去继续轮询。
+fn pending_wx_set_base(qrcode: &str, base_url: &str) {
+    if base_url.trim().is_empty() {
+        return;
+    }
+    let mut m = pending_wx_logins()
+        .lock()
+        .expect("pending wx login 锁 poisoned");
+    if let Some(v) = m.get_mut(qrcode) {
+        v.3 = base_url.trim().to_string();
+    }
+}
+
+/// POST /api/public/teams/{team}/my/push/wechat/start {token}
+/// 取官方协议的用户扫码登录二维码（默认国内 API Base）
+pub async fn my_push_wechat_start(
+    State(st): State<ArcState>,
+    Path(team): Path<String>,
+    axum::Json(body): axum::Json<Value>,
+) -> ApiResult {
+    let token = body
+        .get("token")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let (person_id, _actual_team, name) = my_ident(&team, token)?;
+    if person_id == 0 && !crate::store::my_account_is_admin(&st, &name).await {
+        return Err(anyhow::anyhow!("该账号没有主播档案，不能绑定微信推送").into());
+    }
+    // 管理员观看账号（personId=0）也允许扫码绑定；团别留空，绑定后可看「我的」页推送入口。
+    let team_scope = crate::store::person_team_of_name(&st, &name)
+        .await
+        .unwrap_or_default();
+    let out = crate::bot::weixin::user_login_qrcode().await?;
+    let qrcode = out
+        .get("qrcode")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    if qrcode.is_empty() {
+        return Err(anyhow::anyhow!("微信接口没有返回二维码").into());
+    }
+    pending_wx_put(&qrcode, &name, person_id, &team_scope);
+    Ok(Json(json!({
+        "ok": true,
+        "qrcode": qrcode,
+        "imgContent": out.get("imgContent").cloned().unwrap_or(Value::Null),
+        "url": out.get("url").cloned().unwrap_or(Value::Null),
+    })))
+}
+
+/// POST /api/public/teams/{team}/my/push/wechat/poll {token, qrcode, verifyCode?}
+/// 轮询扫码状态；confirmed 后保存账号凭证并拉起长轮询
+pub async fn my_push_wechat_poll(
+    State(st): State<ArcState>,
+    Path(team): Path<String>,
+    axum::Json(body): axum::Json<Value>,
+) -> ApiResult {
+    let token = body
+        .get("token")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let (person_id, _actual_team, name) = my_ident(&team, token)?;
+    let qrcode = body
+        .get("qrcode")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if qrcode.is_empty() {
+        return Err(anyhow::anyhow!("缺少 qrcode").into());
+    }
+    let verify = body
+        .get("verifyCode")
+        .or_else(|| body.get("verify_code"))
+        .and_then(|v| v.as_str());
+    let Some((_pid, team_scope, poll_base)) = pending_wx_take(&qrcode, &name) else {
+        return Err(anyhow::anyhow!("二维码已过期，请重新获取").into());
+    };
+    let base = if poll_base.is_empty() {
+        "https://ilinkai.weixin.qq.com"
+    } else {
+        poll_base.as_str()
+    };
+    let out = crate::bot::weixin::user_login_status_at(base, &qrcode, verify).await?;
+    if let Some(host) = out.get("redirectHost").and_then(Value::as_str) {
+        if !host.is_empty() {
+            let next = if host.starts_with("http") {
+                host.to_string()
+            } else {
+                format!("https://{host}")
+            };
+            pending_wx_set_base(&qrcode, &next);
+        }
+    }
+    let status = out
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("wait")
+        .to_string();
+    if status != "confirmed" {
+        return Ok(Json(json!({ "status": status, "tokenSaved": false })));
+    }
+    let bot_token = out
+        .get("botToken")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let bot_id = out
+        .get("botId")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let user_id = out
+        .get("userId")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    if bot_token.is_empty() || bot_id.is_empty() || user_id.is_empty() {
+        return Err(anyhow::anyhow!("扫码已确认，但微信没有返回完整凭证").into());
+    }
+    let acct = crate::store::WxPushAccount {
+        name: name.clone(),
+        team: team_scope.clone(),
+        person_id,
+        ilink_bot_id: bot_id,
+        ilink_user_id: user_id,
+        bot_token,
+        base_url: out
+            .get("baseUrl")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        nickname: out
+            .get("nickname")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        conversation_id: String::new(),
+        updates_buf: String::new(),
+        bound_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+    };
+    crate::store::wx_push_account_save(&st, &acct)
+        .await
+        .map_err(|e| anyhow::anyhow!("保存微信凭证失败：{e}"))?;
+    // 先建 push_bindings 行（未通话时 bound=false，但两个推送开关可先设置）
+    crate::store::push_bind_account(&st, &name, &team_scope, "", "").await;
+    crate::wxpush::ensure_account(&st, &name).await;
+    tracing::info!(account = %name, bot = %acct.ilink_bot_id, "用户扫码登录微信推送账号成功，等待首次消息激活");
+    Ok(Json(json!({
+        "status": "confirmed",
+        "tokenSaved": true,
+        "needActivate": true,
+    })))
 }
 
 /// POST /api/public/teams/{team}/my/push/code {token}：生成/刷新绑定码（30 分钟有效）
@@ -2677,6 +2935,7 @@ pub async fn my_push_unbind(
         .unwrap_or_default();
     let (_pid, _t, name) = my_ident(&team, token)?;
     crate::store::push_unbind(&st, &name).await;
+    crate::store::wx_push_account_delete(&st, &name).await;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -2691,7 +2950,12 @@ pub async fn my_push_target_add(
         .get("token")
         .and_then(|v| v.as_str())
         .unwrap_or_default();
-    let (person_id, _t, name) = my_ident(&team, token)?;
+    let (person_id, actual_team, name) = my_ident(&team, token)?;
+    let team_scope = if team == "all" {
+        actual_team.as_str()
+    } else {
+        team.as_str()
+    };
     if person_id == 0 {
         return Err(anyhow::anyhow!("管理员观看账号没有音浪数据，不能设置追分目标").into());
     }
@@ -2714,7 +2978,7 @@ pub async fn my_push_target_add(
                 .filter(|v| *v > 0.0)
                 .ok_or_else(|| anyhow::anyhow!("请输入本月目标（万），要大于 0"))?;
             let raw = (wan * 10_000.0).round() as i64;
-            crate::store::target_add(&st, &name, &team, "value", 0, "", raw)
+            crate::store::target_add(&st, &name, team_scope, "value", 0, "", raw)
                 .await
                 .map_err(|e| anyhow::anyhow!("保存失败：{e}"))?;
         }
@@ -2732,9 +2996,17 @@ pub async fn my_push_target_add(
             if dup {
                 return Err(anyhow::anyhow!("已经在追这个名次了").into());
             }
-            crate::store::target_add(&st, &name, &team, "rank", 0, &format!("第 {rank} 名"), rank)
-                .await
-                .map_err(|e| anyhow::anyhow!("保存失败：{e}"))?;
+            crate::store::target_add(
+                &st,
+                &name,
+                team_scope,
+                "rank",
+                0,
+                &format!("第 {rank} 名"),
+                rank,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("保存失败：{e}"))?;
         }
         _ => {
             let tid = body
@@ -2746,7 +3018,7 @@ pub async fn my_push_target_add(
                 return Err(anyhow::anyhow!("不能追自己").into());
             }
             // 只允许追本团在册主播（搜索接口也只下发本团名单，这里是服务端兜底）
-            let anchor = crate::store::team_anchor_search(&st, &sid(&st), &team, "", 1000)
+            let anchor = crate::store::team_anchor_search(&st, &sid(&st), team_scope, "", 1000)
                 .await
                 .into_iter()
                 .find(|a| a.get("personId").and_then(|v| v.as_u64()) == Some(tid));
@@ -2766,7 +3038,7 @@ pub async fn my_push_target_add(
             if dup {
                 return Err(anyhow::anyhow!("已经在追这个主播了").into());
             }
-            crate::store::target_add(&st, &name, &team, "person", tid, &tname, 0)
+            crate::store::target_add(&st, &name, team_scope, "person", tid, &tname, 0)
                 .await
                 .map_err(|e| anyhow::anyhow!("保存失败：{e}"))?;
         }
@@ -2803,13 +3075,18 @@ pub async fn my_push_search(
     Path(team): Path<String>,
     Query(q): Query<PushSearchQuery>,
 ) -> ApiResult {
-    let (person_id, _t, _name) = my_ident(&team, q.token.as_deref().unwrap_or(""))?;
+    let (person_id, actual_team, _name) = my_ident(&team, q.token.as_deref().unwrap_or(""))?;
+    let team_scope = if team == "all" {
+        actual_team.as_str()
+    } else {
+        team.as_str()
+    };
     let key = q.q.unwrap_or_default();
     let key = key.trim();
     if key.is_empty() {
         return Ok(Json(json!({ "items": [] })));
     }
-    let items = crate::store::team_anchor_search(&st, &sid(&st), &team, key, 20)
+    let items = crate::store::team_anchor_search(&st, &sid(&st), team_scope, key, 20)
         .await
         .into_iter()
         .filter(|a| a.get("personId").and_then(|v| v.as_u64()) != Some(person_id))
@@ -2864,45 +3141,37 @@ pub fn decode_data_url(data_url: &str) -> Option<(String, Vec<u8>)> {
     Some((mime.to_string(), bytes))
 }
 
-/* --------------------------- 公开展示页（/st/m、/st/f） --------------------------- */
+/* --------------------------- 公开展示页 --------------------------- */
 
 const ST_PAGE: &str = include_str!("st_page.html");
 
-/// GET / 根路径：展示页（男女共用一个网址，进页由前端弹团别选择卡）
+/// GET / 根路径：展示页（2026-10-11 起不分男女，统一读 /api/public/teams/all）
 pub async fn st_root() -> Response {
-    st_page_for("male") // 初始默认值，前端 boot 会按选择/记忆覆盖
+    st_page_for("all")
 }
 
-/// GET /1 男团展示页（好记的单字符路由）
+/// GET /1 旧男团链接：兼容重定向到统一首页
 pub async fn st_m() -> Response {
-    st_page_for("male")
+    st_page_for("all")
 }
 
-/// GET /0 女团展示页
+/// GET /0 旧女团链接：兼容重定向到统一首页
 pub async fn st_0() -> Response {
-    st_page_for("female")
+    st_page_for("all")
 }
 
-/// GET /st/{team}：别名路由（m / f）
-pub async fn st_page(axum::extract::Path(team): axum::extract::Path<String>) -> Response {
-    let team = match team.as_str() {
-        "f" | "0" => "female",
-        _ => "male",
-    };
-    st_page_for(team)
+/// GET /st/{team}：旧团别链接统一渲染首页
+pub async fn st_page(axum::extract::Path(_team): axum::extract::Path<String>) -> Response {
+    st_page_for("all")
 }
 
 /// GET /st/{team}/{*rest}：展示端子路径路由（/report、/group/junior、/lineage…）。
 /// 单页应用：子路径一律渲染同一个 HTML，视图切换由前端 history API 完成，
 /// 刷新/分享子路径链接都不会 404。
 pub async fn st_page_sub(
-    axum::extract::Path((team, _rest)): axum::extract::Path<(String, String)>,
+    axum::extract::Path((_team, _rest)): axum::extract::Path<(String, String)>,
 ) -> Response {
-    let team = match team.as_str() {
-        "f" | "0" => "female",
-        _ => "male",
-    };
-    st_page_for(team)
+    st_page_for("all")
 }
 
 fn st_page_for(team: &str) -> Response {

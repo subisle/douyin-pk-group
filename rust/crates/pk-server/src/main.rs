@@ -200,6 +200,9 @@ async fn main() -> anyhow::Result<()> {
         .set(bot_manager)
         .map_err(|_| anyhow::anyhow!("bots 重复初始化"))?;
 
+    /* 用户自助扫码的微信推送通道（2026-10-11，多账号）：恢复每个已扫码账号的长轮询。 */
+    crate::wxpush::bootstrap(&st).await;
+
     /* 延迟推送调度器（2026-10-10）：每 60 秒扫一次 push_jobs，把到点的任务推出去。
     写库不可用时 push_job_take 直接返回 None，循环空转，不影响服务。
     P1-20：调度循环监听全局 shutdown token，graceful shutdown 时随之退出。 */
@@ -273,6 +276,14 @@ async fn main() -> anyhow::Result<()> {
             "/api/public/teams/{team}/my/push/qr",
             get(public_teams::my_push_qr),
         )
+        .route(
+            "/api/public/teams/{team}/my/push/wechat/start",
+            post(public_teams::my_push_wechat_start),
+        )
+        .route(
+            "/api/public/teams/{team}/my/push/wechat/poll",
+            post(public_teams::my_push_wechat_poll),
+        )
         // 展示端手机号注册（2026-10-10）：手机号=账号、验证码=密码；
         // 注册同时调 WorkBuddy 网关「添加账号 (OAuth)」，注册完提示绑定主播。
         // 这几个接口不带团别：注册时还不知道主播属于哪个团。
@@ -315,8 +326,8 @@ async fn main() -> anyhow::Result<()> {
     /* HTML 页面不拦：外省访客打开页面后，第一个数据接口拿 403，
     前端显示「当前地区暂不支持访问」，比直接甩一个 403 页面友好。 */
     let public_pages = Router::new()
-        // 对外展示页（静态 HTML，粉丝/主播手机直开）：/ 为唯一入口（男女共用，
-        // 进页由前端弹团别选择卡），/1、/0、/st/m、/st/f 为兼容旧链接的别名；
+        // 对外展示页（静态 HTML，粉丝/主播手机直开）：/ 为唯一入口（2026-10-11 起
+        // 不分男女、不弹团别选择卡），/1、/0、/st/m、/st/f 为兼容旧链接的别名；
         // 子路径（/report、/lineage、/my、/group/*）也是同一页，前端 history 路由接管
         .route("/", get(public_teams::st_root))
         .route("/report", get(public_teams::st_root))

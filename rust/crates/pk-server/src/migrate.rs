@@ -48,6 +48,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "012_my_phone_unique",
         include_str!("migrations/012_my_phone_unique.sql"),
     ),
+    (
+        "013_wx_push_accounts",
+        include_str!("migrations/013_wx_push_accounts.sql"),
+    ),
 ];
 
 /// 迁移建连（migrator 账号；同样关语句缓存）

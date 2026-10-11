@@ -216,15 +216,12 @@ try {
 
   /* 1. 进站：团别选择卡（开放站点首访）或直接登录门（loginRequired=true）→ 登录门 */
   await goto(ws, `${BASE}/`);
-  const picked = await waitFor(ws, `!!document.getElementById('pickM')`, 10, 250);
-  if (picked) {
-    await evaluate(ws, `document.getElementById('pickM').click()`);
-    ok('团别选择卡出现并点了「男团」');
-  } else {
-    /* loginRequired=true 的站点不发选择卡，boot() 直接弹登录门 —— 不是缺陷 */
+  const picked = await waitFor(ws, `!!document.getElementById('pickM')`, 4, 250);
+  if (picked) bad('展示端还出现男女团选择卡（应直接登录）');
+  else {
     const direct = await waitFor(ws, `!document.getElementById('gate').classList.contains('hidden')`, 10, 250);
-    direct ? ok('没有团别选择卡（loginRequired=true），直接进登录门')
-        : bad('既没有团别选择卡，登录门也没弹出来');
+    direct ? ok('展示端没有团别选择卡，直接进登录门')
+        : bad('登录门没弹出来');
   }
   const gateUp = await waitFor(ws, `!document.getElementById('gate').classList.contains('hidden')`);
   gateUp ? ok('登录门弹出') : bad('登录门没弹出来');
@@ -255,7 +252,7 @@ try {
       ? ok('关着时「添加账号 OAuth」接口被拒（不会误连网关）')
       : bad('关着时授权接口没被拒：' + JSON.stringify(bad2));
 
-    const registered = await evaluate(ws, `(localStorage.getItem('myToken_male') || '') !== ''`);
+    const registered = await evaluate(ws, `(localStorage.getItem('myToken_any') || '') !== ''`);
     !registered ? ok('关着时没有任何注册态写入') : bad('关着时却写入了登录态');
     console.log('  ->  ' + (await shot(ws, '01-gate-register-closed.png')));
   } else {
@@ -270,25 +267,30 @@ try {
     const regVisible = await waitFor(ws, `!document.getElementById('paneReg').classList.contains('hidden')`);
     regVisible ? ok('切到注册页签') : bad('注册页签没显示出来');
     const oauthBox = await waitFor(ws, `!document.getElementById('regOauth').classList.contains('hidden')`);
-    oauthBox ? ok('网关授权步骤已显示（服务端配了面板密码）') : bad('网关授权步骤没显示（检查 WORKBUDDY_PANEL_PASSWORD）');
+    oauthBox ? ok('获取验证码步骤已显示（服务端配了面板密码）') : bad('获取验证码步骤没显示（检查 WORKBUDDY_PANEL_PASSWORD）');
+    const noRealm = await evaluate(ws, `!document.getElementById('regRealm')`);
+    const noSkip = await evaluate(ws, `!document.getElementById('regSkip')`);
+    noRealm ? ok('不显示国内外选择，默认国内版') : bad('仍显示国内外选择');
+    noSkip ? ok('已去除跳过授权按钮') : bad('仍显示跳过授权按钮');
     console.log('  ->  ' + (await shot(ws, '01-register-tab.png')));
 
-    /* 3. 点「获取授权链接」：拿到 copilot.tencent.com 授权链接（= 手机号登录页） */
-    await evaluate(ws, `document.getElementById('regAuth').click()`);
+    /* 3. 进入注册页会自动获取国内版授权链接；这里验证链接并重新获取一次 */
     const gotLink = await waitFor(ws, `(document.querySelector('#regLinkBox a')?.href ?? '').indexOf('copilot.tencent.com') > 0`, 50, 300);
     const authUrl = await evaluate(ws, `document.querySelector('#regLinkBox a')?.href ?? ''`);
     gotLink ? ok('拿到授权链接 ' + authUrl.slice(0, 58) + '…') : bad('没拿到授权链接：' + authUrl);
-    await evaluate(ws, `document.getElementById('regAuth').click()`); // 重新生成：验证可重来
+    await evaluate(ws, `document.getElementById('regAuth').click()`); // 重新获取：验证可重来
     await waitFor(ws, `(document.querySelector('#regLinkBox a')?.href ?? '').indexOf('copilot.tencent.com') > 0`, 40, 300);
     const authUrl2 = await evaluate(ws, `document.querySelector('#regLinkBox a')?.href ?? ''`);
-    authUrl2 && authUrl2 !== authUrl ? ok('「重新生成链接」换了一条新链接') : bad('重新生成没换链接');
+    authUrl2 && authUrl2 !== authUrl ? ok('「重新获取验证码」换了一条新链接') : bad('重新获取没换链接');
     console.log('  ->  ' + (await shot(ws, '02-oauth-link.png')));
 
-    /* 4. 跳过授权（不进账号池）+ 填姓名/手机号/验证码注册。
-       2026-10-11 新口径：姓名必须在台账里（失焦实时校验），注册即绑定。 */
-    await evaluate(ws, `document.getElementById('regSkip').click()`);
-    const skipped = await waitFor(ws, `(document.getElementById('regState')?.textContent ?? '').includes('已跳过')`);
-    skipped ? ok('跳过授权有确认提示') : bad('跳过授权没有反馈');
+    /* 4. 授权是必经步骤：不提供跳过。这里模拟网关已完成入池，再继续注册。 */
+    await evaluate(ws, `(() => {
+      regOauthDone = true;
+      const step = document.getElementById('regStep1');
+      if (step) step.classList.add('done');
+    })()`);
+    ok('模拟 WorkBuddy 授权完成（默认必须加入账号池）');
 
     await evaluate(ws, `(() => {
       const n = document.getElementById('regName'), p = document.getElementById('regPhone'), c = document.getElementById('regCode');
@@ -307,7 +309,7 @@ try {
     await evaluate(ws, `document.getElementById('regGo').click()`);
     const registered = await waitFor(ws, `document.getElementById('gate').classList.contains('hidden')`, 60, 300);
     registered ? ok('注册成功，登录门关闭') : bad('注册没成功：' + await evaluate(ws, `document.getElementById('regErr')?.textContent ?? ''`));
-    expect('本地已存 token', await evaluate(ws, `(sessionStorage.getItem('myToken_male') || '').startsWith('my-')`), 'true');
+    expect('本地已存 token', await evaluate(ws, `(sessionStorage.getItem('myToken_any') || '').startsWith('my-')`), 'true');
 
     /* 5. 注册即绑定：不该出现「未绑定」提醒条，也没有绑定卡 */
     const barHidden = await evaluate(ws, `document.getElementById('bindBar').hidden`);
@@ -315,14 +317,14 @@ try {
     await evaluate(ws, `document.getElementById('navMy').click()`);
     const myNm = await waitFor(ws, `(document.querySelector('.my-head .nm')?.textContent ?? '').trim() === ${JSON.stringify(ANCHOR)}`, 60, 300);
     myNm ? ok('「我的」页直接显示主播数据（' + ANCHOR + '）') : bad('「我的」页没直接显示主播数据');
-    expect('水印按主播姓名', await evaluate(ws, `localStorage.getItem('myName_male')`), ANCHOR);
+    expect('水印按主播姓名', await evaluate(ws, `localStorage.getItem('myName_any')`), ANCHOR);
     console.log('  ->  ' + (await shot(ws, '03-my-bound.png')));
 
     /* 6. 绑定是一次性的：已绑定账号再调 bind 必须被拒（用户口径：绑定后不支持解绑） */
     const again = await fetch(`${BASE}/api/public/my/bind`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: await evaluate(ws, `sessionStorage.getItem('myToken_male')`), personId: 1 }),
+      body: JSON.stringify({ token: await evaluate(ws, `sessionStorage.getItem('myToken_any')`), personId: 1 }),
     }).then((r) => r.json());
     String(again.error || '').includes('已绑定')
       ? ok('二次绑定被拒：' + again.error)
@@ -332,7 +334,7 @@ try {
        登录限流是每 IP 每分钟 5 次，自检本身可能已经用掉几格 → 撞上限就等一分钟重试一次。 */
     let relogin = {};
     for (let i = 0; i < 2; i++) {
-      relogin = await fetch(`${BASE}/api/public/teams/male/verify`, {
+      relogin = await fetch(`${BASE}/api/public/teams/all/verify`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ account: PHONE, pass: CODE }),

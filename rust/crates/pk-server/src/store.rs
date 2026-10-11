@@ -1990,6 +1990,161 @@ pub async fn person_team_of_name(st: &AppState, name: &str) -> Option<String> {
     }
 }
 
+/* --------------------- 用户自助扫码的微信推送账号（2026-10-11） --------------------- */
+
+/// 用户扫码登录得到的微信账号凭证（wx_push_accounts 一行）
+#[derive(Clone, Debug, Default)]
+pub struct WxPushAccount {
+    pub name: String,
+    pub team: String,
+    pub person_id: u64,
+    pub ilink_bot_id: String,
+    pub ilink_user_id: String,
+    pub bot_token: String,
+    pub base_url: String,
+    pub nickname: String,
+    pub conversation_id: String,
+    pub updates_buf: String,
+    pub bound_at: String,
+}
+
+fn wx_push_account_from_row(row: &sqlx::mysql::MySqlRow) -> WxPushAccount {
+    WxPushAccount {
+        name: row.try_get::<String, _>("name").unwrap_or_default(),
+        team: row.try_get::<String, _>("team").unwrap_or_default(),
+        person_id: row
+            .try_get::<u64, _>("person_id")
+            .or_else(|_| row.try_get::<i64, _>("person_id").map(|v| v.max(0) as u64))
+            .unwrap_or(0),
+        ilink_bot_id: row.try_get::<String, _>("ilink_bot_id").unwrap_or_default(),
+        ilink_user_id: row
+            .try_get::<String, _>("ilink_user_id")
+            .unwrap_or_default(),
+        bot_token: row.try_get::<String, _>("bot_token").unwrap_or_default(),
+        base_url: row.try_get::<String, _>("base_url").unwrap_or_default(),
+        nickname: row.try_get::<String, _>("nickname").unwrap_or_default(),
+        conversation_id: row
+            .try_get::<String, _>("conversation_id")
+            .unwrap_or_default(),
+        updates_buf: row.try_get::<String, _>("updates_buf").unwrap_or_default(),
+        bound_at: row.try_get::<String, _>("bound_at").unwrap_or_default(),
+    }
+}
+
+/// 保存 / 覆盖某个展示端账号的微信扫码凭证
+pub async fn wx_push_account_save(st: &AppState, a: &WxPushAccount) -> Result<()> {
+    let pool = w(st)?;
+    sqlx::query(
+        "INSERT INTO wx_push_accounts
+           (name, team, person_id, ilink_bot_id, ilink_user_id, bot_token, base_url,
+            nickname, conversation_id, updates_buf, bound_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE
+           team = VALUES(team), person_id = VALUES(person_id),
+           ilink_bot_id = VALUES(ilink_bot_id), ilink_user_id = VALUES(ilink_user_id),
+           bot_token = VALUES(bot_token), base_url = VALUES(base_url),
+           nickname = VALUES(nickname), updated_at = VALUES(updated_at)",
+    )
+    .bind(a.name.trim())
+    .bind(&a.team)
+    .bind(a.person_id)
+    .bind(&a.ilink_bot_id)
+    .bind(&a.ilink_user_id)
+    .bind(&a.bot_token)
+    .bind(&a.base_url)
+    .bind(&a.nickname)
+    .bind(&a.conversation_id)
+    .bind(&a.updates_buf)
+    .bind(&a.bound_at)
+    .bind(now_str())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// 更新长轮询游标（仅非空时更新，避免把进度打回去）
+pub async fn wx_push_account_set_updates_buf(st: &AppState, name: &str, updates_buf: &str) -> bool {
+    if updates_buf.is_empty() {
+        return false;
+    }
+    matches!(w(st), Ok(pool) if sqlx::query(
+        "UPDATE wx_push_accounts SET updates_buf = ?, updated_at = ? WHERE name = ?"
+    )
+    .bind(updates_buf)
+    .bind(now_str())
+    .bind(name.trim())
+    .execute(pool)
+    .await
+    .map(|r| r.rows_affected() > 0)
+    .unwrap_or(false))
+}
+
+/// 首次收到该用户消息时补会话（conversation_id / bound_at）
+pub async fn wx_push_account_bind_conversation(
+    st: &AppState,
+    name: &str,
+    conversation_id: &str,
+    ilink_user_id: &str,
+) -> bool {
+    matches!(w(st), Ok(pool) if sqlx::query(
+        "UPDATE wx_push_accounts
+           SET conversation_id = ?, ilink_user_id = IF(ilink_user_id = '', ?, ilink_user_id),
+               bound_at = IF(bound_at = '', ?, bound_at), updated_at = ?
+         WHERE name = ?"
+    )
+    .bind(conversation_id)
+    .bind(ilink_user_id)
+    .bind(now_str())
+    .bind(now_str())
+    .bind(name.trim())
+    .execute(pool)
+    .await
+    .map(|r| r.rows_affected() > 0)
+    .unwrap_or(false))
+}
+
+/// 按展示端账号名取扫码凭证
+pub async fn wx_push_account_get(st: &AppState, name: &str) -> Option<WxPushAccount> {
+    let pool = w(st).ok()?;
+    let row = sqlx::query(
+        "SELECT name, team, person_id, ilink_bot_id, ilink_user_id, bot_token, base_url,
+                nickname, conversation_id, updates_buf, bound_at
+         FROM wx_push_accounts WHERE name = ? LIMIT 1",
+    )
+    .bind(name.trim())
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()?;
+    Some(wx_push_account_from_row(&row))
+}
+
+/// 启动时恢复全部扫码账号（各自跑一条长轮询）
+pub async fn wx_push_accounts_all(st: &AppState) -> Vec<WxPushAccount> {
+    let Ok(pool) = w(st) else {
+        return Vec::new();
+    };
+    sqlx::query(
+        "SELECT name, team, person_id, ilink_bot_id, ilink_user_id, bot_token, base_url,
+                nickname, conversation_id, updates_buf, bound_at
+         FROM wx_push_accounts ORDER BY name",
+    )
+    .fetch_all(pool)
+    .await
+    .map(|rows| rows.iter().map(wx_push_account_from_row).collect())
+    .unwrap_or_default()
+}
+
+/// 删除扫码凭证（解绑推送时一并清）
+pub async fn wx_push_account_delete(st: &AppState, name: &str) -> bool {
+    matches!(w(st), Ok(pool) if sqlx::query("DELETE FROM wx_push_accounts WHERE name = ?")
+        .bind(name.trim())
+        .execute(pool)
+        .await
+        .map(|r| r.rows_affected() > 0)
+        .unwrap_or(false))
+}
+
 /// 把已存在的展示端账号接到微信会话上（手机号 / 绑定码两条路共用）
 pub async fn push_bind_account(
     st: &AppState,
@@ -2357,11 +2512,14 @@ pub async fn team_anchor_search(
     limit: i64,
 ) -> Vec<serde_json::Value> {
     let sql = "SELECT id, name FROM person \
-               WHERE deleted_at IS NULL AND gender = ? AND status <> 'left' AND name LIKE ? \
+               WHERE deleted_at IS NULL AND (? = '' OR gender = ?) AND status <> 'left' AND name LIKE ? \
                ORDER BY name LIMIT ?";
     let like = format!("%{}%", q.trim());
     match crate::mysql::query_with_binds(&st.pools, source, sql, |qb| {
-        qb.bind(team.to_string()).bind(like.clone()).bind(limit)
+        qb.bind(team.to_string())
+            .bind(team.to_string())
+            .bind(like.clone())
+            .bind(limit)
     })
     .await
     {

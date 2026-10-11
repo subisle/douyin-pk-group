@@ -29,9 +29,9 @@ use super::{Attachment, BotConfig, BotRouter, Inbound, Outbound};
 
 const DEFAULT_BASE_URL: &str = "https://ilinkai.weixin.qq.com";
 /// 对齐 openclaw-weixin 的插件版本号（信封 channel_version）
-const CHANNEL_VERSION: &str = "2.4.8";
+const CHANNEL_VERSION: &str = "2.4.10";
 /// 客户端版本打包（iLink-App-ClientVersion = 0x00MMNNPP 的十进制）
-const CLIENT_VERSION_MMNNPP: (u32, u32, u32) = (2, 4, 8);
+const CLIENT_VERSION_MMNNPP: (u32, u32, u32) = (2, 4, 10);
 const SESSION_EXPIRED: i64 = -14;
 /// -14 后暂停多久再试（对齐 openclaw：暂停一小时，不清凭据）
 const SESSION_EXPIRED_RETRY: Duration = Duration::from_secs(3600);
@@ -46,6 +46,200 @@ const TRUSTED_HOSTS: [&str; 3] = [
     // confirmed 返回的 baseurl / redirect_host 可能给出其它官方主机，运行时校验后缀
     "weixin.qq.com",
 ];
+
+/* ---------------- 用户自助扫码（多账号）与无状态收发（2026-10-11） ----------------
+ *
+ * 官方协议里二维码是「账号级 bot 登录」：每个用户自己扫码确认后，服务端拿到一组
+ * bot_token / ilink_bot_id / ilink_user_id / baseurl，即多账号支持里的一个账号。
+ * 推送服务按账号各跑一条 getupdates 长轮询；用户首次给机器人发消息时留下
+ * context_token，之后才具备主动推送的会话上下文。以下函数不依赖全局 BotManager，
+ * 供展示端「我的」页扫码与推送引擎直接调用。 */
+
+/// 官方 `qrcode_img_content` 是需要编码进二维码的内容（通常是 URL 字符串），
+/// 不是图片地址。这里统一渲染成 SVG data URL，前后端 <img> 可直接显示，零前端依赖。
+pub fn qr_svg_data_url(content: &str) -> Option<String> {
+    let code = qrcode::QrCode::new(content.as_bytes()).ok()?;
+    let svg = code
+        .render::<qrcode::render::svg::Color>()
+        .min_dimensions(180, 180)
+        .quiet_zone(true)
+        .build();
+    use base64::Engine as _;
+    Some(format!(
+        "data:image/svg+xml;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(svg.as_bytes())
+    ))
+}
+
+fn shared_http() -> &'static reqwest::Client {
+    static HTTP: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    HTTP.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(75))
+            .build()
+            .expect("构造微信 HTTP 客户端失败")
+    })
+}
+
+fn normalize_base(base_url: &str) -> String {
+    let b = base_url.trim().trim_end_matches('/');
+    if b.is_empty() {
+        DEFAULT_BASE_URL.to_string()
+    } else if b.starts_with("http://") || b.starts_with("https://") {
+        b.to_string()
+    } else {
+        format!("https://{b}")
+    }
+}
+
+/// 无状态 JSON 调用：二维码请求 / 状态轮询 / 长轮询 / 发消息共用。
+/// POST 一律带 AuthorizationType（官方协议：二维码 POST 也带）与 X-WECHAT-UIN。
+async fn wx_json(
+    method: reqwest::Method,
+    base_url: &str,
+    route: &str,
+    query: &[(&str, &str)],
+    token: Option<&str>,
+    body: Option<Value>,
+) -> anyhow::Result<Value> {
+    let base = normalize_base(base_url);
+    anyhow::ensure!(is_trusted_host(&base), "微信接口地址不可信: {base}");
+    let mut req =
+        shared_http().request(method.clone(), WxTransport::route_url(&base, route, query));
+    req = req
+        .header("iLink-App-Id", "bot")
+        .header("iLink-App-ClientVersion", client_version_decimal());
+    if let Some(t) = token.map(str::trim).filter(|s| !s.is_empty()) {
+        req = req.header("Authorization", format!("Bearer {t}"));
+    }
+    if let Some(payload) = &body {
+        req = req
+            .header("Content-Type", "application/json")
+            .header("AuthorizationType", "ilink_bot_token")
+            .header("X-WECHAT-UIN", random_uin())
+            .json(payload);
+    }
+    let resp = req.send().await?;
+    let status = resp.status();
+    let raw = resp.bytes().await?;
+    anyhow::ensure!(
+        status.is_success(),
+        "微信接口 HTTP {status}: {}",
+        String::from_utf8_lossy(&raw)
+    );
+    if raw.is_empty() {
+        return Ok(Value::Null);
+    }
+    serde_json::from_slice(&raw).map_err(|e| anyhow::anyhow!("微信接口返回了无效 JSON: {e}"))
+}
+
+/// 用户扫码第一步：取账号登录二维码（固定 API Base，不带本地 token）
+pub async fn user_login_qrcode() -> anyhow::Result<Value> {
+    let out = wx_json(
+        reqwest::Method::POST,
+        DEFAULT_BASE_URL,
+        "get_bot_qrcode",
+        &[("bot_type", "3")],
+        None,
+        Some(json!({ "local_token_list": [] })),
+    )
+    .await?;
+    WxTransport::check_code(&out)?;
+    let content = str_of(&out, &["qrcode_img_content"]);
+    Ok(json!({
+        "qrcode": str_of(&out, &["qrcode"]),
+        "imgContent": qr_svg_data_url(&content).unwrap_or_default(),
+        "content": content,
+        "url": first_of(&out, &["qrcode_url", "qr_code_url", "url"]),
+    }))
+}
+
+/// 用户扫码第二步：轮询二维码状态（原样返回 token / 账号 id 等字段）
+pub async fn user_login_status(qrcode: &str, verify_code: Option<&str>) -> anyhow::Result<Value> {
+    user_login_status_at(DEFAULT_BASE_URL, qrcode, verify_code).await
+}
+
+/// 同 [`user_login_status`]，但允许按 `scaned_but_redirect` 返回的官方主机继续轮询。
+pub async fn user_login_status_at(
+    base_url: &str,
+    qrcode: &str,
+    verify_code: Option<&str>,
+) -> anyhow::Result<Value> {
+    anyhow::ensure!(!qrcode.trim().is_empty(), "微信二维码标识不能为空");
+    let mut query: Vec<(&str, &str)> = vec![("qrcode", qrcode)];
+    if let Some(v) = verify_code.map(str::trim).filter(|s| !s.is_empty()) {
+        query.push(("verify_code", v));
+    }
+    let out = wx_json(
+        reqwest::Method::GET,
+        base_url,
+        "get_qrcode_status",
+        &query,
+        None,
+        None,
+    )
+    .await?;
+    WxTransport::check_code(&out)?;
+    let status = str_of(&out, &["status"]).to_lowercase();
+    Ok(json!({
+        "status": if status.is_empty() { "wait" } else { &status },
+        "botToken": first_of(&out, &["bot_token", "token", "access_token"]),
+        "botId": str_of(&out, &["ilink_bot_id"]),
+        "userId": str_of(&out, &["ilink_user_id"]),
+        "baseUrl": str_of(&out, &["baseurl"]),
+        "redirectHost": str_of(&out, &["redirect_host"]),
+        "nickname": first_of(&out, &["nickname", "nick_name", "name"]),
+    }))
+}
+
+/// 单账号长轮询 getupdates（供 wxpush 模块使用）
+pub async fn user_poll_updates(base_url: &str, token: &str, cursor: &str) -> anyhow::Result<Value> {
+    let out = wx_json(
+        reqwest::Method::POST,
+        base_url,
+        "getupdates",
+        &[],
+        Some(token),
+        Some(json!({
+            "get_updates_buf": cursor,
+            "base_info": { "channel_version": CHANNEL_VERSION, "bot_agent": "OpenClaw" }
+        })),
+    )
+    .await?;
+    WxTransport::check_code(&out)?;
+    Ok(out)
+}
+
+/// 单账号主动发文本（扫码用户的推送走这里，不经过全局机器人 token）
+pub async fn user_send_text(
+    base_url: &str,
+    token: &str,
+    to_user_id: &str,
+    context_token: &str,
+    text: &str,
+) -> anyhow::Result<()> {
+    let out = wx_json(
+        reqwest::Method::POST,
+        base_url,
+        "sendmessage",
+        &[],
+        Some(token),
+        Some(json!({
+            "msg": {
+                "from_user_id": "",
+                "to_user_id": to_user_id,
+                "client_id": client_id(),
+                "message_type": 2,
+                "message_state": 2,
+                "context_token": context_token,
+                "item_list": [{ "type": 1, "text_item": { "text": text } }]
+            },
+            "base_info": { "channel_version": CHANNEL_VERSION, "bot_agent": "OpenClaw" }
+        })),
+    )
+    .await?;
+    WxTransport::check_code(&out)
+}
 
 #[derive(Clone, Debug, Default)]
 struct SessionCtx {
@@ -194,10 +388,8 @@ impl WxTransport {
         if let Some(payload) = &body {
             req = req
                 .header("Content-Type", "application/json")
+                .header("AuthorizationType", "ilink_bot_token")
                 .header("X-WECHAT-UIN", random_uin());
-            if auth {
-                req = req.header("AuthorizationType", "ilink_bot_token");
-            }
             req = req.json(payload);
         }
         let resp = req.send().await?;
@@ -287,9 +479,11 @@ impl WxTransport {
             inner.phase = "awaiting_scan".into();
             inner.redirect_host.clear();
         }
+        let content = str_of(&out, &["qrcode_img_content"]);
         Ok(json!({
             "qrcode": qrcode,
-            "imgContent": str_of(&out, &["qrcode_img_content"]),
+            "imgContent": qr_svg_data_url(&content).unwrap_or_default(),
+            "content": content,
             "url": first_of(&out, &["qrcode_url", "qr_code_url", "url"]),
         }))
     }
@@ -797,8 +991,8 @@ mod tests {
 
     #[test]
     fn client_version_matches_protocol_packing() {
-        // 0x00020408 = 2.4.8 → 132104
-        assert_eq!(client_version_decimal(), "132104");
+        // 0x0002040A = 2.4.10 → 132106
+        assert_eq!(client_version_decimal(), "132106");
     }
 
     #[test]

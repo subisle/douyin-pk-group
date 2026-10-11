@@ -492,9 +492,8 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 
 <header class="masthead">
   <div class="mh-top">
-    <button class="mh-badge mh-switch" id="btnTeam" title="换团">1</button>
     <div class="mh-title">
-      <div class="t" id="mhTitle">男团数据榜</div>
+      <div class="t" id="mhTitle">主播数据榜</div>
       <div class="s"><span id="mhSub">LOADING</span><span id="mhSpin" aria-hidden="true"></span></div>
     </div>
   </div>
@@ -567,13 +566,10 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
      /st/m/lineage     → 族谱
      /st/m/my          → 我的数据（手机号+密码登录；没账号可在登录门「注册」）
    刷新/直接分享子路径链接都能落到正确视图（后端对子路径渲染同一 HTML）。 */
-/* 团别（2026-10-10 起男女共用一个网址）：不再从 URL 推断，
-   进页先弹「男团 / 女团」选择卡，选完存 localStorage，之后直开记住上次选择。
-   只有顶部「换团」按钮能换团（换团 = 重选，清掉记住的团别）。 */
-let TEAM = null;         // 'male' | 'female'，进页选择后才有值
-const TEAM_KEY = 'teamChoice';
-const LABEL = () => TEAM === 'male' ? '男团' : '女团';
-const CODE = () => TEAM === 'male' ? '1' : '0';
+/* 2026-10-11：展示端统一入口，不再区分男团 / 女团。
+   TEAM 固定为 all，所有团数据接口走 /api/public/teams/all。 */
+const TEAM = 'all';
+const LABEL = () => '主播';
 const $ = (id) => document.getElementById(id);
 
 /* 分组子页：key 进 URL，type 对应方案 eventType（与后端 EVENT_TYPES 一致），label 是页面标题 */
@@ -609,7 +605,7 @@ function busyOff() { document.body.classList.remove('busy'); }
     兼容旧链接：/st/m/lineage、/1/report 这类带团别前缀的老路径剥掉前缀照常落视图。 */
 function parseRoute() {
   const rest = location.pathname
-    .replace(/^\/(?:st\/)?(?:m|f|1|0)(?=\/|$)/, '')
+    .replace(/^\/(?:st\/)?(?:m|f|1|0|all)(?=\/|$)/, '')
     .replace(/^\/+|\/+$/g, '');
   if (rest === '' || rest === 'report') return { view: 'data' };
   if (rest === 'lineage') return { view: 'lineage' };
@@ -705,7 +701,6 @@ let meState = null;       // 当前登录身份（who 的结果，带 bound / ne
 let regCfg = null;        // 注册页能力探测：{oauth: 网关配没配}
 let regWbState = '';      // WorkBuddy 授权流水号（第 ① 步申请到的）
 let regOauthDone = false; // 授权是否已完成（账号已加入账号池）
-let regSkipped = false;   // 用户明确跳过「加入账号池」
 let regTimer = null;      // 授权结果轮询
 
 /** 手机号打码：水印/提示里不出现完整号码 */
@@ -797,9 +792,8 @@ function bindLoginPane() {
     btn.disabled = true; btn.textContent = '登录中…';
     errEl.classList.add('hidden');
     try {
-      /* 团别已知（开放站点从「我的」进 / 需登录站点已定团）→ 本团 verify；
-         团别待定（需登录站点首页直接登录）→ 免团别登录口，由账号反推团别 */
-      const url = TEAM ? '/api/public/teams/' + TEAM + '/verify' : '/api/public/my/login';
+      /* 统一免团别登录口：后端按账号反查绑定主播，前端不再按团别分流 */
+      const url = '/api/public/my/login';
       const r = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -808,10 +802,9 @@ function bindLoginPane() {
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
       if (!d.ok) throw new Error('账号或密码不对，或账号还没开通');
-      /* 绑定主播的账号 token 挂在主播所在团；团别待定的账号（管理员观看 / 注册了还没
-         绑主播）挂在 MY_ANY_KEY，两个团都能用 —— 换团不用重新登录 */
+      /* token 统一存 MY_ANY_KEY；后端 all 端点接受任何绑定主播的账号 */
       const team = d.team === 'male' || d.team === 'female' ? d.team : '';
-      const key = team ? 'myToken_' + team : MY_ANY_KEY;
+      const key = MY_ANY_KEY;
       sessionStorage.setItem(key, d.token);
       if (key !== MY_KEY()) sessionStorage.removeItem(MY_KEY());
       localStorage.setItem(team ? 'myName_' + team : MY_ANY_NAME, d.name || acct);
@@ -869,18 +862,10 @@ function bindRegPane() {
     '<p class="tip">手机号就是账号，短信验证码数字就是密码</p>' +
     '<div id="regOauth" class="hidden">' +
       '<div class="reg-step" id="regStep1"><div class="n">1</div>' +
-        '<div class="t">把 WorkBuddy 账号加进账号池：点下面的按钮拿授权链接，' +
-        '在打开的页面用<b>手机号</b>登录（会收到短信验证码）</div></div>' +
-      '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 10px">' +
-        '<select id="regRealm" style="flex:1 1 140px;min-width:0;height:40px;border:1px solid var(--hairline);' +
-          'border-radius:var(--r-md);padding:0 10px;font-size:14px;background:#fff;color:var(--on-surface)">' +
-          '<option value="cn">国内版（copilot.tencent.com）</option>' +
-          '<option value="intl">国际版（workbuddy.ai）</option></select>' +
-        '<button class="btn-sec" id="regAuth" style="flex:none;width:auto;padding:0 14px;margin:0">获取授权链接</button>' +
-      '</div>' +
+        '<div class="t">获取短信验证码并完成授权</div></div>' +
+      '<button class="btn-sec" id="regAuth" style="width:100%;margin:0 0 10px">获取验证码</button>' +
       '<div id="regLinkBox"></div>' +
       '<div class="reg-state wait hidden" id="regState"></div>' +
-      '<button class="reg-skip" id="regSkip">跳过这一步（不加入 WorkBuddy 账号池）</button>' +
     '</div>' +
     '<div class="reg-step"><div class="n">2</div>' +
       '<div class="t">填主播姓名、手机号和刚收到的验证码，完成注册</div></div>' +
@@ -898,12 +883,6 @@ function bindRegPane() {
   $('regName').onblur = () => checkRegName();
   $('regPhone').onkeydown = (e) => { if (e.key === 'Enter') $('regCode').focus(); };
   $('regCode').onkeydown = (e) => { if (e.key === 'Enter') doRegister(); };
-  $('regSkip').onclick = () => {
-    if (!confirm('跳过授权后，本次注册不会把 WorkBuddy 账号加进账号池。确定跳过吗？')) return;
-    regSkipped = true;
-    stopRegPoll();
-    setRegState('已跳过授权：本次注册不加入账号池', 'wait');
-  };
 }
 
 function setRegState(text, kind) {
@@ -931,34 +910,36 @@ async function prepareRegPane() {
   const cfg = await probeRegConfig();
   if (!cfg.open) { gateTab('login'); return; }
   show('regOauth', !!cfg.oauth);
+  /* 默认国内版，进入注册页即发起授权；必须加入账号池后才能完成注册 */
+  if (cfg.oauth && !regWbState && !regOauthDone) await startRegOauth();
 }
 
 async function startRegOauth() {
   const btn = $('regAuth');
-  btn.disabled = true; btn.textContent = '申请中…';
+  btn.disabled = true; btn.textContent = '获取中…';
   $('regLinkBox').innerHTML = '';
-  regWbState = ''; regOauthDone = false; regSkipped = false;
+  regWbState = ''; regOauthDone = false;
   stopRegPoll();
   try {
     const r = await fetch('/api/public/my/register/oauth/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ realm: ($('regRealm') || {}).value || 'cn' }),
+      body: JSON.stringify({ realm: 'cn' }),
     });
     const d = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
     regWbState = d.state || '';
     $('regLinkBox').innerHTML =
       '<a class="reg-link" href="' + esc(d.authUrl) + '" target="_blank" rel="noopener">' + esc(d.authUrl) + '</a>' +
-      '<div class="reg-note" style="margin:-6px 0 10px">点上面的链接，用<b>手机号</b>登录并授权；' +
-      '登录完成后这个窗口会自动检测到，不用手动刷新。</div>';
+      '<div class="reg-note" style="margin:-6px 0 10px">在打开的页面用<b>手机号</b>登录并完成授权；' +
+      '完成后这里会自动继续。</div>';
     setRegState('等待授权完成…', 'wait');
-    btn.disabled = false; btn.textContent = '重新生成链接';
+    btn.disabled = false; btn.textContent = '重新获取验证码';
     try { window.open(d.authUrl, '_blank', 'noopener'); } catch (_) { /* 拦截了就点链接 */ }
     startRegPoll();
   } catch (e) {
-    btn.disabled = false; btn.textContent = '获取授权链接';
-    setRegState('申请失败：' + (e.message || '稍后再试'), 'wait');
+    btn.disabled = false; btn.textContent = '获取验证码';
+    setRegState('获取失败：' + (e.message || '稍后再试'), 'wait');
   }
 }
 
@@ -973,7 +954,7 @@ function startRegPoll() {
     tries += 1;
     if (tries > 120) {   // 5 分钟没结果就别再轮了
       stopRegPoll();
-      setRegState('授权检测超时：可以点「重新生成链接」再来一次', 'wait');
+      setRegState('验证码检测超时：可以点「重新获取验证码」再来一次', 'wait');
       return;
     }
     if (!regWbState) return;
@@ -989,7 +970,7 @@ function startRegPoll() {
         setRegState('✓ 已加入账号池' + (d.nickname ? '（' + d.nickname + '）' : '') + '，请继续第 ② 步', 'ok');
       } else if (s === 'error' || s === 'expired' || s === 'unknown') {
         stopRegPoll();
-        setRegState('授权失败或已过期：请点「重新生成链接」重试', 'wait');
+        setRegState('验证码获取失败或已过期：请点「重新获取验证码」重试', 'wait');
       }
     } catch (_) { /* 网络抖动继续轮询 */ }
   }, 2500);
@@ -1040,9 +1021,9 @@ async function doRegister() {
   if (name.length > 20) return fail('姓名太长（最多 20 字）');
   if (!/^\d{5,20}$/.test(phone)) return fail('请输入 5~20 位数字手机号');
   if (!/^\d{4,20}$/.test(code)) return fail('验证码应为 4~20 位数字（验证码就是密码）');
-  if (regCfg && regCfg.oauth && !regSkipped) {
-    if (!regWbState) return fail('请先做第 ① 步：点「获取授权链接」并用手机号登录授权（不想加账号池可点「跳过这一步」）');
-    if (!regOauthDone) return fail('授权还没完成（账号还没进账号池），等状态变成「已加入账号池」再点完成注册');
+  if (regCfg && regCfg.oauth) {
+    if (!regWbState) return fail('请先点「获取验证码」并用手机号完成授权');
+    if (!regOauthDone) return fail('验证码授权还没完成，请稍后再点完成注册');
   }
   const btn = $('regGo');
   btn.disabled = true; btn.textContent = '注册中…';
@@ -1050,28 +1031,15 @@ async function doRegister() {
     const r = await fetch('/api/public/my/register', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ phone, code, name, team: TEAM || '', wbState: regOauthDone ? regWbState : '' }),
+      body: JSON.stringify({ phone, code, name, team: '', wbState: regOauthDone ? regWbState : '' }),
     });
     const d = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
     if (!d.ok) throw new Error('注册失败，稍后再试');
-    /* 注册即绑定：换发的 token 带主播所在团 —— 必须存到团别对应的那一档。
-       审计 2026-10-11：在女团站点注册男团主播时，若按 MY_KEY()（当前团）存，
-       token 与站点团别不符，之后每个接口都 401，用户被卡死。 */
+    /* 注册即绑定：token 统一存 MY_ANY_KEY，不再按团别分档，避免跨团跳转。 */
     const team = d.team === 'male' || d.team === 'female' ? d.team : '';
-    const tkey = team ? 'myToken_' + team : MY_ANY_KEY;
-    sessionStorage.setItem(tkey, d.token);
-    if (tkey !== MY_KEY()) sessionStorage.removeItem(MY_KEY());
-    localStorage.setItem(team ? 'myName_' + team : MY_ANY_NAME, d.name || name);
-    if (team && team !== TEAM) {
-      /* 主播在另一个团：记住团别后整页重开（链接即团别，页内不换团） */
-      stopRegPoll();
-      localStorage.setItem(TEAM_KEY, team);
-      toast('注册成功，已绑定主播「' + (d.name || name) + '」，正在切换到' +
-        (team === 'male' ? '男团' : '女团') + '…');
-      setTimeout(() => location.reload(), 900);
-      return;
-    }
+    sessionStorage.setItem(MY_ANY_KEY, d.token);
+    localStorage.setItem(MY_ANY_NAME, d.name || name);
     toast('注册成功，已绑定主播「' + (d.name || name) + '」');
     closeGate({ name: d.name || name, personId: d.personId || 0, bound: d.bound !== false,
       needBind: false, team: team, anyTeam: !team });
@@ -1104,8 +1072,7 @@ async function ensureLogin() {
   const t = myToken();
   if (t) {
     /* token 可能记在别的团（团别待定的登录态两团都认）：候选团逐个问一遍身份 */
-    const cands = [TEAM, myTokenTeam(), 'male', 'female']
-      .filter((v, i, a) => (v === 'male' || v === 'female') && a.indexOf(v) === i);
+    const cands = ['all'];
     for (const team of cands) {
       try {
         const who = await fetch('/api/public/teams/' + team + '/my/who?token=' +
@@ -1189,14 +1156,16 @@ function lbRowHtml(it) {
   const off = noData || (!hideWave && it.wave < 2);
   const rc = it.rank === 1 ? ' g' : it.rank === 2 ? ' s' : it.rank === 3 ? ' b' : '';
   const absent = it.absentDays == null ? 0 : it.absentDays;
+  const monthNo = (curDate || '').slice(5, 7).replace(/^0/, '');
+  const dayNo = (curDate || '').slice(8, 10).replace(/^0/, '');
   const main = off
     ? '<span class="pill-off">未播 ' + absent + ' 天</span>'
-    : '<span class="d">' + (it.delta ? deltaChip(it) : '') + '</span>' +
+    : '<span class="d">' + (dayNo ? dayNo + ' 日音浪' : '当日') + '</span>' +
       '<span class="w">' + (hideWave ? '—' : wan(it.wave)) + '</span>';
   const mid = it.periodic
     ? ''
-    : '<span class="mid">本月 ' + (it.totalWave == null ? '—' : wan(it.totalWave)) +
-      ' · 未播 ' + absent + ' 天</span>';
+    : '<span class="mid">' + (monthNo ? monthNo + ' 月' : '本月') + '未播 ' + absent + ' 天' +
+      ' · 累计 ' + (it.totalWave == null ? '—' : wan(it.totalWave)) + '</span>';
   return '<div class="lb-row' + (off ? ' off' : '') + '" data-n="' + esc(it.name) +
     '" data-w="' + (off || hideWave ? '' : it.wave) + '">' +
     '<span class="rk' + rc + '">' + (off ? '—' : (it.rank || '—')) + '</span>' +
@@ -1963,14 +1932,12 @@ function groupHtml(d, page, list) {
    token 存 sessionStorage，关闭浏览器后需重新登录；服务重启或失效自动退回登录卡。 */
 const MY_ANY_KEY = 'myToken_any';
 const MY_ANY_NAME = 'myName_any';
-const MY_KEY = () => (TEAM ? 'myToken_' + TEAM : MY_ANY_KEY);
-const MY_NAME_KEY = () => (TEAM ? 'myName_' + TEAM : MY_ANY_NAME);
+const MY_KEY = () => MY_ANY_KEY;
+const MY_NAME_KEY = () => MY_ANY_NAME;
 
-/* 登录态存放位：当前团的优先，其余按 男团 → 女团 → 待定 依次兜底
-   （启动时 TEAM 还没定，三个都要看一眼） */
+/* 登录态存放位：统一入口存 MY_ANY_KEY；旧团别 key 只做兼容读取 */
 function myTokenKeys() {
-  const all = ['myToken_male', 'myToken_female', MY_ANY_KEY];
-  return TEAM ? [MY_KEY()].concat(all.filter((k) => k !== MY_KEY())) : all;
+  return [MY_ANY_KEY, 'myToken_male', 'myToken_female'];
 }
 const myTeamOfKey = (k) =>
   (k === 'myToken_male' ? 'male' : k === 'myToken_female' ? 'female' : '');
@@ -1994,7 +1961,6 @@ function mySession() {
   return { token: '', team: '' };
 }
 function myToken() { return mySession().token; }
-function myTokenTeam() { return mySession().team; }
 function myLogout() {
   ['myToken_male', 'myToken_female', MY_ANY_KEY].forEach((k) => {
     sessionStorage.removeItem(k);
@@ -2105,20 +2071,11 @@ async function doBind(personId, name) {
     if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
     if (!d.ok) throw new Error('绑定失败，稍后再试');
     /* 绑定成功后换发的 token 带主播所在团：改存到团别那一档，清掉团别待定那档 */
-    const tkey = d.team === 'male' || d.team === 'female' ? 'myToken_' + d.team : MY_ANY_KEY;
-    sessionStorage.setItem(tkey, d.token);
-    if (tkey !== MY_ANY_KEY) sessionStorage.removeItem(MY_ANY_KEY);
-    localStorage.setItem(d.team === 'male' || d.team === 'female' ? 'myName_' + d.team : MY_ANY_NAME,
-      d.name || name);
+    sessionStorage.setItem(MY_ANY_KEY, d.token);
+    localStorage.setItem(MY_ANY_NAME, d.name || name);
     applyLoginState({ name: d.name, personId: d.personId, bound: true, needBind: false });
     toast('已绑定主播：' + (d.name || name));
-    if (d.team && d.team !== TEAM) {
-      /* 主播在另一个团：记住团别后整页重开（链接即团别，页内不换团） */
-      localStorage.setItem(TEAM_KEY, d.team);
-      setTimeout(() => location.reload(), 700);
-    } else {
-      loadMy();
-    }
+    loadMy();
   } catch (e) {
     errEl.textContent = e.message || '绑定失败，稍后再试';
     errEl.classList.remove('hidden');
@@ -2151,7 +2108,7 @@ function renderMyLogin() {
     btn.disabled = true; btn.textContent = '验证中…';
     errEl.classList.add('hidden');
     try {
-      const r = await fetch('/api/public/teams/' + TEAM + '/verify', {
+      const r = await fetch('/api/public/my/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ account: nm, pass: pw }),
@@ -2159,7 +2116,7 @@ function renderMyLogin() {
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
       if (!d.ok) throw new Error('账号或密码不对，或账号还没开通');
-      sessionStorage.setItem(MY_KEY(), d.token);
+      sessionStorage.setItem(MY_ANY_KEY, d.token);
       localStorage.setItem(MY_NAME_KEY(), d.name || nm);
       toast('验证通过');
       loadMy();
@@ -2362,6 +2319,7 @@ function bindClaimCard(claim) {
    没登记手机号的人走兜底：页面出 6 位绑定码，发给机器人同样能绑。 */
 let pushState = null;
 let pushSrTimer = null;
+let pushScanTimer = null;
 
 function pushCard(p) {
   return '<div class="card my-push"><h2 class="card-t">微信推送</h2>' +
@@ -2397,36 +2355,18 @@ function pushNotReady() {
 }
 
 function pushUnboundHtml(p) {
-  /* 主口径：扫码加好友 → 把手机号发给机器人。
-     手机号没登记的人（hasPhone=false）才给 6 位绑定码兜底。 */
+  /* 2026-10-11：用户自己扫码绑定（官方 openclaw-weixin 协议，多账号）。
+     每个主播扫自己的码 → 确认后服务端拿到该账号的 bot 凭证 → 首次给机器人
+     发消息留下会话上下文 → 之后的推送走这个账号自己的 token。 */
   let h = '<div class="sub" style="margin-top:8px;line-height:1.75">' +
-    '<b>1.</b> 用微信扫下面的码，添加机器人好友（长按识别 / 截图后扫一扫）。<br>' +
-    '<b>2.</b> 把你的<b>手机号</b>' + (p.phoneMasked ? '（' + esc(p.phoneMasked) + '）' : '') +
-    '发给机器人，收到「绑定成功」就完成。' +
-    '<br>绑定是你个人的，只有你自己能设置和接收。</div>';
-  if (p.hasQr) {
-    h += '<img class="qrcode" alt="微信机器人二维码" src="/api/public/teams/' + TEAM +
-      '/my/push/qr?access_token=' + encodeURIComponent(myToken()) + '">';
-  } else {
-    h += '<div class="hint" style="margin-top:8px">管理员还没上传机器人二维码，' +
-      '先在后台「机器人」页上传机器人的微信名片码。</div>';
-  }
-  if (p.hasPhone) {
-    h += '<div class="code" style="font:700 17px/1.5 var(--mono, monospace);letter-spacing:.5px">' +
-      esc(p.phoneMasked || '') + '</div>' +
-      '<div class="sub" style="text-align:center">把这个手机号发给机器人即可</div>';
-    h += '<button class="go gray" id="pushNewCode">用绑定码代替（换号时用）</button>';
-  } else if (p.code) {
-    h += '<div class="sub" style="margin-top:8px">你的账号还没登记手机号，用<b>绑定码</b>绑定：</div>';
-    h += '<div class="code">' + esc(p.code) + '</div>' +
-      '<div class="sub" style="text-align:center">' +
-      (p.codeExpires ? esc(p.codeExpires.slice(11, 16)) + ' 之前有效 · ' : '') +
-      '把 6 位码发给机器人即可</div>' +
-      '<button class="go" id="pushNewCode">换一个码</button>';
-  } else {
-    h += '<div class="sub" style="margin-top:8px">你的账号还没登记手机号，用<b>绑定码</b>绑定：</div>';
-    h += '<button class="go" id="pushNewCode">获取绑定码</button>';
-  }
+    (p.scanBound
+      ? '✅ 扫码已确认。请在微信里给机器人发送任意一条消息，收到回执后推送就激活了。'
+      : '用微信扫描下面的二维码，确认授权后即可接收推送。') +
+    '</div>';
+  h += '<div id="pushScanBox" style="margin-top:10px"></div>' +
+    '<button class="go" id="pushScanStart">' +
+    (p.scanBound ? '重新扫码' : '获取二维码') + '</button>';
+  h += '<div class="hint" style="margin-top:8px">推送是你个人的：只有你自己扫码绑定的微信会收到。</div>';
   return h;
 }
 
@@ -2488,30 +2428,7 @@ function pushAddHtml() {
     '<button class="go" id="tkRankAdd">添加名次目标</button></div>';
 }
 
-function bindPushBox(p) {
-  const getCode = $('pushNewCode');
-  if (getCode) {
-    getCode.onclick = async () => {
-      getCode.disabled = true;
-      getCode.textContent = '生成中…';
-      try {
-        await fetch('/api/public/teams/' + TEAM + '/my/push/code', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ token: myToken() }),
-        }).then(async (r) => {
-          const d = await r.json().catch(() => ({}));
-          if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
-        });
-        await refreshPush();
-      } catch (e) {
-        getCode.disabled = false;
-        getCode.textContent = '获取绑定码';
-        toast(e.message || '生成失败');
-      }
-    };
-  }
-
+function bindPushBoundHandlers(p) {
   const swT = $('swTarget'), swD = $('swDaily');
   const saveFlags = async () => {
     try {
@@ -2688,6 +2605,114 @@ async function postPush(path, extra) {
   return d;
 }
 
+function bindPushBox(p) {
+  const btn = $('pushScanStart');
+  if (btn) btn.onclick = () => startPushScan();
+  // 已扫码但还没激活：轮询一下状态，用户发完消息后自动刷新
+  if (p && p.needActivate) {
+    clearTimeout(pushSrTimer);
+    pushSrTimer = setTimeout(() => refreshPush(), 5000);
+  }
+  if (p && p.bound) bindPushBoundHandlers(p);
+}
+
+/** 获取扫码二维码并轮询扫码状态（confirmed 后等服务端长轮询拿到首次消息） */
+async function startPushScan() {
+  const btn = $('pushScanStart');
+  const box = $('pushScanBox');
+  if (!btn || !box) return;
+  btn.disabled = true;
+  btn.textContent = '获取中…';
+  box.innerHTML = '';
+  try {
+    const r = await fetch('/api/public/teams/' + TEAM + '/my/push/wechat/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: myToken() }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+    let h = '';
+    if (d.imgContent) {
+      const src = String(d.imgContent).startsWith('data:')
+        ? d.imgContent : 'data:image/png;base64,' + d.imgContent;
+      h += '<img class="qrcode" alt="微信推送绑定二维码" src="' + esc(src) + '">';
+    } else if (d.url) {
+      h += '<a class="reg-link" href="' + esc(d.url) + '" target="_blank" rel="noopener">打开二维码链接</a>';
+    }
+    h += '<div class="reg-state wait" id="pushScanState">等待扫码…</div>' +
+      '<div id="pushScanVerify" class="hidden" style="margin-top:8px">' +
+      '<input id="pushScanCode" placeholder="微信里显示的验证码" inputmode="numeric" autocomplete="off">' +
+      '<button class="go gray" id="pushScanCodeGo">提交验证码</button></div>';
+    box.innerHTML = h;
+    btn.disabled = false;
+    btn.textContent = '重新获取';
+    startPushScanPoll(d.qrcode);
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = '获取二维码';
+    box.innerHTML = '<div class="form-err">' + esc(e.message || '获取失败，稍后再试') + '</div>';
+  }
+}
+
+function startPushScanPoll(qrcode) {
+  clearTimeout(pushScanTimer);
+  pushScanTimer = null;
+  let verifyCode = '';
+  let stopped = false;
+  const submit = $('pushScanCodeGo');
+  if (submit) {
+    submit.onclick = () => {
+      verifyCode = ($('pushScanCode') || {}).value || '';
+      submit.disabled = true;
+      submit.textContent = '提交中…';
+    };
+  }
+  const stop = () => { stopped = true; clearTimeout(pushScanTimer); pushScanTimer = null; };
+  const tick = async () => {
+    if (stopped) return;
+    try {
+      const r = await fetch('/api/public/teams/' + TEAM + '/my/push/wechat/poll', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: myToken(), qrcode: qrcode, verifyCode: verifyCode }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+      const st = String(d.status || '');
+      const el = $('pushScanState');
+      if (st === 'confirmed') {
+        stop();
+        toast('扫码成功，请在微信里给机器人发一条消息激活推送');
+        refreshPush();
+        return;
+      } else if (st === 'need_verifycode') {
+        show('pushScanVerify', true);
+        if (el) el.textContent = '需要验证码：请在微信里查看并填入';
+      } else if (st === 'scaned') {
+        if (el) el.textContent = '已扫码，等待确认…';
+      } else if (st === 'expired') {
+        stop();
+        if (el) el.textContent = '二维码已过期，请重新获取';
+        return;
+      } else if (st === 'verify_code_blocked') {
+        stop();
+        if (el) el.textContent = '验证失败次数过多，请重新获取二维码';
+        return;
+      } else if (st === 'scaned_but_redirect' || st === 'binded_redirect') {
+        if (el) el.textContent = '已扫码，等待确认…';
+      } else {
+        if (el) el.textContent = '等待扫码…';
+      }
+    } catch (e) {
+      const el = $('pushScanState');
+      if (el) el.textContent = e.message || '检测失败，重试中…';
+    }
+    if (!stopped) pushScanTimer = setTimeout(tick, 3000);
+  };
+  tick();
+}
+
 /* ==================== 视图切换 ==================== */
 /* 顶部导航 sticky 后，工具条吸顶位置要跟头部实际高度走（分组页多一条子导航） */
 function syncHeaderOffset() {
@@ -2706,7 +2731,7 @@ function switchView(v, opts) {
     if (s.groupEnabled === false || !sub) v = 'lineage';
     else if (!sub.classList.contains('on')) curGroup = sub.dataset.g;
   }
-  if (v === 'lineage' && (TEAM !== 'male' || s.lineageEnabled === false)) v = 'data';
+  if (v === 'lineage' && s.lineageEnabled === false) v = 'data';
   if (v === 'my' && s.loginRequired === false) v = 'data';
   view = v;
   document.querySelectorAll('[data-v]').forEach(b => b.classList.toggle('on', b.dataset.v === v));
@@ -2785,7 +2810,7 @@ function syncNav() {
   const s = (site && site.settings) || {};
   const dataOn = s.dataEnabled !== false;
   const groupOn = s.groupEnabled !== false;
-  const linOn = TEAM === 'male' && s.lineageEnabled !== false;
+  const linOn = s.lineageEnabled !== false;
   /* 子导航：把后台关掉的赛事类型按钮摘掉 */
   const gt = s.groupTypes || {};
   document.querySelectorAll('#subnav button').forEach(b => {
@@ -2802,134 +2827,31 @@ function syncNav() {
   show('navMy', s.loginRequired !== false);   // 关登录 = 全面开放，没有「我的」页
 }
 
-/* ==================== 启动 ==================== */
-/* 首页启动口径（2026-10-11 用户口径，男女共用一个网址）：
-   · 站点开放（后台关掉「开启登录」）→ 先弹团别选择卡选男团/女团，选完再进；
-   · 站点需登录（后台开着「开启登录」）→ 不选团，直接弹登录门；登录后按账号所属团进
-     （绑定主播的账号只有一个团；管理员观看账号 / 注册了还没绑主播的账号团别待定，
-      这时才用记住的团别，没记住才弹选择卡）。
-   选中/定团后记住，下次直开默认进上次的团；顶部「换团」随时可重选。
-   点之前就把男女两团的站点配置都预取（sitePrefetch），选中后直接用现成结果，
-   不用等接口往返 —— 选团秒进。 */
-let sitePrefetch = {};   // 'male'/'female' → Promise<site 配置>
-
-function prefetchSites() {
-  const tok = myToken();   // 需登录站点要带 token，不然只能预取到 401
-  ['male', 'female'].forEach((t) => {
-    if (sitePrefetch[t]) return;   // 只预取一次
-    sitePrefetch[t] = fetch('/api/public/teams/' + t +
-      (tok ? '?access_token=' + encodeURIComponent(tok) : ''))
-      .then((r) => r.json().then((d) => ({ ok: r.ok, data: d })));
-  });
-}
-
-/* 不带 token 探一次站点接口：401 = 需登录（登录优先，不先选团）；200 = 开放。
-   探到的配置顺手塞进 sitePrefetch，选团/进站时不用再等接口往返。 */
+/* ==================== 启动（统一展示端） ====================
+   2026-10-11 修复：首页不再弹「男团 / 女团」选择卡，也不根据登录账号所属团
+   跳转；统一直接进 /api/public/teams/all 的全量展示。 */
 async function siteIsOpen() {
   try {
-    const r = await fetch('/api/public/teams/male');
-    const d = await r.json().catch(() => null);
-    if (r.ok && d) {
-      sitePrefetch.male = Promise.resolve({ ok: true, data: d });
-      return true;
-    }
-  } catch (_) { /* 网络问题按「需登录」走：登录卡/接口层会给出报错 */ }
-  return false;
+    const r = await fetch('/api/public/teams/all');
+    return r.ok;
+  } catch (_) { return false; }
 }
 
-/** 记住的团别（上次看的那团）；没记住/值不对返回空串 */
-function savedTeam() {
-  const t = localStorage.getItem(TEAM_KEY);
-  return t === 'male' || t === 'female' ? t : '';
-}
-
-/** 定团进站：记住团别 → 刷新标题/导航 → 预取两团配置 → 走 bootRest
-    （选择卡选完、启动自动定团、换团重选都走这里） */
-function enterTeam(team) {
-  TEAM = team;
-  localStorage.setItem(TEAM_KEY, team);
-  applyTeam();
-  prefetchSites();
-  bootRest();
-}
-
-function showTeamPicker() {
-  prefetchSites();
-  const g = $('gate');
-  g.classList.remove('hidden');
-  g.innerHTML = '<div class="gate-box"><div class="card card-pad team-pick">' +
-    '<div class="pick-title">选择要查看的团队</div>' +
-    '<div class="pick-row">' +
-    '<button class="pick-btn" id="pickM"><span class="pick-av" style="background:#3B82F6">男</span>男团</button>' +
-    '<button class="pick-btn" id="pickF"><span class="pick-av" style="background:#EC4899">女</span>女团</button>' +
-    '</div></div></div>';
-  const pick = (team) => {
-    g.classList.add('hidden');
-    g.innerHTML = '';
-    enterTeam(team);
-  };
-  $('pickM').onclick = () => pick('male');
-  $('pickF').onclick = () => pick('female');
-}
-
-/* 选定团别后刷新页面上所有团相关显示（标题、徽标、标题栏、导航）。
-   徽标元素 id 是 btnTeam（兼「换团」按钮），不是旧的 mhBadge。 */
 function applyTeam() {
-  const badge = $('btnTeam');
-  if (badge) badge.textContent = CODE();
   $('mhTitle').textContent = LABEL() + '数据榜';
-  document.title = LABEL() + '每日报告';
+  document.title = '主播每日报告';
   const linBtn = document.getElementById('navLineage');
-  if (linBtn) linBtn.style.display = TEAM === 'male' ? '' : 'none';
-}
-
-/* 换团：
-   · 开放站点：清掉记住的团别 + 我的登录态，回团别选择卡；
-   · 需登录站点：团别待定的账号（管理员观看 / 注册了还没绑主播）两团都能看，
-     换团只重选不退出；绑定到某个主播的账号只有本团，换团 = 退出重新登录。 */
-function switchTeam() {
-  const needLogin = !!(site && (site.settings || {}).loginRequired !== false);
-  const anyTeam = !!(meState && meState.anyTeam);
-  localStorage.removeItem(TEAM_KEY);
-  TEAM = null;
-  if (needLogin && !anyTeam) {
-    myLogout();
-    toast('该账号只属于本团，换团请重新登录');
-    ensureLogin().then(() => location.reload());
-    return;
-  }
-  if (!needLogin) myLogout();
-  showTeamPicker();
+  if (linBtn) linBtn.style.display = '';
 }
 
 (async function boot() {
-  /* ① 带着登录态重开：token 记在哪个团就是哪个团；
-        团别待定的登录态用记住的团别，没记住才弹选择卡 */
-  const sess = mySession();
-  if (sess.token) {
-    const team = sess.team || savedTeam();
-    if (team) { enterTeam(team); return; }
-    showTeamPicker();
-    return;
-  }
-  const saved = savedTeam();
-  /* ② 没登录态：看站点开没开 —— 开放先选团；需登录直接弹登录门，
-        登录成功后按账号所属团进（团别待定才用记住的团别 / 弹选择卡） */
-  if (await siteIsOpen()) {
-    if (saved) enterTeam(saved);
-    else showTeamPicker();
-    return;
-  }
-  const me = await ensureLogin();
-  const team = (me && me.team) || saved;
-  if (team) { enterTeam(team); return; }
-  showTeamPicker();
+  applyTeam();
+  if (await siteIsOpen()) { bootRest(); return; }
+  await ensureLogin();
+  bootRest();
 })();
 
 async function bootRest() {
-
-  /* 换团按钮（徽标）：回团别选择卡 */
-  $('btnTeam').onclick = switchTeam;
 
   /* 主导航 + 分组子导航 + 前进/后退 */
   document.querySelectorAll('[data-v]').forEach(b => b.onclick = () => switchView(b.dataset.v));
@@ -2959,22 +2881,15 @@ async function bootRest() {
   }
 
   /* 先拿站点配置：登录开关在 settings 里，关登录时根本不用弹登录门。
-     选择卡弹出来时就已经把男女两团配置预取了（sitePrefetch），这里直接等
-     本团的预取结果 —— 通常早已返回，选中即渲染，不再等接口往返。
-     预取失败/没预取（老缓存）就现拉一次。401（要登录）→ 弹登录门重试。 */
+     401（要登录）→ 弹登录门重试。 */
   const fetchSite = () => api('/api/public/teams/' + TEAM);
   try {
-    site = await (sitePrefetch[TEAM] || Promise.resolve({ ok: false, data: null }))
-      .then((p) => {
-        if (p && p.ok) return p.data;
-        return fetchSite();
-      })
-      .catch(async (e) => {
-        if (String(e.message || '').indexOf('登录') < 0) throw e;
-        const me = await ensureLogin();
-        applyLoginState(me);
-        return fetchSite();
-      });
+    site = await fetchSite().catch(async (e) => {
+      if (String(e.message || '').indexOf('登录') < 0) throw e;
+      const me = await ensureLogin();
+      applyLoginState(me);
+      return fetchSite();
+    });
   } catch (e) {
     if (regionBlockedShown) return;   // 已展示地区门禁整页提示，别覆盖成「连不上服务」
     document.body.innerHTML = '<div class="empty" style="padding-top:120px"><span class="big">📡</span>' +
@@ -3013,7 +2928,7 @@ async function bootRest() {
     if (v === 'data' && s.dataEnabled === false) return fb;
     if (v === 'group' && (s.groupEnabled === false ||
         !document.querySelector('#subnav button:not([disabled])'))) return fb;
-    if (v === 'lineage' && (TEAM !== 'male' || s.lineageEnabled === false)) return fb;
+    if (v === 'lineage' && s.lineageEnabled === false) return fb;
     if (v === 'my' && s.loginRequired === false) return fb;
     return v;
   };

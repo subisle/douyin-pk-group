@@ -237,6 +237,51 @@ pub async fn scheduler_loop(st: Arc<AppState>) {
     }
 }
 
+/// 给一条绑定发消息：优先走用户自己扫码得到的微信账号（多账号），
+/// 没有扫码凭证时回落到管理员机器人（旧手机号 / 绑定码路径）。
+///
+/// 扫码账号的主动推送必须带用户首次入站留下的 context_token（官方协议：
+/// 私聊是会话上下文形态）。没等到用户消息时明确报错，推送机会留到下次。
+async fn send_binding(
+    st: &Arc<AppState>,
+    b: &crate::store::PushBinding,
+    wx_global: Option<&Arc<crate::bot::weixin::WxTransport>>,
+    text: &str,
+) -> anyhow::Result<()> {
+    if let Some(a) = crate::store::wx_push_account_get(st, &b.name).await {
+        anyhow::ensure!(!a.bot_token.is_empty(), "扫码账号凭证为空，请重新扫码");
+        let conv = if a.conversation_id.is_empty() {
+            b.conversation_id.clone()
+        } else {
+            a.conversation_id.clone()
+        };
+        let (to_user, context_token) = crate::store::wx_session_get(st, &conv)
+            .await
+            .unwrap_or_default();
+        let to_user = if to_user.is_empty() {
+            a.ilink_user_id.clone()
+        } else {
+            to_user
+        };
+        anyhow::ensure!(
+            !context_token.is_empty(),
+            "等待你在微信里给机器人发送一条消息以激活推送"
+        );
+        return crate::bot::weixin::user_send_text(
+            &a.base_url,
+            &a.bot_token,
+            &to_user,
+            &context_token,
+            text,
+        )
+        .await;
+    }
+    let Some(wx) = wx_global else {
+        anyhow::bail!("没有可用的微信推送通道（请先在「我的」页扫码绑定）");
+    };
+    wx.send_proactive(&b.conversation_id, text).await
+}
+
 /* ------------------------------ 主流程 ------------------------------ */
 
 pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<()> {
@@ -244,13 +289,12 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
     if bindings.is_empty() {
         return Ok(());
     }
-    let Some(mgr) = st.bots.get() else {
-        return Ok(());
-    };
-    let Some(wx) = mgr.wechat.clone() else {
-        tracing::debug!("微信渠道未配置，跳过推送");
-        return Ok(());
-    };
+    // 用户自助扫码的账号优先；没有扫码凭证时回落到管理员机器人（兼容旧绑定）
+    let wx_global = st
+        .bots
+        .get()
+        .and_then(|m| m.wechat.as_ref())
+        .map(std::sync::Arc::clone);
 
     // 本月累计（追分口径：本月音浪，不是历史累计）
     let month = date.get(..7).unwrap_or(date).to_string();
@@ -280,7 +324,7 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
             } else {
                 let text = daily_report_text(team, date, &rank_items, b.person_id);
                 tracing::info!(account = %b.name, text = %text.replace('\n', " | "), "推送·每日报告");
-                match wx.send_proactive(&b.conversation_id, &text).await {
+                match send_binding(st, b, wx_global.as_ref(), &text).await {
                     Ok(()) => {
                         sent_any = true;
                         crate::store::push_set_last_report_date(st, &b.name, date).await;
@@ -337,7 +381,7 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
                         fmt_wan(my)
                     );
                     tracing::info!(account = %b.name, text = %text.replace('\n', " | "), "推送·追分提醒");
-                    match wx.send_proactive(&b.conversation_id, &text).await {
+                    match send_binding(st, b, wx_global.as_ref(), &text).await {
                         Ok(()) => {
                             sent_any = true;
                             tracing::info!(account = %b.name, targets = targets.len(), "追分提醒已推送");

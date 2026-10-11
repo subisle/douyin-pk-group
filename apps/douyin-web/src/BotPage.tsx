@@ -400,10 +400,11 @@ export default function BotPage() {
       </div>
 
       <section className="card">
-        <h2>微信推送 · 加好友二维码</h2>
+        <h2>微信推送 · 加好友二维码（旧流程兜底）</h2>
         <p className="hint">
-          主播扫这张码加机器人后，<b>把自己的手机号发给机器人</b>即完成绑定（手机号要在下面
-          「我的」页面账号里登记过）。没登记手机号的人走兜底：「我的」页出 6 位绑定码，发给机器人同样能绑。
+          现役流程是主播在「我的」页<b>自己扫码绑定微信推送</b>（官方 openclaw-weixin 协议，
+          扫码后由服务端按账号长轮询）。下面这张二维码只作为旧流程（加好友 → 发手机号 + 绑定码）的兜底，
+          新部署可以不配。
         </p>
         <div className="row">
           <button onClick={() => addQrFileRef.current?.click()}>
