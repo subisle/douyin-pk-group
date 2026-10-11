@@ -1167,7 +1167,9 @@ function applyLoginState(me) {
   /* 提醒条用 hidden 属性控制（CSS 写的是 .bindbar[hidden]），不是 class="hidden" */
   const bar = $('bindBar');
   if (bar) bar.hidden = !needBind;
-  applyWatermark(needBind ? '未绑定主播' : (me && me.name));
+  /* 水印口径（2026-10-11）：显示自己的手机号（打码），没有手机号才回退艺名 */
+  const wmText = needBind ? '未绑定主播' : ((me && (me.phone || me.name)) || '');
+  applyWatermark(wmText === (me && me.phone) && wmText ? maskPhone(wmText) : wmText);
   return me;
 }
 
@@ -2680,7 +2682,8 @@ async function doBind(personId, name) {
     /* 绑定成功后换发的 token 带主播所在团：改存到团别那一档，清掉团别待定那档 */
     sessionStorage.setItem(MY_ANY_KEY, d.token);
     localStorage.setItem(MY_ANY_NAME, d.name || name);
-    applyLoginState({ name: d.name, personId: d.personId, bound: true, needBind: false });
+    /* 绑定成功后保留登录时的手机号（水印还用它） */
+    applyLoginState({ name: d.name, phone: (meState && meState.phone) || '', personId: d.personId, bound: true, needBind: false });
     toast('已绑定主播：' + (d.name || name));
     loadMy();
   } catch (e) {
@@ -2741,7 +2744,10 @@ function renderMyLogin() {
 function renderMy(d, series, claim, bound, push) {
   if (d.name) {
     localStorage.setItem(MY_NAME_KEY(), d.name);
-    applyWatermark(d.name);   // 以台账艺名为准刷新水印
+    /* 水印口径（2026-10-11）：手机号优先（打码），无手机号回退艺名。
+       my 数据接口不带 phone，手机号从登录态 meState 取，避免被艺名覆盖 */
+    const wmPhone = meState && meState.phone;
+    applyWatermark(wmPhone ? maskPhone(wmPhone) : d.name);
   }
   pushState = push || null;
   const minText = (v) => v == null ? '' : '时长 ' + (v >= 60

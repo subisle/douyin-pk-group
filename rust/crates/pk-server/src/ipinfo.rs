@@ -2,7 +2,7 @@
 //!
 //! 数据源全部来自 ihmily/ip-info-api 收集的免费接口
 //! （<https://github.com/ihmily/ip-info-api>）：全部并行查询、投票合并、MySQL 缓存 7 天。
-//! 展示端只放行河南 / 安徽 / 江苏——有任一接口识别出这三个省就放行；都没识别出来就不放行；
+//! 展示端只放行河南 / 安徽——有任一接口识别出这两个省就放行；都没识别出来就不放行；
 //! 所有接口都失败也拒绝（外部接口集体故障时门禁不放水）。
 //! 本地开发用 `IP_GATE_DISABLED=1` 关掉拦截（访问日志照记）。
 //!
@@ -49,7 +49,7 @@ pub struct IpGeo {
     pub isp: String,
     /// 命中的来源列表（逗号分隔，排查用）
     pub source: String,
-    /// 门禁判定结果（任一来源识别出河南 / 安徽 / 江苏 → true）
+    /// 门禁判定结果（任一来源识别出河南 / 安徽 → true）
     pub allowed: bool,
 }
 
@@ -383,7 +383,7 @@ pub async fn ip_gate_page_mw(
         "<div style=\"text-align:center;padding:24px\">",
         "<div style=\"font-size:42px\">🔒</div>",
         "<b style=\"font-size:16px\">您的 ip 不在授权范围内</b>",
-        "<p style=\"color:#98a2b3;margin:8px 0 0\">本页面仅对安徽、河南、江苏开放</p>",
+        "<p style=\"color:#98a2b3;margin:8px 0 0\">本页面仅对安徽、河南开放</p>",
         "</div></body></html>",
     );
     (
@@ -665,8 +665,8 @@ fn sources_for(ip: &str, set: SourceSet) -> Vec<Source> {
     sources_named(ip, &source_names(set))
 }
 
-/// 合并：省份投票（票数最多者展示；并列优先河南 / 安徽 / 江苏），
-/// 放行判定 = 任一数据源识别出河南 / 安徽 / 江苏（原口径：宁可对属地的误报放行，也别把真人挡在门外）。
+/// 合并：省份投票（票数最多者展示；并列优先河南 / 安徽），
+/// 放行判定 = 任一数据源识别出河南 / 安徽（原口径：宁可对属地的误报放行，也别把真人挡在门外）。
 /// 城市 / 运营商取「说中最终省份」的第一个来源（中文源在列表前面）。
 fn merge(raws: &[(&str, RawGeo)]) -> IpGeo {
     let mut votes: HashMap<String, i64> = HashMap::new();
@@ -806,11 +806,10 @@ pub fn normalize_province(raw: &str) -> String {
     t.to_string()
 }
 
-/// 门禁口径：河南 / 安徽 / 江苏（2026-10-11 追加江苏：萧县紧邻江苏徐州，
-/// 部分萧县用户 IP 归属地落在江苏，一并放行）
+/// 门禁口径：河南 / 安徽（2026-10-11 用户口径：只放这两个省，江苏不再放行）
 pub fn allowed_province(province: &str) -> bool {
     let p = normalize_province(province);
-    p == "河南" || p == "安徽" || p == "江苏"
+    p == "河南" || p == "安徽"
 }
 
 /* ------------------------------- 各源解析 ------------------------------- */

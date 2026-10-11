@@ -2336,9 +2336,13 @@ pub async fn my_who(
     if name.is_empty() {
         return Err(ApiError::auth("账号不存在或已离团，请联系管理员"));
     }
-    Ok(Json(
-        json!({ "ok": true, "personId": person_id, "name": name, "team": my_team, "bound": true }),
-    ))
+    // 水印口径（2026-10-11 用户要求）：登录后全屏水印显示自己的手机号（打码），
+    // who 里带上 phone；账号没填手机号时前端回退艺名
+    let phone = crate::store::my_account_phone(&st, &token_name).await;
+    Ok(Json(json!({
+        "ok": true, "personId": person_id, "name": name, "team": my_team,
+        "phone": phone, "bound": true,
+    })))
 }
 
 /* --------------------- 抖音号绑定申请（展示端提交 → 管理端审计） --------------------- */
