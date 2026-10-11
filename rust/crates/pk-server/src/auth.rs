@@ -352,16 +352,23 @@ const OPEN_PREFIXES: &[&str] = &[
     "/api/health",
 ];
 
-/// P2-20：带边界的前缀匹配 —— `path` 以 `prefix` 开头，且 prefix 正好是完整
-/// 路径（`/api/health`）或其后紧跟 `/`（`/st/f` 命中 `/st/`）。
-/// `/api/public-x` 不会命中 `/api/public/`，`/10` 也不会命中 `/1`。
+/// P2-20：带边界的前缀匹配。命中条件（任一）：
+/// - `path` 正好等于 `prefix`（去掉尾斜杠后比较）：`/my` 命中 `/my/`
+/// - `path` 以 `prefix` 开头且 `prefix` 以 `/` 结尾：`/st/f` 命中 `/st/`
+/// - `path` 以 `{prefix}/` 开头：不带斜杠的前缀写法的子路径
+///
+/// `/api/public-x` 不会命中 `/api/public/`，`/10` 不会命中 `/1`，`/myfile` 不会命中 `/my`。
 fn open_prefix_hit(prefix: &str, path: &str) -> bool {
     if !path.starts_with(prefix) {
-        return false;
+        // 白名单写成 `/my/`，但前端 router 用的是不带尾斜杠的 `/my`：
+        // 去掉尾斜杠后等值也算命中。边界仍然成立：`/my-page`、`/reports` 不命中。
+        return prefix.strip_suffix('/').is_some_and(|base| path == base);
     }
     // 前缀以 / 结尾时天然带边界（下一个字符不可能让两段拼成别的段）；
-    // 不带 / 的前缀（/api/health 等）要求路径到此正好结束。
-    prefix.ends_with('/') || path.len() == prefix.len()
+    // 不带 / 的前缀（/1、/api/health 等）要么路径到此正好结束，要么紧跟 /。
+    prefix.ends_with('/')
+        || path.len() == prefix.len()
+        || path.as_bytes().get(prefix.len()) == Some(&b'/')
 }
 
 fn is_open(path: &str) -> bool {
@@ -644,6 +651,13 @@ mod tests {
             "/api/public/",
             "/api/public/teams/f",
             "/api/health",
+            // 不带尾斜杠的展示端子路径入口：白名单写的是 `/my/`，
+            // 但浏览器和前端 router 用的是 `/my`（历史上这里漏了，
+            // `/my` 被鉴权中间件拦成 401，展示端「我的」整页打不开）
+            "/my",
+            "/group",
+            "/report",
+            "/lineage",
         ] {
             assert!(is_open(p), "{p} 应该免鉴权");
         }
