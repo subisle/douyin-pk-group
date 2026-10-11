@@ -1082,7 +1082,7 @@ pub async fn log_login_path(
     account: &str,
     ok: bool,
 ) {
-    let allowed = gate_disabled() || ip_in_allowlist(&ip) || geo.allowed;
+    let allowed = gate_disabled() || ip_in_allowlist(ip) || geo.allowed;
     log_access(
         st,
         AccessLog {
