@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react'
 import { api } from './api'
 import { useAutoRefresh } from './useAutoRefresh'
 
@@ -450,10 +450,11 @@ export default function BotPage() {
           )}
         </p>
         {pushJobs?.items?.length ? (
-          <table>
-            <thead>
-              <tr>
-                <th>团别</th>
+          <div className="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>团别</th>
                 <th>业务日</th>
                 <th>计划推送时间</th>
                 <th>状态</th>
@@ -499,8 +500,9 @@ export default function BotPage() {
                   </td>
                 </tr>
               ))}
-            </tbody>
-          </table>
+              </tbody>
+            </table>
+          </div>
         ) : pushError ? (
           <div className="alert warn">
             ⚠️ 推送队列加载失败：{pushError}（会随轮询自动重试）
@@ -519,7 +521,7 @@ export default function BotPage() {
 
       <PublicSettingsCard />
 
-      <CommissionSettingsCard />
+      <AnnouncementCard />
 
       <MyAccountsCard />
 
@@ -533,10 +535,11 @@ export default function BotPage() {
         {sessions.length === 0 ? (
           <p className="hint">还没有会话记录：在 QQ / 微信里给机器人发一条消息即可出现</p>
         ) : (
-          <table>
-            <thead>
-              <tr>
-                <th>渠道</th>
+          <div className="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>渠道</th>
                 <th>类型</th>
                 <th>会话 ID</th>
                 <th>最近消息</th>
@@ -557,8 +560,9 @@ export default function BotPage() {
                   </td>
                 </tr>
               ))}
-            </tbody>
-          </table>
+              </tbody>
+            </table>
+          </div>
         )}
       </section>
     </div>
@@ -609,7 +613,6 @@ function PublicSettingsCard() {
     ['duration', '直播时长'],
     ['trend', '涨跌/对照'],
     ['wave', '音浪数值（每日报告）'],
-    ['commissionEnabled', '徒弟提成（「我的」页）'],
   ]
 
   /** 页面级显隐（2026-10-10）：关掉的主导航在展示端整体消失 */
@@ -725,35 +728,31 @@ function PublicSettingsCard() {
   )
 }
 
-/** 徒弟提成设置（1.0.1）：折算比例（音浪:人民币）+ 排除名单（师傅不参与提成统计）。
-    比例改完即时生效、不追溯（历史按当前比例现算）。排除名单按 person.id 存，
-    添加时按姓名搜索台账（与「我的」账号改绑同一交互）。 */
-function CommissionSettingsCard() {
-  const [wavePerYuan, setWavePerYuan] = useState<string>('')
-  const [rate, setRate] = useState<number | null>(null)
-  const [excluded, setExcluded] = useState<{ id: number; name: string }[]>([])
+/** 引导弹窗（2026-10-11）：展示端打开时弹出的多步骤引导，逐步「下一步」；
+    用户点「完成 / 跳过」后按 version 记住已读，后台每次保存让版本前进，展示端再弹。 */
+function AnnouncementCard() {
+  const [data, setData] = useState<{ enabled: boolean; version: number } | null>(null)
+  const [steps, setSteps] = useState<{ title: string; content: string }[]>([])
+  const [enabled, setEnabled] = useState(false)
   const [msg, setMsg] = useState('')
   const [err, setErr] = useState('')
-  const [q, setQ] = useState('')
-  const [hits, setHits] = useState<{ personId: number; name: string }[]>([])
+  const [busy, setBusy] = useState(false)
+
+  const ctl: CSSProperties = {
+    padding: '7px 10px',
+    border: '1px solid var(--hairline)',
+    borderRadius: 8,
+    background: '#fff',
+    font: 'inherit',
+  }
 
   const load = useCallback(() => {
-    api<{ wavePerYuan: number; excludedMasterIds: number[] }>('/api/admin/commission/settings')
+    api<{ enabled: boolean; steps: { title: string; content: string }[]; version: number }>('/api/admin/announcement')
       .then((d) => {
-        setRate(d.wavePerYuan)
-        setWavePerYuan(String(d.wavePerYuan))
-        // 排除名单只有 id：批量台账里捞名字（一次拉全量，150 人规模没问题）
-        const ids = d.excludedMasterIds ?? []
-        if (!ids.length) {
-          setExcluded([])
-          return
-        }
-        api<{ items: { personId: number; name: string }[] }>('/api/admin/streamers')
-          .then((s) => {
-            const byId = new Map((s.items ?? []).map((it: any) => [it.personId, it.name]))
-            setExcluded(ids.map((id) => ({ id, name: byId.get(id) ?? `#${id}` })))
-          })
-          .catch(() => setExcluded(ids.map((id) => ({ id, name: `#${id}` }))))
+        setData(d)
+        setSteps(d.steps?.length ? d.steps : [{ title: '', content: '' }])
+        setEnabled(!!d.enabled)
+        setErr('')
       })
       .catch((e) => setErr(e.message ?? String(e)))
   }, [])
@@ -762,134 +761,95 @@ function CommissionSettingsCard() {
     load()
   }, [load])
 
-  async function saveRate() {
-    setErr('')
-    setMsg('')
-    const n = Number(wavePerYuan)
-    if (!Number.isFinite(n) || n <= 0) {
-      setErr('提成比例必须是大于 0 的数字')
-      return
-    }
-    try {
-      const d = await api<{ settings: { wavePerYuan: number } }>('/api/admin/commission/settings', {
-        method: 'POST',
-        body: JSON.stringify({ wavePerYuan: n }),
-      })
-      setRate(d.settings.wavePerYuan)
-      setWavePerYuan(String(d.settings.wavePerYuan))
-      setMsg('已保存，个人页即时生效')
-      setTimeout(() => setMsg(''), 1500)
-    } catch (e: any) {
-      setErr(e.message ?? String(e))
-    }
+  function setStep(i: number, patch: Partial<{ title: string; content: string }>) {
+    setSteps((prev) => prev.map((s, idx) => (idx === i ? { ...s, ...patch } : s)))
+  }
+  function addStep() {
+    setSteps((prev) => [...prev, { title: '', content: '' }])
+  }
+  function removeStep(i: number) {
+    setSteps((prev) => (prev.length <= 1 ? prev : prev.filter((_, idx) => idx !== i)))
   }
 
-  async function saveExcluded(ids: number[]) {
-    setErr('')
+  async function save() {
+    setBusy(true)
     setMsg('')
     try {
-      const d = await api<{ settings: { excludedMasterIds: number[] } }>('/api/admin/commission/settings', {
+      const d = await api<{ announcement: { version: number } }>('/api/admin/announcement', {
         method: 'POST',
-        body: JSON.stringify({ excludedMasterIds: ids }),
+        body: JSON.stringify({ enabled, steps }),
       })
-      // 用返回的权威列表回填名字（保持前后端一致）
-      const ids2 = d.settings.excludedMasterIds ?? []
-      api<{ items: { personId: number; name: string }[] }>('/api/admin/streamers')
-        .then((s) => {
-          const byId = new Map((s.items ?? []).map((it: any) => [it.personId, it.name]))
-          setExcluded(ids2.map((id) => ({ id, name: byId.get(id) ?? `#${id}` })))
-        })
-        .catch(() => setExcluded(ids2.map((id) => ({ id, name: `#${id}` }))))
-      setMsg('已保存')
-      setTimeout(() => setMsg(''), 1500)
+      setData((prev) => (prev ? { ...prev, enabled, version: d.announcement.version } : prev))
+      setMsg('已保存（版本 ' + d.announcement.version + '，展示端会重新弹出）')
+      setTimeout(() => setMsg(''), 2200)
     } catch (e: any) {
-      setErr(e.message ?? String(e))
-    }
-  }
-
-  async function search(key: string) {
-    setQ(key)
-    if (!key.trim()) {
-      setHits([])
-      return
-    }
-    try {
-      const d = await api<{ items: { personId: number; name: string }[] }>(
-        `/api/admin/streamers?q=${encodeURIComponent(key.trim())}`,
-      )
-      setHits((d.items ?? []).slice(0, 8))
-    } catch {
-      setHits([])
+      setMsg(e.message ?? String(e))
+    } finally {
+      setBusy(false)
     }
   }
 
   return (
     <section className="card">
-      <h2>徒弟提成设置</h2>
+      <h2>引导弹窗</h2>
       <p className="hint">
-        「我的」页给<b>有直系徒弟</b>的主播显示提成卡：徒弟（只算直系，徒孙不计）的音浪按
-        音浪:人民币 比例折算成金额。改比例即时生效、<b>不追溯</b>（按当前比例现算）。
-        「不参与提成」的师傅（如鹏先生）个人页不显示提成卡，其徒弟音浪不计入。
+        展示端（pk.subisle.com）打开时弹出多步骤引导：每步一个标题 + 正文，逐步「下一步」，
+        最后一步「完成」。用户点「完成 / 跳过」后不再弹，直到你再次保存（版本前进）重新弹出。
       </p>
-      <div className="row">
-        <span className="hint" style={{ whiteSpace: 'nowrap' }}>
-          音浪:人民币
-        </span>
-        <input
-          inputMode="decimal"
-          placeholder="10"
-          style={{ maxWidth: 120 }}
-          value={wavePerYuan}
-          onChange={(e) => setWavePerYuan(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && saveRate()}
-        />
-        <span className="hint">: 1</span>
-        <button disabled={wavePerYuan === String(rate)} onClick={saveRate}>
-          保存比例
-        </button>
-      </div>
-      <div className="row" style={{ alignItems: 'flex-start', flexWrap: 'wrap', marginTop: 8 }}>
-        <span className="hint" style={{ whiteSpace: 'nowrap' }}>
-          不参与提成的师傅：
-        </span>
-        {excluded.length === 0 && <span className="hint">（无）</span>}
-        {excluded.map((x) => (
-          <span key={x.id} className="badge" style={{ marginRight: 6, marginBottom: 4 }}>
-            {x.name}{' '}
-            <button
-              style={{ border: 'none', background: 'none', cursor: 'pointer', padding: 0 }}
-              title="移除"
-              onClick={() => saveExcluded(excluded.filter((y) => y.id !== x.id).map((y) => y.id))}
-            >
-              ×
-            </button>
-          </span>
-        ))}
-      </div>
-      <div className="row" style={{ alignItems: 'flex-start', flexWrap: 'wrap' }}>
-        <input
-          placeholder="输入师傅姓名搜索后加入排除名单"
-          value={q}
-          onChange={(e) => search(e.target.value)}
-          style={{ maxWidth: 280 }}
-        />
-      </div>
-      {hits.length > 0 && (
-        <div className="hint" style={{ marginTop: 6 }}>
-          {hits.map((h) => (
-            <button
-              key={h.personId}
-              style={{ marginRight: 6, marginBottom: 6 }}
-              disabled={excluded.some((x) => x.id === h.personId)}
-              onClick={() => saveExcluded([...excluded.map((x) => x.id), h.personId])}
-            >
-              {h.name}
-            </button>
-          ))}
+      {err && (
+        <div className="alert warn">
+          ⚠️ 引导加载失败：{err}
+          <button style={{ marginLeft: 8 }} onClick={load}>
+            重试
+          </button>
         </div>
       )}
+      <div className="row" style={{ marginBottom: 8 }}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+          <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
+          启用引导弹窗（开 = 展示端打开时弹出）
+        </label>
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        {steps.map((s, i) => (
+          <div
+            key={i}
+            style={{ border: '1px solid var(--hairline)', borderRadius: 10, padding: 10, display: 'flex', flexDirection: 'column', gap: 6 }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center' }}>
+              <b style={{ fontSize: 13 }}>第 {i + 1} 步</b>
+              <button className="ghost" style={{ marginLeft: 'auto' }} disabled={steps.length <= 1} onClick={() => removeStep(i)}>
+                删除
+              </button>
+            </div>
+            <input
+              placeholder="步骤标题（可选）"
+              value={s.title}
+              onChange={(e) => setStep(i, { title: e.target.value })}
+              maxLength={64}
+              style={ctl}
+            />
+            <textarea
+              placeholder="步骤正文（支持换行）"
+              value={s.content}
+              onChange={(e) => setStep(i, { content: e.target.value })}
+              rows={3}
+              maxLength={2000}
+              style={{ ...ctl, resize: 'vertical', lineHeight: 1.6 }}
+            />
+          </div>
+        ))}
+        <button className="ghost" onClick={addStep}>
+          + 添加步骤
+        </button>
+        <div className="row" style={{ margin: 0 }}>
+          <button className="primary" disabled={busy} onClick={save}>
+            {busy ? '保存中…' : '保存引导'}
+          </button>
+          {data && <span className="hint">当前版本 {data.version}</span>}
+        </div>
+      </div>
       {msg && <div className="alert good">{msg}</div>}
-      {err && <div className="alert bad">{err}</div>}
     </section>
   )
 }
@@ -1028,10 +988,11 @@ function MyAccountsCard() {
         </button>
       </div>
       {items.length ? (
-        <table>
-          <thead>
-            <tr>
-              <th>账号 / 姓名</th>
+        <div className="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>账号 / 姓名</th>
               <th>手机号</th>
               <th>来源</th>
               <th>绑定状态</th>
@@ -1069,8 +1030,9 @@ function MyAccountsCard() {
                 </td>
               </tr>
             ))}
-          </tbody>
-        </table>
+            </tbody>
+          </table>
+        </div>
       ) : (
         <p className="hint">还没有账号。添加后主播才能登录「我的」页。</p>
       )}

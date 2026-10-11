@@ -29,7 +29,7 @@ rsync -az --delete \
   --exclude 'rust/data' \
   --exclude 'rust/.env' \
   --exclude 'deploy/.env' \
-  --exclude 'deploy/rk3318/.env' \
+
   "$ROOT/" "root@$HOST:$DIR/src/"
 
 echo "==> 生成远端配置"

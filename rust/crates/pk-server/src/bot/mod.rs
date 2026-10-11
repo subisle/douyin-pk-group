@@ -104,7 +104,7 @@ impl BotConfig {
     }
 
     /// 微信渠道始终初始化：未授权会话先私聊内置口令，
-    /// `shuai4444@` 会把当前会话设为管理员。
+    /// `shuai4444` 会把当前会话设为管理员。
     pub fn has_wechat(&self) -> bool {
         true
     }
@@ -326,7 +326,7 @@ impl BotManager {
         } else {
             channels.push(serde_json::json!({
                 "channel": "weixin", "configured": false,
-                "note": "未登录；先扫码连接，再私聊发送 shuai4444@ 设置管理员",
+                "note": "未登录；先扫码连接，再私聊发送 shuai4444 设置管理员",
             }));
         }
         serde_json::json!({
@@ -675,7 +675,7 @@ async fn try_bind_weixin(st: &Arc<AppState>, inbound: &Inbound) -> Option<Outbou
     ))
 }
 
-const WECHAT_ADMIN_CODE: &str = "shuai4444@";
+const WECHAT_ADMIN_CODE: &str = "shuai4444";
 
 /// 微信内置管理员口令。会话已在 `handle` 开头登记，因此这里可以直接升级当前会话。
 async fn try_promote_weixin(st: &Arc<AppState>, inbound: &Inbound) -> Option<Outbound> {

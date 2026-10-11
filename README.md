@@ -115,14 +115,14 @@ pnpm install && pnpm -F @pk/douyin-web dev  # 5173，/api 代理到 8787
 | `node scripts/check/uicheck-admin.mjs [BASE] [口令]` | 管理端（apps/douyin-web）路由与渲染自检：深链、刷新、导航、导入预览弹窗 | **默认会写**：第 7 段写 2019-01-01 测试日并当场删除；`UICHECK_READONLY=1` 时跳过该段，只跑路由与渲染断言（部署脚本默认只读） |
 | `node scripts/check/uicheck-register.mjs [BASE] [口令]` | 展示端「手机号注册」链路自检：WorkBuddy 授权 → 姓名校验 → 注册即绑定 → 手机号回登录 | **会写**一行 my_accounts（随机手机号），跑完用管理员接口删掉；只对测试/本机环境跑 |
 
-部署自检走的是只读形态：`scripts/deploy/host.sh` / `scripts/deploy/rk3318.sh` 内部以
+部署自检走的是只读形态：`scripts/deploy/host.sh` 内部以
 `UICHECK_READONLY=1 PREFIX=/admin` 调 `uicheck-admin.mjs`；全量自检（含入库回环）
 请在测试环境手动跑。
 
 ## 构建与部署
 
 > **现役生产是 147**（`147.90.235.187` / Debian 12 x86_64，`/opt/pk-server`，
-> 对外 `https://pk.subisle.com`）。rk3318（aarch64 Docker）是备用目标，
+> 对外 `https://pk.subisle.com`）。rk3318 已废弃（2026-10-11），
 > 64 / 115 的历史流程仅作参考。数据上线见 `scripts/deploy/upload-db-vps147.sh`
 > （本机 `douyin_dev` 整体 dump → 灌进 147 的 `pk-mariadb`）。
 
@@ -130,7 +130,7 @@ pnpm install && pnpm -F @pk/douyin-web dev  # 5173，/api 代理到 8787
 - `rust` job：`cargo test` / `cargo clippy -D warnings` / `cargo fmt --check`
 - `web` job：`tsc --noEmit` + `vite build`（只构建现役 `@pk/douyin-web`）
 - `docker` job：构建并推 ghcr 镜像（只有 `pk-server`），默认 amd64；
-  `arm64-bundle.yml` / `amd64-bundle.yml` 另出「可 `docker load` 的离线包」挂 rolling release
+  `amd64-bundle.yml` 另出「可 `docker load` 的离线包」挂 rolling release
 
 镜像里的前端固定是 `apps/douyin-web`（现役统一后台，history 路由挂 `/admin`）。
 
@@ -148,12 +148,6 @@ PK147_PASS='<root 口令>' scripts/deploy/147.sh
 数据库是本机容器 `pk-mariadb`，公网入口是 Caddy。旧的二进制/前端留在
 `/opt/pk-server/pk-server.bak-<时间戳>` 与 `web.bak-<时间戳>`，回滚就是换回去再重启。
 升级前会跑 `pk-server migrate`（只由 `douyin_migrator` 执行 DDL，按 `schema_migrations` 幂等）。
-
-一条命令发布到 rk3318（备用）：
-
-```bash
-scripts/deploy/rk3318.sh     # 等 CI → 下载 arm64 镜像包 → docker load → compose up → pk-server migrate → 只读自检
-```
 
 通用 compose（`deploy/docker-compose.yml`）：
 
@@ -232,7 +226,7 @@ caddy reload
 「sqlpub douyinxs 远程源库 + 64 连不上 MySQL」是单库决策（2026-10-09，docs/00 §4）之前的
 问题：现在业务与运行时状态统一在 MySQL（本机 `douyin_dev` / 生产 MariaDB `douyin`），
 不再从 sqlpub 同步，生产不配 `DB_A_*` 远程源，`sync.rs` 与「同步主播」命令均已删除。
-上线 = `scripts/deploy/upload-db-rk3318.sh` 把本机库整体 dump → scp → 恢复进生产 MariaDB
+上线 = `scripts/deploy/upload-db-vps147.sh` 把本机库整体 dump → scp → 恢复进生产 MariaDB
 （灌库前会先在目标机备份，见脚本头注释）。
 
 ### 远程备份库（2026-10-11）
@@ -346,9 +340,9 @@ person 的行先合并再入库**（`admin::merge_rows_by_person`），合并口
   外还有 16 个仍可选）。逗号分隔、未知名忽略、留空回默认；选中的源**并行查询、投票合并**：
   任一来源识别出河南 / 安徽即放行；都没识别出来或全部失败一律拒绝（**fail-closed**）。
 - **缓存与表**：归属结果落 MySQL `ip_geo_cache`，**缓存 7 天**；表结构与日志表同属迁移
-  `011_ip_geo`（147 发布脚本会自动跑 `pk-server migrate`，rk3318 需手动）。loopback / 私网 IP
+  `011_ip_geo`（147 发布脚本会自动跑 `pk-server migrate`）。loopback / 私网 IP
   不发外部查询，记为「内网」且**默认拒绝**（本机调试用 `IP_GATE_DISABLED=1`）。
-- **拦截位置**：中间件 `ip_gate_mw` 挂在 `/api/public/*` 这一层；**HTML 页面本身不拦** —— 外省
+- **拦截位置**：中间件 `ip_gate_mw` 挂在 `/api/public/*`、`ip_gate_page_mw` 挂在 HTML 页面 —— 外省
   访客页面照常打开，第一个数据接口返回 403 `{"error":"当前地区暂不支持访问"}`，前端整页显示
   该提示（**不是掉登录**，不清 token、不弹登录门）。
 - **访问日志**（表 `access_logs`）：`kind=api` 同 IP + 同路径 **5 分钟对齐桶去重**（非滑动窗口），

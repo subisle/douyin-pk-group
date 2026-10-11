@@ -68,9 +68,6 @@ pub struct PublicSettings {
     /// 想开时在管理端「公开站点设置 → 开放手机号注册」打开即可。
     #[serde(default)]
     pub my_register: bool,
-    /// 徒弟提成显示开关（1.0.1）：关 = /my 一律不下发 commission（金额关了防止反推音浪）。
-    #[serde(default = "default_true")]
-    pub commission_enabled: bool,
 }
 
 fn default_true() -> bool {
@@ -123,31 +120,6 @@ mod settings_tests {
         s.group_types.insert("月终争霸赛".into(), true);
         assert!(plan_visible_by_settings(&s, "初级争霸赛小组赛"));
     }
-
-    #[test]
-    fn commission_settings_defaults_are_total_rate_ten() {
-        let c: CommissionSettings = serde_json::from_str("{}").unwrap();
-        assert_eq!(c.wave_per_yuan, 10.0);
-        assert!(c.excluded_master_ids.is_empty());
-        // 老格式（只有比例）也能读
-        let c: CommissionSettings = serde_json::from_str(r#"{"wavePerYuan":8}"#).unwrap();
-        assert_eq!(c.wave_per_yuan, 8.0);
-        assert!(c.excluded_master_ids.is_empty());
-    }
-
-    #[test]
-    fn commission_payload_json_shape_roundtrip() {
-        let c = CommissionSettings {
-            wave_per_yuan: 12.5,
-            excluded_master_ids: vec![1027, 7],
-        };
-        let j = c.to_json();
-        assert_eq!(j["wavePerYuan"], 12.5);
-        assert_eq!(j["excludedMasterIds"][0], 1027);
-        let back: CommissionSettings = serde_json::from_value(j).unwrap();
-        assert_eq!(back.wave_per_yuan, 12.5);
-        assert_eq!(back.excluded_master_ids, vec![1027, 7]);
-    }
 }
 
 impl Default for PublicSettings {
@@ -168,8 +140,6 @@ impl Default for PublicSettings {
             login_required: true,
             // 注册默认关（用户口径 2026-10-10「注册先不开」）
             my_register: false,
-            // 提成显示默认开（比例/排除名单另存 commission_settings）
-            commission_enabled: true,
         }
     }
 }
@@ -242,7 +212,6 @@ impl PublicSettings {
             "groupTypes": self.group_types,
             "loginRequired": self.login_required,
             "myRegister": self.my_register,
-            "commissionEnabled": self.commission_enabled,
         })
     }
 }
@@ -272,7 +241,6 @@ pub async fn update_settings(State(st): State<ArcState>, Json(body): Json<Value>
     s.lineage_enabled = flag("lineageEnabled", s.lineage_enabled);
     s.login_required = flag("loginRequired", s.login_required);
     s.my_register = flag("myRegister", s.my_register);
-    s.commission_enabled = flag("commissionEnabled", s.commission_enabled);
     // 分组子页：传了 groupTypes（对象）就整包替换；没传保持原样。
     // 未知类型直接存下来也没关系 —— group_type_enabled 对没配置的类型按开处理，
     // 存 false 的才关。
@@ -287,39 +255,30 @@ pub async fn update_settings(State(st): State<ArcState>, Json(body): Json<Value>
     Ok(Json(json!({ "ok": true, "settings": s.to_json() })))
 }
 
-/* --------------------- 徒弟提成设置（1.0.1） --------------------- */
+/* ------------------------------- 引导弹窗 ------------------------------- */
 
-/// 提成配置（config 表 cfg_key = commission_settings）：
-/// 音浪:人民币 折算比例 + 不参与提成的师傅名单（按 person.id）。
-/// 每次计算现读（一次主键查询），后台改完即时生效；**不追溯**：
-/// 改比例后按当前比例对全部口径现算，历史不落账。
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// 引导弹窗（config 表 cfg_key = announcement）：多步骤引导，逐步「下一步」。
+/// 展示端打开时弹一次，用户点「完成 / 跳过」后按 version 记住已读，
+/// 直到下次保存（version 自增）再弹。
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
-pub struct CommissionSettings {
-    /// 多少音浪折 1 元（默认 10）
-    #[serde(rename = "wavePerYuan", default = "default_wave_per_yuan")]
-    pub wave_per_yuan: f64,
-    /// 不参与提成的师傅 person.id（鹏先生等）：他们的直系徒弟音浪不计入其提成
-    #[serde(rename = "excludedMasterIds", default)]
-    pub excluded_master_ids: Vec<u64>,
+pub struct Announcement {
+    pub enabled: bool,
+    pub steps: Vec<AnnounceStep>,
+    /// 每次保存自增；前端按版本判断是否已读（关闭后不再弹，直到版本变化）
+    pub version: u64,
 }
 
-fn default_wave_per_yuan() -> f64 {
-    10.0
+/// 引导弹窗的一步：标题 + 正文。
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Default)]
+pub struct AnnounceStep {
+    pub title: String,
+    pub content: String,
 }
 
-impl Default for CommissionSettings {
-    fn default() -> Self {
-        Self {
-            wave_per_yuan: default_wave_per_yuan(),
-            excluded_master_ids: Vec::new(),
-        }
-    }
-}
-
-impl CommissionSettings {
+impl Announcement {
     pub async fn load(st: &AppState) -> Self {
-        crate::store::config_get(st, "commission_settings")
+        crate::store::config_get(st, "announcement")
             .await
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default()
@@ -327,58 +286,59 @@ impl CommissionSettings {
 
     pub async fn save(&self, st: &AppState) {
         if let Ok(s) = serde_json::to_string(self) {
-            crate::store::config_set(st, "commission_settings", &s).await;
+            crate::store::config_set(st, "announcement", &s).await;
         }
     }
 
     fn to_json(&self) -> Value {
         json!({
-            "wavePerYuan": self.wave_per_yuan,
-            "excludedMasterIds": self.excluded_master_ids,
+            "enabled": self.enabled,
+            "steps": self.steps.iter().map(|s| json!({
+                "title": s.title,
+                "content": s.content,
+            })).collect::<Vec<_>>(),
+            "version": self.version,
         })
     }
 }
 
-/// GET /api/admin/commission/settings
-pub async fn get_commission_settings(State(st): State<ArcState>) -> ApiResult {
-    Ok(Json(CommissionSettings::load(&st).await.to_json()))
+/// GET /api/admin/announcement
+pub async fn get_announcement(State(st): State<ArcState>) -> ApiResult {
+    Ok(Json(Announcement::load(&st).await.to_json()))
 }
 
-/// POST /api/admin/commission/settings：缺省键 = 保留现值。
-/// 排除名单的 id 不在保存时校验存在性——人员后来删除了也只是匹配不到，接口不能因此挂。
-pub async fn update_commission_settings(
+/// POST /api/admin/announcement {enabled?, steps?: [{title, content}]}
+pub async fn update_announcement(
     State(st): State<ArcState>,
     Json(body): Json<Value>,
 ) -> ApiResult {
-    let mut c = CommissionSettings::load(&st).await;
-    if let Some(v) = body.get("wavePerYuan") {
-        let n = v
-            .as_f64()
-            .ok_or_else(|| anyhow::anyhow!("提成比例必须是大于 0 的数字"))?;
-        if !n.is_finite() || n <= 0.0 || n > 1_000_000.0 {
-            return Err(anyhow::anyhow!("提成比例必须是大于 0 的数字").into());
-        }
-        c.wave_per_yuan = n;
+    let mut a = Announcement::load(&st).await;
+    if let Some(v) = body.get("enabled").and_then(|v| v.as_bool()) {
+        a.enabled = v;
     }
-    if let Some(v) = body.get("excludedMasterIds") {
-        let arr = v
-            .as_array()
-            .ok_or_else(|| anyhow::anyhow!("排除名单格式不正确"))?;
-        let mut ids = Vec::with_capacity(arr.len());
-        for x in arr {
-            let id = x
-                .as_u64()
-                .ok_or_else(|| anyhow::anyhow!("排除名单格式不正确"))?;
-            ids.push(id);
-        }
-        ids.sort_unstable();
-        ids.dedup();
-        c.excluded_master_ids = ids;
+    if let Some(steps) = body.get("steps").and_then(|v| v.as_array()) {
+        a.steps = steps
+            .iter()
+            .filter_map(|s| {
+                let title = s.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                let content = s.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                // 完全空的步骤直接丢弃
+                if title.trim().is_empty() && content.trim().is_empty() {
+                    return None;
+                }
+                Some(AnnounceStep {
+                    title: title.trim().chars().take(64).collect(),
+                    content: content.trim().chars().take(2000).collect(),
+                })
+            })
+            .collect();
     }
-    c.save(&st).await;
-    crate::events::emit(crate::events::SCOPE_SETTINGS, "徒弟提成设置已更新");
-    Ok(Json(json!({ "ok": true, "settings": c.to_json() })))
+    // 每次保存都让版本前进，前端据此重新弹出（内容没变也弹，保证运营可主动重发）
+    a.version += 1;
+    a.save(&st).await;
+    Ok(Json(json!({ "ok": true, "announcement": a.to_json() })))
 }
+
 
 /* --------------------- 我的页面账号（管理端手动添加） --------------------- */
 
@@ -663,11 +623,14 @@ pub async fn site(
     let query_team = data_team(&team, &token_team(g.access_token.as_deref(), &headers)).to_string();
     gate_team(s.login_required, &team, g.access_token.as_deref(), &headers)?;
     let dates = crate::repos::get_available_dates(&st, None, false).await?;
+    // 公告弹窗：开启时随站点配置一起下发；关闭时不下发（前端不弹）
+    let ann = Announcement::load(&st).await;
     Ok(Json(json!({
         "published": true,
         "team": query_team,
         "latestDate": dates.first(),
         "dates": dates,
+        "announcement": if ann.enabled { ann.to_json() } else { Value::Null },
         "settings": {
             "daily": s.daily,
             "monthly": s.monthly,
@@ -898,14 +861,50 @@ pub async fn lineage(
     );
     let rows = mysql::query(&st.pools, &sid(&st), &sql).await?;
 
+    // 个人累计总音浪（与日报 totalWave 同口径：wave_reliable=1），内存 join。
+    let wave_sql = "SELECT person_id, CAST(SUM(wave) AS SIGNED) AS total \
+         FROM daily_metric WHERE wave_reliable = 1 GROUP BY person_id"
+        .to_string();
+    let mut wave_map: HashMap<u64, i64> = Default::default();
+    for r in mysql::query(&st.pools, &sid(&st), &wave_sql).await? {
+        wave_map.insert(row_pid(&r, "person_id"), row_i64(&r, "total"));
+    }
+
     let mut nodes: Vec<Value> = Vec::with_capacity(rows.len());
     let mut ids: std::collections::HashSet<u64> = Default::default();
+    let mut children: HashMap<u64, Vec<u64>> = Default::default();
     for r in &rows {
         let id = row_pid(r, "id");
         ids.insert(id);
+        if let Some(master) = read_opt_u64_field(r, "master_id").filter(|m| ids.contains(m)) {
+            children.entry(master).or_default().push(id);
+        }
     }
+    // 门下累计总音浪（自己 + 所有子孙），记忆化递归（人数几百，不会爆栈）。
+    fn subtree_wave(
+        id: u64,
+        children: &HashMap<u64, Vec<u64>>,
+        wave: &HashMap<u64, i64>,
+        memo: &mut HashMap<u64, i64>,
+    ) -> i64 {
+        if let Some(v) = memo.get(&id) {
+            return *v;
+        }
+        let mut total = wave.get(&id).copied().unwrap_or(0);
+        if let Some(kids) = children.get(&id) {
+            for k in kids {
+                total += subtree_wave(*k, children, wave, memo);
+            }
+        }
+        memo.insert(id, total);
+        total
+    }
+    let mut subtree_memo: HashMap<u64, i64> = Default::default();
     for r in &rows {
+        let id = row_pid(r, "id");
         let master_id = read_opt_u64_field(r, "master_id").filter(|m| ids.contains(m));
+        let wave = wave_map.get(&id).copied().unwrap_or(0);
+        let total_wave = subtree_wave(id, &children, &wave_map, &mut subtree_memo);
         nodes.push(json!({
             "id": row_pid(r, "id"),
             "name": r.try_get::<String, _>("name").unwrap_or_default(),
@@ -914,6 +913,9 @@ pub async fn lineage(
             "status": r.try_get::<String, _>("status").unwrap_or_default(),
             "generation": r.try_get::<Option<i64>, _>("generation").ok().flatten(),
             "disciples": row_i64(r, "disciples"),
+            // 音浪数值显隐（后台开关）：关掉后不下发任何数字
+            "wave": if s.wave { json!(wave) } else { Value::Null },
+            "totalWave": if s.wave { json!(total_wave) } else { Value::Null },
         }));
     }
     Ok(Json(json!({
@@ -921,6 +923,73 @@ pub async fn lineage(
         "team": team,
         "nodes": nodes,
     })))
+}
+
+/// 「徒弟 + 师傅」门下累计音浪统计（2026-10-11）：
+/// 师傅自己 + 所有子孙的可信音浪（wave_reliable=1）总和。
+/// 返回 (直系徒弟数, 徒弟音浪总和[不含自己], 门下累计音浪[含自己])。
+pub async fn lineage_wave_summary(
+    st: &AppState,
+    team: &str,
+    person_id: u64,
+) -> anyhow::Result<(i64, i64, i64)> {
+    if person_id == 0 {
+        return Ok((0, 0, 0));
+    }
+    let source = sid(st);
+    // 本团 person 树（只认有师门归属关系的那部分，与族谱同口径）
+    let tree_sql = format!(
+        "SELECT id, master_id FROM person \
+         WHERE deleted_at IS NULL AND ('{team}' = '' OR gender = '{team}')"
+    );
+    let rows = mysql::query(&st.pools, &source, &tree_sql).await?;
+    let mut ids: std::collections::HashSet<u64> = Default::default();
+    let mut children: HashMap<u64, Vec<u64>> = Default::default();
+    for r in &rows {
+        let id = row_pid(r, "id");
+        ids.insert(id);
+    }
+    for r in &rows {
+        let id = row_pid(r, "id");
+        if let Some(master) = read_opt_u64_field(r, "master_id").filter(|m| ids.contains(m)) {
+            children.entry(master).or_default().push(id);
+        }
+    }
+    // 每人累计总音浪（与榜单 totalWave 同口径）
+    let wave_sql = "SELECT person_id, CAST(SUM(wave) AS SIGNED) AS total \
+         FROM daily_metric WHERE wave_reliable = 1 GROUP BY person_id"
+        .to_string();
+    let mut wave_map: HashMap<u64, i64> = Default::default();
+    for r in mysql::query(&st.pools, &source, &wave_sql).await? {
+        wave_map.insert(row_pid(&r, "person_id"), row_i64(&r, "total"));
+    }
+    // 递归门下累计（记忆化）
+    fn subtree(
+        id: u64,
+        children: &HashMap<u64, Vec<u64>>,
+        wave: &HashMap<u64, i64>,
+        memo: &mut HashMap<u64, i64>,
+    ) -> i64 {
+        if let Some(v) = memo.get(&id) {
+            return *v;
+        }
+        let mut total = wave.get(&id).copied().unwrap_or(0);
+        if let Some(kids) = children.get(&id) {
+            for k in kids {
+                total += subtree(*k, children, wave, memo);
+            }
+        }
+        memo.insert(id, total);
+        total
+    }
+    let mut memo: HashMap<u64, i64> = Default::default();
+    let total_wave = subtree(person_id, &children, &wave_map, &mut memo);
+    let self_wave = wave_map.get(&person_id).copied().unwrap_or(0);
+    let disciple_count = children
+        .get(&person_id)
+        .map(|v| v.len() as i64)
+        .unwrap_or(0);
+    Ok((disciple_count, total_wave - self_wave, total_wave))
 }
 
 fn read_opt_u64_field(r: &sqlx::mysql::MySqlRow, col: &str) -> Option<u64> {
@@ -947,7 +1016,10 @@ pub async fn monthly(
     let s = PublicSettings::load(&st).await;
     let query_team = data_team(&team, &token_team(q.access_token.as_deref(), &headers)).to_string();
     gate_team(s.login_required, &team, q.access_token.as_deref(), &headers)?;
-    period_public(&st, &query_team, &q, true).await
+    // 显隐判定用**路径上的团**（all 恒为开放），数据过滤才用 query_team。
+    // 以前把 query_team 传进去判 team_enabled，匿名访客 token 为空 → data_team 返回 ""
+    // → team_enabled("") == false，月/年榜对所有人 published:false（前端 .slice 崩）。
+    period_public(&st, &team, &query_team, &q, true).await
 }
 
 pub async fn yearly(
@@ -959,12 +1031,20 @@ pub async fn yearly(
     let s = PublicSettings::load(&st).await;
     let query_team = data_team(&team, &token_team(q.access_token.as_deref(), &headers)).to_string();
     gate_team(s.login_required, &team, q.access_token.as_deref(), &headers)?;
-    period_public(&st, &query_team, &q, false).await
+    period_public(&st, &team, &query_team, &q, false).await
 }
 
-async fn period_public(st: &Arc<AppState>, team: &str, q: &ListQuery, is_month: bool) -> ApiResult {
+/// `gate` = URL 路径上的团（只用来判显隐：all 恒开放）；`team` = 实际数据过滤用的团
+/// （匿名 all → 空串 = 不过滤，绑了男/女团的主播 → male/female）。
+async fn period_public(
+    st: &Arc<AppState>,
+    gate: &str,
+    team: &str,
+    q: &ListQuery,
+    is_month: bool,
+) -> ApiResult {
     let s = PublicSettings::load(st).await;
-    if !s.team_enabled(team) {
+    if !s.team_enabled(gate) {
         return Ok(Json(json!({ "published": false })));
     }
     let enabled = if is_month { s.monthly } else { s.yearly };
@@ -993,7 +1073,8 @@ async fn period_public(st: &Arc<AppState>, team: &str, q: &ListQuery, is_month: 
         "p.id AS person_id, p.name, \
          CAST(SUM(t.w) AS SIGNED) AS wave, \
          CAST(SUM({minutes}) AS SIGNED) AS minutes, \
-         CAST(SUM(t.live) AS SIGNED) AS live_days",
+         CAST(SUM(t.live) AS SIGNED) AS live_days, \
+         CAST(SUM(t.off) AS SIGNED) AS off_days",
         &format!("{period}%"),
         team,
         " AND p.status <> 'left' AND p.hide_in_daily_report = 0",
@@ -1023,6 +1104,7 @@ async fn period_public(st: &Arc<AppState>, team: &str, q: &ListQuery, is_month: 
             item["minutes"] = json!(row_i64(r, "minutes"));
             item["liveDays"] = json!(row_i64(r, "live_days"));
         }
+        item["absentDays"] = json!(row_i64(r, "off_days"));
         if !s.wave {
             item["wave"] = Value::Null;
         }
@@ -1815,20 +1897,6 @@ pub fn self_prev_wave_sql(p: &PrevPeriods) -> String {
     )
 }
 
-/// 直系徒弟的日/月/年音浪（一条 SQL 条件聚合）。
-/// 口径与 my() 自身卡片一致：只过滤 deleted_at（软删的不算），不过滤 status（离队的音浪照算，
-/// 与「本人自身统计不看 status」一致），不合并副号 wave_snapshot（已知边界，docs/10 §6）。
-pub fn disciple_wave_sql(person_id: u64) -> String {
-    format!(
-        "SELECT \
-         CAST(SUM(CASE WHEN DATE_FORMAT(d.biz_date, '%Y-%m-%d') = '{{today}}' THEN d.wave END) AS SIGNED) AS d_wave, \
-         CAST(SUM(CASE WHEN DATE_FORMAT(d.biz_date, '%Y-%m') = '{{month}}' THEN d.wave END) AS SIGNED) AS m_wave, \
-         CAST(SUM(CASE WHEN DATE_FORMAT(d.biz_date, '%Y') = '{{year}}' THEN d.wave END) AS SIGNED) AS y_wave \
-         FROM daily_metric d \
-         WHERE d.wave_reliable = 1 \
-         AND d.person_id IN (SELECT id FROM person WHERE master_id = {person_id} AND deleted_at IS NULL)"
-    )
-}
 
 /// 个人页时长统计的三种窗口
 pub enum MinutesScope<'a> {
@@ -2133,64 +2201,11 @@ pub async fn my(
         }
     }
 
-    /* 徒弟提成（1.0.1）：直系徒弟可信音浪 ÷ 比例。只在有直系徒弟时下发；
-    排除名单里的师傅（鹏先生等）拿不到；管理员视角（personId=0）没有。 */
-    let commission = if s.commission_enabled && s.wave && person_id > 0 && !today.is_empty() {
-        let c = CommissionSettings::load(&st).await;
-        let excluded = c.excluded_master_ids.contains(&person_id);
-        let source = sid(&st);
-        let count = if excluded {
-            0
-        } else {
-            mysql::query(
-                &st.pools,
-                &source,
-                format!(
-                    "SELECT COUNT(*) AS n FROM person \
-                     WHERE master_id = {person_id} AND deleted_at IS NULL"
-                )
-                .as_str(),
-            )
-            .await?
-            .into_iter()
-            .next()
-            .map(|r| row_i64(&r, "n"))
-            .unwrap_or(0)
-        };
-        if excluded || count <= 0 {
-            Value::Null
-        } else {
-            let sql = disciple_wave_sql(person_id)
-                .replace("{today}", &today)
-                .replace("{month}", &month)
-                .replace("{year}", &year);
-            let r = mysql::query(&st.pools, &source, &sql)
-                .await?
-                .into_iter()
-                .next();
-            // 无行/NULL 都按 0 折算（徒弟都在册但没音浪 = ¥0，卡片仍显示）
-            let g = |col: &str| -> i64 {
-                r.as_ref()
-                    .and_then(|row| {
-                        row.try_get::<i64, _>(col)
-                            .ok()
-                            .or_else(|| row.try_get::<Option<i64>, _>(col).ok().flatten())
-                    })
-                    .unwrap_or(0)
-            };
-            let rate = c.wave_per_yuan;
-            let yuan = |w: i64| ((w as f64 / rate) * 100.0).round() / 100.0;
-            json!({
-                "rate": rate,
-                "discipleCount": count,
-                "daily":   { "wave": g("d_wave"), "yuan": yuan(g("d_wave")) },
-                "monthly": { "wave": g("m_wave"), "yuan": yuan(g("m_wave")) },
-                "yearly":  { "wave": g("y_wave"), "yuan": yuan(g("y_wave")) },
-            })
-        }
-    } else {
-        Value::Null
-    };
+    // 「徒弟 + 师傅」门下累计音浪（2026-10-11）：师傅自己 + 所有徒弟的累计音浪。
+    let (disciple_count, disciple_wave, total_wave) =
+        lineage_wave_summary(&st, &my_team, person_id)
+            .await
+            .unwrap_or((0, 0, 0));
 
     Ok(Json(json!({
         "published": true,
@@ -2201,9 +2216,14 @@ pub async fn my(
         "monthly": monthly,
         "yearly": yearly,
         "total": total,
-        "commission": commission,
         "teamRank": team_rank,
         "teamSize": team_size,
+        // 门下音浪统计：直系徒弟数 / 徒弟音浪总和 / 门下累计（自己 + 徒弟）
+        "disciple": {
+            "count": disciple_count,
+            "wave": if s.wave { json!(disciple_wave) } else { Value::Null },
+            "totalWave": if s.wave { json!(total_wave) } else { Value::Null },
+        },
         // 管理员观看账号（personId=0）：前端据此隐藏「绑定抖音号」表单
         "admin": person_id == 0,
     })))

@@ -131,9 +131,10 @@ fn read_source(id: &str) -> Result<SourceConfig> {
     })
 }
 
-/// 读出全部数据源；LOCAL/A/B 都可按环境变量启用，至少需要一个
+/// 读出全部数据源；LOCAL/A 可按环境变量启用，至少需要一个。
+/// B（userxs 老库）已废弃（2026-10-11）：A（douyinxs）作为备份保留。
 pub fn load_sources() -> Result<Vec<SourceConfig>> {
-    let mut list: Vec<SourceConfig> = ["LOCAL", "A", "B"]
+    let mut list: Vec<SourceConfig> = ["LOCAL", "A"]
         .iter()
         .filter_map(|id| read_source(id).ok())
         .collect();

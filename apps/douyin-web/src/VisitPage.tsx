@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { api, ApiError } from './api'
 import { useAutoRefresh } from './useAutoRefresh'
 
-/* 访客日志（2026-10-10）：展示端只对河南 / 安徽开放，这里是所有访问 / 登录记录。
+/* 访客日志（2026-10-10）：展示端只对河南 / 安徽 / 江苏开放，这里是所有访问 / 登录记录。
    登录了带账号；没登录只记 IP；外省被拦的访问同样入库，用于排查「谁被挡住了」。 */
 
 type Visit = {
@@ -14,7 +14,6 @@ type Visit = {
   isp: string
   source: string
   team: string
-  path: string
   account: string
   allowed: boolean
   loginOk: boolean
@@ -49,6 +48,13 @@ type Lookup = {
   sources: LookupSource[]
 }
 
+type AllowlistItem = {
+  id: number
+  ip: string
+  note: string
+  createdAt: string
+}
+
 const KIND_LABEL: Record<string, string> = {
   api: '访问',
   login: '登录',
@@ -81,6 +87,12 @@ export default function VisitPage() {
   const [looking, setLooking] = useState(false)
   const [lookup, setLookup] = useState<Lookup | null>(null)
   const [lookupError, setLookupError] = useState('')
+  const [allowlist, setAllowlist] = useState<AllowlistItem[]>([])
+  const [wlActive, setWlActive] = useState(false)
+  const [wlDraft, setWlDraft] = useState('')
+  const [wlNote, setWlNote] = useState('')
+  const [wlBusy, setWlBusy] = useState(false)
+  const [wlError, setWlError] = useState('')
 
   const load = useCallback(() => {
     const params = new URLSearchParams({ limit: '300' })
@@ -116,12 +128,55 @@ export default function VisitPage() {
       .finally(() => setLooking(false))
   }, [])
 
+  const loadAllowlist = useCallback(() => {
+    api<{ items: AllowlistItem[]; active: boolean }>('/api/admin/ip-allowlist')
+      .then((d) => {
+        setAllowlist(d.items ?? [])
+        setWlActive(!!d.active)
+        setWlError('')
+      })
+      .catch((e) => setWlError(e.message ?? String(e)))
+  }, [])
+
+  useEffect(loadAllowlist, [loadAllowlist])
+
+  const addAllowlist = useCallback(() => {
+    const ip = wlDraft.trim()
+    if (!ip) return
+    setWlBusy(true)
+    setWlError('')
+    api('/api/admin/ip-allowlist', {
+      method: 'POST',
+      body: JSON.stringify({ ip, note: wlNote.trim() }),
+    })
+      .then(() => {
+        setWlDraft('')
+        setWlNote('')
+        loadAllowlist()
+      })
+      .catch((e) => setWlError(e.message ?? String(e)))
+      .finally(() => setWlBusy(false))
+  }, [wlDraft, wlNote, loadAllowlist])
+
+  const removeAllowlist = useCallback(
+    (id: number) => {
+      setWlBusy(true)
+      setWlError('')
+      api(`/api/admin/ip-allowlist/${id}`, { method: 'DELETE' })
+        .then(() => loadAllowlist())
+        .catch((e) => setWlError(e.message ?? String(e)))
+        .finally(() => setWlBusy(false))
+    },
+    [loadAllowlist],
+  )
+
   return (
     <div className="page">
       <h1>访客日志</h1>
       <p className="hint">
-        展示端只对河南 / 安徽开放（后端按 IP 归属地判定，多数据源投票）。
-        这里记录所有访问与登录：登录了带账号，没登录只记 IP；外省被拦的访问也会入库。
+        展示端只对安徽 / 河南 / 江苏开放（后端按 IP 归属地判定，多数据源投票），
+        白名单是地区之外的额外放行 IP；其余 IP 一律提示「您的 ip 不在授权范围内」。
+        这里只记 IP 访问日志（登录了带账号，没登录只记 IP），不再记录路径。
       </p>
 
       {stats && (
@@ -139,12 +194,12 @@ export default function VisitPage() {
           <div className="card kpi k-good">
             <span className="hint">今日放行</span>
             <b>{stats.todayAllowed}</b>
-            <span className="hint">河南 / 安徽</span>
+            <span className="hint">白名单 / 地区</span>
           </div>
           <div className="card kpi k-warn">
             <span className="hint">今日拦截</span>
             <b>{stats.todayBlocked}</b>
-            <span className="hint">外省 / 查不到归属</span>
+            <span className="hint">不在授权范围</span>
           </div>
           <div className="card kpi">
             <span className="hint">今日登录</span>
@@ -191,6 +246,70 @@ export default function VisitPage() {
           )}
         </form>
       </div>
+
+      <section className="card" style={{ marginBottom: 12 }}>
+        <h2>访问白名单</h2>
+        <p className="hint" style={{ marginTop: 0 }}>
+          安徽 / 河南 / 江苏始终可访问；白名单是地区之外的<b>额外放行</b>（如省外的运营 /
+          管理员固定 IP）。支持精确 IP 或 CIDR（如 1.2.3.4 / 10.0.0.0/24）。
+        </p>
+        <div className="row" style={{ margin: 0 }}>
+          <form
+            style={{ display: 'flex', gap: 8 }}
+            onSubmit={(e) => {
+              e.preventDefault()
+              addAllowlist()
+            }}
+          >
+            <input
+              placeholder="IP，如 121.8.215.106 或 10.0.0.0/24"
+              value={wlDraft}
+              onChange={(e) => setWlDraft(e.target.value)}
+              style={{ width: 240 }}
+            />
+            <input
+              placeholder="备注（可选）"
+              value={wlNote}
+              onChange={(e) => setWlNote(e.target.value)}
+              style={{ width: 160 }}
+            />
+            <button className="primary" type="submit" disabled={wlBusy || !wlDraft.trim()}>
+              {wlBusy ? '保存中…' : '添加'}
+            </button>
+          </form>
+          {wlActive && <span className="badge b-active">白名单 {allowlist.length} 条</span>}
+          {!wlActive && <span className="hint">白名单为空 · 仅安徽 / 河南 / 江苏可访问</span>}
+        </div>
+
+        {wlError && <div className="alert bad">{wlError}</div>}
+
+        {allowlist.length > 0 && (
+          <table style={{ marginTop: 8 }}>
+            <thead>
+              <tr>
+                <th>IP</th>
+                <th>备注</th>
+                <th>添加时间</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {allowlist.map((a) => (
+                <tr key={a.id}>
+                  <td>{a.ip}</td>
+                  <td>{a.note || '—'}</td>
+                  <td>{a.createdAt}</td>
+                  <td>
+                    <button className="ghost" disabled={wlBusy} onClick={() => removeAllowlist(a.id)}>
+                      删除
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </section>
 
       <section className="card" style={{ marginBottom: 12 }}>
         <h2>IP 查询</h2>
@@ -270,10 +389,11 @@ export default function VisitPage() {
             {onlyBlocked || q ? '没有符合条件的记录。' : '还没有访问记录。'}
           </p>
         ) : (
-          <table>
-            <thead>
-              <tr>
-                <th>时间</th>
+          <div className="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>时间</th>
                 <th>类型</th>
                 <th>IP</th>
                 <th>归属地</th>
@@ -281,7 +401,6 @@ export default function VisitPage() {
                 <th>结果</th>
                 <th>账号</th>
                 <th>团别</th>
-                <th>路径</th>
               </tr>
             </thead>
             <tbody>
@@ -316,11 +435,11 @@ export default function VisitPage() {
                   </td>
                   <td>{v.account || '—'}</td>
                   <td>{TEAM_LABEL[v.team] ?? (v.team || '—')}</td>
-                  <td title={v.path}>{v.path || '—'}</td>
                 </tr>
               ))}
-            </tbody>
-          </table>
+              </tbody>
+            </table>
+          </div>
         )}
       </div>
     </div>

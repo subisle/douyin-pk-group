@@ -87,22 +87,6 @@ const SERIES_A: &str = "SELECT k, d, CAST(SUM(w) AS DOUBLE) AS w, \
       GROUP BY a.person_id, d
    ) t GROUP BY k, d";
 
-/// B：userxs —— persons / accounts / wave_stats（anchor_id 是关联键）
-const ANCHORS_B: &str =
-    "SELECT id, name, NULL AS avatar_url, 'active' AS status FROM persons ORDER BY name";
-const DATES_B: &str =
-    "SELECT DATE_FORMAT(date, '%Y-%m-%d') AS d FROM wave_stats GROUP BY d ORDER BY d DESC";
-const WAVES_B: &str =
-    "SELECT a.person_id AS k, CAST(SUM(ws.wave_value) AS DOUBLE) AS w FROM wave_stats ws
-     JOIN accounts a ON a.anchor_id = ws.anchor_id
-     WHERE DATE_FORMAT(ws.date, '%Y-%m-%d') IN (?PLACEHOLDERS?)
-     GROUP BY a.person_id";
-
-const SERIES_B: &str = "SELECT a.person_id AS k, DATE_FORMAT(ws.date, '%Y-%m-%d') AS d, CAST(SUM(ws.wave_value) AS DOUBLE) AS w, 0 AS live FROM wave_stats ws
-     JOIN accounts a ON a.anchor_id = ws.anchor_id
-     WHERE DATE_FORMAT(ws.date, '%Y-%m-%d') IN (?PLACEHOLDERS?)
-     GROUP BY a.person_id, d";
-
 pub struct Dialect {
     pub anchors_sql: &'static str,
     pub dates_sql: &'static str,
@@ -113,31 +97,15 @@ pub struct Dialect {
     pub series_sql: &'static str,
 }
 
-pub fn dialect_of(id: &str) -> Dialect {
-    if id == "LOCAL" {
-        Dialect {
-            anchors_sql: ANCHORS_A,
-            dates_sql: DATES_A,
-            baseline_sql: Some(BASELINE_A),
-            waves_sql: WAVES_A,
-            series_sql: SERIES_A,
-        }
-    } else if id == "B" {
-        Dialect {
-            anchors_sql: ANCHORS_B,
-            dates_sql: DATES_B,
-            baseline_sql: None,
-            waves_sql: WAVES_B,
-            series_sql: SERIES_B,
-        }
-    } else {
-        Dialect {
-            anchors_sql: ANCHORS_A,
-            dates_sql: DATES_A,
-            baseline_sql: Some(BASELINE_A),
-            waves_sql: WAVES_A,
-            series_sql: SERIES_A,
-        }
+/// 方言统一（2026-10-11）：B 数据源已废弃，LOCAL 与 A 的 schema 一致
+/// （person / daily_metric），共用同一套 SQL。
+pub fn dialect_of(_id: &str) -> Dialect {
+    Dialect {
+        anchors_sql: ANCHORS_A,
+        dates_sql: DATES_A,
+        baseline_sql: Some(BASELINE_A),
+        waves_sql: WAVES_A,
+        series_sql: SERIES_A,
     }
 }
 
@@ -156,7 +124,7 @@ pub fn inline_dates(sql: &str, dates: &[String]) -> anyhow::Result<String> {
     Ok(sql.replace("?PLACEHOLDERS?", &quoted.join(",")))
 }
 
-/* ------------------------- 管理端 SQL（B 阶段，LOCAL 专用） ------------------------- */
+/* ------------------------- 管理端 SQL（LOCAL 专用） ------------------------- */
 // 管理端读写在同一台本地 MariaDB（读走 pk_reader 池、写走 douyin_writer 池），
 // 与 A/B 采集源无关。日期一律 DATE_FORMAT 成字符串透传（同上 1835 兼容原因，
 // 值经 bind 绑定，字符串拼进来的只有日期白名单校验后的字面量）。
@@ -290,6 +258,7 @@ pub fn period_rollup_sql(
            SELECT d.person_id AS pid, DATE_FORMAT(d.biz_date, '%Y-%m') AS m, \
              SUM(d.wave) AS w, SUM(d.minutes) AS dm, \
              SUM(CASE WHEN d.wave >= 2 THEN 1 ELSE 0 END) AS live, \
+             SUM(CASE WHEN d.wave < 2 THEN 1 ELSE 0 END) AS off, \
              COUNT(DISTINCT d.biz_date) AS days \
            FROM daily_metric d \
            WHERE d.wave_reliable = 1 \

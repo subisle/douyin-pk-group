@@ -1,0 +1,307 @@
+<!DOCTYPE html><html class="h-full" lang="zh-CN" style=""><head><meta charset="utf-8"><meta content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" name="viewport"><meta content="mobile_tab" name="shell-type"><link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@100..900&amp;display=swap" rel="stylesheet"><script src="https://cdn.tailwindcss.com"></script><script id="tailwind-config">tailwind.config = { darkMode: "class", theme: { extend: { colors: { "on-surface": "#1b1b1d", "inverse-surface": "#303032", "on-primary-container": "#fefcff", "secondary-fixed": "#e2dfff", "on-primary": "#ffffff", "inverse-primary": "#adc6ff", "primary-container": "#0070eb", "error-container": "#ffdad6", "surface-container-high": "#eae7ea", "on-error-container": "#93000a", "outline-variant": "#c1c6d7", "inverse-on-surface": "#f3f0f2", "on-error": "#ffffff", "on-tertiary-container": "#fffbff", "surface-container-low": "#f6f3f5", "primary-fixed-dim": "#adc6ff", "error": "#ba1a1a", "surface-container-lowest": "#ffffff", "tertiary": "#9e3d00", "on-primary-fixed": "#001a41", "surface-container": "#f0edef", "on-tertiary-fixed": "#351000", "surface-variant": "#e4e2e4", "on-secondary": "#ffffff", "surface-dim": "#dcd9dc", "tertiary-container": "#c64f00", "on-background": "#1b1b1d", "on-primary-fixed-variant": "#004493", "surface-container-highest": "#e4e2e4", "on-tertiary": "#ffffff", "surface-tint": "#005bc1", "tertiary-fixed": "#ffdbcc", "on-secondary-fixed": "#0c006a", "primary": "#0058bc", "on-tertiary-fixed-variant": "#7c2e00", "secondary": "#4c4aca", "on-surface-variant": "#414755", "surface": "#fcf8fb", "tertiary-fixed-dim": "#ffb595", "on-secondary-fixed-variant": "#3631b4", "secondary-container": "#6664e4", "on-secondary-container": "#fffbff", "secondary-fixed-dim": "#c2c1ff", "surface-bright": "#fcf8fb", "background": "#fcf8fb", "outline": "#717786", "primary-fixed": "#d8e2ff" }, borderRadius: { "DEFAULT": "0.25rem", "lg": "0.5rem", "xl": "0.75rem", "full": "9999px" }, spacing: { "margin-lg": "3rem", "gutter-md": "1.5rem", "margin-md": "2rem", "margin": "1rem", "space-xl": "2.5rem", "gutter": "1rem", "space-md": "1rem", "space-xs": "0.25rem", "space-lg": "1.5rem", "space-sm": "0.5rem" }, fontFamily: { "body-lg": ["Inter"], "headline-lg": ["Inter"], "body-sm": ["Inter"], "display-lg": ["Inter"], "display-lg-mobile": ["Inter"], "label-md": ["Inter"], "body-md": ["Inter"], "caption": ["Inter"], "headline-sm": ["Inter"], "headline-md": ["Inter"], "label-sm": ["Inter"] }, fontSize: { "body-lg": ["17px", { lineHeight: "24px", letterSpacing: "-0.01em", fontWeight: "400" }], "headline-lg": ["28px", { lineHeight: "34px", letterSpacing: "-0.02em", fontWeight: "600" }], "body-sm": ["13px", { lineHeight: "18px", letterSpacing: "0em", fontWeight: "400" }], "display-lg": ["40px", { lineHeight: "48px", letterSpacing: "-0.025em", fontWeight: "700" }], "display-lg-mobile": ["32px", { lineHeight: "38px", letterSpacing: "-0.02em", fontWeight: "700" }], "label-md": ["14px", { lineHeight: "18px", letterSpacing: "-0.005em", fontWeight: "500" }], "body-md": ["15px", { lineHeight: "22px", letterSpacing: "-0.005em", fontWeight: "400" }], "caption": ["11px", { lineHeight: "14px", letterSpacing: "0.02em", fontWeight: "400" }], "headline-sm": ["18px", { lineHeight: "24px", letterSpacing: "-0.01em", fontWeight: "600" }], "headline-md": ["22px", { lineHeight: "28px", letterSpacing: "-0.015em", fontWeight: "600" }], "label-sm": ["12px", { lineHeight: "16px", letterSpacing: "0.01em", fontWeight: "500" }] } } } }</script><style>@layer base{html,body{min-height:100%;margin:0;padding:0;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;}.pb-safe{padding-bottom:env(safe-area-inset-bottom,0px);}.pt-safe{padding-top:env(safe-area-inset-top,0px);}main>:first-child{margin-top:0!important;}main>:last-child{margin-bottom:0!important;}}::-webkit-scrollbar{display:none;}</style></head><body class="bg-surface font-body-md text-on-surface antialiased flex flex-col min-h-screen selection:bg-primary-fixed"><header class="fixed top-0 w-full z-50 pt-safe bg-surface/80 backdrop-blur-xl shadow-[0_1px_8px_rgba(0,0,0,0.03)]"><div class="h-14 px-gutter flex items-center justify-between"><h1 class="font-headline-sm text-headline-sm text-on-surface tracking-tight font-semibold">Leaderboard</h1><div class="flex items-center gap-space-sm"><button aria-label="搜索" class="w-11 h-11 flex items-center justify-center text-on-surface-variant hover:text-on-surface transition-colors rounded-full"><span class="material-symbols-outlined text-[22px]">search</span></button><div class="w-8 h-8 rounded-full bg-primary flex items-center justify-center shrink-0"><span class="material-symbols-outlined text-on-primary text-[18px]">person</span></div></div></div></header><main class="flex-1 flex flex-col relative w-full pt-14 pb-20 bg-surface"><div class="flex flex-col w-full">
+<!-- 顶部筛选与周期切换区 -->
+<section class="px-gutter pt-space-sm pb-space-sm flex flex-col gap-space-sm">
+<!-- iOS 经典拟物分段控制器 -->
+<div class="w-full bg-surface-container-high p-1 rounded-full flex items-center justify-between shadow-inner">
+<button class="flex-1 py-1.5 rounded-full text-center font-label-md text-label-md font-medium text-on-surface-variant transition-all hover:text-on-surface" type="button">
+        日榜
+      </button>
+<button class="flex-1 py-1.5 rounded-full text-center font-label-md text-label-md font-medium text-on-surface bg-surface-container-lowest shadow-sm transition-all" type="button">
+        月榜
+      </button>
+<button class="flex-1 py-1.5 rounded-full text-center font-label-md text-label-md font-medium text-on-surface-variant transition-all hover:text-on-surface" type="button">
+        年榜
+      </button>
+</div>
+<!-- 日期横向滚动胶囊与快捷按钮 -->
+<div class="flex items-center gap-space-sm">
+<div class="flex-1 flex items-center gap-space-xs overflow-x-auto no-scrollbar py-0.5">
+<button class="shrink-0 px-3.5 py-1.5 rounded-full bg-surface-container-lowest text-on-surface shadow-sm font-label-sm text-label-sm font-semibold flex items-center gap-1">
+<span class="w-1.5 h-1.5 rounded-full bg-primary inline-block"></span>
+          10.06
+        </button>
+<button class="shrink-0 px-3 py-1.5 rounded-full bg-surface-container text-on-surface-variant font-label-sm text-label-sm hover:text-on-surface transition-colors">
+          10.05
+        </button>
+<button class="shrink-0 px-3 py-1.5 rounded-full bg-surface-container text-on-surface-variant font-label-sm text-label-sm hover:text-on-surface transition-colors">
+          10.04
+        </button>
+<button class="shrink-0 px-3 py-1.5 rounded-full bg-surface-container text-on-surface-variant font-label-sm text-label-sm hover:text-on-surface transition-colors">
+          10.03
+        </button>
+<button class="shrink-0 px-3 py-1.5 rounded-full bg-surface-container text-on-surface-variant font-label-sm text-label-sm hover:text-on-surface transition-colors">
+          10.02
+        </button>
+</div>
+<div class="shrink-0 flex items-center gap-1 bg-surface-container-low p-1 rounded-full shadow-sm">
+<button aria-label="日历选择" class="w-8 h-8 rounded-full flex items-center justify-center text-on-surface-variant hover:text-on-surface bg-surface-container-lowest transition-colors shadow-sm">
+<span class="material-symbols-outlined text-[17px]">calendar_today</span>
+</button>
+</div>
+</div>
+<!-- 排序规则提示徽章 -->
+<div class="flex items-center justify-between px-1 text-on-surface-variant">
+<div class="flex items-center gap-1">
+<span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+<span class="font-caption text-caption text-on-surface-variant font-medium">日榜按「日音浪」降序排列</span>
+</div>
+<span class="font-caption text-caption text-outline">月榜按总音浪统计</span>
+</div>
+</section>
+<!-- 领奖台 (Top 3 Podium) 极简纯白奢华风 -->
+<section class="px-gutter pt-space-xs pb-space-lg">
+<div class="grid grid-cols-3 items-end gap-space-xs">
+<!-- 榜眼 NO.2 三宝 (左侧) -->
+<div class="flex flex-col items-center pb-2">
+<div class="relative mb-2">
+<!-- 银霜冷白徽标：首字「三」 -->
+<div class="w-16 h-16 rounded-full bg-surface-container-lowest shadow-md flex items-center justify-center relative">
+<div class="w-14 h-14 rounded-full bg-slate-100 flex items-center justify-center">
+<span class="font-headline-sm text-headline-sm font-semibold text-slate-700 tracking-tight">三</span>
+</div>
+<!-- 名次标 -->
+<span class="absolute -bottom-1 left-1/2 -translate-x-1/2 px-2 py-0.2 bg-outline-variant text-on-surface-variant font-caption text-caption font-bold rounded-full shadow-sm">
+              2
+            </span>
+</div>
+</div>
+<div class="text-center w-full min-w-0">
+<h3 class="font-label-md text-label-md font-semibold text-on-surface truncate">三宝</h3>
+<div class="inline-block mt-0.5 px-1.5 py-0.2 bg-surface-container rounded font-caption text-[10px] text-on-surface-variant font-normal">未播 0天</div>
+<p class="font-body-md text-body-md font-bold text-on-surface tracking-tight tabular-nums mt-1">2万8314</p>
+<span class="font-caption text-[11px] text-primary font-medium tracking-wide block">日音浪</span>
+<p class="font-caption text-caption text-on-surface-variant tabular-nums mt-0.5">总 28万3140</p>
+</div>
+</div>
+<!-- 冠军 NO.1 狼辰 (居中放大凸显) -->
+<div class="flex flex-col items-center pb-5">
+<div class="relative mb-2.5">
+<!-- 微金暖光奢感徽标：首字「狼」 -->
+<div class="w-20 h-20 rounded-full bg-surface-container-lowest shadow-lg flex items-center justify-center relative">
+<div class="w-[70px] h-[70px] rounded-full bg-amber-50 flex items-center justify-center">
+<span class="font-headline-md text-headline-md font-bold text-amber-900 tracking-tight">狼</span>
+</div>
+<!-- 冠军光环小皇冠徽标 -->
+<div class="absolute -top-2 left-1/2 -translate-x-1/2 w-5 h-5 rounded-full bg-tertiary-fixed text-tertiary flex items-center justify-center shadow-sm">
+<span class="material-symbols-outlined text-[13px]" style="font-variation-settings: 'FILL' 1;">crown</span>
+</div>
+<!-- 名次标 -->
+<span class="absolute -bottom-1.5 left-1/2 -translate-x-1/2 px-2.5 py-0.5 bg-tertiary text-on-tertiary font-caption text-caption font-bold rounded-full shadow-sm">
+              1
+            </span>
+</div>
+</div>
+<div class="text-center w-full min-w-0">
+<h3 class="font-headline-sm text-headline-sm font-bold text-on-surface truncate">狼辰</h3>
+<div class="inline-block mt-0.5 px-2 py-0.5 bg-rose-50 text-error rounded-full font-caption text-[11px] font-medium border border-error-container/60">未播 1天</div>
+<p class="font-headline-sm text-headline-sm font-bold text-primary tracking-tight tabular-nums mt-1">3万2950</p>
+<span class="font-caption text-[11px] text-primary font-medium tracking-wide block">1日音浪</span>
+<p class="font-caption text-caption text-on-surface-variant font-medium tabular-nums mt-0.5">总 32万9500</p>
+</div>
+</div>
+<!-- 探花 NO.3 浩沐 (右侧) -->
+<div class="flex flex-col items-center pb-1">
+<div class="relative mb-2">
+<!-- 铜茶温润单字徽标：首字「浩」 -->
+<div class="w-16 h-16 rounded-full bg-surface-container-lowest shadow-md flex items-center justify-center relative">
+<div class="w-14 h-14 rounded-full bg-stone-100 flex items-center justify-center">
+<span class="font-headline-sm text-headline-sm font-semibold text-stone-700 tracking-tight">浩</span>
+</div>
+<!-- 名次标 -->
+<span class="absolute -bottom-1 left-1/2 -translate-x-1/2 px-2 py-0.2 bg-outline-variant text-on-surface-variant font-caption text-caption font-bold rounded-full shadow-sm">
+              3
+            </span>
+</div>
+</div>
+<div class="text-center w-full min-w-0">
+<h3 class="font-label-md text-label-md font-semibold text-on-surface truncate">浩沐</h3>
+<div class="inline-block mt-0.5 px-1.5 py-0.2 bg-surface-container rounded font-caption text-[10px] text-on-surface-variant font-normal">未播 0天</div>
+<p class="font-body-md text-body-md font-bold text-on-surface tracking-tight tabular-nums mt-1">2万1460</p>
+<span class="font-caption text-[11px] text-primary font-medium tracking-wide block">日音浪</span>
+<p class="font-caption text-caption text-on-surface-variant tabular-nums mt-0.5">总 21万4600</p>
+</div>
+</div>
+</div>
+</section>
+<!-- 排行榜列表 (4 - 10 名) - 严格按日音浪降序 -->
+<section class="px-gutter pb-space-lg flex flex-col gap-space-xs">
+<div class="flex items-center justify-between px-space-xs pb-1">
+<span class="font-caption text-caption text-on-surface-variant tracking-wider uppercase">名次 / 主播 / 状态</span>
+<span class="font-caption text-caption text-on-surface-variant tracking-wider uppercase text-right">单日音浪 / 总音浪</span>
+</div>
+<!-- 列表容器 -->
+<div class="bg-surface-container-lowest rounded-xl shadow-sm overflow-hidden flex flex-col divide-y divide-surface-container/60">
+<!-- Rank 4: 狼小宝 -->
+<div class="flex items-center justify-between p-space-md hover:bg-surface-container-low transition-colors">
+<div class="flex items-center gap- space-md min-w-0 gap-3">
+<span class="w-5 text-center font-label-md text-label-md font-semibold text-on-surface-variant tabular-nums">4</span>
+<!-- 首字徽标：狼 -->
+<div class="w-10 h-10 rounded-full bg-indigo-50 text-indigo-700 flex items-center justify-center shrink-0 shadow-sm border border-indigo-100/60">
+<span class="font-label-md text-label-md font-semibold">狼</span>
+</div>
+<div class="min-w-0">
+<div class="flex items-center gap-1.5">
+<p class="font-body-md text-body-md font-semibold text-on-surface truncate">狼小宝</p>
+<span class="px-1.5 py-0.5 rounded text-[10px] bg-surface-container text-on-surface-variant font-normal">未播 0天</span>
+</div>
+<p class="font-caption text-caption text-primary tabular-nums mt-0.5">1日音浪 1万8745</p>
+</div>
+</div>
+<div class="text-right shrink-0">
+<span class="font-body-md text-body-md font-bold text-on-surface tabular-nums block">15万2894</span>
+<span class="font-caption text-caption text-on-surface-variant tabular-nums">总音浪</span>
+</div>
+</div>
+<!-- Rank 5: 狼兴 -->
+<div class="flex items-center justify-between p-space-md bg-surface-container-low/30 hover:bg-surface-container-low transition-colors">
+<div class="flex items-center gap-3 min-w-0">
+<span class="w-5 text-center font-label-md text-label-md font-semibold text-on-surface-variant tabular-nums">5</span>
+<!-- 首字徽标：狼 -->
+<div class="w-10 h-10 rounded-full bg-blue-50 text-primary flex items-center justify-center shrink-0 shadow-sm border border-blue-100/60">
+<span class="font-label-md text-label-md font-semibold">狼</span>
+</div>
+<div class="min-w-0">
+<div class="flex items-center gap-1.5">
+<p class="font-body-md text-body-md font-semibold text-on-surface truncate">狼兴</p>
+<span class="px-1.5 py-0.5 rounded text-[10px] bg-surface-container text-on-surface-variant font-normal">未播 0天</span>
+</div>
+<p class="font-caption text-caption text-primary tabular-nums mt-0.5">1日音浪 1万6320</p>
+</div>
+</div>
+<div class="text-right shrink-0">
+<span class="font-body-md text-body-md font-bold text-on-surface tabular-nums block">14万8320</span>
+<span class="font-caption text-caption text-on-surface-variant tabular-nums">总音浪</span>
+</div>
+</div>
+<!-- Rank 6: 啸恒 -->
+<div class="flex items-center justify-between p-space-md hover:bg-surface-container-low transition-colors">
+<div class="flex items-center gap-3 min-w-0">
+<span class="w-5 text-center font-label-md text-label-md font-semibold text-on-surface-variant tabular-nums">6</span>
+<!-- 首字徽标：啸 -->
+<div class="w-10 h-10 rounded-full bg-sky-50 text-sky-700 flex items-center justify-center shrink-0 shadow-sm border border-sky-100/60">
+<span class="font-label-md text-label-md font-semibold">啸</span>
+</div>
+<div class="min-w-0">
+<div class="flex items-center gap-1.5">
+<p class="font-body-md text-body-md font-semibold text-on-surface truncate">啸恒</p>
+<span class="px-1.5 py-0.5 rounded text-[10px] bg-surface-container text-on-surface-variant font-normal">未播 0天</span>
+</div>
+<p class="font-caption text-caption text-primary tabular-nums mt-0.5">1日音浪 1万4880</p>
+</div>
+</div>
+<div class="text-right shrink-0">
+<span class="font-body-md text-body-md font-bold text-on-surface tabular-nums block">13万5110</span>
+<span class="font-caption text-caption text-on-surface-variant tabular-nums">总音浪</span>
+</div>
+</div>
+<!-- Rank 7: 晓楠 -->
+<div class="flex items-center justify-between p-space-md bg-surface-container-low/30 hover:bg-surface-container-low transition-colors">
+<div class="flex items-center gap-3 min-w-0">
+<span class="w-5 text-center font-label-md text-label-md font-semibold text-on-surface-variant tabular-nums">7</span>
+<!-- 首字徽标：晓 -->
+<div class="w-10 h-10 rounded-full bg-violet-50 text-secondary flex items-center justify-center shrink-0 shadow-sm border border-violet-100/60">
+<span class="font-label-md text-label-md font-semibold">晓</span>
+</div>
+<div class="min-w-0">
+<div class="flex items-center gap-1.5">
+<p class="font-body-md text-body-md font-semibold text-on-surface truncate">晓楠</p>
+<span class="px-1.5 py-0.5 rounded text-[10px] bg-rose-50 text-error font-normal">未播 1天</span>
+</div>
+<p class="font-caption text-caption text-primary tabular-nums mt-0.5">1日音浪 1万3240</p>
+</div>
+</div>
+<div class="text-right shrink-0">
+<span class="font-body-md text-body-md font-bold text-on-surface tabular-nums block">12万1400</span>
+<span class="font-caption text-caption text-on-surface-variant tabular-nums">总音浪</span>
+</div>
+</div>
+<!-- Rank 8: 晓爱 -->
+<div class="flex items-center justify-between p-space-md hover:bg-surface-container-low transition-colors">
+<div class="flex items-center gap-3 min-w-0">
+<span class="w-5 text-center font-label-md text-label-md font-semibold text-on-surface-variant tabular-nums">8</span>
+<!-- 首字徽标：晓 -->
+<div class="w-10 h-10 rounded-full bg-rose-50 text-rose-700 flex items-center justify-center shrink-0 shadow-sm border border-rose-100/60">
+<span class="font-label-md text-label-md font-semibold">晓</span>
+</div>
+<div class="min-w-0">
+<div class="flex items-center gap-1.5">
+<p class="font-body-md text-body-md font-semibold text-on-surface truncate">晓爱</p>
+<span class="px-1.5 py-0.5 rounded text-[10px] bg-surface-container text-on-surface-variant font-normal">未播 0天</span>
+</div>
+<p class="font-caption text-caption text-primary tabular-nums mt-0.5">1日音浪 1万2500</p>
+</div>
+</div>
+<div class="text-right shrink-0">
+<span class="font-body-md text-body-md font-bold text-on-surface tabular-nums block">11万6920</span>
+<span class="font-caption text-caption text-on-surface-variant tabular-nums">总音浪</span>
+</div>
+</div>
+<!-- Rank 9: 凤九 -->
+<div class="flex items-center justify-between p-space-md bg-surface-container-low/30 hover:bg-surface-container-low transition-colors">
+<div class="flex items-center gap-3 min-w-0">
+<span class="w-5 text-center font-label-md text-label-md font-semibold text-on-surface-variant tabular-nums">9</span>
+<!-- 首字徽标：凤 -->
+<div class="w-10 h-10 rounded-full bg-orange-50 text-orange-700 flex items-center justify-center shrink-0 shadow-sm border border-orange-100/60">
+<span class="font-label-md text-label-md font-semibold">凤</span>
+</div>
+<div class="min-w-0">
+<div class="flex items-center gap-1.5">
+<p class="font-body-md text-body-md font-semibold text-on-surface truncate">凤九</p>
+<span class="px-1.5 py-0.5 rounded text-[10px] bg-surface-container text-on-surface-variant font-normal">未播 0天</span>
+</div>
+<p class="font-caption text-caption text-primary tabular-nums mt-0.5">1日音浪 1万1191</p>
+</div>
+</div>
+<div class="text-right shrink-0">
+<span class="font-body-md text-body-md font-bold text-on-surface tabular-nums block">11万1191</span>
+<span class="font-caption text-caption text-on-surface-variant tabular-nums">总音浪</span>
+</div>
+</div>
+<!-- Rank 10: 南方楠 -->
+<div class="flex items-center justify-between p-space-md hover:bg-surface-container-low transition-colors">
+<div class="flex items-center gap-3 min-w-0">
+<span class="w-5 text-center font-label-md text-label-md font-semibold text-on-surface-variant tabular-nums">10</span>
+<!-- 首字徽标：南 -->
+<div class="w-10 h-10 rounded-full bg-teal-50 text-teal-700 flex items-center justify-center shrink-0 shadow-sm border border-teal-100/60">
+<span class="font-label-md text-label-md font-semibold">南</span>
+</div>
+<div class="min-w-0">
+<div class="flex items-center gap-1.5">
+<p class="font-body-md text-body-md font-semibold text-on-surface truncate">南方楠</p>
+<span class="px-1.5 py-0.5 rounded text-[10px] bg-surface-container text-on-surface-variant font-normal">未播 0天</span>
+</div>
+<p class="font-caption text-caption text-primary tabular-nums mt-0.5">1日音浪 9860</p>
+</div>
+</div>
+<div class="text-right shrink-0">
+<span class="font-body-md text-body-md font-bold text-on-surface tabular-nums block">9万8630</span>
+<span class="font-caption text-caption text-on-surface-variant tabular-nums">总音浪</span>
+</div>
+</div>
+</div>
+</section>
+<!-- 底部数据说明与发丝线注脚 -->
+<footer class="px-gutter text-center pb-space-lg">
+<div class="w-12 h-1 bg-surface-container-high rounded-full mx-auto mb-2"></div>
+<p class="font-caption text-caption text-on-surface-variant opacity-60">数据每 60 秒自动校准 · 真实音浪防刷引擎保护中</p>
+</footer>
+</div>
+<script>
+  // 简易交互逻辑：切换日/月/年胶囊控制器与日期胶囊选中高亮
+  document.addEventListener('DOMContentLoaded', () => {
+    const periodButtons = document.querySelectorAll('button[type="button"]');
+    periodButtons.forEach(btn => {
+      btn.addEventListener('click', () => {
+        periodButtons.forEach(b => {
+          b.className = 'flex-1 py-1.5 rounded-full text-center font-label-md text-label-md font-medium text-on-surface-variant transition-all hover:text-on-surface';
+        });
+        btn.className = 'flex-1 py-1.5 rounded-full text-center font-label-md text-label-md font-medium text-on-surface bg-surface-container-lowest shadow-sm transition-all';
+      });
+    });
+  });
+</script></main><nav class="fixed bottom-0 w-full z-50 pb-safe bg-surface/85 backdrop-blur-xl shadow-[0_-1px_12px_rgba(0,0,0,0.04)]" data-active-classes="text-primary font-semibold"><div class="flex items-center justify-around h-16 px-space-xs"><a aria-current="page" class="flex flex-col items-center justify-center min-w-[44px] min-h-[44px] px-space-xs transition-colors text-primary font-semibold" data-path="leaderboard" href="#"><span class="material-symbols-outlined text-[24px]">monitoring</span><span class="font-caption text-caption mt-0.5 tracking-tight">看板</span></a><a class="flex flex-col items-center justify-center min-w-[44px] min-h-[44px] px-space-xs text-on-surface-variant hover:text-on-surface transition-colors" data-path="pk-tournament" href="#"><span class="material-symbols-outlined text-[24px]">emoji_events</span><span class="font-caption text-caption mt-0.5 tracking-tight">分组</span></a><a class="flex flex-col items-center justify-center min-w-[44px] min-h-[44px] px-space-xs text-on-surface-variant hover:text-on-surface transition-colors" data-path="clan-lineage" href="#"><span class="material-symbols-outlined text-[24px]">account_tree</span><span class="font-caption text-caption mt-0.5 tracking-tight">族谱</span></a><a class="flex flex-col items-center justify-center min-w-[44px] min-h-[44px] px-space-xs text-on-surface-variant hover:text-on-surface transition-colors" data-path="my-profile" href="#"><span class="material-symbols-outlined text-[24px]">person</span><span class="font-caption text-caption mt-0.5 tracking-tight">我的</span></a></div></nav>
+
+
+</body></html>

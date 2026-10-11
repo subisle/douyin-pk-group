@@ -52,6 +52,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "013_wx_push_accounts",
         include_str!("migrations/013_wx_push_accounts.sql"),
     ),
+    (
+        "014_ip_allowlist",
+        include_str!("migrations/014_ip_allowlist.sql"),
+    ),
 ];
 
 /// 迁移建连（migrator 账号；同样关语句缓存）

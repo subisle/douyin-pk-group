@@ -2,7 +2,7 @@
 //!
 //! 数据源全部来自 ihmily/ip-info-api 收集的免费接口
 //! （<https://github.com/ihmily/ip-info-api>）：全部并行查询、投票合并、MySQL 缓存 7 天。
-//! 展示端只放行河南 / 安徽——有任一接口识别出河南 / 安徽就放行；都没识别出来就不放行；
+//! 展示端只放行河南 / 安徽 / 江苏——有任一接口识别出这三个省就放行；都没识别出来就不放行；
 //! 所有接口都失败也拒绝（外部接口集体故障时门禁不放水）。
 //! 本地开发用 `IP_GATE_DISABLED=1` 关掉拦截（访问日志照记）。
 //!
@@ -22,10 +22,11 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::{ConnectInfo, Query, Request, State};
+use axum::extract::{ConnectInfo, Path, Query, Request, State};
 use axum::http::HeaderMap;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
+use axum::Json;
 use futures_util::future::join_all;
 use serde_json::Value;
 use sqlx::Row;
@@ -37,7 +38,7 @@ type ArcState = Arc<AppState>;
 const CACHE_TTL_DAYS: i64 = 7;
 const LOOKUP_TIMEOUT: Duration = Duration::from_millis(3000);
 const MAX_LOG_NAME: usize = 64;
-/// 同一 IP 命中同一路径的访问日志去重窗口：页面一次加载会打多个接口，不去重会淹掉日志
+/// 同一 IP 的访问日志去重窗口：页面一次加载会打多个接口，不去重会淹掉日志
 const ACCESS_DEDUP_MINUTES: i64 = 5;
 const MAX_SOURCE_LEN: usize = 180;
 
@@ -48,7 +49,7 @@ pub struct IpGeo {
     pub isp: String,
     /// 命中的来源列表（逗号分隔，排查用）
     pub source: String,
-    /// 门禁判定结果（任一来源识别出河南 / 安徽 → true）
+    /// 门禁判定结果（任一来源识别出河南 / 安徽 / 江苏 → true）
     pub allowed: bool,
 }
 
@@ -60,7 +61,34 @@ pub fn gate_disabled() -> bool {
     )
 }
 
-/// 门禁 IP 白名单：`IP_GATE_ALLOWLIST=1.2.3.4,10.0.0.0/24`
+/// 判断一个 IP 是否命中某条白名单条目（精确 IP 或 CIDR）。
+fn ip_matches_entry(entry: &str, parsed: &IpAddr) -> bool {
+    let entry = entry.trim();
+    if entry.is_empty() {
+        return false;
+    }
+    if let Some((net, bits)) = entry.split_once('/') {
+        let Ok(net): Result<IpAddr, _> = net.parse() else {
+            return false;
+        };
+        let Ok(bits) = bits.parse::<u8>() else {
+            return false;
+        };
+        match (net, *parsed) {
+            (IpAddr::V4(n), IpAddr::V4(p)) => {
+                bits <= 32 && u32::from(n).mask(bits) == u32::from(p).mask(bits)
+            }
+            (IpAddr::V6(n), IpAddr::V6(p)) => {
+                bits <= 128 && u128::from(n).mask(bits) == u128::from(p).mask(bits)
+            }
+            _ => false,
+        }
+    } else {
+        entry.parse::<IpAddr>().map(|a| a == *parsed).unwrap_or(false)
+    }
+}
+
+/// 门禁 IP 白名单（环境变量）：`IP_GATE_ALLOWLIST=1.2.3.4,10.0.0.0/24`
 /// 命中（精确 IP 或 CIDR）直接放行，访问日志照记。用于管理员本机出口等固定 IP。
 fn ip_in_allowlist(ip: &str) -> bool {
     let raw = std::env::var("IP_GATE_ALLOWLIST").unwrap_or_default();
@@ -71,37 +99,49 @@ fn ip_in_allowlist(ip: &str) -> bool {
     let Ok(parsed) = ip.trim().parse::<IpAddr>() else {
         return false;
     };
-    for entry in raw.split(',') {
-        let entry = entry.trim();
-        if entry.is_empty() {
-            continue;
-        }
-        if let Some((net, bits)) = entry.split_once('/') {
-            let Ok(net): Result<IpAddr, _> = net.parse() else {
-                continue;
-            };
-            let Ok(bits) = bits.parse::<u8>() else {
-                continue;
-            };
-            let hit = match (net, parsed) {
-                (IpAddr::V4(n), IpAddr::V4(p)) => {
-                    bits <= 32 && u32::from(n).mask(bits) == u32::from(p).mask(bits)
-                }
-                (IpAddr::V6(n), IpAddr::V6(p)) => {
-                    bits <= 128 && u128::from(n).mask(bits) == u128::from(p).mask(bits)
-                }
-                _ => false,
-            };
-            if hit {
-                return true;
-            }
-        } else if let Ok(a) = entry.parse::<IpAddr>() {
-            if a == parsed {
-                return true;
-            }
-        }
+    raw.split(',').any(|entry| ip_matches_entry(entry, &parsed))
+}
+
+/// IP 是否命中数据库白名单（精确 IP 或 CIDR）。白名单是安徽 / 河南之外的例外放行；
+/// 查不到 / 库不可用时视为未命中。
+async fn ip_in_db_allowlist(st: &ArcState, ip: &str) -> bool {
+    let Ok(parsed) = ip.trim().parse::<IpAddr>() else {
+        return false;
+    };
+    let Some(pool) = st.writer.as_ref() else {
+        return false;
+    };
+    let rows = match sqlx::query("SELECT ip FROM ip_allowlist")
+        .fetch_all(pool)
+        .await
+    {
+        Ok(r) => r,
+        Err(_) => return false,
+    };
+    rows.iter().any(|r| {
+        let entry: String = r.try_get::<String, _>("ip").unwrap_or_default();
+        ip_matches_entry(&entry, &parsed)
+    })
+}
+
+/// 校验并规范化白名单条目（精确 IP 或 CIDR）。返回规范化字符串（IP 走 to_string，CIDR 保留）。
+fn normalize_allowlist_entry(raw: &str) -> Result<String, ()> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err(());
     }
-    false
+    if let Some((net, bits)) = raw.split_once('/') {
+        let ip: IpAddr = net.parse().map_err(|_| ())?;
+        let b: u8 = bits.parse().map_err(|_| ())?;
+        let max = if ip.is_ipv4() { 32 } else { 128 };
+        if b > max {
+            return Err(());
+        }
+        Ok(format!("{}/{}", ip, b))
+    } else {
+        let ip: IpAddr = raw.parse().map_err(|_| ())?;
+        Ok(ip.to_string())
+    }
 }
 
 trait IpMask {
@@ -259,7 +299,7 @@ fn is_internal(ip: &IpAddr) -> bool {
 }
 
 /// 展示端门禁中间件：挂在 /api/public/* 这一层。
-/// 放行 / 拒绝都记访问日志；被拒返回 403（前端展示「当前地区暂不支持访问」，不等于掉登录）。
+/// 放行 / 拒绝都记访问日志；被拒返回 403（前端展示「您的 ip 不在授权范围内」，不等于掉登录）。
 pub async fn ip_gate_mw(
     State(st): State<ArcState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
@@ -278,7 +318,12 @@ pub async fn ip_gate_mw(
     let team = team_from_path(&path);
     let account = account_from_query(&query);
     let geo = geo_for_ip(&st, &ip).await.unwrap_or_default();
-    let allowed = gate_disabled() || ip_in_allowlist(&ip) || geo.allowed;
+    // 访问授权（2026-10-11）：只放行安徽 / 河南，以及白名单（环境变量
+    // IP_GATE_ALLOWLIST + 数据库 ip_allowlist 表）里的例外 IP；其余一律 403。
+    let allowed = gate_disabled()
+        || geo.allowed
+        || ip_in_allowlist(&ip)
+        || ip_in_db_allowlist(&st, &ip).await;
     log_access(
         &st,
         AccessLog {
@@ -295,16 +340,55 @@ pub async fn ip_gate_mw(
     .await;
     if !allowed {
         tracing::info!(
-            ip = %ip, team = %team, province = %geo.province, path = %path,
+            ip = %ip, team = %team, province = %geo.province,
             "展示端访问被地区规则拒绝"
         );
         return (
             axum::http::StatusCode::FORBIDDEN,
-            axum::Json(serde_json::json!({ "error": "当前地区暂不支持访问" })),
+            axum::Json(serde_json::json!({ "error": "您的ip不在授权范围内" })),
         )
             .into_response();
     }
     next.run(req).await
+}
+
+/// 展示端 HTML 页面门禁：与 API 门禁同一套判定，但被拒时返回一个轻量 HTML 提示页
+/// （外省访客「页面都进不去」，而不是先看到页面、点数据才 403）。
+pub async fn ip_gate_page_mw(
+    State(st): State<ArcState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let ip = request_ip(addr, req.headers());
+    let geo = geo_for_ip(&st, &ip).await.unwrap_or_default();
+    let allowed = gate_disabled()
+        || geo.allowed
+        || ip_in_allowlist(&ip)
+        || ip_in_db_allowlist(&st, &ip).await;
+    if allowed {
+        return next.run(req).await;
+    }
+    tracing::info!(ip = %ip, province = %geo.province, "展示端页面被地区规则拒绝");
+    let html = concat!(
+        "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">",
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">",
+        "<title>暂不支持访问</title></head>",
+        "<body style=\"margin:0;background:#f4f5f7;color:#101828;",
+        "font:14px/1.6 -apple-system,'PingFang SC','Noto Sans SC',sans-serif;",
+        "display:grid;place-items:center;min-height:100vh\">",
+        "<div style=\"text-align:center;padding:24px\">",
+        "<div style=\"font-size:42px\">🔒</div>",
+        "<b style=\"font-size:16px\">您的 ip 不在授权范围内</b>",
+        "<p style=\"color:#98a2b3;margin:8px 0 0\">本页面仅对安徽、河南、江苏开放</p>",
+        "</div></body></html>",
+    );
+    (
+        axum::http::StatusCode::FORBIDDEN,
+        [("content-type", "text/html; charset=utf-8")],
+        html,
+    )
+        .into_response()
 }
 
 /// `/api/public/teams/{team}/...` → team；其他公开路径没有团别
@@ -578,8 +662,8 @@ fn sources_for(ip: &str, set: SourceSet) -> Vec<Source> {
     sources_named(ip, &source_names(set))
 }
 
-/// 合并：省份投票（票数最多者展示；并列优先河南 / 安徽），
-/// 放行判定 = 任一数据源识别出河南 / 安徽（原口径：宁可对属地的误报放行，也别把真人挡在门外）。
+/// 合并：省份投票（票数最多者展示；并列优先河南 / 安徽 / 江苏），
+/// 放行判定 = 任一数据源识别出河南 / 安徽 / 江苏（原口径：宁可对属地的误报放行，也别把真人挡在门外）。
 /// 城市 / 运营商取「说中最终省份」的第一个来源（中文源在列表前面）。
 fn merge(raws: &[(&str, RawGeo)]) -> IpGeo {
     let mut votes: HashMap<String, i64> = HashMap::new();
@@ -719,10 +803,11 @@ pub fn normalize_province(raw: &str) -> String {
     t.to_string()
 }
 
-/// 门禁口径：河南 / 安徽
+/// 门禁口径：河南 / 安徽 / 江苏（2026-10-11 追加江苏：萧县紧邻江苏徐州，
+/// 部分萧县用户 IP 归属地落在江苏，一并放行）
 pub fn allowed_province(province: &str) -> bool {
     let p = normalize_province(province);
-    p == "河南" || p == "安徽"
+    p == "河南" || p == "安徽" || p == "江苏"
 }
 
 /* ------------------------------- 各源解析 ------------------------------- */
@@ -996,13 +1081,14 @@ pub struct AccessLog<'a> {
     pub login_ok: bool,
 }
 
-/// 记一条访问日志：登录事件（kind=login）每次都写；普通接口访问 5 分钟内同 IP + 同路径去重。
+/// 记一条访问日志：登录事件（kind=login）每次都写；普通接口访问 5 分钟内同 IP 去重。
+/// 2026-10-11：访客日志只记 IP，不再记路径（path 列统一写空串）。
 pub async fn log_access(st: &ArcState, e: AccessLog<'_>) {
     let kind = e.kind;
     let ip = e.ip;
     let geo = e.geo;
     let team = e.team;
-    let path = e.path;
+    let _path = e.path;
     let login_ok = e.login_ok;
     let Some(pool) = st.writer.as_ref() else {
         return;
@@ -1026,21 +1112,21 @@ pub async fn log_access(st: &ArcState, e: AccessLog<'_>) {
         .bind(&geo.isp)
         .bind(&geo.source)
         .bind(team)
-        .bind(path)
+        .bind("")
         .bind(&account)
         .bind(allowed as i8)
         .bind(login_ok as i8)
         .execute(pool)
         .await
     } else {
-        /* 去重：dedup_key = ip|path|5 分钟桶，靠唯一键 + INSERT IGNORE 精确挡住并发
+        /* 去重：dedup_key = ip|5 分钟桶，靠唯一键 + INSERT IGNORE 精确挡住并发
         重复请求（先 SELECT 再 INSERT 在并发下会放过一批，INSERT..SELECT 自查同表
         还会在多实例场景报 1213 deadlock）。窗口按 5 分钟桶对齐，不做滑动窗口。 */
         let bucket = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() / (ACCESS_DEDUP_MINUTES as u64 * 60))
             .unwrap_or(0);
-        let dedup_key = format!("{ip}|{path}|{bucket}");
+        let dedup_key = format!("{ip}|{bucket}");
         sqlx::query(
             "INSERT IGNORE INTO access_logs \
              (kind, ip, province, city, isp, geo_source, team, path, account_name, allowed, login_ok, dedup_key) \
@@ -1053,7 +1139,7 @@ pub async fn log_access(st: &ArcState, e: AccessLog<'_>) {
         .bind(&geo.isp)
         .bind(&geo.source)
         .bind(team)
-        .bind(path)
+        .bind("")
         .bind(&account)
         .bind(allowed as i8)
         .bind(&dedup_key)
@@ -1061,7 +1147,7 @@ pub async fn log_access(st: &ArcState, e: AccessLog<'_>) {
         .await
     };
     if let Err(e) = result {
-        tracing::warn!(error = %e, ip = %ip, path = %path, "访问日志写入失败");
+        tracing::warn!(error = %e, ip = %ip, "访问日志写入失败");
     }
 }
 
@@ -1082,7 +1168,7 @@ pub async fn log_login_path(
     account: &str,
     ok: bool,
 ) {
-    let allowed = gate_disabled() || ip_in_allowlist(ip) || geo.allowed;
+    let allowed = gate_disabled() || geo.allowed || ip_in_allowlist(ip) || ip_in_db_allowlist(st, ip).await;
     log_access(
         st,
         AccessLog {
@@ -1108,7 +1194,7 @@ pub struct VisitsQuery {
     pub q: Option<String>,
     /// visit / api / login
     pub kind: Option<String>,
-    /// "1" = 只看被拒的（外省）
+    /// "1" = 只看被拒的
     pub blocked: Option<String>,
 }
 
@@ -1169,7 +1255,6 @@ pub async fn admin_visits(
                 "isp": r.try_get::<String, _>(5).unwrap_or_default(),
                 "source": r.try_get::<String, _>(6).unwrap_or_default(),
                 "team": r.try_get::<String, _>(7).unwrap_or_default(),
-                "path": r.try_get::<String, _>(8).unwrap_or_default(),
                 "account": r.try_get::<String, _>(9).unwrap_or_default(),
                 "allowed": r.try_get::<i8, _>(10).unwrap_or(0) == 1,
                 "loginOk": r.try_get::<i8, _>(11).unwrap_or(0) == 1,
@@ -1207,6 +1292,79 @@ pub async fn admin_visits(
         "items": items,
         "stats": stats,
     })))
+}
+
+/* ------------------------------- IP 白名单 ------------------------------- */
+
+#[derive(serde::Deserialize)]
+pub struct AllowlistAdd {
+    pub ip: String,
+    #[serde(default)]
+    pub note: String,
+}
+
+/// GET /api/admin/ip-allowlist —— 白名单列表 + 是否生效（表非空 = 白名单模式）
+pub async fn admin_ip_allowlist_list(
+    State(st): State<ArcState>,
+) -> Result<axum::Json<Value>, crate::routes::ApiError> {
+    let Some(pool) = st.writer.as_ref() else {
+        return Err(anyhow::anyhow!("写库不可用，取不到白名单").into());
+    };
+    let rows = sqlx::query(
+        "SELECT id, ip, note,          DATE_FORMAT(CONVERT_TZ(created_at, '+00:00', '+08:00'), '%Y-%m-%d %H:%i:%s') AS ts          FROM ip_allowlist ORDER BY id DESC",
+    )
+    .fetch_all(pool)
+    .await?;
+    let items: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "id": r.try_get::<u64, _>(0).unwrap_or(0),
+                "ip": r.try_get::<Option<String>, _>(1).unwrap_or_default().unwrap_or_default(),
+                "note": r.try_get::<String, _>(2).unwrap_or_default(),
+                "createdAt": r.try_get::<String, _>(3).unwrap_or_default(),
+            })
+        })
+        .collect();
+    Ok(axum::Json(serde_json::json!({
+        "items": items,
+        "active": !items.is_empty(),
+    })))
+}
+
+/// POST /api/admin/ip-allowlist —— 添加白名单 IP（精确 IP 或 CIDR）
+pub async fn admin_ip_allowlist_add(
+    State(st): State<ArcState>,
+    Json(body): Json<AllowlistAdd>,
+) -> Result<axum::Json<Value>, crate::routes::ApiError> {
+    let raw = body.ip.trim();
+    let ip_str = normalize_allowlist_entry(raw)
+        .map_err(|_| crate::routes::ApiError::bad_request("IP 格式不对"))?;
+    let note: String = body.note.trim().chars().take(128).collect();
+    let Some(pool) = st.writer.as_ref() else {
+        return Err(anyhow::anyhow!("写库不可用").into());
+    };
+    sqlx::query("INSERT INTO ip_allowlist (ip, note) VALUES (?, ?) ON DUPLICATE KEY UPDATE note = VALUES(note)")
+        .bind(&ip_str)
+        .bind(&note)
+        .execute(pool)
+        .await?;
+    Ok(axum::Json(serde_json::json!({ "ok": true })))
+}
+
+/// DELETE /api/admin/ip-allowlist/{id} —— 删除白名单
+pub async fn admin_ip_allowlist_delete(
+    State(st): State<ArcState>,
+    Path(id): Path<u64>,
+) -> Result<axum::Json<Value>, crate::routes::ApiError> {
+    let Some(pool) = st.writer.as_ref() else {
+        return Err(anyhow::anyhow!("写库不可用").into());
+    };
+    sqlx::query("DELETE FROM ip_allowlist WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(axum::Json(serde_json::json!({ "ok": true })))
 }
 
 #[derive(serde::Deserialize)]

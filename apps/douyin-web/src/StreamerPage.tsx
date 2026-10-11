@@ -415,11 +415,12 @@ export default function StreamerPage() {
             <b>不显示在台账、榜单和任何统计里</b>；点「建档」填好团别建档（或在上面建档时填上同样的抖音号），
             数据会自动补账入库，从那一刻起才显示。
           </p>
-          <table>
-            <thead>
-              <tr>
-                <th>名字</th>
-                <th>抖音号 / 采集 ID</th>
+          <div className="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>名字</th>
+                  <th>抖音号 / 采集 ID</th>
                 <th>业务日期</th>
                 <th>当日音浪</th>
                 <th>时长(分)</th>
@@ -446,8 +447,9 @@ export default function StreamerPage() {
                   </td>
                 </tr>
               ))}
-            </tbody>
-          </table>
+              </tbody>
+            </table>
+          </div>
         </section>
       )}
 
@@ -482,11 +484,12 @@ export default function StreamerPage() {
         {items.length === 0 ? (
           <div className="empty">还没有主播，先在上面建档或导入数据</div>
         ) : (
-          <table>
-            <thead>
-              <tr>
-                <th>名字</th>
-                <th>团别</th>
+          <div className="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>名字</th>
+                  <th>团别</th>
                 <th>师傅</th>
                 <th>抖音号</th>
                 <th>状态</th>
@@ -582,8 +585,9 @@ export default function StreamerPage() {
                   </td>
                 </tr>
               ))}
-            </tbody>
-          </table>
+              </tbody>
+            </table>
+          </div>
         )}
       </section>
 

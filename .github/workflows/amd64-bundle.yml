@@ -4,10 +4,7 @@
 # ghcr 上的包默认私有，部署机没有 read:packages 凭据。与其让部署机长期持有
 # 个人 token，不如由 CI 导出一个可离线加载的镜像包，部署机 docker load 即可。
 #
-# 与 arm64-bundle.yml 的关系：两者只是 platforms 不同，逻辑一致。
-# 部署机按架构选对应的工作流：
-#   x86_64 部署机（如腾讯云 115.159.72.31）  gh workflow run amd64-bundle.yml
-#   arm64  部署机（如 rk3318 192.168.5.12）  gh workflow run arm64-bundle.yml
+# 只出 amd64（147 生产）；arm64/rk3318 已废弃（2026-10-11）。
 #
 # 用法：
 #   gh workflow run amd64-bundle.yml

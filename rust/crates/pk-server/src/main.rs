@@ -323,8 +323,8 @@ async fn main() -> anyhow::Result<()> {
             st.clone(),
             ipinfo::ip_gate_mw,
         ));
-    /* HTML 页面不拦：外省访客打开页面后，第一个数据接口拿 403，
-    前端显示「当前地区暂不支持访问」，比直接甩一个 403 页面友好。 */
+    /* HTML 页面也拦（2026-10-11）：外省访客打开页面直接看到「暂不支持访问」提示页，
+    只有安徽 / 河南（以及白名单例外 IP）能进页面。 */
     let public_pages = Router::new()
         // 对外展示页（静态 HTML，粉丝/主播手机直开）：/ 为唯一入口（2026-10-11 起
         // 不分男女、不弹团别选择卡），/1、/0、/st/m、/st/f 为兼容旧链接的别名；
@@ -338,7 +338,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/1", get(public_teams::st_m))
         .route("/0", get(public_teams::st_0))
         .route("/st/{team}", get(public_teams::st_page))
-        .route("/st/{team}/{*rest}", get(public_teams::st_page_sub));
+        .route("/st/{team}/{*rest}", get(public_teams::st_page_sub))
+        .layer(axum::middleware::from_fn_with_state(
+            st.clone(),
+            ipinfo::ip_gate_page_mw,
+        ));
 
     let public = public_api
         .merge(public_pages)
@@ -486,12 +490,6 @@ async fn main() -> anyhow::Result<()> {
             "/api/admin/public/settings",
             get(public_teams::get_settings).post(public_teams::update_settings),
         )
-        // 徒弟提成设置（1.0.1）：折算比例 + 排除名单（鹏先生等不参与提成统计的师傅）
-        .route(
-            "/api/admin/commission/settings",
-            get(public_teams::get_commission_settings)
-                .post(public_teams::update_commission_settings),
-        )
         // 展示端「我的」页面账号（手动设置：姓名 + 纯数字密码，手机号选填）
         .route(
             "/api/admin/my-accounts",
@@ -523,7 +521,21 @@ async fn main() -> anyhow::Result<()> {
         // 访客日志（2026-10-10）：展示端访问 / 登录记录，含外省被拒的
         .route("/api/admin/visits", get(ipinfo::admin_visits))
         // IP 归属地现场查询（2026-10-11，诊断用）：走 IP_QUERY_SOURCES 集，绕过 ip_geo_cache
-        .route("/api/admin/ip-lookup", get(ipinfo::admin_ip_lookup));
+        .route("/api/admin/ip-lookup", get(ipinfo::admin_ip_lookup))
+        // 展示端访问 IP 白名单（2026-10-11）：表非空即白名单授权模式
+        .route(
+            "/api/admin/ip-allowlist",
+            get(ipinfo::admin_ip_allowlist_list).post(ipinfo::admin_ip_allowlist_add),
+        )
+        .route(
+            "/api/admin/ip-allowlist/{id}",
+            delete(ipinfo::admin_ip_allowlist_delete),
+        )
+        // 公告弹窗（2026-10-11）：展示端打开时弹出的公告，内容由后台配置
+        .route(
+            "/api/admin/announcement",
+            get(public_teams::get_announcement).post(public_teams::update_announcement),
+        );
 
     // 鉴权：ADMIN_PASSWORD 配了就拦，没配等于本地开发全放行。
     // 公开端点、登录、探活接口在 auth.rs 的白名单里。

@@ -685,10 +685,11 @@ export default function ImportPage() {
         {batches.length === 0 ? (
           <p className="hint">还没有导入记录</p>
         ) : (
-          <table>
-            <thead>
-              <tr>
-                <th>#</th>
+          <div className="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>#</th>
                 <th>业务日期</th>
                 <th>团别</th>
                 <th>解析</th>
@@ -715,8 +716,9 @@ export default function ImportPage() {
                   <td className="hint">{b.createdAt}</td>
                 </tr>
               ))}
-            </tbody>
-          </table>
+              </tbody>
+            </table>
+          </div>
         )}
       </section>
 

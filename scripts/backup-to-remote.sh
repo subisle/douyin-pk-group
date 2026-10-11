@@ -10,7 +10,7 @@
 #   DB_BACKUP_USER=douyin_backup
 #   DB_BACKUP_PASSWORD=...
 #   DB_BACKUP_NAME=douyin_backup
-#   # 147 默认 pk-mariadb；RK3318 Compose 默认 mariadb
+#   # 147 默认 pk-mariadb
 #   DB_BACKUP_CONTAINER=pk-mariadb
 #
 # 远程账号至少需要目标库的：

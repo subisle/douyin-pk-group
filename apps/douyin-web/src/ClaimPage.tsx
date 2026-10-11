@@ -169,10 +169,11 @@ export default function ClaimPage() {
         {items.length === 0 ? (
           <p className="hint">没有{FILTERS.find((f) => f.key === filter)?.label ?? ''}的申请。</p>
         ) : (
-          <table>
-            <thead>
-              <tr>
-                <th>提交时间</th>
+          <div className="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>提交时间</th>
                 <th>主播</th>
                 <th>团别</th>
                 <th>抖音号</th>
@@ -240,8 +241,9 @@ export default function ClaimPage() {
                   </tr>
                 )
               })}
-            </tbody>
-          </table>
+              </tbody>
+            </table>
+          </div>
         )}
         </div>
       </ClaimErrorBoundary>

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { hasToken, login, logout, UNAUTHORIZED_EVENT } from './api'
 import { subscribeChanges } from './useAutoRefresh'
-import { ROUTES, routeHref, useRoute } from './lib/router'
+import { ROUTES, routeHref, useRoute, type RouteKey } from './lib/router'
 import DashboardPage from './DashboardPage'
 import ImportPage from './ImportPage'
 import StreamerPage from './StreamerPage'
@@ -11,6 +11,18 @@ import LineagePage from './LineagePage'
 import BotPage from './BotPage'
 import GroupPage from './pk/GroupPage'
 import './pk/pk.css'
+
+/** 侧边栏导航图标（emoji，零依赖；与 router.ts 的 RouteKey 一一对应） */
+const NAV_ICONS: Record<RouteKey, string> = {
+  data: '📊',
+  import: '📥',
+  streamers: '👤',
+  claims: '🔗',
+  visits: '👁️',
+  lineage: '🌳',
+  group: '⚔️',
+  bots: '🤖',
+}
 
 export default function App() {
   const [authed, setAuthed] = useState(hasToken())
@@ -87,20 +99,22 @@ export default function App() {
   }
 
   return (
-    <div>
-      <header className="topbar">
-        <span className="brand">
+    <div className="app-shell">
+      <aside className="sidebar">
+        <div className="side-brand">
           <span className="brand-mark" aria-hidden />
-          抖音数据管理
-          <span className="brand-sub">鹏仔传媒 · 运营后台</span>
-        </span>
-        <nav>
+          <div className="side-brand-text">
+            <div className="side-title">抖音数据管理</div>
+            <div className="side-sub">鹏仔传媒 · 运营后台</div>
+          </div>
+        </div>
+        <nav className="side-nav">
           {ROUTES.map((t) => (
             /* 真链接（不是 button）：能中键/右键新开标签、能复制地址、刷新不丢页；
                普通左键交给 history.pushState，避免整页重载。 */
             <a
               key={t.key}
-              className={route === t.key ? 'tab active' : 'tab'}
+              className={route === t.key ? 'side-link active' : 'side-link'}
               href={routeHref(t.key)}
               aria-current={route === t.key ? 'page' : undefined}
               onClick={(e) => {
@@ -109,28 +123,38 @@ export default function App() {
                 go(t.key)
               }}
             >
-              {t.label}
+              <span className="side-ico" aria-hidden>
+                {NAV_ICONS[t.key]}
+              </span>
+              <span className="side-label">{t.label}</span>
             </a>
           ))}
         </nav>
-        <button
-          className="tab ghost"
-          onClick={() => {
-            logout()
-            setAuthed(false)
-          }}
-        >
-          退出
-        </button>
-      </header>
-      {route === 'data' && <DashboardPage />}
-      {route === 'import' && <ImportPage />}
-      {route === 'streamers' && <StreamerPage />}
-      {route === 'claims' && <ClaimPage />}
-      {route === 'visits' && <VisitPage />}
-      {route === 'lineage' && <LineagePage />}
-      {route === 'group' && <GroupPage />}
-      {route === 'bots' && <BotPage />}
+        <div className="side-foot">
+          <button
+            className="side-link"
+            onClick={() => {
+              logout()
+              setAuthed(false)
+            }}
+          >
+            <span className="side-ico" aria-hidden>
+              ↪
+            </span>
+            <span className="side-label">退出登录</span>
+          </button>
+        </div>
+      </aside>
+      <main className="main">
+        {route === 'data' && <DashboardPage />}
+        {route === 'import' && <ImportPage />}
+        {route === 'streamers' && <StreamerPage />}
+        {route === 'claims' && <ClaimPage />}
+        {route === 'visits' && <VisitPage />}
+        {route === 'lineage' && <LineagePage />}
+        {route === 'group' && <GroupPage />}
+        {route === 'bots' && <BotPage />}
+      </main>
       {toast && (
         <div className="toast" role="status">
           <span className="toast-dot" aria-hidden />
