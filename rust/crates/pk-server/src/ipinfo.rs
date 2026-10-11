@@ -683,6 +683,11 @@ fn merge(raws: &[(&str, RawGeo)]) -> IpGeo {
         if allowed_province(&province) {
             allowed = true;
         }
+        // 城市级白名单（2026-10-11 用户口径）：省不放，但特定城市放行——目前只有江苏徐州
+        // （萧县实际归属徐州、IP 归属地常落在徐州）。city 字段来自各来源的 city/area。
+        if allowed_city(&province, &trim_city(&raw.city)) {
+            allowed = true;
+        }
         *votes.entry(province).or_insert(0) += 1;
     }
     let province = votes
@@ -810,6 +815,18 @@ pub fn normalize_province(raw: &str) -> String {
 pub fn allowed_province(province: &str) -> bool {
     let p = normalize_province(province);
     p == "河南" || p == "安徽"
+}
+
+/// 城市级放行白名单：省不放行但这些城市例外。城市名先归一（去掉「市」等后缀再比对）。
+pub fn allowed_city(province: &str, city: &str) -> bool {
+    let p = normalize_province(province);
+    let c = normalize_city(city);
+    !c.is_empty() && p == "江苏" && c.contains("徐州")
+}
+
+/// 城市名归一：trim + 去掉「市」结尾；空/未知原样（可比对的空串）。
+fn normalize_city(city: &str) -> String {
+    city.trim().trim_end_matches('市').trim().to_string()
 }
 
 /* ------------------------------- 各源解析 ------------------------------- */
@@ -1529,6 +1546,21 @@ mod tests {
         let geo = merge(&raws);
         assert_eq!(geo.province, "安徽");
         assert!(geo.allowed);
+    }
+
+    #[test]
+    fn city_allowlist_xuzhou_of_jiangsu() {
+        // 江苏徐州放行（2026-10-11 用户口径）
+        assert!(allowed_city("江苏", "徐州市"));
+        assert!(allowed_city("江苏", "徐州"));
+        assert!(allowed_city("Jiangsu", "Xuzhou") == false); // 英文省名不走 normalize_province 的中文映射也能过？
+        // 江苏其他城市不放
+        assert!(!allowed_city("江苏", "南京市"));
+        assert!(!allowed_city("江苏", "苏州"));
+        // 其他省的徐州同名不存在，但防御性检查：省不匹配不放
+        assert!(!allowed_city("安徽", "徐州"));
+        assert!(!allowed_city("", "徐州"));
+        assert!(!allowed_city("江苏", ""));
     }
 
     #[test]
