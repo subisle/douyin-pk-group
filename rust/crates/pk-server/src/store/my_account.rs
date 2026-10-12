@@ -1294,11 +1294,16 @@ async fn bind_inner(
     }
 
     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    // 2026-10-12 补漏：绑定必须回写 person_id 锚点（015 迁移的设计——账号改名后
+    // 靠 person_id 才不失联；uk_my_person_uniq 顺带保证一个主播只被一个账号绑）。
+    // 原来两条 UPDATE 都只写 name/bound/bound_at，自助绑定的账号 pid 恒 0。
     let affected = sqlx::query(&crate::pq::rewrite(
-        "UPDATE my_accounts SET name = ?, bound = 1, bound_at = ? WHERE name = ? AND bound = 0",
+        "UPDATE my_accounts SET name = ?, bound = 1, bound_at = ?, person_id = ? \
+         WHERE name = ? AND bound = 0",
     ))
     .bind(&person_name)
     .bind(&now)
+    .bind(person_id)
     .bind(login_name)
     .execute(pool)
     .await
@@ -1310,10 +1315,11 @@ async fn bind_inner(
     }
     if affected == 0 {
         sqlx::query(&crate::pq::rewrite(
-            "UPDATE my_accounts SET name = ?, bound = 1, bound_at = ? WHERE name = ?",
+            "UPDATE my_accounts SET name = ?, bound = 1, bound_at = ?, person_id = ? WHERE name = ?",
         ))
         .bind(&person_name)
         .bind(&now)
+        .bind(person_id)
         .bind(login_name)
         .execute(pool)
         .await
