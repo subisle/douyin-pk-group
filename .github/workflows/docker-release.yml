@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write      # release 上传（amd64 tar 工件）
   packages: write
 
 env:
