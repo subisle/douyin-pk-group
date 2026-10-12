@@ -538,7 +538,7 @@ pub async fn my_push_qr(
     headers: HeaderMap,
 ) -> Response {
     let s = PublicSettings::load(&st).await;
-    if gate_team(s.login_required, &team, &headers).is_err() {
+    if gate_team(&st, s.login_required, &team, &headers).await.is_err() {
         return (axum::http::StatusCode::UNAUTHORIZED, "请先登录").into_response();
     }
     let Some(data_url) = crate::store::config_get(&st, "wechat_add_qr").await else {

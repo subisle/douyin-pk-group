@@ -109,7 +109,10 @@ pub async fn verify(
             let token_team = row.try_get::<String, _>("gender").unwrap_or_default();
             let token = my_token_put(pid, token_team.clone(), account_name.clone());
             Ok(Json(json!({
-                "ok": true, "personId": pid, "name": account_name, "token": token, "bound": true
+                "ok": true, "personId": pid, "name": account_name, "token": token, "bound": true,
+                // 登录一次就切对团：前端 applyLoginState 按这个字段设 TEAM，避免登录后
+                // 还用默认团拉数据 → 401 → 二次弹登录门
+                "team": token_team
             })))
         }
         None => {
@@ -788,4 +791,22 @@ pub(super) fn my_token_required(headers: &HeaderMap) -> Result<(u64, String, Str
         return Err(ApiError::auth("缺少验证 token，请先验证姓名和密码"));
     };
     my_token_take(&token).ok_or_else(|| ApiError::auth("验证已过期，请重新验证"))
+}
+
+/// 异步版（2026-10-12 登录态持久化）：内存 miss 时从 Redis 回填再取。
+/// 服务重启清空内存后，24h 内的登录态经此恢复——用户不再被强制二次登录。
+pub(super) async fn my_token_required_with_restore(
+    st: &crate::state::AppState,
+    headers: &HeaderMap,
+) -> Result<(u64, String, String), ApiError> {
+    let Some(token) = header_my_token(headers) else {
+        return Err(ApiError::auth("缺少验证 token，请先验证姓名和密码"));
+    };
+    if let Some(v) = my_token_take(&token) {
+        return Ok(v);
+    }
+    if let Some(v) = super::admin::my_token_restore(st, &token).await {
+        return Ok(v);
+    }
+    Err(ApiError::auth("验证已过期，请重新登录"))
 }

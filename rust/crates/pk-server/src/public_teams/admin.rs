@@ -268,12 +268,83 @@ pub(super) fn rand_u64() -> u64 {
         .finish()
 }
 
+/// 全局 AppState 钩子（2026-10-12 登录态持久化）：main 启动时注册，
+/// 让同步的 token 函数也能把登录态落到 Redis —— **容器重启不再清空登录**。
+pub(crate) static APP_STATE: std::sync::OnceLock<std::sync::Arc<crate::state::AppState>> =
+    std::sync::OnceLock::new();
+
+pub fn register_app_state(st: std::sync::Arc<crate::state::AppState>) {
+    let _ = APP_STATE.set(st);
+}
+
+const MYTOK_TTL: u64 = 24 * 3600;
+fn mytok_key(token: &str) -> String {
+    format!("mytok:{}", token)
+}
+
+/// put/take/revoke 之后的 Redis 同步（拿不到 Redis 就静默跳过，退化为纯内存）。
+/// 异步工厂：让调用点用 async 块传进来（block_on 里再驱动）
+trait FutureFactory: Send + 'static {
+    fn future(self) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>>;
+}
+
+impl<F, Fut> FutureFactory for F
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = anyhow::Result<()>> + Send + 'static,
+{
+    fn future(self) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>> {
+        Box::pin(self())
+    }
+}
+
+fn mytok_redis_sync<F: FutureFactory>(f: F) {
+    let Some(st) = APP_STATE.get().cloned() else { return };
+    std::thread::spawn(move || {
+        let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        else {
+            return;
+        };
+        let _ = rt.block_on(async move {
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(3), f.future()).await;
+        });
+    });
+}
+
+async fn mytok_redis_set(
+    st: &crate::state::AppState,
+    token: &str,
+    pid: u64,
+    team: &str,
+    name: &str,
+) -> anyhow::Result<()> {
+    let v = serde_json::json!({ "pid": pid, "team": team, "name": name });
+    crate::store::cache::set(st, &mytok_key(token), &v.to_string(), MYTOK_TTL).await;
+    Ok(())
+}
+
+async fn mytok_redis_del(st: &crate::state::AppState, token: &str) -> anyhow::Result<()> {
+    crate::store::cache::del(st, &mytok_key(token)).await;
+    Ok(())
+}
+
 pub(super) fn my_token_put(person_id: u64, team: String, name: String) -> String {
     // token 不再编入 pid/时间戳（老格式可被相邻值猜中），纯随机串，映射关系只存在内存里
     let token = format!("my-{:016x}-{:016x}", rand_u64(), rand_u64());
     let mut m = my_tokens().lock().expect("my token 锁 poisoned");
     m.retain(|_, (_, _, _, at)| at.elapsed() < Duration::from_secs(24 * 3600));
-    m.insert(token.clone(), (person_id, team, name, Instant::now()));
+    m.insert(token.clone(), (person_id, team.clone(), name.clone(), Instant::now()));
+    drop(m);
+    let t = token.clone();
+    let tm = team.clone();
+    mytok_redis_sync(move || async move {
+        if let Some(st) = APP_STATE.get().cloned() {
+            mytok_redis_set(&st, &t, person_id, &tm, &name).await?;
+        }
+        anyhow::Ok(())
+    });
     token
 }
 
@@ -284,6 +355,24 @@ pub(super) fn my_token_take(token: &str) -> Option<(u64, String, String)> {
         .map(|(pid, team, name, _)| (*pid, team.clone(), name.clone()))
 }
 
+/// 内存 miss 时从 Redis 回填（2026-10-12 登录态持久化）：
+/// who/token 校验路径（async）在 take 失败后调用，命中即回填内存。
+/// 只回填不消费（take 语义是只读），让 token 继续在 TTL 内可用。
+pub(crate) async fn my_token_restore(st: &crate::state::AppState, token: &str) -> Option<(u64, String, String)> {
+    if my_token_take(token).is_some() {
+        return my_token_take(token); // 内存里有，直接用
+    }
+    let raw = crate::store::cache::get(st, &mytok_key(token)).await?;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let pid = v.get("pid")?.as_u64()?;
+    let team = v.get("team")?.as_str()?.to_string();
+    let name = v.get("name")?.as_str()?.to_string();
+    // 回填内存（Instant=now；TTL 由 Redis 端 24h 控制，内存侧随写随清）
+    let mut m = my_tokens().lock().expect("my token 锁 poisoned");
+    m.insert(token.to_string(), (pid, team.clone(), name.clone(), Instant::now()));
+    Some((pid, team, name))
+}
+
 /// 吊销某账号的全部 my token（2026-10-12 安全审计：token 是 24h 内存态、原本无撤销手段）。
 /// 调用点：改密 / 找回（重置）密码 / 绑定审核通过 / 管理员改绑 / 删除账号——
 /// 这些动作之后旧登录态必须立刻失效，不能等 24h TTL 自然过期。
@@ -291,7 +380,24 @@ pub(super) fn my_token_take(token: &str) -> Option<(u64, String, String)> {
 /// 新旧两个名字都要吊销。）
 pub(crate) fn my_tokens_revoke(name: &str) {
     let mut m = my_tokens().lock().expect("my token 锁 poisoned");
-    m.retain(|_, (_, _, n, _)| n != name);
+    let revoked: Vec<String> = {
+        let removed: Vec<String> = m
+            .iter()
+            .filter(|(_, (_, _, n, _))| *n == name)
+            .map(|(k, _)| k.clone())
+            .collect();
+        m.retain(|_, (_, _, n, _)| *n != name);
+        removed
+    };
+    // Redis 端同步删除（拿不到 Redis 静默跳过）
+    for token in revoked {
+        mytok_redis_sync(move || async move {
+            if let Some(st) = APP_STATE.get().cloned() {
+                mytok_redis_del(&st, &token).await?;
+            }
+            anyhow::Ok(())
+        });
+    }
 }
 
 /// 只读一眼 token 对应的账号（不消费）：公开 API 中间件用它给访问日志带账号。
@@ -321,7 +427,8 @@ pub(super) fn header_my_token(headers: &HeaderMap) -> Option<String> {
 /// 2026-10-10 加开关：后台关掉「开启登录」（login_required=false）时全站免登录开放，
 /// 返回 person_id=0（一个不存在的档案 id，调用方只拿它判「管理员/游客」，不下发个人数据）。
 /// 带 token 的照常解析，所以关登录时之前登过的人仍能直接用「我的」。
-pub(super) fn gate_team(
+pub(super) async fn gate_team(
+    st: &crate::state::AppState,
     login_required: bool,
     team: &str,
     headers: &HeaderMap,
@@ -329,6 +436,11 @@ pub(super) fn gate_team(
     let token = header_my_token(headers);
     // 有 token 就先验（开关关着时也认，访客拿旧 token 仍能看「我的」）
     if let Some(t) = token.as_deref().filter(|s| !s.is_empty()) {
+        // 登录态持久化（2026-10-12）：内存 miss 先从 Redis 回填（服务重启后
+        // 24h 内的登录态自动恢复），再走原判定。
+        if my_token_take(t).is_none() {
+            let _ = my_token_restore(st, t).await;
+        }
         if let Some((pid, my_team, _)) = my_token_take(t) {
             // 团别为空 = 免团别登录口（/api/public/my/login）发的「任意团」token：
             // 管理员观看账号 / 没绑主播的账号，两个团都放行

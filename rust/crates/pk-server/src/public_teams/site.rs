@@ -17,7 +17,7 @@ pub async fn site(
         return Ok(Json(json!({ "published": false })));
     }
     let query_team = data_team(&team, &token_team(&headers)).to_string();
-    gate_team(s.login_required, &team, &headers)?;
+    gate_team(&st, s.login_required, &team, &headers).await?;
     let dates = crate::repos::get_available_dates(&st, None, false).await?;
     // 公告弹窗：开启时随站点配置一起下发；关闭时不下发（前端不弹）
     let ann = Announcement::load(&st).await;
@@ -63,7 +63,7 @@ pub async fn daily(
         return Ok(Json(json!({ "published": false })));
     }
     let query_team = data_team(&team, &token_team(&headers)).to_string();
-    gate_team(s.login_required, &team, &headers)?;
+    gate_team(&st, s.login_required, &team, &headers).await?;
     if !s.daily {
         return Ok(Json(json!({ "published": true, "dailyEnabled": false })));
     }
@@ -611,7 +611,7 @@ pub async fn monthly(
 ) -> ApiResult {
     let s = PublicSettings::load(&st).await;
     let query_team = data_team(&team, &token_team(&headers)).to_string();
-    gate_team(s.login_required, &team, &headers)?;
+    gate_team(&st, s.login_required, &team, &headers).await?;
     // 显隐判定用**路径上的团**（all 恒为开放），数据过滤才用 query_team。
     // 以前把 query_team 传进去判 team_enabled，匿名访客 token 为空 → data_team 返回 ""
     // → team_enabled("") == false，月/年榜对所有人 published:false（前端 .slice 崩）。
@@ -626,7 +626,7 @@ pub async fn yearly(
 ) -> ApiResult {
     let s = PublicSettings::load(&st).await;
     let query_team = data_team(&team, &token_team(&headers)).to_string();
-    gate_team(s.login_required, &team, &headers)?;
+    gate_team(&st, s.login_required, &team, &headers).await?;
     period_public(&st, &team, &query_team, &q, false).await
 }
 

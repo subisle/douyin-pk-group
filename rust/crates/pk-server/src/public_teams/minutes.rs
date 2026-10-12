@@ -686,7 +686,10 @@ pub async fn my_who(
     Query(_q): Query<MyQuery>,
     headers: HeaderMap,
 ) -> ApiResult {
-    let (person_id, my_team, token_name) = my_token_required(&headers)?;
+    // 登录态持久化（2026-10-12）：内存 miss 时从 Redis 回填——服务重启后
+    // 24h 内的登录不再被强制二次登录。
+    let (person_id, my_team, token_name) =
+        my_token_required_with_restore(&st, &headers).await?;
     if my_team != team && team != "all" {
         return Err(ApiError::auth("该账号不属于本团"));
     }

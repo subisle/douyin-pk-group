@@ -28,7 +28,7 @@ pub(crate) fn sid(st: &AppState) -> String {
     st.active_id()
 }
 
-mod admin;
+pub mod admin;
 mod binds;
 mod minutes;
 mod my;

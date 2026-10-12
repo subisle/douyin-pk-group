@@ -680,6 +680,10 @@ async fn main() -> anyhow::Result<()> {
         axum::http::HeaderValue::from_static("strict-origin-when-cross-origin"),
     ));
 
+    // 登录态持久化（2026-10-12）：把 AppState 注册给 token 函数，
+    // my token put/take/revoke 由此落到 Redis——容器重启后 24h 内登录态自动恢复。
+    public_teams::admin::register_app_state(st.clone());
+
     let app = app.with_state(st.clone());
 
     let port: u16 = std::env::var("PORT")
