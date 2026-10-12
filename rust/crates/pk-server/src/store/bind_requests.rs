@@ -139,20 +139,30 @@ pub async fn my_bind_request_decide(
 ) -> Option<(String, i64, String)> {
     let pool = w(st).ok()?;
     let status = bind_request_next_status("pending", approve)?;
-    let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    let n = sqlx::query(&crate::pq::rewrite(
+    // 2026-10-12 审计追查修复：decided_at 是 TIMESTAMPTZ 列，原来把格式化文本串
+    // bind 进去——MySQL 时代 datetime 收文本没事，PG 严格类型直接报
+    // "column decided_at is of type timestamp with time zone but expression is of
+    // type text"，.ok()? 把错误吞成 None，管理员看到的却是「申请不存在」。
+    // 改传 chrono 时间对象（sqlx 按 timestamptz 编码），并在 SQL 报错时留日志。
+    let now = chrono::Local::now();
+    let n = match sqlx::query(&crate::pq::rewrite(
         "UPDATE my_bind_requests SET status = ?, reason = ?, decided_at = ?, decided_by = ? \
          WHERE id = ? AND status = 'pending'",
     ))
     .bind(status)
     .bind(reason)
-    .bind(&now)
+    .bind(now)
     .bind(decided_by)
     .bind(id)
     .execute(pool)
     .await
-    .ok()?
-    .affected();
+    {
+        Ok(r) => r.affected(),
+        Err(e) => {
+            tracing::error!(id, error = %e, "绑定申请裁决 UPDATE 失败");
+            return None;
+        }
+    };
     if n == 0 {
         return None;
     }

@@ -569,6 +569,20 @@ async fn main() -> anyhow::Result<()> {
             "/api/admin/anchor-claims/{id}/decide",
             post(public_teams::admin_anchor_claim_decide),
         )
+        // 展示端主播绑定申请的裁决（2026-10-12 审计 L1 同款遗漏：
+        // handler 与导出都在，路由一直没挂，申请永远停在 pending）
+        .route(
+            "/api/admin/my-bind-requests",
+            get(public_teams::admin_my_bind_requests),
+        )
+        .route(
+            "/api/admin/my-bind-requests/{id}/approve",
+            post(public_teams::admin_my_bind_request_approve),
+        )
+        .route(
+            "/api/admin/my-bind-requests/{id}/reject",
+            post(public_teams::admin_my_bind_request_reject),
+        )
         .route("/api/admin/collect/status", get(admin::collect_status))
         // 访客日志（2026-10-10）：展示端访问 / 登录记录，含外省被拒的
         .route("/api/admin/visits", get(ipinfo::admin_visits))
