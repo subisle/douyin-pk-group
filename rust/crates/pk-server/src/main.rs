@@ -238,6 +238,11 @@ async fn main() -> anyhow::Result<()> {
             "/api/public/teams/{team}/my/series",
             get(public_teams::my_series),
         )
+        // 我的抖音号：每个号的日/月/年/累计音浪（2026-10-12，一人多号时看出哪个号在跑）
+        .route(
+            "/api/public/teams/{team}/my/accounts",
+            get(public_teams::my_accounts),
+        )
         // 登录门轻量身份 + 抖音号绑定申请（展示端，本人 token）
         .route("/api/public/teams/{team}/my/who", get(public_teams::my_who))
         .route(

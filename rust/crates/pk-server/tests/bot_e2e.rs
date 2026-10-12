@@ -9,7 +9,32 @@ use std::sync::Arc;
 use pk_server::bot::{self, BotConfig, Inbound};
 use pk_server::{config, mysql, state::AppState};
 
+/// 测试用管理员口令（2026-10-11 审计整改：不再依赖任何硬编码口令）。
+/// 每进程生成一次随机值并写进 env：WECHAT_ADMIN_CODE 供 bot 私聊提权读取
+/// （bot 侧 OnceLock 只在首次读一次），ADMIN_PASSWORD 供 Auth::from_env。
+/// 每个用例都先经 setup() 走到这里，保证 env 在任何 bot 处理之前就绪。
+fn ensure_test_admin_env() {
+    static DONE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    DONE.get_or_init(|| {
+        let code = format!(
+            "pk-test-admin-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_millis()
+        );
+        std::env::set_var("WECHAT_ADMIN_CODE", &code);
+        std::env::set_var("ADMIN_PASSWORD", &code);
+        code
+    });
+}
+
+/// 本进程随机生成的微信提权口令（构造提权消息用）
+fn test_admin_code() -> String {
+    ensure_test_admin_env();
+    std::env::var("WECHAT_ADMIN_CODE").expect("ensure_test_admin_env 已写入")
+}
+
 async fn setup() -> Option<Arc<AppState>> {
+    ensure_test_admin_env();
     if std::env::var("DB_LOCAL_HOST").is_err() {
         eprintln!("跳过：未配置 DB_LOCAL_*（此测试需要真实测试库）");
         return None;
@@ -90,12 +115,12 @@ async fn wechat_builtin_code_promotes_private_session() {
         channel: "weixin",
         conversation_id: conversation_id.clone(),
         is_group: false,
-        text: "shuai4444@".into(),
+        text: test_admin_code(),
         attachments: vec![],
     };
     let out = bot::BotRouter::handle(&st, &cfg, inbound)
         .await
-        .expect("内置口令应有回复");
+        .expect("提权口令应有回复");
     assert_eq!(out.text, "已成为管理员");
     assert!(
         sqlx::query_scalar::<_, i8>(
@@ -106,7 +131,7 @@ async fn wechat_builtin_code_promotes_private_session() {
         .await
         .expect("应查到已提权会话")
             == 1,
-        "内置口令应写入管理员标记"
+        "提权口令应写入管理员标记"
     );
 }
 
@@ -355,6 +380,164 @@ async fn report_date_then_two_files_import_team_agnostic() {
     assert_eq!(team, "mixed", "批次审计记 mixed");
 
     clean_date(&st, date).await;
+}
+
+/// 用户口径（2026-10-12）：「**如果同日期导入就是覆盖**」——
+/// 同一天再导一次，值被**替换**（不是求和、也不是新增一行）。
+/// 日期用远期过去的固定日期（不碰真实业务日），文件名带日期让入库日确定。
+#[tokio::test]
+async fn same_date_reimport_overwrites_value() {
+    let Some(st) = setup().await else { return };
+    let Some(pool) = st.writer.clone() else {
+        return;
+    };
+    let date = "2019-03-21";
+    clean_date(&st, date).await;
+
+    // 挑一个**姓名唯一**在册主播：重名主播 resolve 会判歧义，跟本用例无关
+    let name: String = sqlx::query(
+        "SELECT p.name FROM person p WHERE p.deleted_at IS NULL AND p.status <> 'left' \
+         AND (SELECT COUNT(*) FROM person p2 WHERE p2.name = p.name AND p2.deleted_at IS NULL) = 1 \
+         ORDER BY p.id LIMIT 1",
+    )
+    .map(|r: sqlx::mysql::MySqlRow| sqlx::Row::try_get::<String, _>(&r, "name").unwrap_or_default())
+    .fetch_optional(&pool)
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or_default();
+    assert!(!name.is_empty(), "名册里要有一个姓名唯一的主播");
+
+    let cfg = cfg_with("CSV-USER-OW");
+    let file = format!("{date}.csv");
+
+    // ① 第一次：1000
+    let Some(url1) = serve_text(Box::leak(format!("{name},1000\n").into_boxed_str())).await else {
+        return;
+    };
+    let out1 = bot::BotRouter::handle(&st, &cfg, inbound_from("CSV-USER-OW", &file, &url1))
+        .await
+        .expect("第一次导入应有回复");
+    assert!(out1.text.contains("导入成功 1 行"), "实际：{}", out1.text);
+    assert!(
+        out1.text.contains(date),
+        "回复要回显业务日期：{}",
+        out1.text
+    );
+
+    // ② 第二次：同日期同一个人，改成 2500
+    let Some(url2) = serve_text(Box::leak(format!("{name},2500\n").into_boxed_str())).await else {
+        return;
+    };
+    let out2 = bot::BotRouter::handle(&st, &cfg, inbound_from("CSV-USER-OW", &file, &url2))
+        .await
+        .expect("第二次导入应有回复");
+    assert!(
+        out2.text.contains(date),
+        "回复要回显业务日期：{}",
+        out2.text
+    );
+
+    // ③ 同人同日只有一行，且值是最后一次的 2500（覆盖，不是 1000+2500）
+    let (rows, wave): (i64, i64) = (
+        sqlx::query(
+            "SELECT COUNT(*) AS n FROM daily_metric d JOIN person p ON p.id = d.person_id \
+             WHERE p.name = ? AND DATE_FORMAT(d.biz_date,'%Y-%m-%d') = ?",
+        )
+        .bind(&name)
+        .bind(date)
+        .map(|r: sqlx::mysql::MySqlRow| sqlx::Row::try_get::<i64, _>(&r, "n").unwrap_or(0))
+        .fetch_one(&pool)
+        .await
+        .unwrap_or(0),
+        sqlx::query(
+            "SELECT COALESCE(SUM(d.wave), 0) AS w FROM daily_metric d JOIN person p ON p.id = d.person_id \
+             WHERE p.name = ? AND DATE_FORMAT(d.biz_date,'%Y-%m-%d') = ?",
+        )
+        .bind(&name)
+        .bind(date)
+        .map(|r: sqlx::mysql::MySqlRow| sqlx::Row::try_get::<i64, _>(&r, "w").unwrap_or(0))
+        .fetch_one(&pool)
+        .await
+        .unwrap_or(0),
+    );
+    assert_eq!(rows, 1, "同人同日只该有一行（覆盖，不是新增）");
+    assert_eq!(wave, 2500, "值应是最后一次的 2500，不是 1000+2500=3500");
+
+    clean_date(&st, date).await;
+}
+
+/// 用户口径（2026-10-12）：「11 号接收的就是 10 号的数据，**前提是没指定日期**」——
+/// 正文和文件名都没日期时，业务日 = 收到日 − 1。
+///
+/// 用**虚构抖音号**跑这条用例：它匹配不到台账、落 `import_pending`（不写 daily_metric），
+/// 所以既证明了日期口径，又不会污染真实「昨天」的业务数据。
+#[tokio::test]
+async fn attachment_without_any_date_uses_yesterday() {
+    let Some(st) = setup().await else { return };
+    let Some(pool) = st.writer.clone() else {
+        return;
+    };
+    let yesterday = (chrono::Local::now().date_naive() - chrono::Duration::days(1))
+        .format("%Y-%m-%d")
+        .to_string();
+    let no = "__e2e_nodate_76543210";
+
+    // 幂等：先清掉本用例上一轮可能留下的暂存行与批次审计行
+    let purge = |pool: sqlx::MySqlPool| async move {
+        let _ = sqlx::query("DELETE FROM import_pending WHERE douyin_no = ?")
+            .bind("__e2e_nodate_76543210")
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM import_batch WHERE filename = ?")
+            .bind("机器人·主播榜.csv")
+            .execute(&pool)
+            .await;
+    };
+    purge(pool.clone()).await;
+
+    let cfg = cfg_with("CSV-USER-ND");
+    let csv = format!("主播ID,主播昵称,抖音号,音浪\n__e2e无日期号,__e2e无日期号,{no},12345\n");
+    let Some(url) = serve_text(Box::leak(csv.into_boxed_str())).await else {
+        return;
+    };
+    // 文件名故意不带日期（"主播榜.csv"），正文也不带
+    let out = bot::BotRouter::handle(&st, &cfg, inbound_from("CSV-USER-ND", "主播榜.csv", &url))
+        .await
+        .expect("附件导入应有回复");
+    assert!(
+        out.text.contains(&yesterday),
+        "回复的业务日应是「收到日 − 1」= {}，实际：{}",
+        yesterday,
+        out.text
+    );
+
+    let (biz_date, wave): (String, i64) = (
+        sqlx::query(
+            "SELECT DATE_FORMAT(biz_date,'%Y-%m-%d') AS d FROM import_pending WHERE douyin_no = ?",
+        )
+        .bind(no)
+        .map(|r: sqlx::mysql::MySqlRow| {
+            sqlx::Row::try_get::<String, _>(&r, "d").unwrap_or_default()
+        })
+        .fetch_optional(&pool)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default(),
+        sqlx::query("SELECT COALESCE(wave, -1) AS w FROM import_pending WHERE douyin_no = ?")
+            .bind(no)
+            .map(|r: sqlx::mysql::MySqlRow| sqlx::Row::try_get::<i64, _>(&r, "w").unwrap_or(-1))
+            .fetch_optional(&pool)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(-1),
+    );
+    assert_eq!(biz_date, yesterday, "没指定日期就落「收到日 − 1」");
+    assert_eq!(wave, 12345, "值要原样暂存");
+
+    purge(pool).await;
 }
 
 /// 下载失败要明确回报，不能让用户以为导过了。

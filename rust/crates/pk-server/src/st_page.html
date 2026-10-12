@@ -368,36 +368,53 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
   background:var(--surface-container-lowest); border-radius:.75rem; padding:0 1rem;
   box-shadow:0 1px 3px rgba(0,0,0,.06); }
 .st-ln-search input { flex:1; border:none; outline:none; background:transparent;
-  font-size:13px; color:var(--on-surface); }
+  font-size:13px; color:var(--on-surface); min-width:0; }
 .st-ln-search input::placeholder { color:var(--outline); }
+/* 搜索框内「清除」按钮（设计稿 cancel 图标）：有输入时才出现，避免常驻占位 */
+.st-ln-clear { border:none; background:transparent; padding:0; display:grid; place-items:center;
+  color:var(--on-surface-variant); flex:none; }
+.st-ln-clear .material-symbols-outlined { font-size:18px; }
 .st-ln-btn { width:2.5rem; height:2.5rem; border-radius:.75rem; background:var(--surface-container-lowest);
   border:none; box-shadow:0 1px 3px rgba(0,0,0,.06); display:grid; place-items:center;
   color:var(--on-surface-variant); font-size:16px; flex:none; }
 .st-ln-btn:active { transform:scale(.95); }
 .st-ln-stat { background:var(--surface-container-lowest); border-radius:.75rem; padding:1rem;
   box-shadow:0 1px 3px rgba(0,0,0,.06); margin-bottom:1rem; }
-.st-ln-stat-h { display:flex; align-items:center; justify-content:space-between;
-  padding-bottom:.5rem; margin-bottom:.75rem; }
-.st-ln-stat-h .l { display:flex; align-items:center; gap:.25rem; font-size:12px; font-weight:600;
-  color:var(--on-surface); }
-.st-ln-stat-h .l .material-symbols-outlined { font-size:18px; color:var(--primary); }
-.st-ln-stat-h .r { font-size:11px; color:var(--on-surface-variant); }
-.st-ln-stat-g { display:grid; grid-template-columns:repeat(4,1fr); gap:.25rem; text-align:center; }
+/* 指标卡固定 3 格（设计稿 Apple Clean Grid）：单根=直属徒弟/师傅音浪/师徒总音浪，
+   多根=公会在册/代际分支/累计音浪 */
+.st-ln-stat-g { display:grid; grid-template-columns:repeat(3,1fr); gap:.25rem; text-align:center; }
 .st-ln-stat-g .k { font-size:18px; font-weight:600; color:var(--on-surface); font-variant-numeric:tabular-nums; }
 .st-ln-stat-g .k.hl { color:var(--primary); }
 .st-ln-stat-g .v { font-size:11px; color:var(--on-surface-variant); margin-top:.125rem; }
 .st-branch { display:flex; flex-direction:column; gap:1.5rem; padding:0 0 1rem; }
+/* 支系卡（设计稿 node-card）：内容比单行高，头像与折叠钮都顶对齐 */
 .st-branch-card { background:var(--surface-container-lowest); border-radius:.75rem; padding:1rem;
-  box-shadow:0 1px 3px rgba(0,0,0,.06); display:flex; align-items:center; justify-content:space-between; }
-.st-branch-card .l { display:flex; align-items:center; gap:1rem; min-width:0; }
-.st-branch-av { width:3rem; height:3rem; border-radius:.75rem; background:var(--secondary-fixed);
-  color:var(--on-secondary-fixed); display:grid; place-items:center; font-size:18px; font-weight:600; flex:none; }
+  box-shadow:0 1px 3px rgba(0,0,0,.06); display:flex; align-items:flex-start; justify-content:space-between; }
+.st-branch-card .l { display:flex; align-items:flex-start; gap:1rem; min-width:0; flex:1; }
+/* 根支系头像/代际胶囊用 primary-fixed 浅蓝底（设计稿一致），不再用 secondary 紫 */
+.st-branch-av { width:3rem; height:3rem; border-radius:.75rem; background:var(--primary-fixed);
+  color:var(--on-primary-fixed); display:grid; place-items:center; font-size:18px; font-weight:600; flex:none; }
 .st-branch-av.sub { width:2.5rem; height:2.5rem; background:var(--surface-container-high);
   color:var(--on-surface); font-size:14px; border-radius:.75rem; }
 .st-branch-nm { font-size:18px; font-weight:600; color:var(--on-surface); letter-spacing:-.01em; }
-.st-branch-tag { padding:0 .5rem; border-radius:9999px; background:var(--secondary-fixed);
-  color:var(--on-secondary-fixed); font-size:11px; line-height:1.5; }
+.st-branch-tag { padding:0 .5rem; border-radius:9999px; background:var(--primary-fixed);
+  color:var(--on-primary-fixed); font-size:11px; line-height:1.5; margin-left:.375rem; }
 .st-branch-sub { font-size:11px; color:var(--on-surface-variant); margin-top:.25rem; }
+/* 「个人音浪」行：与 sub 同级的 caption，数字走 tabular-nums 对齐 */
+.st-branch-wave { font-size:11px; color:var(--on-surface-variant); margin-top:.125rem;
+  font-variant-numeric:tabular-nums; }
+/* 卡内底部「师徒合算总音浪」条（设计稿：surface-container-low 圆角条，左 label 右数值） */
+.st-branch-total { margin-top:.5rem; background:var(--surface-container-low); border-radius:.75rem;
+  padding:.375rem .75rem; display:flex; align-items:center; justify-content:space-between;
+  font-size:11px; font-weight:500; color:var(--on-surface); }
+.st-branch-total b { font-size:14px; font-weight:600; color:var(--primary);
+  font-variant-numeric:tabular-nums; }
+/* 支系/子支系折叠钮（设计稿 branch-toggle：2rem 圆形 surface-container 底） */
+.st-branch-tg { width:2rem; height:2rem; border-radius:9999px; border:none; padding:0;
+  background:var(--surface-container); color:var(--on-surface-variant); display:grid;
+  place-items:center; flex:none; margin-left:.5rem; }
+.st-branch-tg .material-symbols-outlined { font-size:18px; }
+.st-branch-tg:active { transform:scale(.94); }
 .st-branch-kids { display:flex; flex-direction:column; padding-left:1.5rem; margin-top:.75rem;
   position:relative; gap:.75rem; }
 .st-branch-kids::before { content:''; position:absolute; left:.875rem; top:0; bottom:.5rem;
@@ -408,9 +425,19 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .st-kid-card { margin-left:1.25rem; background:var(--surface-container-lowest); border-radius:.75rem;
   padding:.875rem 1rem; box-shadow:0 1px 3px rgba(0,0,0,.06); display:flex; align-items:center;
   justify-content:space-between; }
-.st-kid-card .l { display:flex; align-items:center; gap:.5rem; }
+.st-kid-card .l { display:flex; align-items:center; gap:.5rem; min-width:0; }
 .st-kid-card .nm { font-size:14px; font-weight:600; color:var(--on-surface); }
-.st-kid-card .st { font-size:11px; color:var(--on-surface-variant); }
+/* 「N 代」与状态跟在姓名后面（设计稿：二代 狼小宝 · 活跃） */
+.st-kid-card .gen { font-size:11px; color:var(--on-surface-variant); margin-left:.375rem; }
+.st-kid-card .st { font-size:11px; color:var(--on-surface-variant); margin-left:.375rem; }
+.st-kid-card .wv { font-size:11px; color:var(--on-surface-variant); margin-top:.125rem;
+  font-variant-numeric:tabular-nums; }
+/* 离团淡显：人在树上但权重放低，跟画布 .ln-node.off 同一语义 */
+.st-kid-card.off { opacity:.5; }
+/* 卡片树搜索（与画布 hit 同一个输入框驱动）：不匹配 dim、匹配描边高亮 */
+.st-branch-card, .st-kid-card { transition:opacity .15s, box-shadow .15s; }
+.st-branch-card.dim, .st-kid-card.dim { opacity:.4; }
+.st-branch-card.hit, .st-kid-card.hit { box-shadow:0 0 0 2px var(--primary), 0 1px 3px rgba(0,0,0,.06); }
 .st-ln-tip { background:var(--surface-container-low); border-radius:.75rem; padding:1rem;
   display:flex; align-items:flex-start; gap:1rem; margin-top:.5rem; }
 .st-ln-tip .material-symbols-outlined { font-size:20px; color:var(--primary); margin-top:.125rem; }
@@ -420,8 +447,10 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 /* ===== 我的页（My Profile）Stitch 版 ===== */
 .st-my-head { background:var(--surface-container-lowest); border-radius:.75rem; padding:1rem;
   box-shadow:0 1px 3px rgba(0,0,0,.06); display:flex; align-items:center; gap:1rem; }
+/* 头像用设计稿浅底单字徽标（primary-fixed 底 + primary 字），不再按姓名哈希上彩色 */
 .st-my-av { width:4rem; height:4rem; border-radius:9999px; display:grid; place-items:center;
-  font-size:22px; font-weight:600; color:#fff; flex:none; position:relative; }
+  font-size:22px; font-weight:600; background:var(--primary-fixed); color:var(--primary);
+  flex:none; position:relative; }
 .st-my-av .badge { position:absolute; right:-2px; bottom:-2px; width:1.25rem; height:1.25rem;
   border-radius:9999px; background:var(--primary); color:var(--on-primary); display:grid;
   place-items:center; border:2px solid var(--surface-container-lowest); }
@@ -448,6 +477,8 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .st-my-big .row { display:flex; align-items:center; gap:.25rem; margin-top:.25rem;
   font-size:13px; color:var(--on-surface-variant); }
 .st-my-big .row .rmb { font-size:18px; font-weight:600; color:var(--tertiary); }
+/* 「预估折合收益」行尾：日期/未开播信息（从头像卡副标题挪过来的，不丢信息） */
+.st-my-big .row .tail { margin-left:auto; font-size:11px; color:var(--outline); }
 .st-my-rank { margin-top:.75rem; background:var(--surface-container-low); border-radius:.5rem;
   padding:.5rem; }
 .st-my-rank .l1 { display:flex; align-items:center; justify-content:space-between;
@@ -475,6 +506,56 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .st-my-card .r { display:flex; align-items:center; gap:.25rem; color:var(--on-surface-variant);
   font-size:12px; flex:none; }
 .st-my-card .r .material-symbols-outlined { font-size:18px; }
+
+/* ===== 我的抖音号卡（2026-10-12）：每个号一行，日/月/年/累计四格 =====
+   title 行复用 .st-my-list .sec 口径，右侧「共 N 个」用同色 11px 非大写 */
+.st-my-acct { background:var(--surface-container-lowest); border-radius:.75rem;
+  box-shadow:0 1px 3px rgba(0,0,0,.06); overflow:hidden; margin-top:.75rem; }
+.st-my-acct > .sec { padding:.5rem 1rem; font-size:11px; color:var(--outline);
+  display:flex; align-items:center; justify-content:space-between; }
+.st-my-acct > .sec .n { text-transform:none; letter-spacing:0; }
+/* 合计条：与 /my 大数字卡一致的口径（surface-container-low 圆角条） */
+.st-my-acct .sum { margin:0 1rem .5rem; background:var(--surface-container-low); border-radius:.5rem;
+  padding:.5rem .75rem; display:flex; align-items:center; justify-content:space-between; gap:.5rem;
+  font-size:12px; font-weight:500; color:var(--on-surface); }
+.st-my-acct .sum .g { flex:1; min-width:0; display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr)); gap:.25rem .75rem; }
+.st-my-acct .sum .c { display:flex; align-items:baseline; gap:.25rem; font-size:11px;
+  font-weight:400; color:var(--on-surface-variant); }
+.st-my-acct .sum .c b { font-size:13px; font-weight:600; color:var(--on-surface);
+  font-variant-numeric:tabular-nums; }
+/* 单个抖音号行：.st-my-item 口径（左图标 + 主/副标题，右数值），不可点、无 chevron。
+   窄屏兜底：撑不下时四格整块换行到下一行（左块有 8rem 基宽，不会把主标题挤没） */
+.st-my-acct .row { display:flex; flex-wrap:wrap; align-items:center;
+  justify-content:space-between; gap:.25rem .75rem;
+  padding:.875rem 1rem; border-top:1px solid var(--surface-container); }
+.st-my-acct .row .l { display:flex; align-items:center; gap:1rem; flex:1 1 8rem; min-width:0; }
+.st-my-acct .row .ico { width:2rem; height:2rem; border-radius:.5rem;
+  background:var(--surface-container); color:var(--on-surface-variant);
+  display:grid; place-items:center; flex:none; }
+.st-my-acct .row .ico .material-symbols-outlined { font-size:20px; }
+.st-my-acct .row .t { font-size:15px; font-weight:500; color:var(--on-surface);
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; max-width:100%; }
+.st-my-acct .row .chip { padding:0 .375rem; border-radius:9999px; background:rgba(0,88,188,.10);
+  color:var(--primary); font-size:11px; font-weight:500; line-height:1.5; flex:none; }
+/* 开播状态点：复用 .st-my-head .sync .dot 的脉冲语义，未开播不闪也不用绿 */
+.st-my-acct .row .st { display:inline-flex; align-items:center; gap:.25rem; font-size:11px;
+  color:var(--on-surface-variant); flex:none; white-space:nowrap; }
+.st-my-acct .row .st i { width:.375rem; height:.375rem; border-radius:9999px;
+  background:var(--outline-variant); flex:none; }
+.st-my-acct .row .st.on i { background:var(--primary); animation:stPulse 1.6s ease-in-out infinite; }
+.st-my-acct .row .d { font-size:11px; color:var(--outline); margin-top:.125rem; }
+/* 四格音浪：恒 2×2 小网格 —— 与左侧「标题+副标题」两行等高，且不抢占主标题宽度；
+   与 .l 的 8rem 基宽相加超容器时才整块换行（320px 屏会折到第二行，绝不横向溢出） */
+.st-my-acct .row .wg { display:grid; grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:.25rem .75rem; flex:0 1 9rem; margin-left:auto; }
+.st-my-acct .row .wg .c { display:flex; align-items:baseline; justify-content:flex-end; gap:.25rem;
+  font-size:11px; color:var(--on-surface-variant); white-space:nowrap; }
+.st-my-acct .row .wg .c b { font-size:13px; font-weight:600; color:var(--on-surface);
+  font-variant-numeric:tabular-nums; }
+.st-my-acct .fail { padding:.75rem 1rem; font-size:11px; color:var(--outline); text-align:center; }
+.st-my-acct .none { padding:1rem; font-size:12px; color:var(--on-surface-variant);
+  text-align:center; line-height:1.7; }
 .st-my-list { background:var(--surface-container-lowest); border-radius:.75rem;
   box-shadow:0 1px 3px rgba(0,0,0,.06); overflow:hidden; margin-top:.75rem; }
 .st-my-list .sec { padding:.5rem 1rem; font-size:11px; color:var(--outline);
@@ -487,10 +568,28 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
   display:grid; place-items:center; color:var(--on-surface-variant); flex:none; }
 .st-my-item .ico .material-symbols-outlined { font-size:20px; }
 .st-my-item .t { font-size:15px; font-weight:500; color:var(--on-surface); }
+/* 标题旁的 chip（设计稿：已绑定 N 个）与标题下副行（设计稿 qr_code_scanner 项） */
+.st-my-item .chip { padding:0 .375rem; border-radius:9999px; background:rgba(0,88,188,.10);
+  color:var(--primary); font-size:11px; font-weight:500; line-height:1.5; margin-left:.375rem; flex:none; }
+.st-my-item .d { font-size:11px; color:var(--outline); margin-top:.125rem; }
 .st-my-item .r { display:flex; align-items:center; gap:.25rem; color:var(--on-surface-variant);
   font-size:13px; flex:none; }
 .st-my-item .r .pri { color:var(--primary); font-weight:500; }
 .st-my-item .r .material-symbols-outlined { font-size:18px; }
+
+/* 联系运营卡（设计稿：圆形「帅」字头像 + 文案 + 立即私信 pill） */
+.st-my-ops { margin-top:.75rem; background:var(--surface-container-lowest);
+  border:1px solid var(--hairline); border-radius:.75rem; padding:1rem;
+  box-shadow:0 1px 3px rgba(0,0,0,.06); display:flex; align-items:center; gap:1rem; }
+.st-my-ops-av { width:2.5rem; height:2.5rem; border-radius:9999px; background:var(--primary-fixed);
+  color:var(--primary); display:grid; place-items:center; font-size:18px; font-weight:700; flex:none; }
+.st-my-ops .t { font-size:14px; font-weight:600; color:var(--on-surface); }
+.st-my-ops .d { font-size:11px; color:var(--outline); margin-top:.125rem; }
+.st-my-ops-btn { display:inline-flex; align-items:center; gap:.25rem; padding:.375rem .75rem;
+  border:none; border-radius:9999px; background:var(--surface-container-low); color:var(--primary);
+  font-size:12px; font-weight:500; flex:none; }
+.st-my-ops-btn .material-symbols-outlined { font-size:16px; }
+.st-my-ops-btn:active { transform:scale(.96); }
 
 
 /* 分组页（与导出长图同版式：渐变头部卡 + 彩色分组卡 + 成员胶囊，成员单列） */
@@ -814,27 +913,140 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 #wm { position:fixed; inset:0; z-index:70; pointer-events:none; background-repeat:repeat; }
 #wm[hidden] { display:none; }
 
-/* ===== 公告弹窗（2026-10-11）：打开页面弹一次，按版本记住已读 ===== */
+/* ===== 引导弹窗（2026-10-12 大厂级）：分步引导 + 品牌头 + 步骤条 + 键盘/手势 =====
+   对齐 Apple / 微信「新功能介绍」的做法：
+   · 居中卡片，毛玻璃遮罩 + 卡片回弹入场（不是硬弹）
+   · 品牌头（图标 + 「新功能」chip）替代裸标题，每步一个图标
+   · 进度条可点（Pill 步骤条），第 N 步可点回跳
+   · Esc / 点遮罩 = 跳过，← → 键盘翻页，触屏左右滑动翻页
+   · 底部「跳过引导」+ 主按钮「下一步 / 知道啦」，上一步有但不抢焦点
+   · 滚动锁定（body overflow hidden），长文案卡内滚动，不会把按钮顶出屏幕
+   · prefers-reduced-motion 时关掉动画 */
 #announce { position:fixed; inset:0; z-index:100; background:rgba(11,15,23,.55);
-  display:flex; align-items:center; justify-content:center; padding:20px; }
+  display:flex; align-items:center; justify-content:center; padding:20px;
+  -webkit-backdrop-filter:blur(18px) saturate(150%); backdrop-filter:blur(18px) saturate(150%); }
 #announce.hidden { display:none; }
-.announce-box { max-width:340px; width:100%; background:#fff; border-radius:18px;
-  padding:22px 20px; text-align:center; box-shadow:0 20px 60px rgb(0 0 0 / 25%); }
-.announce-box .a-ico { width:46px; height:46px; border-radius:50%; background:var(--primary);
-  color:var(--on-primary); display:grid; place-items:center; margin:0 auto 12px; font-size:22px; }
-.announce-box h3 { margin:0 0 10px; font-size:17px; font-weight:800; }
-.announce-box .a-body { margin:0 0 18px; font-size:14px; color:var(--on-surface-variant);
-  line-height:1.75; text-align:left; white-space:pre-wrap; word-break:break-word;
-  max-height:40vh; overflow:auto; }
-.announce-box .a-dots { display:flex; justify-content:center; gap:6px; margin:0 0 10px; }
-.announce-box .a-dots span { width:6px; height:6px; border-radius:50%; background:#D8DEE7; transition:all .2s; }
-.announce-box .a-dots span.on { width:16px; border-radius:3px; background:var(--primary); }
-.announce-box .a-actions { display:flex; gap:8px; }
-.announce-box .a-prev, .announce-box .a-ok { flex:1; height:44px; border:none;
-  border-radius:var(--r-md); font-size:15px; font-weight:700; }
-.announce-box .a-prev { background:#F1F5F9; color:var(--on-surface-variant); }
+@keyframes annOverlayIn { from { opacity:0; } to { opacity:1; } }
+@keyframes annCardIn {
+  from { opacity:0; transform:translateY(24px) scale(.96); }
+  60%  { opacity:1; transform:translateY(0) scale(1.005); }
+  to   { opacity:1; transform:none; }
+}
+@keyframes annStepIn { from { opacity:0; transform:translateX(14px); } to { opacity:1; transform:none; } }
+@keyframes annIconPulse { 0%,100% { transform:scale(1); } 50% { transform:scale(1.08); } }
+#announce.ann-overlay-in { animation:annOverlayIn .22s ease both; }
+.announce-box { max-width:352px; width:100%; max-height:calc(100dvh - 40px);
+  background:#fff; border-radius:22px; padding:0 0 18px; text-align:center;
+  box-shadow:0 24px 70px rgb(0 0 0 / 28%); overflow:hidden;
+  display:flex; flex-direction:column; animation:annCardIn .34s cubic-bezier(.22,1,.36,1) both; }
+/* 品牌头：渐变头图，让「这是一个正式功能说明」而不是系统告警 */
+.announce-box .a-head { position:relative; padding:22px 20px 16px;
+  background:var(--primary);
+  background:linear-gradient(160deg, var(--primary) 0%, #6d5bd0 100%);
+  color:var(--on-primary); }
+@supports (background: linear-gradient(in srgb, red, blue)) {
+  .announce-box .a-head { background:linear-gradient(160deg, var(--primary) 0%, color-mix(in srgb, var(--primary) 72%, #7c3aed) 100%); }
+}
+.announce-box .a-ico { width:52px; height:52px; border-radius:16px; margin:0 auto 12px;
+  background:rgb(255 255 255 / 18%); color:#fff; display:grid; place-items:center;
+  font-size:26px; animation:annIconPulse 2.4s ease-in-out infinite; }
+.announce-box .a-chip { display:inline-block; padding:3px 10px; border-radius:9999px;
+  background:rgb(255 255 255 / 20%); color:#fff; font-size:11px; font-weight:700;
+  letter-spacing:.04em; margin-bottom:8px; }
+.announce-box h3 { margin:0; font-size:18px; font-weight:800; line-height:1.4; }
+.announce-box .a-body { margin:0; padding:16px 20px 18px; font-size:14px;
+  color:var(--on-surface-variant); line-height:1.8; text-align:left;
+  white-space:pre-wrap; word-break:break-word; overflow-y:auto; flex:1 1 auto;
+  -webkit-overflow-scrolling:touch; }
+/* 富文本模式（bodyHtml 产出 <p>/<ul>）关掉 pre-wrap，改由块级元素自己管间距；
+   纯文本模式（上面那条）保留 pre-wrap，README 式的手动换行才好看。 */
+.announce-box .a-body.rich { white-space:normal; }
+.announce-box .a-body.rich p { margin:0 0 8px; }
+.announce-box .a-body.rich p:last-child { margin-bottom:0; }
+.announce-box .a-body.rich ul { margin:4px 0 8px; padding-left:4px; list-style:none; }
+.announce-box .a-body.rich ul:last-child { margin-bottom:0; }
+.announce-box .a-body.rich li { position:relative; padding-left:14px; margin:3px 0; }
+.announce-box .a-body.rich li::before { content:''; position:absolute; left:2px; top:.62em;
+  width:4px; height:4px; border-radius:9999px; background:var(--primary); }
+.announce-box .a-body.rich b { color:var(--on-surface); font-weight:700; }
+/* Pill 步骤条：当前步拉长成胶囊，整条可点（大厂引导的标配进度反馈） */
+.announce-box .a-dots { display:flex; justify-content:center; align-items:center;
+  gap:6px; padding:0 20px 14px; }
+.announce-box .a-dots button { width:6px; height:6px; padding:0; border:none; cursor:pointer;
+  border-radius:9999px; background:#D8DEE7; transition:width .25s cubic-bezier(.22,1,.36,1), background .25s; }
+.announce-box .a-dots button.on { width:18px; border-radius:3px; background:var(--primary); }
+.announce-box .a-dots button.done { background:#BFC9E4; }
+@supports (color: color-mix(in srgb, red 50%, blue)) {
+  .announce-box .a-dots button.done { background:color-mix(in srgb, var(--primary) 45%, #fff); }
+}
+.announce-box .a-actions { display:flex; gap:8px; padding:0 20px; }
+.announce-box .a-prev, .announce-box .a-ok { flex:1; height:46px; border:none;
+  border-radius:var(--r-md); font-size:15px; font-weight:700; cursor:pointer;
+  transition:transform .12s ease, opacity .12s ease; }
+.announce-box .a-prev { background:#F1F5F9; color:var(--on-surface-variant); flex:0 0 92px; }
 .announce-box .a-ok { background:var(--primary); color:var(--on-primary); }
-.announce-box .a-skip { margin-top:10px; background:none; border:none; color:var(--ink3); font-size:12px; }
+.announce-box .a-prev:active, .announce-box .a-ok:active { transform:scale(.97); }
+.announce-box .a-prev:disabled { opacity:.4; cursor:default; }
+.announce-box .a-skip { margin:12px 20px 0; background:none; border:none; cursor:pointer;
+  color:var(--ink3); font-size:12px; padding:4px 0; }
+.announce-box .a-step-in { animation:annStepIn .26s cubic-bezier(.22,1,.36,1) both; }
+/* 底部上滑提示（最后一步）：告诉用户可以滑动手势翻页 */
+.announce-box .a-swipe-hint { margin:10px 20px 0; font-size:11px; color:var(--ink3); }
+@media (prefers-reduced-motion: reduce) {
+  #announce.ann-overlay-in, .announce-box, .announce-box .a-step-in,
+  .announce-box .a-ico { animation:none; }
+}
+@media (max-width:360px) {
+  .announce-box { max-width:100%; }
+  .announce-box .a-prev { flex:0 0 80px; }
+}
+
+/* ===== 微信扫码绑定（2026-10-12）：二维码卡 + 状态行 + 倒计时 + 刷新动画 =====
+   对齐微信「添加朋友 → 扫码」的做法：
+   · 二维码固定 208px 白底卡（SVG 原始尺寸不固定，不定尺寸在窄屏必溢出）
+   · 四角取景框装饰：明确「扫这里」，比裸图更像扫码页
+   · 状态行带彩色圆点 + 文案，三态（等待 / 已扫 / 失败）一眼分清
+   · 二维码有效期倒计时（官方约 5 分钟）：剩 30 秒变红，到期自动失效并给「刷新」
+   · 刷新时二维码淡出再淡入，不是硬替换 */
+.qrcode { display:block; width:208px; height:208px; margin:0 auto;
+  background:#fff; border-radius:12px; padding:8px;
+  border:1px solid var(--hairline); image-rendering:pixelated; }
+.qr-wrap { position:relative; width:208px; margin:0 auto; }
+/* 四角取景框 */
+.qr-wrap::before, .qr-wrap::after,
+.qr-frame > i:first-child, .qr-frame > i:last-child { content:''; position:absolute;
+  width:22px; height:22px; border:2.5px solid var(--primary); border-radius:4px; }
+.qr-wrap::before { top:-3px; left:-3px; border-right:none; border-bottom:none; }
+.qr-wrap::after { top:-3px; right:-3px; border-left:none; border-bottom:none; }
+.qr-frame > i:first-child { bottom:-3px; left:-3px; border-right:none; border-top:none; }
+.qr-frame > i:last-child { bottom:-3px; right:-3px; border-left:none; border-top:none; }
+.qr-frame { position:relative; width:208px; height:208px; margin:0 auto; }
+.qr-wrap.qr-refresh .qrcode { animation:annOverlayIn .3s ease both; }
+@keyframes qrPulse { 0%,100% { box-shadow:0 0 0 0 rgb(var(--primary-rgb, 37 99 235) / 22%); }
+  50% { box-shadow:0 0 0 8px rgb(var(--primary-rgb, 37 99 235) / 0%); } }
+.qr-wrap.qr-live { animation:qrPulse 2.2s ease-out infinite; border-radius:12px; }
+/* 扫码状态行：圆点 + 文案，等待=琥珀呼吸 / 已扫=绿 / 失败=红 */
+.qr-status { display:flex; align-items:center; justify-content:center; gap:7px;
+  margin:12px 0 2px; font-size:13px; color:var(--on-surface-variant); }
+.qr-status .dot { width:7px; height:7px; border-radius:9999px; background:#b45309; flex:none; }
+.qr-status.wait .dot { animation:stPulse 1.4s ease-in-out infinite; }
+.qr-status.ok { color:#067647; }
+.qr-status.ok .dot { background:#067647; }
+.qr-status.bad { color:#b42318; }
+.qr-status.bad .dot { background:#b42318; }
+.qr-status.scaned { color:#067647; }
+.qr-status.scaned .dot { background:#067647; }
+.qr-expire { text-align:center; font-size:11px; color:var(--ink3); margin-top:6px; }
+.qr-expire.soon { color:#b42318; font-weight:600; }
+.qr-steps { display:flex; flex-direction:column; gap:0; margin:12px 0 4px; text-align:left; }
+.qr-steps .qr-step { display:flex; gap:10px; align-items:flex-start; padding:5px 0; }
+.qr-steps .qr-n { width:18px; height:18px; border-radius:9999px; flex:none;
+  background:#EEF2FF; color:var(--primary);
+  font-size:11px; font-weight:700; display:grid; place-items:center; margin-top:1px; }
+.qr-steps .qr-txt { font-size:12.5px; color:var(--on-surface-variant); line-height:1.6; }
+@media (prefers-reduced-motion: reduce) {
+  .qr-wrap.qr-live, .qr-status.wait .dot { animation:none; }
+}
 
 /* ===== 注册（2026-10-10：手机号注册 + WorkBuddy 网关「添加账号 OAuth」+ 绑定主播） ===== */
 .gate-tabs { display:flex; margin:0 0 14px; border:1px solid var(--hairline);
@@ -1182,6 +1394,11 @@ function closeGate(me) {
   const fn = gateResolve; gateResolve = null;
   applyLoginState(me);
   if (fn) fn(me);
+  /* 引导在登录门弹出时被 dismissAnnounce 收掉了，登录成功要补弹一次。
+     用 rAF 等一帧：登录门的 hidden 和引导的 remove('hidden') 要在同一帧后
+     再改 class，否则浏览器可能把两层遮罩的过渡叠在一起闪一下。
+     localStorage 已记住版本的（老用户 / 已读过）这里自然不再弹。 */
+  requestAnimationFrame(() => { try { maybeAnnounce(); } catch (_) {} });
 }
 
 function showGate() {
@@ -1206,6 +1423,10 @@ function showGate() {
       '<button class="btn-main" id="gateGo">登 录</button></div>' +
     '<div id="paneReg" class="hidden"></div>' +
     '</div>';
+  /* 引导让位给登录门：两层遮罩叠着用户找不到登录框。
+     dismissAnnounce 走 close()，会把 announceCtx 置 null 并摘掉键盘/触摸监听，
+     所以登录门关掉后 closeGate 里的重弹是一次干净的新实例，不会双监听。 */
+  dismissAnnounce();
   $('tabLogin').onclick = () => gateTab('login');
   $('tabReg').onclick = () => gateTab('reg');
   bindLoginPane();
@@ -1516,6 +1737,7 @@ let regionBlockedShown = false;
 function regionBlocked(msg) {
   if (regionBlockedShown) return;
   regionBlockedShown = true;
+  dismissAnnounce();   // body 整个换掉，引导的 DOM 随之消失，句柄必须清干净
   document.body.innerHTML = '<div class="empty" style="padding-top:120px"><span class="big">🔒</span><b>' +
     esc(msg || '您的ip不在授权范围内') + '</b><br>本展示页仅对安徽、河南、江苏开放</div>';
 }
@@ -1880,11 +2102,13 @@ function shimmerList() {
 
 /* ==================== 族谱画布（男团：鹏先生为祖师爷的师门树） ==================== */
 let lineageNodes = [];   // /lineage 的扁平节点
+let myPersonId = null;   // 当前登录主播 id；0/null 时族谱兜底照常画全树
 let lineageSel = null;   // 点击选中的节点 id（高亮祖师→自己整条链）
 let lnView = { x: 0, y: 0, s: 1 };
 let lnById = new Map();  // id → 布局节点（渲染后供搜索/定位用）
 let lineageQ = '';       // 搜索词
 let lnHitIdx = 0;        // 回车在命中之间循环
+let lnAllOpen = true;    // 卡片树「全部展开/收起」当前状态（默认全展开）
 
 /* 与分组长图同源的 8 色循环：每个师门一种颜色， trunk（祖师+各大支支头）上色 */
 const LN_THEMES = [
@@ -1898,11 +2122,15 @@ const LN_THEMES = [
   { bg:'#e6f6f1', bd:'#74c7ab', tc:'#1c9b77' },
 ];
 
-async function loadLineage() {
-  const d = await api('/api/public/teams/' + TEAM + '/lineage');
+/* 族谱音浪口径（2026-10-12）：daily / monthly / yearly，切换时带 period 重新拉 */
+let lineagePeriod = 'daily';
+
+async function loadLineage(period) {
+  if (period) lineagePeriod = period;
+  const d = await api('/api/public/teams/' + TEAM + '/lineage?period=' + lineagePeriod);
   lineageNodes = d.nodes || [];
   $('mhSub').textContent = 'LINEAGE ' + lineageNodes.length + ' 人';
-  lineageQ = ''; lnHitIdx = 0;
+  lineageQ = ''; lnHitIdx = 0; lnAllOpen = true;
   renderLineage(false);
 }
 
@@ -2179,7 +2407,49 @@ function lineageUpdateHits() {
   }
 }
 
+/* 卡片树搜索（2026-10-12）：与画布高亮共用同一个搜索框——不匹配的树节点卡 dim、
+   匹配的卡描边高亮，并自动展开它的所有祖先支系（不然命中卡可能藏在收起的支系里）；
+   搜索词清空时全部还原。画布一侧的 hit 逻辑仍在 lineageUpdateHits，两边互不干扰。 */
+function lineageUpdateCardHits() {
+  const q = lineageQ.trim();
+  document.querySelectorAll('#view .st-branch-card, #view .st-kid-card').forEach(c => {
+    const hit = !!q && (c.dataset.name || '').indexOf(q) >= 0;
+    c.classList.toggle('dim', !!q && !hit);
+    c.classList.toggle('hit', hit);
+    if (!hit) return;
+    let p = c.parentElement;
+    while (p && !p.classList.contains('section')) {
+      if (p.classList && p.classList.contains('st-branch-kids') && p.classList.contains('hidden')) {
+        p.classList.remove('hidden');
+        /* 容器被强制展开后，对应折叠钮的图标也要同步回「已展开」 */
+        const ic = document.querySelector('[data-toggle="' + p.id + '"] .material-symbols-outlined');
+        if (ic) ic.textContent = 'expand_less';
+      }
+      p = p.parentElement;
+    }
+  });
+}
+
 function renderLineage(keepView) {
+  /* 没收徒的人只看空态：搜索/缩放/画布/导出都不渲染，也不跑树布局。
+     myPersonId 为 0/null 或找不到对应节点时兜底照常画全树（不误伤管理员）。 */
+  const me = myPersonId == null ? null : lineageNodes.find(n => n.id === myPersonId);
+  if (me && !(Number(me.disciples) > 0)) {
+      /* 口径切换 chips（2026-10-12）：日 / 月 / 年，点了带 period 重拉 */
+  const periodChips = '<div class="ln-period" style="display:flex;gap:.5rem;padding:.25rem 1rem .5rem">' +
+    [['daily', '日'], ['monthly', '月'], ['yearly', '年']].map(([k, label]) =>
+      '<button class="go' + (lineagePeriod === k ? '' : ' gray') + '" data-lp="' + k + '">' + label + '</button>').join('') +
+    '</div>';
+$('view').innerHTML =
+      '<div class="section tab-content-enter"><div class="card" style="padding:2rem 1.25rem;text-align:center">' +
+        '<div class="material-symbols-outlined" style="font-size:44px;color:var(--on-surface-variant)">history_edu</div>' +
+        '<h2 class="card-t" style="margin:.5rem 0 .25rem">暂未收徒</h2>' +
+        '<div class="sub">收徒后，徒弟会出现在这里</div>' +
+      '</div></div>';
+    lnById = new Map();
+    lineageQ = ''; lnHitIdx = 0;
+    return { byId: lnById, roots: [] };
+  }
   const t = layoutLineage();
   const { byId, roots } = t;
   lnById = byId;
@@ -2188,32 +2458,50 @@ function renderLineage(keepView) {
   const q = lineageQ.trim();
   const hits = q ? new Set([...byId.values()].filter(n => n.name.indexOf(q) >= 0).map(n => n.id)) : null;
 
-  /* Stitch 指标卡：在册 / 分支 / 代际 / 累计音浪 */
-  const total = lineageNodes.length;
-  const branches = roots.length;
-  const gens = new Set([...byId.values()].map(n => n.generation != null ? n.generation : n.depth)).size;
-  const waveSum = lineageNodes.reduce((s, n) => s + (n.wave || 0), 0);
-  const branchCards = roots.slice(0, 12).map((r, i) => {
-    const sub = r.disciples > 0 ? r.disciples + ' 位徒弟' : (r.status === 'left' ? '已离团' : '在册');
-    const kids = (r.kids || []).slice(0, 6).map(k =>
-      '<div class="st-branch-kid"><div class="st-kid-card">' +
+  /* 代际文案：设计稿用中文序数（一代/二代），十代以外回退阿拉伯数字 */
+  const LN_GEN_ZH = ['一', '二', '三', '四', '五', '六', '七', '八', '九', '十'];
+  const genText = (n) => {
+    const g = (n.generation != null ? n.generation : n.depth) + 1;
+    return (LN_GEN_ZH[g - 1] || g) + ' 代';
+  };
+  /* 支系树改为递归多级（2026-10-12）：不再「2 层 + 截断 6 个」，每个有徒弟的节点
+     都是可折叠子支系，孙辈继续缩进 + 连接线；wave 为 null 时「个人音浪」行整条不显示 */
+  const kidHtml = (k) => {
+    const off = k.status === 'left';
+    const hasKids = (k.kids || []).length > 0;
+    return '<div class="st-branch-kid">' +
+      '<div class="st-kid-card' + (off ? ' off' : '') + '" data-name="' + esc(k.name) + '">' +
         '<div class="l"><div class="st-branch-av sub">' + esc(String(k.name || '?').charAt(0)) + '</div>' +
-        '<div><div class="nm">' + esc(k.name) + '</div>' +
-        '<div class="sub">第 ' + (((k.generation != null ? k.generation : 1) + 1)) + ' 代</div></div></div>' +
-        '<span class="st">' + (k.status === 'left' ? '离团' : '活跃') + '</span>' +
-      '</div></div>').join('');
-    const more = (r.kids || []).length > 6
-      ? '<div class="st-branch-kid"><div class="st-kid-card"><span class="st">… 还有 ' +
-        ((r.kids || []).length - 6) + ' 位</span></div></div>' : '';
-    return '<div class="st-branch-card" data-id="' + r.id + '">' +
+        '<div><div><span class="nm">' + esc(k.name) + '</span>' +
+          '<span class="gen">' + esc(genText(k)) + '</span>' +
+          '<span class="st">' + (off ? '离团' : '活跃') + '</span></div>' +
+        (k.wave == null ? '' : '<div class="wv">个人音浪 ' + wan(k.wave) + '</div>') +
+        '</div></div>' +
+        (hasKids ? '<button class="st-branch-tg" data-toggle="lnkids-' + k.id + '" title="展开/收起">' +
+          '<span class="material-symbols-outlined">expand_less</span></button>' : '') +
+      '</div>' +
+      (hasKids ? '<div class="st-branch-kids' + (lnAllOpen ? '' : ' hidden') + '" id="lnkids-' + k.id + '">' +
+        (k.kids || []).map(kidHtml).join('') + '</div>' : '') +
+    '</div>';
+  };
+  const branchCards = roots.slice(0, 12).map((r) => {
+    const sub = r.disciples > 0 ? r.disciples + ' 位徒弟' : (r.status === 'left' ? '已离团' : '在册');
+    const hasKids = (r.kids || []).length > 0;
+    /* 支系卡：个人音浪行（wave null 不显示）+ 卡底「师徒合算总音浪」条（totalWave null 整条不显示） */
+    return '<div class="st-branch-card" data-id="' + r.id + '" data-name="' + esc(r.name) + '">' +
       '<div class="l"><div class="st-branch-av">' + esc(String(r.name || '?').charAt(0)) + '</div>' +
-        '<div><div><span class="st-branch-nm">' + esc(r.name) + '</span>' +
-        '<span class="st-branch-tag">一代</span></div>' +
-        '<div class="st-branch-sub">' + esc(sub) + '</div></div></div>' +
-      '<button class="st-ln-btn" data-toggle="branch-' + i + '" title="展开/收起">' +
-        '<span class="material-symbols-outlined">expand_less</span></button>' +
+        '<div style="flex:1;min-width:0"><div><span class="st-branch-nm">' + esc(r.name) + '</span>' +
+        '<span class="st-branch-tag">' + esc(genText(r)) + '</span></div>' +
+        '<div class="st-branch-sub">' + esc(sub) + '</div>' +
+        (r.wave == null ? '' : '<div class="st-branch-wave">个人音浪 ' + wan(r.wave) + '</div>') +
+        (r.totalWave == null ? '' : '<div class="st-branch-total"><span>师徒合算总音浪</span><b>' +
+          wan(r.totalWave) + '</b></div>') +
+        '</div></div>' +
+      (hasKids ? '<button class="st-branch-tg" data-toggle="lnkids-' + r.id + '" title="展开/收起">' +
+        '<span class="material-symbols-outlined">expand_less</span></button>' : '') +
     '</div>' +
-    '<div class="st-branch-kids" id="branch-' + i + '">' + kids + more + '</div>';
+    (hasKids ? '<div class="st-branch-kids' + (lnAllOpen ? '' : ' hidden') + '" id="lnkids-' + r.id + '">' +
+      (r.kids || []).map(kidHtml).join('') + '</div>' : '');
   }).join('');
 
   let edges = '';
@@ -2252,23 +2540,15 @@ function renderLineage(keepView) {
       '<div class="st-ln-search">' +
         '<span class="material-symbols-outlined" style="font-size:18px;color:var(--on-surface-variant)">search</span>' +
         '<input id="lnQ" placeholder="搜索主播或代际..." value="' + esc(q) + '" autocomplete="off">' +
+        '<button class="st-ln-clear" id="lnQClear" title="清除"' + (q ? '' : ' style="display:none"') + '>' +
+          '<span class="material-symbols-outlined">cancel</span></button>' +
       '</div>' +
       '<button class="st-ln-btn" id="lnFit" title="复位"><span class="material-symbols-outlined">filter_center_focus</span></button>' +
+      '<button class="st-ln-btn" id="lnTglAll" title="' + (lnAllOpen ? '全部收起' : '全部展开') + '">' +
+        '<span class="material-symbols-outlined" id="lnTglAllIc">' + (lnAllOpen ? 'unfold_less' : 'unfold_more') + '</span></button>' +
       '<button class="st-ln-btn" id="lnPng" title="导出图片">' + LN_PNG_ICON + '</button>' +
     '</div>' +
-    '<div class="st-ln-stat">' +
-      '<div class="st-ln-stat-h"><div class="l">' +
-        '<span class="material-symbols-outlined">hub</span>代际脉络概览</div>' +
-        '<span class="r">' + (new Date().getFullYear()) + ' 年度动态</span></div>' +
-      '<div class="st-ln-stat-g">' +
-        '<div><div class="k">' + total + '</div><div class="v">公会在册</div></div>' +
-        '<div><div class="k">' + branches + '</div><div class="v">代际分支</div></div>' +
-        '<div><div class="k">' + gens + '</div><div class="v">传承代际</div></div>' +
-        '<div><div class="k hl">' + (waveSum >= 10000 ? Math.round(waveSum / 10000) : waveSum) +
-          (waveSum >= 10000 ? '<span style="font-size:11px;font-weight:400">万</span>' : '') +
-          '</div><div class="v">累计音浪</div></div>' +
-      '</div>' +
-    '</div>' +
+    periodChips +
     '<div class="st-branch">' + branchCards + '</div>' +
     '<div class="lineage-wrap" id="lnWrap">' +
     '<div class="ln-hint"><span class="tip">完整师门链 · 拖动查看 · 点人看传承路径</span>' +
@@ -2280,14 +2560,14 @@ function renderLineage(keepView) {
     '</div>' +
     '<svg><g id="lnVp" transform="translate(0,0) scale(1)">' + edges + nodes + '</g></svg>' +
     '</div>' +
-    '<div class="st-ln-tip">' +
-      '<span class="material-symbols-outlined">verified_user</span>' +
-      '<div><div class="t">代际发展激励规范</div>' +
-      '<div class="d">一代导师享有点对点指导津贴；签约主播月流水达标后自动晋级并获得独立指导资格。</div></div>' +
-    '</div>' +
     '</div>';
+  /* 口径切换绑定（2026-10-12）：点了带 period 重拉族谱数据 */
+  $('view').querySelectorAll('[data-lp]').forEach(b => {
+    b.onclick = () => { if (b.dataset.lp !== lineagePeriod) loadLineage(b.dataset.lp); };
+  });
   bindLineage(t, keepView);
-  $('view').querySelectorAll('.st-branch-card [data-toggle]').forEach(b => {
+  /* 支系和子支系共用一套折叠交互（默认全展开）：图标 expand_less=已展开 / expand_more=已收起 */
+  $('view').querySelectorAll('[data-toggle]').forEach(b => {
     b.onclick = () => {
       const box = document.getElementById(b.dataset.toggle);
       if (!box) return;
@@ -2295,6 +2575,8 @@ function renderLineage(keepView) {
       b.querySelector('.material-symbols-outlined').textContent = hidden ? 'expand_more' : 'expand_less';
     };
   });
+  /* 重渲染（如画布点人）会重建卡片树：搜索词还在的话把 dim/高亮补回来 */
+  lineageUpdateCardHits();
 }
 
 function bindLineage(t, keepView) {
@@ -2322,13 +2604,35 @@ function bindLineage(t, keepView) {
   if (lnFsCss) wrap.classList.add('ln-fs');   // 全屏中切视图/重渲染，状态不丢
   lnSyncFsIcon();
   const qInput = $('lnQ');
-  qInput.oninput = () => { lineageQ = qInput.value; lnHitIdx = 0; lineageUpdateHits(); };
+  const qClear = $('lnQClear');
+  /* 清除按钮跟随输入显隐；搜索框同时驱动两边：画布 hit（lineageUpdateHits）+
+     卡片树 dim/高亮（lineageUpdateCardHits） */
+  const syncClear = () => { qClear.style.display = qInput.value.trim() ? '' : 'none'; };
+  qInput.oninput = () => {
+    lineageQ = qInput.value; lnHitIdx = 0;
+    syncClear(); lineageUpdateHits(); lineageUpdateCardHits();
+  };
+  qClear.onclick = () => {
+    qInput.value = ''; lineageQ = ''; lnHitIdx = 0;
+    syncClear(); lineageUpdateHits(); lineageUpdateCardHits();
+    qInput.focus();
+  };
   qInput.onkeydown = (e) => {
     if (e.key !== 'Enter') return;
     const ids = lineageHitIds();
     if (!ids.length) return;
     lnHitIdx = (lnHitIdx + 1) % ids.length;
     lineageUpdateHits();
+  };
+  /* 全部展开/收起：统一控制每一级支系容器（含孙辈），并同步所有折叠钮图标 */
+  $('lnTglAll').onclick = () => {
+    lnAllOpen = !lnAllOpen;
+    $('view').querySelectorAll('.st-branch-kids[id]').forEach(box =>
+      box.classList.toggle('hidden', !lnAllOpen));
+    $('view').querySelectorAll('[data-toggle] .material-symbols-outlined').forEach(ic =>
+      ic.textContent = lnAllOpen ? 'expand_less' : 'expand_more');
+    $('lnTglAllIc').textContent = lnAllOpen ? 'unfold_less' : 'unfold_more';
+    $('lnTglAll').title = lnAllOpen ? '全部收起' : '全部展开';
   };
   const pts = new Map();
   let pinchD = 0, moved = 0, onCtl = false;
@@ -2589,6 +2893,7 @@ async function loadMy() {
     const who = await api('/api/public/teams/' + TEAM + '/my/who?token=' + encodeURIComponent(t));
     if (who && who.needBind) { applyLoginState(who); renderBindCard(who); return; }
     const d = await api('/api/public/teams/' + TEAM + '/my?token=' + encodeURIComponent(t));
+    myPersonId = Number(d.personId || 0) || null;
     let series = null;
     try {
       series = await api('/api/public/teams/' + TEAM + '/my/series?token=' + encodeURIComponent(t) + '&days=14');
@@ -2602,7 +2907,13 @@ async function loadMy() {
     try {
       push = await api('/api/public/teams/' + TEAM + '/my/push?token=' + encodeURIComponent(t));
     } catch (_) { /* 推送状态失败不挡主数据 */ }
-    renderMy(d, series, claim, bound, push);
+    /* 我的抖音号（2026-10-12）：后端并行实现中。失败/超时一律不挡主数据，
+       这里用 {__err:true} 占位，卡片位置只出一行灰字（口径见 myAccountsCard） */
+    let accounts = null;
+    try {
+      accounts = await api('/api/public/teams/' + TEAM + '/my/accounts?token=' + encodeURIComponent(t));
+    } catch (_) { accounts = { __err: true }; }
+    renderMy(d, series, claim, bound, push, accounts);
   } catch (e) {
     /* token 过期/没验证过 → 回登录门；其它错误照常显示错误态 */
     const m = String(e.message || '');
@@ -2742,7 +3053,58 @@ function renderMyLogin() {
   $('myPass').onkeydown = (e) => { if (e.key === 'Enter') go(); };
 }
 
-function renderMy(d, series, claim, bound, push) {
+/** 我的抖音号卡（2026-10-12）：GET /api/public/teams/{TEAM}/my/accounts
+    每个绑定的抖音号一行，显示日/月/年/累计音浪（与 /my 同一口径）。
+    三条兜底：published:false → 整卡不渲染；summary.count 为 0 → 空态文案；
+    accounts.__err（接口失败/超时，loadMy 里吞掉的）→ 灰字「抖音号数据加载失败」，绝不让页面挂掉。 */
+function myAccountsCard(accounts) {
+  if (!accounts || accounts.published === false) return '';
+  const wave = (o) => o == null || o.wave == null ? '—' : wan(o.wave);
+  const cell = (label, o) => '<span class="c">' + label + '<b>' + esc(wave(o)) + '</b></span>';
+  if (accounts.__err) {
+    return '<div class="st-my-acct">' +
+      '<div class="sec"><span>我的抖音号</span></div>' +
+      '<div class="fail">抖音号数据加载失败</div></div>';
+  }
+  const list = Array.isArray(accounts.accounts) ? accounts.accounts : [];
+  const sum = accounts.summary || null;
+  if (!sum || !Number(sum.count)) {
+    return '<div class="st-my-acct">' +
+      '<div class="sec"><span>我的抖音号</span></div>' +
+      '<div class="none">还没有绑定抖音号，绑定后这里显示每个号的数据</div></div>';
+  }
+  const body = list.map((a) => {
+    /* 没登记抖音号时退回采集 ID，并加 `ID ` 前缀标明「这不是抖音号」——
+       与推送文案（push.rs::AccountWave::display_name）同一口径，2026-10-12 */
+    const no = a.douyinNo
+      ? String(a.douyinNo)
+      : (a.anchorId ? 'ID ' + String(a.anchorId) : '');
+    const sub = (a.lastDate ? String(a.lastDate) : '暂无数据') +
+      (Number(a.days) > 0 ? ' · ' + a.days + ' 天有数据' : '');
+    return '<div class="row">' +
+      '<div class="l"><div class="ico"><span class="material-symbols-outlined">smart_display</span></div>' +
+      '<div style="min-width:0">' +
+        '<div style="display:flex;align-items:center;min-width:0"><span class="t">' + esc(no) + '</span>' +
+        (a.primary ? '<span class="chip">主号</span>' : '') +
+        '<span class="st' + (a.liveToday ? ' on' : '') + '"><i></i>' +
+        (a.liveToday ? '今日已开播' : '今日未开播') + '</span></div>' +
+        '<div class="d">' + esc(sub) + '</div>' +
+      '</div></div>' +
+      '<div class="wg">' +
+        cell('日', a.daily) + cell('月', a.monthly) +
+        cell('年', a.yearly) + cell('累计', a.total) +
+      '</div></div>';
+  }).join('');
+  return '<div class="st-my-acct">' +
+    '<div class="sec"><span>我的抖音号</span><span class="n">共 ' + Number(sum.count) + ' 个</span></div>' +
+    '<div class="sum"><span>合计</span><span class="g">' +
+      cell('日', sum.daily) + cell('月', sum.monthly) +
+      cell('年', sum.yearly) + cell('累计', sum.total) +
+    '</span></div>' + body + '</div>';
+}
+
+function renderMy(d, series, claim, bound, push, accounts) {
+  accounts = accounts || null;
   if (d.name) {
     localStorage.setItem(MY_NAME_KEY(), d.name);
     /* 水印口径（2026-10-11）：手机号优先（打码），无手机号回退艺名。
@@ -2763,10 +3125,6 @@ function renderMy(d, series, claim, bound, push) {
     (o.minutes == null ? '' : '<div class="m">' + minText(o.minutes) + '</div>') + '</div>';
   /* 未播口径与榜单一致：当日音浪 < 2 = 未开播 */
   const offToday = d.daily && d.daily.wave != null && d.daily.wave < 2;
-  const rankHtml = d.teamRank > 0
-    ? '<div class="rk"><div class="n">第 ' + d.teamRank + '</div>' +
-      '<div class="l">团内名次 · 共 ' + (d.teamSize || '—') + ' 人</div></div>'
-    : '';
   /* 近 14 个业务日趋势：条形图，未播（<3）置灰 */
   let trend = '';
   const waves = series && series.waves;
@@ -2783,15 +3141,17 @@ function renderMy(d, series, claim, bound, push) {
       '<div class="bars">' + bars + '</div><div class="xs">' + xs + '</div></div>';
   }
   /* Stitch 版我的页：资料卡 → 大数字卡 → Grouped List */
+  /* 副标题（2026-10-12）：「团名 · 师承【师傅】」。masterName 是 /my 接口字段（没有师傅 = null，
+     整段只显示团名）；原「日期 · 未开播」挪到大数字卡「预估折合收益」行尾，信息不丢 */
   const head = '<div class="st-my-head">' +
-    '<div class="st-my-av" style="background:' + avColor(d.name) + '">' +
+    '<div class="st-my-av">' +
       esc(String(d.name || '?').charAt(0)) +
       '<span class="badge"><span class="material-symbols-outlined">verified</span></span>' +
     '</div>' +
     '<div style="flex:1;min-width:0">' +
       '<div style="display:flex;align-items:center;gap:.375rem"><span class="nm">' + esc(d.name || '—') + '</span>' +
       '<span class="tag">主账号</span></div>' +
-      '<div class="sub">' + esc(d.date || '') + (offToday ? ' · 最近一个业务日未开播' : '') + '</div>' +
+      '<div class="sub">' + esc(LABEL()) + (d.masterName ? ' · 师承【' + esc(d.masterName) + '】' : '') + '</div>' +
       '<div class="sync"><span class="dot"></span><span>数据已静默实时同步</span></div>' +
     '</div>' +
   '</div>';
@@ -2802,41 +3162,66 @@ function renderMy(d, series, claim, bound, push) {
   const monthlyYuan = m.yuan == null ? (m.wave == null ? '—' : yuan(m.wave / 10)) : yuan(m.yuan);
   const pct = m.wave != null && m.prevWave > 0
     ? Math.round((m.wave - m.prevWave) / m.prevWave * 1000) / 10 : null;
-  const rankPct = d.teamRank > 0 && d.teamSize > 0
-    ? Math.min(100, Math.round(d.teamRank / d.teamSize * 100)) : 0;
+  /* 排名只显示自己（2026-10-12）：不读 teamSize / rankGap，后端字段半改状态也不闪旧文案 */
+  const rankLeft = d.teamRank > 0
+    ? '战队排名：第 ' + d.teamRank + ' 名'
+    : '战队排名：暂未上榜';
   const big = '<div class="st-my-big">' +
     '<div class="lbl"><span>本月累计个人音浪</span>' +
     (pct == null ? '' : '<span class="chip"><span class="material-symbols-outlined">' +
       (pct >= 0 ? 'trending_up' : 'trending_down') + '</span>' +
       (pct >= 0 ? '+' : '') + pct + '% 环比</span>') + '</div>' +
     '<div class="num">' + monthlyWave + '</div>' +
-    '<div class="row"><span>预估折合收益</span><span class="rmb">' + monthlyYuan + '</span></div>' +
+    '<div class="row"><span>预估折合收益</span><span class="rmb">' + monthlyYuan + '</span>' +
+    '<span class="tail">' + esc(d.date || '') + (offToday ? ' · 未开播' : '') + '</span></div>' +
     '<div class="st-my-rank">' +
       '<div class="l1"><span class="a"><span class="material-symbols-outlined">military_tech</span>' +
-      (d.teamRank > 0 ? '战队排名：第 ' + d.teamRank + ' 名' : '暂无战队排名') + '</span>' +
-      '<span class="b">共 ' + (d.teamSize || '—') + ' 人</span></div>' +
-      '<div class="bar"><i style="width:' + rankPct + '%"></i></div>' +
+      esc(rankLeft) + '</span></div>' +
     '</div>' +
   '</div>';
 
 
-  const claimStatus = claim && claim.status === 'pending' ? '审核中'
-    : claim && claim.status === 'rejected' ? '未通过'
-    : bound && bound.length ? (bound.find(b => b.primary) || bound[0]).douyinNo : '未绑定';
-  const pushStatus = push && push.configured ? '微信 / QQ已同步' : '微信 / QQ未同步';
+  /* 绑定项右侧（设计稿：主号抖音号小字 + 标题旁「已绑定 N 个」chip）。
+     主号判定不能用「有 is_primary=1」当唯一依据：台账里存在一人多号但没标主号的行
+     （1000001/1000004 那种全 0），那时明明绑了 3 个号，右侧却会显示「未绑定」。
+     所以有绑定就按主号→第一个号显示，只有一条都没绑时才看审核状态。 */
+  const boundList = bound || [];
+  const primaryBound = boundList.find(b => b.primary) || boundList[0];
+  const boundRight = primaryBound ? '主号: ' + primaryBound.douyinNo
+    : claim && claim.status === 'pending' ? '审核中'
+    : claim && claim.status === 'rejected' ? '未通过' : '未绑定';
+  const boundChip = boundList.length
+    ? '<span class="chip">已绑定 ' + boundList.length + ' 个</span>' : '';
+  /* 推送状态走 /my/push 的真实字段（后端没有 configured 这个键）：
+     bound=已拿到会话可推送；scanBound+needActivate=扫码了但还没给机器人发过消息。 */
+  const pushStatus = !push ? '微信 / QQ未同步'
+    : push.bound ? '微信 / QQ已同步'
+    : push.scanBound ? (push.needActivate ? '待激活' : '已扫码')
+    : '微信 / QQ未同步';
 
   $('view').innerHTML = '<div class="section tab-content-enter">' +
-    head + big + trend +
+    head + big + trend + myAccountsCard(accounts) +
     '<div class="st-my-list">' +
       '<div class="sec">系统服务与偏好</div>' +
-      '<div class="st-my-item"><div class="l"><div class="ico"><span class="material-symbols-outlined">link</span></div>' +
-      '<div class="t">抖音号绑定与审计</div></div>' +
-      '<div class="r"><span class="pri">' + esc(claimStatus) + '</span>' +
+      '<div class="st-my-item" id="myBindRow" style="cursor:pointer"><div class="l"><div class="ico"><span class="material-symbols-outlined">link</span></div>' +
+      '<div style="display:flex;align-items:center;min-width:0"><span class="t">抖音号绑定与审计</span>' +
+      boundChip + '</div></div>' +
+      '<div class="r"><span>' + esc(boundRight) + '</span>' +
       '<span class="material-symbols-outlined">chevron_right</span></div></div>' +
-      '<div class="st-my-item"><div class="l"><div class="ico"><span class="material-symbols-outlined">notifications_active</span></div>' +
-      '<div class="t">推送机器人服务</div></div>' +
+      '<div class="st-my-item" id="myPushRow" style="cursor:pointer"><div class="l"><div class="ico"><span class="material-symbols-outlined">qr_code_scanner</span></div>' +
+      '<div style="min-width:0"><div class="t">推送机器人服务</div>' +
+      '<div class="d">扫码绑定接收实时战报与提醒</div></div></div>' +
       '<div class="r"><span>' + esc(pushStatus) + '</span>' +
       '<span class="material-symbols-outlined">chevron_right</span></div></div>' +
+      '<div class="st-my-item" id="myChaseRow" style="cursor:pointer"><div class="l"><div class="ico"><span class="material-symbols-outlined">flag</span></div>' +
+      '<div style="min-width:0"><div class="t">追分设置</div>' +
+      '<div class="d">追人 · 定目标分 · 追名次，进度变化 wxbot 私聊提醒</div></div></div>' +
+      '<div class="r"><span>' + esc(chaseSummary(push)) + '</span>' +
+      '<span class="material-symbols-outlined">chevron_right</span></div></div>' +
+      '<div class="st-my-item" id="myForgot" style="cursor:pointer">' +
+      '<div class="l"><div class="ico"><span class="material-symbols-outlined">lock_reset</span></div>' +
+      '<div class="t">忘记密码 / 重置密码</div></div>' +
+      '<div class="r"><span class="material-symbols-outlined">chevron_right</span></div></div>' +
       '<div class="st-my-item"><div class="l"><div class="ico"><span class="material-symbols-outlined">visibility</span></div>' +
       '<div class="t">隐私与对外展示字段</div></div>' +
       '<div class="r"><span class="material-symbols-outlined">chevron_right</span></div></div>' +
@@ -2844,8 +3229,18 @@ function renderMy(d, series, claim, bound, push) {
       '<div class="t">关于系统与内部版本</div></div>' +
       '<div class="r"><span>v7.10-FINAL</span></div></div>' +
     '</div>' +
+    /* 联系运营卡（2026-10-12）：项目里没有私信通道，按钮只给微信联系方式提示 */
+    '<div class="st-my-ops">' +
+      '<div class="st-my-ops-av">帅</div>' +
+      '<div style="flex:1;min-width:0"><div class="t">遇到问题？请私信帅帅</div>' +
+      '<div class="d">运营专员在线 · 快速协助排查核算</div></div>' +
+      '<button class="st-my-ops-btn" id="myOps">' +
+      '<span class="material-symbols-outlined">chat</span>立即私信</button>' +
+    '</div>' +
     claimCard(claim, bound) +
-    (push ? pushCard(push) : '') +
+    /* 不再按 push 有无渲染：接口失败也落地一张带重试的卡，
+       保住「点那一行有东西可滚」这个最基本的行为 */
+    pushCard(push) +
     '<button class="my-logout" id="myOut">退出登录</button>' +
   '</div>';
   $('myOut').onclick = () => {
@@ -2853,8 +3248,59 @@ function renderMy(d, series, claim, bound, push) {
     removeWatermark();
     location.reload();   // 回登录门
   };
+  $('myOps').onclick = () => {
+    /* 没有站内私信通道（运营在微信里），这里只指路不跳转 */
+    toast('请直接在微信里联系帅帅');
+  };
+  $('myForgot').onclick = () => {
+    /* 忘记密码流程在登录门里（gateForgot：按手机号重置为后四位）。直接复用：
+       退出登录态并开门，顺手把手机号填进账号框、聚焦「忘记密码」，点一下就重置；
+       登录成功后 gateResolve 刷新页面回到正常态（与 sessionExpired 同一接法） */
+    const phone = meState && meState.phone ? meState.phone : '';
+    myLogout();
+    removeWatermark();
+    gateResolve = () => location.reload();
+    showGate();
+    if (phone) $('gateAcct').value = phone;
+    setTimeout(() => { const f = $('gateForgot'); if (f) f.focus(); }, 60);
+  };
+  /* 列表两行滚到页内对应的操作卡：绑定行 → 绑定/审计卡，推送行 → 推送卡。
+     卡片是异步渲染的（my / series / claim / push / accounts 五个请求回来才拼 DOM），
+     所以找不到目标时短轮询等一下再滚，而不是静默 return 让用户以为点了没反应。 */
+  const scrollToCard = (id) => {
+    let tries = 0;
+    const attempt = () => {
+      const el = id && $(id);
+      if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'start' }); return true; }
+      if (++tries > 20) {   // 最多等 ~1s（50ms × 20），超过就当这张卡真的不显示
+        toast('功能加载中，稍等一下再点');
+        return false;
+      }
+      setTimeout(attempt, 50);
+      return false;
+    };
+    attempt();
+  };
+  $('myBindRow').onclick = () => scrollToCard('myClaimCard');
+  $('myPushRow').onclick = () => scrollToCard('myPushCard');
+  $('myChaseRow').onclick = () => scrollToCard('myPushCard');
   bindClaimCard(claim);
-  if (push) renderPushBox(push);
+  renderPushBox(push);
+  /* 兜底卡的重试按钮：重新拉一次 /my/push，成功就换成正常内容 */
+  const retry = $('pushRetry');
+  if (retry) {
+    retry.onclick = async () => {
+      retry.disabled = true;
+      retry.textContent = '重试中…';
+      try {
+        renderPushBox(await fetchPush());
+      } catch (e) {
+        retry.disabled = false;
+        retry.textContent = '重试';
+        toast(e.message || '还是没取到');
+      }
+    };
+  }
 }
 
 /* ==================== 绑定抖音号（提交 + 截图 → 管理端审计） ==================== */
@@ -2882,7 +3328,7 @@ function claimCard(claim, bound) {
       '<input type="file" id="clFile" accept="image/*" hidden>' +
       '<div class="form-err hidden" id="clErr" style="color:#D92D20;font-size:12px;margin-top:6px;text-align:left"></div>' +
       '<button class="go" id="clGo">提交绑定申请</button>';
-  return '<div class="st-my-list"><div class="sec">绑定抖音号与审计</div>' +
+  return '<div class="st-my-list" id="myClaimCard"><div class="sec">绑定抖音号与审计</div>' +
     '<div style="padding:0 1rem 1rem">' + boundRows + status + form +
     '<div class="sub" style="margin-top:8px;line-height:1.6">音浪按抖音号对号入座：绑定并通过审计后，' +
     '之后导入的数据里这个抖音号的音浪都会算到你名下。信息只给管理员审计用。</div></div>';
@@ -2962,6 +3408,14 @@ function bindClaimCard(claim) {
   };
 }
 
+/* 追分设置入口行的右侧摘要（2026-10-12）：没开追分开关 = 关；开了看目标数 */
+function chaseSummary(p) {
+  if (!p) return '未绑定';
+  if (!p.notifyTarget) return '已关';
+  const n = (p.targets || []).length;
+  return n ? n + ' 个目标' : '已开 · 未设目标';
+}
+
 /* ==================== 微信推送（绑定机器人 + 追分目标） ==================== */
 /* 2026-10-10：数据入库约 30 分钟后由微信机器人私聊推送，两类内容各自开关（都关着就不推）：
    · 追分提醒 —— 追主播 / 定音浪目标 / 追名次（一律比本月累计），追上/还差多少都推给你
@@ -2971,10 +3425,20 @@ function bindClaimCard(claim) {
 let pushState = null;
 let pushSrTimer = null;
 let pushScanTimer = null;
+let pushScanExpireTimer = null;
 
 function pushCard(p) {
-  return '<div class="st-my-list"><div class="sec">微信推送服务</div>' +
+  /* 接口失败（p == null）也要把卡渲染出来：否则「推送机器人服务」那一行
+     滚不到任何东西，用户点了没反应，还以为功能是坏的。 */
+  return '<div class="st-my-list" id="myPushCard"><div class="sec">微信推送服务</div>' +
     '<div id="pushBox" style="padding:0 1rem 1rem"></div></div>';
+}
+
+/* 推送状态取不到时的兜底内容：一句说明 + 重试按钮（照 myAccountsCard 的 __err 口径） */
+function pushErrHtml() {
+  return '<div class="sub" style="margin-top:6px;line-height:1.75">' +
+    '推送状态没取到，可能是网络慢。点下面重试。</div>' +
+    '<button class="go gray" id="pushRetry" style="margin-top:10px">重试</button>';
 }
 
 async function fetchPush() {
@@ -2994,7 +3458,8 @@ async function refreshPush() {
 function renderPushBox(p) {
   const box = $('pushBox');
   if (!box) return;
-  box.innerHTML = !p.channelConfigured ? pushNotReady()
+  box.innerHTML = !p ? pushErrHtml()
+    : !p.channelConfigured ? pushNotReady()
     : p.bound ? pushBoundHtml(p) : pushUnboundHtml(p);
   bindPushBox(p);
 }
@@ -3016,13 +3481,29 @@ function pushUnboundHtml(p) {
   h += '<div id="pushScanBox" style="margin-top:10px"></div>' +
     '<button class="go" id="pushScanStart">' +
     (p.scanBound ? '重新扫码' : '获取二维码') + '</button>';
+  /* 已扫码未激活：把「重新扫」和「查激活」分成两件事。
+     扫码成功的人点原来的「重新扫码」会拿到一个新码，白扫一次；
+     真正想要的是「我发了消息，怎么还没通」→ 查一下状态。 */
+  if (p.scanBound) {
+    h += '<div class="hint" style="margin-top:8px">已经扫过码了，激活只差一步：' +
+      '在微信里给机器人随便发一条消息，收到回执就通了。</div>' +
+      '<button class="go gray" id="pushCheckActivate" style="margin-top:8px">我发了，查一下激活状态</button>';
+  }
   h += '<div class="hint" style="margin-top:8px">推送是你个人的：只有你自己扫码绑定的微信会收到。</div>';
   return h;
 }
 
 function pushBoundHtml(p) {
-  let h = '<div class="row"><span class="st ok">✓ 已绑定微信</span>' +
+  /* 显示绑的是哪个微信号：后端一直下发 scanNickname，前端原来没用上，
+     用户换了号或代绑过就搞不清推送到底发去哪。 */
+  const who = p.scanNickname ? '（' + esc(p.scanNickname) + '）' : '';
+  let h = '<div class="row"><span class="st ok">✓ 已绑定微信' + who + '</span>' +
     '<span class="sub">' + esc(p.boundAt || '') + '</span></div>';
+  /* 待激活：凭证有了但机器人还没跟用户说过话，微信要求先有对话才能主动推 */
+  if (p.needActivate) {
+    h += '<div class="hint" style="margin-top:6px">还差最后一步：在微信里给机器人发一条消息，' +
+      '收到回执后推送才会正式开始。</div>';
+  }
   h += '<label class="sw"><input type="checkbox" id="swTarget"' +
     (p.notifyTarget ? ' checked' : '') + (p.admin ? ' disabled' : '') +
     '> 追分提醒（追上 / 还差多少）</label>';
@@ -3046,9 +3527,12 @@ function pushBoundHtml(p) {
       h += '<div class="sub" style="padding:6px 0">还没设置。加一个，追上或差多少都会推给你。</div>';
     }
     h += list.map((t) => {
+      /* 2026-10-12：person 目标 targetValue>0 = 用户设了自定义目标分（后端存的是原始值），
+         label 里要把它显出来，不然用户看不出这个目标按什么比 */
       const label = t.kind === 'value' ? '🎯 本月音浪 ' + wan(t.targetValue)
         : t.kind === 'rank' ? '🏅 本月第 ' + t.targetValue + ' 名'
-        : '🏃 ' + esc(t.targetName);
+        : (t.targetValue > 0 ? '🏃 ' + esc(t.targetName) + ' · 目标 ' + wan(t.targetValue)
+                             : '🏃 ' + esc(t.targetName));
       const state = t.hit ? '<span class="st ok">已达成</span>'
         : t.kind === 'rank'
           ? (t.lastGap > 0 ? '<span class="sub">还差 ' + t.lastGap + ' 名</span>' : '<span class="sub">未进榜</span>')
@@ -3069,6 +3553,7 @@ function pushAddHtml() {
     '<div id="tkPerson"><div class="sr">' +
     '<input id="tkQ" placeholder="搜本团主播名字" autocomplete="off">' +
     '<div class="sr-list hidden" id="tkList"></div></div>' +
+    '<input id="tkWan" inputmode="decimal" placeholder="目标分（万，选填）——不填 = 追上他本人">' +
     '<button class="go" id="tkAdd" disabled>添加</button></div>' +
     '<div id="tkValue" class="hidden">' +
     '<input id="tkVal" inputmode="decimal" placeholder="本月音浪目标（万），例如 50">' +
@@ -3155,6 +3640,14 @@ function bindPushBoundHandlers(p) {
       show('tkRank', b.dataset.tk === 'rank');
     };
   });
+  /* Enter 直提（2026-10-12）：三个输入框分别触发对应添加按钮，减少一次点按 */
+  const enterSubmit = (inputId, btnId) => {
+    const el = $(inputId), btn = btnId && $(btnId);
+    if (el && btn) el.addEventListener('keydown', (e) => { if (e.key === 'Enter') btn.click(); });
+  };
+  enterSubmit('tkWan', 'tkAdd');
+  enterSubmit('tkVal', 'tkValAdd');
+  enterSubmit('tkRankVal', 'tkRankAdd');
   const q = $('tkQ'), listEl = $('tkList'), addBtn = $('tkAdd');
   if (q) {
     q.oninput = () => {
@@ -3194,7 +3687,18 @@ function bindPushBoundHandlers(p) {
       addBtn.disabled = true;
       addBtn.textContent = '添加中…';
       try {
-        await postPush('/my/push/targets', { kind: 'person', personId: picked.id });
+        const wanRaw = parseFloat(($('tkWan') || {}).value);
+        const payload = { kind: 'person', personId: picked.id };
+        if (!isNaN(wanRaw)) {
+          if (!(wanRaw > 0)) { toast('目标分要大于 0（万）'); addBtn.disabled = false; addBtn.textContent = '添加'; return; }
+          payload.targetWan = wanRaw;
+        }
+        await postPush('/my/push/targets', payload);
+        if ($('tkWan')) $('tkWan').value = '';
+        q.value = '';
+        picked = null;
+        addBtn.disabled = true;
+        addBtn.textContent = '添加';
         toast('已添加');
         await refreshPush();
       } catch (e) {
@@ -3214,6 +3718,7 @@ function bindPushBoundHandlers(p) {
       try {
         await postPush('/my/push/targets', { kind: 'value', valueWan: v });
         toast('已添加');
+        $('tkVal').value = '';
         await refreshPush();
       } catch (e) {
         valAdd.disabled = false;
@@ -3233,6 +3738,7 @@ function bindPushBoundHandlers(p) {
       try {
         await postPush('/my/push/targets', { kind: 'rank', targetRank: n });
         toast('已添加');
+        $('tkRankVal').value = '';
         await refreshPush();
       } catch (e) {
         rankAdd.disabled = false;
@@ -3263,17 +3769,42 @@ function bindPushBox(p) {
     clearTimeout(pushSrTimer);
     pushSrTimer = setTimeout(() => refreshPush(), 5000);
   }
+  /* 「我发了，查一下激活状态」：已扫码未激活时的手动兜底。
+     自动轮询只在页面停留期间有效，用户切走再回来往往已经停了。 */
+  const chk = $('pushCheckActivate');
+  if (chk) {
+    chk.onclick = async () => {
+      chk.disabled = true;
+      chk.textContent = '查询中…';
+      try {
+        const next = await fetchPush();
+        renderPushBox(next);
+        if (next && next.bound) toast('已激活，推送会按你的开关发送');
+        else if (next && next.needActivate) toast('还没激活：先在微信里给机器人发一条消息');
+        else toast('状态已刷新');
+      } catch (e) {
+        chk.disabled = false;
+        chk.textContent = '我发了，查一下激活状态';
+        toast(e.message || '查询失败');
+      }
+    };
+  }
   if (p && p.bound) bindPushBoundHandlers(p);
 }
 
+/* 扫码二维码有效期：官方约 5 分钟。前端只做「展示倒计时 + 到期提示刷新」，
+   真正的失效由后端 status=expired 判定，前端不自己判死。 */
+var QR_TTL_SEC = 300;
+var pushScanQrExpire = 0;   // 到期时间戳（ms），0 = 无倒计时
+
 /** 获取扫码二维码并轮询扫码状态（confirmed 后等服务端长轮询拿到首次消息） */
 async function startPushScan() {
-  const btn = $('pushScanStart');
-  const box = $('pushScanBox');
+  var btn = $('pushScanStart');
+  var box = $('pushScanBox');
   if (!btn || !box) return;
   btn.disabled = true;
   btn.textContent = '获取中…';
-  box.innerHTML = '';
+  box.innerHTML = '<div class="qr-status wait"><span class="dot"></span>正在获取二维码…</div>';
   try {
     const r = await fetch('/api/public/teams/' + TEAM + '/my/push/wechat/start', {
       method: 'POST',
@@ -3282,34 +3813,82 @@ async function startPushScan() {
     });
     const d = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
-    let h = '';
+    let h = '<div class="qr-frame">';
     if (d.imgContent) {
       const src = String(d.imgContent).startsWith('data:')
         ? d.imgContent : 'data:image/png;base64,' + d.imgContent;
-      h += '<img class="qrcode" alt="微信推送绑定二维码" src="' + esc(src) + '">';
+      h += '<div class="qr-wrap qr-live" id="pushScanWrap">' +
+        '<img class="qrcode" alt="微信推送绑定二维码" src="' + esc(src) + '"></div>';
     } else if (d.url) {
       h += '<a class="reg-link" href="' + esc(d.url) + '" target="_blank" rel="noopener">打开二维码链接</a>';
+    } else {
+      throw new Error('没有拿到二维码，稍后再试');
     }
-    h += '<div class="reg-state wait" id="pushScanState">等待扫码…</div>' +
+    h += '</div>';
+    if (d.imgContent) {
+      h += '<div class="qr-status wait" id="pushScanStatus"><span class="dot"></span>' +
+        '<span id="pushScanStatusTx">等待扫码…</span></div>' +
+        '<div class="qr-expire" id="pushScanExpire"></div>';
+    }
+    h += '<div class="qr-steps">' +
+      '<div class="qr-step"><span class="qr-n">1</span><span class="qr-txt">用微信「扫一扫」扫描上面的二维码</span></div>' +
+      '<div class="qr-step"><span class="qr-n">2</span><span class="qr-txt">在微信里确认授权登录</span></div>' +
+      '<div class="qr-step"><span class="qr-n">3</span><span class="qr-txt">给机器人发一条消息，推送即激活</span></div>' +
+      '</div>' +
       '<div id="pushScanVerify" class="hidden" style="margin-top:8px">' +
       '<input id="pushScanCode" placeholder="微信里显示的验证码" inputmode="numeric" autocomplete="off">' +
       '<button class="go gray" id="pushScanCodeGo">提交验证码</button></div>';
     box.innerHTML = h;
     btn.disabled = false;
-    btn.textContent = '重新获取';
+    btn.textContent = '刷新二维码';
+    scanStatus('wait', '等待扫码…', true);
+    pushScanQrExpire = Date.now() + QR_TTL_SEC * 1000;
     startPushScanPoll(d.qrcode);
   } catch (e) {
     btn.disabled = false;
-    btn.textContent = '获取二维码';
-    box.innerHTML = '<div class="form-err">' + esc(e.message || '获取失败，稍后再试') + '</div>';
+    btn.textContent = '重新获取';
+    box.innerHTML = '<div class="qr-status bad"><span class="dot"></span>' +
+      esc(e.message || '获取失败，稍后再试') + '</div>';
   }
+}
+
+/** 扫码状态行：state = wait / scaned / ok / bad；带呼吸点的只有 wait */
+function scanStatus(state, text, pulse) {
+  var row = $('pushScanStatus');
+  if (!row) return;
+  row.className = 'qr-status ' + (state === 'ok' ? 'ok' : state === 'bad' ? 'bad'
+    : state === 'scaned' ? 'scaned wait' : 'wait');
+  var tx = $('pushScanStatusTx');
+  if (tx) tx.textContent = text;
+  var dot = row.querySelector('.dot');
+  if (dot) dot.style.animation = state === 'wait' && pulse ? '' : 'none';
+}
+
+/** 二维码倒计时：剩 30 秒内变红，到期只提示、不自动跳（后端 expired 才是权威） */
+function qrExpireTick() {
+  var el = $('pushScanExpire');
+  if (!el) return;
+  if (!pushScanQrExpire) { el.textContent = ''; el.className = 'qr-expire'; return; }
+  var left = Math.round((pushScanQrExpire - Date.now()) / 1000);
+  if (left <= 0) {
+    el.textContent = '二维码可能已过期，点「刷新二维码」重新获取';
+    el.className = 'qr-expire soon';
+    return;
+  }
+  var mm = Math.floor(left / 60), ss = left % 60;
+  el.textContent = '二维码 ' + (mm ? mm + ':' + pad2(ss) : ss + ' 秒') + ' 后过期';
+  el.className = 'qr-expire' + (left <= 30 ? ' soon' : '');
 }
 
 function startPushScanPoll(qrcode) {
   clearTimeout(pushScanTimer);
   pushScanTimer = null;
-  let verifyCode = '';
-  let stopped = false;
+  var verifyCode = '';
+  var stopped = false;
+  var ticks = 0;
+  clearInterval(pushScanExpireTimer);
+  pushScanExpireTimer = setInterval(qrExpireTick, 1000);
+  qrExpireTick();
   const submit = $('pushScanCodeGo');
   if (submit) {
     submit.onclick = () => {
@@ -3318,7 +3897,12 @@ function startPushScanPoll(qrcode) {
       submit.textContent = '提交中…';
     };
   }
-  const stop = () => { stopped = true; clearTimeout(pushScanTimer); pushScanTimer = null; };
+  const stop = () => {
+    stopped = true; clearTimeout(pushScanTimer); pushScanTimer = null;
+    clearInterval(pushScanExpireTimer); pushScanQrExpire = 0;
+    var w = $('pushScanWrap');
+    if (w) w.classList.remove('qr-live');
+  };
   const tick = async () => {
     if (stopped) return;
     try {
@@ -3330,33 +3914,38 @@ function startPushScanPoll(qrcode) {
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
       const st = String(d.status || '');
-      const el = $('pushScanState');
       if (st === 'confirmed') {
         stop();
+        scanStatus('ok', '✓ 已扫码确认', false);
         toast('扫码成功，请在微信里给机器人发一条消息激活推送');
         refreshPush();
         return;
       } else if (st === 'need_verifycode') {
         show('pushScanVerify', true);
-        if (el) el.textContent = '需要验证码：请在微信里查看并填入';
+        scanStatus('wait', '需要验证码：请在微信里查看并填入', true);
       } else if (st === 'scaned') {
-        if (el) el.textContent = '已扫码，等待确认…';
+        scanStatus('scaned', '已扫码，等待确认…', false);
       } else if (st === 'expired') {
         stop();
-        if (el) el.textContent = '二维码已过期，请重新获取';
+        scanStatus('bad', '二维码已过期，请点「刷新二维码」重新获取', false);
         return;
       } else if (st === 'verify_code_blocked') {
         stop();
-        if (el) el.textContent = '验证失败次数过多，请重新获取二维码';
+        scanStatus('bad', '验证失败次数过多，请重新获取二维码', false);
         return;
       } else if (st === 'scaned_but_redirect' || st === 'binded_redirect') {
-        if (el) el.textContent = '已扫码，等待确认…';
+        scanStatus('scaned', '已扫码，等待确认…', false);
       } else {
-        if (el) el.textContent = '等待扫码…';
+        scanStatus('wait', '等待扫码…', true);
       }
     } catch (e) {
-      const el = $('pushScanState');
-      if (el) el.textContent = e.message || '检测失败，重试中…';
+      // 连续网络失败不清状态，只在文案上提示；10 次后停轮询让用户手动刷新
+      if (++ticks >= 10) {
+        stop();
+        scanStatus('bad', (e.message || '检测失败') + '（已停止，请手动刷新）', false);
+        return;
+      }
+      scanStatus('wait', (e.message || '检测失败') + '，重试中…', true);
     }
     if (!stopped) pushScanTimer = setTimeout(tick, 3000);
   };
@@ -3390,6 +3979,13 @@ function switchView(v, opts) {
   show('subnav', v === 'group');
   show('foot', v !== 'lineage');
   syncHeaderOffset();
+  /* 离开「我的」页就停扫码轮询：三个计时器（轮询 / 倒计时 / 搜索防抖）
+     不停的话切回来会变成双份轮询，白耗请求 */
+  if (v !== 'my') {
+    clearTimeout(pushScanTimer); pushScanTimer = null;
+    clearInterval(pushScanExpireTimer); pushScanQrExpire = 0;
+    clearTimeout(pushSrTimer);
+  }
   $('view').innerHTML = '';
   if (opts.push !== false) pushRoute(opts.replace === true);
   go();
@@ -3514,44 +4110,233 @@ function applyTeam() {
   if (linBtn) linBtn.style.display = TEAM === 'female' ? 'none' : '';
 }
 
-/* 引导弹窗（2026-10-11）：site.announcement 开启时弹多步骤引导，逐步「下一步」；
-   点「完成 / 跳过」后按 version 记住，后台每次保存会让版本前进，前端就再弹一次。 */
+/* 引导弹窗（2026-10-12 大厂级）：多步骤「新功能介绍」。
+   对齐 Apple / 微信的首次引导：
+   · 品牌头 + 每步一个图标（后端 icon 白名单，前端再验一次）
+   · Pill 步骤条可点击回跳；Esc / 点遮罩 = 跳过
+   · 键盘 ← → 翻页；触屏左右滑动翻页
+   · 滚动锁定 + 长文案卡内滚动，按钮永不被顶出屏幕
+   · 版本记住已读：点「知道啦 / 跳过」，或翻完最后一步，都按 version 落 localStorage
+   每次渲染都重建 DOM（innerHTML），所以这里统一在 render() 里重新绑事件。 */
+
+/* 图标白名单与后端 STEP_ICON_WHITELIST 一致；只允许走 class 名，不放任意字符串 */
+var ANNOUNCE_ICONS = ['auto_awesome', 'military_tech', 'qr_code_scanner',
+  'notifications_active', 'insights', 'tips_and_updates', 'campaign', 'star', 'bolt',
+  'groups', 'emoji_events', 'local_fire_department', 'trending_up', 'calendar_month',
+  'chat_bubble', 'lock', 'person', 'smart_toy', 'workspace_premium'];
+
+var announceCtx = null;   // 当前引导实例的开闭句柄（供外部强制收起）
+
+/* 深链直达：?announce=N（或 #announce=N）从第 N 步打开。
+   运营改完引导可以把链接直接发给用户看某一步，不用让人一路点过来。
+   深链进来的**不写已读** —— 否则用户点开看到一半，下次正式引导反而不弹了。
+   返回 0 起的步序号；没有深链或越界返回 -1。 */
+function announceDeepStep(stepCount) {
+  var m = /(?:[?&#])announce=(\d{1,2})(?!\d)/.exec(location.search + location.hash);
+  if (!m) return -1;
+  var n = +m[1] - 1;
+  return (n >= 0 && n < stepCount) ? n : -1;
+}
+
 function maybeAnnounce() {
-  const a = site && site.announcement;
+  var a = site && site.announcement;
   if (!a || !a.enabled || !(a.steps && a.steps.length)) return;
-  const key = 'pk_announce_v';
-  try {
-    if (localStorage.getItem(key) === String(a.version)) return;
-  } catch (_) {}
-  const box = $('announce');
+  var box = $('announce');
   if (!box) return;
-  const steps = a.steps;
-  let idx = 0;
-  const done = () => {
-    try { localStorage.setItem(key, String(a.version)); } catch (_) {}
+  var steps = a.steps;
+  var closing = false;
+  var deep = announceDeepStep(steps.length);
+  var deepLinked = deep >= 0;
+  /* 深链优先于已读判断：已读用户也要能通过别人发的链接预览某一步，
+     所以这一行必须在版本守卫之前算出来，不能等 return 之后再解析。 */
+  var idx = deepLinked ? deep : 0;
+  if (!deepLinked) {
+    var key = 'pk_announce_v';
+    try {
+      if (localStorage.getItem(key) === String(a.version)) return;
+    } catch (_) {}
+  }
+
+  /* 关闭：锁版本 + 收动画。removeListeners 必须在 DOM 重建前摘干净，
+     否则键盘 / 触摸监听会残留到下一页。 */
+  var detach = [];
+  function removeListeners() {
+    detach.forEach(function (fn) { try { fn(); } catch (_) {} });
+    detach = [];
+  }
+  function close() {
+    if (closing) return;
+    closing = true;
+    clearTimeout(pushSrTimer);
+    removeListeners();
+    /* 深链预览不落已读：看一眼链接不该把正式引导吃掉 */
+    if (!deepLinked) {
+      try { localStorage.setItem(key, String(a.version)); } catch (_) {}
+    }
+    announceCtx = null;
+    unlockScroll();
     box.classList.add('hidden');
-  };
-  const render = () => {
-    const s = steps[idx];
-    const first = idx === 0;
-    const last = idx === steps.length - 1;
-    box.innerHTML = '<div class="announce-box">' +
-      '<div class="a-ico"><span class="material-symbols-outlined">campaign</span></div>' +
-      '<div class="a-dots">' + steps.map((_, i) => '<span' + (i === idx ? ' class="on"' : '') + '></span>').join('') + '</div>' +
-      '<h3>' + esc(s.title || ('第 ' + (idx + 1) + ' 步')) + '</h3>' +
-      '<div class="a-body">' + esc(s.content || '') + '</div>' +
+    box.innerHTML = '';
+    box.classList.remove('ann-overlay-in');
+  }
+  announceCtx = close;
+
+  /* 内容渲染：白名单式富文本，绝不放原始 HTML。
+     支持两种编辑习惯（都是运营在后台 textarea 里 Natural 会写的）：
+       · 「· 」「- 」「1. 」开头的行 → 列表项
+       · *星号包起来* → 加粗
+     其余字符（含 < > & " '）一律走 esc 转义，所以注入面只剩这两个标记本身。 */
+  function bodyHtml(s) {
+    var raw = (s && s.content) ? String(s.content) : '';
+    /* 快路：没有任何标记字符时直接转义返回，省掉拆行/建 DOM 的开销。
+       命中判断必须覆盖全部三种标记（换行、星号、行首列表符）——
+       早期版本漏了行首列表符，导致「· xxx」这种单行列表不走富文本路径。 */
+    if (raw.indexOf('\n') < 0 && raw.indexOf('*') < 0
+        && !/^\s*(?:[\u00b7\u2022-]|\d+[.、)])\s/.test(raw)) return esc(raw);
+    var lines = raw.split('\n').map(function (ln) {
+      var m = /^\s*(?:[·•\-]|\d+[.、)])\s+/.exec(ln);
+      var li = m ? '<li>' + esc(ln.slice(m[0].length)).replace(/\*([^*\n]+)\*/g, '<b>$1</b>') + '</li>'
+                 : esc(ln).replace(/\*([^*\n]+)\*/g, '<b>$1</b>');
+      return { li: !!m, html: li };
+    });
+    var out = '', inList = false;
+    for (var i = 0; i < lines.length; i++) {
+      if (lines[i].li && !inList) { out += '<ul>'; inList = true; }
+      if (!lines[i].li && inList) { out += '</ul>'; inList = false; }
+      out += lines[i].li ? lines[i].html : '<p>' + (lines[i].html || '&nbsp;') + '</p>';
+    }
+    if (inList) out += '</ul>';
+    return out;
+  }
+  function iconOf(s, i) {
+    var ic = s && s.icon ? String(s.icon).trim() : '';
+    return ANNOUNCE_ICONS.indexOf(ic) >= 0 ? ic : ANNOUNCE_ICONS[i % ANNOUNCE_ICONS.length];
+  }
+  function jump(n) {
+    if (n < 0) n = 0;
+    if (n > steps.length - 1) n = steps.length - 1;
+    if (n === idx) return;
+    idx = n;
+    render();
+  }
+
+  var firstOpen = true;
+  function render() {
+    const isFirst = firstOpen;
+    firstOpen = false;
+    removeListeners();
+    var s = steps[idx] || {};
+    var first = idx === 0;
+    var last = idx === steps.length - 1;
+    var ic = iconOf(s, idx);
+    var html = bodyHtml(s);
+    /* 纯文本才挂 rich：只有一行的文本加 rich 会丢掉用户手打的换行 */
+    var isRich = /<(p|ul|li|b)>/.test(html);
+    var dots = steps.map(function (_, i) {
+      return '<button type="button" class="' + (i === idx ? 'on' : (i < idx ? 'done' : '')) +
+        '" data-i="' + i + '" aria-label="第 ' + (i + 1) + ' 步"></button>';
+    }).join('');
+    box.innerHTML = '<div class="announce-box" role="dialog" aria-modal="true" ' +
+      'aria-labelledby="announceTitle" aria-describedby="announceBody">' +
+      '<div class="a-head">' +
+        '<span class="a-chip">新功能</span>' +
+        '<div class="a-ico"><span class="material-symbols-outlined">' + esc(ic) + '</span></div>' +
+        '<h3 id="announceTitle">' + esc(s.title || ('第 ' + (idx + 1) + ' 步')) + '</h3>' +
+      '</div>' +
+      '<div class="a-body a-step-in' + (isRich ? ' rich' : '') + '" id="announceBody">' +
+        html + '</div>' +
+      '<div class="a-dots" id="announceDots">' + dots + '</div>' +
       '<div class="a-actions">' +
         (first ? '' : '<button class="a-prev" id="announcePrev">上一步</button>') +
-        '<button class="a-ok" id="announceNext">' + (last ? '完成' : '下一步') + '</button>' +
+        '<button class="a-ok" id="announceNext">' + (last ? '知道啦' : '下一步') + '</button>' +
       '</div>' +
-      '<button class="a-skip" id="announceSkip">跳过引导</button></div>';
+      '<button class="a-skip" id="announceSkip">' + (last ? '关闭' : '跳过引导') + '</button>' +
+      (steps.length > 1 ? '<div class="a-swipe-hint">左右滑动 / 按 ← → 键也可以翻页</div>' : '') +
+      '</div>';
     box.classList.remove('hidden');
-    $('announceNext').onclick = () => { if (last) done(); else { idx++; render(); } };
-    if (!first) $('announcePrev').onclick = () => { idx--; render(); };
-    $('announceSkip').onclick = done;
-  };
+    box.classList.add('ann-overlay-in');
+
+    $('announceNext').onclick = function () { last ? close() : jump(idx + 1); };
+    /* 焦点落到主按钮：读屏用户进来就能听到「下一步」，键盘党直接回车。
+        只在「引导首次打开」时抢焦点 —— jump() 翻页不抢，否则用户点步骤条
+        回看某一步，焦点被强行挪到按钮上，读屏进度被打断。 */
+    if (isFirst) {
+      const nx = $('announceNext');
+      try { nx.focus({ preventScroll: true }); } catch (_) { nx.focus(); }
+    }
+    var prev = $('announcePrev');
+    if (prev) prev.onclick = function () { jump(idx - 1); };
+    $('announceSkip').onclick = close;
+
+    /* Pill 步骤条：点哪颗去哪步（已看过的步骤可回看，这是大厂引导的标配） */
+    Array.prototype.forEach.call(box.querySelectorAll('#announceDots button'), function (b) {
+      b.onclick = function () { jump(+b.dataset.i); };
+    });
+
+    /* 键盘：Esc 跳过，← → 翻页。只在引导开着时接管。 */
+    function onKey(e) {
+      if (closing) return;
+      var k = e.key;
+      if (k === 'Escape') { e.preventDefault(); close(); }
+      else if (k === 'ArrowRight') { e.preventDefault(); jump(idx + 1); }
+      else if (k === 'ArrowLeft') { e.preventDefault(); jump(idx - 1); }
+    }
+    document.addEventListener('keydown', onKey, true);
+    detach.push(function () { document.removeEventListener('keydown', onKey, true); });
+
+    /* 触屏：左右滑动翻页（阈值 45px，竖向滑动不抢）。 */
+    var card = box.querySelector('.announce-box');
+    var sx = 0, sy = 0, tracking = false;
+    function onStart(e) {
+      var t = e.touches && e.touches[0];
+      if (!t) return;
+      sx = t.clientX; sy = t.clientY; tracking = true;
+    }
+    function onEnd(e) {
+      if (!tracking) return;
+      tracking = false;
+      var t = e.changedTouches && e.changedTouches[0];
+      if (!t) return;
+      var dx = t.clientX - sx, dy = t.clientY - sy;
+      if (Math.abs(dx) < 45 || Math.abs(dy) > Math.abs(dx)) return;
+      jump(idx + (dx < 0 ? 1 : -1));
+    }
+    if (card) {
+      card.addEventListener('touchstart', onStart, { passive: true });
+      card.addEventListener('touchend', onEnd, { passive: true });
+      detach.push(function () {
+        card.removeEventListener('touchstart', onStart);
+        card.removeEventListener('touchend', onEnd);
+      });
+    }
+
+    /* 点遮罩关闭；点在卡片内不关（避免误触把引导吃掉）。 */
+    function onOverlay(e) { if (e.target === box) close(); }
+    box.onclick = onOverlay;
+    detach.push(function () { box.onclick = null; });
+  }
+
+  lockScroll();
   render();
 }
+
+/* 引导开着时锁背景滚动（iOS Safari 上 body overflow:hidden 不够，要连 touchmove 一起挡） */
+var announceScrollDepth = 0;
+function lockScroll() {
+  announceScrollDepth++;
+  var prev = document.body.style.overflow;
+  document.body.setAttribute('data-ann-overflow', prev || '');
+  document.body.style.overflow = 'hidden';
+}
+function unlockScroll() {
+  announceScrollDepth = Math.max(0, announceScrollDepth - 1);
+  if (announceScrollDepth > 0) return;
+  document.body.style.overflow = document.body.getAttribute('data-ann-overflow') || '';
+  document.body.removeAttribute('data-ann-overflow');
+}
+
+/* 登录门 / 地区门禁出现时把引导收掉，避免两层遮罩叠着。 */
+function dismissAnnounce() { if (announceCtx) announceCtx(); }
 
 (async function boot() {
   applyTeam();
@@ -3681,6 +4466,8 @@ async function bootRest() {
   }
   switchView(view, { push: false });
   scheduleRefresh();
+  /* 引导放最后：它依赖 site.settings / site.announcement，且必须让位给登录门。
+     登录成功后 gateResolve 会 reload，二次进来时 localStorage 已记住版本就不弹了。 */
   maybeAnnounce();
 }
 

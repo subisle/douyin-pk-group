@@ -447,18 +447,95 @@ async fn poll_body(st: &Arc<AppState>, name: &str, cursor: &mut CursorBuf) {
     }
 }
 
+/// 群消息判定（纯函数，2026-10-11 审计整改）：iLink 群消息带非空 `group_id`，
+/// 或群会话 id 以 `@chatroom` 结尾。群消息一律不处理——群里任何人都能给 bot 发消息，
+/// 一旦参与绑定 / 激活判定就等于把「第一个说话的人」换成「群里第一个说话的人」。
+fn is_group_message(group_id: &str, from_user: &str) -> bool {
+    !group_id.trim().is_empty() || from_user.ends_with("@chatroom")
+}
+
+/// 本人判定（纯函数）：这条消息是否来自「扫码者本人 / 已绑定会话的那个人」。
+/// - `Some(true/false)`：可以确定是不是本人；
+/// - `None`：历史数据两个字段都空（老账号从未激活过），无法判定——
+///   调用方按兼容口径放行激活，但记 warn 日志。
+///
+/// 为什么严格卡本人（2026-10-11 审计整改）：扫码 confirmed 后「第一个发消息的人」
+/// 会被绑定激活——任何人（群友、陌生人）抢先发一句话就能抢占推送绑定。
+/// 扫码确认时已把扫码者本人的 userId 存进 `ilink_user_id`，激活必须只认他。
+fn activation_owner_ok(acct: &WxPushAccount, from_user: &str, conversation: &str) -> Option<bool> {
+    if !acct.ilink_user_id.is_empty() {
+        // 新数据：扫码时已存本人 userId，严格比对
+        return Some(acct.ilink_user_id == from_user);
+    }
+    if !acct.conversation_id.is_empty() {
+        // 历史已激活账号（无 ilink_user_id）：只认已绑定会话的发送者
+        return Some(acct.conversation_id == conversation);
+    }
+    // 老数据从未激活过：无据可查，交给调用方按兼容口径处理
+    None
+}
+
+/// 从 iLink 消息里取第一段文本（`item_list` 里 type=1 的文本项）。
+/// 图片 / 语音 / 文件等非文本消息返回空串（扫码账号是普通用户，不处理附件导入）。
+fn message_text(m: &Value) -> String {
+    m.get("item_list")
+        .and_then(Value::as_array)
+        .and_then(|items| {
+            items.iter().find_map(|it| {
+                if it.get("type").and_then(Value::as_i64) == Some(1) {
+                    it.pointer("/text_item/text")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                } else {
+                    None
+                }
+            })
+        })
+        .unwrap_or_default()
+}
+
 async fn handle_msg(st: &Arc<AppState>, acct: &WxPushAccount, m: &Value) {
     let from_user = str_of(m, "from_user_id");
     if from_user.is_empty() {
         return;
     }
+    // 群消息一律忽略：不写会话、不绑定、不路由（2026-10-11 审计整改，见 is_group_message）
+    let group_id = str_of(m, "group_id");
+    if is_group_message(&group_id, &from_user) {
+        return;
+    }
     let context_token = str_of(m, "context_token");
     let conversation = format!("wxacct:{}:{}", acct.ilink_bot_id, from_user);
+    // 私聊上下文落库：主动推送（追分提醒 / 每日报告）要带 to_user_id + context_token。
+    // 非本人也照常 upsert（保持原有行为），但下面的激活 / 路由只认本人。
     crate::store::wx_session_upsert(st, &conversation, &from_user, &context_token).await;
+
+    // —— 本人判定：非本人消息绝不触发绑定 / 激活 / 命令路由 ——
+    match activation_owner_ok(acct, &from_user, &conversation) {
+        Some(false) => {
+            tracing::warn!(
+                account = %acct.name,
+                "非扫码者本人消息，忽略激活（仅登记会话上下文）"
+            );
+            return;
+        }
+        None => {
+            // 兼容老数据：ilink_user_id 与 conversation_id 都空，无法证明发送者身份。
+            // 放行激活（否则老账号永远激活不了），但留 warn 便于事后审计。
+            tracing::warn!(
+                account = %acct.name,
+                "历史账号缺少 ilink_user_id，无法校验本人，按兼容口径允许激活"
+            );
+        }
+        Some(true) => {}
+    }
+
     let first_message = acct.conversation_id.is_empty();
+    // 会话绑定只在本人分支里做：非本人消息不能覆盖 conversation_id 抢占绑定
+    // （旧逻辑无条件调用，等于「最后说话的人」都能改写绑定目标）。
     crate::store::wx_push_account_bind_conversation(st, &acct.name, &conversation, &from_user)
         .await;
-    // 扫码后的第一条消息 = 推送激活：把展示端账号接到该会话，并回执一次
+    // 扫码后的第一条本人消息 = 推送激活：把展示端账号接到该会话，并回执一次
     if first_message {
         crate::store::push_bind_account(st, &acct.name, &acct.team, &conversation, &from_user)
             .await;
@@ -476,6 +553,42 @@ async fn handle_msg(st: &Arc<AppState>, acct: &WxPushAccount, m: &Value) {
         } else {
             tracing::info!(account = %acct.name, "扫码推送已激活（首次入站留下会话上下文）");
         }
+        return; // 激活消息本身不进命令路由（它只是「打个招呼」）
+    }
+
+    // —— 已激活账号的本人后续消息：接入命令路由（2026-10-11 审计整改）——
+    // 之前这里什么都不做，「每日报告」「解绑」等命令静默无响应，
+    // 与激活回执里「回复『解绑』可以断开」的承诺矛盾。
+    // 复用 BotRouter：角色判定（push_bindings 命中 → User）、限流（10 条/分钟/会话）、
+    // 「解绑」命令（按 conversation_id 操作 push_bindings）全部走同一份实现。
+    let text = message_text(m);
+    if text.trim().is_empty() {
+        return; // 非文本消息（图 / 语音 / 文件）：扫码账号是普通用户，不处理附件
+    }
+    let inbound = crate::bot::Inbound {
+        channel: "weixin",
+        conversation_id: conversation.clone(),
+        is_group: false,
+        text,
+        attachments: Vec::new(),
+    };
+    let cfg = crate::bot::BotConfig::from_env();
+    let Some(out) = crate::bot::BotRouter::handle(st, &cfg, inbound).await else {
+        return; // None = 静默语义（未绑定 / 空消息），不发任何回复
+    };
+    if out.text.trim().is_empty() {
+        return;
+    }
+    if let Err(e) = user_send_text(
+        &acct.base_url,
+        &acct.bot_token,
+        &from_user,
+        &context_token,
+        &out.text,
+    )
+    .await
+    {
+        tracing::warn!(account = %acct.name, error = %e, "扫码账号命令回复发送失败");
     }
 }
 
@@ -646,6 +759,84 @@ mod tests {
         seen.sort_unstable();
         seen.dedup();
         assert!(seen.len() > 50, "不同账号的错峰延迟要真的散开");
+    }
+
+    /* --------------------- 审计整改（2026-10-11）：群消息 / 本人判定 --------------------- */
+
+    #[test]
+    fn group_messages_are_detected() {
+        // 带 group_id → 群消息
+        assert!(is_group_message("12345@chatroom", "user-a"));
+        assert!(is_group_message("  g  ", "user-a"), "group_id 只看是否非空");
+        // from_user 本身就是群会话 id（兜底：服务端没给 group_id 的情况）
+        assert!(is_group_message("", "12345@chatroom"));
+        // 普通私聊
+        assert!(!is_group_message("", "wxid_abc123"));
+        assert!(
+            !is_group_message("  ", "wxid_abc123"),
+            "空白 group_id 视为私聊"
+        );
+    }
+
+    #[test]
+    fn activation_owner_requires_scanner_themselves() {
+        let bot = "bot-1";
+        let conv_of = |u: &str| format!("wxacct:{bot}:{u}");
+        // 新数据：ilink_user_id 已存扫码者本人 → 严格比对
+        let mut a = acct("鹏先生", "tok");
+        a.ilink_bot_id = bot.into();
+        a.ilink_user_id = "owner-wxid".into();
+        assert_eq!(
+            activation_owner_ok(&a, "owner-wxid", &conv_of("owner-wxid")),
+            Some(true)
+        );
+        assert_eq!(
+            activation_owner_ok(&a, "stranger", &conv_of("stranger")),
+            Some(false),
+            "陌生人抢先发消息不能激活"
+        );
+        // 历史已激活账号（ilink_user_id 空、conversation_id 非空）：只认已绑定会话的发送者
+        let mut legacy = acct("浩冬", "tok");
+        legacy.ilink_bot_id = bot.into();
+        legacy.conversation_id = conv_of("owner-wxid");
+        assert_eq!(
+            activation_owner_ok(&legacy, "owner-wxid", &conv_of("owner-wxid")),
+            Some(true)
+        );
+        assert_eq!(
+            activation_owner_ok(&legacy, "stranger", &conv_of("stranger")),
+            Some(false)
+        );
+        // 老数据从未激活（两个字段都空）：无法判定 → None（调用方放行但记 warn）
+        let mut empty = acct("老账号", "tok");
+        empty.ilink_bot_id = bot.into();
+        assert_eq!(
+            activation_owner_ok(&empty, "whoever", &conv_of("whoever")),
+            None
+        );
+    }
+
+    #[test]
+    fn message_text_extracts_first_text_item_only() {
+        // 正常文本消息
+        let m = serde_json::json!({
+            "item_list": [
+                { "type": 2, "image_item": {} },
+                { "type": 1, "text_item": { "text": "每日报告" } }
+            ]
+        });
+        assert_eq!(message_text(&m), "每日报告");
+        // 纯图片 / 语音 / 文件 → 空串（不路由）
+        for items in [
+            serde_json::json!([{ "type": 2, "image_item": {} }]),
+            serde_json::json!([{ "type": 3, "voice_item": {} }]),
+            serde_json::json!([]),
+        ] {
+            let m = serde_json::json!({ "item_list": items });
+            assert_eq!(message_text(&m), "", "非文本消息不该有文本");
+        }
+        // 缺 item_list 字段也不 panic
+        assert_eq!(message_text(&serde_json::json!({})), "");
     }
 
     #[tokio::test]

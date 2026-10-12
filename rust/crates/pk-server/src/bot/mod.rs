@@ -103,8 +103,8 @@ impl BotConfig {
         }
     }
 
-    /// 微信渠道始终初始化：未授权会话先私聊内置口令，
-    /// `shuai4444` 会把当前会话设为管理员。
+    /// 微信渠道始终初始化：未授权会话可私聊提权口令（env `WECHAT_ADMIN_CODE`，
+    /// 未配置 = 提权路径整体关闭，见 [`wechat_admin_code`]），或由管理员在后台勾选会话。
     pub fn has_wechat(&self) -> bool {
         true
     }
@@ -326,7 +326,7 @@ impl BotManager {
         } else {
             channels.push(serde_json::json!({
                 "channel": "weixin", "configured": false,
-                "note": "未登录；先扫码连接，再私聊发送 shuai4444 设置管理员",
+                "note": "未登录；先扫码连接，再由管理员在后台「机器人」页勾选管理员会话（或配置提权口令）",
             }));
         }
         serde_json::json!({
@@ -617,7 +617,8 @@ async fn try_bind_weixin(st: &Arc<AppState>, inbound: &Inbound) -> Option<Outbou
                 &conversation,
                 "收到手机号。为保护账号安全，还需要一个 6 位绑定码：\n\
                  打开展示端 → 「我的」页 → 「推送设置」→ 点「生成绑定码」，\n\
-                 30 分钟内把码发给我（例：绑定 13800000000 123456）。",
+                 30 秒内把 6 位绑定码发给我（过期请重新发送手机号；\n\
+                 也可以一条发全：绑定 13800000000 123456）。",
             ));
         }
         (None, Some(c)) => {
@@ -675,15 +676,38 @@ async fn try_bind_weixin(st: &Arc<AppState>, inbound: &Inbound) -> Option<Outbou
     ))
 }
 
-const WECHAT_ADMIN_CODE: &str = "shuai4444";
+/// 微信提权口令（2026-10-11 审计整改）：不再硬编码在源码里，
+/// 启动时读 env `WECHAT_ADMIN_CODE`（trim 后非空才启用），进程内只读一次。
+/// 未配置 = 提权路径整体关闭：用户发任何口令都无效果，且不回显是否已配置。
+fn wechat_admin_code() -> Option<&'static str> {
+    static CODE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    CODE.get_or_init(|| {
+        std::env::var("WECHAT_ADMIN_CODE")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    })
+    .as_deref()
+}
 
-/// 微信内置管理员口令。会话已在 `handle` 开头登记，因此这里可以直接升级当前会话。
+/// 口令比对（纯函数，可单测）：只有「已配置」且「全文精确相等」才算命中。
+/// 刻意不用 contains / 前缀匹配——口令必须是整条消息，避免正常聊天里提到口令被误提权。
+fn admin_code_matches(configured: Option<&str>, text: &str) -> bool {
+    matches!(configured, Some(code) if !code.is_empty() && text.trim() == code)
+}
+
+/// 微信管理员提权口令。会话已在 `handle` 开头登记，因此这里可以直接升级当前会话。
 async fn try_promote_weixin(st: &Arc<AppState>, inbound: &Inbound) -> Option<Outbound> {
-    if inbound.channel != "weixin" || inbound.is_group || inbound.text.trim() != WECHAT_ADMIN_CODE {
+    // 未配置口令时静默返回（None 会继续走角色判定，未授权会话照旧静默忽略），
+    // 不向用户透露「提权未开启」这类配置信息。
+    if inbound.channel != "weixin"
+        || inbound.is_group
+        || !admin_code_matches(wechat_admin_code(), &inbound.text)
+    {
         return None;
     }
     crate::store::session_set_admin(st, inbound.channel, &inbound.conversation_id, true).await;
-    tracing::info!(conversation = %inbound.conversation_id, "微信会话已通过内置口令设为管理员");
+    tracing::info!(conversation = %inbound.conversation_id, "微信会话已通过提权口令设为管理员");
     Some(Outbound::to(&inbound.conversation_id, "已成为管理员"))
 }
 
@@ -973,12 +997,12 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
         let (file_date, _file_team) = hints_from_filename(&filename);
         let msg_date = parse_short_date(&text);
         let sticky = pending_date_get(&key);
-        let (biz_date, date_src) = match (&msg_date, &sticky, &file_date) {
-            (Some(d), _, _) => (d.clone(), "本条消息指定"),
-            (None, Some(d), _) => (d.clone(), "沿用你报的日期"),
-            (None, None, Some(d)) => (d.clone(), "文件名里的日期（补录）"),
-            (None, None, None) => (default_biz_date(), "默认「收到日 − 1」（数据半夜才更新）"),
-        };
+        let (biz_date, date_src) = pick_biz_date(
+            msg_date.as_deref(),
+            sticky.as_deref(),
+            file_date.as_deref(),
+            &default_biz_date(),
+        );
         if msg_date.is_some() {
             // 同一条消息里带了日期：黏住，后面那个文件不用再报
             pending_date_put(&key, &biz_date);
@@ -1159,7 +1183,12 @@ async fn cmd_daily_report_user(st: &Arc<AppState>, b: &crate::store::PushBinding
     if items.is_empty() {
         return format!("{date} 还没有音浪数据，等运营导入后再来看。");
     }
-    crate::push::daily_report_text(&team, &date, &items, b.person_id)
+    /* 分号明细（2026-10-12 用户口径「推送多个号带着抖音号」）：
+    用户主动发的「每日报告」和定时推送走的是同一条 wxbot 通道，文案口径必须一致，
+    所以这里也带上「我的抖音号」段。取数失败 push.rs 内部只 warn 并返回空 →
+    自动退回不带明细的原文案，命令照常能回复。 */
+    let accounts = crate::push::person_account_waves(st, b.person_id, &date).await;
+    crate::push::daily_report_text_with_accounts(&team, &date, &items, b.person_id, &accounts)
 }
 
 /// 普通用户「个人报告」：今日名次/音浪 + 本月累计/名次 + 追分目标进度
@@ -1604,10 +1633,46 @@ fn find_date(s: &str) -> Option<String> {
 
 /// 默认业务日期 = 前一天。数据有延迟：每晚 24 点后发前一天的数据，
 /// 8 号发的 CSV 全部是 7 号的（用户口径，2026-10-05 确认）。
+///
+/// 2026-10-12 用户复述：「11 号接收的就是 10 号的数据，**前提是没指定日期**」——
+/// 它是四条日期来源里**最低优先级**的一条（`pick_biz_date` 的兜底），
+/// 报过日期 / 文件名带日期时都不会走到这里。
 fn default_biz_date() -> String {
-    (chrono::Local::now().date_naive() - chrono::Duration::days(1))
+    prev_biz_date(chrono::Local::now().date_naive())
+}
+
+/// 给定「今天」，算出它的前一天并格式化成业务日。
+/// 抽成带参数的纯函数，是为了能单测跨月 / 跨年 / 闰月边界（不能靠真实时钟）。
+fn prev_biz_date(today: chrono::NaiveDate) -> String {
+    (today - chrono::Duration::days(1))
         .format("%Y-%m-%d")
         .to_string()
+}
+
+/// 业务日期的四条来源按优先级取一条（纯函数，好测）。
+///
+/// 优先级（用户口径 2026-10-05 / 2026-10-12）：
+/// 1. **本条消息里带的日期**（运营发「10.1」时顺手把日期粘住，后面几个文件不用再报）
+/// 2. 之前贴住的日期（12h 内）
+/// 3. 文件名里的日期（补录历史数据时靠它）
+/// 4. **收到日 − 1**（兜底：抖音后台半夜才出前一天的数据）
+///
+/// 返回 `(业务日期, 来源说明)`，来源说明进日志与回复文案。
+fn pick_biz_date(
+    msg_date: Option<&str>,
+    sticky: Option<&str>,
+    file_date: Option<&str>,
+    default_date: &str,
+) -> (String, &'static str) {
+    match (msg_date, sticky, file_date) {
+        (Some(d), _, _) => (d.to_string(), "本条消息指定"),
+        (None, Some(d), _) => (d.to_string(), "沿用你报的日期"),
+        (None, None, Some(d)) => (d.to_string(), "文件名里的日期（补录）"),
+        (None, None, None) => (
+            default_date.to_string(),
+            "默认「收到日 − 1」（数据半夜才更新）",
+        ),
+    }
 }
 
 fn valid_date(s: &str) -> bool {
@@ -1853,6 +1918,21 @@ pub async fn bots_session_admin(
 mod tests {
     use super::*;
 
+    /// 提权口令比对（2026-10-11 审计整改：口令改走 env，未配置 = 关闭）
+    #[test]
+    fn admin_code_match_rules() {
+        // 未配置（None / 空串）时任何文本都不命中——提权路径整体关闭
+        assert!(!admin_code_matches(None, "anything"));
+        assert!(!admin_code_matches(Some(""), "anything"));
+        // 已配置：必须 trim 后全文精确相等
+        assert!(admin_code_matches(Some("s3cret"), "s3cret"));
+        assert!(admin_code_matches(Some("s3cret"), "  s3cret  "));
+        // 子串 / 前缀 / 大小写差异都不算（口令必须是整条消息）
+        assert!(!admin_code_matches(Some("s3cret"), "口令是 s3cret 吗"));
+        assert!(!admin_code_matches(Some("s3cret"), "s3cret2"));
+        assert!(!admin_code_matches(Some("s3cret"), "S3CRET"));
+    }
+
     #[test]
     fn team_aliases() {
         assert_eq!(team_of("男团"), Some("male"));
@@ -1995,6 +2075,56 @@ mod tests {
         assert_eq!(extract_bind_code("绑定 ABC234").as_deref(), Some("ABC234"));
         // 手机号格式不会被当成绑定码（码表里没有纯数字组合里的小写，且长度固定 6）
         assert_eq!(extract_bind_code("13800138000"), None);
+    }
+
+    /* ---------------- 业务日期来源（2026-10-12 用户口径） ----------------
+    「11 号接收的就是 10 号的数据，前提是没指定日期；同日期再导入就是覆盖」 */
+
+    /// 兜底：四条来源都没给 → 收到日 − 1
+    #[test]
+    fn biz_date_falls_back_to_yesterday_when_nothing_specified() {
+        let (d, src) = pick_biz_date(None, None, None, "2026-10-10");
+        assert_eq!(d, "2026-10-10", "11 号收到的文件 = 10 号的数据");
+        assert!(src.contains("收到日 − 1"), "来源要说清是兜底：{src}");
+    }
+
+    /// 优先级：本条消息指定 > 贴住的日期 > 文件名里的日期 > 收到日 − 1
+    #[test]
+    fn biz_date_priority_order() {
+        // ① 消息里报了日期 → 它说了算，后面三个都不看
+        let (d, src) = pick_biz_date(
+            Some("2026-10-01"),
+            Some("2026-09-09"),
+            Some("2026-08-08"),
+            "2026-10-10",
+        );
+        assert_eq!(d, "2026-10-01");
+        assert_eq!(src, "本条消息指定");
+
+        // ② 没报但之前贴住过（12h 内）→ 沿用，不看文件名与兜底
+        let (d, src) = pick_biz_date(None, Some("2026-09-09"), Some("2026-08-08"), "2026-10-10");
+        assert_eq!(d, "2026-09-09");
+        assert!(src.contains("沿用"), "{src}");
+
+        // ③ 只有文件名带日期（补录）→ 用它
+        let (d, src) = pick_biz_date(None, None, Some("2019-03-13"), "2026-10-10");
+        assert_eq!(d, "2019-03-13");
+        assert!(src.contains("文件名"), "{src}");
+
+        // ④ 全都没有 → 兜底
+        let (d, _) = pick_biz_date(None, None, None, "2026-10-10");
+        assert_eq!(d, "2026-10-10");
+    }
+
+    /// 兜底日就是「收到日 − 1」，跨月 / 跨年 / 闰月都不能算错
+    #[test]
+    fn prev_biz_date_handles_month_and_year_boundaries() {
+        let d = |s: &str| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap();
+        assert_eq!(prev_biz_date(d("2026-10-11")), "2026-10-10");
+        assert_eq!(prev_biz_date(d("2026-08-01")), "2026-07-31", "跨月");
+        assert_eq!(prev_biz_date(d("2027-01-01")), "2026-12-31", "跨年");
+        assert_eq!(prev_biz_date(d("2026-03-01")), "2026-02-28", "平年 2 月");
+        assert_eq!(prev_biz_date(d("2024-03-01")), "2024-02-29", "闰年 2 月");
     }
 
     #[test]

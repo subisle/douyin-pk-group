@@ -269,12 +269,54 @@ pub struct Announcement {
     pub version: u64,
 }
 
-/// 引导弹窗的一步：标题 + 正文。
+/// 引导弹窗的一步：标题 + 正文 + 图标（Material Symbols 名）。
+///
+/// `icon` 是 2026-10-12 大厂化改造加的可选字段：每步一个图标让引导更像
+/// 「新功能介绍」而不是系统告警。缺省（老配置 / 前端不传）按步序号轮换
+/// [`DEFAULT_STEP_ICONS`]，所以旧数据不迁移也能有图标。
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Default)]
 pub struct AnnounceStep {
     pub title: String,
+    /// Material Symbols 图标名，走前端白名单校验；空 = 按步序号取默认
+    #[serde(default)]
+    pub icon: String,
     pub content: String,
 }
+
+/// 每步默认图标（步序号 % 长度）。取 Material Symbols 里语义中性、
+/// 渲染稳定的几个，避免运营不填时露出「campaign」满屏同一个。
+pub const DEFAULT_STEP_ICONS: &[&str] = &[
+    "auto_awesome",
+    "military_tech",
+    "qr_code_scanner",
+    "notifications_active",
+    "insights",
+    "tips_and_updates",
+];
+
+/// 图标白名单：只放这几个 Material Symbols 名，别让任意字符串进 DOM。
+/// 展示端 st_page.html 也有一份同名列白名单做双重校验，两边保持一致。
+pub const STEP_ICON_WHITELIST: &[&str] = &[
+    "auto_awesome",
+    "military_tech",
+    "qr_code_scanner",
+    "notifications_active",
+    "insights",
+    "tips_and_updates",
+    "campaign",
+    "star",
+    "bolt",
+    "groups",
+    "emoji_events",
+    "local_fire_department",
+    "trending_up",
+    "calendar_month",
+    "chat_bubble",
+    "lock",
+    "person",
+    "smart_toy",
+    "workspace_premium",
+];
 
 impl Announcement {
     pub async fn load(st: &AppState) -> Self {
@@ -293,12 +335,26 @@ impl Announcement {
     fn to_json(&self) -> Value {
         json!({
             "enabled": self.enabled,
-            "steps": self.steps.iter().map(|s| json!({
+            "steps": self.steps.iter().enumerate().map(|(i, s)| json!({
                 "title": s.title,
                 "content": s.content,
+                // 下发前把空 icon 归一成默认值，前端不用再猜第几步该用什么
+                "icon": Self::icon_for(s, i),
             })).collect::<Vec<_>>(),
             "version": self.version,
         })
+    }
+
+    /// 这一步实际用的图标：填了合法值就原样用，否则按步序号取默认。
+    fn icon_for(s: &AnnounceStep, index: usize) -> String {
+        let trimmed = s.icon.trim();
+        if !trimmed.is_empty() && STEP_ICON_WHITELIST.contains(&trimmed) {
+            return trimmed.to_string();
+        }
+        DEFAULT_STEP_ICONS
+            .get(index % DEFAULT_STEP_ICONS.len())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "campaign".to_string())
     }
 }
 
@@ -323,8 +379,15 @@ pub async fn update_announcement(State(st): State<ArcState>, Json(body): Json<Va
                 if title.trim().is_empty() && content.trim().is_empty() {
                     return None;
                 }
+                let icon = s.get("icon").and_then(|v| v.as_str()).unwrap_or("").trim();
                 Some(AnnounceStep {
                     title: title.trim().chars().take(64).collect(),
+                    // 白名单外的图标名直接丢掉（回落默认），任意字符串不进配置
+                    icon: if STEP_ICON_WHITELIST.contains(&icon) {
+                        icon.chars().take(48).collect()
+                    } else {
+                        String::new()
+                    },
                     content: content.trim().chars().take(2000).collect(),
                 })
             })
@@ -345,7 +408,10 @@ pub async fn admin_my_accounts(State(st): State<ArcState>) -> ApiResult {
     ))
 }
 
-/// POST /api/admin/my-accounts {name, phone, pass}：手动设置账号（存在则覆盖更新；密码纯数字，手机号选填）
+/// POST /api/admin/my-accounts {name, phone, pass?}：手动设置账号（存在则覆盖更新；手机号选填）。
+/// 2026-10-12 审计修订：`pass` 留空时服务端生成 CSPRNG 随机密码，随响应下发一次
+/// （{password}，仅此一次，请管理员当场转达）；显式传 pass 的旧调用照旧兼容。
+/// 设置成功后吊销该账号全部 my token（改密/开号后旧登录态必须失效）。
 pub async fn admin_my_account_set(
     State(st): State<ArcState>,
     Json(body): Json<Value>,
@@ -358,14 +424,25 @@ pub async fn admin_my_account_set(
         .get("phone")
         .and_then(|v| v.as_str())
         .unwrap_or_default();
-    let pass = body
+    let (pass, generated) = match body
         .get("pass")
         .and_then(|v| v.as_str())
-        .unwrap_or_default();
-    crate::store::my_account_set(&st, name, phone, pass)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(p) => (p.to_string(), false),
+        None => (crate::random::random_password(), true),
+    };
+    crate::store::my_account_set(&st, name, phone, &pass)
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
-    Ok(Json(json!({ "ok": true })))
+    my_tokens_revoke(name);
+    tracing::info!(account = %name, generated, "管理端设置展示端账号（旧 token 已吊销）");
+    Ok(Json(json!({
+        "ok": true,
+        // 随机生成的密码仅此一次下发；管理员显式指定的密码不回显
+        "password": if generated { json!(pass) } else { Value::Null },
+    })))
 }
 
 /// GET /api/admin/my-accounts/{name}：单个账号（右键弹窗回填；没有则 found:false）
@@ -381,12 +458,14 @@ pub async fn admin_my_account_get(
     Ok(Json(v))
 }
 
-/// DELETE /api/admin/my-accounts/{name}：删除账号（幂等，不存在也返回 ok）
+/// DELETE /api/admin/my-accounts/{name}：删除账号（幂等，不存在也返回 ok）。
+/// 删号同时吊销该账号全部 my token（内存 token 24h TTL，不能等它自然过期）。
 pub async fn admin_my_account_delete(
     State(st): State<ArcState>,
     axum::extract::Path(name): axum::extract::Path<String>,
 ) -> ApiResult {
     crate::store::my_account_delete(&st, &name).await;
+    my_tokens_revoke(&name);
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -411,10 +490,93 @@ pub async fn admin_my_account_bind(
     let r = crate::store::my_account_admin_bind(&st, &name, person_id)
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
-    tracing::info!(account = %name, anchor = %r.name, team = %r.team, "管理员改绑展示端账号");
+    // 改绑后吊销旧登录态：账号名会被改写成主播姓名，新旧两个名字都吊销
+    // （拿着旧 token 的人必须重新登录才能拿到新身份，审计 2026-10-12）
+    my_tokens_revoke(&name);
+    my_tokens_revoke(&r.name);
+    tracing::info!(account = %name, anchor = %r.name, team = %r.team, "管理员改绑展示端账号（旧 token 已吊销）");
     Ok(Json(json!({
         "ok": true, "name": r.name, "team": r.team, "personId": r.person_id,
     })))
+}
+
+/* --------------------- 绑定申请审核（管理端，017 表，2026-10-12 审计） --------------------- */
+
+/// GET /api/admin/my-bind-requests?status=pending：绑定申请列表
+/// （status 空 = 全部，pending 排最前；不含任何密码/凭证字段）
+pub async fn admin_my_bind_requests(
+    State(st): State<ArcState>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> ApiResult {
+    let status = q.get("status").cloned().unwrap_or_default();
+    Ok(Json(
+        json!({ "items": crate::store::my_bind_request_list(&st, &status, 200).await }),
+    ))
+}
+
+/// POST /api/admin/my-bind-requests/{id}/approve：审核通过。
+/// 事务式口径（与 anchor_claim_decide 同款）：先原子翻转 pending→approved 占住裁决权，
+/// 再执行绑定（复用 my_account_bind 的核心绑定逻辑）；绑定失败则回滚申请为 pending，
+/// 不会卡在「已通过却没绑上」。通过后吊销该账号全部 my token（强制重新登录拿新身份）。
+pub async fn admin_my_bind_request_approve(
+    State(st): State<ArcState>,
+    axum::extract::Path(id): axum::extract::Path<i64>,
+) -> ApiResult {
+    /* person_name 是申请单上的姓名快照，绑定后以主播台账现名（r.name）为准，
+    这里只做解构丢弃 —— 事件与响应都发台账现名，避免快照与现名不一致。 */
+    let Some((account, person_id, _person_name)) =
+        crate::store::my_bind_request_decide(&st, id, true, "", "admin").await
+    else {
+        return Err(anyhow::anyhow!("这笔申请不存在或已经处理过了").into());
+    };
+    match crate::store::my_account_bind(&st, &account, person_id).await {
+        Ok(r) => {
+            // 绑定把账号名从手机号占位改写成主播姓名：新旧名都吊销
+            my_tokens_revoke(&account);
+            my_tokens_revoke(&r.name);
+            tracing::info!(id, account = %account, anchor = %r.name, team = %r.team, "绑定申请审核通过（旧 token 已吊销）");
+            crate::events::emit(
+                crate::events::SCOPE_ROSTER,
+                format!("绑定审核通过：账号「{account}」→ 主播「{}」", r.name),
+            );
+            Ok(Json(json!({
+                "ok": true, "status": "approved",
+                "account": account, "name": r.name, "team": r.team,
+            })))
+        }
+        Err(e) => {
+            // 绑定失败（主播已绑别人 / 账号状态变了…）：回滚裁决，让管理员能改判或重试
+            crate::store::my_bind_request_revert(&st, id).await;
+            Err(anyhow::anyhow!(e).into())
+        }
+    }
+}
+
+/// POST /api/admin/my-bind-requests/{id}/reject {reason?}：驳回（reason 会回显给用户）
+pub async fn admin_my_bind_request_reject(
+    State(st): State<ArcState>,
+    axum::extract::Path(id): axum::extract::Path<i64>,
+    Json(body): Json<Value>,
+) -> ApiResult {
+    let reason = body
+        .get("reason")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .unwrap_or_default()
+        .chars()
+        .take(255)
+        .collect::<String>();
+    let Some((account, _pid, person_name)) =
+        crate::store::my_bind_request_decide(&st, id, false, &reason, "admin").await
+    else {
+        return Err(anyhow::anyhow!("这笔申请不存在或已经处理过了").into());
+    };
+    tracing::info!(id, account = %account, anchor = %person_name, reason = %reason, "绑定申请已驳回");
+    crate::events::emit(
+        crate::events::SCOPE_ROSTER,
+        format!("绑定驳回：账号「{account}」申请的主播「{person_name}」（{reason}）"),
+    );
+    Ok(Json(json!({ "ok": true, "status": "rejected" })))
 }
 
 /* ------------------------------- 防遍历限流 ------------------------------- */
@@ -514,36 +676,45 @@ fn my_token_take(token: &str) -> Option<(u64, String, String)> {
         .map(|(pid, team, name, _)| (*pid, team.clone(), name.clone()))
 }
 
+/// 吊销某账号的全部 my token（2026-10-12 安全审计：token 是 24h 内存态、原本无撤销手段）。
+/// 调用点：改密 / 找回（重置）密码 / 绑定审核通过 / 管理员改绑 / 删除账号——
+/// 这些动作之后旧登录态必须立刻失效，不能等 24h TTL 自然过期。
+/// （token 挂的是**账号名**：绑定会把 name 从手机号占位改写成主播姓名，所以绑定类操作
+/// 新旧两个名字都要吊销。）
+pub(crate) fn my_tokens_revoke(name: &str) {
+    let mut m = my_tokens().lock().expect("my token 锁 poisoned");
+    m.retain(|_, (_, _, n, _)| n != name);
+}
+
 /// 只读一眼 token 对应的账号（不消费）：公开 API 中间件用它给访问日志带账号。
 /// 未登录的访客返回 None，日志就只记 IP。
 pub(crate) fn my_token_peek(token: &str) -> Option<(u64, String, String)> {
     my_token_take(token)
 }
 
+/// 从 X-My-Token 头取登录 token（2026-10-12 起**唯一**入口）。
+///
+/// 不再接受 `?token=` / `?access_token=` URL query（审计安全修复）：
+/// URL 会进网关/服务器访问日志、浏览器历史与 Referer 头，token 走 query 等于把
+/// 24h 有效的登录态写进各种日志。POST JSON body 里的 `token` 字段保留（不进 URL/日志）。
+fn header_my_token(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("x-my-token")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+}
+
 /// 展示端登录门（2026-10-10）：/st/{team} 的数据接口一律要求「我的」登录态，
-/// 未登录只给一张登录卡。token 走 ?access_token=（fetch/img 通用）或 X-My-Token 头。
+/// 未登录只给一张登录卡。token 只走 X-My-Token 头（2026-10-12 起，不再认 URL query）。
 /// 校验通过返回 person_id；token 与路径团别不符也拒绝。
 ///
 /// 2026-10-10 加开关：后台关掉「开启登录」（login_required=false）时全站免登录开放，
 /// 返回 person_id=0（一个不存在的档案 id，调用方只拿它判「管理员/游客」，不下发个人数据）。
 /// 带 token 的照常解析，所以关登录时之前登过的人仍能直接用「我的」。
-fn gate_team(
-    login_required: bool,
-    team: &str,
-    q_token: Option<&str>,
-    headers: &HeaderMap,
-) -> Result<u64, ApiError> {
-    let token = q_token
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(String::from)
-        .or_else(|| {
-            headers
-                .get("x-my-token")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-        });
+fn gate_team(login_required: bool, team: &str, headers: &HeaderMap) -> Result<u64, ApiError> {
+    let token = header_my_token(headers);
     // 有 token 就先验（开关关着时也认，访客拿旧 token 仍能看「我的」）
     if let Some(t) = token.as_deref().filter(|s| !s.is_empty()) {
         if let Some((pid, my_team, _)) = my_token_take(t) {
@@ -568,15 +739,9 @@ fn gate_team(
 }
 
 /// 从 token 里取账号所属团别；游客 / 任意团账号返回空串（统一入口按全量展示）。
-fn token_team(token: Option<&str>, headers: &HeaderMap) -> String {
-    let t = token.map(str::trim).filter(|s| !s.is_empty()).or_else(|| {
-        headers
-            .get("x-my-token")
-            .and_then(|v| v.to_str().ok())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-    });
-    t.and_then(my_token_take)
+fn token_team(headers: &HeaderMap) -> String {
+    header_my_token(headers)
+        .and_then(|t| my_token_take(&t))
         .map(|(_, team, _)| team)
         .filter(|team| team == "male" || team == "female")
         .unwrap_or_default()
@@ -594,30 +759,22 @@ fn data_team<'a>(path_team: &'a str, token_team: &'a str) -> &'a str {
     }
 }
 
-/// 各数据接口共用的查询参数：登录门 token 可以跟在任意子接口的 URL 上
-#[derive(Deserialize)]
-pub struct GateQuery {
-    #[serde(rename = "access_token")]
-    pub access_token: Option<String>,
-}
-
 /* ------------------------------- 站点数据 ------------------------------- */
 
 /// GET /api/public/teams/{team}：站点配置 + 最新日期
 /// 团链接被关闭时返回 published=false（前端展示「暂未公布」占位，不是 404）
-/// 展示端登录门（2026-10-10）：要「我的」登录态
+/// 展示端登录门（2026-10-10）：要「我的」登录态（token 走 X-My-Token 头）
 pub async fn site(
     State(st): State<ArcState>,
     Path(team): Path<String>,
-    Query(g): Query<GateQuery>,
     headers: HeaderMap,
 ) -> ApiResult {
     let s = PublicSettings::load(&st).await;
     if !s.team_enabled(&team) {
         return Ok(Json(json!({ "published": false })));
     }
-    let query_team = data_team(&team, &token_team(g.access_token.as_deref(), &headers)).to_string();
-    gate_team(s.login_required, &team, g.access_token.as_deref(), &headers)?;
+    let query_team = data_team(&team, &token_team(&headers)).to_string();
+    gate_team(s.login_required, &team, &headers)?;
     let dates = crate::repos::get_available_dates(&st, None, false).await?;
     // 公告弹窗：开启时随站点配置一起下发；关闭时不下发（前端不弹）
     let ann = Announcement::load(&st).await;
@@ -648,8 +805,6 @@ pub async fn site(
 pub struct ListQuery {
     pub date: Option<String>,
     pub period: Option<String>,
-    #[serde(rename = "access_token")]
-    pub access_token: Option<String>,
 }
 
 /// GET /api/public/teams/{team}/daily?date=
@@ -664,8 +819,8 @@ pub async fn daily(
     if !s.team_enabled(&team) {
         return Ok(Json(json!({ "published": false })));
     }
-    let query_team = data_team(&team, &token_team(q.access_token.as_deref(), &headers)).to_string();
-    gate_team(s.login_required, &team, q.access_token.as_deref(), &headers)?;
+    let query_team = data_team(&team, &token_team(&headers)).to_string();
+    gate_team(s.login_required, &team, &headers)?;
     if !s.daily {
         return Ok(Json(json!({ "published": true, "dailyEnabled": false })));
     }
@@ -827,21 +982,73 @@ pub async fn daily(
 /// DTO 白名单：id / 名字 / 师傅 id+名 / 状态 / 代数 / 直系徒弟数——绝无抖音号。
 /// 师傅不在本团（含 master 为空）的当作树根。离团（status='left'）的人也在树里
 /// （家族成员不因离团消失），前端负责淡显。
+///
+/// 访问口径（2026-10-12 安全审计修复。产品口径：族谱页给**有师门归属**的用户看，
+/// 管理员看全部）：
+/// - **永远要求有效 my token**——即使 login_required=false 也不放行游客：族谱是全团
+///   师承关系数据，游客可见等于把内部师门结构对公网开放。token 缺失/失效 → 401；
+/// - 管理员观看账号（my_accounts.is_admin=1）→ 行为不变：可看任意团，
+///   team=all 时返回两团全量；
+/// - 普通绑定用户：本人**有师傅**（master_id 非空/非 0）或**有徒弟**（直系徒弟数 > 0）
+///   才放行，数据范围维持全团（与现状一致）；否则 403 + code=lineage_forbidden
+///   （前端据此显示「族谱仅对师门成员开放」，区别于地区门禁的 403）；
+/// - 未绑定账号（person_id=0 且非管理员）→ 403 同上；team=all 仅管理员可用。
+///
+/// 返回类型用 Response 而不是 ApiResult：403 需要带自定义 code 字段，ApiError 的
+/// 错误体只有 {error}。
 pub async fn lineage(
     State(st): State<ArcState>,
     Path(team): Path<String>,
-    Query(g): Query<GateQuery>,
+    Query(q): Query<MyQuery>,
     headers: HeaderMap,
-) -> ApiResult {
+) -> Response {
     let s = PublicSettings::load(&st).await;
     if !s.team_enabled(&team) {
-        return Ok(Json(json!({ "published": false })));
+        return Json(json!({ "published": false })).into_response();
     }
     if !s.lineage_enabled {
-        return Ok(Json(json!({ "published": true, "lineageEnabled": false })));
+        return Json(json!({ "published": true, "lineageEnabled": false })).into_response();
     }
-    let query_team = data_team(&team, &token_team(g.access_token.as_deref(), &headers)).to_string();
-    gate_team(s.login_required, &team, g.access_token.as_deref(), &headers)?;
+    /* 音浪口径（2026-10-12 用户口径「支持日期查看音浪」）：
+    daily=最新业务日当天；monthly/yearly=最新业务日所在月/年。
+    date 参数可指定基准日（非法直接回落，不报错——族谱页不因脏参数打不开）。 */
+    let dates: Vec<String> = crate::repos::get_available_dates(&st, None, false)
+        .await
+        .unwrap_or_default();
+    let (period, base_date) = lineage_window(
+        q.period.as_deref(),
+        q.date.as_deref(),
+        dates.first().map(String::as_str),
+    );
+    // 族谱门禁：永远要有效 token（不放行游客），身份判定见上方口径注释
+    let Some(token) = header_my_token(&headers) else {
+        return ApiError::auth("请先登录").into_response();
+    };
+    let Some((pid, my_team, account_name)) = my_token_take(&token) else {
+        return ApiError::auth("登录已过期，请重新登录").into_response();
+    };
+    let is_admin = crate::store::my_account_is_admin(&st, &account_name).await;
+    let query_team = if is_admin {
+        // 管理员：行为不变（任意团；all = 两团全量，即 SQL 里团别条件恒真）
+        if team == "all" {
+            String::new()
+        } else {
+            team.clone()
+        }
+    } else {
+        // 普通账号：token 团别与路径团别不符照旧 401（与登录门同口径）
+        if !my_team.is_empty() && my_team != team && team != "all" {
+            return ApiError::auth("该账号不属于本团").into_response();
+        }
+        let (has_master, disciples) = match person_lineage_membership(&st, pid).await {
+            Ok(v) => v,
+            Err(e) => return ApiError::from(e).into_response(),
+        };
+        if !lineage_view_allowed(false, pid, has_master, disciples, &team) {
+            return lineage_forbidden();
+        }
+        team.clone()
+    };
     /* 族谱只显示有师门归属的人（2026-10-09 规则）：没有师傅且没有徒弟的孤立节点
     不下发（画布和导出图的「没有师傅」名单自动联动）。
     与榜单显隐（hide_in_daily_report）是两个独立配置：榜单隐藏的人只要挂在
@@ -855,15 +1062,21 @@ pub async fn lineage(
          AND (p.master_id IS NOT NULL \
               OR EXISTS(SELECT 1 FROM person k WHERE k.master_id = p.id AND k.deleted_at IS NULL))"
     );
-    let rows = mysql::query(&st.pools, &sid(&st), &sql).await?;
+    let rows = match mysql::query(&st.pools, &sid(&st), &sql).await {
+        Ok(r) => r,
+        Err(e) => return ApiError::from(e).into_response(),
+    };
 
-    // 个人累计总音浪（与日报 totalWave 同口径：wave_reliable=1），内存 join。
-    let wave_sql = "SELECT person_id, CAST(SUM(wave) AS SIGNED) AS total \
-         FROM daily_metric WHERE wave_reliable = 1 GROUP BY person_id"
-        .to_string();
+    // 个人音浪（2026-10-12 改按 period/date 窗口过滤；与榜单口径一致 wave_reliable=1）
+    let wave_sql = lineage_wave_window_sql(&period, &base_date);
     let mut wave_map: HashMap<u64, i64> = Default::default();
-    for r in mysql::query(&st.pools, &sid(&st), &wave_sql).await? {
-        wave_map.insert(row_pid(&r, "person_id"), row_i64(&r, "total"));
+    match mysql::query(&st.pools, &sid(&st), &wave_sql).await {
+        Ok(rs) => {
+            for r in &rs {
+                wave_map.insert(row_pid(r, "person_id"), row_i64(r, "total"));
+            }
+        }
+        Err(e) => return ApiError::from(e).into_response(),
     }
 
     let mut nodes: Vec<Value> = Vec::with_capacity(rows.len());
@@ -896,15 +1109,16 @@ pub async fn lineage(
         total
     }
     let mut subtree_memo: HashMap<u64, i64> = Default::default();
+    // 真实 id/masterId 先单独收集，最后统一重映射为响应内序号（见 lineage_remap_ids）
+    let mut raw_ids: Vec<(u64, Option<u64>)> = Vec::with_capacity(rows.len());
     for r in &rows {
         let id = row_pid(r, "id");
         let master_id = read_opt_u64_field(r, "master_id").filter(|m| ids.contains(m));
         let wave = wave_map.get(&id).copied().unwrap_or(0);
         let total_wave = subtree_wave(id, &children, &wave_map, &mut subtree_memo);
+        raw_ids.push((id, master_id));
         nodes.push(json!({
-            "id": row_pid(r, "id"),
             "name": r.try_get::<String, _>("name").unwrap_or_default(),
-            "masterId": master_id,
             "masterName": r.try_get::<Option<String>, _>("master_name").ok().flatten(),
             "status": r.try_get::<String, _>("status").unwrap_or_default(),
             "generation": r.try_get::<Option<i64>, _>("generation").ok().flatten(),
@@ -914,11 +1128,151 @@ pub async fn lineage(
             "totalWave": if s.wave { json!(total_wave) } else { Value::Null },
         }));
     }
-    Ok(Json(json!({
+    for (node, (id, master)) in nodes.iter_mut().zip(lineage_remap_ids(&raw_ids)) {
+        node["id"] = json!(id);
+        node["masterId"] = match master {
+            Some(m) => json!(m),
+            None => Value::Null,
+        };
+    }
+    Json(json!({
         "published": true,
         "team": team,
         "nodes": nodes,
-    })))
+        // 2026-10-12：音浪口径与基准日（前端切日/月/年时回显 + 请求下一次窗口用）
+        "period": period,
+        "date": base_date,
+        // 前端据此区分管理员（全组树）与普通主播（只看自己徒弟）
+        "viewerIsAdmin": is_admin,
+    }))
+    .into_response()
+}
+
+/// 族谱音浪窗口（纯函数）：period 非法回落 daily；date 非法回落最新业务日。
+/// 返回 (生效口径, 基准日)。
+fn lineage_window(
+    period: Option<&str>,
+    date: Option<&str>,
+    latest: Option<&str>,
+) -> (String, String) {
+    let period = match period.map(str::trim).filter(|s| !s.is_empty()) {
+        Some("monthly") => "monthly",
+        Some("yearly") => "yearly",
+        _ => "daily",
+    };
+    // 日期白名单：YYYY-MM-DD 且真实存在（防注入 + 防脏数据，照 push::is_biz_date）
+    let base = date
+        .map(str::trim)
+        .filter(|d| d.len() == 10 && chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").is_ok())
+        .or(latest)
+        .unwrap_or_default()
+        .to_string();
+    (period.to_string(), base)
+}
+
+/// 族谱音浪 SQL（纯函数，2026-10-12）：按 period 窗口条件聚合。
+/// monthly/yearly 由基准日推出窗口（DATE_FORMAT 前缀匹配），daily 精确到日。
+/// base_date 已由 lineage_window 白名单校验后才拼进 SQL。
+fn lineage_wave_window_sql(period: &str, base_date: &str) -> String {
+    /* 双保险：调用方 lineage_window 已校验，但纯函数直接被测试/复用时也挡一道。
+    日期形状非法 → 退回无窗口条件（空库口径）；绝不把外部字符串带进 SQL。 */
+    let base_date = if base_date.len() == 10
+        && chrono::NaiveDate::parse_from_str(base_date, "%Y-%m-%d").is_ok()
+    {
+        base_date
+    } else {
+        // 空串（库没数据）或形状非法 → 都按空库口径，绝不把外部字符串带进 SQL
+        ""
+    };
+    let where_clause = if base_date.is_empty() {
+        "WHERE wave_reliable = 1".to_string() // 没有任何业务日：不给窗口条件（全空库）
+    } else {
+        match period {
+            "monthly" => format!(
+                "WHERE wave_reliable = 1 AND DATE_FORMAT(biz_date, '%Y-%m') = '{}'",
+                base_date.get(..7).unwrap_or(base_date)
+            ),
+            "yearly" => format!(
+                "WHERE wave_reliable = 1 AND DATE_FORMAT(biz_date, '%Y') = '{}'",
+                base_date.get(..4).unwrap_or(base_date)
+            ),
+            _ => format!(
+                "WHERE wave_reliable = 1 AND DATE_FORMAT(biz_date, '%Y-%m-%d') = '{base_date}'"
+            ),
+        }
+    };
+    format!(
+        "SELECT person_id, CAST(SUM(wave) AS SIGNED) AS total \
+         FROM daily_metric {where_clause} GROUP BY person_id"
+    )
+}
+
+/// 族谱访问判定（纯函数，口径与原因见 lineage 注释）：
+/// 管理员恒放行；普通用户 team=all 拒绝（all 仅管理员）、未绑定（person_id=0）拒绝、
+/// 无师门归属（没师傅也没徒弟）拒绝。
+pub fn lineage_view_allowed(
+    is_admin: bool,
+    person_id: u64,
+    has_master: bool,
+    disciples: i64,
+    team: &str,
+) -> bool {
+    if is_admin {
+        return true;
+    }
+    if team == "all" || person_id == 0 {
+        return false;
+    }
+    has_master || disciples > 0
+}
+
+/// 403 + code=lineage_forbidden：前端据此显示「族谱仅对师门成员开放」
+/// （必须和地区门禁的 403 区分开，后者是 IP 白名单拦截、文案不同）。
+fn lineage_forbidden() -> Response {
+    (
+        axum::http::StatusCode::FORBIDDEN,
+        Json(json!({
+            "error": "族谱仅对师门成员开放（有师傅或徒弟的账号可见）",
+            "code": "lineage_forbidden",
+        })),
+    )
+        .into_response()
+}
+
+/// 本人师门归属：(有师傅, 直系徒弟数)。person_id=0（未绑定）或档案不存在 → (false, 0)。
+async fn person_lineage_membership(st: &AppState, person_id: u64) -> anyhow::Result<(bool, i64)> {
+    if person_id == 0 {
+        return Ok((false, 0));
+    }
+    let sql = "SELECT p.master_id, \
+         (SELECT COUNT(*) FROM person k WHERE k.master_id = p.id AND k.deleted_at IS NULL) AS disciples \
+         FROM person p WHERE p.id = ? AND p.deleted_at IS NULL LIMIT 1";
+    let rows =
+        mysql::query_with_binds(&st.pools, &sid(st), sql, |q| q.bind(person_id as i64)).await?;
+    Ok(match rows.first() {
+        Some(r) => (
+            read_opt_u64_field(r, "master_id")
+                .map(|m| m > 0)
+                .unwrap_or(false),
+            row_i64(r, "disciples"),
+        ),
+        None => (false, 0),
+    })
+}
+
+/// 族谱节点 id 重映射（2026-10-12 安全审计，对齐 daily 接口 P2-19：公开端点不下发内部主键）：
+/// 真实 person.id → 本次响应内的序号 1..N，masterId 同步映射；
+/// 未出现在节点集里的 masterId → None（前端把这种人当树根，与原口径一致）。
+/// 前端只在一棵响应树内用这些 id 建图，序号映射够用。
+pub fn lineage_remap_ids(nodes: &[(u64, Option<u64>)]) -> Vec<(u64, Option<u64>)> {
+    let mut seq: HashMap<u64, u64> = HashMap::with_capacity(nodes.len());
+    for (i, (id, _)) in nodes.iter().enumerate() {
+        seq.insert(*id, (i + 1) as u64);
+    }
+    nodes
+        .iter()
+        .map(|(id, master)| (seq[id], master.and_then(|m| seq.get(&m).copied())))
+        .collect()
 }
 
 /// 「徒弟 + 师傅」门下累计音浪统计（2026-10-11）：
@@ -1010,8 +1364,8 @@ pub async fn monthly(
     headers: HeaderMap,
 ) -> ApiResult {
     let s = PublicSettings::load(&st).await;
-    let query_team = data_team(&team, &token_team(q.access_token.as_deref(), &headers)).to_string();
-    gate_team(s.login_required, &team, q.access_token.as_deref(), &headers)?;
+    let query_team = data_team(&team, &token_team(&headers)).to_string();
+    gate_team(s.login_required, &team, &headers)?;
     // 显隐判定用**路径上的团**（all 恒为开放），数据过滤才用 query_team。
     // 以前把 query_team 传进去判 team_enabled，匿名访客 token 为空 → data_team 返回 ""
     // → team_enabled("") == false，月/年榜对所有人 published:false（前端 .slice 崩）。
@@ -1025,8 +1379,8 @@ pub async fn yearly(
     headers: HeaderMap,
 ) -> ApiResult {
     let s = PublicSettings::load(&st).await;
-    let query_team = data_team(&team, &token_team(q.access_token.as_deref(), &headers)).to_string();
-    gate_team(s.login_required, &team, q.access_token.as_deref(), &headers)?;
+    let query_team = data_team(&team, &token_team(&headers)).to_string();
+    gate_team(s.login_required, &team, &headers)?;
     period_public(&st, &team, &query_team, &q, false).await
 }
 
@@ -1616,8 +1970,12 @@ pub async fn my_register_oauth_cancel(
 }
 
 /// GET /api/public/my/register/check-name?q=：注册页实时校验主播姓名（免 token）。
-/// 返回 `{ok, name, team, personId}`；查不到 → `{ok:false, error}`。
+/// 返回 `{ok, exists, bound, name, team}`；查不到 → `{ok:false, exists:false, error}`。
 /// 只在「开放手机号注册」开着时可用（关着时不泄露台账姓名）。
+///
+/// 2026-10-12 安全审计：**不再下发 personId**（免 token 接口泄露内部 id，会被拿去
+/// 自报绑定冒领身份）；改回 exists + bound（该主播是否已有绑定账号），前端据此提示
+/// 「已有人绑定，请联系管理员」。
 pub async fn my_register_check_name(
     State(st): State<ArcState>,
     axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
@@ -1633,25 +1991,34 @@ pub async fn my_register_check_name(
     let key = q.q.clone().unwrap_or_default();
     let key = key.trim();
     if key.is_empty() {
-        return Ok(Json(json!({ "ok": false, "error": "请输入主播姓名" })));
+        return Ok(Json(
+            json!({ "ok": false, "exists": false, "bound": false, "error": "请输入主播姓名" }),
+        ));
     }
     match crate::store::anchor_lookup_by_name(&st, key).await {
-        Ok(Some((pid, name, team))) => Ok(Json(json!({
-            "ok": true, "name": name, "personId": pid,
-            "team": if team == "male" || team == "female" { team } else { String::new() },
-        }))),
+        Ok(Some((pid, name, team))) => {
+            let bound = crate::store::my_account_bound_for_person(&st, pid, &name).await;
+            Ok(Json(json!({
+                "ok": true, "exists": true, "bound": bound, "name": name,
+                "team": if team == "male" || team == "female" { team } else { String::new() },
+            })))
+        }
         Ok(None) => Ok(Json(json!({
-            "ok": false,
+            "ok": false, "exists": false, "bound": false,
             "error": format!("主播库里没有「{key}」这个姓名，请核对艺名"),
         }))),
-        Err(e) => Ok(Json(json!({ "ok": false, "error": e }))),
+        Err(e) => Ok(Json(
+            json!({ "ok": false, "exists": false, "bound": false, "error": e }),
+        )),
     }
 }
 
 /// POST /api/public/my/register {phone, code, name, team?, wbState?}
 /// **手机号 = 账号，验证码 = 密码，name = 主播姓名（必须在台账里）**。
-/// 2026-10-11 口径：注册即绑定 —— 校验通过直接以主播姓名建号（bound=1），
-/// 不再「注册完再绑一次」。
+/// 2026-10-12 审计修订：注册**不再立即绑定**（自报姓名直接 bound=1 等于无审核冒领）。
+/// 注册成功 = 账号落库（手机号占位名、bound=0）+ 自动生成 pending 绑定申请，
+/// 管理员审核通过后才真正绑定。响应字段保持向后兼容（ok/token/name/team/personId/
+/// bound/needBind 都在），新增 bindStatus:"pending"。
 pub async fn my_register(
     State(st): State<ArcState>,
     axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
@@ -1685,7 +2052,7 @@ pub async fn my_register(
         .take(64)
         .collect();
 
-    let (name, person_id, anchor_team) =
+    let (account_name, person_name, _person_id, anchor_team) =
         crate::store::my_account_register(&st, phone, code, anchor, &wb_state)
             .await
             .map_err(|e| {
@@ -1706,21 +2073,30 @@ pub async fn my_register(
     } else {
         normalize_team(body.get("team").and_then(|v| v.as_str()).unwrap_or(""))
     };
-    let token = my_token_put(person_id.max(0) as u64, team.clone(), name.clone());
-    tracing::info!(phone = %mask_phone(phone), anchor = %name, person = person_id, team = %team, "展示端手机号注册成功（已绑定主播）");
+    /* 审核通过前按「未绑定」签发 token（personId=0）：能登录、能看审核进度，
+    但拿不到任何个人数据。绑定生效后旧 token 会被吊销，需重新登录拿新身份。 */
+    let token = my_token_put(0, team.clone(), account_name.clone());
+    tracing::info!(phone = %mask_phone(phone), anchor = %person_name, team = %team, "展示端手机号注册成功（绑定申请待审核）");
     Ok(Json(json!({
         "ok": true,
         "token": token,
-        "name": name,
+        // name 保持回主播姓名（展示用，向后兼容）；账号登录名在审核通过前是手机号占位，
+        // 前端要展示登录名请用 who 接口的 phone 字段
+        "name": person_name,
         "team": team,
-        "personId": person_id,
-        "bound": true,
-        "needBind": false,
+        // 兼容字段：未绑定恒 0（2026-10-12 起内部 personId 不下发）
+        "personId": 0,
+        "bound": false,
+        "needBind": true,
+        // 新增：绑定申请已自动生成，等管理员审核（前端轮询 who 的 bindRequest）
+        "bindStatus": "pending",
     })))
 }
 
 /// POST /api/public/my/password/reset {phone}
-/// 忘记密码：把自助注册账号密码重置为手机号后四位。
+/// 忘记密码：把自助注册账号密码重置为 **CSPRNG 随机密码**（2026-10-12 审计修复，
+/// 废弃「手机号后四位」——手机号半公开，后四位等于公开口令）。
+/// 新密码只在本次响应里下发一次，请当场转达；重置成功后该账号全部 my token 吊销。
 pub async fn my_password_reset(
     State(st): State<ArcState>,
     axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
@@ -1734,7 +2110,7 @@ pub async fn my_password_reset(
         .get("phone")
         .and_then(|v| v.as_str())
         .unwrap_or_default();
-    let password = crate::store::my_account_reset_password_to_phone_suffix(&st, phone)
+    let (password, names) = crate::store::my_account_reset_password_random(&st, phone)
         .await
         .map_err(|e| {
             /* 与注册同口径：业务拒绝 400，库层故障 500（审计 2026-10-11） */
@@ -1744,79 +2120,127 @@ pub async fn my_password_reset(
                 ApiError::bad_request(e)
             }
         })?;
-    tracing::info!(phone = %mask_phone(phone), "展示端账号密码已重置为手机号后四位");
+    // 改密后旧登录态必须立刻失效（审计 2026-10-12：内存 token 原本无撤销手段）
+    for n in &names {
+        my_tokens_revoke(n);
+    }
+    tracing::info!(phone = %mask_phone(phone), accounts = ?names, "展示端账号密码已重置为随机密码（旧 token 已吊销）");
     Ok(Json(json!({ "ok": true, "password": password })))
 }
 
 #[derive(Deserialize)]
 pub struct BindSearchQuery {
-    pub token: Option<String>,
     pub q: Option<String>,
 }
 
-/// GET /api/public/my/bind/search?token=&q=：绑定页搜主播（全台账，注册账号还没有团别）
+/// GET /api/public/my/bind/search?q=（token 走 X-My-Token 头）：绑定页搜主播
+/// （全台账，注册账号还没有团别）。
+/// 2026-10-12 审计：**不再下发 personId**（模糊搜全台账 + 内部 id = 冒领绑定的弹药）；
+/// 绑定改审核制后按姓名提交，前端其实不再需要这个 id（可考虑停用本接口改用 check-name）。
 pub async fn my_bind_search(
     State(st): State<ArcState>,
     Query(q): Query<BindSearchQuery>,
+    headers: HeaderMap,
 ) -> ApiResult {
-    let token = q.token.unwrap_or_default();
-    if my_token_take(token.trim()).is_none() {
+    let Some(token) = header_my_token(&headers) else {
+        return Err(ApiError::auth("登录已过期，请重新登录"));
+    };
+    if my_token_take(&token).is_none() {
         return Err(ApiError::auth("登录已过期，请重新登录"));
     }
-    let items =
-        crate::store::all_anchor_search(&st, &sid(&st), q.q.as_deref().unwrap_or(""), 20).await;
+    let items = crate::store::all_anchor_search(&st, &sid(&st), q.q.as_deref().unwrap_or(""), 20)
+        .await
+        .into_iter()
+        .map(|mut a| {
+            if let Some(o) = a.as_object_mut() {
+                o.remove("personId");
+            }
+            a
+        })
+        .collect::<Vec<_>>();
     Ok(Json(json!({ "items": items })))
 }
 
-/// POST /api/public/my/bind {token, personId}：绑定主播（**只有一次**）。
-/// 绑定成功后换发新 token（带主播 personId 与所在团），前端据此刷新身份/换团。
-pub async fn my_bind(State(st): State<ArcState>, axum::Json(body): axum::Json<Value>) -> ApiResult {
+/// POST /api/public/my/bind {token, name}：提交主播绑定申请（**2026-10-12 起改管理员审核**）。
+///
+/// 旧口径「自报 personId 直接绑」被废（安全审计：check-name / bind/search 都泄露过
+/// personId，任何人拿别人的 id 就能冒领身份）。现在只收姓名，服务端精确查台账
+/// （排除已软删/已离团）后落 my_bind_requests(pending)，管理员审核通过才真正绑定。
+/// 兼容期：老前端传的 personId 一律忽略，只按 name 处理；name 缺失 → 400。
+///
+/// 响应：{ok:true, status:"pending", already?, personName, team}；
+/// 已有 pending → already:true（幂等）；账号已绑定 / 主播已被他人绑定 → 409。
+/// 返回 Response 而不是 ApiResult：409 需要带 code 字段（ApiError 错误体只有 {error}）。
+pub async fn my_bind(State(st): State<ArcState>, axum::Json(body): axum::Json<Value>) -> Response {
     let token = body
         .get("token")
         .and_then(|v| v.as_str())
         .unwrap_or_default();
-    let person_id = body
-        .get("personId")
-        .and_then(|v| v.as_i64())
-        .or_else(|| {
-            body.get("personId")
-                .and_then(|v| v.as_str())
-                .and_then(|s| s.parse().ok())
-        })
-        .filter(|v| *v > 0)
-        .ok_or_else(|| anyhow::anyhow!("请选择要绑定的主播"))?;
     let Some((_, _, token_name)) = my_token_take(token.trim()) else {
-        return Err(ApiError::auth("登录已过期，请重新登录"));
+        return ApiError::auth("登录已过期，请重新登录").into_response();
     };
-    let r = crate::store::my_account_bind(&st, &token_name, person_id)
+    let name = body
+        .get("name")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .unwrap_or_default();
+    if name.is_empty() {
+        return ApiError::bad_request("请选择要绑定的主播").into_response();
+    }
+    let Some(info) = crate::store::my_account_info(&st, &token_name).await else {
+        return ApiError::auth("账号不存在，请重新登录").into_response();
+    };
+    if info.bound || info.is_admin {
+        return (
+            axum::http::StatusCode::CONFLICT,
+            Json(json!({
+                "error": "该账号已绑定主播，不能自行更改（需要改绑请联系管理员）",
+                "code": "already_bound",
+            })),
+        )
+            .into_response();
+    }
+    // 服务端按姓名精确查台账；内部 personId 不出服务端（不随响应下发）
+    let (person_id, person_name, team) = match crate::store::anchor_lookup_by_name(&st, name).await
+    {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            return ApiError::bad_request(format!("主播库里没有「{name}」这个姓名，请核对艺名"))
+                .into_response()
+        }
+        Err(e) => return ApiError::bad_request(e).into_response(),
+    };
+    if crate::store::my_account_bound_for_person(&st, person_id, &person_name).await {
+        return (
+            axum::http::StatusCode::CONFLICT,
+            Json(json!({
+                "error": "该主播已存在绑定的账号，如有疑问请联系管理员",
+                "code": "person_bound",
+            })),
+        )
+            .into_response();
+    }
+    match crate::store::my_bind_request_submit(&st, &token_name, person_id, &person_name, &team)
         .await
-        .map_err(|e| {
-            /* 与注册/重置同口径（审计 2026-10-11）：已绑定 / 主播不存在 / 已离团
-            都是用户可修的业务拒绝 → 400；库层故障才 500 */
-            if e.starts_with("查账号失败")
-                || e.starts_with("查主播失败")
-                || e.starts_with("查重失败")
-                || e.starts_with("绑定失败")
-            {
-                ApiError::from(anyhow::anyhow!(e))
-            } else {
-                ApiError::bad_request(e)
+    {
+        Ok(already) => {
+            if !already {
+                tracing::info!(account = %token_name, anchor = %person_name, "展示端绑定申请已提交（待审核）");
+                crate::events::emit(
+                    crate::events::SCOPE_ROSTER,
+                    format!(
+                        "绑定申请：账号「{token_name}」申请绑定主播「{person_name}」（待审核）"
+                    ),
+                );
             }
-        })?;
-    let new_token = my_token_put(r.person_id.max(0) as u64, r.team.clone(), r.name.clone());
-    tracing::info!(account = %token_name, anchor = %r.name, team = %r.team, "展示端账号绑定主播");
-    crate::events::emit(
-        crate::events::SCOPE_ROSTER,
-        format!("展示端账号「{token_name}」绑定主播「{}」", r.name),
-    );
-    Ok(Json(json!({
-        "ok": true,
-        "token": new_token,
-        "name": r.name,
-        "team": r.team,
-        "personId": r.person_id,
-        "bound": true,
-    })))
+            Json(json!({
+                "ok": true, "status": "pending", "already": already,
+                "personName": person_name, "team": team,
+            }))
+            .into_response()
+        }
+        Err(e) => ApiError::bad_request(e).into_response(),
+    }
 }
 
 /// 团别白名单：male / female（兼容 m / f），其它一律空串（老链接/异常入参）
@@ -1828,11 +2252,24 @@ fn normalize_team(v: &str) -> String {
     }
 }
 
+/// 「我的」系列 GET 接口的查询参数（2026-10-12 起 token 只走 X-My-Token 头，不再收
+/// `?token=` —— URL 会进访问日志/浏览器历史/Referer，等价于把登录态写进日志）。
 #[derive(Deserialize)]
 pub struct MyQuery {
-    pub token: Option<String>,
     /// 趋势图取几个业务日（默认 14，上限 30）
     pub days: Option<i64>,
+    /// 族谱音浪口径：daily（默认）/ monthly / yearly（2026-10-12）
+    pub period: Option<String>,
+    /// 族谱基准日 YYYY-MM-DD（monthly/yearly 以它所在的月/年为窗口；非法回落最新业务日）
+    pub date: Option<String>,
+}
+
+/// 取请求头里的 my token 并解析身份；缺失/失效 → 401（各「我的」GET 接口统一入口）。
+fn my_token_required(headers: &HeaderMap) -> Result<(u64, String, String), ApiError> {
+    let Some(token) = header_my_token(headers) else {
+        return Err(ApiError::auth("缺少验证 token，请先验证姓名和密码"));
+    };
+    my_token_take(&token).ok_or_else(|| ApiError::auth("验证已过期，请重新验证"))
 }
 
 /* --------------------- 个人页时长口径（2026-10-10 月度时长导入） --------------------- */
@@ -1962,24 +2399,21 @@ pub async fn my_minutes(
     Ok(rows.first().map(|r| row_i64(r, "minutes")).unwrap_or(0))
 }
 
-/// GET /api/public/teams/{team}/my?token=
+/// GET /api/public/teams/{team}/my（token 走 X-My-Token 头）
 /// 个人数据：日/月/年 + 累计 + 团内名次（无密码、无抖音号字段）
 pub async fn my(
     State(st): State<ArcState>,
     Path(team): Path<String>,
-    Query(q): Query<MyQuery>,
+    // 2026-10-12 起 MyQuery 新增族谱用的 period/date；/my 只用 days 语义，
+    // 其余字段忽略（不参与个人页口径）。
+    Query(_q): Query<MyQuery>,
+    headers: HeaderMap,
 ) -> ApiResult {
     let s = PublicSettings::load(&st).await;
     if !s.team_enabled(&team) {
         return Ok(Json(json!({ "published": false })));
     }
-    let token = q.token.unwrap_or_default();
-    if token.is_empty() {
-        return Err(anyhow::anyhow!("缺少验证 token，请先验证姓名和密码").into());
-    }
-    let Some((person_id, my_team, _)) = my_token_take(&token) else {
-        return Err(anyhow::anyhow!("验证已过期，请重新验证").into());
-    };
+    let (person_id, my_team, _) = my_token_required(&headers)?;
     if my_team != team && team != "all" {
         return Err(anyhow::anyhow!("该账号不属于本团").into());
     }
@@ -2131,38 +2565,49 @@ pub async fn my(
     }
 
     let source = sid(&st);
-    // 团内名次（按累计）。口径与 daily 榜单对齐：离队的不占名次，
-    // 否则粉丝页显示的名次会和榜单差几个人，对不上。
-    // P1-7：只聚合可信行（wave_reliable=1）。
-    let rank_sql = "SELECT person_id FROM (SELECT p.id AS person_id, SUM(d.wave) AS tw \
+    /* 团内名次（按累计）。口径与 daily 榜单对齐：离队的不占名次，
+    否则粉丝页显示的名次会和榜单差几个人，对不上。
+    P1-7：只聚合可信行（wave_reliable=1）。
+    2026-10-11 起按团过滤：以前不过滤，男女团同表混排，「团内名次」名不副实。
+    过滤手法与 lineage 相同：团别为空串 = 全公会不过滤（保持旧行为）；
+    token 里的团别只会是 male/female/all/空串（all 归一成空串——gender 列没有
+    all 这个值，不过滤才对），与 lineage 的 query_team 同级信任，沿用 format! 拼 SQL。 */
+    let rank_team = if my_team == "all" { "" } else { &my_team };
+    let rank_sql = format!(
+        "SELECT person_id, tw FROM (SELECT p.id AS person_id, \
+          CAST(SUM(d.wave) AS SIGNED) AS tw \
          FROM daily_metric d JOIN person p ON p.id = d.person_id \
          WHERE p.deleted_at IS NULL \
+           AND ('{rank_team}' = '' OR p.gender = '{rank_team}') \
            AND d.wave_reliable = 1 \
          GROUP BY p.id ORDER BY tw DESC) t"
-        .to_string();
-    let size_sql = "SELECT COUNT(*) AS n FROM person \
-         WHERE deleted_at IS NULL AND status <> 'left'"
-        .to_string();
+    );
     let ranks = mysql::query(&st.pools, &source, &rank_sql).await?;
-    let team_rank = ranks
-        .iter()
-        .position(|r| id_of_pub(r) == person_id)
-        .map(|i| i + 1)
-        .unwrap_or(0);
-    let team_size = mysql::query(&st.pools, &source, &size_sql)
-        .await?
-        .into_iter()
-        .next()
-        .map(|r| row_i64(&r, "n"))
-        .unwrap_or(0);
+    let my_pos = ranks.iter().position(|r| id_of_pub(r) == person_id);
+    let team_rank = my_pos.map(|i| i + 1).unwrap_or(0);
+    /* 2026-10-12 用户口径：我的页只显示自己的排名。rankGap / teamSize 不再计算
+    也不再下发（响应里恒 null）——rank_sql 本身保留（teamRank 还要用），
+    前一名差值和团总人数的查询省掉：每次打开我的页少一条 COUNT 查询，
+    也不再让多余数值出网。 */
 
-    let name_sql =
-        format!("SELECT name FROM person WHERE id = {person_id} AND deleted_at IS NULL LIMIT 1");
-    let name = mysql::query(&st.pools, &source, &name_sql)
+    /* 姓名 + 师傅姓名一条 SQL 带出（LEFT JOIN，没有师傅 = NULL → 前端「师承【xxx】」
+    副标题不显示）。师傅姓名在公开族谱里本来就下发（lineage 节点的 masterName），
+    没有额外的团别/隐私顾虑。 */
+    let name_sql = format!(
+        "SELECT p.name, m.name AS master_name FROM person p \
+         LEFT JOIN person m ON m.id = p.master_id AND m.deleted_at IS NULL \
+         WHERE p.id = {person_id} AND p.deleted_at IS NULL LIMIT 1"
+    );
+    let (name, master_name) = mysql::query(&st.pools, &source, &name_sql)
         .await?
         .into_iter()
         .next()
-        .and_then(|r| r.try_get::<String, _>("name").ok())
+        .map(|r| {
+            (
+                r.try_get::<String, _>("name").unwrap_or_default(),
+                r.try_get::<Option<String>, _>("master_name").ok().flatten(),
+            )
+        })
         .unwrap_or_default();
 
     /* 数值显隐（与每日报告同一套后台开关）：关「音浪数值」→ wave=null；
@@ -2212,7 +2657,13 @@ pub async fn my(
         "yearly": yearly,
         "total": total,
         "teamRank": team_rank,
-        "teamSize": team_size,
+        /* 2026-10-12 用户口径：我的页只显示自己的排名，不再下发 teamSize / rankGap。
+        团总人数 + 距上一名差值能反推团队分布（结合排名可推出前面所有人的量级），
+        与「可反推的一律 null」的安全口径一致。字段保留位置，前端老版本读 null 不炸。 */
+        "teamSize": Value::Null,
+        "rankGap": Value::Null,
+        // 本人的师傅姓名（展示端「我的」页副标题「师承【xxx】」），没有师傅 = null
+        "masterName": master_name,
         // 门下音浪统计：直系徒弟数 / 徒弟音浪总和 / 门下累计（自己 + 徒弟）
         "disciple": {
             "count": disciple_count,
@@ -2224,25 +2675,20 @@ pub async fn my(
     })))
 }
 
-/// GET /api/public/teams/{team}/my/series?token=&days=
+/// GET /api/public/teams/{team}/my/series?days=（token 走 X-My-Token 头）
 /// 本人近 N 个业务日的音浪与时长（按日期正序）。只返回这一个人的序列，
 /// 不下发密码，也不下发团里任何别人的数据。
 pub async fn my_series(
     State(st): State<ArcState>,
     Path(team): Path<String>,
     Query(q): Query<MyQuery>,
+    headers: HeaderMap,
 ) -> ApiResult {
     let s = PublicSettings::load(&st).await;
     if !s.team_enabled(&team) {
         return Ok(Json(json!({ "published": false })));
     }
-    let token = q.token.unwrap_or_default();
-    if token.is_empty() {
-        return Err(anyhow::anyhow!("缺少验证 token，请先验证姓名和密码").into());
-    }
-    let Some((person_id, my_team, _)) = my_token_take(&token) else {
-        return Err(anyhow::anyhow!("验证已过期，请重新验证").into());
-    };
+    let (person_id, my_team, _) = my_token_required(&headers)?;
     if my_team != team && team != "all" {
         return Err(anyhow::anyhow!("该账号不属于本团").into());
     }
@@ -2290,20 +2736,228 @@ pub async fn my_series(
     })))
 }
 
-/// GET /api/public/teams/{team}/my/who?token= ：轻量身份（展示端登录门启动时用），
-/// 只回姓名 + personId，不拉任何业务数据
-pub async fn my_who(
+/* --------------------- 我的抖音号（分账号音浪 2026-10-12） --------------------- */
+
+/// 分账号音浪的四个窗口（2026-10-12 建）：今天的业务日 / 本月 / 今年。
+/// 四窗口都由**库里最新业务日**推出，不能用自然日——数据是每晚补前一天的，
+/// 凌晨打开页面时「今天」的行还不存在，用自然日会让每个号都显示 0（与 /my 同因）。
+pub struct AccountPeriods {
+    /// 最新业务日（YYYY-MM-DD）；库里没数据时为空串
+    pub day: String,
+    /// 业务日所在月（YYYY-MM）
+    pub month: String,
+    /// 业务日所在年（YYYY）
+    pub year: String,
+}
+
+impl AccountPeriods {
+    /// 由最新业务日推出三个窗口。空串输入 → 三个窗口都空（SQL 侧退化成「不命中任何行」）。
+    pub fn of(today: &str) -> Self {
+        Self {
+            day: today.to_string(),
+            month: today.get(..7).map(str::to_string).unwrap_or_default(),
+            year: today.get(..4).map(str::to_string).unwrap_or_default(),
+        }
+    }
+}
+
+/// 分账号音浪 SQL（**一条查全部号**，不每人每号循环查库）。
+///
+/// 口径与 dialect::WAVES_A 完全对齐（2026-10-12），不许自己发明新口径：
+/// - 主号（is_primary=1）走 daily_metric，且只算 wave_reliable=1 的行；
+/// - 副号（is_primary=0）走 wave_snapshot.wave_value（当日值语义，已验证与 daily_metric 对得上）。
+///
+/// 两边按「号」UNION ALL 后再按 account.id 汇总，所以一个号的历史不会被算两遍：
+/// 主号即便在 wave_snapshot 里也有历史行，也只取 daily_metric 那一支（与 WAVES_A 的
+/// is_primary 互斥条件同源，改一处即可，别在两处各写一套）。
+///
+/// 窗口一律 `DATE_FORMAT(biz_date, ...)`（该库对 bind 参数报 1835，日期必须内联；
+/// 值来自库里的 DATE_FORMAT 结果且经 [valid_date_pub] 形状校验，不含外部输入）。
+/// 没有数据的号 SUM 出来是 NULL，调用方用 COALESCE 归零（有这个号但没播 = 0，
+/// 只有后台开关关掉才下发 null，两者语义不同，前端靠它区分）。
+pub fn my_accounts_sql(person_id: u64, p: &AccountPeriods) -> String {
+    format!(
+        "SELECT a.id AS aid, a.anchor_id, a.douyin_no, a.anchor_name, a.is_primary, \
+           CAST(COALESCE(SUM(CASE WHEN t.d = '{day}' THEN t.w END), 0) AS SIGNED) AS wd, \
+           CAST(COALESCE(SUM(CASE WHEN t.d LIKE '{month}-%' THEN t.w END), 0) AS SIGNED) AS wm, \
+           CAST(COALESCE(SUM(CASE WHEN t.d LIKE '{year}-%' THEN t.w END), 0) AS SIGNED) AS wy, \
+           CAST(COALESCE(SUM(t.w), 0) AS SIGNED) AS wt, \
+           MAX(t.d) AS last_d, \
+           COUNT(DISTINCT t.d) AS days \
+         FROM account a LEFT JOIN ( \
+           SELECT d.anchor_id AS anchor_id, DATE_FORMAT(d.biz_date, '%Y-%m-%d') AS d, \
+                  d.wave AS w \
+           FROM daily_metric d JOIN account pa \
+             ON pa.person_id = d.person_id AND pa.anchor_id = d.anchor_id \
+              AND pa.is_primary = 1 \
+           WHERE d.person_id = {person_id} AND d.wave_reliable = 1 \
+           UNION ALL \
+           SELECT ws.anchor_id AS anchor_id, DATE_FORMAT(ws.biz_date, '%Y-%m-%d') AS d, \
+                  ws.wave_value AS w \
+           FROM wave_snapshot ws JOIN account sa \
+             ON sa.anchor_id = ws.anchor_id AND sa.is_primary = 0 \
+           WHERE sa.person_id = {person_id} \
+         ) t ON t.anchor_id = a.anchor_id \
+         WHERE a.person_id = {person_id} \
+         GROUP BY a.id, a.anchor_id, a.douyin_no, a.anchor_name, a.is_primary \
+         ORDER BY a.is_primary DESC, a.id",
+        day = p.day,
+        month = p.month,
+        year = p.year,
+    )
+}
+
+/// 一行查询结果 → 一个抖音号的 DTO（数值部分先全给，开关过滤在 [my_accounts_gate] 里统一做）。
+fn my_account_row(r: &sqlx::mysql::MySqlRow) -> Value {
+    let anchor_id = r.try_get::<String, _>("anchor_id").unwrap_or_default();
+    let douyin_no = r.try_get::<String, _>("douyin_no").unwrap_or_default();
+    let anchor_name = r.try_get::<String, _>("anchor_name").unwrap_or_default();
+    let primary = r.try_get::<i8, _>("is_primary").unwrap_or(0) == 1;
+    // 副号没有时长，也不判未播：这里只有音浪口径
+    let last_date = r
+        .try_get::<Option<String>, _>("last_d")
+        .ok()
+        .flatten()
+        .filter(|s: &String| valid_date_pub(s));
+    json!({
+        "accountId": row_pid(r, "aid"),
+        "anchorId": anchor_id,
+        "douyinNo": douyin_no,
+        "anchorName": anchor_name,
+        "primary": primary,
+        "daily": { "wave": row_i64(r, "wd") },
+        "monthly": { "wave": row_i64(r, "wm") },
+        "yearly": { "wave": row_i64(r, "wy") },
+        "total": { "wave": row_i64(r, "wt") },
+        /* 当日是否开播：与全站同口径（dialect::NOT_LIVE_WAVE_THRESHOLD，音浪 >= 2）。
+        注意这是「号」级的开播，副号有音浪就算播了。 */
+        "liveToday": dialect::is_live_wave(row_i64(r, "wd")),
+        "lastDate": last_date,
+        "days": row_i64(r, "days"),
+    })
+}
+
+/// 后台显隐开关过滤（纯函数，便于单测）：
+/// - 关「每日音浪」或关「音浪数值」→ daily 置 null（两者任一关都不给数字，否则可反推）；
+/// - 关「月报」→ monthly null；关「年报」→ yearly null；关「音浪数值」→ total null；
+/// - 开播标记 / 最后日期 / 天数不是音浪数值，照常下发（与 /my 里名次照常下发同理）。
+///
+/// 顺带回一份全号加总（与 /my 的合计口径一致：主号 daily_metric + 副号 wave_snapshot，
+/// 因此 summary 与 /my 的 total 可以对得上，前端卡顶直接显示它）。
+pub fn my_accounts_gate(items: &mut [Value], s: &PublicSettings) -> Value {
+    let mut sum_d: i64 = 0;
+    let mut sum_m: i64 = 0;
+    let mut sum_y: i64 = 0;
+    let mut sum_t: i64 = 0;
+    for it in items.iter_mut() {
+        let Some(o) = it.as_object_mut() else {
+            continue;
+        };
+        let pick = |o: &serde_json::Map<String, Value>, k: &str| -> i64 {
+            o.get(k)
+                .and_then(|v| v.get("wave"))
+                .and_then(Value::as_i64)
+                .unwrap_or(0)
+        };
+        sum_d += pick(o, "daily");
+        sum_m += pick(o, "monthly");
+        sum_y += pick(o, "yearly");
+        sum_t += pick(o, "total");
+        if !(s.daily && s.wave) {
+            o.insert("daily".into(), Value::Null);
+        }
+        if !s.monthly {
+            o.insert("monthly".into(), Value::Null);
+        }
+        if !s.yearly {
+            o.insert("yearly".into(), Value::Null);
+        }
+        if !s.wave {
+            o.insert("total".into(), Value::Null);
+        }
+    }
+    let one = |on: bool, v: i64| -> Value {
+        if on {
+            json!({ "wave": v })
+        } else {
+            Value::Null
+        }
+    };
+    json!({
+        "count": items.len(),
+        "daily": one(s.daily && s.wave, sum_d),
+        "monthly": one(s.monthly, sum_m),
+        "yearly": one(s.yearly, sum_y),
+        "total": one(s.wave, sum_t),
+    })
+}
+
+/// GET /api/public/teams/{team}/my/accounts（token 走 X-My-Token 头）
+/// 我的**每个抖音号**的日 / 月 / 年 / 累计音浪（一人多号时 /my 只有合计数，看不出哪个号在跑）。
+/// 只下发本人数据；数值一律受后台「展示开关」控制，关掉的口径下发 null。
+pub async fn my_accounts(
     State(st): State<ArcState>,
     Path(team): Path<String>,
-    Query(q): Query<MyQuery>,
+    Query(_q): Query<MyQuery>,
+    headers: HeaderMap,
 ) -> ApiResult {
-    let token = q.token.unwrap_or_default();
-    let Some((person_id, my_team, token_name)) = my_token_take(token.trim()) else {
-        return Err(ApiError::auth("登录已过期，请重新登录"));
-    };
+    let s = PublicSettings::load(&st).await;
+    if !s.team_enabled(&team) {
+        return Ok(Json(json!({ "published": false })));
+    }
+    let (person_id, my_team, _) = my_token_required(&headers)?;
     if my_team != team && team != "all" {
         return Err(ApiError::auth("该账号不属于本团"));
     }
+    // 管理员观看账号（personId=0）没有主播档案，也就没有抖音号：给空列表而不是报错，
+    // 前端「我的」页顶部照常显示（与 /my 的 admin 分支同处理方式）
+    if person_id == 0 {
+        let mut empty: Vec<Value> = Vec::new();
+        let summary = my_accounts_gate(&mut empty, &s);
+        return Ok(Json(json!({
+            "published": true,
+            "date": "",
+            "accounts": empty,
+            "summary": summary,
+        })));
+    }
+
+    /* 「今日」必须是库里最新的业务日，不能用自然日今天（数据与 /my 同因：每晚补前一天）。 */
+    let dates = crate::repos::get_available_dates(&st, None, false).await?;
+    let today = dates.first().cloned().unwrap_or_default();
+    // 日期来自库里的 DATE_FORMAT 结果，这里再校一次形状，防止异常值内联进 SQL
+    if !today.is_empty() && !valid_date_pub(&today) {
+        return Err(ApiError::bad_request("业务日格式异常"));
+    }
+    let periods = AccountPeriods::of(&today);
+
+    let sql = my_accounts_sql(person_id, &periods);
+    let rows = mysql::query(&st.pools, &sid(&st), &sql).await?;
+    let mut accounts: Vec<Value> = rows.iter().map(my_account_row).collect();
+    let summary = my_accounts_gate(&mut accounts, &s);
+    Ok(Json(json!({
+        "published": true,
+        "date": today,
+        "accounts": accounts,
+        "summary": summary,
+    })))
+}
+
+/// GET /api/public/teams/{team}/my/who（token 走 X-My-Token 头）：轻量身份
+/// （展示端登录门启动时用），只回姓名 + personId，不拉任何业务数据。
+/// 2026-10-12 起附带 `bindRequest`（该账号最新一条绑定申请：{status, personName,
+/// reason, createdAt} | null）——绑定改管理员审核制后，前端轮询这里展示审核进度。
+pub async fn my_who(
+    State(st): State<ArcState>,
+    Path(team): Path<String>,
+    Query(_q): Query<MyQuery>,
+    headers: HeaderMap,
+) -> ApiResult {
+    let (person_id, my_team, token_name) = my_token_required(&headers)?;
+    if my_team != team && team != "all" {
+        return Err(ApiError::auth("该账号不属于本团"));
+    }
+    let bind_req = crate::store::my_bind_request_latest(&st, &token_name).await;
     // personId=0 有两种：管理员观看账号（is_admin=1，姓名直接来自登录账号），
     // 以及「手机号注册了、还没绑主播」的账号（bound=0，前端要提示去绑定）
     if person_id == 0 {
@@ -2312,18 +2966,19 @@ pub async fn my_who(
                 return Ok(Json(json!({
                     "ok": true, "personId": 0, "name": info.phone, "team": my_team,
                     "phone": info.phone, "admin": false, "bound": false, "needBind": true,
+                    "bindRequest": bind_req,
                 })));
             }
             if info.is_admin {
                 return Ok(Json(json!({
                     "ok": true, "personId": 0, "name": token_name, "team": my_team,
-                    "admin": true, "bound": true,
+                    "admin": true, "bound": true, "bindRequest": bind_req,
                 })));
             }
         }
         return Ok(Json(json!({
             "ok": true, "personId": 0, "name": token_name, "team": my_team,
-            "admin": true, "bound": true,
+            "admin": true, "bound": true, "bindRequest": bind_req,
         })));
     }
     let sql = "SELECT name FROM person WHERE id = ? AND deleted_at IS NULL".to_string();
@@ -2341,23 +2996,21 @@ pub async fn my_who(
     let phone = crate::store::my_account_phone(&st, &token_name).await;
     Ok(Json(json!({
         "ok": true, "personId": person_id, "name": name, "team": my_team,
-        "phone": phone, "bound": true,
+        "phone": phone, "bound": true, "bindRequest": bind_req,
     })))
 }
 
 /* --------------------- 抖音号绑定申请（展示端提交 → 管理端审计） --------------------- */
 
-/// GET /api/public/teams/{team}/my/claim?token= ：我的绑定状态
+/// GET /api/public/teams/{team}/my/claim（token 走 X-My-Token 头）：我的绑定状态
 /// （最近一笔申请 + 已绑定的抖音号列表，让用户知道现在音浪记在哪个号上）
 pub async fn my_claim_get(
     State(st): State<ArcState>,
     Path(team): Path<String>,
-    Query(q): Query<MyQuery>,
+    Query(_q): Query<MyQuery>,
+    headers: HeaderMap,
 ) -> ApiResult {
-    let token = q.token.unwrap_or_default();
-    let Some((person_id, my_team, _)) = my_token_take(token.trim()) else {
-        return Err(ApiError::auth("登录已过期，请重新登录"));
-    };
+    let (person_id, my_team, _) = my_token_required(&headers)?;
     if my_team != team && team != "all" {
         return Err(ApiError::auth("该账号不属于本团"));
     }
@@ -2634,14 +3287,16 @@ fn my_ident(team: &str, token: &str) -> Result<(u64, String, String), ApiError> 
     Ok((pid, my_team, name))
 }
 
-/// GET /api/public/teams/{team}/my/push?token=：推送设置全量状态
+/// GET /api/public/teams/{team}/my/push（token 走 X-My-Token 头）：推送设置全量状态
 /// （绑定状态 + 两个开关 + 追分目标 + 是否已配机器人二维码）
 pub async fn my_push(
     State(st): State<ArcState>,
     Path(team): Path<String>,
-    Query(q): Query<MyQuery>,
+    Query(_q): Query<MyQuery>,
+    headers: HeaderMap,
 ) -> ApiResult {
-    let (person_id, _my_team, name) = my_ident(&team, q.token.as_deref().unwrap_or(""))?;
+    let token = header_my_token(&headers).unwrap_or_default();
+    let (person_id, _my_team, name) = my_ident(&team, &token)?;
     let mut state = crate::store::push_state(&st, &name).await;
     let targets = crate::store::targets_list(&st, &name).await;
     let has_qr = crate::store::config_get(&st, "wechat_add_qr")
@@ -3048,6 +3703,29 @@ pub async fn my_push_target_add(
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_string();
+            /* 自定义目标分（2026-10-12 用户口径「自定义分数，追人的分数」）：
+            选填（单位万）。填了存 target_value = 万*10000，推送按这个数对比；
+            不填保持旧行为——比他本人本月累计（target_value=0 是「没有自定义分」的哨兵）。
+            展示文案写进 target_name（推送 label / 页面列表都读它）。 */
+            let custom_raw = match body.get("targetWan").and_then(|v| v.as_f64()) {
+                Some(w) => {
+                    // ApiResult 的错误是 ApiError（From<anyhow::Error>）；ensure! 的宏展开
+                    // 在返回 ApiError 的函数里类型不匹配，改成手写 if + anyhow!(...).into()
+                    if w <= 0.0 {
+                        return Err(anyhow::anyhow!("目标分要大于 0（万）").into());
+                    }
+                    if w > 100_000_000.0 {
+                        return Err(anyhow::anyhow!("目标分太大了，检查一下单位（万）").into());
+                    }
+                    (w * 10_000.0).round() as i64
+                }
+                None => 0,
+            };
+            let display = if custom_raw > 0 {
+                format!("{tname} · {}", crate::push::fmt_wan(custom_raw))
+            } else {
+                tname.clone()
+            };
             // 同一个人不重复追
             let dup = crate::store::targets_for_push(&st, &name)
                 .await
@@ -3056,7 +3734,7 @@ pub async fn my_push_target_add(
             if dup {
                 return Err(anyhow::anyhow!("已经在追这个主播了").into());
             }
-            crate::store::target_add(&st, &name, team_scope, "person", tid, &tname, 0)
+            crate::store::target_add(&st, &name, team_scope, "person", tid, &display, custom_raw)
                 .await
                 .map_err(|e| anyhow::anyhow!("保存失败：{e}"))?;
         }
@@ -3087,13 +3765,16 @@ pub async fn my_push_target_del(
     ))
 }
 
-/// GET /api/public/teams/{team}/my/push/search?token=&q=：本团主播搜索（只回 id + 名字）
+/// GET /api/public/teams/{team}/my/push/search?q=（token 走 X-My-Token 头）：
+/// 本团主播搜索（只回 id + 名字）
 pub async fn my_push_search(
     State(st): State<ArcState>,
     Path(team): Path<String>,
     Query(q): Query<PushSearchQuery>,
+    headers: HeaderMap,
 ) -> ApiResult {
-    let (person_id, actual_team, _name) = my_ident(&team, q.token.as_deref().unwrap_or(""))?;
+    let token = header_my_token(&headers).unwrap_or_default();
+    let (person_id, actual_team, _name) = my_ident(&team, &token)?;
     let team_scope = if team == "all" {
         actual_team.as_str()
     } else {
@@ -3114,21 +3795,21 @@ pub async fn my_push_search(
 
 #[derive(Deserialize)]
 pub struct PushSearchQuery {
-    pub token: Option<String>,
     pub q: Option<String>,
 }
 
-/// GET /api/public/teams/{team}/my/push/qr?access_token=
+/// GET /api/public/teams/{team}/my/push/qr（token 走 X-My-Token 头）
 /// 机器人「加好友」二维码图片（管理员在后台「机器人」页上传）。
 /// 走独立图片端点是为了不让 base64 撑大设置接口的 JSON。
+/// 2026-10-12 起不再认 ?access_token=（URL 进日志）；<img> 直链场景请改用
+/// fetch + X-My-Token 头拿 blob 转 objectURL（当前 st_page.html 已不走这个端点）。
 pub async fn my_push_qr(
     State(st): State<ArcState>,
     Path(team): Path<String>,
-    Query(g): Query<GateQuery>,
     headers: HeaderMap,
 ) -> Response {
     let s = PublicSettings::load(&st).await;
-    if gate_team(s.login_required, &team, g.access_token.as_deref(), &headers).is_err() {
+    if gate_team(s.login_required, &team, &headers).is_err() {
         return (axum::http::StatusCode::UNAUTHORIZED, "请先登录").into_response();
     }
     let Some(data_url) = crate::store::config_get(&st, "wechat_add_qr").await else {
@@ -3214,5 +3895,385 @@ mod register_route_tests {
         assert_eq!(normalize_team(" f "), "female");
         assert_eq!(normalize_team(""), "");
         assert_eq!(normalize_team("男团"), "");
+    }
+}
+
+#[cfg(test)]
+mod announcement_tests {
+    use super::*;
+
+    /// 图标白名单：合法名原样保留，白名单外 / 空值一律回落成按步序号的默认。
+    /// 这一步是防「任意字符串进配置 → 前端拼进 class」的唯一关口，必须守住。
+    #[test]
+    fn icon_for_whitelists_and_falls_back() {
+        // 白名单内：原样
+        let s = AnnounceStep {
+            title: "x".into(),
+            icon: "star".into(),
+            content: "y".into(),
+        };
+        assert_eq!(Announcement::icon_for(&s, 3), "star");
+
+        // 白名单外（含 HTML / 脚本注入尝试）：回落默认。
+        // 注意 "star " 不在里面：icon_for 会先 trim，"star "trim 后落在白名单内，
+        // 所以它算合法输入（见下一条），这里只收真正非法的值。
+        for bad in [
+            "<script>",
+            "foo",
+            "STAR",
+            "star\"",
+            "../etc/passwd",
+            "star;",
+            "star\nonmore",
+            "star twist",
+        ] {
+            let s = AnnounceStep {
+                title: "x".into(),
+                icon: bad.into(),
+                content: "y".into(),
+            };
+            let got = Announcement::icon_for(&s, 0);
+            assert_eq!(got, DEFAULT_STEP_ICONS[0], "{bad:?} 该回落默认");
+            assert!(
+                STEP_ICON_WHITELIST.contains(&got.as_str()),
+                "{got} 必须在白名单内"
+            );
+        }
+
+        // 首尾空白是合法输入的容忍（trim 后命中白名单），不是攻击面
+        let padded = AnnounceStep {
+            title: "x".into(),
+            icon: " star ".into(),
+            content: "y".into(),
+        };
+        assert_eq!(Announcement::icon_for(&padded, 0), "star");
+
+        // 空 icon 按步序号轮换，不会满屏同一个
+        let empty = AnnounceStep::default();
+        assert_eq!(Announcement::icon_for(&empty, 0), DEFAULT_STEP_ICONS[0]);
+        assert_eq!(
+            Announcement::icon_for(&empty, DEFAULT_STEP_ICONS.len()),
+            DEFAULT_STEP_ICONS[0],
+            "超出长度要回绕，不能越界"
+        );
+        assert_ne!(
+            Announcement::icon_for(&empty, 0),
+            Announcement::icon_for(&empty, 1)
+        );
+    }
+
+    /// 默认图标表自己不能重复、不能越界（前端按步序号取默认，重复会让
+    /// 「第 3 步」和「第 1 步」长得一样）
+    #[test]
+    fn default_icons_are_unique_and_whitelisted() {
+        let mut seen = std::collections::HashSet::new();
+        for i in DEFAULT_STEP_ICONS {
+            assert!(seen.insert(i), "默认图标重复：{i}");
+            assert!(
+                STEP_ICON_WHITELIST.contains(i),
+                "默认图标必须在白名单内：{i}"
+            );
+        }
+        assert!(
+            DEFAULT_STEP_ICONS.len() >= 4,
+            "默认图标要够 4 步以上的引导轮换"
+        );
+    }
+
+    /// to_json 下发的 icon 是归一化后的值，不是空串（前端不猜）
+    #[test]
+    fn to_json_always_emits_a_usable_icon() {
+        let a = Announcement {
+            enabled: true,
+            steps: vec![
+                AnnounceStep {
+                    title: "a".into(),
+                    icon: String::new(),
+                    content: "1".into(),
+                },
+                AnnounceStep {
+                    title: "b".into(),
+                    icon: "  ".into(),
+                    content: "2".into(),
+                },
+            ],
+            version: 1,
+        };
+        let v = a.to_json();
+        let icons: Vec<&str> = v["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["icon"].as_str().unwrap())
+            .collect();
+        assert_eq!(icons.len(), 2);
+        for i in &icons {
+            assert!(!i.is_empty(), "下发的 icon 不能为空");
+            assert!(STEP_ICON_WHITELIST.contains(i), "下发的 {i} 不在白名单");
+        }
+        assert_ne!(icons[0], icons[1], "相邻步骤默认图标应不同");
+    }
+}
+
+#[cfg(test)]
+mod my_accounts_tests {
+    use super::*;
+
+    /// 三个窗口都由**业务日**推出：展示端数据是每晚补前一天的，
+    /// 用自然日会让「今天」的每个号都显示 0（/my 踩过同样的坑）
+    #[test]
+    fn periods_follow_business_date() {
+        let p = AccountPeriods::of("2026-10-11");
+        assert_eq!(p.day, "2026-10-11");
+        assert_eq!(p.month, "2026-10");
+        assert_eq!(p.year, "2026");
+
+        // 跨年：1 月的业务日不能推出上一年的窗口
+        let p = AccountPeriods::of("2027-01-01");
+        assert_eq!(p.month, "2027-01");
+        assert_eq!(p.year, "2027");
+    }
+
+    /// 库里没数据（today 空串）时三个窗口都空：SQL 侧「不命中任何行」，
+    /// 每个号给 0，接口不能炸
+    #[test]
+    fn periods_of_empty_date_are_empty() {
+        let p = AccountPeriods::of("");
+        assert_eq!(p.day, "");
+        assert_eq!(p.month, "");
+        assert_eq!(p.year, "");
+        let sql = my_accounts_sql(86, &p);
+        assert!(sql.contains("t.d = ''"), "{sql}");
+        assert!(sql.contains("t.d LIKE '-%'"), "{sql}");
+    }
+
+    /// SQL 形状的硬约束（口径回归）：
+    /// - 主号只走 daily_metric 且 wave_reliable=1，副号只走 wave_snapshot；
+    /// - 两侧都用 account 的 is_primary 过滤，一个号的历史不会被算两遍；
+    /// - 只查本人的号（person_id 内联），排序主号在前。
+    #[test]
+    fn accounts_sql_keeps_one_source_per_account() {
+        let sql = my_accounts_sql(86, &AccountPeriods::of("2026-10-11"));
+        assert!(
+            sql.contains("pa.is_primary = 1"),
+            "主号走 daily_metric：{sql}"
+        );
+        assert!(sql.contains("d.wave_reliable = 1"), "主号只算可信行：{sql}");
+        assert!(
+            sql.contains("sa.is_primary = 0"),
+            "副号走 wave_snapshot：{sql}"
+        );
+        // 主号分支按「(person_id, anchor_id)」回 account，副号分支按 anchor_id 回 account，
+        // 两边互斥 → 既是主号又在 wave_snapshot 有历史行的号不会重复计
+        assert!(sql.contains("ON pa.person_id = d.person_id AND pa.anchor_id = d.anchor_id"));
+        assert!(sql.contains("ON sa.anchor_id = ws.anchor_id AND sa.is_primary = 0"));
+        // 日期窗口一律 DATE_FORMAT，不按自然日
+        assert!(sql.contains("DATE_FORMAT(d.biz_date, '%Y-%m-%d')"));
+        assert!(sql.contains("DATE_FORMAT(ws.biz_date, '%Y-%m-%d')"));
+        assert!(sql.contains("t.d LIKE '2026-10-%'"));
+        assert!(sql.contains("t.d LIKE '2026-%'"));
+        // 只查本人的号
+        assert_eq!(sql.matches("person_id = 86").count(), 3, "{sql}");
+        // 主号在前，其余按 id 升序（与 admin 台账 ORDER BY is_primary DESC, id 一致）
+        assert!(sql.ends_with("ORDER BY a.is_primary DESC, a.id"), "{sql}");
+        // 没数据的号要有 0 而不是 NULL（有号没播 = 0），所以外层 COALESCE
+        assert!(sql.contains("COALESCE(SUM(t.w), 0)"), "{sql}");
+        assert!(sql.contains("COUNT(DISTINCT t.d) AS days"), "{sql}");
+        assert!(sql.contains("MAX(t.d) AS last_d"), "{sql}");
+    }
+
+    /// 开关全开：数值照常下发，summary 是各号加总
+    #[test]
+    fn gate_all_on_passes_numbers_and_sums_them() {
+        let s = PublicSettings::default();
+        let mut items = vec![
+            json!({
+                "accountId": 1, "daily": {"wave": 100}, "monthly": {"wave": 1000},
+                "yearly": {"wave": 5000}, "total": {"wave": 9000}, "liveToday": true
+            }),
+            json!({
+                "accountId": 2, "daily": {"wave": 1}, "monthly": {"wave": 20},
+                "yearly": {"wave": 300}, "total": {"wave": 400}, "liveToday": false
+            }),
+        ];
+        let sum = my_accounts_gate(&mut items, &s);
+        assert_eq!(sum["count"], 2);
+        assert_eq!(sum["daily"]["wave"], 101);
+        assert_eq!(sum["monthly"]["wave"], 1020);
+        assert_eq!(sum["yearly"]["wave"], 5300);
+        assert_eq!(sum["total"]["wave"], 9400);
+        assert_eq!(items[0]["daily"]["wave"], 100);
+        assert_eq!(items[1]["total"]["wave"], 400);
+    }
+
+    /// 关掉的口径一律下发 null：给数字就能靠差值反推出被关掉的口径（/my 的 prevWave 同理）
+    #[test]
+    fn gate_nulls_disabled_periods() {
+        let s = PublicSettings {
+            daily: false,
+            monthly: false,
+            yearly: false,
+            wave: false,
+            ..Default::default()
+        };
+        let mut items = vec![json!({
+            "daily": {"wave": 100}, "monthly": {"wave": 1000},
+            "yearly": {"wave": 5000}, "total": {"wave": 9000},
+            "liveToday": true, "lastDate": "2026-10-11", "days": 9
+        })];
+        let sum = my_accounts_gate(&mut items, &s);
+        assert!(items[0]["daily"].is_null());
+        assert!(items[0]["monthly"].is_null());
+        assert!(items[0]["yearly"].is_null());
+        assert!(items[0]["total"].is_null());
+        assert!(sum["daily"].is_null());
+        assert!(sum["monthly"].is_null());
+        assert!(sum["yearly"].is_null());
+        assert!(sum["total"].is_null());
+        // 开播标记 / 最后日期 / 天数不是音浪数值，照常下发
+        assert_eq!(items[0]["liveToday"], true);
+        assert_eq!(items[0]["lastDate"], "2026-10-11");
+        assert_eq!(items[0]["days"], 9);
+    }
+
+    /// 关「音浪数值」时必须连 daily 一起 null：daily 就是音浪，
+    /// 只关 wave 却留 daily 等于没关
+    #[test]
+    fn gate_wave_off_also_hides_daily() {
+        let s = PublicSettings {
+            wave: false,
+            ..Default::default()
+        };
+        let mut items = vec![json!({
+            "daily": {"wave": 100}, "monthly": {"wave": 1000},
+            "yearly": {"wave": 5000}, "total": {"wave": 9000}
+        })];
+        let sum = my_accounts_gate(&mut items, &s);
+        assert!(items[0]["daily"].is_null());
+        assert!(items[0]["total"].is_null());
+        assert!(sum["daily"].is_null());
+        assert!(sum["total"].is_null());
+        // 月 / 年开关没关，照常下发
+        assert_eq!(items[0]["monthly"]["wave"], 1000);
+        assert_eq!(items[0]["yearly"]["wave"], 5000);
+    }
+
+    /// 空结果（这个主播还没绑号 / 管理员观看账号）不炸：count=0，合计 0
+    #[test]
+    fn gate_empty_does_not_panic() {
+        let s = PublicSettings::default();
+        let mut items: Vec<Value> = Vec::new();
+        let sum = my_accounts_gate(&mut items, &s);
+        assert_eq!(sum["count"], 0);
+        assert_eq!(sum["daily"]["wave"], 0);
+        assert_eq!(sum["total"]["wave"], 0);
+        assert!(items.is_empty());
+    }
+
+    /// 缺字段的行（副号刚绑上、啥数据都没有）按 0 参与合计，不能 panic
+    #[test]
+    fn gate_missing_wave_fields_counts_as_zero() {
+        let s = PublicSettings::default();
+        let mut items = vec![json!({ "accountId": 3, "daily": null, "monthly": {} })];
+        let sum = my_accounts_gate(&mut items, &s);
+        assert_eq!(sum["count"], 1);
+        assert_eq!(sum["daily"]["wave"], 0);
+        assert_eq!(sum["monthly"]["wave"], 0);
+        assert_eq!(sum["yearly"]["wave"], 0);
+        assert_eq!(sum["total"]["wave"], 0);
+    }
+}
+
+#[cfg(test)]
+mod lineage_window_tests {
+    use super::*;
+
+    /// 族谱窗口解析（2026-10-12）：period 非法回落 daily；date 形状非法回落最新业务日。
+    #[test]
+    fn lineage_window_falls_back() {
+        // 默认 / 非法 period 都回落 daily，date 不传用 latest
+        assert_eq!(
+            lineage_window(None, None, Some("2026-10-09")),
+            ("daily".to_string(), "2026-10-09".to_string())
+        );
+        assert_eq!(
+            lineage_window(Some("week"), Some("not-a-date"), Some("2026-10-09")),
+            ("daily".to_string(), "2026-10-09".to_string())
+        );
+
+        // date 形状非法回落 latest，period 不因此被改写（monthly 仍生效）
+        assert_eq!(
+            lineage_window(Some("monthly"), Some("2026-02-30"), Some("2026-10-09")),
+            ("monthly".to_string(), "2026-10-09".to_string())
+        );
+
+        // 显式合法 date 覆盖 latest
+        assert_eq!(
+            lineage_window(Some("monthly"), Some("2026-09-15"), Some("2026-10-09")),
+            ("monthly".to_string(), "2026-09-15".to_string())
+        );
+        assert_eq!(
+            lineage_window(Some("yearly"), Some("2026-01-01"), None),
+            ("yearly".to_string(), "2026-01-01".to_string())
+        );
+
+        // 无业务日（库里没数据）时空字符串，SQL 侧退化成全空库
+        assert_eq!(
+            lineage_window(None, None, None),
+            ("daily".to_string(), String::new())
+        );
+    }
+
+    /// 族谱音浪窗口 SQL（2026-10-12）：daily/monthly/yearly 条件 + 防注入双保险。
+    #[test]
+    fn lineage_wave_window_sql_period_and_fallbacks() {
+        // daily：精确业务日
+        let daily = lineage_wave_window_sql("daily", "2026-10-09");
+        assert!(daily.contains("WHERE wave_reliable = 1"), "{daily}");
+        assert!(
+            daily.contains("DATE_FORMAT(biz_date, '%Y-%m-%d') = '2026-10-09'"),
+            "{daily}"
+        );
+
+        // monthly：该业务日所在月（业务日口径，不用自然日）
+        let monthly = lineage_wave_window_sql("monthly", "2026-10-09");
+        assert!(
+            monthly.contains("DATE_FORMAT(biz_date, '%Y-%m') = '2026-10'"),
+            "{monthly}"
+        );
+        assert!(!monthly.contains("'2026-10-09'"), "{monthly}");
+
+        // yearly：该业务日所在年
+        let yearly = lineage_wave_window_sql("yearly", "2026-10-09");
+        assert!(
+            yearly.contains("DATE_FORMAT(biz_date, '%Y') = '2026'"),
+            "{yearly}"
+        );
+
+        // 非法 period 回落 daily
+        assert_eq!(lineage_wave_window_sql("weekly", "2026-10-09"), daily);
+        assert_eq!(lineage_wave_window_sql("", "2026-10-09"), daily);
+
+        // date 非法不能进 SQL：没有业务日时空库查询，不能带用户输入
+        for bad in [
+            "1=1",
+            "2026-13-40",
+            "2026-01-01 OR 1=1",
+            "2026-01-01; DROP TABLE x",
+        ] {
+            let sql = lineage_wave_window_sql("daily", bad);
+            assert!(
+                sql.contains("FROM daily_metric WHERE wave_reliable = 1 GROUP BY person_id"),
+                "{bad} -> {sql}"
+            );
+            assert!(!sql.contains(bad), "{bad} 不许进 SQL: {sql}");
+            assert!(
+                !sql.contains("DATE_FORMAT(biz_date, '%Y-%m-%d') ="),
+                "非法 date 不许进窗口条件：{sql}"
+            );
+        }
+        // monthly/yearly 也一样：非法 date 退回空库口径
+        assert!(!lineage_wave_window_sql("monthly", "DROP TABLE x").contains("DROP"));
+        assert!(!lineage_wave_window_sql("yearly", "DROP TABLE x").contains("DROP"));
     }
 }

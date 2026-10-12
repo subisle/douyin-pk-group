@@ -24,6 +24,7 @@ use crate::dialect;
 use crate::mysql;
 use crate::routes::ApiError;
 use crate::state::AppState;
+use crate::store::WxPushAccount;
 use crate::writer;
 
 type ApiResult = Result<Json<Value>, ApiError>;
@@ -201,11 +202,79 @@ fn is_missing_phone_column(e: &anyhow::Error) -> bool {
         || m.contains("Unknown table")
 }
 
+/// 台账「抖音号个数」：一条 GROUP BY 把全量 account 计数捞成 map，避免逐行查库（2026-10-12）。
+///
+/// 查询失败只记 warn 并返回空 map —— 台账是运营唯一入口页，不能因为一个计数列整页 500。
+/// 空 map 时调用方按 0 兜底（与"没有账号 = 0"语义一致，只是暂时少显示）。
+async fn douyin_counts(st: &AppState) -> HashMap<u64, i64> {
+    match mysql::query(
+        &st.pools,
+        "LOCAL",
+        "SELECT person_id, COUNT(*) AS cnt FROM account GROUP BY person_id",
+    )
+    .await
+    {
+        Ok(rows) => rows
+            .iter()
+            .filter_map(|r| Some((read_u64(r, "person_id")?, read_opt_i64(r, "cnt")?)))
+            .collect(),
+        Err(e) => {
+            tracing::warn!("account 分组计数（douyinCount）查询失败，一律按 0 兜底：{e}");
+            HashMap::new()
+        }
+    }
+}
+
+/// 从全量 `wx_push_accounts` 里挑出属于某个主播的那一行（2026-10-12）。
+///
+/// 归属优先级：
+/// 1. `bot.person_id == person_id`（且 person_id > 0）：018 之后的自助扫码数据带 person_id，最准；
+/// 2. 兜底：`bot.person_id == 0 && bot.name == person_name`。015 之前的老数据没有 person_id，
+///    0 是「未绑定 / 管理员观看账号」哨兵，只能退化成按展示端账号名对。
+///
+/// 同一个人命中多行时取 `bound_at` 最新的一行（018 之后理论上不会，但存量可能有）。
+fn pick_wxbot<'a>(
+    bots: &'a [WxPushAccount],
+    person_id: u64,
+    person_name: &str,
+) -> Option<&'a WxPushAccount> {
+    if person_id > 0 {
+        let exact = newest_by_bound_at(bots.iter().filter(|b| b.person_id == person_id));
+        if exact.is_some() {
+            return exact;
+        }
+    }
+    newest_by_bound_at(
+        bots.iter()
+            .filter(|b| b.person_id == 0 && b.name == person_name),
+    )
+}
+
+/// 在一批候选里取 `bound_at` 最新的一行；空串视为「最旧」永远排最后（2026-10-12）。
+///
+/// bound_at 是 `YYYY-MM-DD HH:MM:SS` 定长格式，字典序即时间序，直接比字符串即可。
+fn newest_by_bound_at<'a, I>(cands: I) -> Option<&'a WxPushAccount>
+where
+    I: Iterator<Item = &'a WxPushAccount>,
+{
+    fn key(s: &str) -> Option<&str> {
+        if s.is_empty() {
+            None
+        } else {
+            Some(s)
+        }
+    }
+    cands.max_by(|a, b| key(&a.bound_at).cmp(&key(&b.bound_at)))
+}
+
 /// GET /api/admin/streamers?q=&team=：主播台账（含主号账号 + 业务库别名合并）
 pub async fn streamers(State(st): State<ArcState>, Query(q): Query<StreamerQuery>) -> ApiResult {
     require_local(&st)?;
     let rows = streamer_rows(&st).await?;
     let alias_map = merged_aliases(&st).await;
+    // wxbot：全量捞一次（失败已返回空 Vec）+ 一条 GROUP BY 建 map，循环里只查内存（2026-10-12）
+    let bots = crate::store::wx_push_accounts_all(&st).await;
+    let douyin_count = douyin_counts(&st).await;
     let mut items: Vec<Value> = Vec::with_capacity(rows.len());
     for r in &rows {
         let name = read_str(r, "name");
@@ -227,8 +296,18 @@ pub async fn streamers(State(st): State<ArcState>, Query(q): Query<StreamerQuery
             .filter(|(_, real)| normalize_name(real) == normalize_name(&name))
             .map(|(a, _)| a)
             .collect();
+        let person_id = read_u64(r, "id").unwrap_or(0);
+        // 「扫了哪个 wxbot」看的是 wx_push_accounts，不是 push_bindings 的推送开关（2026-10-12）
+        let wxbot = pick_wxbot(&bots, person_id, &name).map(|b| {
+            json!({
+                "bound": true,
+                "activated": !b.conversation_id.is_empty(),
+                "nickname": b.nickname,
+                "boundAt": b.bound_at,
+            })
+        });
         items.push(json!({
-            "personId": read_u64(r, "id").unwrap_or(0),
+            "personId": person_id,
             "name": name,
             "team": team,
             "masterId": read_opt_u64(r, "master_id"),
@@ -243,6 +322,8 @@ pub async fn streamers(State(st): State<ArcState>, Query(q): Query<StreamerQuery
             "anchorId": read_opt_str(r, "anchor_id"),
             "douyinNo": read_opt_str(r, "douyin_no"),
             "douyinNos": read_opt_str(r, "all_douyin_nos"),
+            // 该主播 account 行数（含没登记抖音号的号）；没账号 = 0（2026-10-12）
+            "douyinCount": douyin_count.get(&person_id).copied().unwrap_or(0),
             "anchorName": read_opt_str(r, "anchor_name"),
             // 主播手机号（016 起；老库没这列 = 空串，前端照常显示"未登记"）
             "phone": read_opt_str(r, "phone").unwrap_or_default(),
@@ -251,6 +332,8 @@ pub async fn streamers(State(st): State<ArcState>, Query(q): Query<StreamerQuery
             // 微信机器人绑定状态（push_bindings 按姓名 1:1；没绑过 = false）
             "wechatBound": read_opt_i64(r, "wechat_bound").unwrap_or(0) != 0,
             "wechatPush": read_opt_i64(r, "wechat_push").unwrap_or(0) != 0,
+            // wxbot = wx_push_accounts 里属于这个人的那一行（有没有扫过码）；没扫过 = null（2026-10-12）
+            "wxbot": wxbot,
             "aliases": own_aliases,
         }));
     }
@@ -4035,6 +4118,79 @@ fn month_suggest(filename: &str, month_rows: &[ImportRow], rows: &[ImportRow]) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /* ---------------- wxbot 归属判定（2026-10-12） ---------------- */
+
+    /// 造一行 wx_push_accounts（只填判定用得到的列）
+    fn wbot(
+        person_id: u64,
+        name: &str,
+        nickname: &str,
+        conv: &str,
+        bound_at: &str,
+    ) -> WxPushAccount {
+        WxPushAccount {
+            name: name.into(),
+            person_id,
+            nickname: nickname.into(),
+            conversation_id: conv.into(),
+            bound_at: bound_at.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn pick_wxbot_person_id_wins_over_name_fallback() {
+        // 本人有带 person_id 的行；另有一行 person_id=0 同名的旧数据（更晚 bound_at）
+        let bots = vec![
+            wbot(7, "阿猫", "新猫", "c-1", "2026-10-11 09:00:00"),
+            wbot(0, "阿猫", "旧猫", "", "2026-10-12 09:00:00"),
+        ];
+        let got = pick_wxbot(&bots, 7, "阿猫").expect("person_id 精确命中优先");
+        assert_eq!(got.nickname, "新猫");
+    }
+
+    #[test]
+    fn pick_wxbot_takes_latest_bound_at_among_person_id_rows() {
+        let bots = vec![
+            wbot(7, "阿猫", "早", "c-0", "2026-10-11 09:00:00"),
+            wbot(7, "阿猫", "晚", "c-1", "2026-10-12 09:00:00"),
+            wbot(7, "阿猫", "更早", "c-2", "2026-10-10 09:00:00"),
+        ];
+        let got = pick_wxbot(&bots, 7, "阿猫").expect("该人有行");
+        assert_eq!(got.nickname, "晚");
+    }
+
+    #[test]
+    fn pick_wxbot_empty_bound_at_sorts_last() {
+        let bots = vec![
+            wbot(7, "阿猫", "空", "c-1", ""),
+            wbot(7, "阿猫", "有", "c-2", "2026-10-11 09:00:00"),
+        ];
+        let got = pick_wxbot(&bots, 7, "阿猫").expect("该人有行");
+        assert_eq!(got.nickname, "有", "bound_at 为空的行要排最后");
+    }
+
+    #[test]
+    fn pick_wxbot_name_fallback_only_for_person_id_zero() {
+        let bots = vec![
+            // 别人的行，名字恰好也叫阿猫（person_id 有效，不该被名字兜底抢来）
+            wbot(9, "阿猫", "别人", "c-9", "2026-10-12 09:00:00"),
+            // 015 之前的老数据：person_id=0 哨兵，只能按 name 兜底
+            wbot(0, "阿猫", "老猫", "", "2026-10-01 09:00:00"),
+        ];
+        let got = pick_wxbot(&bots, 7, "阿猫").expect("person_id=0 的行按 name 兜底");
+        assert_eq!(got.nickname, "老猫");
+        // 同一个人站在别人视角看：person_id 精确命中自己的行
+        assert_eq!(pick_wxbot(&bots, 9, "别的名字").unwrap().nickname, "别人");
+    }
+
+    #[test]
+    fn pick_wxbot_none_when_no_match() {
+        let bots = vec![wbot(0, "别人", "", "", "2026-10-11 09:00:00")];
+        assert!(pick_wxbot(&bots, 7, "阿猫").is_none(), "对不上就是没扫过码");
+        assert!(pick_wxbot(&[], 7, "阿猫").is_none());
+    }
 
     /* ---------------- 一人多号音浪合并（2026-10-10） ---------------- */
 

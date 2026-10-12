@@ -747,18 +747,14 @@ impl PhoneClash {
     }
 }
 
-/// 手机号后四位当初始密码。
+/// 初始密码 = CSPRNG 随机密码（2026-10-12 安全审计修复）。
 ///
-/// 与「忘记密码」重置口径**必须同款**（`my_account_reset_password_to_phone_suffix` 取后四位）：
-/// 运营按重置流程改过之后，批量开号再跑一遍不该又把密码变成另一个值。
-/// 手机号不足 4 位（台账脏数据 / 空号）→ None：这种号本来也重置不了密码，
-/// 给它开号等于造一个永远登不进去的账号。
-pub fn phone_suffix_pass(phone: &str) -> Option<String> {
-    let p: String = phone.chars().filter(|c| c.is_ascii_digit()).collect();
-    if p.len() < 4 {
-        return None;
-    }
-    Some(p[p.len() - 4..].to_string())
+/// 旧口径「手机号后四位」被废：手机号对同事/粉丝半公开，后四位等于把初始口令
+/// 写死在公开信息里，拿到手机号就能登录别人的展示端账号。
+/// 现在统一走 `crate::random::random_password()`（10 位无混淆字符），
+/// 只在开号/重置的 API 响应里下发一次，请管理员当场转达。
+pub fn initial_password() -> String {
+    crate::random::random_password()
 }
 
 /// 写入主播档案手机号（`person.phone`，016 迁移新增列）。
@@ -828,7 +824,8 @@ pub struct BatchAccountRow {
     /// 实际写进登录账号的手机号（空 = 只能姓名登录）
     pub phone: String,
     /// created = 新开号 / updated = 已存在（补 person_id，密码看 forceReset）
-    /// / skipped = 定不了初始密码 / failed = 见 note
+    /// / failed = 见 note
+    /// （历史上有过 skipped = 定不了初始密码；2026-10-12 起初始密码恒为 CSPRNG 随机，不再跳过）
     pub status: &'static str,
     pub note: String,
     /// 本次生成的初始密码（created 一定下发；updated 只在 forceReset 时下发）
@@ -854,9 +851,10 @@ pub const BATCH_ACCOUNT_MAX: usize = 500;
 ///
 /// - `person_id` 必须对应在职主播（`deleted_at IS NULL AND status <> 'left'`）且姓名非空
 /// - 手机号优先级：**入参 phone > 台账 person.phone > 空**
-/// - 初始密码：**手机号后四位**；没有手机号时退回 `default_pass`（运营统一口令）
+/// - 初始密码：**CSPRNG 随机密码**（2026-10-12 审计修复，废弃「手机号后四位」）；
+///   `default_pass` 入参保留仅为兼容旧调用，**不再使用**（统一口令本身就是审计要消除的风险）
 /// - 已存在账号（按 person_id 优先、name 兜底）→ 更新：补 person_id / 手机号，**默认不动密码**
-///   （重跑一遍批量不会把 104 个人的密码全刷掉）；`force_reset = true` 才重置
+///   （重跑一遍批量不会把 104 个人的密码全刷掉）；`force_reset = true` 才重置（也重置为随机密码）
 /// - source 一律标 `batch`（与管理端手建的 `admin`、自助注册的 `register` 区分，便于事后审计）
 pub async fn my_accounts_batch_open(
     st: &AppState,
@@ -864,6 +862,8 @@ pub async fn my_accounts_batch_open(
     default_pass: Option<&str>,
     force_reset: bool,
 ) -> std::result::Result<Vec<BatchAccountRow>, String> {
+    // 审计 2026-10-12：统一兜底口令废弃（知道口令就能登所有没改密的账号），入参不再读取
+    let _ = default_pass;
     let pool = w(st).map_err(|e| e.to_string())?;
     if inputs.is_empty() {
         return Err("名单为空".into());
@@ -1055,23 +1055,9 @@ pub async fn my_accounts_batch_open(
             None => person_phone.clone(),
         };
 
-        /* 初始密码：手机号后四位 > 统一兜底口令 */
-        let Some(pass) = phone_suffix_pass(&want_phone).or_else(|| {
-            default_pass
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-        }) else {
-            out.push(BatchAccountRow {
-                person_id: pid,
-                name,
-                phone: want_phone,
-                status: "skipped",
-                note: "既没有手机号、也没给统一口令，定不了初始密码".into(),
-                initial_pass: None,
-            });
-            continue;
-        };
+        /* 初始密码：CSPRNG 随机（审计 2026-10-12，废弃手机号后四位 / 统一口令）。
+        每个账号独立随机，只在响应里下发一次（initialPass），请管理员当场转达。 */
+        let pass = initial_password();
         if let Err(e) = validate_my_account(&name, &pass) {
             out.push(BatchAccountRow {
                 person_id: pid,
@@ -1444,41 +1430,44 @@ pub fn validate_my_code(code: &str) -> std::result::Result<String, String> {
     Ok(c.to_string())
 }
 
-/// 忘记密码：把已登记手机号的账号密码重置为手机号后四位。
-pub async fn my_account_reset_password_to_phone_suffix(
+/// 忘记密码：把已登记手机号的账号密码重置为 **CSPRNG 随机密码**
+/// （2026-10-12 审计修复：废弃「手机号后四位」——手机号半公开，后四位等于公开口令）。
+///
+/// 返回 `(新密码, 受影响账号名列表)`：新密码只在 API 响应里下发这一次（请当场转达），
+/// 账号名列表给调用方吊销该账号全部 my token（改密后旧登录态必须失效）。
+pub async fn my_account_reset_password_random(
     st: &AppState,
     phone: &str,
-) -> std::result::Result<String, String> {
+) -> std::result::Result<(String, Vec<String>), String> {
     let phone = validate_my_phone(phone)?;
     if phone.is_empty() {
         return Err("请输入注册手机号".into());
-    }
-    if phone.len() < 4 {
-        return Err("手机号不足 4 位，无法重置".into());
     }
     let pool = w(st).map_err(|e| e.to_string())?;
     /* 只认「自助注册的普通账号」（is_admin=0）：管理员观看账号不参与重置，
     否则知道手机号的人就能接管后台视角账号（审计 2026-10-11 修复）。
     文案不区分「没登记」和「管理员账号」，避免泄露台账。 */
-    let exists = sqlx::query(
-        "SELECT 1 FROM my_accounts WHERE phone = ? AND phone <> '' AND is_admin = 0 LIMIT 1",
+    let names: Vec<String> = sqlx::query(
+        "SELECT name FROM my_accounts WHERE phone = ? AND phone <> '' AND is_admin = 0",
     )
     .bind(&phone)
-    .fetch_optional(pool)
+    .fetch_all(pool)
     .await
     .map_err(|e| format!("查询账号失败：{e}"))?
-    .is_some();
-    if !exists {
+    .iter()
+    .filter_map(|r| r.try_get::<String, _>("name").ok())
+    .collect();
+    if names.is_empty() {
         return Err("该手机号还没有注册或未登记".into());
     }
-    let new_pass = phone[phone.len() - 4..].to_string();
+    let new_pass = initial_password();
     sqlx::query("UPDATE my_accounts SET pass = ? WHERE phone = ? AND phone <> '' AND is_admin = 0")
         .bind(hash_my_password(&new_pass))
         .bind(&phone)
         .execute(pool)
         .await
         .map_err(|e| format!("重置失败：{e}"))?;
-    Ok(new_pass)
+    Ok((new_pass, names))
 }
 
 /// 查账号信息（登录名或手机号都认）。表还没跑 008 迁移时退回老查询：
@@ -1525,23 +1514,26 @@ pub async fn my_account_info(st: &AppState, key: &str) -> Option<MyAccountInfo> 
         })
 }
 
-/// 展示端自助注册（2026-10-11 口径）：**手机号 = 账号，短信验证码 = 密码，注册时直接填主播姓名**。
+/// 展示端自助注册（2026-10-12 审计修订）：**手机号 = 账号，短信验证码 = 密码，注册时直接填主播姓名**。
 ///
 /// 规则：
 /// - 手机号 / 验证码都是纯数字；手机号 5~20 位、验证码 4~20 位
 /// - **主播姓名必须能在台账（person 表）里精确查到**，查不到直接拒绝（避免随便填个名字就进站）
 /// - 手机号已存在（管理员手建或已注册）→ 拒绝，引导去登录
 /// - 该姓名已经有账号了 → 拒绝（一人一号）
-/// - 注册即绑定：新账号 `bound=1`、`name` = 台账姓名，不用再走一遍「绑定主播」
+/// - **注册不再立即绑定**（2026-10-12 安全审计：自助绑定无审核会被冒领）：账号先以手机号
+///   占位名落库（`bound=0`，回到 008 迁移的原始设计），同时自动生成一条
+///   `my_bind_requests(pending)` 申请，管理员审核通过后才真正绑定。
 ///
-/// 返回 `(登录名, personId, 团别)`。登录名 = 主播姓名，手机号也能登录（`phone` 列另存一份）。
+/// 返回 `(账号登录名, 主播姓名, personId, 团别)`。审核通过前登录名 = 手机号占位，
+/// 绑定通过后由 `my_account_bind` 改写为台账姓名（登录照样支持手机号）。
 pub async fn my_account_register(
     st: &AppState,
     phone: &str,
     code: &str,
     anchor_name: &str,
     wb_state: &str,
-) -> std::result::Result<(String, i64, String), String> {
+) -> std::result::Result<(String, String, i64, String), String> {
     let pool = w(st).map_err(|e| e.to_string())?;
     let phone = validate_my_phone(phone)?;
     if phone.is_empty() {
@@ -1589,15 +1581,15 @@ pub async fn my_account_register(
     }
     let pass_hash = hash_my_password(&code);
     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    /* 注册即绑定：name 直接写台账姓名、bound=1 —— 省掉「注册完再绑一次」这一步 */
+    /* 审计 2026-10-12：注册**不再立即绑定**（自报姓名直接 bound=1 等于无审核冒领）。
+    回到 008 的原始设计：name 先填手机号占位、bound=0，绑定走 my_bind_requests 审核流。 */
     sqlx::query(
         "INSERT INTO my_accounts (name, phone, pass, is_admin, created_at, bound, bound_at, source, wb_state)
-         VALUES (?, ?, ?, 0, ?, 1, ?, 'register', ?)",
+         VALUES (?, ?, ?, 0, ?, 0, '', 'register', ?)",
     )
-    .bind(&person_name)
+    .bind(&phone)
     .bind(&phone)
     .bind(&pass_hash)
-    .bind(&now)
     .bind(&now)
     .bind(wb_state.trim())
     .execute(pool)
@@ -1607,7 +1599,7 @@ pub async fn my_account_register(
         if m.contains("Duplicate entry") {
             /* 并发穿过上面的预检：按冲突的键给文案（PRIMARY = name，其余 = 手机号唯一键） */
             if m.contains("PRIMARY") {
-                "该主播已经有账号了，请直接登录；忘记密码可点「忘记密码？」重置".to_string()
+                "该手机号已存在（已注册），请直接登录；忘记密码可点「忘记密码？」重置".to_string()
             } else {
                 "该手机号已存在（已注册），请直接登录；忘记密码请联系管理员".to_string()
             }
@@ -1617,7 +1609,13 @@ pub async fn my_account_register(
             format!("写入失败：{m}")
         }
     })?;
-    Ok((person_name, person_id, team))
+    /* 自动生成 pending 绑定申请（注册即申请，审核通过才生效）。
+    017 未跑时申请写入失败不阻断注册 —— 账号已建好，用户登录后仍可在「我的」页手动提交。 */
+    if let Err(e) = my_bind_request_submit(st, &phone, person_id, &person_name, &team).await {
+        tracing::warn!(account = %phone, anchor = %person_name, error = %e,
+            "注册后自动生成绑定申请失败（账号已建好，可登录后手动提交）");
+    }
+    Ok((phone, person_name, person_id, team))
 }
 
 /// 绑定结果：绑定后的主播身份（前端拿它重新发 token / 换团）
@@ -1735,6 +1733,225 @@ async fn bind_inner(
         team,
         person_id,
     })
+}
+
+/* --------------------- 绑定申请（my_bind_requests，017，审核制） ---------------------
+ *
+ * 2026-10-12 安全审计：旧链路「自报 personId 直接绑」可冒领（check-name / bind/search
+ * 都泄露内部 personId）。改为：用户只提交姓名 → 服务端精确查台账 → 落 pending 申请 →
+ * 管理员审核通过才调 my_account_bind 真正绑定。表结构见 migrations/017_my_bind_requests.sql。
+ */
+
+/// 绑定申请状态机（纯函数）：只有 pending 能被裁决。
+/// 与 `my_bind_request_decide` 里 SQL 的 `WHERE status = 'pending'` 原子翻转同口径 —
+/// 双重保证：先抢裁决权（并发双击只有一刀成功），状态字符串只从这一处来。
+pub fn bind_request_next_status(current: &str, approve: bool) -> Option<&'static str> {
+    if current != "pending" {
+        return None;
+    }
+    Some(if approve { "approved" } else { "rejected" })
+}
+
+/// 表还没跑 017 迁移时的统一文案（表不存在的报错文案里带 "doesn't exist"）
+fn bind_requests_table_err(e: impl std::fmt::Display) -> String {
+    let m = e.to_string();
+    if m.contains("doesn't exist") {
+        "缺少数据库迁移 017（先跑一次 pk-server migrate）".to_string()
+    } else {
+        format!("绑定申请写入失败：{m}")
+    }
+}
+
+/// 提交绑定申请（pending）。返回 Ok(true) = 已有 pending（幂等，前端重复提交不报错）。
+/// 调用方已校验：账号存在且未绑定、主播在台账且未被他人绑定。
+pub async fn my_bind_request_submit(
+    st: &AppState,
+    account: &str,
+    person_id: i64,
+    person_name: &str,
+    team: &str,
+) -> std::result::Result<bool, String> {
+    let pool = w(st).map_err(|e| e.to_string())?;
+    let pending = sqlx::query(
+        "SELECT id FROM my_bind_requests WHERE name = ? AND status = 'pending' LIMIT 1",
+    )
+    .bind(account)
+    .fetch_optional(pool)
+    .await
+    .map_err(bind_requests_table_err)?
+    .is_some();
+    if pending {
+        return Ok(true);
+    }
+    sqlx::query(
+        "INSERT INTO my_bind_requests (name, person_id, person_name, team, status) VALUES (?, ?, ?, ?, 'pending')",
+    )
+    .bind(account)
+    .bind(person_id)
+    .bind(person_name)
+    .bind(team)
+    .execute(pool)
+    .await
+    .map_err(bind_requests_table_err)?;
+    Ok(false)
+}
+
+/// 该账号最新一条绑定申请（展示端「我的」轮询审核进度用）；没有申请 / 017 未跑 → None
+pub async fn my_bind_request_latest(st: &AppState, account: &str) -> Option<serde_json::Value> {
+    let pool = w(st).ok()?;
+    let row = sqlx::query(
+        "SELECT status, person_name, reason, created_at FROM my_bind_requests \
+         WHERE name = ? ORDER BY id DESC LIMIT 1",
+    )
+    .bind(account)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()?;
+    Some(serde_json::json!({
+        "status": row.try_get::<String, _>("status").unwrap_or_default(),
+        "personName": row.try_get::<String, _>("person_name").unwrap_or_default(),
+        "reason": row.try_get::<String, _>("reason").unwrap_or_default(),
+        "createdAt": row.try_get::<String, _>("created_at").unwrap_or_default(),
+    }))
+}
+
+/// 审核列表（管理端）。status 空 = 全部（pending 排最前）。
+pub async fn my_bind_request_list(
+    st: &AppState,
+    status: &str,
+    limit: i64,
+) -> Vec<serde_json::Value> {
+    let Ok(pool) = w(st) else {
+        return Vec::new();
+    };
+    match sqlx::query(
+        "SELECT id, name, person_id, person_name, team, status, reason, created_at, decided_at, decided_by \
+         FROM my_bind_requests \
+         WHERE (? = '' OR status = ?) \
+         ORDER BY (status = 'pending') DESC, id DESC LIMIT ?",
+    )
+    .bind(status)
+    .bind(status)
+    .bind(limit.clamp(1, 500))
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "id": r.try_get::<u64, _>("id").unwrap_or(0) as i64,
+                    "name": r.try_get::<String, _>("name").unwrap_or_default(),
+                    "personId": r.try_get::<u64, _>("person_id").unwrap_or(0) as i64,
+                    "personName": r.try_get::<String, _>("person_name").unwrap_or_default(),
+                    "team": r.try_get::<String, _>("team").unwrap_or_default(),
+                    "status": r.try_get::<String, _>("status").unwrap_or_default(),
+                    "reason": r.try_get::<String, _>("reason").unwrap_or_default(),
+                    "createdAt": r.try_get::<String, _>("created_at").unwrap_or_default(),
+                    "decidedAt": r.try_get::<Option<String>, _>("decided_at").ok().flatten().unwrap_or_default(),
+                    "decidedBy": r.try_get::<String, _>("decided_by").unwrap_or_default(),
+                })
+            })
+            .collect(),
+        Err(e) => {
+            tracing::error!(error = %e, "查绑定申请列表失败");
+            Vec::new()
+        }
+    }
+}
+
+/// 审核裁决：pending → approved/rejected 原子翻转（防双击重复绑定，与 anchor_claim_decide 同款）。
+/// 返回 Some((申请账号, person_id, 主播姓名快照)) = 抢到裁决权；None = 不存在或已处理。
+pub async fn my_bind_request_decide(
+    st: &AppState,
+    id: i64,
+    approve: bool,
+    reason: &str,
+    decided_by: &str,
+) -> Option<(String, i64, String)> {
+    let pool = w(st).ok()?;
+    let status = bind_request_next_status("pending", approve)?;
+    let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let n = sqlx::query(
+        "UPDATE my_bind_requests SET status = ?, reason = ?, decided_at = ?, decided_by = ? \
+         WHERE id = ? AND status = 'pending'",
+    )
+    .bind(status)
+    .bind(reason)
+    .bind(&now)
+    .bind(decided_by)
+    .bind(id)
+    .execute(pool)
+    .await
+    .ok()?
+    .rows_affected();
+    if n == 0 {
+        return None;
+    }
+    let row = sqlx::query("SELECT name, person_id, person_name FROM my_bind_requests WHERE id = ?")
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()?;
+    Some((
+        row.try_get::<String, _>("name").ok()?,
+        row.try_get::<i64, _>("person_id")
+            .or_else(|_| row.try_get::<u64, _>("person_id").map(|v| v as i64))
+            .ok()?,
+        row.try_get::<String, _>("person_name").ok()?,
+    ))
+}
+
+/// 裁决回滚：approve 后绑定写入失败时退回 pending，管理员可重试或改判
+/// （与 anchor_claim_revert 同款理由：申请不能卡在「已通过」却没绑上）
+pub async fn my_bind_request_revert(st: &AppState, id: i64) {
+    if let Ok(pool) = w(st) {
+        let _ = sqlx::query(
+            "UPDATE my_bind_requests SET status = 'pending', decided_at = NULL, decided_by = '' \
+             WHERE id = ? AND status = 'approved'",
+        )
+        .bind(id)
+        .execute(pool)
+        .await;
+    }
+}
+
+/// 该主播是否已有绑定的展示端账号（check-name 的 bound 标记 / 绑定申请提交前查重）。
+/// 姓名是绑定的实际键（bind_inner 按 name 查重）；015 之后有 person_id 锚点的也一并算。
+/// 查询失败一律按「未绑定」返回（宁可让人提交申请由管理员挡，不泄露库状态）。
+pub async fn my_account_bound_for_person(st: &AppState, person_id: i64, person_name: &str) -> bool {
+    let Ok(pool) = w(st) else {
+        return false;
+    };
+    // 015 锚点口径：person_id > 0 且已绑定（列不存在 = 015 未跑，忽略走姓名口径）
+    if person_id > 0 {
+        if let Ok(Some(_)) = sqlx::query(
+            "SELECT 1 FROM my_accounts WHERE person_id = ? AND person_id > 0 AND bound = 1 LIMIT 1",
+        )
+        .bind(person_id)
+        .fetch_optional(pool)
+        .await
+        {
+            return true;
+        }
+    }
+    // 姓名口径（历史账号未必回填了 person_id）；bound 列不存在 = 008 未跑，老账号一律视为已绑定
+    match sqlx::query("SELECT 1 FROM my_accounts WHERE name = ? AND bound = 1 LIMIT 1")
+        .bind(person_name)
+        .fetch_optional(pool)
+        .await
+    {
+        Ok(r) => r.is_some(),
+        Err(_) => matches!(
+            sqlx::query("SELECT 1 FROM my_accounts WHERE name = ? LIMIT 1")
+                .bind(person_name)
+                .fetch_optional(pool)
+                .await,
+            Ok(Some(_))
+        ),
+    }
 }
 
 /// 注册时按姓名精确查主播（2026-10-11 用户口径：注册要填主播姓名，并且必须在台账里）。
@@ -2551,8 +2768,85 @@ fn wx_push_account_from_row(row: &sqlx::mysql::MySqlRow) -> WxPushAccount {
 }
 
 /// 保存 / 覆盖某个展示端账号的微信扫码凭证
+/// 扫码凭证的行内冲突判定（纯函数，2026-10-12 审计整改）。
+///
+/// 018 给 `wx_push_accounts` 加了两个软唯一索引（`uk_wx_push_user_uniq` / `uk_wx_push_person_uniq`），
+/// 但唯一索引抛出来的是 `Duplicate entry`，运营看不懂、也没法据此决定留哪一行。
+/// 所以落库前先查一次，命中就返回人话文案。
+///
+/// 两条「不算冲突」的边界，缺一个就会把正常路径打死：
+/// - **自己更新自己**：`wxpush.rs` 的 `supervisor_loop` / `ensure_account` 会反复 save
+///   同一个账号（重连、token 刷新），排除自身 `name` 才能保持幂等；
+/// - **空值不参与**：`ilink_user_id` 空串、`person_id = 0` 是「还没激活 / 管理员观看账号」
+///   的哨兵语义（015 定的），生成列把它们变 NULL 不进唯一索引，查重口径必须一致。
+///
+/// 入参 `existing` 是「除自己以外的其它凭证行」(name, person_id, ilink_user_id)。
+pub fn wx_push_clash_of(
+    self_name: &str,
+    person_id: u64,
+    ilink_user_id: &str,
+    existing: &[(String, u64, String)],
+) -> Option<String> {
+    let me = self_name.trim();
+    let user = ilink_user_id.trim();
+    for (name, pid, uid) in existing {
+        if name.trim() == me {
+            continue; // 自己更新自己：不算冲突
+        }
+        if !user.is_empty() && uid.trim() == user {
+            return Some(format!(
+                "该微信已经绑定在「{name}」的账号上；一个微信只能绑一个主播，请先解绑旧的再扫"
+            ));
+        }
+        if person_id > 0 && *pid == person_id && *pid > 0 {
+            return Some(format!(
+                "该主播已经有一个微信推送账号（「{name}」）；要换微信请先解绑旧的"
+            ));
+        }
+    }
+    None
+}
+
+/// 落扫码凭证前把「别人的行」捞出来查重（排除自身，见 [`wx_push_clash_of`]）。
+/// 018 没跑时 `ilink_user_id` 列存在（013 就有）、`person_id` 也在（015 才加），
+/// 所以 015 未跑的库这里会拿到空列表 → 查重自然退化，不影响写入。
+async fn wx_push_others(st: &AppState) -> Vec<(String, u64, String)> {
+    let Ok(pool) = w(st) else {
+        return Vec::new();
+    };
+    let rows = sqlx::query(
+        "SELECT name, IFNULL(person_id, 0) AS pid, IFNULL(ilink_user_id, '') AS uid \
+         FROM wx_push_accounts",
+    )
+    .fetch_all(pool)
+    .await;
+    match rows {
+        Ok(rows) => rows
+            .iter()
+            .map(|r| {
+                (
+                    r.try_get::<String, _>("name").unwrap_or_default(),
+                    r.try_get::<u64, _>("pid").unwrap_or(0),
+                    r.try_get::<String, _>("uid").unwrap_or_default(),
+                )
+            })
+            .collect(),
+        Err(e) => {
+            // 查重失败不阻断写入：唯一索引还在，最坏情况是拿到 Duplicate entry 文案
+            tracing::warn!(error = %e, "扫码凭证查重失败，退回唯一索引兜底");
+            Vec::new()
+        }
+    }
+}
+
 pub async fn wx_push_account_save(st: &AppState, a: &WxPushAccount) -> Result<()> {
     let pool = w(st)?;
+    /* 一人一 bot（018）：先查重再写，把 Duplicate entry 换成运营看得懂的文案。
+    查重失败（表结构缺列 / 连不上）不阻断 —— 唯一索引仍在，最坏退回英文报错。 */
+    let others = wx_push_others(st).await;
+    if let Some(msg) = wx_push_clash_of(&a.name, a.person_id, &a.ilink_user_id, &others) {
+        return Err(anyhow::anyhow!("{msg}"));
+    }
     sqlx::query(
         "INSERT INTO wx_push_accounts
            (name, team, person_id, ilink_bot_id, ilink_user_id, bot_token, base_url,
@@ -2577,7 +2871,23 @@ pub async fn wx_push_account_save(st: &AppState, a: &WxPushAccount) -> Result<()
     .bind(&a.bound_at)
     .bind(now_str())
     .execute(pool)
-    .await?;
+    .await
+    .map_err(|e| {
+        /* 并发穿过上面的预检：唯一索引兜底。按撞到的键给文案
+        （018 的两个软唯一索引：微信侧 uk_wx_push_user_uniq / 主播侧 uk_wx_push_person_uniq）。 */
+        let m = e.to_string();
+        if m.contains("Duplicate entry") {
+            if m.contains("uk_wx_push_user_uniq") {
+                anyhow::anyhow!("该微信已经绑定过别的账号，一个微信只能绑一个主播")
+            } else if m.contains("uk_wx_push_person_uniq") {
+                anyhow::anyhow!("该主播已经有一个微信推送账号，要换微信请先解绑旧的")
+            } else {
+                anyhow::anyhow!("该微信推送账号已存在，请刷新后重试")
+            }
+        } else {
+            anyhow::anyhow!("写入微信推送凭证失败：{m}")
+        }
+    })?;
     Ok(())
 }
 
@@ -3468,6 +3778,59 @@ mod tests {
         assert!(validate_douyin_no(&"a".repeat(21)).is_err(), "超长 → 拒绝");
     }
 
+    /* --------------------- 一人一 bot 查重（018，2026-10-12） --------------------- */
+
+    fn wx_row(name: &str, pid: u64, uid: &str) -> (String, u64, String) {
+        (name.to_string(), pid, uid.to_string())
+    }
+
+    #[test]
+    fn wx_push_clash_rejects_same_wechat_on_another_account() {
+        let others = vec![wx_row("浩龙", 1001, "wxid_owner")];
+        let hit = wx_push_clash_of("玖玉", 1002, "wxid_owner", &others);
+        assert!(hit.is_some(), "同一个微信被第二个账号扫到 → 拒绝");
+        assert!(hit.unwrap().contains("浩龙"), "文案要指出撞的是谁的账号");
+    }
+
+    #[test]
+    fn wx_push_clash_rejects_second_bot_for_same_person() {
+        let others = vec![wx_row("浩龙", 1001, "wxid_a")];
+        let hit = wx_push_clash_of("浩龙副号", 1001, "wxid_b", &others);
+        assert!(hit.is_some(), "同一主播挂第二个 bot → 拒绝");
+    }
+
+    #[test]
+    fn wx_push_clash_ignores_self_update() {
+        let others = vec![wx_row("浩龙", 1001, "wxid_owner")];
+        // supervisor_loop 会反复 save 同一个账号：自己更新自己绝不能被判成冲突
+        assert!(
+            wx_push_clash_of("浩龙", 1001, "wxid_owner", &others).is_none(),
+            "自己更新自己不算冲突（否则幂等性被破坏）"
+        );
+    }
+
+    #[test]
+    fn wx_push_clash_ignores_sentinel_values() {
+        // person_id=0（未绑定 / 管理员观看账号）与空 ilink_user_id 都不参与唯一（015 哨兵语义）
+        let others = vec![wx_row("管理员A", 0, ""), wx_row("管理员B", 0, "")];
+        assert!(
+            wx_push_clash_of("管理员C", 0, "", &others).is_none(),
+            "哨兵值不互相冲突，否则第二个人扫不了码"
+        );
+        // 空 ilink_user_id 的两个已激活账号也不能互挡
+        let legacy = vec![wx_row("老账号", 1001, "")];
+        assert!(wx_push_clash_of("新账号", 1002, "", &legacy).is_none());
+    }
+
+    #[test]
+    fn wx_push_clash_allows_distinct_person_and_wechat() {
+        let others = vec![wx_row("浩龙", 1001, "wxid_a")];
+        assert!(
+            wx_push_clash_of("玖玉", 1002, "wxid_b", &others).is_none(),
+            "不同人不同微信 → 正常放行"
+        );
+    }
+
     /// 密码规则：4~20 位字母或数字（2026-10-10 放宽）；符号/空格/太短仍拒绝
     #[test]
     fn my_account_password_rule() {
@@ -3523,16 +3886,28 @@ mod register_tests {
 
     /* ---------------- 手机号 + 批量开号（016，docs/13）---------------- */
 
-    /// 初始密码 = 手机号后四位，必须与「忘记密码」重置口径一致
-    /// （my_account_reset_password_to_phone_suffix 取后四位）
+    /// 初始密码 = CSPRNG 随机（2026-10-12 审计修复，废弃手机号后四位）：
+    /// 10 位无混淆字符，能通过账号密码校验（4~20 位字母数字）
     #[test]
-    fn phone_suffix_pass_takes_last_four() {
-        assert_eq!(phone_suffix_pass("13354463148").as_deref(), Some("3148"));
-        assert_eq!(phone_suffix_pass("199 0000 0001").as_deref(), Some("0001"));
-        assert_eq!(phone_suffix_pass("13800138000").as_deref(), Some("8000"));
-        // 不足 4 位 / 空号 → 不给过：这种号也重置不了密码，开号等于造个登不进的账号
-        assert_eq!(phone_suffix_pass(""), None);
-        assert_eq!(phone_suffix_pass("123"), None);
+    fn initial_password_is_random_and_valid() {
+        let a = initial_password();
+        let b = initial_password();
+        assert_eq!(a.len(), 10);
+        assert_ne!(a, b, "两次生成不应相同");
+        assert!(
+            validate_my_account("啸帆", &a).is_ok(),
+            "随机密码必须过账号校验"
+        );
+    }
+
+    /// 绑定申请状态机：只有 pending 能被裁决（防重复审批 / 已裁决改写）
+    #[test]
+    fn bind_request_only_pending_is_decidable() {
+        assert_eq!(bind_request_next_status("pending", true), Some("approved"));
+        assert_eq!(bind_request_next_status("pending", false), Some("rejected"));
+        assert_eq!(bind_request_next_status("approved", true), None);
+        assert_eq!(bind_request_next_status("rejected", false), None);
+        assert_eq!(bind_request_next_status("", true), None);
     }
 
     /// 台账手机号与登录账号手机号必须同一套格式口径（docs/13 §2.2）

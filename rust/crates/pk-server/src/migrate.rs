@@ -64,6 +64,14 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "016_streamer_phone",
         include_str!("migrations/016_streamer_phone.sql"),
     ),
+    (
+        "017_my_bind_requests",
+        include_str!("migrations/017_my_bind_requests.sql"),
+    ),
+    (
+        "018_identity_uniqueness",
+        include_str!("migrations/018_identity_uniqueness.sql"),
+    ),
 ];
 
 /// 迁移建连（migrator 账号；同样关语句缓存）

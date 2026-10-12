@@ -17,6 +17,11 @@
 //! 发送走微信 iLink 渠道的 [`WxTransport::send_proactive`]（需要最后一次私聊入站留下的
 //! context_token）。渠道没配 / 会话失效都只记日志，不影响导入本身。
 //! **没开任何开关的人不推**（用户口径 2026-10-10）。
+//!
+//! 每日报告里的「我的抖音号分号明细」（2026-10-12 新增）：一人多号的主播看总榜
+//! 只知道「我今天多少」，看不出是哪个号挣的。报告在「我：第 N 名」后补一段
+//! 每个号的当日 / 本月 / 本年音浪（见 [`person_account_waves`] 与
+//! [`account_waves_section`]）。只有一个号时不补——那一行就是自己，重复。
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -38,22 +43,13 @@ pub fn looks_like_bind_code(s: &str) -> bool {
     s.len() == BIND_CODE_LEN && s.bytes().all(|b| CODE_ALPHABET.contains(&b))
 }
 
-/// 随机绑定码（RandomState 每次构造都带 OS 级随机种子，省一个 rand 依赖）
+/// 随机绑定码（2026-10-11 审计整改：改走 CSPRNG）。
+/// 之前用 RandomState（SipHash）拼字节 —— 它不是密码学随机源，种子弱、输出可预测，
+/// 且按字节取模有偏。现在走 crate::random（getrandom → OS CSPRNG，拒绝采样无偏）。
+/// 码表必须保持 CODE_ALPHABET：bot 侧 looks_like_bind_code 用同一码表识别绑定码，
+/// 换成纯数字会让生成的码过不了校验、还会和手机号提取撞车。
 pub fn new_bind_code() -> String {
-    use std::hash::{BuildHasher, Hasher};
-    let mut out = String::with_capacity(BIND_CODE_LEN);
-    while out.len() < BIND_CODE_LEN {
-        let n = std::collections::hash_map::RandomState::new()
-            .build_hasher()
-            .finish();
-        for b in n.to_le_bytes() {
-            out.push(CODE_ALPHABET[(b as usize) % CODE_ALPHABET.len()] as char);
-            if out.len() == BIND_CODE_LEN {
-                break;
-            }
-        }
-    }
-    out
+    crate::random::random_code(BIND_CODE_LEN, CODE_ALPHABET)
 }
 
 /// 音浪数值按「万」表达（用户口径 2026-10-09：推送一律用万）
@@ -318,7 +314,16 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
             if last == date {
                 tracing::debug!(account = %b.name, date = %date, "每日报告同日已推过，跳过");
             } else {
-                let text = daily_report_text(team, date, &rank_items, b.person_id);
+                // 分号明细：一人多号的主播才有意义（<2 个号的函数内自动不加段）。
+                // 取数失败 person_account_waves 已 warn 并返回空 → 退回原文案，不中断整轮推送。
+                let accounts = person_account_waves(st, b.person_id, date).await;
+                let text = daily_report_text_with_accounts(
+                    team,
+                    date,
+                    &rank_items,
+                    b.person_id,
+                    &accounts,
+                );
                 tracing::info!(account = %b.name, text = %text.replace('\n', " | "), "推送·每日报告");
                 match send_binding(st, b, wx_global.as_ref(), &text).await {
                     Ok(()) => {
@@ -539,6 +544,195 @@ pub(crate) async fn daily_rank(st: &AppState, team: &str, date: &str) -> Vec<(u6
     }
 }
 
+/* --------------------- 2026-10-12：我的抖音号分号明细 --------------------- */
+
+/// 一个抖音号在「当日 / 本月 / 本年」三个口径下的音浪。
+///
+/// 为什么要按号拆：一人多号的主播在总榜里只看到一行合计，不知道是哪个号在挣。
+/// 口径与 [`crate::dialect::WAVES_A`] 同源（主号 daily_metric、副号 wave_snapshot），
+/// 只是分组粒度从人下沉到号。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct AccountWave {
+    /// 抖音号（展示用，可能为空）
+    pub(crate) douyin_no: String,
+    /// 抖音昵称（可能为空）
+    pub(crate) anchor_name: String,
+    /// 采集 ID。`douyin_no` / `anchor_name` 都空时的最后兜底显示名（有些号导入时只带 id）
+    pub(crate) anchor_id: String,
+    /// 是否主号（主号在文案里标「（主号）」，且排序时优先）
+    pub(crate) primary: bool,
+    pub(crate) day: i64,
+    pub(crate) month: i64,
+    pub(crate) year: i64,
+}
+
+impl AccountWave {
+    /// 推送里的账号标识：**抖音号优先**，没登记就退回采集 ID，并显式加 `ID` 前缀
+    /// 说明「这不是抖音号」。
+    ///
+    /// 为什么不再用昵称兜底（2026-10-12 用户口径「推送多个号带着抖音号」）：
+    /// `anchor_name` 是抖音昵称，**常常等于主播艺名**（生产里 `狼佑`/`狼沐`/`狼征`
+    /// 这些就是），一人多号时几行全同名 —— 收件人根本分不清哪行是哪个号，
+    /// 等于没带抖音号。采集 ID 至少一号一个、且在管理后台台账里能对上。
+    /// 库里 126 个号有 24 个没登记抖音号，这条路径是真实存在的。
+    pub(crate) fn display_name(&self) -> String {
+        let no = self.douyin_no.trim();
+        if !no.is_empty() {
+            return no.to_string();
+        }
+        let id = self.anchor_id.trim();
+        if !id.is_empty() {
+            return format!("ID {id}");
+        }
+        // 理论上不可达（account.anchor_id 是唯一键、非空）；连 ID 都没有时只剩昵称
+        self.anchor_name.trim().to_string()
+    }
+}
+
+/// 分号明细的 SQL（纯函数，好测；日期与人员 id 都是白名单校验后拼进去的）。
+///
+/// 一条 SQL 出三个口径：子查询把主号（daily_metric，只算 wave_reliable=1）与
+/// 副号（wave_snapshot，JOIN account.is_primary=0）UNION ALL 成「号 → 日 → 音浪」，
+/// 外层按 account 分组用 `SUM(CASE WHEN ...)` 同时算出日 / 月 / 年。
+///
+/// **一个号不能两边都计**：主号分支要求 `account.is_primary = 1`，副号分支要求
+/// `is_primary = 0`，与 `WAVES_A` 的 is_primary 分流完全一致。
+/// 未收敛（该人没有 is_primary=1 的号）时主号分支取不到行，主号显示 0——
+/// `admin.rs::ensure_primary` 每次导入都会收敛，正常不会命中，宁可少算不重复算。
+///
+/// `date` 必须形如 `YYYY-MM-DD`（业务日，来自库里的 biz_date）；不合法返回 None。
+/// 日期不 bind 而拼进 SQL：该库对 prepared statement 报 1835（见 dialect.rs 注释），
+/// 所以先过白名单再拼。person_id 是 u64，天然安全。
+pub(crate) fn account_waves_sql(person_id: u64, date: &str) -> Option<String> {
+    if person_id == 0 || !is_biz_date(date) {
+        return None;
+    }
+    let day = date;
+    let month = date.get(..7)?;
+    let year = date.get(..4)?;
+    Some(format!(
+        "SELECT a.id AS aid, a.anchor_id AS anchor_id, a.douyin_no AS douyin_no, \
+       a.anchor_name AS anchor_name, a.is_primary AS is_pri, \
+       CAST(COALESCE(SUM(CASE WHEN t.d = '{day}' THEN t.w ELSE 0 END), 0) AS SIGNED) AS wd, \
+       CAST(COALESCE(SUM(CASE WHEN t.m = '{month}' THEN t.w ELSE 0 END), 0) AS SIGNED) AS wm, \
+       CAST(COALESCE(SUM(CASE WHEN t.y = '{year}' THEN t.w ELSE 0 END), 0) AS SIGNED) AS wy \
+  FROM account a \
+  LEFT JOIN ( \
+       SELECT d.anchor_id AS ak, DATE_FORMAT(d.biz_date, '%Y-%m-%d') AS d, \
+              DATE_FORMAT(d.biz_date, '%Y-%m') AS m, DATE_FORMAT(d.biz_date, '%Y') AS y, \
+              d.wave AS w \
+         FROM daily_metric d \
+         JOIN account a2 ON a2.anchor_id = d.anchor_id AND a2.person_id = d.person_id \
+          AND a2.is_primary = 1 \
+        WHERE d.person_id = {person_id} AND d.wave_reliable = 1 \
+       UNION ALL \
+       SELECT ws.anchor_id AS ak, DATE_FORMAT(ws.biz_date, '%Y-%m-%d') AS d, \
+              DATE_FORMAT(ws.biz_date, '%Y-%m') AS m, DATE_FORMAT(ws.biz_date, '%Y') AS y, \
+              ws.wave_value AS w \
+         FROM wave_snapshot ws \
+         JOIN account a3 ON a3.anchor_id = ws.anchor_id AND a3.person_id = {person_id} \
+          AND a3.is_primary = 0 \
+       ) t ON t.ak = a.anchor_id \
+ WHERE a.person_id = {person_id} \
+ GROUP BY a.id, a.anchor_id, a.douyin_no, a.anchor_name, a.is_primary \
+ ORDER BY a.is_primary DESC, a.id ASC"
+    ))
+}
+
+/// 业务日白名单：`YYYY-MM-DD` 且是真实日期（挡住拼进 SQL 的注入与脏数据）
+fn is_biz_date(s: &str) -> bool {
+    s.len() == 10 && chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").is_ok()
+}
+
+/// 某人每个抖音号在「当日 / 本月 / 本年」的音浪（分号明细数据源）。
+///
+/// 一条 SQL 出结果（150 人规模下每份日报多一条查询，可接受：既有代码本来
+/// 也是每人多次查库）。取数失败只 warn 并返回空——调用方据此退回不带明细的文案，
+/// 不让一次库抖动掐掉整轮推送。
+pub(crate) async fn person_account_waves(
+    st: &AppState,
+    person_id: u64,
+    date: &str,
+) -> Vec<AccountWave> {
+    let Some(sql) = account_waves_sql(person_id, date) else {
+        if person_id > 0 {
+            tracing::warn!(person_id, date = %date, "分号明细：业务日不合法，跳过");
+        }
+        return Vec::new();
+    };
+    match mysql::query(&st.pools, &st.active_id(), &sql).await {
+        Ok(rows) => rows
+            .iter()
+            .map(|r| AccountWave {
+                douyin_no: r.try_get::<String, _>("douyin_no").unwrap_or_default(),
+                anchor_name: r.try_get::<String, _>("anchor_name").unwrap_or_default(),
+                anchor_id: r.try_get::<String, _>("anchor_id").unwrap_or_default(),
+                primary: row_i64(r, "is_pri") > 0,
+                day: row_i64(r, "wd"),
+                month: row_i64(r, "wm"),
+                year: row_i64(r, "wy"),
+            })
+            .collect(),
+        Err(e) => {
+            tracing::warn!(person_id, date = %date, error = %e, "读分号音浪失败，日报不带分号明细");
+            Vec::new()
+        }
+    }
+}
+
+/// 读整数字段：库里可能是 SIGNED / UNSIGNED / Decimal 字符串，统一兜成 i64
+fn row_i64(r: &sqlx::mysql::MySqlRow, col: &str) -> i64 {
+    if let Ok(v) = r.try_get::<i64, _>(col) {
+        return v;
+    }
+    if let Ok(v) = r.try_get::<u64, _>(col) {
+        return v as i64;
+    }
+    r.try_get::<String, _>(col)
+        .ok()
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(0)
+}
+
+/// 分号明细段落（纯函数）。少于 2 个号返回空串——只有主号时这段就是「我」那行的
+/// 重复，用户口径 2026-10-12 明确不补。
+///
+/// 排序：**当日音浪降序**（→ 本月 → 本年 → 主号 → 抖音号）。日报语境下主播最关心
+/// 「今天哪个号在挣」，所以先按当日排；当日全为 0（今天还没开播）时自然退回看本月。
+/// 折叠上限 5（2026-10-12 从 3 提到 5）：用户口径是「多个号都要带着抖音号」，
+/// 折掉就看不见号了；生产实测一人最多 3 个号，5 是留余量、同时兜住异常多号的极端。
+/// 超过 5 个只显示前 5 个，其余折叠成「…等 N 个号」。
+pub(crate) fn account_waves_section(accounts: &[AccountWave]) -> String {
+    if accounts.len() < 2 {
+        return String::new();
+    }
+    let mut list: Vec<&AccountWave> = accounts.iter().collect();
+    list.sort_by(|x, y| {
+        y.day
+            .cmp(&x.day)
+            .then(y.month.cmp(&x.month))
+            .then(y.year.cmp(&x.year))
+            .then(y.primary.cmp(&x.primary))
+            .then(x.douyin_no.cmp(&y.douyin_no))
+    });
+    const SHOW_MAX: usize = 5;
+    let mut out = format!("\n\n我的抖音号（{} 个）", accounts.len());
+    for a in list.iter().take(SHOW_MAX) {
+        out.push_str(&format!(
+            "\n· {}{} 日 {} / 月 {} / 年 {}",
+            a.display_name(),
+            if a.primary { "（主号）" } else { "" },
+            fmt_wan(a.day),
+            fmt_wan(a.month),
+            fmt_wan(a.year),
+        ));
+    }
+    if accounts.len() > SHOW_MAX {
+        out.push_str(&format!("\n…等 {} 个号", accounts.len() - SHOW_MAX));
+    }
+    out
+}
+
 /// 把三种目标统一折算成「还差多少」+ 文案。纯函数，不碰库，好测。
 ///
 /// - `my`：我本月累计音浪；`rival`：追人目标时对方的本月累计（其它类型忽略）
@@ -584,21 +778,39 @@ pub(crate) fn eval_target(
                 },
             )
         }
-        _ => (
-            rival - my,
-            t.target_name.clone(),
-            format!("你 {} / TA {}", fmt_wan(my), fmt_wan(rival)),
-            fmt_wan((rival - my).max(0)),
-        ),
+        _ => {
+            /* 自定义目标分（2026-10-12 用户口径「自定义分数，追人的分数」）：
+            person 目标 target_value > 0 = 用户设了固定分，rival 用它（对手本月涨跌不影响）；
+            target_value = 0 = 旧行为，按对手本月累计。展示文案 target_name 已带「· N 万」。 */
+            let rival_now = if t.target_value > 0 {
+                t.target_value
+            } else {
+                rival
+            };
+            (
+                rival_now - my,
+                t.target_name.clone(),
+                if t.target_value > 0 {
+                    format!("你 {}", fmt_wan(my))
+                } else {
+                    format!("你 {} / TA {}", fmt_wan(my), fmt_wan(rival))
+                },
+                fmt_wan((rival_now - my).max(0)),
+            )
+        }
     }
 }
 
-/// 每日报告文案：TOP10 + 我的名次
-pub(crate) fn daily_report_text(
+/// 每日报告文案：TOP10 + 我的名次 + 我的抖音号分号明细（2026-10-12）。
+///
+/// 明细挂在「我：第 N 名 · X」之后：先给人一个总览名次，再看每个号各挣多少。
+/// `accounts` 为空 / 只有 1 个号时 [`account_waves_section`] 返回空串，文案与旧版一致。
+pub(crate) fn daily_report_text_with_accounts(
     team: &str,
     date: &str,
     items: &[(u64, String, i64)],
     me: u64,
+    accounts: &[AccountWave],
 ) -> String {
     let label = if team == "female" { "女团" } else { "男团" };
     let mut out = format!(
@@ -619,6 +831,7 @@ pub(crate) fn daily_report_text(
     } else if me > 0 {
         out.push_str("\n\n我：今天还没开播");
     }
+    out.push_str(&account_waves_section(accounts));
     out
 }
 
@@ -690,6 +903,16 @@ mod tests {
         assert!(gap <= 0, "第一名追第三名 = 已达成");
     }
 
+    /// 榜单为空（库挂了 / 本月无数据）：同样按没进榜处理，不能 panic
+    #[test]
+    fn eval_target_person_custom_score_works_without_rival_value() {
+        // 月榜缺对手数值（空 map / 库抖动）时，自定义分仍能算差距，不能退成 0
+        let t = tgt("person", "张三 · 50 万", 500_000, 1001);
+        let (gap, _, _, gap_text) = eval_target(&t, 300_000, 0, None, 9);
+        assert_eq!(gap, 200_000, "按 50 万 - 30 万，不用对手缺失的 0");
+        assert_eq!(gap_text, "20 万");
+    }
+
     /// 追名次但本月没播（榜单里查不到自己）：不能报「还差 0 名」这种假数据
     #[test]
     fn eval_target_rank_when_not_on_board() {
@@ -699,6 +922,32 @@ mod tests {
         assert_eq!(gap, i64::MAX, "没进榜用哨兵值，永不达成");
         assert_eq!(detail, "你还没进本月榜");
         assert_eq!(gap_text, "本月还没开播");
+    }
+
+    /// person 目标带自定义分（2026-10-12）：target_value>0 → 按自定义分对比，
+    /// 与对手本月涨跌无关；target_value=0 保持旧行为（比对手本月累计）。
+    #[test]
+    fn eval_target_person_with_custom_score() {
+        // 张三 · 50 万：对手实际才 10 万，也要按 50 万算差距
+        let t = tgt("person", "张三 · 50 万", 500_000, 1001);
+        let (gap, label, detail, gap_text) = eval_target(&t, 200_000, 100_000, None, 9);
+        assert_eq!(
+            gap, 300_000,
+            "500000 - 200000 = 300000（不是按对手 10 万算）"
+        );
+        assert_eq!(label, "张三 · 50 万");
+        assert_eq!(detail, "你 20 万", "自定义分时不显示对手数值");
+        assert_eq!(gap_text, "30 万");
+
+        // 已超过自定义分 → gap<=0 = 达成
+        let (gap, _, _, _) = eval_target(&t, 600_000, 100_000, None, 9);
+        assert!(gap <= 0);
+
+        // target_value=0 → 旧行为：按对手本月累计
+        let legacy = tgt("person", "李四", 0, 1002);
+        let (gap, _, detail, _) = eval_target(&legacy, 200_000, 300_000, None, 9);
+        assert_eq!(gap, 100_000, "旧口径 = 对手 30 万 - 我 20 万");
+        assert_eq!(detail, "你 20 万 / TA 30 万");
     }
 
     /// 榜单为空（库挂了 / 本月无数据）：同样按没进榜处理，不能 panic
@@ -737,6 +986,293 @@ mod tests {
         assert!(!looks_like_bind_code(""));
     }
 
+    fn aw(douyin_no: &str, primary: bool, day: i64, month: i64, year: i64) -> AccountWave {
+        AccountWave {
+            douyin_no: douyin_no.to_string(),
+            anchor_name: String::new(),
+            anchor_id: String::new(),
+            primary,
+            day,
+            month,
+            year,
+        }
+    }
+
+    /// 0 个号 / 1 个号都不加分号明细：一行榜单里已经写着我今天多少，重复没意义
+    #[test]
+    fn account_waves_section_skips_when_under_two() {
+        assert_eq!(account_waves_section(&[]), "");
+        assert_eq!(
+            account_waves_section(&[aw("cyl765", true, 12_000, 120_000, 880_000)]),
+            ""
+        );
+        // 没有分号数据时就是原本那一条文案（2026-10-12 起唯一的实现只有这个函数，
+        // 所以这里**钉死基线字符串**，改动文案时会立刻红）
+        let items = vec![(1u64, "阿甲".to_string(), 100_000)];
+        assert_eq!(
+            daily_report_text_with_accounts("male", "2026-10-08", &items, 1, &[]),
+            "📊 男团 10-08 音浪榜（1 人开播）\n1. 阿甲 10 万\n\n我：第 1 名 · 10 万"
+        );
+    }
+
+    /// 2 个号：加段落，当日音浪高的在前，主号标「（主号）」
+    #[test]
+    fn account_waves_section_two_accounts() {
+        let accs = vec![
+            aw("cyl765", true, 12_000, 120_000, 880_000),
+            aw("abc123", false, 3_000, 45_000, 300_000),
+        ];
+        let sec = account_waves_section(&accs);
+        assert_eq!(
+            sec,
+            "\n\n我的抖音号（2 个）\n· cyl765（主号） 日 1.2 万 / 月 12 万 / 年 88 万\n· abc123 日 3000 / 月 4.5 万 / 年 30 万",
+            "{sec}"
+        );
+        // 副号当日更高时排到前面（日报语境：先看今天哪个号在挣）
+        let flipped = vec![
+            aw("cyl765", true, 1_000, 900_000, 9_000_000),
+            aw("abc123", false, 30_000, 40_000, 50_000),
+        ];
+        let sec2 = account_waves_section(&flipped);
+        assert!(
+            sec2.find("abc123").unwrap() < sec2.find("cyl765").unwrap(),
+            "当日音浪降序：{sec2}"
+        );
+        assert!(
+            sec2.contains("· cyl765（主号）"),
+            "主号标记不因排序丢失：{sec2}"
+        );
+    }
+
+    /// 超过 5 个号才折叠（2026-10-12 上限从 3 提到 5：用户要求多个号都带着抖音号，
+    /// 折掉就看不见号了；生产实测一人最多 3 个号，5 是留余量）
+    #[test]
+    fn account_waves_section_folds_over_five() {
+        let seven = vec![
+            aw("a1", true, 1, 10, 100),
+            aw("a2", false, 9, 90, 900),
+            aw("a3", false, 8, 80, 800),
+            aw("a4", false, 7, 70, 700),
+            aw("a5", false, 6, 60, 600),
+            aw("a6", false, 5, 50, 500),
+            aw("a7", false, 4, 40, 400),
+        ];
+        let sec = account_waves_section(&seven);
+        assert!(sec.starts_with("\n\n我的抖音号（7 个）"), "{sec}");
+        assert_eq!(sec.matches("\n· ").count(), 5, "列 5 行：{sec}");
+        // 按**当日音浪降序**取前 5：a2(9) a3(8) a4(7) a5(6) a6(5)；
+        // 当日最低的 a1(1) 和 a7(4) 被折掉（日报语境：先看今天哪个号在挣）
+        for k in ["a2", "a3", "a4", "a5", "a6"] {
+            assert!(sec.contains(k), "{k} 必须带着抖音号出现：{sec}");
+        }
+        assert!(
+            !sec.contains("a1") && !sec.contains("a7"),
+            "末尾折叠：{sec}"
+        );
+        assert!(sec.ends_with("…等 2 个号"), "{sec}");
+
+        // 正好 5 个不折叠
+        let five: Vec<AccountWave> = (1..=5)
+            .map(|i| aw(&format!("d{i}"), i == 1, i, i, i))
+            .collect();
+        let sec5 = account_waves_section(&five);
+        assert_eq!(sec5.matches("\n· ").count(), 5, "5 个号全列：{sec5}");
+        assert!(!sec5.contains("…等"), "5 个号不该折叠：{sec5}");
+    }
+
+    /// 推送里的账号标识：**抖音号优先，没登记就用采集 ID**。
+    ///
+    /// 刻意**不用昵称兜底**（2026-10-12 用户口径「推送多个号带着抖音号」）：
+    /// 昵称常常等于主播艺名（生产里 `狼佑`/`狼沐` 就是），一人多号时几行全同名，
+    /// 收件人分不清哪个号是哪个 —— 等于没带抖音号。
+    #[test]
+    fn account_wave_display_name_prefers_douyin_no_then_id() {
+        // 有抖音号 → 用抖音号
+        let with_no = AccountWave {
+            douyin_no: "39863161947".to_string(),
+            anchor_name: "狼佑".to_string(),
+            anchor_id: "dy_haolong01".to_string(),
+            primary: true,
+            day: 0,
+            month: 0,
+            year: 0,
+        };
+        assert_eq!(with_no.display_name(), "39863161947");
+
+        // 没抖音号 → 退回采集 ID，且带 `ID` 前缀（不能让人把 ID 当成抖音号）
+        let id_only = AccountWave {
+            douyin_no: String::new(),
+            anchor_name: "小柠檬".to_string(),
+            anchor_id: "777".to_string(),
+            primary: false,
+            day: 0,
+            month: 0,
+            year: 0,
+        };
+        assert_eq!(id_only.display_name(), "ID 777");
+        assert_ne!(
+            id_only.display_name(),
+            "小柠檬",
+            "昵称绝不能当抖音号用（一人多号时会串成同名）"
+        );
+
+        // 抖音号两侧有空白（导入脏数据）→ trim 掉，别出现「·  3986… 」这种
+        let padded = AccountWave {
+            douyin_no: "  39863161947  ".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(padded.display_name(), "39863161947");
+
+        // 连 ID 都没有（理论上不可达）→ 只剩昵称；全空不 panic
+        assert_eq!(
+            AccountWave {
+                anchor_name: "小柠檬".to_string(),
+                ..Default::default()
+            }
+            .display_name(),
+            "小柠檬"
+        );
+        assert_eq!(AccountWave::default().display_name(), "");
+    }
+
+    /// 生产真实形态：一人 3 个号、其中 1 个没登记抖音号 —— 三行必须各自可区分
+    /// （数据取自 douyin_dev person 86「狼佑」：anchor_id dy_haolong01 / dy_jiuyu01 /
+    /// 2961423756440795，后两个的 anchor_name 与本人同名）
+    #[test]
+    fn account_waves_section_keeps_accounts_distinguishable_without_douyin_no() {
+        let accs = vec![
+            AccountWave {
+                douyin_no: "39863161947".to_string(),
+                anchor_name: "狼佑".to_string(),
+                anchor_id: "dy_haolong01".to_string(),
+                primary: true,
+                day: 0,
+                month: 943,
+                year: 943,
+            },
+            AccountWave {
+                douyin_no: String::new(),
+                anchor_name: "狼佑".to_string(),
+                anchor_id: "dy_jiuyu01".to_string(),
+                primary: false,
+                day: 0,
+                month: 0,
+                year: 0,
+            },
+            AccountWave {
+                douyin_no: String::new(),
+                anchor_name: "狼佑".to_string(),
+                anchor_id: "2961423756440795".to_string(),
+                primary: false,
+                day: 0,
+                month: 0,
+                year: 0,
+            },
+        ];
+        let sec = account_waves_section(&accs);
+        assert!(sec.contains("· 39863161947（主号）"), "{sec}");
+        assert!(sec.contains("· ID 2961423756440795"), "{sec}");
+        assert!(sec.contains("· ID dy_jiuyu01"), "{sec}");
+        // 三行标识必须互不相同，否则收件人分不清哪个号是哪个
+        // （“· ” 与 “ 日 ” 之间的那一段就是账号标识）
+        let names: Vec<&str> = sec
+            .lines()
+            .filter(|l| l.starts_with("· "))
+            .map(|l| {
+                l.trim_start_matches("· ")
+                    .split(" 日 ")
+                    .next()
+                    .unwrap_or("")
+            })
+            .collect();
+        let uniq: std::collections::HashSet<&str> = names.iter().copied().collect();
+        assert_eq!(uniq.len(), names.len(), "每行标识必须唯一：{sec}");
+        assert!(
+            !sec.contains("· 狼佑"),
+            "昵称不能出现在行首当标识（会串成同名）：{sec}"
+        );
+    }
+
+    /// 分号明细 SQL：跨年边界（2026-01-01）的月 / 年片段必须正确取到前 7 / 前 4 位
+    #[test]
+    fn account_waves_sql_boundary_dates() {
+        let sql = account_waves_sql(1034, "2026-01-01").expect("合法业务日");
+        assert!(sql.contains("t.d = '2026-01-01'"), "{sql}");
+        assert!(sql.contains("t.m = '2026-01'"), "{sql}");
+        assert!(sql.contains("t.y = '2026'"), "{sql}");
+        assert!(sql.contains("1034"), "{sql}");
+        assert!(
+            sql.trim_start().starts_with("SELECT"),
+            "要过 mysql 只读守卫"
+        );
+
+        // 12-31：月/年不能串到下一年
+        let sql2 = account_waves_sql(7, "2026-12-31").expect("合法业务日");
+        assert!(sql2.contains("t.m = '2026-12'"), "{sql2}");
+        assert!(sql2.contains("t.y = '2026'"), "{sql2}");
+        assert!(!sql2.contains("2027"), "{sql2}");
+    }
+
+    /// 非法输入不生成 SQL（挡住拼进 SQL 的注入 / 脏数据）
+    #[test]
+    fn account_waves_sql_rejects_bad_input() {
+        assert_eq!(account_waves_sql(0, "2026-10-12"), None, "person_id=0");
+        assert_eq!(account_waves_sql(1, "2026-10-12' OR 1=1--"), None);
+        assert_eq!(account_waves_sql(1, "2026-13-01"), None, "月份不存在");
+        assert_eq!(account_waves_sql(1, "2026-2-30"), None, "日期不存在");
+        assert_eq!(account_waves_sql(1, "20261012"), None, "必须是 YYYY-MM-DD");
+        assert_eq!(account_waves_sql(1, ""), None);
+        // 闰年 2 月 29 合法
+        assert!(account_waves_sql(1, "2024-02-29").is_some());
+    }
+
+    /// 分号明细文案里的数字一律走 fmt_wan（用户口径 2026-10-09：推送用万）
+    #[test]
+    fn account_waves_section_uses_wan_units() {
+        let accs = vec![
+            aw("big1", true, 113_700, 1_000_000, 12_345_678),
+            aw("small", false, 9_999, 0, 12_345),
+        ];
+        let sec = account_waves_section(&accs);
+        assert!(sec.contains("日 11.4 万 / 月 100 万 / 年 1235 万"), "{sec}");
+        assert!(sec.contains("日 9999 / 月 0 / 年 1.2 万"), "{sec}");
+        assert_eq!(fmt_wan(113_700), "11.4 万");
+        assert_eq!(fmt_wan(9_999), "9999");
+    }
+
+    /// 每日报告带分号明细：明细挂在「我：第 N 名」之后
+    #[test]
+    fn daily_report_text_appends_account_section() {
+        let items = vec![
+            (1u64, "阿甲".to_string(), 1_200_000),
+            (2u64, "阿乙".to_string(), 900_000),
+            (9u64, "我".to_string(), 100_000),
+        ];
+        let accs = vec![
+            aw("cyl765", true, 80_000, 500_000, 3_000_000),
+            aw("abc123", false, 20_000, 100_000, 900_000),
+        ];
+        let t = daily_report_text_with_accounts("female", "2026-10-08", &items, 9, &accs);
+        assert!(t.contains("3. 我 10 万"), "{t}");
+        assert!(t.contains("我：第 3 名 · 10 万"), "{t}");
+        let my_pos = t.find("我：第 3 名").unwrap();
+        let sec_pos = t.find("我的抖音号（2 个）").unwrap();
+        assert!(my_pos < sec_pos, "明细必须在我的名次之后：{t}");
+        assert!(
+            t.contains("· cyl765（主号） 日 8 万 / 月 50 万 / 年 300 万"),
+            "{t}"
+        );
+        assert!(t.contains("· abc123 日 2 万 / 月 10 万 / 年 90 万"), "{t}");
+
+        // 没开播的人也照常给明细（可能只是当天没播，本月数据是有的）
+        let t2 = daily_report_text_with_accounts("male", "2026-10-08", &items, 404, &accs);
+        assert!(t2.contains("我：今天还没开播"), "{t2}");
+        assert!(t2.contains("我的抖音号（2 个）"), "{t2}");
+        let a = t2.find("我：今天还没开播").unwrap();
+        let b = t2.find("我的抖音号（2 个）").unwrap();
+        assert!(a < b, "明细在最后：{t2}");
+    }
+
     #[test]
     fn daily_report_text_marks_my_rank() {
         let items = vec![
@@ -744,12 +1280,12 @@ mod tests {
             (2u64, "阿乙".to_string(), 900_000),
             (3u64, "阿丙".to_string(), 100_000),
         ];
-        let t = daily_report_text("male", "2026-10-08", &items, 3);
+        let t = daily_report_text_with_accounts("male", "2026-10-08", &items, 3, &[]);
         assert!(t.contains("男团 10-08 音浪榜"), "{t}");
         assert!(t.contains("1. 阿甲 120 万"), "{t}");
         assert!(t.contains("我：第 3 名"), "{t}");
 
-        let t2 = daily_report_text("female", "2026-10-08", &items, 9);
+        let t2 = daily_report_text_with_accounts("female", "2026-10-08", &items, 9, &[]);
         assert!(t2.contains("今天还没开播"), "{t2}");
     }
 }

@@ -16,6 +16,7 @@ pub mod mysql;
 pub mod public;
 pub mod public_teams;
 pub mod push;
+pub mod random;
 pub mod report;
 pub mod repos;
 pub mod roster_seed;

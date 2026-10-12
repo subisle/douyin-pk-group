@@ -728,11 +728,20 @@ function PublicSettingsCard() {
   )
 }
 
+/** 引导图标白名单：与后端 pk-server/src/public_teams.rs 的 STEP_ICON_WHITELIST
+    保持一致。展示端 st_page.html 里也有一份同名表做双重校验；两边同步改。 */
+const ANNOUNCE_ICONS = [
+  'auto_awesome', 'military_tech', 'qr_code_scanner', 'notifications_active',
+  'insights', 'tips_and_updates', 'campaign', 'star', 'bolt', 'groups',
+  'emoji_events', 'local_fire_department', 'trending_up', 'calendar_month',
+  'chat_bubble', 'lock', 'person', 'smart_toy', 'workspace_premium',
+]
+
 /** 引导弹窗（2026-10-11）：展示端打开时弹出的多步骤引导，逐步「下一步」；
     用户点「完成 / 跳过」后按 version 记住已读，后台每次保存让版本前进，展示端再弹。 */
 function AnnouncementCard() {
   const [data, setData] = useState<{ enabled: boolean; version: number } | null>(null)
-  const [steps, setSteps] = useState<{ title: string; content: string }[]>([])
+  const [steps, setSteps] = useState<{ title: string; content: string; icon: string }[]>([])
   const [enabled, setEnabled] = useState(false)
   const [msg, setMsg] = useState('')
   const [err, setErr] = useState('')
@@ -747,10 +756,10 @@ function AnnouncementCard() {
   }
 
   const load = useCallback(() => {
-    api<{ enabled: boolean; steps: { title: string; content: string }[]; version: number }>('/api/admin/announcement')
+    api<{ enabled: boolean; steps: { title: string; content: string; icon: string }[]; version: number }>('/api/admin/announcement')
       .then((d) => {
         setData(d)
-        setSteps(d.steps?.length ? d.steps : [{ title: '', content: '' }])
+        setSteps(d.steps?.length ? d.steps : [{ title: '', content: '', icon: '' }])
         setEnabled(!!d.enabled)
         setErr('')
       })
@@ -761,11 +770,12 @@ function AnnouncementCard() {
     load()
   }, [load])
 
-  function setStep(i: number, patch: Partial<{ title: string; content: string }>) {
+  function setStep(i: number, patch: Partial<{ title: string; content: string; icon: string }>) {
     setSteps((prev) => prev.map((s, idx) => (idx === i ? { ...s, ...patch } : s)))
   }
   function addStep() {
-    setSteps((prev) => [...prev, { title: '', content: '' }])
+    /* 新步骤默认不带 icon：后端按步序号自动配一个默认图标，运营想换再选 */
+    setSteps((prev) => [...prev, { title: '', content: '', icon: '' }])
   }
   function removeStep(i: number) {
     setSteps((prev) => (prev.length <= 1 ? prev : prev.filter((_, idx) => idx !== i)))
@@ -794,7 +804,15 @@ function AnnouncementCard() {
       <h2>引导弹窗</h2>
       <p className="hint">
         展示端（pk.subisle.com）打开时弹出多步骤引导：每步一个标题 + 正文，逐步「下一步」，
-        最后一步「完成」。用户点「完成 / 跳过」后不再弹，直到你再次保存（版本前进）重新弹出。
+        最后一步「知道啦」。用户点「知道啦 / 跳过」后不再弹，直到你再次保存（版本前进）重新弹出。
+      </p>
+      <p className="hint">
+        正文支持两种简单排版：以 <code>·</code> / <code>-</code> / <code>1.</code> 开头的行会变成列表，
+        用一对 <code>*星号</code> 包起来的字会加粗。其余内容按纯文本原样显示（换行保留）。
+      </p>
+      <p className="hint">
+        深链预览：给展示端链接加上 <code>?announce=2</code> 可直接打开第 2 步，
+        用来给用户看某一步；走深链看不标记已读，正式引导照旧会弹。
       </p>
       {err && (
         <div className="alert warn">
@@ -818,7 +836,12 @@ function AnnouncementCard() {
           >
             <div style={{ display: 'flex', alignItems: 'center' }}>
               <b style={{ fontSize: 13 }}>第 {i + 1} 步</b>
-              <button className="ghost" style={{ marginLeft: 'auto' }} disabled={steps.length <= 1} onClick={() => removeStep(i)}>
+              {!s.icon && (
+                <span className="hint" style={{ marginLeft: 8 }}>
+                  自动图标
+                </span>
+              )}
+              <button className="ghost" style={{ marginLeft: !s.icon ? 'auto' : 8 }} disabled={steps.length <= 1} onClick={() => removeStep(i)}>
                 删除
               </button>
             </div>
@@ -829,8 +852,44 @@ function AnnouncementCard() {
               maxLength={64}
               style={ctl}
             />
+            {/* 图标选择：留空 = 后端按步序号自动配一个；选了就固定。
+                这里只列后端白名单内的 Material Symbols 名，别让任意字符串下发。 */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              <span style={{ fontSize: 12, color: 'var(--muted)' }}>图标</span>
+              <button
+                type="button"
+                className="ghost"
+                style={{
+                  ...ctl,
+                  width: 36,
+                  height: 36,
+                  display: 'grid',
+                  placeItems: 'center',
+                  padding: 0,
+                  borderColor: !s.icon ? 'var(--primary)' : undefined,
+                }}
+                title={s.icon ? `当前：${s.icon}（点这个再取消选择就回落自动）` : '自动（按步序号）'}
+                onClick={() => setStep(i, { icon: '' })}
+              >
+                <span className="material-symbols-outlined" style={{ fontSize: 18 }}>
+                  {s.icon || 'auto_awesome'}
+                </span>
+              </button>
+              <select
+                value={s.icon || ''}
+                onChange={(e) => setStep(i, { icon: e.target.value })}
+                style={{ ...ctl, flex: 1, minWidth: 130 }}
+              >
+                <option value="">自动（按步序号）</option>
+                {ANNOUNCE_ICONS.map((n) => (
+                  <option key={n} value={n}>
+                    {n}
+                  </option>
+                ))}
+              </select>
+            </div>
             <textarea
-              placeholder="步骤正文（支持换行）"
+              placeholder={'步骤正文（支持换行）\n· 列表项用 · 或 1. 开头\n*加粗* 用星号包起来'}
               value={s.content}
               onChange={(e) => setStep(i, { content: e.target.value })}
               rows={3}

@@ -580,57 +580,47 @@ async fn my_register_bind_and_admin_rebind() {
             Err(e) => panic!("注册应当成功，却失败：{e}"),
         }
     }
-    let Some(((login_name, got_pid, team), code)) = registered else {
+    let Some(((login_name, person_name, got_pid, team), code)) = registered else {
         eprintln!("跳过：三次随机验证码都被占用（极小概率）");
         return;
     };
 
-    /* 注册即绑定：登录名 = 主播姓名，不是手机号 */
-    assert_eq!(login_name, anchor_name, "注册即绑定：账号名就是主播姓名");
+    /* 注册不再立即绑定（审计 2026-10-12）：登录名是手机号占位，bound=0，
+    管理员审核通过后才改写为台账姓名。 */
+    assert_eq!(login_name, phone, "审核通过前登录名是手机号占位");
+    assert_eq!(person_name, anchor_name, "返回申请绑定的主播姓名");
     assert_eq!(got_pid, pid, "返回台账里的 personId");
     assert!(
         team == "male" || team == "female",
         "团别来自台账，实际：{team}"
     );
-    let info = store::my_account_info(&st, &anchor_name)
+    let info = store::my_account_info(&st, &phone)
         .await
-        .expect("按姓名查得到");
-    assert!(info.bound, "注册即绑定：bound=1");
-    assert!(!info.bound_at.is_empty(), "记了绑定时间");
+        .expect("按手机号查得到");
+    assert!(!info.bound, "注册不再立即绑定：bound=0");
     assert_eq!(info.source, "register");
     assert_eq!(info.phone, phone, "手机号另存一份");
     assert_eq!(
         store::my_account_check_login(&st, &phone, &code)
             .await
             .as_deref(),
-        Some(anchor_name.as_str()),
+        Some(phone.as_str()),
         "手机号 + 验证码可以登录"
-    );
-    assert_eq!(
-        store::my_account_check_login(&st, &anchor_name, &code)
-            .await
-            .as_deref(),
-        Some(anchor_name.as_str()),
-        "姓名 + 验证码也可以登录"
     );
 
     /* 同手机号不能重复注册 */
     let dup = store::my_account_register(&st, &phone, "135790", &anchor_name, "").await;
     assert!(dup.is_err(), "同手机号重复注册应当被拒");
 
-    /* 用户自己再绑一次 → 拒；管理员改绑 → 允许 */
+    /* 清理：账号已改绑到第二位主播时名字会变，两个名字都删一遍 */
     let Some((pid2, anchor2)) = free.get(1).cloned() else {
         eprintln!("跳过管理员改绑断言：没有第二个可用主播");
-        store::my_account_delete(&st, &anchor_name).await;
+        store::my_account_delete(&st, &phone).await;
         return;
     };
-    let again = store::my_account_bind(&st, &anchor_name, pid2).await;
-    assert!(again.is_err(), "已绑定主播的账号，用户自己不能再改");
-    assert!(again.unwrap_err().contains("已绑定"));
-
-    let Ok(r) = store::my_account_admin_bind(&st, &anchor_name, pid2).await else {
+    let Ok(r) = store::my_account_admin_bind(&st, &phone, pid2).await else {
         eprintln!("跳过：管理员改绑失败（主播可能已被占用）");
-        store::my_account_delete(&st, &anchor_name).await;
+        store::my_account_delete(&st, &phone).await;
         return;
     };
     assert_eq!(r.name, anchor2, "管理员改绑生效");
@@ -644,7 +634,6 @@ async fn my_register_bind_and_admin_rebind() {
 
     /* 清理：账号名可能落在任何一次绑定后的名字上（person 台账行不动，那是真实数据） */
     store::my_account_delete(&st, &anchor2).await;
-    store::my_account_delete(&st, &anchor_name).await;
     store::my_account_delete(&st, &phone).await;
     assert!(
         store::my_account_info(&st, &phone).await.is_none(),
@@ -712,8 +701,9 @@ async fn my_register_rejects_ambiguous_and_teamless_anchors() {
 }
 
 /// 忘记密码只认普通账号（审计 2026-10-11）：
-/// is_admin=1 的观看账号即便登记了手机号也不能被「手机号 → 后四位」重置，
+/// is_admin=1 的观看账号即便登记了手机号也不能被重置，
 /// 否则知道号码的人就能接管后台视角账号。
+/// 2026-10-12 起新密码是 CSPRNG 随机串（不再是手机号后四位）。
 #[tokio::test]
 async fn password_reset_skips_admin_accounts() {
     let Some(st) = setup().await else { return };
@@ -740,20 +730,29 @@ async fn password_reset_skips_admin_accounts() {
         .await
         .expect("标记 is_admin");
 
-    let denied = store::my_account_reset_password_to_phone_suffix(&st, &admin_phone).await;
+    let denied = store::my_account_reset_password_random(&st, &admin_phone).await;
     assert!(denied.is_err(), "管理员账号不能被手机号重置");
     assert!(
-        denied.unwrap_err().contains("还没有注册"),
+        denied.as_ref().unwrap_err().contains("还没有注册"),
         "文案不区分管理员账号（不泄露台账）"
     );
 
     store::my_account_set(&st, &user_name, &user_phone, "246810")
         .await
         .expect("建普通账号");
-    let ok = store::my_account_reset_password_to_phone_suffix(&st, &user_phone)
+    let (new_pass, names) = store::my_account_reset_password_random(&st, &user_phone)
         .await
         .expect("普通账号可以重置");
-    assert_eq!(ok, user_phone[user_phone.len() - 4..].to_string());
+    assert_eq!(names, vec![user_name.clone()], "只重置该手机号的账号");
+    assert!(
+        new_pass.chars().all(|c| c.is_ascii_digit()) && new_pass.len() >= 6,
+        "新密码是随机数字口令，不再是手机号后四位：{new_pass}"
+    );
+    // 新口令立刻可用：旧密码失效
+    let info = store::my_account_info(&st, &user_name)
+        .await
+        .expect("账号还在");
+    assert!(info.name == user_name);
 
     store::my_account_delete(&st, &admin_name).await;
     store::my_account_delete(&st, &user_name).await;

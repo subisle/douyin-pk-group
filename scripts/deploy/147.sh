@@ -151,6 +151,23 @@ if [ "$MIGRATE" = 1 ]; then
     ./pk-server migrate"
 fi
 
+# 5.5 确保远程 pk.env 里有非空 ADMIN_PASSWORD（2026-10-11 起 fail-closed：
+# 没配的话管理接口全部 503，服务默认也拒绝启动）。远程是否已配不确定，
+# 没配就现场生成一个追加进去，且只在终端打印这一次，请管理员立即保存。
+echo "==> 检查远程 ADMIN_PASSWORD"
+NEW_ADMIN="$(ssh_do "set -euo pipefail
+  envf='$DIR/pk.env'
+  touch \"\$envf\"
+  chmod 0600 \"\$envf\"
+  if ! grep -q '^ADMIN_PASSWORD=.' \"\$envf\"; then
+    pw=\$(openssl rand -base64 24 | tr -d '=+/' | cut -c1-20)
+    printf 'ADMIN_PASSWORD=%s\n' \"\$pw\" >> \"\$envf\"
+    printf '%s' \"\$pw\"
+  fi")"
+if [ -n "$NEW_ADMIN" ]; then
+  echo "    远程 pk.env 未配置 ADMIN_PASSWORD，已生成并追加（仅此一次显示，请立即保存）：$NEW_ADMIN"
+fi
+
 # 6. 重启 systemd 服务并等健康
 echo "==> 重启 pk-server"
 ssh_do 'set -e
@@ -175,9 +192,18 @@ ssh_do "set -euo pipefail
   if [ -f '$DIR/backup.env' ]; then chmod 0600 '$DIR/backup.env'; fi"
 
 # 7. 自检：管理端路由（只读模式，不写库）+ 公网前端资源可达
-ADMIN="${PK147_ADMIN:-shuai4444@}"
-echo "==> 管理端路由自检（uicheck-admin，只读模式）"
-UICHECK_READONLY=1 PREFIX=/admin node scripts/check/uicheck-admin.mjs "$BASE" "$ADMIN"
+# 口令优先 PK147_ADMIN，其次从远程 pk.env 里读 ADMIN_PASSWORD（上面 5.5 已保证存在）；
+# 都拿不到就跳过自检 —— 2026-10-11 起删掉硬编码兜底口令，不再默认旧口令。
+ADMIN="${PK147_ADMIN:-}"
+if [ -z "$ADMIN" ]; then
+  ADMIN="$(ssh_do "grep '^ADMIN_PASSWORD=' '$DIR/pk.env' 2>/dev/null | head -n 1 | cut -d= -f2- || true")"
+fi
+if [ -z "$ADMIN" ]; then
+  echo "==> 跳过 uicheck-admin：拿不到管理员口令（请设 PK147_ADMIN，或在远程 $DIR/pk.env 配置 ADMIN_PASSWORD）" >&2
+else
+  echo "==> 管理端路由自检（uicheck-admin，只读模式）"
+  UICHECK_READONLY=1 PREFIX=/admin node scripts/check/uicheck-admin.mjs "$BASE" "$ADMIN"
+fi
 
 asset="$(curl -fsS "$BASE/" | grep -o '/assets/[^"]*\.js' | head -1)"
 curl -fsS -o /dev/null -w "==> 公网前端资源 $asset → HTTP %{http_code}\n" "$BASE$asset"

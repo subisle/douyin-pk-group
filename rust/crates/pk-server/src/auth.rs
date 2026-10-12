@@ -1,11 +1,21 @@
 //! 管理员鉴权：一个共享口令换内存 token。
 //!
 //! - 除公开端点外，所有 /api 必须带 `Authorization: Bearer <token>`
+//! - **query 只接受一次性 ticket**（`?ticket=`，60 秒有效、用过即焚）：
+//!   EventSource（/api/admin/events）/ <img>（日报 SVG）等无法带
+//!   Authorization 头的场景，先 `POST /api/auth/ticket`（Bearer 长效 token）
+//!   换 ticket，再把 ticket 拼进 URL
+//! - 长效 token 一律走 Authorization 头，绝不进 URL（会留在代理日志 /
+//!   浏览器历史 / Referer 里）
 //! - token 存在内存里，进程重启即失效；空闲超过 ADMIN_TOKEN_TTL 自动清理
 //! - 登录失败按来源计数：连续 5 次失败锁 10 分钟（P1-4），成功登录即清零
 //!
 //! 口令哈希用 argon2id（PHC 字符串常驻内存），校验走 `PasswordVerifier`
 //! 的常数时间比较，避免逐字节提前返回泄露前缀。
+//!
+//! fail-closed（2026-10-11 审计整改）：未配置 ADMIN_PASSWORD 时**没有兜底
+//! 口令**，管理接口全部 503；main.rs 启动守卫默认直接拒绝启动（本地开发
+//! 需显式 ALLOW_NO_ADMIN_PASSWORD=1，但此时管理接口依然全关）。
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -22,12 +32,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::json;
 
-/// 内置兜底管理员口令（部署样例里有 ADMIN_PASSWORD；**生产应在 .env 里覆盖并轮换**）。
-/// 审计 2026-10-11：保留兜底是为了不让「没配环境变量的机器」直接起不来，
-/// 但生效时打 WARN 提示；配置了 ADMIN_PASSWORD 时以环境变量为准。
-pub(crate) const DEFAULT_ADMIN_PASSWORD: &str = "shuai4444@";
-
-/// P1-4：口令哈希改 argon2id。启动时对固定管理员口令现算一次（约几十毫秒），
+/// P1-4：口令哈希改 argon2id。启动时对管理员口令现算一次（约几十毫秒），
 /// 之后每次登录 verify。存 PHC 字符串，不再有自造 FNV 变体。
 pub(crate) fn hash_password(pw: &str) -> String {
     let salt = SaltString::generate(&mut OsRng);
@@ -72,9 +77,11 @@ fn random_token() -> String {
 }
 
 pub struct Auth {
-    /// 管理员口令的 argon2id 哈希
+    /// 管理员口令的 argon2id 哈希（None = 未配置 ADMIN_PASSWORD，fail-closed）
     password_hash: Option<String>,
     tokens: Mutex<HashMap<String, Instant>>,
+    /// 一次性 ticket → 过期时刻（SSE / 日报图等只能把凭证放进 URL 的场景）
+    tickets: Mutex<HashMap<String, Instant>>,
     ttl: Duration,
     /// P1-4：登录失败限流（同来源连续失败 N 次锁 M 分钟）
     limiter: LoginLimiter,
@@ -216,16 +223,19 @@ impl Default for Auth {
 }
 
 impl Auth {
-    /// 鉴权是否已就绪 —— 恒为 true：口令要么来自 `ADMIN_PASSWORD`，要么来自内置兜底，
-    /// 两种情况都启用鉴权。故意不在这里返回 false，是为了**不让没配环境变量的机器拒绝启动**
-    /// （历史 P1-5 守卫保留原样；真要不设防请显式 ALLOW_NO_ADMIN_PASSWORD=1 走老路径）。
+    /// 是否配置了 ADMIN_PASSWORD（trim 后非空）。main.rs 启动守卫用它：
+    /// 没配置默认拒绝启动（本地开发可显式 ALLOW_NO_ADMIN_PASSWORD=1 放行启动，
+    /// 但管理接口仍然 fail-closed 全关，见 require_admin）。
     pub fn password_configured() -> bool {
-        true
+        std::env::var("ADMIN_PASSWORD")
+            .ok()
+            .is_some_and(|p| !p.trim().is_empty())
     }
 
     pub fn from_env() -> Self {
-        /* 审计 2026-10-11：口令优先读环境变量（可轮换、不写死在二进制里）；
-        没配才回落到内置兜底，并打 WARN 提醒尽快配置。 */
+        /* 审计 2026-10-11（fail-closed）：口令只认环境变量 ADMIN_PASSWORD，
+        删掉内置兜底口令（硬编码在公开仓库里等于明文公开）。未配置时
+        password_hash=None，管理接口全部 503，绝不再放行任何请求。 */
         let password_hash = match std::env::var("ADMIN_PASSWORD")
             .ok()
             .map(|p| p.trim().to_string())
@@ -235,13 +245,13 @@ impl Auth {
                 tracing::info!(
                     "管理员口令已从 ADMIN_PASSWORD 加载（argon2id 哈希驻留内存，不存明文）"
                 );
-                hash_password(&p)
+                Some(hash_password(&p))
             }
             None => {
-                tracing::warn!(
-                    "未配置 ADMIN_PASSWORD，回落到内置兜底口令 —— 生产环境请立刻在 .env 里配置并轮换"
+                tracing::error!(
+                    "ADMIN_PASSWORD 未配置，管理接口全部关闭（fail-closed）——请在 .env / 环境里配置后重启"
                 );
-                hash_password(DEFAULT_ADMIN_PASSWORD)
+                None
             }
         };
         let ttl = std::env::var("ADMIN_TOKEN_TTL")
@@ -249,8 +259,9 @@ impl Auth {
             .and_then(|v| v.parse().ok())
             .unwrap_or(8 * 3600u64);
         Self {
-            password_hash: Some(password_hash),
+            password_hash,
             tokens: Mutex::new(HashMap::new()),
+            tickets: Mutex::new(HashMap::new()),
             ttl: Duration::from_secs(ttl),
             limiter: LoginLimiter::default(),
         }
@@ -263,8 +274,8 @@ impl Auth {
 
     pub fn check_password(&self, input: &str) -> bool {
         match &self.password_hash {
-            // 没配口令 → 永远放行
-            None => true,
+            // fail-closed：没配口令 → 任何输入都不通过
+            None => false,
             Some(phc) => verify_password(input, phc),
         }
     }
@@ -279,8 +290,9 @@ impl Auth {
     }
 
     pub fn verify(&self, token: &str) -> bool {
+        // fail-closed：没配口令时任何 token 都不认
         if !self.enabled() {
-            return true;
+            return false;
         }
         let mut map = self.tokens.lock().expect("token 锁 poisoned");
         let now = Instant::now();
@@ -290,6 +302,18 @@ impl Auth {
 
     pub fn revoke(&self, token: &str) {
         self.tokens.lock().expect("token 锁 poisoned").remove(token);
+    }
+
+    /// 签发一次性 ticket（调用方必须已验过 Bearer 长效 token，见 issue_ticket handler）
+    pub fn issue_ticket(&self) -> String {
+        let mut map = self.tickets.lock().expect("ticket 锁 poisoned");
+        ticket_issue(&mut map, Instant::now())
+    }
+
+    /// 核销一次性 ticket：存在且未过期 → 立即作废并返回 true
+    pub fn redeem_ticket(&self, ticket: &str) -> bool {
+        let mut map = self.tickets.lock().expect("ticket 锁 poisoned");
+        ticket_redeem(&mut map, ticket, Instant::now())
     }
 
     fn token_of(headers: &axum::http::HeaderMap) -> Option<String> {
@@ -315,6 +339,32 @@ impl std::fmt::Debug for Auth {
             .field("ttl", &self.ttl)
             .finish()
     }
+}
+
+/* --------------------------- 一次性 ticket --------------------------- */
+
+/// ticket 有效期（秒）。SSE / 日报 SVG 等只能把凭证放进 URL 的场景专用：
+/// 先拿长效 Bearer token 换 ticket，再把 ticket 拼进 query。一次性 + 短 TTL，
+/// 即使 URL 被记入代理日志 / 浏览器历史，泄露窗口也被压到最小。
+pub const TICKET_TTL_SECS: u64 = 60;
+/// ticket 字符表：字母数字，免 URL 转义
+const TICKET_ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+const TICKET_LEN: usize = 32;
+
+/// 签发一枚 ticket 并登记过期时刻；顺手惰性清理过期项（不需要后台清扫任务）。
+/// 纯函数（显式传 map 与 now），方便单测。
+fn ticket_issue(map: &mut HashMap<String, Instant>, now: Instant) -> String {
+    map.retain(|_, exp| *exp > now);
+    let t = crate::random::random_code(TICKET_LEN, TICKET_ALPHABET);
+    map.insert(t.clone(), now + Duration::from_secs(TICKET_TTL_SECS));
+    t
+}
+
+/// 核销 ticket：存在且未过期 → 立即删除并返回 true（一次性）；否则 false。
+/// 同样顺手惰性清理过期项，map 不会无限膨胀。
+fn ticket_redeem(map: &mut HashMap<String, Instant>, ticket: &str, now: Instant) -> bool {
+    map.retain(|_, exp| *exp > now);
+    map.remove(ticket).is_some()
 }
 
 /* ------------------------------- axum 中间件 ------------------------------- */
@@ -382,17 +432,29 @@ pub async fn require_admin(
     let path = req.uri().path();
     let auth = &st.auth;
 
-    if !auth.enabled() || is_open(path) {
+    if is_open(path) {
         return next.run(req).await;
     }
 
+    // fail-closed（2026-10-11 审计整改）：未配置 ADMIN_PASSWORD 时管理接口
+    // 一律 503 —— 宁可全关，也不能像旧逻辑那样「没配口令就放行一切」。
+    if !auth.enabled() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "服务端未配置管理员口令，管理接口已关闭" })),
+        )
+            .into_response();
+    }
+
     let mut ok = Auth::token_of(req.headers()).is_some_and(|t| auth.verify(&t));
-    // <img src> 无法带 Authorization 头：允许 ?access_token= 传 token（日报图等场景）
+    // EventSource / <img src> 无法带 Authorization 头：query **只接受一次性
+    // ticket**（?ticket=...，60 秒、用过即焚），不再接受长效 token ——
+    // 长效 token 进 URL 会留在代理日志与浏览器历史里，泄露面太大。
     if !ok {
-        if let Ok(q) = req.uri().query().map(|q| q.to_string()).ok_or(()) {
+        if let Some(q) = req.uri().query() {
             for pair in q.split('&') {
-                if let Some(v) = pair.strip_prefix("access_token=") {
-                    ok = auth.verify(v);
+                if let Some(v) = pair.strip_prefix("ticket=") {
+                    ok = auth.redeem_ticket(v);
                     break;
                 }
             }
@@ -420,6 +482,14 @@ pub async fn login(
     Json(body): Json<serde_json::Value>,
 ) -> Response {
     let auth = &st.auth;
+    // fail-closed：没配口令时登录接口同样关闭（不验口令、不计限流）
+    if !auth.enabled() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "服务端未配置管理员口令，管理接口已关闭" })),
+        )
+            .into_response();
+    }
     let source = login_source_key(Some(remote), &headers);
     let limiter = &auth.limiter;
 
@@ -466,6 +536,36 @@ pub async fn logout(
     Json(json!({ "ok": true })).into_response()
 }
 
+/// `POST /api/auth/ticket`：长效 Bearer token 换一次性 ticket（60 秒、用过即焚）。
+///
+/// 给 EventSource（/api/admin/events）与 <img>（日报 SVG）这类无法带
+/// Authorization 头的场景用：前端先 POST 这里拿 ticket，再拼 `?ticket=`。
+/// 这里**显式再验一次 Bearer 头**而不是只依赖 require_admin —— query ticket
+/// 也能过中间件，不拦的话一张 ticket 就能续杯新 ticket，一次性语义就空了。
+pub async fn issue_ticket(
+    State(st): State<std::sync::Arc<crate::state::AppState>>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    let auth = &st.auth;
+    if !auth.enabled() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "服务端未配置管理员口令，管理接口已关闭" })),
+        )
+            .into_response();
+    }
+    let ok = Auth::token_of(&headers).is_some_and(|t| auth.verify(&t));
+    if !ok {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "需要管理员口令" })),
+        )
+            .into_response();
+    }
+    let ticket = auth.issue_ticket();
+    Json(json!({ "ticket": ticket, "expiresInSec": TICKET_TTL_SECS })).into_response()
+}
+
 /// `GET /api/auth/session`：前端启动时问一句「要不要口令 / 手里这 token 还能用吗」
 pub async fn session(
     State(st): State<std::sync::Arc<crate::state::AppState>>,
@@ -473,7 +573,9 @@ pub async fn session(
 ) -> Response {
     let auth = &st.auth;
     let enabled = auth.enabled();
-    let ok = !enabled || Auth::token_of(&headers).is_some_and(|t| auth.verify(&t));
+    // fail-closed：未配置口令时 enabled=false 且 ok=false（旧逻辑 !enabled → ok=true
+    // 会让前端以为「这台机器不要口令」，与 require_admin 的全关语义自相矛盾）
+    let ok = enabled && Auth::token_of(&headers).is_some_and(|t| auth.verify(&t));
     Json(json!({ "enabled": enabled, "ok": ok })).into_response()
 }
 
@@ -485,6 +587,7 @@ mod tests {
         Auth {
             password_hash: password.map(hash_password),
             tokens: Mutex::new(HashMap::new()),
+            tickets: Mutex::new(HashMap::new()),
             ttl: Duration::from_secs(3600),
             limiter: LoginLimiter::default(),
         }
@@ -504,6 +607,20 @@ mod tests {
         assert_ne!(hash_password("s3cret 口令"), phc);
         // 坏 PHC 串按「不匹配」处理，不 panic
         assert!(!verify_password("x", "$argon2id$garbage"));
+    }
+
+    /// fail-closed：未配置口令（None）时口令校验与 token 校验一律拒绝，
+    /// 任何输入都不放行（2026-10-11 审计整改，删掉内置兜底口令后的核心语义）。
+    #[test]
+    fn disabled_auth_rejects_everything() {
+        let a = auth_with(None);
+        assert!(!a.enabled());
+        assert!(!a.check_password(""));
+        assert!(!a.check_password("any-password"));
+        // 没配口令时即便手里有「token」也不认
+        assert!(!a.verify("anything"));
+        // ticket 也同样发得出但要有 token 才发 —— 这里只验证核销不认凭空值
+        assert!(!a.redeem_ticket("no-such-ticket"));
     }
 
     #[test]
@@ -536,6 +653,7 @@ mod tests {
         let a = Auth {
             password_hash: Some(hash_password("pw")),
             tokens: Mutex::new(HashMap::new()),
+            tickets: Mutex::new(HashMap::new()),
             ttl: Duration::from_secs(0),
             limiter: LoginLimiter::default(),
         };
@@ -550,6 +668,51 @@ mod tests {
         for _ in 0..200 {
             assert!(seen.insert(a.issue()), "token 撞车了");
         }
+    }
+
+    /// ticket 纯逻辑：一次性 + TTL + 惰性清理（显式传 map/now，不依赖锁与系统时钟）
+    #[test]
+    fn ticket_one_time_and_ttl() {
+        let mut map = HashMap::new();
+        let now = Instant::now();
+
+        let t = ticket_issue(&mut map, now);
+        assert_eq!(t.len(), 32, "ticket 固定 32 位");
+        assert!(
+            t.bytes().all(|b| b.is_ascii_alphanumeric()),
+            "ticket 只用字母数字，免 URL 转义"
+        );
+        // 未过期：核销成功
+        assert!(ticket_redeem(&mut map, &t, now));
+        // 一次性：第二次核销必须失败
+        assert!(!ticket_redeem(&mut map, &t, now));
+        // 不存在的 ticket 失败
+        assert!(!ticket_redeem(&mut map, "no-such-ticket", now));
+
+        // 过期：TTL 之后核销失败，且被惰性清理出 map
+        let t2 = ticket_issue(&mut map, now);
+        let later = now + Duration::from_secs(TICKET_TTL_SECS + 1);
+        assert!(!ticket_redeem(&mut map, &t2, later), "过期 ticket 不能用");
+        assert!(map.is_empty(), "过期项应被惰性清理");
+    }
+
+    /// ticket 经 Auth 的完整往返：签发 → 核销成功 → 再核销失败
+    #[test]
+    fn ticket_via_auth_roundtrip() {
+        let a = auth_with(Some("pw"));
+        let t = a.issue_ticket();
+        assert!(a.redeem_ticket(&t));
+        assert!(!a.redeem_ticket(&t), "一次性：第二次必须失败");
+    }
+
+    /// 两枚 ticket 互不干扰：核销一张不影响另一张
+    #[test]
+    fn tickets_are_independent() {
+        let a = auth_with(Some("pw"));
+        let (t1, t2) = (a.issue_ticket(), a.issue_ticket());
+        assert_ne!(t1, t2);
+        assert!(a.redeem_ticket(&t1));
+        assert!(a.redeem_ticket(&t2));
     }
 
     fn headers_with(v: &str) -> axum::http::HeaderMap {

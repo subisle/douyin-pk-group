@@ -1,6 +1,122 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { api } from './api'
 import { useAutoRefresh } from './useAutoRefresh'
+
+/** 抖音号单元格：douyinNos 按 ' / ' 拆开竖排，第一个标「主号」；douyinCount 缺失时退化用号数判断。 */
+function renderDouyinCell(s: any) {
+  const nos = String(s.douyinNos ?? '')
+    .split(' / ')
+    .map((x: string) => x.trim())
+    .filter(Boolean)
+  // 老接口没有 douyinNos 时退回主号单个字段
+  if (nos.length === 0 && s.douyinNo) nos.push(String(s.douyinNo).trim())
+  const numCount = nos.length
+  // 后端还没下发 douyinCount 时用已登记的号数兜底，保证不崩
+  const total = typeof s.douyinCount === 'number' ? s.douyinCount : numCount
+  const unregistered = Math.max(total - numCount, 0)
+
+  if (total <= 0) {
+    return (
+      <td className="hint" title="这个主播名下还没有任何账号（右键 → 查看多抖音号 可绑定）">
+        未绑定抖音号
+      </td>
+    )
+  }
+  if (numCount === 0) {
+    return (
+      <td className="hint" title="名下已有账号，但还没登记抖音号（可右键 → 查看多抖音号 补充）">
+        未登记抖音号{s.anchorId ? `（采集号 ${s.anchorId}）` : ''}
+      </td>
+    )
+  }
+  return (
+    <td title="主号在前；一个主播可挂多个抖音号，详情里绑定，导入时音浪合并">
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-start' }}>
+        {nos.map((no, i) => (
+          <span key={`${no}-${i}`} style={{ whiteSpace: 'nowrap' }}>
+            {i === 0 && (
+              <span className="badge b-active" style={{ marginRight: 4 }}>
+                主号
+              </span>
+            )}
+            {no}
+          </span>
+        ))}
+      </div>
+      {total > 1 && (
+        <div className="hint" style={{ marginTop: 4 }}>
+          {total} 个号
+          {unregistered > 0 ? ` · 另有 ${unregistered} 个号未登记抖音号` : ''}
+        </div>
+      )}
+    </td>
+  )
+}
+
+/** 微信机器人单元格：优先新字段 wxbot（null=未扫码 / activated=能否主动推送），
+ *  用 wechatPush 叠加推送开关；wxbot 字段还没到位时退回旧 wechatBound/wechatPush 三态。 */
+function renderWxbotCell(s: any) {
+  const wx = s.wxbot // undefined = 后端字段未到位；null = 没有扫码记录
+  // 字段缺失，或字段为 null 但旧的推送开关说已绑定 —— 都退回旧口径，避免丢信息
+  if (wx === undefined || (wx == null && s.wechatBound)) {
+    if (!s.wechatBound) {
+      return (
+        <td title="未绑定微信机器人（主播在展示端「我的」页扫码后发手机号绑定）">
+          <span className="hint">未绑定</span>
+        </td>
+      )
+    }
+    return (
+      <td
+        title={
+          s.wechatPush
+            ? '已绑定微信机器人，推送开着（数据入库约 30 分钟后私聊推送）'
+            : '已绑定微信机器人，但两个推送开关都关着，不会收到任何推送'
+        }
+      >
+        {s.wechatPush ? (
+          <span className="badge b-active">已推送</span>
+        ) : (
+          <span className="badge b-paused">已绑·未开</span>
+        )}
+      </td>
+    )
+  }
+  if (wx == null) {
+    return (
+      <td title="未绑定微信机器人（主播在展示端「我的」页扫码后发手机号绑定）">
+        <span className="hint">未绑定</span>
+      </td>
+    )
+  }
+  const boundAt = wx.boundAt ? `（绑定于 ${wx.boundAt}）` : ''
+  const pushOff = s.wechatPush === false
+  const pushOffBadge = pushOff ? (
+    <span className="badge b-left" style={{ marginLeft: 6 }} title="绑了但两个推送开关都关着，收不到推送">
+      未开推送
+    </span>
+  ) : null
+  if (!wx.activated) {
+    return (
+      <td title={`已扫码，还没给机器人发过消息，推送发不出去${boundAt}`}>
+        <span className="badge b-paused">待激活</span>
+        {pushOffBadge}
+      </td>
+    )
+  }
+  return (
+    <td title={`已绑定微信机器人，能主动推送${boundAt}`}>
+      <span className="badge b-active">已绑定</span>
+      {wx.nickname ? (
+        <span className="hint" style={{ marginLeft: 6 }}>
+          {wx.nickname}
+        </span>
+      ) : null}
+      {pushOffBadge}
+    </td>
+  )
+}
+
 
 export default function StreamerPage() {
   const [items, setItems] = useState<any[]>([])
@@ -54,6 +170,17 @@ export default function StreamerPage() {
   }, [q, team, loadPending])
 
   useEffect(load, [load])
+
+  /** 重名提示：姓名是行的唯一标识，从当前 items 现算同名（不在后端接口里新增）。 */
+  const dupNames = useMemo(() => {
+    const m = new Map<string, number>()
+    for (const s of items) {
+      const k = String(s.name ?? '').trim()
+      if (!k) continue
+      m.set(k, (m.get(k) ?? 0) + 1)
+    }
+    return m
+  }, [items])
 
   // 别名增删 / 别处改了台账时自动刷新
   useAutoRefresh(load, ['roster'])
@@ -530,21 +657,18 @@ export default function StreamerPage() {
           <div className="empty">还没有主播，先在上面建档或导入数据</div>
         ) : (
           <div className="table-scroll">
-            <table>
+            <table style={{ minWidth: 1000 }}>
               <thead>
                 <tr>
-                  <th>名字</th>
-                  <th>团别</th>
-                <th>师傅</th>
-                <th>抖音号</th>
-                <th title="主播手机号（展示端登录用）；已开号 = 已有登录账号">手机号</th>
-                <th>状态</th>
-                <th title="是否绑定了微信机器人并开启推送（数据入库约 30 分钟后会私聊推给他）">
-                  微信推送
-                </th>
-                <th title="是否出现在对外展示的每日报告/月榜/年榜里">对外</th>
-                <th>别名</th>
-                <th></th>
+                  <th>姓名</th>
+                  <th title="一个主播可挂多个抖音号；第一个是主号（SQL 按 is_primary DESC 排序）">抖音号</th>
+                  <th title="主播手机号（展示端登录用）；已开号 = 已有登录账号">手机号</th>
+                  <th title="微信推送机器人：未绑定 / 已扫码待激活 / 已绑定（显示微信昵称）">微信机器人</th>
+                  <th>师傅</th>
+                  <th>状态</th>
+                  <th title="是否出现在对外展示的每日报告/月榜/年榜里">对外</th>
+                  <th>别名</th>
+                  <th></th>
               </tr>
             </thead>
             <tbody>
@@ -557,25 +681,30 @@ export default function StreamerPage() {
                     setCtxMenu({ x: e.clientX, y: e.clientY, person: s })
                   }}
                 >
-                  <td>{s.name}</td>
                   <td>
-                    <span className={`badge ${s.team === 'female' ? 'b-female' : 'b-male'}`}>
+                    <span style={{ fontWeight: 600 }}>{s.name}</span>
+                    <span
+                      className={`badge ${s.team === 'female' ? 'b-female' : 'b-male'}`}
+                      style={{ marginLeft: 6 }}
+                    >
                       {s.team === 'female' ? '女团' : s.team === 'male' ? '男团' : s.team}
                     </span>
-                  </td>
-                  <td>
-                    <button className="linkish" title="点击设置师傅" onClick={() => openMasterEdit(s)}>
-                      {s.masterName ?? '—'}
-                    </button>
-                    {!!s.disciples && (
-                      <span className="disciples" title={`徒弟 ${s.disciples} 人`}>
-                        {s.disciples}徒
+                    {s.status === 'left' && (
+                      <span className="badge b-left" style={{ marginLeft: 6 }}>
+                        已离开
+                      </span>
+                    )}
+                    {(dupNames.get(String(s.name ?? '').trim()) ?? 0) > 1 && (
+                      <span
+                        className="badge"
+                        style={{ marginLeft: 6, color: 'var(--bad)', background: 'var(--bad-bg)' }}
+                        title={`「${s.name}」在列表里有重名：姓名要做唯一标识，请用右键「合并」或改名处理`}
+                      >
+                        重名
                       </span>
                     )}
                   </td>
-                  <td className="hint" title="主号在前；详情可绑定多账号">
-                    {s.douyinNos ?? s.douyinNo ?? '—'}
-                  </td>
+                  {renderDouyinCell(s)}
                   <td>
                     {s.phone ? (
                       <>
@@ -605,6 +734,17 @@ export default function StreamerPage() {
                       </span>
                     )}
                   </td>
+                  {renderWxbotCell(s)}
+                  <td>
+                    <button className="linkish" title="点击设置师傅" onClick={() => openMasterEdit(s)}>
+                      {s.masterName ?? '—'}
+                    </button>
+                    {!!s.disciples && (
+                      <span className="disciples" title={`徒弟 ${s.disciples} 人`}>
+                        {s.disciples}徒
+                      </span>
+                    )}
+                  </td>
                   <td>
                     <span
                       className={
@@ -617,25 +757,6 @@ export default function StreamerPage() {
                     >
                       {s.status === 'left' ? '已离开' : s.status === 'paused' ? '暂停' : '在职'}
                     </span>
-                  </td>
-                  <td
-                    title={
-                      s.wechatBound
-                        ? s.wechatPush
-                          ? '已绑定微信机器人，推送开着（数据入库约 30 分钟后私聊推送）'
-                          : '已绑定微信机器人，但两个推送开关都关着，不会收到任何推送'
-                        : '未绑定微信机器人（主播在展示端「我的」页扫码后发手机号绑定）'
-                    }
-                  >
-                    {s.wechatBound ? (
-                      s.wechatPush ? (
-                        <span className="badge b-active">已推送</span>
-                      ) : (
-                        <span className="badge b-paused">已绑·未开</span>
-                      )
-                    ) : (
-                      <span className="hint">未绑定</span>
-                    )}
                   </td>
                   <td title={s.hideInDailyReport ? '已隐藏：对外榜单不下发此人' : '对外显示：出现在每日报告/月榜/年榜'}>
                     <input
