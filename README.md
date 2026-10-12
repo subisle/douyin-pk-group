@@ -1,8 +1,9 @@
 # PK 挑战赛分组程序
 
-后端是**全 Rust 单技术栈**（axum + sqlx/MySQL）：业务与运行时状态统一落在 MySQL
-（本机开发库 `douyin_dev`，生产 MariaDB `douyin`，唯一事实源，SQLite 仅作一次性搬家
-来源留底）。按音浪高低做均衡分组，支持手动拖拽调整与导出图片。前端保留 React 只做
+后端是**全 Rust 单技术栈**（axum + sqlx 0.8 / PostgreSQL）：业务与运行时状态统一落在
+PostgreSQL（本机开发库 `douyin_dev`，`127.0.0.1:3318`，唯一事实源，见
+[docs/16-数据库资产总览.md](docs/16-数据库资产总览.md)；生产 147 / 内网 rk3318 暂仍为
+MySQL/MariaDB，PG 上线切换见 docs/17）。按音浪高低做均衡分组，支持手动拖拽调整与导出图片。前端保留 React 只做
 界面与拖拽，所有分组算法都在 `pk-core`（Rust）里算，浏览器不再跑第二份算法。
 采集 / 导入 / 机器人等数据管理职责同样以 `pk-server` 模块承载。
 
@@ -16,7 +17,8 @@ rust/crates/pk-server   HTTP 服务：axum + sqlx(MySQL) + 静态托管
   ├─ grouping.rs        /api/group/*：arrange / inspect / polish / constraints
   ├─ matching.rs        名单 -> 主播匹配 + read_id（BIGINT UNSIGNED 兼容）
   ├─ dialect.rs         LOCAL / A 库 SQL 方言 + 日期白名单内联
-  ├─ mysql.rs           多数据源连接池 + 只读守卫（读 / 写分池）
+  ├─ pgrs.rs            只读层：PgPool 连接池 + 只读守卫 + `?`→`$N` 重写（内建）
+  ├─ writer.rs          写层：writer 池（DB_WRITER_*）+ 写守卫（拦 DDL）
   ├─ admin.rs           数据管理 API（/api/admin/*）：导入 / 主播台账 / 采集
   ├─ bot/               机器人：QQ / 微信 iLink，确定性命令路由
   └─ import/            CSV / 粘贴 / 补录，字段映射 + 校验报告
@@ -222,9 +224,16 @@ caddy reload
 
 数据库只做查询，三层保障：
 
-1. 所有 SQL 集中在 `pk-server/src/dialect.rs`，不接受外部传入的 SQL 字符串
-2. `queryReadonly()` 只放行 `SELECT / SHOW`，含写操作关键字（按词边界，`deleted_at` 这类列名不算）直接抛错
-3. 分组方案、别名等写操作走 `douyin_writer` 写池落到 MySQL 业务库（与业务数据同库，见 docs/00 单库决策）
+1. 所有 SQL 集中在 `pk-server/src/dialect.rs` 等模块内，不接受外部传入的 SQL 字符串
+2. `pgrs::query` / `pgrs::query_with_binds` 的只读守卫只放行 `SELECT`，含写操作关键字
+   （按词边界，`deleted_at` 这类列名不算）直接抛错
+3. 分组方案、别名等写操作走 writer 池（`DB_WRITER_*`，账号 `pk_writer`）落到 PG 业务库
+   （与业务数据同库，见 docs/00 单库决策）
+
+**数据库访问层约定（2026-10-12 收敛，详见 docs/04 §数据库访问层统一约定）**：
+SQL 一律写 MySQL 风格 `?` 占位符，读走 `pgrs` 入口（内建 `pq::rewrite` 重写为 `$N`），
+写走 writer 池并手动包 `&crate::pq::rewrite("…")`。**新增 `sqlx::query` 调用必须过
+`pq::rewrite` 或改走 `pgrs` 入口**，禁止裸传 `?` 字面量直连。
 
 ## 数据源与部署形态（历史问题存档）
 
@@ -263,6 +272,9 @@ identity 序列 → 逐表行数对账。
    用默认值，绝不补 NULL（会撞 NOT NULL）。
 
 数据产物（`*.sql` / `*.dump` / `*.sql.gz`）已在 `.gitignore` 里，只入脚本本身。
+
+本机 / 147 / rk3318 三处的**全部数据库实例、库名、表数、账号与待收尾项**汇总见
+[docs/16-数据库资产总览.md](docs/16-数据库资产总览.md)（2026-10-12 实查快照）。
 
 ### 远程备份库（2026-10-11）
 
@@ -397,6 +409,10 @@ person 的行先合并再入库**（`admin::merge_rows_by_person`），合并口
 
 ## 已知事项
 
+- **数据库访问（2026-10-12 起）**：新增 `sqlx::query` 调用必须过 `pq::rewrite`（或改走
+  `pgrs::query` / `pgrs::query_with_binds` 入口，重写内建）；写路径一律走 writer 池
+  （`DB_WRITER_*`），禁止拿只读池执行写。同一条 SQL 里 `?` 与 `$N` 不混用。
+  约定全文见 docs/04，改造档案见 docs/18。
 - 免费库对 prepared statement 兼容性不好（报 1835），所以日期参数是**校验后内联**进 SQL 的（只允许 `YYYY-MM-DD`）
 - 连接池上限 3，音浪/主播结果缓存 10 分钟（`WAVE_CACHE_TTL`）；改数据后点「强制刷新」
 - `daily_metric` 首日 `prev_snapshot_date IS NULL`，那天 wave 是**累计音浪**（总音浪的基数）：
