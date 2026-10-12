@@ -52,6 +52,7 @@ const PAGES = [
   { path: '/import', label: '数据导入', marker: '导入数据' },
   { path: '/streamers', label: '主播管理', marker: '主播台账' },
   { path: '/claims', label: '抖音号审计', marker: '抖音号绑定审计' },
+  { path: '/visits', label: '访客日志', marker: '访客日志' },
   { path: '/lineage', label: '族谱', marker: '师门关系' },
   { path: '/group', label: 'PK 分组', marker: '名单与配置' },
   { path: '/bots', label: '机器人', marker: 'QQ 机器人' },
@@ -184,14 +185,17 @@ const waitMarker = (ws, marker, tries) =>
     : waitText(ws, marker, tries)
 const pathname = (ws) => evaluate(ws, 'location.pathname')
 const activeTab = (ws) =>
-  evaluate(ws, `document.querySelector('a.tab.active')?.textContent?.trim() ?? ''`)
+  evaluate(
+    ws,
+    `document.querySelector('a.side-link.active .side-label')?.textContent?.trim() ?? ''`,
+  )
 
 /** 点页面上第一个文本包含 text 的可点元素（导航链接 / 按钮） */
 async function clickByText(ws, text) {
   const hit = await evaluate(
     ws,
     `(() => {
-      const el = [...document.querySelectorAll('a.tab, a.linkish, button, a.file-btn')]
+      const el = [...document.querySelectorAll('a.side-link, a.linkish, button, a.file-btn')]
         .find((x) => x.textContent.trim().includes(${JSON.stringify(text)}))
       if (!el) return false
       el.click()
@@ -285,10 +289,10 @@ if (names.length < 3) {
   console.error('男团主播不足 3 人，无法构造导入用例')
   process.exit(2)
 }
-if (!READONLY) {
-  const csv = ['主播名,音浪', ...names.map((n, i) => `${n},${(i + 1) * 111000}`)].join('\n') + '\n'
-  writeFileSync(CSV, csv)
-}
+/* CSV 内容只读模式也要用（第 6 段拖放/预览要它才能走完，且预览不写库）；
+   落盘只有全量模式才需要（第 7 段真导入用文件）。 */
+const csv = ['主播名,音浪', ...names.map((n, i) => `${n},${(i + 1) * 111000}`)].join('\n') + '\n'
+if (!READONLY) writeFileSync(CSV, csv)
 
 /* 干净的浏览器：杀掉占着调试端口的僵尸实例 + 清 profile（否则会恢复上一轮标签页，
    /json/list 里混进旧页面，断言可能读到别的页面） */
@@ -359,6 +363,14 @@ try {
     }
   })
 
+  /* 请求 URL 留档：2.5 段用来断言 SSE 走 ticket、且没有任何请求把 access_token 放进 URL。
+     （不能只看 Resource Timing：SSE 是长连接，连接不断开就不会落 resource 条目。） */
+  const reqUrls = []
+  ws.send('Network.enable').catch(() => {})
+  ws.on((msg) => {
+    if (msg.method === 'Network.requestWillBeSent') reqUrls.push(msg.params.request.url)
+  })
+
   /* ---------- 1. 未登录：深链留在地址栏 ---------- */
   console.log('== 1. 未登录深链 ==')
   errors = []
@@ -403,12 +415,48 @@ try {
   }
   await shot(ws, 'admin-data.png')
 
+  /* ---------- 2.5 日报 SVG / SSE：长效 token 不许进 URL，只能走一次性 ticket ----------
+     审计后后端 query 只认 `?ticket=`（60 秒、用过即废），`?access_token=` 一律 401
+     「需要管理员口令」——日报图会空白、实时刷新会静默死掉。这一段盯住这两个调用点。 */
+  console.log('== 2.5 日报图 / 实时刷新的凭证不进 URL ==')
+  const emptyDb = await evaluate(ws, `document.body.innerText.includes('还没有采集到任何日期')`)
+  if (emptyDb) {
+    console.log('  --   空库没有基准日，跳过日报图断言')
+  } else {
+    const reportHref = await evaluate(
+      ws,
+      `document.querySelector('a.file-btn')?.getAttribute('href') || ''`,
+    )
+    truthy(
+      '日报 SVG 已带 Authorization 头取回并挂成 blob 地址',
+      reportHref.startsWith('blob:'),
+    )
+    if (reportHref.startsWith('blob:')) {
+      const head = await evaluate(
+        ws,
+        `fetch(${JSON.stringify(reportHref)}).then((r) => r.text()).then((t) => t.trim().slice(0, 4))`,
+      )
+      expect('日报 SVG 内容是 SVG', head, '<svg')
+    }
+  }
+  /* SSE 走 ?ticket=；顺手断言所有请求 URL 里都没有 access_token（老写法 401 → 死连接） */
+  const sse = reqUrls.filter((u) => u.includes('/api/admin/events'))
+  truthy(
+    `SSE 已发起且带 ticket（${sse.length} 条）`,
+    sse.length > 0 && sse.every((u) => u.includes('ticket=')),
+  )
+  expect(
+    '没有任何请求把 access_token 放进 URL',
+    JSON.stringify(reqUrls.filter((u) => u.includes('access_token'))),
+    '[]',
+  )
+
   /* ---------- 3. 点导航 = pushState（不整页刷新） ---------- */
   console.log('== 3. 导航是真链接 + pushState ==')
   errors = []
   const hrefs = await evaluate(
     ws,
-    `JSON.stringify([...document.querySelectorAll('a.tab')].map((a) => a.getAttribute('href')))`,
+    `JSON.stringify([...document.querySelectorAll('a.side-link')].map((a) => a.getAttribute('href')))`,
   )
   expect(
     '导航 href 与路由表一致',

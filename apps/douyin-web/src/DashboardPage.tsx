@@ -13,28 +13,44 @@ export default function DashboardPage() {
   const [reportUrl, setReportUrl] = useState('')
   const { go } = useRoute()
 
+  /* 日报 SVG 只认 Authorization 头（审计后 `?access_token=` 已废），
+     而 <a href> 带不了请求头 → 先 fetch 成 blob 再挂 object URL
+     （与 ClaimPage 的主页截图弹层同一套写法）。 */
+  const loadReport = useCallback(async (date: string, t: string) => {
+    try {
+      const resp = await fetch(`/api/admin/report/daily.svg?date=${date}&team=${t}`, {
+        headers: { Authorization: `Bearer ${sessionStorage.getItem('pk_token') ?? ''}` },
+      })
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+      setReportUrl(URL.createObjectURL(await resp.blob()))
+    } catch {
+      setReportUrl('')   // 日报图拿不到不挡主数据：KPI 照常显示
+    }
+  }, [])
+
   const load = useCallback(async () => {
     setError('')
     try {
       const d = await api(`/api/admin/dashboard?days=${days}&top=10`)
       setData(d)
       // 空库（全新部署 / 刚清空音浪数据）没有基准日，日报 SVG 也没得画
-      if (d?.summary?.date) {
-        const token = sessionStorage.getItem('pk_token') ?? ''
-        setReportUrl(
-          `/api/admin/report/daily.svg?date=${d.summary.date}&team=${team}&access_token=${token}`,
-        )
-      } else {
-        setReportUrl('')
-      }
+      if (d?.summary?.date) await loadReport(d.summary.date, team)
+      else setReportUrl('')
     } catch (e: any) {
       setError(e.message ?? String(e))
     }
-  }, [days, team])
+  }, [days, team, loadReport])
 
   useEffect(() => {
     load()
   }, [load])
+
+  useEffect(() => {
+    // 日报图是 blob URL：换图 / 卸载时用完即还
+    return () => {
+      if (reportUrl) URL.revokeObjectURL(reportUrl)
+    }
+  }, [reportUrl])
 
   // 机器人/网页导入、台账变更、数据源切换后自动重拉
   useAutoRefresh(load, ['import', 'roster', 'source'])

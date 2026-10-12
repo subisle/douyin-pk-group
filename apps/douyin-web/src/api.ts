@@ -48,6 +48,18 @@ export async function api<T = any>(path: string, init?: RequestInit): Promise<T>
   return data as T
 }
 
+/**
+ * 换一次性 ticket（60 秒有效、用过即焚）。
+ *
+ * 审计后长效 token **只能走 Authorization 头**，query 里只认 `?ticket=`
+ * （见后端 auth.rs）。EventSource 这类放不进请求头的场景必须先换 ticket；
+ * `<img>` / `<a>` 能改成 fetch 的优先走 fetch + Authorization（见 DashboardPage）。
+ */
+export async function issueTicket(): Promise<string> {
+  const d = await api<{ ticket: string }>('/api/auth/ticket', { method: 'POST' })
+  return d.ticket
+}
+
 export async function login(password: string) {
   const data = await api<{ token: string; enabled: boolean }>('/api/auth/login', {
     method: 'POST',
