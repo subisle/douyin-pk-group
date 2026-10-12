@@ -1,13 +1,11 @@
-//! PostgreSQL 只读层：多数据源连接池 + 只读守卫（原 mysql.rs 的 PG 版）
+//! PostgreSQL 只读层：业务库连接池 + 只读守卫
 //!
-//! 三层保障（与 MySQL 版一致）：
+//! 三层保障：
 //! 1. 所有 SQL 都写死在 dialect.rs，不接受外部传入
 //! 2. 只读守卫只放行 SELECT，含写操作关键字直接抛错
 //! 3. 账号本身只配查询权限（见 README）
 //!
-//! 2026-10 数据库切换：MySQL/MariaDB → PostgreSQL。数据源只剩 LOCAL（本机 PG）；
-//! 远程 MySQL A 源（sqlpub douyinxs）随切换退役，备份职责转给 pg_dump 备份链路
-//! （scripts/backup-pg.sh）。
+//! 2026-10 数据库收敛：PostgreSQL 是唯一业务库；远程 MySQL 只承担备份职责。
 
 use std::collections::HashMap;
 
@@ -122,12 +120,21 @@ pub async fn query(
     sql: &str,
 ) -> anyhow::Result<Vec<sqlx::postgres::PgRow>> {
     readonly_guard(sql)?;
+    // 与 query_with_binds 同一约定：入口统一做 `?` → `$N` 重写，调用方不用关心方言。
+    // 传 `$N` 原生写法的 SQL 重写后原样通过（没有 `?` 就不动）。
+    let sql = crate::pq::rewrite(sql);
     let pool = pools.get(source_id)?;
-    let rows = sqlx::query(sql).fetch_all(pool).await?;
+    let rows = sqlx::query(&sql).fetch_all(pool).await?;
     Ok(rows)
 }
 
 /// 带参数的只读查询：SQL 仍需过只读守卫，参数由调用方 bind
+///
+/// 2026-10-12：执行前先做 `crate::pq::rewrite`，把 MySQL 风格的 `?` 占位符
+/// 机械重写成 PG 的 `$1..$N`——之前漏了这一步，`WHERE p.name = ? ORDER BY …`
+/// 直接送进 PG 会在 `ORDER` 处报语法错误（`?` 在 PG 里是裸的未知 token，
+/// 恰好卡在 ORDER BY 前面）。前提：调用方 SQL 里要么全是 `?` 要么全是 `$N`，
+/// 不混用（见 pq.rs 头注释）。
 pub async fn query_with_binds<F>(
     pools: &Pools,
     source_id: &str,
@@ -140,8 +147,9 @@ where
     ) -> sqlx::query::Query<'_, sqlx::Postgres, sqlx::postgres::PgArguments>,
 {
     readonly_guard(sql)?;
+    let sql = crate::pq::rewrite(sql);
     let pool = pools.get(source_id)?;
-    let rows = bind(sqlx::query(sql)).fetch_all(pool).await?;
+    let rows = bind(sqlx::query(&sql)).fetch_all(pool).await?;
     Ok(rows)
 }
 
@@ -180,7 +188,7 @@ pub async fn health_check(pools: &Pools, source_id: &str) -> DbHealth {
     }
 }
 
-/// PG 与 MySQL 的 rows_affected 类型差异适配：MySQL 返回 u64、PG 返回 i64。
+/// rows_affected 统一适配：PostgreSQL 返回 i64。
 /// 全库统一走 `affected()`（u64），调用点不用关心方言。
 pub trait PgResultExt {
     fn affected(&self) -> u64;

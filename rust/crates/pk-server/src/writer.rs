@@ -1,6 +1,6 @@
 //! PostgreSQL 写层：douyin_writer 业务写池 + 写守卫
 //!
-//! 与只读层（mysql.rs）分池分账号：
+//! 与只读层分池分账号：
 //! - 写池账号 douyin_writer 只有业务表 SELECT/INSERT/UPDATE/DELETE，**无 DDL**
 //! - 写守卫集中拦截 DDL 关键字（双保险：账号权限是根本，守卫是应用层兜底）
 //! - 所有写入 SQL 仍集中在 dialect.rs / admin.rs，不接受外部传入的 SQL 字符串
@@ -19,8 +19,16 @@ const FORBIDDEN_PHRASES: [&str; 2] = ["INTO OUTFILE", "LOAD_FILE"];
 
 /// 业务写连接允许的语句前缀
 const WRITE_PREFIXES: [&str; 10] = [
-    "SELECT", "INSERT", "UPDATE", "DELETE", "ON CONFLICT", "START", "BEGIN", "COMMIT",
-    "ROLLBACK", "SET",
+    "SELECT",
+    "INSERT",
+    "UPDATE",
+    "DELETE",
+    "ON CONFLICT",
+    "START",
+    "BEGIN",
+    "COMMIT",
+    "ROLLBACK",
+    "SET",
 ];
 
 /// 把单引号字符串字面量里的内容替换成空格，避免值里的关键字（如 'DROP it'）误伤守卫
@@ -64,9 +72,7 @@ pub fn write_guard(sql: &str) -> anyhow::Result<()> {
         anyhow::bail!("写连接拒绝执行：检测到 DDL 关键字 {kw}（DDL 只能走显式 migrate）");
     }
     if !WRITE_PREFIXES.iter().any(|p| upper.starts_with(p)) {
-        anyhow::bail!(
-            "写连接拒绝执行：仅允许业务写语句（INSERT/UPDATE/DELETE/SELECT）"
-        );
+        anyhow::bail!("写连接拒绝执行：仅允许业务写语句（INSERT/UPDATE/DELETE/SELECT）");
     }
     Ok(())
 }

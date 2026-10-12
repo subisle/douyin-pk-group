@@ -202,7 +202,10 @@ CREATE TABLE IF NOT EXISTS monthly_metric (
   PRIMARY KEY (id)
 );
 CREATE INDEX IF NOT EXISTS idx_period ON monthly_metric (period);
-CREATE UNIQUE INDEX IF NOT EXISTS uk_person_period ON monthly_metric (person_id, period);
+-- 2026-10-12：原名 uk_person_period 与 190 行 monthly_duration 的同名索引冲突，
+-- IF NOT EXISTS 只认名字，导致 monthly_metric 的唯一索引从未真正建出（落库的
+-- ON CONFLICT (person_id, period) 一直报 no unique constraint）。改成带表前缀的名字。
+CREATE UNIQUE INDEX IF NOT EXISTS uk_monthly_metric_person_period ON monthly_metric (person_id, period);
 
 CREATE TABLE IF NOT EXISTS my_accounts (
   name VARCHAR(64) NOT NULL,

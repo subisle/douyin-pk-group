@@ -4,8 +4,7 @@
 //! - 日期查询返回：d（YYYY-MM-DD）
 //! - 音浪查询返回：k（人员 id）/ w（区间内音浪合计），序列查询多一个 d（日期）
 //!
-//! 数据源只剩 LOCAL（本地 MariaDB）与 A（douyinxs 远程），两者 schema 一致，
-//! 共用同一套只读 SQL（B 数据源 2026-10-11 已废弃删除）。
+//! 数据源只剩 LOCAL（唯一 PostgreSQL 业务库），共用同一套只读 SQL。
 
 /// 未播口径（2026-10-09 用户定；2026-10-10 统一三处实现，P1-10）：
 /// 「当日导入音浪 < NOT_LIVE_WAVE_THRESHOLD」= 未开播。此前 report.rs（日报）按
@@ -52,7 +51,7 @@ pub fn month_absent_sql(month: &str) -> String {
         .replace("{month}", month)
 }
 
-/// A：douyinxs —— person / account / daily_metric
+/// LOCAL：唯一业务库 —— person / account / daily_metric
 const ANCHORS_A: &str = "SELECT id, name, avatar_url, status FROM person
      WHERE deleted_at IS NULL AND (status IS NULL OR status <> 'left')
      ORDER BY name";
@@ -114,7 +113,7 @@ pub fn dialect_of(_id: &str) -> Dialect {
 }
 
 /// 该库对带参数的查询会报 1835（Malformed communication packet），
-/// 所以日期直接内联进 SQL。日期来自库里的 DATE_FORMAT 结果，
+/// 所以日期直接内联进 SQL。日期来自库里的 TO_CHAR 结果，
 /// 这里再做一次字符白名单（只允许 YYYY-MM-DD）兜底。
 pub fn inline_dates(sql: &str, dates: &[String]) -> anyhow::Result<String> {
     let mut quoted = Vec::with_capacity(dates.len());
@@ -129,8 +128,8 @@ pub fn inline_dates(sql: &str, dates: &[String]) -> anyhow::Result<String> {
 }
 
 /* ------------------------- 管理端 SQL（LOCAL 专用） ------------------------- */
-// 管理端读写在同一台本地 MariaDB（读走 pk_reader 池、写走 douyin_writer 池），
-// 与采集源 A 无关。日期一律 DATE_FORMAT 成字符串透传（同上 1835 兼容原因，
+// 管理端读写在同一台本地 PostgreSQL（读走 pk_reader 池、写走 douyin_writer 池），
+// 日期按 PostgreSQL 口径格式化成字符串透传（值经 bind 绑定，字符串拼进来的
 // 值经 bind 绑定，字符串拼进来的只有日期白名单校验后的字面量）。
 
 /// 主播台账（含主号账号信息）；aliases 在业务库里，代码层合并。
@@ -357,15 +356,15 @@ pub const ACCOUNTS_BY_PERSON_SQL: &str = "SELECT id, anchor_id, douyin_no, ancho
 
 /// 同名主播分组（重复检测）
 pub const DUP_NAMES_SQL: &str = "SELECT name, COUNT(*) AS n,
-       string_agg(id, ',' ORDER BY id) AS ids
-     FROM person WHERE deleted_at IS NULL GROUP BY name HAVING n > 1";
+       string_agg(id::text, ',' ORDER BY id) AS ids
+     FROM person WHERE deleted_at IS NULL GROUP BY name HAVING COUNT(*) > 1";
 
 /// 同抖音号（重复检测）
 pub const DUP_DOUYIN_SQL: &str = "SELECT a.douyin_no, COUNT(*) AS n,
-       string_agg(p.id, ',' ORDER BY p.id) AS ids, string_agg(p.name, ',' ORDER BY p.id) AS names
+       string_agg(p.id::text, ',' ORDER BY p.id) AS ids, string_agg(p.name, ',' ORDER BY p.id) AS names
      FROM account a JOIN person p ON p.id = a.person_id
      WHERE p.deleted_at IS NULL AND a.douyin_no <> ''
-     GROUP BY a.douyin_no HAVING n > 1";
+     GROUP BY a.douyin_no HAVING COUNT(*) > 1";
 
 /// 团内当天缺数据的主播（导入完整度报告）；已离开 / 榜单隐藏的不报（与 MISSING_ALL_SQL 同口径）
 pub const MISSING_SQL: &str = "SELECT p.name FROM person p

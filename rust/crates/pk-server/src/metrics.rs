@@ -310,7 +310,10 @@ async fn period_metrics(st: &AppState, q: MetricsQuery, is_month: bool) -> ApiRe
     // 月度聚合落库（monthly_metric，docs/00 §4 核心实体；查询端当前 on-the-fly，
     // 落库供公开端/历史快照直接读取）
     if is_month {
-        if let Ok(pool) = pgrs::pool_of(&st.pools, "LOCAL") {
+        // 2026-10-12 统一收敛：写路径一律走 writer 池（DB_WRITER_*）。
+        // 原来用 pool_of("LOCAL")——那是 pk_reader 只读账号，INSERT 必然
+        // permission denied 被 warn 吞掉，落库从未成功过。
+        if let Some(pool) = st.writer.clone() {
             for it in &items {
                 let pid = it.get("personId").and_then(|v| v.as_u64()).unwrap_or(0);
                 let wave = it.get("wave").and_then(|v| v.as_i64()).unwrap_or(0);
@@ -319,16 +322,16 @@ async fn period_metrics(st: &AppState, q: MetricsQuery, is_month: bool) -> ApiRe
                     continue;
                 }
                 // P2-8：monthly_metric 表（002 迁移）没有 minutes 列 —— 原来这条
-                // ON DUPLICATE 里引用 EXCLUDED.minutes 每次都报错又被 `let _ =` 吞掉，
+                // ON CONFLICT 里引用 EXCLUDED.minutes 每次都报错又被 `let _ =` 吞掉，
                 // 落库永远 0 行。表结构没有该列，不再写 minutes；整月时长已由
                 // monthly_duration 表单独承载，不需要在 monthly_metric 里冗余一份。
                 // 失败改为记 warn 日志（便于发现），仍不阻断接口返回。
-                if let Err(e) = sqlx::query(
+                if let Err(e) = sqlx::query(&crate::pq::rewrite(
                     "INSERT INTO monthly_metric (person_id, period, wave, live_days, recomputed_at)
-                     VALUES (?,?,?,?,NOW(3))
+                     VALUES (?,?,?,?,now())
                      ON CONFLICT (person_id, period) DO UPDATE SET wave = EXCLUDED.wave, live_days = EXCLUDED.live_days,
-                       recomputed_at = NOW(3)",
-                )
+                       recomputed_at = now()",
+                ))
                 .bind(pid as i64)
                 .bind(&period)
                 .bind(wave)

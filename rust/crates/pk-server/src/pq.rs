@@ -8,7 +8,13 @@
 //!   所以调用方只要保证 SQL 里**要么全是 `?` 要么全是 `$N`**，不混用。
 //!
 //! 用法：`sqlx::query(&pq("SELECT … WHERE id = ?"))`。
-//! 静态 SQL 常量可以在编译期 `pq!` 展开（const fn），运行期零开销。
+//!
+//! 2026-10-12 起的统一约定（数据库访问收敛）：
+//! - **读路径**：走 `pgrs::query` / `pgrs::query_with_binds`，入口内建本重写，调用方无需手动包；
+//! - **写路径**：走 writer 池，SQL 过 `writer::write_guard` 后再 `sqlx::query(&crate::pq::rewrite(sql))`；
+//! - 新增调用点不再手动裸传 `?` 字面量给 `sqlx::query`（历史上 60+ 处漏包就是这来的）。
+//!
+//! 注：旧注释提过的编译期 `pq!` 宏从未实现（const fn 也返回不了 String），已移除该说法。
 
 /// 重写 SQL 里的 `?` 占位符为 `$N`（跳过单引号字符串字面量）。
 /// 不支持反斜杠转义的字符串（PG 标准 `'` 才是转义），当前代码库里没有这种写法。
@@ -54,15 +60,27 @@ mod tests {
 
     #[test]
     fn rewrites_placeholders_in_order() {
-        assert_eq!(rewrite("SELECT * FROM t WHERE a = ? AND b = ?"), "SELECT * FROM t WHERE a = $1 AND b = $2");
-        assert_eq!(rewrite("INSERT INTO t (a, b) VALUES (?, ?)"), "INSERT INTO t (a, b) VALUES ($1, $2)");
+        assert_eq!(
+            rewrite("SELECT * FROM t WHERE a = ? AND b = ?"),
+            "SELECT * FROM t WHERE a = $1 AND b = $2"
+        );
+        assert_eq!(
+            rewrite("INSERT INTO t (a, b) VALUES (?, ?)"),
+            "INSERT INTO t (a, b) VALUES ($1, $2)"
+        );
         assert_eq!(rewrite("no placeholders"), "no placeholders");
     }
 
     #[test]
     fn skips_string_literals() {
-        assert_eq!(rewrite("SELECT * FROM t WHERE note = 'a?b' AND id = ?"), "SELECT * FROM t WHERE note = 'a?b' AND id = $1");
-        assert_eq!(rewrite("WHERE x = 'it''s ?' AND y = ?"), "WHERE x = 'it''s ?' AND y = $1");
+        assert_eq!(
+            rewrite("SELECT * FROM t WHERE note = 'a?b' AND id = ?"),
+            "SELECT * FROM t WHERE note = 'a?b' AND id = $1"
+        );
+        assert_eq!(
+            rewrite("WHERE x = 'it''s ?' AND y = ?"),
+            "WHERE x = 'it''s ?' AND y = $1"
+        );
     }
 
     #[test]

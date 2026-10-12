@@ -82,7 +82,9 @@ async fn connect(ep: &DbEndpoint) -> anyhow::Result<PgPool> {
         .map_err(|e| anyhow::anyhow!("迁移库连接串解析失败: {e}"))?;
     PgPoolOptions::new()
         .max_connections(ep.pool_limit)
+        .min_connections(0)
         .acquire_timeout(std::time::Duration::from_secs(10))
+        .idle_timeout(std::time::Duration::from_secs(30))
         .connect_with(opts)
         .await
         .map_err(|e| anyhow::anyhow!("迁移库连接失败（账号 {}）: {e}", ep.user))
@@ -151,7 +153,8 @@ pub async fn run_with(pool: &PgPool) -> anyhow::Result<Vec<String>> {
     .execute(pool)
     .await?;
 
-    let applied_before: Vec<String> = sqlx::query("SELECT version FROM schema_migrations")
+    let applied_before: Vec<String> =
+        sqlx::query(&crate::pq::rewrite("SELECT version FROM schema_migrations"))
         .fetch_all(pool)
         .await?
         .iter()
