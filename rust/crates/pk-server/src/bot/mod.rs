@@ -244,7 +244,7 @@ pub struct BotManager {
     pub wechat: Option<Arc<WxTransport>>,
 }
 
-/// QQ 凭据解析：MySQL config（后台「机器人」页保存的）逐字段优先，env 兜底。
+/// QQ 凭据解析：config 表（后台「机器人」页保存的）逐字段优先，env 兜底。
 /// 返回 (appId, appSecret, source)：source = settings / env / none。
 async fn resolve_qq_credentials(st: &AppState) -> (String, String, &'static str) {
     let pick = |setting: Option<String>, env_key: &str| -> String {
@@ -272,7 +272,7 @@ async fn resolve_qq_credentials(st: &AppState) -> (String, String, &'static str)
 impl BotManager {
     pub async fn from_env(st: Arc<AppState>) -> Self {
         let config = BotConfig::from_env();
-        // 微信 token 优先 env，其次 MySQL config（扫码成功后落库）
+        // 微信 token 优先 env，其次 config 表（扫码成功后落库）
         let wechat_token = if config.wechat_token.is_empty() {
             crate::store::config_get(&st, "wechat_token")
                 .await

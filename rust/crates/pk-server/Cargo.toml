@@ -24,6 +24,9 @@ sqlx = { workspace = true }
 reqwest = { workspace = true }
 tokio-tungstenite = { workspace = true }
 futures-util = { workspace = true }
+# P0 Redis 缓存层：只有 src/store/cache.rs 允许直接 use（其余模块走封装）
+redis = { workspace = true }
+deadpool-redis = { workspace = true }
 # P1-4：管理口令哈希改 argon2id（替代自造 FNV 变体）
 argon2 = "0.5"
 calamine = "0.30"
@@ -32,3 +35,8 @@ encoding_rs = "0.8"
 # 展示端扫码：把官方返回的二维码内容（URL 字符串）渲染成 SVG data URL
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 getrandom = "0.2"
+# 微信图片推送：日报 SVG → PNG 渲染（纯 Rust，服务器无需系统依赖）
+resvg = "0.45"
+# 微信 CDN 媒体上传的 AES-128-ECB 加密（对齐 openclaw-weixin 协议）
+aes = "0.8"
+md-5 = "0.10"

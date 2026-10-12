@@ -74,6 +74,10 @@ pub struct AppState {
     /// douyin_writer 业务写池（B 阶段：导入 / 主播台账写路径）。
     /// None = 写库账号未配置或连不上：管理写接口返回 503，只读功能照常。
     pub writer: Option<sqlx::PgPool>,
+    /// Redis 缓存 / 锁池（P0，docs/17 §7.3）。
+    /// None = `REDIS_URL` 未配置或建池失败：缓存层整体降级（`store::cache` 一律返回
+    /// None/false，调用方回落内存缓存 + 直查 PG），行为与引入 Redis 之前一致。
+    pub redis: Option<crate::store::cache::RedisPool>,
     /// 当前数据源 id（切换后缓存整体失效）
     pub active: Mutex<String>,
     pub cache: Mutex<WaveCache>,

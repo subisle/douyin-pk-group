@@ -1,4 +1,4 @@
-//! 运行配置：数据源 LOCAL + A（都来自 .env，密钥不进仓库）
+//! 运行配置：唯一业务库 LOCAL（PostgreSQL），密钥不进仓库
 
 use anyhow::{anyhow, Result};
 
@@ -56,7 +56,7 @@ fn urlencode(s: &str) -> String {
     out
 }
 
-/// 极简 .env 解析：容忍值里的中文与空格（`主库 · douyinxs`），
+/// 极简 .env 解析：容忍值里的中文与空格，
 /// dotenvy 0.15 在这类值上报错，所以自己来。已存在的环境变量优先，不覆盖。
 pub fn load_dotenv(path: &str) {
     let Ok(text) = std::fs::read_to_string(path) else {
@@ -96,14 +96,8 @@ fn env_or(key: &str, default: &str) -> String {
 }
 
 fn read_source(id: &str) -> Result<SourceConfig> {
-    let host = match env(&format!("DB_{id}_HOST")) {
-        Some(h) => h,
-        // 旧变量兜底：DB_HOST 只映射到 A
-        None if id == "A" => env("DB_HOST").ok_or_else(|| {
-            anyhow!("没有配置任何数据源：请设置 DB_A_HOST（DB_HOST 等旧变量也识别）")
-        })?,
-        None => return Err(anyhow!("数据源 {id} 未配置 DB_{id}_HOST")),
-    };
+    let host =
+        env(&format!("DB_{id}_HOST")).ok_or_else(|| anyhow!("数据源 {id} 未配置 DB_{id}_HOST"))?;
     if id == "LOCAL" {
         anyhow::ensure!(
             env_or(&format!("DB_{id}_READONLY"), "1") != "0",
@@ -120,9 +114,7 @@ fn read_source(id: &str) -> Result<SourceConfig> {
             .parse()
             .unwrap_or(5432),
         user: env_or(&format!("DB_{id}_USER"), ""),
-        password: env(&format!("DB_{id}_PASSWORD"))
-            .or_else(|| if id == "A" { env("DB_PASSWORD") } else { None })
-            .unwrap_or_default(),
+        password: env(&format!("DB_{id}_PASSWORD")).unwrap_or_default(),
         database: env_or(&format!("DB_{id}_NAME"), ""),
         pool_limit: env_or(&format!("DB_{id}_POOL_LIMIT"), "3")
             .parse()
@@ -131,22 +123,9 @@ fn read_source(id: &str) -> Result<SourceConfig> {
     })
 }
 
-/// 读出全部数据源；LOCAL/A 可按环境变量启用，至少需要一个。
-/// 只认这两个：B（userxs 老库）2026-10-11 已废弃删除，A（douyinxs）是远程备份源。
+/// 读取唯一业务数据源；LOCAL 就是 PostgreSQL 业务库。
 pub fn load_sources() -> Result<Vec<SourceConfig>> {
-    let mut list: Vec<SourceConfig> = ["LOCAL", "A"]
-        .iter()
-        .filter_map(|id| read_source(id).ok())
-        .collect();
-    // 去重（DB_HOST 兜底可能让两个源指向同一个库）
-    let mut seen = std::collections::HashSet::new();
-    list.retain(|s| seen.insert(s.id.clone()));
-    if list.is_empty() {
-        return Err(anyhow!(
-            "没有配置任何数据源：请设置 DB_A_* （或 DB_HOST 等旧变量）"
-        ));
-    }
-    Ok(list)
+    Ok(vec![read_source("LOCAL")?])
 }
 
 pub fn sqlite_path() -> String {
@@ -155,6 +134,23 @@ pub fn sqlite_path() -> String {
 
 pub fn wave_cache_ttl_secs() -> u64 {
     env_or("WAVE_CACHE_TTL", "600").parse().unwrap_or(600)
+}
+
+/* ------------------------------- Redis（P0） ------------------------------- */
+
+/// Redis 连接串：`redis://[user:password@]host:port/db`（docs/17 §7.6）。
+/// 未配置 / 空 = None —— 全内存模式，行为与引入 Redis 之前完全一致。
+pub fn redis_url() -> Option<String> {
+    env("REDIS_URL")
+}
+
+/// Redis 连接池上限，默认 4（低 QPS，够用即可）。
+pub fn redis_pool_limit() -> usize {
+    env_or("REDIS_POOL_LIMIT", "4")
+        .parse()
+        .ok()
+        .filter(|n| *n > 0)
+        .unwrap_or(4)
 }
 
 /* --------------------------- 写库 / 迁移账号（B 阶段） --------------------------- */
@@ -191,10 +187,9 @@ impl DbEndpoint {
 }
 
 fn base_host_port_name() -> (Option<String>, u16, String) {
-    // 业务库位置默认跟随 LOCAL 数据源（都是同一台 MariaDB，账号不同而已）
+    // 业务库位置默认跟随唯一 LOCAL 数据源（同一台 PostgreSQL，账号不同而已）
     let host = env("DB_WRITER_HOST")
         .or_else(|| env("DB_LOCAL_HOST"))
-        .or_else(|| env("DB_A_HOST"))
         .or_else(|| env("DB_HOST"));
     let port_str = env("DB_WRITER_PORT")
         .or_else(|| env("DB_LOCAL_PORT"))
@@ -202,7 +197,6 @@ fn base_host_port_name() -> (Option<String>, u16, String) {
     let port = port_str.parse().unwrap_or(5432);
     let database = env("DB_WRITER_NAME")
         .or_else(|| env("DB_LOCAL_NAME"))
-        .or_else(|| env("DB_A_NAME"))
         .unwrap_or_else(|| "douyin".into());
     (host, port, database)
 }

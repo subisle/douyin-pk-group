@@ -29,7 +29,7 @@ use super::{Attachment, BotConfig, BotRouter, Inbound, Outbound};
 
 const DEFAULT_BASE_URL: &str = "https://ilinkai.weixin.qq.com";
 /// 对齐 openclaw-weixin 的插件版本号（信封 channel_version）
-const CHANNEL_VERSION: &str = "2.4.10";
+pub(crate) const CHANNEL_VERSION: &str = "2.4.10";
 /// 客户端版本打包（iLink-App-ClientVersion = 0x00MMNNPP 的十进制）
 const CLIENT_VERSION_MMNNPP: (u32, u32, u32) = (2, 4, 10);
 const SESSION_EXPIRED: i64 = -14;
@@ -38,7 +38,7 @@ pub(crate) const SESSION_EXPIRED_RETRY: Duration = Duration::from_secs(3600);
 /// 连续多少次 -14 之前先等一小时重试；超过才认定凭据彻底失效、回到等待扫码
 pub(crate) const SESSION_EXPIRED_MAX_RETRY: u32 = 4;
 /// 媒体 CDN（下载兜底模板 / 上传 host 提示）
-const CDN_BASE_URL: &str = "https://novac2c.cdn.weixin.qq.com/c2c";
+pub(crate) const CDN_BASE_URL: &str = "https://novac2c.cdn.weixin.qq.com/c2c";
 
 const TRUSTED_HOSTS: [&str; 3] = [
     "ilinkai.weixin.qq.com",
@@ -114,7 +114,7 @@ fn normalize_base(base_url: &str) -> String {
 
 /// 无状态 JSON 调用：二维码请求 / 状态轮询 / 长轮询 / 发消息共用。
 /// POST 一律带 AuthorizationType（官方协议：二维码 POST 也带）与 X-WECHAT-UIN。
-async fn wx_json(
+pub(crate) async fn wx_json(
     method: reqwest::Method,
     base_url: &str,
     route: &str,
@@ -449,7 +449,7 @@ impl WxTransport {
 
     /// errcode/ret 非 0 → 错误；-14 = 登录过期。
     /// 对齐 openclaw：缺 ret/errcode 视为成功（不同路由返回的字段不一样）。
-    fn check_code(payload: &Value) -> anyhow::Result<()> {
+    pub(crate) fn check_code(payload: &Value) -> anyhow::Result<()> {
         let code = payload
             .get("errcode")
             .and_then(|v| v.as_i64())
@@ -572,7 +572,7 @@ impl WxTransport {
         inner.redirect_host = std::mem::take(host);
     }
 
-    /// token 落 MySQL config（重启不丢），并写回内存。扫码 confirmed 时还会带
+    /// token 落 config 表（重启不丢），并写回内存。扫码 confirmed 时还会带
     /// baseurl（后续 API 主机）与 ilink_user_id（输入状态等功能的身份），一并落库。
     pub async fn set_token(&self, token: String, nickname: &str) -> anyhow::Result<()> {
         self.set_token_full(&token, nickname, "", "").await
@@ -996,7 +996,25 @@ fn b64(data: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(data)
 }
 
-fn client_id() -> String {
+/// 供 store::wxmedia 等外部模块复用的响应码检查（包装 impl 内同逻辑）
+pub(crate) fn check_code(payload: &Value) -> anyhow::Result<()> {
+    let code = payload
+        .get("errcode")
+        .and_then(|v| v.as_i64())
+        .or_else(|| payload.get("ret").and_then(|v| v.as_i64()))
+        .unwrap_or(0);
+    if code == 0 {
+        return Ok(());
+    }
+    let msg = payload
+        .get("errmsg")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    anyhow::bail!("微信接口错误 {code}: {msg}")
+}
+
+pub(crate) fn client_id() -> String {
     let n = rand_u32();
     let ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

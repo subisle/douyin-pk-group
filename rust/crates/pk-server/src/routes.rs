@@ -94,6 +94,10 @@ impl IntoResponse for ApiError {
 /// - `db`：当前数据源（只读池）连通性（沿用原口径，连不上不 500）
 /// - `writer`：douyin_writer 写池连通性；未配置/连不上时 ok=false 并带原因
 /// - `scheduler.lastRun`：延迟推送调度器最近一轮扫描时间；一轮都没跑过标 null
+///
+/// P0（docs/17 §7.3）再加 `redis`：`"disabled"`（未配置 `REDIS_URL`）/ `"up"`（PING 通，
+/// 500ms 超时）/ `"down"`（配了但连不上）。**down 只代表缓存层降级，不影响整体 health
+/// 语义，本接口始终 200**——停 Redis 时服务行为与引入前完全一致。
 pub async fn health(State(st): State<std::sync::Arc<AppState>>) -> ApiResult {
     let db = pgrs::health_check(&st.pools, &st.active_id()).await;
     let writer = match &st.writer {
@@ -110,11 +114,14 @@ pub async fn health(State(st): State<std::sync::Arc<AppState>>) -> ApiResult {
         "running": true,
         "lastRun": crate::push::scheduler_last_run(),
     });
+    // P0：Redis 三态（disabled / up / down），down 不影响整体 health，不返回非 200
+    let redis = crate::store::cache::status(&st).await;
     Ok(Json(json!({
         "server": "ok",
         "db": json!({ "ok": db.ok }),
         "writer": writer,
         "scheduler": scheduler,
+        "redis": redis,
     })))
 }
 

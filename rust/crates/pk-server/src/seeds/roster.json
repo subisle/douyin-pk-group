@@ -1,6 +1,6 @@
 {
  "generated": "2026-10-06",
- "source": "sqlpub douyinxs（远程同步后导出）",
+ "source": "PostgreSQL 业务库导出",
  "persons": [
   {
    "id": 1,

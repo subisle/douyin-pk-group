@@ -51,3 +51,15 @@ pk-board.png
 .dbmerge/*.sql
 .dbmerge/*.sql.gz
 .dbmerge/*.log
+
+# 数据库对齐（scripts/db-align）：本地参数与现场备份产物不入库
+scripts/db-align/local.env
+backups/db-align/
+
+# 数据库 dump / 备份产物（含访问日志等敏感数据，绝不入库）
+backups/
+*.dump
+*.sql.gz
+# 审计/入库现场报告（含账号口令明文）
+dsh-审计报告-*.md
+dsh-入库报告-*.md

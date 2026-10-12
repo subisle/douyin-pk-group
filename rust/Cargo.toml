@@ -23,3 +23,7 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio",
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
+# P0（docs/17 §7.3）：Redis 只放可丢的派生数据（缓存 / 锁 / 去重标记）。
+# 选 deadpool-redis 与 sqlx 池化心智一致，故障即降级入口；仅 store/cache.rs 直接使用。
+redis = { version = "0.27", default-features = false, features = ["tokio-comp"] }
+deadpool-redis = "0.18"

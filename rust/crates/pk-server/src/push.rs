@@ -36,6 +36,8 @@ use crate::state::AppState;
 pub const BIND_CODE_LEN: usize = 6;
 /// 每人最多几个追分目标（用户口径 2026-10-09：5 个）
 pub const MAX_TARGETS: i64 = 5;
+/// 每日报告图片分页：每页行数（40 行 ≈ 微信一屏半，再长看不清）
+const PAGE_ROWS: usize = 40;
 const CODE_ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
 /// 是不是一个合法绑定码（防止把正常聊天误判成绑定）
@@ -240,25 +242,10 @@ async fn send_binding(
     wx_global: Option<&Arc<crate::bot::weixin::WxTransport>>,
     text: &str,
 ) -> anyhow::Result<()> {
+    /* 扫码账号：发文本；没有扫码凭证的旧绑定：回落管理员机器人文本通道 */
     if let Some(a) = crate::store::wx_push_account_get(st, &b.name).await {
         anyhow::ensure!(!a.bot_token.is_empty(), "扫码账号凭证为空，请重新扫码");
-        let conv = if a.conversation_id.is_empty() {
-            b.conversation_id.clone()
-        } else {
-            a.conversation_id.clone()
-        };
-        let (to_user, context_token) = crate::store::wx_session_get(st, &conv)
-            .await
-            .unwrap_or_default();
-        let to_user = if to_user.is_empty() {
-            a.ilink_user_id.clone()
-        } else {
-            to_user
-        };
-        anyhow::ensure!(
-            !context_token.is_empty(),
-            "等待你在微信里给机器人发送一条消息以激活推送"
-        );
+        let (to_user, context_token) = push_ctx(st, b, &a).await?;
         return crate::bot::weixin::user_send_text(
             &a.base_url,
             &a.bot_token,
@@ -268,13 +255,148 @@ async fn send_binding(
         )
         .await;
     }
+    wx_proactive(wx_global, &b.conversation_id, text).await
+}
+
+/// 发图片（1..N 张）+ 首张前带说明文字。逐张独立 sendmessage（openclaw 口径）。
+/// 走扫码账号通道（getuploadurl → AES-ECB → novac2c CDN → image_item）。
+async fn send_binding_images(
+    st: &Arc<AppState>,
+    b: &crate::store::PushBinding,
+    caption: &str,
+    pngs: &[Vec<u8>],
+) -> anyhow::Result<()> {
+    anyhow::ensure!(!pngs.is_empty(), "没有可发送的图片");
+    let a = crate::store::wx_push_account_get(st, &b.name)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("图片推送需要扫码账号（请在「我的」页重新扫码）"))?;
+    anyhow::ensure!(!a.bot_token.is_empty(), "扫码账号凭证为空，请重新扫码");
+    let (to_user, context_token) = push_ctx(st, b, &a).await?;
+    for (i, png) in pngs.iter().enumerate() {
+        // 说明文字只挂在第一张前；第二张起带页码提示
+        let cap = if i == 0 {
+            caption.to_string()
+        } else {
+            format!("📄 榜单第 {} 页（接上条）", i + 1)
+        };
+        crate::store::wxmedia::user_send_image(
+            &a.base_url,
+            &a.bot_token,
+            &to_user,
+            &context_token,
+            &cap,
+            png,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// 两条路径共用的会话上下文解析：conv 取账号/绑定里非空者，
+/// to_user 取会话表/账号 ilink_user_id 里非空者；缺 context_token 报可读错误。
+async fn push_ctx(
+    st: &Arc<AppState>,
+    b: &crate::store::PushBinding,
+    a: &crate::store::WxPushAccount,
+) -> anyhow::Result<(String, String)> {
+    let conv = if a.conversation_id.is_empty() {
+        b.conversation_id.clone()
+    } else {
+        a.conversation_id.clone()
+    };
+    let (to_user, context_token) = crate::store::wx_session_get(st, &conv)
+        .await
+        .unwrap_or_default();
+    let to_user = if to_user.is_empty() {
+        a.ilink_user_id.clone()
+    } else {
+        to_user
+    };
+    anyhow::ensure!(
+        !context_token.is_empty(),
+        "等待你在微信里给机器人发送一条消息以激活推送"
+    );
+    Ok((to_user, context_token))
+}
+
+/// 管理员机器人通道发文本（旧绑定兜底）
+async fn wx_proactive(
+    wx_global: Option<&Arc<crate::bot::weixin::WxTransport>>,
+    conv: &str,
+    text: &str,
+) -> anyhow::Result<()> {
     let Some(wx) = wx_global else {
         anyhow::bail!("没有可用的微信推送通道（请先在「我的」页扫码绑定）");
     };
-    wx.send_proactive(&b.conversation_id, text).await
+    wx.send_proactive(conv, text).await
 }
 
 /* ------------------------------ 主流程 ------------------------------ */
+
+/// 按推送时刻的问候语（2026-10-12 用户口径：晚上好，浩月）。
+/// 时段：5-11 早上好 / 11-13 中午好 / 13-18 下午好 / 18-23 晚上好 / 23-5 夜深了。
+/// 时区用服务器本地时间（147 = EDT，部署机随 TZ env；与导入运维同时区）。
+fn greeting(name: &str) -> String {
+    use chrono::Timelike;
+    let h = chrono::Local::now().hour();
+    let word = match h {
+        5..=10 => "早上好",
+        11..=12 => "中午好",
+        13..=17 => "下午好",
+        18..=22 => "晚上好",
+        _ => "夜深了",
+    };
+    format!("{word}，{name}")
+}
+
+/// 图片推送的 caption：问候语 + 我的名次行（图里已有完整榜单，文字只给关键信息）。
+fn greeting_with_rank(
+    name: &str,
+    items: &[(u64, String, i64)],
+    me: u64,
+    my_month: i64,
+    star: Option<&crate::report::StarBanner>,
+) -> String {
+    let mut out = greeting(name);
+    // 🚩 流动小红旗：称号（后台可配）+ 名字
+    if let Some(st) = star {
+        let mut line = format!("🚩 {} {}", st.title, st.name);
+        if st.wave > 0 {
+            line.push_str(&format!(" {}", fmt_wan(st.wave)));
+        }
+        out.push_str(&format!("\n{line}"));
+    }
+    // 我在月榜的位置 + 本月累计
+    let rank_in_month = items
+        .iter()
+        .position(|(pid, _, _)| *pid == me)
+        .map(|i| i + 1);
+    match rank_in_month {
+        Some(r) => out.push_str(&format!("\n本月第 {} 名 · 累计 {}", r, fmt_wan(my_month))),
+        None => out.push_str("\n本月还没开播"),
+    }
+    out.push_str("\n（本月累计榜见图，含未播天数）");
+    out
+}
+
+/// 日报 SVG → PNG 字节（resvg 纯 Rust 渲染，服务器零系统依赖）。
+/// 宽 720 逻辑像素 ×2 输出（1440），微信长图清晰度够用。
+fn svg_to_png(svg: &str) -> anyhow::Result<Vec<u8>> {
+    use anyhow::Context as _;
+    let opt = resvg::usvg::Options::default();
+    let tree = resvg::usvg::Tree::from_str(svg, &opt)?;
+    let size = tree.size();
+    let scale = 2.0f32;
+    let (w, h) = ((size.width() * scale).round() as u32, (size.height() * scale).round() as u32);
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(w, h).context("PNG 画布创建失败")?;
+    pixmap.fill(resvg::tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::from_scale(scale, scale),
+        &mut pixmap.as_mut(),
+    );
+    pixmap.encode_png().context("PNG 编码失败")
+}
 
 pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<()> {
     let bindings = crate::store::push_bindings_for_team(st, team).await;
@@ -314,8 +436,9 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
             if last == date {
                 tracing::debug!(account = %b.name, date = %date, "每日报告同日已推过，跳过");
             } else {
-                // 分号明细：一人多号的主播才有意义（<2 个号的函数内自动不加段）。
-                // 取数失败 person_account_waves 已 warn 并返回空 → 退回原文案，不中断整轮推送。
+                // 图片版（2026-10-12）：日报按「每页 40 行」分页渲染（榜单太长微信看不清），
+                // 每人一份带艺名水印的 PNG（防转发扩散），逐张发送；
+                // caption = 问候语 + 我的名次行。渲染/取数失败退回纯文本，不中断整轮。
                 let accounts = person_account_waves(st, b.person_id, date).await;
                 let text = daily_report_text_with_accounts(
                     team,
@@ -324,16 +447,101 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
                     b.person_id,
                     &accounts,
                 );
-                tracing::info!(account = %b.name, text = %text.replace('\n', " | "), "推送·每日报告");
-                match send_binding(st, b, wx_global.as_ref(), &text).await {
-                    Ok(()) => {
-                        sent_any = true;
-                        crate::store::push_set_last_report_date(st, &b.name, date).await;
-                        tracing::info!(account = %b.name, "每日报告已推送");
-                    }
+                /* 月榜口径（2026-10-12 用户要求）：图里发本月累计音浪 + 当月未播天数，
+                   日榜不发；头部 🚩 流动小红旗条，称号/人名后台可配：
+                   - config star_title：称号（如「初级争霸赛冠军」），缺省「每日之星」
+                   - config star_override：手动指定「称号|人名|音浪」（ Trophy 人工颁奖），
+                   没配 override 就自动取当日音浪第一。
+                   - config star_icon：小红旗条旁的 Material Symbols 图标名，空 = 不带图标。 */
+                let star = {
+                    let ov = crate::store::config_get(st, "star_override").await;
+                    let auto = rank_items
+                        .first()
+                        .map(|(_, name, w)| (name.clone(), *w));
+                    let (title, def) = parse_star_override(ov.as_deref(), auto);
+                    let icon = crate::store::config_get(st, "star_icon")
+                        .await
+                        .unwrap_or_default();
+                    let icon = icon.trim().to_string();
+                    def.map(|(name, wave)| crate::report::StarBanner {
+                        title,
+                        name,
+                        wave,
+                        icon,
+                    })
+                };
+                let svgs = match crate::report::build_month(st, date, team, star.clone()).await {
+                    Ok(rep) => crate::report::render_month_svg_pages(&rep, PAGE_ROWS, &b.name),
                     Err(e) => {
-                        tracing::warn!(account = %b.name, error = %e, "每日报告推送失败");
-                        crate::store::push_touch(st, &b.name, &e.to_string()).await;
+                        tracing::warn!(error = %e, "月榜 SVG 渲染失败，退回文本推送");
+                        Vec::new()
+                    }
+                };
+                if svgs.is_empty() {
+                    tracing::info!(account = %b.name, text = %text.replace('\n', " | "), "推送·每日报告(文本)");
+                    match send_binding(st, b, wx_global.as_ref(), &text).await {
+                        Ok(()) => {
+                            sent_any = true;
+                            crate::store::push_set_last_report_date(st, &b.name, date).await;
+                            tracing::info!(account = %b.name, "每日报告已推送");
+                        }
+                        Err(e) => {
+                            tracing::warn!(account = %b.name, error = %e, "每日报告推送失败");
+                            crate::store::push_touch(st, &b.name, &e.to_string()).await;
+                        }
+                    }
+                } else {
+                    let caption = greeting_with_rank(
+                        &b.name,
+                        &rank_items,
+                        b.person_id,
+                        month_map.get(&b.person_id).copied().unwrap_or(0),
+                        star.as_ref(),
+                    );
+                    let pngs: Vec<Vec<u8>> = svgs
+                        .iter()
+                        .filter_map(|svg| match svg_to_png(svg) {
+                            Ok(p) => Some(p),
+                            Err(e) => {
+                                tracing::warn!(account = %b.name, error = %e, "SVG 转 PNG 失败");
+                                None
+                            }
+                        })
+                        .collect();
+                    if pngs.is_empty() {
+                        tracing::warn!(account = %b.name, "全部页面转 PNG 失败，退回文本推送");
+                        match send_binding(st, b, wx_global.as_ref(), &text).await {
+                            Ok(()) => {
+                                sent_any = true;
+                                crate::store::push_set_last_report_date(st, &b.name, date).await;
+                            }
+                            Err(e2) => {
+                                tracing::warn!(account = %b.name, error = %e2, "每日报告推送失败");
+                                crate::store::push_touch(st, &b.name, &e2.to_string()).await;
+                            }
+                        }
+                    } else {
+                        tracing::info!(account = %b.name, pages = pngs.len(), bytes = pngs.iter().map(|p| p.len()).sum::<usize>(), "推送·每日报告(图片)");
+                        match send_binding_images(st, b, &caption, &pngs).await {
+                            Ok(()) => {
+                                sent_any = true;
+                                crate::store::push_set_last_report_date(st, &b.name, date).await;
+                                tracing::info!(account = %b.name, pages = pngs.len(), "每日报告(图片)已推送");
+                            }
+                            Err(e) => {
+                                tracing::warn!(account = %b.name, error = %e, "每日报告图片推送失败，退回文本");
+                                match send_binding(st, b, wx_global.as_ref(), &text).await {
+                                    Ok(()) => {
+                                        sent_any = true;
+                                        crate::store::push_set_last_report_date(st, &b.name, date).await;
+                                    }
+                                    Err(e2) => {
+                                        tracing::warn!(account = %b.name, error = %e2, "每日报告文本兜底也失败");
+                                        crate::store::push_touch(st, &b.name, &e2.to_string()).await;
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -478,7 +686,9 @@ pub(crate) async fn month_rank_list(
             .iter()
             .map(|r| {
                 (
-                    r.try_get::<i64, _>("person_id").map(|v| v.max(0) as u64).unwrap_or(0),
+                    r.try_get::<i64, _>("person_id")
+                        .map(|v| v.max(0) as u64)
+                        .unwrap_or(0),
                     r.try_get::<String, _>("name").unwrap_or_default(),
                     r.try_get::<i64, _>("wave")
                         .or_else(|_| r.try_get::<i64, _>("wave").map(|v| v as i64))
@@ -519,7 +729,9 @@ pub(crate) async fn daily_rank(st: &AppState, team: &str, date: &str) -> Vec<(u6
             .iter()
             .map(|r| {
                 (
-                    r.try_get::<i64, _>("person_id").map(|v| v.max(0) as u64).unwrap_or(0),
+                    r.try_get::<i64, _>("person_id")
+                        .map(|v| v.max(0) as u64)
+                        .unwrap_or(0),
                     r.try_get::<String, _>("name").unwrap_or_default(),
                     r.try_get::<i64, _>("wave")
                         .or_else(|_| r.try_get::<i64, _>("wave").map(|v| v as i64))
@@ -627,6 +839,33 @@ pub(crate) fn account_waves_sql(person_id: u64, date: &str) -> Option<String> {
  GROUP BY a.id, a.anchor_id, a.douyin_no, a.anchor_name, a.is_primary \
  ORDER BY a.is_primary DESC, a.id ASC"
     ))
+}
+
+/// 解析 star_override（2026-10-12 小红旗条）：`称号|人名|音浪` / `称号|人名` / `称号`。
+/// 返回 (称号, Some((人名, 音浪)))：
+/// - None / 空串（trim 后）→ 默认称号「每日之星」+ 自动名单（当日音浪第一）
+/// - 只有称号 → 换称号，人名/音浪仍走自动名单
+/// - 称号 trim 后为空 → 回落「每日之星」
+fn parse_star_override(
+    ov: Option<&str>,
+    auto: Option<(String, i64)>,
+) -> (String, Option<(String, i64)>) {
+    let (mut title, def) = match ov.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(v) => match v.splitn(3, '|').collect::<Vec<_>>()[..] {
+            [t, n, w] => (
+                t.trim().to_string(),
+                Some((n.trim().to_string(), w.trim().parse().unwrap_or(0))),
+            ),
+            [t, n] => (t.trim().to_string(), Some((n.trim().to_string(), 0))),
+            [t] => (t.trim().to_string(), auto),
+            _ => ("每日之星".to_string(), auto),
+        },
+        None => ("每日之星".to_string(), auto),
+    };
+    if title.is_empty() {
+        title = "每日之星".to_string();
+    }
+    (title, def)
 }
 
 /// 业务日白名单：`YYYY-MM-DD` 且是真实日期（挡住拼进 SQL 的注入与脏数据）
@@ -839,6 +1078,58 @@ mod tests {
             hit: false,
             last_notice_date: String::new(),
         }
+    }
+
+    /// 小红旗条 override 解析：None → 默认称号 + 自动名单（当日音浪第一）
+    #[test]
+    fn star_override_none_uses_auto() {
+        let (title, def) = parse_star_override(None, Some(("狼哲".into(), 42)));
+        assert_eq!(title, "每日之星");
+        assert_eq!(def, Some(("狼哲".to_string(), 42)));
+    }
+
+    /// 「称号|人名|音浪」三段：全手动指定
+    #[test]
+    fn star_override_full() {
+        let (title, def) = parse_star_override(Some("初级争霸赛冠军|狼哲|285917"), Some(("甲".into(), 1)));
+        assert_eq!(title, "初级争霸赛冠军");
+        assert_eq!(def, Some(("狼哲".to_string(), 285917)));
+    }
+
+    /// 「称号|人名」两段：音浪 = 0
+    #[test]
+    fn star_override_two_parts() {
+        let (title, def) = parse_star_override(Some("冠军|狼哲"), Some(("甲".into(), 1)));
+        assert_eq!(title, "冠军");
+        assert_eq!(def, Some(("狼哲".to_string(), 0)));
+    }
+
+    /// 只有称号：换称号，人名/音浪仍走自动名单
+    #[test]
+    fn star_override_title_only_passthrough_auto() {
+        let (title, def) = parse_star_override(Some("冠军"), Some(("狼哲".into(), 99)));
+        assert_eq!(title, "冠军");
+        assert_eq!(def, Some(("狼哲".to_string(), 99)));
+    }
+
+    /// 空串 / 纯空白 / 空称号 → 回落默认称号；音浪段不是数字 → 0
+    #[test]
+    fn star_override_empty_falls_back() {
+        let (title, def) = parse_star_override(Some(""), Some(("狼哲".into(), 7)));
+        assert_eq!(title, "每日之星");
+        assert_eq!(def, Some(("狼哲".to_string(), 7)));
+
+        let (title, _) = parse_star_override(Some("   "), None);
+        assert_eq!(title, "每日之星");
+
+        // 「|狼哲|285917」：称号段 trim 后为空 → 回落「每日之星」
+        let (title, def) = parse_star_override(Some("|狼哲|285917"), None);
+        assert_eq!(title, "每日之星");
+        assert_eq!(def, Some(("狼哲".to_string(), 285917)));
+
+        // 音浪段解析失败 → 0
+        let (_, def) = parse_star_override(Some("冠军|狼哲|abc"), None);
+        assert_eq!(def, Some(("狼哲".to_string(), 0)));
     }
 
     /// 追人：差距 = 对方 - 我，文案要带上双方数值
@@ -1193,7 +1484,7 @@ mod tests {
         assert!(sql.contains("1034"), "{sql}");
         assert!(
             sql.trim_start().starts_with("SELECT"),
-            "要过 mysql 只读守卫"
+            "要过 PostgreSQL 只读守卫"
         );
 
         // 12-31：月/年不能串到下一年

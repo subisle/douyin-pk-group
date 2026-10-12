@@ -22,7 +22,7 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // .env 值里带空格和中文（`主库 · douyinxs`），shell source 和 dotenvy 都处理不了，自己解析。
+    // .env 值里带空格和中文，shell source 和 dotenvy 都处理不了，自己解析。
     // apps/server/.env 随过渡期退役了，现在按顺序找第一个存在的文件：
     // 显式 ENV_FILE / DOTENV_PATH → rust/.env（cargo run 就在 rust/ 下）→ 仓库根 → /app/.env（容器）
     let env_path = std::env::var("ENV_FILE")
@@ -86,7 +86,7 @@ async fn main() -> anyhow::Result<()> {
             false => println!("已应用: {}", applied.join(", ")),
         }
         // 单库化（2026-10-10）：把旧 SQLite 的运行时数据（账号/方案/别名/配置/会话/
-        // 绑定审计）幂等搬进 MySQL；搬过一次（config.sqlite_carried=1）就跳过。
+        // 绑定审计）幂等搬进业务库；搬过一次（config.sqlite_carried=1）就跳过。
         let pool = writer::connect(&ep).await?;
         store::carry_legacy_sqlite(&pool, &config::sqlite_path()).await?;
         return Ok(());
@@ -128,6 +128,11 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    /* Redis 缓存 / 锁池（P0，docs/17 §7.3）。未配置 REDIS_URL = 全内存模式（不告警）；
+    配了但连不上只 warn，不阻断启动 —— 与上面写池失败的处理风格一致。
+    真连不上时由 /api/health 报 redis:"down"，各调用点静默回落内存 + 直查 PG。 */
+    let redis_pool = store::cache::init_pool();
+
     /* MIGRATE_ON_BOOT=true 时启动即迁移（默认关闭，需要 douyin_migrator 账号） */
     if config::migrate_on_boot() {
         match config::load_migrator() {
@@ -148,11 +153,36 @@ async fn main() -> anyhow::Result<()> {
         sources,
         pools,
         writer: writer_pool,
+        redis: redis_pool,
         active: Mutex::new(active),
         cache: Mutex::new(Default::default()),
         bots: std::sync::OnceLock::new(),
         wb: std::sync::OnceLock::new(),
     });
+    /* Redis 30s PING 探针（P0）：刷新 store::cache 内部的降级标志，断开/恢复各留一条日志。
+    未配置 REDIS_URL 时不启动；探针只做「刷新 + 记录」，不参与任何业务判断。 */
+    if st.redis.is_some() {
+        let probe_st = st.clone();
+        tokio::spawn(async move {
+            let token = push::shutdown_token();
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            tick.tick().await; // 首拍立即返回：吃掉它，首探放到 30s 后
+            loop {
+                tokio::select! {
+                    _ = token.cancelled() => break,
+                    _ = tick.tick() => {
+                        let s = store::cache::status(&probe_st).await;
+                        tracing::debug!(
+                            redis = s,
+                            degraded = store::cache::degraded(),
+                            "Redis 探针"
+                        );
+                    }
+                }
+            }
+        });
+    }
     /* WorkBuddy 网关（注册用「添加账号 OAuth」）：配了 WORKBUDDY_PANEL_PASSWORD 才有；
     没配只打一条提示，注册页自动隐藏 OAuth 步骤。 */
     match wbgateway::WbGateway::from_env() {
