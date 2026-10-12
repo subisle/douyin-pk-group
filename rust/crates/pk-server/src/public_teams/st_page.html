@@ -784,6 +784,11 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
   background:#fff; font-size:15px; font-weight:700; color:#0B1C30;
   display:flex; flex-direction:column; align-items:center; justify-content:center; gap:8px; }
 .team-pick .pick-btn:active { transform:scale(.97); background:#F2F4F7; }
+.st-my-subbar { display:flex; align-items:center; gap:8px; padding:10px 12px 0; }
+.st-my-subbar .st-my-back { display:flex; align-items:center; gap:2px; border:none; background:none;
+  color:var(--primary,#007AFF); font-size:14px; padding:4px 6px; border-radius:8px; }
+.st-my-subbar .st-my-back:active { background:#f0f2f7; }
+.st-my-subbar .t { font-weight:800; font-size:16px; }
 .team-pick .pick-av { width:40px; height:40px; border-radius:9999px; color:#fff; font-size:17px;
   font-weight:800; display:grid; place-items:center; }
 #wm { position:fixed; inset:0; z-index:70; pointer-events:none; background-repeat:repeat; }
@@ -1209,6 +1214,9 @@ let site = null;         // 站点配置（含后台级显隐开关）
 let period = 'daily';    // daily | monthly | yearly
 let view = 'data';       // data | group | lineage | my
 let curGroup = GROUP_PAGES[0].key;  // 分组子页当前 key
+/* 「我的」子页（2026-10-13）：bind/push/chase/privacy/about。/my 是列表首页，
+   点列表行进子页（下一页式，带返回），路由 /my/<sub> 可直达可分享。 */
+let mySub = null;
 let curDate = null;      // 每日口径当前日期
 let curPeriod = null;    // 月/年口径当前周期
 let plans = [];          // 已上架分组方案（各类型独立互斥，每类型最多一场）
@@ -1234,6 +1242,8 @@ function parseRoute() {
   if (rest === '' || rest === 'report') return { view: 'data' };
   if (rest === 'lineage') return { view: 'lineage' };
   if (rest === 'my') return { view: 'my' };
+  const mym = rest.match(/^my\/(bind|push|chase|privacy|about)$/);
+  if (mym) return { view: 'my', mySub: mym[1] };
   const gm = rest.match(/^group\/([a-z-]+)$/);
   if (gm && GROUP_PAGES.some(p => p.key === gm[1])) return { view: 'group', group: gm[1] };
   return { view: 'data' };
@@ -1241,7 +1251,7 @@ function parseRoute() {
 /** 当前视图对应的规范路径（根路径 + 子页路径；男女共用一个网址，团别不进 URL） */
 function routePath() {
   if (view === 'lineage') return '/lineage';
-  if (view === 'my') return '/my';
+  if (view === 'my') return mySub ? '/my/' + mySub : '/my';
   if (view === 'group') return '/group/' + curGroup;
   return '/report';
 }
@@ -3250,10 +3260,10 @@ function renderMy(d, series, claim, bound, push, accounts) {
       '<div class="l"><div class="ico"><span class="material-symbols-outlined">lock_reset</span></div>' +
       '<div class="t">忘记密码 / 重置密码</div></div>' +
       '<div class="r"><span class="material-symbols-outlined">chevron_right</span></div></div>' +
-      '<div class="st-my-item"><div class="l"><div class="ico"><span class="material-symbols-outlined">visibility</span></div>' +
+      '<div class="st-my-item" id="myPrivacy" style="cursor:pointer"><div class="l"><div class="ico"><span class="material-symbols-outlined">visibility</span></div>' +
       '<div class="t">隐私与对外展示字段</div></div>' +
       '<div class="r"><span class="material-symbols-outlined">chevron_right</span></div></div>' +
-      '<div class="st-my-item"><div class="l"><div class="ico"><span class="material-symbols-outlined">info</span></div>' +
+      '<div class="st-my-item" id="myAbout" style="cursor:pointer"><div class="l"><div class="ico"><span class="material-symbols-outlined">info</span></div>' +
       '<div class="t">关于系统与内部版本</div></div>' +
       '<div class="r"><span>v7.10-FINAL</span></div></div>' +
     '</div>' +
@@ -3309,11 +3319,18 @@ function renderMy(d, series, claim, bound, push, accounts) {
     };
     attempt();
   };
-  $('myBindRow').onclick = () => scrollToCard('myClaimCard');
-  $('myPushRow').onclick = () => scrollToCard('myPushCard');
-  $('myChaseRow').onclick = () => scrollToCard('myPushCard');
+  /* 列表行 → 子页（2026-10-13 用户口径）：下一页式（/my/<sub>，带返回按钮），
+     不再是页内滚动。内容由 renderMySub 从本页已加载的数据就地组装。 */
+  $('myPrivacy').onclick = () => { mySub = 'privacy'; pushRoute(); renderMySub(); };
+  $('myAbout').onclick = () => { mySub = 'about'; pushRoute(); renderMySub(); };
+  $('myBindRow').onclick = () => { mySub = 'bind'; pushRoute(); renderMySub(); };
+  $('myPushRow').onclick = () => { mySub = 'push'; pushRoute(); renderMySub(); };
+  $('myChaseRow').onclick = () => { mySub = 'chase'; pushRoute(); renderMySub(); };
   bindClaimCard(claim);
   renderPushBox(push);
+  /* 深链 /my/<sub> 直接落到子页；/my 停在列表首页 */
+  if (mySub) renderMySub();
+  else history.replaceState(null, '', '/my');
   /* 兜底卡的重试按钮：重新拉一次 /my/push，成功就换成正常内容 */
   const retry = $('pushRetry');
   if (retry) {
@@ -3329,6 +3346,90 @@ function renderMy(d, series, claim, bound, push, accounts) {
       }
     };
   }
+}
+
+/* ==================== 「我的」子页（2026-10-13 下一页式路由） ==================== */
+/* 子页清单：id 元素映射 —— 列表首页的一行 ↔ 子页里要显示的那张卡 */
+const MY_SUB_CARDS = {
+  bind:    { title: '抖音号绑定与审计', card: 'myClaimCard' },
+  push:    { title: '推送机器人服务',   card: 'myPushCard' },
+  chase:   { title: '追分设置',         card: 'myPushCard' },
+};
+const MY_SUB_INFO = {
+  privacy: { title: '隐私与对外展示字段', icon: 'visibility' },
+  about:   { title: '关于系统与内部版本', icon: 'info' },
+};
+
+/* 进入 /my/<mySub>：整页只留「返回栏 + 目标内容」，回列表用返回按钮/浏览器返回。 */
+function renderMySub() {
+  const view = $('view');
+  if (!view || view !== $('view')) { /* noop */ }
+  if (!mySub) { showMyHome(); return; }
+  const sub = mySub;
+  const v = $('view');
+  /* 直接子节点按块分组：保留目标卡，其余全部隐藏 */
+  const keep = [];
+  if (MY_SUB_CARDS[sub]) keep.push(MY_SUB_CARDS[sub].card);
+  /* 遍历 view 的块级孩子，把不属于目标卡的都藏起来 */
+  Array.from(v.children).forEach((el) => {
+    if (keep.includes(el.id)) { el.hidden = false; return; }
+    /* 返回栏跳过（重复进入时只保留一个） */
+    if (el.id === 'mySubBar') return;
+    el.hidden = true;
+  });
+  /* 顶部返回栏 */
+  const meta = MY_SUB_CARDS[sub] || MY_SUB_INFO[sub];
+  let bar = $('mySubBar');
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.id = 'mySubBar';
+    bar.className = 'st-my-subbar';
+    v.insertBefore(bar, v.firstChild);
+  } else if (bar.parentElement !== v) {
+    v.insertBefore(bar, v.firstChild);
+  }
+  bar.hidden = false;
+  bar.innerHTML = '<button class="st-my-back" id="mySubBack">' +
+    '<span class="material-symbols-outlined">arrow_back</span>返回</button>' +
+    '<div class="t">' + esc(meta.title) + '</div>';
+  $('mySubBack').onclick = () => {
+    mySub = null;
+    history.pushState(null, '', '/my');
+    showMyHome();
+  };
+  /* 无卡片的信息型子页（隐私/关于）：就地渲染内容卡 */
+  if (MY_SUB_INFO[sub] && !MY_SUB_CARDS[sub]) {
+    let card = $('myInfoCard');
+    if (!card) {
+      card = document.createElement('div');
+      card.id = 'myInfoCard';
+      card.className = 'st-my-list';
+      v.appendChild(card);
+    }
+    card.hidden = false;
+    card.innerHTML = '<div class="sec">' + esc(meta.title) + '</div><div style="padding:0 1rem 1rem">' +
+      (sub === 'privacy'
+        ? '<div class="sub" style="line-height:1.8">对外展示口径：榜单与分组里只显示主播<b>艺名</b>；' +
+          '手机号仅用于登录与微信推送，不在任何页面公开展示。推送图上的水印只压收件人艺名，' +
+          '用于数据溯源。绑定审计提交的抖音号截图仅管理员可见。</div>'
+        : '<div class="sub" style="line-height:1.8">主播数据日报 · 内部系统 v7.10-FINAL。<br>' +
+          '数据每晚 24:00 后入库前一天；推送图带收件人专属隐形水印（可溯源）。' +
+          '遇到问题请在「我的」页联系运营帅帅。</div>') +
+      '</div>';
+  }
+  /* 滚回顶部（进子页的第一屏） */
+  window.scrollTo({ top: 0 });
+}
+
+/* 回「我的」列表首页：恢复所有被隐藏的块 */
+function showMyHome() {
+  const v = $('view');
+  if (!v) return;
+  const bar = $('mySubBar');
+  if (bar) bar.hidden = true;
+  const info = $('myInfoCard');
+  if (info) info.hidden = true;
+  Array.from(v.children).forEach((el) => { el.hidden = false; });
 }
 
 /* ==================== 绑定抖音号（提交 + 截图 → 管理端审计） ==================== */
@@ -4393,6 +4494,14 @@ async function bootRest() {
   window.addEventListener('popstate', () => {
     const r = parseRoute();
     if (r.view === 'group' && r.group) curGroup = r.group;
+    /* 「我的」子页进出（浏览器返回键 / 子页内返回按钮共用） */
+    if (r.view === 'my') {
+      const next = r.mySub || null;
+      if (view === 'my') { mySub = next; renderMySub(); return; }
+      mySub = next;
+    } else if (view === 'my') {
+      mySub = null;
+    }
     switchView(r.view, { push: false });
   });
   document.querySelectorAll('#seg button').forEach(b => b.onclick = () => setPeriod(b.dataset.p));
@@ -4496,6 +4605,8 @@ async function bootRest() {
      按子路径落到对应视图，分享/刷新都不丢。深链指到被后台关掉的页时改道到首页兜底。 */
   const r0 = parseRoute();
   if (r0.view === 'group' && r0.group) curGroup = r0.group;
+  /* 「我的」子页深链：/my/bind 等 → 全局 mySub，loadMy 渲染完按它落子页 */
+  if (r0.view === 'my' && r0.mySub) mySub = r0.mySub;
   view = firstOn(r0.view, fallbackView);
   if (view === 'group' && r0.view === 'group' && r0.group) {
     const sub = document.querySelector('#subnav button[data-g="' + r0.group + '"]');
