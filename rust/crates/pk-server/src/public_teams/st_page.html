@@ -65,6 +65,8 @@
 body { margin:0; background:var(--canvas-bg); color:var(--on-surface);
   font:14px/1.5 -apple-system,BlinkMacSystemFont,'SF Pro Text','PingFang SC','Hiragino Sans GB',sans-serif; }
 button { font:inherit; cursor:pointer; }
+/* hidden 属性必须赢过任何 display 规则（新版 UI 大量 flex/grid 布局会覆盖它） */
+[hidden] { display:none !important; }
 .hidden { display:none !important; }
 
 /* ===== Masthead（Cupertino 毛玻璃浅色头部） ===== */
@@ -3328,9 +3330,13 @@ function renderMy(d, series, claim, bound, push, accounts) {
   $('myChaseRow').onclick = () => { mySub = 'chase'; pushRoute(); renderMySub(); };
   bindClaimCard(claim);
   renderPushBox(push);
-  /* 深链 /my/<sub> 直接落到子页；/my 停在列表首页 */
-  if (mySub) renderMySub();
-  else history.replaceState(null, '', '/my');
+  /* 深链 /my/<sub> 直接落到子页；/my 停在列表首页。
+     首页只显示：头部/数据卡/服务列表/运营卡——绑定表单、推送设置等重卡只在子页出现。 */
+  if (mySub) { renderMySub(); }
+  else {
+    history.replaceState(null, '', '/my');
+    ['myClaimCard', 'myPushCard'].forEach((id) => { const el = $(id); if (el) el.hidden = true; });
+  }
   /* 兜底卡的重试按钮：重新拉一次 /my/push，成功就换成正常内容 */
   const retry = $('pushRetry');
   if (retry) {
@@ -3371,12 +3377,15 @@ function renderMySub() {
   const keep = [];
   if (MY_SUB_CARDS[sub]) keep.push(MY_SUB_CARDS[sub].card);
   /* 遍历 view 的块级孩子，把不属于目标卡的都藏起来 */
-  Array.from(v.children).forEach((el) => {
-    if (keep.includes(el.id)) { el.hidden = false; return; }
-    /* 返回栏跳过（重复进入时只保留一个） */
-    if (el.id === 'mySubBar') return;
-    el.hidden = true;
-  });
+  /* .section 内逐块控制：首页块（概览/数据大卡/趋势/账号/服务列表/运营卡）藏，
+     目标卡（myClaimCard / myPushCard）显。 */
+  const sec = v.querySelector('.section');
+  if (sec) {
+    Array.from(sec.children).forEach((blk) => {
+      if (keep.includes(blk.id)) { blk.hidden = false; return; }
+      blk.hidden = true;
+    });
+  }
   /* 顶部返回栏 */
   const meta = MY_SUB_CARDS[sub] || MY_SUB_INFO[sub];
   let bar = $('mySubBar');
@@ -3421,7 +3430,7 @@ function renderMySub() {
   window.scrollTo({ top: 0 });
 }
 
-/* 回「我的」列表首页：恢复所有被隐藏的块 */
+/* 回「我的」列表首页：恢复所有块，再把只在子页出现的重卡藏起来 */
 function showMyHome() {
   const v = $('view');
   if (!v) return;
@@ -3429,7 +3438,9 @@ function showMyHome() {
   if (bar) bar.hidden = true;
   const info = $('myInfoCard');
   if (info) info.hidden = true;
-  Array.from(v.children).forEach((el) => { el.hidden = false; });
+  const sec = v.querySelector('.section');
+  if (sec) Array.from(sec.children).forEach((blk) => { blk.hidden = false; });
+  ['myClaimCard', 'myPushCard'].forEach((id) => { const el = $(id); if (el) el.hidden = true; });
 }
 
 /* ==================== 绑定抖音号（提交 + 截图 → 管理端审计） ==================== */
@@ -3460,7 +3471,7 @@ function claimCard(claim, bound) {
   return '<div class="st-my-list" id="myClaimCard"><div class="sec">绑定抖音号与审计</div>' +
     '<div style="padding:0 1rem 1rem">' + boundRows + status + form +
     '<div class="sub" style="margin-top:8px;line-height:1.6">音浪按抖音号对号入座：绑定并通过审计后，' +
-    '之后导入的数据里这个抖音号的音浪都会算到你名下。信息只给管理员审计用。</div></div>';
+    '之后导入的数据里这个抖音号的音浪都会算到你名下。信息只给管理员审计用。</div></div></div>';
 }
 
 /* 压缩截图：最长边 1280、JPEG 0.82，一般 100~300KB，审计够看 */
