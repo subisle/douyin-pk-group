@@ -280,6 +280,14 @@ impl Auth {
         }
     }
 
+    /// 展示端登录门（/api/public/my/login）专用：账号、密码两个字段填同一个
+    /// 管理员口令时，允许以「管理员观看账号」身份进展示页。口令读自运行时
+    /// 配置（ADMIN_PASSWORD 启动时哈希驻留内存），改 .env 后重启即生效。
+    /// 未配置口令 → 一律 false（fail-closed）。
+    pub(crate) fn verify_admin_password(&self, input: &str) -> bool {
+        self.check_password(input)
+    }
+
     pub fn issue(&self) -> String {
         let token = random_token();
         let mut map = self.tokens.lock().expect("token 锁 poisoned");
