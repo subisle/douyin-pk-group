@@ -491,6 +491,30 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .st-my-rank .bar { margin-top:.375rem; height:.375rem; border-radius:9999px;
   background:var(--surface-container-highest); overflow:hidden; }
 .st-my-rank .bar i { display:block; height:100%; border-radius:9999px; background:var(--primary); }
+/* ===== Stitch 音浪对比卡（2026-10-13）：三段同期对照 + 分成收益行 ===== */
+.st-my-big .st-cmp-row { display:flex; align-items:baseline; gap:.375rem;
+  padding:.4375rem 0; border-bottom:1px solid var(--hairline);
+  font-variant-numeric:tabular-nums; }
+.st-my-big .st-cmp-row:last-of-type { border-bottom:none; }
+.st-my-big .st-cmp-row .material-symbols-outlined { font-size:16px; color:var(--primary);
+  align-self:center; }
+.st-my-big .st-cmp-row .cl { font-size:13px; color:var(--on-surface-variant); flex:none; }
+.st-my-big .st-cmp-row .cv { font-size:16px; font-weight:700; color:var(--on-surface);
+  margin-left:auto; }
+.st-my-big .st-cmp-row .cv .pv { font-size:12px; font-weight:500; }
+.st-my-big .st-cmp-row .st-cmp-pct { font-size:12px; font-weight:700; color:var(--tertiary); }
+.st-my-big .st-cmp-row .cp { font-size:11px; color:var(--outline); flex:none; }
+/* 分成收益行：图标 + 标签 + 分成 tag 左，金额右（设计稿 monetization_on 行） */
+.st-my-big .st-cmp-rmb { display:flex; align-items:center; justify-content:space-between;
+  margin-top:.625rem; background:var(--surface-container-low); border-radius:.5rem;
+  padding:.5rem .625rem; }
+.st-my-big .st-cmp-rmb .l { display:flex; align-items:center; gap:.25rem;
+  font-size:12.5px; color:var(--on-surface-variant); }
+.st-my-big .st-cmp-rmb .l .material-symbols-outlined { font-size:16px; color:var(--tertiary); }
+.st-my-big .st-cmp-rmb .l .pct-tag { padding:.0625rem .375rem; border-radius:.25rem;
+  background:rgba(0,88,188,.08); color:var(--primary); font-size:11px; font-weight:700; }
+.st-my-big .st-cmp-rmb .v { font-size:17px; font-weight:700; color:var(--tertiary);
+  font-variant-numeric:tabular-nums; }
 .st-my-card { background:var(--surface-container-lowest); border-radius:.75rem; padding:1rem;
   box-shadow:0 1px 3px rgba(0,0,0,.06); margin-top:.75rem; display:flex; align-items:center;
   justify-content:space-between; }
@@ -3287,22 +3311,36 @@ function renderMy(d, series, claim, bound, push, accounts) {
 
   const m = d.monthly || {};
   const t = d.total || {};
-  const monthlyWave = m.wave == null ? '—' : wan(m.wave);
+  const y = d.yearly || {};
+  const dd = d.daily || {};
   const monthlyYuan = m.yuan == null ? (m.wave == null ? '—' : yuan(m.wave / 10)) : yuan(m.yuan);
-  const pct = m.wave != null && m.prevWave > 0
-    ? Math.round((m.wave - m.prevWave) / m.prevWave * 1000) / 10 : null;
   /* 排名只显示自己（2026-10-12）：不读 teamSize / rankGap，后端字段半改状态也不闪旧文案 */
   const rankLeft = d.teamRank > 0
     ? '战队排名：第 ' + d.teamRank + ' 名'
     : '战队排名：暂未上榜';
+  /* Stitch 版音浪对比卡（2026-10-13）：今日/本月/本年 三段同期对照。
+     daily.prevWave=上一业务日、monthly.prevWave=上月同期、yearly.prevWave=去年同期，
+     数据 /my 全有（minutes.rs 同期对照字段）。涨红跌绿沿用 waveDelta。 */
+  const cmpRow = (icon, label, o, prevLabel) => {
+    if (!o || o.wave == null) return '';
+    const delta = (o.prevWave == null || o.prevWave === 0) ? ''
+      : ' <span class="pv">' + waveDelta(o.wave, o.prevWave) + '</span>';
+    const pctTag = (o.prevWave != null && o.prevWave > 0)
+      ? '<span class="st-cmp-pct">' + (o.wave >= o.prevWave ? '+' : '') +
+        Math.round((o.wave - o.prevWave) / o.prevWave * 1000) / 10 + '%</span>' : '';
+    return '<div class="st-cmp-row"><span class="material-symbols-outlined">' + icon + '</span>' +
+      '<span class="cl">' + label + '</span>' +
+      '<span class="cv">' + wan(o.wave) + delta + '</span>' + pctTag +
+      '<span class="cp">' + prevLabel + '</span></div>';
+  };
   const big = '<div class="st-my-big">' +
-    '<div class="lbl"><span>本月累计个人音浪</span>' +
-    (pct == null ? '' : '<span class="chip"><span class="material-symbols-outlined">' +
-      (pct >= 0 ? 'trending_up' : 'trending_down') + '</span>' +
-      (pct >= 0 ? '+' : '') + pct + '% 环比</span>') + '</div>' +
-    '<div class="num">' + monthlyWave + '</div>' +
-    '<div class="row"><span>预估折合收益</span><span class="rmb">' + monthlyYuan + '</span>' +
-    '<span class="tail">' + esc(d.date || '') + (offToday ? ' · 未开播' : '') + '</span></div>' +
+    '<div class="lbl"><span>音浪对比</span><span class="chip">口径: 抖音直连</span></div>' +
+    cmpRow('today', '今日音浪', dd, 'vs上一日') +
+    cmpRow('calendar_month', '本月音浪', m, 'vs上月同期') +
+    cmpRow('functions', '本年累计', y, 'vs去年同期') +
+    '<div class="st-cmp-rmb"><div class="l"><span class="material-symbols-outlined">monetization_on</span>' +
+      '<span>本月预估折合收益</span><span class="pct-tag">35%分成</span></div>' +
+      '<div class="v">' + monthlyYuan + '</div></div>' +
     '<div class="st-my-rank">' +
       '<div class="l1"><span class="a"><span class="material-symbols-outlined">military_tech</span>' +
       esc(rankLeft) + '</span></div>' +
