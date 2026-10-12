@@ -41,13 +41,13 @@ pub async fn push_job_enqueue(st: &AppState, team: &str, biz_date: &str, run_at:
 /// 取一条到点的 pending 任务并立刻标成 running（抢占，多实例也只推一次）
 pub async fn push_job_take(st: &AppState, now: &str) -> Option<(i64, String, String)> {
     let pool = w(st).ok()?;
-    let row = sqlx::query(
+    let row = sqlx::query(&crate::pq::rewrite(
         "SELECT id, team, biz_date FROM push_jobs
          WHERE (status = 'pending' AND run_at <= ?)
             OR (status = 'running' AND done_at = '' AND run_at <= ?
                 AND created_at <> '' AND created_at < ?::timestamptz - INTERVAL '5 minutes')
          ORDER BY run_at LIMIT 1",
-    )
+    ))
     .bind(now)
     .bind(now)
     .bind(now)
@@ -81,10 +81,10 @@ pub async fn push_job_list(st: &AppState, limit: i64) -> Vec<serde_json::Value> 
     let Ok(pool) = w(st) else {
         return Vec::new();
     };
-    match sqlx::query(
+    match sqlx::query(&crate::pq::rewrite(
         "SELECT id, team, biz_date, run_at, status, created_at, done_at, note
          FROM push_jobs ORDER BY id DESC LIMIT ?",
-    )
+    ))
     .bind(limit)
     .fetch_all(pool)
     .await
@@ -116,17 +116,18 @@ pub async fn push_stats(st: &AppState) -> serde_json::Value {
     let Ok(pool) = w(st) else {
         return serde_json::json!({ "bound": 0, "enabled": 0 });
     };
-    let bound: i64 =
-        sqlx::query("SELECT COUNT(*) AS n FROM push_bindings WHERE conversation_id <> ''")
-            .fetch_one(pool)
-            .await
-            .ok()
-            .and_then(|r| r.try_get::<i64, _>("n").ok())
-            .unwrap_or(0);
-    let enabled: i64 = sqlx::query(
+    let bound: i64 = sqlx::query(&crate::pq::rewrite(
+        "SELECT COUNT(*) AS n FROM push_bindings WHERE conversation_id <> ''",
+    ))
+    .fetch_one(pool)
+    .await
+    .ok()
+    .and_then(|r| r.try_get::<i64, _>("n").ok())
+    .unwrap_or(0);
+    let enabled: i64 = sqlx::query(&crate::pq::rewrite(
         "SELECT COUNT(*) AS n FROM push_bindings \
          WHERE conversation_id <> '' AND (notify_target = 1 OR daily_report = 1)",
-    )
+    ))
     .fetch_one(pool)
     .await
     .ok()
@@ -138,13 +139,15 @@ pub async fn push_stats(st: &AppState) -> serde_json::Value {
 /// 任务结束（成功 / 失败都记一笔，失败原因写 note 供后台查看）
 pub async fn push_job_finish(st: &AppState, id: i64, ok: bool, note: &str) {
     if let Ok(pool) = w(st) {
-        let _ = sqlx::query(&crate::pq::rewrite("UPDATE push_jobs SET status = ?, done_at = ?, note = ? WHERE id = ?"))
-            .bind(if ok { "done" } else { "failed" })
-            .bind(now_str())
-            .bind(note.chars().take(200).collect::<String>())
-            .bind(id)
-            .execute(pool)
-            .await;
+        let _ = sqlx::query(&crate::pq::rewrite(
+            "UPDATE push_jobs SET status = ?, done_at = ?, note = ? WHERE id = ?",
+        ))
+        .bind(if ok { "done" } else { "failed" })
+        .bind(now_str())
+        .bind(note.chars().take(200).collect::<String>())
+        .bind(id)
+        .execute(pool)
+        .await;
     }
 }
 
@@ -155,10 +158,10 @@ pub async fn targets_list(st: &AppState, name: &str) -> Vec<serde_json::Value> {
     let Ok(pool) = w(st) else {
         return Vec::new();
     };
-    match sqlx::query(
+    match sqlx::query(&crate::pq::rewrite(
         "SELECT id, kind, target_person_id, target_name, target_value, hit, last_gap, created_at
          FROM my_targets WHERE name = ? ORDER BY id",
-    )
+    ))
     .bind(name.trim())
     .fetch_all(pool)
     .await
@@ -190,13 +193,15 @@ pub async fn target_count(st: &AppState, name: &str) -> i64 {
     let Ok(pool) = w(st) else {
         return 0;
     };
-    sqlx::query(&crate::pq::rewrite("SELECT COUNT(*) AS n FROM my_targets WHERE name = ?"))
-        .bind(name.trim())
-        .fetch_one(pool)
-        .await
-        .ok()
-        .and_then(|r| r.try_get::<i64, _>("n").ok())
-        .unwrap_or(0)
+    sqlx::query(&crate::pq::rewrite(
+        "SELECT COUNT(*) AS n FROM my_targets WHERE name = ?",
+    ))
+    .bind(name.trim())
+    .fetch_one(pool)
+    .await
+    .ok()
+    .and_then(|r| r.try_get::<i64, _>("n").ok())
+    .unwrap_or(0)
 }
 
 /// 目标行（推送引擎用的最小集合）
@@ -215,10 +220,10 @@ pub async fn targets_for_push(st: &AppState, name: &str) -> Vec<PushTarget> {
     let Ok(pool) = w(st) else {
         return Vec::new();
     };
-    match sqlx::query(
+    match sqlx::query(&crate::pq::rewrite(
         "SELECT id, kind, target_person_id, target_name, target_value, hit, last_notice_date
          FROM my_targets WHERE name = ? ORDER BY id",
-    )
+    ))
     .bind(name.trim())
     .fetch_all(pool)
     .await
@@ -228,7 +233,10 @@ pub async fn targets_for_push(st: &AppState, name: &str) -> Vec<PushTarget> {
             .map(|r| PushTarget {
                 id: r.try_get::<i64, _>("id").unwrap_or(0),
                 kind: r.try_get::<String, _>("kind").unwrap_or_default(),
-                target_person_id: r.try_get::<i64, _>("target_person_id").map(|v| v.max(0) as u64).unwrap_or(0),
+                target_person_id: r
+                    .try_get::<i64, _>("target_person_id")
+                    .map(|v| v.max(0) as u64)
+                    .unwrap_or(0),
                 target_name: r.try_get::<String, _>("target_name").unwrap_or_default(),
                 target_value: r.try_get::<i64, _>("target_value").unwrap_or(0),
                 hit: r.try_get::<i16, _>("hit").unwrap_or(0) == 1,
@@ -285,9 +293,9 @@ pub async fn target_delete(st: &AppState, name: &str, id: i64) -> bool {
 /// 推送后回写目标状态（是否已追上 / 上次差距 / 上次提醒的业务日）
 pub async fn target_set_state(st: &AppState, id: i64, hit: bool, gap: i64, notice_date: &str) {
     if let Ok(pool) = w(st) {
-        let _ = sqlx::query(
+        let _ = sqlx::query(&crate::pq::rewrite(
             "UPDATE my_targets SET hit = ?, last_gap = ?, last_notice_date = ? WHERE id = ?",
-        )
+        ))
         .bind(if hit { 1i16 } else { 0i16 })
         .bind(gap)
         .bind(notice_date)

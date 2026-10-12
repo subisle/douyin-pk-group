@@ -22,17 +22,16 @@ pub struct PushBinding {
     pub daily_report: bool,
 }
 
-
 /// 展示端「我的」页看到的推送状态（不含会话 id 等内部字段）
 pub async fn push_state(st: &AppState, name: &str) -> serde_json::Value {
     let Some(pool) = w(st).ok() else {
         return serde_json::json!({ "bound": false, "code": "", "codeExpires": "" });
     };
-    let row = sqlx::query(
+    let row = sqlx::query(&crate::pq::rewrite(
         "SELECT conversation_id, nickname, bind_code, code_expires, bound_at,
                 notify_target, daily_report, last_push, last_error
          FROM push_bindings WHERE name = ?",
-    )
+    ))
     .bind(name.trim())
     .fetch_optional(pool)
     .await
@@ -73,13 +72,13 @@ pub async fn push_set_code(
     let expires = (chrono::Local::now() + chrono::Duration::minutes(30))
         .format("%Y-%m-%d %H:%M:%S")
         .to_string();
-    sqlx::query(
+    sqlx::query(&crate::pq::rewrite(
         "INSERT INTO push_bindings (name, team, person_id, bind_code, code_expires, updated_at)
          VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT (name) DO UPDATE SET team = EXCLUDED.team, person_id = EXCLUDED.person_id,
            bind_code = EXCLUDED.bind_code, code_expires = EXCLUDED.code_expires,
            updated_at = EXCLUDED.updated_at",
-    )
+    ))
     .bind(name.trim())
     .bind(team)
     .bind(person_id as i64)
@@ -104,9 +103,9 @@ pub async fn push_bind_by_code(
     if code.is_empty() {
         return None;
     }
-    let row = sqlx::query(
+    let row = sqlx::query(&crate::pq::rewrite(
         "SELECT name, team, code_expires FROM push_bindings WHERE bind_code = ? AND bind_code <> ''",
-    )
+    ))
     .bind(&code)
     .fetch_optional(pool)
     .await
@@ -126,21 +125,21 @@ pub async fn push_bind_by_code(
     // 会话抢占（2026-10-10 审计补）：绑定码路径与手机号路径口径一致——
     // 同一个微信会话只挂一个账号，先把占着这个会话的其它绑定清掉，
     // 否则换号 / 误发码会让两个账号同时往一个微信号推。
-    let _ = sqlx::query(
+    let _ = sqlx::query(&crate::pq::rewrite(
         "UPDATE push_bindings SET conversation_id = '', to_user_id = '', bound_at = '',
            bind_code = '', code_expires = '', updated_at = ?
          WHERE conversation_id = ? AND name <> ?",
-    )
+    ))
     .bind(now_str())
     .bind(conversation_id)
     .bind(&name)
     .execute(pool)
     .await;
-    let res = sqlx::query(
+    let res = sqlx::query(&crate::pq::rewrite(
         "UPDATE push_bindings SET conversation_id = ?, to_user_id = ?, nickname = ?,
            bind_code = '', code_expires = '', bound_at = ?, last_error = '', updated_at = ?
          WHERE name = ?",
-    )
+    ))
     .bind(conversation_id)
     .bind(to_user_id)
     .bind("")
@@ -184,27 +183,31 @@ pub async fn push_unbind(st: &AppState, name: &str) -> bool {
 /// 按微信会话解绑（机器人里回复「解绑」）：返回被解绑的账号姓名
 pub async fn push_unbind_by_conversation(st: &AppState, conversation_id: &str) -> Option<String> {
     let pool = w(st).ok()?;
-    let row = sqlx::query(&crate::pq::rewrite("SELECT name FROM push_bindings WHERE conversation_id = ?"))
-        .bind(conversation_id)
-        .fetch_optional(pool)
-        .await
-        .ok()
-        .flatten()?;
+    let row = sqlx::query(&crate::pq::rewrite(
+        "SELECT name FROM push_bindings WHERE conversation_id = ?",
+    ))
+    .bind(conversation_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()?;
     let name: String = row.try_get::<String, _>("name").ok()?;
-    let _ = sqlx::query(
+    let _ = sqlx::query(&crate::pq::rewrite(
         "UPDATE push_bindings SET conversation_id = '', to_user_id = '', bound_at = '',
            bind_code = '', code_expires = '', updated_at = ? WHERE name = ?",
-    )
+    ))
     .bind(now_str())
     .bind(&name)
     .execute(pool)
     .await;
     // 顺带清掉这个会话的 iLink 上下文（2026-10-10 审计）：context_token 留着无害
     // 但会积累脏数据；删掉后换人重绑时由新入站消息重建。
-    let _ = sqlx::query(&crate::pq::rewrite("DELETE FROM wx_sessions WHERE conversation_id = ?"))
-        .bind(conversation_id)
-        .execute(pool)
-        .await;
+    let _ = sqlx::query(&crate::pq::rewrite(
+        "DELETE FROM wx_sessions WHERE conversation_id = ?",
+    ))
+    .bind(conversation_id)
+    .execute(pool)
+    .await;
     Some(name)
 }
 
@@ -233,21 +236,24 @@ pub async fn push_set_daily_report(st: &AppState, name: &str, on: bool) -> bool 
         return false;
     };
     let name = name.trim();
-    let changed =
-        sqlx::query(&crate::pq::rewrite("UPDATE push_bindings SET daily_report = ?, updated_at = ? WHERE name = ?"))
-            .bind(if on { 1i16 } else { 0i16 })
-            .bind(now_str())
-            .bind(name)
-            .execute(pool)
-            .await
-            .map(|r| r.affected() > 0)
-            .unwrap_or(false);
+    let changed = sqlx::query(&crate::pq::rewrite(
+        "UPDATE push_bindings SET daily_report = ?, updated_at = ? WHERE name = ?",
+    ))
+    .bind(if on { 1i16 } else { 0i16 })
+    .bind(now_str())
+    .bind(name)
+    .execute(pool)
+    .await
+    .map(|r| r.affected() > 0)
+    .unwrap_or(false);
     if changed {
         return true;
     }
-    // 值没变时 MySQL 的 affected rows = 0（同一秒内重复发同一条命令），
+    // 值没变时 SQL 执行的 affected rows = 0（同一秒内重复发同一条命令），
     // 不是失败：确认这行还在就按幂等成功回执。
-    sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM push_bindings WHERE name = ?")
+    sqlx::query_scalar::<_, i64>(&crate::pq::rewrite(
+        "SELECT COUNT(*) FROM push_bindings WHERE name = ?",
+    ))
         .bind(name)
         .fetch_one(pool)
         .await
@@ -261,10 +267,10 @@ pub async fn push_binding_by_conversation(
     conversation_id: &str,
 ) -> Option<PushBinding> {
     let pool = w(st).ok()?;
-    let row = sqlx::query(
+    let row = sqlx::query(&crate::pq::rewrite(
         "SELECT name, team, person_id, conversation_id, notify_target, daily_report
          FROM push_bindings WHERE conversation_id = ? LIMIT 1",
-    )
+    ))
     .bind(conversation_id)
     .fetch_optional(pool)
     .await
@@ -279,7 +285,10 @@ fn binding_from_row(r: &sqlx::postgres::PgRow) -> PushBinding {
     PushBinding {
         name: r.try_get::<String, _>("name").unwrap_or_default(),
         team: r.try_get::<String, _>("team").unwrap_or_default(),
-        person_id: r.try_get::<i64, _>("person_id").map(|v| v.max(0) as u64).unwrap_or(0),
+        person_id: r
+            .try_get::<i64, _>("person_id")
+            .map(|v| v.max(0) as u64)
+            .unwrap_or(0),
         conversation_id: r
             .try_get::<String, _>("conversation_id")
             .unwrap_or_default(),
@@ -293,11 +302,11 @@ pub async fn push_bindings_for_team(st: &AppState, team: &str) -> Vec<PushBindin
     let Ok(pool) = w(st) else {
         return Vec::new();
     };
-    match sqlx::query(
+    match sqlx::query(&crate::pq::rewrite(
         "SELECT name, team, person_id, conversation_id, notify_target, daily_report
          FROM push_bindings
          WHERE team = ? AND conversation_id <> '' AND (notify_target = 1 OR daily_report = 1)",
-    )
+    ))
     .bind(team)
     .fetch_all(pool)
     .await
@@ -313,13 +322,14 @@ pub async fn push_bindings_for_team(st: &AppState, team: &str) -> Vec<PushBindin
 /// 记录一次推送结果（成功清错误，失败留原因）
 pub async fn push_touch(st: &AppState, name: &str, error: &str) {
     if let Ok(pool) = w(st) {
-        let _ =
-            sqlx::query(&crate::pq::rewrite("UPDATE push_bindings SET last_push = ?, last_error = ? WHERE name = ?"))
-                .bind(now_str())
-                .bind(error.chars().take(200).collect::<String>())
-                .bind(name.trim())
-                .execute(pool)
-                .await;
+        let _ = sqlx::query(&crate::pq::rewrite(
+            "UPDATE push_bindings SET last_push = ?, last_error = ? WHERE name = ?",
+        ))
+        .bind(now_str())
+        .bind(error.chars().take(200).collect::<String>())
+        .bind(name.trim())
+        .execute(pool)
+        .await;
     }
 }
 
@@ -329,23 +339,27 @@ pub async fn push_last_report_date(st: &AppState, name: &str) -> String {
     let Ok(pool) = w(st) else {
         return String::new();
     };
-    sqlx::query(&crate::pq::rewrite("SELECT last_report_date FROM push_bindings WHERE name = ?"))
-        .bind(name.trim())
-        .fetch_optional(pool)
-        .await
-        .ok()
-        .flatten()
-        .and_then(|r| r.try_get::<String, _>("last_report_date").ok())
-        .unwrap_or_default()
+    sqlx::query(&crate::pq::rewrite(
+        "SELECT last_report_date FROM push_bindings WHERE name = ?",
+    ))
+    .bind(name.trim())
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .and_then(|r| r.try_get::<String, _>("last_report_date").ok())
+    .unwrap_or_default()
 }
 
 pub async fn push_set_last_report_date(st: &AppState, name: &str, date: &str) {
     if let Ok(pool) = w(st) {
-        let _ = sqlx::query(&crate::pq::rewrite("UPDATE push_bindings SET last_report_date = ? WHERE name = ?"))
-            .bind(date)
-            .bind(name.trim())
-            .execute(pool)
-            .await;
+        let _ = sqlx::query(&crate::pq::rewrite(
+            "UPDATE push_bindings SET last_report_date = ? WHERE name = ?",
+        ))
+        .bind(date)
+        .bind(name.trim())
+        .execute(pool)
+        .await;
     }
 }
 
@@ -376,12 +390,14 @@ pub async fn push_bind_by_phone_code(
         return None;
     }
     // ① 手机号 → 账号姓名（没登记 = None，与码校验失败同一返回值，不泄露差异）
-    let row = sqlx::query(&crate::pq::rewrite("SELECT name FROM my_accounts WHERE phone = ?"))
-        .bind(&phone)
-        .fetch_optional(pool)
-        .await
-        .ok()
-        .flatten()?;
+    let row = sqlx::query(&crate::pq::rewrite(
+        "SELECT name FROM my_accounts WHERE phone = ?",
+    ))
+    .bind(&phone)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()?;
     let name: String = row.try_get::<String, _>("name").ok()?;
     if name.trim().is_empty() {
         return None;
@@ -392,10 +408,10 @@ pub async fn push_bind_by_phone_code(
     if code_name != name {
         // 码是对的但属于别的账号：把刚接过去的会话撤掉（该账号回到未绑定态，
         // 与「码用掉即清」一致），对外仍统一回复失败，不泄露两账号关系。
-        let _ = sqlx::query(
+        let _ = sqlx::query(&crate::pq::rewrite(
             "UPDATE push_bindings SET conversation_id = '', to_user_id = '', bound_at = '',
                updated_at = ? WHERE name = ?",
-        )
+        ))
         .bind(now_str())
         .bind(&code_name)
         .execute(pool)
@@ -421,12 +437,14 @@ pub async fn push_bind_by_phone(
     if phone.is_empty() || !phone.chars().all(|c| c.is_ascii_digit()) {
         return None;
     }
-    let row = sqlx::query(&crate::pq::rewrite("SELECT name FROM my_accounts WHERE phone = ?"))
-        .bind(&phone)
-        .fetch_optional(pool)
-        .await
-        .ok()
-        .flatten()?;
+    let row = sqlx::query(&crate::pq::rewrite(
+        "SELECT name FROM my_accounts WHERE phone = ?",
+    ))
+    .bind(&phone)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()?;
     let name: String = row.try_get::<String, _>("name").ok()?;
     if name.trim().is_empty() {
         return None;
@@ -479,7 +497,10 @@ fn wx_push_account_from_row(row: &sqlx::postgres::PgRow) -> WxPushAccount {
     WxPushAccount {
         name: row.try_get::<String, _>("name").unwrap_or_default(),
         team: row.try_get::<String, _>("team").unwrap_or_default(),
-        person_id: row.try_get::<i64, _>("person_id").map(|v| v.max(0) as u64).unwrap_or(0),
+        person_id: row
+            .try_get::<i64, _>("person_id")
+            .map(|v| v.max(0) as u64)
+            .unwrap_or(0),
         ilink_bot_id: row.try_get::<String, _>("ilink_bot_id").unwrap_or_default(),
         ilink_user_id: row
             .try_get::<String, _>("ilink_user_id")
@@ -554,7 +575,9 @@ async fn wx_push_others(st: &AppState) -> Vec<(String, u64, String)> {
             .map(|r| {
                 (
                     r.try_get::<String, _>("name").unwrap_or_default(),
-                    r.try_get::<i64, _>("pid").map(|v| v.max(0) as u64).unwrap_or(0),
+                    r.try_get::<i64, _>("pid")
+                        .map(|v| v.max(0) as u64)
+                        .unwrap_or(0),
                     r.try_get::<String, _>("uid").unwrap_or_default(),
                 )
             })
@@ -575,7 +598,7 @@ pub async fn wx_push_account_save(st: &AppState, a: &WxPushAccount) -> Result<()
     if let Some(msg) = wx_push_clash_of(&a.name, a.person_id, &a.ilink_user_id, &others) {
         return Err(anyhow::anyhow!("{msg}"));
     }
-    sqlx::query(
+    sqlx::query(&crate::pq::rewrite(
         "INSERT INTO wx_push_accounts
            (name, team, person_id, ilink_bot_id, ilink_user_id, bot_token, base_url,
             nickname, conversation_id, updates_buf, bound_at, updated_at)
@@ -585,7 +608,7 @@ pub async fn wx_push_account_save(st: &AppState, a: &WxPushAccount) -> Result<()
            ilink_bot_id = EXCLUDED.ilink_bot_id, ilink_user_id = EXCLUDED.ilink_user_id,
            bot_token = EXCLUDED.bot_token, base_url = EXCLUDED.base_url,
            nickname = EXCLUDED.nickname, updated_at = EXCLUDED.updated_at",
-    )
+    ))
     .bind(a.name.trim())
     .bind(&a.team)
     .bind(a.person_id as i64)
@@ -659,11 +682,11 @@ pub async fn wx_push_account_bind_conversation(
 /// 按展示端账号名取扫码凭证
 pub async fn wx_push_account_get(st: &AppState, name: &str) -> Option<WxPushAccount> {
     let pool = w(st).ok()?;
-    let row = sqlx::query(
+    let row = sqlx::query(&crate::pq::rewrite(
         "SELECT name, team, person_id, ilink_bot_id, ilink_user_id, bot_token, base_url,
                 nickname, conversation_id, updates_buf, bound_at
          FROM wx_push_accounts WHERE name = ? LIMIT 1",
-    )
+    ))
     .bind(name.trim())
     .fetch_optional(pool)
     .await
@@ -711,24 +734,27 @@ pub async fn push_bind_account(
     };
     // 同一个微信会话只能绑一个账号：先把占着这个会话的旧绑定清掉，
     // 否则换号后旧账号还在收推送。
-    let _ = sqlx::query(
+    let _ = sqlx::query(&crate::pq::rewrite(
         "UPDATE push_bindings SET conversation_id = '', to_user_id = '', bound_at = '',
            bind_code = '', code_expires = '', updated_at = ?
          WHERE conversation_id = ? AND name <> ?",
-    )
+    ))
     .bind(now_str())
     .bind(conversation_id)
     .bind(name.trim())
     .execute(pool)
     .await;
-    let _ = sqlx::query(
+    let _ = sqlx::query(&crate::pq::rewrite(
         "INSERT INTO push_bindings (name, team, conversation_id, to_user_id, bound_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?)
-         ON CONFLICT (name) DO UPDATE SET team = IF(EXCLUDED.team <> '', EXCLUDED.team, team),
+         ON CONFLICT (name) DO UPDATE SET team = CASE
+           WHEN EXCLUDED.team <> '' THEN EXCLUDED.team
+           ELSE push_bindings.team
+         END,
            conversation_id = EXCLUDED.conversation_id, to_user_id = EXCLUDED.to_user_id,
            bound_at = EXCLUDED.bound_at, bind_code = '', code_expires = '',
            last_error = '', updated_at = EXCLUDED.updated_at",
-    )
+    ))
     .bind(name.trim())
     .bind(team)
     .bind(conversation_id)

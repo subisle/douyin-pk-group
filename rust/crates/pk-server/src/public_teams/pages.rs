@@ -229,7 +229,7 @@ mod my_accounts_tests {
         // 两边互斥 → 既是主号又在 wave_snapshot 有历史行的号不会重复计
         assert!(sql.contains("ON pa.person_id = d.person_id AND pa.anchor_id = d.anchor_id"));
         assert!(sql.contains("ON sa.anchor_id = ws.anchor_id AND sa.is_primary = 0"));
-        // 日期窗口一律 DATE_FORMAT，不按自然日
+        // 日期窗口一律 TO_CHAR，不按自然日
         assert!(sql.contains("TO_CHAR(d.biz_date, 'YYYY-MM-DD')"));
         assert!(sql.contains("TO_CHAR(ws.biz_date, 'YYYY-MM-DD')"));
         assert!(sql.contains("t.d LIKE '2026-10-%'"));

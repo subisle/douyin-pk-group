@@ -39,9 +39,9 @@ pub async fn my_bind_request_submit(
     team: &str,
 ) -> std::result::Result<bool, String> {
     let pool = w(st).map_err(|e| e.to_string())?;
-    let pending = sqlx::query(
+    let pending = sqlx::query(&crate::pq::rewrite(
         "SELECT id FROM my_bind_requests WHERE name = ? AND status = 'pending' LIMIT 1",
-    )
+    ))
     .bind(account)
     .fetch_optional(pool)
     .await
@@ -50,9 +50,9 @@ pub async fn my_bind_request_submit(
     if pending {
         return Ok(true);
     }
-    sqlx::query(
+    sqlx::query(&crate::pq::rewrite(
         "INSERT INTO my_bind_requests (name, person_id, person_name, team, status) VALUES (?, ?, ?, ?, 'pending')",
-    )
+    ))
     .bind(account)
     .bind(person_id)
     .bind(person_name)
@@ -66,10 +66,10 @@ pub async fn my_bind_request_submit(
 /// 该账号最新一条绑定申请（展示端「我的」轮询审核进度用）；没有申请 / 017 未跑 → None
 pub async fn my_bind_request_latest(st: &AppState, account: &str) -> Option<serde_json::Value> {
     let pool = w(st).ok()?;
-    let row = sqlx::query(
+    let row = sqlx::query(&crate::pq::rewrite(
         "SELECT status, person_name, reason, created_at FROM my_bind_requests \
          WHERE name = ? ORDER BY id DESC LIMIT 1",
-    )
+    ))
     .bind(account)
     .fetch_optional(pool)
     .await
@@ -92,12 +92,12 @@ pub async fn my_bind_request_list(
     let Ok(pool) = w(st) else {
         return Vec::new();
     };
-    match sqlx::query(
+    match sqlx::query(&crate::pq::rewrite(
         "SELECT id, name, person_id, person_name, team, status, reason, created_at, decided_at, decided_by \
          FROM my_bind_requests \
          WHERE (? = '' OR status = ?) \
          ORDER BY (status = 'pending') DESC, id DESC LIMIT ?",
-    )
+    ))
     .bind(status)
     .bind(status)
     .bind(limit.clamp(1, 500))
@@ -140,10 +140,10 @@ pub async fn my_bind_request_decide(
     let pool = w(st).ok()?;
     let status = bind_request_next_status("pending", approve)?;
     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    let n = sqlx::query(
+    let n = sqlx::query(&crate::pq::rewrite(
         "UPDATE my_bind_requests SET status = ?, reason = ?, decided_at = ?, decided_by = ? \
          WHERE id = ? AND status = 'pending'",
-    )
+    ))
     .bind(status)
     .bind(reason)
     .bind(&now)
@@ -156,12 +156,14 @@ pub async fn my_bind_request_decide(
     if n == 0 {
         return None;
     }
-    let row = sqlx::query(&crate::pq::rewrite("SELECT name, person_id, person_name FROM my_bind_requests WHERE id = ?"))
-        .bind(id)
-        .fetch_optional(pool)
-        .await
-        .ok()
-        .flatten()?;
+    let row = sqlx::query(&crate::pq::rewrite(
+        "SELECT name, person_id, person_name FROM my_bind_requests WHERE id = ?",
+    ))
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()?;
     Some((
         row.try_get::<String, _>("name").ok()?,
         row.try_get::<i64, _>("person_id")
@@ -175,10 +177,10 @@ pub async fn my_bind_request_decide(
 /// （与 anchor_claim_revert 同款理由：申请不能卡在「已通过」却没绑上）
 pub async fn my_bind_request_revert(st: &AppState, id: i64) {
     if let Ok(pool) = w(st) {
-        let _ = sqlx::query(
+        let _ = sqlx::query(&crate::pq::rewrite(
             "UPDATE my_bind_requests SET status = 'pending', decided_at = NULL, decided_by = '' \
              WHERE id = ? AND status = 'approved'",
-        )
+        ))
         .bind(id)
         .execute(pool)
         .await;
@@ -194,9 +196,9 @@ pub async fn my_account_bound_for_person(st: &AppState, person_id: i64, person_n
     };
     // 015 锚点口径：person_id > 0 且已绑定（列不存在 = 015 未跑，忽略走姓名口径）
     if person_id > 0 {
-        if let Ok(Some(_)) = sqlx::query(
+        if let Ok(Some(_)) = sqlx::query(&crate::pq::rewrite(
             "SELECT 1 FROM my_accounts WHERE person_id = ? AND person_id > 0 AND bound = 1 LIMIT 1",
-        )
+        ))
         .bind(person_id)
         .fetch_optional(pool)
         .await
@@ -205,17 +207,21 @@ pub async fn my_account_bound_for_person(st: &AppState, person_id: i64, person_n
         }
     }
     // 姓名口径（历史账号未必回填了 person_id）；bound 列不存在 = 008 未跑，老账号一律视为已绑定
-    match sqlx::query(&crate::pq::rewrite("SELECT 1 FROM my_accounts WHERE name = ? AND bound = 1 LIMIT 1"))
-        .bind(person_name)
-        .fetch_optional(pool)
-        .await
+    match sqlx::query(&crate::pq::rewrite(
+        "SELECT 1 FROM my_accounts WHERE name = ? AND bound = 1 LIMIT 1",
+    ))
+    .bind(person_name)
+    .fetch_optional(pool)
+    .await
     {
         Ok(r) => r.is_some(),
         Err(_) => matches!(
-            sqlx::query(&crate::pq::rewrite("SELECT 1 FROM my_accounts WHERE name = ? LIMIT 1"))
-                .bind(person_name)
-                .fetch_optional(pool)
-                .await,
+            sqlx::query(&crate::pq::rewrite(
+                "SELECT 1 FROM my_accounts WHERE name = ? LIMIT 1"
+            ))
+            .bind(person_name)
+            .fetch_optional(pool)
+            .await,
             Ok(Some(_))
         ),
     }
@@ -345,18 +351,20 @@ pub async fn anchor_claim_insert(
         _ => "image/jpeg",
     };
     let pool = w(st).map_err(|e| e.to_string())?;
-    if sqlx::query(&crate::pq::rewrite("SELECT 1 FROM anchor_claims WHERE person_id = ? AND status = 'pending'"))
-        .bind(person_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| format!("查重失败：{e}"))?
-        .is_some()
+    if sqlx::query(&crate::pq::rewrite(
+        "SELECT 1 FROM anchor_claims WHERE person_id = ? AND status = 'pending'",
+    ))
+    .bind(person_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("查重失败：{e}"))?
+    .is_some()
     {
         return Err("已存在待审核的提交，请等管理员审核".into());
     }
-    if sqlx::query(
+    if sqlx::query(&crate::pq::rewrite(
         "SELECT 1 FROM anchor_claims WHERE person_id = ? AND status = 'approved' AND douyin_no = ?",
-    )
+    ))
     .bind(person_id)
     .bind(&no)
     .fetch_optional(pool)
@@ -382,16 +390,18 @@ pub async fn anchor_claim_insert(
     .fetch_one(pool)
     .await
     .map_err(|e| format!("写入失败：{e}"))?;
-    Ok(row.try_get::<i64, _>(0).map_err(|e| format!("读取返回 id 失败：{e}"))?)
+    Ok(row
+        .try_get::<i64, _>(0)
+        .map_err(|e| format!("读取返回 id 失败：{e}"))?)
 }
 
 /// 某人最近一笔申请（展示端「我的」显示状态用）
 pub async fn anchor_claim_mine(st: &AppState, person_id: i64) -> Option<serde_json::Value> {
     let pool = w(st).ok()?;
-    let row = match sqlx::query(
+    let row = match sqlx::query(&crate::pq::rewrite(
         "SELECT id, douyin_no, status, reject_reason, created_at, decided_at, person_name, team
          FROM anchor_claims WHERE person_id = ? ORDER BY id DESC LIMIT 1",
-    )
+    ))
     .bind(person_id)
     .fetch_optional(pool)
     .await
@@ -416,13 +426,13 @@ pub async fn anchor_claim_list(st: &AppState, status: &str, limit: i64) -> Vec<s
     let Ok(pool) = w(st) else {
         return Vec::new();
     };
-    match sqlx::query(
+    match sqlx::query(&crate::pq::rewrite(
         "SELECT id, person_id, person_name, team, douyin_no, status,
                 reject_reason, created_at, decided_at, LENGTH(screenshot)
          FROM anchor_claims
          WHERE (? = '' OR status = ?)
          ORDER BY (status = 'pending') DESC, id DESC LIMIT ?",
-    )
+    ))
     .bind(status)
     .bind(status)
     .bind(limit.clamp(1, 500))
@@ -456,10 +466,12 @@ pub async fn anchor_claim_list(st: &AppState, status: &str, limit: i64) -> Vec<s
 /// 截图本体（管理端预览）
 pub async fn anchor_claim_image(st: &AppState, id: i64) -> Option<(Vec<u8>, String)> {
     let pool = w(st).ok()?;
-    let row = match sqlx::query(&crate::pq::rewrite("SELECT screenshot, mime FROM anchor_claims WHERE id = ?"))
-        .bind(id)
-        .fetch_optional(pool)
-        .await
+    let row = match sqlx::query(&crate::pq::rewrite(
+        "SELECT screenshot, mime FROM anchor_claims WHERE id = ?",
+    ))
+    .bind(id)
+    .fetch_optional(pool)
+    .await
     {
         Ok(Some(r)) => r,
         _ => return None,
@@ -481,10 +493,10 @@ pub async fn anchor_claim_decide(
     let pool = w(st).ok()?;
     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     let status = if approve { "approved" } else { "rejected" };
-    let n = sqlx::query(
+    let n = sqlx::query(&crate::pq::rewrite(
         "UPDATE anchor_claims SET status = ?, reject_reason = ?, decided_at = ?, decided_by = ?
          WHERE id = ? AND status = 'pending'",
-    )
+    ))
     .bind(status)
     .bind(reject_reason)
     .bind(&now)
@@ -497,9 +509,9 @@ pub async fn anchor_claim_decide(
     if n == 0 {
         return None;
     }
-    let row = match sqlx::query(
+    let row = match sqlx::query(&crate::pq::rewrite(
         "SELECT person_id, douyin_no, person_name FROM anchor_claims WHERE id = ?",
-    )
+    ))
     .bind(id)
     .fetch_optional(pool)
     .await
@@ -517,10 +529,10 @@ pub async fn anchor_claim_decide(
 /// 裁决回滚：通过但账号写入失败时，把申请退回 pending，管理员可重试或改判
 pub async fn anchor_claim_revert(st: &AppState, id: i64) {
     if let Ok(pool) = w(st) {
-        let _ = sqlx::query(
+        let _ = sqlx::query(&crate::pq::rewrite(
             "UPDATE anchor_claims SET status = 'pending', decided_at = '', decided_by = ''
              WHERE id = ? AND status = 'approved'",
-        )
+        ))
         .bind(id)
         .execute(pool)
         .await;

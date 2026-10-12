@@ -98,12 +98,14 @@ pub async fn verify(
          ORDER BY CASE WHEN p.status = 'left' THEN 1 ELSE 0 END, p.id \
          LIMIT 1"
         .to_string();
-    let rows =
-        pgrs::query_with_binds(&st.pools, &sid(&st), &sql, |q| q.bind(account_name.clone()))
-            .await?;
+    let rows = pgrs::query_with_binds(&st.pools, &sid(&st), &sql, |q| q.bind(account_name.clone()))
+        .await?;
     match rows.into_iter().next() {
         Some(row) => {
-            let pid = row.try_get::<i64, _>("id").map(|v| v.max(0) as u64).unwrap_or(0);
+            let pid = row
+                .try_get::<i64, _>("id")
+                .map(|v| v.max(0) as u64)
+                .unwrap_or(0);
             let token_team = row.try_get::<String, _>("gender").unwrap_or_default();
             let token = my_token_put(pid, token_team.clone(), account_name.clone());
             Ok(Json(json!({
@@ -215,6 +217,29 @@ pub async fn my_login(
         return Err(anyhow::anyhow!("请输入账号和密码").into());
     }
 
+    /* 0. 管理员快捷口令（账号、密码填同一个管理员口令即可登录展示页）：
+    限流之后、my_accounts 账号校验之前判断——这样管理员不用在 my_accounts 里
+    专门留一行账号。口令读自运行时配置（ADMIN_PASSWORD），改 .env 重启即生效；
+    未配置口令时 verify_admin_password 恒 false（fail-closed）。 */
+    if acct == pass && st.auth.verify_admin_password(&acct) {
+        crate::ipinfo::log_login_path(
+            &st,
+            &client_ip,
+            &geo,
+            "",
+            "/api/public/my/login",
+            &acct,
+            true,
+        )
+        .await;
+        let token = my_token_put(0, String::new(), acct.clone());
+        tracing::info!(ip = %client_ip, "展示端管理员口令登录成功（账号=密码=管理员口令）");
+        return Ok(Json(json!({
+            "ok": true, "personId": 0, "name": acct,
+            "token": token, "admin": true, "bound": true
+        })));
+    }
+
     /* 1. 账号校验（与 verify 同一套 my_accounts） */
     let Some(account_name) = crate::store::my_account_check_login(&st, &acct, &pass).await else {
         crate::ipinfo::log_login_path(
@@ -261,7 +286,10 @@ pub async fn my_login(
             pgrs::query_with_binds(&st.pools, &sid(&st), &sql, |q| q.bind(account_name.clone()))
                 .await?;
         if let Some(row) = rows.into_iter().next() {
-            let pid = row.try_get::<i64, _>("id").map(|v| v.max(0) as u64).unwrap_or(0);
+            let pid = row
+                .try_get::<i64, _>("id")
+                .map(|v| v.max(0) as u64)
+                .unwrap_or(0);
             let name: String = row.try_get::<String, _>("name").unwrap_or_default();
             let team: String = row.try_get::<String, _>("gender").unwrap_or_default();
             found = Some((pid, name, team));

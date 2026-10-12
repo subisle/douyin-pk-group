@@ -5,20 +5,20 @@
 //! - 公开 API 一律 DTO 白名单，绝不下发密码、抖音号、全量候选名单
 //! 拆分（2026-10-12）：按业务域分文件，对外路径 `public_teams::*` 不变。
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
-use axum::extract::{Path, Query, State};
-use axum::http::HeaderMap;
-use axum::Json;
-use serde::Deserialize;
-use serde_json::{json, Value};
-use sqlx::Row;
 use crate::dialect::{self, is_live_wave};
 use crate::pgrs;
 use crate::routes::ApiError;
 use crate::state::AppState;
+use axum::extract::{Path, Query, State};
+use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
+use axum::Json;
+use serde::Deserialize;
+use serde_json::{json, Value};
+use sqlx::Row;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 pub(crate) type ApiResult = Result<Json<Value>, ApiError>;
 pub(crate) type ArcState = Arc<AppState>;
 /// 公开端一律读「当前生效数据源」，不能写死某个源 id。

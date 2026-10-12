@@ -191,7 +191,8 @@ pub(super) static VERIFY_LIMITER: std::sync::OnceLock<VerifyLimiter> = std::sync
 pub(super) static REGISTER_LIMITER: std::sync::OnceLock<VerifyLimiter> = std::sync::OnceLock::new();
 /// 授权轮询限流：每 IP 每分钟 120 次（前端 2.5s 一次，正常 24 次/分；
 /// 单独一档防止脚本拿轮询接口猛打网关面板 —— 审计 2026-10-11）
-pub(super) static REGISTER_POLL_LIMITER: std::sync::OnceLock<VerifyLimiter> = std::sync::OnceLock::new();
+pub(super) static REGISTER_POLL_LIMITER: std::sync::OnceLock<VerifyLimiter> =
+    std::sync::OnceLock::new();
 
 pub(super) struct VerifyLimiter {
     hits: std::sync::Mutex<HashMap<String, Vec<Instant>>>,
@@ -249,7 +250,8 @@ pub(super) fn client_ip_for_limit(addr: std::net::SocketAddr, headers: &HeaderMa
 /// 管理员观看账号 personId=0（不对应台账主播，姓名直接来自 my_accounts）。
 pub(super) type MyTokenMap = HashMap<String, (u64, String, String, Instant)>;
 
-pub(super) static MY_TOKENS: std::sync::OnceLock<std::sync::Mutex<MyTokenMap>> = std::sync::OnceLock::new();
+pub(super) static MY_TOKENS: std::sync::OnceLock<std::sync::Mutex<MyTokenMap>> =
+    std::sync::OnceLock::new();
 
 pub(super) fn my_tokens() -> &'static std::sync::Mutex<MyTokenMap> {
     MY_TOKENS.get_or_init(std::sync::Mutex::default)
@@ -316,7 +318,11 @@ pub(super) fn header_my_token(headers: &HeaderMap) -> Option<String> {
 /// 2026-10-10 加开关：后台关掉「开启登录」（login_required=false）时全站免登录开放，
 /// 返回 person_id=0（一个不存在的档案 id，调用方只拿它判「管理员/游客」，不下发个人数据）。
 /// 带 token 的照常解析，所以关登录时之前登过的人仍能直接用「我的」。
-pub(super) fn gate_team(login_required: bool, team: &str, headers: &HeaderMap) -> Result<u64, ApiError> {
+pub(super) fn gate_team(
+    login_required: bool,
+    team: &str,
+    headers: &HeaderMap,
+) -> Result<u64, ApiError> {
     let token = header_my_token(headers);
     // 有 token 就先验（开关关着时也认，访客拿旧 token 仍能看「我的」）
     if let Some(t) = token.as_deref().filter(|s| !s.is_empty()) {

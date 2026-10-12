@@ -71,7 +71,7 @@ fn parse() -> &'static Seed {
 
 /// 表行数（出错按 None 处理，调用方跳过装载）
 async fn person_count(pool: &sqlx::PgPool) -> Option<i64> {
-    sqlx::query("SELECT COUNT(*) AS n FROM person")
+    sqlx::query(&crate::pq::rewrite("SELECT COUNT(*) AS n FROM person"))
         .fetch_one(pool)
         .await
         .ok()
@@ -110,11 +110,11 @@ pub async fn seed_if_empty(st: &Arc<AppState>) {
     };
     let mut persons = 0u64;
     for p in &seed.persons {
-        let res = sqlx::query(
+        let res = sqlx::query(&crate::pq::rewrite(
             "INSERT INTO person (id, name, gender, master_id, generation, group_name, \
              avatar_url, hide_in_daily_report, status, joined_at, deleted_at) \
              VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-        )
+        ))
         .bind(p.id)
         .bind(&p.name)
         .bind(&p.gender)
@@ -134,10 +134,10 @@ pub async fn seed_if_empty(st: &Arc<AppState>) {
     }
     let mut accounts = 0u64;
     for a in &seed.accounts {
-        let res = sqlx::query(
+        let res = sqlx::query(&crate::pq::rewrite(
             "INSERT INTO account (id, person_id, anchor_id, douyin_no, anchor_name, \
              is_primary, status, created_at) VALUES (?,?,?,?,?,?,?,?)",
-        )
+        ))
         .bind(a.id)
         .bind(a.person_id)
         .bind(&a.anchor_id)

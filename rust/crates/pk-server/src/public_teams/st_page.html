@@ -709,61 +709,81 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .my-claim .why, .my-push .hint { font-size:11.5px; color:#b45309; background:#fff7e6;
   border-radius:8px; padding:7px 10px; margin-top:8px; line-height:1.6; }
 
-/* ===== 登录门 / 注册（Apple Style Mobile Showcase） ===== */
-#gate { position:fixed; inset:0; z-index:90; background:rgba(28,28,30,.35);
-  -webkit-backdrop-filter:blur(18px) saturate(150%); backdrop-filter:blur(18px) saturate(150%);
+/* ===== 登录门 / 注册（stitch iOS Style · 2026-10-12 重做）
+   设计稿：stitch_apple_style_mobile_showcase——iOS 卡片（28px 圆角 + 柔和投影）、
+   青绿渐变圆形徽标、蓝 #0066FF 主按钮带投影、50px 输入框、红字错误行。
+   DOM/逻辑（gateHTML/bindLoginPane/bindRegPane）未动，只换皮肤。 ===== */
+#gate { position:fixed; inset:0; z-index:90; background:#F2F4F7;
   display:flex; align-items:center; justify-content:center; padding:20px; overflow:auto; }
 #gate.hidden { display:none; }
-.gate-box { max-width:360px; width:100%; margin:auto; text-align:center;
-  background:var(--surface-container-lowest); border-radius:1.25rem;
-  box-shadow:0 20px 60px rgba(0,0,0,.18); padding:28px 22px;
-  animation:stFadeIn .18s ease-out; }
+.gate-box { max-width:390px; width:100%; margin:auto; text-align:center;
+  background:#FFFFFF; border-radius:28px; border:1px solid rgba(11,28,48,.04);
+  box-shadow:0 12px 36px -4px rgba(11,28,48,.08), 0 4px 12px -2px rgba(11,28,48,.04);
+  padding:28px; padding-top:36px;
+  animation:stFadeIn .18s ease-out;
+  font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Helvetica Neue",sans-serif; }
+/* 青绿渐变圆徽标（设计稿 teal #0BB796 系） */
 .gate-box .big-av { width:64px; height:64px; border-radius:9999px; display:grid; place-items:center;
-  margin:0 auto 10px; color:#fff; font-size:24px; font-weight:700;
-  box-shadow:0 8px 20px rgba(0,0,0,.12); }
-.gate-box h3 { margin:0 0 4px; font-size:18px; font-weight:600; letter-spacing:-.01em; }
-.gate-box .tip { margin:0 0 14px; color:var(--on-surface-variant); font-size:12px; line-height:1.7; }
-.gate-tabs { display:flex; margin:0 0 14px; background:var(--surface-container);
-  border-radius:9999px; padding:.25rem; }
-.gate-tabs button { flex:1; height:1.875rem; border:none; border-radius:9999px;
-  background:transparent; color:var(--on-surface-variant); font-size:13.5px; }
-.gate-tabs button.on { background:var(--surface-container-lowest); color:var(--on-surface);
-  font-weight:700; box-shadow:0 1px 3px rgba(0,0,0,.08); }
-.gate-box input { width:100%; height:44px; border:1px solid var(--hairline);
-  border-radius:.75rem; padding:0 14px; font-size:15px; margin-bottom:10px;
-  background:var(--surface-container-low); color:var(--on-surface); }
-.gate-box input:focus { outline:none; border-color:var(--primary);
-  box-shadow:0 0 0 3px rgba(0,88,188,.12); background:var(--surface-container-lowest); }
-.gate-box .form-err { color:var(--error); font-size:12px; margin:-2px 0 8px; text-align:left; }
-.gate-box .btn-main { width:100%; height:44px; border:none; border-radius:.75rem;
-  background:var(--primary); color:var(--on-primary); font-size:15px; font-weight:600; }
-.gate-box .btn-main:active { opacity:.75; }
-.gate-box .btn-main:disabled { opacity:.45; }
-.gate-box .btn-sec { width:100%; height:40px; border:none; border-radius:.75rem;
-  background:var(--surface-container); color:var(--on-surface);
-  font-size:14px; font-weight:600; margin-bottom:10px; }
+  margin:0 auto 14px; color:#fff;
+  background:linear-gradient(45deg,#08A484,#12CEAA);
+  box-shadow:0 4px 16px rgba(11,183,150,.22); }
+.gate-box .big-av .material-symbols-outlined { font-size:30px; }
+.gate-box h3 { margin:0 0 18px; font-size:23px; font-weight:700; letter-spacing:-.02em; color:#0B1C30; }
+.gate-box .tip { margin:0 0 16px; color:#64748B; font-size:13px; line-height:1.7; }
+.gate-tabs { display:flex; margin:0 0 18px; background:#FFFFFF;
+  border:1px solid #E2E8F0; border-radius:9999px; padding:4px; }
+.gate-tabs button { flex:1; height:40px; border:none; border-radius:9999px;
+  background:transparent; color:#64748B; font-size:15px; transition:all .15s; }
+.gate-tabs button.on { background:#0066FF; color:#fff;
+  font-weight:600; box-shadow:0 4px 14px 0 rgba(0,102,255,.28); }
+.gate-box input { width:100%; height:50px; border:1px solid #E2E8F0;
+  border-radius:12px; padding:0 16px; font-size:15px; margin-bottom:12px;
+  background:#FFFFFF; color:#0B1C30; transition:border-color .18s ease, box-shadow .18s ease; }
+.gate-box input::placeholder { color:#94A3B8; }
+.gate-box input:focus { outline:none; border-color:#0066FF;
+  box-shadow:0 0 0 4px rgba(0,102,255,.10); background:#FFFFFF; }
+.gate-box input.gate-err { border-color:#FB7185;
+  box-shadow:0 0 0 4px rgba(244,63,94,.15); }
+.gate-box .form-err { color:#F43F5E; font-size:13px; margin:-4px 0 10px; text-align:left;
+  display:flex; align-items:center; gap:6px; }
+.gate-box .form-err::before { content:'!'; flex:none; width:16px; height:16px;
+  border-radius:9999px; background:#F43F5E; color:#fff; font-size:11px; font-weight:700;
+  display:grid; place-items:center; }
+.gate-box .form-err:empty { display:none; }
+.gate-box .btn-main { width:100%; height:50px; border:none; border-radius:12px;
+  background:#0066FF; color:#fff; font-size:16px; font-weight:600; letter-spacing:.05em;
+  box-shadow:0 4px 14px 0 rgba(0,102,255,.28);
+  transition:all .15s; cursor:pointer; }
+.gate-box .btn-main:active { transform:scale(.985); filter:brightness(.96); }
+.gate-box .btn-main:disabled { opacity:.45; box-shadow:none; }
+/* 忘记密码：下划线浅灰链接（设计稿 13px slate-400） */
+.gate-box .reg-skip { background:none; border:none; color:#94A3B8; font-size:13px;
+  text-decoration:underline; text-underline-offset:4px; text-decoration-color:#CBD5E1;
+  cursor:pointer; padding:2px 0 0; margin:2px 0 14px; }
+.gate-box .btn-sec { width:100%; height:46px; border:none; border-radius:12px;
+  background:#F2F4F7; color:#0B1C30;
+  font-size:14px; font-weight:600; margin-bottom:10px; transition:all .15s; cursor:pointer; }
+.gate-box .btn-sec:active { transform:scale(.985); }
 .gate-box .btn-sec:disabled { opacity:.45; }
 .gate-box .reg-step { display:flex; gap:9px; text-align:left; margin:0 0 10px; }
 .gate-box .reg-step .n { flex:none; width:19px; height:19px; border-radius:9999px;
-  background:var(--surface-container); color:var(--on-surface-variant); font-size:11px;
+  background:#F2F4F7; color:#64748B; font-size:11px;
   font-weight:700; display:grid; place-items:center; margin-top:1px; }
-.gate-box .reg-step.done .n { background:var(--secondary-fixed); color:var(--on-secondary-fixed); }
-.gate-box .reg-step .t { font-size:12px; color:var(--on-surface-variant); line-height:1.6; }
-.gate-box .reg-link { display:block; word-break:break-all; font-size:12px; color:var(--primary);
+.gate-box .reg-step.done .n { background:#0BB796; color:#fff; }
+.gate-box .reg-step .t { font-size:12px; color:#64748B; line-height:1.6; }
+.gate-box .reg-link { display:block; word-break:break-all; font-size:12px; color:#0066FF;
   text-align:left; margin:0 0 10px; line-height:1.6; }
 .gate-box .reg-state { font-size:12px; text-align:left; margin:-4px 0 10px; line-height:1.6; }
 .gate-box .reg-state.ok { color:#0b7a3e; }
 .gate-box .reg-state.wait { color:#b45309; }
-.gate-box .reg-skip { background:none; border:none; color:var(--outline); font-size:12px;
-  text-decoration:underline; cursor:pointer; padding:0; margin:0 0 12px; }
-.gate-box .reg-note { font-size:11.5px; color:var(--on-surface-variant); text-align:left;
+.gate-box .reg-note { font-size:11.5px; color:#64748B; text-align:left;
   line-height:1.7; margin:12px 0 0; }
 .team-pick .pick-title { font-weight:800; font-size:17px; margin-bottom:16px; }
 .team-pick .pick-row { display:flex; gap:12px; }
-.team-pick .pick-btn { flex:1; height:96px; border:1px solid var(--hairline); border-radius:1rem;
-  background:#fff; font-size:15px; font-weight:700; color:var(--on-surface);
+.team-pick .pick-btn { flex:1; height:96px; border:1px solid #E2E8F0; border-radius:1rem;
+  background:#fff; font-size:15px; font-weight:700; color:#0B1C30;
   display:flex; flex-direction:column; align-items:center; justify-content:center; gap:8px; }
-.team-pick .pick-btn:active { transform:scale(.97); background:var(--surface-container-low); }
+.team-pick .pick-btn:active { transform:scale(.97); background:#F2F4F7; }
 .team-pick .pick-av { width:40px; height:40px; border-radius:9999px; color:#fff; font-size:17px;
   font-weight:800; display:grid; place-items:center; }
 #wm { position:fixed; inset:0; z-index:70; pointer-events:none; background-repeat:repeat; }
@@ -884,32 +904,10 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .my-claim .why, .my-push .hint { font-size:11.5px; color:#b45309; background:#fff7e6;
   border-radius:8px; padding:7px 10px; margin-top:8px; line-height:1.6; }
 
-/* ===== 登录门（2026-10-10）：整站要先登录；登录后全屏手机号水印（打码） ===== */
-#gate { position:fixed; inset:0; z-index:90; background:#F4F5F7; display:flex;
-  align-items:flex-start; justify-content:center; overflow:auto; }
-#gate.hidden { display:none; }
-.gate-box { max-width:360px; width:100%; margin:max(60px, 12vh) 16px 0; text-align:center; }
-.gate-box .card-pad { padding:28px 22px; }
-.gate-box .big-av { width:64px; height:64px; border-radius:50%; display:grid; place-items:center;
-  margin:0 auto 10px; color:#fff; font-size:24px; font-weight:800; }
-.gate-box h3 { margin:0 0 4px; font-size:17px; }
-.gate-box .tip { margin:0 0 16px; color:var(--ink3); font-size:12px; line-height:1.7; }
-.gate-box input { width:100%; height:44px; border:1px solid var(--hairline); border-radius:var(--r-md);
-  padding:0 12px; font-size:15px; margin-bottom:10px; background:#fff; color:var(--on-surface); }
-.gate-box input:focus { outline:none; border-color:var(--primary); }
-.gate-box .form-err { color:#D92D20; font-size:12px; margin:-2px 0 8px; text-align:left; }
-/* 团别选择卡（男女共用一个网址） */
-.team-pick .pick-title { font-weight:800; font-size:17px; margin-bottom:16px; }
-.team-pick .pick-row { display:flex; gap:12px; }
-.team-pick .pick-btn { flex:1; height:96px; border:1px solid var(--hairline); border-radius:14px;
-  background:#fff; font-size:15px; font-weight:700; color:var(--on-surface);
-  display:flex; flex-direction:column; align-items:center; justify-content:center; gap:8px; }
-.team-pick .pick-btn:active { transform:scale(.97); background:#f3f5f9; }
-.team-pick .pick-av { width:40px; height:40px; border-radius:50%; color:#fff; font-size:17px;
-  font-weight:800; display:grid; place-items:center; }
-.gate-box .btn-main { width:100%; height:44px; border:none; border-radius:var(--r-md);
-  background:var(--primary); color:var(--on-primary); font-size:15px; font-weight:700; }
-.gate-box .btn-main:disabled { opacity:.45; }
+/* ===== 登录门（2026-10-12 已并入 712 行 stitch iOS Style 段，此处仅保留水印/团别卡）
+   旧的 .gate-box 灰卡片样式整块删除：两处同名选择器按加载顺序后者胜出，
+   会让 712 段的新设计稿皮肤失效。#gate 布局、.form-err、.btn-main、输入框
+   全部以 712 段为准。 ===== */
 #wm { position:fixed; inset:0; z-index:70; pointer-events:none; background-repeat:repeat; }
 #wm[hidden] { display:none; }
 

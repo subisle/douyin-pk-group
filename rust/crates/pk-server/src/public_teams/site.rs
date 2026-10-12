@@ -414,7 +414,7 @@ pub(super) fn lineage_window(
 }
 
 /// 族谱音浪 SQL（纯函数，2026-10-12）：按 period 窗口条件聚合。
-/// monthly/yearly 由基准日推出窗口（DATE_FORMAT 前缀匹配），daily 精确到日。
+/// monthly/yearly 由基准日推出窗口（TO_CHAR 前缀匹配），daily 精确到日。
 /// base_date 已由 lineage_window 白名单校验后才拼进 SQL。
 pub(super) fn lineage_wave_window_sql(period: &str, base_date: &str) -> String {
     /* 双保险：调用方 lineage_window 已校验，但纯函数直接被测试/复用时也挡一道。
@@ -483,7 +483,10 @@ pub(super) fn lineage_forbidden() -> Response {
 }
 
 /// 本人师门归属：(有师傅, 直系徒弟数)。person_id=0（未绑定）或档案不存在 → (false, 0)。
-pub(super) async fn person_lineage_membership(st: &AppState, person_id: u64) -> anyhow::Result<(bool, i64)> {
+pub(super) async fn person_lineage_membership(
+    st: &AppState,
+    person_id: u64,
+) -> anyhow::Result<(bool, i64)> {
     if person_id == 0 {
         return Ok((false, 0));
     }

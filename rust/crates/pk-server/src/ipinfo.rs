@@ -1,7 +1,7 @@
 //! 访客 IP 归属地门禁 + 访问日志。
 //!
 //! 数据源全部来自 ihmily/ip-info-api 收集的免费接口
-//! （<https://github.com/ihmily/ip-info-api>）：全部并行查询、投票合并、MySQL 缓存 7 天。
+//! （<https://github.com/ihmily/ip-info-api>）：全部并行查询、投票合并、数据库缓存 7 天。
 //! 展示端只放行河南 / 安徽——有任一接口识别出这两个省就放行；都没识别出来就不放行；
 //! 所有接口都失败也拒绝（外部接口集体故障时门禁不放水）。
 //! 本地开发用 `IP_GATE_DISABLED=1` 关掉拦截（访问日志照记）。
@@ -114,7 +114,7 @@ async fn ip_in_db_allowlist(st: &ArcState, ip: &str) -> bool {
     let Some(pool) = st.writer.as_ref() else {
         return false;
     };
-    let rows = match sqlx::query("SELECT ip FROM ip_allowlist")
+    let rows = match sqlx::query(&crate::pq::rewrite("SELECT ip FROM ip_allowlist"))
         .fetch_all(pool)
         .await
     {
@@ -478,7 +478,7 @@ async fn fetch_source(client: &reqwest::Client, s: &Source) -> Option<RawGeo> {
     Some((s.parse)(&json))
 }
 
-/// 缓存放 MySQL：查过的 IP 7 天内不再打外部接口
+/// 缓存放业务库：查过的 IP 7 天内不再打外部接口
 pub async fn geo_for_ip(st: &ArcState, ip: &str) -> anyhow::Result<IpGeo> {
     let parsed: IpAddr = ip.trim().parse()?;
     if is_internal(&parsed) {
@@ -493,9 +493,9 @@ pub async fn geo_for_ip(st: &ArcState, ip: &str) -> anyhow::Result<IpGeo> {
         anyhow::bail!("写库不可用，无法查询 IP 归属地缓存");
     };
 
-    if let Ok(Some(row)) = sqlx::query(
+    if let Ok(Some(row)) = sqlx::query(&crate::pq::rewrite(
         "SELECT province, city, isp, source, allowed, looked_up_at FROM ip_geo_cache WHERE ip = ?::inet",
-    )
+    ))
     .bind(&packed)
     .fetch_optional(pool)
     .await
@@ -527,13 +527,13 @@ pub async fn geo_for_ip(st: &ArcState, ip: &str) -> anyhow::Result<IpGeo> {
         anyhow::bail!("所有 IP 归属接口都没返回省份");
     }
 
-    let _ = sqlx::query(
+    let _ = sqlx::query(&crate::pq::rewrite(
         "INSERT INTO ip_geo_cache (ip, province, city, isp, source, allowed, looked_up_at) \
          VALUES (?::inet, ?, ?, ?, ?, ?, (now() AT TIME ZONE 'UTC')) \
          ON CONFLICT (ip) DO UPDATE SET province = EXCLUDED.province, city = EXCLUDED.city, \
          isp = EXCLUDED.isp, source = EXCLUDED.source, allowed = EXCLUDED.allowed, \
          looked_up_at = (now() AT TIME ZONE 'UTC')",
-    )
+    ))
     .bind(&packed)
     .bind(&geo.province)
     .bind(&geo.city)
@@ -1140,9 +1140,9 @@ pub async fn log_access(st: &ArcState, e: AccessLog<'_>) {
         .execute(pool)
         .await
     } else {
-        /* 去重：dedup_key = ip|5 分钟桶，靠唯一键 + INSERT IGNORE 精确挡住并发
+        /* 去重：dedup_key = ip|5 分钟桶，靠唯一键 + ON CONFLICT 精确挡住并发
         重复请求（先 SELECT 再 INSERT 在并发下会放过一批，INSERT..SELECT 自查同表
-        还会在多实例场景报 1213 deadlock）。窗口按 5 分钟桶对齐，不做滑动窗口。 */
+        还会在多实例场景产生锁等待）。窗口按 5 分钟桶对齐，不做滑动窗口。 */
         let bucket = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() / (ACCESS_DEDUP_MINUTES as u64 * 60))
@@ -1293,9 +1293,9 @@ pub async fn admin_visits(
            ((SELECT COUNT(*) FROM access_logs))::BIGINT AS all_rows, \
            (COUNT(*))::BIGINT AS today, \
            (COUNT(DISTINCT ip))::BIGINT AS today_uniq, \
-           (COALESCE(SUM(allowed = 1), 0))::BIGINT AS today_allowed, \
-           (COALESCE(SUM(allowed = 0), 0))::BIGINT AS today_blocked, \
-           (COALESCE(SUM(kind = 'login'), 0))::BIGINT AS today_logins \
+           (COALESCE(SUM((allowed = 1)::int), 0))::BIGINT AS today_allowed, \
+           (COALESCE(SUM((allowed = 0)::int), 0))::BIGINT AS today_blocked, \
+           (COALESCE(SUM((kind = 'login')::int), 0))::BIGINT AS today_logins \
          FROM access_logs \
          WHERE DATE((created_at AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Shanghai') = \
                DATE((NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Shanghai')",

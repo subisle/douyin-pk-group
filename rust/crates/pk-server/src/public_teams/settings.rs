@@ -4,7 +4,7 @@ use super::*;
 
 /* ------------------------------- 显隐开关 ------------------------------- */
 
-/// 公开站点配置（2026-10-10 起存 MySQL config 表，cfg_key = public_settings；
+/// 公开站点配置（2026-10-10 起存 config 表，cfg_key = public_settings；
 /// 每个公开接口都要读它，进程内缓存 30s，save 时立即刷新缓存）
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PublicSettings {
@@ -119,7 +119,8 @@ pub(super) static PS_CACHE: std::sync::OnceLock<
     std::sync::Mutex<Option<(PublicSettings, std::time::Instant)>>,
 > = std::sync::OnceLock::new();
 
-pub(super) fn ps_cache() -> &'static std::sync::Mutex<Option<(PublicSettings, std::time::Instant)>> {
+pub(super) fn ps_cache() -> &'static std::sync::Mutex<Option<(PublicSettings, std::time::Instant)>>
+{
     PS_CACHE.get_or_init(std::sync::Mutex::default)
 }
 
@@ -191,7 +192,13 @@ impl PublicSettings {
 
 /// GET /api/admin/public/settings
 pub async fn get_settings(State(st): State<ArcState>) -> ApiResult {
-    Ok(Json(PublicSettings::load(&st).await.to_json()))
+    let mut v = PublicSettings::load(&st).await.to_json();
+    // 🚩 流动小红旗条（2026-10-12）：称号 / 手动指定，存 config 表
+    v["starTitle"] = json!(crate::store::config_get(&st, "star_title").await.unwrap_or_default());
+    v["starOverride"] =
+        json!(crate::store::config_get(&st, "star_override").await.unwrap_or_default());
+    v["starIcon"] = json!(crate::store::config_get(&st, "star_icon").await.unwrap_or_default());
+    Ok(Json(v))
 }
 
 /// POST /api/admin/public/settings：整包保存
@@ -220,6 +227,17 @@ pub async fn update_settings(State(st): State<ArcState>, Json(body): Json<Value>
             .iter()
             .filter_map(|(k, v)| v.as_bool().map(|b| (k.clone(), b)))
             .collect();
+    }
+    // 🚩 小红旗条：称号 / 手动指定（「称号|人名|音浪」或「称号|人名」或「称号」）/ 图标，空串清除
+    for (key, body_key) in [
+        ("star_title", "starTitle"),
+        ("star_override", "starOverride"),
+        ("star_icon", "starIcon"),
+    ] {
+        if let Some(v) = body.get(body_key) {
+            let val = v.as_str().unwrap_or_default().trim().to_string();
+            crate::store::config_set(&st, key, &val).await;
+        }
     }
     s.save(&st).await;
     crate::events::emit(crate::events::SCOPE_SETTINGS, "公开站点设置已更新");

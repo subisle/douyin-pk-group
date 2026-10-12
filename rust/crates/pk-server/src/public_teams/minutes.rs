@@ -89,7 +89,11 @@ impl MinutesScope<'_> {
 
 /// 个人「时长」SQL：有整月导入值的月份用月报值，其余月份用日明细求和
 /// （同一段时长不会既算月报又算日明细）。with_monthly = false 时退回纯日明细口径。
-pub(super) fn my_minutes_sql(person_id: u64, scope: &MinutesScope<'_>, with_monthly: bool) -> String {
+pub(super) fn my_minutes_sql(
+    person_id: u64,
+    scope: &MinutesScope<'_>,
+    with_monthly: bool,
+) -> String {
     let daily = scope.daily_where();
     if !with_monthly {
         return format!(
@@ -190,10 +194,10 @@ pub async fn my(
             one(
                 &st,
                 format!(
-            "SELECT (SUM(wave))::BIGINT AS wave, (SUM(minutes))::BIGINT AS minutes \
+                    "SELECT (SUM(wave))::BIGINT AS wave, (SUM(minutes))::BIGINT AS minutes \
              FROM daily_metric WHERE person_id = {person_id} AND wave_reliable = 1 \
              AND TO_CHAR(biz_date, 'YYYY-MM-DD') = '{today}'"
-        ),
+                ),
             )
             .await?,
         )
@@ -207,10 +211,10 @@ pub async fn my(
             one(
                 &st,
                 format!(
-            "SELECT (SUM(wave))::BIGINT AS wave, (SUM(minutes))::BIGINT AS minutes \
+                    "SELECT (SUM(wave))::BIGINT AS wave, (SUM(minutes))::BIGINT AS minutes \
              FROM daily_metric WHERE person_id = {person_id} AND wave_reliable = 1 \
              AND TO_CHAR(biz_date, 'YYYY-MM') = '{month}'"
-        ),
+                ),
             )
             .await?,
         )
@@ -222,10 +226,10 @@ pub async fn my(
             one(
                 &st,
                 format!(
-            "SELECT (SUM(wave))::BIGINT AS wave, (SUM(minutes))::BIGINT AS minutes \
+                    "SELECT (SUM(wave))::BIGINT AS wave, (SUM(minutes))::BIGINT AS minutes \
              FROM daily_metric WHERE person_id = {person_id} AND wave_reliable = 1 \
              AND TO_CHAR(biz_date, 'YYYY') = '{year}'"
-        ),
+                ),
             )
             .await?,
         )
@@ -501,7 +505,7 @@ impl AccountPeriods {
 /// is_primary 互斥条件同源，改一处即可，别在两处各写一套）。
 ///
 /// 窗口一律 `TO_CHAR(biz_date, ...)`（该库对 bind 参数报 1835，日期必须内联；
-/// 值来自库里的 DATE_FORMAT 结果且经 [valid_date_pub] 形状校验，不含外部输入）。
+/// 值来自库里的 TO_CHAR 结果且经 [valid_date_pub] 形状校验，不含外部输入）。
 /// 没有数据的号 SUM 出来是 NULL，调用方用 COALESCE 归零（有这个号但没播 = 0，
 /// 只有后台开关关掉才下发 null，两者语义不同，前端靠它区分）。
 pub fn my_accounts_sql(person_id: u64, p: &AccountPeriods) -> String {
@@ -654,7 +658,7 @@ pub async fn my_accounts(
     /* 「今日」必须是库里最新的业务日，不能用自然日今天（数据与 /my 同因：每晚补前一天）。 */
     let dates = crate::repos::get_available_dates(&st, None, false).await?;
     let today = dates.first().cloned().unwrap_or_default();
-    // 日期来自库里的 DATE_FORMAT 结果，这里再校一次形状，防止异常值内联进 SQL
+    // 日期来自库里的 TO_CHAR 结果，这里再校一次形状，防止异常值内联进 SQL
     if !today.is_empty() && !valid_date_pub(&today) {
         return Err(ApiError::bad_request("业务日格式异常"));
     }

@@ -22,11 +22,11 @@ use sqlx::{PgPool, Row};
 
 use crate::dialect;
 use crate::pgrs;
+use crate::pgrs::PgResultExt;
 use crate::routes::ApiError;
 use crate::state::AppState;
 use crate::store::WxPushAccount;
 use crate::writer;
-use crate::pgrs::PgResultExt;
 
 type ApiResult = Result<Json<Value>, ApiError>;
 type ArcState = Arc<AppState>;
@@ -96,7 +96,10 @@ fn require_local(st: &AppState) -> Result<(), ApiError> {
     if st.sources.iter().any(|s| s.id == "LOCAL") {
         Ok(())
     } else {
-        Err(anyhow::anyhow!("管理端需要 LOCAL 数据源（douyin_writer 对应的本地 MariaDB）").into())
+        Err(
+            anyhow::anyhow!("管理端需要 LOCAL 数据源（douyin_writer 对应的本地 PostgreSQL）")
+                .into(),
+        )
     }
 }
 
@@ -442,10 +445,10 @@ pub async fn create_streamer(
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| no.clone());
-        sqlx::query(
+        sqlx::query(&crate::pq::rewrite(
             "INSERT INTO account (person_id, anchor_id, douyin_no, anchor_name, is_primary)
              VALUES (?,?,?,?,1)",
-        )
+        ))
         .bind(person_id as i64)
         .bind(&anchor_id)
         .bind(&no)
@@ -498,7 +501,8 @@ async fn check_douyin_no_free(
 
 fn map_account_err(e: sqlx::Error, anchor_id: &str) -> anyhow::Error {
     let msg = e.to_string();
-    if (msg.contains("duplicate key") || msg.contains("Duplicate entry")) && msg.contains(anchor_id) {
+    if (msg.contains("duplicate key") || msg.contains("Duplicate entry")) && msg.contains(anchor_id)
+    {
         anyhow::anyhow!("采集 ID {anchor_id} 已存在（anchor_id 唯一），请检查是否重复建档")
     } else {
         anyhow::anyhow!("账号写入失败: {e}")
@@ -618,17 +622,19 @@ pub async fn update_streamer(
             .flatten();
         match anchor {
             Some(a) => {
-                sqlx::query(&crate::pq::rewrite("UPDATE account SET douyin_no = ? WHERE anchor_id = ?"))
-                    .bind(&no)
-                    .bind(&a)
-                    .execute(pool)
-                    .await?;
+                sqlx::query(&crate::pq::rewrite(
+                    "UPDATE account SET douyin_no = ? WHERE anchor_id = ?",
+                ))
+                .bind(&no)
+                .bind(&a)
+                .execute(pool)
+                .await?;
             }
             None => {
-                sqlx::query(
+                sqlx::query(&crate::pq::rewrite(
                     "INSERT INTO account (person_id, anchor_id, douyin_no, anchor_name, is_primary)
                      VALUES (?,?,?,?,1)",
-                )
+                ))
                 .bind(id as i64)
                 .bind(&no) // 没有独立采集 ID 时用抖音号兜底
                 .bind(&no)
@@ -652,11 +658,12 @@ pub async fn update_streamer(
 pub async fn delete_streamer(State(st): State<ArcState>, Path(id): Path<u64>) -> ApiResult {
     require_local(&st)?;
     let pool = writer_pool(&st)?;
-    let res =
-        sqlx::query(&crate::pq::rewrite("UPDATE person SET deleted_at = NOW(3) WHERE id = ? AND deleted_at IS NULL"))
-            .bind(id as i64)
-            .execute(pool)
-            .await?;
+    let res = sqlx::query(&crate::pq::rewrite(
+        "UPDATE person SET deleted_at = now() WHERE id = ? AND deleted_at IS NULL",
+    ))
+    .bind(id as i64)
+    .execute(pool)
+    .await?;
     if res.affected() == 0 {
         return Err(anyhow::anyhow!("主播不存在或已删除").into());
     }
@@ -1379,7 +1386,7 @@ pub async fn commit_import(
     let dropped_minutes = strip_minutes(&mut rows) as u32;
     anyhow::ensure!(
         st.sources.iter().any(|s| s.id == "LOCAL"),
-        "管理端需要 LOCAL 数据源（douyin_writer 对应的本地 MariaDB）"
+        "管理端需要 LOCAL 数据源（douyin_writer 对应的本地 PostgreSQL）"
     );
     let pool = st.writer.as_ref().ok_or_else(|| {
         anyhow::anyhow!(
@@ -1446,11 +1453,11 @@ pub async fn commit_import(
     let mut tx = pool.begin().await?;
 
     if mode == "reject" {
-        let cnt: i64 = sqlx::query(if auto_team {
+        let cnt: i64 = sqlx::query(&crate::pq::rewrite(if auto_team {
             dialect::DATE_COUNT_SQL
         } else {
             dialect::TEAM_DATE_COUNT_SQL
-        })
+        }))
         .bind(biz_date)
         .bind(team)
         .map(|r: sqlx::postgres::PgRow| r.try_get::<i64, _>(0).unwrap_or(0))
@@ -1500,7 +1507,7 @@ pub async fn commit_import(
         let Some(no) = row_ident(&r.raw) else {
             continue;
         };
-        let res = sqlx::query(
+        let res = sqlx::query(&crate::pq::rewrite(
             "INSERT INTO import_pending
                  (name, douyin_no, biz_date, wave, cumulative_wave, minutes, is_live, source_batch_id)
              VALUES (?,?,?::date,?,?,?,?,?)
@@ -1508,7 +1515,7 @@ pub async fn commit_import(
                  name = EXCLUDED.name, wave = EXCLUDED.wave,
                  cumulative_wave = EXCLUDED.cumulative_wave, minutes = EXCLUDED.minutes,
                  is_live = EXCLUDED.is_live, source_batch_id = EXCLUDED.source_batch_id",
-        )
+        ))
         .bind(truncate_chars(&r.raw.name, PENDING_NAME_MAX_CHARS))
         .bind(&no)
         .bind(biz_date)
@@ -1531,13 +1538,15 @@ pub async fn commit_import(
 
     // 备注在写库后再刷一次：写入阶段的行级错误也要进摘要（同样先截断，别炸事务）
     let note = batch_note(&failures, pending_count as usize, &skipped);
-    sqlx::query(&crate::pq::rewrite("UPDATE import_batch SET ok_rows = ?, failed_rows = ?, note = ? WHERE id = ?"))
-        .bind(ok_count as i64)
-        .bind(failures.len() as i64)
-        .bind(&note)
-        .bind(batch_id)
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query(&crate::pq::rewrite(
+        "UPDATE import_batch SET ok_rows = ?, failed_rows = ?, note = ? WHERE id = ?",
+    ))
+    .bind(ok_count as i64)
+    .bind(failures.len() as i64)
+    .bind(&note)
+    .bind(batch_id)
+    .execute(&mut *tx)
+    .await?;
     tx.commit().await?;
 
     st.clear_cache();
@@ -1747,22 +1756,25 @@ enum WriteOutcome {
 /// 幂等：已有主号（或根本没有账号）时一条 UPDATE 都不发，直接返回。
 /// 失败只记日志不阻断导入：宁缺 anchor_id，不能让当天数据写不进去。
 async fn ensure_primary(conn: &mut sqlx::PgConnection, person_id: u64) {
-    let has_primary: i64 =
-        sqlx::query(&crate::pq::rewrite("SELECT COUNT(*) FROM account WHERE person_id = ? AND is_primary = 1"))
-            .bind(person_id as i64)
-            .fetch_one(&mut *conn)
-            .await
-            .map(|r| r.try_get::<i64, _>(0).unwrap_or(0))
-            .unwrap_or(1); // 查询失败按「有主号」处理：不做任何写入
+    let has_primary: i64 = sqlx::query(&crate::pq::rewrite(
+        "SELECT COUNT(*) FROM account WHERE person_id = ? AND is_primary = 1",
+    ))
+    .bind(person_id as i64)
+    .fetch_one(&mut *conn)
+    .await
+    .map(|r| r.try_get::<i64, _>(0).unwrap_or(0))
+    .unwrap_or(1); // 查询失败按「有主号」处理：不做任何写入
     if has_primary > 0 {
         return;
     }
-    let has_any: i64 = sqlx::query(&crate::pq::rewrite("SELECT COUNT(*) FROM account WHERE person_id = ?"))
-        .bind(person_id as i64)
-        .fetch_one(&mut *conn)
-        .await
-        .map(|r| r.try_get::<i64, _>(0).unwrap_or(0))
-        .unwrap_or(0);
+    let has_any: i64 = sqlx::query(&crate::pq::rewrite(
+        "SELECT COUNT(*) FROM account WHERE person_id = ?",
+    ))
+    .bind(person_id as i64)
+    .fetch_one(&mut *conn)
+    .await
+    .map(|r| r.try_get::<i64, _>(0).unwrap_or(0))
+    .unwrap_or(0);
     if has_any == 0 {
         return; // 连账号都没有：没有可提的号，anchor_id 保持空
     }
@@ -1827,25 +1839,26 @@ async fn write_daily_row(
     r: &ResolvedRow,
 ) -> anyhow::Result<WriteOutcome> {
     let person_id = r.person_id.expect("调用前已保证 matched");
-    let prev: Option<(f64, String)> = sqlx::query(&crate::pq::rewrite(dialect::PREV_CUMULATIVE_SQL))
-        .bind(person_id as i64)
-        .bind(biz_date)
-        .map(|row: sqlx::postgres::PgRow| {
-            let cum = row
-                .try_get::<Option<f64>, _>(0)
-                .ok()
-                .flatten()
-                .or_else(|| row.try_get::<i64, _>(0).ok().map(|v| v as f64))
-                .unwrap_or(0.0);
-            let d = row
-                .try_get::<Option<String>, _>(1)
-                .ok()
-                .flatten()
-                .unwrap_or_default();
-            (cum, d)
-        })
-        .fetch_optional(&mut **tx)
-        .await?;
+    let prev: Option<(f64, String)> =
+        sqlx::query(&crate::pq::rewrite(dialect::PREV_CUMULATIVE_SQL))
+            .bind(person_id as i64)
+            .bind(biz_date)
+            .map(|row: sqlx::postgres::PgRow| {
+                let cum = row
+                    .try_get::<Option<f64>, _>(0)
+                    .ok()
+                    .flatten()
+                    .or_else(|| row.try_get::<i64, _>(0).ok().map(|v| v as f64))
+                    .unwrap_or(0.0);
+                let d = row
+                    .try_get::<Option<String>, _>(1)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default();
+                (cum, d)
+            })
+            .fetch_optional(&mut **tx)
+            .await?;
 
     // P2-11 收敛：有账号但无主号（生产 1000001/1000004）时 PRIMARY_ANCHOR_SQL 取不到，
     // 先把最早的号提为主号再取（幂等，正常情况零开销）。
@@ -1905,14 +1918,14 @@ async fn write_daily_row(
                 return Ok(WriteOutcome::Unchanged);
             }
         }
-        sqlx::query(
+        sqlx::query(&crate::pq::rewrite(
             "INSERT INTO daily_metric
                  (person_id, anchor_id, biz_date, minutes, is_live, source_batch_id)
              VALUES (?,?,?::date,?,?,?)
              ON CONFLICT (person_id, biz_date) DO UPDATE SET
                  minutes = EXCLUDED.minutes, is_live = EXCLUDED.is_live,
                  source_batch_id = EXCLUDED.source_batch_id",
-        )
+        ))
         .bind(person_id as i64)
         .bind(&anchor)
         .bind(biz_date)
@@ -2031,10 +2044,10 @@ pub async fn absorb_pending(st: &AppState, person_id: u64) -> anyhow::Result<u32
                     let new_cum = c.max(p.cumulative_wave.unwrap_or(0));
                     let new_min = m + p.minutes.unwrap_or(0);
                     let new_live = live | p.is_live.unwrap_or(0);
-                    sqlx::query(
+                    sqlx::query(&crate::pq::rewrite(
                         "UPDATE daily_metric SET wave = ?, cumulative_wave = ?, minutes = ?, is_live = ?
                          WHERE person_id = ? AND biz_date = ?::date",
-                    )
+                    ))
                     .bind(new_wave)
                     .bind(new_cum)
                     .bind(new_min)
@@ -2064,13 +2077,14 @@ pub async fn absorb_pending(st: &AppState, person_id: u64) -> anyhow::Result<u32
                         candidates: Vec::new(),
                         matched_by_douyin: true,
                     };
-                    write_daily_row(&mut tx, p.batch_id as i64, &p.biz_date, date, &resolved).await?;
+                    write_daily_row(&mut tx, p.batch_id as i64, &p.biz_date, date, &resolved)
+                        .await?;
                 }
             }
         }
-        sqlx::query(
-            "UPDATE import_pending SET absorbed_person_id = ?, absorbed_at = NOW(3) WHERE id = ?",
-        )
+        sqlx::query(&crate::pq::rewrite(
+            "UPDATE import_pending SET absorbed_person_id = ?, absorbed_at = now() WHERE id = ?",
+        ))
         .bind(person_id as i64)
         .bind(p.id as i64)
         .execute(&mut *tx)
@@ -2145,20 +2159,20 @@ pub async fn import_pending_delete(
     require_local(&st)?;
     let pool = writer_pool(&st)?;
     let affected = match (q.id, q.douyin_no.as_deref().map(str::trim)) {
-        (Some(id), _) if id > 0 => {
-            sqlx::query(&crate::pq::rewrite("DELETE FROM import_pending WHERE id = ? AND absorbed_at IS NULL"))
-                .bind(id as i64)
-                .execute(pool)
-                .await?
-                .affected()
-        }
-        (_, Some(no)) if !no.is_empty() => {
-            sqlx::query(&crate::pq::rewrite("DELETE FROM import_pending WHERE douyin_no = ? AND absorbed_at IS NULL"))
-                .bind(no)
-                .execute(pool)
-                .await?
-                .affected()
-        }
+        (Some(id), _) if id > 0 => sqlx::query(&crate::pq::rewrite(
+            "DELETE FROM import_pending WHERE id = ? AND absorbed_at IS NULL",
+        ))
+        .bind(id as i64)
+        .execute(pool)
+        .await?
+        .affected(),
+        (_, Some(no)) if !no.is_empty() => sqlx::query(&crate::pq::rewrite(
+            "DELETE FROM import_pending WHERE douyin_no = ? AND absorbed_at IS NULL",
+        ))
+        .bind(no)
+        .execute(pool)
+        .await?
+        .affected(),
         _ => return Err(anyhow::anyhow!("要给 id 或 douyinNo 才能丢弃暂存行").into()),
     };
     Ok(Json(json!({ "ok": true, "deleted": affected })))
@@ -2211,7 +2225,8 @@ pub async fn import_day_status(
         "SELECT filename, TO_CHAR(created_at, 'YYYY-MM-DD HH24:MI') AS ts
          FROM import_batch WHERE biz_date = ?::date AND team = ? ORDER BY id DESC LIMIT 1"
     };
-    let mut last_q = sqlx::query(last_sql).bind(biz_date);
+    let last_sql = crate::pq::rewrite(last_sql);
+    let mut last_q = sqlx::query(&last_sql).bind(biz_date);
     if !auto_team {
         last_q = last_q.bind(team);
     }
@@ -2280,17 +2295,21 @@ pub async fn import_day_delete(
     let pool = writer_pool(&st)?;
     let mut tx = pool.begin().await?;
     let metrics = if auto_team {
-        sqlx::query(&crate::pq::rewrite("DELETE FROM daily_metric WHERE TO_CHAR(biz_date, 'YYYY-MM-DD') = ?"))
-            .bind(&q.biz_date)
-            .execute(&mut *tx)
-            .await?
-            .affected()
+        sqlx::query(&crate::pq::rewrite(
+            "DELETE FROM daily_metric WHERE TO_CHAR(biz_date, 'YYYY-MM-DD') = ?",
+        ))
+        .bind(&q.biz_date)
+        .execute(&mut *tx)
+        .await?
+        .affected()
     } else {
-        sqlx::query(
-            "DELETE d FROM daily_metric d \
-             JOIN person p ON p.id = d.person_id \
-             WHERE TO_CHAR(d.biz_date, 'YYYY-MM-DD') = ? AND p.gender = ?",
-        )
+        sqlx::query(&crate::pq::rewrite(
+            // PG 方言：DELETE … USING（MySQL 的 DELETE d FROM … JOIN 在 PG 语法不通）
+            "DELETE FROM daily_metric d \
+             USING person p \
+             WHERE p.id = d.person_id \
+               AND TO_CHAR(d.biz_date, 'YYYY-MM-DD') = ? AND p.gender = ?",
+        ))
         .bind(&q.biz_date)
         .bind(team)
         .execute(&mut *tx)
@@ -2300,17 +2319,17 @@ pub async fn import_day_delete(
     // 只删按日导入的批次：月度时长批次也用当月 1 号当 biz_date 占位，
     // 少了 source 过滤，删「某一天」会连坐删掉整月的月报审计记录（审计栈断裂）。
     let batches = if auto_team {
-        sqlx::query(
+        sqlx::query(&crate::pq::rewrite(
             "DELETE FROM import_batch WHERE source <> 'admin-import-month' AND biz_date = ?::date",
-        )
+        ))
         .bind(&q.biz_date)
         .execute(&mut *tx)
         .await?
         .affected()
     } else {
-        sqlx::query(
+        sqlx::query(&crate::pq::rewrite(
             "DELETE FROM import_batch WHERE source <> 'admin-import-month' AND biz_date = ?::date AND team = ?",
-        )
+        ))
         .bind(&q.biz_date)
         .bind(team)
         .execute(&mut *tx)
@@ -2540,7 +2559,7 @@ pub async fn commit_month_duration(
 ) -> anyhow::Result<CommitReport> {
     anyhow::ensure!(
         st.sources.iter().any(|s| s.id == "LOCAL"),
-        "管理端需要 LOCAL 数据源（douyin_writer 对应的本地 MariaDB）"
+        "管理端需要 LOCAL 数据源（douyin_writer 对应的本地 PostgreSQL）"
     );
     let pool = st.writer.as_ref().ok_or_else(|| {
         anyhow::anyhow!(
@@ -2604,10 +2623,10 @@ pub async fn commit_month_duration(
 
     let mut tx = pool.begin().await?;
     if mode == "reject" {
-        let cnt: i64 = sqlx::query(
+        let cnt: i64 = sqlx::query(&crate::pq::rewrite(
             "SELECT COUNT(*) AS n FROM monthly_duration md JOIN person p ON p.id = md.person_id \
              WHERE md.period = ?",
-        )
+        ))
         .bind(period)
         .map(|r: sqlx::postgres::PgRow| r.try_get::<i64, _>("n").unwrap_or(0))
         .fetch_one(&mut *tx)
@@ -2640,24 +2659,25 @@ pub async fn commit_month_duration(
         let person_id = r.person_id.expect("调用前已保证 matched");
         let minutes = r.raw.minutes.unwrap_or(0.0) as i64;
         // 相同不覆盖（与按日导入同一口径）：值一样就一行不写，updated_at 也不动
-        let cur: Option<i64> =
-            sqlx::query(&crate::pq::rewrite("SELECT minutes FROM monthly_duration WHERE person_id = ? AND period = ?"))
-                .bind(person_id as i64)
-                .bind(period)
-                .map(|row: sqlx::postgres::PgRow| row.try_get::<i64, _>(0).unwrap_or(0))
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(month_table_err)?;
+        let cur: Option<i64> = sqlx::query(&crate::pq::rewrite(
+            "SELECT minutes FROM monthly_duration WHERE person_id = ? AND period = ?",
+        ))
+        .bind(person_id as i64)
+        .bind(period)
+        .map(|row: sqlx::postgres::PgRow| row.try_get::<i64, _>(0).unwrap_or(0))
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(month_table_err)?;
         if cur == Some(minutes) {
             unchanged += 1;
             minutes_total += minutes;
             continue;
         }
-        sqlx::query(
+        sqlx::query(&crate::pq::rewrite(
             "INSERT INTO monthly_duration (person_id, period, minutes, source_batch_id)
              VALUES (?,?,?,?)
              ON CONFLICT (person_id, period) DO UPDATE SET minutes = EXCLUDED.minutes, source_batch_id = EXCLUDED.source_batch_id",
-        )
+        ))
         .bind(person_id as i64)
         .bind(period)
         .bind(minutes)
@@ -2670,13 +2690,15 @@ pub async fn commit_month_duration(
     }
 
     let note = month_note(&failures, &skipped);
-    sqlx::query(&crate::pq::rewrite("UPDATE import_batch SET ok_rows = ?, failed_rows = ?, note = ? WHERE id = ?"))
-        .bind(ok_count as i64)
-        .bind(failures.len() as i64)
-        .bind(&note)
-        .bind(batch_id)
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query(&crate::pq::rewrite(
+        "UPDATE import_batch SET ok_rows = ?, failed_rows = ?, note = ? WHERE id = ?",
+    ))
+    .bind(ok_count as i64)
+    .bind(failures.len() as i64)
+    .bind(&note)
+    .bind(batch_id)
+    .execute(&mut *tx)
+    .await?;
     tx.commit().await?;
 
     st.clear_cache();
@@ -2773,17 +2795,21 @@ pub async fn import_month_delete(
     let pool = writer_pool(&st)?;
     let mut tx = pool.begin().await?;
     let rows = if auto_team {
-        sqlx::query(&crate::pq::rewrite("DELETE FROM monthly_duration WHERE period = ?"))
-            .bind(&period)
-            .execute(&mut *tx)
-            .await
-            .map_err(month_table_err)?
-            .affected()
+        sqlx::query(&crate::pq::rewrite(
+            "DELETE FROM monthly_duration WHERE period = ?",
+        ))
+        .bind(&period)
+        .execute(&mut *tx)
+        .await
+        .map_err(month_table_err)?
+        .affected()
     } else {
-        sqlx::query(
-            "DELETE md FROM monthly_duration md JOIN person p ON p.id = md.person_id \
-             WHERE md.period = ? AND p.gender = ?",
-        )
+        sqlx::query(&crate::pq::rewrite(
+            // PG 方言：DELETE … USING（MySQL 的 DELETE md FROM … JOIN 在 PG 语法不通）
+            "DELETE FROM monthly_duration md \
+             USING person p \
+             WHERE p.id = md.person_id AND md.period = ? AND p.gender = ?",
+        ))
         .bind(&period)
         .bind(&team)
         .execute(&mut *tx)
@@ -2792,15 +2818,17 @@ pub async fn import_month_delete(
         .affected()
     };
     let batches = if auto_team {
-        sqlx::query(&crate::pq::rewrite("DELETE FROM import_batch WHERE source = 'admin-import-month' AND biz_date = ?::date"))
-            .bind(&biz_date)
-            .execute(&mut *tx)
-            .await?
-            .affected()
+        sqlx::query(&crate::pq::rewrite(
+            "DELETE FROM import_batch WHERE source = 'admin-import-month' AND biz_date = ?::date",
+        ))
+        .bind(&biz_date)
+        .execute(&mut *tx)
+        .await?
+        .affected()
     } else {
-        sqlx::query(
+        sqlx::query(&crate::pq::rewrite(
             "DELETE FROM import_batch WHERE source = 'admin-import-month' AND biz_date = ?::date AND team = ?",
-        )
+        ))
         .bind(&biz_date)
         .bind(&team)
         .execute(&mut *tx)
@@ -3086,14 +3114,18 @@ pub async fn bind_account(
     .await?;
     if let Some((acc_id, was_primary)) = existing {
         if body.is_primary == Some(true) && was_primary == 0 {
-            sqlx::query(&crate::pq::rewrite("UPDATE account SET is_primary = 0 WHERE person_id = ? AND is_primary = 1"))
-                .bind(id as i64)
-                .execute(pool)
-                .await?;
-            sqlx::query(&crate::pq::rewrite("UPDATE account SET is_primary = 1 WHERE id = ?"))
-                .bind(acc_id)
-                .execute(pool)
-                .await?;
+            sqlx::query(&crate::pq::rewrite(
+                "UPDATE account SET is_primary = 0 WHERE person_id = ? AND is_primary = 1",
+            ))
+            .bind(id as i64)
+            .execute(pool)
+            .await?;
+            sqlx::query(&crate::pq::rewrite(
+                "UPDATE account SET is_primary = 1 WHERE id = ?",
+            ))
+            .bind(acc_id)
+            .execute(pool)
+            .await?;
             let absorbed = absorb_pending_best_effort(&st, id, "bind_account").await;
             return Ok(Json(
                 json!({ "ok": true, "douyinNo": no, "promoted": true, "absorbed": absorbed }),
@@ -3115,27 +3147,31 @@ pub async fn bind_account(
         .map(str::to_string)
         .unwrap_or_else(|| no.clone());
     // 第一次绑号 = 主号（daily_metric.anchor_id 回填要用）
-    let has_any: bool = sqlx::query(&crate::pq::rewrite("SELECT 1 FROM account WHERE person_id = ? LIMIT 1"))
-        .bind(id as i64)
-        .fetch_optional(pool)
-        .await?
-        .is_some();
+    let has_any: bool = sqlx::query(&crate::pq::rewrite(
+        "SELECT 1 FROM account WHERE person_id = ? LIMIT 1",
+    ))
+    .bind(id as i64)
+    .fetch_optional(pool)
+    .await?
+    .is_some();
     let is_primary = body.is_primary.unwrap_or(!has_any);
 
     let mut tx = pool.begin().await?;
     if is_primary {
-        sqlx::query(&crate::pq::rewrite("UPDATE account SET is_primary = 0 WHERE person_id = ? AND is_primary = 1"))
-            .bind(id as i64)
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(&crate::pq::rewrite(
+            "UPDATE account SET is_primary = 0 WHERE person_id = ? AND is_primary = 1",
+        ))
+        .bind(id as i64)
+        .execute(&mut *tx)
+        .await?;
     }
-    sqlx::query(
+    sqlx::query(&crate::pq::rewrite(
         "INSERT INTO account (person_id, anchor_id, douyin_no, anchor_name, is_primary)
          VALUES (?,?,?,?,?)
          ON CONFLICT (anchor_id) DO UPDATE SET
            person_id = EXCLUDED.person_id, douyin_no = EXCLUDED.douyin_no,
            anchor_name = EXCLUDED.anchor_name, is_primary = EXCLUDED.is_primary",
-    )
+    ))
     .bind(id as i64)
     .bind(&anchor_id)
     .bind(&no)
@@ -3184,15 +3220,16 @@ pub async fn unbind_account(
     require_local(&st)?;
     let pool = writer_pool(&st)?;
     ensure(id > 0 && account_id > 0, "无效的 id")?;
-    let was_primary: bool =
-        sqlx::query(&crate::pq::rewrite("SELECT is_primary FROM account WHERE id = ? AND person_id = ?"))
-            .bind(account_id as i64)
-            .bind(id as i64)
-            .fetch_optional(pool)
-            .await?
-            .and_then(|r| r.try_get::<i16, _>("is_primary").ok())
-            .unwrap_or(0)
-            == 1;
+    let was_primary: bool = sqlx::query(&crate::pq::rewrite(
+        "SELECT is_primary FROM account WHERE id = ? AND person_id = ?",
+    ))
+    .bind(account_id as i64)
+    .bind(id as i64)
+    .fetch_optional(pool)
+    .await?
+    .and_then(|r| r.try_get::<i16, _>("is_primary").ok())
+    .unwrap_or(0)
+        == 1;
 
     /* P2-10（2026-10-10）：先在事务里读出这个账号的 anchor_id / douyin_no，再删行。
     wave_snapshot / duration_snapshot 按 anchor_id 关联（表里没有 person_id），
@@ -3206,43 +3243,47 @@ pub async fn unbind_account(
       什么都不用动
     删账号与快照处理在同一个事务里，避免删了账号还没处理快照时被并发读到半个状态。 */
     let mut tx = pool.begin().await?;
-    let acc: Option<(String, String)> =
-        sqlx::query(&crate::pq::rewrite("SELECT anchor_id, douyin_no FROM account WHERE id = ? AND person_id = ?"))
-            .bind(account_id as i64)
-            .bind(id as i64)
-            .map(|r: sqlx::postgres::PgRow| {
-                (
-                    r.try_get::<String, _>("anchor_id").unwrap_or_default(),
-                    r.try_get::<String, _>("douyin_no").unwrap_or_default(),
-                )
-            })
-            .fetch_optional(&mut *tx)
-            .await?;
+    let acc: Option<(String, String)> = sqlx::query(&crate::pq::rewrite(
+        "SELECT anchor_id, douyin_no FROM account WHERE id = ? AND person_id = ?",
+    ))
+    .bind(account_id as i64)
+    .bind(id as i64)
+    .map(|r: sqlx::postgres::PgRow| {
+        (
+            r.try_get::<String, _>("anchor_id").unwrap_or_default(),
+            r.try_get::<String, _>("douyin_no").unwrap_or_default(),
+        )
+    })
+    .fetch_optional(&mut *tx)
+    .await?;
     let Some((anchor_id, douyin_no)) = acc else {
         return Err(anyhow::anyhow!("这个抖音号不存在或不属于该主播").into());
     };
-    let res = sqlx::query(&crate::pq::rewrite("DELETE FROM account WHERE id = ? AND person_id = ?"))
-        .bind(account_id as i64)
-        .bind(id as i64)
-        .execute(&mut *tx)
-        .await?;
+    let res = sqlx::query(&crate::pq::rewrite(
+        "DELETE FROM account WHERE id = ? AND person_id = ?",
+    ))
+    .bind(account_id as i64)
+    .bind(id as i64)
+    .execute(&mut *tx)
+    .await?;
     if res.affected() == 0 {
         return Err(anyhow::anyhow!("这个抖音号不存在或不属于该主播").into());
     }
     // anchor_id 是否还有别的账号行在用（同号重绑过的旧行：快照继续归它，不算孤儿）
-    let anchor_still_used: i64 =
-        sqlx::query(&crate::pq::rewrite("SELECT COUNT(*) FROM account WHERE anchor_id = ? AND id <> ?"))
-            .bind(&anchor_id)
-            .bind(account_id as i64)
-            .fetch_one(&mut *tx)
-            .await?
-            .try_get(0)
-            .unwrap_or(0);
+    let anchor_still_used: i64 = sqlx::query(&crate::pq::rewrite(
+        "SELECT COUNT(*) FROM account WHERE anchor_id = ? AND id <> ?",
+    ))
+    .bind(&anchor_id)
+    .bind(account_id as i64)
+    .fetch_one(&mut *tx)
+    .await?
+    .try_get(0)
+    .unwrap_or(0);
     if anchor_still_used == 0 && !anchor_id.is_empty() {
         // 快照有数才落暂存区：没有历史就不制造空行
-        let snap: (i64, i64) = sqlx::query(
+        let snap: (i64, i64) = sqlx::query(&crate::pq::rewrite(
             "SELECT COUNT(*), COALESCE(SUM(wave_value), 0) FROM wave_snapshot WHERE anchor_id = ?",
-        )
+        ))
         .bind(&anchor_id)
         .map(|r: sqlx::postgres::PgRow| {
             (
@@ -3257,10 +3298,10 @@ pub async fn unbind_account(
             // 一行汇总快照（每天不展开）：解除绑定的事实 + 快照条数与合计，够运营对账。
             // import_pending 以 douyin_no 认领（bind_account 后 absorb 自动补进 daily_metric
             // 的是暂存行里的 wave 值）；这里 wave 写合计，单日快照明细仍在 wave_snapshot 表里。
-            let _ = sqlx::query(
+            let _ = sqlx::query(&crate::pq::rewrite(
                 "INSERT INTO import_pending (name, douyin_no, biz_date, wave, source_batch_id)
                  VALUES (?,?,?::date,?,NULL)",
-            )
+            ))
             .bind(format!(
                 "（解绑留档）{} 副号快照 {} 条，音浪合计 {}",
                 douyin_no, n, sum
@@ -3281,10 +3322,10 @@ pub async fn unbind_account(
     tx.commit().await?;
     if was_primary {
         // 把剩下最早的一个提为主号（ON DUPLICATE 不需要，直接 UPDATE 最小 id 那条）
-        let _ = sqlx::query(
+        let _ = sqlx::query(&crate::pq::rewrite(
             "UPDATE account SET is_primary = 1 WHERE person_id = ? AND id = \
                (SELECT min_id FROM (SELECT MIN(id) AS min_id FROM account WHERE person_id = ?) t)",
-        )
+        ))
         .bind(id as i64)
         .bind(id as i64)
         .execute(pool)
@@ -3337,11 +3378,10 @@ pub async fn set_master(
         // 防环：沿师傅链向上走，若回到本人即成环（师徒关系必须是森林）
         let mut cursor = mid;
         for _ in 0..50 {
-            let link =
-                pgrs::query_with_binds(&st.pools, "LOCAL", dialect::MASTER_CHAIN_SQL, |q| {
-                    q.bind(cursor as i64)
-                })
-                .await?;
+            let link = pgrs::query_with_binds(&st.pools, "LOCAL", dialect::MASTER_CHAIN_SQL, |q| {
+                q.bind(cursor as i64)
+            })
+            .await?;
             let link = match link.into_iter().next() {
                 Some(r) => r,
                 None => break,
@@ -3643,9 +3683,9 @@ pub async fn master_batch(
                     continue;
                 };
                 let gen = gen_of.get(mid).copied().flatten().map(|g| g + 1);
-                match sqlx::query(
+                match sqlx::query(&crate::pq::rewrite(
                     "UPDATE person SET master_id = ?, generation = ? WHERE id = ? AND deleted_at IS NULL",
-                )
+                ))
                 .bind(*mid)
                 .bind(gen)
                 .bind(*pid)
@@ -3823,9 +3863,9 @@ pub async fn batch_delete(
     let mut tx = pool.begin().await?;
     let mut ok = 0u64;
     for id in &ids {
-        let r = sqlx::query(
-            "UPDATE person SET deleted_at = NOW(3) WHERE id = ? AND deleted_at IS NULL",
-        )
+        let r = sqlx::query(&crate::pq::rewrite(
+            "UPDATE person SET deleted_at = now() WHERE id = ? AND deleted_at IS NULL",
+        ))
         .bind(*id as i64)
         .execute(&mut *tx)
         .await?;
@@ -3860,26 +3900,31 @@ pub async fn merge_person(
     let mut tx = pool.begin().await?;
 
     // 账号：先解 anchor_id 唯一冲突——target 已有同 anchor 的行保持不动，其余改绑
-    let src_accounts = sqlx::query(&crate::pq::rewrite("SELECT id, anchor_id FROM account WHERE person_id = ?"))
-        .bind(source as i64)
-        .fetch_all(&mut *tx)
-        .await?;
+    let src_accounts = sqlx::query(&crate::pq::rewrite(
+        "SELECT id, anchor_id FROM account WHERE person_id = ?",
+    ))
+    .bind(source as i64)
+    .fetch_all(&mut *tx)
+    .await?;
     for a in &src_accounts {
         let anchor: String = a.try_get("anchor_id").unwrap_or_default();
-        let exists: i64 =
-            sqlx::query(&crate::pq::rewrite("SELECT COUNT(*) FROM account WHERE anchor_id = ? AND person_id = ?"))
-                .bind(&anchor)
-                .bind(id as i64)
-                .fetch_one(&mut *tx)
-                .await?
-                .try_get(0)
-                .unwrap_or(0);
+        let exists: i64 = sqlx::query(&crate::pq::rewrite(
+            "SELECT COUNT(*) FROM account WHERE anchor_id = ? AND person_id = ?",
+        ))
+        .bind(&anchor)
+        .bind(id as i64)
+        .fetch_one(&mut *tx)
+        .await?
+        .try_get(0)
+        .unwrap_or(0);
         if exists == 0 {
-            sqlx::query(&crate::pq::rewrite("UPDATE account SET person_id = ? WHERE id = ?"))
-                .bind(id as i64)
-                .bind(a.try_get::<i64, _>("id").unwrap_or(0))
-                .execute(&mut *tx)
-                .await?;
+            sqlx::query(&crate::pq::rewrite(
+                "UPDATE account SET person_id = ? WHERE id = ?",
+            ))
+            .bind(id as i64)
+            .bind(a.try_get::<i64, _>("id").unwrap_or(0))
+            .execute(&mut *tx)
+            .await?;
         }
     }
 
@@ -3890,18 +3935,18 @@ pub async fn merge_person(
       累计取最大），然后删掉 source 该日行
     - target 该日没有行 → 走后面的整批 UPDATE 改绑（不会撞唯一键）
     两人任一天都有数据（一人多号最常见场景）也能正常合并。 */
-    let src_dates = sqlx::query(
+    let src_dates = sqlx::query(&crate::pq::rewrite(
         "SELECT DISTINCT TO_CHAR(biz_date, 'YYYY-MM-DD') AS d
          FROM daily_metric WHERE person_id = ?",
-    )
+    ))
     .bind(source as i64)
     .fetch_all(&mut *tx)
     .await?;
     for r in &src_dates {
         let d: String = r.try_get("d").unwrap_or_default();
-        let exists: i64 = sqlx::query(
+        let exists: i64 = sqlx::query(&crate::pq::rewrite(
             "SELECT COUNT(*) FROM daily_metric WHERE person_id = ? AND TO_CHAR(biz_date, 'YYYY-MM-DD') = ?",
-        )
+        ))
         .bind(id as i64)
         .bind(&d)
         .fetch_one(&mut *tx)
@@ -3910,26 +3955,27 @@ pub async fn merge_person(
         .unwrap_or(0);
         if exists > 0 {
             // 同日冲突：source 该日合计并进 target 该日行，然后删源行（不再撞唯一键）
-            sqlx::query(
+            // PG 方言：UPDATE … FROM（MySQL 的 UPDATE…JOIN 在 PG 里语法不通）
+            sqlx::query(&crate::pq::rewrite(
                 "UPDATE daily_metric t
-                 JOIN (SELECT SUM(wave) AS w, SUM(minutes) AS m, MAX(is_live) AS live,
+                 SET wave = t.wave + s.w, minutes = t.minutes + s.m,
+                     is_live = GREATEST(t.is_live, s.live),
+                     cumulative_wave = GREATEST(t.cumulative_wave, s.cum)
+                 FROM (SELECT SUM(wave) AS w, SUM(minutes) AS m, MAX(is_live) AS live,
                               MAX(cumulative_wave) AS cum
                        FROM daily_metric WHERE person_id = ? AND TO_CHAR(biz_date, 'YYYY-MM-DD') = ?) s
-                 SET t.wave = t.wave + s.w, t.minutes = t.minutes + s.m,
-                     t.is_live = GREATEST(t.is_live, s.live),
-                     t.cumulative_wave = GREATEST(t.cumulative_wave, s.cum)
                  WHERE t.person_id = ? AND TO_CHAR(t.biz_date, 'YYYY-MM-DD') = ?",
-            )
+            ))
             .bind(source as i64)
             .bind(&d)
             .bind(id as i64)
             .bind(&d)
             .execute(&mut *tx)
             .await?;
-            sqlx::query(
+            sqlx::query(&crate::pq::rewrite(
                 "DELETE FROM daily_metric
                  WHERE person_id = ? AND TO_CHAR(biz_date, 'YYYY-MM-DD') = ?",
-            )
+            ))
             .bind(source as i64)
             .bind(&d)
             .execute(&mut *tx)
@@ -3937,17 +3983,21 @@ pub async fn merge_person(
         }
     }
     // 剩下的都是 target 没有同日数据的行，整批改绑不会撞 uk_person_date
-    sqlx::query(&crate::pq::rewrite("UPDATE daily_metric SET person_id = ? WHERE person_id = ?"))
-        .bind(id as i64)
-        .bind(source as i64)
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query(&crate::pq::rewrite(
+        "UPDATE daily_metric SET person_id = ? WHERE person_id = ?",
+    ))
+    .bind(id as i64)
+    .bind(source as i64)
+    .execute(&mut *tx)
+    .await?;
 
     // source 软删
-    sqlx::query(&crate::pq::rewrite("UPDATE person SET deleted_at = NOW(3) WHERE id = ? AND deleted_at IS NULL"))
-        .bind(source as i64)
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query(&crate::pq::rewrite(
+        "UPDATE person SET deleted_at = now() WHERE id = ? AND deleted_at IS NULL",
+    ))
+    .bind(source as i64)
+    .execute(&mut *tx)
+    .await?;
     tx.commit().await?;
     Ok(Json(
         json!({ "ok": true, "mergedFrom": source, "into": id }),
@@ -4808,7 +4858,7 @@ mod tests {
         // 管理端走写池的静态 SQL 必须全部过写守卫
         let admin_sql = [
             "UPDATE person SET name = ? WHERE id = ?",
-            "UPDATE person SET deleted_at = NOW(3) WHERE id = ? AND deleted_at IS NULL",
+            "UPDATE person SET deleted_at = now() WHERE id = ? AND deleted_at IS NULL",
             "INSERT INTO person (name, gender) VALUES (?,?)",
             "INSERT INTO account (person_id, anchor_id) VALUES (?,?)",
             "UPDATE account SET douyin_no = ? WHERE anchor_id = ?",

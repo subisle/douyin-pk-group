@@ -59,11 +59,13 @@ async fn upgrade_my_password_if_plain(pool: &PgPool, name: &str, stored: &str, p
     if stored.starts_with("$argon2") {
         return;
     }
-    if let Err(e) = sqlx::query(&crate::pq::rewrite("UPDATE my_accounts SET pass = ? WHERE name = ?"))
-        .bind(hash_my_password(pass))
-        .bind(name)
-        .execute(pool)
-        .await
+    if let Err(e) = sqlx::query(&crate::pq::rewrite(
+        "UPDATE my_accounts SET pass = ? WHERE name = ?",
+    ))
+    .bind(hash_my_password(pass))
+    .bind(name)
+    .execute(pool)
+    .await
     {
         tracing::warn!(error = %e, name, "展示端老明文密码升级为 argon2id 失败");
     }
@@ -164,23 +166,24 @@ async fn my_account_set_pool(
     let (name, pass) = validate_my_account(name, pass)?;
     let phone = validate_my_phone(phone)?;
     if !phone.is_empty() {
-        let dup_phone: bool =
-            sqlx::query(&crate::pq::rewrite("SELECT 1 FROM my_accounts WHERE phone = ? AND name != ? AND phone != ''"))
-                .bind(&phone)
-                .bind(&name)
-                .fetch_optional(pool)
-                .await
-                .map_err(|e| format!("查重失败：{e}"))?
-                .is_some();
+        let dup_phone: bool = sqlx::query(&crate::pq::rewrite(
+            "SELECT 1 FROM my_accounts WHERE phone = ? AND name != ? AND phone != ''",
+        ))
+        .bind(&phone)
+        .bind(&name)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| format!("查重失败：{e}"))?
+        .is_some();
         if dup_phone {
             return Err("手机号已存在（已绑定其它姓名）".into());
         }
     }
     let pass_hash = hash_my_password(&pass);
-    sqlx::query(
+    sqlx::query(&crate::pq::rewrite(
         "INSERT INTO my_accounts (name, phone, pass, is_admin, created_at) VALUES (?, ?, ?, 0, ?)
          ON CONFLICT (name) DO UPDATE SET phone = EXCLUDED.phone, pass = EXCLUDED.pass",
-    )
+    ))
     .bind(&name)
     .bind(&phone)
     .bind(&pass_hash)
@@ -212,14 +215,16 @@ pub async fn my_account_phone(st: &AppState, name: &str) -> String {
     let Ok(pool) = w(st) else {
         return String::new();
     };
-    sqlx::query(&crate::pq::rewrite("SELECT phone FROM my_accounts WHERE name = ?"))
-        .bind(name.trim())
-        .fetch_optional(pool)
-        .await
-        .ok()
-        .flatten()
-        .and_then(|r| r.try_get::<String, _>("phone").ok())
-        .unwrap_or_default()
+    sqlx::query(&crate::pq::rewrite(
+        "SELECT phone FROM my_accounts WHERE name = ?",
+    ))
+    .bind(name.trim())
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .and_then(|r| r.try_get::<String, _>("phone").ok())
+    .unwrap_or_default()
 }
 
 /// 单个账号（右键弹窗回填用）；没有则 None。
@@ -227,10 +232,10 @@ pub async fn my_account_phone(st: &AppState, name: &str) -> String {
 pub async fn my_account_get(st: &AppState, name: &str) -> Option<serde_json::Value> {
     let pool = w(st).ok()?;
     let key = name.trim();
-    let row = sqlx::query(
+    let row = sqlx::query(&crate::pq::rewrite(
         "SELECT name, phone, is_admin, created_at, bound, bound_at, source \
          FROM my_accounts WHERE name = ?",
-    )
+    ))
     .bind(key)
     .fetch_optional(pool)
     .await
@@ -249,13 +254,14 @@ pub async fn my_account_get(st: &AppState, name: &str) -> Option<serde_json::Val
         }));
     }
     // 兜底：表还没跑 008 迁移（没有 bound/source 列）时退回老查询
-    let row =
-        sqlx::query(&crate::pq::rewrite("SELECT name, phone, is_admin, created_at FROM my_accounts WHERE name = ?"))
-            .bind(key)
-            .fetch_optional(pool)
-            .await
-            .ok()
-            .flatten()?;
+    let row = sqlx::query(&crate::pq::rewrite(
+        "SELECT name, phone, is_admin, created_at FROM my_accounts WHERE name = ?",
+    ))
+    .bind(key)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()?;
     let name = row.try_get::<String, _>("name").ok()?;
     Some(serde_json::json!({
         "name": name,
@@ -335,7 +341,8 @@ pub async fn person_set_phone(
     let phone = validate_my_phone(phone)?;
     let pool = w(st).map_err(|e| e.to_string())?;
     if !phone.is_empty() {
-        let taken_person = sqlx::query(crate::dialect::PERSON_PHONE_TAKEN_SQL)
+        let taken_person =
+            sqlx::query(&crate::pq::rewrite(crate::dialect::PERSON_PHONE_TAKEN_SQL))
             .bind(&phone)
             .bind(person_id as i64)
             .fetch_optional(pool)
@@ -346,33 +353,36 @@ pub async fn person_set_phone(
         if taken_person {
             return Err(PhoneClash::Person.message(&phone));
         }
-        let taken_account =
-            sqlx::query(&crate::pq::rewrite("SELECT 1 FROM my_accounts WHERE phone <> '' AND phone = ? LIMIT 1"))
-                .bind(&phone)
-                .fetch_optional(pool)
-                .await
-                .ok()
-                .flatten()
-                .is_some();
+        let taken_account = sqlx::query(&crate::pq::rewrite(
+            "SELECT 1 FROM my_accounts WHERE phone <> '' AND phone = ? LIMIT 1",
+        ))
+        .bind(&phone)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .is_some();
         if taken_account {
             return Err(PhoneClash::Account.message(&phone));
         }
     }
-    sqlx::query(&crate::pq::rewrite("UPDATE person SET phone = ? WHERE id = ? AND deleted_at IS NULL"))
-        .bind(&phone)
-        .bind(person_id as i64)
-        .execute(pool)
-        .await
-        .map_err(|e| {
-            let m = e.to_string();
-            if m.contains("Unknown column") {
-                "主播手机号功能未启用：请先跑一次 pk-server migrate（016_streamer_phone）".into()
-            } else if m.contains("Duplicate entry") {
-                format!("手机号 {phone} 已被其它主播登记")
-            } else {
-                format!("写入失败：{m}")
-            }
-        })?;
+    sqlx::query(&crate::pq::rewrite(
+        "UPDATE person SET phone = ? WHERE id = ? AND deleted_at IS NULL",
+    ))
+    .bind(&phone)
+    .bind(person_id as i64)
+    .execute(pool)
+    .await
+    .map_err(|e| {
+        let m = e.to_string();
+        if m.contains("Unknown column") {
+            "主播手机号功能未启用：请先跑一次 pk-server migrate（016_streamer_phone）".into()
+        } else if m.contains("Duplicate entry") {
+            format!("手机号 {phone} 已被其它主播登记")
+        } else {
+            format!("写入失败：{m}")
+        }
+    })?;
     Ok(())
 }
 
@@ -551,7 +561,7 @@ pub async fn my_accounts_batch_open(
     PRIMARY KEY(name) 直接撞车 → 该条报 failed，运营看到"已存在"却开不了号。 */
     let mut account_by_name: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
-    if let Ok(rows) = sqlx::query("SELECT name, phone FROM my_accounts")
+    if let Ok(rows) = sqlx::query(&crate::pq::rewrite("SELECT name, phone FROM my_accounts"))
         .fetch_all(pool)
         .await
     {
@@ -690,7 +700,8 @@ pub async fn my_accounts_batch_open(
                 } else {
                     "UPDATE my_accounts SET phone = ?, person_id = ?, bound = 1 WHERE name = ?"
                 };
-                let mut q = sqlx::query(sql).bind(&keep_phone);
+                let sql = crate::pq::rewrite(sql);
+                let mut q = sqlx::query(&sql).bind(&keep_phone);
                 if force_reset {
                     q = q.bind(&pass_hash);
                 }
@@ -728,11 +739,11 @@ pub async fn my_accounts_batch_open(
             None => {
                 /* 新建：开号即绑定（bound=1、name = 台账姓名、person_id 锚定），
                 与 my_account_register 同口径 —— 主播拿到号就能登，不用再绑一次。 */
-                let res = sqlx::query(
+                let res = sqlx::query(&crate::pq::rewrite(
                     "INSERT INTO my_accounts
                        (name, phone, pass, is_admin, created_at, bound, bound_at, source, person_id)
                      VALUES (?, ?, ?, 0, ?, 1, ?, 'batch', ?)",
-                )
+                ))
                 .bind(&name)
                 .bind(&want_phone)
                 .bind(&pass_hash)
@@ -849,10 +860,12 @@ pub async fn ensure_builtin_my_accounts(st: &AppState) -> (usize, usize) {
     for (name, pass) in &accounts {
         let name = name.as_str();
         let pass = pass.as_str();
-        let exists = match sqlx::query(&crate::pq::rewrite("SELECT name FROM my_accounts WHERE name = ?"))
-            .bind(name)
-            .fetch_optional(pool)
-            .await
+        let exists = match sqlx::query(&crate::pq::rewrite(
+            "SELECT name FROM my_accounts WHERE name = ?",
+        ))
+        .bind(name)
+        .fetch_optional(pool)
+        .await
         {
             Ok(row) => row.is_some(),
             Err(e) => {
@@ -862,10 +875,12 @@ pub async fn ensure_builtin_my_accounts(st: &AppState) -> (usize, usize) {
             }
         };
         if exists {
-            if let Err(e) = sqlx::query(&crate::pq::rewrite("UPDATE my_accounts SET is_admin = 1 WHERE name = ?"))
-                .bind(name)
-                .execute(pool)
-                .await
+            if let Err(e) = sqlx::query(&crate::pq::rewrite(
+                "UPDATE my_accounts SET is_admin = 1 WHERE name = ?",
+            ))
+            .bind(name)
+            .execute(pool)
+            .await
             {
                 tracing::warn!(error = %e, name, "内置展示端账号管理员标记更新失败");
                 skipped += 1;
@@ -874,10 +889,10 @@ pub async fn ensure_builtin_my_accounts(st: &AppState) -> (usize, usize) {
         }
 
         // 密码 1:1：已被别的姓名占用就不能插（否则会顶掉那个人的登录）
-        match sqlx::query(
+        match sqlx::query(&crate::pq::rewrite(
             "INSERT INTO my_accounts (name, phone, pass, is_admin, created_at)
              VALUES (?, '', ?, 1, ?)",
-        )
+        ))
         .bind(name)
         .bind(hash_my_password(pass))
         .bind(&now)
@@ -921,12 +936,14 @@ pub async fn my_account_check_login(st: &AppState, account: &str, pass: &str) ->
     let phone = normalize_phone(acct);
     let as_phone = phone.chars().all(|c| c.is_ascii_digit()) && (5..=20).contains(&phone.len());
     if as_phone {
-        if let Some(row) = sqlx::query(&crate::pq::rewrite("SELECT name, pass FROM my_accounts WHERE phone = ? LIMIT 1"))
-            .bind(&phone)
-            .fetch_optional(pool)
-            .await
-            .ok()
-            .flatten()
+        if let Some(row) = sqlx::query(&crate::pq::rewrite(
+            "SELECT name, pass FROM my_accounts WHERE phone = ? LIMIT 1",
+        ))
+        .bind(&phone)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
         {
             let stored: String = row.try_get("pass").ok()?;
             let name: String = row.try_get("name").ok()?;
@@ -936,12 +953,14 @@ pub async fn my_account_check_login(st: &AppState, account: &str, pass: &str) ->
             }
         }
     }
-    if let Some(row) = sqlx::query(&crate::pq::rewrite("SELECT name, pass FROM my_accounts WHERE name = ? LIMIT 1"))
-        .bind(acct)
-        .fetch_optional(pool)
-        .await
-        .ok()
-        .flatten()
+    if let Some(row) = sqlx::query(&crate::pq::rewrite(
+        "SELECT name, pass FROM my_accounts WHERE name = ? LIMIT 1",
+    ))
+    .bind(acct)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
     {
         let stored: String = row.try_get("pass").ok()?;
         let name: String = row.try_get("name").ok()?;
@@ -1009,9 +1028,9 @@ pub async fn my_account_reset_password_random(
     /* 只认「自助注册的普通账号」（is_admin=0）：管理员观看账号不参与重置，
     否则知道手机号的人就能接管后台视角账号（审计 2026-10-11 修复）。
     文案不区分「没登记」和「管理员账号」，避免泄露台账。 */
-    let names: Vec<String> = sqlx::query(
+    let names: Vec<String> = sqlx::query(&crate::pq::rewrite(
         "SELECT name FROM my_accounts WHERE phone = ? AND phone <> '' AND is_admin = 0",
-    )
+    ))
     .bind(&phone)
     .fetch_all(pool)
     .await
@@ -1023,12 +1042,14 @@ pub async fn my_account_reset_password_random(
         return Err("该手机号还没有注册或未登记".into());
     }
     let new_pass = initial_password();
-    sqlx::query(&crate::pq::rewrite("UPDATE my_accounts SET pass = ? WHERE phone = ? AND phone <> '' AND is_admin = 0"))
-        .bind(hash_my_password(&new_pass))
-        .bind(&phone)
-        .execute(pool)
-        .await
-        .map_err(|e| format!("重置失败：{e}"))?;
+    sqlx::query(&crate::pq::rewrite(
+        "UPDATE my_accounts SET pass = ? WHERE phone = ? AND phone <> '' AND is_admin = 0",
+    ))
+    .bind(hash_my_password(&new_pass))
+    .bind(&phone)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("重置失败：{e}"))?;
     Ok((new_pass, names))
 }
 
@@ -1042,7 +1063,7 @@ pub async fn my_account_info(st: &AppState, key: &str) -> Option<MyAccountInfo> 
     }
     let sql = "SELECT name, phone, is_admin, bound, bound_at, source FROM my_accounts \
                WHERE name = ? OR (phone <> '' AND phone = ?) LIMIT 1";
-    if let Ok(Some(r)) = sqlx::query(sql)
+    if let Ok(Some(r)) = sqlx::query(&crate::pq::rewrite(sql))
         .bind(key)
         .bind(key)
         .fetch_optional(pool)
@@ -1059,7 +1080,7 @@ pub async fn my_account_info(st: &AppState, key: &str) -> Option<MyAccountInfo> 
     }
     let sql = "SELECT name, phone, is_admin FROM my_accounts \
                WHERE name = ? OR (phone <> '' AND phone = ?) LIMIT 1";
-    sqlx::query(sql)
+    sqlx::query(&crate::pq::rewrite(sql))
         .bind(key)
         .bind(key)
         .fetch_optional(pool)
@@ -1118,10 +1139,10 @@ pub async fn my_account_register(
     };
     /* 一次查询覆盖三种占用（少两次往返）：同名主播已占号 / 手机号已占 / 历史「手机号占位名」。
     真正的唯一性由主键(name) + uk_my_phone_uniq(phone) 兜底，这里只为给出准确文案。 */
-    let clashes = sqlx::query(
+    let clashes = sqlx::query(&crate::pq::rewrite(
         "SELECT name, phone FROM my_accounts \
          WHERE name IN (?, ?) OR (phone <> '' AND phone = ?) LIMIT 5",
-    )
+    ))
     .bind(&person_name)
     .bind(&phone)
     .bind(&phone)
@@ -1145,10 +1166,10 @@ pub async fn my_account_register(
     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     /* 审计 2026-10-12：注册**不再立即绑定**（自报姓名直接 bound=1 等于无审核冒领）。
     回到 008 的原始设计：name 先填手机号占位、bound=0，绑定走 my_bind_requests 审核流。 */
-    sqlx::query(
+    sqlx::query(&crate::pq::rewrite(
         "INSERT INTO my_accounts (name, phone, pass, is_admin, created_at, bound, bound_at, source, wb_state)
          VALUES (?, ?, ?, 0, ?, 0, '', 'register', ?)",
-    )
+    ))
     .bind(&phone)
     .bind(&phone)
     .bind(&pass_hash)
@@ -1217,18 +1238,20 @@ async fn bind_inner(
     if login_name.is_empty() {
         return Err("请先登录".into());
     }
-    let row = sqlx::query(&crate::pq::rewrite("SELECT name, bound FROM my_accounts WHERE name = ? LIMIT 1"))
-        .bind(login_name)
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| {
-            if e.to_string().contains("Unknown column") {
-                "缺少数据库迁移 008（先跑一次 pk-server migrate）".to_string()
-            } else {
-                format!("查账号失败：{e}")
-            }
-        })?
-        .ok_or_else(|| "账号不存在，请重新登录".to_string())?;
+    let row = sqlx::query(&crate::pq::rewrite(
+        "SELECT name, bound FROM my_accounts WHERE name = ? LIMIT 1",
+    ))
+    .bind(login_name)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| {
+        if e.to_string().contains("Unknown column") {
+            "缺少数据库迁移 008（先跑一次 pk-server migrate）".to_string()
+        } else {
+            format!("查账号失败：{e}")
+        }
+    })?
+    .ok_or_else(|| "账号不存在，请重新登录".to_string())?;
     let bound = row.try_get::<i16, _>("bound").unwrap_or(1) == 1;
     if bound && !admin {
         return Err("该账号已绑定主播，不能自行更改（需要改绑请联系管理员）".into());
@@ -1255,21 +1278,23 @@ async fn bind_inner(
         return Err("该主播已离团，不能绑定".into());
     }
 
-    let taken = sqlx::query(&crate::pq::rewrite("SELECT name FROM my_accounts WHERE name = ? AND name <> ? LIMIT 1"))
-        .bind(&person_name)
-        .bind(login_name)
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| format!("查重失败：{e}"))?
-        .is_some();
+    let taken = sqlx::query(&crate::pq::rewrite(
+        "SELECT name FROM my_accounts WHERE name = ? AND name <> ? LIMIT 1",
+    ))
+    .bind(&person_name)
+    .bind(login_name)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("查重失败：{e}"))?
+    .is_some();
     if taken {
         return Err("该主播已存在绑定的账号，请联系管理员".into());
     }
 
     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    let affected = sqlx::query(
+    let affected = sqlx::query(&crate::pq::rewrite(
         "UPDATE my_accounts SET name = ?, bound = 1, bound_at = ? WHERE name = ? AND bound = 0",
-    )
+    ))
     .bind(&person_name)
     .bind(&now)
     .bind(login_name)
@@ -1282,13 +1307,15 @@ async fn bind_inner(
         return Err("该账号已绑定主播，不能自行更改（需要改绑请联系管理员）".into());
     }
     if affected == 0 {
-        sqlx::query(&crate::pq::rewrite("UPDATE my_accounts SET name = ?, bound = 1, bound_at = ? WHERE name = ?"))
-            .bind(&person_name)
-            .bind(&now)
-            .bind(login_name)
-            .execute(pool)
-            .await
-            .map_err(|e| format!("绑定失败：{e}"))?;
+        sqlx::query(&crate::pq::rewrite(
+            "UPDATE my_accounts SET name = ?, bound = 1, bound_at = ? WHERE name = ?",
+        ))
+        .bind(&person_name)
+        .bind(&now)
+        .bind(login_name)
+        .execute(pool)
+        .await
+        .map_err(|e| format!("绑定失败：{e}"))?;
     }
     Ok(MyBindResult {
         name: person_name,

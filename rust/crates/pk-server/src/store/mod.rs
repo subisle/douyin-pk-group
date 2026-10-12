@@ -10,7 +10,7 @@
 //! - [`legacy`] 旧 SQLite 数据一次性搬家
 //!
 //! 对外 API 不变：全部通过本模块 re-export（`store::xxx` 照旧可用）。
-//! 运行时状态存储（2026-10-10 单库化，并入 MySQL）：别名 / 分组方案 / 名单草稿 /
+//! 运行时状态存储（2026-10-10 单库化，并入业务库）：别名 / 分组方案 / 名单草稿 /
 //! 配置 / 机器人会话 / 展示端账号 / 抖音号绑定审计。
 //!
 //! 这批表早期放在本地 SQLite（rusqlite 同步 API），单库决策（2026-10-10）后统一并入
@@ -22,12 +22,16 @@
 //!   [`carry_legacy_sqlite`] 把数据幂等搬进来（config 表 sqlite_carried=1 后跳过）
 //! - 表结构见 migrations/003_runtime.sql；列名差异（key→cfg_key、text→body）都是方言原因
 
-
 mod bind_requests;
+/// Redis 缓存 / 锁封装（P0）：不做 `pub use cache::*`，避免 get/set/del 这类
+/// 通用名与下面各业务模块的 re-export 撞名；调用方一律写 `store::cache::xxx`。
+pub mod cache;
 mod legacy;
 pub mod my_account;
 mod push_jobs;
 mod wx_sessions;
+/// 微信 iLink 图片发送（getuploadurl → CDN 上传 → image_item），供每日报告图片推送
+pub mod wxmedia;
 mod wxpush;
 
 pub use bind_requests::*;
@@ -37,13 +41,12 @@ pub use push_jobs::*;
 pub use wx_sessions::*;
 pub use wxpush::*;
 
-
 use anyhow::Result;
 use sqlx::PgPool;
 use sqlx::Row;
 
-use crate::state::AppState;
 use crate::pgrs::PgResultExt;
+use crate::state::AppState;
 
 /* ------------------------------ 内部工具 ------------------------------ */
 
@@ -105,7 +108,9 @@ pub async fn list_aliases(st: &AppState) -> AliasMap {
     let Ok(pool) = w(st) else {
         return AliasMap::new();
     };
-    match sqlx::query("SELECT alias, real_name FROM aliases")
+    match sqlx::query(&crate::pq::rewrite(
+"SELECT alias, real_name FROM aliases"
+        ))
         .fetch_all(pool)
         .await
     {
@@ -126,10 +131,10 @@ pub async fn list_aliases(st: &AppState) -> AliasMap {
 }
 
 pub async fn upsert_alias(st: &AppState, alias: &str, real_name: &str) -> Result<()> {
-    sqlx::query(
+    sqlx::query(&crate::pq::rewrite(
         "INSERT INTO aliases (alias, real_name) VALUES (?, ?)
          ON CONFLICT (alias) DO UPDATE SET real_name = EXCLUDED.real_name",
-    )
+    ))
     .bind(alias)
     .bind(real_name)
     .execute(w(st)?)
@@ -153,10 +158,12 @@ pub async fn delete_alias(st: &AppState, alias: &str) -> Result<()> {
 /// 会让用户不小心清空一次之后就再也回不来。
 pub async fn load_roster(st: &AppState, event_type: &str) -> Option<(String, String)> {
     let pool = w(st).ok()?;
-    let row = match sqlx::query(&crate::pq::rewrite("SELECT body, updated_at FROM roster_state WHERE event_type = ?"))
-        .bind(event_type)
-        .fetch_optional(pool)
-        .await
+    let row = match sqlx::query(&crate::pq::rewrite(
+        "SELECT body, updated_at FROM roster_state WHERE event_type = ?",
+    ))
+    .bind(event_type)
+    .fetch_optional(pool)
+    .await
     {
         Ok(Some(r)) => r,
         _ => return None,
@@ -172,10 +179,10 @@ pub async fn save_roster(st: &AppState, event_type: &str, text: &str) -> String 
     let updated_at = chrono::Utc::now().to_rfc3339();
     let res = async {
         let pool = w(st)?;
-        sqlx::query(
+        sqlx::query(&crate::pq::rewrite(
             "INSERT INTO roster_state (event_type, body, updated_at) VALUES (?, ?, ?)
              ON CONFLICT (event_type) DO UPDATE SET body = EXCLUDED.body, updated_at = EXCLUDED.updated_at",
-        )
+        ))
         .bind(event_type)
         .bind(text)
         .bind(&updated_at)
@@ -265,10 +272,12 @@ pub async fn list_plans(st: &AppState) -> Vec<PlanRow> {
 
 pub async fn get_plan(st: &AppState, id: i64) -> Option<PlanRow> {
     let pool = w(st).ok()?;
-    let row = match sqlx::query(&crate::pq::rewrite(&format!("SELECT {PLAN_COLS} FROM plans WHERE id = ?")))
-        .bind(id)
-        .fetch_optional(pool)
-        .await
+    let row = match sqlx::query(&crate::pq::rewrite(&format!(
+        "SELECT {PLAN_COLS} FROM plans WHERE id = ?"
+    )))
+    .bind(id)
+    .fetch_optional(pool)
+    .await
     {
         Ok(Some(r)) => r,
         _ => return None,
@@ -292,10 +301,10 @@ pub async fn set_published(st: &AppState, id: i64, published: bool) -> bool {
         }
     };
     if published {
-        if let Err(e) = sqlx::query(
+        if let Err(e) = sqlx::query(&crate::pq::rewrite(
             "UPDATE plans SET published = 0 WHERE published = 1 AND id != ? \
              AND COALESCE(event_type, '') = COALESCE((SELECT event_type FROM (SELECT event_type FROM plans WHERE id = ?) t), '')",
-        )
+        ))
         .bind(id)
         .bind(id)
         .execute(&mut *tx)
@@ -305,11 +314,13 @@ pub async fn set_published(st: &AppState, id: i64, published: bool) -> bool {
             return false;
         }
     }
-    match sqlx::query(&crate::pq::rewrite("UPDATE plans SET published = ? WHERE id = ?"))
-        .bind(if published { 1i16 } else { 0i16 })
-        .bind(id)
-        .execute(&mut *tx)
-        .await
+    match sqlx::query(&crate::pq::rewrite(
+        "UPDATE plans SET published = ? WHERE id = ?",
+    ))
+    .bind(if published { 1i16 } else { 0i16 })
+    .bind(id)
+    .execute(&mut *tx)
+    .await
     {
         Ok(res) => {
             if tx.commit().await.is_err() {
@@ -342,24 +353,26 @@ pub async fn delete_plan(st: &AppState, id: i64) -> Result<()> {
 /// 读配置项（机器人 token 等跨重启保留的状态）；读不到/出错 → None
 pub async fn config_get(st: &AppState, key: &str) -> Option<String> {
     let pool = w(st).ok()?;
-    sqlx::query(&crate::pq::rewrite("SELECT cfg_value FROM config WHERE cfg_key = ?"))
-        .bind(key)
-        .fetch_optional(pool)
-        .await
-        .ok()?
-        .into_iter()
-        .next()
-        .and_then(|r| r.try_get::<String, _>(0).ok())
+    sqlx::query(&crate::pq::rewrite(
+        "SELECT cfg_value FROM config WHERE cfg_key = ?",
+    ))
+    .bind(key)
+    .fetch_optional(pool)
+    .await
+    .ok()?
+    .into_iter()
+    .next()
+    .and_then(|r| r.try_get::<String, _>(0).ok())
 }
 
 /// 写配置项（出错只记日志——配置写失败不应打断主流程）
 pub async fn config_set(st: &AppState, key: &str, value: &str) {
     let res = async {
         let pool = w(st)?;
-        sqlx::query(
+        sqlx::query(&crate::pq::rewrite(
             "INSERT INTO config (cfg_key, cfg_value, updated_at) VALUES (?, ?, ?)
              ON CONFLICT (cfg_key) DO UPDATE SET cfg_value = EXCLUDED.cfg_value, updated_at = EXCLUDED.updated_at",
-        )
+        ))
         .bind(key)
         .bind(value)
         .bind(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string())
@@ -385,11 +398,11 @@ pub async fn session_upsert(
 ) {
     let res = async {
         let pool = w(st)?;
-        sqlx::query(
+        sqlx::query(&crate::pq::rewrite(
             "INSERT INTO bot_sessions (channel, conversation_id, kind, last_text, last_seen, is_admin)
              VALUES (?, ?, ?, ?, ?, 0)
              ON CONFLICT (channel, conversation_id) DO UPDATE SET kind = EXCLUDED.kind, last_text = EXCLUDED.last_text, last_seen = EXCLUDED.last_seen",
-        )
+        ))
         .bind(channel)
         .bind(conversation_id)
         .bind(kind)
@@ -460,9 +473,9 @@ pub async fn session_set_admin(
     is_admin: bool,
 ) {
     if let Ok(pool) = w(st) {
-        let _ = sqlx::query(
+        let _ = sqlx::query(&crate::pq::rewrite(
             "UPDATE bot_sessions SET is_admin = ? WHERE channel = ? AND conversation_id = ?",
-        )
+        ))
         .bind(if is_admin { 1i16 } else { 0i16 })
         .bind(channel)
         .bind(conversation_id)
@@ -472,7 +485,6 @@ pub async fn session_set_admin(
 }
 
 /* --------------------------- 抖音号绑定校验（纯函数） --------------------------- */
-
 
 /* --------------------------------- 单元测试（纯函数） --------------------------------- */
 

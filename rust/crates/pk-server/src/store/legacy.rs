@@ -4,14 +4,17 @@ use super::*; // 共享 w() / now_str() / AppState 等内部工具
 
 /* -------------------- 旧 SQLite 数据一次性搬家（migrate 触发） -------------------- */
 
-/// 把旧 SQLite（SQLITE_PATH）里的运行时数据幂等搬进 MySQL。
+/// 把旧 SQLite（SQLITE_PATH）里的运行时数据幂等搬进业务库。
 /// 只搬一次：config 表 sqlite_carried=1 后直接跳过（SQLite 文件保持原样不删，作留底）。
 /// 表缺列/文件不存在都按「没得搬」处理，绝不阻塞 migrate。
 pub async fn carry_legacy_sqlite(pool: &PgPool, sqlite_path: &str) -> Result<()> {
     use sqlx::Row;
 
     // 1. 已搬过 → 跳过
-    let carried = sqlx::query("SELECT cfg_value FROM config WHERE cfg_key = 'sqlite_carried'")
+    let carried =
+        sqlx::query(&crate::pq::rewrite(
+            "SELECT cfg_value FROM config WHERE cfg_key = 'sqlite_carried'",
+        ))
         .fetch_optional(pool)
         .await
         .ok()
@@ -65,10 +68,10 @@ pub async fn carry_legacy_sqlite(pool: &PgPool, sqlite_path: &str) -> Result<()>
             .filter_map(Result::ok)
             .collect();
         for (a, rn) in &rows {
-            sqlx::query(
+            sqlx::query(&crate::pq::rewrite(
                 "INSERT INTO aliases (alias, real_name) VALUES (?, ?)
                  ON CONFLICT (alias) DO UPDATE SET real_name = EXCLUDED.real_name",
-            )
+            ))
             .bind(a)
             .bind(rn)
             .execute(pool)
@@ -85,10 +88,10 @@ pub async fn carry_legacy_sqlite(pool: &PgPool, sqlite_path: &str) -> Result<()>
             .filter_map(Result::ok)
             .collect();
         for (et, body, at) in &rows {
-            sqlx::query(
+            sqlx::query(&crate::pq::rewrite(
                 "INSERT INTO roster_state (event_type, body, updated_at) VALUES (?, ?, ?)
                  ON CONFLICT (event_type) DO UPDATE SET body = EXCLUDED.body, updated_at = EXCLUDED.updated_at",
-            )
+            ))
             .bind(et)
             .bind(body)
             .bind(at)
@@ -109,10 +112,10 @@ pub async fn carry_legacy_sqlite(pool: &PgPool, sqlite_path: &str) -> Result<()>
             if k == "sqlite_carried" {
                 continue;
             }
-            sqlx::query(
+            sqlx::query(&crate::pq::rewrite(
                 "INSERT INTO config (cfg_key, cfg_value, updated_at) VALUES (?, ?, ?)
                  ON CONFLICT (cfg_key) DO UPDATE SET cfg_value = EXCLUDED.cfg_value, updated_at = EXCLUDED.updated_at",
-            )
+            ))
             .bind(k)
             .bind(v)
             .bind(&now)
@@ -141,12 +144,12 @@ pub async fn carry_legacy_sqlite(pool: &PgPool, sqlite_path: &str) -> Result<()>
             .filter_map(Result::ok)
             .collect();
         for (c, cid, kind, lt, ls, adm) in &rows {
-            sqlx::query(
+            sqlx::query(&crate::pq::rewrite(
                 "INSERT INTO bot_sessions (channel, conversation_id, kind, last_text, last_seen, is_admin)
                  VALUES (?, ?, ?, ?, ?, ?)
                  ON CONFLICT (channel, conversation_id) DO UPDATE SET kind = EXCLUDED.kind, last_text = EXCLUDED.last_text,
                    last_seen = EXCLUDED.last_seen, is_admin = EXCLUDED.is_admin",
-            )
+            ))
             .bind(c)
             .bind(cid)
             .bind(kind)
@@ -190,13 +193,13 @@ pub async fn carry_legacy_sqlite(pool: &PgPool, sqlite_path: &str) -> Result<()>
             .filter_map(Result::ok)
             .collect();
         for (id, title, metric, days, payload, created, published, et) in &rows {
-            sqlx::query(
+            sqlx::query(&crate::pq::rewrite(
                 "INSERT INTO plans (id, title, metric, days, payload, created_at, published, event_type)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                  ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, metric = EXCLUDED.metric,
                    days = EXCLUDED.days, payload = EXCLUDED.payload, created_at = EXCLUDED.created_at,
                    published = EXCLUDED.published, event_type = EXCLUDED.event_type",
-            )
+            ))
             .bind(id)
             .bind(title)
             .bind(metric)
@@ -227,12 +230,12 @@ pub async fn carry_legacy_sqlite(pool: &PgPool, sqlite_path: &str) -> Result<()>
             .filter_map(Result::ok)
             .collect();
         for (name, phone, pass, is_admin, created) in &rows {
-            sqlx::query(
+            sqlx::query(&crate::pq::rewrite(
                 "INSERT INTO my_accounts (name, phone, pass, is_admin, created_at)
                  VALUES (?, ?, ?, ?, ?)
                  ON CONFLICT (name) DO UPDATE SET phone = EXCLUDED.phone, pass = EXCLUDED.pass,
                    is_admin = EXCLUDED.is_admin, created_at = EXCLUDED.created_at",
-            )
+            ))
             .bind(name)
             .bind(phone)
             .bind(hash_my_password(pass))
@@ -285,7 +288,7 @@ pub async fn carry_legacy_sqlite(pool: &PgPool, sqlite_path: &str) -> Result<()>
             .filter_map(Result::ok)
             .collect();
         for row in &rows {
-            sqlx::query(
+            sqlx::query(&crate::pq::rewrite(
                 "INSERT INTO anchor_claims
                    (id, person_id, person_name, team, douyin_no, screenshot, mime, status,
                     reject_reason, created_at, decided_at, decided_by)
@@ -294,7 +297,7 @@ pub async fn carry_legacy_sqlite(pool: &PgPool, sqlite_path: &str) -> Result<()>
                    team = EXCLUDED.team, douyin_no = EXCLUDED.douyin_no, screenshot = EXCLUDED.screenshot,
                    mime = EXCLUDED.mime, status = EXCLUDED.status, reject_reason = EXCLUDED.reject_reason,
                    created_at = EXCLUDED.created_at, decided_at = EXCLUDED.decided_at, decided_by = EXCLUDED.decided_by",
-            )
+            ))
             .bind(row.0)
             .bind(row.1)
             .bind(&row.2)
@@ -314,13 +317,13 @@ pub async fn carry_legacy_sqlite(pool: &PgPool, sqlite_path: &str) -> Result<()>
     }
 
     // 9. 落搬家标记
-    sqlx::query(
+    sqlx::query(&crate::pq::rewrite(
         "INSERT INTO config (cfg_key, cfg_value, updated_at) VALUES ('sqlite_carried', '1', ?)
          ON CONFLICT (cfg_key) DO UPDATE SET cfg_value = '1', updated_at = EXCLUDED.updated_at",
-    )
+    ))
     .bind(&now)
     .execute(pool)
     .await?;
-    tracing::info!("旧 SQLite 运行时数据已全部并入 MySQL（sqlite_carried=1）");
+    tracing::info!("旧 SQLite 运行时数据已全部并入业务库（sqlite_carried=1）");
     Ok(())
 }

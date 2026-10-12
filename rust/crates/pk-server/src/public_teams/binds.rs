@@ -147,7 +147,7 @@ pub async fn admin_anchor_claim_screenshot(
 }
 
 /// POST /api/admin/anchor-claims/{id}/decide {approve, reason?}
-/// 通过 → 写 MySQL account（抖音号精确命中是导入匹配第一优先级，此后音浪自动落到这个人）；
+/// 通过 → 写 account 表（抖音号精确命中是导入匹配第一优先级，此后音浪自动落到这个人）；
 /// 驳回 → 记原因，用户可在展示端重新提交。
 pub async fn admin_anchor_claim_decide(
     State(st): State<ArcState>,
@@ -188,10 +188,12 @@ pub async fn admin_anchor_claim_decide(
         .writer
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("写库不可用：douyin_writer 未配置"))?;
-    let dup = sqlx::query(&crate::pq::rewrite("SELECT person_id FROM account WHERE douyin_no = ? LIMIT 1"))
-        .bind(&no)
-        .fetch_optional(writer)
-        .await?;
+    let dup = sqlx::query(&crate::pq::rewrite(
+        "SELECT person_id FROM account WHERE douyin_no = ? LIMIT 1",
+    ))
+    .bind(&no)
+    .fetch_optional(writer)
+    .await?;
     if let Some(r) = dup {
         let owner = r
             .try_get::<i64, _>("person_id")
@@ -205,16 +207,18 @@ pub async fn admin_anchor_claim_decide(
         }
         .into());
     }
-    let cnt = sqlx::query(&crate::pq::rewrite("SELECT COUNT(*) AS n FROM account WHERE person_id = ?"))
-        .bind(person_id)
-        .fetch_one(writer)
-        .await?
-        .try_get::<i64, _>("n")
-        .unwrap_or(0);
-    let ins = sqlx::query(
+    let cnt = sqlx::query(&crate::pq::rewrite(
+        "SELECT COUNT(*) AS n FROM account WHERE person_id = ?",
+    ))
+    .bind(person_id)
+    .fetch_one(writer)
+    .await?
+    .try_get::<i64, _>("n")
+    .unwrap_or(0);
+    let ins = sqlx::query(&crate::pq::rewrite(
         "INSERT INTO account (person_id, anchor_id, douyin_no, anchor_name, is_primary) \
          VALUES (?,?,?,?,?)",
-    )
+    ))
     .bind(person_id)
     .bind(&no)
     .bind(&no)
@@ -226,11 +230,13 @@ pub async fn admin_anchor_claim_decide(
         // account 写失败必须回滚裁决，否则申请卡在「已通过」却没有账号
         crate::store::anchor_claim_revert(&st, id).await;
         let msg = e.to_string();
-        return Err(if msg.contains("duplicate key") || msg.contains("Duplicate entry") {
-            anyhow::anyhow!("抖音号或采集 ID 已存在（唯一键冲突），请检查是否重复绑定").into()
-        } else {
-            anyhow::anyhow!("写入账号失败：{msg}").into()
-        });
+        return Err(
+            if msg.contains("duplicate key") || msg.contains("Duplicate entry") {
+                anyhow::anyhow!("抖音号或采集 ID 已存在（唯一键冲突），请检查是否重复绑定").into()
+            } else {
+                anyhow::anyhow!("写入账号失败：{msg}").into()
+            },
+        );
     }
 
     // 审核通过 = 这个号正式绑到该主播名下：暂存区里这个号的导入行立刻补账，
