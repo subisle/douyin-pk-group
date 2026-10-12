@@ -861,6 +861,9 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .gate-box .reg-skip { background:none; border:none; color:#94A3B8; font-size:13px;
   text-decoration:underline; text-underline-offset:4px; text-decoration-color:#CBD5E1;
   cursor:pointer; padding:2px 0 0; margin:2px 0 14px; }
+/* 设计稿脚注：遇到问题？请联系管理员帅帅（12px slate-400 居中） */
+.gate-box .gate-foot { margin:14px 0 0; font-size:12px; color:#94A3B8;
+  letter-spacing:.02em; }
 .gate-box .btn-sec { width:100%; height:46px; border:none; border-radius:12px;
   background:#F2F4F7; color:#0B1C30;
   font-size:14px; font-weight:600; margin-bottom:10px; transition:all .15s; cursor:pointer; }
@@ -1534,7 +1537,8 @@ function showGate() {
       '<input id="gatePass" placeholder="密码" inputmode="numeric" autocomplete="off">' +
       '<button class="reg-skip" id="gateForgot">忘记密码？重置生成临时密码</button>' +
       '<div class="form-err hidden" id="gateErr"></div>' +
-      '<button class="btn-main" id="gateGo">登 录</button></div>' +
+      '<button class="btn-main" id="gateGo">登 录</button>' +
+      '<div class="gate-foot">遇到问题？请联系管理员帅帅</div></div>' +
     '<div id="paneReg" class="hidden"></div>' +
     '</div>';
   /* 引导让位给登录门：两层遮罩叠着用户找不到登录框。
