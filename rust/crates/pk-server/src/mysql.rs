@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions};
+use sqlx::pgrs::{MySqlConnectOptions, MySqlPoolOptions};
 use sqlx::{MySqlPool, Row};
 
 use crate::config::SourceConfig;
@@ -119,7 +119,7 @@ pub async fn query(
     pools: &Pools,
     source_id: &str,
     sql: &str,
-) -> anyhow::Result<Vec<sqlx::mysql::MySqlRow>> {
+) -> anyhow::Result<Vec<sqlx::pgrs::MySqlRow>> {
     readonly_guard(sql)?;
     let pool = pools.get(source_id)?;
     let rows = sqlx::query(sql).fetch_all(pool).await?;
@@ -132,11 +132,11 @@ pub async fn query_with_binds<F>(
     source_id: &str,
     sql: &str,
     bind: F,
-) -> anyhow::Result<Vec<sqlx::mysql::MySqlRow>>
+) -> anyhow::Result<Vec<sqlx::pgrs::MySqlRow>>
 where
     F: FnOnce(
-        sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments>,
-    ) -> sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments>,
+        sqlx::query::Query<'_, sqlx::MySql, sqlx::pgrs::MySqlArguments>,
+    ) -> sqlx::query::Query<'_, sqlx::MySql, sqlx::pgrs::MySqlArguments>,
 {
     readonly_guard(sql)?;
     let pool = pools.get(source_id)?;

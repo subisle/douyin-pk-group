@@ -9,7 +9,7 @@
 //! 测试用键全部带 `__e2e_` 前缀 / 独立 person_id 段，结束即清理，不污染真实数据。
 
 use pk_server::store;
-use pk_server::{config, mysql, state::AppState};
+use pk_server::{config, pgrs, state::AppState};
 
 async fn setup() -> Option<AppState> {
     if std::env::var("DB_LOCAL_HOST").is_err() {
@@ -17,7 +17,7 @@ async fn setup() -> Option<AppState> {
         return None;
     }
     let sources = config::load_sources().expect("sources");
-    let pools = mysql::build_pools(&sources).await.expect("建池失败");
+    let pools = pgrs::build_pools(&sources).await.expect("建池失败");
     let writer = match config::load_writer() {
         Ok(ep) => pk_server::writer::connect(&ep).await.ok(),
         Err(_) => None,
@@ -791,21 +791,23 @@ const E2E_DAILY_DATE2: &str = "2999-01-06";
 
 /// 建两个测试 person + 各自 account（独立 anchor_id 段），返回 id。
 /// 已有残留先清掉，保证测试从干净状态开始。
-async fn setup_two_people(st: &AppState) -> (u64, u64) {
+async fn setup_two_people(st: &AppState) -> (i64, i64) {
     let pool = st.writer.as_ref().expect("writer");
     cleanup_admin_e2e(st).await;
-    let tid = sqlx::query("INSERT INTO person (name, gender, status) VALUES (?, 'male', 'active')")
+    let tid = sqlx::query("INSERT INTO person (name, gender, status) VALUES (?, 'male', 'active') RETURNING id")
         .bind(format!("{MERGE_PREFIX}目标甲"))
-        .execute(pool)
+        .fetch_one(pool)
         .await
         .expect("建目标主播")
-        .last_insert_id();
-    let sid = sqlx::query("INSERT INTO person (name, gender, status) VALUES (?, 'male', 'active')")
+        .try_get::<i64, _>(0)
+        .expect("id");
+    let sid = sqlx::query("INSERT INTO person (name, gender, status) VALUES (?, 'male', 'active') RETURNING id")
         .bind(format!("{MERGE_PREFIX}来源乙"))
-        .execute(pool)
+        .fetch_one(pool)
         .await
         .expect("建来源主播")
-        .last_insert_id();
+        .try_get::<i64, _>(0)
+        .expect("id");
     for (pid, anchor) in [
         (tid, format!("{MERGE_PREFIX}_anchor_t")),
         (sid, format!("{MERGE_PREFIX}_anchor_s")),
@@ -824,7 +826,7 @@ async fn setup_two_people(st: &AppState) -> (u64, u64) {
 }
 
 /// 挂一天数据（写真实 daily_metric 行；wave = cumulative 给定值，minutes=10、is_live=1）
-async fn insert_daily_row(st: &AppState, person_id: u64, anchor: &str, date: &str, wave: i64) {
+async fn insert_daily_row(st: &AppState, person_id: i64, anchor: &str, date: &str, wave: i64) {
     let pool = st.writer.as_ref().expect("writer");
     sqlx::query(
         "INSERT INTO daily_metric (person_id, anchor_id, biz_date, wave, cumulative_wave, wave_reliable, minutes, is_live) \
@@ -841,12 +843,12 @@ async fn insert_daily_row(st: &AppState, person_id: u64, anchor: &str, date: &st
 }
 
 /// 读某 person 某日的 wave（没数据返回 None）
-async fn read_daily_wave(st: &AppState, person_id: u64, date: &str) -> Option<i64> {
+async fn read_daily_wave(st: &AppState, person_id: i64, date: &str) -> Option<i64> {
     let pool = st.writer.as_ref().expect("writer");
     sqlx::query("SELECT wave FROM daily_metric WHERE person_id = ? AND biz_date = ?")
         .bind(person_id as i64)
         .bind(date)
-        .map(|r: sqlx::mysql::MySqlRow| r.try_get::<i64, _>(0).unwrap_or(0))
+        .map(|r: sqlx::postgres::PgRow| r.try_get::<i64, _>(0).unwrap_or(0))
         .fetch_optional(pool)
         .await
         .expect("读日明细")
@@ -883,14 +885,14 @@ async fn cleanup_admin_e2e(st: &AppState) {
 /// 直接调用 merge_person handler（Axum 提取器在集成测试里手工构造）
 async fn call_merge(
     st: std::sync::Arc<AppState>,
-    target_id: u64,
-    source_id: u64,
+    target_id: i64,
+    source_id: i64,
 ) -> Result<serde_json::Value, ()> {
     match admin::merge_person(
         axum::extract::State(st),
-        axum::extract::Path(target_id),
+        axum::extract::Path(target_id as u64),
         axum::Json(admin::MergeBody {
-            source_id: Some(source_id),
+            source_id: Some(source_id as u64),
         }),
     )
     .await
@@ -901,8 +903,12 @@ async fn call_merge(
 }
 
 /// 直接调用 unbind_account handler
-async fn call_unbind(st: std::sync::Arc<AppState>, pid: u64, acc_id: u64) -> Result<(), ()> {
-    match admin::unbind_account(axum::extract::State(st), axum::extract::Path((pid, acc_id))).await
+async fn call_unbind(st: std::sync::Arc<AppState>, pid: i64, acc_id: i64) -> Result<(), ()> {
+    match admin::unbind_account(
+        axum::extract::State(st),
+        axum::extract::Path((pid as u64, acc_id as u64)),
+    )
+    .await
     {
         Ok(_) => Ok(()),
         Err(_) => Err(()),
@@ -999,12 +1005,13 @@ async fn ensure_primary_converges_during_import() {
         .execute(pool)
         .await;
 
-    let pid = sqlx::query("INSERT INTO person (name, gender, status) VALUES (?, 'male', 'active')")
+    let pid = sqlx::query("INSERT INTO person (name, gender, status) VALUES (?, 'male', 'active') RETURNING id")
         .bind(&name)
-        .execute(pool)
+        .fetch_one(pool)
         .await
         .expect("建测试主播")
-        .last_insert_id();
+        .try_get::<i64, _>(0)
+        .expect("id");
     // 复刻生产 1000001/1000004：有 account 行但 is_primary=0
     sqlx::query(
         "INSERT INTO account (person_id, anchor_id, douyin_no, is_primary) VALUES (?,?,?,0)",
@@ -1018,7 +1025,7 @@ async fn ensure_primary_converges_during_import() {
     // 收敛前：PRIMARY_ANCHOR_SQL 取不到（这正是 anchor_id='' 的根因）
     let before: Option<String> = sqlx::query(pk_server::dialect::PRIMARY_ANCHOR_SQL)
         .bind(pid as i64)
-        .map(|r: sqlx::mysql::MySqlRow| r.try_get::<String, _>(0).unwrap_or_default())
+        .map(|r: sqlx::postgres::PgRow| r.try_get::<String, _>(0).unwrap_or_default())
         .fetch_optional(pool)
         .await
         .expect("查主号");
@@ -1038,7 +1045,7 @@ async fn ensure_primary_converges_during_import() {
     // 收敛后：主号存在、anchor_id 就位
     let anchor_after: Option<String> = sqlx::query(pk_server::dialect::PRIMARY_ANCHOR_SQL)
         .bind(pid as i64)
-        .map(|r: sqlx::mysql::MySqlRow| r.try_get::<String, _>(0).unwrap_or_default())
+        .map(|r: sqlx::postgres::PgRow| r.try_get::<String, _>(0).unwrap_or_default())
         .fetch_optional(pool)
         .await
         .expect("查主号");
@@ -1051,7 +1058,7 @@ async fn ensure_primary_converges_during_import() {
         sqlx::query("SELECT anchor_id FROM daily_metric WHERE person_id = ? AND biz_date = ?")
             .bind(pid as i64)
             .bind(E2E_DAILY_DATE)
-            .map(|r: sqlx::mysql::MySqlRow| r.try_get::<String, _>(0).unwrap_or_default())
+            .map(|r: sqlx::postgres::PgRow| r.try_get::<String, _>(0).unwrap_or_default())
             .fetch_one(pool)
             .await
             .expect("读日明细");
@@ -1113,22 +1120,24 @@ async fn unbind_account_keeps_snapshots_traced() {
     let snap_date = "2999-02-01"; // 独立测试日期
     let snap_date2 = "2999-02-02";
 
-    let pid = sqlx::query("INSERT INTO person (name, gender, status) VALUES (?, 'male', 'active')")
+    let pid = sqlx::query("INSERT INTO person (name, gender, status) VALUES (?, 'male', 'active') RETURNING id")
         .bind(&name)
-        .execute(pool)
+        .fetch_one(pool)
         .await
         .expect("建测试主播")
-        .last_insert_id();
+        .try_get::<i64, _>(0)
+        .expect("id");
     let acc_id = sqlx::query(
-        "INSERT INTO account (person_id, anchor_id, douyin_no, is_primary) VALUES (?,?,?,1)",
+        "INSERT INTO account (person_id, anchor_id, douyin_no, is_primary) VALUES (?,?,?,1) RETURNING id",
     )
     .bind(pid as i64)
     .bind(&anchor)
     .bind(&douyin_no)
-    .execute(pool)
+    .fetch_one(pool)
     .await
     .expect("建副号")
-    .last_insert_id();
+    .try_get::<i64, _>(0)
+    .expect("id");
     // 该副号的历史快照（2 天）
     for (d, v) in [(snap_date, 500i64), (snap_date2, 700i64)] {
         sqlx::query("INSERT INTO wave_snapshot (anchor_id, biz_date, wave_value) VALUES (?,?,?)")
@@ -1170,7 +1179,7 @@ async fn unbind_account_keeps_snapshots_traced() {
         "SELECT name, wave FROM import_pending WHERE douyin_no = ? AND absorbed_at IS NULL",
     )
     .bind(&anchor)
-    .map(|r: sqlx::mysql::MySqlRow| {
+    .map(|r: sqlx::postgres::PgRow| {
         (
             r.try_get::<String, _>(0).unwrap_or_default(),
             r.try_get::<i64, _>(1).unwrap_or(0),

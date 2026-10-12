@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use sqlx::Row;
 
 use crate::dialect;
-use crate::mysql;
+use crate::pgrs;
 use crate::routes::ApiError;
 use crate::state::AppState;
 
@@ -23,17 +23,14 @@ fn valid_date(s: &str) -> bool {
     chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").is_ok()
 }
 
-fn read_id(row: &sqlx::mysql::MySqlRow, col: &str) -> u64 {
-    if let Ok(v) = row.try_get::<u64, _>(col) {
-        return v;
-    }
+fn read_id(row: &sqlx::postgres::PgRow, col: &str) -> u64 {
     if let Ok(v) = row.try_get::<i64, _>(col) {
-        return v as u64;
+        return v.max(0) as u64;
     }
     0
 }
 
-fn read_u64(row: &sqlx::mysql::MySqlRow, col: &str) -> u64 {
+fn read_u64(row: &sqlx::postgres::PgRow, col: &str) -> u64 {
     read_id(row, col)
 }
 
@@ -50,7 +47,7 @@ pub struct DashboardQuery {
 }
 
 /// date -> (person_id -> (wave, minutes, live, name, gender))
-type PerDay = BTreeMap<String, HashMap<u64, (i64, i64, i8, String, String)>>;
+type PerDay = BTreeMap<String, HashMap<u64, (i64, i64, i16, String, String)>>;
 
 /// GET /api/admin/dashboard?date=&days=&top=
 pub async fn dashboard(State(st): State<ArcState>, Query(q): Query<DashboardQuery>) -> ApiResult {
@@ -80,7 +77,7 @@ pub async fn dashboard(State(st): State<ArcState>, Query(q): Query<DashboardQuer
         /* 全新库 / 刚清空音浪数据：不是错误 —— 给数据页一个空状态（docs/06 §7：
         「还没有采集到任何日期」+ 去导入，不显示假进度）。在册人数照常给，
         台账还在，只是没有音浪。 */
-        let person_count = mysql::query(&st.pools, "LOCAL", dialect::ACTIVE_PERSON_COUNT_SQL)
+        let person_count = pgrs::query(&st.pools, "LOCAL", dialect::ACTIVE_PERSON_COUNT_SQL)
             .await?
             .first()
             .map(|r| read_u64(r, "n"))
@@ -111,7 +108,7 @@ pub async fn dashboard(State(st): State<ArcState>, Query(q): Query<DashboardQuer
 
     // 一次取窗口内全部日指标，内存聚合（200 人 × 90 天 = 万级行，毫秒级）
     let sql = dialect::trend_sql(&start, &date);
-    let rows = mysql::query(&st.pools, "LOCAL", &sql).await?;
+    let rows = pgrs::query(&st.pools, "LOCAL", &sql).await?;
     // date -> (person_id -> (wave, minutes, live, name, gender))
     let mut per_day: PerDay = Default::default();
     for r in &rows {
@@ -119,7 +116,7 @@ pub async fn dashboard(State(st): State<ArcState>, Query(q): Query<DashboardQuer
         let pid = read_id(r, "person_id");
         let wave = read_u64(r, "w") as i64;
         let minutes = read_u64(r, "m") as i64;
-        let live: i8 = r.try_get::<i8, _>("live").unwrap_or(0);
+        let live: i16 = r.try_get::<i16, _>("live").unwrap_or(0);
         let name: String = r.try_get::<String, _>("name").unwrap_or_default();
         let gender: String = r.try_get::<String, _>("gender").unwrap_or_default();
         per_day
@@ -157,7 +154,7 @@ pub async fn dashboard(State(st): State<ArcState>, Query(q): Query<DashboardQuer
         .map(|m| m.values().filter(|(_, _, l, _, _)| *l == 1).count())
         .unwrap_or(0);
     // 在册人数 = 全部未删除且未离开的主播（不是「当天有数据的人数」）
-    let person_count = mysql::query(&st.pools, "LOCAL", dialect::ACTIVE_PERSON_COUNT_SQL)
+    let person_count = pgrs::query(&st.pools, "LOCAL", dialect::ACTIVE_PERSON_COUNT_SQL)
         .await?
         .first()
         .map(|r| read_u64(r, "n"))
@@ -313,7 +310,7 @@ async fn period_metrics(st: &AppState, q: MetricsQuery, is_month: bool) -> ApiRe
     // 月度聚合落库（monthly_metric，docs/00 §4 核心实体；查询端当前 on-the-fly，
     // 落库供公开端/历史快照直接读取）
     if is_month {
-        if let Ok(pool) = mysql::pool_of(&st.pools, "LOCAL") {
+        if let Ok(pool) = pgrs::pool_of(&st.pools, "LOCAL") {
             for it in &items {
                 let pid = it.get("personId").and_then(|v| v.as_u64()).unwrap_or(0);
                 let wave = it.get("wave").and_then(|v| v.as_i64()).unwrap_or(0);
@@ -322,14 +319,14 @@ async fn period_metrics(st: &AppState, q: MetricsQuery, is_month: bool) -> ApiRe
                     continue;
                 }
                 // P2-8：monthly_metric 表（002 迁移）没有 minutes 列 —— 原来这条
-                // ON DUPLICATE 里引用 VALUES(minutes) 每次都报错又被 `let _ =` 吞掉，
+                // ON DUPLICATE 里引用 EXCLUDED.minutes 每次都报错又被 `let _ =` 吞掉，
                 // 落库永远 0 行。表结构没有该列，不再写 minutes；整月时长已由
                 // monthly_duration 表单独承载，不需要在 monthly_metric 里冗余一份。
                 // 失败改为记 warn 日志（便于发现），仍不阻断接口返回。
                 if let Err(e) = sqlx::query(
                     "INSERT INTO monthly_metric (person_id, period, wave, live_days, recomputed_at)
                      VALUES (?,?,?,?,NOW(3))
-                     ON DUPLICATE KEY UPDATE wave = VALUES(wave), live_days = VALUES(live_days),
+                     ON CONFLICT (person_id, period) DO UPDATE SET wave = EXCLUDED.wave, live_days = EXCLUDED.live_days,
                        recomputed_at = NOW(3)",
                 )
                 .bind(pid as i64)

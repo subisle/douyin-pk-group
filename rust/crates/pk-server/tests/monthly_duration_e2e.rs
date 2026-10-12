@@ -11,7 +11,7 @@
 
 use pk_server::admin::{self, ImportRow};
 use pk_server::public_teams::{my_minutes, MinutesScope};
-use pk_server::{config, dialect, mysql, state::AppState};
+use pk_server::{config, dialect, pgrs, state::AppState};
 use sqlx::Row;
 
 const NAME: &str = "__e2e_月时长主播__";
@@ -26,7 +26,7 @@ async fn setup() -> Option<std::sync::Arc<AppState>> {
         return None;
     }
     let sources = config::load_sources().expect("sources");
-    let pools = mysql::build_pools(&sources).await.expect("建池失败");
+    let pools = pgrs::build_pools(&sources).await.expect("建池失败");
     let writer = match config::load_writer() {
         Ok(ep) => pk_server::writer::connect(&ep).await.ok(),
         Err(_) => None,
@@ -75,17 +75,18 @@ async fn cleanup(st: &AppState) {
     }
 }
 
-async fn insert_person(st: &AppState) -> u64 {
+async fn insert_person(st: &AppState) -> i64 {
     let pool = st.writer.as_ref().expect("writer");
-    sqlx::query("INSERT INTO person (name, gender, status) VALUES (?, 'male', 'active')")
+    sqlx::query("INSERT INTO person (name, gender, status) VALUES (?, 'male', 'active') RETURNING id")
         .bind(NAME)
-        .execute(pool)
+        .fetch_one(pool)
         .await
         .expect("建测试主播")
-        .last_insert_id()
+        .try_get::<i64, _>(0)
+        .expect("id")
 }
 
-async fn insert_account(st: &AppState, person_id: u64) {
+async fn insert_account(st: &AppState, person_id: i64) {
     let pool = st.writer.as_ref().expect("writer");
     sqlx::query(
         "INSERT INTO account (person_id, anchor_id, douyin_no, anchor_name, is_primary, status) \
@@ -101,7 +102,7 @@ async fn insert_account(st: &AppState, person_id: u64) {
 }
 
 /// 塞一天日明细（带时长），用于验证「月报优先于日明细求和」
-async fn insert_daily(st: &AppState, person_id: u64, date: &str, minutes: i64) {
+async fn insert_daily(st: &AppState, person_id: i64, date: &str, minutes: i64) {
     let pool = st.writer.as_ref().expect("writer");
     sqlx::query(
         "INSERT INTO daily_metric (person_id, anchor_id, biz_date, wave, cumulative_wave, \
@@ -117,7 +118,7 @@ async fn insert_daily(st: &AppState, person_id: u64, date: &str, minutes: i64) {
 }
 
 async fn scalar_i64(st: &AppState, sql: &str) -> i64 {
-    mysql::query(&st.pools, "LOCAL", sql)
+    pgrs::query(&st.pools, "LOCAL", sql)
         .await
         .expect("查询失败")
         .first()
@@ -125,11 +126,11 @@ async fn scalar_i64(st: &AppState, sql: &str) -> i64 {
         .unwrap_or(-1)
 }
 
-/// 行里的 person_id：BIGINT UNSIGNED 用 u64 读，退回 i64
-fn row_uid(r: &sqlx::mysql::MySqlRow, col: &str) -> u64 {
-    r.try_get::<u64, _>(col)
+/// 行里的 person_id：PG BIGINT 用 i64 读，转 u64
+fn row_uid(r: &sqlx::postgres::PgRow, col: &str) -> u64 {
+    r.try_get::<i64, _>(col)
         .ok()
-        .or_else(|| r.try_get::<i64, _>(col).ok().map(|v| v as u64))
+        .map(|v| v.max(0) as u64)
         .unwrap_or(0)
 }
 
@@ -226,7 +227,7 @@ async fn monthly_duration_import_drives_month_and_year_minutes() {
     .expect("月榜查询");
     let mine = rows
         .iter()
-        .find(|r| row_uid(r, "person_id") == person_id)
+        .find(|r| row_uid(r, "person_id") == person_id as u64)
         .expect("测试主播应出现在月榜里（他有日明细音浪）");
     assert_eq!(
         mine.try_get::<i64, _>("minutes").unwrap_or(0),
@@ -236,19 +237,19 @@ async fn monthly_duration_import_drives_month_and_year_minutes() {
 
     // 5) 个人页月 / 年 / 累计口径同样是整月值
     assert_eq!(
-        my_minutes(&st, person_id, &MinutesScope::Month(PERIOD))
+        my_minutes(&st, person_id as u64, &MinutesScope::Month(PERIOD))
             .await
             .expect("个人月时长"),
         4800
     );
     assert_eq!(
-        my_minutes(&st, person_id, &MinutesScope::Year(YEAR))
+        my_minutes(&st, person_id as u64, &MinutesScope::Year(YEAR))
             .await
             .expect("个人年时长"),
         4800
     );
     assert_eq!(
-        my_minutes(&st, person_id, &MinutesScope::Total)
+        my_minutes(&st, person_id as u64, &MinutesScope::Total)
             .await
             .expect("个人累计时长"),
         4800

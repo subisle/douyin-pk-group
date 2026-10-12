@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use sqlx::Row;
 
-use crate::mysql;
+use crate::pgrs;
 use crate::state::AppState;
 
 /// 日报数据（含当日指标、当月未播天数、累计音浪）
@@ -52,10 +52,10 @@ pub async fn build(st: &Arc<AppState>, date: &str, team: &str) -> anyhow::Result
     use crate::dialect::is_live_wave;
     // 当日指标（P1-7：与榜单一致，只聚合可信行 wave_reliable=1）
     let today_sql = format!(
-        "SELECT person_id, CAST(SUM(wave) AS SIGNED) AS wave, \
-         CAST(SUM(minutes) AS SIGNED) AS m, MAX(is_live) AS live \
+        "SELECT person_id, (SUM(wave))::BIGINT AS wave, \
+         (SUM(minutes))::BIGINT AS m, MAX(is_live) AS live \
          FROM daily_metric WHERE wave_reliable = 1 \
-           AND DATE_FORMAT(biz_date, '%Y-%m-%d') = '{date}' GROUP BY person_id"
+           AND TO_CHAR(biz_date, 'YYYY-MM-DD') = '{date}' GROUP BY person_id"
     );
     // 当月未播天数：与展示端榜单共用 dialect::MONTH_ABSENT_SQL（只有一份口径，
     // 见那里的注释：只算有数据行，缺采的日子不算未播）。
@@ -65,9 +65,9 @@ pub async fn build(st: &Arc<AppState>, date: &str, team: &str) -> anyhow::Result
     // 基线日 wave_reliable=0 记的是累计基数，其 wave 值本来就是 0/不可信，
     // 排除它不会少算当日口径的累计 —— 「累计总音浪」列展示的是当日口径累计）。
     let total_sql = format!(
-        "SELECT person_id, CAST(SUM(wave) AS SIGNED) AS total \
+        "SELECT person_id, (SUM(wave))::BIGINT AS total \
          FROM daily_metric WHERE wave_reliable = 1 \
-           AND DATE_FORMAT(biz_date, '%Y-%m-%d') <= '{date}' GROUP BY person_id"
+           AND TO_CHAR(biz_date, 'YYYY-MM-DD') <= '{date}' GROUP BY person_id"
     );
     // 名册（含师傅；P1-10：隐藏/离职的主播不进日报 —— 对外 SVG 不该再出现他们）
     let roster_sql = format!(
@@ -80,25 +80,25 @@ pub async fn build(st: &Arc<AppState>, date: &str, team: &str) -> anyhow::Result
     let mut wave_map: HashMap<u64, i64> = Default::default();
     let mut minutes_map: HashMap<u64, i64> = Default::default();
     let mut live_map: HashMap<u64, bool> = Default::default();
-    for r in mysql::query(&st.pools, "LOCAL", &today_sql).await? {
+    for r in pgrs::query(&st.pools, "LOCAL", &today_sql).await? {
         let pid = id_of(&r, "person_id");
         wave_map.insert(pid, signed(&r, "wave"));
         minutes_map.insert(pid, signed(&r, "m"));
-        live_map.insert(pid, r.try_get::<i8, _>("live").unwrap_or(0) == 1);
+        live_map.insert(pid, r.try_get::<i16, _>("live").unwrap_or(0) == 1);
     }
     let mut absent_map: HashMap<u64, i64> = Default::default();
-    for r in mysql::query(&st.pools, "LOCAL", &month_sql).await? {
+    for r in pgrs::query(&st.pools, "LOCAL", &month_sql).await? {
         absent_map.insert(id_of(&r, "person_id"), signed(&r, "n"));
     }
     let mut total_map: HashMap<u64, i64> = Default::default();
-    for r in mysql::query(&st.pools, "LOCAL", &total_sql).await? {
+    for r in pgrs::query(&st.pools, "LOCAL", &total_sql).await? {
         total_map.insert(id_of(&r, "person_id"), signed(&r, "total"));
     }
 
     let mut rows: Vec<ReportRow> = Vec::new();
     let mut master_groups: HashMap<String, Vec<String>> = Default::default();
     let mut no_master: Vec<String> = Vec::new();
-    for r in mysql::query(&st.pools, "LOCAL", &roster_sql).await? {
+    for r in pgrs::query(&st.pools, "LOCAL", &roster_sql).await? {
         let pid = id_of(&r, "id");
         let name: String = r.try_get::<String, _>("name").unwrap_or_default();
         let master: String = r
@@ -141,9 +141,9 @@ pub async fn build(st: &Arc<AppState>, date: &str, team: &str) -> anyhow::Result
     })
 }
 
-fn id_of(r: &sqlx::mysql::MySqlRow, col: &str) -> u64 {
-    if let Ok(v) = r.try_get::<u64, _>(col) {
-        return v;
+fn id_of(r: &sqlx::postgres::PgRow, col: &str) -> u64 {
+    if let Ok(v) = r.try_get::<i64, _>(col) {
+        return v.max(0) as u64;
     }
     if let Ok(v) = r.try_get::<i64, _>(col) {
         return v as u64;
@@ -154,11 +154,11 @@ fn id_of(r: &sqlx::mysql::MySqlRow, col: &str) -> u64 {
     0
 }
 
-fn signed(r: &sqlx::mysql::MySqlRow, col: &str) -> i64 {
+fn signed(r: &sqlx::postgres::PgRow, col: &str) -> i64 {
     if let Ok(v) = r.try_get::<i64, _>(col) {
         return v;
     }
-    if let Ok(v) = r.try_get::<u64, _>(col) {
+    if let Ok(v) = r.try_get::<i64, _>(col) {
         return v as i64;
     }
     if let Ok(v) = r.try_get::<String, _>(col) {

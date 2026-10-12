@@ -44,3 +44,10 @@ pk-board.png
 
 # uicheck 截图产物
 .uicheck/
+
+# .dbmerge：拉取/合并数据库的现场产物（dump、转换中间 SQL、灌库前备份）
+# 脚本 scripts/pull-db-147.sh、scripts/mysql2pg.py 入库，数据产物只在本地
+.dbmerge/*.dump
+.dbmerge/*.sql
+.dbmerge/*.sql.gz
+.dbmerge/*.log

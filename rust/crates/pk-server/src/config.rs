@@ -18,10 +18,10 @@ pub struct SourceConfig {
 }
 
 impl SourceConfig {
-    /// 拼 sqlx 连接串（密码做 percent-encode）
+    /// 拼 sqlx 连接串（密码做 percent-encode）。2026-10 切 PostgreSQL。
     pub fn url(&self) -> String {
         format!(
-            "mysql://{}:{}@{}:{}/{}",
+            "postgres://{}:{}@{}:{}/{}",
             urlencode(&self.user),
             urlencode(&self.password),
             self.host,
@@ -116,9 +116,9 @@ fn read_source(id: &str) -> Result<SourceConfig> {
         label: env_or(&format!("DB_{id}_LABEL"), &format!("数据源 {id}")),
         note: env_or(&format!("DB_{id}_NOTE"), ""),
         host,
-        port: env_or(&format!("DB_{id}_PORT"), "3306")
+        port: env_or(&format!("DB_{id}_PORT"), "5432")
             .parse()
-            .unwrap_or(3306),
+            .unwrap_or(5432),
         user: env_or(&format!("DB_{id}_USER"), ""),
         password: env(&format!("DB_{id}_PASSWORD"))
             .or_else(|| if id == "A" { env("DB_PASSWORD") } else { None })
@@ -198,8 +198,8 @@ fn base_host_port_name() -> (Option<String>, u16, String) {
         .or_else(|| env("DB_HOST"));
     let port_str = env("DB_WRITER_PORT")
         .or_else(|| env("DB_LOCAL_PORT"))
-        .unwrap_or_else(|| "3306".into());
-    let port = port_str.parse().unwrap_or(3306);
+        .unwrap_or_else(|| "5432".into());
+    let port = port_str.parse().unwrap_or(5432);
     let database = env("DB_WRITER_NAME")
         .or_else(|| env("DB_LOCAL_NAME"))
         .or_else(|| env("DB_A_NAME"))

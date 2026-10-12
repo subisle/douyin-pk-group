@@ -92,9 +92,9 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    /* MySQL 只读数据源 */
+    /* PostgreSQL 只读数据源 */
     let sources = config::load_sources()?;
-    let pools = mysql::build_pools(&sources).await?;
+    let pools = pgrs::build_pools(&sources).await?;
     let default_source = sources
         .iter()
         .find(|s| s.id == "LOCAL")

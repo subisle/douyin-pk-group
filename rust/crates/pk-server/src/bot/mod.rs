@@ -1549,7 +1549,7 @@ async fn cmd_missing(st: &Arc<AppState>, args: &[&str]) -> String {
     let sql = crate::dialect::MISSING_SQL.replace("/*TEAM*/", "");
     let _ = sql;
     let rows =
-        crate::mysql::query_with_binds(&st.pools, "LOCAL", crate::dialect::MISSING_SQL, |q| {
+        crate::pgrs::query_with_binds(&st.pools, "LOCAL", crate::dialect::MISSING_SQL, |q| {
             q.bind(date.clone()).bind(team)
         })
         .await;

@@ -11,15 +11,16 @@
 //! - 表结构见 migrations/003_runtime.sql；列名差异（key→cfg_key、text→body）都是方言原因
 
 use anyhow::Result;
-use sqlx::MySqlPool;
+use sqlx::PgPool;
 use sqlx::Row;
 
 use crate::state::AppState;
+use crate::pgrs::PgResultExt;
 
 /* ------------------------------ 内部工具 ------------------------------ */
 
 /// writer 池。运行时表都在业务库，读写统一走 writer（缺配置时读返回空、写报错）。
-fn w(st: &AppState) -> Result<&MySqlPool> {
+fn w(st: &AppState) -> Result<&PgPool> {
     st.writer
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("写库不可用：douyin_writer 未配置"))
@@ -95,7 +96,7 @@ pub async fn list_aliases(st: &AppState) -> AliasMap {
 pub async fn upsert_alias(st: &AppState, alias: &str, real_name: &str) -> Result<()> {
     sqlx::query(
         "INSERT INTO aliases (alias, real_name) VALUES (?, ?)
-         ON DUPLICATE KEY UPDATE real_name = VALUES(real_name)",
+         ON CONFLICT (alias) DO UPDATE SET real_name = EXCLUDED.real_name",
     )
     .bind(alias)
     .bind(real_name)
@@ -105,7 +106,7 @@ pub async fn upsert_alias(st: &AppState, alias: &str, real_name: &str) -> Result
 }
 
 pub async fn delete_alias(st: &AppState, alias: &str) -> Result<()> {
-    sqlx::query("DELETE FROM aliases WHERE alias = ?")
+    sqlx::query(&crate::pq::rewrite("DELETE FROM aliases WHERE alias = ?"))
         .bind(alias)
         .execute(w(st)?)
         .await?;
@@ -120,7 +121,7 @@ pub async fn delete_alias(st: &AppState, alias: &str) -> Result<()> {
 /// 会让用户不小心清空一次之后就再也回不来。
 pub async fn load_roster(st: &AppState, event_type: &str) -> Option<(String, String)> {
     let pool = w(st).ok()?;
-    let row = match sqlx::query("SELECT body, updated_at FROM roster_state WHERE event_type = ?")
+    let row = match sqlx::query(&crate::pq::rewrite("SELECT body, updated_at FROM roster_state WHERE event_type = ?"))
         .bind(event_type)
         .fetch_optional(pool)
         .await
@@ -141,7 +142,7 @@ pub async fn save_roster(st: &AppState, event_type: &str, text: &str) -> String 
         let pool = w(st)?;
         sqlx::query(
             "INSERT INTO roster_state (event_type, body, updated_at) VALUES (?, ?, ?)
-             ON DUPLICATE KEY UPDATE body = VALUES(body), updated_at = VALUES(updated_at)",
+             ON CONFLICT (event_type) DO UPDATE SET body = EXCLUDED.body, updated_at = EXCLUDED.updated_at",
         )
         .bind(event_type)
         .bind(text)
@@ -176,15 +177,15 @@ pub struct PlanRow {
 
 const PLAN_COLS: &str = "id, title, metric, days, payload, created_at, published, event_type";
 
-fn map_plan(r: &sqlx::mysql::MySqlRow) -> Result<PlanRow> {
+fn map_plan(r: &sqlx::postgres::PgRow) -> Result<PlanRow> {
     Ok(PlanRow {
-        id: r.try_get::<u64, _>(0)? as i64,
+        id: r.try_get::<i64, _>(0)? as i64,
         title: r.try_get::<String, _>(1)?,
         metric: r.try_get::<String, _>(2)?,
         days: r.try_get::<i64, _>(3)?,
         payload: r.try_get::<String, _>(4)?,
         created_at: r.try_get::<String, _>(5)?,
-        published: r.try_get::<i8, _>(6)? != 0,
+        published: r.try_get::<i16, _>(6)? != 0,
         event_type: r.try_get::<String, _>(7).unwrap_or_default(),
     })
 }
@@ -197,19 +198,19 @@ pub async fn save_plan(
     payload: &str,
     event_type: &str,
 ) -> Result<i64> {
-    let res = sqlx::query(
+    let row = sqlx::query(&crate::pq::rewrite(
         "INSERT INTO plans (title, metric, days, payload, created_at, published, event_type)
-         VALUES (?, ?, ?, ?, ?, 0, ?)",
-    )
+         VALUES (?, ?, ?, ?, ?, 0, ?) RETURNING id",
+    ))
     .bind(title)
     .bind(metric)
     .bind(days)
     .bind(payload)
     .bind(chrono::Utc::now().to_rfc3339())
     .bind(normalize_event_type(event_type))
-    .execute(w(st)?)
+    .fetch_one(w(st)?)
     .await?;
-    Ok(res.last_insert_id() as i64)
+    Ok(row.try_get::<i64, _>(0)?)
 }
 
 pub async fn list_plans(st: &AppState) -> Vec<PlanRow> {
@@ -232,7 +233,7 @@ pub async fn list_plans(st: &AppState) -> Vec<PlanRow> {
 
 pub async fn get_plan(st: &AppState, id: i64) -> Option<PlanRow> {
     let pool = w(st).ok()?;
-    let row = match sqlx::query(&format!("SELECT {PLAN_COLS} FROM plans WHERE id = ?"))
+    let row = match sqlx::query(&crate::pq::rewrite(&format!("SELECT {PLAN_COLS} FROM plans WHERE id = ?")))
         .bind(id)
         .fetch_optional(pool)
         .await
@@ -272,8 +273,8 @@ pub async fn set_published(st: &AppState, id: i64, published: bool) -> bool {
             return false;
         }
     }
-    match sqlx::query("UPDATE plans SET published = ? WHERE id = ?")
-        .bind(if published { 1i8 } else { 0i8 })
+    match sqlx::query(&crate::pq::rewrite("UPDATE plans SET published = ? WHERE id = ?"))
+        .bind(if published { 1i16 } else { 0i16 })
         .bind(id)
         .execute(&mut *tx)
         .await
@@ -282,7 +283,7 @@ pub async fn set_published(st: &AppState, id: i64, published: bool) -> bool {
             if tx.commit().await.is_err() {
                 return false;
             }
-            res.rows_affected() > 0
+            res.affected() > 0
         }
         Err(e) => {
             tracing::error!(error = %e, "上架更新失败");
@@ -297,7 +298,7 @@ pub async fn get_published_plan(st: &AppState, id: i64) -> Option<PlanRow> {
 }
 
 pub async fn delete_plan(st: &AppState, id: i64) -> Result<()> {
-    sqlx::query("DELETE FROM plans WHERE id = ?")
+    sqlx::query(&crate::pq::rewrite("DELETE FROM plans WHERE id = ?"))
         .bind(id)
         .execute(w(st)?)
         .await?;
@@ -309,7 +310,7 @@ pub async fn delete_plan(st: &AppState, id: i64) -> Result<()> {
 /// 读配置项（机器人 token 等跨重启保留的状态）；读不到/出错 → None
 pub async fn config_get(st: &AppState, key: &str) -> Option<String> {
     let pool = w(st).ok()?;
-    sqlx::query("SELECT cfg_value FROM config WHERE cfg_key = ?")
+    sqlx::query(&crate::pq::rewrite("SELECT cfg_value FROM config WHERE cfg_key = ?"))
         .bind(key)
         .fetch_optional(pool)
         .await
@@ -325,7 +326,7 @@ pub async fn config_set(st: &AppState, key: &str, value: &str) {
         let pool = w(st)?;
         sqlx::query(
             "INSERT INTO config (cfg_key, cfg_value, updated_at) VALUES (?, ?, ?)
-             ON DUPLICATE KEY UPDATE cfg_value = VALUES(cfg_value), updated_at = VALUES(updated_at)",
+             ON CONFLICT (cfg_key) DO UPDATE SET cfg_value = EXCLUDED.cfg_value, updated_at = EXCLUDED.updated_at",
         )
         .bind(key)
         .bind(value)
@@ -355,7 +356,7 @@ pub async fn session_upsert(
         sqlx::query(
             "INSERT INTO bot_sessions (channel, conversation_id, kind, last_text, last_seen, is_admin)
              VALUES (?, ?, ?, ?, ?, 0)
-             ON DUPLICATE KEY UPDATE kind = VALUES(kind), last_text = VALUES(last_text), last_seen = VALUES(last_seen)",
+             ON CONFLICT (channel, conversation_id) DO UPDATE SET kind = EXCLUDED.kind, last_text = EXCLUDED.last_text, last_seen = EXCLUDED.last_seen",
         )
         .bind(channel)
         .bind(conversation_id)
@@ -378,12 +379,12 @@ pub async fn session_is_admin(st: &AppState, channel: &str, conversation_id: &st
         return false;
     };
     matches!(
-        sqlx::query("SELECT is_admin FROM bot_sessions WHERE channel = ? AND conversation_id = ?")
+        sqlx::query(&crate::pq::rewrite("SELECT is_admin FROM bot_sessions WHERE channel = ? AND conversation_id = ?"))
             .bind(channel)
             .bind(conversation_id)
             .fetch_optional(pool)
             .await,
-        Ok(Some(r)) if r.try_get::<i8, _>(0).unwrap_or(0) == 1
+        Ok(Some(r)) if r.try_get::<i16, _>(0).unwrap_or(0) == 1
     )
 }
 
@@ -393,7 +394,7 @@ pub async fn session_list(st: &AppState) -> Vec<serde_json::Value> {
         return Vec::new();
     };
     match sqlx::query(
-        "SELECT channel, conversation_id, kind, IFNULL(last_text,''), last_seen, is_admin
+        "SELECT channel, conversation_id, kind, COALESCE(last_text,''), last_seen, is_admin
          FROM bot_sessions ORDER BY last_seen DESC LIMIT 200",
     )
     .fetch_all(pool)
@@ -408,7 +409,7 @@ pub async fn session_list(st: &AppState) -> Vec<serde_json::Value> {
                     "kind": r.try_get::<String, _>(2).unwrap_or_default(),
                     "lastText": r.try_get::<String, _>(3).unwrap_or_default(),
                     "lastSeen": r.try_get::<String, _>(4).unwrap_or_default(),
-                    "isAdmin": r.try_get::<i8, _>(5).unwrap_or(0) == 1,
+                    "isAdmin": r.try_get::<i16, _>(5).unwrap_or(0) == 1,
                 })
             })
             .collect(),
@@ -430,7 +431,7 @@ pub async fn session_set_admin(
         let _ = sqlx::query(
             "UPDATE bot_sessions SET is_admin = ? WHERE channel = ? AND conversation_id = ?",
         )
-        .bind(if is_admin { 1i8 } else { 0i8 })
+        .bind(if is_admin { 1i16 } else { 0i16 })
         .bind(channel)
         .bind(conversation_id)
         .execute(pool)
@@ -493,11 +494,11 @@ fn verify_my_password(pass: &str, stored: &str) -> bool {
 
 /// 登录命中后把老明文密码就地升级为 argon2id。
 /// 升级失败不阻断登录；下一次成功登录会重试。
-async fn upgrade_my_password_if_plain(pool: &MySqlPool, name: &str, stored: &str, pass: &str) {
+async fn upgrade_my_password_if_plain(pool: &PgPool, name: &str, stored: &str, pass: &str) {
     if stored.starts_with("$argon2") {
         return;
     }
-    if let Err(e) = sqlx::query("UPDATE my_accounts SET pass = ? WHERE name = ?")
+    if let Err(e) = sqlx::query(&crate::pq::rewrite("UPDATE my_accounts SET pass = ? WHERE name = ?"))
         .bind(hash_my_password(pass))
         .bind(name)
         .execute(pool)
@@ -545,9 +546,9 @@ pub async fn my_account_list(st: &AppState) -> Vec<serde_json::Value> {
                 serde_json::json!({
                     "name": r.try_get::<String, _>(0).unwrap_or_default(),
                     "phone": r.try_get::<String, _>(1).unwrap_or_default(),
-                    "isAdmin": r.try_get::<i8, _>(2).unwrap_or(0) == 1,
+                    "isAdmin": r.try_get::<i16, _>(2).unwrap_or(0) == 1,
                     "createdAt": r.try_get::<String, _>(3).unwrap_or_default(),
-                    "bound": r.try_get::<i8, _>(4).unwrap_or(1) == 1,
+                    "bound": r.try_get::<i16, _>(4).unwrap_or(1) == 1,
                     "boundAt": r.try_get::<String, _>(5).unwrap_or_default(),
                     "source": r.try_get::<String, _>(6).unwrap_or_default(),
                 })
@@ -565,7 +566,7 @@ pub async fn my_account_list(st: &AppState) -> Vec<serde_json::Value> {
                     serde_json::json!({
                         "name": r.try_get::<String, _>(0).unwrap_or_default(),
                         "phone": r.try_get::<String, _>(1).unwrap_or_default(),
-                        "isAdmin": r.try_get::<i8, _>(2).unwrap_or(0) == 1,
+                        "isAdmin": r.try_get::<i16, _>(2).unwrap_or(0) == 1,
                         "createdAt": r.try_get::<String, _>(3).unwrap_or_default(),
                         "bound": true,
                         "boundAt": "",
@@ -594,7 +595,7 @@ pub async fn my_account_set(
 }
 
 async fn my_account_set_pool(
-    pool: &MySqlPool,
+    pool: &PgPool,
     name: &str,
     phone: &str,
     pass: &str,
@@ -603,7 +604,7 @@ async fn my_account_set_pool(
     let phone = validate_my_phone(phone)?;
     if !phone.is_empty() {
         let dup_phone: bool =
-            sqlx::query("SELECT 1 FROM my_accounts WHERE phone = ? AND name != ? AND phone != ''")
+            sqlx::query(&crate::pq::rewrite("SELECT 1 FROM my_accounts WHERE phone = ? AND name != ? AND phone != ''"))
                 .bind(&phone)
                 .bind(&name)
                 .fetch_optional(pool)
@@ -617,7 +618,7 @@ async fn my_account_set_pool(
     let pass_hash = hash_my_password(&pass);
     sqlx::query(
         "INSERT INTO my_accounts (name, phone, pass, is_admin, created_at) VALUES (?, ?, ?, 0, ?)
-         ON DUPLICATE KEY UPDATE phone = VALUES(phone), pass = VALUES(pass)",
+         ON CONFLICT (name) DO UPDATE SET phone = EXCLUDED.phone, pass = EXCLUDED.pass",
     )
     .bind(&name)
     .bind(&phone)
@@ -650,7 +651,7 @@ pub async fn my_account_phone(st: &AppState, name: &str) -> String {
     let Ok(pool) = w(st) else {
         return String::new();
     };
-    sqlx::query("SELECT phone FROM my_accounts WHERE name = ?")
+    sqlx::query(&crate::pq::rewrite("SELECT phone FROM my_accounts WHERE name = ?"))
         .bind(name.trim())
         .fetch_optional(pool)
         .await
@@ -679,16 +680,16 @@ pub async fn my_account_get(st: &AppState, name: &str) -> Option<serde_json::Val
         return Some(serde_json::json!({
             "name": name,
             "phone": row.try_get::<String, _>("phone").unwrap_or_default(),
-            "isAdmin": row.try_get::<i8, _>("is_admin").unwrap_or(0) == 1,
+            "isAdmin": row.try_get::<i16, _>("is_admin").unwrap_or(0) == 1,
             "createdAt": row.try_get::<String, _>("created_at").unwrap_or_default(),
-            "bound": row.try_get::<i8, _>("bound").unwrap_or(1) == 1,
+            "bound": row.try_get::<i16, _>("bound").unwrap_or(1) == 1,
             "boundAt": row.try_get::<String, _>("bound_at").unwrap_or_default(),
             "source": row.try_get::<String, _>("source").unwrap_or_default(),
         }));
     }
     // 兜底：表还没跑 008 迁移（没有 bound/source 列）时退回老查询
     let row =
-        sqlx::query("SELECT name, phone, is_admin, created_at FROM my_accounts WHERE name = ?")
+        sqlx::query(&crate::pq::rewrite("SELECT name, phone, is_admin, created_at FROM my_accounts WHERE name = ?"))
             .bind(key)
             .fetch_optional(pool)
             .await
@@ -698,7 +699,7 @@ pub async fn my_account_get(st: &AppState, name: &str) -> Option<serde_json::Val
     Some(serde_json::json!({
         "name": name,
         "phone": row.try_get::<String, _>("phone").unwrap_or_default(),
-        "isAdmin": row.try_get::<i8, _>("is_admin").unwrap_or(0) == 1,
+        "isAdmin": row.try_get::<i16, _>("is_admin").unwrap_or(0) == 1,
         "createdAt": row.try_get::<String, _>("created_at").unwrap_or_default(),
         "bound": true,
         "boundAt": "",
@@ -708,22 +709,22 @@ pub async fn my_account_get(st: &AppState, name: &str) -> Option<serde_json::Val
 
 /// 删除账号，返回是否存在
 pub async fn my_account_delete(st: &AppState, name: &str) -> bool {
-    matches!(w(st), Ok(pool) if sqlx::query("DELETE FROM my_accounts WHERE name = ?")
+    matches!(w(st), Ok(pool) if sqlx::query(&crate::pq::rewrite("DELETE FROM my_accounts WHERE name = ?"))
         .bind(name.trim())
         .execute(pool)
         .await
-        .map(|r| r.rows_affected() > 0)
+        .map(|r| r.affected() > 0)
         .unwrap_or(false))
 }
 
 /// 设置/取消展示端管理员标记（管理员观看账号：不对应台账主播也能登录看全站）
 pub async fn my_account_set_admin(st: &AppState, name: &str, admin: bool) -> bool {
-    matches!(w(st), Ok(pool) if sqlx::query("UPDATE my_accounts SET is_admin = ? WHERE name = ?")
-        .bind(if admin { 1i8 } else { 0i8 })
+    matches!(w(st), Ok(pool) if sqlx::query(&crate::pq::rewrite("UPDATE my_accounts SET is_admin = ? WHERE name = ?"))
+        .bind(if admin { 1i16 } else { 0i16 })
         .bind(name.trim())
         .execute(pool)
         .await
-        .map(|r| r.rows_affected() > 0)
+        .map(|r| r.affected() > 0)
         .unwrap_or(false))
 }
 
@@ -785,7 +786,7 @@ pub async fn person_set_phone(
             return Err(PhoneClash::Person.message(&phone));
         }
         let taken_account =
-            sqlx::query("SELECT 1 FROM my_accounts WHERE phone <> '' AND phone = ? LIMIT 1")
+            sqlx::query(&crate::pq::rewrite("SELECT 1 FROM my_accounts WHERE phone <> '' AND phone = ? LIMIT 1"))
                 .bind(&phone)
                 .fetch_optional(pool)
                 .await
@@ -796,7 +797,7 @@ pub async fn person_set_phone(
             return Err(PhoneClash::Account.message(&phone));
         }
     }
-    sqlx::query("UPDATE person SET phone = ? WHERE id = ? AND deleted_at IS NULL")
+    sqlx::query(&crate::pq::rewrite("UPDATE person SET phone = ? WHERE id = ? AND deleted_at IS NULL"))
         .bind(&phone)
         .bind(person_id as i64)
         .execute(pool)
@@ -818,7 +819,7 @@ pub async fn person_set_phone(
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct BatchAccountRow {
     #[serde(rename = "personId")]
-    pub person_id: u64,
+    pub person_id: i64,
     /// 登录名 = 台账姓名
     pub name: String,
     /// 实际写进登录账号的手机号（空 = 只能姓名登录）
@@ -836,7 +837,7 @@ pub struct BatchAccountRow {
 /// 批量开号的入参：person_id 必填；phone 留空 = 沿用台账上已登记的手机号。
 #[derive(Clone, Debug)]
 pub struct BatchAccountInput {
-    pub person_id: u64,
+    pub person_id: i64,
     pub phone: Option<String>,
 }
 
@@ -877,7 +878,7 @@ pub async fn my_accounts_batch_open(
     }
     /* 016 没跑时 person.phone 不存在 → 退回 LEGACY 列清单（手机号一律当"未登记"）。
     批量开号是 104 人的唯一入口，不能因为少跑一次迁移就整个不可用。 */
-    let roster_rows = match crate::mysql::query(
+    let roster_rows = match crate::pgrs::query(
         &st.pools,
         "LOCAL",
         crate::dialect::PERSON_ROSTER_FOR_ACCOUNTS_SQL,
@@ -892,7 +893,7 @@ pub async fn my_accounts_batch_open(
             } =>
         {
             tracing::warn!("person.phone 列不存在（016 未跑），批量开号按无手机号口径继续");
-            crate::mysql::query(
+            crate::pgrs::query(
                 &st.pools,
                 "LOCAL",
                 crate::dialect::PERSON_ROSTER_FOR_ACCOUNTS_SQL_LEGACY,
@@ -902,11 +903,11 @@ pub async fn my_accounts_batch_open(
         }
         Err(e) => return Err(format!("读取主播台账失败：{e}")),
     };
-    let roster: Vec<(u64, String, String)> = roster_rows
+    let roster: Vec<(i64, String, String)> = roster_rows
         .iter()
         .map(|r| {
             (
-                r.try_get::<u64, _>("id").unwrap_or(0),
+                r.try_get::<i64, _>("id").unwrap_or(0),
                 r.try_get::<String, _>("name").unwrap_or_default(),
                 r.try_get::<String, _>("phone").unwrap_or_default(),
             )
@@ -930,7 +931,7 @@ pub async fn my_accounts_batch_open(
         }
     }
     // 台账上「谁的号」：手机号 → person_id（用来判断撞的到底是别人还是自己）
-    let mut person_phone_owner: std::collections::HashMap<String, u64> =
+    let mut person_phone_owner: std::collections::HashMap<String, i64> =
         std::collections::HashMap::new();
     if let Ok(rows) = sqlx::query(
         "SELECT phone, id FROM person WHERE phone <> '' AND deleted_at IS NULL
@@ -940,15 +941,15 @@ pub async fn my_accounts_batch_open(
     .await
     {
         for r in &rows {
-            if let (Ok(p), Ok(id)) = (r.try_get::<String, _>("phone"), r.try_get::<u64, _>("id")) {
+            if let (Ok(p), Ok(id)) = (r.try_get::<String, _>("phone"), r.try_get::<i64, _>("id")) {
                 person_phone_owner.insert(p, id);
             }
         }
     }
     // 登录账号侧：手机号 → 账号名（含 person_id，用于「改名后 name 对不上」的判定）
-    let mut account_phone: Vec<(String, String, u64)> = Vec::new();
+    let mut account_phone: Vec<(String, String, i64)> = Vec::new();
     if let Ok(rows) = sqlx::query(
-        "SELECT name, phone, IFNULL(person_id, 0) AS pid FROM my_accounts WHERE phone <> ''",
+        "SELECT name, phone, COALESCE(person_id, 0) AS pid FROM my_accounts WHERE phone <> ''",
     )
     .fetch_all(pool)
     .await
@@ -958,13 +959,13 @@ pub async fn my_accounts_batch_open(
                 r.try_get::<String, _>("name"),
                 r.try_get::<String, _>("phone"),
             ) {
-                let pid = r.try_get::<u64, _>("pid").unwrap_or(0);
+                let pid = r.try_get::<i64, _>("pid").unwrap_or(0);
                 account_phone.push((n, p, pid));
             }
         }
     }
     // 已开号的主播：person_id → (账号名, 手机号)
-    let mut account_by_person: std::collections::HashMap<u64, (String, String)> =
+    let mut account_by_person: std::collections::HashMap<i64, (String, String)> =
         std::collections::HashMap::new();
     if let Ok(rows) = sqlx::query(
         "SELECT name, phone, person_id FROM my_accounts
@@ -977,7 +978,7 @@ pub async fn my_accounts_batch_open(
             if let (Ok(n), Ok(p), Ok(pid)) = (
                 r.try_get::<String, _>("name"),
                 r.try_get::<String, _>("phone"),
-                r.try_get::<u64, _>("person_id"),
+                r.try_get::<i64, _>("person_id"),
             ) {
                 account_by_person.entry(pid).or_insert((n, p));
             }
@@ -1223,11 +1224,11 @@ pub async fn my_account_is_admin(st: &AppState, name: &str) -> bool {
         return false;
     };
     matches!(
-        sqlx::query("SELECT is_admin FROM my_accounts WHERE name = ?")
+        sqlx::query(&crate::pq::rewrite("SELECT is_admin FROM my_accounts WHERE name = ?"))
             .bind(name.trim())
             .fetch_optional(pool)
             .await,
-        Ok(Some(r)) if r.try_get::<i8, _>(0).unwrap_or(0) == 1
+        Ok(Some(r)) if r.try_get::<i16, _>(0).unwrap_or(0) == 1
     )
 }
 
@@ -1287,7 +1288,7 @@ pub async fn ensure_builtin_my_accounts(st: &AppState) -> (usize, usize) {
     for (name, pass) in &accounts {
         let name = name.as_str();
         let pass = pass.as_str();
-        let exists = match sqlx::query("SELECT name FROM my_accounts WHERE name = ?")
+        let exists = match sqlx::query(&crate::pq::rewrite("SELECT name FROM my_accounts WHERE name = ?"))
             .bind(name)
             .fetch_optional(pool)
             .await
@@ -1300,7 +1301,7 @@ pub async fn ensure_builtin_my_accounts(st: &AppState) -> (usize, usize) {
             }
         };
         if exists {
-            if let Err(e) = sqlx::query("UPDATE my_accounts SET is_admin = 1 WHERE name = ?")
+            if let Err(e) = sqlx::query(&crate::pq::rewrite("UPDATE my_accounts SET is_admin = 1 WHERE name = ?"))
                 .bind(name)
                 .execute(pool)
                 .await
@@ -1359,7 +1360,7 @@ pub async fn my_account_check_login(st: &AppState, account: &str, pass: &str) ->
     let phone = normalize_phone(acct);
     let as_phone = phone.chars().all(|c| c.is_ascii_digit()) && (5..=20).contains(&phone.len());
     if as_phone {
-        if let Some(row) = sqlx::query("SELECT name, pass FROM my_accounts WHERE phone = ? LIMIT 1")
+        if let Some(row) = sqlx::query(&crate::pq::rewrite("SELECT name, pass FROM my_accounts WHERE phone = ? LIMIT 1"))
             .bind(&phone)
             .fetch_optional(pool)
             .await
@@ -1374,7 +1375,7 @@ pub async fn my_account_check_login(st: &AppState, account: &str, pass: &str) ->
             }
         }
     }
-    if let Some(row) = sqlx::query("SELECT name, pass FROM my_accounts WHERE name = ? LIMIT 1")
+    if let Some(row) = sqlx::query(&crate::pq::rewrite("SELECT name, pass FROM my_accounts WHERE name = ? LIMIT 1"))
         .bind(acct)
         .fetch_optional(pool)
         .await
@@ -1461,7 +1462,7 @@ pub async fn my_account_reset_password_random(
         return Err("该手机号还没有注册或未登记".into());
     }
     let new_pass = initial_password();
-    sqlx::query("UPDATE my_accounts SET pass = ? WHERE phone = ? AND phone <> '' AND is_admin = 0")
+    sqlx::query(&crate::pq::rewrite("UPDATE my_accounts SET pass = ? WHERE phone = ? AND phone <> '' AND is_admin = 0"))
         .bind(hash_my_password(&new_pass))
         .bind(&phone)
         .execute(pool)
@@ -1489,8 +1490,8 @@ pub async fn my_account_info(st: &AppState, key: &str) -> Option<MyAccountInfo> 
         return Some(MyAccountInfo {
             name: r.try_get::<String, _>("name").unwrap_or_default(),
             phone: r.try_get::<String, _>("phone").unwrap_or_default(),
-            is_admin: r.try_get::<i8, _>("is_admin").unwrap_or(0) == 1,
-            bound: r.try_get::<i8, _>("bound").unwrap_or(1) == 1,
+            is_admin: r.try_get::<i16, _>("is_admin").unwrap_or(0) == 1,
+            bound: r.try_get::<i16, _>("bound").unwrap_or(1) == 1,
             bound_at: r.try_get::<String, _>("bound_at").unwrap_or_default(),
             source: r.try_get::<String, _>("source").unwrap_or_default(),
         });
@@ -1507,7 +1508,7 @@ pub async fn my_account_info(st: &AppState, key: &str) -> Option<MyAccountInfo> 
         .map(|r| MyAccountInfo {
             name: r.try_get::<String, _>("name").unwrap_or_default(),
             phone: r.try_get::<String, _>("phone").unwrap_or_default(),
-            is_admin: r.try_get::<i8, _>("is_admin").unwrap_or(0) == 1,
+            is_admin: r.try_get::<i16, _>("is_admin").unwrap_or(0) == 1,
             bound: true,
             bound_at: String::new(),
             source: "admin".to_string(),
@@ -1655,7 +1656,7 @@ async fn bind_inner(
     if login_name.is_empty() {
         return Err("请先登录".into());
     }
-    let row = sqlx::query("SELECT name, bound FROM my_accounts WHERE name = ? LIMIT 1")
+    let row = sqlx::query(&crate::pq::rewrite("SELECT name, bound FROM my_accounts WHERE name = ? LIMIT 1"))
         .bind(login_name)
         .fetch_optional(pool)
         .await
@@ -1667,12 +1668,12 @@ async fn bind_inner(
             }
         })?
         .ok_or_else(|| "账号不存在，请重新登录".to_string())?;
-    let bound = row.try_get::<i8, _>("bound").unwrap_or(1) == 1;
+    let bound = row.try_get::<i16, _>("bound").unwrap_or(1) == 1;
     if bound && !admin {
         return Err("该账号已绑定主播，不能自行更改（需要改绑请联系管理员）".into());
     }
 
-    let p = crate::mysql::query_with_binds(
+    let p = crate::pgrs::query_with_binds(
         &st.pools,
         &st.active_id(),
         "SELECT id, name, gender, status FROM person WHERE id = ? AND deleted_at IS NULL LIMIT 1",
@@ -1693,7 +1694,7 @@ async fn bind_inner(
         return Err("该主播已离团，不能绑定".into());
     }
 
-    let taken = sqlx::query("SELECT name FROM my_accounts WHERE name = ? AND name <> ? LIMIT 1")
+    let taken = sqlx::query(&crate::pq::rewrite("SELECT name FROM my_accounts WHERE name = ? AND name <> ? LIMIT 1"))
         .bind(&person_name)
         .bind(login_name)
         .fetch_optional(pool)
@@ -1714,13 +1715,13 @@ async fn bind_inner(
     .execute(pool)
     .await
     .map_err(|e| format!("绑定失败：{e}"))?
-    .rows_affected();
+    .affected();
     if affected == 0 && !admin {
         // 并发下被别人先绑走了：用户侧不允许覆盖
         return Err("该账号已绑定主播，不能自行更改（需要改绑请联系管理员）".into());
     }
     if affected == 0 {
-        sqlx::query("UPDATE my_accounts SET name = ?, bound = 1, bound_at = ? WHERE name = ?")
+        sqlx::query(&crate::pq::rewrite("UPDATE my_accounts SET name = ?, bound = 1, bound_at = ? WHERE name = ?"))
             .bind(&person_name)
             .bind(&now)
             .bind(login_name)
@@ -1841,9 +1842,9 @@ pub async fn my_bind_request_list(
             .iter()
             .map(|r| {
                 serde_json::json!({
-                    "id": r.try_get::<u64, _>("id").unwrap_or(0) as i64,
+                    "id": r.try_get::<i64, _>("id").unwrap_or(0) as i64,
                     "name": r.try_get::<String, _>("name").unwrap_or_default(),
-                    "personId": r.try_get::<u64, _>("person_id").unwrap_or(0) as i64,
+                    "personId": r.try_get::<i64, _>("person_id").unwrap_or(0) as i64,
                     "personName": r.try_get::<String, _>("person_name").unwrap_or_default(),
                     "team": r.try_get::<String, _>("team").unwrap_or_default(),
                     "status": r.try_get::<String, _>("status").unwrap_or_default(),
@@ -1885,11 +1886,11 @@ pub async fn my_bind_request_decide(
     .execute(pool)
     .await
     .ok()?
-    .rows_affected();
+    .affected();
     if n == 0 {
         return None;
     }
-    let row = sqlx::query("SELECT name, person_id, person_name FROM my_bind_requests WHERE id = ?")
+    let row = sqlx::query(&crate::pq::rewrite("SELECT name, person_id, person_name FROM my_bind_requests WHERE id = ?"))
         .bind(id)
         .fetch_optional(pool)
         .await
@@ -1898,7 +1899,7 @@ pub async fn my_bind_request_decide(
     Some((
         row.try_get::<String, _>("name").ok()?,
         row.try_get::<i64, _>("person_id")
-            .or_else(|_| row.try_get::<u64, _>("person_id").map(|v| v as i64))
+            .or_else(|_| row.try_get::<i64, _>("person_id").map(|v| v as i64))
             .ok()?,
         row.try_get::<String, _>("person_name").ok()?,
     ))
@@ -1938,14 +1939,14 @@ pub async fn my_account_bound_for_person(st: &AppState, person_id: i64, person_n
         }
     }
     // 姓名口径（历史账号未必回填了 person_id）；bound 列不存在 = 008 未跑，老账号一律视为已绑定
-    match sqlx::query("SELECT 1 FROM my_accounts WHERE name = ? AND bound = 1 LIMIT 1")
+    match sqlx::query(&crate::pq::rewrite("SELECT 1 FROM my_accounts WHERE name = ? AND bound = 1 LIMIT 1"))
         .bind(person_name)
         .fetch_optional(pool)
         .await
     {
         Ok(r) => r.is_some(),
         Err(_) => matches!(
-            sqlx::query("SELECT 1 FROM my_accounts WHERE name = ? LIMIT 1")
+            sqlx::query(&crate::pq::rewrite("SELECT 1 FROM my_accounts WHERE name = ? LIMIT 1"))
                 .bind(person_name)
                 .fetch_optional(pool)
                 .await,
@@ -1976,7 +1977,7 @@ pub async fn anchor_lookup_by_name(
     if key.is_empty() {
         return Ok(None);
     }
-    let rows = crate::mysql::query_with_binds(
+    let rows = crate::pgrs::query_with_binds(
         &st.pools,
         &st.active_id(),
         "SELECT id, name, gender FROM person \
@@ -1996,7 +1997,7 @@ pub async fn anchor_lookup_by_name(
     };
     let pid = r
         .try_get::<i64, _>("id")
-        .or_else(|_| r.try_get::<u64, _>("id").map(|v| v as i64))
+        .or_else(|_| r.try_get::<i64, _>("id").map(|v| v as i64))
         .unwrap_or(0);
     if pid <= 0 {
         return Ok(None);
@@ -2029,7 +2030,7 @@ pub async fn all_anchor_search(
                WHERE deleted_at IS NULL AND status <> 'left' AND name LIKE ? \
                ORDER BY CASE WHEN name = ? THEN 0 ELSE 1 END, name LIMIT ?";
     let like = format!("%{key}%");
-    match crate::mysql::query_with_binds(&st.pools, source, sql, |qb| {
+    match crate::pgrs::query_with_binds(&st.pools, source, sql, |qb| {
         qb.bind(like.clone()).bind(key.to_string()).bind(limit)
     })
     .await
@@ -2038,9 +2039,7 @@ pub async fn all_anchor_search(
             .iter()
             .map(|r| {
                 serde_json::json!({
-                    "personId": r.try_get::<u64, _>("id")
-                        .or_else(|_| r.try_get::<i64, _>("id").map(|v| v as u64))
-                        .unwrap_or(0),
+                    "personId": r.try_get::<i64, _>("id").unwrap_or(0),
                     "name": r.try_get::<String, _>("name").unwrap_or_default(),
                     "team": r.try_get::<String, _>("gender").unwrap_or_default(),
                 })
@@ -2080,7 +2079,7 @@ pub async fn anchor_claim_insert(
         _ => "image/jpeg",
     };
     let pool = w(st).map_err(|e| e.to_string())?;
-    if sqlx::query("SELECT 1 FROM anchor_claims WHERE person_id = ? AND status = 'pending'")
+    if sqlx::query(&crate::pq::rewrite("SELECT 1 FROM anchor_claims WHERE person_id = ? AND status = 'pending'"))
         .bind(person_id)
         .fetch_optional(pool)
         .await
@@ -2102,11 +2101,11 @@ pub async fn anchor_claim_insert(
         return Err("该抖音号已存在绑定记录，不用重复提交".into());
     }
     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    let res = sqlx::query(
+    let row = sqlx::query(&crate::pq::rewrite(
         "INSERT INTO anchor_claims
            (person_id, person_name, team, douyin_no, screenshot, mime, status, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)",
-    )
+         VALUES (?, ?, ?, ?, ?, ?, 'pending', ?) RETURNING id",
+    ))
     .bind(person_id)
     .bind(person_name)
     .bind(team)
@@ -2114,10 +2113,10 @@ pub async fn anchor_claim_insert(
     .bind(screenshot)
     .bind(mime)
     .bind(&now)
-    .execute(pool)
+    .fetch_one(pool)
     .await
     .map_err(|e| format!("写入失败：{e}"))?;
-    Ok(res.last_insert_id() as i64)
+    Ok(row.try_get::<i64, _>(0).map_err(|e| format!("读取返回 id 失败：{e}"))?)
 }
 
 /// 某人最近一笔申请（展示端「我的」显示状态用）
@@ -2135,7 +2134,7 @@ pub async fn anchor_claim_mine(st: &AppState, person_id: i64) -> Option<serde_js
         _ => return None,
     };
     Some(serde_json::json!({
-        "id": row.try_get::<u64, _>("id").ok()? as i64,
+        "id": row.try_get::<i64, _>("id").ok()? as i64,
         "douyinNo": row.try_get::<String, _>("douyin_no").unwrap_or_default(),
         "status": row.try_get::<String, _>("status").unwrap_or_default(),
         "rejectReason": row.try_get::<String, _>("reject_reason").unwrap_or_default(),
@@ -2168,8 +2167,8 @@ pub async fn anchor_claim_list(st: &AppState, status: &str, limit: i64) -> Vec<s
             .iter()
             .map(|r| {
                 serde_json::json!({
-                    "id": r.try_get::<u64, _>(0).unwrap_or(0) as i64,
-                    "personId": r.try_get::<u64, _>(1).unwrap_or(0) as i64,
+                    "id": r.try_get::<i64, _>(0).unwrap_or(0) as i64,
+                    "personId": r.try_get::<i64, _>(1).unwrap_or(0) as i64,
                     "personName": r.try_get::<String, _>(2).unwrap_or_default(),
                     "team": r.try_get::<String, _>(3).unwrap_or_default(),
                     "douyinNo": r.try_get::<String, _>(4).unwrap_or_default(),
@@ -2191,7 +2190,7 @@ pub async fn anchor_claim_list(st: &AppState, status: &str, limit: i64) -> Vec<s
 /// 截图本体（管理端预览）
 pub async fn anchor_claim_image(st: &AppState, id: i64) -> Option<(Vec<u8>, String)> {
     let pool = w(st).ok()?;
-    let row = match sqlx::query("SELECT screenshot, mime FROM anchor_claims WHERE id = ?")
+    let row = match sqlx::query(&crate::pq::rewrite("SELECT screenshot, mime FROM anchor_claims WHERE id = ?"))
         .bind(id)
         .fetch_optional(pool)
         .await
@@ -2228,7 +2227,7 @@ pub async fn anchor_claim_decide(
     .execute(pool)
     .await
     .ok()?
-    .rows_affected();
+    .affected();
     if n == 0 {
         return None;
     }
@@ -2243,7 +2242,7 @@ pub async fn anchor_claim_decide(
         _ => return None,
     };
     Some((
-        row.try_get::<u64, _>("person_id").ok()? as i64,
+        row.try_get::<i64, _>("person_id").ok()? as i64,
         row.try_get::<String, _>("douyin_no").ok()?,
         row.try_get::<String, _>("person_name").ok()?,
     ))
@@ -2316,8 +2315,8 @@ pub async fn push_state(st: &AppState, name: &str) -> serde_json::Value {
         "code": r.try_get::<String, _>("bind_code").unwrap_or_default(),
         "codeExpires": r.try_get::<String, _>("code_expires").unwrap_or_default(),
         "boundAt": r.try_get::<String, _>("bound_at").unwrap_or_default(),
-        "notifyTarget": r.try_get::<i8, _>("notify_target").unwrap_or(0) == 1,
-        "dailyReport": r.try_get::<i8, _>("daily_report").unwrap_or(0) == 1,
+        "notifyTarget": r.try_get::<i16, _>("notify_target").unwrap_or(0) == 1,
+        "dailyReport": r.try_get::<i16, _>("daily_report").unwrap_or(0) == 1,
         "lastPush": r.try_get::<String, _>("last_push").unwrap_or_default(),
         "lastError": r.try_get::<String, _>("last_error").unwrap_or_default(),
     })
@@ -2339,13 +2338,13 @@ pub async fn push_set_code(
     sqlx::query(
         "INSERT INTO push_bindings (name, team, person_id, bind_code, code_expires, updated_at)
          VALUES (?, ?, ?, ?, ?, ?)
-         ON DUPLICATE KEY UPDATE team = VALUES(team), person_id = VALUES(person_id),
-           bind_code = VALUES(bind_code), code_expires = VALUES(code_expires),
-           updated_at = VALUES(updated_at)",
+         ON CONFLICT (name) DO UPDATE SET team = EXCLUDED.team, person_id = EXCLUDED.person_id,
+           bind_code = EXCLUDED.bind_code, code_expires = EXCLUDED.code_expires,
+           updated_at = EXCLUDED.updated_at",
     )
     .bind(name.trim())
     .bind(team)
-    .bind(person_id)
+    .bind(person_id as i64)
     .bind(code)
     .bind(expires)
     .bind(now_str())
@@ -2422,34 +2421,32 @@ pub async fn push_bind_by_code(
 /// 补写绑定行的团别（绑定码路径：台账建档晚于绑定码生成时团别为空，
 /// 推送按团捞绑定会漏掉这个人——绑定成功后由机器人回查台账补上）
 pub async fn push_set_team(st: &AppState, name: &str, team: &str) -> bool {
-    matches!(w(st), Ok(pool) if sqlx::query(
-        "UPDATE push_bindings SET team = ?, updated_at = ? WHERE name = ?")
-        .bind(team)
+    matches!(w(st), Ok(pool) if sqlx::query(&crate::pq::rewrite("UPDATE push_bindings SET team = ?, updated_at = ? WHERE name = ?"))
+                .bind(team)
         .bind(now_str())
         .bind(name.trim())
         .execute(pool)
         .await
-        .map(|r| r.rows_affected() > 0)
+        .map(|r| r.affected() > 0)
         .unwrap_or(false))
 }
 
 /// 解绑（保留目标配置，只断开微信）
 pub async fn push_unbind(st: &AppState, name: &str) -> bool {
-    matches!(w(st), Ok(pool) if sqlx::query(
-        "UPDATE push_bindings SET conversation_id = '', to_user_id = '', bound_at = '',
-           bind_code = '', code_expires = '', updated_at = ? WHERE name = ?")
-        .bind(now_str())
+    matches!(w(st), Ok(pool) if sqlx::query(&crate::pq::rewrite("UPDATE push_bindings SET conversation_id = '', to_user_id = '', bound_at = '',
+           bind_code = '', code_expires = '', updated_at = ? WHERE name = ?"))
+                .bind(now_str())
         .bind(name.trim())
         .execute(pool)
         .await
-        .map(|r| r.rows_affected() > 0)
+        .map(|r| r.affected() > 0)
         .unwrap_or(false))
 }
 
 /// 按微信会话解绑（机器人里回复「解绑」）：返回被解绑的账号姓名
 pub async fn push_unbind_by_conversation(st: &AppState, conversation_id: &str) -> Option<String> {
     let pool = w(st).ok()?;
-    let row = sqlx::query("SELECT name FROM push_bindings WHERE conversation_id = ?")
+    let row = sqlx::query(&crate::pq::rewrite("SELECT name FROM push_bindings WHERE conversation_id = ?"))
         .bind(conversation_id)
         .fetch_optional(pool)
         .await
@@ -2466,7 +2463,7 @@ pub async fn push_unbind_by_conversation(st: &AppState, conversation_id: &str) -
     .await;
     // 顺带清掉这个会话的 iLink 上下文（2026-10-10 审计）：context_token 留着无害
     // 但会积累脏数据；删掉后换人重绑时由新入站消息重建。
-    let _ = sqlx::query("DELETE FROM wx_sessions WHERE conversation_id = ?")
+    let _ = sqlx::query(&crate::pq::rewrite("DELETE FROM wx_sessions WHERE conversation_id = ?"))
         .bind(conversation_id)
         .execute(pool)
         .await;
@@ -2480,15 +2477,14 @@ pub async fn push_set_flags(
     notify_target: bool,
     daily_report: bool,
 ) -> bool {
-    matches!(w(st), Ok(pool) if sqlx::query(
-        "UPDATE push_bindings SET notify_target = ?, daily_report = ?, updated_at = ? WHERE name = ?")
-        .bind(if notify_target { 1i8 } else { 0i8 })
-        .bind(if daily_report { 1i8 } else { 0i8 })
+    matches!(w(st), Ok(pool) if sqlx::query(&crate::pq::rewrite("UPDATE push_bindings SET notify_target = ?, daily_report = ?, updated_at = ? WHERE name = ?"))
+                .bind(if notify_target { 1i16 } else { 0i16 })
+        .bind(if daily_report { 1i16 } else { 0i16 })
         .bind(now_str())
         .bind(name.trim())
         .execute(pool)
         .await
-        .map(|r| r.rows_affected() > 0)
+        .map(|r| r.affected() > 0)
         .unwrap_or(false))
 }
 
@@ -2500,13 +2496,13 @@ pub async fn push_set_daily_report(st: &AppState, name: &str, on: bool) -> bool 
     };
     let name = name.trim();
     let changed =
-        sqlx::query("UPDATE push_bindings SET daily_report = ?, updated_at = ? WHERE name = ?")
-            .bind(if on { 1i8 } else { 0i8 })
+        sqlx::query(&crate::pq::rewrite("UPDATE push_bindings SET daily_report = ?, updated_at = ? WHERE name = ?"))
+            .bind(if on { 1i16 } else { 0i16 })
             .bind(now_str())
             .bind(name)
             .execute(pool)
             .await
-            .map(|r| r.rows_affected() > 0)
+            .map(|r| r.affected() > 0)
             .unwrap_or(false);
     if changed {
         return true;
@@ -2541,19 +2537,16 @@ pub async fn push_binding_by_conversation(
 
 /// push_bindings → PushBinding 的统一映射（列固定：name/team/person_id/
 /// conversation_id/notify_target/daily_report，两处查询共用）
-fn binding_from_row(r: &sqlx::mysql::MySqlRow) -> PushBinding {
+fn binding_from_row(r: &sqlx::postgres::PgRow) -> PushBinding {
     PushBinding {
         name: r.try_get::<String, _>("name").unwrap_or_default(),
         team: r.try_get::<String, _>("team").unwrap_or_default(),
-        person_id: r
-            .try_get::<u64, _>("person_id")
-            .or_else(|_| r.try_get::<i64, _>("person_id").map(|v| v as u64))
-            .unwrap_or(0),
+        person_id: r.try_get::<i64, _>("person_id").map(|v| v.max(0) as u64).unwrap_or(0),
         conversation_id: r
             .try_get::<String, _>("conversation_id")
             .unwrap_or_default(),
-        notify_target: r.try_get::<i8, _>("notify_target").unwrap_or(0) == 1,
-        daily_report: r.try_get::<i8, _>("daily_report").unwrap_or(0) == 1,
+        notify_target: r.try_get::<i16, _>("notify_target").unwrap_or(0) == 1,
+        daily_report: r.try_get::<i16, _>("daily_report").unwrap_or(0) == 1,
     }
 }
 
@@ -2583,7 +2576,7 @@ pub async fn push_bindings_for_team(st: &AppState, team: &str) -> Vec<PushBindin
 pub async fn push_touch(st: &AppState, name: &str, error: &str) {
     if let Ok(pool) = w(st) {
         let _ =
-            sqlx::query("UPDATE push_bindings SET last_push = ?, last_error = ? WHERE name = ?")
+            sqlx::query(&crate::pq::rewrite("UPDATE push_bindings SET last_push = ?, last_error = ? WHERE name = ?"))
                 .bind(now_str())
                 .bind(error.chars().take(200).collect::<String>())
                 .bind(name.trim())
@@ -2598,7 +2591,7 @@ pub async fn push_last_report_date(st: &AppState, name: &str) -> String {
     let Ok(pool) = w(st) else {
         return String::new();
     };
-    sqlx::query("SELECT last_report_date FROM push_bindings WHERE name = ?")
+    sqlx::query(&crate::pq::rewrite("SELECT last_report_date FROM push_bindings WHERE name = ?"))
         .bind(name.trim())
         .fetch_optional(pool)
         .await
@@ -2610,7 +2603,7 @@ pub async fn push_last_report_date(st: &AppState, name: &str) -> String {
 
 pub async fn push_set_last_report_date(st: &AppState, name: &str, date: &str) {
     if let Ok(pool) = w(st) {
-        let _ = sqlx::query("UPDATE push_bindings SET last_report_date = ? WHERE name = ?")
+        let _ = sqlx::query(&crate::pq::rewrite("UPDATE push_bindings SET last_report_date = ? WHERE name = ?"))
             .bind(date)
             .bind(name.trim())
             .execute(pool)
@@ -2645,7 +2638,7 @@ pub async fn push_bind_by_phone_code(
         return None;
     }
     // ① 手机号 → 账号姓名（没登记 = None，与码校验失败同一返回值，不泄露差异）
-    let row = sqlx::query("SELECT name FROM my_accounts WHERE phone = ?")
+    let row = sqlx::query(&crate::pq::rewrite("SELECT name FROM my_accounts WHERE phone = ?"))
         .bind(&phone)
         .fetch_optional(pool)
         .await
@@ -2690,7 +2683,7 @@ pub async fn push_bind_by_phone(
     if phone.is_empty() || !phone.chars().all(|c| c.is_ascii_digit()) {
         return None;
     }
-    let row = sqlx::query("SELECT name FROM my_accounts WHERE phone = ?")
+    let row = sqlx::query(&crate::pq::rewrite("SELECT name FROM my_accounts WHERE phone = ?"))
         .bind(&phone)
         .fetch_optional(pool)
         .await
@@ -2708,7 +2701,7 @@ pub async fn push_bind_by_phone(
 
 /// 台账里查这个姓名属于哪个团（person.gender）；查不到返回 None
 pub async fn person_team_of_name(st: &AppState, name: &str) -> Option<String> {
-    let rows = crate::mysql::query_with_binds(
+    let rows = crate::pgrs::query_with_binds(
         &st.pools,
         "LOCAL",
         "SELECT gender FROM person WHERE deleted_at IS NULL AND name = ? LIMIT 1",
@@ -2744,14 +2737,11 @@ pub struct WxPushAccount {
     pub bound_at: String,
 }
 
-fn wx_push_account_from_row(row: &sqlx::mysql::MySqlRow) -> WxPushAccount {
+fn wx_push_account_from_row(row: &sqlx::postgres::PgRow) -> WxPushAccount {
     WxPushAccount {
         name: row.try_get::<String, _>("name").unwrap_or_default(),
         team: row.try_get::<String, _>("team").unwrap_or_default(),
-        person_id: row
-            .try_get::<u64, _>("person_id")
-            .or_else(|_| row.try_get::<i64, _>("person_id").map(|v| v.max(0) as u64))
-            .unwrap_or(0),
+        person_id: row.try_get::<i64, _>("person_id").map(|v| v.max(0) as u64).unwrap_or(0),
         ilink_bot_id: row.try_get::<String, _>("ilink_bot_id").unwrap_or_default(),
         ilink_user_id: row
             .try_get::<String, _>("ilink_user_id")
@@ -2815,7 +2805,7 @@ async fn wx_push_others(st: &AppState) -> Vec<(String, u64, String)> {
         return Vec::new();
     };
     let rows = sqlx::query(
-        "SELECT name, IFNULL(person_id, 0) AS pid, IFNULL(ilink_user_id, '') AS uid \
+        "SELECT name, COALESCE(person_id, 0) AS pid, COALESCE(ilink_user_id, '') AS uid \
          FROM wx_push_accounts",
     )
     .fetch_all(pool)
@@ -2826,7 +2816,7 @@ async fn wx_push_others(st: &AppState) -> Vec<(String, u64, String)> {
             .map(|r| {
                 (
                     r.try_get::<String, _>("name").unwrap_or_default(),
-                    r.try_get::<u64, _>("pid").unwrap_or(0),
+                    r.try_get::<i64, _>("pid").map(|v| v.max(0) as u64).unwrap_or(0),
                     r.try_get::<String, _>("uid").unwrap_or_default(),
                 )
             })
@@ -2852,15 +2842,15 @@ pub async fn wx_push_account_save(st: &AppState, a: &WxPushAccount) -> Result<()
            (name, team, person_id, ilink_bot_id, ilink_user_id, bot_token, base_url,
             nickname, conversation_id, updates_buf, bound_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON DUPLICATE KEY UPDATE
-           team = VALUES(team), person_id = VALUES(person_id),
-           ilink_bot_id = VALUES(ilink_bot_id), ilink_user_id = VALUES(ilink_user_id),
-           bot_token = VALUES(bot_token), base_url = VALUES(base_url),
-           nickname = VALUES(nickname), updated_at = VALUES(updated_at)",
+         ON CONFLICT (name) DO UPDATE SET
+           team = EXCLUDED.team, person_id = EXCLUDED.person_id,
+           ilink_bot_id = EXCLUDED.ilink_bot_id, ilink_user_id = EXCLUDED.ilink_user_id,
+           bot_token = EXCLUDED.bot_token, base_url = EXCLUDED.base_url,
+           nickname = EXCLUDED.nickname, updated_at = EXCLUDED.updated_at",
     )
     .bind(a.name.trim())
     .bind(&a.team)
-    .bind(a.person_id)
+    .bind(a.person_id as i64)
     .bind(&a.ilink_bot_id)
     .bind(&a.ilink_user_id)
     .bind(&a.bot_token)
@@ -2896,15 +2886,13 @@ pub async fn wx_push_account_set_updates_buf(st: &AppState, name: &str, updates_
     if updates_buf.is_empty() {
         return false;
     }
-    matches!(w(st), Ok(pool) if sqlx::query(
-        "UPDATE wx_push_accounts SET updates_buf = ?, updated_at = ? WHERE name = ?"
-    )
-    .bind(updates_buf)
+    matches!(w(st), Ok(pool) if sqlx::query(&crate::pq::rewrite("UPDATE wx_push_accounts SET updates_buf = ?, updated_at = ? WHERE name = ?"))
+            .bind(updates_buf)
     .bind(now_str())
     .bind(name.trim())
     .execute(pool)
     .await
-    .map(|r| r.rows_affected() > 0)
+    .map(|r| r.affected() > 0)
     .unwrap_or(false))
 }
 
@@ -2915,20 +2903,18 @@ pub async fn wx_push_account_bind_conversation(
     conversation_id: &str,
     ilink_user_id: &str,
 ) -> bool {
-    matches!(w(st), Ok(pool) if sqlx::query(
-        "UPDATE wx_push_accounts
-           SET conversation_id = ?, ilink_user_id = IF(ilink_user_id = '', ?, ilink_user_id),
-               bound_at = IF(bound_at = '', ?, bound_at), updated_at = ?
-         WHERE name = ?"
-    )
-    .bind(conversation_id)
+    matches!(w(st), Ok(pool) if sqlx::query(&crate::pq::rewrite("UPDATE wx_push_accounts
+           SET conversation_id = ?, ilink_user_id = COALESCE(NULLIF(ilink_user_id, ''), ?),
+               bound_at = COALESCE(NULLIF(bound_at, ''), ?), updated_at = ?
+         WHERE name = ?"))
+            .bind(conversation_id)
     .bind(ilink_user_id)
     .bind(now_str())
     .bind(now_str())
     .bind(name.trim())
     .execute(pool)
     .await
-    .map(|r| r.rows_affected() > 0)
+    .map(|r| r.affected() > 0)
     .unwrap_or(false))
 }
 
@@ -2966,11 +2952,11 @@ pub async fn wx_push_accounts_all(st: &AppState) -> Vec<WxPushAccount> {
 
 /// 删除扫码凭证（解绑推送时一并清）
 pub async fn wx_push_account_delete(st: &AppState, name: &str) -> bool {
-    matches!(w(st), Ok(pool) if sqlx::query("DELETE FROM wx_push_accounts WHERE name = ?")
+    matches!(w(st), Ok(pool) if sqlx::query(&crate::pq::rewrite("DELETE FROM wx_push_accounts WHERE name = ?"))
         .bind(name.trim())
         .execute(pool)
         .await
-        .map(|r| r.rows_affected() > 0)
+        .map(|r| r.affected() > 0)
         .unwrap_or(false))
 }
 
@@ -3000,10 +2986,10 @@ pub async fn push_bind_account(
     let _ = sqlx::query(
         "INSERT INTO push_bindings (name, team, conversation_id, to_user_id, bound_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?)
-         ON DUPLICATE KEY UPDATE team = IF(VALUES(team) <> '', VALUES(team), team),
-           conversation_id = VALUES(conversation_id), to_user_id = VALUES(to_user_id),
-           bound_at = VALUES(bound_at), bind_code = '', code_expires = '',
-           last_error = '', updated_at = VALUES(updated_at)",
+         ON CONFLICT (name) DO UPDATE SET team = IF(EXCLUDED.team <> '', EXCLUDED.team, team),
+           conversation_id = EXCLUDED.conversation_id, to_user_id = EXCLUDED.to_user_id,
+           bound_at = EXCLUDED.bound_at, bind_code = '', code_expires = '',
+           last_error = '', updated_at = EXCLUDED.updated_at",
     )
     .bind(name.trim())
     .bind(team)
@@ -3024,33 +3010,26 @@ pub async fn push_bind_account(
 
 /// 排队一次推送。run_at = 到点时刻（本地时间 "YYYY-MM-DD HH:MM:SS"）。
 /// 同一 (team, biz_date) 已有 pending 任务 → 只返回 id，不新排。
-pub async fn push_job_enqueue(st: &AppState, team: &str, biz_date: &str, run_at: &str) -> u64 {
+pub async fn push_job_enqueue(st: &AppState, team: &str, biz_date: &str, run_at: &str) -> i64 {
     let Ok(pool) = w(st) else {
         return 0;
     };
-    let res = sqlx::query(
+    let res = sqlx::query(&crate::pq::rewrite(
         "INSERT INTO push_jobs (team, biz_date, run_at, status, created_at)
          VALUES (?, ?, ?, 'pending', ?)
-         ON DUPLICATE KEY UPDATE status = 'pending', run_at = VALUES(run_at),
-           done_at = '', note = ''",
-    )
+         ON CONFLICT (team, biz_date) DO UPDATE SET status = 'pending', run_at = EXCLUDED.run_at,
+           done_at = '', note = ''
+         RETURNING id",
+    ))
     .bind(team)
     .bind(biz_date)
     .bind(run_at)
     .bind(now_str())
-    .execute(pool)
+    .fetch_optional(pool)
     .await;
     match res {
-        Ok(r) if r.last_insert_id() > 0 => r.last_insert_id(),
-        Ok(_) => sqlx::query("SELECT id FROM push_jobs WHERE team = ? AND biz_date = ?")
-            .bind(team)
-            .bind(biz_date)
-            .fetch_optional(pool)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|r| r.try_get::<u64, _>("id").ok())
-            .unwrap_or(0),
+        Ok(Some(r)) => r.try_get::<i64, _>(0).unwrap_or(0),
+        Ok(None) => 0,
         Err(e) => {
             tracing::warn!(error = %e, "推送任务排队失败");
             0
@@ -3059,13 +3038,13 @@ pub async fn push_job_enqueue(st: &AppState, team: &str, biz_date: &str, run_at:
 }
 
 /// 取一条到点的 pending 任务并立刻标成 running（抢占，多实例也只推一次）
-pub async fn push_job_take(st: &AppState, now: &str) -> Option<(u64, String, String)> {
+pub async fn push_job_take(st: &AppState, now: &str) -> Option<(i64, String, String)> {
     let pool = w(st).ok()?;
     let row = sqlx::query(
         "SELECT id, team, biz_date FROM push_jobs
          WHERE (status = 'pending' AND run_at <= ?)
             OR (status = 'running' AND done_at = '' AND run_at <= ?
-                AND created_at <> '' AND created_at < DATE_SUB(?, INTERVAL 5 MINUTE))
+                AND created_at <> '' AND created_at < ?::timestamptz - INTERVAL '5 minutes')
          ORDER BY run_at LIMIT 1",
     )
     .bind(now)
@@ -3075,23 +3054,20 @@ pub async fn push_job_take(st: &AppState, now: &str) -> Option<(u64, String, Str
     .await
     .ok()
     .flatten()?;
-    let id = row
-        .try_get::<u64, _>("id")
-        .or_else(|_| row.try_get::<i64, _>("id").map(|v| v as u64))
-        .unwrap_or(0);
+    let id = row.try_get::<i64, _>("id").unwrap_or(0);
     let team: String = row.try_get::<String, _>("team").unwrap_or_default();
     let biz_date: String = row.try_get::<String, _>("biz_date").unwrap_or_default();
     if id == 0 {
         return None;
     }
-    let taken = sqlx::query(
+    let taken = sqlx::query(&crate::pq::rewrite(
         "UPDATE push_jobs SET status = 'running'
          WHERE id = ? AND (status = 'pending' OR (status = 'running' AND done_at = ''))",
-    )
+    ))
     .bind(id)
     .execute(pool)
     .await
-    .map(|r| r.rows_affected() > 0)
+    .map(|r| r.affected() > 0)
     .unwrap_or(false);
     if !taken {
         return None;
@@ -3116,9 +3092,7 @@ pub async fn push_job_list(st: &AppState, limit: i64) -> Vec<serde_json::Value> 
             .iter()
             .map(|r| {
                 serde_json::json!({
-                    "id": r.try_get::<u64, _>("id")
-                        .or_else(|_| r.try_get::<i64, _>("id").map(|v| v as u64))
-                        .unwrap_or(0),
+                    "id": r.try_get::<i64, _>("id").map(|v| v as u64).unwrap_or(0),
                     "team": r.try_get::<String, _>("team").unwrap_or_default(),
                     "bizDate": r.try_get::<String, _>("biz_date").unwrap_or_default(),
                     "runAt": r.try_get::<String, _>("run_at").unwrap_or_default(),
@@ -3161,9 +3135,9 @@ pub async fn push_stats(st: &AppState) -> serde_json::Value {
 }
 
 /// 任务结束（成功 / 失败都记一笔，失败原因写 note 供后台查看）
-pub async fn push_job_finish(st: &AppState, id: u64, ok: bool, note: &str) {
+pub async fn push_job_finish(st: &AppState, id: i64, ok: bool, note: &str) {
     if let Ok(pool) = w(st) {
-        let _ = sqlx::query("UPDATE push_jobs SET status = ?, done_at = ?, note = ? WHERE id = ?")
+        let _ = sqlx::query(&crate::pq::rewrite("UPDATE push_jobs SET status = ?, done_at = ?, note = ? WHERE id = ?"))
             .bind(if ok { "done" } else { "failed" })
             .bind(now_str())
             .bind(note.chars().take(200).collect::<String>())
@@ -3192,16 +3166,12 @@ pub async fn targets_list(st: &AppState, name: &str) -> Vec<serde_json::Value> {
             .iter()
             .map(|r| {
                 serde_json::json!({
-                    "id": r.try_get::<u64, _>("id")
-                        .or_else(|_| r.try_get::<i64, _>("id").map(|v| v as u64))
-                        .unwrap_or(0),
+                    "id": r.try_get::<i64, _>("id").map(|v| v as u64).unwrap_or(0),
                     "kind": r.try_get::<String, _>("kind").unwrap_or_default(),
-                    "targetPersonId": r.try_get::<u64, _>("target_person_id")
-                        .or_else(|_| r.try_get::<i64, _>("target_person_id").map(|v| v as u64))
-                        .unwrap_or(0),
+                    "targetPersonId": r.try_get::<i64, _>("target_person_id").map(|v| v.max(0) as u64).unwrap_or(0),
                     "targetName": r.try_get::<String, _>("target_name").unwrap_or_default(),
                     "targetValue": r.try_get::<i64, _>("target_value").unwrap_or(0),
-                    "hit": r.try_get::<i8, _>("hit").unwrap_or(0) == 1,
+                    "hit": r.try_get::<i16, _>("hit").unwrap_or(0) == 1,
                     "lastGap": r.try_get::<i64, _>("last_gap").unwrap_or(0),
                     "createdAt": r.try_get::<String, _>("created_at").unwrap_or_default(),
                 })
@@ -3219,7 +3189,7 @@ pub async fn target_count(st: &AppState, name: &str) -> i64 {
     let Ok(pool) = w(st) else {
         return 0;
     };
-    sqlx::query("SELECT COUNT(*) AS n FROM my_targets WHERE name = ?")
+    sqlx::query(&crate::pq::rewrite("SELECT COUNT(*) AS n FROM my_targets WHERE name = ?"))
         .bind(name.trim())
         .fetch_one(pool)
         .await
@@ -3231,7 +3201,7 @@ pub async fn target_count(st: &AppState, name: &str) -> i64 {
 /// 目标行（推送引擎用的最小集合）
 #[derive(Clone, Debug)]
 pub struct PushTarget {
-    pub id: u64,
+    pub id: i64,
     pub kind: String,
     pub target_person_id: u64,
     pub target_name: String,
@@ -3255,18 +3225,12 @@ pub async fn targets_for_push(st: &AppState, name: &str) -> Vec<PushTarget> {
         Ok(rows) => rows
             .iter()
             .map(|r| PushTarget {
-                id: r
-                    .try_get::<u64, _>("id")
-                    .or_else(|_| r.try_get::<i64, _>("id").map(|v| v as u64))
-                    .unwrap_or(0),
+                id: r.try_get::<i64, _>("id").unwrap_or(0),
                 kind: r.try_get::<String, _>("kind").unwrap_or_default(),
-                target_person_id: r
-                    .try_get::<u64, _>("target_person_id")
-                    .or_else(|_| r.try_get::<i64, _>("target_person_id").map(|v| v as u64))
-                    .unwrap_or(0),
+                target_person_id: r.try_get::<i64, _>("target_person_id").map(|v| v.max(0) as u64).unwrap_or(0),
                 target_name: r.try_get::<String, _>("target_name").unwrap_or_default(),
                 target_value: r.try_get::<i64, _>("target_value").unwrap_or(0),
-                hit: r.try_get::<i8, _>("hit").unwrap_or(0) == 1,
+                hit: r.try_get::<i16, _>("hit").unwrap_or(0) == 1,
                 last_notice_date: r
                     .try_get::<String, _>("last_notice_date")
                     .unwrap_or_default(),
@@ -3290,40 +3254,40 @@ pub async fn target_add(
     target_value: i64,
 ) -> Result<u64> {
     let pool = w(st)?;
-    let r = sqlx::query(
+    let r = sqlx::query(&crate::pq::rewrite(
         "INSERT INTO my_targets (name, team, kind, target_person_id, target_name, target_value, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)",
-    )
+         VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id",
+    ))
     .bind(name.trim())
     .bind(team)
     .bind(kind)
-    .bind(target_person_id)
+    .bind(target_person_id as i64)
     .bind(target_name)
     .bind(target_value)
     .bind(now_str())
-    .execute(pool)
+    .fetch_one(pool)
     .await?;
-    Ok(r.last_insert_id())
+    Ok(r.try_get::<i64, _>(0)? as u64)
 }
 
 /// 删除目标（只能删自己的）
-pub async fn target_delete(st: &AppState, name: &str, id: u64) -> bool {
-    matches!(w(st), Ok(pool) if sqlx::query("DELETE FROM my_targets WHERE id = ? AND name = ?")
+pub async fn target_delete(st: &AppState, name: &str, id: i64) -> bool {
+    matches!(w(st), Ok(pool) if sqlx::query(&crate::pq::rewrite("DELETE FROM my_targets WHERE id = ? AND name = ?"))
         .bind(id)
         .bind(name.trim())
         .execute(pool)
         .await
-        .map(|r| r.rows_affected() > 0)
+        .map(|r| r.affected() > 0)
         .unwrap_or(false))
 }
 
 /// 推送后回写目标状态（是否已追上 / 上次差距 / 上次提醒的业务日）
-pub async fn target_set_state(st: &AppState, id: u64, hit: bool, gap: i64, notice_date: &str) {
+pub async fn target_set_state(st: &AppState, id: i64, hit: bool, gap: i64, notice_date: &str) {
     if let Ok(pool) = w(st) {
         let _ = sqlx::query(
             "UPDATE my_targets SET hit = ?, last_gap = ?, last_notice_date = ? WHERE id = ?",
         )
-        .bind(if hit { 1i8 } else { 0i8 })
+        .bind(if hit { 1i16 } else { 0i16 })
         .bind(gap)
         .bind(notice_date)
         .bind(id)
@@ -3344,7 +3308,7 @@ pub async fn team_anchor_search(
                WHERE deleted_at IS NULL AND (? = '' OR gender = ?) AND status <> 'left' AND name LIKE ? \
                ORDER BY name LIMIT ?";
     let like = format!("%{}%", q.trim());
-    match crate::mysql::query_with_binds(&st.pools, source, sql, |qb| {
+    match crate::pgrs::query_with_binds(&st.pools, source, sql, |qb| {
         qb.bind(team.to_string())
             .bind(team.to_string())
             .bind(like.clone())
@@ -3356,9 +3320,7 @@ pub async fn team_anchor_search(
             .iter()
             .map(|r| {
                 serde_json::json!({
-                    "personId": r.try_get::<u64, _>("id")
-                        .or_else(|_| r.try_get::<i64, _>("id").map(|v| v as u64))
-                        .unwrap_or(0),
+                    "personId": r.try_get::<i64, _>("id").unwrap_or(0),
                     "name": r.try_get::<String, _>("name").unwrap_or_default(),
                 })
             })
@@ -3383,8 +3345,8 @@ pub async fn wx_session_upsert(
         let _ = sqlx::query(
             "INSERT INTO wx_sessions (conversation_id, to_user_id, context_token, updated_at)
              VALUES (?, ?, ?, ?)
-             ON DUPLICATE KEY UPDATE to_user_id = VALUES(to_user_id),
-               context_token = VALUES(context_token), updated_at = VALUES(updated_at)",
+             ON CONFLICT (conversation_id) DO UPDATE SET to_user_id = EXCLUDED.to_user_id,
+               context_token = EXCLUDED.context_token, updated_at = EXCLUDED.updated_at",
         )
         .bind(conversation_id)
         .bind(to_user_id)
@@ -3399,7 +3361,7 @@ pub async fn wx_session_upsert(
 pub async fn wx_session_get(st: &AppState, conversation_id: &str) -> Option<(String, String)> {
     let pool = w(st).ok()?;
     let r =
-        sqlx::query("SELECT to_user_id, context_token FROM wx_sessions WHERE conversation_id = ?")
+        sqlx::query(&crate::pq::rewrite("SELECT to_user_id, context_token FROM wx_sessions WHERE conversation_id = ?"))
             .bind(conversation_id)
             .fetch_optional(pool)
             .await
@@ -3418,7 +3380,7 @@ pub async fn wx_session_get(st: &AppState, conversation_id: &str) -> Option<(Str
 /// 把旧 SQLite（SQLITE_PATH）里的运行时数据幂等搬进 MySQL。
 /// 只搬一次：config 表 sqlite_carried=1 后直接跳过（SQLite 文件保持原样不删，作留底）。
 /// 表缺列/文件不存在都按「没得搬」处理，绝不阻塞 migrate。
-pub async fn carry_legacy_sqlite(pool: &MySqlPool, sqlite_path: &str) -> Result<()> {
+pub async fn carry_legacy_sqlite(pool: &PgPool, sqlite_path: &str) -> Result<()> {
     use sqlx::Row;
 
     // 1. 已搬过 → 跳过
@@ -3478,7 +3440,7 @@ pub async fn carry_legacy_sqlite(pool: &MySqlPool, sqlite_path: &str) -> Result<
         for (a, rn) in &rows {
             sqlx::query(
                 "INSERT INTO aliases (alias, real_name) VALUES (?, ?)
-                 ON DUPLICATE KEY UPDATE real_name = VALUES(real_name)",
+                 ON CONFLICT (alias) DO UPDATE SET real_name = EXCLUDED.real_name",
             )
             .bind(a)
             .bind(rn)
@@ -3498,7 +3460,7 @@ pub async fn carry_legacy_sqlite(pool: &MySqlPool, sqlite_path: &str) -> Result<
         for (et, body, at) in &rows {
             sqlx::query(
                 "INSERT INTO roster_state (event_type, body, updated_at) VALUES (?, ?, ?)
-                 ON DUPLICATE KEY UPDATE body = VALUES(body), updated_at = VALUES(updated_at)",
+                 ON CONFLICT (event_type) DO UPDATE SET body = EXCLUDED.body, updated_at = EXCLUDED.updated_at",
             )
             .bind(et)
             .bind(body)
@@ -3522,7 +3484,7 @@ pub async fn carry_legacy_sqlite(pool: &MySqlPool, sqlite_path: &str) -> Result<
             }
             sqlx::query(
                 "INSERT INTO config (cfg_key, cfg_value, updated_at) VALUES (?, ?, ?)
-                 ON DUPLICATE KEY UPDATE cfg_value = VALUES(cfg_value), updated_at = VALUES(updated_at)",
+                 ON CONFLICT (cfg_key) DO UPDATE SET cfg_value = EXCLUDED.cfg_value, updated_at = EXCLUDED.updated_at",
             )
             .bind(k)
             .bind(v)
@@ -3536,7 +3498,7 @@ pub async fn carry_legacy_sqlite(pool: &MySqlPool, sqlite_path: &str) -> Result<
     // 5. bot_sessions
     if has_table("bot_sessions") {
         let mut stmt = conn.prepare(
-            "SELECT channel, conversation_id, kind, IFNULL(last_text,''), last_seen, is_admin FROM bot_sessions",
+            "SELECT channel, conversation_id, kind, COALESCE(last_text,''), last_seen, is_admin FROM bot_sessions",
         )?;
         let rows: Vec<(String, String, String, String, String, i64)> = stmt
             .query_map([], |r| {
@@ -3555,15 +3517,15 @@ pub async fn carry_legacy_sqlite(pool: &MySqlPool, sqlite_path: &str) -> Result<
             sqlx::query(
                 "INSERT INTO bot_sessions (channel, conversation_id, kind, last_text, last_seen, is_admin)
                  VALUES (?, ?, ?, ?, ?, ?)
-                 ON DUPLICATE KEY UPDATE kind = VALUES(kind), last_text = VALUES(last_text),
-                   last_seen = VALUES(last_seen), is_admin = VALUES(is_admin)",
+                 ON CONFLICT (channel, conversation_id) DO UPDATE SET kind = EXCLUDED.kind, last_text = EXCLUDED.last_text,
+                   last_seen = EXCLUDED.last_seen, is_admin = EXCLUDED.is_admin",
             )
             .bind(c)
             .bind(cid)
             .bind(kind)
             .bind(lt)
             .bind(ls)
-            .bind(*adm as i8)
+            .bind(*adm as i16)
             .execute(pool)
             .await?;
         }
@@ -3604,9 +3566,9 @@ pub async fn carry_legacy_sqlite(pool: &MySqlPool, sqlite_path: &str) -> Result<
             sqlx::query(
                 "INSERT INTO plans (id, title, metric, days, payload, created_at, published, event_type)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                 ON DUPLICATE KEY UPDATE title = VALUES(title), metric = VALUES(metric),
-                   days = VALUES(days), payload = VALUES(payload), created_at = VALUES(created_at),
-                   published = VALUES(published), event_type = VALUES(event_type)",
+                 ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, metric = EXCLUDED.metric,
+                   days = EXCLUDED.days, payload = EXCLUDED.payload, created_at = EXCLUDED.created_at,
+                   published = EXCLUDED.published, event_type = EXCLUDED.event_type",
             )
             .bind(id)
             .bind(title)
@@ -3614,7 +3576,7 @@ pub async fn carry_legacy_sqlite(pool: &MySqlPool, sqlite_path: &str) -> Result<
             .bind(days)
             .bind(payload)
             .bind(created)
-            .bind(*published as i8)
+            .bind(*published as i16)
             .bind(et)
             .execute(pool)
             .await?;
@@ -3641,13 +3603,13 @@ pub async fn carry_legacy_sqlite(pool: &MySqlPool, sqlite_path: &str) -> Result<
             sqlx::query(
                 "INSERT INTO my_accounts (name, phone, pass, is_admin, created_at)
                  VALUES (?, ?, ?, ?, ?)
-                 ON DUPLICATE KEY UPDATE phone = VALUES(phone), pass = VALUES(pass),
-                   is_admin = VALUES(is_admin), created_at = VALUES(created_at)",
+                 ON CONFLICT (name) DO UPDATE SET phone = EXCLUDED.phone, pass = EXCLUDED.pass,
+                   is_admin = EXCLUDED.is_admin, created_at = EXCLUDED.created_at",
             )
             .bind(name)
             .bind(phone)
             .bind(hash_my_password(pass))
-            .bind(*is_admin as i8)
+            .bind(*is_admin as i16)
             .bind(created)
             .execute(pool)
             .await?;
@@ -3659,7 +3621,7 @@ pub async fn carry_legacy_sqlite(pool: &MySqlPool, sqlite_path: &str) -> Result<
     if has_table("anchor_claims") {
         let mut stmt = conn.prepare(
             "SELECT id, person_id, person_name, team, douyin_no, screenshot, mime, status,
-                    IFNULL(reject_reason,''), created_at, IFNULL(decided_at,''), IFNULL(decided_by,'')
+                    COALESCE(reject_reason,''), created_at, COALESCE(decided_at,''), COALESCE(decided_by,'')
              FROM anchor_claims",
         )?;
         type AnchorClaimRowTuple = (
@@ -3701,10 +3663,10 @@ pub async fn carry_legacy_sqlite(pool: &MySqlPool, sqlite_path: &str) -> Result<
                    (id, person_id, person_name, team, douyin_no, screenshot, mime, status,
                     reject_reason, created_at, decided_at, decided_by)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                 ON DUPLICATE KEY UPDATE person_id = VALUES(person_id), person_name = VALUES(person_name),
-                   team = VALUES(team), douyin_no = VALUES(douyin_no), screenshot = VALUES(screenshot),
-                   mime = VALUES(mime), status = VALUES(status), reject_reason = VALUES(reject_reason),
-                   created_at = VALUES(created_at), decided_at = VALUES(decided_at), decided_by = VALUES(decided_by)",
+                 ON CONFLICT (id) DO UPDATE SET person_id = EXCLUDED.person_id, person_name = EXCLUDED.person_name,
+                   team = EXCLUDED.team, douyin_no = EXCLUDED.douyin_no, screenshot = EXCLUDED.screenshot,
+                   mime = EXCLUDED.mime, status = EXCLUDED.status, reject_reason = EXCLUDED.reject_reason,
+                   created_at = EXCLUDED.created_at, decided_at = EXCLUDED.decided_at, decided_by = EXCLUDED.decided_by",
             )
             .bind(row.0)
             .bind(row.1)
@@ -3727,7 +3689,7 @@ pub async fn carry_legacy_sqlite(pool: &MySqlPool, sqlite_path: &str) -> Result<
     // 9. 落搬家标记
     sqlx::query(
         "INSERT INTO config (cfg_key, cfg_value, updated_at) VALUES ('sqlite_carried', '1', ?)
-         ON DUPLICATE KEY UPDATE cfg_value = '1', updated_at = VALUES(updated_at)",
+         ON CONFLICT (cfg_key) DO UPDATE SET cfg_value = '1', updated_at = EXCLUDED.updated_at",
     )
     .bind(&now)
     .execute(pool)

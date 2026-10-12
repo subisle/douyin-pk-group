@@ -16,7 +16,7 @@ def q_remote(sql):
     return norm_null([line.split("\t") for line in out.splitlines()]) if out.strip() else []
 def q_pg(sql):
     out = subprocess.check_output(["/opt/homebrew/opt/postgresql@17/bin/psql","-p","3318","-h","127.0.0.1",
-        "-U","douyin_dev","-d","douyin_dev","-At","-F","\t","-c","SET search_path TO douyin_dev; "+sql], text=True)
+        "-U","douyin_dev","-d","douyin_dev","-At","-F","\t","-c","SET search_path TO public; "+sql], text=True)
     lines = out.splitlines()
     if lines and lines[0] == "SET": lines = lines[1:]
     return norm_null([line.split("\t") for line in lines if line.strip()])
@@ -39,18 +39,23 @@ def insert(table, cols, rows, conflict=None):
         if isinstance(row, bool):
             continue
         vals.append("("+",".join(esc(x) for x in row)+")")
-    sql = f"INSERT INTO {table} ({','.join(cols)}) VALUES {','.join(vals)} ON CONFLICT DO NOTHING"
+    sql = f"INSERT INTO public.{table} ({','.join(cols)}) VALUES {','.join(vals)} " + (f"ON CONFLICT ({conflict}) DO NOTHING" if conflict else "ON CONFLICT DO NOTHING")
     subprocess.check_call(["/opt/homebrew/opt/postgresql@17/bin/psql","-p","3318","-h","127.0.0.1",
-        "-U","douyin_dev","-d","douyin_dev","-v","ON_ERROR_STOP=1","-q","-c","SET search_path TO douyin_dev; "+sql])
+        "-U","douyin_dev","-d","douyin_dev","-v","ON_ERROR_STOP=1","-q","-c","SET search_path TO public; "+sql])
 
 # Build map: anchor_id -> person_id
 print("== person ==")
+subprocess.check_call(["/opt/homebrew/opt/postgresql@17/bin/psql","-p","3318","-h","127.0.0.1","-U","douyin_dev","-d","douyin_dev","-v","ON_ERROR_STOP=1","-q","-c","TRUNCATE public.person,public.account,public.daily_metric,public.import_batch,public.wave_snapshot,public.my_accounts,public.my_targets,public.wx_push_accounts RESTART IDENTITY CASCADE"])
 local_person = q_mysql("SELECT id,name,gender,master_id,generation,group_name,avatar_url,hide_in_daily_report,status,joined_at FROM person")
 remote_person = q_remote("SELECT id,name,gender,master_id,generation,group_name,avatar_url,hide_in_daily_report,status,joined_at FROM person")
 
 # First insert all local person with new ids
+seen=set()
 for r in local_person:
-    insert("person", ["name","gender","master_id","generation","group_name","avatar_url","hide_in_daily_report","status","joined_at"], [r[1],r[2],None,r[4],r[5],r[6],r[7]=="1",r[8],r[9]])
+    if r[1] in seen:
+        continue
+    seen.add(r[1])
+    insert("person", ["name","gender","master_id","generation","group_name","avatar_url","hide_in_daily_report","status","joined_at"], [r[1],r[2],None,r[4],r[5],r[6],r[7]=="1",r[8],r[9]], conflict="name")
 
 # Build local name -> new pg id
 name_map = {}
@@ -63,7 +68,10 @@ for r in remote_person:
     if r[1] not in name_map:
         new_remote.append(r)
 for r in new_remote:
-    insert("person", ["name","gender","master_id","generation","group_name","avatar_url","hide_in_daily_report","status","joined_at"], [r[1],r[2],None,r[4],r[5],r[6],r[7]=="1",r[8],r[9]])
+    if r[1] in seen:
+        continue
+    seen.add(r[1])
+    insert("person", ["name","gender","master_id","generation","group_name","avatar_url","hide_in_daily_report","status","joined_at"], [r[1],r[2],None,r[4],r[5],r[6],r[7]=="1",r[8],r[9]], conflict="name")
 
 # Rebuild name_map
 name_map = {}
@@ -83,7 +91,7 @@ for r in local_account:
     pg_person_id = name_map.get(name)
     if pg_person_id:
         douyin_no = r[3] if r[3] not in (None,"NULL") else ""
-        insert("account", ["person_id","anchor_id","douyin_no","anchor_name","is_primary","status"], [pg_person_id,r[2],douyin_no or "",r[4],r[5]=="1",r[6]])
+        insert("account", ["person_id","anchor_id","douyin_no","anchor_name","is_primary","status"], [pg_person_id,r[2],douyin_no or "",r[4],r[5]=="1",r[6]], conflict="anchor_id")
 
 for r in remote_account:
     local_person_id = r[1]
@@ -91,7 +99,7 @@ for r in remote_account:
     pg_person_id = name_map.get(name)
     if pg_person_id:
         douyin_no = r[3] if r[3] not in (None,"NULL") else ""
-        insert("account", ["person_id","anchor_id","douyin_no","anchor_name","is_primary","status"], [pg_person_id,r[2],douyin_no or "",r[4],r[5]=="1",r[6]])
+        insert("account", ["person_id","anchor_id","douyin_no","anchor_name","is_primary","status"], [pg_person_id,r[2],douyin_no or "",r[4],r[5]=="1",r[6]], conflict="anchor_id")
 
 # Build anchor -> pg_person_id
 anchor_map = {}
@@ -145,7 +153,7 @@ for r in local_daily:
 print("local daily rows:", len(rows))
 # insert in chunks
 for i in range(0,len(rows),500):
-    insert("daily_metric", ["person_id","anchor_id","biz_date","wave","cumulative_wave","prev_snapshot_date","wave_span","wave_reliable","minutes","cumulative_minutes","minutes_span","minutes_reliable","is_live","tier","source_batch_id"], rows[i:i+500])
+    insert("daily_metric", ["person_id","anchor_id","biz_date","wave","cumulative_wave","prev_snapshot_date","wave_span","wave_reliable","minutes","cumulative_minutes","minutes_span","minutes_reliable","is_live","tier","source_batch_id"], rows[i:i+500], conflict="person_id,biz_date")
 
 rows = []
 for r in remote_daily:
@@ -153,13 +161,13 @@ for r in remote_daily:
     if x: rows.append(x)
 print("remote daily rows:", len(rows))
 for i in range(0,len(rows),500):
-    insert("daily_metric", ["person_id","anchor_id","biz_date","wave","cumulative_wave","prev_snapshot_date","wave_span","wave_reliable","minutes","cumulative_minutes","minutes_span","minutes_reliable","is_live","tier","source_batch_id"], rows[i:i+500])
+    insert("daily_metric", ["person_id","anchor_id","biz_date","wave","cumulative_wave","prev_snapshot_date","wave_span","wave_reliable","minutes","cumulative_minutes","minutes_span","minutes_reliable","is_live","tier","source_batch_id"], rows[i:i+500], conflict="person_id,biz_date")
 
 print("== wave_snapshot ==")
 local_snap = q_mysql("SELECT anchor_id,biz_date,wave_value,rank_in_guild,source_batch_id FROM wave_snapshot")
 remote_snap = q_remote("SELECT anchor_id,biz_date,wave_value,rank_in_guild,source_batch_id FROM wave_snapshot")
 for r in local_snap+remote_snap:
-    insert("wave_snapshot", ["anchor_id","biz_date","wave_value","rank_in_guild","source_batch_id"], [r[0],r[1],r[2],r[3],batch_map.get(r[4])])
+    insert("wave_snapshot", ["anchor_id","biz_date","wave_value","rank_in_guild","source_batch_id"], [r[0],r[1],r[2],r[3],batch_map.get(r[4])], conflict="anchor_id,biz_date")
 
 print("== my_accounts ==")
 local_my = q_mysql("SELECT name,phone,pass,is_admin,created_at,bound,bound_at,source,wb_state FROM my_accounts")

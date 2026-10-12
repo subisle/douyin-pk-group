@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use crate::auth::Auth;
 use crate::config::SourceConfig;
-use crate::mysql::Pools;
+use crate::pgrs::Pools;
 
 pub struct Cached<T> {
     pub at: Instant,
@@ -47,7 +47,7 @@ pub struct WaveCache {
 pub struct WaveSeries {
     pub dates: Vec<String>,
     pub series: HashMap<String, Vec<f64>>,
-    pub live: HashMap<String, Vec<i8>>,
+    pub live: HashMap<String, Vec<i16>>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -73,7 +73,7 @@ pub struct AppState {
     pub pools: Pools,
     /// douyin_writer 业务写池（B 阶段：导入 / 主播台账写路径）。
     /// None = 写库账号未配置或连不上：管理写接口返回 503，只读功能照常。
-    pub writer: Option<sqlx::MySqlPool>,
+    pub writer: Option<sqlx::PgPool>,
     /// 当前数据源 id（切换后缓存整体失效）
     pub active: Mutex<String>,
     pub cache: Mutex<WaveCache>,

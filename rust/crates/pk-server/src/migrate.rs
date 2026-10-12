@@ -5,8 +5,8 @@
 //! - 通过 `pk-server migrate` 子命令（或容器内 `docker exec pk-server migrate`）显式触发
 //! - 已应用的版本登记在 schema_migrations，重复执行只补未应用的
 
-use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions};
-use sqlx::{MySqlPool, Row};
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+use sqlx::{PgPool, Row};
 
 use crate::config::DbEndpoint;
 
@@ -75,13 +75,12 @@ const MIGRATIONS: &[(&str, &str)] = &[
 ];
 
 /// 迁移建连（migrator 账号；同样关语句缓存）
-async fn connect(ep: &DbEndpoint) -> anyhow::Result<MySqlPool> {
-    let opts: MySqlConnectOptions = ep
+async fn connect(ep: &DbEndpoint) -> anyhow::Result<PgPool> {
+    let opts: PgConnectOptions = ep
         .url()
         .parse()
         .map_err(|e| anyhow::anyhow!("迁移库连接串解析失败: {e}"))?;
-    let opts = opts.statement_cache_capacity(0);
-    MySqlPoolOptions::new()
+    PgPoolOptions::new()
         .max_connections(ep.pool_limit)
         .acquire_timeout(std::time::Duration::from_secs(10))
         .connect_with(opts)
@@ -90,19 +89,49 @@ async fn connect(ep: &DbEndpoint) -> anyhow::Result<MySqlPool> {
 }
 
 /// 把迁移脚本拆成单条语句：去掉 `--` 注释行后按 `;` 分割。
-/// 这些脚本都是简单 DDL，没有存储过程/字符串内分号，按此规则拆安全。
+/// PG 版注意：`$$...$$`（plpgsql 函数体）内部的分号不是语句边界，先保护再切。
 fn split_statements(sql: &str) -> Vec<String> {
     let no_comments: String = sql
         .lines()
         .filter(|l| !l.trim_start().starts_with("--"))
         .collect::<Vec<_>>()
         .join("\n");
-    no_comments
-        .split(';')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .collect()
+    // 把 $$...$$ 段落替换成不含分号的占位符后按 ; 切，切完再还原
+    let mut dollar_bodies: Vec<String> = Vec::new();
+    let mut masked = String::with_capacity(no_comments.len());
+    let mut rest = no_comments.as_str();
+    while let Some(pos) = rest.find("$$") {
+        // 第一个 $$ 之前的内容原样保留（去掉 $$ 本身）
+        masked.push_str(&rest[..pos]);
+        rest = &rest[pos + 2..];
+        if let Some(end) = rest.find("$$") {
+            // 整个函数体（含两侧 $$）作为占位符替身，内部无 ';'
+            dollar_bodies.push(format!("$$ {} $$", &rest[..end]));
+            masked.push_str(&format!("\x00DOLLAR{}\x00", dollar_bodies.len() - 1));
+            rest = &rest[end + 2..];
+        } else {
+            // 未闭合（不该发生）：原样返回剩余
+            masked.push_str("$$");
+            masked.push_str(rest);
+            rest = "";
+            break;
+        }
+    }
+    masked.push_str(rest);
+    let mut chunks: Vec<String> = Vec::new();
+    for stmt in masked.split(';') {
+        let t = stmt.trim();
+        if t.is_empty() {
+            continue;
+        }
+        // 还原被保护的 $$...$$ 段落
+        let mut restored = t.to_string();
+        for (i, body) in dollar_bodies.iter().enumerate() {
+            restored = restored.replace(&format!("\x00DOLLAR{i}\x00"), body);
+        }
+        chunks.push(restored);
+    }
+    chunks
 }
 
 /// 执行迁移，返回本次应用的版本列表。幂等，可重复执行。
@@ -111,13 +140,13 @@ pub async fn run(ep: &DbEndpoint) -> anyhow::Result<Vec<String>> {
     run_with(&pool).await
 }
 
-pub async fn run_with(pool: &MySqlPool) -> anyhow::Result<Vec<String>> {
+pub async fn run_with(pool: &PgPool) -> anyhow::Result<Vec<String>> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS schema_migrations (
             version VARCHAR(64) NOT NULL,
             applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (version)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+        )",
     )
     .execute(pool)
     .await?;
@@ -136,18 +165,17 @@ pub async fn run_with(pool: &MySqlPool) -> anyhow::Result<Vec<String>> {
             continue;
         }
         for stmt in split_statements(sql) {
-            // 走 raw_sql（COM_QUERY 文本协议）而不是 query()：MariaDB 不允许在
-            // 预处理语句协议里执行 `PREPARE ... FROM @var`（1295 prepared statement
-            // protocol yet），010_my_pass_hash 的动态 DROP INDEX 会挂在第 4 条。
-            // 迁移脚本没有任何绑定参数，文本协议也支持 DDL / 多语句。
+            // 走 raw_sql：迁移脚本没有任何绑定参数，raw_sql 支持 DDL / 多语句。
             if let Err(e) = sqlx::raw_sql(&stmt).execute(pool).await {
                 anyhow::bail!("迁移 {version} 执行失败: {e}\n语句: {stmt}");
             }
         }
-        sqlx::query("INSERT INTO schema_migrations (version) VALUES (?)")
-            .bind(version)
-            .execute(pool)
-            .await?;
+        sqlx::query(&crate::pq::rewrite(
+            "INSERT INTO schema_migrations (version) VALUES (?)",
+        ))
+        .bind(version)
+        .execute(pool)
+        .await?;
         tracing::info!(version, "迁移已应用");
         applied_now.push(version.to_string());
     }
@@ -177,10 +205,10 @@ mod tests {
                 assert!(
                     upper.starts_with("CREATE")
                         || upper.starts_with("ALTER")
-                        || upper.starts_with("SET")
-                        || upper.starts_with("PREPARE")
-                        || upper.starts_with("EXECUTE")
-                        || upper.starts_with("DEALLOCATE"),
+                        || upper.starts_with("INSERT")
+                        || upper.starts_with("UPDATE")
+                        || upper.starts_with("DROP TRIGGER")
+                        || upper.starts_with("SELECT"),
                     "{version} 里出现意外语句: {s}"
                 );
             }

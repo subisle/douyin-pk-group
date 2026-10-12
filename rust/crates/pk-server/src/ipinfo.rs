@@ -494,7 +494,7 @@ pub async fn geo_for_ip(st: &ArcState, ip: &str) -> anyhow::Result<IpGeo> {
     };
 
     if let Ok(Some(row)) = sqlx::query(
-        "SELECT province, city, isp, source, allowed, looked_up_at FROM ip_geo_cache WHERE ip = ?",
+        "SELECT province, city, isp, source, allowed, looked_up_at FROM ip_geo_cache WHERE ip = ?::inet",
     )
     .bind(&packed)
     .fetch_optional(pool)
@@ -512,7 +512,7 @@ pub async fn geo_for_ip(st: &ArcState, ip: &str) -> anyhow::Result<IpGeo> {
                 city: row.try_get(1).unwrap_or_default(),
                 isp: row.try_get(2).unwrap_or_default(),
                 source: row.try_get(3).unwrap_or_default(),
-                allowed: row.try_get::<i8, _>(4).unwrap_or(0) == 1,
+                allowed: row.try_get::<i16, _>(4).unwrap_or(0) == 1,
             });
         }
     }
@@ -529,17 +529,17 @@ pub async fn geo_for_ip(st: &ArcState, ip: &str) -> anyhow::Result<IpGeo> {
 
     let _ = sqlx::query(
         "INSERT INTO ip_geo_cache (ip, province, city, isp, source, allowed, looked_up_at) \
-         VALUES (?, ?, ?, ?, ?, ?, UTC_TIMESTAMP()) \
-         ON DUPLICATE KEY UPDATE province = VALUES(province), city = VALUES(city), \
-         isp = VALUES(isp), source = VALUES(source), allowed = VALUES(allowed), \
-         looked_up_at = UTC_TIMESTAMP()",
+         VALUES (?::inet, ?, ?, ?, ?, ?, (now() AT TIME ZONE 'UTC')) \
+         ON CONFLICT (ip) DO UPDATE SET province = EXCLUDED.province, city = EXCLUDED.city, \
+         isp = EXCLUDED.isp, source = EXCLUDED.source, allowed = EXCLUDED.allowed, \
+         looked_up_at = (now() AT TIME ZONE 'UTC')",
     )
     .bind(&packed)
     .bind(&geo.province)
     .bind(&geo.city)
     .bind(&geo.isp)
     .bind(&geo.source)
-    .bind(geo.allowed as i8)
+    .bind(geo.allowed as i16)
     .execute(pool)
     .await;
     Ok(geo)
@@ -1121,11 +1121,11 @@ pub async fn log_access(st: &ArcState, e: AccessLog<'_>) {
     let account = truncate_name(e.account);
     let allowed = e.allowed;
     let result = if kind == "login" {
-        sqlx::query(
+        sqlx::query(&crate::pq::rewrite(
             "INSERT INTO access_logs \
              (kind, ip, province, city, isp, geo_source, team, path, account_name, allowed, login_ok, dedup_key) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)",
-        )
+             VALUES (?, ?::inet, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)",
+        ))
         .bind(kind)
         .bind(&packed)
         .bind(&geo.province)
@@ -1135,8 +1135,8 @@ pub async fn log_access(st: &ArcState, e: AccessLog<'_>) {
         .bind(team)
         .bind("")
         .bind(&account)
-        .bind(allowed as i8)
-        .bind(login_ok as i8)
+        .bind(allowed as i16)
+        .bind(login_ok as i16)
         .execute(pool)
         .await
     } else {
@@ -1148,11 +1148,11 @@ pub async fn log_access(st: &ArcState, e: AccessLog<'_>) {
             .map(|d| d.as_secs() / (ACCESS_DEDUP_MINUTES as u64 * 60))
             .unwrap_or(0);
         let dedup_key = format!("{ip}|{bucket}");
-        sqlx::query(
-            "INSERT IGNORE INTO access_logs \
+        sqlx::query(&crate::pq::rewrite(
+            "INSERT INTO access_logs \
              (kind, ip, province, city, isp, geo_source, team, path, account_name, allowed, login_ok, dedup_key) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)",
-        )
+             VALUES (?, ?::inet, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)",
+        ))
         .bind(kind)
         .bind(&packed)
         .bind(&geo.province)
@@ -1162,7 +1162,7 @@ pub async fn log_access(st: &ArcState, e: AccessLog<'_>) {
         .bind(team)
         .bind("")
         .bind(&account)
-        .bind(allowed as i8)
+        .bind(allowed as i16)
         .bind(&dedup_key)
         .execute(pool)
         .await
@@ -1230,9 +1230,9 @@ pub async fn admin_visits(
     };
     let limit = q.limit.unwrap_or(200).min(500) as i64;
     let mut sql = String::from(
-        "SELECT id, kind, INET6_NTOA(ip) AS ip, province, city, isp, geo_source, team, path, \
+        "SELECT id, kind, host(ip) AS ip, province, city, isp, geo_source, team, path, \
          account_name, allowed, login_ok, \
-         DATE_FORMAT(CONVERT_TZ(created_at, '+00:00', '+08:00'), '%Y-%m-%d %H:%i:%s') AS ts \
+         TO_CHAR((created_at AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI:SS') AS ts \
          FROM access_logs WHERE 1 = 1",
     );
     if let Some(kind) = q.kind.as_deref().filter(|s| !s.is_empty()) {
@@ -1249,10 +1249,11 @@ pub async fn admin_visits(
             .filter(|s| !s.is_empty())
             .map(|s| format!("%{s}%"));
     if search.is_some() {
-        sql.push_str(" AND (INET6_NTOA(ip) LIKE ? OR account_name LIKE ?)");
+        sql.push_str(" AND (host(ip) LIKE ? OR account_name LIKE ?)");
     }
     sql.push_str(" ORDER BY id DESC LIMIT ?");
 
+    let sql = crate::pq::rewrite(&sql);
     let mut query = sqlx::query(&sql);
     if let Some(kind) = q.kind.as_deref().filter(|s| !s.is_empty()) {
         if ["api", "login", "visit"].contains(&kind) {
@@ -1269,7 +1270,7 @@ pub async fn admin_visits(
         .iter()
         .map(|r| {
             serde_json::json!({
-                "id": r.try_get::<u64, _>(0).unwrap_or(0),
+                "id": r.try_get::<i64, _>(0).unwrap_or(0),
                 "kind": r.try_get::<String, _>(1).unwrap_or_default(),
                 "ip": r.try_get::<Option<String>, _>(2).unwrap_or_default().unwrap_or_default(),
                 "province": r.try_get::<String, _>(3).unwrap_or_default(),
@@ -1278,8 +1279,8 @@ pub async fn admin_visits(
                 "source": r.try_get::<String, _>(6).unwrap_or_default(),
                 "team": r.try_get::<String, _>(7).unwrap_or_default(),
                 "account": r.try_get::<String, _>(9).unwrap_or_default(),
-                "allowed": r.try_get::<i8, _>(10).unwrap_or(0) == 1,
-                "loginOk": r.try_get::<i8, _>(11).unwrap_or(0) == 1,
+                "allowed": r.try_get::<i16, _>(10).unwrap_or(0) == 1,
+                "loginOk": r.try_get::<i16, _>(11).unwrap_or(0) == 1,
                 "createdAt": r.try_get::<String, _>(12).unwrap_or_default(),
             })
         })
@@ -1289,15 +1290,15 @@ pub async fn admin_visits(
     访客日志给人看，统一换算成北京时间再判断「今天」。 */
     let stats = sqlx::query(
         "SELECT \
-           CAST((SELECT COUNT(*) FROM access_logs) AS SIGNED) AS all_rows, \
-           CAST(COUNT(*) AS SIGNED) AS today, \
-           CAST(COUNT(DISTINCT ip) AS SIGNED) AS today_uniq, \
-           CAST(COALESCE(SUM(allowed = 1), 0) AS SIGNED) AS today_allowed, \
-           CAST(COALESCE(SUM(allowed = 0), 0) AS SIGNED) AS today_blocked, \
-           CAST(COALESCE(SUM(kind = 'login'), 0) AS SIGNED) AS today_logins \
+           ((SELECT COUNT(*) FROM access_logs))::BIGINT AS all_rows, \
+           (COUNT(*))::BIGINT AS today, \
+           (COUNT(DISTINCT ip))::BIGINT AS today_uniq, \
+           (COALESCE(SUM(allowed = 1), 0))::BIGINT AS today_allowed, \
+           (COALESCE(SUM(allowed = 0), 0))::BIGINT AS today_blocked, \
+           (COALESCE(SUM(kind = 'login'), 0))::BIGINT AS today_logins \
          FROM access_logs \
-         WHERE DATE(CONVERT_TZ(created_at, '+00:00', '+08:00')) = \
-               DATE(CONVERT_TZ(NOW(), '+00:00', '+08:00'))",
+         WHERE DATE((created_at AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Shanghai') = \
+               DATE((NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Shanghai')",
     )
     .fetch_one(pool)
     .await?;
@@ -1333,7 +1334,7 @@ pub async fn admin_ip_allowlist_list(
         return Err(anyhow::anyhow!("写库不可用，取不到白名单").into());
     };
     let rows = sqlx::query(
-        "SELECT id, ip, note,          DATE_FORMAT(CONVERT_TZ(created_at, '+00:00', '+08:00'), '%Y-%m-%d %H:%i:%s') AS ts          FROM ip_allowlist ORDER BY id DESC",
+        "SELECT id, ip, note,          TO_CHAR((created_at AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI:SS') AS ts          FROM ip_allowlist ORDER BY id DESC",
     )
     .fetch_all(pool)
     .await?;
@@ -1341,7 +1342,7 @@ pub async fn admin_ip_allowlist_list(
         .iter()
         .map(|r| {
             serde_json::json!({
-                "id": r.try_get::<u64, _>(0).unwrap_or(0),
+                "id": r.try_get::<i64, _>(0).unwrap_or(0),
                 "ip": r.try_get::<Option<String>, _>(1).unwrap_or_default().unwrap_or_default(),
                 "note": r.try_get::<String, _>(2).unwrap_or_default(),
                 "createdAt": r.try_get::<String, _>(3).unwrap_or_default(),
@@ -1366,7 +1367,7 @@ pub async fn admin_ip_allowlist_add(
     let Some(pool) = st.writer.as_ref() else {
         return Err(anyhow::anyhow!("写库不可用").into());
     };
-    sqlx::query("INSERT INTO ip_allowlist (ip, note) VALUES (?, ?) ON DUPLICATE KEY UPDATE note = VALUES(note)")
+    sqlx::query(&crate::pq::rewrite("INSERT INTO ip_allowlist (ip, note) VALUES (?, ?) ON CONFLICT (ip) DO UPDATE SET note = EXCLUDED.note"))
         .bind(&ip_str)
         .bind(&note)
         .execute(pool)
@@ -1382,8 +1383,8 @@ pub async fn admin_ip_allowlist_delete(
     let Some(pool) = st.writer.as_ref() else {
         return Err(anyhow::anyhow!("写库不可用").into());
     };
-    sqlx::query("DELETE FROM ip_allowlist WHERE id = ?")
-        .bind(id)
+    sqlx::query(&crate::pq::rewrite("DELETE FROM ip_allowlist WHERE id = ?"))
+        .bind(id as i64)
         .execute(pool)
         .await?;
     Ok(axum::Json(serde_json::json!({ "ok": true })))
@@ -1460,24 +1461,9 @@ pub async fn admin_ip_lookup(
 
 /* ------------------------------- 工具 ------------------------------- */
 
-fn pack_ip(ip: IpAddr) -> Vec<u8> {
-    match ip {
-        IpAddr::V4(v4) => v4.octets().to_vec(),
-        IpAddr::V6(v6) => v6.octets().to_vec(),
-    }
-}
-
-/// 测试用：管理端列表的 IP 字符串走 SQL 的 INET6_NTOA，不经这里
-#[allow(dead_code)]
-fn unpack_ip(bytes: &[u8]) -> String {
-    match bytes.len() {
-        4 => Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3]).to_string(),
-        16 => {
-            let octets: [u8; 16] = bytes.try_into().unwrap_or([0; 16]);
-            Ipv6Addr::from(octets).to_string()
-        }
-        _ => String::new(),
-    }
+fn pack_ip(ip: IpAddr) -> String {
+    // PG INET 列直接绑文本形式（原 MySQL VARBINARY 打包字节已退役）
+    ip.to_string()
 }
 
 fn truncate_name(name: &str) -> String {
@@ -1733,11 +1719,11 @@ mod tests {
     }
 
     #[test]
-    fn packs_and_unpacks_ips() {
+    fn pack_ip_formats_inet() {
         let v4: IpAddr = "123.15.57.1".parse().unwrap();
-        assert_eq!(unpack_ip(&pack_ip(v4)), "123.15.57.1");
+        assert_eq!(pack_ip(v4), "123.15.57.1");
         let v6: IpAddr = "2408:8221:7917::1".parse().unwrap();
-        assert_eq!(unpack_ip(&pack_ip(v6)), "2408:8221:7917::1");
+        assert_eq!(pack_ip(v6), "2408:8221:7917::1");
     }
 
     #[test]

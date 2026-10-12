@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 use sqlx::Row;
 
 use crate::dialect::{self, is_live_wave};
-use crate::mysql;
+use crate::pgrs;
 use crate::routes::ApiError;
 use crate::state::AppState;
 use axum::response::{IntoResponse, Response};
@@ -847,13 +847,13 @@ pub async fn daily(
     hide_in_daily_report = 1 的主播（管理端逐人设置）完全不进榜、不占名次。 */
     let sql = format!(
         "SELECT p.id AS person_id, p.name, \
-         CAST(COALESCE(SUM(d.wave), 0) AS SIGNED) AS wave, \
-         CAST(COALESCE(SUM(d.minutes), 0) AS SIGNED) AS minutes, \
+         (COALESCE(SUM(d.wave), 0))::BIGINT AS wave, \
+         (COALESCE(SUM(d.minutes), 0))::BIGINT AS minutes, \
          CASE WHEN COALESCE(SUM(d.wave), 0) >= 2 THEN 1 ELSE 0 END AS live, \
          COUNT(d.id) AS nrow \
          FROM person p \
          LEFT JOIN daily_metric d ON d.person_id = p.id \
-           AND DATE_FORMAT(d.biz_date, '%Y-%m-%d') = '{date}' \
+           AND TO_CHAR(d.biz_date, 'YYYY-MM-DD') = '{date}' \
            AND d.wave_reliable = 1 \
          WHERE p.deleted_at IS NULL \
          AND ('{query_team}' = '' OR p.gender = '{query_team}') \
@@ -861,7 +861,7 @@ pub async fn daily(
          GROUP BY p.id, p.name \
          ORDER BY nrow DESC, wave DESC, p.name ASC"
     );
-    let rows = mysql::query(&st.pools, &source, &sql).await?;
+    let rows = pgrs::query(&st.pools, &source, &sql).await?;
 
     // 当月未播天数 + 历史累计总音浪 + 前一日名次（内存 join）
     // 未播口径（2026-10-09 用户定；2026-10-10 P1-10 统一引用 dialect::NOT_LIVE_WAVE_THRESHOLD）：
@@ -871,15 +871,15 @@ pub async fn daily(
     let month = &date[..7];
     // 与日报共用 dialect::month_absent_sql（唯一口径：有数据行且音浪 < 2 才算未播）
     let absent_sql = crate::dialect::month_absent_sql(month);
-    let total_sql = "SELECT person_id, CAST(SUM(wave) AS SIGNED) AS total \
+    let total_sql = "SELECT person_id, (SUM(wave))::BIGINT AS total \
          FROM daily_metric WHERE wave_reliable = 1 GROUP BY person_id"
         .to_string();
     let mut absent_map: HashMap<u64, i64> = Default::default();
-    for r in mysql::query(&st.pools, &source, &absent_sql).await? {
+    for r in pgrs::query(&st.pools, &source, &absent_sql).await? {
         absent_map.insert(row_pid(&r, "person_id"), row_i64(&r, "n"));
     }
     let mut total_map: HashMap<u64, i64> = Default::default();
-    for r in mysql::query(&st.pools, &source, &total_sql).await? {
+    for r in pgrs::query(&st.pools, &source, &total_sql).await? {
         total_map.insert(row_pid(&r, "person_id"), row_i64(&r, "total"));
     }
     let mut prev_rank: HashMap<u64, usize> = Default::default();
@@ -890,10 +890,10 @@ pub async fn daily(
              WHERE p.deleted_at IS NULL \
              AND ('{query_team}' = '' OR p.gender = '{query_team}') \
              AND p.hide_in_daily_report = 0 AND d.wave_reliable = 1 \
-             AND DATE_FORMAT(d.biz_date, '%Y-%m-%d') = '{pd}' \
+             AND TO_CHAR(d.biz_date, 'YYYY-MM-DD') = '{pd}' \
              GROUP BY p.id, p.name ORDER BY SUM(d.wave) DESC"
         );
-        for (i, r) in mysql::query(&st.pools, &source, &psql)
+        for (i, r) in pgrs::query(&st.pools, &source, &psql)
             .await?
             .iter()
             .enumerate()
@@ -1062,7 +1062,7 @@ pub async fn lineage(
          AND (p.master_id IS NOT NULL \
               OR EXISTS(SELECT 1 FROM person k WHERE k.master_id = p.id AND k.deleted_at IS NULL))"
     );
-    let rows = match mysql::query(&st.pools, &sid(&st), &sql).await {
+    let rows = match pgrs::query(&st.pools, &sid(&st), &sql).await {
         Ok(r) => r,
         Err(e) => return ApiError::from(e).into_response(),
     };
@@ -1070,7 +1070,7 @@ pub async fn lineage(
     // 个人音浪（2026-10-12 改按 period/date 窗口过滤；与榜单口径一致 wave_reliable=1）
     let wave_sql = lineage_wave_window_sql(&period, &base_date);
     let mut wave_map: HashMap<u64, i64> = Default::default();
-    match mysql::query(&st.pools, &sid(&st), &wave_sql).await {
+    match pgrs::query(&st.pools, &sid(&st), &wave_sql).await {
         Ok(rs) => {
             for r in &rs {
                 wave_map.insert(row_pid(r, "person_id"), row_i64(r, "total"));
@@ -1189,20 +1189,20 @@ fn lineage_wave_window_sql(period: &str, base_date: &str) -> String {
     } else {
         match period {
             "monthly" => format!(
-                "WHERE wave_reliable = 1 AND DATE_FORMAT(biz_date, '%Y-%m') = '{}'",
+                "WHERE wave_reliable = 1 AND TO_CHAR(biz_date, 'YYYY-MM') = '{}'",
                 base_date.get(..7).unwrap_or(base_date)
             ),
             "yearly" => format!(
-                "WHERE wave_reliable = 1 AND DATE_FORMAT(biz_date, '%Y') = '{}'",
+                "WHERE wave_reliable = 1 AND TO_CHAR(biz_date, 'YYYY') = '{}'",
                 base_date.get(..4).unwrap_or(base_date)
             ),
             _ => format!(
-                "WHERE wave_reliable = 1 AND DATE_FORMAT(biz_date, '%Y-%m-%d') = '{base_date}'"
+                "WHERE wave_reliable = 1 AND TO_CHAR(biz_date, 'YYYY-MM-DD') = '{base_date}'"
             ),
         }
     };
     format!(
-        "SELECT person_id, CAST(SUM(wave) AS SIGNED) AS total \
+        "SELECT person_id, (SUM(wave))::BIGINT AS total \
          FROM daily_metric {where_clause} GROUP BY person_id"
     )
 }
@@ -1248,7 +1248,7 @@ async fn person_lineage_membership(st: &AppState, person_id: u64) -> anyhow::Res
          (SELECT COUNT(*) FROM person k WHERE k.master_id = p.id AND k.deleted_at IS NULL) AS disciples \
          FROM person p WHERE p.id = ? AND p.deleted_at IS NULL LIMIT 1";
     let rows =
-        mysql::query_with_binds(&st.pools, &sid(st), sql, |q| q.bind(person_id as i64)).await?;
+        pgrs::query_with_binds(&st.pools, &sid(st), sql, |q| q.bind(person_id as i64)).await?;
     Ok(match rows.first() {
         Some(r) => (
             read_opt_u64_field(r, "master_id")
@@ -1292,7 +1292,7 @@ pub async fn lineage_wave_summary(
         "SELECT id, master_id FROM person \
          WHERE deleted_at IS NULL AND ('{team}' = '' OR gender = '{team}')"
     );
-    let rows = mysql::query(&st.pools, &source, &tree_sql).await?;
+    let rows = pgrs::query(&st.pools, &source, &tree_sql).await?;
     let mut ids: std::collections::HashSet<u64> = Default::default();
     let mut children: HashMap<u64, Vec<u64>> = Default::default();
     for r in &rows {
@@ -1306,11 +1306,11 @@ pub async fn lineage_wave_summary(
         }
     }
     // 每人累计总音浪（与榜单 totalWave 同口径）
-    let wave_sql = "SELECT person_id, CAST(SUM(wave) AS SIGNED) AS total \
+    let wave_sql = "SELECT person_id, (SUM(wave))::BIGINT AS total \
          FROM daily_metric WHERE wave_reliable = 1 GROUP BY person_id"
         .to_string();
     let mut wave_map: HashMap<u64, i64> = Default::default();
-    for r in mysql::query(&st.pools, &source, &wave_sql).await? {
+    for r in pgrs::query(&st.pools, &source, &wave_sql).await? {
         wave_map.insert(row_pid(&r, "person_id"), row_i64(&r, "total"));
     }
     // 递归门下累计（记忆化）
@@ -1342,10 +1342,10 @@ pub async fn lineage_wave_summary(
     Ok((disciple_count, total_wave - self_wave, total_wave))
 }
 
-fn read_opt_u64_field(r: &sqlx::mysql::MySqlRow, col: &str) -> Option<u64> {
+fn read_opt_u64_field(r: &sqlx::postgres::PgRow, col: &str) -> Option<u64> {
     use sqlx::Row;
-    if let Ok(v) = r.try_get::<u64, _>(col) {
-        return Some(v);
+    if let Ok(v) = r.try_get::<i64, _>(col) {
+        return Some(v.max(0) as u64);
     }
     if let Ok(v) = r.try_get::<Option<i64>, _>(col) {
         return v.map(|x| x.max(0) as u64);
@@ -1421,10 +1421,10 @@ async fn period_public(
         &st.pools,
         &sid(st),
         "p.id AS person_id, p.name, \
-         CAST(SUM(t.w) AS SIGNED) AS wave, \
-         CAST(SUM({minutes}) AS SIGNED) AS minutes, \
-         CAST(SUM(t.live) AS SIGNED) AS live_days, \
-         CAST(SUM(t.off) AS SIGNED) AS off_days",
+         (SUM(t.w))::BIGINT AS wave, \
+         (SUM({minutes}))::BIGINT AS minutes, \
+         (SUM(t.live))::BIGINT AS live_days, \
+         (SUM(t.off))::BIGINT AS off_days",
         &format!("{period}%"),
         team,
         " AND p.status <> 'left' AND p.hide_in_daily_report = 0",
@@ -1465,9 +1465,9 @@ async fn period_public(
     ))
 }
 
-fn row_pid(r: &sqlx::mysql::MySqlRow, col: &str) -> u64 {
-    if let Ok(v) = r.try_get::<u64, _>(col) {
-        return v;
+fn row_pid(r: &sqlx::postgres::PgRow, col: &str) -> u64 {
+    if let Ok(v) = r.try_get::<i64, _>(col) {
+        return v.max(0) as u64;
     }
     if let Ok(v) = r.try_get::<i64, _>(col) {
         return v as u64;
@@ -1479,8 +1479,8 @@ fn valid_date_pub(s: &str) -> bool {
     chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").is_ok()
 }
 
-fn row_live(r: &sqlx::mysql::MySqlRow) -> bool {
-    if let Ok(v) = r.try_get::<i8, _>("live") {
+fn row_live(r: &sqlx::postgres::PgRow) -> bool {
+    if let Ok(v) = r.try_get::<i16, _>("live") {
         return v == 1;
     }
     if let Ok(v) = r.try_get::<i64, _>("live") {
@@ -1493,11 +1493,11 @@ fn row_live(r: &sqlx::mysql::MySqlRow) -> bool {
         .unwrap_or(false)
 }
 
-fn row_i64(r: &sqlx::mysql::MySqlRow, col: &str) -> i64 {
+fn row_i64(r: &sqlx::postgres::PgRow, col: &str) -> i64 {
     if let Ok(v) = r.try_get::<i64, _>(col) {
         return v;
     }
-    if let Ok(v) = r.try_get::<u64, _>(col) {
+    if let Ok(v) = r.try_get::<i64, _>(col) {
         return v as i64;
     }
     if let Ok(v) = r.try_get::<String, _>(col) {
@@ -1603,15 +1603,11 @@ pub async fn verify(
          LIMIT 1"
         .to_string();
     let rows =
-        mysql::query_with_binds(&st.pools, &sid(&st), &sql, |q| q.bind(account_name.clone()))
+        pgrs::query_with_binds(&st.pools, &sid(&st), &sql, |q| q.bind(account_name.clone()))
             .await?;
     match rows.into_iter().next() {
         Some(row) => {
-            let pid = row
-                .try_get::<i64, _>("id")
-                .map(|v| v as u64)
-                .or_else(|_| row.try_get::<u64, _>("id"))
-                .unwrap_or(0);
+            let pid = row.try_get::<i64, _>("id").map(|v| v.max(0) as u64).unwrap_or(0);
             let token_team = row.try_get::<String, _>("gender").unwrap_or_default();
             let token = my_token_put(pid, token_team.clone(), account_name.clone());
             Ok(Json(json!({
@@ -1766,14 +1762,10 @@ pub async fn my_login(
              LIMIT 1"
             .to_string();
         let rows =
-            mysql::query_with_binds(&st.pools, &sid(&st), &sql, |q| q.bind(account_name.clone()))
+            pgrs::query_with_binds(&st.pools, &sid(&st), &sql, |q| q.bind(account_name.clone()))
                 .await?;
         if let Some(row) = rows.into_iter().next() {
-            let pid = row
-                .try_get::<i64, _>("id")
-                .map(|v| v as u64)
-                .or_else(|_| row.try_get::<u64, _>("id"))
-                .unwrap_or(0);
+            let pid = row.try_get::<i64, _>("id").map(|v| v.max(0) as u64).unwrap_or(0);
             let name: String = row.try_get::<String, _>("name").unwrap_or_default();
             let team: String = row.try_get::<String, _>("gender").unwrap_or_default();
             found = Some((pid, name, team));
@@ -2311,9 +2303,9 @@ pub fn prev_periods_of(today: &str) -> PrevPeriods {
 pub fn self_prev_wave_sql(p: &PrevPeriods) -> String {
     let day_clause = match &p.day {
         Some(d) => format!(
-            "CAST(SUM(CASE WHEN DATE_FORMAT(biz_date, '%Y-%m-%d') = '{d}' THEN wave END) AS SIGNED) AS pd"
+            "(SUM(CASE WHEN TO_CHAR(biz_date, 'YYYY-MM-DD') = '{d}' THEN wave END))::BIGINT AS pd"
         ),
-        None => "CAST(NULL AS SIGNED) AS pd".to_string(),
+        None => "(NULL)::BIGINT AS pd".to_string(),
     };
     let until = p
         .year_until
@@ -2322,8 +2314,8 @@ pub fn self_prev_wave_sql(p: &PrevPeriods) -> String {
         .unwrap_or_default();
     format!(
         "SELECT {day_clause}, \
-         CAST(SUM(CASE WHEN DATE_FORMAT(biz_date, '%Y-%m') = '{m}' THEN wave END) AS SIGNED) AS pm, \
-         CAST(SUM(CASE WHEN DATE_FORMAT(biz_date, '%Y') = '{y}'{until} THEN wave END) AS SIGNED) AS py \
+         (SUM(CASE WHEN TO_CHAR(biz_date, 'YYYY-MM') = '{m}' THEN wave END))::BIGINT AS pm, \
+         (SUM(CASE WHEN TO_CHAR(biz_date, 'YYYY') = '{y}'{until} THEN wave END))::BIGINT AS py \
          FROM daily_metric WHERE person_id = {{pid}} AND wave_reliable = 1",
         m = p.month,
         y = p.year,
@@ -2341,8 +2333,8 @@ impl MinutesScope<'_> {
     /// 日明细的过滤条件（daily_metric 别名 d）
     fn daily_where(&self) -> String {
         match self {
-            MinutesScope::Month(m) => format!(" AND DATE_FORMAT(d.biz_date, '%Y-%m') = '{m}'"),
-            MinutesScope::Year(y) => format!(" AND DATE_FORMAT(d.biz_date, '%Y') = '{y}'"),
+            MinutesScope::Month(m) => format!(" AND TO_CHAR(d.biz_date, 'YYYY-MM') = '{m}'"),
+            MinutesScope::Year(y) => format!(" AND TO_CHAR(d.biz_date, 'YYYY') = '{y}'"),
             MinutesScope::Total => String::new(),
         }
     }
@@ -2363,19 +2355,18 @@ fn my_minutes_sql(person_id: u64, scope: &MinutesScope<'_>, with_monthly: bool) 
     let daily = scope.daily_where();
     if !with_monthly {
         return format!(
-            "SELECT CAST(COALESCE((SELECT SUM(d.minutes) FROM daily_metric d \
-             WHERE d.person_id = {person_id}{daily}), 0) AS SIGNED) AS minutes"
+            "SELECT (COALESCE((SELECT SUM(d.minutes) FROM daily_metric d \
+             WHERE d.person_id = {person_id}{daily}), 0))::BIGINT AS minutes"
         );
     }
     let period = scope.period_where();
     format!(
-        "SELECT CAST(COALESCE((SELECT SUM(minutes) FROM monthly_duration \
+        "SELECT (COALESCE((SELECT SUM(minutes) FROM monthly_duration \
           WHERE person_id = {person_id}{period}), 0) \
          + COALESCE((SELECT SUM(d.minutes) FROM daily_metric d \
           WHERE d.person_id = {person_id}{daily} \
-            AND DATE_FORMAT(d.biz_date, '%Y-%m') NOT IN \
-              (SELECT period FROM monthly_duration WHERE person_id = {person_id}{period})), 0) \
-         AS SIGNED) AS minutes"
+            AND TO_CHAR(d.biz_date, 'YYYY-MM') NOT IN \
+              (SELECT period FROM monthly_duration WHERE person_id = {person_id}{period})), 0))::BIGINT AS minutes"
     )
 }
 
@@ -2388,11 +2379,11 @@ pub async fn my_minutes(
 ) -> anyhow::Result<i64> {
     let source = sid(st);
     let sql = my_minutes_sql(person_id, scope, true);
-    let rows = match mysql::query(&st.pools, &source, &sql).await {
+    let rows = match pgrs::query(&st.pools, &source, &sql).await {
         Ok(rows) => rows,
         Err(e) if dialect::is_missing_month_table(&e) => {
             let sql = my_minutes_sql(person_id, scope, false);
-            mysql::query(&st.pools, &source, &sql).await?
+            pgrs::query(&st.pools, &source, &sql).await?
         }
         Err(e) => return Err(e),
     };
@@ -2421,7 +2412,7 @@ pub async fn my(
     // 个人各口径
     async fn one(st: &AppState, sql: String) -> anyhow::Result<Value> {
         let source = sid(st);
-        let rows = mysql::query(&st.pools, &source, &sql).await?;
+        let rows = pgrs::query(&st.pools, &source, &sql).await?;
         Ok(rows
             .into_iter()
             .next()
@@ -2461,9 +2452,9 @@ pub async fn my(
             one(
                 &st,
                 format!(
-            "SELECT CAST(SUM(wave) AS SIGNED) AS wave, CAST(SUM(minutes) AS SIGNED) AS minutes \
+            "SELECT (SUM(wave))::BIGINT AS wave, (SUM(minutes))::BIGINT AS minutes \
              FROM daily_metric WHERE person_id = {person_id} AND wave_reliable = 1 \
-             AND DATE_FORMAT(biz_date, '%Y-%m-%d') = '{today}'"
+             AND TO_CHAR(biz_date, 'YYYY-MM-DD') = '{today}'"
         ),
             )
             .await?,
@@ -2478,9 +2469,9 @@ pub async fn my(
             one(
                 &st,
                 format!(
-            "SELECT CAST(SUM(wave) AS SIGNED) AS wave, CAST(SUM(minutes) AS SIGNED) AS minutes \
+            "SELECT (SUM(wave))::BIGINT AS wave, (SUM(minutes))::BIGINT AS minutes \
              FROM daily_metric WHERE person_id = {person_id} AND wave_reliable = 1 \
-             AND DATE_FORMAT(biz_date, '%Y-%m') = '{month}'"
+             AND TO_CHAR(biz_date, 'YYYY-MM') = '{month}'"
         ),
             )
             .await?,
@@ -2493,9 +2484,9 @@ pub async fn my(
             one(
                 &st,
                 format!(
-            "SELECT CAST(SUM(wave) AS SIGNED) AS wave, CAST(SUM(minutes) AS SIGNED) AS minutes \
+            "SELECT (SUM(wave))::BIGINT AS wave, (SUM(minutes))::BIGINT AS minutes \
              FROM daily_metric WHERE person_id = {person_id} AND wave_reliable = 1 \
-             AND DATE_FORMAT(biz_date, '%Y') = '{year}'"
+             AND TO_CHAR(biz_date, 'YYYY') = '{year}'"
         ),
             )
             .await?,
@@ -2506,7 +2497,7 @@ pub async fn my(
     let mut total = one(
         &st,
         format!(
-            "SELECT CAST(SUM(wave) AS SIGNED) AS wave, CAST(SUM(minutes) AS SIGNED) AS minutes \
+            "SELECT (SUM(wave))::BIGINT AS wave, (SUM(minutes))::BIGINT AS minutes \
          FROM daily_metric WHERE person_id = {person_id} AND wave_reliable = 1"
         ),
     )
@@ -2528,7 +2519,7 @@ pub async fn my(
     if s.wave && !today.is_empty() {
         let sql = self_prev_wave_sql(&prev).replace("{pid}", &person_id.to_string());
         let source = sid(&st);
-        if let Some(r) = mysql::query(&st.pools, &source, &sql)
+        if let Some(r) = pgrs::query(&st.pools, &source, &sql)
             .await?
             .into_iter()
             .next()
@@ -2575,14 +2566,14 @@ pub async fn my(
     let rank_team = if my_team == "all" { "" } else { &my_team };
     let rank_sql = format!(
         "SELECT person_id, tw FROM (SELECT p.id AS person_id, \
-          CAST(SUM(d.wave) AS SIGNED) AS tw \
+          (SUM(d.wave))::BIGINT AS tw \
          FROM daily_metric d JOIN person p ON p.id = d.person_id \
          WHERE p.deleted_at IS NULL \
            AND ('{rank_team}' = '' OR p.gender = '{rank_team}') \
            AND d.wave_reliable = 1 \
          GROUP BY p.id ORDER BY tw DESC) t"
     );
-    let ranks = mysql::query(&st.pools, &source, &rank_sql).await?;
+    let ranks = pgrs::query(&st.pools, &source, &rank_sql).await?;
     let my_pos = ranks.iter().position(|r| id_of_pub(r) == person_id);
     let team_rank = my_pos.map(|i| i + 1).unwrap_or(0);
     /* 2026-10-12 用户口径：我的页只显示自己的排名。rankGap / teamSize 不再计算
@@ -2598,7 +2589,7 @@ pub async fn my(
          LEFT JOIN person m ON m.id = p.master_id AND m.deleted_at IS NULL \
          WHERE p.id = {person_id} AND p.deleted_at IS NULL LIMIT 1"
     );
-    let (name, master_name) = mysql::query(&st.pools, &source, &name_sql)
+    let (name, master_name) = pgrs::query(&st.pools, &source, &name_sql)
         .await?
         .into_iter()
         .next()
@@ -2705,12 +2696,12 @@ pub async fn my_series(
 
     // P1-7：序列只聚合可信行（wave_reliable=1），与展示页曲线/榜单口径一致
     let sql = format!(
-        "SELECT DATE_FORMAT(biz_date, '%Y-%m-%d') AS d, \
-         CAST(SUM(wave) AS SIGNED) AS wave, CAST(SUM(minutes) AS SIGNED) AS minutes \
+        "SELECT TO_CHAR(biz_date, 'YYYY-MM-DD') AS d, \
+         (SUM(wave))::BIGINT AS wave, (SUM(minutes))::BIGINT AS minutes \
          FROM daily_metric WHERE person_id = {person_id} AND wave_reliable = 1 \
          GROUP BY d ORDER BY d DESC LIMIT {days}"
     );
-    let rows = mysql::query(&st.pools, &sid(&st), &sql).await?;
+    let rows = pgrs::query(&st.pools, &sid(&st), &sql).await?;
     let mut wave_map: HashMap<String, i64> = HashMap::new();
     let mut min_map: HashMap<String, i64> = HashMap::new();
     for r in &rows {
@@ -2771,28 +2762,28 @@ impl AccountPeriods {
 /// 主号即便在 wave_snapshot 里也有历史行，也只取 daily_metric 那一支（与 WAVES_A 的
 /// is_primary 互斥条件同源，改一处即可，别在两处各写一套）。
 ///
-/// 窗口一律 `DATE_FORMAT(biz_date, ...)`（该库对 bind 参数报 1835，日期必须内联；
+/// 窗口一律 `TO_CHAR(biz_date, ...)`（该库对 bind 参数报 1835，日期必须内联；
 /// 值来自库里的 DATE_FORMAT 结果且经 [valid_date_pub] 形状校验，不含外部输入）。
 /// 没有数据的号 SUM 出来是 NULL，调用方用 COALESCE 归零（有这个号但没播 = 0，
 /// 只有后台开关关掉才下发 null，两者语义不同，前端靠它区分）。
 pub fn my_accounts_sql(person_id: u64, p: &AccountPeriods) -> String {
     format!(
         "SELECT a.id AS aid, a.anchor_id, a.douyin_no, a.anchor_name, a.is_primary, \
-           CAST(COALESCE(SUM(CASE WHEN t.d = '{day}' THEN t.w END), 0) AS SIGNED) AS wd, \
-           CAST(COALESCE(SUM(CASE WHEN t.d LIKE '{month}-%' THEN t.w END), 0) AS SIGNED) AS wm, \
-           CAST(COALESCE(SUM(CASE WHEN t.d LIKE '{year}-%' THEN t.w END), 0) AS SIGNED) AS wy, \
-           CAST(COALESCE(SUM(t.w), 0) AS SIGNED) AS wt, \
+           (COALESCE(SUM(CASE WHEN t.d = '{day}' THEN t.w END), 0))::BIGINT AS wd, \
+           (COALESCE(SUM(CASE WHEN t.d LIKE '{month}-%' THEN t.w END), 0))::BIGINT AS wm, \
+           (COALESCE(SUM(CASE WHEN t.d LIKE '{year}-%' THEN t.w END), 0))::BIGINT AS wy, \
+           (COALESCE(SUM(t.w), 0))::BIGINT AS wt, \
            MAX(t.d) AS last_d, \
            COUNT(DISTINCT t.d) AS days \
          FROM account a LEFT JOIN ( \
-           SELECT d.anchor_id AS anchor_id, DATE_FORMAT(d.biz_date, '%Y-%m-%d') AS d, \
+           SELECT d.anchor_id AS anchor_id, TO_CHAR(d.biz_date, 'YYYY-MM-DD') AS d, \
                   d.wave AS w \
            FROM daily_metric d JOIN account pa \
              ON pa.person_id = d.person_id AND pa.anchor_id = d.anchor_id \
               AND pa.is_primary = 1 \
            WHERE d.person_id = {person_id} AND d.wave_reliable = 1 \
            UNION ALL \
-           SELECT ws.anchor_id AS anchor_id, DATE_FORMAT(ws.biz_date, '%Y-%m-%d') AS d, \
+           SELECT ws.anchor_id AS anchor_id, TO_CHAR(ws.biz_date, 'YYYY-MM-DD') AS d, \
                   ws.wave_value AS w \
            FROM wave_snapshot ws JOIN account sa \
              ON sa.anchor_id = ws.anchor_id AND sa.is_primary = 0 \
@@ -2808,11 +2799,11 @@ pub fn my_accounts_sql(person_id: u64, p: &AccountPeriods) -> String {
 }
 
 /// 一行查询结果 → 一个抖音号的 DTO（数值部分先全给，开关过滤在 [my_accounts_gate] 里统一做）。
-fn my_account_row(r: &sqlx::mysql::MySqlRow) -> Value {
+fn my_account_row(r: &sqlx::postgres::PgRow) -> Value {
     let anchor_id = r.try_get::<String, _>("anchor_id").unwrap_or_default();
     let douyin_no = r.try_get::<String, _>("douyin_no").unwrap_or_default();
     let anchor_name = r.try_get::<String, _>("anchor_name").unwrap_or_default();
-    let primary = r.try_get::<i8, _>("is_primary").unwrap_or(0) == 1;
+    let primary = r.try_get::<i16, _>("is_primary").unwrap_or(0) == 1;
     // 副号没有时长，也不判未播：这里只有音浪口径
     let last_date = r
         .try_get::<Option<String>, _>("last_d")
@@ -2932,7 +2923,7 @@ pub async fn my_accounts(
     let periods = AccountPeriods::of(&today);
 
     let sql = my_accounts_sql(person_id, &periods);
-    let rows = mysql::query(&st.pools, &sid(&st), &sql).await?;
+    let rows = pgrs::query(&st.pools, &sid(&st), &sql).await?;
     let mut accounts: Vec<Value> = rows.iter().map(my_account_row).collect();
     let summary = my_accounts_gate(&mut accounts, &s);
     Ok(Json(json!({
@@ -2983,7 +2974,7 @@ pub async fn my_who(
     }
     let sql = "SELECT name FROM person WHERE id = ? AND deleted_at IS NULL".to_string();
     let rows =
-        mysql::query_with_binds(&st.pools, &sid(&st), &sql, |q| q.bind(person_id as i64)).await?;
+        pgrs::query_with_binds(&st.pools, &sid(&st), &sql, |q| q.bind(person_id as i64)).await?;
     let name = rows
         .first()
         .and_then(|r| r.try_get::<String, _>("name").ok())
@@ -3014,7 +3005,7 @@ pub async fn my_claim_get(
     if my_team != team && team != "all" {
         return Err(ApiError::auth("该账号不属于本团"));
     }
-    let bound = mysql::query_with_binds(
+    let bound = pgrs::query_with_binds(
         &st.pools,
         &sid(&st),
         "SELECT douyin_no, is_primary FROM account \
@@ -3028,7 +3019,7 @@ pub async fn my_claim_get(
             .try_get::<String, _>("douyin_no")
             .ok()
             .filter(|s| !s.is_empty())?;
-        let primary = r.try_get::<i8, _>("is_primary").unwrap_or(0) == 1;
+        let primary = r.try_get::<i16, _>("is_primary").unwrap_or(0) == 1;
         Some(json!({ "douyinNo": no, "primary": primary }))
     })
     .collect::<Vec<_>>();
@@ -3078,7 +3069,7 @@ pub async fn my_claim_post(
 
     // 提交前先查重：抖音号已被占用就直接拒，省得用户白等审计
     let no = crate::store::validate_douyin_no(douyin_no).map_err(|e| anyhow::anyhow!(e))?;
-    let dup = mysql::query_with_binds(
+    let dup = pgrs::query_with_binds(
         &st.pools,
         &sid(&st),
         "SELECT person_id FROM account WHERE douyin_no = ? LIMIT 1",
@@ -3112,7 +3103,7 @@ pub async fn my_claim_post(
 async fn person_name_of(st: &AppState, person_id: u64) -> anyhow::Result<String> {
     let sql = "SELECT name FROM person WHERE id = ? AND deleted_at IS NULL";
     let rows =
-        mysql::query_with_binds(&st.pools, &sid(st), sql, |q| q.bind(person_id as i64)).await?;
+        pgrs::query_with_binds(&st.pools, &sid(st), sql, |q| q.bind(person_id as i64)).await?;
     Ok(rows
         .first()
         .and_then(|r| r.try_get::<String, _>("name").ok())
@@ -3186,7 +3177,7 @@ pub async fn admin_anchor_claim_decide(
         .writer
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("写库不可用：douyin_writer 未配置"))?;
-    let dup = sqlx::query("SELECT person_id FROM account WHERE douyin_no = ? LIMIT 1")
+    let dup = sqlx::query(&crate::pq::rewrite("SELECT person_id FROM account WHERE douyin_no = ? LIMIT 1"))
         .bind(&no)
         .fetch_optional(writer)
         .await?;
@@ -3203,7 +3194,7 @@ pub async fn admin_anchor_claim_decide(
         }
         .into());
     }
-    let cnt = sqlx::query("SELECT COUNT(*) AS n FROM account WHERE person_id = ?")
+    let cnt = sqlx::query(&crate::pq::rewrite("SELECT COUNT(*) AS n FROM account WHERE person_id = ?"))
         .bind(person_id)
         .fetch_one(writer)
         .await?
@@ -3217,14 +3208,14 @@ pub async fn admin_anchor_claim_decide(
     .bind(&no)
     .bind(&no)
     .bind(&person_name)
-    .bind(if cnt == 0 { 1i8 } else { 0i8 })
+    .bind(if cnt == 0 { 1i16 } else { 0i16 })
     .execute(writer)
     .await;
     if let Err(e) = ins {
         // account 写失败必须回滚裁决，否则申请卡在「已通过」却没有账号
         crate::store::anchor_claim_revert(&st, id).await;
         let msg = e.to_string();
-        return Err(if msg.contains("Duplicate entry") {
+        return Err(if (msg.contains("duplicate key") || msg.contains("Duplicate entry")) {
             anyhow::anyhow!("抖音号或采集 ID 已存在（唯一键冲突），请检查是否重复绑定").into()
         } else {
             anyhow::anyhow!("写入账号失败：{msg}").into()
@@ -3263,14 +3254,10 @@ pub async fn admin_anchor_claim_decide(
     })))
 }
 
-fn id_of_pub(r: &sqlx::mysql::MySqlRow) -> u64 {
-    if let Ok(v) = r.try_get::<u64, _>("person_id") {
-        return v;
-    }
-    if let Ok(v) = r.try_get::<i64, _>("person_id") {
-        return v as u64;
-    }
-    0
+fn id_of_pub(r: &sqlx::postgres::PgRow) -> u64 {
+    r.try_get::<i64, _>("person_id")
+        .map(|v| v.max(0) as u64)
+        .unwrap_or(0)
 }
 
 /* ------------------ 我的页面 · 微信推送（绑定 + 追分目标 + 每日报告） ------------------ */
@@ -3759,7 +3746,7 @@ pub async fn my_push_target_del(
         .get("id")
         .and_then(|v| v.as_u64())
         .ok_or_else(|| anyhow::anyhow!("缺少目标 id"))?;
-    crate::store::target_delete(&st, &name, id).await;
+    crate::store::target_delete(&st, &name, id as i64).await;
     Ok(Json(
         json!({ "targets": crate::store::targets_list(&st, &name).await }),
     ))
@@ -4068,8 +4055,8 @@ mod my_accounts_tests {
         assert!(sql.contains("ON pa.person_id = d.person_id AND pa.anchor_id = d.anchor_id"));
         assert!(sql.contains("ON sa.anchor_id = ws.anchor_id AND sa.is_primary = 0"));
         // 日期窗口一律 DATE_FORMAT，不按自然日
-        assert!(sql.contains("DATE_FORMAT(d.biz_date, '%Y-%m-%d')"));
-        assert!(sql.contains("DATE_FORMAT(ws.biz_date, '%Y-%m-%d')"));
+        assert!(sql.contains("TO_CHAR(d.biz_date, 'YYYY-MM-DD')"));
+        assert!(sql.contains("TO_CHAR(ws.biz_date, 'YYYY-MM-DD')"));
         assert!(sql.contains("t.d LIKE '2026-10-%'"));
         assert!(sql.contains("t.d LIKE '2026-%'"));
         // 只查本人的号
@@ -4231,14 +4218,14 @@ mod lineage_window_tests {
         let daily = lineage_wave_window_sql("daily", "2026-10-09");
         assert!(daily.contains("WHERE wave_reliable = 1"), "{daily}");
         assert!(
-            daily.contains("DATE_FORMAT(biz_date, '%Y-%m-%d') = '2026-10-09'"),
+            daily.contains("TO_CHAR(biz_date, 'YYYY-MM-DD') = '2026-10-09'"),
             "{daily}"
         );
 
         // monthly：该业务日所在月（业务日口径，不用自然日）
         let monthly = lineage_wave_window_sql("monthly", "2026-10-09");
         assert!(
-            monthly.contains("DATE_FORMAT(biz_date, '%Y-%m') = '2026-10'"),
+            monthly.contains("TO_CHAR(biz_date, 'YYYY-MM') = '2026-10'"),
             "{monthly}"
         );
         assert!(!monthly.contains("'2026-10-09'"), "{monthly}");
@@ -4246,7 +4233,7 @@ mod lineage_window_tests {
         // yearly：该业务日所在年
         let yearly = lineage_wave_window_sql("yearly", "2026-10-09");
         assert!(
-            yearly.contains("DATE_FORMAT(biz_date, '%Y') = '2026'"),
+            yearly.contains("TO_CHAR(biz_date, 'YYYY') = '2026'"),
             "{yearly}"
         );
 
@@ -4268,7 +4255,7 @@ mod lineage_window_tests {
             );
             assert!(!sql.contains(bad), "{bad} 不许进 SQL: {sql}");
             assert!(
-                !sql.contains("DATE_FORMAT(biz_date, '%Y-%m-%d') ="),
+                !sql.contains("TO_CHAR(biz_date, 'YYYY-MM-DD') ="),
                 "非法 date 不许进窗口条件：{sql}"
             );
         }

@@ -9,7 +9,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::matching::{match_roster, MatchOptions};
-use crate::mysql;
+use crate::pgrs;
 use crate::repos;
 use crate::state::AppState;
 use crate::store;
@@ -95,10 +95,10 @@ impl IntoResponse for ApiError {
 /// - `writer`：douyin_writer 写池连通性；未配置/连不上时 ok=false 并带原因
 /// - `scheduler.lastRun`：延迟推送调度器最近一轮扫描时间；一轮都没跑过标 null
 pub async fn health(State(st): State<std::sync::Arc<AppState>>) -> ApiResult {
-    let db = mysql::health_check(&st.pools, &st.active_id()).await;
+    let db = pgrs::health_check(&st.pools, &st.active_id()).await;
     let writer = match &st.writer {
         Some(pool) => {
-            let ok = sqlx::query_scalar::<_, i64>("SELECT 1")
+            let ok = sqlx::query_scalar::<_, i32>("SELECT 1")
                 .fetch_one(pool)
                 .await
                 .is_ok();
@@ -147,7 +147,7 @@ pub async fn test_source(
     State(st): State<std::sync::Arc<AppState>>,
     Path(id): Path<String>,
 ) -> ApiResult {
-    let db = mysql::health_check(&st.pools, &id).await;
+    let db = pgrs::health_check(&st.pools, &id).await;
     let mut latest = None;
     let mut anchor_count = 0;
     if db.ok {

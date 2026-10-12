@@ -29,7 +29,7 @@ use std::time::Duration;
 
 use sqlx::Row;
 
-use crate::mysql;
+use crate::pgrs;
 use crate::state::AppState;
 
 /// 绑定码：6 位，码表剔除易混字符（0/O/1/I）
@@ -424,31 +424,25 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
 /// 本月累计音浪：person_id → wave（只算在册且对外可见的人，与榜单口径一致）
 /// P1-7：只聚合可信行（wave_reliable=1）。
 pub(crate) async fn month_wave_map(st: &AppState, team: &str, month: &str) -> HashMap<u64, i64> {
-    let sql = "SELECT p.id AS person_id, CAST(COALESCE(SUM(d.wave), 0) AS SIGNED) AS wave \
+    let sql = "SELECT p.id AS person_id, (COALESCE(SUM(d.wave), 0))::BIGINT AS wave \
           FROM person p \
           LEFT JOIN daily_metric d ON d.person_id = p.id \
-            AND DATE_FORMAT(d.biz_date, '%Y-%m') = ? \
+            AND TO_CHAR(d.biz_date, 'YYYY-MM') = ? \
             AND d.wave_reliable = 1 \
           WHERE p.deleted_at IS NULL AND p.gender = ? \
           GROUP BY p.id";
     let mut map = HashMap::new();
-    match mysql::query_with_binds(&st.pools, &st.active_id(), sql, |q| {
+    match pgrs::query_with_binds(&st.pools, &st.active_id(), sql, |q| {
         q.bind(month.to_string()).bind(team.to_string())
     })
     .await
     {
         Ok(rows) => {
             for r in &rows {
-                let pid = r
-                    .try_get::<u64, _>("person_id")
-                    .or_else(|_| r.try_get::<i64, _>("person_id").map(|v| v as u64))
-                    .unwrap_or(0);
-                let w = r
-                    .try_get::<i64, _>("wave")
-                    .or_else(|_| r.try_get::<u64, _>("wave").map(|v| v as i64))
-                    .unwrap_or(0);
+                let pid = r.try_get::<i64, _>("person_id").unwrap_or(0);
+                let w = r.try_get::<i64, _>("wave").unwrap_or(0);
                 if pid > 0 {
-                    map.insert(pid, w);
+                    map.insert(pid as u64, w);
                 }
             }
         }
@@ -465,17 +459,17 @@ pub(crate) async fn month_rank_list(
     team: &str,
     month: &str,
 ) -> Vec<(u64, String, i64)> {
-    let sql = "SELECT p.id AS person_id, p.name, CAST(COALESCE(SUM(d.wave), 0) AS SIGNED) AS wave \
+    let sql = "SELECT p.id AS person_id, p.name, (COALESCE(SUM(d.wave), 0))::BIGINT AS wave \
          FROM person p \
          JOIN daily_metric d ON d.person_id = p.id \
-           AND DATE_FORMAT(d.biz_date, '%Y-%m') = ? \
+           AND TO_CHAR(d.biz_date, 'YYYY-MM') = ? \
            AND d.wave_reliable = 1 \
          WHERE p.deleted_at IS NULL AND p.gender = ? AND p.status <> 'left' \
            AND p.hide_in_daily_report = 0 \
          GROUP BY p.id, p.name \
          HAVING wave > 0 \
          ORDER BY wave DESC, p.name ASC";
-    match mysql::query_with_binds(&st.pools, &st.active_id(), sql, |q| {
+    match pgrs::query_with_binds(&st.pools, &st.active_id(), sql, |q| {
         q.bind(month.to_string()).bind(team.to_string())
     })
     .await
@@ -484,12 +478,10 @@ pub(crate) async fn month_rank_list(
             .iter()
             .map(|r| {
                 (
-                    r.try_get::<u64, _>("person_id")
-                        .or_else(|_| r.try_get::<i64, _>("person_id").map(|v| v as u64))
-                        .unwrap_or(0),
+                    r.try_get::<i64, _>("person_id").map(|v| v.max(0) as u64).unwrap_or(0),
                     r.try_get::<String, _>("name").unwrap_or_default(),
                     r.try_get::<i64, _>("wave")
-                        .or_else(|_| r.try_get::<u64, _>("wave").map(|v| v as i64))
+                        .or_else(|_| r.try_get::<i64, _>("wave").map(|v| v as i64))
                         .unwrap_or(0),
                 )
             })
@@ -506,17 +498,17 @@ pub(crate) async fn month_rank_list(
 /// [`crate::dialect::NOT_LIVE_WAVE_THRESHOLD`]（2）视为未开播（不计入榜）。
 /// P1-7：只聚合可信行（wave_reliable=1）。P1-6：日期参数化（不再内联 SQL）。
 pub(crate) async fn daily_rank(st: &AppState, team: &str, date: &str) -> Vec<(u64, String, i64)> {
-    let sql = "SELECT p.id AS person_id, p.name, CAST(COALESCE(SUM(d.wave), 0) AS SIGNED) AS wave \
+    let sql = "SELECT p.id AS person_id, p.name, (COALESCE(SUM(d.wave), 0))::BIGINT AS wave \
          FROM person p \
          JOIN daily_metric d ON d.person_id = p.id \
-           AND DATE_FORMAT(d.biz_date, '%Y-%m-%d') = ? \
+           AND TO_CHAR(d.biz_date, 'YYYY-MM-DD') = ? \
            AND d.wave_reliable = 1 \
          WHERE p.deleted_at IS NULL AND p.gender = ? AND p.status <> 'left' \
            AND p.hide_in_daily_report = 0 \
          GROUP BY p.id, p.name \
          HAVING wave >= ? \
          ORDER BY wave DESC, p.name ASC";
-    match mysql::query_with_binds(&st.pools, &st.active_id(), sql, |q| {
+    match pgrs::query_with_binds(&st.pools, &st.active_id(), sql, |q| {
         q.bind(date.to_string())
             .bind(team.to_string())
             .bind(crate::dialect::NOT_LIVE_WAVE_THRESHOLD)
@@ -527,12 +519,10 @@ pub(crate) async fn daily_rank(st: &AppState, team: &str, date: &str) -> Vec<(u6
             .iter()
             .map(|r| {
                 (
-                    r.try_get::<u64, _>("person_id")
-                        .or_else(|_| r.try_get::<i64, _>("person_id").map(|v| v as u64))
-                        .unwrap_or(0),
+                    r.try_get::<i64, _>("person_id").map(|v| v.max(0) as u64).unwrap_or(0),
                     r.try_get::<String, _>("name").unwrap_or_default(),
                     r.try_get::<i64, _>("wave")
-                        .or_else(|_| r.try_get::<u64, _>("wave").map(|v| v as i64))
+                        .or_else(|_| r.try_get::<i64, _>("wave").map(|v| v as i64))
                         .unwrap_or(0),
                 )
             })
@@ -613,21 +603,21 @@ pub(crate) fn account_waves_sql(person_id: u64, date: &str) -> Option<String> {
     Some(format!(
         "SELECT a.id AS aid, a.anchor_id AS anchor_id, a.douyin_no AS douyin_no, \
        a.anchor_name AS anchor_name, a.is_primary AS is_pri, \
-       CAST(COALESCE(SUM(CASE WHEN t.d = '{day}' THEN t.w ELSE 0 END), 0) AS SIGNED) AS wd, \
-       CAST(COALESCE(SUM(CASE WHEN t.m = '{month}' THEN t.w ELSE 0 END), 0) AS SIGNED) AS wm, \
-       CAST(COALESCE(SUM(CASE WHEN t.y = '{year}' THEN t.w ELSE 0 END), 0) AS SIGNED) AS wy \
+       (COALESCE(SUM(CASE WHEN t.d = '{day}' THEN t.w ELSE 0 END), 0))::BIGINT AS wd, \
+       (COALESCE(SUM(CASE WHEN t.m = '{month}' THEN t.w ELSE 0 END), 0))::BIGINT AS wm, \
+       (COALESCE(SUM(CASE WHEN t.y = '{year}' THEN t.w ELSE 0 END), 0))::BIGINT AS wy \
   FROM account a \
   LEFT JOIN ( \
-       SELECT d.anchor_id AS ak, DATE_FORMAT(d.biz_date, '%Y-%m-%d') AS d, \
-              DATE_FORMAT(d.biz_date, '%Y-%m') AS m, DATE_FORMAT(d.biz_date, '%Y') AS y, \
+       SELECT d.anchor_id AS ak, TO_CHAR(d.biz_date, 'YYYY-MM-DD') AS d, \
+              TO_CHAR(d.biz_date, 'YYYY-MM') AS m, TO_CHAR(d.biz_date, 'YYYY') AS y, \
               d.wave AS w \
          FROM daily_metric d \
          JOIN account a2 ON a2.anchor_id = d.anchor_id AND a2.person_id = d.person_id \
           AND a2.is_primary = 1 \
         WHERE d.person_id = {person_id} AND d.wave_reliable = 1 \
        UNION ALL \
-       SELECT ws.anchor_id AS ak, DATE_FORMAT(ws.biz_date, '%Y-%m-%d') AS d, \
-              DATE_FORMAT(ws.biz_date, '%Y-%m') AS m, DATE_FORMAT(ws.biz_date, '%Y') AS y, \
+       SELECT ws.anchor_id AS ak, TO_CHAR(ws.biz_date, 'YYYY-MM-DD') AS d, \
+              TO_CHAR(ws.biz_date, 'YYYY-MM') AS m, TO_CHAR(ws.biz_date, 'YYYY') AS y, \
               ws.wave_value AS w \
          FROM wave_snapshot ws \
          JOIN account a3 ON a3.anchor_id = ws.anchor_id AND a3.person_id = {person_id} \
@@ -660,7 +650,7 @@ pub(crate) async fn person_account_waves(
         }
         return Vec::new();
     };
-    match mysql::query(&st.pools, &st.active_id(), &sql).await {
+    match pgrs::query(&st.pools, &st.active_id(), &sql).await {
         Ok(rows) => rows
             .iter()
             .map(|r| AccountWave {
@@ -681,11 +671,11 @@ pub(crate) async fn person_account_waves(
 }
 
 /// 读整数字段：库里可能是 SIGNED / UNSIGNED / Decimal 字符串，统一兜成 i64
-fn row_i64(r: &sqlx::mysql::MySqlRow, col: &str) -> i64 {
+fn row_i64(r: &sqlx::postgres::PgRow, col: &str) -> i64 {
     if let Ok(v) = r.try_get::<i64, _>(col) {
         return v;
     }
-    if let Ok(v) = r.try_get::<u64, _>(col) {
+    if let Ok(v) = r.try_get::<i64, _>(col) {
         return v as i64;
     }
     r.try_get::<String, _>(col)

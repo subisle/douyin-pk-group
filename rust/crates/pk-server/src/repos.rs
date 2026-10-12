@@ -6,13 +6,13 @@ use sqlx::Row;
 
 use crate::config::wave_cache_ttl_secs;
 use crate::dialect::{dialect_of, inline_dates};
-use crate::mysql;
+use crate::pgrs;
 use crate::state::{AnchorBrief, AppState, Cached, DateInfo, WaveInfo, WaveMap, WaveSeries};
 
 /// 主键在不同库/不同版本里可能是 BIGINT UNSIGNED / BIGINT / INT / VARCHAR，
 /// 逐个类型尝试，都不行就返回 None
-fn read_id(row: &sqlx::mysql::MySqlRow, idx: usize) -> Option<String> {
-    if let Ok(v) = row.try_get::<u64, _>(idx) {
+fn read_id(row: &sqlx::postgres::PgRow, idx: usize) -> Option<String> {
+    if let Ok(v) = row.try_get::<i64, _>(idx) {
         return Some(v.to_string());
     }
     if let Ok(v) = row.try_get::<i64, _>(idx) {
@@ -36,7 +36,7 @@ pub async fn get_dates_info(
         }
     }
     let dia = dialect_of(&id);
-    let rows = mysql::query(&st.pools, &id, dia.dates_sql).await?;
+    let rows = pgrs::query(&st.pools, &id, dia.dates_sql).await?;
     let mut dates: Vec<String> = rows
         .iter()
         .filter_map(|r| r.try_get::<Option<String>, _>(0).ok().flatten())
@@ -45,7 +45,7 @@ pub async fn get_dates_info(
     dates.dedup();
 
     let baseline = match dia.baseline_sql {
-        Some(sql) => mysql::query(&st.pools, &id, sql)
+        Some(sql) => pgrs::query(&st.pools, &id, sql)
             .await?
             .first()
             .and_then(|r| r.try_get::<Option<String>, _>(0).ok().flatten()),
@@ -145,7 +145,7 @@ pub async fn get_waves(
             let mut w: WaveMap = HashMap::new();
             if !use_dates.is_empty() {
                 let sql = inline_dates(dialect_of(&id).waves_sql, &use_dates)?;
-                let rows = mysql::query(&st.pools, &id, &sql).await?;
+                let rows = pgrs::query(&st.pools, &id, &sql).await?;
                 for r in rows {
                     let v: f64 = r.try_get::<Option<f64>, _>(1).ok().flatten().unwrap_or(0.0);
                     if let Some(k) = read_id(&r, 0) {
@@ -212,10 +212,10 @@ pub async fn get_wave_series(
     }
 
     let mut series: HashMap<String, Vec<f64>> = HashMap::new();
-    let mut live: HashMap<String, Vec<i8>> = HashMap::new();
+    let mut live: HashMap<String, Vec<i16>> = HashMap::new();
     if !dates.is_empty() {
         let sql = inline_dates(dialect_of(&id).series_sql, &dates)?;
-        let rows = mysql::query(&st.pools, &id, &sql).await?;
+        let rows = pgrs::query(&st.pools, &id, &sql).await?;
         let index: HashMap<&str, usize> = dates
             .iter()
             .enumerate()
@@ -231,7 +231,7 @@ pub async fn get_wave_series(
             };
             let v: f64 = r.try_get::<Option<f64>, _>(2).ok().flatten().unwrap_or(0.0);
             // MAX(is_live) 聚出来的可能是 i8/int；解析不了按未开播处理
-            let l: i8 = r.try_get::<Option<i8>, _>(3).ok().flatten().unwrap_or(0);
+            let l: i16 = r.try_get::<Option<i16>, _>(3).ok().flatten().unwrap_or(0);
             series
                 .entry(pid.clone())
                 .or_insert_with(|| vec![0.0; dates.len()])[i] = v;
@@ -276,7 +276,7 @@ pub async fn load_anchors(
             return Ok(hit.clone());
         }
     }
-    let rows = mysql::query(&st.pools, &id, dialect_of(&id).anchors_sql).await?;
+    let rows = pgrs::query(&st.pools, &id, dialect_of(&id).anchors_sql).await?;
     let mut brief: Vec<AnchorBrief> = Vec::with_capacity(rows.len());
     for r in &rows {
         // id 在不同库可能是 BIGINT / INT，统一按 i64 读再转字符串；万一变 VARCHAR 也兜得住

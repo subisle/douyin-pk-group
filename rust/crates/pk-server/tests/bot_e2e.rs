@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use pk_server::bot::{self, BotConfig, Inbound};
-use pk_server::{config, mysql, state::AppState};
+use pk_server::{config, pgrs, state::AppState};
 
 /// 测试用管理员口令（2026-10-11 审计整改：不再依赖任何硬编码口令）。
 /// 每进程生成一次随机值并写进 env：WECHAT_ADMIN_CODE 供 bot 私聊提权读取
@@ -40,7 +40,7 @@ async fn setup() -> Option<Arc<AppState>> {
         return None;
     }
     let sources = config::load_sources().expect("sources");
-    let pools = mysql::build_pools(&sources).await.expect("建池失败");
+    let pools = pgrs::build_pools(&sources).await.expect("建池失败");
     let writer = match config::load_writer() {
         Ok(ep) => pk_server::writer::connect(&ep).await.ok(),
         Err(_) => None,
@@ -215,34 +215,34 @@ async fn clean_date(st: &Arc<AppState>, date: &str) {
 }
 
 /// 某业务日的 daily_metric 行数（权限用例断言「没落库」用）
-async fn metric_rows(pool: &sqlx::MySqlPool, date: &str) -> i64 {
+async fn metric_rows(pool: &sqlx::PgPool, date: &str) -> i64 {
     sqlx::query(
         "SELECT COUNT(*) AS n FROM daily_metric WHERE DATE_FORMAT(biz_date, '%Y-%m-%d') = ?",
     )
     .bind(date)
-    .map(|r: sqlx::mysql::MySqlRow| sqlx::Row::try_get::<i64, _>(&r, "n").unwrap_or(0))
+    .map(|r: sqlx::postgres::PgRow| sqlx::Row::try_get::<i64, _>(&r, "n").unwrap_or(0))
     .fetch_one(pool)
     .await
     .unwrap_or(0)
 }
 
 /// 某业务日的 import_batch 行数（权限用例断言「没导入」用）
-async fn batch_rows(pool: &sqlx::MySqlPool, date: &str) -> i64 {
+async fn batch_rows(pool: &sqlx::PgPool, date: &str) -> i64 {
     sqlx::query(
         "SELECT COUNT(*) AS n FROM import_batch WHERE DATE_FORMAT(biz_date, '%Y-%m-%d') = ?",
     )
     .bind(date)
-    .map(|r: sqlx::mysql::MySqlRow| sqlx::Row::try_get::<i64, _>(&r, "n").unwrap_or(0))
+    .map(|r: sqlx::postgres::PgRow| sqlx::Row::try_get::<i64, _>(&r, "n").unwrap_or(0))
     .fetch_one(pool)
     .await
     .unwrap_or(0)
 }
 
 /// push_bindings 的两个开关（(daily_report, notify_target)，i8 便于和 1/0 直接比）
-async fn push_flags(pool: &sqlx::MySqlPool, name: &str) -> (i8, i8) {
+async fn push_flags(pool: &sqlx::PgPool, name: &str) -> (i8, i8) {
     sqlx::query("SELECT daily_report, notify_target FROM push_bindings WHERE name = ?")
         .bind(name)
-        .map(|r: sqlx::mysql::MySqlRow| {
+        .map(|r: sqlx::postgres::PgRow| {
             (
                 sqlx::Row::try_get::<i8, _>(&r, "daily_report").unwrap_or(-1),
                 sqlx::Row::try_get::<i8, _>(&r, "notify_target").unwrap_or(-1),
@@ -296,7 +296,7 @@ async fn report_date_then_two_files_import_team_agnostic() {
         async move {
             sqlx::query("SELECT name FROM person WHERE deleted_at IS NULL AND gender = ? AND status <> 'left' ORDER BY id LIMIT 1")
                 .bind(gender)
-                .map(|r: sqlx::mysql::MySqlRow| sqlx::Row::try_get::<String, _>(&r, "name").unwrap_or_default())
+                .map(|r: sqlx::postgres::PgRow| sqlx::Row::try_get::<String, _>(&r, "name").unwrap_or_default())
                 .fetch_optional(&pool)
                 .await
                 .ok()
@@ -356,19 +356,19 @@ async fn report_date_then_two_files_import_team_agnostic() {
     let (rows, genders, team): (i64, i64, String) = (
         sqlx::query("SELECT COUNT(*) AS n FROM daily_metric WHERE DATE_FORMAT(biz_date,'%Y-%m-%d') = ?")
             .bind(date)
-            .map(|r: sqlx::mysql::MySqlRow| sqlx::Row::try_get::<i64, _>(&r, "n").unwrap_or(0))
+            .map(|r: sqlx::postgres::PgRow| sqlx::Row::try_get::<i64, _>(&r, "n").unwrap_or(0))
             .fetch_one(&pool)
             .await
             .unwrap_or(0),
         sqlx::query("SELECT COUNT(DISTINCT p.gender) AS n FROM daily_metric d JOIN person p ON p.id = d.person_id WHERE DATE_FORMAT(d.biz_date,'%Y-%m-%d') = ?")
             .bind(date)
-            .map(|r: sqlx::mysql::MySqlRow| sqlx::Row::try_get::<i64, _>(&r, "n").unwrap_or(0))
+            .map(|r: sqlx::postgres::PgRow| sqlx::Row::try_get::<i64, _>(&r, "n").unwrap_or(0))
             .fetch_one(&pool)
             .await
             .unwrap_or(0),
         sqlx::query("SELECT team FROM import_batch WHERE DATE_FORMAT(biz_date,'%Y-%m-%d') = ? ORDER BY id LIMIT 1")
             .bind(date)
-            .map(|r: sqlx::mysql::MySqlRow| sqlx::Row::try_get::<String, _>(&r, "team").unwrap_or_default())
+            .map(|r: sqlx::postgres::PgRow| sqlx::Row::try_get::<String, _>(&r, "team").unwrap_or_default())
             .fetch_optional(&pool)
             .await
             .ok()
@@ -400,7 +400,7 @@ async fn same_date_reimport_overwrites_value() {
          AND (SELECT COUNT(*) FROM person p2 WHERE p2.name = p.name AND p2.deleted_at IS NULL) = 1 \
          ORDER BY p.id LIMIT 1",
     )
-    .map(|r: sqlx::mysql::MySqlRow| sqlx::Row::try_get::<String, _>(&r, "name").unwrap_or_default())
+    .map(|r: sqlx::postgres::PgRow| sqlx::Row::try_get::<String, _>(&r, "name").unwrap_or_default())
     .fetch_optional(&pool)
     .await
     .ok()
@@ -446,7 +446,7 @@ async fn same_date_reimport_overwrites_value() {
         )
         .bind(&name)
         .bind(date)
-        .map(|r: sqlx::mysql::MySqlRow| sqlx::Row::try_get::<i64, _>(&r, "n").unwrap_or(0))
+        .map(|r: sqlx::postgres::PgRow| sqlx::Row::try_get::<i64, _>(&r, "n").unwrap_or(0))
         .fetch_one(&pool)
         .await
         .unwrap_or(0),
@@ -456,7 +456,7 @@ async fn same_date_reimport_overwrites_value() {
         )
         .bind(&name)
         .bind(date)
-        .map(|r: sqlx::mysql::MySqlRow| sqlx::Row::try_get::<i64, _>(&r, "w").unwrap_or(0))
+        .map(|r: sqlx::postgres::PgRow| sqlx::Row::try_get::<i64, _>(&r, "w").unwrap_or(0))
         .fetch_one(&pool)
         .await
         .unwrap_or(0),
@@ -484,7 +484,7 @@ async fn attachment_without_any_date_uses_yesterday() {
     let no = "__e2e_nodate_76543210";
 
     // 幂等：先清掉本用例上一轮可能留下的暂存行与批次审计行
-    let purge = |pool: sqlx::MySqlPool| async move {
+    let purge = |pool: sqlx::PgPool| async move {
         let _ = sqlx::query("DELETE FROM import_pending WHERE douyin_no = ?")
             .bind("__e2e_nodate_76543210")
             .execute(&pool)
@@ -517,7 +517,7 @@ async fn attachment_without_any_date_uses_yesterday() {
             "SELECT DATE_FORMAT(biz_date,'%Y-%m-%d') AS d FROM import_pending WHERE douyin_no = ?",
         )
         .bind(no)
-        .map(|r: sqlx::mysql::MySqlRow| {
+        .map(|r: sqlx::postgres::PgRow| {
             sqlx::Row::try_get::<String, _>(&r, "d").unwrap_or_default()
         })
         .fetch_optional(&pool)
@@ -527,7 +527,7 @@ async fn attachment_without_any_date_uses_yesterday() {
         .unwrap_or_default(),
         sqlx::query("SELECT COALESCE(wave, -1) AS w FROM import_pending WHERE douyin_no = ?")
             .bind(no)
-            .map(|r: sqlx::mysql::MySqlRow| sqlx::Row::try_get::<i64, _>(&r, "w").unwrap_or(-1))
+            .map(|r: sqlx::postgres::PgRow| sqlx::Row::try_get::<i64, _>(&r, "w").unwrap_or(-1))
             .fetch_optional(&pool)
             .await
             .ok()

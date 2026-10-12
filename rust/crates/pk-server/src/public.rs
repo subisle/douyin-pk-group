@@ -345,7 +345,7 @@ pub async fn plan(State(st): State<std::sync::Arc<AppState>>, Path(id): Path<i64
                                 .map(|v| v.iter().map(|x| x.round() as i64).collect())
                                 .unwrap_or_else(|| vec![0; day_count]);
                             // 当天是否开播（daily_metric.is_live），与 values 下标一一对应
-                            let live: Vec<i8> = p
+                            let live: Vec<i16> = p
                                 .person_id
                                 .as_deref()
                                 .and_then(|id| series.live.get(id))

@@ -4,14 +4,44 @@
 #   docker compose -f deploy/docker-compose.yml up -d
 #
 # ⚠️ 监听地址：compose 里端口发布固定绑 127.0.0.1（公网入口走 Caddy 反代）。
-#    容器内 pk-server 的 HOST 默认 127.0.0.1 时只能容器内自连 —— 若 compose
-#    healthcheck 或容器外直连探活，需要显式在 .env 配 HOST=0.0.0.0（容器内监听
-#    全部地址没问题：宿主侧端口只绑 127.0.0.1，公网仍然进不来）。
+# 2026-10 数据库切换：业务库 = PostgreSQL（pk-postgres 容器），数据卷持久化。
 services:
+  pk-postgres:
+    image: postgres:17-alpine
+    container_name: pk-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: douyin_dev
+      POSTGRES_USER: douyin_dev
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-changeme-strong}
+      # 性能与连接参数（小机型友好）
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8"
+    command:
+      - postgres
+      - -c
+      - max_connections=40
+      - -c
+      - shared_buffers=128MB
+      - -c
+      - log_min_duration_statement=500
+    ports:
+      - "127.0.0.1:5432:5432"   # 只绑本机：pk-server 容器走内网；宿主调试用
+    volumes:
+      - ./data/pg:/var/lib/postgresql/data          # 数据持久化
+      - ./backup-pg:/backup                          # 备份落盘目录
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U douyin_dev -d douyin_dev"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
   pk-server:
     image: ghcr.io/subisle/douyin-pk-group:latest
     container_name: pk-server
     restart: unless-stopped
+    depends_on:
+      pk-postgres:
+        condition: service_healthy
     ports:
       # 只绑 127.0.0.1：公网入口交给 Caddy 反代，别把 8787 裸奔到 0.0.0.0
       - "127.0.0.1:${PK_PORT:-6666}:8787"
@@ -20,11 +50,19 @@ services:
     environment:
       PORT: "8787"
       WEB_DIST: /app/web
-      SQLITE_PATH: /app/data/app.db
       WAVE_CACHE_TTL: "600"
-      # CORS_ORIGINS 等一律走 .env；管理员口令内置于 pk-server
+      # 业务库 = 容器内 PG
+      DB_LOCAL_HOST: pk-postgres
+      DB_LOCAL_PORT: "5432"
+      DB_LOCAL_USER: douyin_dev
+      DB_LOCAL_NAME: douyin_dev
+      DB_WRITER_HOST: pk-postgres
+      DB_WRITER_PORT: "5432"
+      DB_WRITER_USER: douyin_dev
+      DB_WRITER_NAME: douyin_dev
+      # CORS_ORIGINS / ADMIN_PASSWORD 等一律走 .env
     volumes:
-      - ./data:/app/data        # SQLite（方案 + 别名）持久化
+      - ./data/app:/app/data        # 兼容目录（SQLite 已退役，留空占位）
     healthcheck:
       test: ["CMD", "/usr/local/bin/pk-server", "--health-check"]
       interval: 30s

@@ -70,14 +70,14 @@ fn parse() -> &'static Seed {
 }
 
 /// 表行数（出错按 None 处理，调用方跳过装载）
-async fn person_count(pool: &sqlx::MySqlPool) -> Option<i64> {
+async fn person_count(pool: &sqlx::PgPool) -> Option<i64> {
     sqlx::query("SELECT COUNT(*) AS n FROM person")
         .fetch_one(pool)
         .await
         .ok()
         .and_then(|r| {
             r.try_get::<i64, _>(0)
-                .or_else(|_| r.try_get::<u64, _>(0).map(|v| v as i64))
+                .or_else(|_| r.try_get::<i64, _>(0).map(|v| v as i64))
                 .ok()
         })
 }
@@ -122,7 +122,7 @@ pub async fn seed_if_empty(st: &Arc<AppState>) {
         .bind(p.generation.map(|v| v as i32))
         .bind(&p.group_name)
         .bind(&p.avatar_url)
-        .bind(p.hide_in_daily_report.unwrap_or(false) as i8)
+        .bind(p.hide_in_daily_report.unwrap_or(false) as i16)
         .bind(&p.status)
         .bind(&p.joined_at)
         .bind(&p.deleted_at)
@@ -143,7 +143,7 @@ pub async fn seed_if_empty(st: &Arc<AppState>) {
         .bind(&a.anchor_id)
         .bind(a.douyin_no.clone().unwrap_or_default())
         .bind(a.anchor_name.clone().unwrap_or_default())
-        .bind(a.is_primary.unwrap_or(false) as i8)
+        .bind(a.is_primary.unwrap_or(false) as i16)
         .bind(&a.status)
         .bind(&a.created_at)
         .execute(&mut *tx)
