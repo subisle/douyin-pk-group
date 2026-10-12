@@ -52,3 +52,16 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=min
+
+      # 额外产出 amd64 docker tar 挂 rolling release：147 无 ghcr PAT 时
+      # 用 gh release download（匿名可下公开仓库 release）+ docker load 更新。
+      - name: 导出 amd64 tar 到 release
+        run: |
+          set -euo pipefail
+          docker buildx build --platform linux/amd64 --output type=docker,dest=/tmp/pk-server-amd64.tar .
+          gzip -9 /tmp/pk-server-amd64.tar
+          gh release view dist-amd64 >/dev/null 2>&1 || \
+            gh release create dist-amd64 --title "amd64 镜像包" --notes "docker-release.yml 自动更新"
+          gh release upload dist-amd64 /tmp/pk-server-amd64.tar.gz --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
