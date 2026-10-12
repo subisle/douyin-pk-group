@@ -579,6 +579,81 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .st-my-item .r .pri { color:var(--primary); font-weight:500; }
 .st-my-item .r .material-symbols-outlined { font-size:18px; }
 
+/* ===== 修复2：「我的」子页控件样式补齐 =====
+   claimCard/pushCard/pushAddHtml/pushBoundHtml 用的 .go/.sw/.tgt/.tabs2/.sr/.sr-list/
+   .sk/.my-stat/.delta 等原来依赖 .my-claim/.my-push 祖先类（旧 DOM），
+   新 Stitch DOM（.st-my-list 直接包内容）没有该祖先，样式全部丢失。这里补一套
+   独立规则，变量对齐文件头 :root（--primary/--hairline/--up/--down 等）。 */
+/* 主操作按钮：主色实底圆角；.go.gray 灰底次级款 */
+.go { display:block; width:100%; height:40px; margin-top:10px; border:none;
+  border-radius:var(--r-md); background:var(--primary); color:var(--on-primary);
+  font-size:14px; font-weight:700; cursor:pointer; transition:opacity .15s, transform .1s; }
+.go:active { transform:scale(.98); }
+.go:disabled { opacity:.45; cursor:default; }
+.go.gray { background:var(--surface-container-high); color:var(--on-surface);
+  border:1px solid var(--hairline); font-weight:600; }
+/* iOS 式开关：36x20 圆角轨道 + 滑块，checked 变主色 */
+.sw { display:flex; align-items:center; gap:8px; margin-top:10px; font-size:13px;
+  color:var(--on-surface); cursor:pointer; -webkit-user-select:none; user-select:none; }
+.sw input { appearance:none; -webkit-appearance:none; width:36px; height:20px; flex:none;
+  border-radius:9999px; background:var(--surface-container-highest); position:relative;
+  outline:none; cursor:pointer; transition:background .2s; }
+.sw input::before { content:''; position:absolute; top:2px; left:2px; width:16px; height:16px;
+  border-radius:9999px; background:#fff; box-shadow:0 1px 3px rgba(0,0,0,.25);
+  transition:transform .2s; }
+.sw input:checked { background:var(--primary); }
+.sw input:checked::before { transform:translateX(16px); }
+.sw input:disabled { opacity:.5; cursor:default; }
+/* 追分目标行：flex 行 + 右侧删除 ✕ */
+.tgt { display:flex; align-items:center; gap:8px; padding:9px 2px; font-size:13px;
+  color:var(--on-surface); border-bottom:1px solid var(--hairline); }
+.tgt:last-of-type { border-bottom:none; }
+.tgt .x { flex:none; width:26px; height:26px; padding:0; margin-left:2px; border:none;
+  border-radius:9999px; background:var(--surface-container); color:var(--on-surface-variant);
+  font-size:13px; line-height:1; cursor:pointer; }
+.tgt .x:active { background:var(--surface-container-high); color:var(--up); }
+/* tab 切换：两个/三个等宽按钮，选中反色（主色底白字） */
+.tabs2 { display:flex; gap:6px; margin-top:12px; }
+.tabs2 button { flex:1; height:32px; padding:0 8px; border:1px solid var(--hairline);
+  border-radius:var(--r-full); background:#fff; color:var(--on-surface-variant);
+  font-size:12.5px; font-weight:600; cursor:pointer; }
+.tabs2 button.on { background:var(--primary); border-color:var(--primary); color:#fff; }
+/* 搜索框 + 下拉候选列表：相对定位容器，下拉绝对定位白底阴影 */
+.sr { position:relative; margin-top:10px; }
+.sr input { width:100%; height:40px; border:1px solid var(--hairline);
+  border-radius:var(--r-md); padding:0 12px; font-size:14px; background:#fff;
+  color:var(--on-surface); }
+.sr input:focus { outline:none; border-color:var(--primary); }
+.sr-list { position:absolute; left:0; right:0; top:calc(100% + 4px); z-index:20;
+  background:#fff; border:1px solid var(--hairline); border-radius:var(--r-md);
+  box-shadow:0 8px 24px rgba(0,0,0,.12); max-height:200px; overflow:auto; }
+.sr-list > div { padding:9px 12px; font-size:13px; color:var(--on-surface);
+  border-bottom:1px solid var(--hairline); cursor:pointer; }
+.sr-list > div:last-child { border-bottom:none; }
+.sr-list > div:active { background:var(--surface-container-low); }
+.sr-list .none { color:var(--on-surface-variant); font-size:12px; cursor:default; }
+/* 骨架屏：灰底块 + shimmer 扫光动画（shimmerList 用 .sk.sk-row） */
+.sk { background:linear-gradient(90deg, var(--surface-container) 25%,
+  var(--surface-container-highest) 45%, var(--surface-container) 65%);
+  background-size:200% 100%; border-radius:6px;
+  animation:skShimmer 1.4s ease-in-out infinite; }
+.sk-row { height:14px; margin:12px 0; }
+@keyframes skShimmer { from { background-position:120% 0; } to { background-position:-80% 0; } }
+/* 统计行：label 左 / 值右（renderMy 里的 stat() 输出） */
+.my-stat { display:flex; align-items:baseline; justify-content:space-between; gap:8px;
+  padding:8px 2px; font-size:13px; border-bottom:1px solid var(--hairline); }
+.my-stat:last-child { border-bottom:none; }
+.my-stat .l { color:var(--on-surface-variant); flex:none; }
+.my-stat .w { font-weight:600; color:var(--on-surface);
+  font-variant-numeric:tabular-nums; text-align:right; }
+.my-stat .m { width:100%; font-size:11px; color:var(--outline); }
+/* 涨跌小字：红涨绿跌（与 waveDelta 的 d-up/d-down/d-flat 口径一致） */
+.delta { display:inline-block; margin-left:4px; font-size:11px; font-weight:600;
+  font-variant-numeric:tabular-nums; }
+.delta.d-up { color:var(--up); }
+.delta.d-down { color:var(--down); }
+.delta.d-flat { color:var(--outline); font-weight:400; }
+
 /* 联系运营卡（设计稿：圆形「帅」字头像 + 文案 + 立即私信 pill） */
 .st-my-ops { margin-top:.75rem; background:var(--surface-container-lowest);
   border:1px solid var(--hairline); border-radius:.75rem; padding:1rem;
@@ -1433,7 +1508,7 @@ function showGate() {
     '<div id="paneLogin"><p class="tip">使用「手机号 + 密码」登录（姓名也可以）</p>' +
       '<input id="gateAcct" placeholder="手机号 / 姓名" autocomplete="off">' +
       '<input id="gatePass" placeholder="密码" inputmode="numeric" autocomplete="off">' +
-      '<button class="reg-skip" id="gateForgot">忘记密码？重置为手机号后四位</button>' +
+      '<button class="reg-skip" id="gateForgot">忘记密码？重置生成临时密码</button>' +
       '<div class="form-err hidden" id="gateErr"></div>' +
       '<button class="btn-main" id="gateGo">登 录</button></div>' +
     '<div id="paneReg" class="hidden"></div>' +
@@ -1531,13 +1606,19 @@ async function forgotPassword() {
     });
     const d = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
-    $('gatePass').value = d.password || acct.slice(-4);
-    toast('密码已重置为手机号后四位');
+    /* 修复3：后端 my.rs 重置为 CSPRNG 随机密码（响应 d.password 只下发一次），
+       不再是手机号后四位 —— 文案/回填/按钮态三处同步改，别再误导用户 */
+    $('gatePass').value = d.password || '';
+    errEl.classList.remove('hidden');
+    errEl.textContent = d.password
+      ? '已生成临时密码：' + d.password + '（已帮你填进密码框，登录后请尽快在设置里修改）'
+      : '重置后会生成一个临时密码，登录成功后请尽快在设置里修改';
+    toast('密码已重置，临时密码见下方提示');
   } catch (e) {
     errEl.textContent = e.message || '重置失败，稍后再试';
     errEl.classList.remove('hidden');
   } finally {
-    btn.disabled = false; btn.textContent = '忘记密码？重置为手机号后四位';
+    btn.disabled = false; btn.textContent = '忘记密码？重置生成临时密码';
   }
 }
 
@@ -1565,7 +1646,7 @@ function bindRegPane() {
     '<div class="form-err hidden" id="regErr"></div>' +
     '<button class="btn-main" id="regGo">完成注册</button>' +
     '<p class="reg-note">姓名必须是主播台账里已有的艺名（注册时会自动核对，查不到无法注册）；' +
-    '注册后手机号就是账号、验证码就是密码，忘记密码可重置为手机号后四位。</p>';
+    '注册后手机号就是账号、验证码就是密码，忘记密码可重置生成临时密码。</p>';
   $('regAuth').onclick = startRegOauth;
   $('regGo').onclick = doRegister;
   $('regName').onkeydown = (e) => { if (e.key === 'Enter') $('regPhone').focus(); };
@@ -3004,12 +3085,14 @@ async function searchBind() {
       box.innerHTML = '<div class="none">没有找到这个名字，换个写法试试（可以只打一个字）</div>';
       return;
     }
+    /* 修复1：后端 bind/search 已不再下发 personId（2026-10-12 审计），
+       选中项只带 name —— 渲染行不再写 data-pid（避免打出 "undefined"） */
     box.innerHTML = items.map((it) =>
       '<div class="hit"><div>' + esc(it.name) +
       '<span class="tag">' + (it.team === 'male' ? '男团' : it.team === 'female' ? '女团' : '') + '</span></div>' +
-      '<button data-pid="' + esc(it.personId) + '" data-name="' + esc(it.name) + '">绑定</button></div>').join('');
-    box.querySelectorAll('button[data-pid]').forEach((b) => {
-      b.onclick = () => doBind(b.dataset.pid, b.dataset.name);
+      '<button data-name="' + esc(it.name) + '">绑定</button></div>').join('');
+    box.querySelectorAll('button[data-name]').forEach((b) => {
+      b.onclick = () => doBind(b.dataset.name);
     });
   } catch (e) {
     box.innerHTML = '';
@@ -3018,7 +3101,9 @@ async function searchBind() {
   }
 }
 
-async function doBind(personId, name) {
+/* 修复1：后端 my.rs my_bind 只认 name（缺 name → 400「请选择要绑定的主播」），
+   personId 一律被忽略；改为只传 {token, name}。 */
+async function doBind(name) {
   if (!confirm('确认绑定到「' + name + '」吗？\n绑定之后不能自行解绑或换绑，填错了需要联系管理员。')) return;
   const errEl = $('bindErr');
   errEl.classList.add('hidden');
@@ -3026,7 +3111,8 @@ async function doBind(personId, name) {
     const r = await fetch('/api/public/my/bind', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: myToken(), personId: Number(personId) }),
+      /* 修复1：body 里不再传 personId（后端忽略且已不下发），只传 token + name */
+      body: JSON.stringify({ token: myToken(), name: name }),
     });
     const d = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
@@ -3035,8 +3121,11 @@ async function doBind(personId, name) {
     sessionStorage.setItem(MY_ANY_KEY, d.token);
     localStorage.setItem(MY_ANY_NAME, d.name || name);
     /* 绑定成功后保留登录时的手机号（水印还用它） */
-    applyLoginState({ name: d.name, phone: (meState && meState.phone) || '', personId: d.personId, bound: true, needBind: false });
-    toast('已绑定主播：' + (d.name || name));
+    /* 修复1：绑定走审核制，不再即时生效；本地登录态只更新姓名，
+       personId/bound 等身份字段以 who 接口为准（loadMy 会重拉） */
+    applyLoginState({ name: d.name || name, phone: (meState && meState.phone) || '', personId: 0, bound: false, needBind: true });
+    /* 修复1：绑定申请已提交（pending），提示文案与审核制对齐 */
+    toast(d.already ? '已有待审核的绑定申请' : '已提交绑定申请，等管理员审核');
     loadMy();
   } catch (e) {
     errEl.textContent = e.message || '绑定失败，稍后再试';
@@ -3293,16 +3382,12 @@ function renderMy(d, series, claim, bound, push, accounts) {
     toast('请直接在微信里联系帅帅');
   };
   $('myForgot').onclick = () => {
-    /* 忘记密码流程在登录门里（gateForgot：按手机号重置为后四位）。直接复用：
-       退出登录态并开门，顺手把手机号填进账号框、聚焦「忘记密码」，点一下就重置；
-       登录成功后 gateResolve 刷新页面回到正常态（与 sessionExpired 同一接法） */
-    const phone = meState && meState.phone ? meState.phone : '';
-    myLogout();
-    removeWatermark();
-    gateResolve = () => location.reload();
-    showGate();
-    if (phone) $('gateAcct').value = phone;
-    setTimeout(() => { const f = $('gateForgot'); if (f) f.focus(); }, 60);
+    /* 修复4（QA 实测）：原实现直接 myLogout() 清掉全部 token 再去登录门 ——
+       用户只是想改个密码却丢了登录态。改成页内重置对话框：
+       输手机号 → POST /api/public/my/password/reset {phone} → 展示返回的临时密码。
+       token 全程不动；重置接口本身会吊销全部旧 token，之后走「退出登录」重新登录。 */
+    const prePhone = meState && meState.phone ? meState.phone : '';
+    openMyResetDlg(prePhone);
   };
   /* 列表两行滚到页内对应的操作卡：绑定行 → 绑定/审计卡，推送行 → 推送卡。
      卡片是异步渲染的（my / series / claim / push / accounts 五个请求回来才拼 DOM），
@@ -3368,15 +3453,22 @@ const MY_SUB_INFO = {
 
 /* 进入 /my/<mySub>：整页只留「返回栏 + 目标内容」，回列表用返回按钮/浏览器返回。 */
 function renderMySub() {
-  const view = $('view');
-  if (!view || view !== $('view')) { /* noop */ }
+  /* 修复6①：原代码 const view = $('view') 遮蔽了全局 view（let view = 'data'），
+     `view !== $('view')` 是恒真的死判断（同一次取值当然相等）——整段删除。
+     后面统一用局部名 v，不与全局 view 撞名。 */
+  const v = $('view');
+  if (!v) return;
   if (!mySub) { showMyHome(); return; }
   const sub = mySub;
-  const v = $('view');
+  /* 修复6②：信息型子页要显示 myInfoCard，卡片型子页要隐藏它——
+     否则从 privacy/about 切到 bind/push 时旧的信息卡会叠在目标卡上。
+     在这里统一处理（原实现只在 showMyHome 里隐藏，方向反了就漏）。 */
+  const info = $('myInfoCard');
+  if (info) info.hidden = !MY_SUB_INFO[sub];
   /* 直接子节点按块分组：保留目标卡，其余全部隐藏 */
   const keep = [];
   if (MY_SUB_CARDS[sub]) keep.push(MY_SUB_CARDS[sub].card);
-  /* 遍历 view 的块级孩子，把不属于目标卡的都藏起来 */
+  /* 遍历 v 的块级孩子，把不属于目标卡的都藏起来 */
   /* .section 内逐块控制：首页块（概览/数据大卡/趋势/账号/服务列表/运营卡）藏，
      目标卡（myClaimCard / myPushCard）显。 */
   const sec = v.querySelector('.section');
@@ -3402,12 +3494,22 @@ function renderMySub() {
     '<span class="material-symbols-outlined">arrow_back</span>返回</button>' +
     '<div class="t">' + esc(meta.title) + '</div>';
   $('mySubBack').onclick = () => {
+    /* 修复5：返回用 history.back()（popstate 已统一处理 mySub 切换），
+       不再 pushState('/my') —— 否则每进一次子页历史就多一条，返回键要按很多下。
+       深链直达（栈里上一条不是本站 /my，或根本没有历史）时 back() 会离开站点，
+       此时降级为 pushState('/my') 原地回列表首页。 */
     mySub = null;
-    history.pushState(null, '', '/my');
-    showMyHome();
+    if (document.referrer && history.length > 1) {
+      history.back();
+    } else {
+      history.pushState(null, '', '/my');
+      showMyHome();
+    }
   };
-  /* 无卡片的信息型子页（隐私/关于）：就地渲染内容卡 */
-  if (MY_SUB_INFO[sub] && !MY_SUB_CARDS[sub]) {
+  /* 无卡片的信息型子页（隐私/关于）：就地渲染内容卡
+     （修复6③：MY_SUB_INFO 定义里本就没有卡片键，!MY_SUB_CARDS[sub] 是恒真判断，
+     保留只是噪音——改为直接判 MY_SUB_INFO[sub]） */
+  if (MY_SUB_INFO[sub]) {
     let card = $('myInfoCard');
     if (!card) {
       card = document.createElement('div');
@@ -3441,6 +3543,75 @@ function showMyHome() {
   const sec = v.querySelector('.section');
   if (sec) Array.from(sec.children).forEach((blk) => { blk.hidden = false; });
   ['myClaimCard', 'myPushCard'].forEach((id) => { const el = $(id); if (el) el.hidden = true; });
+}
+
+/* ==================== 修复4：「我的」页内重置密码对话框 ====================
+   接口（my.rs::my_password_reset）：POST /api/public/my/password/reset
+   请求体 {phone}；响应 {ok:true, password:"<CSPRNG 临时密码>"}，只在本次下发。
+   后端重置成功会吊销该账号全部 my token —— 提示用户重置后需重新登录。 */
+function openMyResetDlg(prePhone) {
+  const old = $('myResetMask');
+  if (old) old.remove();   // 防重复弹层
+  const mask = document.createElement('div');
+  mask.id = 'myResetMask';
+  /* 行内样式：单文件 SPA 的对话框没有现成皮肤可套，照登录门 iOS 卡风格给一套 */
+  mask.style.cssText = 'position:fixed;inset:0;z-index:95;background:rgba(11,28,48,.45);' +
+    'display:flex;align-items:center;justify-content:center;padding:20px;';
+  mask.innerHTML = '<div class="gate-box" style="max-width:360px">' +
+    '<h3 style="font-size:19px">重置密码</h3>' +
+    '<p class="tip">输入注册手机号，重置后会生成一个临时密码。' +
+    '重置成功后需要用新密码重新登录（原登录态会失效）。</p>' +
+    '<input id="myResetPhone" inputmode="numeric" placeholder="注册手机号" autocomplete="off"' +
+    (prePhone ? ' value="' + esc(prePhone) + '"' : '') + '>' +
+    '<div class="form-err hidden" id="myResetErr" style="color:#F43F5E;font-size:13px;text-align:left;margin:6px 0"></div>' +
+    '<div id="myResetOk" class="hidden" style="display:none;background:#E7F7EC;border-radius:10px;' +
+    'padding:10px 12px;font-size:13px;line-height:1.7;color:#0b7a3e;text-align:left;margin:6px 0"></div>' +
+    '<div style="display:flex;gap:10px;margin-top:12px">' +
+    '<button class="go gray" id="myResetCancel" style="margin-top:0">取消</button>' +
+    '<button class="go" id="myResetGo" style="margin-top:0">重置密码</button></div></div>';
+  document.body.appendChild(mask);
+  mask.addEventListener('click', (e) => { if (e.target === mask) close(); });
+  const close = () => mask.remove();
+  $('myResetCancel').onclick = close;
+  $('myResetPhone').onkeydown = (e) => { if (e.key === 'Enter') $('myResetGo').click(); };
+  setTimeout(() => { const el = $('myResetPhone'); if (el) el.focus(); }, 60);
+  $('myResetGo').onclick = async () => {
+    const phone = ($('myResetPhone').value || '').trim().replace(/[\s-]/g, '');
+    const errEl = $('myResetErr');
+    const okEl = $('myResetOk');
+    errEl.classList.add('hidden');
+    if (!/^\d{5,20}$/.test(phone)) {
+      errEl.textContent = '请输入注册时用的手机号';
+      errEl.classList.remove('hidden');
+      return;
+    }
+    const btn = $('myResetGo');
+    btn.disabled = true; btn.textContent = '重置中…';
+    try {
+      const r = await fetch('/api/public/my/password/reset', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone: phone }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+      /* 成功：展示临时密码（只此一次），后端已吊销全部旧 token */
+      okEl.textContent = '✓ 临时密码：' + (d.password || '（未返回，请联系管理员）') +
+        '\n请复制保存，用新密码重新登录。';
+      okEl.style.whiteSpace = 'pre-wrap';
+      okEl.classList.remove('hidden');
+      okEl.style.display = 'block';
+      btn.textContent = '已完成';
+      $('myResetCancel').textContent = '关闭';
+      /* 重置接口已把旧 token 全部吊销：本地登录态清掉，避免半死状态（修复4 收尾） */
+      myLogout();
+      removeWatermark();
+    } catch (e) {
+      btn.disabled = false; btn.textContent = '重置密码';
+      errEl.textContent = e.message || '重置失败，稍后再试';
+      errEl.classList.remove('hidden');
+    }
+  };
 }
 
 /* ==================== 绑定抖音号（提交 + 截图 → 管理端审计） ==================== */

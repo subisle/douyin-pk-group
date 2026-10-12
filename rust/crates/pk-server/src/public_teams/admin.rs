@@ -282,6 +282,15 @@ fn mytok_key(token: &str) -> String {
     format!("mytok:{}", token)
 }
 
+/// 2026-10-13 安全修复（my token 可吊销性）：反向索引 `mytokname:<name>` → SET of tokens。
+/// 之前吊销只删「内存里能枚举到」的 token 的 Redis 键——进程重启后内存为空，
+/// Redis 侧旧键删不掉，旧 token 会经 my_token_restore 复活（吊销被绕过）。
+/// 有了这个按账号名聚合的 SET，吊销时 SMEMBERS 即可拿到该账号的全部 token，
+/// 不再依赖内存枚举。
+fn mytok_name_key(name: &str) -> String {
+    format!("mytokname:{}", name)
+}
+
 /// put/take/revoke 之后的 Redis 同步（拿不到 Redis 就静默跳过，退化为纯内存）。
 /// 异步工厂：让调用点用 async 块传进来（block_on 里再驱动）
 trait FutureFactory: Send + 'static {
@@ -322,11 +331,27 @@ async fn mytok_redis_set(
 ) -> anyhow::Result<()> {
     let v = serde_json::json!({ "pid": pid, "team": team, "name": name });
     crate::store::cache::set(st, &mytok_key(token), &v.to_string(), MYTOK_TTL).await;
+    // 2026-10-13 安全修复：同步登记反向索引（SADD + 与 token 键同 TTL 的 EXPIRE），
+    // 让「按账号名吊销」能在不依赖内存枚举的情况下覆盖 Redis 侧全部 token。
+    let members: Vec<&str> = vec![token];
+    if crate::store::cache::sadd(st, &mytok_name_key(name), &members).await.is_some() {
+        crate::store::cache::expire(st, &mytok_name_key(name), MYTOK_TTL).await;
+    }
     Ok(())
 }
 
-async fn mytok_redis_del(st: &crate::state::AppState, token: &str) -> anyhow::Result<()> {
+// 2026-10-13 安全修复：原 mytok_redis_del 已并入 mytok_redis_revoke（吊销要连
+// 反向索引一起清，单删 token 键不足以让旧登录失效），函数体保留在 revoke 里。
+
+/// 2026-10-13 安全修复：吊销路径专用——同时删 token 键本体 + 从反向索引 SET 里摘除。
+async fn mytok_redis_revoke(
+    st: &crate::state::AppState,
+    token: &str,
+    name: &str,
+) -> anyhow::Result<()> {
     crate::store::cache::del(st, &mytok_key(token)).await;
+    // SREM 失败只是降级（SET 有 24h EXPIRE 兜底），不冒泡
+    let _ = crate::store::cache::srem(st, &mytok_name_key(name), &[token]).await;
     Ok(())
 }
 
@@ -362,8 +387,17 @@ pub(crate) async fn my_token_restore(st: &crate::state::AppState, token: &str) -
     if my_token_take(token).is_some() {
         return my_token_take(token); // 内存里有，直接用
     }
+    // 2026-10-13 安全修复：回填前先校验该 token 仍在反向索引 mytokname:<name> 里。
+    // 旧 token 若已被吊销（DEL + SREM），SMEMBERS 里不会再有它——即使 Redis 侧
+    // mytok:<token> 键因故残留，也不允许复活进内存。不在索引里（含索引键丢失/
+    // 整体过期）一律按「已吊销」处理：返回 None 且不回填内存（失败关闭，宁拒不放）。
     let raw = crate::store::cache::get(st, &mytok_key(token)).await?;
     let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let owner = v.get("name").and_then(|n| n.as_str()).unwrap_or_default();
+    let members = crate::store::cache::smembers(st, &mytok_name_key(owner)).await;
+    if !members.iter().any(|t| t == token) {
+        return None; // 不在反向索引里 = 已吊销：不回填内存，视为未登录
+    }
     let pid = v.get("pid")?.as_u64()?;
     let team = v.get("team")?.as_str()?.to_string();
     let name = v.get("name")?.as_str()?.to_string();
@@ -389,15 +423,32 @@ pub(crate) fn my_tokens_revoke(name: &str) {
         m.retain(|_, (_, _, n, _)| *n != name);
         removed
     };
-    // Redis 端同步删除（拿不到 Redis 静默跳过）
-    for token in revoked {
-        mytok_redis_sync(move || async move {
-            if let Some(st) = APP_STATE.get().cloned() {
-                mytok_redis_del(&st, &token).await?;
+    // 2026-10-13 安全修复：内存可见的 token 照旧逐个吊销；
+    // 同时必须处理「进程重启后内存为空」的情况——改密前签发的旧 token 还躺在
+    // Redis 里，等 my_token_restore 回填就复活了。所以无论内存里有没有，
+    // 都从反向索引 mytokname:<name> 取该账号在 Redis 侧的全部 token 逐个 DEL + SREM，
+    // 完全不依赖内存枚举。
+    // 2026-10-13 安全修复：name 是调用方传进来的 &str，mytok_redis_sync 的异步工厂
+    // 要求 'static，先克隆成 owned 再 move 进闭包，避免生命周期逃逸（E0521）。
+    let name_owned = name.to_string();
+    mytok_redis_sync(move || async move {
+        if let Some(st) = APP_STATE.get().cloned() {
+            let name = name_owned;
+            // 1) Redis 反向索引里的全部 token（含本进程没见过的）
+            let mut all: Vec<String> =
+                crate::store::cache::smembers(&st, &mytok_name_key(&name)).await;
+            // 2) 内存枚举到的也合并进去（极端情况：反向索引写失败但 token 键写成功了）
+            for t in revoked {
+                if !all.contains(&t) {
+                    all.push(t);
+                }
             }
-            anyhow::Ok(())
-        });
-    }
+            for token in all {
+                mytok_redis_revoke(&st, &token, &name).await?;
+            }
+        }
+        anyhow::Ok(())
+    });
 }
 
 /// 只读一眼 token 对应的账号（不消费）：公开 API 中间件用它给访问日志带账号。

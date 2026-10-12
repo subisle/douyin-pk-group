@@ -1001,14 +1001,19 @@ impl MyAccountInfo {
     }
 }
 
-/// 短信验证码 = 密码：4~20 位纯数字（用户口径「验证码数字就是密码」）
+/// 短信验证码 = 密码：6~20 位纯数字（用户口径「验证码数字就是密码」）
+///
+/// 修复6：注册密码下限统一 6（与 validate_my_account 的 6~20 对齐，原先是 4~20 不一致）。
+/// 注意**只收紧注册路径**：登录校验在 my_account_check_login（不比长度、只比哈希），
+/// 存量 4~5 位密码账号的登录不受影响；validate_my_code 只在注册时被调用，
+/// 没有其它调用点依赖 4 位下限。
 pub fn validate_my_code(code: &str) -> std::result::Result<String, String> {
     let c = code.trim();
     if c.is_empty() {
         return Err("请输入短信验证码".into());
     }
-    if !c.chars().all(|ch| ch.is_ascii_digit()) || c.len() < 4 || c.len() > 20 {
-        return Err("验证码格式不对：应为 4~20 位数字（验证码就是密码）".into());
+    if !c.chars().all(|ch| ch.is_ascii_digit()) || c.len() < 6 || c.len() > 20 {
+        return Err("验证码格式不对：应为 6~20 位数字（验证码就是密码）".into());
     }
     Ok(c.to_string())
 }
@@ -1102,7 +1107,7 @@ pub async fn my_account_info(st: &AppState, key: &str) -> Option<MyAccountInfo> 
 /// 展示端自助注册（2026-10-12 审计修订）：**手机号 = 账号，短信验证码 = 密码，注册时直接填主播姓名**。
 ///
 /// 规则：
-/// - 手机号 / 验证码都是纯数字；手机号 5~20 位、验证码 4~20 位
+/// - 手机号 / 验证码都是纯数字；手机号 5~20 位、验证码 6~20 位（修复6：下限 4→6，与登录密码口径统一）
 /// - **主播姓名必须能在台账（person 表）里精确查到**，查不到直接拒绝（避免随便填个名字就进站）
 /// - 手机号已存在（管理员手建或已注册）→ 拒绝，引导去登录
 /// - 该姓名已经有账号了 → 拒绝（一人一号）

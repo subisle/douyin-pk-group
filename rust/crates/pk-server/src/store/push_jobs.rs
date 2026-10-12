@@ -39,6 +39,10 @@ pub async fn push_job_enqueue(st: &AppState, team: &str, biz_date: &str, run_at:
 }
 
 /// 取一条到点的 pending 任务并立刻标成 running（抢占，多实例也只推一次）
+///
+/// 修复5：扫描条件同时覆盖「到点的待重试任务」（状态 `failed:N`，N=已重试次数，
+/// 0..3）——它们要等退避窗口过完才算到点（done_at 存失败/重试时刻，
+/// `done_at + 5*2^(N-1) 分钟 <= now` 才重新可取）。
 pub async fn push_job_take(st: &AppState, now: &str) -> Option<(i64, String, String)> {
     let pool = w(st).ok()?;
     let row = sqlx::query(&crate::pq::rewrite(
@@ -46,8 +50,12 @@ pub async fn push_job_take(st: &AppState, now: &str) -> Option<(i64, String, Str
          WHERE (status = 'pending' AND run_at <= ?)
             OR (status = 'running' AND done_at = '' AND run_at <= ?
                 AND created_at <> '' AND created_at < ?::timestamptz - INTERVAL '5 minutes')
+            OR (status LIKE 'failed:%' AND done_at <> '' AND done_at <= ?::timestamptz
+                - make_interval(mins => 5 * (1 << LEAST(
+                     GREATEST(SUBSTRING(status FROM 8)::int - 1, 0), 5))))
          ORDER BY run_at LIMIT 1",
     ))
+    .bind(now)
     .bind(now)
     .bind(now)
     .bind(now)
@@ -63,7 +71,8 @@ pub async fn push_job_take(st: &AppState, now: &str) -> Option<(i64, String, Str
     }
     let taken = sqlx::query(&crate::pq::rewrite(
         "UPDATE push_jobs SET status = 'running'
-         WHERE id = ? AND (status = 'pending' OR (status = 'running' AND done_at = ''))",
+         WHERE id = ? AND (status = 'pending' OR status LIKE 'failed:%'
+                           OR (status = 'running' AND done_at = ''))",
     ))
     .bind(id)
     .execute(pool)
@@ -137,12 +146,45 @@ pub async fn push_stats(st: &AppState) -> serde_json::Value {
 }
 
 /// 任务结束（成功 / 失败都记一笔，失败原因写 note 供后台查看）
+///
+/// 修复5·重试：push_jobs 表没有 retries 列（不新增迁移），把已重试次数编码在
+/// status 里（`failed:N`，N=已重试次数；成功落 done，额度用完落终态 failed）。
+/// 失败且 N < 3 时标成 `failed:N+1`，done_at 记失败时刻——push_job_take 会按
+/// `done_at + 5*2^(N-1) 分钟` 的退避窗口把它重新捞出来跑（5/10/20 分钟三档）。
+/// note 始终保留最后一次的失败原因；后台「机器人」页能看到 N 的变化轨迹。
 pub async fn push_job_finish(st: &AppState, id: i64, ok: bool, note: &str) {
     if let Ok(pool) = w(st) {
+        // 修复5：读当前已重试次数（pending=0，failed:N=N；终态 done/failed 也按 0 读，
+        // 但对终态来说 ok=true 时覆盖成 done 无害，ok=false 时只有任务不存在才会走到）
+        let attempts: i64 = sqlx::query(&crate::pq::rewrite(
+            "SELECT CASE
+                   WHEN status = 'pending' THEN 0
+                   WHEN status LIKE 'failed:%' THEN COALESCE(SUBSTRING(status FROM 8)::int, 0)
+                   ELSE 0 END
+             FROM push_jobs WHERE id = ?",
+        ))
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|r| r.try_get::<i64, _>(0).ok())
+        .unwrap_or(0);
+        // 修复5：先算好目标状态再回写。
+        // ok → 终态 done（清掉失败计数）；
+        // 失败且 attempts < 3 → `failed:N+1`（N=当前已重试次数），take 按退避窗口回捞；
+        // 失败且额度用完 → 终态 failed，不再自动重试。
+        let next_status = if ok {
+            "done".to_string()
+        } else if attempts < MAX_JOB_RETRIES {
+            format!("failed:{}", attempts + 1)
+        } else {
+            "failed".to_string()
+        };
         let _ = sqlx::query(&crate::pq::rewrite(
             "UPDATE push_jobs SET status = ?, done_at = ?, note = ? WHERE id = ?",
         ))
-        .bind(if ok { "done" } else { "failed" })
+        .bind(next_status)
         .bind(now_str())
         .bind(note.chars().take(200).collect::<String>())
         .bind(id)
@@ -150,6 +192,9 @@ pub async fn push_job_finish(st: &AppState, id: i64, ok: bool, note: &str) {
         .await;
     }
 }
+
+/// 修复5：单条推送任务的最大自动重试次数（不含首跑）。
+pub const MAX_JOB_RETRIES: i64 = 3;
 
 /* --------------------------- 追分目标 --------------------------- */
 

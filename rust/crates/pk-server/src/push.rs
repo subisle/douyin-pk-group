@@ -438,6 +438,44 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
         Vec::new()
     };
 
+    /* 修复1·性能：🚩 小红旗条与 build_month（4 条聚合 SQL + 全量名册）对全团是
+    同一份结果（DailyReport 只依赖 team+date，daily_star 也在 rep 里），原先在
+    订阅者循环里每人各算一次 —— N 个订阅者 = N 次全量重算。现在提到循环外算一次；
+    循环内只做按人的 render_month_svg_pages（水印 personal_mark 因收件人而异）
+    与 resvg PNG 转换（PNG 必须按人渲染，保留）。构建失败只记一次日志，
+    month_rep 保持 None → 循环内 svgs 为空，每个订阅者照旧退回文本推送，
+    行为与原先逐人失败一致。 */
+    let star = if bindings.iter().any(|b| b.daily_report) {
+        let ov = crate::store::config_get(st, "star_override").await;
+        let auto = rank_items
+            .first()
+            .map(|(_, name, w)| (name.clone(), *w));
+        let (title, def) = parse_star_override(ov.as_deref(), auto);
+        let icon = crate::store::config_get(st, "star_icon")
+            .await
+            .unwrap_or_default();
+        let icon = icon.trim().to_string();
+        def.map(|(name, wave)| crate::report::StarBanner {
+            title,
+            name,
+            wave,
+            icon,
+        })
+    } else {
+        None
+    };
+    let month_rep: Option<crate::report::DailyReport> = if bindings.iter().any(|b| b.daily_report) {
+        match crate::report::build_month(st, date, team, star.clone()).await {
+            Ok(rep) => Some(rep),
+            Err(e) => {
+                tracing::warn!(error = %e, "月榜数据构建失败，全部订阅者退回文本推送");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     for (idx, b) in bindings.iter().enumerate() {
         let mut sent_any = false;
 
@@ -464,29 +502,12 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
                    - config star_override：手动指定「称号|人名|音浪」（ Trophy 人工颁奖），
                    没配 override 就自动取当日音浪第一。
                    - config star_icon：小红旗条旁的 Material Symbols 图标名，空 = 不带图标。 */
-                let star = {
-                    let ov = crate::store::config_get(st, "star_override").await;
-                    let auto = rank_items
-                        .first()
-                        .map(|(_, name, w)| (name.clone(), *w));
-                    let (title, def) = parse_star_override(ov.as_deref(), auto);
-                    let icon = crate::store::config_get(st, "star_icon")
-                        .await
-                        .unwrap_or_default();
-                    let icon = icon.trim().to_string();
-                    def.map(|(name, wave)| crate::report::StarBanner {
-                        title,
-                        name,
-                        wave,
-                        icon,
-                    })
-                };
-                let svgs = match crate::report::build_month(st, date, team, star.clone()).await {
-                    Ok(rep) => crate::report::render_month_svg_pages(&rep, PAGE_ROWS, &b.name),
-                    Err(e) => {
-                        tracing::warn!(error = %e, "月榜 SVG 渲染失败，退回文本推送");
-                        Vec::new()
-                    }
+                /* 🚩 小红旗条与月榜数据已在循环外算好（修复1·性能）：rep 对全团相同，
+                这里只按收件人 render_month_svg_pages（personal_mark 水印因人而异）
+                并转 PNG。 */
+                let svgs = match &month_rep {
+                    Some(rep) => crate::report::render_month_svg_pages(rep, PAGE_ROWS, &b.name),
+                    None => Vec::new(), // 构建失败（循环外已 warn）→ 退回文本推送
                 };
                 if svgs.is_empty() {
                     tracing::info!(account = %b.name, text = %text.replace('\n', " | "), "推送·每日报告(文本)");

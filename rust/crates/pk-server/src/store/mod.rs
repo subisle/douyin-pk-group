@@ -581,7 +581,8 @@ mod tests {
         );
     }
 
-    /// 密码规则：4~20 位字母或数字（2026-10-10 放宽）；符号/空格/太短仍拒绝
+    /// 密码规则：6~20 位字母或数字（2026-10-12 审计 M4：下限 4→6）；符号/空格/太短仍拒绝。
+    /// 登录路径（my_account_check_login）不比长度，存量 4~5 位密码账号登录不受影响。
     #[test]
     fn my_account_password_rule() {
         assert!(validate_my_account("shuai4444", "shuai4444").is_ok());
@@ -596,7 +597,7 @@ mod tests {
         );
         assert!(
             validate_my_account("啸帆", "123").is_err(),
-            "少于 4 位 → 拒绝"
+            "少于 6 位 → 拒绝"
         );
         assert!(validate_my_account("", "13312345678").is_err());
         assert!(validate_my_account("啸帆", "").is_err());
@@ -607,13 +608,15 @@ mod tests {
 mod register_tests {
     use super::*;
 
-    /// 注册密码 = 短信验证码：必须是 4~20 位纯数字（用户口径「验证码数字就是密码」）
+    /// 注册密码 = 短信验证码：必须是 6~20 位纯数字（用户口径「验证码数字就是密码」；
+    /// 修复6：下限 4→6，与登录密码 6~20 口径统一——只收紧注册，存量短密码登录不受影响）
     #[test]
     fn my_code_is_digits_only() {
         assert_eq!(validate_my_code("246810").unwrap(), "246810");
-        assert_eq!(validate_my_code(" 1357 ").unwrap(), "1357");
+        assert_eq!(validate_my_code(" 246810 ").unwrap(), "246810");
         assert!(validate_my_code("").is_err(), "空验证码不给过");
         assert!(validate_my_code("123").is_err(), "太短不给过");
+        assert!(validate_my_code("13579").is_err(), "5 位也不给过（修复6：下限 6）");
         assert!(
             validate_my_code("123456789012345678901").is_err(),
             "太长不给过"

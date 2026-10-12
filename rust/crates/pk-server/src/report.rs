@@ -44,10 +44,16 @@ pub struct ReportRow {
     pub total_wave: i64,
 }
 
+/// SVG/XML 文本转义。修复4：补 &quot; / &#39; —— 水印 personal_mark、师傅分组等
+/// 都来自用户可控字符串（账号名、台账姓名），原版只转义 & < >，名字里带引号
+/// 会提前闭合属性/标签，构成 SVG 注入面。& → &amp; 的既有行为保持不变，
+/// 已有调用点不会双转义（转义只做一次，顺序 & 在前）。
 fn esc(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
 fn fmt_wan(v: i64) -> String {
@@ -283,7 +289,8 @@ pub fn render_svg_pages(rep: &DailyReport, per_page: usize, personal_mark: &str)
         return Vec::new();
     }
     if per_page == 0 || rep.rows.len() <= per_page {
-        return vec![render_svg_labeled(rep, "", rep.rows.len(), personal_mark)];
+        // 单页/首页：名次从 1 开始，row_offset = 0（修复2）
+        return vec![render_svg_labeled(rep, "", rep.rows.len(), personal_mark, 0)];
     }
     /* 排序口径与 render_svg 一致：音浪降序（rows 已按此排好，不重复排）。
        第 1 页取已开播者（保持名次），第 2 页放未开播者。开播者超过一页时
@@ -330,15 +337,23 @@ pub fn render_svg_pages(rep: &DailyReport, per_page: usize, personal_mark: &str)
                 daily_star: rep.daily_star.clone(),
                 rows,
             };
-            render_svg_labeled(&page_rep, &page_label, total, personal_mark)
+            render_svg_labeled(&page_rep, &page_label, total, personal_mark, pi * per_page)
         })
         .collect()
 }
 
 /// render_svg 的分页变体：标题带页码、footer 人数显示全团口径。
 /// `total` = 全团人数（跨页统计用）；页内行数 = 本页行数。
-fn render_svg_labeled(rep: &DailyReport, page_label: &str, total: usize, personal_mark: &str) -> String {
-    render_svg_labeled_inner(rep, page_label, total, personal_mark, false)
+/// `row_offset` = 本页第一行在全团榜单里的名次偏移（修复2：前面页行数之和，
+/// 名次跨页连续；原先 `total - n` 只对「两页且当前是末页」成立，>2 页时第 2 页起编号错）。
+fn render_svg_labeled(
+    rep: &DailyReport,
+    page_label: &str,
+    total: usize,
+    personal_mark: &str,
+    row_offset: usize,
+) -> String {
+    render_svg_labeled_inner(rep, page_label, total, personal_mark, false, row_offset)
 }
 
 /// 月榜分页渲染（2026-10-12 微信推送口径）：本月累计音浪 + 当月未播天数，
@@ -352,7 +367,7 @@ pub fn render_month_svg_pages(
         return Vec::new();
     }
     if per_page == 0 || rep.rows.len() <= per_page {
-        return vec![render_svg_labeled_inner(rep, "", rep.rows.len(), personal_mark, true)];
+        return vec![render_svg_labeled_inner(rep, "", rep.rows.len(), personal_mark, true, 0)];
     }
     let mut pages_rows: Vec<Vec<ReportRow>> = Vec::new();
     let mut cur: Vec<ReportRow> = Vec::new();
@@ -393,7 +408,8 @@ pub fn render_month_svg_pages(
                 daily_star: rep.daily_star.clone(),
                 rows,
             };
-            render_svg_labeled_inner(&page_rep, &page_label, total, personal_mark, true)
+            // 修复2：第 pi 页的名次从「前面页行数之和」起编（pi*per_page），跨页连续
+            render_svg_labeled_inner(&page_rep, &page_label, total, personal_mark, true, pi * per_page)
         })
         .collect()
 }
@@ -405,6 +421,9 @@ fn render_svg_labeled_inner(
     total: usize,
     personal_mark: &str,
     is_month: bool,
+    // 修复2：本页第一行的名次偏移 = 前面页行数之和（0 = 单页/首页）。
+    // 原先函数内用 `total - n` 推导，只对「两页且当前是末页」成立。
+    row_offset: usize,
 ) -> String {
     let n = rep.rows.len();
     // 头部高度：有每日之星条时多 42px（表头/行整体下移）
@@ -433,10 +452,14 @@ fn render_svg_labeled_inner(
     // 水印层（2026-10-12 用户口径）：推送图只压收件人艺名（如「浩月」），
     // 斜排密铺防转发；管理后台网页版（无 personal_mark）保持通用水印。
     // ⚠️ 渲染顺序：水印压在最顶层（条形图/数值之上）——先攒着，</svg> 前再拼接。
+    // 修复4：水印文字（personal_mark 来自收件人账号名）必须过 esc——两层隐形水印
+    // 与 footer 呼应处共用同一份转义文本；seed 仍用原始 personal_mark 计算，
+    // 保证转义前后的水印位置不变（不因修复4改变随机种子）。
+    let mark_escaped = esc(personal_mark.trim());
     let marks: Vec<String> = if personal_mark.trim().is_empty() {
         vec![WATERMARK.to_string()]
     } else {
-        vec![personal_mark.trim().to_string()]
+        vec![mark_escaped.clone()]
     };
     // 随机分布（2026-10-12 用户口径）：网格基础上每点加 ±18px 抖动。
     // 种子 = 日期|团别|收件人 的 FNV hash → 同一张图稳定可复现（检测方按同种子
@@ -541,8 +564,8 @@ fn render_svg_labeled_inner(
         ));
     }
 
-    // 数据行（名次按全团连续编号：页 2 的第 1 行 = 前页行数 + 1）
-    let row_offset = total - n; // 最后一页时 = 前面页的行数和（仅单前页时成立）
+    // 数据行（名次按全团连续编号：修复2 —— row_offset 参数由分页方传入（前面页行数之和），
+    // >2 页时编号依然连续；原先函数内 `total - n` 只在「两页且当前是末页」时碰巧正确）
     let bar_full = 242.5f64;
     for (i, r) in rep.rows.iter().enumerate() {
         let y = header_h + i as f64 * 48.0;
@@ -629,7 +652,8 @@ fn render_svg_labeled_inner(
     ));
     s.push_str(&format!(
         "<text x=\"360\" y=\"{footer_y:.0}\" font-size=\"12\" fill=\"#98A2B3\" font-weight=\"700\" text-anchor=\"middle\" dominant-baseline=\"central\" font-family=\"{FONT}\">{}</text>",
-        if personal_mark.trim().is_empty() { WATERMARK } else { personal_mark.trim() }
+        // 修复4：personal_mark 同样要过 esc（与水印层共用 mark_escaped）
+        if personal_mark.trim().is_empty() { WATERMARK.to_string() } else { mark_escaped }
     ));
 
     // 底部警示条：未播者按师傅分组（只出现在含未播名单的页）
@@ -657,7 +681,8 @@ fn render_svg_labeled_inner(
 }
 
 pub fn render_svg(rep: &DailyReport) -> String {
-    render_svg_labeled(rep, "", rep.rows.len(), "")
+    // 单页渲染：名次从 1 开始，row_offset = 0（修复2 新增参数）
+    render_svg_labeled(rep, "", rep.rows.len(), "", 0)
 }
 
 
@@ -868,8 +893,8 @@ mod tests {
             no_master: vec![],
             daily_star: None,
         };
-        let a = render_svg_labeled_inner(&build("浩月"), "", 1, "浩月", true);
-        let b = render_svg_labeled_inner(&build("狼征"), "", 1, "狼征", true);
+        let a = render_svg_labeled_inner(&build("浩月"), "", 1, "浩月", true, 0);
+        let b = render_svg_labeled_inner(&build("狼征"), "", 1, "狼征", true, 0);
         // 隐形双层都在：白 0.35 + 黑 0.012
         assert!(a.contains("fill-opacity=\"0.35\"") && a.contains("fill-opacity=\"0.012\""));
         // 文字是各自艺名，且互不相同
@@ -883,7 +908,7 @@ mod tests {
         assert!(b.contains(">狼征</text>"));
         assert!(!b.contains(">浩月</text>"), "狼征的图里不能出现浩月水印");
         // 管理后台版（无 personal_mark）保持通用水印，不带个人名
-        let admin = render_svg_labeled_inner(&build(""), "", 1, "", true);
+        let admin = render_svg_labeled_inner(&build(""), "", 1, "", true, 0);
         assert!(admin.contains(WATERMARK));
         assert!(!admin.contains(">浩月</text>"));
     }
@@ -910,7 +935,7 @@ mod tests {
                 icon: String::new(),
             }),
         };
-        let svg = render_svg_labeled_inner(&rep, "", 1, "浩月", true);
+        let svg = render_svg_labeled_inner(&rep, "", 1, "浩月", true, 0);
         // 表头锚点与列值锚点一一对应：主播姓名 start @72.6，累计总音浪 end @708
         let h_name = text_element_of(&svg, "主播姓名");
         assert!(h_name.contains("x=\"72.6\""), "姓名表头 x 应与列值同为 72.6: {h_name}");
@@ -960,7 +985,7 @@ mod tests {
                 icon: "data:image/png;base64,iVBOR&x<y".into(),
             }),
         };
-        let svg = render_svg_labeled_inner(&rep, "", 1, "", true);
+        let svg = render_svg_labeled_inner(&rep, "", 1, "", true, 0);
         // data:image 图标走 <image>，href 经 esc() 转义 & < >
         assert!(svg.contains(
             "<image x=\"24\" y=\"72\" width=\"32\" height=\"32\" href=\"data:image/png;base64,iVBOR&amp;x&lt;y\" preserveAspectRatio=\"xMidYMid meet\"/>"

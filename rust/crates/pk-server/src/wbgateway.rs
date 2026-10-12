@@ -13,6 +13,8 @@
 //!
 //! 配置（.env）：
 //!   WORKBUDDY_PANEL_URL       面板地址，默认 <http://64.188.8.149:8788>
+//!                             （2026-10-13 安全修复：默认值仅为向后兼容，
+//!                              生产必须配成 HTTPS —— 面板密码要过这条链路）
 //!   WORKBUDDY_PANEL_PASSWORD  面板密码；**没配 = 注册页不显示 OAuth 步骤**，其余注册照常
 //!
 //! 安全：面板密码只留在服务端（环境变量 + 内存里的 token），`/panel/*` 一律不转发给浏览器；
@@ -23,8 +25,23 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-/// 默认面板地址（用户 2026-10-11 给的口径）
+/// 默认面板地址（用户 2026-10-11 给的口径）。
+///
+/// 2026-10-13 安全修复：面板密码经这条链路明文 POST（/panel/login），硬编码公网
+/// IP + http 意味着密码全程明文过公网。保留默认值只为向后兼容（没配环境变量的
+/// 旧部署不炸），**生产必须通过 WORKBUDDY_PANEL_URL 配成 HTTPS 地址**；
+/// 该地址也可按 config.rs::env 的口径用环境变量覆盖（空串视为未配置）。
 pub const DEFAULT_PANEL_URL: &str = "http://64.188.8.149:8788";
+
+/// 读环境变量口径（与 config.rs 的 env()/env_or() 一致：未配置或空串都算没配）。
+/// 2026-10-13 安全修复：面板地址从硬编码改为可被环境覆盖，配合生产切 HTTPS。
+fn panel_url_or_default() -> String {
+    std::env::var("WORKBUDDY_PANEL_URL")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| DEFAULT_PANEL_URL.to_string())
+}
 
 const UA: &str = "pk-server/1.0 (+workbuddy-register)";
 
@@ -43,11 +60,10 @@ impl WbGateway {
             .ok()
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty())?;
-        let base = std::env::var("WORKBUDDY_PANEL_URL")
-            .ok()
-            .map(|v| v.trim().to_string())
-            .filter(|v| !v.is_empty())
-            .unwrap_or_else(|| DEFAULT_PANEL_URL.to_string());
+        // 2026-10-13 安全修复：改走 panel_url_or_default()（读 WORKBUDDY_PANEL_URL，
+        // 与 config.rs::env 同口径），不再依赖这里的内联读取；默认值仅向后兼容，
+        // 生产应配 HTTPS 地址覆盖。
+        let base = panel_url_or_default();
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(20))
             .connect_timeout(Duration::from_secs(8))

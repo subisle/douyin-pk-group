@@ -59,6 +59,18 @@ pub async fn push_state(st: &AppState, name: &str) -> serde_json::Value {
     })
 }
 
+/// 修复3：push_bindings.team 白名单归一（该列会被 report.rs 内联进 `p.gender='{team}'`）。
+/// 返回 None = 完全非法的输入（调用方拒绝）；空串按 all 归一（管理员观看账号口径）。
+pub(crate) fn normalize_push_team(team: &str) -> Option<&'static str> {
+    match team.trim() {
+        "male" => Some("male"),
+        "female" => Some("female"),
+        "all" => Some("all"),
+        "" => Some("all"), // 空团别 = 台账查不到的观看账号，按 all（全站口径）
+        _ => None,
+    }
+}
+
 /// 写入/刷新绑定码（保留已有绑定；重新生成只在未绑定时用于首次绑定）。
 /// 已绑定时也允许生成新码（用于换微信号重绑），绑定成功会覆盖旧会话。
 pub async fn push_set_code(
@@ -68,6 +80,13 @@ pub async fn push_set_code(
     person_id: u64,
     code: &str,
 ) -> Result<()> {
+    // 修复3·健壮：team 白名单校验。team 会原样落 push_bindings.team，
+    // 而推送引擎/report.rs 拼 SQL 用 `p.gender='{team}'` 内联（见 report.rs build/build_month），
+    // URL path 里的任意值直通这里就能污染那段 SQL。入口只放行 male/female/all
+    // （空串归一为 all = 观看账号口径），其余值（含引号、SQL 片段）一律报错，
+    // 注入面在源头封死。调用方（public_teams/wx.rs）会把该错误转成 400。
+    let team = normalize_push_team(team)
+        .ok_or_else(|| anyhow::anyhow!("团别参数不合法（只接受 male/female/all）"))?;
     let pool = w(st)?;
     let expires = (chrono::Local::now() + chrono::Duration::minutes(30))
         .format("%Y-%m-%d %H:%M:%S")
@@ -729,6 +748,10 @@ pub async fn push_bind_account(
     conversation_id: &str,
     to_user_id: &str,
 ) {
+    // 修复3·健壮：与 push_set_code 同一口径的 team 白名单（team 会落 push_bindings.team，
+    // report.rs 用 `p.gender='{team}'` 内联拼 SQL）。合法值只有 male/female/all，
+    // 空串（台账查不到的观看账号）按 all 归一，其余一律拒绝写库。
+    let team = normalize_push_team(team);
     let Ok(pool) = w(st) else {
         return;
     };

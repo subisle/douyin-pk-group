@@ -150,6 +150,58 @@ pub async fn unlock(st: &AppState, key: &str) -> bool {
     .is_some()
 }
 
+/* ------------------------------- 集合（SET） ------------------------------- */
+
+/// 2026-10-13 安全修复（my token 反向索引）：`SADD key member…`，
+/// 返回成功加入的成员数；失败降级返回 `None`（调用方静默跳过）。
+/// 语义同本文件其它 API：Redis 不可用绝不把错误冒泡成 5xx。
+pub async fn sadd(st: &AppState, key: &str, members: &[&str]) -> Option<i64> {
+    // 空成员列表会让 SADD 报参数错误，直接当降级处理
+    if members.is_empty() {
+        return None;
+    }
+    // 注意：把成员切片整体作为一个 arg 传（redis 对 &[] 实现了 ToRedisArgs），
+    // 不要在临时块里另建 cmd —— 那会让临时量在 future await 期间被 drop（E0597）。
+    redis_op!(st, "SADD", |c| redis::cmd("SADD")
+        .arg(key)
+        .arg(members)
+        .query_async::<i64>(&mut c))
+}
+
+/// 2026-10-13 安全修复（my token 反向索引）：`SMEMBERS key`，
+/// 返回集合全部成员；未配置 / 失败 / 未命中 → 空表（调用方按降级处理）。
+pub async fn smembers(st: &AppState, key: &str) -> Vec<String> {
+    redis_op!(st, "SMEMBERS", |c| redis::cmd("SMEMBERS")
+        .arg(key)
+        .query_async::<Vec<String>>(&mut c))
+    .unwrap_or_default()
+}
+
+/// 2026-10-13 安全修复（my token 反向索引）：`SREM key member…`，
+/// 返回成功移除的成员数；失败降级返回 `None`。
+pub async fn srem(st: &AppState, key: &str, members: &[&str]) -> Option<i64> {
+    if members.is_empty() {
+        return None;
+    }
+    // 同 sadd：切片整体作为一个 arg，避免临时 cmd 的生命周期问题（E0597）。
+    redis_op!(st, "SREM", |c| redis::cmd("SREM")
+        .arg(key)
+        .arg(members)
+        .query_async::<i64>(&mut c))
+}
+
+/// 2026-10-13 安全修复（my token 反向索引）：`EXPIRE key ttl`，
+/// 让整条反向索引 SET 随 token 同生命周期滚动过期，避免死集合常驻。
+/// 失败降级返回 `false`。
+pub async fn expire(st: &AppState, key: &str, ttl_secs: u64) -> bool {
+    redis_op!(st, "EXPIRE", |c| redis::cmd("EXPIRE")
+        .arg(key)
+        .arg(ttl_secs)
+        .query_async::<i64>(&mut c))
+    .map(|n| n > 0)
+    .unwrap_or(false)
+}
+
 /// `/api/health` 用的三态：未配置 = `"disabled"`；PING 通 = `"up"`；配了但连不上 = `"down"`。
 ///
 /// `down` 只表示缓存层降级，不影响整体 health 语义（HTTP 仍 200）。

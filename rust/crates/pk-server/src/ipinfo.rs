@@ -266,16 +266,23 @@ pub fn source_names(set: SourceSet) -> Vec<&'static str> {
 
 /* ------------------------------- 请求 IP ------------------------------- */
 
-/// 生产流量经 Caddy / Cloudflare 到本机。只信任回环 / 私网连接传来的转发头，
-/// 避免公网直连伪造 X-Forwarded-For。
+/// 生产流量经 Caddy（→ 127.0.0.1）到本机。
+///
+/// 2026-10-13 安全修复（与 auth.rs login_source_key / admin.rs client_ip_for_limit
+/// 同口径）：XFF **第一跳是客户端可任意伪造的值**（`curl -H "X-Forwarded-For: 1.2.3.4"`
+/// 即可换地区绕过门禁）；XFF 链尾才是反代追加的、客户端无法篡改的一跳。
+/// 所以只信任来自回环连接的 X-Forwarded-For，且**取链尾**；其余情况一律用直连地址。
+/// （旧实现还认 cf-connecting-ip / x-real-ip 的第一跳，同样可被伪造，已移除。）
 pub fn request_ip(addr: SocketAddr, headers: &HeaderMap) -> String {
-    if is_internal(&addr.ip()) {
-        let names = ["cf-connecting-ip", "x-real-ip", "x-forwarded-for"];
-        for name in names {
-            if let Some(raw) = headers.get(name).and_then(|v| v.to_str().ok()) {
-                let first = raw.split(',').next().unwrap_or_default().trim();
-                if let Ok(ip) = first.parse::<IpAddr>() {
-                    return ip.to_string();
+    if addr.ip().is_loopback() {
+        if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+            // 取链尾（最接近服务端的一跳），并做 IP 合法性校验，非法则回落直连地址
+            if let Some(last) = xff.rsplit(',').next() {
+                let ip = last.trim();
+                if !ip.is_empty() {
+                    if let Ok(parsed) = ip.parse::<IpAddr>() {
+                        return parsed.to_string();
+                    }
                 }
             }
         }
@@ -1708,15 +1715,23 @@ mod tests {
     fn request_ip_prefers_forwarded_headers_only_from_internal() {
         use axum::http::HeaderMap;
         let mut h = HeaderMap::new();
+        // 2026-10-13 安全修复：XFF 取链尾（反代追加的一跳，不可伪造），
+        // 客户端塞在第一跳的伪造值 1.2.3.4 必须被忽略。
         h.insert("x-forwarded-for", "1.2.3.4, 10.0.0.1".parse().unwrap());
         let local: SocketAddr = "127.0.0.1:5555".parse().unwrap();
-        assert_eq!(request_ip(local, &h), "1.2.3.4");
+        assert_eq!(request_ip(local, &h), "10.0.0.1");
         let public: SocketAddr = "8.8.8.8:5555".parse().unwrap();
         assert_eq!(request_ip(public, &h), "8.8.8.8");
 
+        // cf-connecting-ip 同样可被客户端伪造，已不再信任，回落直连地址
         let mut h = HeaderMap::new();
         h.insert("cf-connecting-ip", "223.5.5.5".parse().unwrap());
-        assert_eq!(request_ip(local, &h), "223.5.5.5");
+        assert_eq!(request_ip(local, &h), "127.0.0.1");
+
+        // XFF 链尾不是合法 IP 时也应回落直连地址，不能 panic / 返回脏值
+        let mut h = HeaderMap::new();
+        h.insert("x-forwarded-for", "not-an-ip".parse().unwrap());
+        assert_eq!(request_ip(local, &h), "127.0.0.1");
     }
 
     #[test]
