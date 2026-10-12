@@ -1343,8 +1343,15 @@ async function api(p) {
   if (r.status === 401) { sessionExpired(); throw new Error('请先登录'); }
   let d = {};
   try { d = await r.json(); } catch (_) {}
-  /* 访问门禁（2026-10-11）：白名单外的 IP 后端统一 403，不清 token、不弹登录门 */
-  if (r.status === 403) { regionBlocked(d.error || '您的ip不在授权范围内'); throw new Error(d.error || '您的ip不在授权范围内'); }
+  /* 访问门禁（2026-10-11）：白名单外的 IP 后端统一 403，不清 token、不弹登录门。
+     2026-10-13：403 不再全是地区门禁 —— 后端用 `code` 区分（如族谱的
+     lineage_forbidden）。带 code 的是业务拒绝，抛给调用方就地展示；
+     只有不带 code 的（地区门禁）才整页替换，否则页面骨架会被整个换掉。 */
+  if (r.status === 403) {
+    if (d.code) throw Object.assign(new Error(d.error || '没有访问权限'), { code: d.code });
+    regionBlocked(d.error || '您的ip不在授权范围内');
+    throw new Error(d.error || '您的ip不在授权范围内');
+  }
   if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
   return d;
 }
@@ -2123,7 +2130,23 @@ let lineagePeriod = 'daily';
 
 async function loadLineage(period) {
   if (period) lineagePeriod = period;
-  const d = await api('/api/public/teams/' + TEAM + '/lineage?period=' + lineagePeriod);
+  let d;
+  try {
+    d = await api('/api/public/teams/' + TEAM + '/lineage?period=' + lineagePeriod);
+  } catch (e) {
+    /* 非师门成员：后端 403 + code=lineage_forbidden（2026-10-12 审计口径，产品口径是
+       「族谱给有师门归属的人看」）。这是本人的正常态，不是地区门禁 —— 页面骨架/导航
+       保留，只把内容区换成提示（原来落进 regionBlocked 会把整页换成地区门禁文案，
+       紧接着 $('mhSub') 取不到元素 → 整个页面挂掉）。 */
+    if (e && e.code === 'lineage_forbidden') {
+      $('mhSub').textContent = 'LINEAGE';
+      $('view').innerHTML = '<div class="empty" style="padding-top:80px">' +
+        '<span class="big">🔒</span><b>族谱仅对师门成员开放</b><br>' +
+        '有师傅或徒弟的账号才能查看师门树。</div>';
+      return;
+    }
+    throw e;
+  }
   lineageNodes = d.nodes || [];
   $('mhSub').textContent = 'LINEAGE ' + lineageNodes.length + ' 人';
   lineageQ = ''; lnHitIdx = 0; lnAllOpen = true;
@@ -3971,9 +3994,14 @@ function switchView(v, opts) {
   const s = (site && site.settings) || {};
   if (v === 'data' && s.dataEnabled === false) v = 'group';
   if (v === 'group') {
-    const sub = [...document.querySelectorAll('#subnav button')].find(b => !b.disabled);
-    if (s.groupEnabled === false || !sub) v = 'lineage';
-    else if (!sub.classList.contains('on')) curGroup = sub.dataset.g;
+    /* 还开着的子页（后台按赛事类型逐个关） */
+    const enabled = [...document.querySelectorAll('#subnav button:not([disabled])')];
+    if (s.groupEnabled === false || !enabled.length) v = 'lineage';
+    /* 2026-10-13 修「点子页被改道回首个子页」：原来拿"第一个按钮有没有 .on"当
+       "当前有没有选中子页"，可子导航点击早已把 curGroup 设成目标页，而 .on 还停在
+       上一次选中项 —— 于是只要第一个子页当前不是选中态，点第二个起的所有子页都会被
+       改道回第一个（实测 5 次点击 3 次无效）。改成：curGroup 不在还开着的列表里才落到第一个。 */
+    else if (!enabled.some(b => b.dataset.g === curGroup)) curGroup = enabled[0].dataset.g;
   }
   if (v === 'lineage' && (s.lineageEnabled === false || TEAM === 'female')) v = 'data';
   if (v === 'my' && s.loginRequired === false) v = 'data';
@@ -4030,8 +4058,10 @@ async function go() {
     if (seq !== loadSeq) return;          // 过期失败的报错也不许盖住新内容
     consecutiveFail++;
     if (consecutiveFail >= 2) show('stale', true);
-    $('mhSub').textContent = 'NETWORK';
-    $('view').innerHTML = '<div class="empty"><span class="big">📶</span>暂时取不到数据<br>' +
+    /* 页面骨架可能已被整页接管（地区门禁 regionBlocked）：取不到就别硬写 */
+    const mh = $('mhSub'), box = $('view');
+    if (mh) mh.textContent = 'NETWORK';
+    if (box) box.innerHTML = '<div class="empty"><span class="big">📶</span>暂时取不到数据<br>' +
       esc(e.message) + '</div>';
   } finally {
     if (seq === loadSeq) busyOff();
