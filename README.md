@@ -234,6 +234,36 @@ caddy reload
 上线 = `scripts/deploy/upload-db-vps147.sh` 把本机库整体 dump → scp → 恢复进生产 MariaDB
 （灌库前会先在目标机备份，见脚本头注释）。
 
+### 把 147 生产数据拉回本机（2026-10-12，PG 迁移）
+
+`scripts/pull-db-147.sh` 把 147（`https://pk.subisle.com`，MariaDB 容器 `pk-mariadb`）
+的生产库 `douyin` 拉到本机，恢复进本机 PG `douyin_dev`（pg-migration 分支目标库）：
+
+```bash
+PK147_PASS='<147 root 口令>' CONFIRM_DROP=1 scripts/pull-db-147.sh
+# 只拉 dump 不灌库（先看一眼再决定）：
+PK147_PASS='<147 root 口令>' scripts/pull-db-147.sh --dump-only
+```
+
+链路：容器内 `mariadb-dump`（root 口令从 147 的 `/opt/pk-server/.env` 读，不落本地文件）
+→ scp 到 `.dbmerge/` → `scripts/mysql2pg.py` 按目标库 `information_schema` 逐列对齐转换
+→ 灌库前先 `pg_dump` 备份 → `DROP SCHEMA` + `001_core.sql` 重建 → 灌数据 → `setval` 复位
+identity 序列 → 逐表行数对账。
+
+转换器要处理的三处不对称，都已经在代码里解决：
+
+1. **时区**：147 的 MariaDB 跑在 UTC，`mariadb-dump` 吐的是 UTC 墙上时间的裸串，目标列是
+   `timestamptz`（会话时区 Asia/Shanghai）。直接用会被当成北京时间解释、整体差 8 小时，
+   所以时间值统一写成 `'...'::timestamp AT TIME ZONE 'UTC'`。
+2. **二进制 IP**：`varbinary(16)` 在 dump 里有引号包裹的转义序列（`'\x7f\0\0\x01'`）和
+   裸字节两种形态，还有 IPv4 只存 4 字节、IPv6 16 字节混排；按 MariaDB 列类型逐列解，
+   不做「先按逗号切再解」——裸字节里的引号/逗号/括号会让无差别切分错位。
+3. **列集合不一致**：147 缺 `person.phone`（016 迁移没在那台跑过）、`my_accounts` 有生成列
+   `phone_uniq`。以目标库列清单为准，多出的列丢掉、缺的列整个不进 INSERT 列清单让 PG
+   用默认值，绝不补 NULL（会撞 NOT NULL）。
+
+数据产物（`*.sql` / `*.dump` / `*.sql.gz`）已在 `.gitignore` 里，只入脚本本身。
+
 ### 远程备份库（2026-10-11）
 
 生产库仍是 MySQL/MariaDB 唯一事实源；另有远程 MySQL/MariaDB 备份库。147 部署会安装
