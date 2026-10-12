@@ -1,15 +1,18 @@
 /**
- * 注册自检：登录门「注册」→ WorkBuddy 网关授权链接 → 填姓名/手机号/验证码 → 注册即绑定。
+ * 注册自检：登录门「注册」→ WorkBuddy 网关授权链接 → 填姓名/手机号/验证码 → 注册
+ * → 管理员审核绑定 → 手机号回登录看到个人数据。
  *
- * 覆盖 2026-10-11 用户口径：手机号 = 账号、短信验证码数字 = 密码；注册时必须填主播姓名，
- * 且姓名必须能在主播台账里查到（姓名框失焦实时校验）；注册即绑定（bound=1，不用再绑一次），
- * 注册同时调 WorkBuddy 用量看板（wb-proxy）的「添加账号 (OAuth)」；
- * 绑定后用户自己不能解绑（本脚本顺带验证「二次绑定被拒」）。
+ * 覆盖口径：手机号 = 账号、短信验证码数字 = 密码；注册时必须填主播姓名，且姓名必须能在
+ * 主播台账里查到（姓名框失焦实时校验）；注册同时调 WorkBuddy 用量看板（wb-proxy）的
+ * 「添加账号 (OAuth)」。
+ * **2026-10-12 审计起改为审核制**：注册不再立即绑定（bound=0 + 自动生成 pending 绑定申请），
+ * 管理员审核通过才真正绑上；通过后旧 token 立即吊销 → 必须重新登录。
+ * 本脚本按这个现行口径断言整条链路；绑定后用户自己不能解绑（顺带验证「二次绑定被拒」）。
  *
  * 用法：
  *   node scripts/check/uicheck-register.mjs [BASE] [管理员口令]
  * 默认 BASE=http://127.0.0.1:8787。**只对测试/本机环境跑**：会真写一行
- * my_accounts（随机手机号），跑完用管理员接口删掉；没给口令就留一行并提示。
+ * my_accounts + 一条绑定申请（随机手机号），跑完用管理员接口删掉账号；没给口令就留一行并提示。
  *
  * 只用 Node 内置能力（Node 22+ 自带 WebSocket），不需要 puppeteer/playwright。
  */
@@ -35,7 +38,8 @@ const CODE = String(Math.floor(100000 + Math.random() * 899999)); // 6 位验证
 const ANCHOR_CANDIDATES = ['啸帆', '狼九', '狼征', '狼明'];
 let ANCHOR = ANCHOR_CANDIDATES[0];
 
-/** 用管理员接口挑一个「还没有账号」的候选主播名；没给口令就退回第一个候选 */
+/** 用管理员接口挑一个「还没开过号」的男团主播（台账 hasAccount=false）。
+    不能只看 my_accounts 的名字：审核制下注册账号名先是手机号占位，绑完才改成主播名。 */
 async function pickFreeAnchor() {
   if (!ADMIN_PASSWORD) return ANCHOR_CANDIDATES[0];
   try {
@@ -45,16 +49,13 @@ async function pickFreeAnchor() {
       body: JSON.stringify({ password: ADMIN_PASSWORD }),
     }).then((r) => r.json());
     if (!login.token) return ANCHOR_CANDIDATES[0];
-    const list = await fetch(`${BASE}/api/admin/my-accounts`, {
+    const list = await fetch(`${BASE}/api/admin/streamers?team=male`, {
       headers: { Authorization: `Bearer ${login.token}` },
     }).then((r) => r.json());
-    const taken = new Set((list.items || []).map((a) => a.name));
-    for (const name of ANCHOR_CANDIDATES) {
-      if (taken.has(name)) continue;
-      const chk = await fetch(`${BASE}/api/public/my/register/check-name?q=${encodeURIComponent(name)}`)
-        .then((r) => r.json());
-      if (chk.ok) return name;
-    }
+    const free = (list.items || []).filter((s) => !s.hasAccount && s.status !== 'left');
+    const hit = free.find((s) => ANCHOR_CANDIDATES.includes(s.name)) || free[0];
+    if (hit) return hit.name;
+    console.log('   台账里已经没有「没开过号」的男团主播，退回首個候选名（可能因此失败）');
     return ANCHOR_CANDIDATES[0];
   } catch {
     return ANCHOR_CANDIDATES[0];
@@ -311,44 +312,79 @@ try {
     registered ? ok('注册成功，登录门关闭') : bad('注册没成功：' + await evaluate(ws, `document.getElementById('regErr')?.textContent ?? ''`));
     expect('本地已存 token', await evaluate(ws, `(sessionStorage.getItem('myToken_any') || '').startsWith('my-')`), 'true');
 
-    /* 5. 注册即绑定：不该出现「未绑定」提醒条，也没有绑定卡 */
-    const barHidden = await evaluate(ws, `document.getElementById('bindBar').hidden`);
-    barHidden ? ok('没有出现「未绑定主播」提醒条（注册即绑定）') : bad('注册后还出现未绑定提醒条');
+    /* 5. 审核制（2026-10-12 审计修复）：注册 ≠ 立刻绑定 —— 账号落库 bound=0、
+       自动生成一条 pending 绑定申请；前端应出现「未绑定主播」提醒条 + 绑定卡。 */
+    const needBind = await evaluate(ws, `!document.getElementById('bindBar').hidden`);
+    needBind ? ok('注册后出现「未绑定主播」提醒条（审核制：不再注册即绑定）') : bad('没出现未绑定提醒条');
     await evaluate(ws, `document.getElementById('navMy').click()`);
-    const myNm = await waitFor(ws, `(document.querySelector('.my-head .nm')?.textContent ?? '').trim() === ${JSON.stringify(ANCHOR)}`, 60, 300);
-    myNm ? ok('「我的」页直接显示主播数据（' + ANCHOR + '）') : bad('「我的」页没直接显示主播数据');
-    expect('水印按主播姓名', await evaluate(ws, `localStorage.getItem('myName_any')`), ANCHOR);
-    console.log('  ->  ' + (await shot(ws, '03-my-bound.png')));
+    const bindCard = await waitFor(ws, `document.body.innerText.includes('绑定主播姓名')`, 40, 300);
+    bindCard ? ok('「我的」页给出绑定卡') : bad('「我的」页没有绑定卡');
+    console.log('  ->  ' + (await shot(ws, '03-my-needbind.png')));
 
-    /* 6. 绑定是一次性的：已绑定账号再调 bind 必须被拒（用户口径：绑定后不支持解绑） */
+    /* 6. 管理员审核通过（后台「绑定申请」）→ 绑定生效、旧 token 立即吊销 */
+    const adminTok = await fetch(`${BASE}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: ADMIN_PASSWORD }),
+    }).then((r) => r.json()).then((d) => d.token || '');
+    const pending = await fetch(`${BASE}/api/admin/my-bind-requests?status=pending`, {
+      headers: { Authorization: `Bearer ${adminTok}` },
+    }).then((r) => r.json());
+    const req = (pending.items || []).find((x) => x.personName === ANCHOR) || (pending.items || [])[0];
+    req ? ok(`管理端能看到待审申请（id=${req.id} · ${req.personName ?? ''}）`) : bad('管理端看不到待审申请');
+    if (req) {
+      const ap = await fetch(`${BASE}/api/admin/my-bind-requests/${req.id}/approve`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${adminTok}` },
+      }).then((r) => r.json());
+      ap.ok === true
+        ? ok(`审核通过 → 绑定到「${ap.name}」，旧 token 已吊销`)
+        : bad('审核通过失败：' + JSON.stringify(ap));
+    }
+
+    /* 7. 旧 token 已被吊销：刷新应回登录门；用「手机号 + 验证码」重新登录后能看到自己的数据。
+       登录限流每 IP 每分钟 5 次 → 撞上限等一分钟重试一次。 */
+    await goto(ws, `${BASE}/`);
+    await sleep(1500);
+    const backToGate = await waitFor(ws, `!document.getElementById('gate').classList.contains('hidden')`, 40, 300);
+    backToGate ? ok('绑定生效后旧登录态失效 → 回登录门') : bad('旧 token 没失效（还停在站内）');
+    if (backToGate) {
+      for (let i = 0; i < 2; i++) {
+        await evaluate(ws, `(() => {
+          document.getElementById('gateAcct').value = ${JSON.stringify(PHONE)};
+          document.getElementById('gatePass').value = ${JSON.stringify(CODE)};
+          document.getElementById('gateGo').click();
+          return true;
+        })()`);
+        const logged = await waitFor(ws, `document.getElementById('gate').classList.contains('hidden')`, 30, 300);
+        if (logged) { ok('手机号 + 验证码重新登录成功'); break; }
+        const err = await evaluate(ws, `document.getElementById('gateErr')?.textContent ?? ''`);
+        if (err.includes('频繁') && i === 0) {
+          console.log('  ..   登录限流命中（每分钟 5 次），等 62 秒后重试一次');
+          await sleep(62000);
+          continue;
+        }
+        bad('手机号 + 验证码登录失败：' + (err || '(无提示)'));
+        break;
+      }
+    }
+    /* 绑到主播后团别已定（male）→ 名字记在 myName_male；团别待定时才落 myName_any */
+    const nameStored = await evaluate(ws, `localStorage.getItem('myName_male') || localStorage.getItem('myName_any')`);
+    expect('水印按主播姓名', nameStored, ANCHOR);
+    await evaluate(ws, `document.getElementById('navMy').click()`);
+    const myNm = await waitFor(ws, `(document.querySelector('.st-my-head .nm')?.textContent ?? '').trim() === ${JSON.stringify(ANCHOR)}`, 60, 300);
+    myNm ? ok('「我的」页显示主播数据（' + ANCHOR + '）') : bad('「我的」页没显示主播数据');
+    console.log('  ->  ' + (await shot(ws, '04-my-bound.png')));
+
+    /* 8. 绑定是一次性的：已绑定账号再调 bind 必须被拒（用户口径：绑定后不支持解绑） */
     const again = await fetch(`${BASE}/api/public/my/bind`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: await evaluate(ws, `sessionStorage.getItem('myToken_any')`), personId: 1 }),
+      body: JSON.stringify({ token: await evaluate(ws, `sessionStorage.getItem('myToken_any')`), name: ANCHOR }),
     }).then((r) => r.json());
     String(again.error || '').includes('已绑定')
       ? ok('二次绑定被拒：' + again.error)
       : bad('二次绑定没被拒：' + JSON.stringify(again));
-
-    /* 8. 手机号 + 验证码回登录（注册出来的账号，验证码就是密码）。
-       登录限流是每 IP 每分钟 5 次，自检本身可能已经用掉几格 → 撞上限就等一分钟重试一次。 */
-    let relogin = {};
-    for (let i = 0; i < 2; i++) {
-      relogin = await fetch(`${BASE}/api/public/teams/all/verify`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ account: PHONE, pass: CODE }),
-      }).then((r) => r.json());
-      if (String(relogin.error || '').includes('太频繁') && i === 0) {
-        console.log('  ..   登录限流命中（每分钟 5 次），等 62 秒后重试一次');
-        await sleep(62000);
-        continue;
-      }
-      break;
-    }
-    relogin.ok === true && relogin.name === ANCHOR
-      ? ok('手机号 + 验证码可以登录（' + relogin.name + '）')
-      : bad('手机号登录失败：' + JSON.stringify(relogin));
 
     /* 9. 清掉自检过程中在网关面板上开的授权状态（不留垃圾 state） */
     for (const u of [authUrl, authUrl2]) {
