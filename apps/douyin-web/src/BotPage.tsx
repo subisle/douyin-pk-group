@@ -631,6 +631,53 @@ function PublicSettingsCard() {
     ['中级争霸赛晋级赛', '中级晋级赛'],
   ]
 
+  /** 🚩 小红旗条文本/图标字段：blur 时保存（空串 = 清除恢复默认） */
+  async function saveStarText(key: 'starTitle' | 'starOverride' | 'starIcon', value: string) {
+    try {
+      const d = await api('/api/admin/public/settings', {
+        method: 'POST',
+        body: JSON.stringify({ [key]: value }),
+      })
+      setSettings((prev: any) => ({ ...prev, ...d.settings, [key]: value }))
+      setMsg('已保存')
+      setTimeout(() => setMsg(''), 1500)
+    } catch (e: any) {
+      setMsg(e.message ?? String(e))
+    }
+  }
+
+  /** 🚩 小红旗图标：选图后客户端缩放裁剪成 ≤128×128 方形 PNG，再保存为 data URL */
+  function onStarIconFile(file: File | undefined) {
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = () => {
+      const img = new Image()
+      img.onload = () => {
+        try {
+          const side = Math.min(img.naturalWidth || img.width, img.naturalHeight || img.height)
+          if (!side || side <= 0) throw new Error('图片尺寸无效')
+          const sx = ((img.naturalWidth || img.width) - side) / 2
+          const sy = ((img.naturalHeight || img.height) - side) / 2
+          const canvas = document.createElement('canvas')
+          canvas.width = 128
+          canvas.height = 128
+          const ctx = canvas.getContext('2d')
+          if (!ctx) throw new Error('canvas 不可用')
+          ctx.imageSmoothingEnabled = true
+          ctx.drawImage(img, sx, sy, side, side, 0, 0, 128, 128)
+          const dataUrl = canvas.toDataURL('image/png')
+          void saveStarText('starIcon', dataUrl)
+        } catch (err: any) {
+          setMsg(err?.message ?? String(err))
+        }
+      }
+      img.onerror = () => setMsg('图片读取失败')
+      img.src = String(reader.result)
+    }
+    reader.onerror = () => setMsg('文件读取失败')
+    reader.readAsDataURL(file)
+  }
+
   async function toggleGroupType(key: string, on: boolean) {
     const cur = (settings?.groupTypes ?? {}) as Record<string, boolean>
     try {
@@ -692,6 +739,61 @@ function PublicSettingsCard() {
                 onChange={(v) => toggle(key, v)}
               />
             ))}
+          </div>
+
+          <h3 className="flag-title">🚩 流动小红旗条（每日推送图头部）</h3>
+          <div style={{ display: 'grid', gap: 8, margin: '4px 0 12px' }}>
+            <label style={{ fontSize: 12.5, color: 'var(--muted, #667085)' }}>
+              称号（默认「每日之星」，可改成如「初级争霸赛冠军」；清空恢复默认）
+              <input
+                defaultValue={settings.starTitle ?? ''}
+                placeholder="每日之星"
+                onBlur={(e) => {
+                  if (e.target.value !== (settings.starTitle ?? '')) saveStarText('starTitle', e.target.value)
+                }}
+                style={{ display: 'block', width: '100%', height: 34, marginTop: 4, border: '1px solid var(--hairline, #EAECF0)', borderRadius: 8, padding: '0 10px', fontSize: 13 }}
+              />
+            </label>
+            <label style={{ fontSize: 12.5, color: 'var(--muted, #667085)' }}>
+              手动指定（可选）：「称号|人名|音浪」或「称号|人名」或只写称号；留空 = 自动取当日音浪第一
+              <input
+                defaultValue={settings.starOverride ?? ''}
+                placeholder="初级争霸赛冠军|狼哲|285917"
+                onBlur={(e) => {
+                  if (e.target.value !== (settings.starOverride ?? '')) saveStarText('starOverride', e.target.value)
+                }}
+                style={{ display: 'block', width: '100%', height: 34, marginTop: 4, border: '1px solid var(--hairline, #EAECF0)', borderRadius: 8, padding: '0 10px', fontSize: 13 }}
+              />
+            </label>
+            <label style={{ fontSize: 12.5, color: 'var(--muted, #667085)' }}>
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                小红旗图标（可选）
+                {typeof settings.starIcon === 'string' && settings.starIcon && (
+                  <>
+                    <img src={settings.starIcon} width={28} height={28} style={{ borderRadius: 6, verticalAlign: 'middle' }} />
+                    <button
+                      type="button"
+                      onClick={() => saveStarText('starIcon', '')}
+                      style={{ fontSize: 12, padding: '2px 8px', border: '1px solid var(--hairline, #EAECF0)', borderRadius: 6, background: 'transparent', color: 'var(--muted, #667085)', cursor: 'pointer' }}
+                    >
+                      清除
+                    </button>
+                  </>
+                )}
+              </span>
+              <input
+                type="file"
+                accept="image/*"
+                onChange={(e) => {
+                  onStarIconFile(e.target.files?.[0])
+                  e.target.value = ''
+                }}
+                style={{ display: 'block', width: '100%', height: 34, marginTop: 4, border: '1px solid var(--hairline, #EAECF0)', borderRadius: 8, fontSize: 13 }}
+              />
+              <span style={{ display: 'block', marginTop: 2, fontSize: 11.5 }}>
+                留空 = 默认 🚩 emoji；上传图片后推送图头部用该图标。
+              </span>
+            </label>
           </div>
 
           <h3 className="flag-title">分组子页显隐（按赛事类型）</h3>

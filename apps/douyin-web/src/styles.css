@@ -492,6 +492,37 @@ th.num {
   box-shadow: inset 0 -1px 0 var(--line);
 }
 
+/* 未播预警卡：紧凑版 + 内部滚动，不把整页撑长 */
+.card-absent {
+  padding: 13px 14px;
+  align-self: start;
+}
+.card-absent h2 {
+  font-size: 13.5px;
+  margin: 0 0 6px;
+}
+.card-absent .absent-scroll {
+  overflow-y: auto;
+  max-height: 240px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-ctl);
+  margin-top: 2px;
+}
+.card-absent table {
+  margin-top: 0;
+}
+.card-absent th {
+  position: sticky;
+  top: 0;
+  background: #fff;
+  z-index: 1;
+  padding: 6px 8px;
+  box-shadow: inset 0 -1px 0 var(--line);
+}
+.card-absent td {
+  padding: 5px 8px;
+}
+
 /* ---------------- 徽标 ---------------- */
 .badge {
   display: inline-block;

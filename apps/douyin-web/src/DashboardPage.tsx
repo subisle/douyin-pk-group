@@ -152,27 +152,31 @@ export default function DashboardPage() {
           )}
         </section>
 
-        <section className="card">
+        <section className="card card-absent">
           <h2>未播预警（连续 ≥2 天）</h2>
           {data.absent.length === 0 ? (
             <div className="empty">没有人连续未播 👍</div>
           ) : (
-            <table>
-              <thead>
-                <tr>
-                  <th>主播</th>
-                  <th>连续未播</th>
-                </tr>
-              </thead>
-              <tbody>
-                {data.absent.map((r: any) => (
-                  <tr key={r.personId}>
-                    <td>{r.name}</td>
-                    <td className="bad-num">{r.days === -1 ? '窗口内从未开播' : `${r.days} 天`}</td>
+            <div className="absent-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th>主播</th>
+                    <th>连续未播</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {data.absent.map((r: any) => (
+                    <tr key={r.personId}>
+                      <td>{r.name}</td>
+                      <td className="bad-num">
+                        {r.days === -1 ? '窗口内从未开播' : `${r.days} 天`}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
         </section>
       </div>
