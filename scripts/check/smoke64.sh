@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 在 64 上冒烟测试：鉴权 + 公开只读端点 + 数据库不可用时的降级。
 #
-# 故意配一个连不上的 MySQL：验证「库挂了服务照样起得来」，展示页降级用方案快照。
+# 故意配一个连不上的 PostgreSQL：验证「库挂了服务照样起得来」，展示页降级用方案快照。
 # 整段测试在 64 上跑完再回传结果，避免每次断言都开一次 ssh。
 set -euo pipefail
 
@@ -26,7 +26,7 @@ cargo build --manifest-path rust/Cargo.toml -p pk-server 2>&1 | tail -3
 rm -f /tmp/smoke.db* /tmp/smoke.log
 ADMIN_TOKEN_TTL=3600 PORT=$PORT \
   SQLITE_PATH=/tmp/smoke.db WEB_DIST="$REMOTE/apps/web/dist" \
-  DB_A_HOST=127.0.0.1 DB_A_PORT=13306 DB_A_USER=x DB_A_PASSWORD=x DB_A_NAME=x \
+  DB_LOCAL_HOST=127.0.0.1 DB_LOCAL_PORT=13306 DB_LOCAL_USER=x DB_LOCAL_PASSWORD=x DB_LOCAL_NAME=x \
   RUST_LOG=warn \
   ./rust/target/debug/pk-server >/tmp/smoke.log 2>&1 &
 SRV=$!

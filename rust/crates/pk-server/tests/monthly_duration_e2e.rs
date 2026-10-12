@@ -1,4 +1,4 @@
-//! 月度时长导入端到端测试：真实 MySQL（需要 DB_LOCAL_* / DB_WRITER_* 环境变量）。
+//! 月度时长导入端到端测试：真实 PostgreSQL（需要 DB_LOCAL_* / DB_WRITER_* 环境变量）。
 //! 未配置数据库时自动跳过（CI / 本地纯单测不依赖库）。
 //!
 //! 覆盖 2026-10-10 用户口径「每日不能导入时长，只有月时长」的完整链路：
@@ -26,6 +26,25 @@ async fn setup() -> Option<std::sync::Arc<AppState>> {
         return None;
     }
     let sources = config::load_sources().expect("sources");
+    // 防呆（2026-10-12）：e2e 会写库（建/删 __e2e 主播），绝不能对准生产。
+    // 生产 MariaDB 的库名是 douyin —— 检测到直接拒绝，让测试显式指一个测试库。
+    {
+        let prod_hit = |h: &str, d: &str| {
+            d == "douyin" && (h.contains("147.90") || h == "127.0.0.1" || h == "localhost")
+        };
+        for s in &sources {
+            if prod_hit(&s.host, &s.database) {
+                eprintln!("拒绝运行：数据源 {} 指向生产库（{} / {}）。e2e 测试必须用独立测试库（DB_LOCAL_NAME≠douyin）", s.id, s.host, s.database);
+                return None;
+            }
+        }
+        if let Ok(w) = config::load_writer() {
+            if prod_hit(&w.host, &w.database) {
+                eprintln!("拒绝运行：writer 指向生产库（{} / {}）。e2e 测试必须用独立测试库", w.host, w.database);
+                return None;
+            }
+        }
+    }
     let pools = pgrs::build_pools(&sources).await.expect("建池失败");
     let writer = match config::load_writer() {
         Ok(ep) => pk_server::writer::connect(&ep).await.ok(),
@@ -44,6 +63,8 @@ async fn setup() -> Option<std::sync::Arc<AppState>> {
         sources,
         pools,
         writer,
+        // P0：测试不起 Redis（None = 全内存模式，与引入前一致）
+        redis: None,
         active: std::sync::Mutex::new(active),
         cache: std::sync::Mutex::new(Default::default()),
         bots: std::sync::OnceLock::new(),
@@ -77,13 +98,15 @@ async fn cleanup(st: &AppState) {
 
 async fn insert_person(st: &AppState) -> i64 {
     let pool = st.writer.as_ref().expect("writer");
-    sqlx::query("INSERT INTO person (name, gender, status) VALUES (?, 'male', 'active') RETURNING id")
-        .bind(NAME)
-        .fetch_one(pool)
-        .await
-        .expect("建测试主播")
-        .try_get::<i64, _>(0)
-        .expect("id")
+    sqlx::query(
+        "INSERT INTO person (name, gender, status) VALUES (?, 'male', 'active') RETURNING id",
+    )
+    .bind(NAME)
+    .fetch_one(pool)
+    .await
+    .expect("建测试主播")
+    .try_get::<i64, _>(0)
+    .expect("id")
 }
 
 async fn insert_account(st: &AppState, person_id: i64) {

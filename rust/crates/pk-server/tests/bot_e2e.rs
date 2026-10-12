@@ -40,6 +40,25 @@ async fn setup() -> Option<Arc<AppState>> {
         return None;
     }
     let sources = config::load_sources().expect("sources");
+    // 防呆（2026-10-12）：e2e 会写库（建/删 __e2e 主播），绝不能对准生产。
+    // 生产 MariaDB 的库名是 douyin —— 检测到直接拒绝，让测试显式指一个测试库。
+    {
+        let prod_hit = |h: &str, d: &str| {
+            d == "douyin" && (h.contains("147.90") || h == "127.0.0.1" || h == "localhost")
+        };
+        for s in &sources {
+            if prod_hit(&s.host, &s.database) {
+                eprintln!("拒绝运行：数据源 {} 指向生产库（{} / {}）。e2e 测试必须用独立测试库（DB_LOCAL_NAME≠douyin）", s.id, s.host, s.database);
+                return None;
+            }
+        }
+        if let Ok(w) = config::load_writer() {
+            if prod_hit(&w.host, &w.database) {
+                eprintln!("拒绝运行：writer 指向生产库（{} / {}）。e2e 测试必须用独立测试库", w.host, w.database);
+                return None;
+            }
+        }
+    }
     let pools = pgrs::build_pools(&sources).await.expect("建池失败");
     let writer = match config::load_writer() {
         Ok(ep) => pk_server::writer::connect(&ep).await.ok(),
@@ -58,6 +77,8 @@ async fn setup() -> Option<Arc<AppState>> {
         sources,
         pools,
         writer,
+        // P0：测试不起 Redis（None = 全内存模式，与引入前一致）
+        redis: None,
         active: std::sync::Mutex::new(active),
         cache: std::sync::Mutex::new(Default::default()),
         bots: std::sync::OnceLock::new(),

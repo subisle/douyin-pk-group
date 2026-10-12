@@ -1,0 +1,51 @@
+# 数据库对齐清单（scripts/db-align/tables.manifest）
+#
+# 这是 push / pull / dbcheck 三个脚本共用的**唯一分类来源**，与设计文档
+# docs/17-数据库对齐与64部署方案.md §5.1（表分类）与 §5.2（config 按键拆分）一一对应。
+#
+# 格式（竖线分隔，忽略 # 注释与空行）：
+#   table|class|conflict|check_pk|check_cols|mode|nullkey
+#
+#   class      A = 本机权威（运营/业务数据，push 方向 本机→64）
+#              B = 生产权威（线上运行时数据，pull 方向 64→本机）
+#              （config 属 C 类混合，按键拆分，由脚本内置键清单处理，不在此表）
+#   conflict   upsert 的 ON CONFLICT 目标列（取业务唯一键，避免 id 漂移时撞唯一索引）
+#   check_pk   对账时 md5 聚合的排序键（跨环境可比的列，不用自增 id 的表用业务键）
+#   check_cols 参与校验和的业务列（**不含 id / created_at / updated_at / *_at 时间戳**：
+#              person/import_pending/monthly_duration 上有 touch_updated_at 触发器，
+#              时间戳会因写入时机不同产生假差异）
+#   mode       upsert = 冲突则更新；insert_ignore = 冲突则跳过（仅追加型日志表）
+#   nullkey    insert_ignore 专用：conflict 列为 NULL 时的判重自然键（NULL 不参与
+#              ON CONFLICT 去重，access_logs 有 237 行历史 NULL dedup_key，
+#              仅靠 conflict 列会在每次 pull 时重复插入）
+#
+# 顺序即 push 顺序：person → account → 业务事实 → 方案/别名/名单，满足外键依赖。
+
+# ---------- Class A：本机权威（push 本机 → 64）----------
+person|A|id|id|name,gender,master_id,generation,group_name,avatar_url,hide_in_daily_report,phone,status,joined_at|upsert|
+account|A|anchor_id|anchor_id|person_id,anchor_id,douyin_no,anchor_name,is_primary,status|upsert|
+daily_metric|A|person_id,biz_date|person_id,biz_date|anchor_id,wave,cumulative_wave,minutes,cumulative_minutes,is_live,tier|upsert|
+import_batch|A|id|id|source,filename,biz_date,team,imported_rows,ok_rows,failed_rows,note|upsert|
+import_pending|A|douyin_no,biz_date|douyin_no,biz_date|name,wave,cumulative_wave,minutes,is_live,absorbed_person_id|upsert|
+monthly_duration|A|person_id,period|person_id,period|minutes|upsert|
+monthly_metric|A|id|person_id,period|wave,live_days,best_day_wave,best_day_date|upsert|
+plans|A|id|id|title,metric,days,published,event_type,payload|upsert|
+aliases|A|alias|alias|real_name|upsert|
+roster_state|A|event_type|event_type|body|upsert|
+wave_snapshot|A|id|id|anchor_id,biz_date,wave_value,rank_in_guild|upsert|
+duration_snapshot|A|anchor_id,biz_date|anchor_id,biz_date|minutes,cumulative_minutes,minutes_span,minutes_reliable|upsert|
+
+# ---------- Class B：生产权威（pull 64 → 本机）----------
+access_logs|B|dedup_key|dedup_key|kind,ip,province,city,isp,geo_source,team,path,account_name,allowed,login_ok|insert_ignore|kind,ip,path,account_name,created_at
+ip_geo_cache|B|ip|ip|province,city,isp,source,allowed|upsert|
+ip_allowlist|B|ip|ip|note|upsert|
+my_accounts|B|name|name|phone,pass,is_admin,bound,bound_at,source,wb_state,person_id|upsert|
+my_bind_requests|B|id|id|name,person_id,person_name,team,status,reason,decided_at,decided_by|upsert|
+anchor_claims|B|id|id|person_id,person_name,team,douyin_no,mime,status,reject_reason,decided_at,decided_by|upsert|
+my_targets|B|id|id|name,team,kind,target_person_id,target_name,target_value,hit,last_gap,last_notice_date|upsert|
+bot_sessions|B|channel,conversation_id|channel,conversation_id|kind,last_text,is_admin|upsert|
+wx_push_accounts|B|name|name|team,person_id,ilink_bot_id,ilink_user_id,nickname,conversation_id,bound_at|upsert|
+wx_sessions|B|conversation_id|conversation_id|to_user_id,context_token,nickname|upsert|
+push_bindings|B|name|name|team,person_id,conversation_id,to_user_id,nickname,bind_code,notify_target,daily_report,last_push,last_error|upsert|
+push_jobs|B|team,biz_date|id|team,biz_date,run_at,status,note|upsert|
+identity_orphan_log|B|id|id|tbl,row_key,person_id,kind,handled,note|upsert|

@@ -1,7 +1,7 @@
-//! 运行时状态存储端到端测试：真实 MySQL（需要 DB_LOCAL_* / DB_WRITER_* 环境变量）。
+//! 运行时状态存储端到端测试：真实 PostgreSQL（需要 DB_LOCAL_* / DB_WRITER_* 环境变量）。
 //! 未配置数据库时自动跳过（CI / 本地纯单测不依赖库）。
 //!
-//! 2026-10-10 单库化：这批表从 SQLite 并入 MySQL（migrations/003_runtime.sql），
+//! 2026-10-10 单库化：这批表从 SQLite 并入业务库（migrations/003_runtime.sql），
 //! 旧 sqlite.rs 的落库断言全部迁到这里，仍覆盖原有口径：
 //! 别名、配置、方案（上架互斥）、名单（按赛事类型）、展示端账号（登录/管理员标记）、
 //! 绑定申请（唯一待审/裁决/回滚）。
@@ -17,6 +17,25 @@ async fn setup() -> Option<AppState> {
         return None;
     }
     let sources = config::load_sources().expect("sources");
+    // 防呆（2026-10-12）：e2e 会写库（建/删 __e2e 主播），绝不能对准生产。
+    // 生产 MariaDB 的库名是 douyin —— 检测到直接拒绝，让测试显式指一个测试库。
+    {
+        let prod_hit = |h: &str, d: &str| {
+            d == "douyin" && (h.contains("147.90") || h == "127.0.0.1" || h == "localhost")
+        };
+        for s in &sources {
+            if prod_hit(&s.host, &s.database) {
+                eprintln!("拒绝运行：数据源 {} 指向生产库（{} / {}）。e2e 测试必须用独立测试库（DB_LOCAL_NAME≠douyin）", s.id, s.host, s.database);
+                return None;
+            }
+        }
+        if let Ok(w) = config::load_writer() {
+            if prod_hit(&w.host, &w.database) {
+                eprintln!("拒绝运行：writer 指向生产库（{} / {}）。e2e 测试必须用独立测试库", w.host, w.database);
+                return None;
+            }
+        }
+    }
     let pools = pgrs::build_pools(&sources).await.expect("建池失败");
     let writer = match config::load_writer() {
         Ok(ep) => pk_server::writer::connect(&ep).await.ok(),
@@ -35,6 +54,8 @@ async fn setup() -> Option<AppState> {
         sources,
         pools,
         writer,
+        // P0：测试不起 Redis（None = 全内存模式，与引入前一致）
+        redis: None,
         active: std::sync::Mutex::new(active),
         cache: std::sync::Mutex::new(Default::default()),
         bots: std::sync::OnceLock::new(),
@@ -794,20 +815,24 @@ const E2E_DAILY_DATE2: &str = "2999-01-06";
 async fn setup_two_people(st: &AppState) -> (i64, i64) {
     let pool = st.writer.as_ref().expect("writer");
     cleanup_admin_e2e(st).await;
-    let tid = sqlx::query("INSERT INTO person (name, gender, status) VALUES (?, 'male', 'active') RETURNING id")
-        .bind(format!("{MERGE_PREFIX}目标甲"))
-        .fetch_one(pool)
-        .await
-        .expect("建目标主播")
-        .try_get::<i64, _>(0)
-        .expect("id");
-    let sid = sqlx::query("INSERT INTO person (name, gender, status) VALUES (?, 'male', 'active') RETURNING id")
-        .bind(format!("{MERGE_PREFIX}来源乙"))
-        .fetch_one(pool)
-        .await
-        .expect("建来源主播")
-        .try_get::<i64, _>(0)
-        .expect("id");
+    let tid = sqlx::query(
+        "INSERT INTO person (name, gender, status) VALUES (?, 'male', 'active') RETURNING id",
+    )
+    .bind(format!("{MERGE_PREFIX}目标甲"))
+    .fetch_one(pool)
+    .await
+    .expect("建目标主播")
+    .try_get::<i64, _>(0)
+    .expect("id");
+    let sid = sqlx::query(
+        "INSERT INTO person (name, gender, status) VALUES (?, 'male', 'active') RETURNING id",
+    )
+    .bind(format!("{MERGE_PREFIX}来源乙"))
+    .fetch_one(pool)
+    .await
+    .expect("建来源主播")
+    .try_get::<i64, _>(0)
+    .expect("id");
     for (pid, anchor) in [
         (tid, format!("{MERGE_PREFIX}_anchor_t")),
         (sid, format!("{MERGE_PREFIX}_anchor_s")),
@@ -1005,13 +1030,15 @@ async fn ensure_primary_converges_during_import() {
         .execute(pool)
         .await;
 
-    let pid = sqlx::query("INSERT INTO person (name, gender, status) VALUES (?, 'male', 'active') RETURNING id")
-        .bind(&name)
-        .fetch_one(pool)
-        .await
-        .expect("建测试主播")
-        .try_get::<i64, _>(0)
-        .expect("id");
+    let pid = sqlx::query(
+        "INSERT INTO person (name, gender, status) VALUES (?, 'male', 'active') RETURNING id",
+    )
+    .bind(&name)
+    .fetch_one(pool)
+    .await
+    .expect("建测试主播")
+    .try_get::<i64, _>(0)
+    .expect("id");
     // 复刻生产 1000001/1000004：有 account 行但 is_primary=0
     sqlx::query(
         "INSERT INTO account (person_id, anchor_id, douyin_no, is_primary) VALUES (?,?,?,0)",
@@ -1120,13 +1147,15 @@ async fn unbind_account_keeps_snapshots_traced() {
     let snap_date = "2999-02-01"; // 独立测试日期
     let snap_date2 = "2999-02-02";
 
-    let pid = sqlx::query("INSERT INTO person (name, gender, status) VALUES (?, 'male', 'active') RETURNING id")
-        .bind(&name)
-        .fetch_one(pool)
-        .await
-        .expect("建测试主播")
-        .try_get::<i64, _>(0)
-        .expect("id");
+    let pid = sqlx::query(
+        "INSERT INTO person (name, gender, status) VALUES (?, 'male', 'active') RETURNING id",
+    )
+    .bind(&name)
+    .fetch_one(pool)
+    .await
+    .expect("建测试主播")
+    .try_get::<i64, _>(0)
+    .expect("id");
     let acc_id = sqlx::query(
         "INSERT INTO account (person_id, anchor_id, douyin_no, is_primary) VALUES (?,?,?,1) RETURNING id",
     )
