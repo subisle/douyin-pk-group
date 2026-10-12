@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
 use axum::Json;
 use calamine::{open_workbook_auto_from_rs, Reader};
 use chrono::NaiveDate;
@@ -136,6 +137,34 @@ fn ensure(cond: bool, msg: impl std::fmt::Display) -> Result<(), ApiError> {
         Ok(())
     } else {
         Err(anyhow::anyhow!("{msg}").into())
+    }
+}
+
+/// 2026-10-12 审计 L3：导入上传的扩展名白名单。
+///
+/// 以解析端实际支持的格式为准：CSV/TSV/文本兜底走 `parse_any_text`，
+/// Excel 走 `maybe_spreadsheet_text`（xlsx/xlsm/xls，含 PK 头嗅探）。
+/// 白名单收口到「csv / tsv / txt / xlsx / xlsm / xls」，其余一律 400 拒收，
+/// 防止把上传口当任意文件投递通道。判断只看扩展名（大小写不敏感）。
+fn allowed_upload_ext(filename: &str) -> bool {
+    let ext = std::path::Path::new(filename)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    matches!(ext.as_str(), "csv" | "tsv" | "txt" | "xlsx" | "xlsm" | "xls")
+}
+
+/// multipart 字段读取失败 → ApiError：保留 axum 已分类的状态码（超限 → 413）。
+///
+/// 之前用 `anyhow::anyhow!("...: {e}")` 包一层，只留下 Display 文本，
+/// body-limit 的语义丢了，超限请求掉进兜底 500（审计 L3 实测 5MB 文件返回 500）。
+fn multipart_error_to_api(e: axum::extract::multipart::MultipartError) -> ApiError {
+    if e.status() == StatusCode::PAYLOAD_TOO_LARGE {
+        // 全局上限是 main.rs 里的 DefaultBodyLimit::max(4*1024*1024)，文案跟着它写
+        ApiError::with_status(StatusCode::PAYLOAD_TOO_LARGE, "文件超过 4MB 上限")
+    } else {
+        ApiError::with_status(e.status(), format!("读取上传内容失败: {e}"))
     }
 }
 
@@ -4071,7 +4100,10 @@ pub async fn import_upload(
     while let Some(field) = multipart
         .next_field()
         .await
-        .map_err(|e| anyhow::anyhow!("读取上传内容失败: {e}"))?
+        // 2026-10-12 审计 L3：全局 DefaultBodyLimit(4MB) 的超限错误在字段读取
+        // 时爆出来，axum 的 MultipartError 已经把 body-limit（LengthLimitError）
+        // 分类为 413，这里按状态码透传，别让它掉进兜底 500。
+        .map_err(multipart_error_to_api)?
     {
         match field.name() {
             Some("filename") => {
@@ -4081,11 +4113,9 @@ pub async fn import_upload(
             }
             Some("file") => {
                 let fname = field.file_name().unwrap_or("上传文件").to_string();
+                ensure(allowed_upload_ext(&fname), format_args!("不支持的文件类型：{fname}，请上传 csv 或 Excel 文件"))?;
                 filename = fname;
-                let bytes = field
-                    .bytes()
-                    .await
-                    .map_err(|e| anyhow::anyhow!("读取文件失败: {e}"))?;
+                let bytes = field.bytes().await.map_err(multipart_error_to_api)?;
                 text = match maybe_spreadsheet_text(&filename, &bytes)? {
                     Some(text) => text,
                     None => String::from_utf8_lossy(&bytes).into_owned(),
@@ -4157,6 +4187,40 @@ fn month_suggest(filename: &str, month_rows: &[ImportRow], rows: &[ImportRow]) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /* ---------------- 上传扩展名白名单（2026-10-12 审计 L3） ---------------- */
+
+    #[test]
+    fn upload_allowlist_accepts_supported_formats() {
+        for name in [
+            "9月份时长.csv",
+            "2026-10-07-男团.CSV",
+            "data.tsv",
+            "notes.txt",
+            "月报.xlsx",
+            "月报.XLSX",
+            "老格式.xls",
+            "带宏.xlsm",
+            "no_dir/x.csv",
+        ] {
+            assert!(allowed_upload_ext(name), "{name} 应该放行");
+        }
+    }
+
+    #[test]
+    fn upload_allowlist_rejects_others() {
+        for name in [
+            "payload.exe",
+            "script.sh",
+            "doc.pdf",
+            "archive.zip",
+            "noext",
+            ".csv", // 纯扩展名式隐藏文件：Path::extension 为 None → 拒
+            "data.csv.exe",
+        ] {
+            assert!(!allowed_upload_ext(name), "{name} 应该拒收");
+        }
+    }
 
     /* ---------------- wxbot 归属判定（2026-10-12） ---------------- */
 

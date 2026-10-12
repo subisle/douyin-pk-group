@@ -230,13 +230,16 @@ impl VerifyLimiter {
 /// P1-3：限流用的「客户端真实 IP」。
 /// 生产经反代（Caddy → 127.0.0.1:8787），直连看到的 ConnectInfo 全是 127.0.0.1，
 /// 全站会共用一个限流桶；但 X-Forwarded-For 可以被任何人伪造 —— 所以只信任
-/// **来自 127.0.0.1 的连接**带来的 XFF（取第一个 IP，即反代记录的真实客户端），
+/// **来自 127.0.0.1 的连接**带来的 XFF（取最后一跳，即反代追加的直连来源），
 /// 非本机连接一律用 ConnectInfo（伪造的 XFF 直接忽略）。
+///
+/// 2026-10-12 安全审计 H1 修复：第一跳是客户端可任意伪造的值（换一次头换一个
+/// 限流桶，实测 8 连发全过）；XFF 链尾才是反代追加的、客户端无法篡改的真实来源。
 pub(super) fn client_ip_for_limit(addr: std::net::SocketAddr, headers: &HeaderMap) -> String {
     if addr.ip().is_loopback() {
         if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-            if let Some(first) = xff.split(',').next() {
-                let ip = first.trim();
+            if let Some(last) = xff.rsplit(',').next() {
+                let ip = last.trim();
                 if !ip.is_empty() {
                     return ip.to_string();
                 }

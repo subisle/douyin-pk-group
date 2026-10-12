@@ -1,0 +1,110 @@
+# 147 生产容器编排（2026-10-12 容器化定稿）。
+# 拓扑：caddy(已有) → pk-server → pk-postgres(业务库) + pk-redis(缓存)
+# 持久化全部 bind mount 到 /opt/pk-server/，宿主机 cron 每日 pg_dump 到 backups/。
+# 用法：cp .env.prod.example /opt/pk-server/.env.prod && 编辑后
+#       docker compose -f docker-compose.prod.yml --env-file .env.prod up -d
+name: douyin-pk
+
+services:
+  pk-server:
+    image: ghcr.io/${GHCR_REPO:?GHCR_REPO is required}:${PK_TAG:-latest}
+    container_name: pk-server
+    restart: unless-stopped
+    depends_on:
+      pk-postgres:
+        condition: service_healthy
+      pk-redis:
+        condition: service_started
+    environment:
+      # 业务库（PG，唯一事实源）
+      DB_SOURCE: LOCAL
+      DB_LOCAL_HOST: pk-postgres
+      DB_LOCAL_PORT: "5432"
+      DB_LOCAL_NAME: douyin
+      DB_LOCAL_USER: douyin_admin
+      DB_LOCAL_PASSWORD: ${PG_PASSWORD:?PG_PASSWORD is required}
+      DB_LOCAL_POOL_LIMIT: "6"
+      DB_WRITER_HOST: pk-postgres
+      DB_WRITER_PORT: "5432"
+      DB_WRITER_NAME: douyin
+      DB_WRITER_USER: douyin_admin
+      DB_WRITER_PASSWORD: ${PG_PASSWORD}
+      DB_MIGRATOR_HOST: pk-postgres
+      DB_MIGRATOR_PORT: "5432"
+      DB_MIGRATOR_NAME: douyin
+      DB_MIGRATOR_USER: douyin_admin
+      DB_MIGRATOR_PASSWORD: ${PG_PASSWORD}
+      # 音浪读源（远程 sqlpub，与现网一致）
+      DB_A_HOST: ${DB_A_HOST}
+      DB_A_PORT: ${DB_A_PORT:-3306}
+      DB_A_NAME: ${DB_A_NAME}
+      DB_A_USER: ${DB_A_USER}
+      DB_A_PASSWORD: ${DB_A_PASSWORD}
+      # 缓存（可选：不设 REDIS_URL 则走进程内缓存）
+      REDIS_URL: redis://pk-redis:6379/0
+      # 管理口令 / 机器人凭据等沿用原 pk.env 其余项
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      PORT: "8787"
+      HOST: 0.0.0.0
+      TZ: Asia/Shanghai
+      RUST_LOG: info
+    ports:
+      - "127.0.0.1:8787:8787"
+    volumes:
+      - /opt/pk-server/data:/app/data
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/pk-server", "--health-check"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+  pk-postgres:
+    image: postgres:17-alpine
+    container_name: pk-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: douyin
+      POSTGRES_USER: douyin_admin
+      POSTGRES_PASSWORD: ${PG_PASSWORD}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    command:
+      - postgres
+      - -c
+      - max_connections=40
+      - -c
+      - shared_buffers=128MB
+      - -c
+      - effective_cache_size=512MB
+      - -c
+      - work_mem=4MB
+      - -c
+      - timezone=Asia/Shanghai
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - /opt/pk-server/pg-data:/var/lib/postgresql/data
+      - /opt/pk-server/backups:/backup
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U douyin_admin -d douyin"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  pk-redis:
+    image: redis:7-alpine
+    container_name: pk-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 96mb --maxmemory-policy allkeys-lru
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - /opt/pk-server/redis-data:/data
+    mem_limit: 128m
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5

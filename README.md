@@ -123,6 +123,13 @@ pnpm install && pnpm -F @pk/douyin-web dev  # 5173，/api 代理到 8787
 
 ## 构建与部署
 
+> **🎯 147 容器化部署计划（2026-10-12 定稿）**：pk-server/PG/Redis 全容器化，
+> GitHub Actions 构建双架构镜像推 GHCR，147 一键更新（健康检查失败自动回滚）。
+> 详见 **[docs/deploy/147-docker-plan.md](docs/deploy/147-docker-plan.md)**；
+> 工件：`docker-release.yml`（CI）、`deploy/docker-compose.prod.yml`、
+> `scripts/deploy/update-147.sh`（一键更新）、`backup-pg-147.sh`（每日备份）、
+> `restore-pg-147.sh`（恢复）。
+>
 > **现役生产有两处（2026-10-11）**：
 >
 > - **147**（`147.90.235.187` / Debian 12 x86_64，systemd 服务 `/opt/pk-server`，

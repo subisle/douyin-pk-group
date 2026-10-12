@@ -17,8 +17,10 @@ pub fn validate_douyin_no(v: &str) -> std::result::Result<String, String> {
 /* ------------------------------ 我的页面账号 ------------------------------ */
 
 /// 校验姓名/密码。Err(错误文案)，Ok((姓名, 密码))。
-/// **密码为 4~20 位字母或数字（2026-10-10 放宽，原为纯数字）**：
+/// **密码为 6~20 位字母或数字（2026-10-12 安全审计 M4：下限 4→6）**：
 /// 去首尾空格后必须全是 ASCII 字母/数字，不允许空格、横线等分隔符。
+/// 历史口径备注：2026-10-10 曾放宽为 4 位纯数字/字母；4~5 位存量密码仍可
+/// 登录（校验只在设置/修改时执行），但新设密码一律 ≥6 位。
 pub fn validate_my_account(
     name: &str,
     pass: &str,
@@ -34,8 +36,8 @@ pub fn validate_my_account(
     if pass.is_empty() {
         return Err("密码不能为空；已有账号要保留原密码请传当前密码".into());
     }
-    if !pass.chars().all(|c| c.is_ascii_alphanumeric()) || pass.len() < 4 || pass.len() > 20 {
-        return Err("密码必须是 4~20 位字母或数字".into());
+    if !pass.chars().all(|c| c.is_ascii_alphanumeric()) || pass.len() < 6 || pass.len() > 20 {
+        return Err("密码必须是 6~20 位字母或数字".into());
     }
     Ok((name.to_string(), pass.to_string()))
 }

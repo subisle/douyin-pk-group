@@ -29,6 +29,14 @@ impl ApiError {
         Self(anyhow::anyhow!(msg.into()), Some(StatusCode::BAD_REQUEST))
     }
 
+    /// 显式指定状态码的错误（2026-10-12 审计 L3）：给 axum 已经分好类、
+    /// 不该再落进中文关键词推断的错误用，比如 multipart 超限的 413。
+    /// 注意带显式状态码的文案会原样回传客户端（不走 500 的通用文案兜底），
+    /// 所以调用方只能传面向用户的安全文案。
+    pub fn with_status(status: StatusCode, msg: impl Into<String>) -> Self {
+        Self(anyhow::anyhow!(msg.into()), Some(status))
+    }
+
     /// 地区 / 访问限制：前端不应把 403 当作“需要重新登录”处理
     pub fn forbidden(msg: impl Into<String>) -> Self {
         Self(anyhow::anyhow!(msg.into()), Some(StatusCode::FORBIDDEN))
@@ -86,7 +94,15 @@ impl IntoResponse for ApiError {
         if status == StatusCode::INTERNAL_SERVER_ERROR {
             tracing::error!(error = %msg, "请求处理失败");
         }
-        (status, Json(json!({ "error": msg }))).into_response()
+        // 2026-10-12 安全审计 L5：500 类错误不把底层文本回传客户端——
+        // sqlx/PG 的报错常带表名、约束名、SQL 片段，属于实现细节泄露。
+        // 服务端日志（上一行）已留全量原文，客户端只给通用提示。
+        let client_msg = if status == StatusCode::INTERNAL_SERVER_ERROR {
+            "服务器开小差了，请稍后重试".to_string()
+        } else {
+            msg
+        };
+        (status, Json(json!({ "error": client_msg }))).into_response()
     }
 }
 

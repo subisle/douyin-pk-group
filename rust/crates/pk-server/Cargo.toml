@@ -10,7 +10,7 @@ description = "抖音 PK 挑战赛分组服务：管理员后台 API + 对外只
 pk-core = { path = "../pk-core" }
 axum = { version = "0.8", features = ["macros", "multipart"] }
 tokio = { workspace = true }
-tower-http = { version = "0.6", features = ["fs", "cors", "trace"] }
+tower-http = { version = "0.6", features = ["fs", "cors", "trace", "set-header"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }

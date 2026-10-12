@@ -438,21 +438,43 @@ fn render_svg_labeled_inner(
     } else {
         vec![personal_mark.trim().to_string()]
     };
+    // 随机分布（2026-10-12 用户口径）：网格基础上每点加 ±18px 抖动。
+    // 种子 = 日期|团别|收件人 的 FNV hash → 同一张图稳定可复现（检测方按同种子
+    // 重建网格做相关），不同人/不同天的水印位置互不相同，防固定网格批量抹除。
+    let seed = {
+        let mut h: u64 = 1469598103934665603;
+        for b in format!("{}|{}|{}", rep.date, rep.team, personal_mark).bytes() {
+            h ^= b as u64;
+            h = h.wrapping_mul(1099511628211);
+        }
+        h
+    };
+    let jitter = |i: u64| -> f64 {
+        let mut z = i.wrapping_mul(0x9E3779B97F4A7C15).wrapping_add(seed);
+        z ^= z >> 30;
+        z = z.wrapping_mul(0xBF58476D1CE4E5B9);
+        z ^= z >> 27;
+        ((z % 37) as f64) - 18.0
+    };
     let mut watermark_layer = String::new();
+    let mut wi: u64 = 0;
     for (si, x) in [-30.0f64, 90.0, 210.0, 330.0, 450.0, 570.0, 690.0].into_iter().enumerate() {
         for (yi, y) in (0..((total_h / 52.0).ceil() as i64 + 1)).enumerate() {
             let y = y as f64 * 52.0 - 30.0;
             let mark = &marks[(si + yi) % marks.len()];
+            wi += 1;
+            let wx = x + jitter(wi);
+            let wy = y + jitter(wi.wrapping_add(0x5DEECE66D));
             // 双层隐形水印：
             //  a) 白色文字压白底/浅底（fill #FFFFFF, opacity 0.5）→ 肉眼不可见，
             //     在白/浅色背景上形成极细微的亮度差；
             //  b) 同坐标再叠一层纯黑 opacity 0.004 → 在蓝条/深色区域形成可检测暗差。
             // 两层都是实心文字字形，像素层面稳定存在，程序按模板位置做相关即可提取。
             watermark_layer.push_str(&format!(
-                "<text x=\"{x}\" y=\"{y:.0}\" font-family=\"{FONT}\" font-size=\"22\" font-weight=\"900\" fill=\"#FFFFFF\" fill-opacity=\"0.35\" text-anchor=\"middle\" transform=\"rotate(-18 {x} {y:.0})\">{mark}</text>"
+                "<text x=\"{wx:.0}\" y=\"{wy:.0}\" font-family=\"{FONT}\" font-size=\"22\" font-weight=\"900\" fill=\"#FFFFFF\" fill-opacity=\"0.35\" text-anchor=\"middle\" transform=\"rotate(-18 {wx:.0} {wy:.0})\">{mark}</text>"
             ));
             watermark_layer.push_str(&format!(
-                "<text x=\"{x}\" y=\"{y:.0}\" font-family=\"{FONT}\" font-size=\"22\" font-weight=\"900\" fill=\"#000000\" fill-opacity=\"0.012\" text-anchor=\"middle\" transform=\"rotate(-18 {x} {y:.0})\">{mark}</text>"
+                "<text x=\"{wx:.0}\" y=\"{wy:.0}\" font-family=\"{FONT}\" font-size=\"22\" font-weight=\"900\" fill=\"#000000\" fill-opacity=\"0.012\" text-anchor=\"middle\" transform=\"rotate(-18 {wx:.0} {wy:.0})\">{mark}</text>"
             ));
         }
     }
@@ -742,7 +764,6 @@ mod tests {
         svg[start..end].to_string()
     }
 
-    #[test]
     /// 开发预览（不参与断言）：跑 `cargo test -p pk-server --lib preview -- --nocapture`
     /// 会把微信推送月榜两页渲染到 /tmp/preview-new-{1,2}.svg（真实分页逻辑 + 40 行/页）。
     #[test]
@@ -867,6 +888,7 @@ mod tests {
         assert!(!admin.contains(">浩月</text>"));
     }
 
+    #[test]
     fn month_svg_headers_align_with_values() {
         let rep = DailyReport {
             date: "2026-10-11".into(),

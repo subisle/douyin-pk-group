@@ -51,11 +51,29 @@ for a in "$@"; do
 done
 
 SSH=(sshpass -p "$PASS" ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=20 "root@$HOST")
-SCP=(sshpass -p "$PASS" scp -o StrictHostKeyChecking=accept-new)
+# 传输通道：SFTP（2026-10-12 用户要求，长传输更稳——断线可用 put -a 续传，默认重试 3 次）
+# -b 会强制 BatchMode=yes（禁密码），必须显式关掉并限密码认证
+SFTP=(sshpass -p "$PASS" sftp -o StrictHostKeyChecking=accept-new -o ConnectTimeout=20 \
+      -o BatchMode=no -o PreferredAuthentications=password -o PubkeyAuthentication=no)
 if [ -n "$PROXY" ]; then
   SSH+=(-o "ProxyCommand=nc -X connect -x $PROXY %h %p")
-  SCP+=(-o "ProxyCommand=nc -X connect -x $PROXY %h %p")
+  SFTP+=(-o "ProxyCommand=nc -X connect -x $PROXY %h %p")
 fi
+
+# sftp_get <远程路径> <本地路径>：SFTP 下载（get），失败自动重试（断点续传 -a）
+sftp_get() {
+  local remote="$1" local_path="$2" attempt
+  for attempt in 1 2 3; do
+    # get -a：本地已存在部分文件时从断点续传（OpenSSH 8.0+）
+    if printf 'get -a "%s" "%s"\n' "$remote" "$local_path" | "${SFTP[@]}" -b - "root@$HOST"; then
+      return 0
+    fi
+    echo "    sftp 传输失败（第 $attempt 次），重试..."
+    sleep 3
+  done
+  echo "    sftp 三次重试均失败" >&2
+  return 1
+}
 
 REMOTE_ROOT_PW='$(grep "^MARIADB_ROOT_PASSWORD=" "'$REMOTE_DIR'/.env" | cut -d= -f2-)'
 
@@ -72,8 +90,8 @@ echo "==> 1/5 在 $HOST 上导出 MariaDB $SRC_DB"
   ls -lh /tmp/pk147-$SRC_DB-$TS.sql.gz | awk '{print \"    dump:\", \$5, \$9}'
 "
 
-echo "==> 2/5 下载 dump"
-"${SCP[@]}" "$HOST:/tmp/pk147-$SRC_DB-$TS.sql.gz" "$OUT_DIR/"
+echo "==> 2/5 下载 dump（SFTP，支持断点续传）"
+sftp_get "/tmp/pk147-$SRC_DB-$TS.sql.gz" "$OUT_DIR/pk147-$SRC_DB-$TS.sql.gz"
 "${SSH[@]}" "rm -f /tmp/pk147-$SRC_DB-$TS.sql.gz"
 DUMP="$OUT_DIR/pk147-$SRC_DB-$TS.sql.gz"
 ls -lh "$DUMP" | awk '{print "    本地:", $5, $9}'

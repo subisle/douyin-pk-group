@@ -191,6 +191,11 @@ impl LoginLimiter {
 
 /// 登录来源：优先 X-Forwarded-For（仅当直连方是 127.0.0.1，即经本机反代），
 /// 否则用直连 IP。避免经 Caddy 后全站共用一个来源，同时不信任外来的 XFF。
+///
+/// 2026-10-12 安全审计 H1 修复：改取 **最后一跳**。XFF 规范里每个代理把「来源」
+/// 追加到链尾——自建 Caddy 是追加者，真实客户端在链上；取第一跳等于取攻击者
+/// 随手伪造的值（`curl -H "X-Forwarded-For: 1.2.3.4"` 每次换桶，限流完全失效，
+/// 审计实测复现）。直连反代场景下最后一跳 = 反代追加的直连 IP，客户端无法伪造。
 fn login_source_key(
     remote: Option<std::net::SocketAddr>,
     headers: &axum::http::HeaderMap,
@@ -203,9 +208,9 @@ fn login_source_key(
             .map(str::trim)
             .filter(|s| !s.is_empty())
         {
-            // 取第一跳（最初客户端）
+            // 取最后一跳（最接近服务端的一跳，反代追加、不可伪造）
             return xff
-                .split(',')
+                .rsplit(',')
                 .next()
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
@@ -873,6 +878,8 @@ mod tests {
     }
 
     /// P1-4：XFF 只在直连方是回环地址（经本机反代）时才被信任。
+    /// 2026-10-12 安全审计 H1：改取**最后一跳**——第一跳是客户端可伪造的值，
+    /// 每次换头即换限流桶（实测 8 连发全过）；链尾才是反代追加的真实来源。
     #[test]
     fn login_source_trusts_xff_only_from_loopback() {
         let mut h = axum::http::HeaderMap::new();
@@ -880,7 +887,19 @@ mod tests {
         let loopback: std::net::SocketAddr = "127.0.0.1:5000".parse().unwrap();
         let external: std::net::SocketAddr = "192.168.1.5:5000".parse().unwrap();
 
-        assert_eq!(login_source_key(Some(loopback), &h), "203.0.113.7");
+        // 最后一跳 = 10.0.0.1（反代追加的直连来源，客户端无法篡改链尾之后的部分）
+        assert_eq!(login_source_key(Some(loopback), &h), "10.0.0.1");
+        // 单跳 XFF（无中间代理）：链尾即自身
+        let mut h1 = axum::http::HeaderMap::new();
+        h1.insert("x-forwarded-for", "203.0.113.9".parse().unwrap());
+        assert_eq!(login_source_key(Some(loopback), &h1), "203.0.113.9");
+        // 伪造者把假值放第一跳也无效——仍然取链尾
+        let mut hf = axum::http::HeaderMap::new();
+        hf.insert(
+            "x-forwarded-for",
+            "1.2.3.4, 5.6.7.8, 203.0.113.10".parse().unwrap(),
+        );
+        assert_eq!(login_source_key(Some(loopback), &hf), "203.0.113.10");
         // 直连方不是回环 → 不信任 XFF，用直连 IP
         assert_eq!(login_source_key(Some(external), &h), "192.168.1.5");
         // 没有 XFF → 用直连 IP

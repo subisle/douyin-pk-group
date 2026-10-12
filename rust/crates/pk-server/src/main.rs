@@ -392,6 +392,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/auth/login", post(auth::login))
         .route("/api/auth/logout", post(auth::logout))
         .route("/api/auth/session", get(auth::session))
+        // 2026-10-12 审计 L1：handler 早就有（长效 token 换一次性 ticket，给
+        // EventSource/<img> 等带不了 Authorization 头的场景），路由一直漏挂，
+        // 前端日报图 URL 因此 401。补上。
+        .route("/api/auth/ticket", post(auth::issue_ticket))
         // 数据变更推送（SSE）：后台页面据此自动刷新，不再轮询
         .route("/api/admin/events", get(events::sse))
         .route("/api/health", get(routes::health))
@@ -642,7 +646,25 @@ async fn main() -> anyhow::Result<()> {
             tracing::warn!(dir = %dist_dir.display(), "没有前端构建产物，仅提供 API（先跑 pnpm --filter @pk/douyin-web build）");
             api
         }
-    };
+    }
+    // 2026-10-12 安全审计 L4：基础安全响应头（全站，含静态页）。
+    // XFO/CSP frame-ancestors 防点击劫持，nosniff 防 MIME 嗅探，referrer 收敛。
+    .layer(tower_http::set_header::SetResponseHeaderLayer::overriding(
+        axum::http::header::X_FRAME_OPTIONS,
+        axum::http::HeaderValue::from_static("DENY"),
+    ))
+    .layer(tower_http::set_header::SetResponseHeaderLayer::overriding(
+        axum::http::header::X_CONTENT_TYPE_OPTIONS,
+        axum::http::HeaderValue::from_static("nosniff"),
+    ))
+    .layer(tower_http::set_header::SetResponseHeaderLayer::overriding(
+        axum::http::header::CONTENT_SECURITY_POLICY,
+        axum::http::HeaderValue::from_static("frame-ancestors 'none'"),
+    ))
+    .layer(tower_http::set_header::SetResponseHeaderLayer::overriding(
+        axum::http::header::REFERRER_POLICY,
+        axum::http::HeaderValue::from_static("strict-origin-when-cross-origin"),
+    ));
 
     let app = app.with_state(st.clone());
 

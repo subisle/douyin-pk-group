@@ -1151,7 +1151,8 @@ pub async fn log_access(st: &ArcState, e: AccessLog<'_>) {
         sqlx::query(&crate::pq::rewrite(
             "INSERT INTO access_logs \
              (kind, ip, province, city, isp, geo_source, team, path, account_name, allowed, login_ok, dedup_key) \
-             VALUES (?, ?::inet, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)",
+             VALUES (?, ?::inet, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?) \
+             ON CONFLICT (dedup_key) DO NOTHING",
         ))
         .bind(kind)
         .bind(&packed)

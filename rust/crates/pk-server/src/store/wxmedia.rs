@@ -50,8 +50,6 @@ struct Uploaded {
     download_param: String,
     /// AES key（hex，原始生成值）
     aeskey_hex: String,
-    /// 明文大小
-    file_size: usize,
     /// 密文大小（PKCS#7 后）
     file_size_cipher: usize,
 }
@@ -150,7 +148,6 @@ async fn upload_image(
     Ok(Uploaded {
         download_param,
         aeskey_hex: hex(&aeskey),
-        file_size: rawsize,
         file_size_cipher: filesize,
     })
 }

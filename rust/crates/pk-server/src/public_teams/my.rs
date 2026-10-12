@@ -220,7 +220,9 @@ pub async fn my_login(
     /* 0. 管理员快捷口令（账号、密码填同一个管理员口令即可登录展示页）：
     限流之后、my_accounts 账号校验之前判断——这样管理员不用在 my_accounts 里
     专门留一行账号。口令读自运行时配置（ADMIN_PASSWORD），改 .env 重启即生效；
-    未配置口令时 verify_admin_password 恒 false（fail-closed）。 */
+    未配置口令时 verify_admin_password 恒 false（fail-closed）。
+    2026-10-12 安全审计 M1：account 字段绝不能落口令本体——access_logs 运营可查
+    （/api/admin/visits 支持关键字搜索）且随备份 dump 外流。这里记固定占位符。 */
     if acct == pass && st.auth.verify_admin_password(&acct) {
         crate::ipinfo::log_login_path(
             &st,
@@ -228,7 +230,7 @@ pub async fn my_login(
             &geo,
             "",
             "/api/public/my/login",
-            &acct,
+            "admin-gate",
             true,
         )
         .await;

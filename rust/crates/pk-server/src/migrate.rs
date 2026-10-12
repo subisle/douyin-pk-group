@@ -72,6 +72,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "018_identity_uniqueness",
         include_str!("migrations/018_identity_uniqueness.sql"),
     ),
+    (
+        "019_monthly_metric_unique_index",
+        include_str!("migrations/019_monthly_metric_unique_index.sql"),
+    ),
 ];
 
 /// 迁移建连（migrator 账号；同样关语句缓存）
@@ -224,5 +228,28 @@ mod tests {
         let sorted = names.clone();
         names.sort();
         assert_eq!(names, sorted, "迁移必须按文件名顺序排列");
+    }
+
+    /// 编号连续且无重复（xxx_name 前缀，001 起），防止登记时漏号/撞号。
+    #[test]
+    fn version_numbers_are_unique_and_contiguous() {
+        let mut nums: Vec<u32> = MIGRATIONS
+            .iter()
+            .map(|(v, _)| {
+                let (num, rest) = v.split_once('_').unwrap_or_else(|| {
+                    panic!("迁移版本 {v} 不符合 xxx_name 命名");
+                });
+                assert!(!rest.is_empty(), "迁移版本 {v} 缺少下划线后的名字");
+                num.parse()
+                    .unwrap_or_else(|_| panic!("迁移版本 {v} 的编号 {num} 不是数字"))
+            })
+            .collect();
+        nums.sort_unstable();
+        nums.dedup();
+        assert_eq!(
+            nums,
+            (1..=nums.len() as u32).collect::<Vec<_>>(),
+            "迁移编号必须从 001 起连续且无重复"
+        );
     }
 }

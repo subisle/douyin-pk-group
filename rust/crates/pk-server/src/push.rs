@@ -414,10 +414,21 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
     let month = date.get(..7).unwrap_or(date).to_string();
     let month_map = month_wave_map(st, team, &month).await;
     // 追名次目标要全团本月排名，只在这类目标存在时才算
-    let month_rank = if bindings.iter().any(|b| b.notify_target && b.person_id > 0) {
+    let month_rank_opt = if bindings.iter().any(|b| b.notify_target && b.person_id > 0) {
         Some(month_rank_list(st, team, &month).await)
     } else {
         None
+    };
+    // 2026-10-12 审计 M6：图片推送 caption 的「本月第 N 名」必须用**月榜**排名。
+    // 原来把当日榜 rank_items 传给 greeting_with_rank 算名次——文字与月榜图对不上。
+    // 只要有 daily_report 订阅者就要有月榜名次（month_rank_opt 可能没算过，补一次）。
+    let month_rank_for_caption = if bindings.iter().any(|b| b.daily_report) {
+        Some(match month_rank_opt {
+            Some(list) => list,
+            None => month_rank_list(st, team, &month).await,
+        })
+    } else {
+        month_rank_opt
     };
 
     // 每日报告全团共用一份排名，算一次
@@ -493,7 +504,7 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
                 } else {
                     let caption = greeting_with_rank(
                         &b.name,
-                        &rank_items,
+                        month_rank_for_caption.as_deref().unwrap_or(&[]),
                         b.person_id,
                         month_map.get(&b.person_id).copied().unwrap_or(0),
                         star.as_ref(),
@@ -558,7 +569,7 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
                 for t in &targets {
                     let rival = month_map.get(&t.target_person_id).copied().unwrap_or(0);
                     let (gap, label, detail, gap_text) =
-                        eval_target(t, my, rival, month_rank.as_deref(), b.person_id);
+                        eval_target(t, my, rival, month_rank_for_caption.as_deref(), b.person_id);
                     if gap <= 0 {
                         if !t.hit {
                             lines.push(format!("🚀 已追上「{label}」！\n   {detail}",));
