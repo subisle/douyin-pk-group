@@ -72,6 +72,7 @@ mod announcement_tests {
         let s = AnnounceStep {
             title: "x".into(),
             icon: "star".into(),
+            target: String::new(),
             content: "y".into(),
         };
         assert_eq!(Announcement::icon_for(&s, 3), "star");
@@ -92,7 +93,8 @@ mod announcement_tests {
             let s = AnnounceStep {
                 title: "x".into(),
                 icon: bad.into(),
-                content: "y".into(),
+                target: String::new(),
+            content: "y".into(),
             };
             let got = Announcement::icon_for(&s, 0);
             assert_eq!(got, DEFAULT_STEP_ICONS[0], "{bad:?} 该回落默认");
@@ -106,6 +108,7 @@ mod announcement_tests {
         let padded = AnnounceStep {
             title: "x".into(),
             icon: " star ".into(),
+            target: String::new(),
             content: "y".into(),
         };
         assert_eq!(Announcement::icon_for(&padded, 0), "star");
@@ -151,12 +154,14 @@ mod announcement_tests {
                 AnnounceStep {
                     title: "a".into(),
                     icon: String::new(),
-                    content: "1".into(),
+                    target: String::new(),
+            content: "1".into(),
                 },
                 AnnounceStep {
                     title: "b".into(),
                     icon: "  ".into(),
-                    content: "2".into(),
+                    target: String::new(),
+            content: "2".into(),
                 },
             ],
             version: 1,

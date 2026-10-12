@@ -3273,15 +3273,19 @@ function myAccountsCard(accounts) {
   const body = list.map((a) => {
     /* 没登记抖音号时退回采集 ID，并加 `ID ` 前缀标明「这不是抖音号」——
        与推送文案（push.rs::AccountWave::display_name）同一口径，2026-10-12 */
+    /* 2026-10-13 用户口径：抖音号行主标题显示抖音名称（anchorName），
+       抖音号做次行说明；没有名称才退回抖音号/采集 ID。 */
     const no = a.douyinNo
       ? String(a.douyinNo)
       : (a.anchorId ? 'ID ' + String(a.anchorId) : '');
-    const sub = (a.lastDate ? String(a.lastDate) : '暂无数据') +
+    const title = (a.anchorName ? String(a.anchorName) : '') || no;
+    const sub = (no && a.anchorName ? no + ' · ' : '') +
+      (a.lastDate ? String(a.lastDate) : '暂无数据') +
       (Number(a.days) > 0 ? ' · ' + a.days + ' 天有数据' : '');
     return '<div class="row">' +
       '<div class="l"><div class="ico"><span class="material-symbols-outlined">smart_display</span></div>' +
       '<div style="min-width:0">' +
-        '<div style="display:flex;align-items:center;min-width:0"><span class="t">' + esc(no) + '</span>' +
+        '<div style="display:flex;align-items:center;min-width:0"><span class="t">' + esc(title) + '</span>' +
         (a.primary ? '<span class="chip">主号</span>' : '') +
         '<span class="st' + (a.liveToday ? ' on' : '') + '"><i></i>' +
         (a.liveToday ? '今日已开播' : '今日未开播') + '</span></div>' +
@@ -3349,7 +3353,6 @@ function renderMy(d, series, claim, bound, push, accounts) {
       '<div style="display:flex;align-items:center;gap:.375rem"><span class="nm">' + esc(d.name || '—') + '</span>' +
       '<span class="tag">主账号</span></div>' +
       '<div class="sub">' + esc(LABEL()) + (d.masterName ? ' · 师承【' + esc(d.masterName) + '】' : '') + '</div>' +
-      '<div class="sync"><span class="dot"></span><span>数据已静默实时同步</span></div>' +
     '</div>' +
   '</div>';
 
@@ -3397,10 +3400,11 @@ function renderMy(d, series, claim, bound, push, accounts) {
     ? '<span class="chip">已绑定 ' + boundList.length + ' 个</span>' : '';
   /* 推送状态走 /my/push 的真实字段（后端没有 configured 这个键）：
      bound=已拿到会话可推送；scanBound+needActivate=扫码了但还没给机器人发过消息。 */
-  const pushStatus = !push ? '微信 / QQ未同步'
-    : push.bound ? '微信 / QQ已同步'
+  /* 2026-10-13 用户口径：只接微信推送，不显示 QQ */
+  const pushStatus = !push ? '微信未同步'
+    : push.bound ? '微信已同步'
     : push.scanBound ? (push.needActivate ? '待激活' : '已扫码')
-    : '微信 / QQ未同步';
+    : '微信未同步';
 
   $('view').innerHTML = '<div class="section tab-content-enter">' +
     head + big + trend + myAccountsCard(accounts) +
