@@ -1334,14 +1334,12 @@ function toast(msg) {
   toastTimer = setTimeout(() => $('toast').classList.remove('show'), 1800);
 }
 async function api(p) {
-  /* 登录门（2026-10-10）：团数据接口自动带上我的 token；401 → 弹登录门 */
-  let url = p;
-  const t = myToken();
-  if (t && url.indexOf('/api/public/teams/' + TEAM) === 0 &&
-      url.indexOf('access_token=') < 0 && url.indexOf('?token=') < 0) {
-    url += (url.indexOf('?') >= 0 ? '&' : '?') + 'access_token=' + encodeURIComponent(t);
-  }
-  const r = await fetch(url);
+  /* 登录门（2026-10-10）：带登录态请求头；401 → 弹登录门。
+     2026-10-13 修「登录成功又回登录门」：token 一律走 X-My-Token 头——后端
+     （admin.rs::header_my_token）只认这个头，?token= / ?access_token= 一律按未登录
+     401 处理。旧写法下登录成功后第一个数据请求就 401 → sessionExpired 清 token →
+     又弹登录门。顺带 token 不再进 URL（访问日志/浏览器历史/Referer 不再记登录态）。 */
+  const r = await fetch(p, { headers: myTokenHeaders() });
   if (r.status === 401) { sessionExpired(); throw new Error('请先登录'); }
   let d = {};
   try { d = await r.json(); } catch (_) {}
@@ -1748,8 +1746,8 @@ async function ensureLogin() {
     const cands = ['all'];
     for (const team of cands) {
       try {
-        const who = await fetch('/api/public/teams/' + team + '/my/who?token=' +
-          encodeURIComponent(t)).then((r) => r.json());
+        const who = await fetch('/api/public/teams/' + team + '/my/who',
+          { headers: myTokenHeaders() }).then((r) => r.json());
         if (who && who.ok) {
           /* team 回账号真正的团别（团别待定 = 空串），不是刚试探的团 */
           who.team = who.anyTeam ? '' :
@@ -2873,6 +2871,14 @@ function mySession() {
   return { token: '', team: '' };
 }
 function myToken() { return mySession().token; }
+/** 带登录态的请求头：token 只走 X-My-Token（后端唯一入口，见 admin.rs::header_my_token）。
+    所有需要登录态的 fetch 都必须经过这里，别再往 URL 上拼 ?token= / ?access_token=。 */
+function myTokenHeaders(extra) {
+  const h = Object.assign({}, extra || {});
+  const t = myToken();
+  if (t) h['X-My-Token'] = t;
+  return h;
+}
 function myLogout() {
   ['myToken_male', 'myToken_female', MY_ANY_KEY].forEach((k) => {
     sessionStorage.removeItem(k);
@@ -2887,29 +2893,30 @@ async function loadMy() {
   if (!t) { sessionExpired(); return; }
   $('mhSub').textContent = 'MY';
   try {
-    /* 手机号注册了但还没绑主播：这里只有一张绑定卡（绑定后才有个人的音浪数据） */
-    const who = await api('/api/public/teams/' + TEAM + '/my/who?token=' + encodeURIComponent(t));
+    /* 手机号注册了但还没绑主播：这里只有一张绑定卡（绑定后才有个人的音浪数据）。
+       token 由 api() 统一走 X-My-Token 头（2026-10-13），URL 不再带登录态。 */
+    const who = await api('/api/public/teams/' + TEAM + '/my/who');
     if (who && who.needBind) { applyLoginState(who); renderBindCard(who); return; }
-    const d = await api('/api/public/teams/' + TEAM + '/my?token=' + encodeURIComponent(t));
+    const d = await api('/api/public/teams/' + TEAM + '/my');
     myPersonId = Number(d.personId || 0) || null;
     let series = null;
     try {
-      series = await api('/api/public/teams/' + TEAM + '/my/series?token=' + encodeURIComponent(t) + '&days=14');
+      series = await api('/api/public/teams/' + TEAM + '/my/series?days=14');
     } catch (_) { /* 趋势图失败不挡主数据 */ }
     let claim = null, bound = [];
     try {
-      const c = await api('/api/public/teams/' + TEAM + '/my/claim?token=' + encodeURIComponent(t));
+      const c = await api('/api/public/teams/' + TEAM + '/my/claim');
       claim = c.claim; bound = c.bound || [];
     } catch (_) { /* 绑定状态失败不挡主数据 */ }
     let push = null;
     try {
-      push = await api('/api/public/teams/' + TEAM + '/my/push?token=' + encodeURIComponent(t));
+      push = await api('/api/public/teams/' + TEAM + '/my/push');
     } catch (_) { /* 推送状态失败不挡主数据 */ }
     /* 我的抖音号（2026-10-12）：后端并行实现中。失败/超时一律不挡主数据，
        这里用 {__err:true} 占位，卡片位置只出一行灰字（口径见 myAccountsCard） */
     let accounts = null;
     try {
-      accounts = await api('/api/public/teams/' + TEAM + '/my/accounts?token=' + encodeURIComponent(t));
+      accounts = await api('/api/public/teams/' + TEAM + '/my/accounts');
     } catch (_) { accounts = { __err: true }; }
     renderMy(d, series, claim, bound, push, accounts);
   } catch (e) {
@@ -2954,8 +2961,8 @@ async function searchBind() {
   if (!key) { box.innerHTML = ''; return; }
   box.innerHTML = '<div class="none">搜索中…</div>';
   try {
-    const d = await fetch('/api/public/my/bind/search?token=' + encodeURIComponent(myToken()) +
-      '&q=' + encodeURIComponent(key)).then((r) => r.json());
+    const d = await fetch('/api/public/my/bind/search?q=' + encodeURIComponent(key),
+      { headers: myTokenHeaders() }).then((r) => r.json());
     if (d.error) throw new Error(d.error);
     const items = d.items || [];
     if (!items.length) {
@@ -3440,7 +3447,7 @@ function pushErrHtml() {
 }
 
 async function fetchPush() {
-  const p = await api('/api/public/teams/' + TEAM + '/my/push?token=' + encodeURIComponent(myToken()));
+  const p = await api('/api/public/teams/' + TEAM + '/my/push');
   pushState = p;
   return p;
 }
@@ -3656,8 +3663,8 @@ function bindPushBoundHandlers(p) {
       if (!key) { listEl.classList.add('hidden'); listEl.innerHTML = ''; return; }
       pushSrTimer = setTimeout(async () => {
         try {
-          const d = await api('/api/public/teams/' + TEAM + '/my/push/search?token=' +
-            encodeURIComponent(myToken()) + '&q=' + encodeURIComponent(key));
+          const d = await api('/api/public/teams/' + TEAM + '/my/push/search?q=' +
+            encodeURIComponent(key));
           const items = d.items || [];
           listEl.innerHTML = items.length
             ? items.map((a) => '<div data-pid="' + a.personId + '">' + esc(a.name) + '</div>').join('')
@@ -4078,7 +4085,10 @@ function syncNav() {
    跳转；统一直接进 /api/public/teams/all 的全量展示。 */
 async function siteIsOpen() {
   try {
-    const r = await fetch('/api/public/teams/all');
+    /* 带上已有登录态：登录门开启时 /all 对有效 token 放行（后端 gate_team 口径）。
+       token 走 X-My-Token 头（2026-10-13）；裸 fetch 或 ?access_token= 都会 401，
+       导致每次 boot 又弹一次登录门（"登录成功又回登录门 / 要登录两次"的根因之一）。 */
+    const r = await fetch('/api/public/teams/all', { headers: myTokenHeaders() });
     return r.ok;
   } catch (_) { return false; }
 }
