@@ -270,6 +270,10 @@ pub struct AnnounceStep {
     #[serde(default)]
     pub icon: String,
     pub content: String,
+    /// CSS 选择器（2026-10-13 spotlight 引导）：指向页面上的具体元素，
+    /// 前端挖孔高亮 + 卡片贴位；空 = 旧的居中卡片模式（完全向后兼容）。
+    #[serde(default)]
+    pub target: String,
 }
 
 /// 每步默认图标（步序号 % 长度）。取 Material Symbols 里语义中性、
@@ -329,6 +333,8 @@ impl Announcement {
                 "content": s.content,
                 // 下发前把空 icon 归一成默认值，前端不用再猜第几步该用什么
                 "icon": Self::icon_for(s, i),
+                // spotlight 引导的目标元素选择器（空 = 居中卡片）
+                "target": s.target,
             })).collect::<Vec<_>>(),
             "version": self.version,
         })
@@ -369,6 +375,12 @@ pub async fn update_announcement(State(st): State<ArcState>, Json(body): Json<Va
                     return None;
                 }
                 let icon = s.get("icon").and_then(|v| v.as_str()).unwrap_or("").trim();
+                // spotlight 目标选择器：只收合法字符，长度兜底，不让任意长串进配置
+                let target = s.get("target").and_then(|v| v.as_str()).unwrap_or("").trim();
+                let target_ok = !target.is_empty()
+                    && target.len() <= 120
+                    && target.chars().all(|c| c.is_ascii_alphanumeric()
+                        || " _-#.[\"]>:()~*=^|,$".contains(c));
                 Some(AnnounceStep {
                     title: title.trim().chars().take(64).collect(),
                     // 白名单外的图标名直接丢掉（回落默认），任意字符串不进配置
@@ -378,6 +390,7 @@ pub async fn update_announcement(State(st): State<ArcState>, Json(body): Json<Va
                         String::new()
                     },
                     content: content.trim().chars().take(2000).collect(),
+                    target: if target_ok { target.to_string() } else { String::new() },
                 })
             })
             .collect();

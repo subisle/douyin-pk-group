@@ -1108,6 +1108,46 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
   .announce-box .a-prev { flex:0 0 80px; }
 }
 
+/* ===== spotlight 引导（2026-10-13）：指向具体元素的挖孔高亮 + 卡片贴位 =====
+   原理：目标元素临时挂 .guide-spot —— 巨大 box-shadow（0 0 0 9999px）把全屏
+   涂暗，只留元素本身「挖亮」；此时 #announce 遮罩切到 ann-spot 模式
+   （去掉自己的半透明底色和毛玻璃，否则会把挖孔重新盖住）。
+   卡片 position:fixed 按 getBoundingClientRect 贴在目标下/上/侧方，
+   ::before 画 14px 小三角指向目标；哪个方向空间都不够就回落居中卡片。 */
+#announce.ann-spot { background:transparent; -webkit-backdrop-filter:none; backdrop-filter:none; }
+#announce.ann-spot .announce-box { position:fixed; z-index:103; }
+/* 贴位时关掉入场动画：annCardIn 的 to{transform:none} 会盖掉 at-top 的
+   translateY(-100%) 定位（CSS 动画优先级高于 inline style），卡片会闪回目标下方。 */
+.announce-box.at-bottom, .announce-box.at-top,
+.announce-box.at-left, .announce-box.at-right { animation:none; }
+.guide-spot { position:relative; z-index:102 !important;
+  border-radius:12px !important;
+  box-shadow:0 0 0 4px #fff, 0 0 0 6px var(--primary), 0 0 0 9999px rgba(11,15,23,.55);
+  animation:guideSpotPulse 1.8s ease-in-out infinite; }
+@keyframes guideSpotPulse {
+  0%,100% { box-shadow:0 0 0 4px #fff, 0 0 0 6px var(--primary), 0 0 0 9999px rgba(11,15,23,.55); }
+  50%     { box-shadow:0 0 0 5px #fff, 0 0 0 8px var(--primary), 0 0 0 9999px rgba(11,15,23,.62); }
+}
+/* 贴位卡片：overflow 放开让小三角露出（a-head 渐变自带圆角自己裁） */
+.announce-box .a-head { border-radius:22px 22px 0 0; }
+.announce-box.at-bottom, .announce-box.at-top,
+.announce-box.at-left, .announce-box.at-right { overflow:visible; }
+.announce-box.at-bottom::before, .announce-box.at-top::before,
+.announce-box.at-left::before, .announce-box.at-right::before {
+  content:''; position:absolute; width:14px; height:14px; background:#fff;
+  transform:rotate(45deg); z-index:-1; }
+.announce-box.at-bottom::before { top:-7px; left:var(--ax, 50%); margin-left:-7px;
+  border-left:1px solid rgba(15,23,42,.06); border-top:1px solid rgba(15,23,42,.06); }
+.announce-box.at-top::before { bottom:-7px; left:var(--ax, 50%); margin-left:-7px;
+  border-right:1px solid rgba(15,23,42,.06); border-bottom:1px solid rgba(15,23,42,.06); }
+.announce-box.at-right::before { left:-7px; top:var(--ay, 50%); margin-top:-7px;
+  border-right:1px solid rgba(15,23,42,.06); border-bottom:1px solid rgba(15,23,42,.06); }
+.announce-box.at-left::before { right:-7px; top:var(--ay, 50%); margin-top:-7px;
+  border-left:1px solid rgba(15,23,42,.06); border-top:1px solid rgba(15,23,42,.06); }
+@media (prefers-reduced-motion: reduce) {
+  .guide-spot { animation:none; }
+}
+
 /* ===== 微信扫码绑定（2026-10-12）：二维码卡 + 状态行 + 倒计时 + 刷新动画 =====
    对齐微信「添加朋友 → 扫码」的做法：
    · 二维码固定 208px 白底卡（SVG 原始尺寸不固定，不定尺寸在窄屏必溢出）
@@ -3318,10 +3358,6 @@ function renderMy(d, series, claim, bound, push, accounts) {
   const y = d.yearly || {};
   const dd = d.daily || {};
   const monthlyYuan = m.yuan == null ? (m.wave == null ? '—' : yuan(m.wave / 10)) : yuan(m.yuan);
-  /* 排名只显示自己（2026-10-12）：不读 teamSize / rankGap，后端字段半改状态也不闪旧文案 */
-  const rankLeft = d.teamRank > 0
-    ? '战队排名：第 ' + d.teamRank + ' 名'
-    : '战队排名：暂未上榜';
   /* Stitch 版音浪对比卡（2026-10-13）：今日/本月/本年 三段同期对照。
      daily.prevWave=上一业务日、monthly.prevWave=上月同期、yearly.prevWave=去年同期，
      数据 /my 全有（minutes.rs 同期对照字段）。涨红跌绿沿用 waveDelta。 */
@@ -3345,10 +3381,6 @@ function renderMy(d, series, claim, bound, push, accounts) {
     '<div class="st-cmp-rmb"><div class="l"><span class="material-symbols-outlined">monetization_on</span>' +
       '<span>本月预估折合收益</span><span class="pct-tag">35%分成</span></div>' +
       '<div class="v">' + monthlyYuan + '</div></div>' +
-    '<div class="st-my-rank">' +
-      '<div class="l1"><span class="a"><span class="material-symbols-outlined">military_tech</span>' +
-      esc(rankLeft) + '</span></div>' +
-    '</div>' +
   '</div>';
 
 
@@ -4501,6 +4533,129 @@ function announceDeepStep(stepCount) {
   return (n >= 0 && n < stepCount) ? n : -1;
 }
 
+/* ---- spotlight 引导（2026-10-13）：step.target 指向具体元素时的定位逻辑 ---- */
+
+/* target selector → 所属视图的映射：selector 命不中当前视图时先切页再定位。
+   #my* → my；#navRow → 看按钮的 data-v 属性（分组页签→group、族谱页签→lineage、
+   我的页签→my、看板页签不用切）；其余（.seg / .st-row* 等）→ data。
+   映射里没有的 selector 不切页。 */
+function announceTargetView(sel) {
+  if (!sel) return null;
+  if (/^#my/.test(sel)) return 'my';
+  if (/^#navRow/.test(sel)) {
+    var b = null;
+    try { b = document.querySelector(sel); } catch (_) {}
+    var v = b && b.dataset ? b.dataset.v : null;
+    return (v === 'group' || v === 'lineage' || v === 'my') ? v : null;
+  }
+  if (/^\.seg\b|^\.st-row/.test(sel)) return 'data';
+  return null;
+}
+
+/* target 指向的页面被后台关掉（如 groupEnabled=false 时 #navGroup 整体 hidden）：
+   spotlight 找不到可见元素会自然回落居中卡片，但卡片文案里写着「点分组页签」就会误导。
+   这里提前检测：目标元素是 hidden 或干脆不存在时，直接把整步跳过（自动滑到下一步），
+   没有下一步就当这一步看完。返回 true 表示已跳过、调用方不要再 render。 */
+function announceStepTargetMissing(steps, idxRef) {
+  var s = steps[idxRef.idx] || {};
+  var sel = s.target;
+  if (!sel) return false;
+  var el = null;
+  try { el = document.querySelector(sel); } catch (_) {}
+  var missing = !el || el.classList.contains('hidden')
+    || el.offsetWidth <= 0 || el.offsetHeight <= 0;
+  if (!missing) return false;
+  if (idxRef.idx < steps.length - 1) {
+    idxRef.idx++;
+    return true;   // jump/render 由调用方继续
+  }
+  return false;    // 最后一步：留着走居中卡片，文案仍在
+}
+
+/* 上一步挂在目标元素上的 spotlight class / 贴位 class，步进与关闭时都要清干净 */
+var announceSpotEl = null;
+function clearAnnounceSpot() {
+  if (announceSpotEl) {
+    announceSpotEl.classList.remove('guide-spot');
+    announceSpotEl.style.zIndex = announceSpotEl.getAttribute('data-ann-z') || '';
+    announceSpotEl.removeAttribute('data-ann-z');
+    announceSpotEl = null;
+  }
+}
+/* 卡片贴位：按目标 rect 与剩余空间挑方向（下 > 上 > 右 > 左），都不够回落居中。
+   贴位失败返回 false（调用方据此去掉方向 class，让卡片回到遮罩居中布局）。 */
+function placeAnnounceCard(card, rect) {
+  var cls = ['at-bottom', 'at-top', 'at-right', 'at-left'];
+  cls.forEach(function (c) { card.classList.remove(c); });
+  var m = 14, gap = 12;                       // 屏幕边距 / 卡片与目标间距
+  var vw = window.innerWidth, vh = window.innerHeight;
+  var top = rect.top, bottom = vh - rect.bottom, left = rect.left, right = vw - rect.right;
+  var small = vw < 480;                        // 手机上竖屏：侧贴空间普遍不够
+  card.style.left = card.style.top = card.style.right = card.style.bottom = '';
+  card.style.maxWidth = '';
+  var best = null;
+  if (bottom >= 190 + gap && (!small || top < bottom)) best = 'at-bottom';
+  else if (top >= 190 + gap) best = 'at-top';
+  else if (!small && right >= 250 + gap && left < right) best = 'at-right';
+  else if (!small && left >= 250 + gap) best = 'at-left';
+  if (!best) return false;
+  var bw = Math.min(352, vw - m * 2);
+  card.style.maxWidth = bw + 'px';
+  if (best === 'at-bottom' || best === 'at-top') {
+    var ax = Math.min(Math.max(rect.left + rect.width / 2, m + bw / 2), vw - m - bw / 2);
+    card.style.left = Math.round(ax - bw / 2) + 'px';
+    card.style.top = best === 'at-bottom'
+      ? Math.min(Math.round(rect.bottom + gap), vh - 120) + 'px'
+      : Math.max(Math.round(rect.top - gap), 0) + 'px';
+    card.style.transform = best === 'at-bottom' ? '' : 'translateY(-100%)';
+    /* 箭头 x：相对卡片自身的偏移 = 目标中心 - 卡片左缘 */
+    card.style.setProperty('--ax', Math.round(rect.left + rect.width / 2 - parseFloat(card.style.left)) + 'px');
+  } else {
+    var ay = Math.min(Math.max(rect.top + rect.height / 2, m + 90), vh - m - 90);
+    card.style.top = Math.round(ay - 90) + 'px';
+    card.style.left = best === 'at-right'
+      ? Math.min(Math.round(rect.right + gap), vw - bw - m) + 'px'
+      : Math.max(Math.round(rect.left - gap - bw), m) + 'px';
+    card.style.setProperty('--ay', Math.round(Math.min(Math.max(rect.top + rect.height / 2, 90), 180)) + 'px');
+  }
+  card.classList.add(best);
+  return true;
+}
+/* 渲染某一步时挂 spotlight：返回 true 表示进入贴位模式（遮罩变透明挖孔），
+   false 表示找不到目标 / 放不下，回落旧的居中卡片。 */
+function applyAnnounceSpot(box, card, sel) {
+  clearAnnounceSpot();
+  var spotMode = false;
+  var el = null;
+  if (sel) { try { el = document.querySelector(sel); } catch (_) { el = null; } }
+  /* 显式挂着 hidden 的元素（如非当前视图的 toolbar）不算数 */
+  if (el && el.classList.contains('hidden')) el = null;
+  if (el && el.offsetWidth > 0 && el.offsetHeight > 0) {
+    announceSpotEl = el;
+    el.setAttribute('data-ann-z', el.style.zIndex || '');
+    el.classList.add('guide-spot');
+    el.style.zIndex = '102';
+    /* 目标可能在长页面视口外（如我的页推送行）：先滚到可视区再量位置 */
+    var vr = el.getBoundingClientRect();
+    if (vr.top < 60 || vr.bottom > window.innerHeight - 60) {
+      try { el.scrollIntoView({ block: 'center', behavior: 'instant' }); } catch (_) {}
+    }
+    /* 挂 class 后再量一次：guide-spot 的圆角/描边可能改变布局 */
+    var rect = el.getBoundingClientRect();
+    spotMode = placeAnnounceCard(card, rect);
+    if (spotMode) {
+      /* 读屏：把描述文本也用 aria-describedby 关联到目标元素本身 */
+      try { el.setAttribute('aria-describedby', 'announceBody'); } catch (_) {}
+    } else {
+      /* 哪个方向都放不下：挖孔留着也意义不大，整个回落居中卡片 */
+      clearAnnounceSpot();
+      el.removeAttribute('aria-describedby');
+    }
+  }
+  box.classList.toggle('ann-spot', spotMode);
+  return spotMode;
+}
+
 function maybeAnnounce() {
   var a = site && site.announcement;
   if (!a || !a.enabled || !(a.steps && a.steps.length)) return;
@@ -4531,15 +4686,18 @@ function maybeAnnounce() {
     if (closing) return;
     closing = true;
     clearTimeout(pushSrTimer);
+    clearSwitching();
     removeListeners();
     /* 深链预览不落已读：看一眼链接不该把正式引导吃掉 */
     if (!deepLinked) {
       try { localStorage.setItem(key, String(a.version)); } catch (_) {}
     }
     announceCtx = null;
+    clearAnnounceSpot();
     unlockScroll();
     box.classList.add('hidden');
     box.innerHTML = '';
+    box.classList.remove('ann-spot');
     box.classList.remove('ann-overlay-in');
   }
   announceCtx = close;
@@ -4575,18 +4733,102 @@ function maybeAnnounce() {
     var ic = s && s.icon ? String(s.icon).trim() : '';
     return ANNOUNCE_ICONS.indexOf(ic) >= 0 ? ic : ANNOUNCE_ICONS[i % ANNOUNCE_ICONS.length];
   }
+
+  /* 步进时若新步骤的 target 在别的视图里，先切页（data / my / group …）。
+     go() 是 async：用轮询等目标视图真正渲染出来（上限 2.5s），数据一到就
+     渲染 spotlight；超时也要渲染兜底，别让引导卡死在黑屏。
+     等待期间卡片先收起，切完页再整卡淡入，避免卡片盖在空视图上闪烁。 */
+  var switchingTimer = null, switchingPoll = null;
+  function clearSwitching() {
+    clearTimeout(switchingTimer); switchingTimer = null;
+    clearInterval(switchingPoll); switchingPoll = null;
+  }
+  /* 目标此刻真的可定位：存在、没挂 hidden、有实际尺寸 */
+  function targetReady(sel) {
+    var el = null;
+    try { el = document.querySelector(sel); } catch (_) {}
+    return !!el && !el.classList.contains('hidden')
+      && el.offsetWidth > 0 && el.offsetHeight > 0;
+  }
   function jump(n) {
     if (n < 0) n = 0;
     if (n > steps.length - 1) n = steps.length - 1;
     if (n === idx) return;
     idx = n;
+    var sel = (steps[idx] && steps[idx].target) || '';
+    var need = announceTargetView(sel);
+    if (need && need !== view) {
+      clearAnnounceSpot();
+      box.classList.add('hidden');
+      box.innerHTML = '';
+      box.classList.remove('ann-spot');
+      try { switchView(need); } catch (e) { render(); return; }
+      clearSwitching();
+      var waited = 0;
+      switchingPoll = setInterval(function () {
+        waited += 120;
+        if (targetReady(sel) || waited >= 2500) {
+          clearInterval(switchingPoll); switchingPoll = null; render();
+        }
+      }, 120);
+      switchingTimer = setTimeout(function () { clearSwitching(); render(); }, 2600);
+      return;
+    }
+    /* 同视图：元素已经在了直接渲染；还没渲染出来（如 .st-row 行）等它出现 */
+    if (sel && !targetReady(sel)) {
+      clearSwitching();
+      var w2 = 0;
+      switchingPoll = setInterval(function () {
+        w2 += 120;
+        if (targetReady(sel) || w2 >= 2500) {
+          clearInterval(switchingPoll); switchingPoll = null; render();
+        }
+      }, 120);
+      switchingTimer = setTimeout(function () { clearSwitching(); render(); }, 2600);
+      return;
+    }
     render();
   }
 
   var firstOpen = true;
   function render() {
+    clearSwitching();
     const isFirst = firstOpen;
     firstOpen = false;
+    /* 深链直达的步骤：target 若在别的视图里，先切页再渲染（普通步进由 jump 管，
+       深链绕过 jump，所以这里补一刀）。只处理一次：切页后 firstOpen 已翻 false。 */
+    if (isFirst && deepLinked) {
+      var s0 = steps[idx] || {};
+      var v0 = announceTargetView(s0.target);
+      if (v0 && v0 !== view) {
+        try { switchView(v0); } catch (_) {}
+      }
+    }
+    /* 目标被后台关掉的步骤自动滑过：指向的页签整个 hidden 时，挖孔没意义、
+       文案还会误导用户去找一个不存在的按钮 —— 直接跳到下一步更干净。 */
+    var idxRef = { idx: idx };
+    if (announceStepTargetMissing(steps, idxRef)) {
+      if (idxRef.idx === idx) return;   // 最后一步且目标缺失：不跳,照常渲染
+      idx = idxRef.idx;
+      render();
+      return;
+    }
+    /* 深链首渲染：目标视图刚切过去、数据还在加载（如我的页推送行），
+       和 jump 一样轮询等它出现（上限 2.5s），而不是立刻渲染成居中卡片。 */
+    var sWait = steps[idx] || {};
+    if (isFirst && deepLinked && sWait.target && !targetReady(sWait.target)) {
+      var w0 = 0;
+      switchingPoll = setInterval(function () {
+        w0 += 120;
+        if (targetReady(sWait.target) || w0 >= 2500) {
+          clearInterval(switchingPoll); switchingPoll = null;
+          firstOpen = false;
+          render();
+        }
+      }, 120);
+      switchingTimer = setTimeout(function () { clearSwitching(); firstOpen = false; render(); }, 2600);
+      return;
+    }
     removeListeners();
     var s = steps[idx] || {};
     var first = idx === 0;
@@ -4618,6 +4860,18 @@ function maybeAnnounce() {
       '</div>';
     box.classList.remove('hidden');
     box.classList.add('ann-overlay-in');
+
+    /* spotlight：step.target 命中页面元素 → 挖孔 + 卡片贴位；否则保持居中卡片。
+       贴位失败（元素太小放不下卡）时把方向 class 摘掉，让卡片回落遮罩居中。 */
+    var cardEl = box.querySelector('.announce-box');
+    var spotOn = applyAnnounceSpot(box, cardEl, s.target);
+    if (!spotOn && cardEl) {
+      ['at-bottom', 'at-top', 'at-right', 'at-left'].forEach(function (c) {
+        cardEl.classList.remove(c);
+      });
+      cardEl.style.left = cardEl.style.top =
+        cardEl.style.maxWidth = cardEl.style.transform = '';
+    }
 
     $('announceNext').onclick = function () { last ? close() : jump(idx + 1); };
     /* 焦点落到主按钮：读屏用户进来就能听到「下一步」，键盘党直接回车。
@@ -4698,8 +4952,12 @@ function unlockScroll() {
   document.body.removeAttribute('data-ann-overflow');
 }
 
-/* 登录门 / 地区门禁出现时把引导收掉，避免两层遮罩叠着。 */
-function dismissAnnounce() { if (announceCtx) announceCtx(); }
+/* 登录门 / 地区门禁出现时把引导收掉，避免两层遮罩叠着。
+   会话中途（登录 reload 前的窗口期）切页也可能把 spotlight 元素冲掉，一并清。 */
+function dismissAnnounce() {
+  clearAnnounceSpot();
+  if (announceCtx) announceCtx();
+}
 
 (async function boot() {
   applyTeam();
