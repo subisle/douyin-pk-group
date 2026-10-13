@@ -1402,6 +1402,26 @@ fn spawn_post_import_backup() {
 
 /// 导入提交核心：匹配 + 校验 + 事务写入 + 批次审计 + 清缓存。
 /// bot 命令与 HTTP 端共用，保证同一套口径与校验。
+/// 异常文件防御（2026-10-13 QQ 机器人导入口径）：全部数据行音浪完全相同（≥3 行）
+/// → 拒绝导入（像拿错文件/列错位/把某日快照当全员当日）。抽成纯函数方便单测。
+pub(crate) fn ensure_not_all_same_wave(rows: &[ImportRow]) -> anyhow::Result<()> {
+    let wave_values: Vec<i64> = rows
+        .iter()
+        .filter_map(|r| r.wave.map(|w| w.round() as i64))
+        .collect();
+    if wave_values.len() >= 3 {
+        let first = wave_values[0];
+        if wave_values.iter().all(|&w| w == first) {
+            anyhow::bail!(
+                "异常文件：全部 {} 行的音浪值都相同（{}）——像是一份与日期无关的全员同值文件，                 已拒绝导入。请核对文件里的日期列与音浪列后再试；确实要导入请用管理端手工分批。",
+                wave_values.len(),
+                first
+            );
+        }
+    }
+    Ok(())
+}
+
 pub async fn commit_import(
     st: &Arc<AppState>,
     team: &str,
@@ -1439,20 +1459,7 @@ pub async fn commit_import(
        文件里所有数据行的音浪值完全相同（≥3 行）→ 几乎可以断定是拿错了文件 /
        列错位（例如把固定值列当成了音浪，或把「某一日」的快照当成全员当日数据）。
        这种文件一旦导入，全团所有人的当日音浪会变成同一个数——拒绝并提示运营。 */
-    let wave_values: Vec<i64> = rows
-        .iter()
-        .filter_map(|r| r.wave.map(|w| w.round() as i64))
-        .collect();
-    if wave_values.len() >= 3 {
-        let first = wave_values[0];
-        if wave_values.iter().all(|&w| w == first) {
-            anyhow::bail!(
-                "异常文件：全部 {} 行的音浪值都相同（{}）——像是一份与日期无关的全员同值文件，                 已拒绝导入。请核对文件里的日期列与音浪列后再试；确实要导入请用管理端手工分批。",
-                wave_values.len(),
-                first
-            );
-        }
-    }
+    ensure_not_all_same_wave(&rows)?;
 
     let ctx = load_match_ctx(st).await?;
     let aliases = merged_aliases(st).await;
@@ -4206,6 +4213,46 @@ fn month_suggest(filename: &str, month_rows: &[ImportRow], rows: &[ImportRow]) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /* ---------------- 全员同值文件防御（2026-10-13 QQ 机器人导入口径） ---------------- */
+
+    fn mk_import_row(w: Option<f64>) -> ImportRow {
+        ImportRow {
+            name: "测试".into(),
+            douyin_no: None,
+            anchor_id: Some("a".into()),
+            wave: w,
+            cumulative_wave: None,
+            minutes: None,
+            is_live: Some(false),
+            err: None,
+        }
+    }
+
+    #[test]
+    fn all_same_wave_rejected() {
+        let rows = vec![
+            mk_import_row(Some(100.0)),
+            mk_import_row(Some(100.0)),
+            mk_import_row(Some(100.0)),
+        ];
+        assert!(ensure_not_all_same_wave(&rows).is_err(), "全员同值应拒绝");
+        let rows = vec![
+            mk_import_row(Some(100.0)),
+            mk_import_row(Some(200.0)),
+            mk_import_row(Some(100.0)),
+        ];
+        assert!(ensure_not_all_same_wave(&rows).is_ok(), "值不同应放行");
+        let rows = vec![mk_import_row(Some(100.0)), mk_import_row(Some(100.0))];
+        assert!(ensure_not_all_same_wave(&rows).is_ok(), "不足 3 行放行");
+        let rows = vec![
+            mk_import_row(Some(100.0)),
+            mk_import_row(None),
+            mk_import_row(None),
+            mk_import_row(None),
+        ];
+        assert!(ensure_not_all_same_wave(&rows).is_ok(), "缺失值不参与判定");
+    }
 
     /* ---------------- 上传扩展名白名单（2026-10-12 审计 L3） ---------------- */
 
