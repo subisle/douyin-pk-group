@@ -6,7 +6,7 @@
  *   history 路由。
  * - 开发：vite dev 直接挂在根（`/group`），base 自动识别为空串。
  *
- * 不引第三方路由库：页面就 7 个常量路径，手写一份够用也好读。
+ * 不引第三方路由库：页面就 9 个常量路径，手写一份够用也好读。
  */
 import { useCallback, useEffect, useState } from 'react'
 
@@ -21,6 +21,7 @@ export type RouteKey =
   | 'visits'
   | 'lineage'
   | 'group'
+  | 'announce'
   | 'bots'
 
 export const DEFAULT_ROUTE: RouteKey = 'data'
@@ -34,6 +35,7 @@ export const ROUTES: { key: RouteKey; path: string; label: string }[] = [
   { key: 'visits', path: '/visits', label: '访客日志' },
   { key: 'lineage', path: '/lineage', label: '族谱' },
   { key: 'group', path: '/group', label: 'PK 分组' },
+  { key: 'announce', path: '/announcements', label: '公告' },
   { key: 'bots', path: '/bots', label: '机器人' },
 ]
 

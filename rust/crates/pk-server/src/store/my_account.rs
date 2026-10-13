@@ -1041,9 +1041,12 @@ pub fn validate_my_code(code: &str) -> std::result::Result<String, String> {
     Ok(c.to_string())
 }
 
-/// 忘记密码：把已登记手机号的账号密码重置为 **手机号后四位**
-/// （2026-10-13 产品拍板：与开号口径一致，主播凭手机号自己就能推算出新密码，
-/// 不用等人转达随机串）。
+/// 忘记密码：把已登记手机号的账号密码重置为 **CSPRNG 随机临时密码**
+///
+/// 2026-10-14 审计修复（P0）：原先重置成「手机号后四位」。该值可从手机号直接推算，
+/// 而这个重置入口（`/api/public/my/password/reset`）不带任何身份证明 ——
+/// 任何人知道手机号就能算出新密码并接管账号。改成不可推导的随机串后，
+/// 重置本身不再等价于「把密码告诉攻击者」。
 ///
 /// 返回 `(新密码, 受影响账号名列表)`：新密码只在 API 响应里下发这一次（请当场转达），
 /// 账号名列表给调用方吊销该账号全部 my token（改密后旧登录态必须失效）。
@@ -1072,9 +1075,10 @@ pub async fn my_account_reset_password_random(
     if names.is_empty() {
         return Err("该手机号还没有注册或未登记".into());
     }
-    /* 重置后的密码 = 手机号后四位（与开号口径一致）。手机号经 validate_my_phone
-    校验过是 5~20 位数字，所以这里必定能取出后四位。 */
-    let new_pass = initial_password(&phone);
+    /* 重置后的密码 = CSPRNG 随机串（2026-10-14 审计 P0）：不再用手机号后四位。
+    手机号后四位是可推导值，配上一个不带身份证明的重置入口 = 任意账号接管。
+    展示端只把本次响应里下发的新密码回填一次，攻击者拿不到。 */
+    let new_pass = crate::random::random_password();
     sqlx::query(&crate::pq::rewrite(
         "UPDATE my_accounts SET pass = ? WHERE phone = ? AND phone <> '' AND is_admin = 0",
     ))

@@ -63,6 +63,21 @@ pub async fn my_bind_request_submit(
     Ok(false)
 }
 
+/// `my_bind_requests.created_at / decided_at` 是 **TIMESTAMPTZ**（001_core.sql:396），
+/// sqlx 的 `String` 解码白名单不含该类型 —— 用 `try_get::<String>` 读必报
+/// ColumnDecode，再被 `.unwrap_or_default()` 吞成空串。
+/// 2026-10-14 审计修复：latest 路径就是这么漏改的（list 路径已在上一轮改成 chrono）。
+/// 抽成公共函数，两条路径共用，杜绝再次分叉。
+fn fmt_ts(row: &sqlx::postgres::PgRow, col: &str) -> String {
+    row.try_get::<chrono::DateTime<chrono::Utc>, _>(col)
+        .map(|t| {
+            t.with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M")
+                .to_string()
+        })
+        .unwrap_or_default()
+}
+
 /// 该账号最新一条绑定申请（展示端「我的」轮询审核进度用）；没有申请 / 017 未跑 → None
 pub async fn my_bind_request_latest(st: &AppState, account: &str) -> Option<serde_json::Value> {
     let pool = w(st).ok()?;
@@ -79,7 +94,7 @@ pub async fn my_bind_request_latest(st: &AppState, account: &str) -> Option<serd
         "status": row.try_get::<String, _>("status").unwrap_or_default(),
         "personName": row.try_get::<String, _>("person_name").unwrap_or_default(),
         "reason": row.try_get::<String, _>("reason").unwrap_or_default(),
-        "createdAt": row.try_get::<String, _>("created_at").unwrap_or_default(),
+        "createdAt": fmt_ts(&row, "created_at"),
     }))
 }
 
@@ -116,11 +131,9 @@ pub async fn my_bind_request_list(
                     "status": r.try_get::<String, _>("status").unwrap_or_default(),
                     "reason": r.try_get::<String, _>("reason").unwrap_or_default(),
                     /* 2026-10-13 审计修复：列是 timestamptz，用 String 读会类型不匹配
-                       → .ok() 吞掉后 createdAt/decidedAt 恒为空串。改读 chrono 再格式化。 */
-                    "createdAt": r
-                        .try_get::<chrono::DateTime<chrono::Utc>, _>("created_at")
-                        .map(|t| t.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string())
-                        .unwrap_or_default(),
+                       → .ok() 吞掉后 createdAt/decidedAt 恒为空串。改读 chrono 再格式化。
+                       2026-10-14：两条路径统一走 fmt_ts（见该文件顶部）。 */
+                    "createdAt": fmt_ts(r, "created_at"),
                     "decidedAt": r
                         .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("decided_at")
                         .ok()

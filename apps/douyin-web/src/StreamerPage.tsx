@@ -151,6 +151,8 @@ export default function StreamerPage() {
 
   /** 导入暂存区：有抖音号/ID 但台账还没建档的行（不进榜单/统计，建档后自动补账） */
   const [pending, setPending] = useState<any[]>([])
+  /** 暂存区默认收起：行数多时不再把台账顶到下面，需要处理再展开 */
+  const [pendingOpen, setPendingOpen] = useState(false)
 
   const loadPending = useCallback(() => {
     // 线上没跑 006 迁移时接口会 404/500：静默忽略，不影响台账页
@@ -572,50 +574,56 @@ export default function StreamerPage() {
       </section>
 
       {/* 导入暂存区：导入时有抖音号/ID、但台账还没有这个主播的行。
-          它们不进台账 / 榜单 / 统计，只有在这里建档或绑定该抖音号之后才会补账显示。 */}
+          它们不进台账 / 榜单 / 统计，只有在这里建档或绑定该抖音号之后才会补账显示。
+          默认收起成一行（行数多时不占位），点「展开」才显示明细与操作。 */}
       {pending.length > 0 && (
         <section className="card">
-          <h2>导入暂存（{pending.length} 行，未建档）</h2>
-          <p className="hint">
-            这些行来自导入文件：<b>有抖音号/ID，但台账里还没有这个主播</b>。它们
-            <b>不显示在台账、榜单和任何统计里</b>；点「建档」填好团别建档（或在上面建档时填上同样的抖音号），
-            数据会自动补账入库，从那一刻起才显示。
-          </p>
-          <div className="table-scroll">
-            <table>
-              <thead>
-                <tr>
-                  <th>名字</th>
-                  <th>抖音号 / 采集 ID</th>
-                <th>业务日期</th>
-                <th>当日音浪</th>
-                <th>时长(分)</th>
-                <th>来源批次</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {pending.map((p) => (
-                <tr key={p.id}>
-                  <td>{p.name}</td>
-                  <td className="hint">{p.douyinNo}</td>
-                  <td className="hint">{p.bizDate ?? '—'}</td>
-                  <td className="num">{p.wave ?? '—'}</td>
-                  <td className="num">{p.minutes ?? '—'}</td>
-                  <td className="hint">#{p.batchId ?? '—'}</td>
-                  <td>
-                    <button className="primary" onClick={() => prefillArchive(p)}>
-                      建档
-                    </button>
-                    <button className="danger" style={{ marginLeft: 6 }} onClick={() => discardPending(p)}>
-                      丢弃
-                    </button>
-                  </td>
-                </tr>
-              ))}
-              </tbody>
-            </table>
+          <div className="row" style={{ margin: 0, justifyContent: 'space-between' }}>
+            <span className="hint" style={{ margin: 0 }}>
+              导入暂存 <b>{pending.length}</b> 行未建档：不显示在台账、榜单和任何统计里，
+              建档（填同样抖音号）后数据自动补账入库。
+            </span>
+            <button className="ghost" onClick={() => setPendingOpen((v) => !v)}>
+              {pendingOpen ? '收起' : '展开处理'}
+            </button>
           </div>
+          {pendingOpen && (
+            <div className="table-scroll" style={{ marginTop: 10 }}>
+              <table>
+                <thead>
+                  <tr>
+                    <th>名字</th>
+                    <th>抖音号 / 采集 ID</th>
+                    <th>业务日期</th>
+                    <th>当日音浪</th>
+                    <th>时长(分)</th>
+                    <th>来源批次</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pending.map((p) => (
+                    <tr key={p.id}>
+                      <td>{p.name}</td>
+                      <td className="hint">{p.douyinNo}</td>
+                      <td className="hint">{p.bizDate ?? '—'}</td>
+                      <td className="num">{p.wave ?? '—'}</td>
+                      <td className="num">{p.minutes ?? '—'}</td>
+                      <td className="hint">#{p.batchId ?? '—'}</td>
+                      <td>
+                        <button className="primary" onClick={() => prefillArchive(p)}>
+                          建档
+                        </button>
+                        <button className="danger" style={{ marginLeft: 6 }} onClick={() => discardPending(p)}>
+                          丢弃
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </section>
       )}
 

@@ -28,9 +28,19 @@ const BASE = (process.env.BASE ?? process.argv[2] ?? 'http://127.0.0.1:8787').re
 const PORT = Number(process.env.CDP_PORT ?? 9341) // 故意不占 uicheck-admin 的 9334
 const OUT = fileURLToPath(new URL('../.uicheck/', import.meta.url))
 const CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD ?? 'shuai4444@'
-const MY_ACCOUNT = process.env.MY_ACCOUNT ?? 'shuai4444@'
-const MY_PASS = process.env.MY_PASS ?? 'shuai4444@'
+// 2026-10-14 审计修复：这三个变量原先硬编码真实口令（'shuai4444@'），已随公开仓库泄露。
+// 脚本不再内置任何凭据，缺哪个就报哪个，避免「拿默认口令去打生产」。
+const needEnv = (name) => {
+  const v = process.env[name]
+  if (!v) {
+    console.error(`缺少环境变量 ${name}（仓库不再内置任何默认口令）`)
+    process.exit(2)
+  }
+  return v
+}
+const ADMIN_PASSWORD = needEnv('ADMIN_PASSWORD')
+const MY_ACCOUNT = needEnv('MY_ACCOUNT')
+const MY_PASS = needEnv('MY_PASS')
 
 mkdirSync(OUT, { recursive: true })
 

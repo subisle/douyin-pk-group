@@ -8,6 +8,7 @@ import StreamerPage from './StreamerPage'
 import ClaimPage from './ClaimPage'
 import VisitPage from './VisitPage'
 import LineagePage from './LineagePage'
+import AnnouncePage from './AnnouncePage'
 import BotPage from './BotPage'
 import GroupPage from './pk/GroupPage'
 import './pk/pk.css'
@@ -21,6 +22,7 @@ const NAV_ICONS: Record<RouteKey, string> = {
   visits: '👁️',
   lineage: '🌳',
   group: '⚔️',
+  announce: '📣',
   bots: '🤖',
 }
 
@@ -153,6 +155,7 @@ export default function App() {
         {route === 'visits' && <VisitPage />}
         {route === 'lineage' && <LineagePage />}
         {route === 'group' && <GroupPage />}
+        {route === 'announce' && <AnnouncePage />}
         {route === 'bots' && <BotPage />}
       </main>
       {toast && (

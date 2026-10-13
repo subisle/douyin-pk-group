@@ -180,7 +180,7 @@ export default function VisitPage() {
       </p>
 
       {stats && (
-        <div className="cards">
+        <div className="cards cards-kpi">
           <div className="card kpi">
             <span className="hint">今日访问</span>
             <b>{stats.today}</b>

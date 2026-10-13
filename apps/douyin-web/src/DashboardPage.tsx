@@ -116,7 +116,7 @@ export default function DashboardPage() {
         </a>
       </div>
 
-      <div className="cards">
+      <div className="cards cards-kpi">
         <section className="card kpi">
           <span className="hint">统计日期</span>
           <b>{s.date}</b>
@@ -170,30 +170,44 @@ export default function DashboardPage() {
 
         <section className="card card-absent">
           <h2>未播预警（连续 ≥2 天）</h2>
-          {data.absent.length === 0 ? (
-            <div className="empty">没有人连续未播 👍</div>
-          ) : (
-            <div className="absent-scroll">
-              <table>
-                <thead>
-                  <tr>
-                    <th>主播</th>
-                    <th>连续未播</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {data.absent.map((r: any) => (
-                    <tr key={r.personId}>
-                      <td>{r.name}</td>
-                      <td className="bad-num">
-                        {r.days === -1 ? '窗口内从未开播' : `${r.days} 天`}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
+          {(() => {
+            /* 「窗口内从未开播」（days=-1）不算连续未播预警，不再逐条红字刷屏，
+               收成卡片底部一行灰字名单；表格只留真正的连续未播（≥2 天）。 */
+            const warned = data.absent.filter((r: any) => r.days >= 2)
+            const neverLive = data.absent.filter((r: any) => r.days === -1)
+            return (
+              <>
+                {warned.length === 0 ? (
+                  <div className="empty">没有人连续未播 👍</div>
+                ) : (
+                  <div className="absent-scroll">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>主播</th>
+                          <th>连续未播</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {warned.map((r: any) => (
+                          <tr key={r.personId}>
+                            <td>{r.name}</td>
+                            <td className="bad-num">{r.days} 天</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+                {neverLive.length > 0 && (
+                  <div className="absent-never hint">
+                    窗口内从未开播（{neverLive.length}）：
+                    {neverLive.map((r: any) => r.name).join('、')}
+                  </div>
+                )}
+              </>
+            )
+          })()}
         </section>
       </div>
 

@@ -81,7 +81,12 @@ pub async fn build(st: &Arc<AppState>, date: &str, team: &str) -> anyhow::Result
     );
     // 当月未播天数：与展示端榜单共用 dialect::MONTH_ABSENT_SQL（只有一份口径，
     // 见那里的注释：只算有数据行，缺采的日子不算未播）。
-    let month = &date[..7];
+    // 2026-10-14 审计修复（P1）：原来写 `&date[..7]`。chrono 的 parse_from_str 对
+    // **非补零输入照样返回 Ok**（"1-1-1" 长 5、"26-1-1" 长 6），所以上游的
+    // valid_date_str 挡不住短串 —— 越界直接 panic（实测：byte index 7 is out of bounds）。
+    // HTTP 侧（daily_svg 的 query date）与机器人侧（"日报 男团 26-1-1"）都可达。
+    // 改成安全切片，与同文件 build_month 的 `get(..7)` 口径一致。
+    let month = date.get(..7).unwrap_or(date);
     let month_sql = crate::dialect::month_absent_sql(month);
     // 累计音浪（≤ date 的全部增量求和；P1-7 total 口径与 WAVES_A 一致：只算可靠行。
     // 基线日 wave_reliable=0 记的是累计基数，其 wave 值本来就是 0/不可信，
@@ -751,13 +756,39 @@ pub async fn daily_svg(
         .into_response())
 }
 
+/// 2026-10-14 审计修复（P1）：原来只靠 `parse_from_str("%Y-%m-%d")`，而 chrono 对
+/// **非补零输入照样返回 Ok** —— "1-1-1"（长 5）、"26-1-1"（长 6）都能通过，
+/// 随后 `&date[..7]` 就越界 panic。这里补上长度约束，把宽松解析彻底封死。
+/// 合法业务日必须是定长 10 位的 `YYYY-MM-DD`。
 fn valid_date_str(s: &str) -> bool {
-    chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").is_ok()
+    s.len() == 10 && chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").is_ok()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 2026-10-14 审计回归：chrono 的 `parse_from_str("%Y-%m-%d")` 对**非补零**输入
+    /// 也返回 Ok（"1-1-1"、"26-1-1" 都能过）。只靠解析做校验会让短串流到 `date[..7]`
+    /// 处越界 panic。这里把「能通过 valid_date_str 的输入一定安全取前 7 位」钉死。
+    #[test]
+    fn valid_date_str_rejects_short_and_unpadded_dates() {
+        // 合法：定长补零
+        assert!(valid_date_str("2026-10-14"));
+        // 不合法：非补零（chrono 会解析成功，但长度不足 → 旧实现越界 panic）
+        assert!(!valid_date_str("1-1-1"), "\"1-1-1\" 只有 5 位，必须拒绝");
+        assert!(!valid_date_str("26-1-1"), "\"26-1-1\" 只有 6 位，必须拒绝");
+        assert!(!valid_date_str("2026-1-1"), "月/日未补零必须拒绝");
+        assert!(!valid_date_str(""));
+        assert!(!valid_date_str("2026-13-45"));
+
+        // 更进一步：任何被判为合法的串，安全切片都不能 panic
+        for s in ["2026-10-14", "2026-01-01", "9999-12-31"] {
+            assert!(valid_date_str(s));
+            let month = s.get(..7).unwrap_or(s);
+            assert_eq!(month.len(), 7);
+        }
+    }
 
     /// 取 SVG 中包含 `label` 的完整 `<text>` 元素（含起始标签），便于断言表头锚点。
     fn text_element_of(svg: &str, label: &str) -> String {

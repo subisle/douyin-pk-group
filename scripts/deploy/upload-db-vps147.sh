@@ -34,8 +34,15 @@ LOCAL_DB="${LOCAL_DB:-douyin_dev}"
 TARGET_DB="${TARGET_DB:-douyin}"
 BACKUP_DIR="${RK_BACKUP_DIR:-/opt/pk-server/backups}"  # 目标机备份目录
 BACKUP_KEEP="${RK_BACKUP_KEEP:-5}"                     # 目标机上保留的备份份数
-MY=(mysql -h127.0.0.1 -P3306 -udev -pdev12345)
-DUMP=(mysqldump -h127.0.0.1 -P3306 -udev -pdev12345)
+# 2026-10-14 审计修复：本地 MySQL 账号口令原先硬编码为 -udev -pdev12345。
+# 仓库是公开的，口令等同公开；且 -p 紧跟明文会留在 ps / shell 历史里。
+# 改由环境变量注入，缺省即中止。
+LOCAL_MYSQL_USER="${LOCAL_MYSQL_USER:-dev}"
+LOCAL_MYSQL_PASS="${LOCAL_MYSQL_PASS:?请用环境变量 LOCAL_MYSQL_PASS 提供本机 MySQL 口令}"
+LOCAL_MYSQL_HOST="${LOCAL_MYSQL_HOST:-127.0.0.1}"
+LOCAL_MYSQL_PORT="${LOCAL_MYSQL_PORT:-3306}"
+MY=(mysql -h"$LOCAL_MYSQL_HOST" -P"$LOCAL_MYSQL_PORT" -u"$LOCAL_MYSQL_USER" -p"$LOCAL_MYSQL_PASS")
+DUMP=(mysqldump -h"$LOCAL_MYSQL_HOST" -P"$LOCAL_MYSQL_PORT" -u"$LOCAL_MYSQL_USER" -p"$LOCAL_MYSQL_PASS")
 SSH=(sshpass -p "$PASS" ssh -o StrictHostKeyChecking=accept-new "root@$HOST")
 SCP=(sshpass -p "$PASS" scp -o StrictHostKeyChecking=accept-new)
 

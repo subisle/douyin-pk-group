@@ -9,11 +9,14 @@ HOST="${PK64_HOST:-64.188.8.149}"
 PASS="${PK64_PASS:?请用环境变量提供 PK64_PASS}"
 REMOTE="${PK64_DIR:-/opt/it/douyin-pk-group}"
 
-sshpass -p "$PASS" ssh -o StrictHostKeyChecking=accept-new "root@$HOST" bash -s -- "$REMOTE" <<'REMOTE_SCRIPT'
+# 2026-10-14 审计修复：远端脚本原先硬编码真实管理员口令（'shuai4444@'），
+# 已随公开仓库泄露。口令改由本地 ADMIN_PASSWORD 注入，作为第 2 个参数传进远端。
+: "${ADMIN_PASSWORD:?请用环境变量 ADMIN_PASSWORD 提供管理员口令}"
+sshpass -p "$PASS" ssh -o StrictHostKeyChecking=accept-new "root@$HOST" bash -s -- "$REMOTE" "$ADMIN_PASSWORD" <<'REMOTE_SCRIPT'
 set -uo pipefail
 REMOTE="$1"
+PW="$2"
 PORT=18788
-PW='shuai4444@'
 B="http://127.0.0.1:$PORT"
 FAILED=0
 

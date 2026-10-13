@@ -548,6 +548,15 @@ pub async fn my_push_target_del(
 
 /// GET /api/public/teams/{team}/my/push/search?q=（token 走 X-My-Token 头）：
 /// 本团主播搜索（只回 id + 名字）
+///
+/// 关于 `personId`（2026-10-14 审计复核结论：**保持下发，不改**）：
+/// 审计疑此处与 `my_bind_search`（my.rs）口径不一致（后者 2026-10-12 起剥掉 personId）。
+/// 复核后判定两者场景不同，不必也不该统一：
+/// - `my_bind_search` 是**绑定前**、无团别、跨全台账的模糊搜，personId 等于冒领绑定的弹药；
+/// - 这里是**已登录且已限定本团**的搜索，且 `my_push_target_add` 服务端会再用
+///   team_anchor_search 兜底校验 tid 必须是本团在册主播（wx.rs 的 `_ =>` 分支），
+///   所以拿到 id 也不带来额外能力；
+/// - 展示端 st_page.html 的追分目标选人依赖这个 id 提交，剥掉会直接打断该功能。
 pub async fn my_push_search(
     State(st): State<ArcState>,
     Path(team): Path<String>,

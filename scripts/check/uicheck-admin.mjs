@@ -55,11 +55,15 @@ const PAGES = [
   { path: '/visits', label: '访客日志', marker: '访客日志' },
   { path: '/lineage', label: '族谱', marker: '师门关系' },
   { path: '/group', label: 'PK 分组', marker: '名单与配置' },
+  { path: '/announcements', label: '公告', marker: '引导弹窗' },
   { path: '/bots', label: '机器人', marker: 'QQ 机器人' },
 ]
 
 function passwordFromEnv() {
-  return 'shuai4444@'
+  // 2026-10-14 审计修复：这里原先硬编码真实管理员口令（'shuai4444@'）。
+  // 该口令已被推到公开仓库，必须轮换；脚本本身不再内置任何口令——
+  // 调用方显式给（命令行参数或 ADMIN_PASSWORD 环境变量）。
+  return process.env.ADMIN_PASSWORD ?? ''
 }
 
 const PASSWORD = process.argv[3] ?? passwordFromEnv()
@@ -384,7 +388,7 @@ try {
     source: `try { sessionStorage.setItem('pk_token', ${JSON.stringify(token)}) } catch (e) {}`,
   })
 
-  /* ---------- 2. 七个页面：深链直达（等价刷新） ---------- */
+  /* ---------- 2. 九个页面：深链直达（等价刷新） ---------- */
   console.log('== 2. 深链直达 / 刷新不丢页 ==')
   for (const p of PAGES) {
     errors = []

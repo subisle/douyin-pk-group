@@ -76,6 +76,18 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "019_monthly_metric_unique_index",
         include_str!("migrations/019_monthly_metric_unique_index.sql"),
     ),
+    // 020 之前只存在于磁盘、没被 include_str! 引用 → `pk-server migrate` 永不执行它，
+    // 001 里的索引名撞车因此一个都没补上。这里补登记。
+    (
+        "020_fix_index_collisions",
+        include_str!("migrations/020_fix_index_collisions.sql"),
+    ),
+    // 021：uk_anchor_date 跨表撞名，wave_snapshot 的唯一索引从未建出（灌库 ON CONFLICT
+    // 直接失败 + 音浪可重复计入）。
+    (
+        "021_fix_wave_snapshot_unique",
+        include_str!("migrations/021_fix_wave_snapshot_unique.sql"),
+    ),
 ];
 
 /// 迁移建连（migrator 账号；同样关语句缓存）
@@ -228,6 +240,42 @@ mod tests {
         let sorted = names.clone();
         names.sort();
         assert_eq!(names, sorted, "迁移必须按文件名顺序排列");
+    }
+
+    /// 磁盘上的每个 `migrations/0xx_*.sql` 都必须被登记进 MIGRATIONS
+    /// （2026-10-14 审计：020 文件存在却漏登记 → 索引撞车修复从未执行）。
+    /// 上一条「编号连续」测试防不住这种漏登记——它只检查已登记项之间的关系。
+    #[test]
+    fn every_migration_file_is_registered() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src/migrations");
+        let mut on_disk: Vec<String> = std::fs::read_dir(dir)
+            .expect("读取 migrations 目录失败")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".sql"))
+            .map(|n| n.trim_end_matches(".sql").to_string())
+            .collect();
+        on_disk.sort();
+
+        let mut registered: Vec<&str> = MIGRATIONS.iter().map(|(v, _)| *v).collect();
+        registered.sort();
+
+        let missing: Vec<&String> = on_disk
+            .iter()
+            .filter(|n| !registered.contains(&n.as_str()))
+            .collect();
+        let orphan: Vec<&&str> = registered
+            .iter()
+            .filter(|v| !on_disk.iter().any(|n| n == *v))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "这些迁移文件在磁盘上但没被 include_str! 登记（永远不会被应用）: {missing:?}"
+        );
+        assert!(
+            orphan.is_empty(),
+            "MIGRATIONS 登记了但磁盘上没有对应文件（编译期就该报错）: {orphan:?}"
+        );
     }
 
     /// 编号连续且无重复（xxx_name 前缀，001 起），防止登记时漏号/撞号。

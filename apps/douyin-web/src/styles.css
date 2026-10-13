@@ -281,6 +281,11 @@ a.tab {
   grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
   gap: 14px;
 }
+/* KPI 卡行：数字卡内容窄，放宽 minmax 让 4~5 张能同排，
+   不再出现 3+1 / 3+2 的缺口；窄屏仍由 auto-fit 自动换行 */
+.cards-kpi {
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+}
 .card {
   background: var(--card);
   border: 1px solid var(--line);
@@ -521,6 +526,16 @@ th.num {
 }
 .card-absent td {
   padding: 5px 8px;
+}
+/* 「窗口内从未开播」汇总行：灰字小字，名单过长时最多两行省略 */
+.card-absent .absent-never {
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 1.6;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 /* ---------------- 徽标 ---------------- */
@@ -1046,4 +1061,149 @@ input.switch:focus-visible {
   font-size: 13px;
   font-weight: 600;
   color: var(--ink2);
+}
+
+/* ---------------- 公告配置页（2026-10-14）：/admin/announce 分区块 + 吸顶保存条 ----------------
+   `AnnouncePage.tsx` 专用样式，全部以 .ann-* 开头的新规则；不改动上面任何既有选择器。
+   色值 / 圆角 / 阴影 / 缓动全部复用文件顶部变量（--canvas --card --line --brand --radius --shadow-card）。 */
+.ann-page {
+  /* 配置页比数据页窄一点更好读：同为单类选择器，靠源码顺序覆盖 .page 的 1240px（只作用于本页）。
+     必须覆盖 .page 的 display:grid：grid 子项的包含块是它自己的 grid area（单行 = 自身高度），
+     `position: sticky` 在 grid 子项上无处可移动 = 完全失效（实测：rect 始终跟着文档滚走）。
+     改成 flex 列（间距用 gap，视觉与 grid 一致）：flex 子项的包含块是整个容器，吸顶才成立。 */
+  max-width: 1080px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px; /* 区块之间比 .page 默认 14px 略松，视觉上更像「一页几块」 */
+}
+.ann-sec {
+  /* 与 .card 同时存在：只调内部节奏与内边距，背景/边框/圆角/阴影继续吃 .card。
+     用 block 而不是 grid：grid 子项的 `min-width: auto`（= min-content）会把窄屏下的
+     标题/正文/开关行顶到 99px，在只剩 40~68px 的列里直接撑出横向滚动（实测 320px 视口 scrollWidth 344）。
+     块级容器里子元素宽度只受包含块约束，文字自己换行，不会反过来撑宽父级。 */
+  display: block;
+  padding: 18px 20px 16px;
+  scroll-margin-top: 64px; /* 以后加锚点跳转时不被吸顶条盖住 */
+}
+.ann-sec-head {
+  /* 清掉全局 h2 的 `margin: 0 0 12px`，改用更紧的标题/说明节奏 */
+  margin: 0 0 6px;
+  font-size: 15.5px;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+  color: var(--ink);
+}
+.ann-sec-sub {
+  margin: 0 0 8px;
+  max-width: 68ch;
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: var(--ink3);
+}
+.ann-savebar {
+  /* 吸顶方向 = 吸底，这是「滚动中始终可见」唯一可行的 sticky 写法：
+     保存条在 DOM 里是 .ann-page 的最后一个子元素，它的自然位置永远在视口下方，
+     而 sticky 只会把元素往视口内拉、且不能超出包含块 —— 所以 top: 0 毫无可移动空间。
+     实测（headless Chrome，f=0/0.25/0.5/0.75/1 逐点量 rect，视口高 613）：
+       top: 0    → 滚动全程不可见（top=2988/2357/1725/1094），只有滚到文档末尾才露头；
+       bottom: 0 → 滚动全程贴住视口底边（bottom == 613），到页面末尾自动落回文档流。
+     保持 DOM 顺序不变（不移动 React 里的位置），视觉顺序与焦点顺序不受影响。 */
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin: 0;
+  padding: 10px 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  /* 与 .topbar 同一套毛玻璃：内容从条子后面滚过时仍可读，不算硬遮挡 */
+  background: color-mix(in srgb, #ffffff 92%, transparent);
+  backdrop-filter: blur(14px) saturate(1.6);
+  box-shadow: var(--shadow-card);
+  /* 兜底：页面内联用了 var(--muted)，全局未定义；此处作用域内补一个弱化色（不动 :root） */
+  --muted: var(--ink3);
+}
+/* 兜底：若将来把保存条挪到所有区块之前（DOM 第一个子元素），吸顶方向自动翻转为顶部吸顶 */
+.ann-page > .ann-savebar:first-child {
+  top: 0;
+  bottom: auto;
+}
+.ann-savebar > button.primary {
+  flex: none;
+  min-height: 34px;
+  padding: 7px 16px;
+}
+.ann-savebar > span {
+  min-width: 0; /* 允许长说明在窄条里换行而不是把条子撑出横向滚动 */
+}
+.ann-savebar > .alert {
+  flex: 1 1 100%; /* 保存结果提示独占一行，不挤按钮 */
+  margin: 0;
+}
+/* 公告位卡片行 / 字段行：原来写在 TSX 里的内联 `display:grid; grid-template-columns:
+   repeat(auto-fit, minmax(240px|160px, 1fr))`，随公告 UI 从 BotPage 搬到 AnnouncePage 时
+   改成了 .ann-grid / .ann-grid-3 / .ann-grid-fields 类名，但 CSS 侧一直缺这几条规则 ——
+   结果是类名无对应样式，三处网格退化成普通块级 div（卡片/字段纵向堆叠、卡片不再等宽）。
+   这里补上与当时内联值一致的规则；收进 CSS 后窄屏单列也能正常覆盖，不再需要 !important 救援。 */
+.ann-grid {
+  display: grid;
+  gap: 10px;
+}
+/* 三个公告位（登录页 / 看板 / 个人页）并排，卡片内容较宽 → 240px 轨道 */
+.ann-grid-3 {
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+}
+/* 公告条 / 庆祝配置里的短字段行 → 160px 轨道，一行能放更多个 */
+.ann-grid-fields {
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 8px;
+}
+
+/* 窄屏（≤640px）：条子与区块贴边收窄，按钮可点；固定最小轨道的网格降为单列，杜绝横向溢出 */
+@media (max-width: 640px) {
+  .ann-page {
+    padding: 16px 14px 28px;
+    gap: 14px;
+  }
+  .ann-sec {
+    padding: 15px 14px 13px;
+  }
+  .ann-savebar {
+    padding: 10px 12px;
+    /* 窄屏条子会叠成多行，限高 + 内部滚动，避免吸底条吃掉半个屏幕 */
+    max-height: 45vh;
+    overflow-y: auto;
+  }
+  .ann-savebar > button.primary {
+    flex: 1 1 100%;
+    min-height: 40px; /* 触达尺寸 ≥40px，拇指可点 */
+  }
+  /* .flag-grid 的 minmax(280px,1fr) 在 320px 视口 + 双层内边距下会溢出，本页窄屏统一单列；
+     `> * { min-width: 0 }` 抵消 grid 子项 min-width:auto(=min-content) 造成的轨道撑宽
+     （实测：不写这条时 .flag-row 的 99px min-content 会把 352px 视口撑出 23px 横向滚动） */
+  .ann-sec .flag-grid {
+    grid-template-columns: 1fr;
+  }
+  .ann-sec .flag-grid > * {
+    min-width: 0;
+  }
+  /* 窄屏把上面两个固定轨道网格降为单列：320px 视口 + 双层内边距下，
+     minmax(240px|160px, 1fr) 会把页面撑出横向滚动。网格已收进 .ann-grid*（不再是内联
+     样式），所以这里用普通规则即可覆盖，不需要 !important。 */
+  .ann-grid-3,
+  .ann-grid-fields {
+    grid-template-columns: 1fr;
+  }
+  /* grid 子项默认 min-width:auto(=min-content)，短字段里的 select/input 仍可能撑宽轨道 */
+  .ann-grid > * {
+    min-width: 0;
+  }
+  .ann-sec .row input,
+  .ann-sec .row select,
+  .ann-sec .row textarea {
+    min-width: 0 !important;
+  }
 }

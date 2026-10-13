@@ -96,8 +96,9 @@ sshpass -p "$PASS" ssh -o StrictHostKeyChecking=accept-new "root@$HOST" "
 
 # 5. 真跑一遍渲染自检：路由深链 / 导航 / 弹窗（只读模式，不写库）
 echo "==> 渲染自检（uicheck-admin，只读模式）"
-# 管理口令内置于 pk-server
-ADMIN="${RK_ADMIN:-shuai4444@}"
+# 2026-10-14 审计修复：原先硬编码真实管理员口令（'shuai4444@'），已随公开仓库泄露。
+# 改由 RK_ADMIN 环境变量提供；为空时 uicheck-admin 会自己报「缺少管理员口令」并退出。
+ADMIN="${RK_ADMIN:-}"
 # 部署自检默认只读（UICHECK_READONLY=1）：只跑路由与渲染断言，不写 2019-01-01 测试日。
 # 全量自检（含入库/删除回环）请在测试环境手动跑：UICHECK_READONLY= node scripts/check/uicheck-admin.mjs。
 UICHECK_READONLY="${UICHECK_READONLY:-1}" \

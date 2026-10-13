@@ -4085,32 +4085,46 @@ pub async fn collect_status(State(st): State<ArcState>) -> ApiResult {
     require_local(&st)?;
     let dates = crate::repos::get_available_dates(&st, Some("LOCAL"), false).await?;
     let latest = dates.first().cloned().unwrap_or_default();
+    /* 2026-10-14 审计修复：`latest` 来自库里 daily_metric 的 TO_CHAR 结果，不是代码
+    白名单。原实现把它和 team 一起 format! 进 SQL —— pgrs::readonly_guard 只查
+    FORBIDDEN 关键字 + SELECT 开头，不是注入防护（' UNION SELECT ... -- 照样放行）。
+    改成绑定参数；latest 另外过一遍 valid_biz_date 白名单，双重收口。 */
+    let latest = match valid_biz_date(&latest) {
+        Ok(d) => d.format("%Y-%m-%d").to_string(),
+        Err(_) => String::new(),
+    };
     let mut teams = serde_json::Map::new();
     for team in ["male", "female"] {
-        let sql = format!(
-            "SELECT COUNT(*) AS n FROM person p WHERE p.deleted_at IS NULL AND p.gender = '{team}'"
-        );
-        let total = pgrs::query(&st.pools, "LOCAL", &sql)
+        let total = pgrs::query_with_binds(
+            &st.pools,
+            "LOCAL",
+            "SELECT COUNT(*) AS n FROM person p WHERE p.deleted_at IS NULL AND p.gender = ?",
+            |q| q.bind(team),
+        )
+        .await?
+        .into_iter()
+        .next()
+        .and_then(|r| r.try_get::<i64, _>(0).ok())
+        .unwrap_or(0);
+        let missing = if latest.is_empty() {
+            total
+        } else {
+            // 闭包要 'static，所以按值搬一份 latest 进去（每天最多一条，拷贝可忽略）
+            let latest = latest.clone();
+            pgrs::query_with_binds(
+                &st.pools,
+                "LOCAL",
+                "SELECT COUNT(*) AS n FROM person p \
+                 LEFT JOIN daily_metric d ON d.person_id = p.id \
+                   AND TO_CHAR(d.biz_date, 'YYYY-MM-DD') = ? \
+                 WHERE p.deleted_at IS NULL AND p.gender = ? AND d.id IS NULL",
+                move |q| q.bind(latest).bind(team),
+            )
             .await?
             .into_iter()
             .next()
             .and_then(|r| r.try_get::<i64, _>(0).ok())
-            .unwrap_or(0);
-        let missing_sql = format!(
-            "SELECT COUNT(*) AS n FROM person p \
-             LEFT JOIN daily_metric d ON d.person_id = p.id \
-               AND TO_CHAR(d.biz_date, 'YYYY-MM-DD') = '{latest}' \
-             WHERE p.deleted_at IS NULL AND p.gender = '{team}' AND d.id IS NULL"
-        );
-        let missing = if latest.is_empty() {
-            total
-        } else {
-            pgrs::query(&st.pools, "LOCAL", &missing_sql)
-                .await?
-                .into_iter()
-                .next()
-                .and_then(|r| r.try_get::<i64, _>(0).ok())
-                .unwrap_or(0)
+            .unwrap_or(0)
         };
         teams.insert(
             team.to_string(),

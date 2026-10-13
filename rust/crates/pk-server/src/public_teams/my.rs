@@ -615,8 +615,19 @@ pub async fn my_register(
 }
 
 /// POST /api/public/my/password/reset {phone}
-/// 忘记密码：把自助注册账号密码重置为 **手机号后四位**（2026-10-13 产品拍板，
-/// 与开号口径一致，主播自己就能推算出新密码，不用等人转达随机串）。
+///
+/// 2026-10-14 审计修复（P0）：原实现是**任意账号接管** —— 这个端点挂在 /api/public/
+/// 下、免管理员鉴权，handler 内也不要任何身份，只要知道（或猜到）一个主播的手机号，
+/// 就能把该账号的密码重置成「手机号后四位」，并且接口把新密码明文回显。
+/// 手机号在公会内部半公开、且重置结果可自行推算，等于忘记密码流程完全没有身份绑定。
+///
+/// 现在三件事一起改：
+/// 1. 受注册开关约束（`my_register`）—— 与注册同口径，运营关掉注册即一并关闭重置；
+///    这是唯一的运维级总闸，防止端点在无人配置时被滥用。
+/// 2. 新密码改用 CSPRNG 随机串（不再是手机号后四位），攻击者无法自行推算。
+///    （展示端 st_page.html 早已按「后端下发随机临时密码」写文案与回填，本次是对齐后端。）
+/// 3. 日志不再打账号名 —— 未绑定 / 自助注册账号的 name 就是手机号本身，
+///    `mask_phone` 的脱敏被 `accounts = ?names` 绕过，只打数量。
 /// 新密码只在本次响应里下发一次，请当场转达；重置成功后该账号全部 my token 吊销。
 pub async fn my_password_reset(
     State(st): State<ArcState>,
@@ -624,6 +635,7 @@ pub async fn my_password_reset(
     headers: HeaderMap,
     axum::Json(body): axum::Json<Value>,
 ) -> ApiResult {
+    ensure_register_open(&st).await?;
     if !public_register_allow(&client_ip_for_limit(addr, &headers)) {
         return Err(anyhow::anyhow!("尝试太频繁，请稍后再试").into());
     }
@@ -645,7 +657,11 @@ pub async fn my_password_reset(
     for n in &names {
         my_tokens_revoke(n);
     }
-    tracing::info!(phone = %mask_phone(phone), accounts = ?names, "展示端账号密码已重置为手机号后四位（旧 token 已吊销）");
+    tracing::info!(
+        phone = %mask_phone(phone),
+        accounts = names.len(),
+        "展示端账号密码已重置为随机临时密码（旧 token 已吊销）"
+    );
     Ok(Json(json!({ "ok": true, "password": password })))
 }
 
