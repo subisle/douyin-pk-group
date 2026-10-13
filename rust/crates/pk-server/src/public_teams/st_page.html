@@ -108,6 +108,15 @@ button { font:inherit; cursor:pointer; }
 .star-banner .star-name { font-weight:700; font-size:14px; color:#101828; }
 .star-banner.hidden { display:none; }
 
+/* 🏆 争霸赛冠军横幅（2026-10-13）：管理员整条可编，紫金渐变与每日之星区分 */
+.champ-banner { display:flex; align-items:center; gap:10px; margin:10px 12px;
+  padding:10px 14px; background:linear-gradient(135deg,#F5F3FF,#EDE9FE);
+  border:1px solid #C4B5FD; border-radius:12px; }
+.champ-banner .champ-flag { font-size:22px; color:#6D28D9; }
+.champ-banner .champ-title { font-weight:800; font-size:14px; color:#6D28D9; white-space:nowrap; }
+.champ-banner .champ-name { font-weight:700; font-size:14px; color:#101828; }
+.champ-banner.hidden { display:none; }
+
 /* 底部标签栏（看板 / 分组 / 族谱 / 我的）：毛玻璃 + 安全区 */
 .tabbar { position:fixed; left:0; right:0; bottom:0; z-index:31;
   display:flex; background:var(--glass);
@@ -1276,6 +1285,11 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
   <span class="material-symbols-outlined star-flag">emoji_flags</span>
   <span class="star-title" id="starTitle">每日之星</span>
   <span class="star-name" id="starName"></span>
+</div>
+<div class="champ-banner hidden" id="champBanner">
+  <span class="material-symbols-outlined champ-flag">military_tech</span>
+  <span class="champ-title" id="champTitle"></span>
+  <span class="champ-name" id="champName"></span>
 </div>
 
 <div class="toolbar hidden" id="toolbar">
@@ -5030,15 +5044,26 @@ async function bootRest() {
 
   /* 先拿站点配置：登录开关在 settings 里，关登录时根本不用弹登录门。
      401（要登录）→ 弹登录门重试。 */
-/* 🚩 冠军展示位渲染：site.star = {title, name, wave} 或 null */
-function renderStarBanner(star) {
+/* 🚩 冠军展示位渲染：site.star = 每日之星（自动/可配），site.champ = 争霸赛冠军横幅（纯手编） */
+function renderStarBanner(star, champ) {
   const el = $('starBanner');
-  if (!el) return;
-  if (!star || !star.name) { el.classList.add('hidden'); return; }
-  el.classList.remove('hidden');
-  $('starTitle').textContent = star.title || '每日之星';
-  const wv = star.wave > 0 ? ' · ' + (function(v){ if(v>=10000){ const w=v/10000; return w>=100? Math.round(w)+'万' : (Math.round(w*10)/10)+'万'; } return String(v); })(star.wave) : '';
-  $('starName').textContent = star.name + wv;
+  if (el) {
+    if (!star || !star.name) { el.classList.add('hidden'); }
+    else {
+      el.classList.remove('hidden');
+      $('starTitle').textContent = star.title || '每日之星';
+      const wv = star.wave > 0 ? ' · ' + wan(star.wave) : '';
+      $('starName').textContent = star.name + wv;
+    }
+  }
+  const cb = $('champBanner');
+  if (cb) {
+    if (!champ || !champ.title || !champ.name) { cb.classList.add('hidden'); return; }
+    cb.classList.remove('hidden');
+    $('champTitle').textContent = champ.title;
+    const wv = champ.wave > 0 ? ' · ' + wan(champ.wave) : '';
+    $('champName').textContent = champ.name + wv;
+  }
 }
 
   const fetchSite = () => api('/api/public/teams/' + TEAM);
@@ -5062,7 +5087,7 @@ function renderStarBanner(star) {
   }
   /* 🚩 冠军展示位（2026-10-13）：管理员可配称号/人名（star_override），
      没配则自动显示最近业务日的当日音浪第一（与推送图每日之星同源）。 */
-  renderStarBanner(site.star);
+  renderStarBanner(site.star, site.champ);
 
   /* 展示端登录门（2026-10-11）：后台「开启登录」开着 → 先登录再看；
      关掉 → 全面开放，直接展示全量数据（统一入口，不再分男团/女团）。 */

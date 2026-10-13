@@ -632,7 +632,10 @@ function PublicSettingsCard() {
   ]
 
   /** 🚩 小红旗条文本/图标字段：blur 时保存（空串 = 清除恢复默认） */
-  async function saveStarText(key: 'starTitle' | 'starOverride' | 'starIcon', value: string) {
+  async function saveStarText(
+    key: 'starTitle' | 'starOverride' | 'starIcon' | 'champBanner',
+    value: string,
+  ) {
     try {
       const d = await api('/api/admin/public/settings', {
         method: 'POST',
@@ -794,6 +797,21 @@ function PublicSettingsCard() {
                 留空 = 默认 🚩 emoji；上传图片后推送图头部用该图标。
               </span>
             </label>
+          <h3 className="flag-title">🏆 争霸赛冠军横幅（展示页顶部）</h3>
+          <div style={{ display: 'grid', gap: 8, margin: '4px 0 12px' }}>
+            <label style={{ fontSize: 12.5, color: 'var(--muted, #667085)' }}>
+              横幅文案：「称号|人名|音浪」或「称号|人名」或只写称号；留空 = 不显示该横幅
+              <input
+                defaultValue={settings.champBanner ?? ''}
+                placeholder="初级争霸赛冠军|狼哲|285917"
+                onBlur={(e) => {
+                  if (e.target.value !== (settings.champBanner ?? '')) saveStarText('champBanner', e.target.value)
+                }}
+                style={{ display: 'block', width: '100%', height: 34, marginTop: 4, border: '1px solid var(--hairline, #EAECF0)', borderRadius: 8, padding: '0 10px', fontSize: 13 }}
+              />
+            </label>
+          </div>
+
           </div>
 
           <h3 className="flag-title">分组子页显隐（按赛事类型）</h3>

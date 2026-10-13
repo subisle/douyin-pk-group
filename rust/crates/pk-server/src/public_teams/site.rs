@@ -41,12 +41,32 @@ pub async fn site(
             None => auto_json(&auto),
         }
     };
+    /* 🏆 争霸赛冠军横幅（2026-10-13）：管理员整条文案可编（config champ_banner，
+    格式「称号|人名|音浪」，空 = 不显示横幅）。与 🚩每日之星独立。 */
+    let champ = match crate::store::config_get(&st, "champ_banner")
+        .await
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(v) => match v.splitn(3, '|').collect::<Vec<_>>()[..] {
+            [t, n, w] => serde_json::json!({
+                "title": t.trim(), "name": n.trim(),
+                "wave": w.trim().parse::<i64>().unwrap_or(0),
+            }),
+            [t, n] => serde_json::json!({ "title": t.trim(), "name": n.trim(), "wave": 0 }),
+            [t] => serde_json::json!({ "title": t.trim(), "name": "", "wave": 0 }),
+            _ => serde_json::Value::Null,
+        },
+        None => serde_json::Value::Null,
+    };
     Ok(Json(json!({
         "published": true,
         "team": query_team,
         "latestDate": dates.first(),
         "dates": dates,
         "star": star,
+        "champ": champ,
         "announcement": if ann.enabled { ann.to_json() } else { Value::Null },
         "settings": {
             "daily": s.daily,

@@ -429,7 +429,7 @@ fn render_svg_labeled_inner(
     // 头部高度：有每日之星条时多 42px（表头/行整体下移）
     let header_h = if rep.daily_star.is_some() { 168.0f64 } else { 126.0f64 };
     let list_h = n as f64 * 48.0;
-    let footer_y = header_h + list_h + 42.0;
+    let footer_y = header_h + list_h + 20.0;
     let total_h = footer_y + 50.0;
     let max_wave = rep.rows.iter().map(|r| r.wave).max().unwrap_or(1).max(1);
     let th_y = header_h - 40.0;   // 表头背景 y
@@ -655,24 +655,6 @@ fn render_svg_labeled_inner(
         // 修复4：personal_mark 同样要过 esc（与水印层共用 mark_escaped）
         if personal_mark.trim().is_empty() { WATERMARK.to_string() } else { mark_escaped }
     ));
-
-    // 底部警示条：未播者按师傅分组（只出现在含未播名单的页）
-    let summary_y = footer_y + 34.0;
-    if !rep.master_groups.is_empty() || !rep.no_master.is_empty() {
-        let mut parts: Vec<String> = rep
-            .master_groups
-            .iter()
-            .map(|(m, names)| format!("{}: {}", m, names.join("、")))
-            .collect();
-        if !rep.no_master.is_empty() {
-            parts.push(format!("无师傅: {}", rep.no_master.join("、")));
-        }
-        s.push_str(&format!(
-            "<rect y=\"{:.0}\" width=\"720\" height=\"42\" fill=\"#FEF2F2\" rx=\"8\" stroke=\"#FECACA\"/><text x=\"12\" y=\"{summary_y:.0}\" font-size=\"13\" fill=\"#B42318\" text-anchor=\"start\" dominant-baseline=\"central\" font-family=\"{FONT}\">{}</text>",
-            footer_y + 8.0,
-            esc(&parts.join("  /  "))
-        ));
-    }
 
     // 水印最顶层：盖在榜单/条形图/数值/冠军条之上，全图可见
     s.push_str(&watermark_layer);

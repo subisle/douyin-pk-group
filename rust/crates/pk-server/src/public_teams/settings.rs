@@ -197,6 +197,9 @@ pub async fn get_settings(State(st): State<ArcState>) -> ApiResult {
     v["starTitle"] = json!(crate::store::config_get(&st, "star_title").await.unwrap_or_default());
     v["starOverride"] =
         json!(crate::store::config_get(&st, "star_override").await.unwrap_or_default());
+    /* 🏆 争霸赛冠军横幅（2026-10-13）：整条文案可编（「称号|人名|音浪」），空 = 不显示 */
+    v["champBanner"] =
+        json!(crate::store::config_get(&st, "champ_banner").await.unwrap_or_default());
     v["starIcon"] = json!(crate::store::config_get(&st, "star_icon").await.unwrap_or_default());
     Ok(Json(v))
 }
@@ -233,6 +236,7 @@ pub async fn update_settings(State(st): State<ArcState>, Json(body): Json<Value>
         ("star_title", "starTitle"),
         ("star_override", "starOverride"),
         ("star_icon", "starIcon"),
+        ("champ_banner", "champBanner"),
     ] {
         if let Some(v) = body.get(body_key) {
             let val = v.as_str().unwrap_or_default().trim().to_string();
