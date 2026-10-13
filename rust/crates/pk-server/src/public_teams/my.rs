@@ -615,8 +615,8 @@ pub async fn my_register(
 }
 
 /// POST /api/public/my/password/reset {phone}
-/// 忘记密码：把自助注册账号密码重置为 **CSPRNG 随机密码**（2026-10-12 审计修复，
-/// 废弃「手机号后四位」——手机号半公开，后四位等于公开口令）。
+/// 忘记密码：把自助注册账号密码重置为 **手机号后四位**（2026-10-13 产品拍板，
+/// 与开号口径一致，主播自己就能推算出新密码，不用等人转达随机串）。
 /// 新密码只在本次响应里下发一次，请当场转达；重置成功后该账号全部 my token 吊销。
 pub async fn my_password_reset(
     State(st): State<ArcState>,
@@ -645,7 +645,7 @@ pub async fn my_password_reset(
     for n in &names {
         my_tokens_revoke(n);
     }
-    tracing::info!(phone = %mask_phone(phone), accounts = ?names, "展示端账号密码已重置为随机密码（旧 token 已吊销）");
+    tracing::info!(phone = %mask_phone(phone), accounts = ?names, "展示端账号密码已重置为手机号后四位（旧 token 已吊销）");
     Ok(Json(json!({ "ok": true, "password": password })))
 }
 

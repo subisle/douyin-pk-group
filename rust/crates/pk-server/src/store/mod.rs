@@ -639,18 +639,31 @@ mod register_tests {
 
     /* ---------------- 手机号 + 批量开号（016，docs/13）---------------- */
 
-    /// 初始密码 = CSPRNG 随机（2026-10-12 审计修复，废弃手机号后四位）：
-    /// 10 位无混淆字符，能通过账号密码校验（4~20 位字母数字）
+    /// 初始密码 = 手机号后四位（2026-10-13 产品拍板恢复，与运营开号习惯一致）：
+    /// 同一个手机号两次结果必须一致（可预期，主播自己能推出来），且能通过账号密码校验。
     #[test]
-    fn initial_password_is_random_and_valid() {
-        let a = initial_password();
-        let b = initial_password();
-        assert_eq!(a.len(), 10);
-        assert_ne!(a, b, "两次生成不应相同");
+    fn initial_password_is_phone_last4_and_valid() {
+        let a = initial_password("15560099282");
+        let b = initial_password("15560099282");
+        assert_eq!(a, "9282", "应取手机号后四位");
+        assert_eq!(a, b, "同一手机号两次结果必须一致（可预期）");
+        assert_eq!(initial_password("13800138000"), "8000");
+        // 带分隔符/空格的手机号也能正确取后四位
+        assert_eq!(initial_password("138-0013-8000"), "8000");
         assert!(
             validate_my_account("啸帆", &a).is_ok(),
-            "随机密码必须过账号校验"
+            "后四位必须过账号校验（4~20 位字母数字）"
         );
+        // 手机号太短（取不出 4 位）→ 退回随机密码，且仍要过校验
+        let r = initial_password("123");
+        assert!(validate_my_account("啸帆", &r).is_ok(), "随机兜底也要过校验");
+    }
+
+    /// 密码下限回到 4（2026-10-13）：手机号后四位的账号能正常设置/重置
+    #[test]
+    fn password_min_len_is_four() {
+        assert!(validate_my_account("凤夏", "9282").is_ok(), "4 位应放行");
+        assert!(validate_my_account("凤夏", "123").is_err(), "3 位仍拒绝");
     }
 
     /// 绑定申请状态机：只有 pending 能被裁决（防重复审批 / 已裁决改写）

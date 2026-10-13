@@ -12,8 +12,9 @@ pub async fn admin_my_accounts(State(st): State<ArcState>) -> ApiResult {
 }
 
 /// POST /api/admin/my-accounts {name, phone, pass?}：手动设置账号（存在则覆盖更新；手机号选填）。
-/// 2026-10-12 审计修订：`pass` 留空时服务端生成 CSPRNG 随机密码，随响应下发一次
-/// （{password}，仅此一次，请管理员当场转达）；显式传 pass 的旧调用照旧兼容。
+/// 2026-10-13 产品拍板：`pass` 留空时按运营惯例用**手机号后四位**当初始密码
+/// （2026-10-12 曾改成 CSPRNG 随机，因运营转达成本高、主播记不住而回退）；
+/// 随响应下发一次（{password}，仅此一次，请管理员当场转达）；显式传 pass 的旧调用照旧兼容。
 /// 设置成功后吊销该账号全部 my token（改密/开号后旧登录态必须失效）。
 pub async fn admin_my_account_set(
     State(st): State<ArcState>,
@@ -34,13 +35,31 @@ pub async fn admin_my_account_set(
         .filter(|s| !s.is_empty())
     {
         Some(p) => (p.to_string(), false),
-        None => (crate::random::random_password(), true),
+        // 2026-10-13：未指定密码时按运营惯例生成**手机号后四位**（原先是随机 10 位）。
+        None => (
+            crate::store::my_account::initial_password(phone),
+            true,
+        ),
     };
     crate::store::my_account_set(&st, name, phone, &pass)
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
+    /* 写后回读校验（2026-10-13）：之前出现过「接口返回 ok 但库里没这一行」的静默失败
+       （写池指向了非预期实例 / 事务被丢弃），运营看到绿色「已保存」却根本没账号。
+       这里落地后立刻回读，读不到就报错，绝不再假成功。 */
+    let saved = crate::store::my_account_get(&st, name).await;
+    /* 判据是「查得到这一行」而不是 JSON 里的 found 键：
+       found 是 admin_my_account_get（GET 单条）自己补的展示字段，
+       store::my_account_get 返回的裸值里没有它 —— 上一版读 v["found"] 恒 false，
+       导致每次开号/改密明明成功却一律 500「写入后校验失败」（2026-10-13 修复）。 */
+    let verified = saved.is_some();
+    if !verified {
+        return Err(anyhow::anyhow!(
+            "账号「{}」写入后校验失败（库里读不到），请检查写库配置后重试", name
+        ).into());
+    }
     my_tokens_revoke(name);
-    tracing::info!(account = %name, generated, "管理端设置展示端账号（旧 token 已吊销）");
+    tracing::info!(account = %name, generated, "管理端设置展示端账号（旧 token 已吊销，已回读校验）");
     Ok(Json(json!({
         "ok": true,
         // 随机生成的密码仅此一次下发；管理员显式指定的密码不回显

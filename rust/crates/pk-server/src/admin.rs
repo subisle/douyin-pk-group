@@ -1435,6 +1435,25 @@ pub async fn commit_import(
     );
     anyhow::ensure!(!rows.is_empty(), "没有解析到任何数据行");
 
+    /* 异常文件防御（2026-10-13 QQ 机器人导入口径）：
+       文件里所有数据行的音浪值完全相同（≥3 行）→ 几乎可以断定是拿错了文件 /
+       列错位（例如把固定值列当成了音浪，或把「某一日」的快照当成全员当日数据）。
+       这种文件一旦导入，全团所有人的当日音浪会变成同一个数——拒绝并提示运营。 */
+    let wave_values: Vec<i64> = rows
+        .iter()
+        .filter_map(|r| r.wave.map(|w| w.round() as i64))
+        .collect();
+    if wave_values.len() >= 3 {
+        let first = wave_values[0];
+        if wave_values.iter().all(|&w| w == first) {
+            anyhow::bail!(
+                "异常文件：全部 {} 行的音浪值都相同（{}）——像是一份与日期无关的全员同值文件，                 已拒绝导入。请核对文件里的日期列与音浪列后再试；确实要导入请用管理端手工分批。",
+                wave_values.len(),
+                first
+            );
+        }
+    }
+
     let ctx = load_match_ctx(st).await?;
     let aliases = merged_aliases(st).await;
     // 自动模式不做团别冲突校验：谁是哪个团由主播档案说了算

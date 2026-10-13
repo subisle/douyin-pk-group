@@ -17,10 +17,17 @@ pub fn validate_douyin_no(v: &str) -> std::result::Result<String, String> {
 /* ------------------------------ 我的页面账号 ------------------------------ */
 
 /// 校验姓名/密码。Err(错误文案)，Ok((姓名, 密码))。
-/// **密码为 6~20 位字母或数字（2026-10-12 安全审计 M4：下限 4→6）**：
-/// 去首尾空格后必须全是 ASCII 字母/数字，不允许空格、横线等分隔符。
-/// 历史口径备注：2026-10-10 曾放宽为 4 位纯数字/字母；4~5 位存量密码仍可
-/// 登录（校验只在设置/修改时执行），但新设密码一律 ≥6 位。
+/// **密码为 4~20 位字母或数字**：去首尾空格后必须全是 ASCII 字母/数字，
+/// 不允许空格、横线等分隔符。
+///
+/// 口径沿革（2026-10-13 产品拍板：**回到 4 位下限**）：
+/// - 2026-10-10 放宽为 4 位；
+/// - 2026-10-12 安全审计 M4 把下限提到 6（理由：4 位易被撞库）；
+/// - 2026-10-13 恢复 4 位 —— 运营的实际开号习惯是**手机号后四位**
+///   （xlsx 收集入库的那批账号全是 4 位），6 位下限会让后台开号、
+///   以及开号后按惯例改密全部被拒，与既有 39 个账号口径不一致。
+/// 折中：下限回 4 兼容惯例；撞库风险交给登录限流（5 次/分/IP、
+/// 失败 5 次锁 10 分钟）承担，不再用密码长度当第一道防线。
 pub fn validate_my_account(
     name: &str,
     pass: &str,
@@ -36,8 +43,8 @@ pub fn validate_my_account(
     if pass.is_empty() {
         return Err("密码不能为空；已有账号要保留原密码请传当前密码".into());
     }
-    if !pass.chars().all(|c| c.is_ascii_alphanumeric()) || pass.len() < 6 || pass.len() > 20 {
-        return Err("密码必须是 6~20 位字母或数字".into());
+    if !pass.chars().all(|c| c.is_ascii_alphanumeric()) || pass.len() < 4 || pass.len() > 20 {
+        return Err("密码必须是 4~20 位字母或数字".into());
     }
     Ok((name.to_string(), pass.to_string()))
 }
@@ -317,14 +324,24 @@ impl PhoneClash {
     }
 }
 
-/// 初始密码 = CSPRNG 随机密码（2026-10-12 安全审计修复）。
+/// 初始密码 = **手机号后四位**（2026-10-13 产品拍板恢复）。
 ///
-/// 旧口径「手机号后四位」被废：手机号对同事/粉丝半公开，后四位等于把初始口令
-/// 写死在公开信息里，拿到手机号就能登录别人的展示端账号。
-/// 现在统一走 `crate::random::random_password()`（10 位无混淆字符），
-/// 只在开号/重置的 API 响应里下发一次，请管理员当场转达。
-pub fn initial_password() -> String {
-    crate::random::random_password()
+/// 口径沿革：
+/// - 旧口径就是手机号后四位（与运营开号习惯一致）；
+/// - 2026-10-12 安全审计改成 CSPRNG 随机（理由：手机号在公会内部半公开，
+///   后四位等于把初始口令暴露给知道号码的人）；
+/// - 2026-10-13 产品决策恢复后四位——随机 10 位密码运营转达成本高、
+///   且主播记不住，反复重置；撞库风险改由登录限流承担。
+///
+/// 手机号不足 4 位（或拿不到手机号）时退回 CSPRNG 随机，保证总有可用密码。
+pub fn initial_password(phone: &str) -> String {
+    let p: String = phone.chars().filter(|c| c.is_ascii_digit()).collect();
+    if p.chars().count() >= 4 {
+        let v: Vec<char> = p.chars().collect();
+        v[v.len() - 4..].iter().collect()
+    } else {
+        crate::random::random_password()
+    }
 }
 
 /// 写入主播档案手机号（`person.phone`，016 迁移新增列）。
@@ -399,7 +416,7 @@ pub struct BatchAccountRow {
     pub phone: String,
     /// created = 新开号 / updated = 已存在（补 person_id，密码看 forceReset）
     /// / failed = 见 note
-    /// （历史上有过 skipped = 定不了初始密码；2026-10-12 起初始密码恒为 CSPRNG 随机，不再跳过）
+    /// （历史上有过 skipped = 定不了初始密码；2026-10-13 起初始密码恒为手机号后四位，不再跳过）
     pub status: &'static str,
     pub note: String,
     /// 本次生成的初始密码（created 一定下发；updated 只在 forceReset 时下发）
@@ -425,10 +442,10 @@ pub const BATCH_ACCOUNT_MAX: usize = 500;
 ///
 /// - `person_id` 必须对应在职主播（`deleted_at IS NULL AND status <> 'left'`）且姓名非空
 /// - 手机号优先级：**入参 phone > 台账 person.phone > 空**
-/// - 初始密码：**CSPRNG 随机密码**（2026-10-12 审计修复，废弃「手机号后四位」）；
+/// - 初始密码：**手机号后四位**（2026-10-13 产品拍板恢复，与运营开号习惯一致）；
 ///   `default_pass` 入参保留仅为兼容旧调用，**不再使用**（统一口令本身就是审计要消除的风险）
 /// - 已存在账号（按 person_id 优先、name 兜底）→ 更新：补 person_id / 手机号，**默认不动密码**
-///   （重跑一遍批量不会把 104 个人的密码全刷掉）；`force_reset = true` 才重置（也重置为随机密码）
+///   （重跑一遍批量不会把 104 个人的密码全刷掉）；`force_reset = true` 才重置（重置为手机号后四位）
 /// - source 一律标 `batch`（与管理端手建的 `admin`、自助注册的 `register` 区分，便于事后审计）
 pub async fn my_accounts_batch_open(
     st: &AppState,
@@ -629,9 +646,9 @@ pub async fn my_accounts_batch_open(
             None => person_phone.clone(),
         };
 
-        /* 初始密码：CSPRNG 随机（审计 2026-10-12，废弃手机号后四位 / 统一口令）。
-        每个账号独立随机，只在响应里下发一次（initialPass），请管理员当场转达。 */
-        let pass = initial_password();
+        /* 初始密码 = 手机号后四位（2026-10-13 恢复；手机号不足 4 位时退回随机）。
+        只在响应里下发一次（initialPass），请管理员当场转达。 */
+        let pass = initial_password(&want_phone);
         if let Err(e) = validate_my_account(&name, &pass) {
             out.push(BatchAccountRow {
                 person_id: pid,
@@ -1018,8 +1035,9 @@ pub fn validate_my_code(code: &str) -> std::result::Result<String, String> {
     Ok(c.to_string())
 }
 
-/// 忘记密码：把已登记手机号的账号密码重置为 **CSPRNG 随机密码**
-/// （2026-10-12 审计修复：废弃「手机号后四位」——手机号半公开，后四位等于公开口令）。
+/// 忘记密码：把已登记手机号的账号密码重置为 **手机号后四位**
+/// （2026-10-13 产品拍板：与开号口径一致，主播凭手机号自己就能推算出新密码，
+/// 不用等人转达随机串）。
 ///
 /// 返回 `(新密码, 受影响账号名列表)`：新密码只在 API 响应里下发这一次（请当场转达），
 /// 账号名列表给调用方吊销该账号全部 my token（改密后旧登录态必须失效）。
@@ -1048,7 +1066,9 @@ pub async fn my_account_reset_password_random(
     if names.is_empty() {
         return Err("该手机号还没有注册或未登记".into());
     }
-    let new_pass = initial_password();
+    /* 重置后的密码 = 手机号后四位（与开号口径一致）。手机号经 validate_my_phone
+    校验过是 5~20 位数字，所以这里必定能取出后四位。 */
+    let new_pass = initial_password(&phone);
     sqlx::query(&crate::pq::rewrite(
         "UPDATE my_accounts SET pass = ? WHERE phone = ? AND phone <> '' AND is_admin = 0",
     ))
