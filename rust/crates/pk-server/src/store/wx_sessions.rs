@@ -45,3 +45,15 @@ pub async fn wx_session_get(st: &AppState, conversation_id: &str) -> Option<(Str
     }
     Some((to_user, token))
 }
+
+/// 删某会话的发送上下文（换微信号重扫时作废旧会话；不存在时静默）
+pub async fn wx_session_delete(st: &AppState, conversation_id: &str) {
+    if let Ok(pool) = w(st) {
+        let _ = sqlx::query(&crate::pq::rewrite(
+            "DELETE FROM wx_sessions WHERE conversation_id = ?",
+        ))
+        .bind(conversation_id)
+        .execute(pool)
+        .await;
+    }
+}

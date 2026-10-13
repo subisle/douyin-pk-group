@@ -99,21 +99,12 @@ button { font:inherit; cursor:pointer; }
   font-size:12.5px; }
 .subnav button.on { background:var(--primary); border-color:var(--primary); color:#fff; font-weight:600; }
 
-/* 🚩 冠军展示位（2026-10-13）：masthead 下方金底横条 */
-.star-banner { display:flex; align-items:center; gap:10px; margin:10px 12px 0;
-  padding:10px 14px; background:linear-gradient(135deg,#FFFAEB,#FFF6D6);
-  border:1px solid #FEDF89; border-radius:12px; }
-.star-banner.star-flag { font-size:22px; color:#B54708; }
-.star-banner .star-title { font-weight:800; font-size:14px; color:#B54708; white-space:nowrap; }
-.star-banner .star-name { font-weight:700; font-size:14px; color:#101828; }
-.star-banner.hidden { display:none; }
-
-/* 🏆 争霸赛冠军横幅（2026-10-13）：管理员整条可编，紫金渐变与每日之星区分 */
+/* 🏆 争霸赛冠军横幅（2026-10-13）：管理员整条可编，紫金渐变。
+   （2026-10-13 二次口径：每日之星横幅整个下线，只留这一条；
+   champ 单独显示时的间距就是自己的 margin:10px 12px，不依赖兄弟选择器。） */
 .champ-banner { display:flex; align-items:center; gap:10px; margin:10px 12px;
   padding:10px 14px; background:linear-gradient(135deg,#F5F3FF,#EDE9FE);
   border:1px solid #C4B5FD; border-radius:12px; }
-.champ-banner:has(+ .toolbar), .star-banner:not(.hidden) ~ .champ-banner.hidden ~ * { }
-.star-banner:not(.hidden) + .champ-banner { margin-top:0; }
 .champ-banner .champ-flag { font-size:22px; color:#6D28D9; }
 .champ-banner .champ-title { font-weight:800; font-size:14px; color:#6D28D9; white-space:nowrap; }
 .champ-banner .champ-name { font-weight:700; font-size:14px; color:#101828; }
@@ -1259,6 +1250,36 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
   padding:9px 14px; background:#fff7e6; color:#b45309; font-size:12.5px; }
 .bindbar span.link { font-weight:700; text-decoration:underline; cursor:pointer; }
 .bindbar[hidden] { display:none; }
+
+/* ===== 公告条 + 庆祝横幅（2026-10-13）：运营触达位，颜色对齐 :root 变量 ===== */
+/* .ann-bar：圆角浅蓝渐变横条，图标 + 文案（white-space:pre-line 支持多行公告）。
+   三处共用同一套底样式：登录门里（#gate-ann）、看板 toolbar 上方（#home-ann）、
+   「我的」页内容顶部（#my-ann），只差外边距，靠 id 差异化。 */
+.ann-bar { display:flex; align-items:flex-start; gap:8px; margin:10px 12px;
+  padding:10px 14px; border-radius:12px;
+  background:linear-gradient(135deg, #EAF3FF, #E0EDFF);
+  border:1px solid var(--primary-fixed-dim); text-align:left; }
+.ann-bar .ann-ico { font-size:20px; color:var(--primary); flex:none; line-height:1; margin-top:1px; }
+.ann-bar .ann-tx { flex:1; min-width:0; font-size:13px; line-height:1.65;
+  color:var(--on-surface); white-space:pre-line; word-break:break-word; }
+/* 登录门里的公告条：贴在登录卡（gate-box）上方。
+   #gate 是 display:flex 行布局，公告条和登录卡要上下排 → 内容统一包进 .gate-col 纵向容器 */
+#gate .gate-col { display:flex; flex-direction:column; align-items:center;
+  justify-content:center; width:100%; max-width:390px; margin:auto; }
+#gate-ann { margin:0 0 14px; width:100%; }
+/* 看板公告条：插在 toolbar 之前，与 champ-banner 同一布局节奏 */
+#home-ann { margin:10px 12px 0; }
+/* 「我的」页公告条：插在 view 内容顶部（section 内第一个元素） */
+#my-ann { margin:0 0 10px; }
+/* .celebrate-bar：登录后首屏庆祝横幅（每日之星），紫金渐变，比 champ-banner 更醒目 */
+.celebrate-bar { display:flex; align-items:center; gap:10px; margin:10px 12px;
+  padding:12px 14px; border-radius:12px;
+  background:linear-gradient(120deg, #4C1D95 0%, #6D28D9 45%, #B45309 100%);
+  border:1px solid #F59E0B; color:#FFFBEB;
+  box-shadow:0 4px 18px rgba(109,40,217,.35); }
+.celebrate-bar .cb-flag { font-size:24px; line-height:1; flex:none; }
+.celebrate-bar .cb-title { font-weight:800; font-size:14px; color:#FDE68A; white-space:nowrap; }
+.celebrate-bar .cb-name { font-weight:700; font-size:14px; color:#FFFBEB; min-width:0; }
 </style>
 </head>
 <body>
@@ -1283,11 +1304,6 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
   </div>
 </header>
 
-<div class="star-banner hidden" id="starBanner">
-  <span class="material-symbols-outlined star-flag">emoji_flags</span>
-  <span class="star-title" id="starTitle">每日之星</span>
-  <span class="star-name" id="starName"></span>
-</div>
 <div class="champ-banner hidden" id="champBanner">
   <span class="material-symbols-outlined champ-flag">military_tech</span>
   <span class="champ-title" id="champTitle"></span>
@@ -1597,7 +1613,14 @@ function showGate() {
   const title = TEAM ? LABEL() + '数据榜' : '数据榜';
   const av = TEAM ? LABEL().charAt(0) : '榜';
   g.classList.remove('hidden');
-  g.innerHTML = '<div class="gate-box">' +
+  /* 📣 登录页公告条（2026-10-13）：login.enabled && login.text 才渲染，插在登录卡上方。
+     boot() 已把配置存进 siteAnnouncements（接口失败 = 全关，自然不显示）。
+     icon 只认文件内 ANNOUNCE_ICONS 白名单里的 Material Symbols 名，白名单外回默认 campaign。 */
+  const gateAnnHtml = annBarHtml('gate-ann', siteAnnouncements.login, 'campaign');
+  /* #gate 本身是 flex 行布局：公告条 + 登录卡要上下排，统一包进 .gate-col 纵向容器。
+     没有公告时包一层透明容器，布局行为与原单卡完全一致（margin:auto 居中已迁到容器上）。 */
+  g.innerHTML = '<div class="gate-col">' + (gateAnnHtml || '') +
+    '<div class="gate-box">' +
     '<div class="big-av" style="background:' + avColor(av) + '"><span class="material-symbols-outlined" style="font-size:28px">person</span></div>' +
     '<h3>' + esc(title) + '</h3>' +
     '<div class="gate-tabs">' +
@@ -1611,7 +1634,7 @@ function showGate() {
       '<button class="btn-main" id="gateGo">登 录</button>' +
       '<div class="gate-foot">遇到问题？请联系管理员帅帅</div></div>' +
     '<div id="paneReg" class="hidden"></div>' +
-    '</div>';
+    '</div></div>';
   /* 引导让位给登录门：两层遮罩叠着用户找不到登录框。
      dismissAnnounce 走 close()，会把 announceCtx 置 null 并摘掉键盘/触摸监听，
      所以登录门关掉后 closeGate 里的重弹是一次干净的新实例，不会双监听。 */
@@ -3134,6 +3157,10 @@ async function loadMy() {
       accounts = await api('/api/public/teams/' + TEAM + '/my/accounts');
     } catch (_) { accounts = { __err: true }; }
     renderMy(d, series, claim, bound, push, accounts);
+    /* 📣 「我的」页公告条（2026-10-13）：renderMy 渲染完成后，placements.my 开着才追加。
+       插在 view 内容最顶上（资料卡之前），图标默认 person。
+       深链 /my/<sub> 直接落到子页时不挂（公告属于「我的」列表首页）。 */
+    if (!mySub) renderMyAnnouncement(site && site.placements && site.placements.my);
   } catch (e) {
     /* token 过期/没验证过 → 回登录门；其它错误照常显示错误态 */
     const m = String(e.message || '');
@@ -3479,6 +3506,9 @@ function renderMy(d, series, claim, bound, push, accounts) {
     /* 不再按 push 有无渲染：接口失败也落地一张带重试的卡，
        保住「点那一行有东西可滚」这个最基本的行为 */
     pushCard(push) +
+    /* 「追分设置」独立卡（2026-10-13 用户口径）：与推送卡分开，
+       追分目标表单只出现在这张卡里，推送卡只管绑定与开关 */
+    chaseCard(push) +
     '<button class="my-logout" id="myOut">退出登录</button>' +
   '</div>';
   $('myOut').onclick = () => {
@@ -3524,14 +3554,18 @@ function renderMy(d, series, claim, bound, push, accounts) {
   $('myChaseRow').onclick = () => { mySub = 'chase'; pushRoute(); renderMySub(); };
   bindClaimCard(claim);
   renderPushBox(push);
+  /* 「追分设置」独立卡（2026-10-13）：首次渲染（bindPushBox 里也会同步，
+     这里补一次保证首页/深链任意路径进来都有内容；卡不在 DOM 时自动跳过）。 */
+  renderChaseBox(push);
   /* 深链 /my/<sub> 直接落到子页；/my 停在列表首页。
      首页只显示：头部/数据卡/服务列表/运营卡——绑定表单、推送设置等重卡只在子页出现。 */
   if (mySub) { renderMySub(); }
   else {
     history.replaceState(null, '', '/my');
-    ['myClaimCard', 'myPushCard'].forEach((id) => { const el = $(id); if (el) el.hidden = true; });
+    ['myClaimCard', 'myPushCard', 'myChaseCard'].forEach((id) => { const el = $(id); if (el) el.hidden = true; });
   }
-  /* 兜底卡的重试按钮：重新拉一次 /my/push，成功就换成正常内容 */
+  /* 兜底卡的重试按钮：重新拉一次 /my/push，成功就换成正常内容
+     （推送卡与追分卡都会跟着刷新；chaseRetry 由 bindChaseRetry 单独绑） */
   const retry = $('pushRetry');
   if (retry) {
     retry.onclick = async () => {
@@ -3546,6 +3580,7 @@ function renderMy(d, series, claim, bound, push, accounts) {
       }
     };
   }
+  bindChaseRetry();
 }
 
 /* ==================== 「我的」子页（2026-10-13 下一页式路由） ==================== */
@@ -3553,7 +3588,7 @@ function renderMy(d, series, claim, bound, push, accounts) {
 const MY_SUB_CARDS = {
   bind:    { title: '抖音号绑定与审计', card: 'myClaimCard' },
   push:    { title: '推送机器人服务',   card: 'myPushCard' },
-  chase:   { title: '追分设置',         card: 'myPushCard' },
+  chase:   { title: '追分设置',         card: 'myChaseCard' },
 };
 const MY_SUB_INFO = {
   privacy: { title: '隐私与对外展示字段', icon: 'visibility' },
@@ -3579,7 +3614,7 @@ function renderMySub() {
   if (MY_SUB_CARDS[sub]) keep.push(MY_SUB_CARDS[sub].card);
   /* 遍历 v 的块级孩子，把不属于目标卡的都藏起来 */
   /* .section 内逐块控制：首页块（概览/数据大卡/趋势/账号/服务列表/运营卡）藏，
-     目标卡（myClaimCard / myPushCard）显。 */
+     目标卡（myClaimCard / myPushCard / myChaseCard）显。 */
   const sec = v.querySelector('.section');
   if (sec) {
     Array.from(sec.children).forEach((blk) => {
@@ -3651,7 +3686,7 @@ function showMyHome() {
   if (info) info.hidden = true;
   const sec = v.querySelector('.section');
   if (sec) Array.from(sec.children).forEach((blk) => { blk.hidden = false; });
-  ['myClaimCard', 'myPushCard'].forEach((id) => { const el = $(id); if (el) el.hidden = true; });
+  ['myClaimCard', 'myPushCard', 'myChaseCard'].forEach((id) => { const el = $(id); if (el) el.hidden = true; });
 }
 
 /* ==================== 修复4：「我的」页内重置密码对话框 ====================
@@ -3854,6 +3889,13 @@ function pushCard(p) {
     '<div id="pushBox" style="padding:0 1rem 1rem"></div></div>';
 }
 
+/* 「追分设置」独立子页卡（2026-10-13 用户口径：不再复用 myPushCard）。
+   内容由 renderChaseBox 就地填进 #chaseBox，与推送卡各管各的。 */
+function chaseCard(p) {
+  return '<div class="st-my-list" id="myChaseCard"><div class="sec">追分设置</div>' +
+    '<div id="chaseBox" style="padding:0 1rem 1rem"></div></div>';
+}
+
 /* 推送状态取不到时的兜底内容：一句说明 + 重试按钮（照 myAccountsCard 的 __err 口径） */
 function pushErrHtml() {
   return '<div class="sub" style="margin-top:6px;line-height:1.75">' +
@@ -3936,35 +3978,87 @@ function pushBoundHtml(p) {
     h += '<div class="hint">上次推送没成功：' + esc(p.lastError) +
       '<br>让对方给机器人发一条消息后再试（微信要求先有对话）</div>';
   }
+  /* 管理员观看账号说明（2026-10-13）：追分目标表单已移到「追分设置」独立卡，
+     这里只留一行提示，解释追分开关为什么置灰。 */
   if (p.admin) {
     h += '<div class="sub" style="margin-top:10px;line-height:1.7">管理员观看账号没有自己的音浪，' +
       '不能设置追分目标，只能收每日报告。</div>';
-  } else {
-    const list = p.targets || [];
-    h += '<div class="card-t" style="margin:14px 0 2px;font-size:13px">追分目标（最多 ' +
-      (p.maxTargets || 5) + ' 个 · 一律比本月累计）</div>';
-    if (!list.length) {
-      h += '<div class="sub" style="padding:6px 0">还没设置。加一个，追上或差多少都会推给你。</div>';
-    }
-    h += list.map((t) => {
-      /* 2026-10-12：person 目标 targetValue>0 = 用户设了自定义目标分（后端存的是原始值），
-         label 里要把它显出来，不然用户看不出这个目标按什么比 */
-      const label = t.kind === 'value' ? '🎯 本月音浪 ' + wan(t.targetValue)
-        : t.kind === 'rank' ? '🏅 本月第 ' + t.targetValue + ' 名'
-        : (t.targetValue > 0 ? '🏃 ' + esc(t.targetName) + ' · 目标 ' + wan(t.targetValue)
-                             : '🏃 ' + esc(t.targetName));
-      const state = t.hit ? '<span class="st ok">已达成</span>'
-        : t.kind === 'rank'
-          ? (t.lastGap > 0 ? '<span class="sub">还差 ' + t.lastGap + ' 名</span>' : '<span class="sub">未进榜</span>')
-          : (t.lastGap > 0 ? '<span class="sub">还差 ' + wan(t.lastGap) + '</span>' : '');
-      return '<div class="tgt"><span>' + label + '</span>' +
-        '<span style="margin-left:auto">' + state + '</span>' +
-        '<button class="x" data-del="' + t.id + '">✕</button></div>';
-    }).join('');
-    if (list.length < (p.maxTargets || 5)) h += pushAddHtml();
   }
   h += '<button class="go gray" id="pushUnbind">解除绑定</button>';
   return h;
+}
+
+/* 「追分设置」子页内容（2026-10-13 用户口径）：追分目标管理 + 状态提示，
+   从 pushBoundHtml 拆出来，填进 #chaseBox；推送卡不再出现追分表单。 */
+function renderChaseBox(p) {
+  const box = $('chaseBox');
+  if (!box) return;
+  /* 顶部状态行：绑定状态决定能不能真的收到提醒，目标本身任何时候都能设 */
+  if (!p) { box.innerHTML = chaseErrHtml(); bindChaseRetry(); return; }
+  let h = '';
+  if (!p.bound) {
+    h += !p.channelConfigured
+      ? '<div class="hint">微信推送暂未开放（管理员还没连接微信机器人），' +
+        '激活前设置的追分目标会先存着，推送通了再发。</div>'
+      : p.scanBound
+        ? '<div class="hint">微信还在待激活，激活后提醒才会发过来；目标可以先设好。</div>'
+        : '<div class="hint">还没绑定微信推送：先去「推送机器人服务」扫码绑定，目标可以先设好。</div>';
+  }
+  if (p.admin) {
+    h += '<div class="sub" style="margin-top:6px;line-height:1.7">管理员观看账号没有自己的音浪，' +
+      '不能设置追分目标。</div>';
+    box.innerHTML = h;
+    return;
+  }
+  const list = p.targets || [];
+  h += '<div class="card-t" style="margin:8px 0 2px;font-size:13px">追分目标（最多 ' +
+    (p.maxTargets || 5) + ' 个 · 一律比本月累计）</div>';
+  if (!list.length) {
+    h += '<div class="sub" style="padding:6px 0">还没设置。加一个，追上或差多少都会推给你。</div>';
+  }
+  h += list.map((t) => {
+    /* 2026-10-12：person 目标 targetValue>0 = 用户设了自定义目标分（后端存的是原始值），
+       label 里要把它显出来，不然用户看不出这个目标按什么比 */
+    const label = t.kind === 'value' ? '🎯 本月音浪 ' + wan(t.targetValue)
+      : t.kind === 'rank' ? '🏅 本月第 ' + t.targetValue + ' 名'
+      : (t.targetValue > 0 ? '🏃 ' + esc(t.targetName) + ' · 目标 ' + wan(t.targetValue)
+                           : '🏃 ' + esc(t.targetName));
+    const state = t.hit ? '<span class="st ok">已达成</span>'
+      : t.kind === 'rank'
+        ? (t.lastGap > 0 ? '<span class="sub">还差 ' + t.lastGap + ' 名</span>' : '<span class="sub">未进榜</span>')
+        : (t.lastGap > 0 ? '<span class="sub">还差 ' + wan(t.lastGap) + '</span>' : '');
+    return '<div class="tgt"><span>' + label + '</span>' +
+      '<span style="margin-left:auto">' + state + '</span>' +
+      '<button class="x" data-del="' + t.id + '">✕</button></div>';
+  }).join('');
+  if (list.length < (p.maxTargets || 5)) h += pushAddHtml();
+  box.innerHTML = h;
+  /* 事件绑定不在这里做：bindPushBox 统一调 bindChaseHandlers，
+     避免 enterSubmit 的 addEventListener 被挂两份（Enter 会重复提交）。 */
+}
+
+/* 追分状态取不到时的兜底内容（照 pushErrHtml 口径，重试按钮独立命名避免撞车） */
+function chaseErrHtml() {
+  return '<div class="sub" style="margin-top:6px;line-height:1.75">' +
+    '追分状态没取到，可能是网络慢。点下面重试。</div>' +
+    '<button class="go gray" id="chaseRetry" style="margin-top:10px">重试</button>';
+}
+
+/* chase 卡兜底重试：重新拉一次 /my/push，成功就同时刷新追分卡与推送卡 */
+function bindChaseRetry() {
+  const retry = $('chaseRetry');
+  if (!retry) return;
+  retry.onclick = async () => {
+    retry.disabled = true;
+    retry.textContent = '重试中…';
+    try {
+      renderPushBox(await fetchPush());   // renderPushBox 内部会同步刷 chase 卡
+    } catch (e) {
+      retry.disabled = false;
+      retry.textContent = '重试';
+      toast(e.message || '还是没取到');
+    }
+  };
 }
 
 function pushAddHtml() {
@@ -4030,8 +4124,12 @@ function bindPushBoundHandlers(p) {
       }
     };
   }
+}
 
-  document.querySelectorAll('#pushBox [data-del]').forEach((b) => {
+/* 「追分设置」卡的事件（2026-10-13 从 bindPushBoundHandlers 拆出，逻辑不变，
+   只是选择器从 #pushBox 换到 #chaseBox）：目标删除、三个添加面板、搜索。 */
+function bindChaseHandlers(p) {
+  document.querySelectorAll('#chaseBox [data-del]').forEach((b) => {
     b.onclick = async () => {
       try {
         await fetch('/api/public/teams/' + TEAM + '/my/push/targets/delete', {
@@ -4052,9 +4150,9 @@ function bindPushBoundHandlers(p) {
 
   /* 追主播 / 定音浪 / 追名次 三个子面板 */
   let picked = null;
-  document.querySelectorAll('#pushBox .tabs2 button').forEach((b) => {
+  document.querySelectorAll('#chaseBox .tabs2 button').forEach((b) => {
     b.onclick = () => {
-      document.querySelectorAll('#pushBox .tabs2 button').forEach((x) => x.classList.toggle('on', x === b));
+      document.querySelectorAll('#chaseBox .tabs2 button').forEach((x) => x.classList.toggle('on', x === b));
       show('tkPerson', b.dataset.tk === 'person');
       show('tkValue', b.dataset.tk === 'value');
       show('tkRank', b.dataset.tk === 'rank');
@@ -4210,6 +4308,13 @@ function bindPushBox(p) {
     };
   }
   if (p && p.bound) bindPushBoundHandlers(p);
+  /* 「追分设置」独立卡（2026-10-13）：内容渲染 + 事件都跟着推送状态走，
+     每次推送卡刷新（renderPushBox → 这里）都同步刷一遍 chase 卡。
+     chase 卡不存在（首页藏着也存在于 DOM）时 renderChaseBox 自己会跳过。 */
+  renderChaseBox(p);
+  /* 非 admin 一律绑（目标满员没有添加表单，但 data-del 删除按钮仍在）；
+     admin 卡只有一行说明，无可绑元素 */
+  if (p && !p.admin) bindChaseHandlers(p);
 }
 
 /* 扫码二维码有效期：官方约 5 分钟。前端只做「展示倒计时 + 到期提示刷新」，
@@ -4401,6 +4506,10 @@ function switchView(v, opts) {
   document.querySelectorAll('[data-v]').forEach(b => b.classList.toggle('on', b.dataset.v === v));
   document.querySelectorAll('#subnav button').forEach(b => b.classList.toggle('on', b.dataset.g === curGroup));
   show('toolbar', v === 'data');
+  /* 看板公告条跟 toolbar 一起显隐：公告挂在数据看板（运营触达位），
+     切到分组/族谱/我的时收起，进「我的」由 renderMyAnnouncement 挂自己的条 */
+  const homeAnn = $('home-ann');
+  if (homeAnn) show(homeAnn, v === 'data');
   show('subnav', v === 'group');
   show('foot', v !== 'lineage');
   syncHeaderOffset();
@@ -4428,25 +4537,8 @@ function setPeriod(p) {
   go();
 }
 
-/* 按所选日期刷新每日之星横幅（不阻塞主数据加载，失败静默保持原横幅） */
-async function refreshStarForDate(date) {
-  try {
-    const h = myTokenHeaders();
-    const r = await fetch('/api/public/teams/' + TEAM + '/star' + (date ? '?date=' + date : ''), { headers: h });
-    if (!r.ok) return;
-    const star = await r.json();
-    if (star && star.name) {
-      const el = $('starBanner');
-      if (el) {
-        el.classList.remove('hidden');
-        $('starTitle').textContent = star.title || '每日之星';
-        $('starName').textContent = star.name + (star.wave > 0 ? ' · ' + wan(star.wave) : '');
-      }
-    } else {
-      $('starBanner')?.classList.add('hidden');
-    }
-  } catch (_) { /* 静默：横幅保持上次内容 */ }
-}
+/* 2026-10-13 二次口径：每日之星横幅整个下线（后端 /star 接口保留但前端不再调用）；
+   争霸赛冠军横幅只在站点初始化时渲染一次（renderChampBanner），不随日期口径切换刷新。 */
 
 
 async function go() {
@@ -4467,8 +4559,6 @@ async function go() {
     if (seq !== loadSeq) return;          // 期间用户又点了别的：过期响应作废
     consecutiveFail = 0;
     show('stale', false);
-    /* 每日之星横幅跟随所选日期（2026-10-13）：日期/口径切换后刷新 */
-    if (view === 'data') refreshStarForDate(curDate || '');
   } catch (e) {
     if (seq !== loadSeq) return;          // 过期失败的报错也不许盖住新内容
     consecutiveFail++;
@@ -4995,6 +5085,188 @@ function maybeAnnounce() {
   render();
 }
 
+/* ==================== 🎉 彩带庆祝 + 📣 运营公告（2026-10-13） ====================
+   数据契约（后端并行实现，前端按契约消费，拿不到就全关不显示）：
+   · GET /api/public/announcements（无需登录）
+       → { login:{enabled,text,icon}, celebrate:{enabled,confetti,title,name,wave} }
+   · GET /api/public/teams/{TEAM}（site 接口）新增
+       placements: { home:{enabled,text,icon}, my:{enabled,text,icon} }
+       celebrate:  { enabled, confetti, title, name, wave }   */
+
+let siteAnnouncements = {};   // /announcements 探测结果（失败 = {}，所有消费点 falsy 兜底）
+
+/** 拉 announcements 配置：任何失败（404/网络/后端未上线）都回落为空对象，绝不挡启动 */
+async function fetchAnnouncements() {
+  const r = await fetch('/api/public/announcements');
+  if (!r.ok) return {};
+  const d = await r.json().catch(() => ({}));
+  return d && typeof d === 'object' ? d : {};
+}
+
+/** 公告条统一 HTML（文案经 esc 转义；icon 只认文件内 ANNOUNCE_ICONS 白名单，
+    白名单外的名字一律回默认图标 —— 与后端 STEP_ICON_WHITELIST 同一口径，防注入） */
+function annBarHtml(id, cfg, defIcon) {
+  cfg = cfg || {};
+  if (!cfg.enabled || !cfg.text) return '';   // 关着 / 没文案：不出（调用方空串直拼）
+  const icon = ANNOUNCE_ICONS.indexOf(cfg.icon) >= 0 ? cfg.icon : defIcon;
+  return '<div class="ann-bar" id="' + id + '">' +
+    '<span class="material-symbols-outlined ann-ico">' + esc(icon) + '</span>' +
+    '<span class="ann-tx">' + esc(cfg.text) + '</span>' +
+  '</div>';
+}
+
+/** 看板公告条：插在 toolbar 之前（champ-banner 下面）。每次 bootRest 都重建 = 每次进看板都显示 */
+function renderHomeAnnouncement(home) {
+  const old = $('home-ann');
+  if (old) old.remove();   // 静默刷新重复调用时先摘旧的，避免叠两条
+  const html = annBarHtml('home-ann', home, 'notifications');
+  if (!html) return;
+  const tb = $('toolbar');
+  if (tb && tb.parentNode) tb.insertAdjacentHTML('beforebegin', html);
+}
+
+/** 「我的」页公告条：renderMy 渲染完成后调用，插在 view 内容最顶上。
+    loadMy 每次都整体重建 view，天然不持久 —— 每次进「我的」都重新显示。 */
+function renderMyAnnouncement(my) {
+  const html = annBarHtml('my-ann', my, 'person');
+  if (!html) return;
+  const box = $('view');
+  if (box) box.insertAdjacentHTML('afterbegin', html);
+}
+
+/* ---- 🎉 彩带：全屏 canvas 粒子（零依赖，rAF 驱动；样式全内联不碰其它元素） ---- */
+
+/** 发射彩带：顶部两侧喷射 80~120 个彩色矩形/圆片，重力下落 + 旋转，
+    durationMs 后自动停止并移除 canvas（重复调用会先清掉上一场） */
+function fireConfetti(durationMs) {
+  durationMs = Number(durationMs) > 0 ? Number(durationMs) : 2500;
+  /* 上一场还没结束就再点：直接掐掉旧的 rAF 和 canvas，保证全场只有一份 */
+  if (fireConfetti._raf) { cancelAnimationFrame(fireConfetti._raf); fireConfetti._raf = null; }
+  const old = document.getElementById('confettiCanvas');
+  if (old) old.remove();
+
+  const doc = document.documentElement;
+  const cv = document.createElement('canvas');
+  cv.id = 'confettiCanvas';
+  /* 全屏覆盖、绝不挡操作；z-index 9999 压过登录门(90)/toast 等一切 UI */
+  cv.setAttribute('style', 'position:fixed;inset:0;width:100%;height:100%;' +
+    'pointer-events:none;z-index:9999;');
+  cv.width = doc.clientWidth;
+  cv.height = doc.clientHeight;
+  document.body.appendChild(cv);
+  const ctx = cv.getContext('2d');
+
+  /* 配色：金/蓝/紫/粉，与整站庆祝视觉（紫金 celebrate-bar）一致 */
+  const COLORS = ['#F59E0B', '#FBBF24', '#3B82F6', '#8B5CF6', '#EC4899', '#F472B6', '#FDE68A'];
+  const rnd = (a, b) => a + Math.random() * (b - a);
+
+  /* 80~120 个粒子：从左上 / 右上两个喷射点往外上方抛，带随机初速、角速度与形状 */
+  const N = 80 + Math.floor(Math.random() * 41);
+  const W = cv.width, H = cv.height;
+  const parts = [];
+  for (let i = 0; i < N; i++) {
+    const left = i % 2 === 0;                       // 偶数从左侧喷、奇数从右侧喷
+    parts.push({
+      x: left ? rnd(0, W * 0.12) : rnd(W * 0.88, W),
+      y: rnd(-20, H * 0.08),
+      vx: (left ? 1 : -1) * rnd(2, 7),              // 左点朝右上喷、右点朝左上喷
+      vy: -rnd(7, 13),                              // 先向上抛，重力再拉下来
+      w: rnd(6, 11), h: rnd(8, 16),                 // 矩形尺寸
+      r: rnd(0, Math.PI * 2),                       // 当前旋转角
+      vr: rnd(-0.22, 0.22),                         // 角速度
+      round: Math.random() < 0.35,                  // 35% 圆片、其余矩形
+      color: COLORS[Math.floor(Math.random() * COLORS.length)],
+    });
+  }
+
+  const g = 0.22;                                   // 重力（px/帧²）
+  const t0 = performance.now();
+  const tick = (now) => {
+    const el = now - t0;
+    if (el >= durationMs || !cv.isConnected) {      // 到点 / canvas 被移除：收场
+      cv.remove();
+      fireConfetti._raf = null;
+      return;
+    }
+    /* 最后 500ms 整体淡出，避免彩带凭空消失 */
+    ctx.clearRect(0, 0, W, H);
+    ctx.globalAlpha = el > durationMs - 500 ? Math.max(0, (durationMs - el) / 500) : 1;
+    for (const p of parts) {
+      p.vy += g; p.x += p.vx; p.y += p.vy; p.r += p.vr;
+      if (p.y > H + 24) continue;                   // 已落出屏：不再画
+      ctx.save();
+      ctx.translate(p.x, p.y);
+      ctx.rotate(p.r);
+      ctx.fillStyle = p.color;
+      if (p.round) { ctx.beginPath(); ctx.arc(0, 0, p.w / 2, 0, Math.PI * 2); ctx.fill(); }
+      else ctx.fillRect(-p.w / 2, -p.h / 2, p.w, p.h);
+      ctx.restore();
+    }
+    fireConfetti._raf = requestAnimationFrame(tick);
+  };
+  fireConfetti._raf = requestAnimationFrame(tick);
+}
+
+/* ---- 🎉 每日之星登录庆祝：彩带 + 紫金庆祝横幅（当天只弹一次） ---- */
+
+/* 当天只庆祝一次的两层锁：
+   · sessionStorage celebrateShown_<YYYY-MM-DD> —— 跨页面加载（刷新/再进站当天不再弹）；
+   · celebrateFiredThisLoad（内存）—— 本次页面里的庆祝事件进行中（登录时刻彩带已放，
+     紧接着 bootRest 挂横幅属于同一次庆祝，不能被当天锁误吞）。 */
+let celebrateFiredThisLoad = false;
+
+function celebrateShownToday() {
+  try { return !!sessionStorage.getItem('celebrateShown_' + todayStr()); }
+  catch (_) { return false; }
+}
+function markCelebrateShown() {
+  try { sessionStorage.setItem('celebrateShown_' + todayStr(), '1'); } catch (_) {}
+}
+
+/** 登录成功触发点（boot 主路径）：celebrate.enabled && confetti → 放彩带。
+    只放彩带、只写锁；横幅等 site 数据回来由 showCelebrateBar 补挂 ——
+    它靠 celebrateFiredThisLoad 知道本次页面的庆祝事件已开跑，横幅照常显示。 */
+function fireConfettiOnce(celebrate) {
+  if (!celebrate || !celebrate.enabled || !celebrate.confetti) return;
+  if (celebrateShownToday() || celebrateFiredThisLoad) return;
+  markCelebrateShown();
+  celebrateFiredThisLoad = true;
+  fireConfetti(2800);
+}
+
+/** 庆祝横幅：插在冠军横幅 champBanner 上方，紫金渐变 + 🎉，比 champ-banner 更醒目。
+    site.celebrate 是主数据源；site 没带字段（后端只发 /announcements）用 preferAnn 兜底。
+    彩带允许但还没放过（比如 confetti 只在 site 侧给出 / 关登录直接进站）→ 挂横幅时补一场。
+    bootRest 每次页面加载只跑一次，本函数天然只在首屏执行；静默刷新不经过这里。 */
+function showCelebrateBar(celebrate, preferAnn) {
+  const old = $('celebrateBar');
+  if (old) old.remove();
+  const c = celebrate && (celebrate.enabled || celebrate.title || celebrate.name)
+    ? celebrate : preferAnn;
+  if (!c || !c.enabled || (!c.title && !c.name)) return;
+  /* 当天已庆祝过、且本次页面没有进行中的庆祝事件 → 今天弹过了，横幅不再重复 */
+  if (celebrateShownToday() && !celebrateFiredThisLoad) return;
+  /* 彩带：允许 && 本次页面还没放过（当天锁顺带写上，覆盖 confetti 只配在 site 侧的情况） */
+  if (c.confetti && !celebrateFiredThisLoad) {
+    markCelebrateShown();
+    celebrateFiredThisLoad = true;
+    fireConfetti(2800);
+  }
+  const cb = $('champBanner');
+  if (!cb || !cb.parentNode) return;
+  const wv = c.wave > 0 ? ' · ' + wan(c.wave) : '';
+  const bar = '<div class="celebrate-bar" id="celebrateBar">' +
+    '<span class="cb-flag">🎉</span>' +
+    '<span class="cb-title">' + esc(c.title || '') + '</span>' +
+    '<span class="cb-name">' + esc(c.name || '') + wv + '</span>' +
+  '</div>';
+  cb.insertAdjacentHTML('beforebegin', bar);   // 横幅在 champBanner 上方
+  /* 横幅落地 = 本次庆祝完成：写当天锁（confetti 没配时由这里写，口径统一） */
+  markCelebrateShown();
+  celebrateFiredThisLoad = true;
+}
+
+
 /* 引导开着时锁背景滚动（iOS Safari 上 body overflow:hidden 不够，要连 touchmove 一起挡） */
 var announceScrollDepth = 0;
 function lockScroll() {
@@ -5019,9 +5291,16 @@ function dismissAnnounce() {
 
 (async function boot() {
   applyTeam();
+  /* 公告/庆祝配置（2026-10-13）：并行探测 GET /api/public/announcements，
+     失败/后端未上线时回落为全关（{}），所有消费点都按 falsy 兜底，不挡启动流程 */
+  siteAnnouncements = await fetchAnnouncements().catch(() => ({}));
   if (await siteIsOpen()) { bootRest(); return; }
   const me = await ensureLogin();
   applyLoginState(me);   // 登录后立刻按账号团别设置 TEAM
+  /* 每日之星登录彩带（2026-10-13）：celebrate.enabled && celebrate.confetti 才放。
+     庆祝横幅等 site 数据回来、champBanner 落地后由 showCelebrateBar() 补挂
+     （celebrateFiredThisLoad 记着本次页面的庆祝事件已开跑，横幅不会被当天锁误吞）。 */
+  fireConfettiOnce(siteAnnouncements.celebrate);
   bootRest();
 })();
 
@@ -5069,18 +5348,9 @@ async function bootRest() {
 
   /* 先拿站点配置：登录开关在 settings 里，关登录时根本不用弹登录门。
      401（要登录）→ 弹登录门重试。 */
-/* 🚩 冠军展示位渲染：site.star = 每日之星（自动/可配），site.champ = 争霸赛冠军横幅（纯手编） */
-function renderStarBanner(star, champ) {
-  const el = $('starBanner');
-  if (el) {
-    if (!star || !star.name) { el.classList.add('hidden'); }
-    else {
-      el.classList.remove('hidden');
-      $('starTitle').textContent = star.title || '每日之星';
-      const wv = star.wave > 0 ? ' · ' + wan(star.wave) : '';
-      $('starName').textContent = star.name + wv;
-    }
-  }
+/* 🏆 争霸赛冠军横幅渲染（2026-10-13 二次口径：每日之星横幅下线，只留 champ；
+   site.star 字段后端仍下发，前端直接忽略。） */
+function renderChampBanner(champ) {
   const cb = $('champBanner');
   if (cb) {
     if (!champ || !champ.title || !champ.name) { cb.classList.add('hidden'); return; }
@@ -5110,9 +5380,13 @@ function renderStarBanner(star, champ) {
       '<b>' + LABEL() + '数据暂未公布</b><br>请等管理员发布</div>';
     return;
   }
-  /* 🚩 冠军展示位（2026-10-13）：管理员可配称号/人名（star_override），
-     没配则自动显示最近业务日的当日音浪第一（与推送图每日之星同源）。 */
-  renderStarBanner(site.star, site.champ);
+  /* 🏆 争霸赛冠军横幅（2026-10-13）：管理员可配称号/人名；每日之星横幅已下线。 */
+  renderChampBanner(site.champ);
+  /* 📣 看板公告条（2026-10-13）：placements.home 开着才渲染。不持久化关闭 ——
+     公告是运营触达位，每次进看板都显示。 */
+  renderHomeAnnouncement(site.placements && site.placements.home);
+  /* 🎉 每日之星庆祝横幅（2026-10-13）：celebrate.title/name 有值才显示。 */
+  showCelebrateBar(site.celebrate, siteAnnouncements.celebrate);
 
   /* 展示端登录门（2026-10-11）：后台「开启登录」开着 → 先登录再看；
      关掉 → 全面开放，直接展示全量数据（统一入口，不再分男团/女团）。 */

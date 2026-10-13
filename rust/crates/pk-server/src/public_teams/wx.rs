@@ -251,18 +251,30 @@ pub async fn my_push_wechat_poll(
     if bot_token.is_empty() || bot_id.is_empty() || user_id.is_empty() {
         return Err(anyhow::anyhow!("扫码已确认，但微信没有返回完整凭证").into());
     }
-    let acct = crate::store::WxPushAccount {
+    // 重扫不丢已激活绑定（2026-10-13 用户口径：配置还要和之前一样）：
+    // 覆盖凭证前先取库里已有账号，下面重申 push_bindings 时带上旧会话。
+    let existing = crate::store::wx_push_account_get(&st, &name).await;
+    let mut acct = crate::store::WxPushAccount {
         name: name.clone(),
         team: team_scope.clone(),
         person_id,
         ilink_bot_id: bot_id,
         ilink_user_id: user_id,
         bot_token,
-        base_url: out
-            .get("baseUrl")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
+        // baseUrl 可能为空；本次轮询实际是走 pending 会话记录的 redirect base（poll_base）
+        // 成功的（poll_base 为空时本就走默认主机），空串回落它，
+        // 不然 user_send_text 退默认主机不保证对。
+        base_url: {
+            let from_out = out
+                .get("baseUrl")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if from_out.is_empty() {
+                base.to_string()
+            } else {
+                from_out.to_string()
+            }
+        },
         nickname: out
             .get("nickname")
             .and_then(Value::as_str)
@@ -272,11 +284,51 @@ pub async fn my_push_wechat_poll(
         updates_buf: String::new(),
         bound_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
     };
+    // save 的 DO UPDATE 不覆盖 conversation_id；已有账号时把内存结构与库对齐
+    if let Some(e) = &existing {
+        acct.conversation_id = e.conversation_id.clone();
+    }
+    // 换微信号重扫（2026-10-13 补）：ilink_user_id / bot_id 变了 = 绑定目标换人了，
+    // 旧会话必须作废（account 与 push_bindings 的 conv 一起清空，updates_buf 游标同清），
+    // 让用户给新 bot 发第一条消息时按「首次激活」重走一遍；
+    // 开关（notify_target/daily_report）与追分目标（my_targets）都不动——配置还要和之前一样。
+    // 同一个微信重扫（uid 相同）不走这里，会话原样保留。
+    // 注意 save 的 DO UPDATE 不覆盖 conversation_id / updates_buf，
+    // 所以换微信时要把旧行删掉重插，清空才真正落库。
+    let rescan_new_wechat = existing
+        .as_ref()
+        .map(|e| {
+            !e.ilink_user_id.is_empty()
+                && e.ilink_user_id != acct.ilink_user_id
+        })
+        .unwrap_or(false);
+    if rescan_new_wechat {
+        acct.conversation_id.clear();
+        crate::store::wx_push_account_delete(&st, &name).await;
+    }
     crate::store::wx_push_account_save(&st, &acct)
         .await
         .map_err(|e| anyhow::anyhow!("保存微信凭证失败：{e}"))?;
-    // 先建 push_bindings 行（未通话时 bound=false，但两个推送开关可先设置）
-    crate::store::push_bind_account(&st, &name, &team_scope, "", "").await;
+    if rescan_new_wechat {
+        if let Some(e) = &existing {
+            let old_conv =
+                format!("wxacct:{}:{}", e.ilink_bot_id, e.ilink_user_id);
+            crate::store::wx_session_delete(&st, &old_conv).await;
+        }
+    }
+    // 先建 push_bindings 行（未通话时 bound=false，但两个推送开关可先设置）。
+    // 重扫不丢已激活绑定（2026-10-13 用户口径：配置还要和之前一样）：
+    // - 同一个微信重扫：库里已有激活会话就原样重申（conv / to_user_id 不变）；
+    // - 换了微信号重扫：会话作废，落空串（等新微信发消息重新激活）；
+    // - 首次扫码：传空串建未激活行，与原行为一致。
+    // push_bind_account 自带的「同一会话抢占清理」语义不变。
+    let (bind_conv, bind_uid) = match existing.as_ref() {
+        Some(e) if !e.conversation_id.is_empty() && !rescan_new_wechat => {
+            (e.conversation_id.as_str(), e.ilink_user_id.as_str())
+        }
+        _ => ("", ""),
+    };
+    crate::store::push_bind_account(&st, &name, &team_scope, bind_conv, bind_uid).await;
     crate::wxpush::ensure_account(&st, &name).await;
     tracing::info!(account = %name, bot = %acct.ilink_bot_id, "用户扫码登录微信推送账号成功，等待首次消息激活");
     Ok(Json(json!({

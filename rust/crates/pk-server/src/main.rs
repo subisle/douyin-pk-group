@@ -246,6 +246,13 @@ async fn main() -> anyhow::Result<()> {
     let public_api = Router::new()
         .route("/api/public/plans", get(public::plans))
         .route("/api/public/plans/{id}", get(public::plan))
+        // 公告系统 v2（2026-10-13）：登录页公告 + 庆祝配置，无需登录。
+        // 登录门出现时用户还没登录，site() 过不了登录门拿不到配置，
+        // 所以登录页走这个轻量端点（只下发 login 公告位 + celebrate，不带 steps）。
+        .route(
+            "/api/public/announcements",
+            get(public_teams::public_announcements),
+        )
         // 阶段 D：团别公开站点（/st/m、/st/f 的数据接口）
         .route("/api/public/teams/{team}", get(public_teams::site))
         .route("/api/public/teams/{team}/daily", get(public_teams::daily))

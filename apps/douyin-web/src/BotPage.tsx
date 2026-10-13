@@ -857,12 +857,44 @@ const ANNOUNCE_ICONS = [
   'chat_bubble', 'lock', 'person', 'smart_toy', 'workspace_premium',
 ]
 
+/* -------------- 公告系统 v2（2026-10-13）类型定义 -------------- */
+
+/** 公告位 v2：单个位置（登录页 / 看板 / 个人页）的配置，结构与后端
+    pk-server public_teams/settings.rs 的 Announcement.placements.<key> 一一对应
+    （serde default：旧数据缺字段 = 关闭 + 空文案，load 时逐字段兜底）。 */
+type PlacementCfg = { enabled: boolean; text: string; icon: string }
+type PlacementKey = 'login' | 'home' | 'my'
+type PlacementsMap = Record<PlacementKey, PlacementCfg>
+
+/** 庆祝配置 v2：每日之星 / 争霸赛冠军的庆祝元素（总开关 / 彩带 / 标题 / 人名 / 音浪数）。
+    wave（音浪数）后端是数字、0 = 不显示；state 里存字符串方便 number 输入框编辑，保存时转回数字。 */
+type CelebrateCfg = { enabled: boolean; confetti: boolean; title: string; name: string; wave: string }
+
+/** 公告位 v2 三个位置：key 与后端 Announcement.placements 的字段一一对应 */
+const PLACEMENTS: { key: PlacementKey; label: string }[] = [
+  { key: 'login', label: '登录页' },
+  { key: 'home', label: '看板' },
+  { key: 'my', label: '个人页' },
+]
+
+/** v2 加载前 / 加载失败时的缺省值：全部关闭 + 空文案（GET 成功后被真实数据覆盖） */
+const EMPTY_PLACEMENTS: PlacementsMap = {
+  login: { enabled: false, text: '', icon: '' },
+  home: { enabled: false, text: '', icon: '' },
+  my: { enabled: false, text: '', icon: '' },
+}
+const EMPTY_CELEBRATE: CelebrateCfg = { enabled: false, confetti: false, title: '', name: '', wave: '0' }
+
 /** 引导弹窗（2026-10-11）：展示端打开时弹出的多步骤引导，逐步「下一步」；
     用户点「完成 / 跳过」后按 version 记住已读，后台每次保存让版本前进，展示端再弹。 */
 function AnnouncementCard() {
   const [data, setData] = useState<{ enabled: boolean; version: number } | null>(null)
   const [steps, setSteps] = useState<{ title: string; content: string; icon: string }[]>([])
   const [enabled, setEnabled] = useState(false)
+  // 公告位 v2（登录页 / 看板 / 个人页）：受控输入，GET 后逐字段兜底填充
+  const [placements, setPlacements] = useState<PlacementsMap>(EMPTY_PLACEMENTS)
+  // 庆祝配置 v2：受控输入；wave 在 state 里是字符串（number 输入框好编辑），保存时转数字
+  const [celebrate, setCelebrate] = useState<CelebrateCfg>(EMPTY_CELEBRATE)
   const [msg, setMsg] = useState('')
   const [err, setErr] = useState('')
   const [busy, setBusy] = useState(false)
@@ -875,12 +907,48 @@ function AnnouncementCard() {
     font: 'inherit',
   }
 
+  // 公告系统 v2：单行输入框样式，对齐上面 starTitle / champBanner 的内联写法
+  // （height 34 + hairline 边框 + 圆角 8），让新区块和旧区块视觉一致
+  const input34: CSSProperties = {
+    display: 'block',
+    width: '100%',
+    height: 34,
+    marginTop: 4,
+    border: '1px solid var(--hairline, #EAECF0)',
+    borderRadius: 8,
+    padding: '0 10px',
+    fontSize: 13,
+  }
+
   const load = useCallback(() => {
-    api<{ enabled: boolean; steps: { title: string; content: string; icon: string }[]; version: number }>('/api/admin/announcement')
+    // v2：后端 to_json 全量下发 placements / celebrate；泛型只声明用到的字段
+    api<{
+      enabled: boolean
+      steps: { title: string; content: string; icon: string }[]
+      version: number
+      placements?: Partial<Record<PlacementKey, Partial<PlacementCfg>>>
+      celebrate?: Partial<CelebrateCfg>
+    }>('/api/admin/announcement')
       .then((d) => {
         setData(d)
         setSteps(d.steps?.length ? d.steps : [{ title: '', content: '', icon: '' }])
         setEnabled(!!d.enabled)
+        // 公告位 v2 初始化：旧数据（serde default，字段可能整体缺失 / 某项缺失）逐字段兜底
+        const p = d.placements ?? {}
+        setPlacements({
+          login: { enabled: !!p.login?.enabled, text: p.login?.text ?? '', icon: p.login?.icon ?? '' },
+          home: { enabled: !!p.home?.enabled, text: p.home?.text ?? '', icon: p.home?.icon ?? '' },
+          my: { enabled: !!p.my?.enabled, text: p.my?.text ?? '', icon: p.my?.icon ?? '' },
+        })
+        // 庆祝配置 v2 初始化：wave 数字转字符串给输入框（0 = 不显示）
+        const c = d.celebrate ?? {}
+        setCelebrate({
+          enabled: !!c.enabled,
+          confetti: !!c.confetti,
+          title: c.title ?? '',
+          name: c.name ?? '',
+          wave: String(c.wave ?? 0),
+        })
         setErr('')
       })
       .catch((e) => setErr(e.message ?? String(e)))
@@ -901,15 +969,30 @@ function AnnouncementCard() {
     setSteps((prev) => (prev.length <= 1 ? prev : prev.filter((_, idx) => idx !== i)))
   }
 
-  async function save() {
+  /** 保存整个 Announcement JSON（引导 + 公告位 v2 + 庆祝 v2 一起 POST）。
+      overrides：开关类控件在同一 tick 里 setState 还没生效，把新值直接带进来
+      避免用旧 state 覆盖刚点完的开关；文本类控件失焦时不传、走最新 state。 */
+  async function save(overrides?: { enabled?: boolean; placements?: PlacementsMap; celebrate?: CelebrateCfg }) {
+    const en = overrides?.enabled ?? enabled
+    const pl = overrides?.placements ?? placements
+    const ce = overrides?.celebrate ?? celebrate
     setBusy(true)
     setMsg('')
     try {
       const d = await api<{ announcement: { version: number } }>('/api/admin/announcement', {
         method: 'POST',
-        body: JSON.stringify({ enabled, steps }),
+        // v2：保存 = 整个 Announcement JSON 一起下发（引导 + 公告位 + 庆祝），
+        // 后端 update_announcement 按字段合并后 version 自增（展示端重新弹出引导）。
+        body: JSON.stringify({
+          enabled: en,
+          steps,
+          // 公告位 v2：三个位置原样上传，后端逐项做 enabled / 文案长度 / 图标白名单校验
+          placements: pl,
+          // 庆祝配置 v2：wave 转回数字（非数字 / 负数兜底 0 = 不显示）
+          celebrate: { ...ce, wave: Math.max(0, Math.round(Number(ce.wave) || 0)) },
+        }),
       })
-      setData((prev) => (prev ? { ...prev, enabled, version: d.announcement.version } : prev))
+      setData((prev) => (prev ? { ...prev, enabled: en, version: d.announcement.version } : prev))
       setMsg('已保存（版本 ' + d.announcement.version + '，展示端会重新弹出）')
       setTimeout(() => setMsg(''), 2200)
     } catch (e: any) {
@@ -1021,9 +1104,160 @@ function AnnouncementCard() {
         <button className="ghost" onClick={addStep}>
           + 添加步骤
         </button>
+
+        {/* ============ 公告系统 v2 · 公告位（2026-10-13） ============ */}
+        <h3 className="flag-title">📢 公告位（登录页 / 看板 / 个人页）</h3>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 10 }}>
+          {PLACEMENTS.map(({ key, label }) => {
+            const p = placements[key]
+            return (
+              <div
+                key={key}
+                style={{
+                  border: '1px solid var(--hairline)',
+                  borderRadius: 10,
+                  padding: 10,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 6,
+                }}
+              >
+                {/* 位置标题行：图标即时预览（Material Symbols）+ 位置名 + 启用开关 */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <span className="material-symbols-outlined" style={{ fontSize: 18 }}>
+                    {p.icon || 'campaign'}
+                  </span>
+                  <b style={{ fontSize: 13 }}>{label}</b>
+                  <label style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: 12, color: 'var(--muted)' }}>
+                    启用
+                    {/* 开关即时保存：同 tick 内 state 未更新，把新值作为 overrides
+                        传给 save，避免保存时旧值覆盖刚点完的开关 */}
+                    <input
+                      type="checkbox"
+                      className="switch"
+                      checked={p.enabled}
+                      onChange={(e) => {
+                        const next = { ...placements, [key]: { ...placements[key], enabled: e.target.checked } }
+                        setPlacements(next)
+                        save({ placements: next })
+                      }}
+                    />
+                  </label>
+                </div>
+                {/* 文案：多行，支持换行（展示端按换行渲染多行公告） */}
+                <textarea
+                  placeholder={'公告文案（支持换行）\n每行一条，展示端原样换行显示'}
+                  value={p.text}
+                  onChange={(e) => setPlacements((prev) => ({ ...prev, [key]: { ...prev[key], text: e.target.value } }))}
+                  onBlur={() => save()}
+                  rows={3}
+                  maxLength={300}
+                  style={{ ...ctl, resize: 'vertical', lineHeight: 1.6 }}
+                />
+                {/* 图标：Material Symbols 名，失焦保存（后端有图标白名单，白名单外回落默认） */}
+                <input
+                  placeholder="图标，如 campaign / notifications / person"
+                  value={p.icon}
+                  onChange={(e) => setPlacements((prev) => ({ ...prev, [key]: { ...prev[key], icon: e.target.value } }))}
+                  onBlur={() => save()}
+                  maxLength={48}
+                  style={ctl}
+                />
+              </div>
+            )
+          })}
+        </div>
+
+        {/* ============ 公告系统 v2 · 庆祝配置（2026-10-13） ============ */}
+        <h3 className="flag-title">🎉 庆祝配置（每日之星 / 争霸赛冠军）</h3>
+        <div
+          style={{
+            border: '1px solid var(--hairline)',
+            borderRadius: 10,
+            padding: 10,
+            display: 'grid',
+            gap: 8,
+          }}
+        >
+          {/* 总开关：开启庆祝（关 = 展示端不渲染庆祝横幅，其余字段保留但不生效） */}
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 12.5 }}>
+            <input
+              type="checkbox"
+              className="switch"
+              checked={celebrate.enabled}
+              onChange={(e) => {
+                // 开关即时保存：新值作为 overrides 传入，避免旧 state 覆盖
+                const next = { ...celebrate, enabled: e.target.checked }
+                setCelebrate(next)
+                save({ celebrate: next })
+              }}
+            />
+            开启庆祝
+          </label>
+          {/* 彩带开关：登录后彩带动画（需总开关开着才生效） */}
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 12.5 }}>
+            <input
+              type="checkbox"
+              className="switch"
+              checked={celebrate.confetti}
+              onChange={(e) => {
+                // 开关即时保存：新值作为 overrides 传入，避免旧 state 覆盖
+                const next = { ...celebrate, confetti: e.target.checked }
+                setCelebrate(next)
+                save({ celebrate: next })
+              }}
+            />
+            登录后彩带动画
+          </label>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 8 }}>
+            {/* 庆祝标题：展示端庆祝横幅的大字（placeholder 对齐需求：初级争霸赛冠军） */}
+            <label style={{ fontSize: 12.5, color: 'var(--muted, #667085)' }}>
+              庆祝标题
+              <input
+                value={celebrate.title}
+                placeholder="初级争霸赛冠军"
+                onChange={(e) => setCelebrate((prev) => ({ ...prev, title: e.target.value }))}
+                onBlur={() => save()}
+                maxLength={64}
+                style={input34}
+              />
+            </label>
+            {/* 人名：庆祝的主角（placeholder 对齐需求：狼哲） */}
+            <label style={{ fontSize: 12.5, color: 'var(--muted, #667085)' }}>
+              人名
+              <input
+                value={celebrate.name}
+                placeholder="狼哲"
+                onChange={(e) => setCelebrate((prev) => ({ ...prev, name: e.target.value }))}
+                onBlur={() => save()}
+                maxLength={32}
+                style={input34}
+              />
+            </label>
+            {/* 音浪数：数字输入，0 = 不显示；state 存字符串，保存时统一转数字 */}
+            <label style={{ fontSize: 12.5, color: 'var(--muted, #667085)' }}>
+              音浪数（0 = 不显示）
+              <input
+                type="number"
+                min={0}
+                value={celebrate.wave}
+                placeholder="285917"
+                onChange={(e) => setCelebrate((prev) => ({ ...prev, wave: e.target.value }))}
+                onBlur={() => save()}
+                style={input34}
+              />
+            </label>
+          </div>
+          <span style={{ fontSize: 11.5, color: 'var(--muted)' }}>
+            文本框失焦或开关切换后自动保存（引导 + 公告位 + 庆祝整体一起保存，版本前进）。
+          </span>
+        </div>
+
         <div className="row" style={{ margin: 0 }}>
-          <button className="primary" disabled={busy} onClick={save}>
-            {busy ? '保存中…' : '保存引导'}
+          {/* 手动保存按钮：save 现在带 overrides 参数，onClick 必须包一层箭头函数，
+              否则 click 事件对象会被当成 overrides 传进去 */}
+          <button className="primary" disabled={busy} onClick={() => save()}>
+            {busy ? '保存中…' : '保存全部（引导 / 公告位 / 庆祝）'}
           </button>
           {data && <span className="hint">当前版本 {data.version}</span>}
         </div>

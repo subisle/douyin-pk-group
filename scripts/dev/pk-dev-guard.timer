@@ -1,0 +1,11 @@
+# pk-dev-guard 定时器：每 5 分钟查一次磁盘/内存（脚本同目录 rk3328-guard.sh）
+# 安装：cp pk-dev-guard.{service,timer} /etc/systemd/system/ && systemctl daemon-reload && systemctl enable --now pk-dev-guard.timer
+[Unit]
+Description=Run pk-dev-guard every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target

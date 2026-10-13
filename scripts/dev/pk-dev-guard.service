@@ -1,0 +1,6 @@
+[Unit]
+Description=pk-dev disk/memory guard (one shot)
+
+[Service]
+Type=oneshot
+ExecStart=/opt/pk-dev/guard.sh

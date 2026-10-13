@@ -539,13 +539,20 @@ async fn handle_msg(st: &Arc<AppState>, acct: &WxPushAccount, m: &Value) {
     if first_message {
         crate::store::push_bind_account(st, &acct.name, &acct.team, &conversation, &from_user)
             .await;
-        let text = "✅ 微信推送已绑定\n\n以后数据更新后会给你推送：\n· 追分提醒\n· 每日报告\n\n要开哪一项、要追谁，到展示页「我的」里设置。回复「解绑」可以断开。";
+        // 2026-10-13 用户口径：激活回执先问候「你好，艺名」；艺名空白则兜底只发「你好」
+        let greeting = match acct.name.trim() {
+            "" => "你好".to_string(),
+            n => format!("你好，{n}"),
+        };
+        let text = format!(
+            "{greeting}\n\n✅ 微信推送已绑定\n\n以后数据更新后会给你推送：\n· 追分提醒\n· 每日报告\n\n要开哪一项、要追谁，到展示页「我的」里设置。回复「解绑」可以断开。"
+        );
         if let Err(e) = user_send_text(
             &acct.base_url,
             &acct.bot_token,
             &from_user,
             &context_token,
-            text,
+            &text,
         )
         .await
         {

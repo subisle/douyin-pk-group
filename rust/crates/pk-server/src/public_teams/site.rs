@@ -68,6 +68,11 @@ pub async fn site(
         "star": star,
         "champ": champ,
         "announcement": if ann.enabled { ann.to_json() } else { Value::Null },
+        // 公告位（2026-10-13）：登录页 / 展示页（看板）/ 个人页三处，全量下发，
+        // 前端各页各取所需（登录页在登录前拿不到 site，另有 /api/public/announcements）
+        "placements": ann.placements,
+        // 庆祝配置（2026-10-13）：登录后展示页/我的页的彩带庆祝 + 冠军横幅用
+        "celebrate": ann.celebrate,
         "settings": {
             "daily": s.daily,
             "monthly": s.monthly,
@@ -89,6 +94,33 @@ pub async fn site(
 pub struct ListQuery {
     pub date: Option<String>,
     pub period: Option<String>,
+}
+
+/// GET /api/public/announcements：登录页用的轻量公告端点（2026-10-13，无需登录）。
+///
+/// 为什么不直接用 site()：登录门出现时用户还没登录，site() 要过登录门
+/// （gate_team），未登录拿不到 → 登录页公告/庆祝配置必须走一个不需要登录的
+/// 独立端点。只下发登录前需要的部分：
+/// - login：登录门卡片上方那条公告（enabled/text/icon）；
+/// - celebrate：登录后彩带庆祝（enabled/confetti/title/name/wave），
+///   title/name 空时前端回退推送配置 star_title / star_override 的值。
+///
+/// 不下发 steps / version 等引导弹窗字段。不带团别参数、也不查 team_enabled：
+/// 公告/庆祝是全站性配置，且团关闭时展示页（含登录门）照样要能取到这两块。
+pub async fn public_announcements(State(st): State<ArcState>) -> ApiResult {
+    let ann = Announcement::load(&st).await;
+    // 登录页图标归一化先算好再进 json!（宏的值位置放不了语句块），与 placement_json 同口径
+    let login_icon = ann.placements.login.icon.trim();
+    let login_icon = if STEP_ICON_WHITELIST.contains(&login_icon) { login_icon } else { "" };
+    Ok(Json(json!({
+        "login": {
+            "enabled": ann.placements.login.enabled,
+            "text": ann.placements.login.text,
+            "icon": login_icon,
+        },
+        // 庆祝配置裁剪形态（celebrate_public_json），登录后彩带庆祝用
+        "celebrate": ann.celebrate_public_json(),
+    })))
 }
 
 /// GET /api/public/teams/{team}/daily?date=

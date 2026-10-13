@@ -148,6 +148,8 @@ mod announcement_tests {
     /// to_json 下发的 icon 是归一化后的值，不是空串（前端不猜）
     #[test]
     pub(super) fn to_json_always_emits_a_usable_icon() {
+        // 公告位/庆祝字段（2026-10-13）与 icon 测试无关，走 Default::default()
+        // （全关 / 全空），保持原断言语义不变。
         let a = Announcement {
             enabled: true,
             steps: vec![
@@ -165,6 +167,7 @@ mod announcement_tests {
                 },
             ],
             version: 1,
+            ..Default::default()
         };
         let v = a.to_json();
         let icons: Vec<&str> = v["steps"]
@@ -179,6 +182,112 @@ mod announcement_tests {
             assert!(STEP_ICON_WHITELIST.contains(i), "下发的 {i} 不在白名单");
         }
         assert_ne!(icons[0], icons[1], "相邻步骤默认图标应不同");
+    }
+
+    /* ---------------------- 公告系统 v2（2026-10-13） ---------------------- */
+
+    /// 旧数据反序列化兼容：库里存的 cfg_key='announcement' 没有 placements /
+    /// celebrate 字段，serde(default) 必须兜底成「全关」，登录页/看板/个人页
+    /// 不出公告条、登录后不弹彩带（与 v1 行为一致）。
+    #[test]
+    pub(super) fn announcement_v2_old_json_defaults_all_off() {
+        let ann: Announcement = serde_json::from_str(
+            r#"{"enabled":true,"steps":[{"title":"a","content":"b"}],"version":3}"#,
+        )
+        .expect("旧 JSON 必须能反序列化");
+        assert!(ann.enabled);
+        assert_eq!(ann.version, 3);
+        assert!(!ann.placements.login.enabled);
+        assert!(!ann.placements.home.enabled);
+        assert!(!ann.placements.my.enabled);
+        assert!(ann.placements.login.text.is_empty());
+        assert!(!ann.celebrate.enabled);
+        assert!(!ann.celebrate.confetti);
+        assert_eq!(ann.celebrate.wave, 0);
+    }
+
+    /// to_json 全量下发新字段（管理端编辑用），且 placements/celebrate 保存
+    /// 取值后 roundtrip 不丢。
+    #[test]
+    pub(super) fn to_json_emits_placements_and_celebrate() {
+        let ann = Announcement {
+            enabled: false,
+            placements: AnnouncementPlacements {
+                login: Placement {
+                    enabled: true,
+                    text: "第一行\n第二行".into(),
+                    icon: " campaign ".into(),
+                },
+                home: Placement { enabled: false, text: "看板".into(), icon: String::new() },
+                my: Placement::default(),
+            },
+            celebrate: CelebrateConfig {
+                enabled: true,
+                confetti: true,
+                title: String::new(), // 空 = 前端回退 star_title
+                name: "狼哲".into(),
+                wave: 88888,
+            },
+            ..Default::default()
+        };
+        let v = ann.to_json();
+        let login = &v["placements"]["login"];
+        assert_eq!(login["enabled"], true);
+        // text 支持换行，原样下发
+        assert_eq!(login["text"], "第一行\n第二行");
+        // icon trim 后命中白名单才下发
+        assert_eq!(login["icon"], "campaign");
+        assert_eq!(v["placements"]["home"]["text"], "看板");
+        assert_eq!(v["placements"]["my"]["enabled"], false);
+        let c = &v["celebrate"];
+        assert_eq!(c["enabled"], true);
+        assert_eq!(c["confetti"], true);
+        assert_eq!(c["name"], "狼哲");
+        assert_eq!(c["wave"], 88888);
+        // roundtrip：to_json 再反序列化，字段不丢（save/load 走同一 serde 形态）
+        let back: Announcement = serde_json::from_value(v).expect("roundtrip 必须无损");
+        assert_eq!(back.placements.login.text, "第一行\n第二行");
+        assert_eq!(back.celebrate.name, "狼哲");
+        assert_eq!(back.celebrate.wave, 88888);
+    }
+
+    /// 公告位 icon 白名单：合法名（含首尾空白）原样/trim 后下发，白名单外一律空串，
+    /// 任意字符串不进前端 DOM（与引导弹窗 icon_for 同一道关口）。
+    #[test]
+    pub(super) fn placement_json_whitelists_icon() {
+        let ok = Placement { enabled: true, text: String::new(), icon: " star ".into() };
+        assert_eq!(Announcement::placement_json(&ok)["icon"], "star");
+        for bad in ["<script>", "foo", "STAR", "star twist", ""] {
+            let p = Placement { enabled: true, text: String::new(), icon: bad.into() };
+            assert_eq!(
+                Announcement::placement_json(&p)["icon"],
+                "",
+                "{bad:?} 白名单外必须为空"
+            );
+        }
+    }
+
+    /// 登录页公开端点的裁剪形态：celebrate_public_json 只含庆祝五字段，
+    /// 不夹带 steps/version 等引导弹窗数据（登录前少出网）。
+    #[test]
+    pub(super) fn celebrate_public_json_shape() {
+        let ann = Announcement {
+            celebrate: CelebrateConfig {
+                enabled: true,
+                confetti: false,
+                title: String::new(),
+                name: "狼哲".into(),
+                wave: 0,
+            },
+            ..Default::default()
+        };
+        let v = ann.celebrate_public_json();
+        let obj = v.as_object().unwrap();
+        let mut keys: Vec<_> = obj.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, vec!["confetti", "enabled", "name", "title", "wave"]);
+        assert_eq!(v["name"], "狼哲");
+        assert_eq!(v["wave"], 0);
     }
 }
 

@@ -1,0 +1,24 @@
+# pk-server 开发实例（rk3328 裸跑，非 Docker）
+# 安装：cp pk-dev.service /etc/systemd/system/ && systemctl daemon-reload
+[Unit]
+Description=PK Server dev instance (bare metal on rk3328)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/pk-dev
+EnvironmentFile=/opt/pk-dev/.env
+ExecStart=/opt/pk-dev/pk-server
+Restart=on-failure
+RestartSec=5
+# 小板子保险丝：内存超 1.2G 杀掉重启，防止拖死整机
+MemoryMax=1200M
+MemoryHigh=900M
+# 日志直接进 journal，守护脚本会做 journal 收缩
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=pk-dev
+
+[Install]
+WantedBy=multi-user.target

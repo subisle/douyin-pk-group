@@ -260,6 +260,67 @@ pub struct Announcement {
     pub steps: Vec<AnnounceStep>,
     /// 每次保存自增；前端按版本判断是否已读（关闭后不再弹，直到版本变化）
     pub version: u64,
+    /// 三处公告位（2026-10-13）：登录页 / 展示页（看板）/ 个人页，各自独立开关与文案。
+    /// text 支持换行；每处独立展示，互不影响。
+    #[serde(default)]
+    pub placements: AnnouncementPlacements,
+    /// 庆祝配置（2026-10-13）：每日之星/争霸赛冠军登录后彩带庆祝 + 展示
+    #[serde(default)]
+    pub celebrate: CelebrateConfig,
+}
+
+/// 三处公告位（2026-10-13）：登录页（login）/ 展示页看板顶部（home）/ 个人页顶部（my）。
+/// 整体挂在 Announcement 下随 cfg_key='announcement' 一起存取，旧数据缺字段时
+/// serde(default) 回落全关（老行为：登录页/看板/个人页都没有公告条）。
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Default)]
+pub struct AnnouncementPlacements {
+    /// 登录页公告（登录门卡片上方一条）
+    #[serde(default)]
+    pub login: Placement,
+    /// 展示页（看板顶部）公告
+    #[serde(default)]
+    pub home: Placement,
+    /// 个人页公告（「我的」页顶部）
+    #[serde(default)]
+    pub my: Placement,
+}
+
+/// 单个公告位：独立开关 + 文案 + 可选图标。
+/// enabled=false 时对应接口不下发该条（前端也无从渲染），不只是前端隐藏。
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Default)]
+pub struct Placement {
+    /// 该公告位是否启用
+    #[serde(default)]
+    pub enabled: bool,
+    /// 公告文案；支持换行，可为空（空串 = 前端不渲染内容行）
+    #[serde(default)]
+    pub text: String,
+    /// 可选图标（Material Symbols 名，如 star_tech）；空 = 不带图标。
+    /// 入口在 update_announcement 走 STEP_ICON_WHITELIST 白名单，任意字符串不进配置。
+    #[serde(default)]
+    pub icon: String,
+}
+
+/// 庆祝配置（2026-10-13）：每日之星/争霸赛冠军登录后彩带庆祝 + 展示。
+/// 语义与推送小红旗条共用一套兜底链：title 空 → 推送配置 star_title；name 空 →
+/// star_override 里的人名。enabled=false = 登录后不弹彩带、横幅不闪。
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Default)]
+pub struct CelebrateConfig {
+    /// 庆祝总开关（关 = 登录后不弹彩带、横幅不闪）
+    #[serde(default)]
+    pub enabled: bool,
+    /// 彩带动画开关
+    #[serde(default)]
+    pub confetti: bool,
+    /// 庆祝标题（如「初级争霸赛冠军」），空 = 用推送配置 star_title
+    #[serde(default)]
+    pub title: String,
+    /// 庆祝人（艺名），空 = 用 star_override 的人名
+    #[serde(default)]
+    pub name: String,
+    /// 音浪数（0 = 不显示数值）
+    #[serde(default)]
+    pub wave: i64,
 }
 
 /// 引导弹窗的一步：标题 + 正文 + 图标（Material Symbols 名）。
@@ -341,6 +402,45 @@ impl Announcement {
                 "target": s.target,
             })).collect::<Vec<_>>(),
             "version": self.version,
+            // 公告位（2026-10-13）：全量下发，管理端编辑用；展示端各取所需
+            "placements": {
+                "login": Self::placement_json(&self.placements.login),
+                "home": Self::placement_json(&self.placements.home),
+                "my": Self::placement_json(&self.placements.my),
+            },
+            // 庆祝配置（2026-10-13）：全量下发（总开关 / 彩带 / 标题 / 人名 / 音浪数）
+            "celebrate": {
+                "enabled": self.celebrate.enabled,
+                "confetti": self.celebrate.confetti,
+                "title": self.celebrate.title,
+                "name": self.celebrate.name,
+                "wave": self.celebrate.wave,
+            },
+        })
+    }
+
+    /// 单个公告位 → 下发 JSON（2026-10-13）。text 原样下发（支持换行），
+    /// icon 归一化：空白去掉、白名单外的丢弃（空 = 前端不带图标）。
+    pub(super) fn placement_json(p: &Placement) -> Value {
+        // 归一化先算好再进 json!（宏的值位置放不了语句块）
+        let icon = p.icon.trim();
+        let icon = if STEP_ICON_WHITELIST.contains(&icon) { icon } else { "" };
+        json!({
+            "enabled": p.enabled,
+            "text": p.text,
+            "icon": icon,
+        })
+    }
+
+    /// 登录页公开端点（GET /api/public/announcements）用的庆祝裁剪 JSON：
+    /// 只给登录前需要的那几个字段，与 to_json 全量形态分开，方便各端各取所需。
+    pub fn celebrate_public_json(&self) -> Value {
+        json!({
+            "enabled": self.celebrate.enabled,
+            "confetti": self.celebrate.confetti,
+            "title": self.celebrate.title,
+            "name": self.celebrate.name,
+            "wave": self.celebrate.wave,
         })
     }
 
@@ -362,7 +462,11 @@ pub async fn get_announcement(State(st): State<ArcState>) -> ApiResult {
     Ok(Json(Announcement::load(&st).await.to_json()))
 }
 
-/// POST /api/admin/announcement {enabled?, steps?: [{title, content}]}
+/// POST /api/admin/announcement
+/// {enabled?, steps?: [{title, content, icon?, target?}],
+///  placements?: {login|home|my: {enabled?, text?, icon?}},   // 2026-10-13 公告位
+///  celebrate?: {enabled?, confetti?, title?, name?, wave?}}  // 2026-10-13 庆祝
+/// 部分更新语义：没传的字段/公告位保持原样（与 enabled/steps 同一套口径）。
 pub async fn update_announcement(State(st): State<ArcState>, Json(body): Json<Value>) -> ApiResult {
     let mut a = Announcement::load(&st).await;
     if let Some(v) = body.get("enabled").and_then(|v| v.as_bool()) {
@@ -401,6 +505,70 @@ pub async fn update_announcement(State(st): State<ArcState>, Json(body): Json<Va
     }
     // 每次保存都让版本前进，前端据此重新弹出（内容没变也弹，保证运营可主动重发）
     a.version += 1;
+
+    /* ---------------- 公告位（2026-10-13）：login / home / my 三处独立 ----------------
+    部分更新：没传的公告位整体保持原样；传了就逐字段合并（enabled/text/icon，
+    缺哪个字段保哪个字段），与 enabled/steps 的部分更新语义一致。
+    校验沿用引导弹窗同一道关口：icon 走 STEP_ICON_WHITELIST 白名单，白名单外
+    直接丢（存空串 = 不带图标），任意字符串不进配置；text 支持换行，只做长度兜底。 */
+    if let Some(placements) = body.get("placements").and_then(|v| v.as_object()) {
+        let parse_placement = |cur: &Placement, v: &Value| -> Placement {
+            Placement {
+                enabled: v
+                    .get("enabled")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(cur.enabled),
+                // text 允许换行；trim 只在字符层面兜底，不去掉中间换行
+                text: v
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .chars()
+                    .take(500) // 长度兜底：公告条不是长文，防止配置被撑爆
+                    .collect(),
+                // 与 AnnounceStep.icon 同一白名单：合法才收，任意字符串不进配置
+                icon: {
+                    let icon = v.get("icon").and_then(|v| v.as_str()).unwrap_or("").trim();
+                    if STEP_ICON_WHITELIST.contains(&icon) {
+                        icon.chars().take(48).collect()
+                    } else {
+                        String::new()
+                    }
+                },
+            }
+        };
+        if let Some(v) = placements.get("login") {
+            a.placements.login = parse_placement(&a.placements.login, v);
+        }
+        if let Some(v) = placements.get("home") {
+            a.placements.home = parse_placement(&a.placements.home, v);
+        }
+        if let Some(v) = placements.get("my") {
+            a.placements.my = parse_placement(&a.placements.my, v);
+        }
+    }
+
+    /* ---------------- 庆祝配置（2026-10-13）：部分更新，逐字段合并 ----------------
+    enabled/confetti 是开关，title/name 截断兜底，wave 负数归 0（音浪数不为负）。 */
+    if let Some(c) = body.get("celebrate").and_then(|v| v.as_object()) {
+        if let Some(v) = c.get("enabled").and_then(|v| v.as_bool()) {
+            a.celebrate.enabled = v;
+        }
+        if let Some(v) = c.get("confetti").and_then(|v| v.as_bool()) {
+            a.celebrate.confetti = v;
+        }
+        if let Some(v) = c.get("title").and_then(|v| v.as_str()) {
+            a.celebrate.title = v.trim().chars().take(64).collect();
+        }
+        if let Some(v) = c.get("name").and_then(|v| v.as_str()) {
+            a.celebrate.name = v.trim().chars().take(64).collect();
+        }
+        if let Some(v) = c.get("wave").and_then(|v| v.as_i64()) {
+            a.celebrate.wave = v.max(0);
+        }
+    }
+
     a.save(&st).await;
     Ok(Json(json!({ "ok": true, "announcement": a.to_json() })))
 }
