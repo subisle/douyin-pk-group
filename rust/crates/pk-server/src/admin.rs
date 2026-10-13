@@ -3125,6 +3125,25 @@ pub async fn set_person_phone(
     crate::store::person_set_phone(&st, id, &phone)
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
+    /* 写后回读校验（2026-10-13）：与 my_account_set 同口径——杜绝「返回 ok 但库里
+       没写入」的静默失败（64 环境曾出现运营以为绑上了实际没绑）。 */
+    let saved_phone = sqlx::query(&crate::pq::rewrite(
+        "SELECT phone FROM person WHERE id = ? AND deleted_at IS NULL",
+    ))
+    .bind(id as i64)
+    .fetch_optional(st.writer.as_ref().ok_or_else(|| anyhow::anyhow!("写库不可用"))?)
+    .await
+    .map_err(|e| anyhow::anyhow!("回读失败：{e}"))?
+    .and_then(|r| r.try_get::<String, _>("phone").ok())
+    .unwrap_or_default();
+    if saved_phone != phone.trim() {
+        return Err(anyhow::anyhow!(
+            "手机号「{}」写入后校验失败（库里读到的是「{}」），请重试",
+            phone.trim(),
+            saved_phone
+        )
+        .into());
+    }
     Ok(Json(
         json!({ "ok": true, "personId": id, "phone": phone.trim() }),
     ))
