@@ -631,9 +631,11 @@ function PublicSettingsCard() {
     ['中级争霸赛晋级赛', '中级晋级赛'],
   ]
 
-  /** 🚩 小红旗条文本/图标字段：blur 时保存（空串 = 清除恢复默认） */
+  /** 🚩 小红旗条文本/图标字段：blur 时保存（空串 = 清除恢复默认）。
+      注：champBanner 的入口已下线（改由「公告」卡片配多条），这里不再收该字段，
+      后端「传了才改」语义下不传 = 保持原值。 */
   async function saveStarText(
-    key: 'starTitle' | 'starOverride' | 'starIcon' | 'champBanner',
+    key: 'starTitle' | 'starOverride' | 'starIcon',
     value: string,
   ) {
     try {
@@ -797,19 +799,8 @@ function PublicSettingsCard() {
                 留空 = 默认 🚩 emoji；上传图片后推送图头部用该图标。
               </span>
             </label>
-          <h3 className="flag-title">🏆 争霸赛冠军横幅（展示页顶部）</h3>
-          <div style={{ display: 'grid', gap: 8, margin: '4px 0 12px' }}>
-            <label style={{ fontSize: 12.5, color: 'var(--muted, #667085)' }}>
-              横幅文案：「称号|人名|音浪」或「称号|人名」或只写称号；留空 = 不显示该横幅
-              <input
-                defaultValue={settings.champBanner ?? ''}
-                placeholder="初级争霸赛冠军|狼哲|285917"
-                onBlur={(e) => {
-                  if (e.target.value !== (settings.champBanner ?? '')) saveStarText('champBanner', e.target.value)
-                }}
-                style={{ display: 'block', width: '100%', height: 34, marginTop: 4, border: '1px solid var(--hairline, #EAECF0)', borderRadius: 8, padding: '0 10px', fontSize: 13 }}
-              />
-            </label>
+          <div style={{ margin: '4px 0 12px', fontSize: 11.5, color: 'var(--muted)' }}>
+            🏆 争霸赛冠军横幅已挪到下方「公告」卡片里配置（展示页公告条，可配多条）——这里不再单独设置，避免两处撞车。
           </div>
 
           </div>
@@ -885,6 +876,32 @@ const EMPTY_PLACEMENTS: PlacementsMap = {
 }
 const EMPTY_CELEBRATE: CelebrateCfg = { enabled: false, confetti: false, title: '', name: '', wave: '0' }
 
+/** 展示页公告条（2026-10-14）：可配多条，数组顺序 = 展示端从上到下。
+    对应后端 Announcement.items[idx]；tone：brand = 紫金渐变（原庆祝条样式）、
+    plain = 白底描边（原冠军条样式）。wave 同 celebrate 存字符串方便 number 输入框，
+    保存时转数字（0 = 不显示数值）。 */
+type AnnounceTone = 'brand' | 'plain'
+type AnnounceItemCfg = {
+  enabled: boolean
+  icon: string
+  title: string
+  name: string
+  wave: string
+  text: string
+  tone: AnnounceTone
+}
+
+/** 「+ 添加公告条」的新条目：默认不启用，免得文案还没填就在展示端顶出一条空公告 */
+const EMPTY_ANNOUNCE_ITEM: AnnounceItemCfg = {
+  enabled: false,
+  icon: '',
+  title: '',
+  name: '',
+  wave: '0',
+  text: '',
+  tone: 'plain',
+}
+
 /** 引导弹窗（2026-10-11）：展示端打开时弹出的多步骤引导，逐步「下一步」；
     用户点「完成 / 跳过」后按 version 记住已读，后台每次保存让版本前进，展示端再弹。 */
 function AnnouncementCard() {
@@ -895,6 +912,10 @@ function AnnouncementCard() {
   const [placements, setPlacements] = useState<PlacementsMap>(EMPTY_PLACEMENTS)
   // 庆祝配置 v2：受控输入；wave 在 state 里是字符串（number 输入框好编辑），保存时转数字
   const [celebrate, setCelebrate] = useState<CelebrateCfg>(EMPTY_CELEBRATE)
+  // 展示页公告条（2026-10-14）：多条列表，顺序即展示顺序
+  const [items, setItems] = useState<AnnounceItemCfg[]>([])
+  /** GET 里有没有 items 这个 key：老后端不下发时保存不发 items，避免整包替换把已有配置清空 */
+  const [itemsLoaded, setItemsLoaded] = useState(false)
   const [msg, setMsg] = useState('')
   const [err, setErr] = useState('')
   const [busy, setBusy] = useState(false)
@@ -907,7 +928,7 @@ function AnnouncementCard() {
     font: 'inherit',
   }
 
-  // 公告系统 v2：单行输入框样式，对齐上面 starTitle / champBanner 的内联写法
+  // 公告系统 v2：单行输入框样式，对齐上面 starTitle / starIcon 的内联写法
   // （height 34 + hairline 边框 + 圆角 8），让新区块和旧区块视觉一致
   const input34: CSSProperties = {
     display: 'block',
@@ -928,6 +949,16 @@ function AnnouncementCard() {
       version: number
       placements?: Partial<Record<PlacementKey, Partial<PlacementCfg>>>
       celebrate?: Partial<CelebrateCfg>
+      /** 展示页公告条（2026-10-14）：全量下发（含 enabled=false），编辑初值就是它 */
+      items?: {
+        enabled?: boolean
+        icon?: string
+        title?: string
+        name?: string
+        wave?: number | string
+        text?: string
+        tone?: string
+      }[]
     }>('/api/admin/announcement')
       .then((d) => {
         setData(d)
@@ -949,6 +980,25 @@ function AnnouncementCard() {
           name: c.name ?? '',
           wave: String(c.wave ?? 0),
         })
+        // 公告条初始化：数组整体替换（顺序即展示顺序）；老后端没有 items key 时保持空列表，
+        // 且不标 loaded —— 保存时不发 items，防止把库里的多条整包清空
+        if (Array.isArray(d.items)) {
+          setItems(
+            d.items.map((it) => ({
+              enabled: !!it?.enabled,
+              icon: it?.icon ?? '',
+              title: it?.title ?? '',
+              name: it?.name ?? '',
+              wave: String(it?.wave ?? 0),
+              text: it?.text ?? '',
+              tone: it?.tone === 'brand' ? 'brand' : 'plain',
+            })),
+          )
+          setItemsLoaded(true)
+        } else {
+          setItems([])
+          setItemsLoaded(false)
+        }
         setErr('')
       })
       .catch((e) => setErr(e.message ?? String(e)))
@@ -969,28 +1019,83 @@ function AnnouncementCard() {
     setSteps((prev) => (prev.length <= 1 ? prev : prev.filter((_, idx) => idx !== i)))
   }
 
-  /** 保存整个 Announcement JSON（引导 + 公告位 v2 + 庆祝 v2 一起 POST）。
+  /* ---- 展示页公告条（多条，2026-10-14） ---- */
+
+  /** 改第 i 条但不落库：文本框用，失焦时 save() 走最新 state */
+  function setItem(i: number, patch: Partial<AnnounceItemCfg>) {
+    setItems((prev) => prev.map((it, idx) => (idx === i ? { ...it, ...patch } : it)))
+  }
+  /** 改第 i 条并立即保存：开关 / 下拉用（同一 tick 里 state 还没更新，
+      把算好的新数组作为 overrides 传给 save，避免旧的 items 覆盖刚点的改动） */
+  function setItemSaved(i: number, patch: Partial<AnnounceItemCfg>) {
+    const next = items.map((it, idx) => (idx === i ? { ...it, ...patch } : it))
+    setItems(next)
+    void save({ items: next })
+  }
+  function addItem() {
+    // 一旦手动加过条目，就允许保存 items（老后端场景下也按运营意图发整包）
+    setItemsLoaded(true)
+    setItems((prev) => [...prev, { ...EMPTY_ANNOUNCE_ITEM }])
+  }
+  function removeItem(i: number) {
+    const next = items.filter((_, idx) => idx !== i)
+    setItems(next)
+    void save({ items: next })
+  }
+  /** 上移 / 下移：数组顺序就是展示端从上到下的顺序 */
+  function moveItem(i: number, dir: -1 | 1) {
+    const j = i + dir
+    if (j < 0 || j >= items.length) return
+    const next = [...items]
+    const [moved] = next.splice(i, 1)
+    next.splice(j, 0, moved)
+    setItems(next)
+    void save({ items: next })
+  }
+
+  /** 保存整个 Announcement JSON（引导 + 公告位 v2 + 庆祝 v2 + 公告条一起 POST）。
       overrides：开关类控件在同一 tick 里 setState 还没生效，把新值直接带进来
       避免用旧 state 覆盖刚点完的开关；文本类控件失焦时不传、走最新 state。 */
-  async function save(overrides?: { enabled?: boolean; placements?: PlacementsMap; celebrate?: CelebrateCfg }) {
+  async function save(overrides?: {
+    enabled?: boolean
+    placements?: PlacementsMap
+    celebrate?: CelebrateCfg
+    items?: AnnounceItemCfg[]
+  }) {
     const en = overrides?.enabled ?? enabled
     const pl = overrides?.placements ?? placements
     const ce = overrides?.celebrate ?? celebrate
+    const its = overrides?.items ?? items
     setBusy(true)
     setMsg('')
     try {
+      // items 是整包替换语义：只在「GET 下发过 items」或运营手动加过条目时才带上，
+      // 老后端 / 未加载时省略该字段，避免把库里的多条清空
+      const body: Record<string, unknown> = {
+        enabled: en,
+        steps,
+        // 公告位 v2：三个位置原样上传，后端逐项做 enabled / 文案长度 / 图标白名单校验
+        placements: pl,
+        // 庆祝配置 v2：wave 转回数字（非数字 / 负数兜底 0 = 不显示）
+        celebrate: { ...ce, wave: Math.max(0, Math.round(Number(ce.wave) || 0)) },
+      }
+      if (itemsLoaded) {
+        // 展示页公告条：数组顺序 = 展示端从上到下；wave 转数字，tone 只收 brand / plain
+        body.items = its.map((it) => ({
+          enabled: it.enabled,
+          icon: it.icon.trim(),
+          title: it.title,
+          name: it.name,
+          wave: Math.max(0, Math.round(Number(it.wave) || 0)),
+          text: it.text,
+          tone: it.tone === 'brand' ? 'brand' : 'plain',
+        }))
+      }
       const d = await api<{ announcement: { version: number } }>('/api/admin/announcement', {
         method: 'POST',
-        // v2：保存 = 整个 Announcement JSON 一起下发（引导 + 公告位 + 庆祝），
+        // v2：保存 = 整个 Announcement JSON 一起下发（引导 + 公告位 + 庆祝 + 公告条），
         // 后端 update_announcement 按字段合并后 version 自增（展示端重新弹出引导）。
-        body: JSON.stringify({
-          enabled: en,
-          steps,
-          // 公告位 v2：三个位置原样上传，后端逐项做 enabled / 文案长度 / 图标白名单校验
-          placements: pl,
-          // 庆祝配置 v2：wave 转回数字（非数字 / 负数兜底 0 = 不显示）
-          celebrate: { ...ce, wave: Math.max(0, Math.round(Number(ce.wave) || 0)) },
-        }),
+        body: JSON.stringify(body),
       })
       setData((prev) => (prev ? { ...prev, enabled: en, version: d.announcement.version } : prev))
       setMsg('已保存（版本 ' + d.announcement.version + '，展示端会重新弹出）')
@@ -1168,6 +1273,122 @@ function AnnouncementCard() {
           })}
         </div>
 
+        {/* ============ 公告系统 v2 · 展示页公告条（2026-10-14） ============ */}
+        <h3 className="flag-title">📣 展示页公告条（多条）</h3>
+        <p className="hint" style={{ margin: 0 }}>
+          这里的每一条 = 展示端顶部一条公告，数组顺序即展示顺序（用「↑ / ↓」调）。
+          样式 <b>brand</b> = 紫金渐变（原庆祝条），<b>plain</b> = 白底描边（原冠军条）。
+          文本框失焦 / 开关切换后自动整体保存；「启用」关掉的条目会留在配置里，但展示端不显示。
+        </p>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {items.length === 0 && <span className="hint">还没有公告条，点下面的「+ 添加公告条」新建一条。</span>}
+          {items.map((it, i) => (
+            <div
+              key={i}
+              style={{ border: '1px solid var(--hairline)', borderRadius: 10, padding: 10, display: 'flex', flexDirection: 'column', gap: 6 }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                <span className="material-symbols-outlined" style={{ fontSize: 18 }}>
+                  {it.icon || 'campaign'}
+                </span>
+                <b style={{ fontSize: 13 }}>第 {i + 1} 条</b>
+                <label style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: 12, color: 'var(--muted)' }}>
+                  启用
+                  {/* 开关即时保存：新数组作为 overrides 传给 save，避免旧 state 覆盖 */}
+                  <input
+                    type="checkbox"
+                    className="switch"
+                    checked={it.enabled}
+                    onChange={(e) => setItemSaved(i, { enabled: e.target.checked })}
+                  />
+                </label>
+                <button className="ghost" title="上移" disabled={i === 0} onClick={() => moveItem(i, -1)}>
+                  ↑
+                </button>
+                <button className="ghost" title="下移" disabled={i === items.length - 1} onClick={() => moveItem(i, 1)}>
+                  ↓
+                </button>
+                <button className="ghost" onClick={() => removeItem(i)}>
+                  删除
+                </button>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 8 }}>
+                {/* 样式：brand = 紫金渐变，plain = 白底描边（下拉即保存） */}
+                <label style={{ fontSize: 12.5, color: 'var(--muted, #667085)' }}>
+                  样式
+                  <select
+                    value={it.tone}
+                    onChange={(e) => setItemSaved(i, { tone: e.target.value === 'brand' ? 'brand' : 'plain' })}
+                    style={input34}
+                  >
+                    <option value="brand">brand（紫金渐变）</option>
+                    <option value="plain">plain（白底描边）</option>
+                  </select>
+                </label>
+                {/* 图标：只列后端白名单内的 Material Symbols 名，空 = 不带图标（下拉即保存） */}
+                <label style={{ fontSize: 12.5, color: 'var(--muted, #667085)' }}>
+                  图标（可不选）
+                  <select value={it.icon} onChange={(e) => setItemSaved(i, { icon: e.target.value })} style={input34}>
+                    <option value="">不显示图标</option>
+                    {ANNOUNCE_ICONS.map((n) => (
+                      <option key={n} value={n}>
+                        {n}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label style={{ fontSize: 12.5, color: 'var(--muted, #667085)' }}>
+                  标题
+                  <input
+                    value={it.title}
+                    placeholder="初级争霸赛冠军"
+                    onChange={(e) => setItem(i, { title: e.target.value })}
+                    onBlur={() => save()}
+                    maxLength={64}
+                    style={input34}
+                  />
+                </label>
+                <label style={{ fontSize: 12.5, color: 'var(--muted, #667085)' }}>
+                  人名
+                  <input
+                    value={it.name}
+                    placeholder="狼哲"
+                    onChange={(e) => setItem(i, { name: e.target.value })}
+                    onBlur={() => save()}
+                    maxLength={32}
+                    style={input34}
+                  />
+                </label>
+                {/* 音浪数：数字输入，0 = 不显示；state 存字符串，保存时统一转数字 */}
+                <label style={{ fontSize: 12.5, color: 'var(--muted, #667085)' }}>
+                  音浪（0 = 不显示）
+                  <input
+                    type="number"
+                    min={0}
+                    value={it.wave}
+                    placeholder="285917"
+                    onChange={(e) => setItem(i, { wave: e.target.value })}
+                    onBlur={() => save()}
+                    style={input34}
+                  />
+                </label>
+              </div>
+              <textarea
+                placeholder="公告正文（支持换行）"
+                value={it.text}
+                onChange={(e) => setItem(i, { text: e.target.value })}
+                onBlur={() => save()}
+                rows={2}
+                maxLength={300}
+                style={{ ...ctl, resize: 'vertical', lineHeight: 1.6 }}
+              />
+            </div>
+          ))}
+          <button className="ghost" onClick={addItem}>
+            + 添加公告条
+          </button>
+        </div>
+
         {/* ============ 公告系统 v2 · 庆祝配置（2026-10-13） ============ */}
         <h3 className="flag-title">🎉 庆祝配置（每日之星 / 争霸赛冠军）</h3>
         <div
@@ -1249,7 +1470,7 @@ function AnnouncementCard() {
             </label>
           </div>
           <span style={{ fontSize: 11.5, color: 'var(--muted)' }}>
-            文本框失焦或开关切换后自动保存（引导 + 公告位 + 庆祝整体一起保存，版本前进）。
+            文本框失焦或开关切换后自动保存（引导 + 公告位 + 公告条 + 庆祝整体一起保存，版本前进）。
           </span>
         </div>
 
@@ -1257,7 +1478,7 @@ function AnnouncementCard() {
           {/* 手动保存按钮：save 现在带 overrides 参数，onClick 必须包一层箭头函数，
               否则 click 事件对象会被当成 overrides 传进去 */}
           <button className="primary" disabled={busy} onClick={() => save()}>
-            {busy ? '保存中…' : '保存全部（引导 / 公告位 / 庆祝）'}
+            {busy ? '保存中…' : '保存全部（引导 / 公告位 / 公告条 / 庆祝）'}
           </button>
           {data && <span className="hint">当前版本 {data.version}</span>}
         </div>

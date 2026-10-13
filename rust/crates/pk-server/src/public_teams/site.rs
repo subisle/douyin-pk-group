@@ -20,7 +20,8 @@ pub async fn site(
     gate_team(&st, s.login_required, &team, &headers).await?;
     let dates = crate::repos::get_available_dates(&st, None, false).await?;
     // 公告弹窗：开启时随站点配置一起下发；关闭时不下发（前端不弹）
-    let ann = Announcement::load(&st).await;
+    // load_effective（2026-10-14）：items 为空时按 celebrate/champ_banner 内存合成一条
+    let ann = Announcement::load_effective(&st).await;
     // 🚩 冠军展示位（2026-10-13）：管理员可配（star_title/star_override，与推送图共用配置）。
     // 手动指定「称号|人名|音浪」优先；没配就自动取最近一个业务日的当日音浪第一。
     let star = {
@@ -60,6 +61,16 @@ pub async fn site(
         },
         None => serde_json::Value::Null,
     };
+    /* 引导弹窗：开启时随站点一起来（管理端全量形态）。但公开响应里不能出现
+    enabled=false 的公告条 —— 把嵌套的 items 换成公开裁剪口径，公开响应任何位置
+    都只含上线条目。 */
+    let announcement_json = if ann.enabled {
+        let mut v = ann.to_json();
+        v["items"] = ann.public_items_json();
+        v
+    } else {
+        Value::Null
+    };
     Ok(Json(json!({
         "published": true,
         "team": query_team,
@@ -67,12 +78,15 @@ pub async fn site(
         "dates": dates,
         "star": star,
         "champ": champ,
-        "announcement": if ann.enabled { ann.to_json() } else { Value::Null },
+        "announcement": announcement_json,
         // 公告位（2026-10-13）：登录页 / 展示页（看板）/ 个人页三处，全量下发，
         // 前端各页各取所需（登录页在登录前拿不到 site，另有 /api/public/announcements）
         "placements": ann.placements,
         // 庆祝配置（2026-10-13）：登录后展示页/我的页的彩带庆祝 + 冠军横幅用
         "celebrate": ann.celebrate,
+        // 展示页公告条（2026-10-14）新增键：数组顺序 = 从上到下；只含 enabled=true，
+        // 是展示端公告/冠军横幅的**唯一来源**（champ/celebrate 保留兼容，页面不再单独渲染）
+        "items": ann.public_items_json(),
         "settings": {
             "daily": s.daily,
             "monthly": s.monthly,
@@ -107,8 +121,10 @@ pub struct ListQuery {
 ///
 /// 不下发 steps / version 等引导弹窗字段。不带团别参数、也不查 team_enabled：
 /// 公告/庆祝是全站性配置，且团关闭时展示页（含登录门）照样要能取到这两块。
+/// 2026-10-14：新增 `items`（展示页公告条，site 未回来前的兜底数据源），
+/// 与 site 同口径（load_effective + public_items_json）。
 pub async fn public_announcements(State(st): State<ArcState>) -> ApiResult {
-    let ann = Announcement::load(&st).await;
+    let ann = Announcement::load_effective(&st).await;
     // 登录页图标归一化先算好再进 json!（宏的值位置放不了语句块），与 placement_json 同口径
     let login_icon = ann.placements.login.icon.trim();
     let login_icon = if STEP_ICON_WHITELIST.contains(&login_icon) { login_icon } else { "" };
@@ -120,6 +136,8 @@ pub async fn public_announcements(State(st): State<ArcState>) -> ApiResult {
         },
         // 庆祝配置裁剪形态（celebrate_public_json），登录后彩带庆祝用
         "celebrate": ann.celebrate_public_json(),
+        // 展示页公告条（2026-10-14）：与 site.items 同口径，登录门弹出时页面就能兜底渲染
+        "items": ann.public_items_json(),
     })))
 }
 

@@ -99,16 +99,29 @@ button { font:inherit; cursor:pointer; }
   font-size:12.5px; }
 .subnav button.on { background:var(--primary); border-color:var(--primary); color:#fff; font-weight:600; }
 
-/* 🏆 争霸赛冠军横幅（2026-10-13）：管理员整条可编，紫金渐变。
-   （2026-10-13 二次口径：每日之星横幅整个下线，只留这一条；
-   champ 单独显示时的间距就是自己的 margin:10px 12px，不依赖兄弟选择器。） */
-.champ-banner { display:flex; align-items:center; gap:10px; margin:10px 12px;
-  padding:10px 14px; background:linear-gradient(135deg,#F5F3FF,#EDE9FE);
-  border:1px solid #C4B5FD; border-radius:12px; }
-.champ-banner .champ-flag { font-size:22px; color:#6D28D9; }
-.champ-banner .champ-title { font-weight:800; font-size:14px; color:#6D28D9; white-space:nowrap; }
-.champ-banner .champ-name { font-weight:700; font-size:14px; color:#101828; }
-.champ-banner.hidden { display:none; }
+/* 📣 公告条（2026-10-14）：页面顶部只按后端下发的 items 渲染，有几条渲染几条、
+   顺序 = 数组顺序。原来的 champ-banner / celebrate-bar 两条独立渲染路径已删除，
+   避免同一条冠军信息在顶部上下重复出现。
+   tone=plain → 白底描边（沿原 .champ-banner 视觉）；tone=brand → 紫金渐变
+   （沿原 .celebrate-bar 视觉）。容器 #annItems 自身无 margin/padding，
+   空数组 = 无子节点 = 不占位。 */
+#annItems:empty { display:none; }
+.ann-item { display:flex; align-items:flex-start; gap:10px; margin:10px 12px;
+  padding:10px 14px; border-radius:12px; }
+.ann-item.ai-plain { background:linear-gradient(135deg,#F5F3FF,#EDE9FE); border:1px solid #C4B5FD; }
+.ann-item.ai-brand { padding:12px 14px;
+  background:linear-gradient(120deg,#4C1D95 0%,#6D28D9 45%,#B45309 100%);
+  border:1px solid #F59E0B; color:#FFFBEB; box-shadow:0 4px 18px rgba(109,40,217,.35); }
+.ann-item .ai-ico { font-size:22px; line-height:1.25; flex:none; color:#6D28D9; }
+.ann-item.ai-brand .ai-ico { font-size:24px; color:#FDE68A; }
+.ann-item .ai-body { flex:1; min-width:0; }
+.ann-item .ai-head { display:flex; align-items:baseline; gap:6px; flex-wrap:wrap; }
+.ann-item .ai-title { font-weight:800; font-size:14px; color:#6D28D9; }
+.ann-item.ai-brand .ai-title { color:#FDE68A; }
+.ann-item .ai-name { font-weight:700; font-size:14px; color:#101828; }
+.ann-item.ai-brand .ai-name { color:#FFFBEB; }
+.ann-item .ai-text { font-size:13px; line-height:1.65; margin-top:2px;
+  white-space:pre-line; word-break:break-word; }
 
 /* 底部标签栏（看板 / 分组 / 族谱 / 我的）：毛玻璃 + 安全区 */
 .tabbar { position:fixed; left:0; right:0; bottom:0; z-index:31;
@@ -1267,19 +1280,10 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 #gate .gate-col { display:flex; flex-direction:column; align-items:center;
   justify-content:center; width:100%; max-width:390px; margin:auto; }
 #gate-ann { margin:0 0 14px; width:100%; }
-/* 看板公告条：插在 toolbar 之前，与 champ-banner 同一布局节奏 */
+/* 看板公告条：插在 toolbar 之前（#annItems 公告条下方），与公告条同一布局节奏 */
 #home-ann { margin:10px 12px 0; }
 /* 「我的」页公告条：插在 view 内容顶部（section 内第一个元素） */
 #my-ann { margin:0 0 10px; }
-/* .celebrate-bar：登录后首屏庆祝横幅（每日之星），紫金渐变，比 champ-banner 更醒目 */
-.celebrate-bar { display:flex; align-items:center; gap:10px; margin:10px 12px;
-  padding:12px 14px; border-radius:12px;
-  background:linear-gradient(120deg, #4C1D95 0%, #6D28D9 45%, #B45309 100%);
-  border:1px solid #F59E0B; color:#FFFBEB;
-  box-shadow:0 4px 18px rgba(109,40,217,.35); }
-.celebrate-bar .cb-flag { font-size:24px; line-height:1; flex:none; }
-.celebrate-bar .cb-title { font-weight:800; font-size:14px; color:#FDE68A; white-space:nowrap; }
-.celebrate-bar .cb-name { font-weight:700; font-size:14px; color:#FFFBEB; min-width:0; }
 </style>
 </head>
 <body>
@@ -1304,11 +1308,10 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
   </div>
 </header>
 
-<div class="champ-banner hidden" id="champBanner">
-  <span class="material-symbols-outlined champ-flag">military_tech</span>
-  <span class="champ-title" id="champTitle"></span>
-  <span class="champ-name" id="champName"></span>
-</div>
+<!-- 📣 公告条容器（2026-10-14）：页面顶部唯一入口，由 renderAnnounceItems(items)
+     按后端下发的数组顺序渲染，有几条渲染几条；空数组 = 容器空且不占位。
+     原来这里是一条写死的冠军条，与庆祝横幅重复，已删除。 -->
+<div class="ann-items" id="annItems"></div>
 
 <div class="toolbar hidden" id="toolbar">
   <div class="tools">
@@ -4478,7 +4481,11 @@ function startPushScanPoll(qrcode) {
 }
 
 /* ==================== 视图切换 ==================== */
-/* 顶部导航 sticky 后，工具条吸顶位置要跟头部实际高度走（分组页多一条子导航） */
+/* 顶部导航 sticky 后，工具条吸顶位置要跟头部实际高度走（分组页多一条子导航）。
+   公告条容器 #annItems 夹在 masthead 与 toolbar 之间，但它跟正文一起滚走、自身不吸顶，
+   所以**不把**它的高度算进 --mh-h（算了会在吸顶的 masthead 下面留一条空隙）；
+   这里只量真正吸顶的 .masthead。renderAnnounceItems 每次改完条数会再调一次本函数，
+   保证站点初始化后第一次渲染出来的高度变化也能同步。 */
 function syncHeaderOffset() {
   const h = document.querySelector('.masthead')?.offsetHeight || 0;
   if (h) document.documentElement.style.setProperty('--mh-h', h + 'px');
@@ -4537,8 +4544,8 @@ function setPeriod(p) {
   go();
 }
 
-/* 2026-10-13 二次口径：每日之星横幅整个下线（后端 /star 接口保留但前端不再调用）；
-   争霸赛冠军横幅只在站点初始化时渲染一次（renderChampBanner），不随日期口径切换刷新。 */
+/* 2026-10-14：顶部公告/庆祝只按 items 渲染一次（renderAnnounceItems），
+   不再有独立的冠军/庆祝横幅路径，也不随日期口径切换刷新。 */
 
 
 async function go() {
@@ -5085,13 +5092,17 @@ function maybeAnnounce() {
   render();
 }
 
-/* ==================== 🎉 彩带庆祝 + 📣 运营公告（2026-10-13） ====================
+/* ==================== 🎉 彩带庆祝 + 📣 运营公告（2026-10-13 / items 2026-10-14） ====================
    数据契约（后端并行实现，前端按契约消费，拿不到就全关不显示）：
    · GET /api/public/announcements（无需登录）
-       → { login:{enabled,text,icon}, celebrate:{enabled,confetti,title,name,wave} }
-   · GET /api/public/teams/{TEAM}（site 接口）新增
+       → { login:{enabled,text,icon}, celebrate:{enabled,confetti,title,name,wave},
+           items:[{enabled,icon,title,name,wave,text,tone}] }   ← 登录前的公告条兜底
+   · GET /api/public/teams/{TEAM}（site 接口）
        placements: { home:{enabled,text,icon}, my:{enabled,text,icon} }
-       celebrate:  { enabled, confetti, title, name, wave }   */
+       celebrate:  { enabled, confetti, title, name, wave }
+       items:      [{enabled,icon,title,name,wave,text,tone}]   ← 公告条主数据源（顺序即从上到下）
+   页面顶部**只**渲染 items（renderAnnounceItems）；site.champ / site.celebrate 兼容期
+   后端仍下发，但前端不再单独渲染横幅（否则同一条冠军信息会上下重复）。 */
 
 let siteAnnouncements = {};   // /announcements 探测结果（失败 = {}，所有消费点 falsy 兜底）
 
@@ -5115,7 +5126,72 @@ function annBarHtml(id, cfg, defIcon) {
   '</div>';
 }
 
-/** 看板公告条：插在 toolbar 之前（champ-banner 下面）。每次 bootRest 都重建 = 每次进看板都显示 */
+/** 📣 公告条渲染（2026-10-14）：页面顶部唯一渲染入口，按 items 数组顺序一条一个
+    .ann-item，几条就渲染几条。
+    契约（每条）：{ enabled, icon, title, name, wave, text, tone:'brand'|'plain' }
+    · 只渲染 enabled=true 的（公开接口已过滤一遍，这里再兜一道，防管理端形态误喂）
+    · tone=brand → 紫金渐变；其余/非法 → plain 白底描边（与后端 normalize_tone 同口径）
+    · wave>0 → 人名后补 ' · ' + wan(wave)（wan 是页面已有函数）
+    · title/name 都空而 text 有值 → 纯文本条；text 支持换行（CSS white-space:pre-line）
+    · 三条都空 → 该条直接跳过，不占位
+    安全：全程 createElement + textContent，后端字符串一律不进 innerHTML（零注入面）；
+    icon 只认页面 ANNOUNCE_ICONS 白名单（与后端 STEP_ICON_WHITELIST 同一口径），
+    白名单外/空串 → 按 tone 回默认图标。
+    空数组/全关 → 容器清空且不占位（#annItems 自身无 margin，CSS :empty 再兜一层）。 */
+function renderAnnounceItems(items) {
+  const box = $('annItems');
+  if (!box) return;
+  box.textContent = '';   // 先清空（赋值 textContent 一次性摘掉所有子节点）
+  const list = Array.isArray(items) ? items : [];
+  for (const it of list) {
+    if (!it || !it.enabled) continue;
+    const title = String(it.title == null ? '' : it.title);
+    const name = String(it.name == null ? '' : it.name);
+    const text = String(it.text == null ? '' : it.text);
+    if (!title && !name && !text) continue;   // 全空条：跳过，别留一条空壳占位
+    const brand = it.tone === 'brand';
+    const row = document.createElement('div');
+    row.className = 'ann-item ' + (brand ? 'ai-brand' : 'ai-plain');
+    const ico = document.createElement('span');
+    ico.className = 'material-symbols-outlined ai-ico';
+    const ic = String(it.icon == null ? '' : it.icon).trim();
+    ico.textContent = ANNOUNCE_ICONS.indexOf(ic) >= 0
+      ? ic : (brand ? 'emoji_events' : 'military_tech');
+    row.appendChild(ico);
+    const body = document.createElement('div');
+    body.className = 'ai-body';
+    if (title || name) {
+      const head = document.createElement('div');
+      head.className = 'ai-head';
+      if (title) {
+        const t = document.createElement('span');
+        t.className = 'ai-title';
+        t.textContent = title;
+        head.appendChild(t);
+      }
+      if (name) {
+        const n = document.createElement('span');
+        n.className = 'ai-name';
+        n.textContent = name + (Number(it.wave) > 0 ? ' · ' + wan(it.wave) : '');
+        head.appendChild(n);
+      }
+      body.appendChild(head);
+    }
+    if (text) {
+      const tx = document.createElement('div');
+      tx.className = 'ai-text';
+      tx.textContent = text;
+      body.appendChild(tx);
+    }
+    row.appendChild(body);
+    box.appendChild(row);
+  }
+  /* 条数变化会改公告区高度（虽然它不吸顶、--mh-h 只量 masthead），
+     这里仍重算一次吸顶偏移，保证切换视图/初始化后的首帧布局口径一致。 */
+  syncHeaderOffset();
+}
+
+/** 看板公告条：插在 toolbar 之前（#annItems 公告条下方）。每次 bootRest 都重建 = 每次进看板都显示 */
 function renderHomeAnnouncement(home) {
   const old = $('home-ann');
   if (old) old.remove();   // 静默刷新重复调用时先摘旧的，避免叠两条
@@ -5156,7 +5232,7 @@ function fireConfetti(durationMs) {
   document.body.appendChild(cv);
   const ctx = cv.getContext('2d');
 
-  /* 配色：金/蓝/紫/粉，与整站庆祝视觉（紫金 celebrate-bar）一致 */
+  /* 配色：金/蓝/紫/粉，与整站庆祝视觉（items 里 tone=brand 那条紫金公告条）一致 */
   const COLORS = ['#F59E0B', '#FBBF24', '#3B82F6', '#8B5CF6', '#EC4899', '#F472B6', '#FDE68A'];
   const rnd = (a, b) => a + Math.random() * (b - a);
 
@@ -5224,8 +5300,8 @@ function markCelebrateShown() {
 }
 
 /** 登录成功触发点（boot 主路径）：celebrate.enabled && confetti → 放彩带。
-    只放彩带、只写锁；横幅等 site 数据回来由 showCelebrateBar 补挂 ——
-    它靠 celebrateFiredThisLoad 知道本次页面的庆祝事件已开跑，横幅照常显示。 */
+    只放彩带、只写锁；展示内容全部走 items（见 renderAnnounceItems），
+    这里不再挂任何横幅。 */
 function fireConfettiOnce(celebrate) {
   if (!celebrate || !celebrate.enabled || !celebrate.confetti) return;
   if (celebrateShownToday() || celebrateFiredThisLoad) return;
@@ -5234,17 +5310,18 @@ function fireConfettiOnce(celebrate) {
   fireConfetti(2800);
 }
 
-/** 庆祝横幅：插在冠军横幅 champBanner 上方，紫金渐变 + 🎉，比 champ-banner 更醒目。
+/** 庆祝彩带补挂（2026-10-14 改）：横幅已并入 items（tone=brand 那条），本函数
+    **只**负责「彩带允许但本次页面还没放过」的补一场 + 两层锁，不再渲染任何横幅元素。
+    （原实现往页面顶部再插一条庆祝横幅，与固定冠军条一起造成顶部两条重复，
+    该路径已删除。）
     site.celebrate 是主数据源；site 没带字段（后端只发 /announcements）用 preferAnn 兜底。
-    彩带允许但还没放过（比如 confetti 只在 site 侧给出 / 关登录直接进站）→ 挂横幅时补一场。
+    彩带允许但还没放过（比如 confetti 只在 site 侧给出 / 关登录直接进站）→ 这里补一场。
     bootRest 每次页面加载只跑一次，本函数天然只在首屏执行；静默刷新不经过这里。 */
-function showCelebrateBar(celebrate, preferAnn) {
-  const old = $('celebrateBar');
-  if (old) old.remove();
+function ensureCelebrateConfetti(celebrate, preferAnn) {
   const c = celebrate && (celebrate.enabled || celebrate.title || celebrate.name)
     ? celebrate : preferAnn;
-  if (!c || !c.enabled || (!c.title && !c.name)) return;
-  /* 当天已庆祝过、且本次页面没有进行中的庆祝事件 → 今天弹过了，横幅不再重复 */
+  if (!c || !c.enabled) return;
+  /* 当天已庆祝过、且本次页面没有进行中的庆祝事件 → 今天放过了，不再补 */
   if (celebrateShownToday() && !celebrateFiredThisLoad) return;
   /* 彩带：允许 && 本次页面还没放过（当天锁顺带写上，覆盖 confetti 只配在 site 侧的情况） */
   if (c.confetti && !celebrateFiredThisLoad) {
@@ -5252,18 +5329,6 @@ function showCelebrateBar(celebrate, preferAnn) {
     celebrateFiredThisLoad = true;
     fireConfetti(2800);
   }
-  const cb = $('champBanner');
-  if (!cb || !cb.parentNode) return;
-  const wv = c.wave > 0 ? ' · ' + wan(c.wave) : '';
-  const bar = '<div class="celebrate-bar" id="celebrateBar">' +
-    '<span class="cb-flag">🎉</span>' +
-    '<span class="cb-title">' + esc(c.title || '') + '</span>' +
-    '<span class="cb-name">' + esc(c.name || '') + wv + '</span>' +
-  '</div>';
-  cb.insertAdjacentHTML('beforebegin', bar);   // 横幅在 champBanner 上方
-  /* 横幅落地 = 本次庆祝完成：写当天锁（confetti 没配时由这里写，口径统一） */
-  markCelebrateShown();
-  celebrateFiredThisLoad = true;
 }
 
 
@@ -5292,14 +5357,16 @@ function dismissAnnounce() {
 (async function boot() {
   applyTeam();
   /* 公告/庆祝配置（2026-10-13）：并行探测 GET /api/public/announcements，
-     失败/后端未上线时回落为全关（{}），所有消费点都按 falsy 兜底，不挡启动流程 */
+     失败/后端未上线时回落为全关（{}），所有消费点都按 falsy 兜底，不挡启动流程。
+     items 也在这份里先垫一帧，见 bootRest 顶部。 */
   siteAnnouncements = await fetchAnnouncements().catch(() => ({}));
   if (await siteIsOpen()) { bootRest(); return; }
   const me = await ensureLogin();
   applyLoginState(me);   // 登录后立刻按账号团别设置 TEAM
-  /* 每日之星登录彩带（2026-10-13）：celebrate.enabled && celebrate.confetti 才放。
-     庆祝横幅等 site 数据回来、champBanner 落地后由 showCelebrateBar() 补挂
-     （celebrateFiredThisLoad 记着本次页面的庆祝事件已开跑，横幅不会被当天锁误吞）。 */
+  /* 登录彩带（2026-10-13）：celebrate.enabled && celebrate.confetti 才放。
+     只放彩带、不挂横幅（展示内容走 items）；
+     celebrateFiredThisLoad 记着本次页面的庆祝事件已开跑，site 数据回来后
+     ensureCelebrateConfetti 不会因为当天锁误吞/重放。 */
   fireConfettiOnce(siteAnnouncements.celebrate);
   bootRest();
 })();
@@ -5346,21 +5413,14 @@ async function bootRest() {
     go();
   }
 
+  /* 📣 公告条先垫一帧（2026-10-14）：site 还没回来，先用 boot 里探测到的
+     /api/public/announcements.items（登录前就能拿到，与 site.items 同源同口径）。
+     site 到了以后由下面的 renderAnnounceItems(site.items) 整包覆盖；
+     site.items 不是数组（旧后端）时才回落到这份兜底。 */
+  renderAnnounceItems(Array.isArray(siteAnnouncements.items) ? siteAnnouncements.items : []);
+
   /* 先拿站点配置：登录开关在 settings 里，关登录时根本不用弹登录门。
      401（要登录）→ 弹登录门重试。 */
-/* 🏆 争霸赛冠军横幅渲染（2026-10-13 二次口径：每日之星横幅下线，只留 champ；
-   site.star 字段后端仍下发，前端直接忽略。） */
-function renderChampBanner(champ) {
-  const cb = $('champBanner');
-  if (cb) {
-    if (!champ || !champ.title || !champ.name) { cb.classList.add('hidden'); return; }
-    cb.classList.remove('hidden');
-    $('champTitle').textContent = champ.title;
-    const wv = champ.wave > 0 ? ' · ' + wan(champ.wave) : '';
-    $('champName').textContent = champ.name + wv;
-  }
-}
-
   const fetchSite = () => api('/api/public/teams/' + TEAM);
   try {
     site = await fetchSite().catch(async (e) => {
@@ -5380,13 +5440,17 @@ function renderChampBanner(champ) {
       '<b>' + LABEL() + '数据暂未公布</b><br>请等管理员发布</div>';
     return;
   }
-  /* 🏆 争霸赛冠军横幅（2026-10-13）：管理员可配称号/人名；每日之星横幅已下线。 */
-  renderChampBanner(site.champ);
+  /* 📣 公告条（2026-10-14）：页面顶部唯一渲染入口 —— site.items 是主数据源
+     （顺序即从上到下，几条渲染几条；空数组 = 一条都不显示），整包覆盖掉上面那帧兜底。
+     旧后端没有 items 字段时才回落到 boot 探测的 /announcements.items。
+     site.champ / site.celebrate 兼容期后端仍会下发，但这里**不再**单独渲染
+     （原来是固定冠军条 + 庆祝横幅两条独立路径同时渲染 = 顶部重复一条冠军）。 */
+  renderAnnounceItems(Array.isArray(site.items) ? site.items : siteAnnouncements.items);
   /* 📣 看板公告条（2026-10-13）：placements.home 开着才渲染。不持久化关闭 ——
      公告是运营触达位，每次进看板都显示。 */
   renderHomeAnnouncement(site.placements && site.placements.home);
-  /* 🎉 每日之星庆祝横幅（2026-10-13）：celebrate.title/name 有值才显示。 */
-  showCelebrateBar(site.celebrate, siteAnnouncements.celebrate);
+  /* 🎉 登录庆祝彩带（2026-10-14）：只补彩带 + 两层锁，不再挂横幅（内容走 items）。 */
+  ensureCelebrateConfetti(site.celebrate, siteAnnouncements.celebrate);
 
   /* 展示端登录门（2026-10-11）：后台「开启登录」开着 → 先登录再看；
      关掉 → 全面开放，直接展示全量数据（统一入口，不再分男团/女团）。 */
