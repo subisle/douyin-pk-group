@@ -21,11 +21,32 @@ pub async fn site(
     let dates = crate::repos::get_available_dates(&st, None, false).await?;
     // 公告弹窗：开启时随站点配置一起下发；关闭时不下发（前端不弹）
     let ann = Announcement::load(&st).await;
+    // 🚩 冠军展示位（2026-10-13）：管理员可配（star_title/star_override，与推送图共用配置）。
+    // 手动指定「称号|人名|音浪」优先；没配就自动取最近一个业务日的当日音浪第一。
+    let star = {
+        let ov = crate::store::config_get(&st, "star_override").await;
+        let auto = star_auto(&st, &query_team).await;
+        match ov.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            Some(v) => match v.splitn(3, '|').collect::<Vec<_>>()[..] {
+                [t, n, w] => serde_json::json!({
+                    "title": t.trim(), "name": n.trim(),
+                    "wave": w.trim().parse::<i64>().unwrap_or(0),
+                }),
+                [t, n] => serde_json::json!({ "title": t.trim(), "name": n.trim(), "wave": 0 }),
+                [t] => serde_json::json!({
+                    "title": t.trim(), "name": auto.0, "wave": auto.1,
+                }),
+                _ => auto_json(&auto),
+            },
+            None => auto_json(&auto),
+        }
+    };
     Ok(Json(json!({
         "published": true,
         "team": query_team,
         "latestDate": dates.first(),
         "dates": dates,
+        "star": star,
         "announcement": if ann.enabled { ann.to_json() } else { Value::Null },
         "settings": {
             "daily": s.daily,
@@ -750,4 +771,24 @@ pub(super) fn row_i64(r: &sqlx::postgres::PgRow, col: &str) -> i64 {
         return v.parse().unwrap_or(0);
     }
     0
+}
+
+/// 自动冠军：最近一个业务日的当日音浪第一（绕过登录门，直接查只读池）
+async fn star_auto(st: &AppState, team: &str) -> (String, i64) {
+    let sql = format!(
+        "SELECT p.name, SUM(d.wave)::BIGINT AS w          FROM daily_metric d JOIN person p ON p.id = d.person_id          WHERE d.wave_reliable = 1 AND p.gender = '{team}'            AND TO_CHAR(d.biz_date,'YYYY-MM-DD') = (SELECT MAX(TO_CHAR(biz_date,'YYYY-MM-DD')) FROM daily_metric)          GROUP BY p.id, p.name ORDER BY w DESC LIMIT 1"
+    );
+    match crate::pgrs::query(&st.pools, &st.active_id(), &sql).await {
+        Ok(rows) => match rows.first() {
+            Some(r) => (
+                r.try_get::<String, _>("name").unwrap_or_default(),
+                r.try_get::<i64, _>("w").unwrap_or(0),
+            ),
+            None => (String::new(), 0),
+        },
+        Err(_) => (String::new(), 0),
+    }
+}
+fn auto_json(a: &(String, i64)) -> serde_json::Value {
+    serde_json::json!({ "title": "每日之星", "name": a.0, "wave": a.1 })
 }

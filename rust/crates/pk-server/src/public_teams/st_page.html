@@ -99,6 +99,15 @@ button { font:inherit; cursor:pointer; }
   font-size:12.5px; }
 .subnav button.on { background:var(--primary); border-color:var(--primary); color:#fff; font-weight:600; }
 
+/* 🚩 冠军展示位（2026-10-13）：masthead 下方金底横条 */
+.star-banner { display:flex; align-items:center; gap:10px; margin:0 12px 10px;
+  padding:10px 14px; background:linear-gradient(135deg,#FFFAEB,#FFF6D6);
+  border:1px solid #FEDF89; border-radius:12px; }
+.star-banner.star-flag { font-size:22px; color:#B54708; }
+.star-banner .star-title { font-weight:800; font-size:14px; color:#B54708; white-space:nowrap; }
+.star-banner .star-name { font-weight:700; font-size:14px; color:#101828; }
+.star-banner.hidden { display:none; }
+
 /* 底部标签栏（看板 / 分组 / 族谱 / 我的）：毛玻璃 + 安全区 */
 .tabbar { position:fixed; left:0; right:0; bottom:0; z-index:31;
   display:flex; background:var(--glass);
@@ -1262,6 +1271,12 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
     <button data-g="mid-promo">中级晋级赛</button>
   </div>
 </header>
+
+<div class="star-banner hidden" id="starBanner">
+  <span class="material-symbols-outlined star-flag">emoji_flags</span>
+  <span class="star-title" id="starTitle">每日之星</span>
+  <span class="star-name" id="starName"></span>
+</div>
 
 <div class="toolbar hidden" id="toolbar">
   <div class="tools">
@@ -5015,6 +5030,17 @@ async function bootRest() {
 
   /* 先拿站点配置：登录开关在 settings 里，关登录时根本不用弹登录门。
      401（要登录）→ 弹登录门重试。 */
+/* 🚩 冠军展示位渲染：site.star = {title, name, wave} 或 null */
+function renderStarBanner(star) {
+  const el = $('starBanner');
+  if (!el) return;
+  if (!star || !star.name) { el.classList.add('hidden'); return; }
+  el.classList.remove('hidden');
+  $('starTitle').textContent = star.title || '每日之星';
+  const wv = star.wave > 0 ? ' · ' + (function(v){ if(v>=10000){ const w=v/10000; return w>=100? Math.round(w)+'万' : (Math.round(w*10)/10)+'万'; } return String(v); })(star.wave) : '';
+  $('starName').textContent = star.name + wv;
+}
+
   const fetchSite = () => api('/api/public/teams/' + TEAM);
   try {
     site = await fetchSite().catch(async (e) => {
@@ -5034,6 +5060,9 @@ async function bootRest() {
       '<b>' + LABEL() + '数据暂未公布</b><br>请等管理员发布</div>';
     return;
   }
+  /* 🚩 冠军展示位（2026-10-13）：管理员可配称号/人名（star_override），
+     没配则自动显示最近业务日的当日音浪第一（与推送图每日之星同源）。 */
+  renderStarBanner(site.star);
 
   /* 展示端登录门（2026-10-11）：后台「开启登录」开着 → 先登录再看；
      关掉 → 全面开放，直接展示全量数据（统一入口，不再分男团/女团）。 */
