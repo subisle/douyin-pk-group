@@ -80,7 +80,11 @@ impl IntoResponse for ApiError {
             || msg.contains("请输入")
             || msg.contains("太长")
             || msg.contains("不存在")
-            || msg.contains("reject 模式");
+            || msg.contains("reject 模式")
+            || msg.contains("异常文件")
+            || msg.contains("已绑在另一个展示端账号上")
+            || msg.contains("已被其它在职主播登记")
+            || msg.contains("已存在（已绑在另一个账号上）");
         let status = if msg.contains("写库不可用") {
             StatusCode::SERVICE_UNAVAILABLE
         } else if msg.contains("太频繁") {
