@@ -100,7 +100,7 @@ button { font:inherit; cursor:pointer; }
 .subnav button.on { background:var(--primary); border-color:var(--primary); color:#fff; font-weight:600; }
 
 /* 🚩 冠军展示位（2026-10-13）：masthead 下方金底横条 */
-.star-banner { display:flex; align-items:center; gap:10px; margin:0 12px 10px;
+.star-banner { display:flex; align-items:center; gap:10px; margin:10px 12px 0;
   padding:10px 14px; background:linear-gradient(135deg,#FFFAEB,#FFF6D6);
   border:1px solid #FEDF89; border-radius:12px; }
 .star-banner.star-flag { font-size:22px; color:#B54708; }
@@ -112,6 +112,8 @@ button { font:inherit; cursor:pointer; }
 .champ-banner { display:flex; align-items:center; gap:10px; margin:10px 12px;
   padding:10px 14px; background:linear-gradient(135deg,#F5F3FF,#EDE9FE);
   border:1px solid #C4B5FD; border-radius:12px; }
+.champ-banner:has(+ .toolbar), .star-banner:not(.hidden) ~ .champ-banner.hidden ~ * { }
+.star-banner:not(.hidden) + .champ-banner { margin-top:0; }
 .champ-banner .champ-flag { font-size:22px; color:#6D28D9; }
 .champ-banner .champ-title { font-weight:800; font-size:14px; color:#6D28D9; white-space:nowrap; }
 .champ-banner .champ-name { font-weight:700; font-size:14px; color:#101828; }
@@ -4426,6 +4428,27 @@ function setPeriod(p) {
   go();
 }
 
+/* 按所选日期刷新每日之星横幅（不阻塞主数据加载，失败静默保持原横幅） */
+async function refreshStarForDate(date) {
+  try {
+    const h = myTokenHeaders();
+    const r = await fetch('/api/public/teams/' + TEAM + '/star' + (date ? '?date=' + date : ''), { headers: h });
+    if (!r.ok) return;
+    const star = await r.json();
+    if (star && star.name) {
+      const el = $('starBanner');
+      if (el) {
+        el.classList.remove('hidden');
+        $('starTitle').textContent = star.title || '每日之星';
+        $('starName').textContent = star.name + (star.wave > 0 ? ' · ' + wan(star.wave) : '');
+      }
+    } else {
+      $('starBanner')?.classList.add('hidden');
+    }
+  } catch (_) { /* 静默：横幅保持上次内容 */ }
+}
+
+
 async function go() {
   show('err', false);
   /* 立刻给反馈：小菊花 + 内容压暗（数据没到不清空，到了再换）。
@@ -4444,6 +4467,8 @@ async function go() {
     if (seq !== loadSeq) return;          // 期间用户又点了别的：过期响应作废
     consecutiveFail = 0;
     show('stale', false);
+    /* 每日之星横幅跟随所选日期（2026-10-13）：日期/口径切换后刷新 */
+    if (view === 'data') refreshStarForDate(curDate || '');
   } catch (e) {
     if (seq !== loadSeq) return;          // 过期失败的报错也不许盖住新内容
     consecutiveFail++;

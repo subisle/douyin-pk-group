@@ -25,7 +25,7 @@ pub async fn site(
     // 手动指定「称号|人名|音浪」优先；没配就自动取最近一个业务日的当日音浪第一。
     let star = {
         let ov = crate::store::config_get(&st, "star_override").await;
-        let auto = star_auto(&st, &query_team).await;
+        let auto = star_auto(&st, &query_team, "").await;
         match ov.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
             Some(v) => match v.splitn(3, '|').collect::<Vec<_>>()[..] {
                 [t, n, w] => serde_json::json!({
@@ -794,9 +794,21 @@ pub(super) fn row_i64(r: &sqlx::postgres::PgRow, col: &str) -> i64 {
 }
 
 /// 自动冠军：最近一个业务日的当日音浪第一（绕过登录门，直接查只读池）
-async fn star_auto(st: &AppState, team: &str) -> (String, i64) {
+async fn star_auto(st: &AppState, team: &str, date: &str) -> (String, i64) {
+    /* 2026-10-13：按所选日期取每日之星（前端切换日期时横幅跟随）；
+       date 为空 = 最近业务日。all 团全量口径，male/female 按团过滤。 */
+    let date_filter = if date.is_empty() {
+        "TO_CHAR(d.biz_date,'YYYY-MM-DD') = (SELECT MAX(TO_CHAR(biz_date,'YYYY-MM-DD')) FROM daily_metric)".to_string()
+    } else {
+        format!("TO_CHAR(d.biz_date,'YYYY-MM-DD') = '{date}'")
+    };
+    let team_filter = if team == "all" { String::new() } else { format!("AND p.gender = '{team}' ") };
     let sql = format!(
-        "SELECT p.name, SUM(d.wave)::BIGINT AS w          FROM daily_metric d JOIN person p ON p.id = d.person_id          WHERE d.wave_reliable = 1 AND p.gender = '{team}'            AND TO_CHAR(d.biz_date,'YYYY-MM-DD') = (SELECT MAX(TO_CHAR(biz_date,'YYYY-MM-DD')) FROM daily_metric)          GROUP BY p.id, p.name ORDER BY w DESC LIMIT 1"
+        "SELECT p.name, SUM(d.wave)::BIGINT AS w \
+         FROM daily_metric d JOIN person p ON p.id = d.person_id \
+         WHERE d.wave_reliable = 1 {team_filter}\
+           AND {date_filter} \
+         GROUP BY p.id, p.name ORDER BY w DESC LIMIT 1"
     );
     match crate::pgrs::query(&st.pools, &st.active_id(), &sql).await {
         Ok(rows) => match rows.first() {
@@ -809,6 +821,30 @@ async fn star_auto(st: &AppState, team: &str) -> (String, i64) {
         Err(_) => (String::new(), 0),
     }
 }
+
+/// GET /api/public/teams/{team}/star?date=YYYY-MM-DD：所选日期的每日之星
+/// （前端切换日期时横幅跟随；未登录可看——榜单数据本来就公开）
+pub async fn star_of_day(
+    State(st): State<ArcState>,
+    Path(team): Path<String>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> ApiResult {
+    let s = PublicSettings::load(&st).await;
+    if !s.team_enabled(&team) {
+        return Ok(Json(json!({ "published": false })));
+    }
+    let date = q.get("date").cloned().unwrap_or_default();
+    let date = if date.is_empty() { String::new() } else {
+        // 简单格式校验（防注入：只允许数字与连字符）
+        if date.chars().all(|c| c.is_ascii_digit() || c == '-') { date } else { String::new() }
+    };
+    let (name, wave) = star_auto(&st, &team, &date).await;
+    if name.is_empty() {
+        return Ok(Json(json!({ "title": "每日之星", "name": "", "wave": 0 })));
+    }
+    Ok(Json(json!({ "title": "每日之星", "name": name, "wave": wave })))
+}
+
 fn auto_json(a: &(String, i64)) -> serde_json::Value {
     serde_json::json!({ "title": "每日之星", "name": a.0, "wave": a.1 })
 }

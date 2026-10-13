@@ -270,6 +270,10 @@ async fn main() -> anyhow::Result<()> {
         )
         // 我的抖音号：每个号的日/月/年/累计音浪（2026-10-12，一人多号时看出哪个号在跑）
         .route(
+            "/api/public/teams/{team}/star",
+            get(public_teams::star_of_day),
+        )
+        .route(
             "/api/public/teams/{team}/my/accounts",
             get(public_teams::my_accounts),
         )
