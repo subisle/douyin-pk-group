@@ -154,7 +154,7 @@ CREATE TABLE IF NOT EXISTS import_pending (
   PRIMARY KEY (id)
 );
 CREATE INDEX IF NOT EXISTS idx_open ON import_pending (absorbed_at, biz_date);
-CREATE INDEX IF NOT EXISTS idx_person ON import_pending (absorbed_person_id);
+CREATE INDEX IF NOT EXISTS idx_import_pending_absorbed ON import_pending (absorbed_person_id);
 CREATE UNIQUE INDEX IF NOT EXISTS uk_no_date ON import_pending (douyin_no, biz_date);
 
 CREATE TABLE IF NOT EXISTS ip_allowlist (
@@ -186,7 +186,7 @@ CREATE TABLE IF NOT EXISTS monthly_duration (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (id)
 );
-CREATE INDEX IF NOT EXISTS idx_period ON monthly_duration (period);
+CREATE INDEX IF NOT EXISTS idx_monthly_duration_period ON monthly_duration (period);
 CREATE UNIQUE INDEX IF NOT EXISTS uk_person_period ON monthly_duration (person_id, period);
 
 CREATE TABLE IF NOT EXISTS monthly_metric (
@@ -201,7 +201,7 @@ CREATE TABLE IF NOT EXISTS monthly_metric (
   recomputed_at TIMESTAMPTZ,
   PRIMARY KEY (id)
 );
-CREATE INDEX IF NOT EXISTS idx_period ON monthly_metric (period);
+CREATE INDEX IF NOT EXISTS idx_monthly_metric_period ON monthly_metric (period);
 -- 2026-10-12：原名 uk_person_period 与 190 行 monthly_duration 的同名索引冲突，
 -- IF NOT EXISTS 只认名字，导致 monthly_metric 的唯一索引从未真正建出（落库的
 -- ON CONFLICT (person_id, period) 一直报 no unique constraint）。改成带表前缀的名字。

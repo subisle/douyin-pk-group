@@ -45,20 +45,20 @@ pub async fn push_job_enqueue(st: &AppState, team: &str, biz_date: &str, run_at:
 /// `done_at + 5*2^(N-1) 分钟 <= now` 才重新可取）。
 pub async fn push_job_take(st: &AppState, now: &str) -> Option<(i64, String, String)> {
     let pool = w(st).ok()?;
-    let row = sqlx::query(&crate::pq::rewrite(
+    /* 2026-10-13 审计修复：列在部分环境是 varchar、部分是 timestamptz（灌库丢类型）。
+       原写法 run_at <= ?（varchar 环境隐式转换 OK）但 created_at < ?::timestamptz
+       在 varchar 环境直接报 operator 不存在且被 .ok()? 吞掉 → 调度器静默瘫痪。
+       改为 NULLIF(col,'')::timestamptz 统一转换 + SQL 端 now()，两种列型都成立。 */
+    let row = sqlx::query(
         "SELECT id, team, biz_date FROM push_jobs
-         WHERE (status = 'pending' AND run_at <= ?)
-            OR (status = 'running' AND done_at = '' AND run_at <= ?
-                AND created_at <> '' AND created_at < ?::timestamptz - INTERVAL '5 minutes')
-            OR (status LIKE 'failed:%' AND done_at <> '' AND done_at <= ?::timestamptz
+         WHERE (status = 'pending' AND NULLIF(run_at,'')::timestamptz <= now())
+            OR (status = 'running' AND done_at = '' AND NULLIF(run_at,'')::timestamptz <= now()
+                AND created_at <> '' AND NULLIF(created_at,'')::timestamptz < now() - INTERVAL '5 minutes')
+            OR (status LIKE 'failed:%' AND done_at <> '' AND NULLIF(done_at,'')::timestamptz <= now()
                 - make_interval(mins => 5 * (1 << LEAST(
                      GREATEST(SUBSTRING(status FROM 8)::int - 1, 0), 5))))
          ORDER BY run_at LIMIT 1",
-    ))
-    .bind(now)
-    .bind(now)
-    .bind(now)
-    .bind(now)
+    )
     .fetch_optional(pool)
     .await
     .ok()

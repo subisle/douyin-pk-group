@@ -195,6 +195,7 @@ pub async fn carry_legacy_sqlite(pool: &PgPool, sqlite_path: &str) -> Result<()>
         for (id, title, metric, days, payload, created, published, et) in &rows {
             sqlx::query(&crate::pq::rewrite(
                 "INSERT INTO plans (id, title, metric, days, payload, created_at, published, event_type)
+                 OVERRIDING SYSTEM VALUE
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                  ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, metric = EXCLUDED.metric,
                    days = EXCLUDED.days, payload = EXCLUDED.payload, created_at = EXCLUDED.created_at,
@@ -292,6 +293,7 @@ pub async fn carry_legacy_sqlite(pool: &PgPool, sqlite_path: &str) -> Result<()>
                 "INSERT INTO anchor_claims
                    (id, person_id, person_name, team, douyin_no, screenshot, mime, status,
                     reject_reason, created_at, decided_at, decided_by)
+                 OVERRIDING SYSTEM VALUE
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                  ON CONFLICT (id) DO UPDATE SET person_id = EXCLUDED.person_id, person_name = EXCLUDED.person_name,
                    team = EXCLUDED.team, douyin_no = EXCLUDED.douyin_no, screenshot = EXCLUDED.screenshot,
@@ -316,7 +318,20 @@ pub async fn carry_legacy_sqlite(pool: &PgPool, sqlite_path: &str) -> Result<()>
         tracing::info!(n = rows.len(), "搬家：anchor_claims");
     }
 
-    // 9. 落搬家标记
+    // 9. 复位显式插过 id 的表的 identity 序列（2026-10-13 审计修复：
+    //    OVERRIDING SYSTEM VALUE 插入不推进序列，后续普通 INSERT 会撞主键）
+    sqlx::query(&crate::pq::rewrite(
+        "SELECT setval(pg_get_serial_sequence('plans', 'id'), COALESCE((SELECT MAX(id) FROM plans), 0) + 1, false)",
+    ))
+    .execute(pool)
+    .await?;
+    sqlx::query(&crate::pq::rewrite(
+        "SELECT setval(pg_get_serial_sequence('anchor_claims', 'id'), COALESCE((SELECT MAX(id) FROM anchor_claims), 0) + 1, false)",
+    ))
+    .execute(pool)
+    .await?;
+
+    // 10. 落搬家标记
     sqlx::query(&crate::pq::rewrite(
         "INSERT INTO config (cfg_key, cfg_value, updated_at) VALUES ('sqlite_carried', '1', ?)
          ON CONFLICT (cfg_key) DO UPDATE SET cfg_value = '1', updated_at = EXCLUDED.updated_at",

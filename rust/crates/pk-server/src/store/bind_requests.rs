@@ -115,8 +115,18 @@ pub async fn my_bind_request_list(
                     "team": r.try_get::<String, _>("team").unwrap_or_default(),
                     "status": r.try_get::<String, _>("status").unwrap_or_default(),
                     "reason": r.try_get::<String, _>("reason").unwrap_or_default(),
-                    "createdAt": r.try_get::<String, _>("created_at").unwrap_or_default(),
-                    "decidedAt": r.try_get::<Option<String>, _>("decided_at").ok().flatten().unwrap_or_default(),
+                    /* 2026-10-13 审计修复：列是 timestamptz，用 String 读会类型不匹配
+                       → .ok() 吞掉后 createdAt/decidedAt 恒为空串。改读 chrono 再格式化。 */
+                    "createdAt": r
+                        .try_get::<chrono::DateTime<chrono::Utc>, _>("created_at")
+                        .map(|t| t.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string())
+                        .unwrap_or_default(),
+                    "decidedAt": r
+                        .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("decided_at")
+                        .ok()
+                        .flatten()
+                        .map(|t| t.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string())
+                        .unwrap_or_default(),
                     "decidedBy": r.try_get::<String, _>("decided_by").unwrap_or_default(),
                 })
             })

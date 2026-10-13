@@ -758,10 +758,16 @@ pub async fn my_accounts_batch_open(
             None => {
                 /* 新建：开号即绑定（bound=1、name = 台账姓名、person_id 锚定），
                 与 my_account_register 同口径 —— 主播拿到号就能登，不用再绑一次。 */
+                /* 2026-10-13 审计修复：先查后插存在并发竞态（双跑时预查"不存在"而
+                INSERT 撞主键导致整批部分失败）。改 ON CONFLICT (name) 幂等覆盖，
+                与单条 my_account_set 同口径；手机号唯一索引冲突仍会被后面的
+                match Err 分支捕获并逐行报「手机号已存在」。 */
                 let res = sqlx::query(&crate::pq::rewrite(
                     "INSERT INTO my_accounts
                        (name, phone, pass, is_admin, created_at, bound, bound_at, source, person_id)
-                     VALUES (?, ?, ?, 0, ?, 1, ?, 'batch', ?)",
+                     VALUES (?, ?, ?, 0, ?, 1, ?, 'batch', ?)
+                     ON CONFLICT (name) DO UPDATE SET phone = EXCLUDED.phone,
+                       pass = EXCLUDED.pass, person_id = EXCLUDED.person_id",
                 ))
                 .bind(&name)
                 .bind(&want_phone)
