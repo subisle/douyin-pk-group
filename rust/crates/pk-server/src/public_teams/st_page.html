@@ -2009,6 +2009,7 @@ async function doRegister() {
 function sessionExpired() {
   myLogout();
   removeWatermark();
+  dismissMsgModal();                  // 消息弹窗同样让位给登录门
   if (gateResolve) return;            // 登录门已在
   gateResolve = () => location.reload();
   showGate();
@@ -3225,6 +3226,10 @@ async function loadMy() {
        插在 view 内容最顶上（资料卡之前），图标默认 person。
        深链 /my/<sub> 直接落到子页时不挂（公告属于「我的」列表首页）。 */
     if (!mySub) renderMyAnnouncement(site && site.placements && site.placements.my);
+    /* 📩 管理员消息探测（docs/23 §6.1）：主界面渲染完成后拉一次未读，有未读才弹。
+       fire-and-forget：接口失败/无未读/token 过期一律静默（fetchMyMessages 内部兜底），
+       绝不挡主数据；本次页面生命周期只自动弹一次（probeMyMessages 内部锁）。 */
+    probeMyMessages().catch(() => {});
   } catch (e) {
     /* token 过期/没验证过 → 回登录门；其它错误照常显示错误态 */
     const m = String(e.message || '');
@@ -4035,6 +4040,13 @@ function pushBoundHtml(p) {
     '> 追分提醒（追上 / 还差多少）</label>';
   h += '<label class="sw"><input type="checkbox" id="swDaily"' +
     (p.dailyReport ? ' checked' : '') + '> 每日报告（当天音浪排行榜）</label>';
+  /* 师门日报第三开关（docs/23 §4.3）：仅名下有直系徒弟的人显示（hasDisciples）。
+     兼容期后端还没下发 hasDisciples 时按 false 处理 = 不显示，开关自然回退两开盖。 */
+  if (p.hasDisciples) {
+    h += '<label class="sw"><input type="checkbox" id="swLineage"' +
+      (p.lineageReport ? ' checked' : '') + '> 师门日报（徒弟音浪对比）</label>';
+    h += '<div class="hint">开 = 每日推送名下徒弟音浪对比图；关 = 关闭后不再推送师门日报</div>';
+  }
   if (!p.notifyTarget && !p.dailyReport) {
     h += '<div class="hint">两个开关都关着，现在不会给你推任何东西，先开一个。</div>';
   }
