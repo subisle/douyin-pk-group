@@ -642,17 +642,9 @@ export default function ImportPage() {
                 ♻️ 另有 {report.unchanged} 行{report.period ? '月度时长' : '音浪值'}与库里完全相同，未覆盖（改过的值才会覆盖）
               </div>
             )}
-            {!!report.pending?.length && (
-              <div>
-                📥 另有 {report.pending.length} 行有抖音号/ID 但还没建档，已<b>暂存</b>（
-                {report.pending
-                  .slice(0, 8)
-                  .map((p) => `${p.name}${p.douyinNo ? `(${p.douyinNo})` : ''}`)
-                  .join('、')}
-                {report.pending.length > 8 ? ` 等 ${report.pending.length} 行` : ''}
-                ）：不进榜单和统计，在「主播台账」建档或绑定该抖音号后自动补账。
-              </div>
-            )}
+            {/* 导入结果里的「另有 N 行已暂存」一行已移除（2026-10-14 用户口径：
+                暂存内容不需要显示）。后端仍照旧落 import_pending、建档/绑号后自动补账，
+                只是本次结果不再逐条列出暂存的人名。 */}
             {!!report.skipped?.length && (
               <div>
                 ⏭️ 跳过 {report.skipped.length} 行

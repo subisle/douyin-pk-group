@@ -149,17 +149,8 @@ export default function StreamerPage() {
   const [batchAcc, setBatchAcc] = useState<{ defaultPass: string; forceReset: boolean; result: any | null } | null>(null)
   const [batchAccBusy, setBatchAccBusy] = useState(false)
 
-  /** 导入暂存区：有抖音号/ID 但台账还没建档的行（不进榜单/统计，建档后自动补账） */
-  const [pending, setPending] = useState<any[]>([])
-  /** 暂存区默认收起：行数多时不再把台账顶到下面，需要处理再展开 */
-  const [pendingOpen, setPendingOpen] = useState(false)
-
-  const loadPending = useCallback(() => {
-    // 线上没跑 006 迁移时接口会 404/500：静默忽略，不影响台账页
-    api('/api/admin/import/pending')
-      .then((d) => setPending(d.items ?? []))
-      .catch(() => setPending([]))
-  }, [])
+  /* 导入暂存区相关 state / 拉取 / 建档 / 丢弃已整块移除（2026-10-14 用户口径：
+     暂存内容不需要在台账页显示）。后端端点与补账逻辑不动，只是前端不再呈现。 */
 
   const load = useCallback(() => {
     const qs = new URLSearchParams()
@@ -168,8 +159,7 @@ export default function StreamerPage() {
     api(`/api/admin/streamers?${qs}`)
       .then((d) => setItems(d.items ?? []))
       .catch((e) => setError(e.message ?? String(e)))
-    loadPending()
-  }, [q, team, loadPending])
+  }, [q, team])
 
   useEffect(load, [load])
 
@@ -222,25 +212,6 @@ export default function StreamerPage() {
       setName('')
       setDouyinNo('')
       load()
-    } catch (e: any) {
-      setError(e.message ?? String(e))
-    }
-  }
-
-  /** 暂存行「建档」：把名字 / 抖音号填进上面的新建表单，运营补团别后点建档 */
-  function prefillArchive(p: any) {
-    setName(p.name ?? '')
-    setDouyinNo(p.douyinNo ?? '')
-    setMsg(`已填入：${p.name}（抖音号 ${p.douyinNo}）—— 选好团别点「建档」，暂存数据会自动补账`)
-    window.scrollTo({ top: 0, behavior: 'smooth' })
-  }
-
-  async function discardPending(p: any) {
-    if (!confirm(`丢弃暂存行「${p.name}（${p.douyinNo}）」？该行数据不入库。`)) return
-    try {
-      await api(`/api/admin/import/pending?id=${p.id}`, { method: 'DELETE' })
-      loadPending()
-      setMsg(`已丢弃暂存行：${p.name}`)
     } catch (e: any) {
       setError(e.message ?? String(e))
     }
@@ -573,59 +544,11 @@ export default function StreamerPage() {
         {msg && <div className="alert good">{msg}</div>}
       </section>
 
-      {/* 导入暂存区：导入时有抖音号/ID、但台账还没有这个主播的行。
-          它们不进台账 / 榜单 / 统计，只有在这里建档或绑定该抖音号之后才会补账显示。
-          默认收起成一行（行数多时不占位），点「展开」才显示明细与操作。 */}
-      {pending.length > 0 && (
-        <section className="card">
-          <div className="row" style={{ margin: 0, justifyContent: 'space-between' }}>
-            <span className="hint" style={{ margin: 0 }}>
-              导入暂存 <b>{pending.length}</b> 行未建档：不显示在台账、榜单和任何统计里，
-              建档（填同样抖音号）后数据自动补账入库。
-            </span>
-            <button className="ghost" onClick={() => setPendingOpen((v) => !v)}>
-              {pendingOpen ? '收起' : '展开处理'}
-            </button>
-          </div>
-          {pendingOpen && (
-            <div className="table-scroll" style={{ marginTop: 10 }}>
-              <table>
-                <thead>
-                  <tr>
-                    <th>名字</th>
-                    <th>抖音号 / 采集 ID</th>
-                    <th>业务日期</th>
-                    <th>当日音浪</th>
-                    <th>时长(分)</th>
-                    <th>来源批次</th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {pending.map((p) => (
-                    <tr key={p.id}>
-                      <td>{p.name}</td>
-                      <td className="hint">{p.douyinNo}</td>
-                      <td className="hint">{p.bizDate ?? '—'}</td>
-                      <td className="num">{p.wave ?? '—'}</td>
-                      <td className="num">{p.minutes ?? '—'}</td>
-                      <td className="hint">#{p.batchId ?? '—'}</td>
-                      <td>
-                        <button className="primary" onClick={() => prefillArchive(p)}>
-                          建档
-                        </button>
-                        <button className="danger" style={{ marginLeft: 6 }} onClick={() => discardPending(p)}>
-                          丢弃
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </section>
-      )}
+      {/* 导入暂存区（2026-10-14 用户口径：不再显示）
+          原先这里会挂一张「导入暂存 N 行未建档」卡片（收起态仍占一行，展开后是明细 +
+          建档/丢弃按钮）。运营口径是暂存内容不需要在台账页出现，故整块移除。
+          后端 /api/admin/import/pending 与 import_pending 表**保持原样**：导入时的
+          暂存落库、建档/绑号后的自动补账逻辑都不受影响，只是前端不再呈现。 */}
 
       <section className="card">
         <h2>主播台账（{items.length} 人）</h2>
