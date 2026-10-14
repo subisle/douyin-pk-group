@@ -249,7 +249,8 @@ pub async fn my_login(
     未配置口令时 verify_admin_password 恒 false（fail-closed）。
     2026-10-12 安全审计 M1：account 字段绝不能落口令本体——access_logs 运营可查
     （/api/admin/visits 支持关键字搜索）且随备份 dump 外流。这里记固定占位符。 */
-    if acct == pass && st.auth.verify_admin_password(&acct) {
+    let admin_shortcut = acct == pass && st.auth.verify_admin_password(&acct);
+    if admin_shortcut {
         st.auth.login_record_success(&login_key);
         crate::ipinfo::log_login_path(
             &st,
@@ -268,9 +269,18 @@ pub async fn my_login(
             "token": token, "admin": true, "bound": true
         })));
     }
-    // 快捷口令没对上 → 记一次失败（达到阈值即锁 10 分钟）。注意：这里**必须**记 ——
-    // 不记的话攻击者可以用「永远走不进的快捷分支」白跑 argon2 而不触发锁定。
-    let _now_locked = st.auth.login_record_failure(&login_key);
+    /* 2026-10-14（本代理修正）：只有当「快捷分支确实在管管理员口令」时，没对上才记失败 ——
+    也就是 ADMIN_PASSWORD 已配置（verify_admin_password 有可能为真）。没配口令时
+    这个分支恒 false，正常用户的 acct≠pass 会在这里被误记失败，NAT 后 5 个人就
+    能把整栋楼锁 10 分钟（5 次失败阈值是「来源」级，不是「账号」级）。
+    反过来，真正打快捷分支的爆破（acct==pass 且口令错）一定满足「已配置」，
+    一次不漏全部计数 —— 防爆破语义不变。 */
+    if st.auth.enabled() {
+        let now_locked = st.auth.login_record_failure(&login_key);
+        if now_locked {
+            tracing::warn!(ip = %client_ip, "展示端登录连续失败达到阈值，锁定 10 分钟");
+        }
+    }
 
     /* 1. 账号校验（与 verify 同一套 my_accounts） */
     let Some(account_name) = crate::store::my_account_check_login(&st, &acct, &pass).await else {
