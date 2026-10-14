@@ -1177,6 +1177,79 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
   .guide-spot { animation:none; }
 }
 
+/* ===== 管理员消息弹窗（docs/23 §6.1，msg- 前缀独立类，不复用引导弹窗类名） =====
+   视觉对齐引导弹窗：毛玻璃遮罩 + 居中圆角卡 + 品牌渐变头 + 主按钮「知道了」。
+   差异点：多消息列表（卡内滚动）、图片按需加载、无步骤条/手势翻页。
+   z-index 95：低于引导(100)，高于普通内容 / toast(40) / 家族水印(70)。 */
+#msgModal { position:fixed; inset:0; z-index:95; background:rgba(11,15,23,.55);
+  display:flex; align-items:center; justify-content:center; padding:20px;
+  -webkit-backdrop-filter:blur(18px) saturate(150%); backdrop-filter:blur(18px) saturate(150%); }
+#msgModal.hidden { display:none; }
+@keyframes msgOverlayIn { from { opacity:0; } to { opacity:1; } }
+@keyframes msgCardIn {
+  from { opacity:0; transform:translateY(24px) scale(.96); }
+  60%  { opacity:1; transform:translateY(0) scale(1.005); }
+  to   { opacity:1; transform:none; }
+}
+#msgModal.msg-overlay-in { animation:msgOverlayIn .22s ease both; }
+.msg-box { max-width:352px; width:100%; max-height:calc(100dvh - 40px);
+  background:#fff; border-radius:22px; padding:0 0 18px; text-align:center;
+  box-shadow:0 24px 70px rgb(0 0 0 / 28%); overflow:hidden;
+  display:flex; flex-direction:column; animation:msgCardIn .34s cubic-bezier(.22,1,.36,1) both; }
+/* 品牌头（与 .announce-box .a-head 同款渐变，独立类实现） */
+.msg-box .msg-head { position:relative; padding:22px 20px 16px; flex:none;
+  background:var(--primary);
+  background:linear-gradient(160deg, var(--primary) 0%, #6d5bd0 100%);
+  color:var(--on-primary); border-radius:22px 22px 0 0; }
+@supports (background: linear-gradient(in srgb, red, blue)) {
+  .msg-box .msg-head { background:linear-gradient(160deg, var(--primary) 0%, color-mix(in srgb, var(--primary) 72%, #7c3aed) 100%); }
+}
+.msg-box .msg-ico { width:52px; height:52px; border-radius:16px; margin:0 auto 12px;
+  background:rgb(255 255 255 / 18%); color:#fff; display:grid; place-items:center;
+  font-size:26px; }
+.msg-box .msg-chip { display:inline-block; padding:3px 10px; border-radius:9999px;
+  background:rgb(255 255 255 / 20%); color:#fff; font-size:11px; font-weight:700;
+  letter-spacing:.04em; margin-bottom:8px; }
+.msg-box .msg-head h3 { margin:0; font-size:18px; font-weight:800; line-height:1.4; }
+/* 列表区：多条未读卡内滚动，按钮永不被顶出屏幕（与引导 .a-body 同口径） */
+.msg-box .msg-list { margin:0; padding:14px 14px 4px; overflow-y:auto; flex:1 1 auto;
+  -webkit-overflow-scrolling:touch; text-align:left; }
+.msg-box .msg-item { border:1px solid #E8ECF2; border-radius:14px;
+  padding:12px 14px 10px; margin-bottom:10px; }
+.msg-box .msg-item:last-child { margin-bottom:4px; }
+.msg-box .msg-item-top { display:flex; align-items:flex-start; gap:8px; }
+.msg-box .msg-item-title { flex:1 1 auto; min-width:0; font-size:14px; font-weight:700;
+  color:var(--on-surface); line-height:1.5; word-break:break-word; }
+/* 单条「已读」小按钮：完成态换文案变灰，不再响应 */
+.msg-box .msg-read-btn { flex:none; border:none; cursor:pointer; border-radius:9999px;
+  padding:3px 10px; font-size:11px; font-weight:700; background:#F1F5F9;
+  color:var(--on-surface-variant); transition:opacity .12s ease; white-space:nowrap; }
+.msg-box .msg-read-btn:active { transform:scale(.97); }
+.msg-box .msg-read-btn.msg-read-done { opacity:.5; cursor:default; }
+.msg-box .msg-item-date { margin-top:4px; font-size:11px; color:var(--ink3); }
+.msg-box .msg-item-body { margin-top:6px; font-size:13px;
+  color:var(--on-surface-variant); line-height:1.8; white-space:pre-wrap;
+  word-break:break-word; }
+/* 图片占位/容器：按需加载，加载失败文案不挡正文 */
+.msg-box .msg-img-wrap { margin-top:10px; border-radius:12px; overflow:hidden;
+  background:#F6F8FB; min-height:28px; display:flex; align-items:center;
+  justify-content:center; }
+.msg-box .msg-img-wrap img { display:block; max-width:100%; height:auto; }
+.msg-box .msg-img-note { padding:8px 10px; font-size:11px; color:var(--ink3); }
+.msg-box .msg-actions { display:flex; gap:8px; padding:10px 20px 0; flex:none; }
+.msg-box .msg-ok { flex:1; height:46px; border:none; border-radius:var(--r-md);
+  font-size:15px; font-weight:700; cursor:pointer; background:var(--primary);
+  color:var(--on-primary); transition:transform .12s ease, opacity .12s ease; }
+.msg-box .msg-ok:active { transform:scale(.97); }
+.msg-box .msg-ok:disabled { opacity:.4; cursor:default; }
+.msg-box .msg-swipe-hint { margin:10px 20px 0; font-size:11px; color:var(--ink3); flex:none; }
+@media (prefers-reduced-motion: reduce) {
+  #msgModal.msg-overlay-in, .msg-box { animation:none; }
+}
+@media (max-width:360px) {
+  .msg-box { max-width:100%; }
+}
+
 /* ===== 微信扫码绑定（2026-10-12）：二维码卡 + 状态行 + 倒计时 + 刷新动画 =====
    对齐微信「添加朋友 → 扫码」的做法：
    · 二维码固定 208px 白底卡（SVG 原始尺寸不固定，不定尺寸在窄屏必溢出）
@@ -1380,6 +1453,9 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 <!-- 登录门（未登录时盖住整页）+ 登录后全屏手机号水印（打码） -->
 <div id="gate" class="hidden"></div>
 <div id="announce" class="hidden"></div>
+<!-- 管理员消息弹窗（docs/23 §6.1）：容器常驻，DOM 由 openMsgModal 重建。
+     z-index 95 低于引导(100)高于内容/toast(40)；登录门打开时 dismissMsgModal 主动让位。 -->
+<div id="msgModal" class="hidden"></div>
 <div id="wm" hidden></div>
 
 <script>
@@ -1632,44 +1708,24 @@ function showGate() {
     '<div class="big-av" style="background:' + avColor(av) + '"><span class="material-symbols-outlined" style="font-size:28px">person</span></div>' +
     '<h3>' + esc(title) + '</h3>' +
     '<div class="gate-tabs">' +
-      '<button id="tabLogin" class="on">登录</button><button id="tabReg" hidden>注册</button>' +
     '</div>' +
     '<div id="paneLogin"><p class="tip">使用「手机号 + 密码」登录（姓名也可以）</p>' +
       '<input id="gateAcct" placeholder="手机号 / 姓名" autocomplete="off">' +
-      '<input id="gatePass" placeholder="密码" inputmode="numeric" autocomplete="off">' +
       '<button class="reg-skip" id="gateForgot">忘记密码？重置生成临时密码</button>' +
       '<div class="form-err hidden" id="gateErr"></div>' +
       '<button class="btn-main" id="gateGo">登 录</button>' +
       '<div class="gate-foot">遇到问题？请联系管理员帅帅</div></div>' +
-    '<div id="paneReg" class="hidden"></div>' +
     '</div></div>';
   /* 引导让位给登录门：两层遮罩叠着用户找不到登录框。
      dismissAnnounce 走 close()，会把 announceCtx 置 null 并摘掉键盘/触摸监听，
      所以登录门关掉后 closeGate 里的重弹是一次干净的新实例，不会双监听。 */
   dismissAnnounce();
+  dismissMsgModal();
   $('tabLogin').onclick = () => gateTab('login');
-  $('tabReg').onclick = () => gateTab('reg');
   bindLoginPane();
-  bindRegPane();
   gateTab('login');
-  /* 注册是后台开关（2026-10-10 用户口径「注册先不开」，默认关）：
-     探测到开着才把「注册」页签露出来，关着时登录门跟以前一模一样 */
-  probeRegConfig().then((cfg) => {
-    const tab = $('tabReg');
-    if (tab) tab.hidden = !cfg.open;
-  });
 }
 
-function gateTab(tab) {
-  const login = tab === 'login';
-  if (!login && regCfg && !regCfg.open) return;   // 注册没开：不进注册页签
-  $('tabLogin').classList.toggle('on', login);
-  $('tabReg').classList.toggle('on', !login);
-  show('paneLogin', login);
-  show('paneReg', !login);
-  if (login) stopRegPoll();
-  else prepareRegPane();
-  setTimeout(() => { const el = login ? $('gateAcct') : $('regName'); if (el) el.focus(); }, 30);
 }
 
 /* ------------------------------ 登录页签 ------------------------------ */
@@ -4086,7 +4142,7 @@ function pushAddHtml() {
 }
 
 function bindPushBoundHandlers(p) {
-  const swT = $('swTarget'), swD = $('swDaily');
+  const swT = $('swTarget'), swD = $('swDaily'), swL = $('swLineage');
   const saveFlags = async () => {
     try {
       await fetch('/api/public/teams/' + TEAM + '/my/push/settings', {
@@ -4094,8 +4150,13 @@ function bindPushBoundHandlers(p) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           token: myToken(),
+          /* 三个开关每次全量带当前值：后端 my_push_settings 缺省字段按 false 落库
+             （wx.rs flag() unwrap_or(false) → push_set_flags 整行 UPDATE），
+             只传改动的一个会把另外两个覆盖成关。 */
           notifyTarget: !!(swT && swT.checked),
           dailyReport: !!(swD && swD.checked),
+          /* 师门日报（docs/23 §4.3）：旧后端不认这个字段（忽略）不影响前两个开关。 */
+          lineageReport: !!(swL && swL.checked),
         }),
       }).then(async (r) => {
         const d = await r.json().catch(() => ({}));
@@ -4109,6 +4170,7 @@ function bindPushBoundHandlers(p) {
   };
   if (swT) swT.onchange = saveFlags;
   if (swD) swD.onchange = saveFlags;
+  if (swL) swL.onchange = saveFlags;
 
   const unbind = $('pushUnbind');
   if (unbind) {
@@ -5095,6 +5157,273 @@ function maybeAnnounce() {
 
   lockScroll();
   render();
+}
+
+/* ==================== 📩 管理员消息弹窗（docs/23 §6.1 / P3，msg- 前缀独立实现） ====================
+   与引导弹窗的关系：视觉对齐（品牌头 / 圆角卡 / 主按钮），类名与逻辑完全独立，互不复用。
+   数据契约（后端并行实现，任何失败一律静默）：
+   · GET  /api/public/my/messages          （X-My-Token）→ {items:[{id,title,content,imageKind,date,createdAt}]}，只含未读
+   · POST /api/public/my/messages/{id}/read（X-My-Token）→ {ok:true}，幂等
+   · GET  /api/public/my/messages/{id}/image.png（X-My-Token）→ image/png，按收件人实时渲染（水印=本人姓名）
+   行为约定：
+   · 登录成功进「我的」主界面后探测一次；有未读才弹，无未读什么都不做
+   · 弹窗内列表展示全部未读（最新在上），不做连续弹
+   · 「知道了」逐条 POST read（allSettled，失败不阻塞关闭但 console.warn）→ 关闭
+   · 单条也可先标已读；全部已读后自动关闭
+   · 本次页面生命周期只自动弹一次（内存变量；「知道了」后不再弹）
+   · token 未登录/过期 → 非 2xx 直接静默返回，绝不挡页面加载 */
+
+/* 会话内防重弹：本次页面生命周期只自动弹一次；「知道了」/ 单条全读后也置 true */
+let msgModalAutoShown = false;
+/* 打开中的弹窗收起句柄（dismissMsgModal 用；登录门出现时主动让位） */
+let msgModalCtx = null;
+
+/* 单条消息的 date 字段过白名单：只放 数字/-/: 与空格，其余原样丢弃（防注入显示层）。
+   形如 2026-10-14 的业务日与 2026-10-14 18:00 的展示时间都能通过；空/非法返回空串。 */
+function msgSafeDate(v) {
+  const s = String(v == null ? '' : v);
+  if (!s) return '';
+  const cleaned = s.replace(/[^0-9\-: ]/g, '').trim();
+  return /^\d{4}-\d{2}-\d{2}([ ]\d{2}:\d{2}(:\d{2})?)?$/.test(cleaned) ? cleaned : '';
+}
+
+/* 拉未读消息：非 2xx（含 401 登录过期）/网络失败 → null，调用方静默忽略 */
+async function fetchMyMessages() {
+  try {
+    const r = await fetch('/api/public/my/messages', { headers: myTokenHeaders() });
+    if (!r.ok) return null;
+    const d = await r.json().catch(() => null);
+    if (!d || !Array.isArray(d.items)) return null;
+    /* 只认带合法 id 的条目；title/content/date 缺省给空串，渲染端兜底 */
+    return d.items.filter((it) => it && it.id != null)
+      .map((it) => ({
+        id: it.id,
+        title: String(it.title || ''),
+        content: String(it.content || ''),
+        imageKind: String(it.imageKind || ''),
+        date: String(it.date || ''),
+        createdAt: String(it.createdAt || ''),
+      }));
+  } catch (_) {
+    return null;   // 网络失败：静默，绝不挡页面
+  }
+}
+
+/* 图片按需加载：fetch + blob + URL.createObjectURL（<img> 直接指 URL 会丢 X-My-Token 头）。
+   成功 resolve URL；任何失败 resolve null（调用方显示占位文案，不挡正文）。 */
+async function fetchMsgImage(id) {
+  try {
+    const r = await fetch('/api/public/my/messages/' + encodeURIComponent(String(id)) + '/image.png',
+      { headers: myTokenHeaders() });
+    if (!r.ok) return null;
+    const b = await r.blob();
+    if (!b || b.type.indexOf('image') !== 0) return null;
+    return URL.createObjectURL(b);
+  } catch (_) {
+    return null;
+  }
+}
+
+/* 逐条标已读：幂等；失败抛错（调用方 warn/降级），非 2xx 原样走失败分支 */
+async function postMsgRead(id) {
+  const r = await fetch('/api/public/my/messages/' + encodeURIComponent(String(id)) + '/read', {
+    method: 'POST',
+    headers: Object.assign({ 'Content-Type': 'application/json' }, myTokenHeaders()),
+    body: JSON.stringify({}),
+  });
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return true;
+}
+
+/* 图片懒加载：item 未读且带 imageKind 才按需拉图；失败/无图显示占位文案，不挡正文。
+   返回是否发起了加载（用于决定占位文案内容）。 */
+function loadMsgImage(item, wrapEl) {
+  let note = null;
+  const showNote = (tx) => {
+    if (!note) { note = document.createElement('div'); note.className = 'msg-img-note'; wrapEl.appendChild(note); }
+    note.textContent = tx;   // textContent，绝不 innerHTML
+  };
+  if (!item.imageKind) { wrapEl.hidden = true; return false; }
+  fetchMsgImage(item.id).then((url) => {
+    if (!document.getElementById('msgModal').contains(wrapEl)) {
+      if (url) URL.revokeObjectURL(url);   // 弹窗已关：直接回收
+      return;
+    }
+    if (!url) { showNote('图片加载失败，稍后重试'); return; }
+    const img = document.createElement('img');
+    img.alt = '消息配图';
+    img.onload = () => { wrapEl.style.minHeight = ''; };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      img.remove();
+      showNote('图片加载失败，稍后重试');
+    };
+    img.src = url;
+    wrapEl.style.minHeight = '120px';   // 加载中撑住高度，避免闪跳
+    wrapEl.appendChild(img);
+  });
+  return true;
+}
+
+/** 打开消息弹窗：items 最新在上（服务端只发未读；顺序这里再保险一次）。
+    title/content 一律 textContent 赋值，绝不 innerHTML 拼接用户内容。 */
+function openMsgModal(items) {
+  const box = $('msgModal');
+  if (!box || !items || !items.length) return;
+  const list = items.slice().sort((a, b) => {
+    const da = String(a.createdAt || a.date || ''), db = String(b.createdAt || b.date || '');
+    return da < db ? 1 : da > db ? -1 : 0;   // 最新在上；同刻按原序稳定
+  });
+  const card = document.createElement('div');
+  card.className = 'msg-box';
+  card.setAttribute('role', 'dialog');
+  card.setAttribute('aria-modal', 'true');
+  card.setAttribute('aria-labelledby', 'msgTitle');
+
+  /* 品牌头（静态结构固定，无用户内容） */
+  const head = document.createElement('div');
+  head.className = 'msg-head';
+  const chip = document.createElement('span');
+  chip.className = 'msg-chip';
+  chip.textContent = '管理员消息';
+  const ico = document.createElement('div');
+  ico.className = 'msg-ico';
+  const icoSpan = document.createElement('span');
+  icoSpan.className = 'material-symbols-outlined';
+  icoSpan.textContent = 'campaign';
+  ico.appendChild(icoSpan);
+  const h3 = document.createElement('h3');
+  h3.id = 'msgTitle';
+  h3.textContent = '你有 ' + list.length + ' 条未读消息';
+  head.appendChild(chip); head.appendChild(ico); head.appendChild(h3);
+  card.appendChild(head);
+
+  /* 消息列表（textContent 渲染，防注入） */
+  const listEl = document.createElement('div');
+  listEl.className = 'msg-list';
+  const markOneRead = (item, btn) => {
+    btn.disabled = true;
+    postMsgRead(item.id).then(() => {
+      btn.textContent = '已读';
+      btn.classList.add('msg-read-done');
+      item.__read = true;
+      /* 全部已读 → 自动关闭（含一条的情况） */
+      if (list.every((x) => x.__read)) closeMsgModal();
+    }).catch((e) => {
+      console.warn('[msgModal] 标记已读失败 id=' + item.id, e);
+      btn.disabled = false;
+      btn.textContent = '标已读';
+    });
+  };
+  list.forEach((item) => {
+    const li = document.createElement('div');
+    li.className = 'msg-item';
+    const top = document.createElement('div');
+    top.className = 'msg-item-top';
+    const t = document.createElement('div');
+    t.className = 'msg-item-title';
+    t.textContent = item.title || '（无标题）';
+    top.appendChild(t);
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'msg-read-btn';
+    btn.textContent = '标已读';
+    btn.onclick = () => markOneRead(item, btn);
+    top.appendChild(btn);
+    li.appendChild(top);
+    const dt = msgSafeDate(item.date) || msgSafeDate(item.createdAt);
+    if (dt) {
+      const dEl = document.createElement('div');
+      dEl.className = 'msg-item-date';
+      dEl.textContent = dt;
+      li.appendChild(dEl);
+    }
+    if (item.content) {
+      const body = document.createElement('div');
+      body.className = 'msg-item-body';
+      body.textContent = item.content;   // 绝不 innerHTML
+      li.appendChild(body);
+    }
+    if (item.imageKind) {
+      const wrap = document.createElement('div');
+      wrap.className = 'msg-img-wrap';
+      li.appendChild(wrap);
+      loadMsgImage(item, wrap);   // 按需 fetch blob，失败占位文案不挡正文
+    }
+    listEl.appendChild(li);
+  });
+  card.appendChild(listEl);
+
+  /* 底部「知道了」：逐条 POST read（allSettled，幂等），失败不阻塞关闭 */
+  const actions = document.createElement('div');
+  actions.className = 'msg-actions';
+  const okBtn = document.createElement('button');
+  okBtn.type = 'button';
+  okBtn.className = 'msg-ok';
+  okBtn.textContent = '知道了';
+  okBtn.onclick = () => {
+    okBtn.disabled = true;
+    const pending = list.filter((x) => !x.__read);
+    Promise.allSettled(pending.map((x) => postMsgRead(x.id))).then((rs) => {
+      rs.forEach((r, i) => {
+        if (r.status === 'rejected') console.warn('[msgModal] 已读回执失败 id=' +
+          (pending[i] && pending[i].id), r.reason);
+      });
+      closeMsgModal();
+    });
+  };
+  actions.appendChild(okBtn);
+  card.appendChild(actions);
+
+  if (list.length > 1) {
+    const hint = document.createElement('div');
+    hint.className = 'msg-swipe-hint';
+    hint.textContent = '共 ' + list.length + ' 条，可逐条「标已读」，或一次「知道了」全部已读';
+    card.appendChild(hint);
+  }
+
+  box.innerHTML = '';
+  box.appendChild(card);
+  box.classList.remove('hidden');
+  box.classList.add('msg-overlay-in');
+  lockScroll();
+  /* 点遮罩不关（消息需要确认已读，误触遮罩关掉会丢「知道了」时机）；Esc 让位给登录门 */
+  msgModalCtx = closeMsgModal;
+  try { okBtn.focus({ preventScroll: true }); } catch (_) { okBtn.focus(); }
+}
+
+/** 关闭弹窗：回滚遮罩入场动画、解锁滚动、清 DOM 与句柄 */
+function closeMsgModal() {
+  const box = $('msgModal');
+  msgModalCtx = null;
+  msgModalAutoShown = true;   // 关过一次（含单条全读自动关）：本次页面不再自动弹
+  if (!box) return;
+  /* 回收列表里已生成的 blob URL：节点上取不到原始 url，逐个 img.src 撤销 */
+  box.querySelectorAll('.msg-img-wrap img').forEach((img) => {
+    if (img.src && img.src.indexOf('blob:') === 0) URL.revokeObjectURL(img.src);
+  });
+  box.classList.add('hidden');
+  box.classList.remove('msg-overlay-in');
+  box.innerHTML = '';
+  unlockScroll();
+}
+
+/** 收起消息弹窗（登录门出现时调用，让位优先级更高的界面） */
+function dismissMsgModal() {
+  const box = $('msgModal');
+  if (box && !box.classList.contains('hidden')) closeMsgModal();
+  else if (msgModalCtx) { msgModalCtx = null; }
+}
+
+/** 登录成功进「我的」主界面后的探测入口：只自动弹一次，任何失败静默忽略。
+    调用点：loadMy() 主数据渲染完成后（fire-and-forget，不 await，绝不挡主数据）。 */
+async function probeMyMessages() {
+  if (msgModalAutoShown) return;
+  msgModalAutoShown = true;   // 先占位：本次页面生命周期只探测弹一次，失败也不重试
+  const items = await fetchMyMessages();
+  if (!items || !items.length) return;   // 无未读 / token 失效 / 网络失败：什么都不做
+  if (!$('gate') || !$('gate').classList.contains('hidden')) return;   // 登录门开着：不叠层
+  openMsgModal(items);
 }
 
 /* ==================== 🎉 彩带庆祝 + 📣 运营公告（2026-10-13 / items 2026-10-14） ====================

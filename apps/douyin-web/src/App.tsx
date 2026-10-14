@@ -10,6 +10,7 @@ import VisitPage from './VisitPage'
 import LineagePage from './LineagePage'
 import AnnouncePage from './AnnouncePage'
 import BotPage from './BotPage'
+import SendPage from './SendPage'
 import GroupPage from './pk/GroupPage'
 import './pk/pk.css'
 
@@ -24,6 +25,7 @@ const NAV_ICONS: Record<RouteKey, string> = {
   group: '⚔️',
   announce: '📣',
   bots: '🤖',
+  send: '📢',
 }
 
 export default function App() {
@@ -157,6 +159,7 @@ export default function App() {
         {route === 'group' && <GroupPage />}
         {route === 'announce' && <AnnouncePage />}
         {route === 'bots' && <BotPage />}
+        {route === 'send' && <SendPage />}
       </main>
       {toast && (
         <div className="toast" role="status">

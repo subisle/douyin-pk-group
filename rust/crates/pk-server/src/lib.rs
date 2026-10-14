@@ -1,6 +1,7 @@
 //! pk-server 库入口：模块以 pub 暴露给集成测试与二进制。
 
 pub mod admin;
+pub mod admin_send;
 pub mod auth;
 pub mod bot;
 pub mod config;

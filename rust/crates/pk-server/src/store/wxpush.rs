@@ -20,6 +20,10 @@ pub struct PushBinding {
     pub conversation_id: String,
     pub notify_target: bool,
     pub daily_report: bool,
+    /// 师门日报开关（docs/23 §4.3）：名下有直系徒弟才推
+    pub lineage_report: bool,
+    /// 同业务日去重：师门日报只推一次（对齐 last_report_date）
+    pub last_lineage_date: String,
 }
 
 /// 展示端「我的」页看到的推送状态（不含会话 id 等内部字段）
@@ -29,7 +33,8 @@ pub async fn push_state(st: &AppState, name: &str) -> serde_json::Value {
     };
     let row = sqlx::query(&crate::pq::rewrite(
         "SELECT conversation_id, nickname, bind_code, code_expires, bound_at,
-                notify_target, daily_report, last_push, last_error
+                notify_target, daily_report, last_push, last_error,
+                lineage_report, last_lineage_date
          FROM push_bindings WHERE name = ?",
     ))
     .bind(name.trim())
@@ -41,6 +46,7 @@ pub async fn push_state(st: &AppState, name: &str) -> serde_json::Value {
         return serde_json::json!({
             "bound": false, "code": "", "codeExpires": "",
             "notifyTarget": false, "dailyReport": false,
+            "lineageReport": false, "hasDisciples": false,
         });
     };
     let conv: String = r
@@ -54,6 +60,7 @@ pub async fn push_state(st: &AppState, name: &str) -> serde_json::Value {
         "boundAt": r.try_get::<String, _>("bound_at").unwrap_or_default(),
         "notifyTarget": r.try_get::<i16, _>("notify_target").unwrap_or(0) == 1,
         "dailyReport": r.try_get::<i16, _>("daily_report").unwrap_or(0) == 1,
+        "lineageReport": r.try_get::<i16, _>("lineage_report").unwrap_or(0) == 1,
         "lastPush": r.try_get::<String, _>("last_push").unwrap_or_default(),
         "lastError": r.try_get::<String, _>("last_error").unwrap_or_default(),
     })
@@ -280,6 +287,53 @@ pub async fn push_set_daily_report(st: &AppState, name: &str, on: bool) -> bool 
         .unwrap_or(false)
 }
 
+/// 只改「师门日报」开关（docs/23 §4.3；「我的」页第三开关，仅名下有徒弟的人可见）。
+/// 与 [`push_set_daily_report`] 同款幂等语义：值没变但行在 = 成功。
+pub async fn push_set_lineage_report(st: &AppState, name: &str, on: bool) -> bool {
+    let Ok(pool) = w(st) else {
+        return false;
+    };
+    let name = name.trim();
+    let changed = sqlx::query(&crate::pq::rewrite(
+        "UPDATE push_bindings SET lineage_report = ?, updated_at = ? WHERE name = ?",
+    ))
+    .bind(if on { 1i16 } else { 0i16 })
+    .bind(now_str())
+    .bind(name)
+    .execute(pool)
+    .await
+    .map(|r| r.affected() > 0)
+    .unwrap_or(false);
+    if changed {
+        return true;
+    }
+    sqlx::query_scalar::<_, i64>(&crate::pq::rewrite(
+        "SELECT COUNT(*) FROM push_bindings WHERE name = ?",
+    ))
+    .bind(name)
+    .fetch_one(pool)
+    .await
+    .map(|n| n > 0)
+    .unwrap_or(false)
+}
+
+/// 师门日报推送成功后写同业务日去重标记（对齐 last_report_date 机制）
+pub async fn push_set_lineage_date(st: &AppState, name: &str, date: &str) -> bool {
+    let Ok(pool) = w(st) else {
+        return false;
+    };
+    sqlx::query(&crate::pq::rewrite(
+        "UPDATE push_bindings SET last_lineage_date = ?, updated_at = ? WHERE name = ?",
+    ))
+    .bind(date)
+    .bind(now_str())
+    .bind(name.trim())
+    .execute(pool)
+    .await
+    .map(|r| r.affected() > 0)
+    .unwrap_or(false)
+}
+
 /// 按微信会话查绑定（机器人角色判定 + 普通用户命令取姓名 / person_id / 团别）
 pub async fn push_binding_by_conversation(
     st: &AppState,
@@ -287,7 +341,8 @@ pub async fn push_binding_by_conversation(
 ) -> Option<PushBinding> {
     let pool = w(st).ok()?;
     let row = sqlx::query(&crate::pq::rewrite(
-        "SELECT name, team, person_id, conversation_id, notify_target, daily_report
+        "SELECT name, team, person_id, conversation_id, notify_target, daily_report,
+                lineage_report, last_lineage_date
          FROM push_bindings WHERE conversation_id = ? LIMIT 1",
     ))
     .bind(conversation_id)
@@ -299,7 +354,8 @@ pub async fn push_binding_by_conversation(
 }
 
 /// push_bindings → PushBinding 的统一映射（列固定：name/team/person_id/
-/// conversation_id/notify_target/daily_report，两处查询共用）
+/// conversation_id/notify_target/daily_report/lineage_report/last_lineage_date，
+/// 两处查询共用）
 fn binding_from_row(r: &sqlx::postgres::PgRow) -> PushBinding {
     PushBinding {
         name: r.try_get::<String, _>("name").unwrap_or_default(),
@@ -313,6 +369,10 @@ fn binding_from_row(r: &sqlx::postgres::PgRow) -> PushBinding {
             .unwrap_or_default(),
         notify_target: r.try_get::<i16, _>("notify_target").unwrap_or(0) == 1,
         daily_report: r.try_get::<i16, _>("daily_report").unwrap_or(0) == 1,
+        lineage_report: r.try_get::<i16, _>("lineage_report").unwrap_or(0) == 1,
+        last_lineage_date: r
+            .try_get::<String, _>("last_lineage_date")
+            .unwrap_or_default(),
     }
 }
 
@@ -322,9 +382,10 @@ pub async fn push_bindings_for_team(st: &AppState, team: &str) -> Vec<PushBindin
         return Vec::new();
     };
     match sqlx::query(&crate::pq::rewrite(
-        "SELECT name, team, person_id, conversation_id, notify_target, daily_report
+        "SELECT name, team, person_id, conversation_id, notify_target, daily_report,
+                lineage_report, last_lineage_date
          FROM push_bindings
-         WHERE team = ? AND conversation_id <> '' AND (notify_target = 1 OR daily_report = 1)",
+         WHERE team = ? AND conversation_id <> '' AND (notify_target = 1 OR daily_report = 1 OR lineage_report = 1)",
     ))
     .bind(team)
     .fetch_all(pool)

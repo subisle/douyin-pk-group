@@ -4,10 +4,12 @@
 //! 运营一次导入往往连着发好几个文件（男女团分开、一人多号分开），入库就推会把
 //! 半成品榜单推给用户。延迟队列在 `push_jobs` 表，同一 (团, 业务日) 只排一队。
 //!
-//! 推两类，各自独立开关（都在「我的」页设置）：
+//! 推三类，各自独立开关（都在「我的」页设置）：
 //! - **每日报告**：当天音浪榜 TOP10 + 我的名次（同一业务日只推一次）
 //! - **追分提醒**：把该账号所有追分目标合成一条消息（追上 / 被反超 / 还差多少），
 //!   一天只推一次（按业务日去重），但「追上」「被反超」是事件，发生即推。
+//! - **师门日报**（docs/23 §4，2026-10-14）：名下有直系徒弟的师傅收「徒弟音浪对比图」
+//!   （同一业务日只推一次，按 `last_lineage_date` 去重；无徒弟不推空图）。
 //!
 //! 目标三种（2026-10-10 用户口径：一律比本月累计）：
 //! - `person` 追某个人：本月累计音浪超过 TA = 追上
@@ -381,7 +383,8 @@ fn greeting_with_rank(
 
 /// 日报 SVG → PNG 字节（resvg 纯 Rust 渲染，服务器零系统依赖）。
 /// 宽 720 逻辑像素 ×2 输出（1440），微信长图清晰度够用。
-fn svg_to_png(svg: &str) -> anyhow::Result<Vec<u8>> {
+/// pub(crate)：lineage_report.rs 与 admin_send.rs 的图片渲染共用同一份调用。
+pub(crate) fn svg_to_png(svg: &str) -> anyhow::Result<Vec<u8>> {
     use anyhow::Context as _;
     let opt = resvg::usvg::Options::default();
     let tree = resvg::usvg::Tree::from_str(svg, &opt)?;
@@ -631,6 +634,93 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
                             tracing::warn!(account = %b.name, error = %e, "追分提醒推送失败");
                             crate::store::push_touch(st, &b.name, &e.to_string()).await;
                         }
+                    }
+                }
+            }
+        }
+
+        // ③ 师门日报（docs/23 §4，2026-10-14）：名下有直系徒弟的师傅收徒弟音浪对比图。
+        /* 与 daily_report 完全同构的三层保护：
+        - 开关：b.lineage_report（「我的」页第三开关 / 管理端一键开启）；
+        - 同业务日去重：b.last_lineage_date == date → skip（对齐 last_report_date，
+          补数重排队列时不重复发）；
+        - 有徒弟才算师傅：build() 报「师傅不存在」或名下只有师傅本人一行（无徒弟）
+          → 记 debug 跳过，不推空图；person_id == 0（管理员观看账号）直接跳过。
+        图片路径：按人 build（师傅不同、水印不同，循环内不可外提；同师傅在同一团
+        只有一行绑定，天然不重复算）→ render_svg_pages(rep, PAGE_ROWS, 收件人名)
+        → 逐页 svg_to_png → send_binding_images(caption = render_text)。
+        渲染/PNG 失败降级 wx_proactive 纯文本（同 daily_report 图片失败退文本）；
+        发送成功后才写 last_lineage_date（幂等，失败下次再推）。 */
+        if b.lineage_report {
+            if b.person_id == 0 {
+                tracing::debug!(account = %b.name, "师门日报：管理员观看账号（person_id=0），跳过");
+            } else if b.last_lineage_date == date {
+                tracing::debug!(account = %b.name, date = %date, "师门日报同日已推过，跳过");
+            } else {
+                match crate::lineage_report::build(st, date, b.person_id).await {
+                    Ok(rep) if rep.rows.len() > 1 => {
+                        let caption = crate::lineage_report::render_text(&rep);
+                        let svgs =
+                            crate::lineage_report::render_svg_pages(&rep, PAGE_ROWS, &b.name);
+                        let pngs: Vec<Vec<u8>> = svgs
+                            .iter()
+                            .filter_map(|svg| match svg_to_png(svg) {
+                                Ok(p) => Some(p),
+                                Err(e) => {
+                                    tracing::warn!(account = %b.name, error = %e, "师门日报 SVG 转 PNG 失败");
+                                    None
+                                }
+                            })
+                            .collect();
+                        if pngs.is_empty() {
+                            // 全部页面转 PNG 失败 → 退回文本摘要（同 daily_report 图片失败退文本）
+                            tracing::warn!(account = %b.name, "师门日报全部页面转 PNG 失败，退回文本推送");
+                            match send_binding(st, b, wx_global.as_ref(), &caption).await {
+                                Ok(()) => {
+                                    sent_any = true;
+                                    crate::store::push_set_lineage_date(st, &b.name, date).await;
+                                    tracing::info!(account = %b.name, "师门日报(文本)已推送");
+                                }
+                                Err(e2) => {
+                                    tracing::warn!(account = %b.name, error = %e2, "师门日报文本推送失败");
+                                    crate::store::push_touch(st, &b.name, &e2.to_string()).await;
+                                }
+                            }
+                        } else {
+                            tracing::info!(account = %b.name, pages = pngs.len(), bytes = pngs.iter().map(|p| p.len()).sum::<usize>(), "推送·师门日报(图片)");
+                            match send_binding_images(st, b, &caption, &pngs).await {
+                                Ok(()) => {
+                                    sent_any = true;
+                                    crate::store::push_set_lineage_date(st, &b.name, date).await;
+                                    tracing::info!(account = %b.name, pages = pngs.len(), "师门日报(图片)已推送");
+                                }
+                                Err(e) => {
+                                    tracing::warn!(account = %b.name, error = %e, "师门日报图片推送失败，退回文本");
+                                    match send_binding(st, b, wx_global.as_ref(), &caption).await {
+                                        Ok(()) => {
+                                            sent_any = true;
+                                            crate::store::push_set_lineage_date(st, &b.name, date)
+                                                .await;
+                                        }
+                                        Err(e2) => {
+                                            tracing::warn!(account = %b.name, error = %e2, "师门日报文本兜底也失败");
+                                            crate::store::push_touch(st, &b.name, &e2.to_string())
+                                                .await;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Ok(rep) => tracing::debug!(
+                        account = %b.name,
+                        rows = rep.rows.len(),
+                        "师门日报：名下无直系徒弟（或徒弟全隐藏/离职），skipped"
+                    ),
+                    Err(e) => {
+                        // 「师傅不存在」（档案被删 / person_id 失联）或库抖动：只记日志，
+                        // 不写 last_lineage_date，不影响其他订阅者。
+                        tracing::warn!(account = %b.name, error = %e, "师门日报数据构建失败，跳过");
                     }
                 }
             }

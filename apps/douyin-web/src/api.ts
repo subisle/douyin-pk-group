@@ -73,3 +73,95 @@ export function logout() {
   api('/api/auth/logout', { method: 'POST' }).catch(() => {})
   setToken(null)
 }
+
+/* ---------------- 管理员消息下发（docs/23 §5.5，/api/admin/send/*） ----------------
+ * 鉴权与现有 admin api 相同：api() 自动带 Authorization: Bearer token。
+ * 圈人只传「意图」（docs/23 §5.2），展开与校验都在服务端做，前端不给全量 id 兜底。 */
+
+/** 收件人候选（GET /api/admin/send/targets?q=） */
+export type SendTarget = {
+  personId: number
+  name: string
+  team: string
+  masterId: number | null
+  masterName: string | null
+  hasWx: boolean
+  hasPopup: boolean
+  discipleCount: number
+}
+
+/** 圈人意图：persons=手工多选 / masters=按师傅（includeMaster 默认 true，师傅本人也收）/ team=按团批量 / all=全部 */
+export type SendTargetSpec =
+  | { type: 'persons'; ids: number[] }
+  | { type: 'masters'; ids: number[]; includeMaster?: boolean }
+  | { type: 'team'; team: 'male' | 'female' }
+  | { type: 'all' }
+
+export type SendChannel = 'wxbot' | 'popup'
+
+/** POST /api/admin/send 请求体 */
+export type SendCreateReq = {
+  title: string
+  content: string
+  imageKind: 'none' | 'lineage'
+  imageDate?: string
+  channels: SendChannel[]
+  target: SendTargetSpec
+}
+
+export type SendCreateResp = { ok: boolean; messageId: number; recipients: number }
+
+/** 发送计数（历史列表与详情共用） */
+export type SendCounts = { sent: number; failed: number; skipped: number; pending: number }
+
+/** 消息投影（admin_messages，docs/23 §5.3；channels 后端为逗号分隔串，容忍数组返回） */
+export type SendMessage = {
+  id: number
+  title: string
+  content: string
+  imageKind: string
+  imageDate?: string | null
+  createdAt: string
+  channels: string | string[]
+  targetType: string
+  counts: SendCounts
+}
+
+/** outbox 行：一条消息 × 每收件人 × 每渠道 = 一行，失败互不影响 */
+export type SendOutboxRow = {
+  id: number
+  recipientName: string
+  channel: string
+  status: 'pending' | 'sent' | 'failed' | 'skipped'
+  error: string
+  sentAt: string | null
+  readAt: string | null
+}
+
+export type SendMessageDetail = { message: SendMessage; outbox: SendOutboxRow[] }
+
+/** 收件人候选（q 为空拉全量，供批量计数与展开徒弟用） */
+export async function fetchSendTargets(q: string): Promise<{ items: SendTarget[] }> {
+  const key = q.trim()
+  return api(`/api/admin/send/targets${key ? `?q=${encodeURIComponent(key)}` : ''}`)
+}
+
+/** 创建消息 + outbox 并启动 worker（立即返回，页面跳到发送详情） */
+export async function createSend(body: SendCreateReq): Promise<SendCreateResp> {
+  return api('/api/admin/send', { method: 'POST', body: JSON.stringify(body) })
+}
+
+/** 发送历史（最近 limit 条，含四态计数） */
+export async function fetchSendMessages(limit = 50): Promise<{ items: SendMessage[] }> {
+  return api(`/api/admin/send/messages?limit=${limit}`)
+}
+
+/** 发送详情：每收件人每渠道状态（页面 3s 轮询直到无 pending） */
+export async function fetchSendMessageDetail(id: number): Promise<SendMessageDetail> {
+  return api(`/api/admin/send/messages/${id}`)
+}
+
+/** 一键为所有师傅（有徒弟的主播）开启师门日报，返回影响行数 */
+export async function postEnableLineage(): Promise<{ ok: boolean; enabled: number }> {
+  return api('/api/admin/send/enable-lineage', { method: 'POST' })
+}

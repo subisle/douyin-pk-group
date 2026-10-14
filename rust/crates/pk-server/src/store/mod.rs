@@ -22,6 +22,7 @@
 //!   [`carry_legacy_sqlite`] 把数据幂等搬进来（config 表 sqlite_carried=1 后跳过）
 //! - 表结构见 migrations/003_runtime.sql；列名差异（key→cfg_key、text→body）都是方言原因
 
+mod admin_messages;
 mod bind_requests;
 /// Redis 缓存 / 锁封装（P0）：不做 `pub use cache::*`，避免 get/set/del 这类
 /// 通用名与下面各业务模块的 re-export 撞名；调用方一律写 `store::cache::xxx`。
@@ -35,6 +36,8 @@ mod wx_sessions;
 /// 微信 iLink 图片发送（getuploadurl → CDN 上传 → image_item），供每日报告图片推送
 pub mod wxmedia;
 mod wxpush;
+
+pub use admin_messages::*;
 
 pub use bind_requests::*;
 pub use import_pending::import_pending_prune;

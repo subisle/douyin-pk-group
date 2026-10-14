@@ -62,6 +62,41 @@ pub async fn my_push(
         let phone = crate::store::my_account_phone(&st, &name).await;
         obj.insert("hasPhone".into(), json!(!phone.is_empty()));
         obj.insert("phoneMasked".into(), json!(mask_phone(&phone)));
+        // 师门日报（docs/23 §4.3）：只有「名下有直系徒弟的人」才适用第三开关。
+        // 口径（父任务指定）：person_id > 0 且本人 master_id IS NULL（开山师傅），
+        // 且存在未删除的直系徒弟（c.master_id = person_id AND c.deleted_at IS NULL）。
+        // 折成一条 COUNT 查询（结果恒 0/1），走 pgrs 只读池；档案不存在 → 0。
+        // ⚠️ 口径备注：lineage_report::build() 与 docs/23 §4.2 的跳过判定只看
+        // 「build 出来的行数 ≤ 1」（不要求本人 master_id IS NULL），若产品后续要
+        // 放宽到「中间层师傅」（自己也有师傅但名下有徒弟），删掉 p.master_id IS NULL
+        // 这半个条件即可，推送侧无需改动（它按 build 结果兜底）。
+        let has_disciples = if person_id > 0 {
+            let sql = "SELECT COUNT(*) AS n FROM person p \
+              WHERE p.id = ? AND p.deleted_at IS NULL AND p.master_id IS NULL \
+                AND EXISTS (SELECT 1 FROM person c \
+                     WHERE c.master_id = p.id AND c.deleted_at IS NULL)";
+            let res =
+                pgrs::query_with_binds(&st.pools, &sid(&st), sql, |q| q.bind(person_id as i64))
+                    .await;
+            match res {
+                // COUNT(*) 恒返回一行一列；取不到列（异常列型）按 false 兜底
+                Ok(rows) => rows
+                    .first()
+                    .and_then(|r| r.try_get::<i64, _>("n").ok())
+                    .map(|n| n > 0)
+                    .unwrap_or(false),
+                // 查询失败（库抖动 / 只读守卫拒绝）：false = 前端不显示第三开关，
+                // 行为退化到没有该字段的旧版，推送侧仍按真实名单兜底
+                Err(e) => {
+                    tracing::warn!(person_id, error = %e, "查师门归属失败，hasDisciples 按 false 兜底");
+                    false
+                }
+            }
+        } else {
+            // 管理员观看账号（person_id == 0）没有主播档案，恒 false
+            false
+        };
+        obj.insert("hasDisciples".into(), json!(has_disciples));
     }
     Ok(Json(state))
 }
@@ -369,7 +404,16 @@ pub async fn my_push_code(
     })))
 }
 
-/// POST /api/public/teams/{team}/my/push/settings {token, notifyTarget, dailyReport}
+/// POST /api/public/teams/{team}/my/push/settings {token, notifyTarget, dailyReport[, lineageReport]}
+///
+/// 三个开关的缺省语义**刻意不一致**（保持既有行为，只增量加第三开关）：
+/// - `notifyTarget` / `dailyReport`：body 里没带时按 `false` 落库（历史语义——
+///   前端每次把两个开关的当前值全量带上，见 st_page.html saveFlags 的注释），
+///   继续走 [`crate::store::push_set_flags`] 整行覆盖那两列；
+/// - `lineageReport`（docs/23 §4.3）：**缺省 = 不改动现值**。因为旧调用方
+///   （只带 token / 只带两个旧开关）不知道这个字段，若跟着 flag() 缺省 false
+///   落库，任何旧客户端一保存就会把师门日报静默关掉。字段出现时才走
+///   [`crate::store::push_set_lineage_report`] 单独写这一列。
 pub async fn my_push_settings(
     State(st): State<ArcState>,
     Path(team): Path<String>,
@@ -382,6 +426,11 @@ pub async fn my_push_settings(
     let (_pid, _t, name) = my_ident(&team, token)?;
     let flag = |k: &str| body.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
     crate::store::push_set_flags(&st, &name, flag("notifyTarget"), flag("dailyReport")).await;
+    // 师门日报第三开关：body 里带了才改（含显式 false），缺省不动现值。
+    // 开关本身允许任意人切换（build() 侧「无徒弟不推空图」兜底），不在入口拦。
+    if let Some(v) = body.get("lineageReport").and_then(|v| v.as_bool()) {
+        crate::store::push_set_lineage_report(&st, &name, v).await;
+    }
     Ok(Json(json!({ "ok": true })))
 }
 

@@ -612,6 +612,29 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/admin/announcement",
             get(public_teams::get_announcement).post(public_teams::update_announcement),
+        )
+        // 管理员消息下发（docs/23 §5）：收件人解析 + outbox 队列 + 限速 worker
+        .route("/api/admin/send", post(admin_send::send_create))
+        .route("/api/admin/send/targets", get(admin_send::send_targets))
+        .route("/api/admin/send/messages", get(admin_send::send_messages))
+        .route(
+            "/api/admin/send/messages/{id}",
+            get(admin_send::send_message_detail),
+        )
+        .route(
+            "/api/admin/send/enable-lineage",
+            post(admin_send::enable_lineage),
+        )
+        // 消息下发 · 展示端弹窗渠道（docs/23 §6，X-My-Token 鉴权在 handler 内做，
+        // 路径在 auth.rs 的 /api/public/ 免鉴权前缀内）
+        .route("/api/public/my/messages", get(admin_send::my_messages))
+        .route(
+            "/api/public/my/messages/{id}/read",
+            post(admin_send::my_message_read),
+        )
+        .route(
+            "/api/public/my/messages/{id}/image.png",
+            get(admin_send::my_message_image),
         );
 
     // 鉴权：ADMIN_PASSWORD 配了就拦，没配等于本地开发全放行。

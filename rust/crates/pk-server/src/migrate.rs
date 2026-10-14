@@ -88,6 +88,12 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "021_fix_wave_snapshot_unique",
         include_str!("migrations/021_fix_wave_snapshot_unique.sql"),
     ),
+    // 022：师门日报开关（push_bindings.lineage_report / last_lineage_date）+
+    // 管理员消息下发三张表（docs/23）。
+    (
+        "022_admin_messages",
+        include_str!("migrations/022_admin_messages.sql"),
+    ),
 ];
 
 /// 迁移建连（migrator 账号；同样关语句缓存）

@@ -49,6 +49,41 @@ export default function BotPage() {
   /** 推送队列加载失败（P2-5）：不再渲染成「还没有推送任务」的假空态 */
   const [pushError, setPushError] = useState('')
   const [pushBusy, setPushBusy] = useState<string | null>(null)
+  /** 师门日报只读概览（docs/23 §4.3）：已绑定微信的人里，名下有直系徒弟的「师傅」名单。
+      口径与后端 hasDisciples 一致（person_id>0 且本人无师傅 master_id IS NULL，
+      且存在未删除的直系徒弟）。开关值本身在展示端「我的」页由用户自己设，
+      管理端只读展示，不做交互开关。 */
+  const [lineageBind, setLineageBind] = useState<{
+    total: number
+    items: { name: string; team: string; disciples: number }[]
+  } | null>(null)
+
+  const loadLineageBind = useCallback(() => {
+    api<{ items: any[] }>('/api/admin/streamers')
+      .then((d) => {
+        const rows = (d.items ?? []).filter(
+          (a: any) => a.wechatBound && !a.masterId && a.disciples > 0,
+        )
+        setLineageBind({
+          total: rows.length,
+          items: rows.map((a: any) => ({
+            name: a.name,
+            team: a.team,
+            disciples: a.disciples,
+          })),
+        })
+      })
+      .catch(() => {
+        // 概览加载失败只留空态，不影响推送队列卡的正常使用
+        setLineageBind(null)
+      })
+  }, [])
+
+  useEffect(() => {
+    loadLineageBind()
+    const t = setInterval(loadLineageBind, 60000)
+    return () => clearInterval(t)
+  }, [loadLineageBind])
 
   const loadPushJobs = useCallback(() => {
     api('/api/admin/push/jobs')
@@ -519,6 +554,53 @@ export default function BotPage() {
         {pushMsg && <div className="alert good">{pushMsg}</div>}
       </section>
 
+      <section className="card">
+        <h2>师门日报推送概览（只读）</h2>
+        <p className="hint">
+          开了「师门日报」开关（第三开关）的师傅，会在数据入库延迟推送时收到
+          「名下徒弟音浪 + 与上日差距」的分页图（docs/23 §4）。
+          <b>有徒弟才算师傅</b>：名下没有直系徒弟的绑定不会推空图；同一业务日只推一次。
+          开关值由用户在展示端「我的」页自己设置（或后端一键开启），管理端只读展示，不在这里改。
+          {lineageBind && (
+            <>
+              {' '}
+              当前已绑定微信的账号里，<b>{lineageBind.total}</b> 人名下有直系徒弟
+              （这批人开开关后即可收到）。
+            </>
+          )}
+        </p>
+        {!lineageBind ? (
+          <p className="hint">师门概览没取到（台账接口不可用会自动重试）。</p>
+        ) : lineageBind.items.length === 0 ? (
+          <p className="hint">已绑定微信的账号里，还没有名下有直系徒弟的人。</p>
+        ) : (
+          <div className="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>主播</th>
+                  <th>团别</th>
+                  <th>直系徒弟数</th>
+                  <th>师门日报开关</th>
+                </tr>
+              </thead>
+              <tbody>
+                {lineageBind.items.map((a) => (
+                  <tr key={a.name}>
+                    <td>{a.name}</td>
+                    <td>
+                      {a.team === 'female' ? '女团' : a.team === 'male' ? '男团' : a.team || '—'}
+                    </td>
+                    <td>{a.disciples}</td>
+                    <td className="hint">在展示端「我的」页查看 / 设置</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
       <PublicSettingsCard />
       <MyAccountsCard />
 
@@ -726,12 +808,6 @@ function PublicSettingsCard() {
               checked={!!settings.loginRequired}
               onChange={(v) => toggle('loginRequired', v)}
             />
-            <FlagRow
-              label="开放手机号注册"
-              hint="开 = 登录门显示「注册」（手机号 = 账号、短信验证码 = 密码、姓名须在主播台账里，注册即绑定，同步走 WorkBuddy 网关授权）；默认关"
-              checked={!!settings.myRegister}
-              onChange={(v) => toggle('myRegister', v)}
-            />
             {PAGE_FLAGS.map(([key, label]) => (
               <FlagRow
                 key={key}
@@ -836,11 +912,9 @@ function PublicSettingsCard() {
   )
 }
 
-/** 我的页面账号（2026-10-10）：展示端「我的」页的登录账号。
-    两种来源：① 管理员在这里手动设置（也能在主播管理右键单个主播设置）；
-    ② 主播在展示端登录门「注册」自助创建（手机号 = 账号、短信验证码 = 密码，
-    注册时同时把 WorkBuddy 账号加进用量看板的账号池）。
-    自助注册出来的账号 name 先是手机号占位、bound=0，等绑定主播后 name = 主播姓名；
+/** 我的页面账号（2026-10-10；2026-10-14 注册功能已下线，只剩后台开号一条路径）：
+    展示端「我的」页的登录账号，由管理员在这里手动设置（也能在主播管理右键单个主播设置）。
+    历史自助注册账号 name 先是手机号占位、bound=0，等绑定主播后 name = 主播姓名；
     绑定后用户自己不能解绑，只有这里能改绑。 */
 function MyAccountsCard() {
   const [items, setItems] = useState<any[]>([])
@@ -938,11 +1012,10 @@ function MyAccountsCard() {
     <section className="card">
       <h2>「我的」页面账号（/st/m · /st/f）</h2>
       <p className="hint">
-        账号来源两种：<b>这里手动设置</b>（姓名要跟主播台账里的一致，姓名已存在时保存 = 覆盖更新），
-        或主播在展示端登录门点「注册」自助创建（手机号 = 账号、短信验证码 = 密码）。
+        账号由<b>这里手动设置</b>（姓名要跟主播台账里的一致，姓名已存在时保存 = 覆盖更新）。
         <b>手机号不只是登录方式，也是微信绑定的凭证</b>：填了手机号，主播加机器人后发手机号就能绑定推送；
         没填就只能用「我的」页的 6 位绑定码。
-        自助注册的账号是「待绑定」状态：主播在「我的」页绑定主播姓名后才能看个人数据，
+        历史自助注册遗留的账号是「待绑定」状态：主播在「我的」页绑定主播姓名后才能看个人数据，
         <b>绑定后主播自己不能解绑，只有这里能改绑</b>。
       </p>
       <div className="row">
