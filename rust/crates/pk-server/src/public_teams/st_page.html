@@ -1720,6 +1720,7 @@ function showGate() {
      dismissAnnounce 走 close()，会把 announceCtx 置 null 并摘掉键盘/触摸监听，
      所以登录门关掉后 closeGate 里的重弹是一次干净的新实例，不会双监听。 */
   dismissAnnounce();
+  /* 消息弹窗同样让位给登录门（#msgModal z-index 95 会盖住 #gate z-index 90）。 */
   dismissMsgModal();
   $('tabLogin').onclick = () => gateTab('login');
   bindLoginPane();
