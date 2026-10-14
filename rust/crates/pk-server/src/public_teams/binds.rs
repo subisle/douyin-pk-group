@@ -59,7 +59,9 @@ pub async fn my_claim_post(
         return Err(ApiError::auth("该账号不属于本团"));
     }
     if person_id == 0 {
-        return Err(anyhow::anyhow!("管理员账号缺少对应的主播档案，不能绑定抖音号").into());
+        return Err(ApiError::bad_request(
+            "管理员账号缺少对应的主播档案，不能绑定抖音号",
+        ));
     }
     let douyin_no = body
         .get("douyinNo")
@@ -72,14 +74,14 @@ pub async fn my_claim_post(
     let (mime, b64) = data_url
         .strip_prefix("data:")
         .and_then(|rest| rest.split_once(";base64,"))
-        .ok_or_else(|| anyhow::anyhow!("截图数据格式不对，请重新选择图片"))?;
+        .ok_or_else(|| ApiError::bad_request("截图数据格式不对，请重新选择图片"))?;
     use base64::Engine as _;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(b64.trim())
-        .map_err(|_| anyhow::anyhow!("截图数据格式非法（解码失败），请重新选择图片"))?;
+        .map_err(|_| ApiError::bad_request("截图数据格式非法（解码失败），请重新选择图片"))?;
 
     // 提交前先查重：抖音号已被占用就直接拒，省得用户白等审计
-    let no = crate::store::validate_douyin_no(douyin_no).map_err(|e| anyhow::anyhow!(e))?;
+    let no = crate::store::validate_douyin_no(douyin_no).map_err(|e| ApiError::bad_request(e))?;
     let dup = pgrs::query_with_binds(
         &st.pools,
         &sid(&st),
@@ -93,16 +95,19 @@ pub async fn my_claim_post(
             .map(|v| v as u64)
             .unwrap_or(0);
         if owner == person_id {
-            return Err(anyhow::anyhow!("这个抖音号已经绑定在你名下了").into());
+            return Err(ApiError::bad_request("这个抖音号已经绑定在你名下了"));
         }
-        return Err(anyhow::anyhow!("该抖音号已绑定其他主播，如有疑问请联系管理员").into());
+        return Err(ApiError::bad_request(
+            "该抖音号已绑定其他主播，如有疑问请联系管理员",
+        ));
     }
 
-    // 报错文案统一走 anyhow::anyhow!(中文) → 400（routes.rs 关键词）
+    // 校验/业务拒绝统一 ApiError::bad_request（显式 400；anyhow 关键词推断已于
+    // 2026-10-14 收紧为「显式构造才原样下发」，见 routes.rs）
     let name = person_name_of(&st, person_id).await?;
     crate::store::anchor_claim_insert(&st, person_id as i64, &name, &team, &no, &bytes, mime)
         .await
-        .map_err(|e| anyhow::anyhow!(e))?;
+        .map_err(|e| ApiError::bad_request(e))?;
     crate::events::emit(
         crate::events::SCOPE_IMPORT,
         format!("绑定申请：{} 提交抖音号 {}（待审计）", name, no),
@@ -165,14 +170,14 @@ pub async fn admin_anchor_claim_decide(
         .unwrap_or_default()
         .to_string();
     if !approve && reason.is_empty() {
-        return Err(anyhow::anyhow!("驳回要填写原因，请输入驳回原因").into());
+        return Err(ApiError::bad_request("驳回要填写原因，请输入驳回原因"));
     }
 
     // 1. 先占住裁决权（pending → approved/rejected 原子翻转，防双击重复绑定）
     let Some((person_id, no, person_name)) =
         crate::store::anchor_claim_decide(&st, id, approve, &reason, "admin").await
     else {
-        return Err(anyhow::anyhow!("这笔申请不存在或已经处理过了").into());
+        return Err(ApiError::bad_request("这笔申请不存在或已经处理过了"));
     };
 
     if !approve {
@@ -202,10 +207,9 @@ pub async fn admin_anchor_claim_decide(
         // 回滚裁决，让管理员能改判或处理冲突
         crate::store::anchor_claim_revert(&st, id).await;
         return Err(match owner == person_id as u64 {
-            true => anyhow::anyhow!("该抖音号已存在绑定记录（就在该主播名下）"),
-            false => anyhow::anyhow!("该抖音号已存在绑定记录（绑在其他主播名下）"),
-        }
-        .into());
+            true => ApiError::bad_request("该抖音号已存在绑定记录（就在该主播名下）"),
+            false => ApiError::bad_request("该抖音号已存在绑定记录（绑在其他主播名下）"),
+        });
     }
     let cnt = sqlx::query(&crate::pq::rewrite(
         "SELECT COUNT(*) AS n FROM account WHERE person_id = ?",
@@ -232,8 +236,11 @@ pub async fn admin_anchor_claim_decide(
         let msg = e.to_string();
         return Err(
             if msg.contains("duplicate key") || msg.contains("Duplicate entry") {
-                anyhow::anyhow!("抖音号或采集 ID 已存在（唯一键冲突），请检查是否重复绑定").into()
+                // 唯一键冲突 → 业务拒绝 400（这是用户能理解、可操作的提示）
+                ApiError::bad_request("抖音号或采集 ID 已存在（唯一键冲突），请检查是否重复绑定")
             } else {
+                // 其他写库失败 → 内部错误：原文留日志，客户端通用文案
+                tracing::error!(error = %msg, "绑定通过后写入 account 失败");
                 anyhow::anyhow!("写入账号失败：{msg}").into()
             },
         );

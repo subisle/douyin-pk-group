@@ -26,6 +26,8 @@ mod bind_requests;
 /// Redis 缓存 / 锁封装（P0）：不做 `pub use cache::*`，避免 get/set/del 这类
 /// 通用名与下面各业务模块的 re-export 撞名；调用方一律写 `store::cache::xxx`。
 pub mod cache;
+/// 导入暂存区（import_pending）按保留期清理：手动触发，不挂自动任务。
+pub mod import_pending;
 mod legacy;
 pub mod my_account;
 mod push_jobs;
@@ -35,6 +37,7 @@ pub mod wxmedia;
 mod wxpush;
 
 pub use bind_requests::*;
+pub use import_pending::import_pending_prune;
 pub use legacy::*;
 pub use my_account::*;
 pub use push_jobs::*;

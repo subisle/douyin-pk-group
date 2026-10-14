@@ -83,7 +83,10 @@ pub struct Auth {
     /// 一次性 ticket → 过期时刻（SSE / 日报图等只能把凭证放进 URL 的场景）
     tickets: Mutex<HashMap<String, Instant>>,
     ttl: Duration,
-    /// P1-4：登录失败限流（同来源连续失败 N 次锁 M 分钟）
+    /// P1-4：登录失败限流（同来源连续失败 N 次锁 M 分钟）。
+    /// 2026-10-14 审计（P1）：展示端 /api/public/my/login 经 login_locked /
+    /// login_record_* 委托方法复用这一个限流器（此前只有 /api/auth/login 在用，
+    /// 公开端可绕开锁定爆破管理员口令），字段保持私有。
     limiter: LoginLimiter,
 }
 
@@ -291,6 +294,34 @@ impl Auth {
     /// 未配置口令 → 一律 false（fail-closed）。
     pub(crate) fn verify_admin_password(&self, input: &str) -> bool {
         self.check_password(input)
+    }
+
+    /* ───── 登录失败限流（2026-10-14 审计 P1 修复）─────
+    /api/public/my/login 的管理员快捷口令分支原先只过每 IP 每分钟 5 次的滑动窗口
+    （public_write_allow），**没有**接这里连续失败锁 10 分钟的 LoginLimiter ——
+    而那个 limiter 只挂在 /api/auth/login 上。结果是公网可以对这个公开端点上的
+    管理员口令匀速慢速爆破（5 次/分/IP，换 IP 就重置），argon2 校验还白送攻击者算力。
+    暴露三个委托方法给展示端登录用，key 仍由调用方按来源 IP 生成，跟 /api/auth/login
+    共用同一个 limiter 实例与同一套阈值（5 次失败锁 10 分钟）。 */
+
+    /// 该来源是否已被锁定（锁定期间拒绝，不跑 argon2）
+    pub fn login_locked(&self, key: &str) -> bool {
+        self.limiter.locked(key)
+    }
+
+    /// 剩余锁定秒数（响应体提示用）
+    pub fn login_locked_seconds(&self, key: &str) -> u64 {
+        self.limiter.locked_seconds(key)
+    }
+
+    /// 记一次失败；返回是否刚好达到阈值触发锁定
+    pub fn login_record_failure(&self, key: &str) -> bool {
+        self.limiter.record_failure(key)
+    }
+
+    /// 登录成功：清零该来源失败计数
+    pub fn login_record_success(&self, key: &str) {
+        self.limiter.record_success(key)
     }
 
     pub fn issue(&self) -> String {

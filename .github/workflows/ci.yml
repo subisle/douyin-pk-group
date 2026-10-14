@@ -31,6 +31,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
+      # 注（2026-10-14）：原 bot_e2e.rs / monthly_duration_e2e.rs 及 store_e2e.rs 其余用例已删除
+      # —— 它们是 MySQL 方言（`?` 占位符 / `DELETE d FROM ... JOIN`），在 PostgreSQL 上会 42601，
+      # 且未配 DB_LOCAL_HOST 时静默跳过（退出码 0），CI 一直空转变绿。
+      # 如需重新引入 DB e2e：须起 postgres service + 用 PG 原生 $n 占位符（或统一走 pq::rewrite），
+      # 参考 store_e2e.rs::absorb_pending_is_idempotent_across_repeated_calls（唯一保留并真实跑库的用例）。
       - name: 单元测试
         working-directory: rust
         run: cargo test --workspace

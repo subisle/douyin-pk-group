@@ -1573,11 +1573,9 @@ let regWbState = '';      // WorkBuddy 授权流水号（第 ① 步申请到的
 let regOauthDone = false; // 授权是否已完成（账号已加入账号池）
 let regTimer = null;      // 授权结果轮询
 
-/** 手机号打码：水印/提示里不出现完整号码 */
-const maskPhone = (p) => {
-  const s = String(p || '');
-  return s.length >= 7 ? s.slice(0, 3) + '****' + s.slice(-4) : s;
-};
+/* 2026-10-14：原 maskPhone() 前端打码函数已删 —— 手机号统一由后端 /my/who、
+   /my/push 在服务端 mask_phone() 后下发，前端拿到即已脱敏，不再二次打码
+   （对已打码值再 mask 会把 138****1234 打成 13****34，水印失真）。 */
 
 /** 登录/注册成功后统一收口：水印 + 未绑定提醒条 */
 function applyLoginState(me) {
@@ -1591,9 +1589,11 @@ function applyLoginState(me) {
   /* 提醒条用 hidden 属性控制（CSS 写的是 .bindbar[hidden]），不是 class="hidden" */
   const bar = $('bindBar');
   if (bar) bar.hidden = !needBind;
-  /* 水印口径（2026-10-11）：显示自己的手机号（打码），没有手机号才回退艺名 */
+  /* 水印口径（2026-10-11）：显示自己的手机号（打码），没有手机号才回退艺名。
+     2026-10-14：phone 现在是后端 /my/who 服务端打码后的值，这里直接用、不再 mask，
+     （对已打码值再 mask 会把 138****1234 打成 13****34，水印反而失真）。 */
   const wmText = needBind ? '未绑定主播' : ((me && (me.phone || me.name)) || '');
-  applyWatermark(wmText === (me && me.phone) && wmText ? maskPhone(wmText) : wmText);
+  applyWatermark(wmText);
   return me;
 }
 
@@ -3189,7 +3189,8 @@ function renderBindCard(who) {
   $('view').innerHTML = '<div class="section">' +
     '<div class="card my-bind">' +
       '<h2 class="card-t">绑定主播姓名</h2>' +
-      '<div class="sub">账号已绑定手机号 <b>' + esc(maskPhone(who.phone || who.name || '')) +
+      /* 2026-10-14：后端 /my/who 已在服务端打码（mask_phone），这里不再二次 mask */
+      '<div class="sub">账号已绑定手机号 <b>' + esc(who.phone || who.name || '') +
         '</b>，还没有对应主播。<br>绑定后「我的」数据、水印、榜单名次都按这位主播算。</div>' +
       '<div class="warn">绑定之后不能自行解绑或换绑；名字填错了请联系管理员改绑。</div>' +
       '<input id="bindQ" placeholder="输入你的主播姓名（艺名）" autocomplete="off">' +
@@ -3375,9 +3376,10 @@ function renderMy(d, series, claim, bound, push, accounts) {
   if (d.name) {
     localStorage.setItem(MY_NAME_KEY(), d.name);
     /* 水印口径（2026-10-11）：手机号优先（打码），无手机号回退艺名。
-       my 数据接口不带 phone，手机号从登录态 meState 取，避免被艺名覆盖 */
+       my 数据接口不带 phone，手机号从登录态 meState 取，避免被艺名覆盖。
+       2026-10-14：meState.phone 已是后端打码值，这里不再二次 mask。 */
     const wmPhone = meState && meState.phone;
-    applyWatermark(wmPhone ? maskPhone(wmPhone) : d.name);
+    applyWatermark(wmPhone || d.name);
   }
   pushState = push || null;
   const minText = (v) => v == null ? '' : '时长 ' + (v >= 60

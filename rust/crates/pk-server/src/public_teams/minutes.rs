@@ -148,7 +148,7 @@ pub async fn my(
     }
     let (person_id, my_team, _) = my_token_required(&headers)?;
     if my_team != team && team != "all" {
-        return Err(anyhow::anyhow!("该账号不属于本团").into());
+        return Err(ApiError::bad_request("该账号不属于本团"));
     }
 
     // 个人各口径
@@ -423,7 +423,7 @@ pub async fn my_series(
     }
     let (person_id, my_team, _) = my_token_required(&headers)?;
     if my_team != team && team != "all" {
-        return Err(anyhow::anyhow!("该账号不属于本团").into());
+        return Err(ApiError::bad_request("该账号不属于本团"));
     }
     let days = q.days.unwrap_or(14).clamp(1, 30);
     let dates = crate::repos::get_available_dates(&st, None, false).await?;
@@ -436,14 +436,34 @@ pub async fn my_series(
         ));
     }
 
-    // P1-7：序列只聚合可信行（wave_reliable=1），与展示页曲线/榜单口径一致
-    let sql = format!(
-        "SELECT TO_CHAR(biz_date, 'YYYY-MM-DD') AS d, \
+    /* 2026-10-14 审计 P1（按 Lead 口径：消除 SQL 拼接，改日期窗口过滤 + 绑定参数）。
+    Lead 已核实：原实现**不是**轴错位 bug——SQL 取最近 N 个有数据的日期，轴取最近
+    N 个全局业务日，个人数据日 ⊆ 全局业务日，两者天然一致。真正缺陷是 format! 拼
+    {person_id} 和 LIMIT {days}。现改为绑定参数窗口：终点 = 轴最新业务日，起点 =
+    终点往前第 days-1 个**轴内**业务日（聚合日期与轴逐日对齐的保证不变，不再需要
+    LIMIT）。person_id 与两个日期全部走 ? 占位符（pgrs::rewrite 统一转 $N）。
+    bind 先例：push.rs month_wave_map 在同一 active 池上 `TO_CHAR(biz_date,…) = ?`
+    绑定正常；「该库 bind 报 1835」是 MySQL 时代的口径——2026-10 收敛后业务库只有
+    PostgreSQL（pgrs Pools 只装 PgPool），本地库 `biz_date = ?::date` 亦为例证。 */
+    let window_start_idx = take.len().saturating_sub(days as usize);
+    // 窗口边界独立成 String（不借 take）：闭包按值 move 它们，之后 take 照常 move 进响应
+    let window_end = take.last().expect("take 非空已在上方提前返回").clone();
+    let window_start = take[window_start_idx].clone();
+    let sql = "SELECT TO_CHAR(biz_date, 'YYYY-MM-DD') AS d, \
          (SUM(wave))::BIGINT AS wave, (SUM(minutes))::BIGINT AS minutes \
-         FROM daily_metric WHERE person_id = {person_id} AND wave_reliable = 1 \
-         GROUP BY d ORDER BY d DESC LIMIT {days}"
-    );
-    let rows = pgrs::query(&st.pools, &sid(&st), &sql).await?;
+         FROM daily_metric WHERE person_id = ? AND wave_reliable = 1 \
+         AND biz_date >= ?::date AND biz_date <= ?::date \
+         GROUP BY d ORDER BY d ASC";
+    let rows = {
+        // 闭包要求 'static：直接把 String **move** 进闭包（E0597 —— 借用活不过语句）。
+        // 先把要 move 的值在闭包外准备好，闭包体里再解引用，避免与 take 的 move 冲突。
+        let ws = window_start.clone();
+        let we = window_end.clone();
+        pgrs::query_with_binds(&st.pools, &sid(&st), sql, move |q| {
+            q.bind(person_id as i64).bind(ws).bind(we)
+        })
+        .await?
+    };
     let mut wave_map: HashMap<String, i64> = HashMap::new();
     let mut min_map: HashMap<String, i64> = HashMap::new();
     for r in &rows {
@@ -729,9 +749,14 @@ pub async fn my_who(
     }
     // 水印口径（2026-10-11 用户要求）：登录后全屏水印显示自己的手机号（打码），
     // who 里带上 phone；账号没填手机号时前端回退艺名
+    // 2026-10-14 审计 P1：原先把**明文手机号**下发，打码全靠前端 maskPhone()——
+    // 前端漏调（或接口被直接 curl）明文号码就出网了。改成服务端在这里就脱敏
+    // （mask_phone 与 my_push 用的同一份），键名保持 phone 不变，前端两处
+    // maskPhone() 调用随本日改动删除，避免二次打码把已打码的值再打一遍。
     let phone = crate::store::my_account_phone(&st, &token_name).await;
+    let phone_masked = super::wx::mask_phone(&phone);
     Ok(Json(json!({
         "ok": true, "personId": person_id, "name": name, "team": my_team,
-        "phone": phone, "bound": true, "bindRequest": bind_req,
+        "phone": phone_masked, "bound": true, "bindRequest": bind_req,
     })))
 }

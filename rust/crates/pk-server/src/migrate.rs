@@ -152,13 +152,79 @@ fn split_statements(sql: &str) -> Vec<String> {
     chunks
 }
 
+/// 识别「迁移账号不是表属主」类错误（docs/22-数据库运维说明.md）。
+///
+/// 背景（2026-10-14 本机实踩）：douyin_dev 的表属主是 zmy，而 rust/.env 里
+/// DB_WRITER_USER=pk_writer —— 019 的 `CREATE INDEX` 一执行就报
+/// `must be owner of table monthly_metric`。schema_migrations 里 019 没登记，
+/// 下次 migrate 会原样再失败一遍：这类错误永远不会自愈，必须人工把属主
+/// 移交过来（scripts/deploy/bootstrap-roles-64.sql §5）或用属主账号跑迁移。
+///
+/// PG 的权限报错分四类，全部归一识别（SQLSTATE 0LP01 也算上——它出现在
+/// ALTER TABLE ... OWNER 需要的额外前置上）：
+/// - `must be owner of table x` / `... of relation x`（CREATE INDEX / ALTER TABLE）
+/// - `permission denied for table x` / `... for relation x`（GRANT 系 DDL）
+/// - `must have create privilege on schema public`（新表落在别人拥有的 schema）
+/// - `must be superuser` / `permission denied to change owner`（改属主本身）
+///
+/// 返回 (命中与否, 表名)。表名从报错原文里截取：拿不到就返回 None，
+/// **不做猜测** —— 文案里宁可让运维去看完整报错，也不能指错表。
+fn detect_ownership_error(msg: &str) -> (bool, Option<String>) {
+    let m = msg.to_ascii_lowercase();
+    let hit = m.contains("must be owner of")
+        || m.contains("permission denied for table")
+        || m.contains("permission denied for relation")
+        || m.contains("must have create privilege on schema")
+        || m.contains("must be superuser")
+        || m.contains("permission denied to change owner");
+    let table = ["table ", "relation "]
+        .iter()
+        .find_map(|tag| {
+            let idx = m.find(tag)?;
+            let rest = msg[idx + tag.len()..].trim_start();
+            // 带引号的对象名（可含空格/标点，PG 对大小写敏感名会加引号）：取到配对引号为止
+            if let Some(quoted) = rest.strip_prefix('"') {
+                let end = quoted.find('"')?;
+                let name = &quoted[..end];
+                return (!name.is_empty()).then(|| name.to_string());
+            }
+            // 裸对象名：字母数字 + _ $ .（schema 限定名含点）；结尾标点不属于名字
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || "_$.".contains(*c))
+                .collect();
+            let name = name.trim_end_matches('.').to_string();
+            (!name.is_empty()).then_some(name)
+        });
+    (hit, table)
+}
+
+/// 把权限类执行错误翻译成可操作的中文处置说明（不自动改权限，改属主必须人工确认）。
+fn ownership_hint(msg: &str, user: &str) -> Option<String> {
+    let (hit, table) = detect_ownership_error(msg);
+    if !hit {
+        return None;
+    }
+    let target = table.as_deref().unwrap_or("报错指向的对象");
+    Some(format!(
+        "\n\n【属主权限不足】迁移账号 {user} 不是表 {target} 的属主，这条 DDL 被拒绝。\
+迁移**不会自愈**：schema_migrations 里该版本未登记，重跑还是同一个错。二选一处置：\n\
+  1) 由属主账号执行一次移交（推荐，生产=64 上容器内 psql）：\n\
+     ALTER TABLE {target} OWNER TO {user};\n\
+     （全库一次到位：跑 scripts/deploy/bootstrap-roles-64.sh，见 docs/22-数据库运维说明.md）\n\
+  2) 换属主账号跑迁移：pk-server migrate 改用表的属主连接（DB_WRITER_USER=属主）。\n\
+查当前属主：SELECT tablename, tableowner FROM pg_tables WHERE schemaname='public' AND tablename='{target}';"
+    ))
+}
+
 /// 执行迁移，返回本次应用的版本列表。幂等，可重复执行。
 pub async fn run(ep: &DbEndpoint) -> anyhow::Result<Vec<String>> {
     let pool = connect(ep).await?;
-    run_with(&pool).await
+    run_with(&pool, &ep.user).await
 }
 
-pub async fn run_with(pool: &PgPool) -> anyhow::Result<Vec<String>> {
+/// `user` 只用于权限报错的中文提示文案（谁是迁移账号，提示就指谁）。
+pub async fn run_with(pool: &PgPool, user: &str) -> anyhow::Result<Vec<String>> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS schema_migrations (
             version VARCHAR(64) NOT NULL,
@@ -186,6 +252,12 @@ pub async fn run_with(pool: &PgPool) -> anyhow::Result<Vec<String>> {
         for stmt in split_statements(sql) {
             // 走 raw_sql：迁移脚本没有任何绑定参数，raw_sql 支持 DDL / 多语句。
             if let Err(e) = sqlx::raw_sql(&stmt).execute(pool).await {
+                // 权限不足（账号不是表属主等）→ 给出可操作处置说明，别让运维只看到一句裸英文。
+                let msg = format!("{e}");
+                if let Some(hint) = ownership_hint(&msg, user) {
+                    tracing::error!(version, hint = %hint.trim(), "迁移因数据库属主权限失败");
+                    anyhow::bail!("迁移 {version} 执行失败: {e}\n语句: {stmt}{hint}");
+                }
                 anyhow::bail!("迁移 {version} 执行失败: {e}\n语句: {stmt}");
             }
         }
@@ -240,6 +312,66 @@ mod tests {
         let sorted = names.clone();
         names.sort();
         assert_eq!(names, sorted, "迁移必须按文件名顺序排列");
+    }
+
+    /// 2026-10-14 实踩：douyin_dev 表属主是 zmy，pk_writer 跑 019 的
+    /// CREATE INDEX 报 must be owner —— 必须被识别成「属主权限」类错误。
+    #[test]
+    fn ownership_error_detection() {
+        // PG 真实报错原文（sqlx Display 里就是这段）
+        for (msg, table) in [
+            ("must be owner of table monthly_metric", Some("monthly_metric")),
+            ("error returned from database: must be owner of relation monthly_metric", Some("monthly_metric")),
+            ("permission denied for table import_pending", Some("import_pending")),
+            ("permission denied for relation wave_snapshot", Some("wave_snapshot")),
+            ("must have create privilege on schema public", None),
+            ("must be superuser to alter owners", None),
+            ("permission denied to change owner", None),
+        ] {
+            let (hit, got) = detect_ownership_error(msg);
+            assert!(hit, "应识别为属主权限错误: {msg}");
+            assert_eq!(got.as_deref(), table, "表名提取错: {msg}");
+        }
+
+        // 普通错误绝不能误判（否则 migrate 报错会被错误文案带偏）
+        for msg in [
+            "there is no unique or exclusion constraint matching the ON CONFLICT specification",
+            "relation \"schema_migrations\" already exists",
+            "column \"wave\" does not exist",
+        ] {
+            assert!(!detect_ownership_error(msg).0, "误判成属主错误: {msg}");
+        }
+    }
+
+    /// 表名截取的边界：不吞标点、不带引号、拿不到就 None（不猜）。
+    #[test]
+    fn ownership_table_extraction_edges() {
+        // 带引号的对象名
+        assert_eq!(
+            detect_ownership_error("must be owner of table \"My Table\"").1,
+            Some("My Table".into()),
+            "带引号对象名要剥引号"
+        );
+        // 句号结尾（sqlx 拼接文案）不吞标点
+        let (hit, got) = detect_ownership_error("must be owner of table monthly_metric.");
+        assert!(hit);
+        assert_eq!(got.as_deref(), Some("monthly_metric"));
+        // 摸不到对象名 → None，不硬猜
+        assert_eq!(detect_ownership_error("must have create privilege on schema public").1, None);
+    }
+
+    /// 提示文案：点名账号与表、给出 ALTER TABLE 语句和 runbook 指引。
+    #[test]
+    fn ownership_hint_names_account_and_table() {
+        let h = ownership_hint("must be owner of table monthly_metric", "pk_writer")
+            .expect("属主错误必须给出提示");
+        assert!(h.contains("pk_writer"));
+        assert!(h.contains("monthly_metric"));
+        assert!(h.contains("ALTER TABLE monthly_metric OWNER TO pk_writer"));
+        assert!(h.contains("bootstrap-roles-64.sh"));
+        assert!(h.contains("docs/22-数据库运维说明.md"));
+        // 普通错误不附加提示
+        assert!(ownership_hint("column \"x\" does not exist", "pk_writer").is_none());
     }
 
     /// 磁盘上的每个 `migrations/0xx_*.sql` 都必须被登记进 MIGRATIONS

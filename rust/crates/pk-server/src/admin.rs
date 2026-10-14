@@ -97,10 +97,9 @@ fn require_local(st: &AppState) -> Result<(), ApiError> {
     if st.sources.iter().any(|s| s.id == "LOCAL") {
         Ok(())
     } else {
-        Err(
-            anyhow::anyhow!("管理端需要 LOCAL 数据源（douyin_writer 对应的本地 PostgreSQL）")
-                .into(),
-        )
+        Err(ApiError::bad_request(
+            "管理端需要 LOCAL 数据源（douyin_writer 对应的本地 PostgreSQL）",
+        ))
     }
 }
 
@@ -136,7 +135,11 @@ fn ensure(cond: bool, msg: impl std::fmt::Display) -> Result<(), ApiError> {
     if cond {
         Ok(())
     } else {
-        Err(anyhow::anyhow!("{msg}").into())
+        // 2026-10-14 审计 P2：ensure 只用于**入参校验**，文案是给运营看的安全话术，
+        // 应显式标成 400（client-safe）——原先走 anyhow 兜底 + 关键词猜状态码，
+        // 像「不支持的文件类型：x.exe」「无效的主播 id」不含关键词就落 500，
+        // 运营只看到「服务器开小差了」，真实原因被吞掉。
+        Err(ApiError::bad_request(msg.to_string()))
     }
 }
 
@@ -161,7 +164,9 @@ fn allowed_upload_ext(filename: &str) -> bool {
 /// body-limit 的语义丢了，超限请求掉进兜底 500（审计 L3 实测 5MB 文件返回 500）。
 fn multipart_error_to_api(e: axum::extract::multipart::MultipartError) -> ApiError {
     if e.status() == StatusCode::PAYLOAD_TOO_LARGE {
-        // 全局上限是 main.rs 里的 DefaultBodyLimit::max(4*1024*1024)，文案跟着它写
+        // 全局上限是 main.rs 最外层的 DefaultBodyLimit::max(4*1024*1024)——
+        // 2026-10-14 提到最外层后管理端上传口也真的拿到 4MB（原先只有 public 子树有），
+        // 文案与实际阈值一致
         ApiError::with_status(StatusCode::PAYLOAD_TOO_LARGE, "文件超过 4MB 上限")
     } else {
         ApiError::with_status(e.status(), format!("读取上传内容失败: {e}"))
@@ -389,12 +394,12 @@ pub async fn create_streamer(
         .name
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("名字必填"))?;
+        .ok_or_else(|| ApiError::bad_request("名字必填"))?;
     let team = body
         .team
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("团别必填（male / female）"))?;
+        .ok_or_else(|| ApiError::bad_request("团别必填（male / female）"))?;
     valid_team(&team)?;
     ensure(
         body.status.is_none()
@@ -412,7 +417,7 @@ pub async fn create_streamer(
     .await?;
     if let Some(row) = dup.into_iter().next() {
         let exist = read_str(&row, "name");
-        return Err(anyhow::anyhow!("同名主播「{exist}」已存在，请改用别名映射").into());
+        return Err(ApiError::bad_request(format!("同名主播「{exist}」已存在，请改用别名映射")));
     }
 
     // 抖音号全局唯一（docs/06：重复时行内红字提示）
@@ -431,7 +436,7 @@ pub async fn create_streamer(
         .filter(|s| !s.is_empty())
         .map(str::to_string);
     if let Some(p) = phone.as_deref() {
-        crate::store::validate_my_phone(p).map_err(|e| anyhow::anyhow!(e))?;
+        crate::store::validate_my_phone(p).map_err(|e| ApiError::bad_request(e))?;
         // 016 没跑时这条查询会报 Unknown column：当「查不到冲突」处理。
         // 建档失败比"手机号没存上"严重得多（运营要重录一遍），不能让少跑的迁移挡住建档。
         let taken =
@@ -442,7 +447,7 @@ pub async fn create_streamer(
             .unwrap_or_default();
         if let Some(row) = taken.into_iter().next() {
             let owner = read_str(&row, "name");
-            return Err(anyhow::anyhow!("手机号已被在职主播「{owner}」登记").into());
+            return Err(ApiError::bad_request(format!("手机号已被在职主播「{owner}」登记")));
         }
     }
 
@@ -521,20 +526,25 @@ async fn check_douyin_no_free(
         if except_person != Some(taken_id) {
             let holder = read_str(&r, "name");
             return Err(
-                anyhow::anyhow!("抖音号 {no} 已被「{holder}」使用，抖音号必须全局唯一").into(),
+                ApiError::bad_request(format!("抖音号 {no} 已被「{holder}」使用，抖音号必须全局唯一")),
             );
         }
     }
     Ok(())
 }
 
-fn map_account_err(e: sqlx::Error, anchor_id: &str) -> anyhow::Error {
+fn map_account_err(e: sqlx::Error, anchor_id: &str) -> ApiError {
     let msg = e.to_string();
     if (msg.contains("duplicate key") || msg.contains("Duplicate entry")) && msg.contains(anchor_id)
     {
-        anyhow::anyhow!("采集 ID {anchor_id} 已存在（anchor_id 唯一），请检查是否重复建档")
+        // 唯一键冲突 → 运营可理解、可操作的业务拒绝（显式 400，文案不含底层细节）
+        ApiError::bad_request(format!(
+            "采集 ID {anchor_id} 已存在（anchor_id 唯一），请检查是否重复建档"
+        ))
     } else {
-        anyhow::anyhow!("账号写入失败: {e}")
+        // 其他写库失败 → 内部错误：原文留日志，客户端走 500 通用文案
+        tracing::error!(error = %e, anchor_id, "account 写入失败");
+        ApiError::from(anyhow::anyhow!("账号写入失败: {e}"))
     }
 }
 
@@ -638,7 +648,7 @@ pub async fn update_streamer(
     if let Some(p) = phone_in.as_deref() {
         crate::store::person_set_phone(&st, id, p)
             .await
-            .map_err(|e| anyhow::anyhow!(e))?;
+            .map_err(|e| ApiError::bad_request(e))?;
     }
 
     // 抖音号：upsert 到主号账号行
@@ -694,7 +704,7 @@ pub async fn delete_streamer(State(st): State<ArcState>, Path(id): Path<u64>) ->
     .execute(pool)
     .await?;
     if res.affected() == 0 {
-        return Err(anyhow::anyhow!("主播不存在或已删除").into());
+        return Err(ApiError::bad_request("主播不存在或已删除"));
     }
     Ok(Json(json!({ "ok": true })))
 }
@@ -1142,6 +1152,30 @@ fn period_first_day(period: &str) -> String {
     format!("{}-01", period.trim())
 }
 
+/// anyhow::Error → ApiError 的「白名单 400」翻译层（2026-10-14 审计 P2）：
+/// 只把**代码里写死的用户可修复提示**（含白名单关键词）显式转成 400 原样下发；
+/// 其余（真正的 sqlx/PG 错误、未知错误）原路走 anyhow 兜底 → 500 通用文案，
+/// 绝不把底层报错文本发给客户端。用在这几个 anyhow 签名的解析/查询辅助函数的
+/// 调用点上（body_rows / month_body_rows / streamer_row_by_id），让「缺少导入内容」
+/// 「主播不存在或已删除」这类运营能自己修的提示保住 400。
+fn nice_400(e: anyhow::Error) -> ApiError {
+    const NICE: &[&str] = &[
+        "缺少导入内容",
+        "没有解析到任何数据行",
+        "主播不存在或已删除",
+        "Excel 文件里没有工作表",
+        // commit_import 的两类显式拒绝：文案由代码拼好（含日期/行数/团别，不含底层细节）
+        "异常文件：",
+        "reject 模式：",
+    ];
+    let msg = e.to_string();
+    if NICE.iter().any(|k| msg.contains(k)) {
+        ApiError::bad_request(msg)
+    } else {
+        e.into()
+    }
+}
+
 async fn body_rows(
     text: &Option<String>,
     rows: &Option<Vec<ImportRow>>,
@@ -1161,9 +1195,7 @@ async fn body_rows(
             .as_deref()
             .map(str::trim)
             .filter(|t| !t.is_empty())
-            .ok_or_else(|| {
-                anyhow::anyhow!("缺少导入内容：text（粘贴文本）或 rows（结构化行）至少给一个")
-            })?;
+            .ok_or_else(|| anyhow::anyhow!("缺少导入内容：text（粘贴文本）或 rows（结构化行）至少给一个"))?;
         out = parse_any_text(text);
     }
     let dropped = strip_minutes(&mut out);
@@ -1205,9 +1237,7 @@ async fn month_body_rows(
             .as_deref()
             .map(str::trim)
             .filter(|t| !t.is_empty())
-            .ok_or_else(|| {
-                anyhow::anyhow!("缺少导入内容：text（文件内容）或 rows（结构化行）至少给一个")
-            })?;
+            .ok_or_else(|| anyhow::anyhow!("缺少导入内容：text（文件内容）或 rows（结构化行）至少给一个"))?;
         out = parse_month_duration_text(text);
     }
     Ok(out)
@@ -1265,7 +1295,8 @@ pub async fn import_preview(State(st): State<ArcState>, Json(body): Json<ImportB
     if !team.is_empty() {
         valid_team(team)?;
     }
-    let (raw_rows, dropped_minutes) = body_rows(&body.text, &body.rows).await?;
+    let (raw_rows, dropped_minutes) =
+        body_rows(&body.text, &body.rows).await.map_err(nice_400)?;
     ensure(!raw_rows.is_empty(), "没有解析到任何数据行")?;
     let ctx = load_match_ctx(&st).await?;
     let aliases = merged_aliases(&st).await;
@@ -1300,11 +1331,14 @@ pub async fn import_commit(State(st): State<ArcState>, Json(body): Json<ImportBo
     let biz_date = body
         .biz_date
         .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("缺少业务日期 bizDate"))?;
+        .ok_or_else(|| ApiError::bad_request("缺少业务日期 bizDate"))?;
     // 不分男女团是默认：team 不传 / 传 auto 都按主播档案逐行归属
     let team = body.team.as_deref().unwrap_or("auto");
     let mode = body.mode.as_deref().unwrap_or("merge");
-    let (rows, dropped_minutes) = body_rows(&body.text, &body.rows).await?;
+    let (rows, dropped_minutes) =
+        body_rows(&body.text, &body.rows).await.map_err(nice_400)?;
+    // commit_import 的「异常文件 / reject 模式」两类拒绝是代码拼好的运营提示
+    //（安全、可操作），经 nice_400 白名单保住 400；其余错误照旧 500 通用文案。
     let report = commit_import(
         &st,
         team,
@@ -1313,7 +1347,8 @@ pub async fn import_commit(State(st): State<ArcState>, Json(body): Json<ImportBo
         mode,
         body.filename.as_deref().unwrap_or("粘贴导入"),
     )
-    .await?;
+    .await
+    .map_err(nice_400)?;
     Ok(Json(json!({
         "ok": true,
         "batchId": report.batch_id,
@@ -2180,6 +2215,11 @@ pub struct PendingQuery {
     /// 丢弃某个号码（或采集 ID）的全部暂存行
     #[serde(rename = "douyinNo")]
     pub douyin_no: Option<String>,
+    /// 按保留期批量清理：删除「未认领 && created_at 早于 N 天前」的暂存行。
+    /// 2026-10-14：前台暂存 UI 已移除，但暂存行仍会持续写入，这是唯一的清理入口；
+    /// 实际删除逻辑在 store::import_pending_prune（见 docs/22-数据库运维说明.md）。
+    #[serde(rename = "pruneDays")]
+    pub prune_days: Option<i32>,
 }
 
 /// GET /api/admin/import/pending：暂存区列表（未认领的导入行）
@@ -2206,13 +2246,28 @@ pub async fn import_pending_list(State(st): State<ArcState>) -> ApiResult {
     Ok(Json(json!({ "items": items, "total": items.len() })))
 }
 
-/// DELETE /api/admin/import/pending?id= 或 ?douyinNo=：丢弃暂存行（不入库）
+/// DELETE /api/admin/import/pending?id= 或 ?douyinNo= 或 ?pruneDays=N：清理暂存行
+/// - ?id= / ?douyinNo=：丢弃指定行（原行为不变）
+/// - ?pruneDays=N：按保留期批量清理（只删未认领且早于 N 天的行；实际删除在
+///   store::import_pending_prune，含 ≤0 拒绝守卫与写失败日志）
 pub async fn import_pending_delete(
     State(st): State<ArcState>,
     Query(q): Query<PendingQuery>,
 ) -> ApiResult {
     require_local(&st)?;
     let pool = writer_pool(&st)?;
+    // pruneDays 与 id/douyinNo 互斥：给了 pruneDays 就走批量清理（显式丢弃优先级更高没意义，
+    // 两个语义混在一发请求里只会让运维数不清删了什么）
+    if let Some(days) = q.prune_days {
+        if q.id.is_some() || q.douyin_no.is_some() {
+            return Err(ApiError::bad_request("pruneDays 与 id / douyinNo 不能同时给"));
+        }
+        let Some(days) = crate::store::import_pending::valid_prune_days(days) else {
+            return Err(ApiError::bad_request("pruneDays 必须 > 0（例如 ?pruneDays=30）"));
+        };
+        let deleted = crate::store::import_pending_prune(&st, days).await;
+        return Ok(Json(json!({ "ok": true, "deleted": deleted })));
+    }
     let affected = match (q.id, q.douyin_no.as_deref().map(str::trim)) {
         (Some(id), _) if id > 0 => sqlx::query(&crate::pq::rewrite(
             "DELETE FROM import_pending WHERE id = ? AND absorbed_at IS NULL",
@@ -2228,7 +2283,7 @@ pub async fn import_pending_delete(
         .execute(pool)
         .await?
         .affected(),
-        _ => return Err(anyhow::anyhow!("要给 id 或 douyinNo 才能丢弃暂存行").into()),
+        _ => return Err(ApiError::bad_request("要给 id 或 douyinNo 才能丢弃暂存行")),
     };
     Ok(Json(json!({ "ok": true, "deleted": affected })))
 }
@@ -2500,7 +2555,7 @@ pub async fn import_month_preview(
     if !team.is_empty() && !is_auto_team(team) {
         valid_team(team)?;
     }
-    let raw_rows = month_body_rows(&body.text, &body.rows).await?;
+    let raw_rows = month_body_rows(&body.text, &body.rows).await.map_err(nice_400)?;
     ensure(
         !raw_rows.is_empty(),
         "没有解析到时长列：确认文件里有「时长 / 开播有效时长」这一列（月度时长只认时长列）",
@@ -2576,7 +2631,7 @@ pub async fn import_month_commit(
     valid_period(&period)?;
     let team = body.team.as_deref().unwrap_or("auto");
     let mode = body.mode.as_deref().unwrap_or("merge");
-    let rows = month_body_rows(&body.text, &body.rows).await?;
+    let rows = month_body_rows(&body.text, &body.rows).await.map_err(nice_400)?;
     let report = commit_month_duration(
         &st,
         &period,
@@ -2936,7 +2991,7 @@ async fn streamer_row_by_id(st: &AppState, id: u64) -> anyhow::Result<sqlx::post
 /// GET /api/admin/streamers/{id}/detail：主播详情（含全部账号）
 pub async fn streamer_detail(State(st): State<ArcState>, Path(id): Path<u64>) -> ApiResult {
     require_local(&st)?;
-    let row = streamer_row_by_id(&st, id).await?;
+    let row = streamer_row_by_id(&st, id).await.map_err(nice_400)?;
     let accounts =
         pgrs::query_with_binds(&st.pools, "LOCAL", dialect::ACCOUNTS_BY_PERSON_SQL, |q| {
             q.bind(id as i64)
@@ -3024,15 +3079,14 @@ pub async fn batch_my_accounts(
     require_local(&st)?;
     let items = body.items.unwrap_or_default();
     if items.is_empty() {
-        return Err(anyhow::anyhow!("名单为空：至少选一个主播").into());
+        return Err(ApiError::bad_request("名单为空：至少选一个主播"));
     }
     if items.len() > crate::store::BATCH_ACCOUNT_MAX {
-        return Err(anyhow::anyhow!(
+        return Err(ApiError::bad_request(format!(
             "一次最多开 {} 个账号（本次 {} 个，请分批提交）",
             crate::store::BATCH_ACCOUNT_MAX,
             items.len()
-        )
-        .into());
+        )));
     }
     let inputs: Vec<crate::store::BatchAccountInput> = items
         .iter()
@@ -3050,7 +3104,7 @@ pub async fn batch_my_accounts(
         })
         .collect();
     if inputs.is_empty() {
-        return Err(anyhow::anyhow!("名单里没有有效的主播 id").into());
+        return Err(ApiError::bad_request("名单里没有有效的主播 id"));
     }
 
     /* dry-run：不写库，只回一条"会怎么走"的汇总（打开页面时的预览）。
@@ -3070,7 +3124,7 @@ pub async fn batch_my_accounts(
         body.force_reset.unwrap_or(false),
     )
     .await
-    .map_err(|e| anyhow::anyhow!(e))?;
+    .map_err(|e| ApiError::bad_request(e))?;
 
     let (mut created, mut updated, mut skipped, mut failed) = (0usize, 0usize, 0usize, 0usize);
     for r in &rows {
@@ -3121,10 +3175,10 @@ pub async fn set_person_phone(
     ensure(id > 0, "无效的主播 id")?;
     let phone = body
         .phone
-        .ok_or_else(|| anyhow::anyhow!("缺少 phone 字段"))?;
+        .ok_or_else(|| ApiError::bad_request("缺少 phone 字段"))?;
     crate::store::person_set_phone(&st, id, &phone)
         .await
-        .map_err(|e| anyhow::anyhow!(e))?;
+        .map_err(|e| ApiError::bad_request(e))?;
     /* 写后回读校验（2026-10-13）：与 my_account_set 同口径——杜绝「返回 ok 但库里
        没写入」的静默失败（64 环境曾出现运营以为绑上了实际没绑）。 */
     let saved_phone = sqlx::query(&crate::pq::rewrite(
@@ -3137,12 +3191,11 @@ pub async fn set_person_phone(
     .and_then(|r| r.try_get::<String, _>("phone").ok())
     .unwrap_or_default();
     if saved_phone != phone.trim() {
-        return Err(anyhow::anyhow!(
+        return Err(ApiError::bad_request(format!(
             "手机号「{}」写入后校验失败（库里读到的是「{}」），请重试",
             phone.trim(),
             saved_phone
-        )
-        .into());
+        )));
     }
     Ok(Json(
         json!({ "ok": true, "personId": id, "phone": phone.trim() }),
@@ -3167,8 +3220,9 @@ pub async fn bind_account(
         .or(body.anchor_id.as_deref())
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("抖音号必填（一人可挂多个；抖音号全局唯一）"))?;
-    let no = crate::store::validate_douyin_no(douyin_no).map_err(|e| anyhow::anyhow!(e))?;
+        .ok_or_else(|| ApiError::bad_request("抖音号必填（一人可挂多个；抖音号全局唯一）"))?;
+    let no = crate::store::validate_douyin_no(douyin_no)
+        .map_err(|e| ApiError::bad_request(e))?;
     // 抖音号被别人占了 → 直接拒（不静默改绑，否则等于把别人的号抢过来）
     check_douyin_no_free(&st, Some(&no), Some(id)).await?;
     // 同一个人重复挂同一个号：幂等，不报错也不新增。
@@ -3431,7 +3485,7 @@ pub async fn set_master(
     let master_id = body.master_id.filter(|m| *m > 0);
 
     // 本人必须存在（顺带取名字做回显/报错）
-    let me = streamer_row_by_id(&st, id).await?;
+    let me = streamer_row_by_id(&st, id).await.map_err(nice_400)?;
     let me_name = read_str(&me, "name");
 
     let mut master_name: Option<String> = None;

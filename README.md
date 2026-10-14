@@ -161,7 +161,8 @@ PK147_PASS='<root 口令>' scripts/deploy/147.sh
 环境变量在 `/opt/pk-server/pk.env`（`WEB_DIST=/opt/pk-server/web`，监听 `127.0.0.1:8787`），
 数据库是本机容器 `pk-mariadb`，公网入口是 Caddy。旧的二进制/前端留在
 `/opt/pk-server/pk-server.bak-<时间戳>` 与 `web.bak-<时间戳>`，回滚就是换回去再重启。
-升级前会跑 `pk-server migrate`（只由 `douyin_migrator` 执行 DDL，按 `schema_migrations` 幂等）。
+升级前会跑 `pk-server migrate`（DDL 由迁移账号执行，按 `schema_migrations` 幂等；
+迁移账号必须是表属主，报「must be owner」的处置见 docs/22-数据库运维说明.md）。
 
 通用 compose（`deploy/docker-compose.yml`）：
 

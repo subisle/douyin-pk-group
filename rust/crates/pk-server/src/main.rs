@@ -697,6 +697,13 @@ async fn main() -> anyhow::Result<()> {
 
     let app = app.with_state(st.clone());
 
+    /* 2026-10-14 审计 P2：4MB 请求体上限提到**最外层**。
+    原先只挂在 public 子路由上 —— axum 的 layer 只包裹「注册于它之前」的路由，
+    所以 /api/admin/import/upload 等管理端上传口一直在用 axum 默认的 2MB，
+    而 admin.rs 的 413 文案写的是「文件超过 4MB 上限」，2MB 就被拒还谎报 4MB。
+    统一 4MB（管理端 CSV/Excel 上传需要），文案与实际阈值一致。 */
+    let app = app.layer(axum::extract::DefaultBodyLimit::max(4 * 1024 * 1024));
+
     let port: u16 = std::env::var("PORT")
         .ok()
         .and_then(|p| p.parse().ok())

@@ -157,7 +157,8 @@ pub async fn my_push_wechat_start(
         .unwrap_or_default();
     let (person_id, _actual_team, name) = my_ident(&team, token)?;
     if person_id == 0 && !crate::store::my_account_is_admin(&st, &name).await {
-        return Err(anyhow::anyhow!("该账号没有主播档案，不能绑定微信推送").into());
+        // 登录账号缺主播档案（管理员观看账号）：请求态不能做这个操作 → 显式 400
+        return Err(ApiError::bad_request("该账号没有主播档案，不能绑定微信推送"));
     }
     // 管理员观看账号（personId=0）也允许扫码绑定；团别留空，绑定后可看「我的」页推送入口。
     let team_scope = crate::store::person_team_of_name(&st, &name)
@@ -170,7 +171,8 @@ pub async fn my_push_wechat_start(
         .unwrap_or_default()
         .to_string();
     if qrcode.is_empty() {
-        return Err(anyhow::anyhow!("微信接口没有返回二维码").into());
+        // 上游微信接口没吐二维码（上游故障或参数被拒）：给用户引导话术 400，细节留上游日志
+        return Err(ApiError::bad_request("微信接口没有返回二维码，请稍后再试"));
     }
     pending_wx_put(&qrcode, &name, person_id, &team_scope);
     Ok(Json(json!({
@@ -200,14 +202,14 @@ pub async fn my_push_wechat_poll(
         .trim()
         .to_string();
     if qrcode.is_empty() {
-        return Err(anyhow::anyhow!("缺少 qrcode").into());
+        return Err(ApiError::bad_request("缺少 qrcode"));
     }
     let verify = body
         .get("verifyCode")
         .or_else(|| body.get("verify_code"))
         .and_then(|v| v.as_str());
     let Some((_pid, team_scope, poll_base)) = pending_wx_take(&qrcode, &name) else {
-        return Err(anyhow::anyhow!("二维码已过期，请重新获取").into());
+        return Err(ApiError::bad_request("二维码已过期，请重新获取"));
     };
     let base = if poll_base.is_empty() {
         "https://ilinkai.weixin.qq.com"
@@ -249,7 +251,7 @@ pub async fn my_push_wechat_poll(
         .unwrap_or_default()
         .to_string();
     if bot_token.is_empty() || bot_id.is_empty() || user_id.is_empty() {
-        return Err(anyhow::anyhow!("扫码已确认，但微信没有返回完整凭证").into());
+        return Err(ApiError::bad_request("扫码已确认，但微信没有返回完整凭证，请重试"));
     }
     // 重扫不丢已激活绑定（2026-10-13 用户口径：配置还要和之前一样）：
     // 覆盖凭证前先取库里已有账号，下面重申 push_bindings 时带上旧会话。
@@ -308,7 +310,10 @@ pub async fn my_push_wechat_poll(
     }
     crate::store::wx_push_account_save(&st, &acct)
         .await
-        .map_err(|e| anyhow::anyhow!("保存微信凭证失败：{e}"))?;
+        .map_err(|e| {
+            tracing::error!(error = %e, "保存微信凭证失败");
+            anyhow::anyhow!("保存微信凭证失败：{e}")
+        })?;
     if rescan_new_wechat {
         if let Some(e) = &existing {
             let old_conv =
@@ -352,7 +357,10 @@ pub async fn my_push_code(
     let code = crate::push::new_bind_code();
     crate::store::push_set_code(&st, &name, &team, person_id, &code)
         .await
-        .map_err(|e| anyhow::anyhow!("生成绑定码失败：{e}"))?;
+        .map_err(|e| {
+            tracing::error!(error = %e, "生成绑定码失败");
+            anyhow::anyhow!("生成绑定码失败：{e}")
+        })?;
     let state = crate::store::push_state(&st, &name).await;
     Ok(Json(json!({
         "ok": true,
@@ -411,14 +419,15 @@ pub async fn my_push_target_add(
         team.as_str()
     };
     if person_id == 0 {
-        return Err(anyhow::anyhow!("管理员观看账号没有音浪数据，不能设置追分目标").into());
+        return Err(ApiError::bad_request(
+            "管理员观看账号没有音浪数据，不能设置追分目标",
+        ));
     }
     if crate::store::target_count(&st, &name).await >= crate::push::MAX_TARGETS {
-        return Err(anyhow::anyhow!(format!(
+        return Err(ApiError::bad_request(format!(
             "最多只能追 {} 个人，请先删掉一个",
             crate::push::MAX_TARGETS
-        ))
-        .into());
+        )));
     }
     let kind = body
         .get("kind")
@@ -430,11 +439,15 @@ pub async fn my_push_target_add(
                 .get("valueWan")
                 .and_then(|v| v.as_f64())
                 .filter(|v| *v > 0.0)
-                .ok_or_else(|| anyhow::anyhow!("请输入本月目标（万），要大于 0"))?;
+                .ok_or_else(|| ApiError::bad_request("请输入本月目标（万），要大于 0"))?;
             let raw = (wan * 10_000.0).round() as i64;
-            crate::store::target_add(&st, &name, team_scope, "value", 0, "", raw)
-                .await
-                .map_err(|e| anyhow::anyhow!("保存失败：{e}"))?;
+            let t = crate::store::target_add(&st, &name, team_scope, "value", 0, "", raw)
+                .await;
+            if let Err(e) = t {
+                // 底层写库失败：原文留日志，客户端给通用提示（不再靠「失败」关键词兜）
+                tracing::error!(error = %e, "保存追分目标（自定义分）失败");
+                return Err(anyhow::anyhow!("保存失败：{e}").into());
+            }
         }
         // 追名次（2026-10-10）：target_value 存目标名次，名字列存展示文案
         "rank" => {
@@ -442,15 +455,15 @@ pub async fn my_push_target_add(
                 .get("targetRank")
                 .and_then(|v| v.as_i64())
                 .filter(|v| (1..=999).contains(v))
-                .ok_or_else(|| anyhow::anyhow!("请输入要追的名次（1~999）"))?;
+                .ok_or_else(|| ApiError::bad_request("请输入要追的名次（1~999）"))?;
             let dup = crate::store::targets_for_push(&st, &name)
                 .await
                 .into_iter()
                 .any(|t| t.kind == "rank" && t.target_value == rank);
             if dup {
-                return Err(anyhow::anyhow!("已经在追这个名次了").into());
+                return Err(ApiError::bad_request("已经在追这个名次了"));
             }
-            crate::store::target_add(
+            let t = crate::store::target_add(
                 &st,
                 &name,
                 team_scope,
@@ -459,17 +472,20 @@ pub async fn my_push_target_add(
                 &format!("第 {rank} 名"),
                 rank,
             )
-            .await
-            .map_err(|e| anyhow::anyhow!("保存失败：{e}"))?;
+            .await;
+            if let Err(e) = t {
+                tracing::error!(error = %e, "保存追分目标（名次）失败");
+                return Err(anyhow::anyhow!("保存失败：{e}").into());
+            }
         }
         _ => {
             let tid = body
                 .get("personId")
                 .and_then(|v| v.as_u64())
                 .filter(|v| *v > 0)
-                .ok_or_else(|| anyhow::anyhow!("请选择要追的主播"))?;
+                .ok_or_else(|| ApiError::bad_request("请选择要追的主播"))?;
             if tid == person_id {
-                return Err(anyhow::anyhow!("不能追自己").into());
+                return Err(ApiError::bad_request("不能追自己"));
             }
             // 只允许追本团在册主播（搜索接口也只下发本团名单，这里是服务端兜底）
             let anchor = crate::store::team_anchor_search(&st, &sid(&st), team_scope, "", 1000)
@@ -477,7 +493,7 @@ pub async fn my_push_target_add(
                 .into_iter()
                 .find(|a| a.get("personId").and_then(|v| v.as_u64()) == Some(tid));
             let Some(anchor) = anchor else {
-                return Err(anyhow::anyhow!("没有找到这个主播（只能追本团在册主播）").into());
+                return Err(ApiError::bad_request("没有找到这个主播（只能追本团在册主播）"));
             };
             let tname = anchor
                 .get("name")
@@ -493,10 +509,12 @@ pub async fn my_push_target_add(
                     // ApiResult 的错误是 ApiError（From<anyhow::Error>）；ensure! 的宏展开
                     // 在返回 ApiError 的函数里类型不匹配，改成手写 if + anyhow!(...).into()
                     if w <= 0.0 {
-                        return Err(anyhow::anyhow!("目标分要大于 0（万）").into());
+                        return Err(ApiError::bad_request("目标分要大于 0（万）"));
                     }
                     if w > 100_000_000.0 {
-                        return Err(anyhow::anyhow!("目标分太大了，检查一下单位（万）").into());
+                        return Err(ApiError::bad_request(
+                            "目标分太大了，检查一下单位（万）",
+                        ));
                     }
                     (w * 10_000.0).round() as i64
                 }
@@ -513,11 +531,15 @@ pub async fn my_push_target_add(
                 .into_iter()
                 .any(|t| t.kind == "person" && t.target_person_id == tid);
             if dup {
-                return Err(anyhow::anyhow!("已经在追这个主播了").into());
+                return Err(ApiError::bad_request("已经在追这个主播了"));
             }
-            crate::store::target_add(&st, &name, team_scope, "person", tid, &display, custom_raw)
-                .await
-                .map_err(|e| anyhow::anyhow!("保存失败：{e}"))?;
+            let t =
+                crate::store::target_add(&st, &name, team_scope, "person", tid, &display, custom_raw)
+                    .await;
+            if let Err(e) = t {
+                tracing::error!(error = %e, "保存追分目标（追人）失败");
+                return Err(anyhow::anyhow!("保存失败：{e}").into());
+            }
         }
     }
     Ok(Json(
@@ -539,7 +561,7 @@ pub async fn my_push_target_del(
     let id = body
         .get("id")
         .and_then(|v| v.as_u64())
-        .ok_or_else(|| anyhow::anyhow!("缺少目标 id"))?;
+        .ok_or_else(|| ApiError::bad_request("缺少目标 id"))?;
     crate::store::target_delete(&st, &name, id as i64).await;
     Ok(Json(
         json!({ "targets": crate::store::targets_list(&st, &name).await }),

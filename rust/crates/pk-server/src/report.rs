@@ -738,7 +738,11 @@ pub async fn daily_svg(
         _ => dates.first().cloned().unwrap_or_default(),
     };
     if date.is_empty() {
-        return Err(anyhow::anyhow!("还没有采集到任何日期").into());
+        // 2026-10-14 审计 P2：库里一条业务日都没有 → 这是运营可理解的状态，不是服务端故障。
+        // 原先走 anyhow 兜底落 500，运营只看到「服务器开小差了」。显式 400 + 明确文案。
+        return Err(crate::routes::ApiError::bad_request(
+            "还没有采集到任何日期（先在「导入」页上传一份音浪文件）",
+        ));
     }
     let team = match q.team.as_deref() {
         Some("female") => "female",

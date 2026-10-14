@@ -16,17 +16,35 @@ use crate::store;
 
 type ApiResult = Result<Json<serde_json::Value>, ApiError>;
 
-pub struct ApiError(anyhow::Error, Option<StatusCode>);
+/// 第二个字段：该文案是否**明确面向客户端**。
+/// `true`  = 由 ApiError::auth / bad_request / with_status / forbidden 显式构造，
+///           文案是开发者手写的面向用户的安全话术，可原样下发；
+/// `false` = 由 From<anyhow::Error> / From<sqlx::Error> 等兜底转来 —— 内容多半带着
+///           sqlx/PG 的表名、约束名、SQL 片段，属于实现细节，**绝不能**外发。
+/// 2026-10-14 审计 P2：原先靠中文关键词猜 400，结果 PG 报错里含「不存在」「唯一」
+/// 就被当成 400 把原文（表名/约束名/SQL 片段）回传客户端；反过来真正的用户错误
+/// （「不支持的文件类型」「无效的主播 id」）不含关键词，落 500 只能看到通用文案。
+pub struct ApiError(anyhow::Error, Option<StatusCode>, bool, Option<serde_json::Value>);
 
 impl ApiError {
     /// 登录态问题（未登录 / 过期 / 团别不符）→ 401，展示端登录门据此弹登录卡
     pub fn auth(msg: impl Into<String>) -> Self {
-        Self(anyhow::anyhow!(msg.into()), Some(StatusCode::UNAUTHORIZED))
+        Self(
+            anyhow::anyhow!(msg.into()),
+            Some(StatusCode::UNAUTHORIZED),
+            true,
+            None,
+        )
     }
 
     /// 明确的 400（功能没开之类）：不靠中文关键词推断，文案可以随便写
     pub fn bad_request(msg: impl Into<String>) -> Self {
-        Self(anyhow::anyhow!(msg.into()), Some(StatusCode::BAD_REQUEST))
+        Self(
+            anyhow::anyhow!(msg.into()),
+            Some(StatusCode::BAD_REQUEST),
+            true,
+            None,
+        )
     }
 
     /// 显式指定状态码的错误（2026-10-12 审计 L3）：给 axum 已经分好类、
@@ -34,37 +52,54 @@ impl ApiError {
     /// 注意带显式状态码的文案会原样回传客户端（不走 500 的通用文案兜底），
     /// 所以调用方只能传面向用户的安全文案。
     pub fn with_status(status: StatusCode, msg: impl Into<String>) -> Self {
-        Self(anyhow::anyhow!(msg.into()), Some(status))
+        Self(anyhow::anyhow!(msg.into()), Some(status), true, None)
+    }
+
+    /// 显式状态码 + 自定义响应体（2026-10-14 审计 P1）：/api/public/my/login 被
+    /// LoginLimiter 锁定时返回 429 且要带 `lockedFor` 字段（与 /api/auth/login
+    /// 的响应结构对齐，前端才能做「请 X 秒后再试」倒计时）。文案/字段由调用方
+    /// 保证是面向用户的安全内容，原样下发，不做任何关键词推断。
+    pub fn with_json(status: StatusCode, body: serde_json::Value) -> Self {
+        Self(anyhow::anyhow!(""), Some(status), true, Some(body))
     }
 
     /// 地区 / 访问限制：前端不应把 403 当作“需要重新登录”处理
     pub fn forbidden(msg: impl Into<String>) -> Self {
-        Self(anyhow::anyhow!(msg.into()), Some(StatusCode::FORBIDDEN))
+        Self(
+            anyhow::anyhow!(msg.into()),
+            Some(StatusCode::FORBIDDEN),
+            true,
+            None,
+        )
     }
 }
 
 impl From<anyhow::Error> for ApiError {
     fn from(e: anyhow::Error) -> Self {
-        Self(e, None)
+        Self(e, None, false, None)
     }
 }
 
 impl From<sqlx::Error> for ApiError {
     fn from(e: sqlx::Error) -> Self {
-        Self(e.into(), None)
+        Self(e.into(), None, false, None)
     }
 }
 
 impl From<serde_json::Error> for ApiError {
     fn from(e: serde_json::Error) -> Self {
-        Self(e.into(), None)
+        Self(e.into(), None, false, None)
     }
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
         let msg = self.0.to_string();
+        // with_json（显式状态码 + 自定义响应体）：原样返回，不走任何推断
         if let Some(status) = self.1 {
+            if let Some(body) = self.3 {
+                return (status, Json(body)).into_response();
+            }
             return (status, Json(json!({ "error": msg }))).into_response();
         }
         let bad_request = msg.contains("缺少")
@@ -101,8 +136,21 @@ impl IntoResponse for ApiError {
         // 2026-10-12 安全审计 L5：500 类错误不把底层文本回传客户端——
         // sqlx/PG 的报错常带表名、约束名、SQL 片段，属于实现细节泄露。
         // 服务端日志（上一行）已留全量原文，客户端只给通用提示。
-        let client_msg = if status == StatusCode::INTERNAL_SERVER_ERROR {
-            "服务器开小差了，请稍后重试".to_string()
+        // 2026-10-14 审计 P2（本条补口子）：**非 500 也一样**——凡是靠 From<...>
+        // 兜底转来的错误（safe=false），即使被关键词猜成了 400/429/503，
+        // 原文同样可能带 PG 的表名/约束名/SQL 片段，一律给通用文案。
+        // 只有显式构造（safe=true）的文案才原样下发。
+        let client_msg = if !self.2 || status == StatusCode::INTERNAL_SERVER_ERROR {
+            if status == StatusCode::INTERNAL_SERVER_ERROR {
+                "服务器开小差了，请稍后重试".to_string()
+            } else {
+                // 4xx 但来源不明：给一句与状态码匹配的通用话术，不外发原文
+                match status {
+                    StatusCode::TOO_MANY_REQUESTS => "尝试太频繁，请稍后再试".to_string(),
+                    StatusCode::SERVICE_UNAVAILABLE => "服务暂时不可用，请稍后重试".to_string(),
+                    _ => "请求参数有误，请检查后重试".to_string(),
+                }
+            }
         } else {
             msg
         };

@@ -168,7 +168,7 @@ pub async fn daily(
         _ => dates.first().cloned().unwrap_or_default(),
     };
     if date.is_empty() {
-        return Err(anyhow::anyhow!("暂未公布数据").into());
+        return Err(ApiError::bad_request("暂未公布数据"));
     }
     let source = sid(&st);
     // 前一业务日（用于名次变动 ↑↓）

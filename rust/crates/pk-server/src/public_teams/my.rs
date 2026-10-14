@@ -42,7 +42,10 @@ pub async fn verify(
     }
     let limiter_ok = public_write_allow(&client_ip_for_limit(addr, &headers));
     if !limiter_ok {
-        return Err(anyhow::anyhow!("尝试太频繁，请稍后再试").into());
+        return Err(ApiError::with_status(
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            "尝试太频繁，请稍后再试",
+        ));
     }
     // 账号 = 手机号或姓名：新前端传 account，老前端传 name，两者都行
     let acct = body
@@ -65,7 +68,7 @@ pub async fn verify(
         .unwrap_or_default()
         .to_string();
     if acct.is_empty() || pass.trim().is_empty() {
-        return Err(anyhow::anyhow!("请输入账号和密码").into());
+        return Err(ApiError::bad_request("请输入账号和密码"));
     }
 
     /* 1. 账号校验：手机号+密码 或 姓名+密码（my_accounts 名单，管理员手动维护 / 手机号自助注册） */
@@ -195,7 +198,27 @@ pub async fn my_login(
     }
     let limiter_ok = public_write_allow(&client_ip_for_limit(addr, &headers));
     if !limiter_ok {
-        return Err(anyhow::anyhow!("尝试太频繁，请稍后再试").into());
+        return Err(ApiError::with_status(
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            "尝试太频繁，请稍后再试",
+        ));
+    }
+    /* 2026-10-14 审计 P1：登录接入 LoginLimiter（连续失败锁 10 分钟）。
+    原先这里只过上面的 5 次/分滑动窗口，攻击者换 IP 即可对公开端点慢速爆破
+    管理员口令（下面的快捷口令分支会跑 argon2，白送算力）。现在与 /api/auth/login
+    共用同一套「连续失败 5 次锁 10 分钟」，key 用同一来源口径并加 mylogin: 前缀分桶。 */
+    let login_key = format!("mylogin:{}", client_ip_for_limit(addr, &headers));
+    if st.auth.login_locked(&login_key) {
+        let wait = st.auth.login_locked_seconds(&login_key);
+        tracing::warn!(ip = %client_ip, wait_s = wait, "展示端登录失败次数过多，来源被临时锁定");
+        // 与 /api/auth/login 同一响应结构（error + lockedFor），前端可做倒计时提示
+        return Err(ApiError::with_json(
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            json!({
+                "error": format!("失败次数过多，请 {wait} 秒后再试"),
+                "lockedFor": wait,
+            }),
+        ));
     }
     let acct = body
         .get("account")
@@ -217,7 +240,7 @@ pub async fn my_login(
         .unwrap_or_default()
         .to_string();
     if acct.is_empty() || pass.trim().is_empty() {
-        return Err(anyhow::anyhow!("请输入账号和密码").into());
+        return Err(ApiError::bad_request("请输入账号和密码"));
     }
 
     /* 0. 管理员快捷口令（账号、密码填同一个管理员口令即可登录展示页）：
@@ -227,6 +250,7 @@ pub async fn my_login(
     2026-10-12 安全审计 M1：account 字段绝不能落口令本体——access_logs 运营可查
     （/api/admin/visits 支持关键字搜索）且随备份 dump 外流。这里记固定占位符。 */
     if acct == pass && st.auth.verify_admin_password(&acct) {
+        st.auth.login_record_success(&login_key);
         crate::ipinfo::log_login_path(
             &st,
             &client_ip,
@@ -244,9 +268,13 @@ pub async fn my_login(
             "token": token, "admin": true, "bound": true
         })));
     }
+    // 快捷口令没对上 → 记一次失败（达到阈值即锁 10 分钟）。注意：这里**必须**记 ——
+    // 不记的话攻击者可以用「永远走不进的快捷分支」白跑 argon2 而不触发锁定。
+    let _now_locked = st.auth.login_record_failure(&login_key);
 
     /* 1. 账号校验（与 verify 同一套 my_accounts） */
     let Some(account_name) = crate::store::my_account_check_login(&st, &acct, &pass).await else {
+        let _now_locked = st.auth.login_record_failure(&login_key);
         crate::ipinfo::log_login_path(
             &st,
             &client_ip,
@@ -259,6 +287,8 @@ pub async fn my_login(
         .await;
         return Ok(Json(json!({ "ok": false })));
     };
+    // 账号密码正确 → 清零失败计数（与 /api/auth/login 同口径：成功即解锁）
+    st.auth.login_record_success(&login_key);
     /* 1.5 账号没绑主播：两个团都放行，token 挂 MY_ANY_KEY（登录后强制绑定） */
     if let Some(info) = crate::store::my_account_info(&st, &account_name).await {
         if !info.bound && !info.is_admin {
@@ -395,13 +425,16 @@ pub async fn my_register_oauth_start(
 ) -> ApiResult {
     ensure_register_open(&st).await?;
     if !public_register_allow(&client_ip_for_limit(addr, &headers)) {
-        return Err(anyhow::anyhow!("尝试太频繁，请稍后再试").into());
+        return Err(ApiError::with_status(
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            "尝试太频繁，请稍后再试",
+        ));
     }
     let Some(wb) = st.wb.get() else {
-        return Err(anyhow::anyhow!(
-            "服务端还没有配置 WorkBuddy 网关（WORKBUDDY_PANEL_PASSWORD），暂时不能自动添加账号"
-        )
-        .into());
+        // 面向用户的配置缺口提示：注册流程在没配网关时给 400 引导话术（非服务端故障）
+        return Err(ApiError::bad_request(
+            "服务端还没有配置 WorkBuddy 网关（WORKBUDDY_PANEL_PASSWORD），暂时不能自动添加账号",
+        ));
     };
     let realm = body
         .get("realm")
@@ -410,7 +443,11 @@ pub async fn my_register_oauth_start(
     let (state, auth_url, realm) = wb
         .login_start(realm)
         .await
-        .map_err(|e| anyhow::anyhow!("申请授权链接失败：{e}"))?;
+        .map_err(|e| {
+            // 网关返回的 e 可能带上游 HTTP 细节：给出面向用户的主文案，细节留日志
+            tracing::warn!(error = %e, "申请 WorkBuddy 授权链接失败");
+            ApiError::bad_request("申请授权链接失败，请稍后再试或联系管理员")
+        })?;
     Ok(Json(
         json!({ "ok": true, "state": state, "authUrl": auth_url, "realm": realm }),
     ))
@@ -437,18 +474,30 @@ pub async fn my_register_oauth_poll(
     /* 审计 2026-10-11：轮询接口会代打 WorkBuddy 网关面板，加一档宽松限流
     （前端 2.5s 一次，正常远低于 120/分） */
     if !public_poll_allow(&client_ip_for_limit(addr, &headers)) {
-        return Err(anyhow::anyhow!("尝试太频繁，请稍后再试").into());
+        return Err(ApiError::with_status(
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            "尝试太频繁，请稍后再试",
+        ));
     }
     let state = q.state.unwrap_or_default();
     let state = state.trim();
     if state.is_empty() || state.len() > 128 {
-        return Err(anyhow::anyhow!("缺少授权流水号 state").into());
+        return Err(ApiError::bad_request("缺少授权流水号 state"));
     }
     ensure_register_open(&st).await?;
     let Some(wb) = st.wb.get() else {
-        return Err(anyhow::anyhow!("服务端还没有配置 WorkBuddy 网关，不能查询授权状态").into());
+        return Err(ApiError::bad_request(
+            "服务端还没有配置 WorkBuddy 网关，不能查询授权状态",
+        ));
     };
-    let v = wb.login_poll(state).await.map_err(|e| anyhow::anyhow!(e))?;
+    let v = wb
+        .login_poll(state)
+        .await
+        .map_err(|e| {
+            // 网关返回的 e 可能带上游 HTTP 状态/报文细节：细节留日志，客户端给通用话术
+            tracing::warn!(error = %e, "查询 WorkBuddy 授权状态失败");
+            ApiError::bad_request("查询授权状态失败，请稍后再试或联系管理员")
+        })?;
     let status = v
         .get("status")
         .and_then(|s| s.as_str())
@@ -507,7 +556,10 @@ pub async fn my_register_check_name(
     /* 审计 2026-10-11：姓名校验是免 token 的精确匹配查询，不限流就能被脚本拿来做
     「某个艺名在不在册」的枚举，和注册接口共用同一档限流。 */
     if !public_register_allow(&client_ip_for_limit(addr, &headers)) {
-        return Err(anyhow::anyhow!("尝试太频繁，请稍后再试").into());
+        return Err(ApiError::with_status(
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            "尝试太频繁，请稍后再试",
+        ));
     }
     let key = q.q.clone().unwrap_or_default();
     let key = key.trim();
@@ -548,7 +600,10 @@ pub async fn my_register(
 ) -> ApiResult {
     ensure_register_open(&st).await?;
     if !public_register_allow(&client_ip_for_limit(addr, &headers)) {
-        return Err(anyhow::anyhow!("尝试太频繁，请稍后再试").into());
+        return Err(ApiError::with_status(
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            "尝试太频繁，请稍后再试",
+        ));
     }
     let phone = body
         .get("phone")
@@ -583,6 +638,8 @@ pub async fn my_register(
                     || e.starts_with("查重失败")
                     || e.starts_with("写入失败")
                 {
+                    // 底层库故障（500 走通用文案）；原文细节留日志
+                    tracing::error!(error = %e, "注册账号写入失败");
                     ApiError::from(anyhow::anyhow!(e))
                 } else {
                     ApiError::bad_request(e)
@@ -637,7 +694,10 @@ pub async fn my_password_reset(
 ) -> ApiResult {
     ensure_register_open(&st).await?;
     if !public_register_allow(&client_ip_for_limit(addr, &headers)) {
-        return Err(anyhow::anyhow!("尝试太频繁，请稍后再试").into());
+        return Err(ApiError::with_status(
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            "尝试太频繁，请稍后再试",
+        ));
     }
     let phone = body
         .get("phone")
@@ -648,6 +708,8 @@ pub async fn my_password_reset(
         .map_err(|e| {
             /* 与注册同口径：业务拒绝 400，库层故障 500（审计 2026-10-11） */
             if e.starts_with("查询账号失败") || e.starts_with("重置失败") {
+                // 底层库故障（500 走通用文案）；原文细节留日志
+                tracing::error!(error = %e, "重置展示端账号密码失败");
                 ApiError::from(anyhow::anyhow!(e))
             } else {
                 ApiError::bad_request(e)

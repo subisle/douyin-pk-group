@@ -279,12 +279,17 @@ pub(super) fn my_tokens() -> &'static std::sync::Mutex<MyTokenMap> {
     MY_TOKENS.get_or_init(std::sync::Mutex::default)
 }
 
-/// 进程内随机数来源：RandomState 每次构造都带 OS 级随机种子，省一个 rand 依赖
-pub(super) fn rand_u64() -> u64 {
-    use std::hash::{BuildHasher, Hasher};
-    std::collections::hash_map::RandomState::new()
-        .build_hasher()
-        .finish()
+/// 2026-10-14 审计 P2：my token 改 **CSPRNG**。原先用 RandomState（SipHash，
+/// 每进程一个随机 key）——不是密码学生成器，输出可被观测/预测，而 token 一旦
+/// 被猜中就是 24h 的完整登录态。改用 crate::random::random_code（getrandom →
+/// OS CSPRNG，auth.rs 的 ticket 也走它），长度与 `my-<16hex>-<16hex>` 格式不变。
+fn my_token_random() -> String {
+    const HEX: &[u8] = b"0123456789abcdef";
+    format!(
+        "my-{}-{}",
+        crate::random::random_code(16, HEX),
+        crate::random::random_code(16, HEX)
+    )
 }
 
 /// 全局 AppState 钩子（2026-10-12 登录态持久化）：main 启动时注册，
@@ -376,7 +381,8 @@ async fn mytok_redis_revoke(
 
 pub(super) fn my_token_put(person_id: u64, team: String, name: String) -> String {
     // token 不再编入 pid/时间戳（老格式可被相邻值猜中），纯随机串，映射关系只存在内存里
-    let token = format!("my-{:016x}-{:016x}", rand_u64(), rand_u64());
+    // 2026-10-14 审计 P2：随机源从 RandomState 换成 CSPRNG（random::random_code）
+    let token = my_token_random();
     let mut m = my_tokens().lock().expect("my token 锁 poisoned");
     m.retain(|_, (_, _, _, at)| at.elapsed() < Duration::from_secs(24 * 3600));
     m.insert(token.clone(), (person_id, team.clone(), name.clone(), Instant::now()));
