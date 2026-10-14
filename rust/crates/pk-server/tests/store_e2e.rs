@@ -1239,3 +1239,136 @@ async fn unbind_account_keeps_snapshots_traced() {
         "测试快照已清理"
     );
 }
+
+/* ══════════ 暂存补账幂等性（2026-10-14） ══════════
+   后台「导入暂存区」的 UI 入口已移除：运营不再能手工挨行「建档 / 丢弃」。
+   这条链路现在完全依赖 absorb 自动补账，因此它的**幂等性**成了唯一防线 ——
+   一旦重复补账，音浪会静默翻倍且没有任何前端提示能让运营察觉。
+
+   触发点共 5 处（create_streamer / update_streamer / bind_account ×3 / 绑定审核通过），
+   建档后往往会紧跟一次绑号（或二次编辑），同一个 person_id 会被 absorb 多次。
+   本测试把「连续两次 absorb」钉死：第二次必须补 0 行、daily_metric 数值不变。
+
+   ⚠️ 方言提醒：本文件其余用例是 MySQL 时代写的（`?` 占位符、`DELETE d FROM ... JOIN`），
+   直接 `sqlx::query("...")` 没走生产代码的 `pq::rewrite`，在 PostgreSQL 下会报
+   `syntax error at or near ","`。所以它们一旦真正跑起来（配了 DB_*）就会失败。
+   本用例改用 **PG 原生 $n**，是该文件里第一个在真实 PG 上真跑真断言的 e2e；
+   新增用例请照此写法。 */
+
+#[tokio::test]
+async fn absorb_pending_is_idempotent_across_repeated_calls() {
+    let Some(st) = setup().await else { return };
+    if !need_writer(&st) {
+        return;
+    }
+    let pool = st.writer.as_ref().expect("writer");
+    let name = format!("{MERGE_PREFIX}暂存补账");
+    let no = format!("{MERGE_PREFIX}_pending_no");
+    let nomatch = format!("{MERGE_PREFIX}_nomatch");
+    let biz = "2999-02-01";
+
+    cleanup_admin_e2e(&st).await;
+
+    let pid = sqlx::query(
+        "INSERT INTO person (name, gender, status) VALUES ($1, 'male', 'active') RETURNING id",
+    )
+    .bind(&name)
+    .fetch_one(pool)
+    .await
+    .expect("建测试主播")
+    .try_get::<i64, _>(0)
+    .expect("id");
+
+    let _ = sqlx::query("DELETE FROM import_pending WHERE douyin_no = ANY($1)")
+        .bind(vec![no.clone(), nomatch.clone()])
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("DELETE FROM account WHERE douyin_no = $1")
+        .bind(&no)
+        .execute(pool)
+        .await;
+
+    // 该主播持有一个抖音号 —— absorb 的命中依据（PENDING_FOR_PERSON_SQL）
+    sqlx::query(
+        "INSERT INTO account (person_id, anchor_id, douyin_no, is_primary) VALUES ($1,$2,$3,1)",
+    )
+    .bind(pid)
+    .bind(&no)
+    .bind(&no)
+    .execute(pool)
+    .await
+    .expect("挂账号");
+
+    // 两行暂存：一行能对上号（应命中），一行无关（不应命中）
+    for (no2, w) in [(no.clone(), 500i64), (nomatch.clone(), 700i64)] {
+        sqlx::query(
+            "INSERT INTO import_pending (name, douyin_no, biz_date, wave, minutes)
+             VALUES ($1,$2,$3::date,$4,$5)
+             ON CONFLICT (douyin_no, biz_date) DO UPDATE SET wave = EXCLUDED.wave",
+        )
+        .bind(&name)
+        .bind(&no2)
+        .bind(biz)
+        .bind(w)
+        .bind(30i32)
+        .execute(pool)
+        .await
+        .expect("插暂存行");
+    }
+
+    let got = pk_server::admin::absorb_pending(&st, pid as u64)
+        .await
+        .expect("首次补账");
+    assert_eq!(got, 1, "首轮只补能对上号的那 1 行（实际 {got}）");
+
+    let wave_after_first: i64 = sqlx::query(
+        "SELECT (SUM(wave))::BIGINT FROM daily_metric WHERE person_id = $1 AND biz_date = $2::date",
+    )
+    .bind(pid)
+    .bind(biz)
+    .fetch_one(pool)
+    .await
+    .expect("查当日")
+    .try_get::<i64, _>(0)
+    .unwrap_or(0);
+    assert!(
+        wave_after_first > 0,
+        "首轮补账必须真的落进 daily_metric（实际 {wave_after_first}）"
+    );
+
+    let got2 = pk_server::admin::absorb_pending(&st, pid as u64)
+        .await
+        .expect("二次补账");
+    assert_eq!(
+        got2, 0,
+        "重复 absorb 绝不能再补行（否则音浪翻倍，实际补了 {got2} 行）"
+    );
+
+    let wave_after_second: i64 = sqlx::query(
+        "SELECT (SUM(wave))::BIGINT FROM daily_metric WHERE person_id = $1 AND biz_date = $2::date",
+    )
+    .bind(pid)
+    .bind(biz)
+    .fetch_one(pool)
+    .await
+    .expect("查当日")
+    .try_get::<i64, _>(0)
+    .unwrap_or(0);
+    assert_eq!(
+        wave_after_second, wave_after_first,
+        "二次 absorb 后当日音浪必须不变（首次 {wave_after_first}，二次 {wave_after_second}）"
+    );
+
+    let still: i64 = sqlx::query(
+        "SELECT COUNT(*) FROM import_pending WHERE douyin_no = $1 AND absorbed_at IS NULL",
+    )
+    .bind(&nomatch)
+    .fetch_one(pool)
+    .await
+    .expect("查未命中行")
+    .try_get::<i64, _>(0)
+    .unwrap_or(0);
+    assert_eq!(still, 1, "对不上号的暂存行不该被 absorb 吞掉（实际剩 {still}）");
+
+    cleanup_admin_e2e(&st).await;
+}
