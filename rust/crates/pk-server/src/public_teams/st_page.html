@@ -515,8 +515,10 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .st-my-rank .bar { margin-top:.375rem; height:.375rem; border-radius:9999px;
   background:var(--surface-container-highest); overflow:hidden; }
 .st-my-rank .bar i { display:block; height:100%; border-radius:9999px; background:var(--primary); }
-/* ===== Stitch 音浪对比卡（2026-10-13）：三段同期对照 + 分成收益行 ===== */
-.st-my-big .st-cmp-row { display:flex; align-items:baseline; gap:.375rem;
+/* ===== Stitch 音浪对比卡（2026-10-13）：三段同期对照 + 分成收益行 =====
+   2026-10-14 用户反馈行内太挤：gap 收到 .25rem，右侧「比X」小字 11→10.5px，
+   cv 右对齐不动（.st-cmp-pct 涨跌百分比保留） */
+.st-my-big .st-cmp-row { display:flex; align-items:baseline; gap:.25rem;
   padding:.4375rem 0; border-bottom:1px solid var(--hairline);
   font-variant-numeric:tabular-nums; }
 .st-my-big .st-cmp-row:last-of-type { border-bottom:none; }
@@ -527,7 +529,7 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
   margin-left:auto; }
 .st-my-big .st-cmp-row .cv .pv { font-size:12px; font-weight:500; }
 .st-my-big .st-cmp-row .st-cmp-pct { font-size:12px; font-weight:700; color:var(--tertiary); }
-.st-my-big .st-cmp-row .cp { font-size:11px; color:var(--outline); flex:none; }
+.st-my-big .st-cmp-row .cp { font-size:10.5px; color:var(--outline); flex:none; }
 /* 分成收益行：图标 + 标签 + 分成 tag 左，金额右（设计稿 monetization_on 行） */
 .st-my-big .st-cmp-rmb { display:flex; align-items:center; justify-content:space-between;
   margin-top:.625rem; background:var(--surface-container-low); border-radius:.5rem;
@@ -596,13 +598,16 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .st-my-acct .row .st.on i { background:var(--primary); animation:stPulse 1.6s ease-in-out infinite; }
 .st-my-acct .row .d { font-size:11px; color:var(--outline); margin-top:.125rem; }
 /* 四格音浪：恒 2×2 小网格 —— 与左侧「标题+副标题」两行等高，且不抢占主标题宽度；
-   与 .l 的 8rem 基宽相加超容器时才整块换行（320px 屏会折到第二行，绝不横向溢出） */
-.st-my-acct .row .wg { display:grid; grid-template-columns:repeat(2,minmax(0,1fr));
-  gap:.25rem .75rem; flex:0 1 9rem; margin-left:auto; }
+   2026-10-14 防挤：列宽 minmax(max-content,1fr)，数值格至少占满自身内容宽
+   （「4万3892」这类带万字的值永不截断、永不和「日/月/年/累计」标签重叠），
+   基宽 9rem→11rem 并允许 shrink，富余空间才均分；与 .l 的 8rem 基宽相加超容器时
+   才整块换行（320px 屏折到第二行，绝不横向溢出） */
+.st-my-acct .row .wg { display:grid; grid-template-columns:repeat(2,minmax(max-content,1fr));
+  gap:.25rem .75rem; flex:0 1 11rem; margin-left:auto; }
 .st-my-acct .row .wg .c { display:flex; align-items:baseline; justify-content:flex-end; gap:.25rem;
   font-size:11px; color:var(--on-surface-variant); white-space:nowrap; }
 .st-my-acct .row .wg .c b { font-size:13px; font-weight:600; color:var(--on-surface);
-  font-variant-numeric:tabular-nums; }
+  font-variant-numeric:tabular-nums; white-space:nowrap; }
 .st-my-acct .fail { padding:.75rem 1rem; font-size:11px; color:var(--outline); text-align:center; }
 .st-my-acct .none { padding:1rem; font-size:12px; color:var(--on-surface-variant);
   text-align:center; line-height:1.7; }
@@ -3438,10 +3443,10 @@ function renderMy(d, series, claim, bound, push, accounts) {
       '<span class="cp">' + prevLabel + '</span></div>';
   };
   const big = '<div class="st-my-big">' +
-    '<div class="lbl"><span>音浪对比</span><span class="chip">口径: 抖音直连</span></div>' +
-    cmpRow('today', '今日音浪', dd, 'vs上一日') +
-    cmpRow('calendar_month', '本月音浪', m, 'vs上月同期') +
-    cmpRow('functions', '本年累计', y, 'vs去年同期') +
+    '<div class="lbl"><span>音浪对比</span></div>' +
+    cmpRow('today', '今日音浪', dd, '比上日') +
+    cmpRow('calendar_month', '本月音浪', m, '比上月同期') +
+    cmpRow('functions', '本年累计', y, '比去年同期') +
     '<div class="st-cmp-rmb"><div class="l"><span class="material-symbols-outlined">monetization_on</span>' +
       '<span>本月预估折合收益</span><span class="pct-tag">35%分成</span></div>' +
       '<div class="v">' + monthlyYuan + '</div></div>' +
@@ -3489,9 +3494,6 @@ function renderMy(d, series, claim, bound, push, accounts) {
       '<div class="st-my-item" id="myForgot" style="cursor:pointer">' +
       '<div class="l"><div class="ico"><span class="material-symbols-outlined">lock_reset</span></div>' +
       '<div class="t">忘记密码 / 重置密码</div></div>' +
-      '<div class="r"><span class="material-symbols-outlined">chevron_right</span></div></div>' +
-      '<div class="st-my-item" id="myPrivacy" style="cursor:pointer"><div class="l"><div class="ico"><span class="material-symbols-outlined">visibility</span></div>' +
-      '<div class="t">隐私与对外展示字段</div></div>' +
       '<div class="r"><span class="material-symbols-outlined">chevron_right</span></div></div>' +
       '<div class="st-my-item" id="myAbout" style="cursor:pointer"><div class="l"><div class="ico"><span class="material-symbols-outlined">info</span></div>' +
       '<div class="t">关于系统与内部版本</div></div>' +
@@ -3550,7 +3552,8 @@ function renderMy(d, series, claim, bound, push, accounts) {
   };
   /* 列表行 → 子页（2026-10-13 用户口径）：下一页式（/my/<sub>，带返回按钮），
      不再是页内滚动。内容由 renderMySub 从本页已加载的数据就地组装。 */
-  $('myPrivacy').onclick = () => { mySub = 'privacy'; pushRoute(); renderMySub(); };
+  /* 2026-10-14：myPrivacy 行已删除，对应 onclick 一并移除
+     （$() 找不到元素会返回 null，留着赋值会 TypeError 白屏）。 */
   $('myAbout').onclick = () => { mySub = 'about'; pushRoute(); renderMySub(); };
   $('myBindRow').onclick = () => { mySub = 'bind'; pushRoute(); renderMySub(); };
   $('myPushRow').onclick = () => { mySub = 'push'; pushRoute(); renderMySub(); };

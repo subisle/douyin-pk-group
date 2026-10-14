@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react'
 import { api } from './api'
 
-/** 公告配置页（2026-10-14）：从「机器人」页整体搬出来的公告 UI（引导弹窗 / 公告位 /
-    展示页公告条 / 庆祝配置）。状态与保存逻辑不变——仍由一个组件持有全部状态，
-    一次整包 POST /api/admin/announcement。页面分四个 ann-sec 区块，底部 ann-savebar 统一保存。 */
+/** 公告配置页（2026-10-14）：从「机器人」页整体搬出来的公告 UI。状态与保存逻辑不变——
+    仍由一个组件持有全部状态，一次整包 POST /api/admin/announcement。底部 ann-savebar 统一保存。
+    （2026-10-14 运营要求：引导弹窗的编辑区块已下线不再渲染，但 steps / enabled 的
+    state 与 load / save 保留——save 是整包 POST，把后端已有的引导配置原样回传，
+    别把库里的 steps / enabled 清掉。） */
 
 /** 引导图标白名单：与后端 pk-server/src/public_teams.rs 的 STEP_ICON_WHITELIST
     保持一致。展示端 st_page.html 里也有一份同名表做双重校验；两边同步改。 */
@@ -13,6 +15,28 @@ const ANNOUNCE_ICONS = [
   'emoji_events', 'local_fire_department', 'trending_up', 'calendar_month',
   'chat_bubble', 'lock', 'person', 'smart_toy', 'workspace_premium',
 ]
+/** 图标英文内名 → 运营看的中文显示名（下拉里显示「中文名（内名）」，值仍传英文名） */
+const ICON_LABELS: Record<string, string> = {
+  auto_awesome: '闪光',
+  military_tech: '勋章',
+  qr_code_scanner: '扫码',
+  notifications_active: '铃铛',
+  insights: '数据洞察',
+  tips_and_updates: '提示灯泡',
+  campaign: '喇叭公告',
+  star: '星标',
+  bolt: '闪电',
+  groups: '群组',
+  emoji_events: '奖杯',
+  local_fire_department: '火焰',
+  trending_up: '上升趋势',
+  calendar_month: '日历',
+  chat_bubble: '对话气泡',
+  lock: '锁',
+  person: '人形',
+  smart_toy: '机器人',
+  workspace_premium: '高级徽章',
+}
 
 /* -------------- 公告系统 v2（2026-10-13）类型定义 -------------- */
 
@@ -68,8 +92,8 @@ const EMPTY_ANNOUNCE_ITEM: AnnounceItemCfg = {
   tone: 'plain',
 }
 
-/** 公告配置页：四个区块（🎬 引导弹窗 / 📢 公告位 / 📣 展示页公告条 / 🎉 庆祝配置）
-    共用一份状态，底部 ann-savebar 一次整包保存。 */
+/** 公告配置页：📢 公告位 / 📣 展示页公告条 / 🎉 庆祝配置 三个编辑区块
+    共用一份状态，底部 ann-savebar 一次整包保存（引导配置只回传、不再编辑）。 */
 export default function AnnouncePage() {
   const [data, setData] = useState<{ enabled: boolean; version: number } | null>(null)
   /* 引导步骤（2026-10-14 审计修复）：state 原先只声明 title/content/icon，但后端
@@ -193,20 +217,6 @@ export default function AnnouncePage() {
     load()
   }, [load])
 
-  function setStep(
-    i: number,
-    patch: Partial<{ title: string; content: string; icon: string; target: string }>,
-  ) {
-    setSteps((prev) => prev.map((s, idx) => (idx === i ? { ...s, ...patch } : s)))
-  }
-  function addStep() {
-    /* 新步骤默认不带 icon：后端按步序号自动配一个默认图标，运营想换再选 */
-    setSteps((prev) => [...prev, { title: '', content: '', icon: '', target: '' }])
-  }
-  function removeStep(i: number) {
-    setSteps((prev) => (prev.length <= 1 ? prev : prev.filter((_, idx) => idx !== i)))
-  }
-
   /* ---- 展示页公告条（多条，2026-10-14） ---- */
 
   /** 改第 i 条但不落库：文本框用，失焦时 save() 走最新 state */
@@ -304,120 +314,18 @@ export default function AnnouncePage() {
 
   return (
     <div className="page ann-page">
-      {/* ============ 区块 1 · 引导弹窗（2026-10-11） ============ */}
-      <section className="card ann-sec">
-        <h2 className="ann-sec-head">🎬 引导弹窗</h2>
-        <p className="ann-sec-sub">
-          展示端打开时弹出的多步骤引导（每步一个标题 + 正文，逐步「下一步」，最后一步「知道啦」）。
-          用户点「知道啦 / 跳过」后不再弹，直到你再次保存（版本前进）重新弹出。
-        </p>
-        <p className="hint">
-          正文支持两种简单排版：以 <code>·</code> / <code>-</code> / <code>1.</code> 开头的行会变成列表，
-          用一对 <code>*星号</code> 包起来的字会加粗。其余内容按纯文本原样显示（换行保留）。
-        </p>
-        <p className="hint">
-          深链预览：给展示端链接加上 <code>?announce=2</code> 可直接打开第 2 步，
-          用来给用户看某一步；走深链看不标记已读，正式引导照旧会弹。
-        </p>
-        {err && (
-          <div className="alert warn">
-            ⚠️ 引导加载失败：{err}
-            <button style={{ marginLeft: 8 }} onClick={load}>
-              重试
-            </button>
-          </div>
-        )}
-        <div className="row" style={{ marginBottom: 8 }}>
-          <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
-            <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
-            启用引导弹窗（开 = 展示端打开时弹出）
-          </label>
-        </div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          {steps.map((s, i) => (
-            <div
-              key={i}
-              style={{ border: '1px solid var(--hairline)', borderRadius: 10, padding: 10, display: 'flex', flexDirection: 'column', gap: 6 }}
-            >
-              <div style={{ display: 'flex', alignItems: 'center' }}>
-                <b style={{ fontSize: 13 }}>第 {i + 1} 步</b>
-                {!s.icon && (
-                  <span className="hint" style={{ marginLeft: 8 }}>
-                    自动图标
-                  </span>
-                )}
-                <button className="ghost" style={{ marginLeft: !s.icon ? 'auto' : 8 }} disabled={steps.length <= 1} onClick={() => removeStep(i)}>
-                  删除
-                </button>
-              </div>
-              <input
-                placeholder="步骤标题（可选）"
-                value={s.title}
-                onChange={(e) => setStep(i, { title: e.target.value })}
-                maxLength={64}
-                style={ctl}
-              />
-              {/* 图标选择：留空 = 后端按步序号自动配一个；选了就固定。
-                  这里只列后端白名单内的 Material Symbols 名，别让任意字符串下发。 */}
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                <span style={{ fontSize: 12, color: 'var(--ink3)' }}>图标</span>
-                <button
-                  type="button"
-                  className="ghost"
-                  style={{
-                    ...ctl,
-                    width: 36,
-                    height: 36,
-                    display: 'grid',
-                    placeItems: 'center',
-                    padding: 0,
-                    borderColor: !s.icon ? 'var(--primary)' : undefined,
-                  }}
-                  title={s.icon ? `当前：${s.icon}（点这个再取消选择就回落自动）` : '自动（按步序号）'}
-                  onClick={() => setStep(i, { icon: '' })}
-                >
-                  <span className="material-symbols-outlined" style={{ fontSize: 18 }}>
-                    {s.icon || 'auto_awesome'}
-                  </span>
-                </button>
-                <select
-                  value={s.icon || ''}
-                  onChange={(e) => setStep(i, { icon: e.target.value })}
-                  style={{ ...ctl, flex: 1, minWidth: 0 }}
-                >
-                  <option value="">自动（按步序号）</option>
-                  {ANNOUNCE_ICONS.map((n) => (
-                    <option key={n} value={n}>
-                      {n}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <textarea
-                placeholder={'步骤正文（支持换行）\n· 列表项用 · 或 1. 开头\n*加粗* 用星号包起来'}
-                value={s.content}
-                onChange={(e) => setStep(i, { content: e.target.value })}
-                rows={3}
-                maxLength={2000}
-                style={{ ...ctl, resize: 'vertical', lineHeight: 1.6 }}
-              />
-              {/* spotlight 目标元素选择器（2026-10-14 审计补回）：
-                  空 = 卡片居中显示；填了则展示端挖孔高亮该元素、卡片贴到它旁边。
-                  后端对字符集与长度（≤120）有校验，这里 maxLength 与之对齐。 */}
-              <input
-                placeholder="指向元素（可选）：CSS 选择器，留空则卡片居中"
-                value={s.target}
-                onChange={(e) => setStep(i, { target: e.target.value })}
-                maxLength={120}
-                style={ctl}
-              />
-            </div>
-          ))}
-          <button className="ghost" onClick={addStep}>
-            + 添加步骤
+      {/* 2026-10-14：引导弹窗编辑区块已按运营要求下线。steps / enabled 的 state 与
+          load / save 保留——save 是整包 POST /api/admin/announcement，把后端已有的
+          引导配置原样回传，别把库里的 steps 清掉。 */}
+      {/* 配置加载失败提示（含重试）：data 为空 = 整包 GET 还没成功过 */}
+      {!data && err && (
+        <div className="alert warn">
+          ⚠️ 配置加载失败：{err}
+          <button style={{ marginLeft: 8 }} onClick={load}>
+            重试
           </button>
         </div>
-      </section>
+      )}
 
       {/* ============ 区块 2 · 公告位（2026-10-13） ============ */}
       <section className="card ann-sec">
@@ -473,9 +381,10 @@ export default function AnnouncePage() {
                   maxLength={300}
                   style={{ ...ctl, resize: 'vertical', lineHeight: 1.6 }}
                 />
-                {/* 图标：Material Symbols 名，失焦保存（后端有图标白名单，白名单外回落默认） */}
+                {/* 图标：Material Symbols 图标名，失焦保存（后端有图标白名单，
+                    白名单外回落默认喇叭）。给运营的中文对照见 ICON_LABELS / 下拉版本。 */}
                 <input
-                  placeholder="图标，如 campaign / notifications / person"
+                  placeholder="图标（可不填）：如「喇叭公告」「铃铛」「人形」，留空用默认喇叭"
                   value={p.icon}
                   onChange={(e) => setPlacements((prev) => ({ ...prev, [key]: { ...prev[key], icon: e.target.value } }))}
                   onBlur={() => save()}
@@ -496,7 +405,7 @@ export default function AnnouncePage() {
           文本框失焦 / 开关切换后自动整体保存；「启用」关掉的条目会留在配置里，但展示端不显示。
         </p>
         <p className="hint" style={{ margin: 0 }}>
-          样式 <b>brand</b> = 紫金渐变（原庆祝条），<b>plain</b> = 白底描边（原冠军条）。
+          样式「紫金渐变」= 原庆祝条的紫底金字，样式「白底描边」= 原冠军条的白底带边框。
         </p>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
           {items.length === 0 && <span className="hint">还没有公告条，点下面的「+ 添加公告条」新建一条。</span>}
@@ -539,8 +448,8 @@ export default function AnnouncePage() {
                     onChange={(e) => setItemSaved(i, { tone: e.target.value === 'brand' ? 'brand' : 'plain' })}
                     style={input34}
                   >
-                    <option value="brand">brand（紫金渐变）</option>
-                    <option value="plain">plain（白底描边）</option>
+                    <option value="brand">紫金渐变（原庆祝条样式）</option>
+                    <option value="plain">白底描边（原冠军条样式）</option>
                   </select>
                 </label>
                 {/* 图标：只列后端白名单内的 Material Symbols 名，空 = 不带图标（下拉即保存） */}
@@ -550,7 +459,7 @@ export default function AnnouncePage() {
                     <option value="">不显示图标</option>
                     {ANNOUNCE_ICONS.map((n) => (
                       <option key={n} value={n}>
-                        {n}
+                        {ICON_LABELS[n] ?? n}（{n}）
                       </option>
                     ))}
                   </select>
@@ -696,16 +605,17 @@ export default function AnnouncePage() {
         </div>
       </section>
 
-      {/* 保存区：四个区块共用一次整包保存（引导 + 公告位 + 公告条 + 庆祝） */}
+      {/* 保存区：三个编辑区块共用一次整包保存（公告位 + 公告条 + 庆祝；引导只回传不编辑） */}
       <div className="ann-savebar">
         {/* 手动保存按钮：save 现在带 overrides 参数，onClick 必须包一层箭头函数，
             否则 click 事件对象会被当成 overrides 传进去 */}
         <button className="primary" disabled={busy} onClick={() => save()}>
-          {busy ? '保存中…' : '保存全部（引导 / 公告位 / 公告条 / 庆祝）'}
+          {busy ? '保存中…' : '保存全部（公告位 / 公告条 / 庆祝）'}
         </button>
         {data && <span className="hint">当前版本 {data.version}</span>}
         <span style={{ fontSize: 11.5, color: 'var(--ink3)' }}>
-          文本框失焦或开关切换后自动保存（引导 + 公告位 + 公告条 + 庆祝整体一起保存，版本前进）。
+          文本框失焦或开关切换后自动保存（公告位 + 公告条 + 庆祝整体一起保存，版本前进；
+          原有引导配置会原样保留一并回传）。
         </span>
         {msg && <div className="alert good">{msg}</div>}
         {/* 2026-10-14 审计修复：保存失败现在走 err，这里补上红色提示条
