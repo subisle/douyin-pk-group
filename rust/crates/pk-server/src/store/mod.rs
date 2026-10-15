@@ -224,10 +224,15 @@ const PLAN_COLS: &str = "id, title, metric, days, payload, created_at, published
 
 fn map_plan(r: &sqlx::postgres::PgRow) -> Result<PlanRow> {
     Ok(PlanRow {
-        id: r.try_get::<i64, _>(0)? as i64,
+        id: r.try_get::<i64, _>(0)?,
         title: r.try_get::<String, _>(1)?,
         metric: r.try_get::<String, _>(2)?,
-        days: r.try_get::<i64, _>(3)?,
+        /* `plans.days` 是 **INT4**（001_core.sql:267），不是 BIGINT：sqlx 0.8 在解码前
+        做精确类型匹配，按 i64 读每行都返回 ColumnDecode → map_plan 整体 Err。
+        2026-10-14 审计 P0-1 实机现象：库里 44 个方案（2 个已发布）全被丢掉 ——
+        `GET /api/public/plans` 恒 `{"items":[]}`、已发布方案页 404，且服务端零日志。
+        这里显式按 i32 读再转 i64（模型字段保持 i64，写路径 bind 不受影响）。 */
+        days: r.try_get::<i32, _>(3)? as i64,
         payload: r.try_get::<String, _>(4)?,
         created_at: r.try_get::<String, _>(5)?,
         published: r.try_get::<i16, _>(6)? != 0,
@@ -268,7 +273,19 @@ pub async fn list_plans(st: &AppState) -> Vec<PlanRow> {
     .fetch_all(pool)
     .await
     {
-        Ok(rows) => rows.iter().map(map_plan).filter_map(Result::ok).collect(),
+        /* 不能用 `.filter_map(Result::ok)`：它连 Err 分支都到不了，列类型漂移
+        （P0-1 的 days）就等于「方案全没了，但日志里一个字都没有」。逐行显式 match，
+        解析失败记 error 并跳过该行，同一类漂移下次能立刻在日志里看见。 */
+        Ok(rows) => rows
+            .iter()
+            .filter_map(|r| match map_plan(r) {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    tracing::error!(error = %e, "方案行解析失败，已跳过该行");
+                    None
+                }
+            })
+            .collect(),
         Err(e) => {
             tracing::error!(error = %e, "查方案失败，按空表处理");
             Vec::new()
@@ -286,9 +303,20 @@ pub async fn get_plan(st: &AppState, id: i64) -> Option<PlanRow> {
     .await
     {
         Ok(Some(r)) => r,
-        _ => return None,
+        Ok(None) => return None,
+        Err(e) => {
+            tracing::error!(error = %e, plan_id = id, "查方案失败，按不存在处理");
+            return None;
+        }
     };
-    map_plan(&row).ok()
+    // 解析失败要能看见（P0-1：这里原来是 `.ok()`，44 个方案无声消失）
+    match map_plan(&row) {
+        Ok(p) => Some(p),
+        Err(e) => {
+            tracing::error!(error = %e, plan_id = id, "方案行解析失败，按不存在处理");
+            None
+        }
+    }
 }
 
 /// 发布 / 取消发布。未发布时对外展示页返回 404。
@@ -587,8 +615,38 @@ mod tests {
         );
     }
 
-    /// 密码规则：6~20 位字母或数字（2026-10-12 审计 M4：下限 4→6）；符号/空格/太短仍拒绝。
-    /// 登录路径（my_account_check_login）不比长度，存量 4~5 位密码账号登录不受影响。
+    /// P0-1 回归护栏：`map_plan` 按 **下标** 读列，PLAN_COLS 的列顺序必须与之一致
+    /// （days 在 3 号位、published 在 6 号位）。顺序或列数一改，下标就整体错位 ——
+    /// 这条断言让「改 SQL 忘了改 map_plan」在单测阶段就红。
+    #[test]
+    fn plan_cols_order_matches_map_plan_indexes() {
+        let cols: Vec<&str> = PLAN_COLS.split(',').map(str::trim).collect();
+        assert_eq!(
+            cols,
+            [
+                "id",
+                "title",
+                "metric",
+                "days",
+                "payload",
+                "created_at",
+                "published",
+                "event_type"
+            ],
+            "PLAN_COLS 顺序必须与 map_plan 的下标一一对应"
+        );
+        assert_eq!(cols[3], "days", "days 必须是第 4 列（map_plan 按 i32 读）");
+        assert_eq!(
+            cols[6], "published",
+            "published 必须是第 7 列（map_plan 按 i16 读）"
+        );
+    }
+
+    /// 密码规则：4~20 位字母或数字。
+    /// 下限沿革：2026-10-10 放宽为 4 → 10-12 审计 M4 提到 6 → **10-13 产品拍板回到 4**
+    /// （运营开号习惯是手机号后四位，6 位下限会把后台开号全拒掉）。
+    /// 符号/空格/太短仍拒绝；登录路径（my_account_check_login）不比长度，
+    /// 存量短密码账号登录不受影响。
     #[test]
     fn my_account_password_rule() {
         assert!(validate_my_account("shuai4444", "shuai4444").is_ok());
@@ -603,35 +661,23 @@ mod tests {
         );
         assert!(
             validate_my_account("啸帆", "123").is_err(),
-            "少于 6 位 → 拒绝"
+            "少于 4 位 → 拒绝"
         );
         assert!(validate_my_account("", "13312345678").is_err());
         assert!(validate_my_account("啸帆", "").is_err());
     }
 }
 
+/// 手机号 + 开号 + 绑定申请这批「账号凭证」纯函数用例。
+///
+/// 2026-10-14 注册功能移除前这里叫 `register_tests`（内含注册验证码用例）；
+/// 注册链路删除后剩下的用例与注册无关，改名以免后人误以为这里还守着注册。
 #[cfg(test)]
-mod register_tests {
+mod phone_batch_open_tests {
     use super::*;
 
-    /// 注册密码 = 短信验证码：必须是 6~20 位纯数字（用户口径「验证码数字就是密码」；
-    /// 修复6：下限 4→6，与登录密码 6~20 口径统一——只收紧注册，存量短密码登录不受影响）
-    #[test]
-    fn my_code_is_digits_only() {
-        assert_eq!(validate_my_code("246810").unwrap(), "246810");
-        assert_eq!(validate_my_code(" 246810 ").unwrap(), "246810");
-        assert!(validate_my_code("").is_err(), "空验证码不给过");
-        assert!(validate_my_code("123").is_err(), "太短不给过");
-        assert!(validate_my_code("13579").is_err(), "5 位也不给过（修复6：下限 6）");
-        assert!(
-            validate_my_code("123456789012345678901").is_err(),
-            "太长不给过"
-        );
-        assert!(
-            validate_my_code("12a4").is_err(),
-            "字母不给过（手机验证码是数字）"
-        );
-    }
+    /* 2026-10-14 注册功能移除：`my_code_is_digits_only`（注册验证码格式用例）已删 ——
+       它断言的 `validate_my_code` 随注册一起清理了。手机号相关用例仍保留在下面。 */
 
     /// 手机号：5~20 位数字，允许空格/横线（归一化后）——与管理员手建账号同一套口径
     #[test]

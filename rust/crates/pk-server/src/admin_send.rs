@@ -177,15 +177,216 @@ fn parse_target_spec(body: &Value) -> Result<TargetSpec, ApiError> {
 const IMAGE_KINDS: [&str; 4] = ["none", "lineage", "daily", "month"];
 const CHANNELS_ALLOWED: [&str; 2] = ["wxbot", "popup"];
 
+/* ------------------ §5.5 自定义上传图（只收 PNG，task-14/15，纯函数可单测） ------------------ */
+
+/// 上传图**解码后**的字节上限（前端提交的是 base64，会膨胀约 1.37 倍）。
+pub(crate) const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+/// `/api/admin/send` 的请求体上限：main.rs 给这条路由单独挂 `DefaultBodyLimit`。
+/// 5MB 原图 base64 后 ≈6.7MB，再给 title/content/target 留余量 → 8MB。
+/// （`pub` 而非 `pub(crate)`：bin 的 main.rs 要引用，跨 lib/bin 边界。）
+pub const SEND_BODY_LIMIT: usize = 8 * 1024 * 1024;
+/// 单边像素上限 + 总像素上限：防「几百 KB 的 PNG 解出几亿像素」的压缩炸弹
+/// （iLink 服务端会真解码上传图，一张就够把内存打爆）。
+const MAX_IMAGE_SIDE: u32 = 4096;
+const MAX_IMAGE_PIXELS: u64 = 16_000_000;
+/// 上传图**唯一**允许的 MIME（2026-10-15 用户口径：「去掉 gif，只留 PNG 这一种格式即可」）。
+/// 只收 PNG 就不需要任何转码（iLink 的图片上传本来就只按 PNG 走），原图全程原样透传。
+const IMAGE_MIME_PNG: &str = "image/png";
+/// 上限对应的 base64 理论最长长度：先在**字符串层面**挡掉超大提交，不做无谓解码。
+const MAX_IMAGE_B64_LEN: usize = MAX_IMAGE_BYTES.div_ceil(3) * 4;
+
+/// PNG 的 8 字节魔数。按**文件魔数**判类型 —— 只信字节，不信前端声明的 `imageMime`。
+fn is_png(bytes: &[u8]) -> bool {
+    bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A])
+}
+
+/// MIME 别名归一化（浏览器/系统偶尔给 `image/x-png`）+ 转小写。
+fn normalize_mime(m: &str) -> String {
+    match m.trim().to_ascii_lowercase().as_str() {
+        "image/x-png" => "image/png".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// `imageBase64` 既收裸 base64，也收 `data:<mime>;base64,<payload>`。
+/// 返回 (payload, dataURL 里声明的 mime)。非 base64 的 dataURL 直接 400。
+fn split_data_url(raw: &str) -> Result<(&str, Option<String>), ApiError> {
+    let s = raw.trim();
+    let Some(rest) = s.strip_prefix("data:") else {
+        return Ok((s, None));
+    };
+    let Some((meta, payload)) = rest.split_once(',') else {
+        return Err(ApiError::bad_request("图片 dataURL 格式不对"));
+    };
+    let mut mime = String::new();
+    let mut is_b64 = false;
+    for part in meta.split(';') {
+        let p = part.trim();
+        if p.eq_ignore_ascii_case("base64") {
+            is_b64 = true;
+        } else if !p.is_empty() && mime.is_empty() {
+            mime = normalize_mime(p);
+        }
+    }
+    if !is_b64 {
+        return Err(ApiError::bad_request(
+            "图片只支持 base64 编码的 dataURL（data:image/png;base64,…）",
+        ));
+    }
+    Ok((payload.trim(), (!mime.is_empty()).then_some(mime)))
+}
+
+/// PNG 容器探测：读出 (宽, 高)；不是 PNG / 结构不完整 = None。
+///
+/// 只扫**容器结构**（8 字节魔数 → 首块必须是 IHDR(13) → 走块链确认有 IDAT 与收尾
+/// IEND），**不做像素解码**：上传图全程不转码、原样落库原样投递，这里的目标是
+/// ① 挡住「改了扩展名/只有半张」的坏图 ② 顺手拿宽高做压缩炸弹防护。
+/// 有意不校验块 CRC（浏览器产出的 PNG 交给 iLink 真机兜底，失败会降级纯文本）。
+fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    const SIG_LEN: usize = 8;
+    if !is_png(bytes) {
+        return None;
+    }
+    // 首个块必须是 IHDR，长度固定 13
+    if bytes.get(8..12)? != 13u32.to_be_bytes().as_slice()
+        || bytes.get(12..16) != Some(b"IHDR".as_slice())
+    {
+        return None;
+    }
+    let w = u32::from_be_bytes(bytes.get(16..20)?.try_into().ok()?);
+    let h = u32::from_be_bytes(bytes.get(20..24)?.try_into().ok()?);
+    if w == 0 || h == 0 {
+        return None;
+    }
+    // 块 = 长度(4) + 类型(4) + 数据(len) + CRC(4)；截断的图在这里被挡下
+    let (mut pos, mut has_idat, mut has_iend) = (SIG_LEN, false, false);
+    while pos + 8 <= bytes.len() {
+        let len = u32::from_be_bytes(bytes[pos..pos + 4].try_into().ok()?) as usize;
+        let ty = bytes.get(pos + 4..pos + 8)?;
+        has_idat |= ty == b"IDAT".as_slice();
+        pos = pos.checked_add(12)?.checked_add(len)?;
+        if pos > bytes.len() {
+            return None; // 块声明的长度越界 = 截断
+        }
+        if ty == b"IEND".as_slice() {
+            has_iend = true;
+            break;
+        }
+    }
+    (has_idat && has_iend).then_some((w, h))
+}
+
+/// 解析 `imageBase64` / `imageMime` / `imageName` 三个字段。
+///
+/// 返回 `None` = 本次请求没带上传图；`Some((bytes, mime, name))` = 校验通过的上传图
+/// （`mime` 恒为 `image/png`）。
+/// 校验顺序（都在写库之前、纯内存）：空 → base64 长度粗筛 → 解码 → 解码后体积 →
+/// PNG 魔数 → 与声明 mime 一致 → 容器结构 + 宽高上限。
+///
+/// 字段口径（给前端）：**字段缺失或为 null** = 纯文本/服务端渲染图消息；
+/// 一旦带了 `imageBase64` 就必须是完整的非空 PNG，**空串会 400**
+/// （契约「空图 → 400」；前端发文本消息时请直接不带这个字段）。
+fn parse_upload_image(body: &Value) -> Result<Option<(Vec<u8>, String, String)>, ApiError> {
+    let Some(field) = body.get("imageBase64") else {
+        return Ok(None);
+    };
+    if field.is_null() {
+        return Ok(None);
+    }
+    let raw = field
+        .as_str()
+        .ok_or_else(|| ApiError::bad_request("imageBase64 必须是 base64 字符串"))?;
+    if raw.trim().is_empty() {
+        return Err(ApiError::bad_request("图片内容为空"));
+    }
+    let (payload, data_mime) = split_data_url(raw)?;
+    // 去掉换行等空白（有些前端会按 76 列折行）
+    let payload: String = if payload.bytes().any(|b| b.is_ascii_whitespace()) {
+        payload.chars().filter(|c| !c.is_ascii_whitespace()).collect()
+    } else {
+        payload.to_string()
+    };
+    if payload.is_empty() {
+        return Err(ApiError::bad_request("图片内容为空"));
+    }
+    if payload.len() > MAX_IMAGE_B64_LEN {
+        return Err(ApiError::bad_request(format!(
+            "图片太大（原图最多 {} MB）",
+            MAX_IMAGE_BYTES / 1024 / 1024
+        )));
+    }
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(payload.as_bytes())
+        .map_err(|_| ApiError::bad_request("图片 base64 解码失败，请检查提交内容"))?;
+    if bytes.is_empty() {
+        return Err(ApiError::bad_request("图片内容为空"));
+    }
+    if bytes.len() > MAX_IMAGE_BYTES {
+        return Err(ApiError::bad_request(format!(
+            "图片太大（原图最多 {} MB）",
+            MAX_IMAGE_BYTES / 1024 / 1024
+        )));
+    }
+    if !is_png(&bytes) {
+        return Err(ApiError::bad_request(
+            "只支持 PNG 格式的图片（image/png）",
+        ));
+    }
+    // 声明的 mime（body.imageMime 优先，其次 dataURL 前缀）必须也是 PNG
+    let declared = body
+        .get("imageMime")
+        .and_then(Value::as_str)
+        .map(normalize_mime)
+        .filter(|m| !m.is_empty())
+        .or(data_mime);
+    if let Some(d) = declared {
+        if d != IMAGE_MIME_PNG {
+            return Err(ApiError::bad_request(format!(
+                "图片类型与文件内容不一致（声明 {d}，实际 {IMAGE_MIME_PNG}）"
+            )));
+        }
+    }
+    let Some((w, h)) = png_dimensions(&bytes) else {
+        return Err(ApiError::bad_request("PNG 图片已损坏或不完整"));
+    };
+    if w == 0 || h == 0 || w > MAX_IMAGE_SIDE || h > MAX_IMAGE_SIDE {
+        return Err(ApiError::bad_request(format!(
+            "图片尺寸不支持（单边最多 {MAX_IMAGE_SIDE}px）"
+        )));
+    }
+    if u64::from(w) * u64::from(h) > MAX_IMAGE_PIXELS {
+        return Err(ApiError::bad_request(format!(
+            "图片像素太多（最多 {} 万像素）",
+            MAX_IMAGE_PIXELS / 10_000
+        )));
+    }
+    let name: String = body
+        .get("imageName")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .chars()
+        .take(128)
+        .collect();
+    Ok(Some((bytes, IMAGE_MIME_PNG.to_string(), name)))
+}
+
 /// POST /api/admin/send 请求体（解析 + 校验，全部纯函数可单测）
 #[derive(Debug, Clone)]
 pub(crate) struct MsgInput {
     pub title: String,
     pub content: String,
-    /// none | lineage | daily | month（白名单内）
+    /// none | lineage | daily | month | custom（白名单内；custom = 管理员上传图）
     pub image_kind: String,
     /// 图片业务日 YYYY-MM-DD（缺省 = 今天；lineage 渲染用它）
     pub image_date: String,
+    /// 上传图原始字节（None = 没用上传图）
+    pub image_blob: Option<Vec<u8>>,
+    /// 规范化 MIME（无上传图时空串；有图时恒为 `image/png`）
+    pub image_mime: String,
+    /// 上传时的原始文件名（可选）
+    pub image_name: String,
     /// 去重后的渠道（非空）
     pub channels: Vec<String>,
     pub target: TargetSpec,
@@ -194,7 +395,7 @@ pub(crate) struct MsgInput {
 }
 
 /// 解析并校验发送请求体（docs/23 §5.4 / §7 内容上限）。
-/// 校验：title ≤64 字、content 非空 ≤1000 字、imageKind 白名单、
+/// 校验：title ≤64 字、content 非空 ≤1000 字、imageKind 白名单（或自定义上传图）、
 /// imageDate 过日期白名单（缺省今天）、channels ⊆ {wxbot, popup} 非空（去重）。
 fn parse_send_body(body: &Value) -> Result<MsgInput, ApiError> {
     let title = body
@@ -221,15 +422,27 @@ fn parse_send_body(body: &Value) -> Result<MsgInput, ApiError> {
     if content.chars().count() > 1000 {
         return Err(ApiError::bad_request("内容太长（最多 1000 字）"));
     }
-    let image_kind = body
+    let image_kind_requested = body
         .get("imageKind")
         .and_then(Value::as_str)
         .unwrap_or("none");
-    if !IMAGE_KINDS.contains(&image_kind) {
+    if !IMAGE_KINDS.contains(&image_kind_requested) {
         return Err(ApiError::bad_request(format!(
-            "不支持的图片类型：{image_kind}"
+            "不支持的图片类型：{image_kind_requested}"
         )));
     }
+    // 上传图（task-14）：imageBase64 给了就按上传图走；与服务端渲染图（imageKind）
+    // 互斥 —— imageKind 除了默认值 "none" 之外还给了值就 400（前端默认带 none 不算冲突）。
+    let upload = parse_upload_image(body)?;
+    let image_kind: &str = match &upload {
+        Some(_) if image_kind_requested != "none" => {
+            return Err(ApiError::bad_request(
+                "自定义上传图与 imageKind（服务端渲染图）不能同时提交",
+            ))
+        }
+        Some(_) => "custom",
+        None => image_kind_requested,
+    };
     let image_date = match body.get("imageDate").and_then(Value::as_str).map(str::trim) {
         Some(d) if !d.is_empty() => {
             if !valid_date_str(d) {
@@ -269,6 +482,9 @@ fn parse_send_body(body: &Value) -> Result<MsgInput, ApiError> {
         content,
         image_kind: image_kind.to_string(),
         image_date,
+        image_blob: upload.as_ref().map(|(b, _, _)| b.clone()),
+        image_mime: upload.as_ref().map(|(_, m, _)| m.clone()).unwrap_or_default(),
+        image_name: upload.as_ref().map(|(_, _, n)| n.clone()).unwrap_or_default(),
         channels,
         target,
         raw_target,
@@ -468,6 +684,9 @@ pub async fn send_create(State(st): State<ArcState>, Json(body): Json<Value>) ->
         content: input.content.clone(),
         image_kind: input.image_kind.clone(),
         image_date: Some(input.image_date.clone()),
+        image_blob: input.image_blob.clone(),
+        image_mime: input.image_mime.clone(),
+        image_name: input.image_name.clone(),
         channels: input.channels.join(","),
         target_type: target_type_name(&input.target).to_string(),
         target_ids: input.raw_target.clone(),
@@ -626,11 +845,32 @@ struct MsgCore {
     content: String,
     image_kind: String,
     image_date: String,
+    /// 上传图原始字节（仅 image_kind="custom" 时才去库里取，见 [`msg_core_of`]）。
+    /// 只收 PNG（task-15），所以投递时原样透传、不做任何转码。
+    image_blob: Option<Vec<u8>>,
 }
 
-/// 主档 → 核心字段（复用 admin_message_get 的投影 JSON，不重复写 SQL）
+/// 主档 → 核心字段（复用 admin_message_get 的投影 JSON，不重复写 SQL）。
+///
+/// task-14：image_kind="custom" 时**额外**取一次原图（`admin_message_image` 只读
+/// `image_mime + image_blob` 两列）。worker 每批 20 行、同消息主档每批只查一次
+/// （上面 `msgs` 缓存），所以同一条消息的原图每批最多读一遍。
 async fn msg_core_of(st: &AppState, message_id: i64) -> Option<MsgCore> {
     let v = crate::store::admin_message_get(st, message_id).await.ok()??;
+    let image_kind = v
+        .get("imageKind")
+        .and_then(Value::as_str)
+        .unwrap_or("none")
+        .to_string();
+    let image_blob = if image_kind == "custom" {
+        match crate::store::admin_message_image(st, message_id).await {
+            Ok(Some((_mime, blob))) => Some(blob),
+            // 图没了（例如迁移前的行/被清理）：保持 kind，走降级纯文本分支
+            _ => None,
+        }
+    } else {
+        None
+    };
     Some(MsgCore {
         title: v
             .get("title")
@@ -642,16 +882,13 @@ async fn msg_core_of(st: &AppState, message_id: i64) -> Option<MsgCore> {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string(),
-        image_kind: v
-            .get("imageKind")
-            .and_then(Value::as_str)
-            .unwrap_or("none")
-            .to_string(),
+        image_kind,
         image_date: v
             .get("imageDate")
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string(),
+        image_blob,
     })
 }
 
@@ -809,6 +1046,18 @@ async fn wx_send_lineage_images(
     Ok(pages)
 }
 
+/// 发一张管理员上传的图（正文已单独发过，所以不带说明文字）。
+/// 与 [`wx_send_lineage_images`] 同一会话口径，只是图来自库里而不是现场渲染。
+async fn wx_send_uploaded_image(
+    st: &AppState,
+    a: &crate::store::WxPushAccount,
+    conv: &str,
+    png: &[u8],
+) -> anyhow::Result<()> {
+    let (to_user, ctx) = wx_session_ctx(st, Some(a), conv).await?;
+    crate::store::wxmedia::user_send_image(&a.base_url, &a.bot_token, &to_user, &ctx, "", png).await
+}
+
 /// 发送一行 wxbot 任务。返回 (是否成功, error 备注)。
 ///
 /// 语义（docs/23 §5.4 / §8 边界与降级）：
@@ -865,6 +1114,23 @@ async fn send_wxbot_row(
                 }
                 Ok(_) => (true, "名下没有在职徒弟，已降级纯文本".into()),
                 Err(e) => (true, format!("图片生成失败，已发纯文本：{e}")),
+            }
+        }
+        // 管理员上传的自定义图：只收 PNG（task-15，iLink 的图片上传本来就只按 PNG 走），
+        // 所以这里**原样透传**、没有任何转码。发失败只降级纯文本。
+        "custom" => {
+            let Some(a) = acct.as_ref() else {
+                return (
+                    true,
+                    "图片推送需要扫码账号（请在「我的」页重新扫码），已发纯文本".into(),
+                );
+            };
+            let Some(png) = msg.image_blob.as_ref() else {
+                return (true, "消息图片缺失，已发纯文本".into());
+            };
+            match wx_send_uploaded_image(st, a, &conv, png).await {
+                Ok(()) => (true, String::new()),
+                Err(e) => (true, format!("图片发送失败，已发纯文本：{e}")),
             }
         }
         // daily / month 渲染器本期未接，一律降级纯文本并备注（docs/23 §5.4）
@@ -967,7 +1233,8 @@ pub async fn my_message_read(
 }
 
 /// GET /api/public/my/messages/{id}/image.png —— 按收件人实时渲染消息配图。
-/// 水印 = 本人姓名；只对 imageKind=lineage 出图（daily/month 本期未开放），
+/// - `lineage`：水印 = 本人姓名，现场渲染师门日报第 1 页（daily/month 本期未开放）
+/// - `custom`：管理员上传图，按落库的 `image_mime` 原样回传（task-14）
 /// 渲染失败 / 非收件人 / 无图消息一律 404，不挡正文。
 pub async fn my_message_image(
     State(st): State<ArcState>,
@@ -1003,6 +1270,24 @@ pub async fn my_message_image(
         return not_found();
     };
     let kind = msg.get("imageKind").and_then(Value::as_str).unwrap_or("none");
+    // 管理员上传的自定义图：只收 PNG，原样回传（不做任何转码）。mime 与落库值一致才下发，
+    // 响应头用静态 HeaderValue（不把库里的字符串直接塞头，防 CRLF 注入）。
+    if kind == "custom" {
+        let Ok(Some((mime, bytes))) = crate::store::admin_message_image(&st, id).await else {
+            return not_found();
+        };
+        if mime != IMAGE_MIME_PNG {
+            return not_found();
+        }
+        return (
+            [(
+                axum::http::header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_static(IMAGE_MIME_PNG),
+            )],
+            bytes,
+        )
+            .into_response();
+    }
     if kind != "lineage" {
         return not_found();
     }
@@ -1350,5 +1635,207 @@ mod tests {
         assert_eq!(message_text("标题", "正文"), "标题\n正文");
         assert_eq!(message_text("", "正文"), "正文");
         assert_eq!(message_text("  标题  ", " 正文 "), "标题\n正文");
+    }
+
+    /* ---------- 自定义上传图（task-14） ---------- */
+
+    /// ApiError 字段私有也不实现 Display：转响应再读 JSON 里的 error 文案
+    async fn err_msg(e: ApiError) -> String {
+        let resp = e.into_response();
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), 64 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        body.get("error")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    fn b64(b: &[u8]) -> String {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode(b)
+    }
+
+    /// 真 PNG 夹具（Python zlib + CRC 生成：8 字节魔数 + IHDR + IDAT + IEND）
+    const PNG_1X1_B64: &str =
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP4z8DwHwAFAAH/VscvDQAAAABJRU5ErkJggg==";
+    const PNG_2X2_B64: &str =
+        "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEUlEQVR42mP4z8DwH4QZYAwAR8oH+Rq28akAAAAASUVORK5CYII=";
+    /// 5000×1：整图只有 ~102 字节，用来测「小文件大尺寸」的压缩炸弹防护
+    const PNG_WIDE_B64: &str =
+        "iVBORw0KGgoAAAANSUhEUgAAE4gAAAABCAYAAAAyEUSIAAAALUlEQVR42u3DQQ0AAAwDofNvupOxDyS0mqqqqqqqqqqqqqqqqqqqqqqqqqr/D/ay6ytGLmpRAAAAAElFTkSuQmCC";
+
+    fn raw(b64s: &str) -> Vec<u8> {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD
+            .decode(b64s)
+            .expect("PNG 夹具解不开")
+    }
+
+    fn body_with_image(payload: &str, mime: Option<&str>) -> Value {
+        let mut b = json!({
+            "title": "t", "content": "c", "channels": ["popup"],
+            "target": { "type": "persons", "ids": [1] },
+            "imageBase64": payload,
+        });
+        if let Some(m) = mime {
+            b["imageMime"] = json!(m);
+        }
+        b
+    }
+
+    /// 纯文本/渲染图消息：**不带** imageBase64 字段（或带 null）
+    fn body_no_image() -> Value {
+        json!({
+            "title": "t", "content": "c", "channels": ["popup"],
+            "target": { "type": "persons", "ids": [1] },
+        })
+    }
+
+    /// PNG 正常通过：魔数 + 容器宽高 + kind 落 "custom"；裸 base64 与 dataURL 都收
+    #[test]
+    fn upload_accepts_png_plain_base64_and_data_url() {
+        let png = raw(PNG_1X1_B64);
+        assert!(is_png(&png));
+        assert_eq!(png_dimensions(&png), Some((1, 1)));
+
+        let plain = parse(body_with_image(PNG_1X1_B64, None)).ok().unwrap();
+        assert_eq!(plain.image_kind, "custom");
+        assert_eq!(plain.image_mime, "image/png");
+        assert_eq!(plain.image_blob, Some(png));
+
+        let durl = format!("data:image/png;base64,{PNG_2X2_B64}");
+        let via_url = parse(body_with_image(&durl, None)).ok().unwrap();
+        assert_eq!(via_url.image_mime, "image/png", "mime 从 dataURL 前缀解析");
+        assert_eq!(via_url.image_blob, Some(raw(PNG_2X2_B64)));
+
+        // imageMime 可省；别名 image/x-png 归一后也算一致
+        assert!(parse(body_with_image(PNG_1X1_B64, Some("image/x-png"))).is_ok());
+    }
+
+    /// T15：jpeg / gif / webp 现在一律被拒（只留 PNG）
+    #[tokio::test]
+    async fn upload_rejects_non_png_formats() {
+        let cases: [(&[u8], &str); 4] = [
+            (&[0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46], "jpeg"),
+            (b"GIF89a\x01\x00\x01\x00", "gif89a"),
+            (b"GIF87a\x01\x00\x01\x00", "gif87a"),
+            (b"RIFF\x00\x00\x00\x00WEBPVP8 ", "webp"),
+        ];
+        for (bytes, name) in cases {
+            let e = parse(body_with_image(&b64(bytes), None)).err().unwrap();
+            let msg = err_msg(e).await;
+            assert!(msg.contains("只支持 PNG"), "{name} 应被拒且只提 PNG：{msg}");
+        }
+    }
+
+    /// 内容是真 PNG 但声明 image/jpeg → 类型不一致 400
+    #[tokio::test]
+    async fn upload_rejects_declared_mime_not_png() {
+        let e = parse(body_with_image(PNG_1X1_B64, Some("image/jpeg")))
+            .err()
+            .unwrap();
+        let msg = err_msg(e).await;
+        assert!(msg.contains("不一致"), "要指出类型不一致：{msg}");
+        assert!(msg.contains("image/png"), "要说出实际类型：{msg}");
+    }
+
+    /// 魔数对但结构不完整（截断）→ 400，不能把半张图存进去
+    #[tokio::test]
+    async fn upload_rejects_truncated_png() {
+        // 只有魔数 + IHDR 长度，块头都不全
+        let head = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13];
+        let e = parse(body_with_image(&b64(&head), None)).err().unwrap();
+        assert!(err_msg(e).await.contains("损坏"));
+
+        // 完整 PNG 掐掉收尾 IEND → 也算不完整
+        let full = raw(PNG_1X1_B64);
+        let cut = &full[..full.len() - 12];
+        let e = parse(body_with_image(&b64(cut), None)).err().unwrap();
+        assert!(err_msg(e).await.contains("损坏"));
+    }
+
+    /// 空 / 非 base64 / 非图片字节 三种脏输入
+    #[tokio::test]
+    async fn upload_rejects_empty_and_garbage() {
+        // 不带字段 = 纯文本消息，不算错
+        let m = parse(body_no_image()).ok().unwrap();
+        assert_eq!(m.image_kind, "none");
+        assert!(m.image_blob.is_none());
+        // 显式 null 同上
+        let mut b_null = body_no_image();
+        b_null["imageBase64"] = json!(null);
+        assert!(parse(b_null).ok().unwrap().image_blob.is_none());
+
+        // 契约：带了图片字段但内容为空 → 400
+        let e = parse(body_with_image("", None)).err().unwrap();
+        assert!(err_msg(e).await.contains("图片内容为空"));
+        // dataURL 前缀带了但 payload 空 → 也是空图
+        let e = parse(body_with_image("data:image/png;base64,", None))
+            .err()
+            .unwrap();
+        assert!(err_msg(e).await.contains("图片内容为空"));
+        // 非字符串
+        let mut b_num = body_no_image();
+        b_num["imageBase64"] = json!(12345);
+        assert!(parse(b_num).is_err(), "非字符串要 400");
+
+        let e = parse(body_with_image("!!!not-base64!!!", None))
+            .err()
+            .unwrap();
+        assert!(err_msg(e).await.contains("base64"));
+
+        let e = parse(body_with_image(&b64(b"hello world, not an image"), None))
+            .err()
+            .unwrap();
+        assert!(err_msg(e).await.contains("只支持 PNG"));
+    }
+
+    /// 超体积：必须在解码前的 base64 长度粗筛就被拦下，不能先解 7MB
+    #[tokio::test]
+    async fn upload_rejects_oversize_before_decoding() {
+        let big = "A".repeat(MAX_IMAGE_B64_LEN + 8);
+        let t0 = std::time::Instant::now();
+        let e = parse(body_with_image(&big, None)).err().unwrap();
+        let dt = t0.elapsed();
+        let msg = err_msg(e).await;
+        assert!(msg.contains("图片太大"), "文案要说明超限：{msg}");
+        assert!(
+            dt < std::time::Duration::from_millis(300),
+            "长度粗筛要立刻返回，实测 {dt:?}"
+        );
+    }
+
+    /// 压缩炸弹：文件很小但单边超 4096 的 PNG 必须按尺寸拒（只读头部，不整张解码）
+    #[tokio::test]
+    async fn upload_rejects_huge_dimensions() {
+        let wide = raw(PNG_WIDE_B64);
+        assert_eq!(png_dimensions(&wide), Some((5000, 1)), "夹具宽高读得出来");
+        assert!(wide.len() < 200, "测试图本身要小：{} 字节", wide.len());
+        let e = parse(body_with_image(PNG_WIDE_B64, Some("image/png")))
+            .err()
+            .unwrap();
+        assert!(err_msg(e).await.contains("尺寸"), "要报尺寸不支持");
+    }
+
+    /// 与 imageKind 互斥；前端默认带的 "none" 不算冲突
+    #[tokio::test]
+    async fn upload_conflicts_with_rendered_image_kind() {
+        let mut b = body_with_image(PNG_2X2_B64, Some("image/png"));
+        b["imageKind"] = json!("lineage");
+        let e = parse(b).err().unwrap();
+        assert!(err_msg(e).await.contains("不能同时提交"));
+
+        let mut b2 = body_with_image(PNG_2X2_B64, Some("image/png"));
+        b2["imageKind"] = json!("none");
+        assert_eq!(parse(b2).ok().unwrap().image_kind, "custom");
+
+        // 只声明 imageKind=custom 但没带图 → 仍按白名单拒（custom 不是提交值）
+        let mut b3 = body_no_image();
+        b3["imageKind"] = json!("custom");
+        assert!(parse(b3).is_err(), "没有图时不许提交 imageKind=custom");
     }
 }

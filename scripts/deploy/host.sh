@@ -88,7 +88,7 @@ sshpass -p "$PASS" ssh -o StrictHostKeyChecking=accept-new "root@$HOST" "
     sleep 2
   done
   # 审计 2026-10-11：这条发布路径原来不跑迁移（008/010/012 只在 147 脚本里有），
-  # 漏跑时注册会直接报「缺少数据库迁移」。没配 douyin_migrator 账号时只提示、不阻断发布。
+  # 漏跑时展示端登录/改密会直接报「缺少数据库迁移」。没配 douyin_migrator 账号时只提示、不阻断发布。
   docker compose exec -T pk-server /usr/local/bin/pk-server migrate \
     || echo '    （迁移跳过：未配置 douyin_migrator 或无需迁移）'
   docker compose ps

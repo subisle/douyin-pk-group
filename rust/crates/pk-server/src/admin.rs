@@ -69,19 +69,45 @@ pub fn maybe_spreadsheet_text(filename: &str, bytes: &[u8]) -> anyhow::Result<Op
 
 /* ------------------------------- 公共小工具 ------------------------------- */
 
+/// 读整数列（可空列也能读）：PG 里 int2 / int4 / int8 / bool / 数字文本都可能出现。
+///
+/// 2026-10-14 审计 P0-2 统一收口：sqlx 解码前做**精确类型匹配**，列类型与 Rust 读取
+/// 类型不一致就 ColumnDecode，而调用方普遍用 `.unwrap_or(0)` 兜底 → 页面上恒 0/恒空
+/// 且零日志。本项目已经踩过一整批：
+/// - `person.generation`（INT4）→ 详情页代数恒空
+/// - `person.hide_in_daily_report`（int2）→ 榜单隐藏标记恒 false
+/// - `import_batch.imported_rows/ok_rows/failed_rows`（INT4）→ 批次列表行数恒 0
+/// - `import_pending.minutes`（INT4）→ 暂存区时长恒空
+/// - `STREAMERS_SQL` 的 `wechat_bound` / `wechat_push`（**boolean**）→ 台账两列恒 false
+///
+/// 所以这里按「宽 → 窄 → 布尔 → 数字文本」回退，一次收口；新读点直接用本 helper，
+/// 不要再写 `try_get::<i64>` 单类型读取。
+fn read_opt_i64(row: &sqlx::postgres::PgRow, col: &str) -> Option<i64> {
+    if let Ok(v) = row.try_get::<Option<i64>, _>(col) {
+        return v;
+    }
+    if let Ok(v) = row.try_get::<Option<i32>, _>(col) {
+        return v.map(i64::from);
+    }
+    if let Ok(v) = row.try_get::<Option<i16>, _>(col) {
+        return v.map(i64::from);
+    }
+    if let Ok(v) = row.try_get::<Option<bool>, _>(col) {
+        return v.map(i64::from);
+    }
+    // 兜底：个别环境把计数列灌成了文本（历史 MySQL → PG 灌库出过）
+    row.try_get::<Option<String>, _>(col)
+        .ok()
+        .flatten()
+        .and_then(|s| s.trim().parse::<i64>().ok())
+}
+
 fn read_u64(row: &sqlx::postgres::PgRow, col: &str) -> Option<u64> {
-    row.try_get::<i64, _>(col).ok().map(|v| v.max(0) as u64)
+    read_opt_i64(row, col).map(|v| v.max(0) as u64)
 }
 
 fn read_opt_u64(row: &sqlx::postgres::PgRow, col: &str) -> Option<u64> {
-    row.try_get::<Option<i64>, _>(col)
-        .ok()
-        .flatten()
-        .map(|v| v.max(0) as u64)
-}
-
-fn read_opt_i64(row: &sqlx::postgres::PgRow, col: &str) -> Option<i64> {
-    row.try_get::<Option<i64>, _>(col).ok().flatten()
+    read_opt_i64(row, col).map(|v| v.max(0) as u64)
 }
 
 fn read_opt_str(row: &sqlx::postgres::PgRow, col: &str) -> Option<String> {
@@ -90,6 +116,23 @@ fn read_opt_str(row: &sqlx::postgres::PgRow, col: &str) -> Option<String> {
 
 fn read_str(row: &sqlx::postgres::PgRow, col: &str) -> String {
     row.try_get::<String, _>(col).unwrap_or_default()
+}
+
+/// 表是否存在（老库兼容探测）。
+///
+/// `to_regclass` 对不存在的表返回 NULL 而不是报错，所以这个探测放在事务里也安全
+/// （不会把事务打成 25P02）。用途：007 之前的库没有 monthly_duration ——
+/// merge_person 要跳过月时长合并，别让日常的「合并」因为少一张表直接 500。
+async fn table_exists(conn: &mut sqlx::PgConnection, name: &str) -> bool {
+    sqlx::query(&crate::pq::rewrite(
+        "SELECT to_regclass(?) IS NOT NULL AS ok",
+    ))
+    .bind(name)
+    .fetch_one(&mut *conn)
+    .await
+    .ok()
+    .and_then(|r| r.try_get::<bool, _>("ok").ok())
+    .unwrap_or(false)
 }
 
 /// 管理端只对本地库操作；没有 LOCAL 数据源直接报错
@@ -436,7 +479,7 @@ pub async fn create_streamer(
         .filter(|s| !s.is_empty())
         .map(str::to_string);
     if let Some(p) = phone.as_deref() {
-        crate::store::validate_my_phone(p).map_err(|e| ApiError::bad_request(e))?;
+        crate::store::validate_my_phone(p).map_err(ApiError::bad_request)?;
         // 016 没跑时这条查询会报 Unknown column：当「查不到冲突」处理。
         // 建档失败比"手机号没存上"严重得多（运营要重录一遍），不能让少跑的迁移挡住建档。
         let taken =
@@ -611,9 +654,18 @@ pub async fn update_streamer(
         binds.push(Bind::S(v));
     }
     if let Some(v) = body.master_id {
-        // 0 = 清空师傅；否则写主键
+        /* 0 = 清空师傅；否则写主键。
+        2026-10-14 审计 P1-6：这里原来**直接写库**，不校验自指 / 成环 / 目标是否存在 ——
+        落一条 `master_id = 自己` 后，公开端族谱的门下累计递归会 stack overflow
+        把整个进程打崩。现在与 set_master 共用 `check_master_choice`。 */
+        let mid = (v > 0).then_some(v);
+        if let Some(mid) = mid {
+            let me = streamer_row_by_id(&st, id).await.map_err(nice_400)?;
+            let me_name = read_str(&me, "name");
+            check_master_choice(&st, id, mid, &me_name).await?;
+        }
         sets.push("master_id = ?");
-        binds.push(Bind::U((v > 0).then_some(v as i64)));
+        binds.push(Bind::U(mid.map(|m| m as i64)));
     }
     if let Some(v) = body.generation {
         sets.push("generation = ?");
@@ -648,7 +700,7 @@ pub async fn update_streamer(
     if let Some(p) = phone_in.as_deref() {
         crate::store::person_set_phone(&st, id, p)
             .await
-            .map_err(|e| ApiError::bad_request(e))?;
+            .map_err(ApiError::bad_request)?;
     }
 
     // 抖音号：upsert 到主号账号行
@@ -1543,16 +1595,30 @@ pub async fn commit_import(
     let mut tx = pool.begin().await?;
 
     if mode == "reject" {
-        let cnt: i64 = sqlx::query(&crate::pq::rewrite(if auto_team {
+        /* 2026-10-14 审计 P1-4：bind 个数必须**跟着 SQL 走**。
+        auto（不分团）用 DATE_COUNT_SQL —— 只有 1 个 `?`（biz_date）；
+        分团用 TEAM_DATE_COUNT_SQL —— 2 个 `?`（biz_date + gender）。
+        原来无条件 `.bind(biz_date).bind(team)`：auto 时 PG 直接报
+        "bind message supplies 2 parameters, but prepared statement requires 1"，
+        事务第一条语句就失败、整批回滚。而前端 ImportPage 的 team 默认就是 auto，
+        等于「reject + 自动·不分团」100% 失败。
+        现在按占位符个数 bind（写法与 import_day_status 同口径）。 */
+        let sql = if auto_team {
             dialect::DATE_COUNT_SQL
         } else {
             dialect::TEAM_DATE_COUNT_SQL
-        }))
-        .bind(biz_date)
-        .bind(team)
-        .map(|r: sqlx::postgres::PgRow| r.try_get::<i64, _>(0).unwrap_or(0))
-        .fetch_one(&mut *tx)
-        .await?;
+        };
+        // rewrite 出的 String 必须先绑到变量：直接写在 `sqlx::query(&...)` 里是临时值，
+        // 语句结束即释放，而 q 会一直借用到 fetch_one —— 触发 E0716。
+        let sql_rw = crate::pq::rewrite(sql);
+        let mut q = sqlx::query(&sql_rw).bind(biz_date);
+        if dialect::placeholder_count(sql) > 1 {
+            q = q.bind(team);
+        }
+        let cnt: i64 = q
+            .map(|r: sqlx::postgres::PgRow| r.try_get::<i64, _>(0).unwrap_or(0))
+            .fetch_one(&mut *tx)
+            .await?;
         if cnt > 0 {
             anyhow::bail!(
                 "reject 模式：{} {biz_date} 已有 {cnt} 行数据，请改用 merge（幂等覆盖）或先处理旧数据",
@@ -2021,7 +2087,7 @@ async fn write_daily_row(
         .bind(biz_date)
         .bind(minutes)
         .bind(is_live)
-        .bind(batch_id as i64)
+        .bind(batch_id)
         .execute(&mut **tx)
         .await?;
         return Ok(WriteOutcome::Written);
@@ -2055,7 +2121,7 @@ async fn write_daily_row(
     .bind(reliable)
     .bind(minutes)
     .bind(is_live)
-    .bind(batch_id as i64)
+    .bind(batch_id)
     .execute(&mut **tx)
     .await?;
     Ok(WriteOutcome::Written)
@@ -3113,7 +3179,11 @@ pub async fn batch_my_accounts(
         let total = inputs.len();
         return Ok(Json(json!({
             "ok": true, "dryRun": true, "total": total,
-            "note": format!("预览：将对 {total} 个主播开号（初始密码 = 手机号后四位；无手机号时用 defaultPass）"),
+            /* 2026-10-14 校对：这句 note 原先写「无手机号时用 defaultPass」，与实现不符 ——
+            `defaultPass` 自 2026-10-13 起已不被读取（`my_accounts_batch_open` 里
+            `let _ = default_pass` 直接丢弃）。真实口径见 `store::initial_password`：
+            有手机号 → 手机号后四位；无手机号（或手机号不足 4 位）→ CSPRNG 随机串。 */
+            "note": format!("预览：将对 {total} 个主播开号（初始密码 = 手机号后四位；无手机号时用系统随机密码）"),
         })));
     }
 
@@ -3124,7 +3194,7 @@ pub async fn batch_my_accounts(
         body.force_reset.unwrap_or(false),
     )
     .await
-    .map_err(|e| ApiError::bad_request(e))?;
+    .map_err(ApiError::bad_request)?;
 
     let (mut created, mut updated, mut skipped, mut failed) = (0usize, 0usize, 0usize, 0usize);
     for r in &rows {
@@ -3178,7 +3248,7 @@ pub async fn set_person_phone(
         .ok_or_else(|| ApiError::bad_request("缺少 phone 字段"))?;
     crate::store::person_set_phone(&st, id, &phone)
         .await
-        .map_err(|e| ApiError::bad_request(e))?;
+        .map_err(ApiError::bad_request)?;
     /* 写后回读校验（2026-10-13）：与 my_account_set 同口径——杜绝「返回 ok 但库里
        没写入」的静默失败（64 环境曾出现运营以为绑上了实际没绑）。 */
     let saved_phone = sqlx::query(&crate::pq::rewrite(
@@ -3221,8 +3291,7 @@ pub async fn bind_account(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .ok_or_else(|| ApiError::bad_request("抖音号必填（一人可挂多个；抖音号全局唯一）"))?;
-    let no = crate::store::validate_douyin_no(douyin_no)
-        .map_err(|e| ApiError::bad_request(e))?;
+    let no = crate::store::validate_douyin_no(douyin_no).map_err(ApiError::bad_request)?;
     // 抖音号被别人占了 → 直接拒（不静默改绑，否则等于把别人的号抢过来）
     check_douyin_no_free(&st, Some(&no), Some(id)).await?;
     // 同一个人重复挂同一个号：幂等，不报错也不新增。
@@ -3466,6 +3535,137 @@ pub async fn unbind_account(
     Ok(Json(json!({ "ok": true })))
 }
 
+/* ------------------- 师门关系校验（set_master / update_streamer / master_batch 共用） ------------------- */
+
+/// 师门校验的失败原因。
+///
+/// 为什么不直接返回 ApiError：`master_batch` 是「一行失败不影响其他行」的批处理，
+/// 需要把原因写进该行的 note；单行接口则要把它翻成明确的 400。分成两类是为了
+/// 状态码正确：Reject（运营能照着改）→ 400；Db（表名/SQL 等实现细节）→ 500 通用文案。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MasterChoiceError {
+    /// 自指 / 成环 / 目标不存在 —— 输入问题
+    Reject(String),
+    /// 查库失败（细节只进日志）
+    Db,
+}
+
+impl std::fmt::Display for MasterChoiceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MasterChoiceError::Reject(m) => write!(f, "{m}"),
+            MasterChoiceError::Db => write!(f, "师门校验查询失败，请查看服务端日志后重试"),
+        }
+    }
+}
+
+impl From<MasterChoiceError> for ApiError {
+    fn from(e: MasterChoiceError) -> Self {
+        match e {
+            MasterChoiceError::Reject(m) => ApiError::bad_request(m),
+            // 查库细节（表名 / SQL 片段）绝不外发，走 500 的通用文案兜底
+            MasterChoiceError::Db => anyhow::anyhow!("师门校验查询失败").into(),
+        }
+    }
+}
+
+/// 沿师傅链向上走的最大跳数（防环判据的上限；50 跳远超真实师门深度）
+pub const MASTER_CHAIN_MAX_STEPS: usize = 50;
+
+/// 防环判据（**纯函数**，不碰库）：从 `mid` 沿师傅链向上走最多 `max_steps` 跳，
+/// 是否回到 `id`。`master_of` 是「person.id → person.master_id」邻接表。
+///
+/// - 自指：`mid == id` → 第一次循环就命中（调用方通常已先挡一道）
+/// - 2 环：A→B、B→A，设置 A 的师傅为 B 时 → 命中
+/// - 长环 / 隔代回环同样命中；链断了（无师傅）或走满上限没回来 → 放行
+pub fn master_chain_reaches(
+    mid: u64,
+    id: u64,
+    max_steps: usize,
+    master_of: &HashMap<u64, u64>,
+) -> bool {
+    let mut cursor = mid;
+    for _ in 0..max_steps {
+        if cursor == id {
+            return true;
+        }
+        match master_of.get(&cursor) {
+            Some(next) => cursor = *next,
+            None => return false,
+        }
+    }
+    cursor == id
+}
+
+/// 全库师傅边：`id → master_id`（防环校验用一次取回，替代原来「每跳查一次、最多 50 次」）
+const MASTER_EDGES_SQL: &str =
+    "SELECT id, master_id FROM person WHERE deleted_at IS NULL AND master_id IS NOT NULL";
+
+/// 按主键取师傅姓名。不碰 `person.phone`（老库没跑 016 也能用），
+/// 因此与 [`dialect::STREAMER_BY_ID_SQL`] 刻意分开。
+const MASTER_NAME_SQL: &str =
+    "SELECT id, name FROM person WHERE deleted_at IS NULL AND id = ? LIMIT 1";
+
+/// 校验「把主播 `id` 的师傅设为 `mid`」，通过时返回师傅姓名（回显用）。
+///
+/// 三条判据（2026-10-14 审计 P1-6 抽成共用函数）：
+/// 1. 不能自指（`mid == id`）；
+/// 2. 目标必须**存在且未删除**；
+/// 3. 沿目标向上不超过 [`MASTER_CHAIN_MAX_STEPS`] 跳不得回到 `id`（师徒关系必须是森林）。
+///
+/// 起因：`update_streamer` 原来直接写 `master_id`，不校验自指/成环/目标存在 ——
+/// 落一条 `master_id = 自己` 之后，公开端 `GET /api/public/teams/{team}/my` 的
+/// 门下累计递归无限递归 → stack overflow → 整个进程 abort。
+async fn check_master_choice(
+    st: &AppState,
+    id: u64,
+    mid: u64,
+    me_name: &str,
+) -> Result<String, MasterChoiceError> {
+    if mid == id {
+        return Err(MasterChoiceError::Reject("不能把自己设为师傅".into()));
+    }
+    // 目标存在且未删除：只取 id / name（不碰 person.phone，老库没跑 016 也能用）
+    let rows = pgrs::query_with_binds(&st.pools, "LOCAL", MASTER_NAME_SQL, |q| {
+        q.bind(mid as i64)
+    })
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, master_id = mid, "师门校验：查师傅失败");
+        MasterChoiceError::Db
+    })?;
+    let Some(mrow) = rows.into_iter().next() else {
+        return Err(MasterChoiceError::Reject(format!(
+            "要设为师傅的主播不存在或已删除（id={mid}）"
+        )));
+    };
+    let master_name = read_str(&mrow, "name");
+
+    // 防环：一次取回全库师傅边，在内存里走链
+    let edges = pgrs::query(&st.pools, "LOCAL", MASTER_EDGES_SQL)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, person_id = id, master_id = mid, "师门校验：查师傅链失败");
+            MasterChoiceError::Db
+        })?;
+    let mut master_of: HashMap<u64, u64> = HashMap::with_capacity(edges.len());
+    for r in &edges {
+        let pid = read_u64(r, "id").unwrap_or(0);
+        if let Some(m) = read_opt_u64(r, "master_id") {
+            // 自指边不入图（脏数据；真正的自指由上面的 mid == id 与链上的 id 判据兜住）
+            if pid > 0 && m > 0 && m != pid {
+                master_of.insert(pid, m);
+            }
+        }
+    }
+    if master_chain_reaches(mid, id, MASTER_CHAIN_MAX_STEPS, &master_of) {
+        return Err(MasterChoiceError::Reject(format!(
+            "不能设置：「{me_name}」已在「{master_name}」的师傅链上，会形成环"
+        )));
+    }
+    Ok(master_name)
+}
+
 #[derive(Deserialize)]
 pub struct SetMasterBody {
     /// 要设为师傅的 person.id；null / 缺省 → 清除师傅
@@ -3490,42 +3690,10 @@ pub async fn set_master(
 
     let mut master_name: Option<String> = None;
     if let Some(mid) = master_id {
-        ensure(mid != id, "不能把自己设为师傅")?;
-
-        // 师傅必须是有效主播
-        let mrow = pgrs::query_with_binds(&st.pools, "LOCAL", dialect::STREAMER_BY_ID_SQL, |q| {
-            q.bind(mid as i64)
-        })
-        .await?;
-        let mrow = mrow
-            .into_iter()
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("要设为师傅的主播不存在或已删除（id={mid}）"))?;
-        master_name = Some(read_str(&mrow, "name"));
-
-        // 防环：沿师傅链向上走，若回到本人即成环（师徒关系必须是森林）
-        let mut cursor = mid;
-        for _ in 0..50 {
-            let link = pgrs::query_with_binds(&st.pools, "LOCAL", dialect::MASTER_CHAIN_SQL, |q| {
-                q.bind(cursor as i64)
-            })
-            .await?;
-            let link = match link.into_iter().next() {
-                Some(r) => r,
-                None => break,
-            };
-            match read_opt_u64(&link, "master_id") {
-                Some(next) if next == id => {
-                    return Err(anyhow::anyhow!(
-                        "不能设置：「{me_name}」已在「{}」的师傅链上，会形成环",
-                        master_name.as_deref().unwrap_or_default()
-                    )
-                    .into())
-                }
-                Some(next) => cursor = next,
-                None => break,
-            }
-        }
+        /* 2026-10-14 审计 P1-6：自指 / 成环 / 目标存在的三条判据抽成
+        `check_master_choice`，与 update_streamer / master_batch 共用同一套实现
+        （原来是这里一份内联逻辑，其它写入路径完全没有校验）。 */
+        master_name = Some(check_master_choice(&st, id, mid, &me_name).await?);
     }
 
     sqlx::query(&crate::pq::rewrite(dialect::SET_MASTER_SQL))
@@ -3811,6 +3979,16 @@ pub async fn master_batch(
                     continue;
                 };
                 let gen = gen_of.get(mid).copied().flatten().map(|g| g + 1);
+                /* 2026-10-14 审计 P1-6：写库前再走一遍共用的师门校验。
+                planner 已按「名字 → 师傅名」挡过自指与成环（含批内临时边），
+                这里是落到真实 id 上的最后一道 —— 规划层的图与库里的边一旦不同步，
+                也绝不让成环的关系写进 person.master_id。 */
+                if let Err(e) = check_master_choice(&st, *pid as u64, *mid as u64, &p.name).await {
+                    failed += 1;
+                    item["note"] = json!(format!("师门校验未通过：{e}"));
+                    report.push(item);
+                    continue;
+                }
                 match sqlx::query(&crate::pq::rewrite(
                     "UPDATE person SET master_id = ?, generation = ? WHERE id = ? AND deleted_at IS NULL",
                 ))
@@ -3881,7 +4059,7 @@ pub async fn master_batch(
                     .bind(pid)
                     .execute(pool)
                     .await
-                    .map(|_| pid as i64)
+                    .map(|_| pid)
                     .map_err(anyhow::Error::from)
                 } else {
                     sqlx::query(&crate::pq::rewrite(
@@ -3893,9 +4071,10 @@ pub async fn master_batch(
                     .bind(gen)
                     .fetch_one(pool)
                     .await
-                    .map(|r| r.try_get::<i64, _>(0).map_err(anyhow::Error::from))
+                    /* MSRV 1.82：`.flatten()`（Result::flatten，1.89 才稳定）在 clippy
+                    `incompatible_msrv` 下报错，换成先 map_err 再 and_then —— 语义不变 */
                     .map_err(anyhow::Error::from)
-                    .flatten()
+                    .and_then(|r| r.try_get::<i64, _>(0).map_err(anyhow::Error::from))
                 };
                 match res {
                     Ok(pid) => {
@@ -4119,6 +4298,86 @@ pub async fn merge_person(
     .execute(&mut *tx)
     .await?;
 
+    // 月度时长（monthly_duration）：另抽成 merge_monthly_duration，缺表的库自动跳过
+    merge_monthly_duration(&mut tx, source, id).await?;
+
+    /* 推送绑定（push_bindings.person_id）：推送引擎按它取「我的」音浪 / 月榜
+    （push.rs 的 person_account_waves / month_map 都按 person_id 查），
+    不迁 → 该微信账号合并后推出来的是空数据。表按 name 唯一、person_id 无唯一键，
+    直接改绑即可（同一人名下多个 bot 各自照常收自己的推送）。
+    同类的 wx_push_accounts 也存 person_id，但那张表只用于「一人一 bot」查重，
+    不参与取数，本轮不动。 */
+    sqlx::query(&crate::pq::rewrite(
+        "UPDATE push_bindings SET person_id = ? WHERE person_id = ?",
+    ))
+    .bind(id as i64)
+    .bind(source as i64)
+    .execute(&mut *tx)
+    .await?;
+
+    /* 展示端登录账号（my_accounts.person_id）：账号的数据视图全靠它（月卡、我的音浪）。
+    ⚠️ 有部分唯一索引 `uk_my_person_uniq (person_id) WHERE person_id > 0`：
+    target 已经有账号时不能盲目改绑（会撞唯一键 → 整个合并 500），
+    这种情况保持 source 的账号不动并记 warn，让运营人工决定并掉哪个账号。 */
+    let target_has_account: i64 = sqlx::query(&crate::pq::rewrite(
+        "SELECT COUNT(*) FROM my_accounts WHERE person_id = ?",
+    ))
+    .bind(id as i64)
+    .fetch_one(&mut *tx)
+    .await?
+    .try_get(0)
+    .unwrap_or(0);
+    if target_has_account == 0 {
+        sqlx::query(&crate::pq::rewrite(
+            "UPDATE my_accounts SET person_id = ? WHERE person_id = ?",
+        ))
+        .bind(id as i64)
+        .bind(source as i64)
+        .execute(&mut *tx)
+        .await?;
+    } else {
+        let left: i64 = sqlx::query(&crate::pq::rewrite(
+            "SELECT COUNT(*) FROM my_accounts WHERE person_id = ?",
+        ))
+        .bind(source as i64)
+        .fetch_one(&mut *tx)
+        .await?
+        .try_get(0)
+        .unwrap_or(0);
+        if left > 0 {
+            tracing::warn!(
+                merged_from = source,
+                into = id,
+                accounts = left,
+                "合并：两端都有展示端登录账号，source 的账号未改绑（唯一索引一人一号）——请人工处理"
+            );
+        }
+    }
+
+    /* 待裁决的绑定申请 / 抖音号认领：只有 **pending** 需要跟着身份走 ——
+    通过后要把号写到 person_id 上，若还挂在已软删的 source 上，等于批了也不可见；
+    已裁决的行保留原始归属作为历史记录。两张表在 person_id 上都没有唯一键，直接改绑。 */
+    for sql in [
+        "UPDATE anchor_claims SET person_id = ? WHERE person_id = ? AND status = 'pending'",
+        "UPDATE my_bind_requests SET person_id = ? WHERE person_id = ? AND status = 'pending'",
+    ] {
+        sqlx::query(&crate::pq::rewrite(sql))
+            .bind(id as i64)
+            .bind(source as i64)
+            .execute(&mut *tx)
+            .await?;
+    }
+
+    /* 逐表判断后**故意不迁**的（见审计 P1-5 的「不要盲改」要求）：
+    - `monthly_metric`：只写不读的派生缓存（metrics.rs 落库，代码里没有任何 SELECT），
+      月页每次查询都会按 daily_metric 现算并 upsert，daily_metric 已迁 → 自愈。
+    - `import_pending.absorbed_person_id`：只标记「这行已被谁吸收」，
+      所有列表都带 `absorbed_at IS NULL` 过滤，纯历史留痕，改了反而丢溯源信息。
+    - `account`：函数开头已按 anchor_id 去重后改绑。
+    - `admin_message_reads` / `admin_outbox` / `identity_orphan_log` / `wx_push_accounts`：
+      属于消息下发与个人机器人凭证域（docs/23，并行开发中），不参与台账取数；
+      合并语义该不该跟人走需要产品口径，这里不动，避免越界改坏别人正在改的功能。 */
+
     // source 软删
     sqlx::query(&crate::pq::rewrite(
         "UPDATE person SET deleted_at = now() WHERE id = ? AND deleted_at IS NULL",
@@ -4130,6 +4389,81 @@ pub async fn merge_person(
     Ok(Json(
         json!({ "ok": true, "mergedFrom": source, "into": id }),
     ))
+}
+
+/// 把 source 的整月时长并进 target（merge_person 的一步，独立出来便于「缺表跳过」）。
+///
+/// 2026-10-14 审计 P1-5：`monthly_duration` 原来整表不迁 —— 合并后 source 的整月时长
+/// 在**所有读路径**都看不见（月/年榜 `period_rollup_sql` 按 person_id JOIN、
+/// 个人月卡 `MINUTES_MONTH_SQL` 直查 person_id），行还在库里但等于消失，月榜时长凭空少一截。
+///
+/// 口径与 daily_metric 的合并一致：同 (person, period) 冲突则 minutes **相加**，
+/// 不冲突的整批改绑；与 daily_metric 同样先「并冲突再改绑」，避免撞 `uk_person_period`。
+///
+/// 007 未跑的老库没有这张表（dialect::query_period 对它有专门的降级）：
+/// 先探测一次，缺表直接返回 —— 不能让「合并主播」这个日常操作因为少一张表 500。
+async fn merge_monthly_duration(
+    conn: &mut sqlx::PgConnection,
+    source: u64,
+    target: u64,
+) -> anyhow::Result<()> {
+    if !table_exists(&mut *conn, "monthly_duration").await {
+        tracing::warn!(
+            source,
+            target,
+            "合并主播：库没跑 007（无 monthly_duration），跳过整月时长合并"
+        );
+        return Ok(());
+    }
+    let src_periods = sqlx::query(&crate::pq::rewrite(
+        "SELECT period FROM monthly_duration WHERE person_id = ?",
+    ))
+    .bind(source as i64)
+    .fetch_all(&mut *conn)
+    .await?;
+    for r in &src_periods {
+        let period: String = r.try_get("period").unwrap_or_default();
+        let exists: i64 = sqlx::query(&crate::pq::rewrite(
+            "SELECT COUNT(*) FROM monthly_duration WHERE person_id = ? AND period = ?",
+        ))
+        .bind(target as i64)
+        .bind(&period)
+        .fetch_one(&mut *conn)
+        .await?
+        .try_get(0)
+        .unwrap_or(0);
+        if exists > 0 {
+            // 同 period 冲突：source 该月时长并进 target 该行，然后删源行（不再撞唯一键）
+            sqlx::query(&crate::pq::rewrite(
+                "UPDATE monthly_duration t SET minutes = t.minutes + s.m
+                 FROM (SELECT SUM(minutes) AS m FROM monthly_duration
+                       WHERE person_id = ? AND period = ?) s
+                 WHERE t.person_id = ? AND t.period = ?",
+            ))
+            .bind(source as i64)
+            .bind(&period)
+            .bind(target as i64)
+            .bind(&period)
+            .execute(&mut *conn)
+            .await?;
+            sqlx::query(&crate::pq::rewrite(
+                "DELETE FROM monthly_duration WHERE person_id = ? AND period = ?",
+            ))
+            .bind(source as i64)
+            .bind(&period)
+            .execute(&mut *conn)
+            .await?;
+        }
+    }
+    // 剩下的（target 没有同 period 的）整批改绑
+    sqlx::query(&crate::pq::rewrite(
+        "UPDATE monthly_duration SET person_id = ? WHERE person_id = ?",
+    ))
+    .bind(target as i64)
+    .bind(source as i64)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
 }
 
 /// GET /api/admin/collect/status：采集链路状态
@@ -5236,5 +5570,103 @@ mod spreadsheet_tests {
                 .all(|r| r.name.chars().any(|c| !c.is_ascii_control())),
             "姓名不应是二进制乱码"
         );
+    }
+}
+
+/* ------------------- 单测：师门校验（P1-6）与 reject 绑定个数（P1-4） ------------------- */
+
+#[cfg(test)]
+mod master_choice_tests {
+    use super::*;
+
+    fn edges(pairs: &[(u64, u64)]) -> HashMap<u64, u64> {
+        pairs.iter().copied().collect()
+    }
+
+    /// 用默认步数上限判环（测试简写，免得每行都拖一长串参数）
+    fn reaches(mid: u64, id: u64, master_of: &HashMap<u64, u64>) -> bool {
+        master_chain_reaches(mid, id, MASTER_CHAIN_MAX_STEPS, master_of)
+    }
+
+    /// P1-6 回归：**自指**必须被拒（把 id 的师傅设成 id）
+    #[test]
+    fn self_master_is_rejected() {
+        assert!(reaches(7, 7, &edges(&[])), "自指会成环，必须拒绝");
+    }
+
+    /// P1-6 回归：**2 环**必须被拒（A 的师傅是 B、B 的师傅是 A）
+    #[test]
+    fn two_cycle_is_rejected() {
+        // 库里已有：2 的师傅是 1；现在要把 1 的师傅设成 2 → 1→2→1 成环
+        assert!(reaches(2, 1, &edges(&[(2, 1)])));
+        // 反过来同样拦
+        assert!(reaches(1, 2, &edges(&[(1, 2)])));
+    }
+
+    /// 长环（3 环 / 更长的环）也必须拦下
+    #[test]
+    fn longer_cycles_are_rejected() {
+        // 2→3→1：把 1 的师傅设成 2 会绕回 1
+        assert!(reaches(2, 1, &edges(&[(2, 3), (3, 1)])));
+        // 10 个节点的环：1→2→…→10→1
+        let mut g: HashMap<u64, u64> = (1..10u64).map(|i| (i, i + 1)).collect();
+        g.insert(10, 1);
+        assert!(reaches(2, 1, &g));
+        // 同一张图里，挂到环外的节点不算成环
+        assert!(!reaches(99, 1, &g));
+    }
+
+    /// 正常森林不能被误伤：向上走到头就放行（含「师傅的师傅」这种合法祖先）
+    #[test]
+    fn acyclic_forest_is_allowed() {
+        // 2 的师傅是 3，3 没有师傅；把 1 的师傅设成 2 → 链 2→3→(无)，不回 1
+        assert!(!reaches(2, 1, &edges(&[(2, 3)])));
+        // 目标没有师傅
+        assert!(!reaches(9, 1, &edges(&[])));
+        // 目标链很长但没回头（60 个节点的一字长蛇）
+        let chain: HashMap<u64, u64> = (1..60u64).map(|i| (i, i + 1)).collect();
+        assert!(!reaches(2, 1, &chain));
+    }
+
+    /// 防环判据的步数上限与旧实现一致（50 跳），超深链不会误判
+    #[test]
+    fn cycle_detection_stops_at_step_limit() {
+        // 写在 const 块里：这是编译期就能定的性质（clippy::assertions_on_constants）
+        const {
+            assert!(MASTER_CHAIN_MAX_STEPS == 50);
+        }
+        // 60 个节点的环 + 从很远的地方进入：50 跳内回不到起点 → 按「放行」处理（与旧实现同）
+        let mut g: HashMap<u64, u64> = (1..60u64).map(|i| (i, i + 1)).collect();
+        g.insert(60, 1);
+        assert!(!reaches(2, 1, &g));
+        // 但同一个环从近处进入能命中：50→…→60→1→…→40 正好 50 跳走回 40
+        assert!(reaches(50, 40, &g));
+    }
+
+    /// P1-4 护栏：reject 模式的 bind 个数必须 == SQL 里的 `?` 个数。
+    /// 原来硬编码 bind(biz_date).bind(team) 两个，而 auto 用的 DATE_COUNT_SQL 只有 1 个 `?`
+    /// → PG 报 "bind message supplies 2 parameters" → 事务第一条语句就失败、整批回滚。
+    #[test]
+    fn reject_mode_bind_count_matches_placeholders() {
+        for (sql, is_auto) in [
+            (dialect::DATE_COUNT_SQL, true),
+            (dialect::TEAM_DATE_COUNT_SQL, false),
+        ] {
+            // 与 commit_import 的 reject 分支同款绑定逻辑：先 biz_date，占位符 > 1 再 team
+            let mut binds = 1usize;
+            if dialect::placeholder_count(sql) > 1 {
+                binds += 1;
+            }
+            assert_eq!(
+                binds,
+                dialect::placeholder_count(sql),
+                "bind 个数必须与 SQL 占位符个数一致：{sql}"
+            );
+            if is_auto {
+                assert_eq!(binds, 1, "不分团只能 bind 1 个参数（只有 biz_date）");
+            } else {
+                assert_eq!(binds, 2, "分团是 biz_date + team");
+            }
+        }
     }
 }

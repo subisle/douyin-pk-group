@@ -196,7 +196,7 @@ fn signed(r: &sqlx::postgres::PgRow, col: &str) -> i64 {
         return v;
     }
     if let Ok(v) = r.try_get::<i64, _>(col) {
-        return v as i64;
+        return v;
     }
     if let Ok(v) = r.try_get::<String, _>(col) {
         return v.parse().unwrap_or(0);
@@ -519,9 +519,9 @@ fn render_svg_labeled_inner(
     // 🚩 流动小红旗条（2026-10-12 用户口径）：称号后台可配，如「初级争霸赛冠军 狼哲」。
     // icon 支持 data:image 内嵌图（后台可配）；空/非 data:image 回退 🚩 emoji。
     if let Some(star) = &rep.daily_star {
-        s.push_str(&format!(
-            "<rect x=\"12\" y=\"68\" width=\"696\" height=\"40\" fill=\"#FFFAEB\" rx=\"10\" stroke=\"#FEDF89\"/>"
-        ));
+        s.push_str(
+            "<rect x=\"12\" y=\"68\" width=\"696\" height=\"40\" fill=\"#FFFAEB\" rx=\"10\" stroke=\"#FEDF89\"/>",
+        );
         let use_image_icon =
             !star.icon.is_empty() && star.icon.starts_with("data:image");
         if use_image_icon {

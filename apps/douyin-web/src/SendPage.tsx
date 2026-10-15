@@ -1,12 +1,16 @@
 /* 消息下发页（/admin/send，docs/23 §5/§6）：
- * - 编辑卡片 + 收件人三种圈人（多选 / 按师傅 / 批量）+ 右侧手机弹窗实时预览；
+ * - 编辑卡片 + 收件人三种圈人（多选 / 按师傅 / 批量）；
  * - 发送确认（N>100 二次确认）→ 跳转发送详情（3s 轮询直到无 pending）；
  * - 发送历史列表。
- * 防注入：标题/正文一律 React 文本节点渲染（预览、详情、历史都一样），全页没有
+ * 2026-10-15 用户口径：**去掉弹窗预览** —— 原右侧手机壳预览区是纯前端装饰
+ * （只读本地 state，不走任何接口），删掉不影响发送主链路。
+ * 2026-10-15 task-14/17：支持随消息发**一张 PNG 上传图**（后端按文件头魔数校验、解码后
+ * ≤5MB；前端本地同口径拦截并给提示），与服务端渲染图（imageKind）互斥。
+ * 防注入：标题/正文一律 React 文本节点渲染（详情、历史都一样），全页没有
  * dangerouslySetInnerHTML，也不引外部 HTML。
  * 样式只复用 styles.css 既有类，页面私有的布局类全部 send- 前缀，写在本文件
  * 底部的局部 <style> 里，不动全局 styles.css。 */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react'
 import {
   createSend,
   fetchSendMessageDetail,
@@ -43,6 +47,7 @@ const IMAGE_LABEL: Record<string, string> = {
   lineage: '师门日报',
   daily: '每日报告',
   month: '月榜',
+  custom: '上传图',
 }
 
 const CHANNEL_LABEL: Record<string, string> = {
@@ -60,6 +65,58 @@ function teamLabel(team: string): string {
 function fmtTime(v: string | null | undefined): string {
   if (!v) return '—'
   return String(v).replace('T', ' ').slice(0, 19)
+}
+
+/* ---------------- 上传图（task-14/15）：只收 PNG、解码后 ≤5MB ---------------- */
+
+/** 与后端 `MAX_IMAGE_BYTES` 同口径（5MB，按**解码后**字节算）；超限本地就拦，别撞 8MB body limit */
+const MAX_UPLOAD_BYTES = 5 * 1024 * 1024
+/** PNG 文件头魔数：后端 `sniff_image_mime` 只信字节，前端同样不能只信 `file.type` */
+const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
+
+/** 已选上传图（存裸 base64；缩略图 src 自己拼 dataURL，不依赖浏览器给的 mime） */
+type UploadImg = { name: string; bytes: number; base64: string }
+
+/** 文件前 8 字节是否为 PNG 魔数 */
+async function hasPngMagic(file: File): Promise<boolean> {
+  const head = new Uint8Array(await file.slice(0, PNG_MAGIC.length).arrayBuffer())
+  return head.length === PNG_MAGIC.length && PNG_MAGIC.every((b, i) => head[i] === b)
+}
+
+/** 读成**裸 base64**（剥掉 dataURL 前缀；浏览器 type 为空时会拼成 octet-stream，不能直接用） */
+function readFileAsBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader()
+    fr.onload = () => {
+      const s = String(fr.result ?? '')
+      const comma = s.indexOf(',')
+      resolve(comma >= 0 ? s.slice(comma + 1) : s)
+    }
+    fr.onerror = () => reject(new Error('读取文件失败，请重试'))
+    fr.readAsDataURL(file)
+  })
+}
+
+function fmtBytes(n: number): string {
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
+  return `${(n / 1024 / 1024).toFixed(2)} MB`
+}
+
+/** 历史 / 详情的图片列文案：custom 带文件名与体积，其余按 IMAGE_LABEL（渲染图带日期） */
+function imageText(m: {
+  imageKind: string
+  imageDate?: string | null
+  imageName?: string
+  imageBytes?: number
+}): string {
+  const label = IMAGE_LABEL[m.imageKind] ?? m.imageKind
+  if (m.imageKind === 'custom') {
+    return `${label}${m.imageName ? ` ${m.imageName}` : ''}${
+      m.imageBytes ? `（${fmtBytes(m.imageBytes)}）` : ''
+    }`
+  }
+  return m.imageDate ? `${label} · ${m.imageDate}` : label
 }
 
 /** 渠道串（后端逗号分隔，容忍数组返回）→ ['wxbot','popup'] */
@@ -95,6 +152,9 @@ export default function SendPage() {
   const [imageDate, setImageDate] = useState(isoLocal())
   const [wxChk, setWxChk] = useState(true)
   const [popupChk, setPopupChk] = useState(true)
+  /** 上传图（task-14）：null = 本次不带图 —— 提交时**不能**带 imageBase64 字段（空串会被判 400） */
+  const [upload, setUpload] = useState<UploadImg | null>(null)
+  const [uploadErr, setUploadErr] = useState('')
 
   /* ---------------- 收件人 ---------------- */
   const [tab, setTab] = useState<'multi' | 'masters' | 'batch'>('multi')
@@ -210,6 +270,49 @@ export default function SendPage() {
     return { type: 'team' as const, team: batch }
   }
 
+  /** 选图：魔数 + type/扩展名 + 5MB 三重本地校验；任一条不过就不落 state，只给中文提示 */
+  async function onPickImage(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    e.target.value = '' // 清空以便再次选同一个文件还能触发 onChange
+    if (!file) return
+    setUploadErr('')
+    if (file.type !== 'image/png' || !/\.png$/i.test(file.name)) {
+      setUpload(null)
+      setUploadErr(`只支持 PNG 图片（当前：${file.type || '未知类型'}，${file.name}）`)
+      return
+    }
+    if (file.size > MAX_UPLOAD_BYTES) {
+      setUpload(null)
+      setUploadErr(
+        `图片太大：${fmtBytes(file.size)}，上限 5MB（后端按解码后体积校验，超限会 400）`,
+      )
+      return
+    }
+    try {
+      if (!(await hasPngMagic(file))) {
+        setUpload(null)
+        setUploadErr('这不是 PNG 图片（文件内容与扩展名不符），请换一张')
+        return
+      }
+      const base64 = await readFileAsBase64(file)
+      if (!base64) {
+        setUpload(null)
+        setUploadErr('图片内容为空，请重新选择')
+        return
+      }
+      setUpload({ name: file.name, bytes: file.size, base64 })
+      setImageKind('none') // 与服务端渲染图（师门日报）互斥：同时给后端会 400
+    } catch (err: unknown) {
+      setUpload(null)
+      setUploadErr(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  function removeUpload() {
+    setUpload(null)
+    setUploadErr('')
+  }
+
   function openSendConfirm() {
     if (!canSend) return
     setConfirmBox({ stage: 1, n: estimatedN, m: channels.length })
@@ -223,10 +326,15 @@ export default function SendPage() {
       const d = await createSend({
         title: title.trim(),
         content,
-        imageKind,
+        // 上传图与 imageKind 互斥：选图时固定 none（后端据 imageBase64 落 image_kind=custom）
+        imageKind: upload ? 'none' : imageKind,
         imageDate,
         channels,
         target: buildTarget(),
+        // 未选图时**不带** imageBase64（缺字段 = 没带图；带空串会被后端判 400）
+        ...(upload
+          ? { imageBase64: upload.base64, imageMime: 'image/png', imageName: upload.name }
+          : {}),
       })
       setConfirmBox(null)
       setView({ kind: 'detail', id: d.messageId })
@@ -329,8 +437,7 @@ export default function SendPage() {
       {view.kind === 'detail' ? (
         <DetailCard id={view.id} onBack={() => setView({ kind: 'compose' })} />
       ) : (
-        <div className="send-cols">
-          <div className="send-sticky">
+          <div className="send-stack">
             {/* 编辑卡片 */}
             <section className="card">
               <h2>编辑消息</h2>
@@ -357,10 +464,39 @@ export default function SendPage() {
                 </span>
               </div>
               <div className="row">
+                <label title="随消息发给收件人的一张图片（与服务端渲染图互斥）">
+                  选择图片{' '}
+                  <input
+                    type="file"
+                    accept="image/png"
+                    disabled={sending}
+                    onChange={onPickImage}
+                  />
+                </label>
+                <span className="hint">只支持 PNG，≤5MB（后端按文件头魔数校验）</span>
+              </div>
+              {upload && (
+                <div className="row send-upload">
+                  <img
+                    className="send-upload-thumb"
+                    src={`data:image/png;base64,${upload.base64}`}
+                    alt={upload.name}
+                  />
+                  <span className="send-upload-meta">
+                    {upload.name} · {fmtBytes(upload.bytes)}
+                  </span>
+                  <button type="button" onClick={removeUpload} disabled={sending}>
+                    移除
+                  </button>
+                </div>
+              )}
+              {uploadErr && <div className="alert warn">{uploadErr}</div>}
+              <div className="row">
                 <label>
                   图片类型{' '}
                   <select
-                    value={imageKind}
+                    value={upload ? 'none' : imageKind}
+                    disabled={!!upload}
                     onChange={(e) => setImageKind(e.target.value === 'lineage' ? 'lineage' : 'none')}
                   >
                     <option value="none">无</option>
@@ -372,6 +508,7 @@ export default function SendPage() {
                   <input
                     type="date"
                     value={imageDate}
+                    disabled={!!upload}
                     onChange={(e) => setImageDate(e.target.value)}
                   />
                 </label>
@@ -392,7 +529,13 @@ export default function SendPage() {
                   web 弹窗
                 </label>
               </div>
-              {imageKind === 'lineage' && (
+              {upload && (
+                <p className="hint">
+                  已选上传图：与「图片类型」里的服务端渲染图**互斥**（同时提交后端会 400），
+                  本次按上传图发送（后端把 imageKind 落成 custom）。
+                </p>
+              )}
+              {imageKind === 'lineage' && !upload && (
                 <p className="hint">
                   师门日报图按每位收件人实时渲染（水印 = 本人姓名）；无徒弟的收件人自动降级纯文本。
                 </p>
@@ -538,34 +681,6 @@ export default function SendPage() {
               )}
             </section>
           </div>
-
-          {/* 右侧：实时预览（宽屏并排、窄屏堆叠） */}
-          <div className="send-sticky">
-            <section className="card">
-              <h2>弹窗预览</h2>
-              <p className="hint">收件人在展示端「我的」页看到的样式（随编辑区即时变化）。</p>
-              <div className="send-phone">
-                <div className="send-screen">
-                  <div className="send-screen-bar">展示端 · 我的</div>
-                  <div className="send-popup">
-                    <div className="send-popup-bar">📣 管理员消息</div>
-                    <div className="send-popup-title">{title.trim() || '（标题）'}</div>
-                    {imageKind !== 'none' && (
-                      <div className="send-popup-img">
-                        🖼 {IMAGE_LABEL[imageKind] ?? imageKind} · {imageDate || '（日期）'}
-                        <div style={{ marginTop: 4 }}>（按收件人实时渲染）</div>
-                      </div>
-                    )}
-                    <div className="send-popup-text">
-                      {content || '（正文预览：在这里输入要下发的文字）'}
-                    </div>
-                    <div className="send-popup-btn">知道了</div>
-                  </div>
-                </div>
-              </div>
-            </section>
-          </div>
-        </div>
       )}
 
       {/* 历史列表（详情视图下也保留，方便点其他一条） */}
@@ -605,7 +720,7 @@ export default function SendPage() {
                       {m.title || <span className="hint">（无标题）</span>}
                       <div className="hint send-clamp">{m.content}</div>
                     </td>
-                    <td className="hint">{IMAGE_LABEL[m.imageKind] ?? m.imageKind}</td>
+                    <td className="hint">{imageText(m)}</td>
                     <td className="hint">{channelText(m.channels)}</td>
                     <td className="hint">{TARGET_LABEL[m.targetType] ?? m.targetType}</td>
                     <td>
@@ -634,7 +749,11 @@ export default function SendPage() {
                 <p className="hint">
                   标题：{title.trim() || '（无标题）'}
                   <br />
-                  {imageKind === 'lineage' ? `附图：师门日报 · ${imageDate}` : '附图：无'}
+                  {upload
+                    ? `附图：上传图 ${upload.name}（${fmtBytes(upload.bytes)}）`
+                    : imageKind === 'lineage'
+                      ? `附图：师门日报 · ${imageDate}`
+                      : '附图：无'}
                   <br />
                   圈人方式：{tab === 'multi' ? '多选' : tab === 'masters' ? '按师傅' : batch === 'all' ? '全部' : batch === 'male' ? '男团' : '女团'}
                   ；未绑定渠道的收件人该渠道记「跳过」。
@@ -893,8 +1012,7 @@ function DetailCard({ id, onBack }: { id: number; onBack: () => void }) {
           <p>
             <b>{m.title || '（无标题）'}</b>
             <span className="hint" style={{ marginLeft: 8 }}>
-              {fmtTime(m.createdAt)} · {IMAGE_LABEL[m.imageKind] ?? m.imageKind}
-              {m.imageDate ? ` · ${m.imageDate}` : ''} · 渠道 {channelText(m.channels)} · 圈人{' '}
+              {fmtTime(m.createdAt)} · {imageText(m)} · 渠道 {channelText(m.channels)} · 圈人{' '}
               {TARGET_LABEL[m.targetType] ?? m.targetType}
             </span>
           </p>
@@ -960,10 +1078,7 @@ function DetailCard({ id, onBack }: { id: number; onBack: () => void }) {
 
 /* ---------------- 页面私有样式（不动全局 styles.css） ---------------- */
 const SEND_CSS = `
-.send-cols { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 14px; align-items: start; }
-.send-sticky { display: grid; gap: 14px; min-width: 0; }
-.send-sticky:last-child { position: sticky; top: 16px; }
-@media (max-width: 1020px) { .send-cols { grid-template-columns: 1fr; } .send-sticky:last-child { position: static; } }
+.send-stack { display: grid; gap: 14px; min-width: 0; }
 
 .send-tabs { display: flex; gap: 4px; background: color-mix(in srgb, var(--ink) 5%, transparent); padding: 4px; border-radius: 10px; width: fit-content; margin: 8px 0; }
 .send-tabs button { border: none; background: transparent; padding: 6px 16px; border-radius: 8px; font: inherit; font-size: 13px; cursor: pointer; color: var(--ink2); }
@@ -980,16 +1095,10 @@ const SEND_CSS = `
 .send-chip button { border: none; background: transparent; cursor: pointer; color: inherit; font: inherit; font-size: 12px; padding: 0 2px; }
 .send-chip-on { background: var(--brand-soft); color: var(--brand); font-weight: 600; }
 
-/* 手机壳预览 */
-.send-phone { width: 290px; max-width: 100%; margin: 10px auto 0; background: #101828; border-radius: 34px; padding: 10px; box-shadow: var(--shadow-pop); }
-.send-screen { background: #eef0f4; border-radius: 24px; padding: 12px 10px 16px; min-height: 430px; display: flex; flex-direction: column; gap: 10px; }
-.send-screen-bar { text-align: center; font-size: 11px; color: var(--ink3); }
-.send-popup { background: #fff; border-radius: 14px; padding: 14px; box-shadow: 0 6px 24px rgb(16 24 40 / 12%); display: grid; gap: 8px; margin-top: 8px; }
-.send-popup-bar { font-size: 11px; color: var(--ink3); letter-spacing: 0.02em; }
-.send-popup-title { font-size: 15px; font-weight: 700; color: var(--ink); word-break: break-word; }
-.send-popup-img { border: 1px dashed var(--brand); border-radius: 10px; padding: 16px 10px; text-align: center; color: var(--brand); font-size: 12px; background: var(--brand-soft); }
-.send-popup-text { font-size: 13px; line-height: 1.65; color: var(--ink2); white-space: pre-wrap; word-break: break-word; min-height: 42px; }
-.send-popup-btn { margin-top: 2px; text-align: center; background: var(--brand); color: #fff; border-radius: 999px; padding: 8px 0; font-size: 13px; font-weight: 600; }
+/* 上传图：缩略图 + 文件名/体积 + 移除按钮 */
+.send-upload { align-items: center; gap: 10px; }
+.send-upload-thumb { width: 72px; height: 72px; object-fit: contain; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+.send-upload-meta { font-size: 12px; color: var(--ink2); word-break: break-all; }
 
 .send-detail-content { white-space: pre-wrap; word-break: break-word; background: color-mix(in srgb, var(--ink) 4%, transparent); border-radius: 8px; padding: 10px 12px; font-size: 13.5px; }
 `

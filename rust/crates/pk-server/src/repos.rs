@@ -9,13 +9,15 @@ use crate::dialect::{dialect_of, inline_dates};
 use crate::pgrs;
 use crate::state::{AnchorBrief, AppState, Cached, DateInfo, WaveInfo, WaveMap, WaveSeries};
 
-/// 主键在不同库/不同版本里可能是 BIGINT UNSIGNED / BIGINT / INT / VARCHAR，
+/// 主键在不同库/不同版本里可能是 BIGINT / INT / VARCHAR，
 /// 逐个类型尝试，都不行就返回 None
 fn read_id(row: &sqlx::postgres::PgRow, idx: usize) -> Option<String> {
     if let Ok(v) = row.try_get::<i64, _>(idx) {
         return Some(v.to_string());
     }
-    if let Ok(v) = row.try_get::<i64, _>(idx) {
+    /* 第二分支原来逐字抄了第一句（死代码）：列的候选类型是 INT4 而不是再来一遍 BIGINT。
+    2026-10-14 审计 P2 同类清理 —— 少了它，INT4 主键的库只能靠下面的 String 兜底。 */
+    if let Ok(v) = row.try_get::<i32, _>(idx) {
         return Some(v.to_string());
     }
     row.try_get::<String, _>(idx).ok()
@@ -230,8 +232,11 @@ pub async fn get_wave_series(
                 continue;
             };
             let v: f64 = r.try_get::<Option<f64>, _>(2).ok().flatten().unwrap_or(0.0);
-            // MAX(is_live) 聚出来的可能是 i8/int；解析不了按未开播处理
-            let l: i16 = r.try_get::<Option<i16>, _>(3).ok().flatten().unwrap_or(0);
+            /* SERIES_A 的 live 列是 `MAX(is_live)`（smallint）与 `CASE ... THEN 1 ELSE 0 END`
+            （integer）的 UNION ALL —— PG 会统一成 **integer**（实库 pg_typeof 已确认），
+            按 i16 读每行都 ColumnDecode 再被吞成 0（折线图开播标记恒 0）。
+            2026-10-14 审计 P0-2：按 i32 读，再显式收窄成 0/1 存进 Vec<i16>。 */
+            let l: i16 = r.try_get::<Option<i32>, _>(3).ok().flatten().unwrap_or(0) as i16;
             series
                 .entry(pid.clone())
                 .or_insert_with(|| vec![0.0; dates.len()])[i] = v;

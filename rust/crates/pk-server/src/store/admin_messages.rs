@@ -17,10 +17,17 @@ use super::*; // 共享 w() / now_str() / AppState / Result / Row / PgResultExt
 pub struct NewMessage {
     pub title: String,
     pub content: String,
-    /// none | lineage | daily | month（入口已过白名单）
+    /// none | lineage | daily | month | custom（入口已过白名单；
+    /// custom = 管理员上传图，见 task-14）
     pub image_kind: String,
     /// YYYY-MM-DD；None = 库里留 NULL
     pub image_date: Option<String>,
+    /// 上传图原始字节（None = 没用上传图；`022` 之前的行也是 None）
+    pub image_blob: Option<Vec<u8>>,
+    /// 按文件魔数判出来的 MIME；只收 PNG（task-15），有图时恒为 `image/png`，无图空串
+    pub image_mime: String,
+    /// 上传时的原始文件名（可选）
+    pub image_name: String,
     /// 逗号分隔：wxbot,popup
     pub channels: String,
     /// persons | masters | team | all
@@ -69,14 +76,18 @@ pub async fn admin_message_insert(st: &AppState, m: &NewMessage) -> Result<i64> 
     let pool = w(st)?;
     let id: i64 = sqlx::query_scalar(&crate::pq::rewrite(
         "INSERT INTO admin_messages
-           (title, content, image_kind, image_date, channels, target_type, target_ids, created_by)
-         VALUES (?, ?, ?, ?::DATE, ?, ?, ?, ?)
+           (title, content, image_kind, image_date, image_blob, image_mime, image_name,
+            channels, target_type, target_ids, created_by)
+         VALUES (?, ?, ?, ?::DATE, ?, ?, ?, ?, ?, ?, ?)
          RETURNING id",
     ))
     .bind(m.title.trim())
     .bind(&m.content)
     .bind(&m.image_kind)
     .bind(m.image_date.as_deref())
+    .bind(m.image_blob.as_deref())
+    .bind(&m.image_mime)
+    .bind(m.image_name.trim())
     .bind(&m.channels)
     .bind(&m.target_type)
     .bind(&m.target_ids)
@@ -176,13 +187,24 @@ pub async fn admin_outbox_finish(st: &AppState, outbox_id: i64, ok: bool, error:
 
 /* ------------------------------ 主档读取 ------------------------------ */
 
+/// 主档行 → JSON 投影。
+///
+/// ⚠️ **有意不下发 image_blob**（一张图最多 5MB，base64 进 JSON 会撑爆列表接口）：
+/// 只回 `imageMime` / `imageName` / `imageBytes` / `hasImage` 四个小字段，
+/// 原图由 `admin_message_image()`（和展示端 `…/image.png`）按需单取。
+/// 注意调用方的 SELECT 必须带上 `image_mime` / `image_name` / `image_bytes` 三列。
 fn message_from_row(r: &sqlx::postgres::PgRow) -> serde_json::Value {
+    let image_bytes = r.try_get::<i64, _>("image_bytes").unwrap_or(0);
     serde_json::json!({
         "id": r.try_get::<i64, _>("id").unwrap_or(0),
         "title": r.try_get::<String, _>("title").unwrap_or_default(),
         "content": r.try_get::<String, _>("content").unwrap_or_default(),
         "imageKind": r.try_get::<String, _>("image_kind").unwrap_or_default(),
         "imageDate": r.try_get::<Option<String>, _>("image_date_s").ok().flatten(),
+        "imageMime": r.try_get::<String, _>("image_mime").unwrap_or_default(),
+        "imageName": r.try_get::<String, _>("image_name").unwrap_or_default(),
+        "imageBytes": image_bytes,
+        "hasImage": image_bytes > 0,
         "channels": r.try_get::<String, _>("channels").unwrap_or_default(),
         "targetType": r.try_get::<String, _>("target_type").unwrap_or_default(),
         "targetIds": r.try_get::<String, _>("target_ids").unwrap_or_default(),
@@ -191,33 +213,55 @@ fn message_from_row(r: &sqlx::postgres::PgRow) -> serde_json::Value {
     })
 }
 
+/// 主档 SELECT 的公共列表（`message_from_row` 依赖：三列一个都不能少）
+const MESSAGE_COLS: &str = "id, title, content, image_kind,
+                TO_CHAR(image_date, 'YYYY-MM-DD') AS image_date_s,
+                image_mime, image_name,
+                COALESCE(OCTET_LENGTH(image_blob), 0)::BIGINT AS image_bytes,
+                channels, target_type, target_ids, created_by,
+                TO_CHAR(created_at, 'YYYY-MM-DD HH24:MI:SS') AS created_s";
+
 /// 单条主档（详情页用）。查不到 = None。
 pub async fn admin_message_get(st: &AppState, id: i64) -> Result<Option<serde_json::Value>> {
+    let sql = format!("SELECT {MESSAGE_COLS} FROM admin_messages WHERE id = ?");
+    let rows = crate::pgrs::query_with_binds(&st.pools, "LOCAL", &sql, |q| q.bind(id)).await?;
+    Ok(rows.first().map(message_from_row))
+}
+
+/// 一条消息的上传图原图：`(mime, bytes)`。没有上传图 / 消息不存在 = None。
+///
+/// 只按 id 取 `image_mime + image_blob` 两列，不碰其它字段：投递（wxbot 转 PNG）
+/// 与展示端图片端点都用这一条，避免把 5MB BYTEA 拖进任何列表查询。
+pub async fn admin_message_image(st: &AppState, id: i64) -> Result<Option<(String, Vec<u8>)>> {
     let rows = crate::pgrs::query_with_binds(
         &st.pools,
         "LOCAL",
-        "SELECT id, title, content, image_kind,
-                TO_CHAR(image_date, 'YYYY-MM-DD') AS image_date_s,
-                channels, target_type, target_ids, created_by,
-                TO_CHAR(created_at, 'YYYY-MM-DD HH24:MI:SS') AS created_s
-         FROM admin_messages WHERE id = ?",
+        "SELECT image_mime, image_blob FROM admin_messages
+         WHERE id = ? AND image_blob IS NOT NULL",
         |q| q.bind(id),
     )
     .await?;
-    Ok(rows.first().map(message_from_row))
+    let Some(r) = rows.first() else {
+        return Ok(None);
+    };
+    let mime = r.try_get::<String, _>("image_mime").unwrap_or_default();
+    let blob = r
+        .try_get::<Option<Vec<u8>>, _>("image_blob")
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    if blob.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some((mime, blob)))
 }
 
 /// 发送历史：主档 + 每条 (sent, failed, skipped, pending) 计数。
 /// pending 计数含 'sending'（正在发，页面当作未完成）。
 pub async fn admin_message_list(st: &AppState, limit: i64) -> Result<Vec<serde_json::Value>> {
     let limit = limit.clamp(1, 200);
-    let rows = crate::pgrs::query_with_binds(
-        &st.pools,
-        "LOCAL",
-        "SELECT id, title, content, image_kind,
-                TO_CHAR(image_date, 'YYYY-MM-DD') AS image_date_s,
-                channels, target_type, target_ids, created_by,
-                TO_CHAR(created_at, 'YYYY-MM-DD HH24:MI:SS') AS created_s,
+    let sql = format!(
+        "SELECT {MESSAGE_COLS},
                 (SELECT COUNT(*) FROM admin_outbox o WHERE o.message_id = m.id AND o.status = 'sent') AS sent_n,
                 (SELECT COUNT(*) FROM admin_outbox o WHERE o.message_id = m.id AND o.status = 'failed') AS failed_n,
                 (SELECT COUNT(*) FROM admin_outbox o WHERE o.message_id = m.id AND o.status = 'skipped') AS skipped_n,
@@ -225,10 +269,9 @@ pub async fn admin_message_list(st: &AppState, limit: i64) -> Result<Vec<serde_j
                    AND o.status IN ('pending', 'sending')) AS pending_n
          FROM admin_messages m
          ORDER BY m.id DESC
-         LIMIT ?",
-        |q| q.bind(limit),
-    )
-    .await?;
+         LIMIT ?"
+    );
+    let rows = crate::pgrs::query_with_binds(&st.pools, "LOCAL", &sql, |q| q.bind(limit)).await?;
     Ok(rows
         .iter()
         .map(|r| {
@@ -321,6 +364,8 @@ pub async fn admin_unread_for(
         "LOCAL",
         "SELECT m.id, m.title, m.content, m.image_kind,
                 TO_CHAR(m.image_date, 'YYYY-MM-DD') AS image_date_s,
+                m.image_mime,
+                COALESCE(OCTET_LENGTH(m.image_blob), 0)::BIGINT AS image_bytes,
                 TO_CHAR(m.created_at, 'YYYY-MM-DD HH24:MI:SS') AS created_s
          FROM admin_outbox o
          JOIN admin_messages m ON m.id = o.message_id
@@ -337,11 +382,15 @@ pub async fn admin_unread_for(
     Ok(rows
         .iter()
         .map(|r| {
+            let image_bytes = r.try_get::<i64, _>("image_bytes").unwrap_or(0);
             serde_json::json!({
                 "id": r.try_get::<i64, _>("id").unwrap_or(0),
                 "title": r.try_get::<String, _>("title").unwrap_or_default(),
                 "content": r.try_get::<String, _>("content").unwrap_or_default(),
                 "imageKind": r.try_get::<String, _>("image_kind").unwrap_or_default(),
+                // 弹窗据此决定要不要取 `…/image.png`（原图按需单取，不进这个响应）
+                "imageMime": r.try_get::<String, _>("image_mime").unwrap_or_default(),
+                "hasImage": image_bytes > 0,
                 "date": r
                     .try_get::<Option<String>, _>("image_date_s")
                     .ok()

@@ -157,7 +157,6 @@ async fn main() -> anyhow::Result<()> {
         active: Mutex::new(active),
         cache: Mutex::new(Default::default()),
         bots: std::sync::OnceLock::new(),
-        wb: std::sync::OnceLock::new(),
     });
     /* Redis 30s PING 探针（P0）：刷新 store::cache 内部的降级标志，断开/恢复各留一条日志。
     未配置 REDIS_URL 时不启动；探针只做「刷新 + 记录」，不参与任何业务判断。 */
@@ -183,18 +182,6 @@ async fn main() -> anyhow::Result<()> {
             }
         });
     }
-    /* WorkBuddy 网关（注册用「添加账号 OAuth」）：配了 WORKBUDDY_PANEL_PASSWORD 才有；
-    没配只打一条提示，注册页自动隐藏 OAuth 步骤。 */
-    match wbgateway::WbGateway::from_env() {
-        Some(wb) => {
-            tracing::info!(panel = wb.base(), "WorkBuddy 网关注册授权已启用");
-            let _ = st.wb.set(wb);
-        }
-        None => tracing::info!(
-            "WorkBuddy 网关未配置（WORKBUDDY_PANEL_PASSWORD 空）：注册页不显示 OAuth 步骤"
-        ),
-    }
-
     /* 内置主播名册：person 表为空（全新部署）时自动装载 105 人种子数据 */
     roster_seed::seed_if_empty(&st).await;
 
@@ -311,6 +298,12 @@ async fn main() -> anyhow::Result<()> {
             "/api/public/teams/{team}/my/push/targets",
             post(public_teams::my_push_target_add),
         )
+        // 追人目标批量多选（契约 B 节 2026-10-15）：与上面单条添加入口同组、同鉴权口径
+        // （token 走 X-My-Token 头，handler 内 my_ident 校验登录态 + 团别）。
+        .route(
+            "/api/public/teams/{team}/my/push/targets/batch",
+            post(public_teams::my_push_targets_batch),
+        )
         .route(
             "/api/public/teams/{team}/my/push/targets/delete",
             post(public_teams::my_push_target_del),
@@ -332,32 +325,13 @@ async fn main() -> anyhow::Result<()> {
             "/api/public/teams/{team}/my/push/wechat/poll",
             post(public_teams::my_push_wechat_poll),
         )
-        // 展示端手机号注册（2026-10-10）：手机号=账号、验证码=密码；
-        // 注册同时调 WorkBuddy 网关「添加账号 (OAuth)」，注册完提示绑定主播。
-        // 这几个接口不带团别：注册时还不知道主播属于哪个团。
-        .route(
-            "/api/public/my/register/config",
-            get(public_teams::my_register_config),
-        )
-        // 注册页实时校验主播姓名（免 token；注册开关关着时不泄露台账）
-        .route(
-            "/api/public/my/register/check-name",
-            get(public_teams::my_register_check_name),
-        )
-        .route(
-            "/api/public/my/register/oauth/start",
-            post(public_teams::my_register_oauth_start),
-        )
-        .route(
-            "/api/public/my/register/oauth/poll",
-            get(public_teams::my_register_oauth_poll),
-        )
-        .route(
-            "/api/public/my/register/oauth/cancel",
-            post(public_teams::my_register_oauth_cancel),
-        )
+        // 展示端登录 / 密码（2026-10-14 口径：注册功能已彻底移除，保留忘记密码重置，
+        // 新增已登录后的自助改密）。这几个接口不带团别。
         .route("/api/public/my/login", post(public_teams::my_login))
-        .route("/api/public/my/register", post(public_teams::my_register))
+        .route(
+            "/api/public/my/password",
+            post(public_teams::my_password_set),
+        )
         .route(
             "/api/public/my/password/reset",
             post(public_teams::my_password_reset),
@@ -614,7 +588,14 @@ async fn main() -> anyhow::Result<()> {
             get(public_teams::get_announcement).post(public_teams::update_announcement),
         )
         // 管理员消息下发（docs/23 §5）：收件人解析 + outbox 队列 + 限速 worker
-        .route("/api/admin/send", post(admin_send::send_create))
+        // task-14：这条路由收自定义上传图（base64），要按单条路由放宽 body limit
+        // （全局是 4MB，5MB 原图 base64 后 ≈6.7MB）。DefaultBodyLimit 是往请求
+        // extensions 里 insert，内层覆盖外层，所以这里比全局那层更靠内 → 生效 8MB。
+        .route(
+            "/api/admin/send",
+            post(admin_send::send_create)
+                .layer(axum::extract::DefaultBodyLimit::max(admin_send::SEND_BODY_LIMIT)),
+        )
         .route("/api/admin/send/targets", get(admin_send::send_targets))
         .route("/api/admin/send/messages", get(admin_send::send_messages))
         .route(

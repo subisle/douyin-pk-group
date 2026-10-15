@@ -43,12 +43,6 @@ export default function BotPage() {
   const [addQrSet, setAddQrSet] = useState(false)
   const [addQrMsg, setAddQrMsg] = useState('')
   const addQrFileRef = useRef<HTMLInputElement | null>(null)
-  /** 延迟推送队列（运营查有没有推出去 / 立刻催一次） */
-  const [pushJobs, setPushJobs] = useState<any>(null)
-  const [pushMsg, setPushMsg] = useState('')
-  /** 推送队列加载失败（P2-5）：不再渲染成「还没有推送任务」的假空态 */
-  const [pushError, setPushError] = useState('')
-  const [pushBusy, setPushBusy] = useState<string | null>(null)
   /** 师门日报只读概览（docs/23 §4.3）：已绑定微信的人里，名下有直系徒弟的「师傅」名单。
       口径与后端 hasDisciples 一致（person_id>0 且本人无师傅 master_id IS NULL，
       且存在未删除的直系徒弟）。开关值本身在展示端「我的」页由用户自己设，
@@ -74,7 +68,7 @@ export default function BotPage() {
         })
       })
       .catch(() => {
-        // 概览加载失败只留空态，不影响推送队列卡的正常使用
+        // 概览加载失败只留空态
         setLineageBind(null)
       })
   }, [])
@@ -84,41 +78,6 @@ export default function BotPage() {
     const t = setInterval(loadLineageBind, 60000)
     return () => clearInterval(t)
   }, [loadLineageBind])
-
-  const loadPushJobs = useCallback(() => {
-    api('/api/admin/push/jobs')
-      .then(setPushJobs)
-      .catch((e) => {
-        // P2-5：失败显示出来（空态文案会在下面提示「还没有推送任务」，加一条错误态避免误导）
-        console.error('推送队列加载失败', e)
-        setPushJobs(null)
-        setPushMsg('')
-        setPushError(String(e?.message ?? e))
-      })
-  }, [])
-
-  useEffect(() => {
-    loadPushJobs()
-    const t = setInterval(loadPushJobs, 30000)
-    return () => clearInterval(t)
-  }, [loadPushJobs])
-
-  async function runPushNow(team: string, bizDate: string) {
-    setPushBusy(`${team}:${bizDate}`)
-    setPushMsg('')
-    try {
-      await api(
-        `/api/admin/push/run?team=${encodeURIComponent(team)}&bizDate=${encodeURIComponent(bizDate)}`,
-        { method: 'POST' },
-      )
-      setPushMsg(`已立即推送：${team === 'female' ? '女团' : '男团'} ${bizDate}`)
-      loadPushJobs()
-    } catch (e: any) {
-      setPushMsg(e.message ?? String(e))
-    } finally {
-      setPushBusy(null)
-    }
-  }
 
   const load = useCallback(async () => {
     try {
@@ -469,89 +428,6 @@ export default function BotPage() {
           </div>
         )}
         {addQrMsg && <div className="alert good">{addQrMsg}</div>}
-      </section>
-
-      <section className="card">
-        <h2>推送队列（入库后 {pushJobs?.delayMinutes ?? 30} 分钟推）</h2>
-        <p className="hint">
-          数据入库不立刻推，先排队等一轮导入的几个文件（男女团 / 多抖音号）都到齐，到点统一推一次。
-          同一团同一业务日只排一队，重复导入只刷新不叠加。
-          {pushJobs?.stats && (
-            <>
-              {' '}
-              当前：<b>{pushJobs.stats.bound}</b> 人已绑定微信，其中{' '}
-              <b>{pushJobs.stats.enabled}</b> 人开了推送开关。
-            </>
-          )}
-        </p>
-        {pushJobs?.items?.length ? (
-          <div className="table-scroll">
-            <table>
-              <thead>
-                <tr>
-                  <th>团别</th>
-                <th>业务日</th>
-                <th>计划推送时间</th>
-                <th>状态</th>
-                <th>完成时间</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {pushJobs.items.map((j: any) => (
-                <tr key={j.id}>
-                  <td>{j.team === 'female' ? '女团' : j.team === 'male' ? '男团' : j.team}</td>
-                  <td>{j.bizDate}</td>
-                  <td className="hint">{j.runAt?.slice(11, 16) || j.runAt}</td>
-                  <td>
-                    <span
-                      className={
-                        j.status === 'done'
-                          ? 'badge b-active'
-                          : j.status === 'failed'
-                            ? 'badge b-left'
-                            : j.status === 'running'
-                              ? 'badge b-paused'
-                              : 'badge'
-                      }
-                    >
-                      {j.status === 'done'
-                        ? '已推送'
-                        : j.status === 'failed'
-                          ? '失败'
-                          : j.status === 'running'
-                            ? '推送中'
-                            : '排队中'}
-                    </span>
-                  </td>
-                  <td className="hint">{j.doneAt || '—'}</td>
-                  <td>
-                    <button
-                      disabled={pushBusy === `${j.team}:${j.bizDate}`}
-                      onClick={() => runPushNow(j.team, j.bizDate)}
-                    >
-                      {pushBusy === `${j.team}:${j.bizDate}` ? '推送中…' : '立即推送'}
-                    </button>
-                  </td>
-                </tr>
-              ))}
-              </tbody>
-            </table>
-          </div>
-        ) : pushError ? (
-          <div className="alert warn">
-            ⚠️ 推送队列加载失败：{pushError}（会随轮询自动重试）
-          </div>
-        ) : (
-          <p className="hint">还没有推送任务：导入一轮数据后这里会出现。</p>
-        )}
-        {pushJobs?.items?.some((j: any) => j.status === 'failed' && j.note) && (
-          <div className="alert bad">
-            失败原因：
-            {pushJobs.items.find((j: any) => j.status === 'failed' && j.note)?.note}
-          </div>
-        )}
-        {pushMsg && <div className="alert good">{pushMsg}</div>}
       </section>
 
       <section className="card">

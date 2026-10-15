@@ -71,10 +71,14 @@ pub async fn verify(
         return Err(ApiError::bad_request("请输入账号和密码"));
     }
 
-    /* 1. 账号校验：手机号+密码 或 姓名+密码（my_accounts 名单，管理员手动维护 / 手机号自助注册） */
-    let Some(account_name) = crate::store::my_account_check_login(&st, &acct, &pass).await else {
-        crate::ipinfo::log_login(&st, &client_ip, &geo, &team, &acct, false).await;
-        return Ok(Json(json!({ "ok": false }))); // 统一失败，不区分「账号不存在/密码错」
+    /* 1. 账号校验：手机号+密码 或 姓名+密码（my_accounts 名单，管理员后台开通）
+       2026-10-14：失败要说明白是哪一种（密码错 / 账号没开通），不再统一糊成一句。 */
+    let account_name = match crate::store::my_account_check_login(&st, &acct, &pass).await {
+        Ok(name) => name,
+        Err(why) => {
+            crate::ipinfo::log_login(&st, &client_ip, &geo, &team, &acct, false).await;
+            return Ok(Json(json!({ "ok": false, "error": why.message() })));
+        }
     };
     crate::ipinfo::log_login(&st, &client_ip, &geo, &team, &account_name, true).await;
 
@@ -132,17 +136,6 @@ pub async fn verify(
         }
     }
 }
-
-/* ----------------- 手机号注册（WorkBuddy 网关 OAuth）+ 绑定主播 -----------------
- *
- * 用户口径（2026-10-10）：
- *   1. 展示端登录门加「注册」——注册同时调用 WorkBuddy 网关的「添加账号 (OAuth)」，
- *      那张授权页本身就是手机号 + 短信验证码登录；
- *   2. 验证码数字就是密码，手机号就是账号（所以这里不需要短信通道）；
- *   3. 注册完提醒绑定主播姓名，绑定之后用户自己不能解绑（只有管理员能改绑）。
- *
- * 分工：面板密码只在服务端，浏览器只拿 state + authUrl（`wbgateway` 模块）。
- */
 
 /* --------------- 免团别登录口（/api/public/my/login）---------------
  *
@@ -269,12 +262,15 @@ pub async fn my_login(
             "token": token, "admin": true, "bound": true
         })));
     }
-    /* 2026-10-14（本代理修正）：只有当「快捷分支确实在管管理员口令」时，没对上才记失败 ——
-    也就是 ADMIN_PASSWORD 已配置（verify_admin_password 有可能为真）。没配口令时
-    这个分支恒 false，正常用户的 acct≠pass 会在这里被误记失败，NAT 后 5 个人就
-    能把整栋楼锁 10 分钟（5 次失败阈值是「来源」级，不是「账号」级）。
-    反过来，真正打快捷分支的爆破（acct==pass 且口令错）一定满足「已配置」，
-    一次不漏全部计数 —— 防爆破语义不变。 */
+    /* 2026-10-14 修正（失败只记一次 + 门控）：本块是这条登录路径**唯一**的失败计数点，
+    下面的账号校验分支不再重复计数 —— 原先两处各记一次，auth.rs 的「连续失败 5 次
+    锁 10 分钟」实际第 3 次失败就触发，注释与行为不符。
+    计数还受 `st.auth.enabled()`（= ADMIN_PASSWORD 已配置）门控：没配口令时
+    verify_admin_password 恒 false，快捷分支不可能被爆破；不门控的话，正常用户
+    输错密码也会被按「来源」级计数（阈值按 IP 不按账号），NAT 后 5 个人就能把整栋楼
+    锁 10 分钟。
+    真正打快捷分支的爆破（acct==pass 且口令错）一定满足「已配置」，一次不漏全部计数 ——
+    防爆破语义不变；账号密码正确时，下面会 login_record_success 清零。 */
     if st.auth.enabled() {
         let now_locked = st.auth.login_record_failure(&login_key);
         if now_locked {
@@ -282,20 +278,24 @@ pub async fn my_login(
         }
     }
 
-    /* 1. 账号校验（与 verify 同一套 my_accounts） */
-    let Some(account_name) = crate::store::my_account_check_login(&st, &acct, &pass).await else {
-        let _now_locked = st.auth.login_record_failure(&login_key);
-        crate::ipinfo::log_login_path(
-            &st,
-            &client_ip,
-            &geo,
-            "",
-            "/api/public/my/login",
-            &acct,
-            false,
-        )
-        .await;
-        return Ok(Json(json!({ "ok": false })));
+    /* 1. 账号校验（与 verify 同一套 my_accounts）
+       2026-10-14：失败原因（密码错 / 账号没开通）下发前端照实显示。 */
+    let account_name = match crate::store::my_account_check_login(&st, &acct, &pass).await {
+        Ok(name) => name,
+        Err(why) => {
+            // 失败计数已在上面的门控块记过（每次请求只记一次），这里不再重复计数
+            crate::ipinfo::log_login_path(
+                &st,
+                &client_ip,
+                &geo,
+                "",
+                "/api/public/my/login",
+                &acct,
+                false,
+            )
+            .await;
+            return Ok(Json(json!({ "ok": false, "error": why.message() })));
+        }
     };
     // 账号密码正确 → 清零失败计数（与 /api/auth/login 同口径：成功即解锁）
     st.auth.login_record_success(&login_key);
@@ -389,296 +389,82 @@ pub(super) fn public_write_allow(ip: &str) -> bool {
         .allow(ip)
 }
 
-/// 注册类写接口限流：每 IP 每分钟 12 次（一次注册本来就要接好几下，单独一档）
-pub(super) fn public_register_allow(ip: &str) -> bool {
-    REGISTER_LIMITER
+/// 「忘记密码重置」写接口限流：每 IP 每分钟 12 次。
+///
+/// 这一档原是注册时代的「注册类写接口」档（一次注册本来就要接好几下，所以比登录撞库
+/// 单独放宽到 12）；2026-10-14 注册功能移除后，`POST /api/public/my/password/reset`
+/// 是它唯一的调用方 —— 档位数值不动，只把名字改成反映当前用途。
+pub(super) fn public_password_reset_allow(ip: &str) -> bool {
+    PASSWORD_RESET_LIMITER
         .get_or_init(|| VerifyLimiter::new(12))
         .allow(ip)
 }
 
-/// 授权轮询限流：每 IP 每分钟 120 次（前端 2.5s 轮一次 ≈ 24 次/分，余量给重试）
-pub(super) fn public_poll_allow(ip: &str) -> bool {
-    REGISTER_POLL_LIMITER
-        .get_or_init(|| VerifyLimiter::new(120))
-        .allow(ip)
-}
-
-/// 注册开关（用户口径 2026-10-10「注册先不开」）：默认关，后台「公开站点设置 → 开放手机号注册」开。
-/// 关着时注册相关接口一律 400；登录、绑定、我的页完全不受影响。
-pub(super) async fn ensure_register_open(st: &AppState) -> Result<(), ApiError> {
-    if PublicSettings::load(st).await.my_register {
-        Ok(())
-    } else {
-        Err(ApiError::bad_request(
-            "注册功能暂未开放（管理员可在后台「公开站点设置 → 开放手机号注册」里打开）",
-        ))
-    }
-}
-
-/// GET /api/public/my/register/config：注册页能力探测（功能开没开 + 网关配没配）
-pub async fn my_register_config(State(st): State<ArcState>) -> ApiResult {
-    let open = PublicSettings::load(&st).await.my_register;
-    Ok(Json(json!({
-        "open": open,
-        "oauth": open && st.wb.get().is_some(),
-        "platform": "CLI",
-    })))
-}
-
-/// POST /api/public/my/register/oauth/start {realm}：向网关申请一条「添加账号」授权链接。
-/// 返回 {state, authUrl, realm}；面板密码不出服务端。
-pub async fn my_register_oauth_start(
-    State(st): State<ArcState>,
-    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
-    headers: HeaderMap,
-    axum::Json(body): axum::Json<Value>,
-) -> ApiResult {
-    ensure_register_open(&st).await?;
-    if !public_register_allow(&client_ip_for_limit(addr, &headers)) {
-        return Err(ApiError::with_status(
-            axum::http::StatusCode::TOO_MANY_REQUESTS,
-            "尝试太频繁，请稍后再试",
-        ));
-    }
-    let Some(wb) = st.wb.get() else {
-        // 面向用户的配置缺口提示：注册流程在没配网关时给 400 引导话术（非服务端故障）
-        return Err(ApiError::bad_request(
-            "服务端还没有配置 WorkBuddy 网关（WORKBUDDY_PANEL_PASSWORD），暂时不能自动添加账号",
-        ));
-    };
-    let realm = body
-        .get("realm")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
-    let (state, auth_url, realm) = wb
-        .login_start(realm)
-        .await
-        .map_err(|e| {
-            // 网关返回的 e 可能带上游 HTTP 细节：给出面向用户的主文案，细节留日志
-            tracing::warn!(error = %e, "申请 WorkBuddy 授权链接失败");
-            ApiError::bad_request("申请授权链接失败，请稍后再试或联系管理员")
-        })?;
-    Ok(Json(
-        json!({ "ok": true, "state": state, "authUrl": auth_url, "realm": realm }),
-    ))
-}
-
-#[derive(Deserialize)]
-pub struct OauthPollQuery {
-    pub state: Option<String>,
-}
-
-/// 姓名校验查询串：`?q=主播姓名`
-#[derive(Deserialize)]
-pub struct NameQuery {
-    pub q: Option<String>,
-}
-
-/// GET /api/public/my/register/oauth/poll?state=：轮询授权结果（原样转发网关状态）
-pub async fn my_register_oauth_poll(
-    State(st): State<ArcState>,
-    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
-    headers: HeaderMap,
-    Query(q): Query<OauthPollQuery>,
-) -> ApiResult {
-    /* 审计 2026-10-11：轮询接口会代打 WorkBuddy 网关面板，加一档宽松限流
-    （前端 2.5s 一次，正常远低于 120/分） */
-    if !public_poll_allow(&client_ip_for_limit(addr, &headers)) {
-        return Err(ApiError::with_status(
-            axum::http::StatusCode::TOO_MANY_REQUESTS,
-            "尝试太频繁，请稍后再试",
-        ));
-    }
-    let state = q.state.unwrap_or_default();
-    let state = state.trim();
-    if state.is_empty() || state.len() > 128 {
-        return Err(ApiError::bad_request("缺少授权流水号 state"));
-    }
-    ensure_register_open(&st).await?;
-    let Some(wb) = st.wb.get() else {
-        return Err(ApiError::bad_request(
-            "服务端还没有配置 WorkBuddy 网关，不能查询授权状态",
-        ));
-    };
-    let v = wb
-        .login_poll(state)
-        .await
-        .map_err(|e| {
-            // 网关返回的 e 可能带上游 HTTP 状态/报文细节：细节留日志，客户端给通用话术
-            tracing::warn!(error = %e, "查询 WorkBuddy 授权状态失败");
-            ApiError::bad_request("查询授权状态失败，请稍后再试或联系管理员")
-        })?;
-    let status = v
-        .get("status")
-        .and_then(|s| s.as_str())
-        .unwrap_or("unknown")
-        .to_string();
-    let message = v
-        .get("message")
-        .and_then(|s| s.as_str())
-        .unwrap_or_default()
-        .to_string();
-    let nickname = v
-        .pointer("/account/nickname")
-        .and_then(|s| s.as_str())
-        .filter(|s| !s.is_empty())
-        .map(String::from);
-    Ok(Json(
-        json!({ "status": status, "message": message, "nickname": nickname }),
-    ))
-}
-
-/// POST /api/public/my/register/oauth/cancel {state}：用户关掉弹窗时清理面板上的授权状态
-pub async fn my_register_oauth_cancel(
-    State(st): State<ArcState>,
-    axum::Json(body): axum::Json<Value>,
-) -> ApiResult {
-    let state = body
-        .get("state")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-    if PublicSettings::load(&st).await.my_register {
-        if let Some(wb) = st.wb.get() {
-            if !state.is_empty() && state.len() <= 128 {
-                wb.login_cancel(&state).await;
-            }
-        }
-    }
-    Ok(Json(json!({ "ok": true })))
-}
-
-/// GET /api/public/my/register/check-name?q=：注册页实时校验主播姓名（免 token）。
-/// 返回 `{ok, exists, bound, name, team}`；查不到 → `{ok:false, exists:false, error}`。
-/// 只在「开放手机号注册」开着时可用（关着时不泄露台账姓名）。
+/// POST /api/public/my/password {newPass}（身份**只**认 X-My-Token 头）
 ///
-/// 2026-10-12 安全审计：**不再下发 personId**（免 token 接口泄露内部 id，会被拿去
-/// 自报绑定冒领身份）；改回 exists + bound（该主播是否已有绑定账号），前端据此提示
-/// 「已有人绑定，请联系管理员」。
-pub async fn my_register_check_name(
-    State(st): State<ArcState>,
-    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
-    headers: HeaderMap,
-    Query(q): Query<NameQuery>,
-) -> ApiResult {
-    ensure_register_open(&st).await?;
-    /* 审计 2026-10-11：姓名校验是免 token 的精确匹配查询，不限流就能被脚本拿来做
-    「某个艺名在不在册」的枚举，和注册接口共用同一档限流。 */
-    if !public_register_allow(&client_ip_for_limit(addr, &headers)) {
-        return Err(ApiError::with_status(
-            axum::http::StatusCode::TOO_MANY_REQUESTS,
-            "尝试太频繁，请稍后再试",
-        ));
-    }
-    let key = q.q.clone().unwrap_or_default();
-    let key = key.trim();
-    if key.is_empty() {
-        return Ok(Json(
-            json!({ "ok": false, "exists": false, "bound": false, "error": "请输入主播姓名" }),
-        ));
-    }
-    match crate::store::anchor_lookup_by_name(&st, key).await {
-        Ok(Some((pid, name, team))) => {
-            let bound = crate::store::my_account_bound_for_person(&st, pid, &name).await;
-            Ok(Json(json!({
-                "ok": true, "exists": true, "bound": bound, "name": name,
-                "team": if team == "male" || team == "female" { team } else { String::new() },
-            })))
-        }
-        Ok(None) => Ok(Json(json!({
-            "ok": false, "exists": false, "bound": false,
-            "error": format!("主播库里没有「{key}」这个姓名，请核对艺名"),
-        }))),
-        Err(e) => Ok(Json(
-            json!({ "ok": false, "exists": false, "bound": false, "error": e }),
-        )),
-    }
-}
-
-/// POST /api/public/my/register {phone, code, name, team?, wbState?}
-/// **手机号 = 账号，验证码 = 密码，name = 主播姓名（必须在台账里）**。
-/// 2026-10-12 审计修订：注册**不再立即绑定**（自报姓名直接 bound=1 等于无审核冒领）。
-/// 注册成功 = 账号落库（手机号占位名、bound=0）+ 自动生成 pending 绑定申请，
-/// 管理员审核通过后才真正绑定。响应字段保持向后兼容（ok/token/name/team/personId/
-/// bound/needBind 都在），新增 bindStatus:"pending"。
-pub async fn my_register(
+/// 个人页（已登录）自助**重置密码**：只能改**当前 token 对应的那个账号**的密码 ——
+/// 请求体里不接受任何账号名，杜绝「拿自己的 token 改别人的密码」。
+///
+/// **2026-10-15 起不再校验旧密码**：用户口径是「点『重置密码』直接输两遍新密码」，
+/// 展示端对话框（st_page.html）已删掉旧密码输入框、两次输入是否一致由前端自行拦下，
+/// 后端只读 `newPass`。请求里若仍带 `oldPass`（旧版前端 / 第三方脚本）
+/// **一律忽略、不报错**，保持向后兼容。
+/// 注意：身份门槛没有放松 —— 仍然必须有有效的 `X-My-Token`，也只能改自己这个账号；
+/// 管理员观看账号依旧不支持自助改密（400）。
+///
+/// 成功后：吊销该账号全部旧 token（改密后旧登录态必须立刻失效），**再签发一个
+/// 同身份的新 token 返回**（person_id 与团别原样保留），避免用户刚改完密码就被
+/// 自己触发的吊销踢回登录门；前端用返回的 token 覆盖本地即可。
+pub async fn my_password_set(
     State(st): State<ArcState>,
     axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
     axum::Json(body): axum::Json<Value>,
 ) -> ApiResult {
-    ensure_register_open(&st).await?;
-    if !public_register_allow(&client_ip_for_limit(addr, &headers)) {
+    /* 复用登录门那一档写接口限流（public_write_allow：每 IP 每分钟 5 次）：
+    改密要跑 argon2，且是免 token 时最值得挡的写口之一。 */
+    if !public_write_allow(&client_ip_for_limit(addr, &headers)) {
         return Err(ApiError::with_status(
             axum::http::StatusCode::TOO_MANY_REQUESTS,
             "尝试太频繁，请稍后再试",
         ));
     }
-    let phone = body
-        .get("phone")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
-    let code = body
-        .get("code")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
-    let anchor = body
-        .get("name")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
-    /* wb_state 落库列是 VARCHAR(64)：超长会写成 500「写入失败」，这里先截断到 64 字符
-    （审计 2026-10-11；正常网关 state 是 36 位 UUID，截断只影响伪造/异常入参） */
-    let wb_state: String = body
-        .get("wbState")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .trim()
-        .chars()
-        .take(64)
-        .collect();
-
-    let (account_name, person_name, _person_id, anchor_team) =
-        crate::store::my_account_register(&st, phone, code, anchor, &wb_state)
-            .await
-            .map_err(|e| {
-                /* 审计 2026-10-11：注册失败都是用户可修复的问题（姓名不在台账 / 已注册 /
-                格式不对）→ 400；只有底层库故障才留 500。 */
-                if e.starts_with("查主播失败")
-                    || e.starts_with("查重失败")
-                    || e.starts_with("写入失败")
-                {
-                    // 底层库故障（500 走通用文案）；原文细节留日志
-                    tracing::error!(error = %e, "注册账号写入失败");
-                    ApiError::from(anyhow::anyhow!(e))
-                } else {
-                    ApiError::bad_request(e)
-                }
-            })?;
-    /* 团别以台账为准（主播姓名决定男女团），前端传的 team 只作兜底 */
-    let team = if anchor_team == "male" || anchor_team == "female" {
-        anchor_team
-    } else {
-        normalize_team(body.get("team").and_then(|v| v.as_str()).unwrap_or(""))
+    let Some(token) = header_my_token(&headers) else {
+        return Err(ApiError::auth("登录已过期，请重新登录"));
     };
-    /* 审核通过前按「未绑定」签发 token（personId=0）：能登录、能看审核进度，
-    但拿不到任何个人数据。绑定生效后旧 token 会被吊销，需重新登录拿新身份。 */
-    let token = my_token_put(0, team.clone(), account_name.clone());
-    tracing::info!(phone = %mask_phone(phone), anchor = %person_name, team = %team, "展示端手机号注册成功（绑定申请待审核）");
-    Ok(Json(json!({
-        "ok": true,
-        "token": token,
-        // name 保持回主播姓名（展示用，向后兼容）；账号登录名在审核通过前是手机号占位，
-        // 前端要展示登录名请用 who 接口的 phone 字段
-        "name": person_name,
-        "team": team,
-        // 兼容字段：未绑定恒 0（2026-10-12 起内部 personId 不下发）
-        "personId": 0,
-        "bound": false,
-        "needBind": true,
-        // 新增：绑定申请已自动生成，等管理员审核（前端轮询 who 的 bindRequest）
-        "bindStatus": "pending",
-    })))
+    /* 内存 miss 时从 Redis 回填（与 my_token_required_with_restore 同口径）：
+    服务重启后 24h 内的登录态照常可以改密，不必先重新登录。 */
+    let mut ident = my_token_take(&token);
+    if ident.is_none() {
+        ident = super::admin::my_token_restore(&st, &token).await;
+    }
+    let Some((person_id, team, account_name)) = ident else {
+        return Err(ApiError::auth("登录已过期，请重新登录"));
+    };
+    /* 2026-10-15 起**不再读 oldPass**（旧前端会带上，忽略即可，不报错）。 */
+    let new_pass = body
+        .get("newPass")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    crate::store::my_account_reset_password_self(&st, &account_name, new_pass)
+        .await
+        .map_err(|e| {
+            /* 与 my_password_reset 同口径：业务拒绝（密码格式 / 不支持自助改密）
+            → 400 原样下发；库层故障 → 500 走通用文案，不把 sqlx/PG 的表名、SQL 片段
+            回传客户端（审计 2026-10-11 / 2026-10-14 P2 的口径）。 */
+            if e.starts_with("查账号失败") || e.starts_with("写入失败") {
+                tracing::error!(error = %e, "展示端自助改密写入失败");
+                ApiError::from(anyhow::anyhow!(e))
+            } else {
+                ApiError::bad_request(e)
+            }
+        })?;
+    // 改密成功 → 该账号旧 token 全部吊销，再给当前用户换发同身份的新 token
+    my_tokens_revoke(&account_name);
+    let token = my_token_put(person_id, team, account_name);
+    // 不打账号名：未绑定账号的 name 就是手机号本身（同 my_password_reset 的口径）
+    tracing::info!("展示端账号已自助重置密码（旧 token 已吊销并换发新 token）");
+    Ok(Json(json!({ "ok": true, "token": token })))
 }
 
 /// POST /api/public/my/password/reset {phone}
@@ -689,12 +475,15 @@ pub async fn my_register(
 /// 手机号在公会内部半公开、且重置结果可自行推算，等于忘记密码流程完全没有身份绑定。
 ///
 /// 现在三件事一起改：
-/// 1. 受注册开关约束（`my_register`）—— 与注册同口径，运营关掉注册即一并关闭重置；
-///    这是唯一的运维级总闸，防止端点在无人配置时被滥用。
+/// 1. 只保留 `public_password_reset_allow` 限流（每 IP 每分钟 12 次）挡脚本刷。
+///    （2026-10-14「彻底移除注册功能」后注册开关已不存在，原先这里那道
+///    「注册开关」运维总闸随之删掉 —— 忘记密码是未登录场景的唯一入口，
+///    不能跟着注册一起消失。）
 /// 2. 新密码改用 CSPRNG 随机串（不再是手机号后四位），攻击者无法自行推算。
 ///    （展示端 st_page.html 早已按「后端下发随机临时密码」写文案与回填，本次是对齐后端。）
 /// 3. 日志不再打账号名 —— 未绑定 / 自助注册账号的 name 就是手机号本身，
 ///    `mask_phone` 的脱敏被 `accounts = ?names` 绕过，只打数量。
+///
 /// 新密码只在本次响应里下发一次，请当场转达；重置成功后该账号全部 my token 吊销。
 pub async fn my_password_reset(
     State(st): State<ArcState>,
@@ -702,8 +491,7 @@ pub async fn my_password_reset(
     headers: HeaderMap,
     axum::Json(body): axum::Json<Value>,
 ) -> ApiResult {
-    ensure_register_open(&st).await?;
-    if !public_register_allow(&client_ip_for_limit(addr, &headers)) {
+    if !public_password_reset_allow(&client_ip_for_limit(addr, &headers)) {
         return Err(ApiError::with_status(
             axum::http::StatusCode::TOO_MANY_REQUESTS,
             "尝试太频繁，请稍后再试",
@@ -852,14 +640,9 @@ pub async fn my_bind(State(st): State<ArcState>, axum::Json(body): axum::Json<Va
     }
 }
 
-/// 团别白名单：male / female（兼容 m / f），其它一律空串（老链接/异常入参）
-pub(super) fn normalize_team(v: &str) -> String {
-    match v.trim().to_ascii_lowercase().as_str() {
-        "male" | "m" => "male".to_string(),
-        "female" | "f" => "female".to_string(),
-        _ => String::new(),
-    }
-}
+/* 2026-10-14 注册功能移除：`normalize_team`（注册页团别白名单）随注册一起删除 ——
+   它已无任何生产调用点，仅剩 pages.rs 的 register_route_tests 在断言，那个测试模块
+   也一并删掉了（见 public_teams/pages.rs）。 */
 
 /// 「我的」系列 GET 接口的查询参数（2026-10-12 起 token 只走 X-My-Token 头，不再收
 /// `?token=` —— URL 会进访问日志/浏览器历史/Referer，等价于把登录态写进日志）。

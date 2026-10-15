@@ -801,6 +801,245 @@ pub async fn wx_push_account_delete(st: &AppState, name: &str) -> bool {
         .unwrap_or(false))
 }
 
+/* --------------- 追分目标按 kind 分类计数（2026-10-15 契约 B 节） --------------- */
+
+/// 追分目标按 kind 分类计数，返回 `(person, value, rank)`。
+///
+/// 用户口径「分数是分数，追人是追人」：追人（person）与追分数（value）各自独立
+/// 计上限（都沿用 [`crate::push::MAX_TARGETS`]），所以上限校验不能再数总数。
+/// 一条 `GROUP BY kind` 查询拿全三类，顺带给 `GET /my/push` 的 `counts` 回显用。
+///
+/// 与既有 `push_jobs::target_count` 同口径的失败语义：没库/查询失败一律回 `(0,0,0)`
+/// （调用方随后真正写库时才会暴露 DB 故障，这里不额外改行为）。
+pub async fn target_counts(st: &AppState, name: &str) -> (i64, i64, i64) {
+    let Ok(pool) = w(st) else {
+        return (0, 0, 0);
+    };
+    match sqlx::query(&crate::pq::rewrite(
+        "SELECT kind, COUNT(*) AS n FROM my_targets WHERE name = ? GROUP BY kind",
+    ))
+    .bind(name.trim())
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => {
+            let mut out = (0i64, 0i64, 0i64);
+            for r in rows.iter() {
+                let n = r.try_get::<i64, _>("n").unwrap_or(0);
+                match r.try_get::<String, _>("kind").unwrap_or_default().as_str() {
+                    "person" => out.0 = n,
+                    "value" => out.1 = n,
+                    "rank" => out.2 = n,
+                    _ => {}
+                }
+            }
+            out
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "统计追分目标分类条数失败");
+            (0, 0, 0)
+        }
+    }
+}
+
+/* ---------------- 追分目标写入：事务内串行化（FIX1 · 2026-10-15 qa 并发穿透） ---------------- */
+
+/// 一次事务里要插入的一条目标（调用方已按语义准备好）。
+#[derive(Clone, Debug)]
+pub struct NewTarget {
+    /// 追人（kind=person）用：判重 + 落 target_person_id；value/rank 恒 0
+    pub person_id: u64,
+    /// 展示文案（person = 主播名；value/rank 一般传空串）
+    pub name: String,
+    /// person = 自定义目标分（0 = 没填）；value = 原始音浪；rank = 名次
+    pub value: i64,
+}
+
+/// 同 kind 重复目标的处理策略（三条既有口径各不一样，不能一刀切）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DupPolicy {
+    /// 不查重：value 历史上就允许同一个数值目标并存
+    Ignore,
+    /// 查到重复整单拒绝：单条 person/rank（保持既有 400 文案）
+    Reject,
+    /// 重复的跳过不插：批量 person（计进 skipped）
+    Skip,
+}
+
+/// 目标写入的结构化失败原因。文案由 handler（wx.rs）出，store 只给原因，
+/// 这样 store 层不掺 UI 文案，也不会把 sqlx/PG 细节漏给客户端。
+#[derive(Debug)]
+pub enum TargetAddError {
+    /// 单类上限已满（person / value / rank 各自 ≤ push::MAX_TARGETS）
+    OverLimit,
+    /// 同 kind 的重复目标（仅 `DupPolicy::Reject` 会产生）
+    Duplicate,
+    /// 写库失败（原文只进日志，不下发客户端）
+    Db(anyhow::Error),
+}
+
+/// 底层错误（sqlx::Error / anyhow::Error）统一收成 `TargetAddError::Db`：
+/// `map_err` 里直接写闭包，省得为两种错误各写一次 From。
+fn db_err(e: impl std::fmt::Display) -> TargetAddError {
+    TargetAddError::Db(anyhow::anyhow!("{e}"))
+}
+
+/// 纯计算（无 IO，便于单测）：从「候选键 + 已有键集合 + 单类现有条数」算出
+/// **本次真正要插入的下标**（保序）。
+///
+/// - `Reject`：候选里有已在的 → `Err(Duplicate)`；`Skip`：跳过，继续看下一个；
+///   `Ignore`：不查重（候选之间也不去重，保持 value 的历史行为）。
+/// - 上限按「现有条数 + 本次要插的条数」一起算，超了 → `Err(OverLimit)`。
+///   注意只重复提交已满名单（新增 0 条）不会报错，语义与旧实现一致。
+fn plan_inserts(
+    keys: &[i64],
+    existing: &std::collections::HashSet<i64>,
+    used: i64,
+    max_per_kind: i64,
+    dup: DupPolicy,
+) -> Result<Vec<usize>, TargetAddError> {
+    let mut pending: Vec<usize> = Vec::with_capacity(keys.len());
+    let mut seen: std::collections::HashSet<i64> = existing.clone();
+    // 单条入口（Reject）的历史口径是「先判上限、再判重复」；批量（Skip）不产生
+    // Duplicate，所以这里只对 Reject 保留同样的优先级，两种 400 同时成立时文案不变。
+    if dup == DupPolicy::Reject && used >= max_per_kind {
+        return Err(TargetAddError::OverLimit);
+    }
+    for (i, key) in keys.iter().enumerate() {
+        if dup != DupPolicy::Ignore && seen.contains(key) {
+            match dup {
+                DupPolicy::Reject => return Err(TargetAddError::Duplicate),
+                DupPolicy::Skip => continue,
+                DupPolicy::Ignore => unreachable!("Ignore 已在上面短路"),
+            }
+        }
+        seen.insert(*key);
+        pending.push(i);
+    }
+    if used + pending.len() as i64 > max_per_kind {
+        return Err(TargetAddError::OverLimit);
+    }
+    Ok(pending)
+}
+
+/// 追分目标写入（上限校验 + 去重 + 逐条 INSERT）——**两条入口共用**：
+/// 批量 `POST /my/push/targets/batch`（`DupPolicy::Skip`）与单条 `POST /my/push/targets`
+/// （person/rank 用 `Reject`、value 用 `Ignore`）。
+///
+/// FIX1（qa 实测：空态 4 路并发 batch 各插 5 个 → DB 10 行；3 路并发同 id → 2 行重复；
+/// 6 路并发单条 value → 6 行）：旧实现是「先 COUNT/先查重 → 再逐条 INSERT」的
+/// check-then-insert，`my_targets` 又没有 (name,kind,target_person_id) 唯一约束，
+/// 并发下必然穿越。现在整段在**同一事务**里按账号串行化：
+/// `pg_advisory_xact_lock(hashtext(账号名))` → 重读分类计数与已存在键 → 校验 → 插入 → 提交。
+/// 锁在提交/回滚时自动释放，不需要新迁移，也不依赖唯一索引。
+///
+/// 返回本次真正插入的条数（`added`）。批量的 `skipped` 由调用方按
+/// 「请求原始条数 − added」计算（契约不变）。
+pub async fn targets_add_serialized(
+    st: &AppState,
+    name: &str,
+    team: &str,
+    kind: &str,
+    items: &[NewTarget],
+    max_per_kind: i64,
+    dup: DupPolicy,
+) -> Result<usize, TargetAddError> {
+    let pool = w(st).map_err(db_err)?;
+    targets_add_serialized_pool(pool, name, team, kind, items, max_per_kind, dup).await
+}
+
+/// [`targets_add_serialized`] 的事务本体。单独暴露是为了能在集成测试里拿一个
+/// `PgPool` 直接跑真并发回归（不用起 HTTP 服务，也就不会碰到线上那套机器人/推送循环）。
+pub async fn targets_add_serialized_pool(
+    pool: &PgPool,
+    name: &str,
+    team: &str,
+    kind: &str,
+    items: &[NewTarget],
+    max_per_kind: i64,
+    dup: DupPolicy,
+) -> Result<usize, TargetAddError> {
+    let name = name.trim();
+    if items.is_empty() {
+        return Ok(0);
+    }
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    // 1) 按账号取事务级咨询锁：两条入口共用同一把，互相之间也串行。
+    //    （hashtext 冲突只意味着两个账号偶尔多串一会儿，不影响正确性。）
+    sqlx::query(&crate::pq::rewrite(
+        "SELECT pg_advisory_xact_lock(hashtext(?))",
+    ))
+    .bind(name)
+    .execute(&mut *tx)
+    .await
+    .map_err(db_err)?;
+    // 2) 事务内重读：已有键（判重用）+ 单类现有条数（上限用）。
+    //    person 比 target_person_id，value/rank 比 target_value。
+    let key_sql = if kind == "person" {
+        "SELECT target_person_id AS v FROM my_targets WHERE name = ? AND kind = ?"
+    } else {
+        "SELECT target_value AS v FROM my_targets WHERE name = ? AND kind = ?"
+    };
+    let existing: std::collections::HashSet<i64> = if dup == DupPolicy::Ignore {
+        std::collections::HashSet::new()
+    } else {
+        sqlx::query(&crate::pq::rewrite(key_sql))
+            .bind(name)
+            .bind(kind)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(db_err)?
+            .iter()
+            .map(|r| r.try_get::<i64, _>("v").unwrap_or(0))
+            .collect()
+    };
+    let used: i64 = sqlx::query(&crate::pq::rewrite(
+        "SELECT COUNT(*) AS n FROM my_targets WHERE name = ? AND kind = ?",
+    ))
+    .bind(name)
+    .bind(kind)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(db_err)?
+    .try_get::<i64, _>("n")
+    .unwrap_or(0);
+    // 3) 纯计算要插哪几条；OverLimit / Duplicate 在这里返回（tx 随之 drop → 自动回滚）。
+    let keys: Vec<i64> = items
+        .iter()
+        .map(|it| {
+            if kind == "person" {
+                it.person_id as i64
+            } else {
+                it.value
+            }
+        })
+        .collect();
+    let pending = plan_inserts(&keys, &existing, used, max_per_kind, dup)?;
+    if pending.is_empty() {
+        return Ok(0);
+    }
+    // 4) 串行区内逐条插入 + 提交。
+    for &i in &pending {
+        let it = &items[i];
+        sqlx::query(&crate::pq::rewrite(
+            "INSERT INTO my_targets (name, team, kind, target_person_id, target_name, target_value, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ))
+        .bind(name)
+        .bind(team)
+        .bind(kind)
+        .bind(it.person_id as i64)
+        .bind(&it.name)
+        .bind(it.value)
+        .bind(now_str())
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+    }
+    tx.commit().await.map_err(db_err)?;
+    Ok(pending.len())
+}
+
 /// 把已存在的展示端账号接到微信会话上（手机号 / 绑定码两条路共用）
 pub async fn push_bind_account(
     st: &AppState,
@@ -847,4 +1086,371 @@ pub async fn push_bind_account(
     .bind(now_str())
     .execute(pool)
     .await;
+}
+
+/* ------------- 追分目标写入单测：plan_inserts 纯逻辑 + 真库并发回归（FIX1） ------------- */
+
+#[cfg(test)]
+mod target_write_tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    fn set(v: &[i64]) -> HashSet<i64> {
+        v.iter().copied().collect()
+    }
+
+    fn plan_ok(
+        keys: &[i64],
+        existing: &[i64],
+        used: i64,
+        max: i64,
+        dup: DupPolicy,
+    ) -> Vec<usize> {
+        match plan_inserts(keys, &set(existing), used, max, dup) {
+            Ok(v) => v,
+            Err(e) => panic!("期望通过，实际 {e:?}"),
+        }
+    }
+
+    fn plan_err(keys: &[i64], existing: &[i64], used: i64, max: i64, dup: DupPolicy) -> TargetAddError {
+        match plan_inserts(keys, &set(existing), used, max, dup) {
+            Ok(v) => panic!("期望报错，实际通过 {v:?}"),
+            Err(e) => e,
+        }
+    }
+
+    /// Skip：已在追的跳过，返回的是**下标**（保序）。
+    #[test]
+    fn plan_skips_existing_targets() {
+        // keys=[1,2,3]，已在追 1 → 只插 2、3（下标 1、2）
+        assert_eq!(plan_ok(&[1, 2, 3], &[1], 1, 5, DupPolicy::Skip), vec![1, 2]);
+    }
+
+    /// 上限按「现有条数 + 本次要插的条数」一起算。
+    #[test]
+    fn plan_enforces_max_on_existing_plus_new() {
+        // 已有 4 个 + 新 1 个 = 5，刚好到顶 → 通过
+        assert_eq!(plan_ok(&[5], &[1, 2, 3, 4], 4, 5, DupPolicy::Skip), vec![0]);
+        // 已有 4 个 + 新 2 个 = 6 > 5 → OverLimit
+        assert!(matches!(
+            plan_err(&[5, 6], &[1, 2, 3, 4], 4, 5, DupPolicy::Skip),
+            TargetAddError::OverLimit
+        ));
+    }
+
+    /// 已满时重复提交全是在追的名单：新增 0 条，不能报错（契约语义）。
+    #[test]
+    fn plan_resubmitting_full_list_is_not_overflow() {
+        assert_eq!(
+            plan_ok(&[1, 2, 3, 4, 5], &[1, 2, 3, 4, 5], 5, 5, DupPolicy::Skip),
+            Vec::<usize>::new()
+        );
+    }
+
+    /// 请求内重复：Skip 只保首位，`skipped` 仍由调用方按「原始条数 − added」算。
+    #[test]
+    fn skip_count_matches_contract_formula() {
+        // raw=[7,7,1]、已在追 1 → added=1、skipped=3-1=2
+        let keys = [7, 7, 1];
+        let added = plan_ok(&keys, &[1], 1, 5, DupPolicy::Skip).len();
+        assert_eq!(added, 1);
+        assert_eq!(keys.len() - added, 2, "重复项 + 已存在项都要算进 skipped");
+    }
+
+    /// Reject（单条 person/rank）：重复 → Duplicate（handler 映射成既有 400 文案）。
+    #[test]
+    fn reject_policy_duplicate() {
+        assert!(matches!(
+            plan_err(&[9], &[9], 1, 5, DupPolicy::Reject),
+            TargetAddError::Duplicate
+        ));
+        // 请求内两个相同键也一样拒
+        assert!(matches!(
+            plan_err(&[9, 9], &[], 0, 5, DupPolicy::Reject),
+            TargetAddError::Duplicate
+        ));
+    }
+
+    /// 单条入口的历史优先级：已满 + 重复同时成立时报「上限」，不是「重复」。
+    #[test]
+    fn reject_policy_over_limit_takes_precedence() {
+        assert!(matches!(
+            plan_err(&[9], &[9], 5, 5, DupPolicy::Reject),
+            TargetAddError::OverLimit
+        ));
+    }
+
+    /// Ignore（单条 value）：不查重，同一个数值可以并存（保持历史行为），只受上限约束。
+    #[test]
+    fn ignore_policy_allows_same_value_twice() {
+        assert_eq!(plan_ok(&[100, 100], &[100], 1, 5, DupPolicy::Ignore), vec![0, 1]);
+        assert!(matches!(
+            plan_err(&[1, 2, 3, 4, 5, 6], &[], 0, 5, DupPolicy::Ignore),
+            TargetAddError::OverLimit
+        ));
+    }
+
+    /* --------------------------- 真库并发回归（默认跳过） --------------------------- */
+
+    /// 拿写池；没设 `PK_IT_DB=1` / 缺 `DB_WRITER_*` 就返回 None（默认 cargo test 不碰库）。
+    /// 跑法：
+    /// `cd rust && set -a && . ./.env && set +a && PK_IT_DB=1 cargo test -p pk-server --lib \
+    ///   target_write_tests::concurrency_regression_real_db -- --nocapture`
+    async fn it_pool() -> Option<sqlx::PgPool> {
+        if std::env::var("PK_IT_DB").as_deref() != Ok("1") {
+            return None;
+        }
+        let host = std::env::var("DB_WRITER_HOST").ok()?;
+        let port: u16 = std::env::var("DB_WRITER_PORT").ok()?.parse().ok()?;
+        let user = std::env::var("DB_WRITER_USER").ok()?;
+        let pass = std::env::var("DB_WRITER_PASSWORD").unwrap_or_default();
+        let db = std::env::var("DB_WRITER_NAME").ok()?;
+        let opt = sqlx::postgres::PgConnectOptions::new()
+            .host(&host)
+            .port(port)
+            .username(&user)
+            .password(&pass)
+            .database(&db);
+        match sqlx::PgPool::connect_with(opt).await {
+            Ok(p) => Some(p),
+            Err(e) => {
+                eprintln!("[skip] 连写库失败：{e}");
+                None
+            }
+        }
+    }
+
+    async fn count_kind(pool: &sqlx::PgPool, name: &str, kind: &str) -> i64 {
+        sqlx::query(&crate::pq::rewrite(
+            "SELECT COUNT(*) AS n FROM my_targets WHERE name = ? AND kind = ?",
+        ))
+        .bind(name)
+        .bind(kind)
+        .fetch_one(pool)
+        .await
+        .expect("count 查询失败")
+        .try_get::<i64, _>("n")
+        .unwrap_or(0)
+    }
+
+    /// 有重复 target_person_id 的分组数（0 = 无重复行）
+    async fn dup_person_groups(pool: &sqlx::PgPool, name: &str) -> i64 {
+        sqlx::query(&crate::pq::rewrite(
+            "SELECT COUNT(*) AS n FROM (SELECT target_person_id FROM my_targets
+             WHERE name = ? AND kind = 'person'
+             GROUP BY target_person_id HAVING COUNT(*) > 1) d",
+        ))
+        .bind(name)
+        .fetch_one(pool)
+        .await
+        .expect("dup 查询失败")
+        .try_get::<i64, _>("n")
+        .unwrap_or(0)
+    }
+
+    async fn cleanup(pool: &sqlx::PgPool, name: &str) {
+        let _ = sqlx::query(&crate::pq::rewrite("DELETE FROM my_targets WHERE name = ?"))
+            .bind(name)
+            .execute(pool)
+            .await;
+    }
+
+    fn items(ids: &[u64]) -> Vec<NewTarget> {
+        ids.iter()
+            .map(|id| NewTarget {
+                person_id: *id,
+                name: format!("t{id}"),
+                value: 0,
+            })
+            .collect()
+    }
+
+    /// FIX1 回归：真并发打 `targets_add_serialized_pool`（handler 用的就是它），
+    /// 断言单类上限 ≤5、无重复行、added 之和 ≤5。临时数据用 `__e2e_fix_t6_<pid>` 前缀，
+    /// 每段断言前先删干净（断言放在 cleanup 之后，失败也不留脏数据）。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn concurrency_regression_real_db() {
+        let Some(pool) = it_pool().await else {
+            eprintln!("[skip] 未设置 PK_IT_DB=1 / DB_WRITER_*，跳过真库并发回归");
+            return;
+        };
+        let name = format!("__e2e_fix_t6_{}", std::process::id());
+
+        // ---- A) 空态 6 路并发 batch（各 5 个不同 id）→ 只能落下 5 行 ----
+        cleanup(&pool, &name).await;
+        let mut hs = Vec::new();
+        for k in 0..6u64 {
+            let pool = pool.clone();
+            let name = name.clone();
+            hs.push(tokio::spawn(async move {
+                let ids: Vec<u64> = (0..5).map(|i| k * 5 + i + 1).collect();
+                targets_add_serialized_pool(
+                    &pool,
+                    &name,
+                    "male",
+                    "person",
+                    &items(&ids),
+                    5,
+                    DupPolicy::Skip,
+                )
+                .await
+            }));
+        }
+        let (mut oks, mut over, mut added_sum) = (0usize, 0usize, 0usize);
+        for h in hs {
+            match h.await.expect("join") {
+                Ok(n) => {
+                    oks += 1;
+                    added_sum += n;
+                }
+                Err(TargetAddError::OverLimit) => over += 1,
+                Err(e) => panic!("不应出现的错误：{e:?}"),
+            }
+        }
+        let a_rows = count_kind(&pool, &name, "person").await;
+        let a_dups = dup_person_groups(&pool, &name).await;
+        cleanup(&pool, &name).await;
+        let a_left = count_kind(&pool, &name, "person").await;
+        println!(
+            "[A] 6 路并发 batch(各 5 id)：200×{oks} / 400(OverLimit)×{over}；added 之和={added_sum}；\
+             DB person 行数={a_rows}；重复 id 组={a_dups}；清理后残留={a_left}"
+        );
+        assert_eq!(a_left, 0, "临时数据必须删净");
+        assert!(a_rows <= 5, "person 行数必须 ≤5（旧实现实测 10），实际 {a_rows}");
+        assert!(added_sum <= 5, "added 之和必须 ≤5，实际 {added_sum}");
+        assert_eq!(a_dups, 0, "不允许重复 target_person_id");
+
+        // ---- B) 3 路并发同一个 id ----
+        // B1 批量（Skip）：只落 1 行、added 之和 = 1
+        cleanup(&pool, &name).await;
+        let mut hs = Vec::new();
+        for _ in 0..3 {
+            let pool = pool.clone();
+            let name = name.clone();
+            hs.push(tokio::spawn(async move {
+                targets_add_serialized_pool(
+                    &pool,
+                    &name,
+                    "male",
+                    "person",
+                    &items(&[4242]),
+                    5,
+                    DupPolicy::Skip,
+                )
+                .await
+            }));
+        }
+        let mut b1_added = 0usize;
+        for h in hs {
+            b1_added += h.await.expect("join").expect("Skip 策略不该报错");
+        }
+        let b1_rows = count_kind(&pool, &name, "person").await;
+        cleanup(&pool, &name).await;
+        println!("[B1] 3 路并发同 id（batch/Skip）：added 之和={b1_added}；DB 行数={b1_rows}");
+        assert_eq!(b1_rows, 1, "3 路并发同一 id 必须恰好 1 行，实际 {b1_rows}");
+        assert_eq!(b1_added, 1, "added 之和必须 = 1，实际 {b1_added}");
+
+        // B2 单条（Reject）：恰好 1 个成功、2 个 Duplicate
+        cleanup(&pool, &name).await;
+        let mut hs = Vec::new();
+        for _ in 0..3 {
+            let pool = pool.clone();
+            let name = name.clone();
+            hs.push(tokio::spawn(async move {
+                targets_add_serialized_pool(
+                    &pool,
+                    &name,
+                    "male",
+                    "person",
+                    &items(&[4243]),
+                    5,
+                    DupPolicy::Reject,
+                )
+                .await
+            }));
+        }
+        let (mut b2_ok, mut b2_dup) = (0usize, 0usize);
+        for h in hs {
+            match h.await.expect("join") {
+                Ok(_) => b2_ok += 1,
+                Err(TargetAddError::Duplicate) => b2_dup += 1,
+                Err(e) => panic!("不应出现的错误：{e:?}"),
+            }
+        }
+        let b2_rows = count_kind(&pool, &name, "person").await;
+        cleanup(&pool, &name).await;
+        println!(
+            "[B2] 3 路并发同 id（single/Reject）：成功×{b2_ok} / Duplicate×{b2_dup}；DB 行数={b2_rows}"
+        );
+        assert_eq!(b2_rows, 1, "3 路并发同一 id 必须恰好 1 行，实际 {b2_rows}");
+        assert_eq!((b2_ok, b2_dup), (1, 2), "应恰好 1 成功 + 2 Duplicate");
+
+        // ---- C) 6 路并发单条 kind=value（各不同值）→ ≤5 行 ----
+        cleanup(&pool, &name).await;
+        let mut hs = Vec::new();
+        for i in 1..=6i64 {
+            let pool = pool.clone();
+            let name = name.clone();
+            hs.push(tokio::spawn(async move {
+                let one = [NewTarget {
+                    person_id: 0,
+                    name: String::new(),
+                    value: i * 10_000,
+                }];
+                targets_add_serialized_pool(
+                    &pool,
+                    &name,
+                    "male",
+                    "value",
+                    &one,
+                    5,
+                    DupPolicy::Ignore,
+                )
+                .await
+            }));
+        }
+        let (mut c_ok, mut c_over) = (0usize, 0usize);
+        for h in hs {
+            match h.await.expect("join") {
+                Ok(_) => c_ok += 1,
+                Err(TargetAddError::OverLimit) => c_over += 1,
+                Err(e) => panic!("不应出现的错误：{e:?}"),
+            }
+        }
+        let c_rows = count_kind(&pool, &name, "value").await;
+        cleanup(&pool, &name).await;
+        println!("[C] 6 路并发单条 value：成功×{c_ok} / 400(OverLimit)×{c_over}；DB value 行数={c_rows}");
+        assert!(c_rows <= 5, "value 行数必须 ≤5（旧实现实测 6），实际 {c_rows}");
+        assert_eq!(c_ok, c_rows as usize, "成功数必须等于落库行数");
+
+        // ---- D) 分类互不挤占：person 满 5 后 value 仍能加满 5 ----
+        cleanup(&pool, &name).await;
+        let p_ids: Vec<u64> = (0..5).map(|i| 9000 + i).collect();
+        targets_add_serialized_pool(
+            &pool, &name, "male", "person", &items(&p_ids), 5, DupPolicy::Skip,
+        )
+        .await
+        .expect("person 5 个应成功");
+        let mut v_ok = 0usize;
+        for i in 1..=5i64 {
+            let one = [NewTarget { person_id: 0, name: String::new(), value: i * 1_000 }];
+            if targets_add_serialized_pool(&pool, &name, "male", "value", &one, 5, DupPolicy::Ignore)
+                .await
+                .is_ok()
+            {
+                v_ok += 1;
+            }
+        }
+        let d_person = count_kind(&pool, &name, "person").await;
+        let d_value = count_kind(&pool, &name, "value").await;
+        cleanup(&pool, &name).await;
+        let d_left = count_kind(&pool, &name, "person").await + count_kind(&pool, &name, "value").await;
+        println!(
+            "[D] person 满 5 后加 value：value 成功×{v_ok}；person={d_person} value={d_value}；清理后残留={d_left}"
+        );
+        assert_eq!((d_person, d_value), (5, 5), "person / value 各自独立算上限");
+        assert_eq!(d_left, 0, "临时数据必须删净");
+
+        println!("[done] 真库并发回归全部通过，临时账号 {name} 已清空");
+    }
 }

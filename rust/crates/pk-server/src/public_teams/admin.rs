@@ -205,12 +205,13 @@ pub async fn admin_my_bind_request_reject(
 
 /// 验证接口限流：每 IP 每分钟 5 次（姓名/密码撞库防护）
 pub(super) static VERIFY_LIMITER: std::sync::OnceLock<VerifyLimiter> = std::sync::OnceLock::new();
-/// 注册类接口限流：每 IP 每分钟 12 次（一次注册本来就要「申请授权 → 重新生成 → 提交」好几下，
-/// 跟登录撞库不是一回事，单独一档更宽松；仍然防脚本刷）
-pub(super) static REGISTER_LIMITER: std::sync::OnceLock<VerifyLimiter> = std::sync::OnceLock::new();
-/// 授权轮询限流：每 IP 每分钟 120 次（前端 2.5s 一次，正常 24 次/分；
-/// 单独一档防止脚本拿轮询接口猛打网关面板 —— 审计 2026-10-11）
-pub(super) static REGISTER_POLL_LIMITER: std::sync::OnceLock<VerifyLimiter> =
+/// 写接口限流：每 IP 每分钟 12 次（原先只给注册类接口，2026-10-14 注册功能移除后
+/// 由「忘记密码重置」`/api/public/my/password/reset` 复用；与登录撞库不是一回事，
+/// 单独一档更宽松，仍然防脚本刷）
+///
+/// 名字随用途改：原先叫 `REGISTER_LIMITER`（注册时代命名），现在唯一的调用方就是
+/// 忘记密码重置，故改名 `PASSWORD_RESET_LIMITER` —— 档位数值（12 次/分钟）不变。
+pub(super) static PASSWORD_RESET_LIMITER: std::sync::OnceLock<VerifyLimiter> =
     std::sync::OnceLock::new();
 
 pub(super) struct VerifyLimiter {
@@ -332,7 +333,9 @@ where
 }
 
 fn mytok_redis_sync<F: FutureFactory>(f: F) {
-    let Some(st) = APP_STATE.get().cloned() else { return };
+    if APP_STATE.get().is_none() {
+        return;
+    }
     std::thread::spawn(move || {
         let Ok(rt) = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -340,7 +343,7 @@ fn mytok_redis_sync<F: FutureFactory>(f: F) {
         else {
             return;
         };
-        let _ = rt.block_on(async move {
+        rt.block_on(async move {
             let _ = tokio::time::timeout(std::time::Duration::from_secs(3), f.future()).await;
         });
     });

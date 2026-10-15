@@ -123,9 +123,9 @@ pub async fn my_bind_request_list(
             .iter()
             .map(|r| {
                 serde_json::json!({
-                    "id": r.try_get::<i64, _>("id").unwrap_or(0) as i64,
+                    "id": r.try_get::<i64, _>("id").unwrap_or(0),
                     "name": r.try_get::<String, _>("name").unwrap_or_default(),
-                    "personId": r.try_get::<i64, _>("person_id").unwrap_or(0) as i64,
+                    "personId": r.try_get::<i64, _>("person_id").unwrap_or(0),
                     "personName": r.try_get::<String, _>("person_name").unwrap_or_default(),
                     "team": r.try_get::<String, _>("team").unwrap_or_default(),
                     "status": r.try_get::<String, _>("status").unwrap_or_default(),
@@ -199,8 +199,10 @@ pub async fn my_bind_request_decide(
     .flatten()?;
     Some((
         row.try_get::<String, _>("name").ok()?,
+        /* person_id 在 PG 里是 BIGINT，但历史上灌过 INT4 的库；回退分支原来逐字抄了
+        第一句（等于死代码），改成真正的 i32 回退（2026-10-14 审计 P2 同类清理）。 */
         row.try_get::<i64, _>("person_id")
-            .or_else(|_| row.try_get::<i64, _>("person_id").map(|v| v as i64))
+            .or_else(|_| row.try_get::<i32, _>("person_id").map(i64::from))
             .ok()?,
         row.try_get::<String, _>("person_name").ok()?,
     ))
@@ -302,7 +304,7 @@ pub async fn anchor_lookup_by_name(
     };
     let pid = r
         .try_get::<i64, _>("id")
-        .or_else(|_| r.try_get::<i64, _>("id").map(|v| v as i64))
+        .or_else(|_| r.try_get::<i32, _>("id").map(i64::from))
         .unwrap_or(0);
     if pid <= 0 {
         return Ok(None);
@@ -423,9 +425,8 @@ pub async fn anchor_claim_insert(
     .fetch_one(pool)
     .await
     .map_err(|e| format!("写入失败：{e}"))?;
-    Ok(row
-        .try_get::<i64, _>(0)
-        .map_err(|e| format!("读取返回 id 失败：{e}"))?)
+    row.try_get::<i64, _>(0)
+        .map_err(|e| format!("读取返回 id 失败：{e}"))
 }
 
 /// 某人最近一笔申请（展示端「我的」显示状态用）
@@ -443,7 +444,7 @@ pub async fn anchor_claim_mine(st: &AppState, person_id: i64) -> Option<serde_js
         _ => return None,
     };
     Some(serde_json::json!({
-        "id": row.try_get::<i64, _>("id").ok()? as i64,
+        "id": row.try_get::<i64, _>("id").ok()?,
         "douyinNo": row.try_get::<String, _>("douyin_no").unwrap_or_default(),
         "status": row.try_get::<String, _>("status").unwrap_or_default(),
         "rejectReason": row.try_get::<String, _>("reject_reason").unwrap_or_default(),
@@ -455,6 +456,10 @@ pub async fn anchor_claim_mine(st: &AppState, person_id: i64) -> Option<serde_js
 }
 
 /// 审计列表（管理端）。status 空 = 全部；不含截图本体。
+///
+/// ⚠️ `LENGTH(screenshot)` 对 BYTEA 返回 **integer（INT4）**：读取侧必须按 i32 解，
+/// 按 i64 读会 ColumnDecode 被 `.unwrap_or(0)` 吞成 0（2026-10-14 审计 P0-2：
+/// 审核列表的 screenshotBytes 曾经恒为 0）。
 pub async fn anchor_claim_list(st: &AppState, status: &str, limit: i64) -> Vec<serde_json::Value> {
     let Ok(pool) = w(st) else {
         return Vec::new();
@@ -476,8 +481,8 @@ pub async fn anchor_claim_list(st: &AppState, status: &str, limit: i64) -> Vec<s
             .iter()
             .map(|r| {
                 serde_json::json!({
-                    "id": r.try_get::<i64, _>(0).unwrap_or(0) as i64,
-                    "personId": r.try_get::<i64, _>(1).unwrap_or(0) as i64,
+                    "id": r.try_get::<i64, _>(0).unwrap_or(0),
+                    "personId": r.try_get::<i64, _>(1).unwrap_or(0),
                     "personName": r.try_get::<String, _>(2).unwrap_or_default(),
                     "team": r.try_get::<String, _>(3).unwrap_or_default(),
                     "douyinNo": r.try_get::<String, _>(4).unwrap_or_default(),
@@ -485,7 +490,7 @@ pub async fn anchor_claim_list(st: &AppState, status: &str, limit: i64) -> Vec<s
                     "rejectReason": r.try_get::<String, _>(6).unwrap_or_default(),
                     "createdAt": r.try_get::<String, _>(7).unwrap_or_default(),
                     "decidedAt": r.try_get::<String, _>(8).unwrap_or_default(),
-                    "screenshotBytes": r.try_get::<i64, _>(9).unwrap_or(0),
+                    "screenshotBytes": r.try_get::<i32, _>(9).map(i64::from).unwrap_or(0),
                 })
             })
             .collect(),
@@ -553,7 +558,7 @@ pub async fn anchor_claim_decide(
         _ => return None,
     };
     Some((
-        row.try_get::<i64, _>("person_id").ok()? as i64,
+        row.try_get::<i64, _>("person_id").ok()?,
         row.try_get::<String, _>("douyin_no").ok()?,
         row.try_get::<String, _>("person_name").ok()?,
     ))

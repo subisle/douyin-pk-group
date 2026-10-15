@@ -70,7 +70,6 @@ async fn setup() -> Option<AppState> {
         active: std::sync::Mutex::new(active),
         cache: std::sync::Mutex::new(Default::default()),
         bots: std::sync::OnceLock::new(),
-        wb: std::sync::OnceLock::new(),
     })
 }
 

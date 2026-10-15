@@ -423,39 +423,32 @@ pub async fn lineage(
             children.entry(master).or_default().push(id);
         }
     }
-    // 门下累计总音浪（自己 + 所有子孙），记忆化递归（人数几百，不会爆栈）。
-    pub(super) fn subtree_wave(
-        id: u64,
-        children: &HashMap<u64, Vec<u64>>,
-        wave: &HashMap<u64, i64>,
-        memo: &mut HashMap<u64, i64>,
-    ) -> i64 {
-        if let Some(v) = memo.get(&id) {
-            return *v;
-        }
-        let mut total = wave.get(&id).copied().unwrap_or(0);
-        if let Some(kids) = children.get(&id) {
-            for k in kids {
-                total += subtree_wave(*k, children, wave, memo);
-            }
-        }
-        memo.insert(id, total);
-        total
-    }
+    // 门下累计总音浪（自己 + 所有子孙）：带环保护的记忆化递归（见 subtree_wave_sum）。
+    // 2026-10-14 审计 P1-6：这份曾经是「先递归、后 memo」的第二份拷贝 —— 自指/成环
+    // 时无限递归打崩进程，现在两处共用同一份实现。
     let mut subtree_memo: HashMap<u64, i64> = Default::default();
+    let mut subtree_stack: std::collections::HashSet<u64> = Default::default();
     // 真实 id/masterId 先单独收集，最后统一重映射为响应内序号（见 lineage_remap_ids）
     let mut raw_ids: Vec<(u64, Option<u64>)> = Vec::with_capacity(rows.len());
     for r in &rows {
         let id = row_pid(r, "id");
         let master_id = read_opt_u64_field(r, "master_id").filter(|m| ids.contains(m));
         let wave = wave_map.get(&id).copied().unwrap_or(0);
-        let total_wave = subtree_wave(id, &children, &wave_map, &mut subtree_memo);
+        let total_wave = subtree_wave_sum(
+            id,
+            &children,
+            &wave_map,
+            &mut subtree_memo,
+            &mut subtree_stack,
+        );
         raw_ids.push((id, master_id));
         nodes.push(json!({
             "name": r.try_get::<String, _>("name").unwrap_or_default(),
             "masterName": r.try_get::<Option<String>, _>("master_name").ok().flatten(),
             "status": r.try_get::<String, _>("status").unwrap_or_default(),
-            "generation": r.try_get::<Option<i64>, _>("generation").ok().flatten(),
+            /* person.generation 是 INT4（001_core.sql），按 Option<i64> 读会 ColumnDecode
+            被 `.ok().flatten()` 吞成 null（族谱上「第几代」永远空）—— 走类型回退 helper */
+            "generation": row_opt_i64(r, "generation"),
             "disciples": row_i64(r, "disciples"),
             // 音浪数值显隐（后台开关）：关掉后不下发任何数字
             "wave": if s.wave { json!(wave) } else { Value::Null },
@@ -612,6 +605,41 @@ pub fn lineage_remap_ids(nodes: &[(u64, Option<u64>)]) -> Vec<(u64, Option<u64>)
         .collect()
 }
 
+/// 门下累计音浪（含自己 + 所有子孙）：**进入即标记**的记忆化递归。
+///
+/// 2026-10-14 审计 P1-6：原来 `lineage` 与 `lineage_wave_summary` 各有一份
+/// 「先递归、后 memo.insert」的实现，而 children 由 `person.master_id` 直接构建、
+/// 不过滤自指 —— 库里只要有一行 `master_id = 自己`（或 A→B→A 的环），递归就永不触底
+/// → stack overflow → 整个进程 abort。`GET /api/public/teams/{team}/my` 与族谱接口
+/// 都是公开可达的，所以脏数据最多「算错」，绝不能崩进程。
+///
+/// 现在进入节点先登记 `on_stack`：再次遇到同一节点（成环）直接截断返回 0。
+/// 递归深度被「未重复节点数」限住（每人只可能在栈上一次），有环也必然终止。
+fn subtree_wave_sum(
+    id: u64,
+    children: &HashMap<u64, Vec<u64>>,
+    wave: &HashMap<u64, i64>,
+    memo: &mut HashMap<u64, i64>,
+    on_stack: &mut std::collections::HashSet<u64>,
+) -> i64 {
+    if let Some(v) = memo.get(&id) {
+        return *v;
+    }
+    if !on_stack.insert(id) {
+        // 脏数据成环：这一支截断（环内节点已经各自计过一次，不再重复累加）
+        return 0;
+    }
+    let mut total = wave.get(&id).copied().unwrap_or(0);
+    if let Some(kids) = children.get(&id) {
+        for k in kids {
+            total += subtree_wave_sum(*k, children, wave, memo, on_stack);
+        }
+    }
+    on_stack.remove(&id);
+    memo.insert(id, total);
+    total
+}
+
 /// 「徒弟 + 师傅」门下累计音浪统计（2026-10-11）：
 /// 师傅自己 + 所有子孙的可信音浪（wave_reliable=1）总和。
 /// 返回 (直系徒弟数, 徒弟音浪总和[不含自己], 门下累计音浪[含自己])。
@@ -650,27 +678,10 @@ pub async fn lineage_wave_summary(
     for r in pgrs::query(&st.pools, &source, &wave_sql).await? {
         wave_map.insert(row_pid(&r, "person_id"), row_i64(&r, "total"));
     }
-    // 递归门下累计（记忆化）
-    pub(super) fn subtree(
-        id: u64,
-        children: &HashMap<u64, Vec<u64>>,
-        wave: &HashMap<u64, i64>,
-        memo: &mut HashMap<u64, i64>,
-    ) -> i64 {
-        if let Some(v) = memo.get(&id) {
-            return *v;
-        }
-        let mut total = wave.get(&id).copied().unwrap_or(0);
-        if let Some(kids) = children.get(&id) {
-            for k in kids {
-                total += subtree(*k, children, wave, memo);
-            }
-        }
-        memo.insert(id, total);
-        total
-    }
+    // 递归门下累计（记忆化 + 进入即标记，见 subtree_wave_sum 的环保护说明）
     let mut memo: HashMap<u64, i64> = Default::default();
-    let total_wave = subtree(person_id, &children, &wave_map, &mut memo);
+    let mut on_stack: std::collections::HashSet<u64> = Default::default();
+    let total_wave = subtree_wave_sum(person_id, &children, &wave_map, &mut memo, &mut on_stack);
     let self_wave = wave_map.get(&person_id).copied().unwrap_or(0);
     let disciple_count = children
         .get(&person_id)
@@ -680,17 +691,9 @@ pub async fn lineage_wave_summary(
 }
 
 pub(super) fn read_opt_u64_field(r: &sqlx::postgres::PgRow, col: &str) -> Option<u64> {
-    use sqlx::Row;
-    if let Ok(v) = r.try_get::<i64, _>(col) {
-        return Some(v.max(0) as u64);
-    }
-    if let Ok(v) = r.try_get::<Option<i64>, _>(col) {
-        return v.map(|x| x.max(0) as u64);
-    }
-    if let Ok(v) = r.try_get::<i64, _>(col) {
-        return Some(v.max(0) as u64);
-    }
-    None
+    // 原来第二/第三个分支逐字重复了第一个（死代码），int4 列读不出来 ——
+    // 统一走 row_opt_i64 的类型回退（2026-10-14 审计 P0-2 同类清理）
+    row_opt_i64(r, col).map(|v| v.max(0) as u64)
 }
 
 /// GET /api/public/teams/{team}/monthly?period=YYYY-MM（或 /yearly?period=YYYY）
@@ -802,14 +805,34 @@ pub(super) async fn period_public(
     ))
 }
 
+/// 读整数列（可空列也能读）：PG 里 int2 / int4 / int8 / bool / 数字文本都可能出现。
+///
+/// 2026-10-14 审计 P0-2 收口：本项目反复踩「SQL 表达式类型与 Rust 读取类型不精确匹配
+/// → ColumnDecode → 被 unwrap_or(0) 吞成 0」的坑。本文件里 `live` 就是
+/// `CASE WHEN ... THEN 1 ELSE 0 END`（= integer），而下面 row_live 原来只试
+/// i16 / i64 / 文本三种：当日榜的 `isLive` 曾经恒 false。统一在这里做类型回退。
+pub(super) fn row_opt_i64(r: &sqlx::postgres::PgRow, col: &str) -> Option<i64> {
+    if let Ok(v) = r.try_get::<Option<i64>, _>(col) {
+        return v;
+    }
+    if let Ok(v) = r.try_get::<Option<i32>, _>(col) {
+        return v.map(i64::from);
+    }
+    if let Ok(v) = r.try_get::<Option<i16>, _>(col) {
+        return v.map(i64::from);
+    }
+    if let Ok(v) = r.try_get::<Option<bool>, _>(col) {
+        return v.map(i64::from);
+    }
+    // 兜底：个别环境把计数列灌成了文本（历史 MySQL → PG 灌库出过）
+    r.try_get::<Option<String>, _>(col)
+        .ok()
+        .flatten()
+        .and_then(|s| s.trim().parse::<i64>().ok())
+}
+
 pub(super) fn row_pid(r: &sqlx::postgres::PgRow, col: &str) -> u64 {
-    if let Ok(v) = r.try_get::<i64, _>(col) {
-        return v.max(0) as u64;
-    }
-    if let Ok(v) = r.try_get::<i64, _>(col) {
-        return v as u64;
-    }
-    0
+    row_opt_i64(r, col).map(|v| v.max(0) as u64).unwrap_or(0)
 }
 
 pub(super) fn valid_date_pub(s: &str) -> bool {
@@ -817,30 +840,11 @@ pub(super) fn valid_date_pub(s: &str) -> bool {
 }
 
 pub(super) fn row_live(r: &sqlx::postgres::PgRow) -> bool {
-    if let Ok(v) = r.try_get::<i16, _>("live") {
-        return v == 1;
-    }
-    if let Ok(v) = r.try_get::<i64, _>("live") {
-        return v == 1;
-    }
-    r.try_get::<String, _>("live")
-        .ok()
-        .and_then(|s| s.parse::<i64>().ok())
-        .map(|v| v == 1)
-        .unwrap_or(false)
+    row_opt_i64(r, "live") == Some(1)
 }
 
 pub(super) fn row_i64(r: &sqlx::postgres::PgRow, col: &str) -> i64 {
-    if let Ok(v) = r.try_get::<i64, _>(col) {
-        return v;
-    }
-    if let Ok(v) = r.try_get::<i64, _>(col) {
-        return v as i64;
-    }
-    if let Ok(v) = r.try_get::<String, _>(col) {
-        return v.parse().unwrap_or(0);
-    }
-    0
+    row_opt_i64(r, col).unwrap_or(0)
 }
 
 /// 自动冠军：最近一个业务日的当日音浪第一（绕过登录门，直接查只读池）
@@ -897,4 +901,74 @@ pub async fn star_of_day(
 
 fn auto_json(a: &(String, i64)) -> serde_json::Value {
     serde_json::json!({ "title": "每日之星", "name": a.0, "wave": a.1 })
+}
+
+/* --------------------------------- 单测 --------------------------------- */
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tree(
+        edges: &[(u64, u64)],
+        waves: &[(u64, i64)],
+    ) -> (HashMap<u64, Vec<u64>>, HashMap<u64, i64>) {
+        let mut children: HashMap<u64, Vec<u64>> = HashMap::new();
+        for (master, child) in edges {
+            children.entry(*master).or_default().push(*child);
+        }
+        let wave: HashMap<u64, i64> = waves.iter().copied().collect();
+        (children, wave)
+    }
+
+    fn total(start: u64, children: &HashMap<u64, Vec<u64>>, wave: &HashMap<u64, i64>) -> i64 {
+        let mut memo: HashMap<u64, i64> = HashMap::new();
+        let mut on_stack: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        subtree_wave_sum(start, children, wave, &mut memo, &mut on_stack)
+    }
+
+    /// 正常师门树：门下累计 = 自己 + 所有子孙（含隔代）
+    #[test]
+    fn subtree_sums_whole_tree() {
+        // 1 → 2, 1 → 3, 2 → 4
+        let (children, wave) = tree(
+            &[(1, 2), (1, 3), (2, 4)],
+            &[(1, 10), (2, 20), (3, 30), (4, 40)],
+        );
+        assert_eq!(total(1, &children, &wave), 100);
+        assert_eq!(total(2, &children, &wave), 60);
+        assert_eq!(total(4, &children, &wave), 40);
+    }
+
+    /// P1-6 回归：**自指**（master_id = 自己）绝不能无限递归。
+    /// 修复前这里是 stack overflow（公开端点可打崩进程）。
+    #[test]
+    fn subtree_survives_self_reference() {
+        let (children, wave) = tree(&[(7, 7)], &[(7, 5)]);
+        assert_eq!(total(7, &children, &wave), 5, "自指只算自己一次");
+    }
+
+    /// P1-6 回归：**2 环**（A→B→A）同样必须终止
+    #[test]
+    fn subtree_survives_two_cycle() {
+        let (children, wave) = tree(&[(1, 2), (2, 1)], &[(1, 3), (2, 4)]);
+        assert_eq!(
+            total(1, &children, &wave),
+            7,
+            "两人各算一次，不重复也不死循环"
+        );
+        // 从环上任意一点进入都要能收敛
+        assert_eq!(total(2, &children, &wave), 7);
+    }
+
+    /// 长环（3 环）+ 环上挂着正常子树：仍然终止且不重复累加
+    #[test]
+    fn subtree_survives_three_cycle_with_branch() {
+        // 1→2→3→1，且 2 还有徒弟 4
+        let (children, wave) = tree(
+            &[(1, 2), (2, 3), (3, 1), (2, 4)],
+            &[(1, 1), (2, 2), (3, 3), (4, 4)],
+        );
+        assert_eq!(total(1, &children, &wave), 10);
+    }
 }

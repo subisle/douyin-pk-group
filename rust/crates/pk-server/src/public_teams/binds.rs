@@ -81,7 +81,7 @@ pub async fn my_claim_post(
         .map_err(|_| ApiError::bad_request("截图数据格式非法（解码失败），请重新选择图片"))?;
 
     // 提交前先查重：抖音号已被占用就直接拒，省得用户白等审计
-    let no = crate::store::validate_douyin_no(douyin_no).map_err(|e| ApiError::bad_request(e))?;
+    let no = crate::store::validate_douyin_no(douyin_no).map_err(ApiError::bad_request)?;
     let dup = pgrs::query_with_binds(
         &st.pools,
         &sid(&st),
@@ -107,7 +107,7 @@ pub async fn my_claim_post(
     let name = person_name_of(&st, person_id).await?;
     crate::store::anchor_claim_insert(&st, person_id as i64, &name, &team, &no, &bytes, mime)
         .await
-        .map_err(|e| ApiError::bad_request(e))?;
+        .map_err(ApiError::bad_request)?;
     crate::events::emit(
         crate::events::SCOPE_IMPORT,
         format!("绑定申请：{} 提交抖音号 {}（待审计）", name, no),

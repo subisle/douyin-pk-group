@@ -44,21 +44,8 @@ pub(super) fn st_page_for(team: &str) -> Response {
         .into_response()
 }
 
-#[cfg(test)]
-mod register_route_tests {
-    use super::*;
-
-    /// 注册页的团别白名单：male/female（兼容 m/f），其它一律空串（老链接/异常入参）
-    #[test]
-    pub(super) fn team_whitelist_for_register() {
-        assert_eq!(normalize_team("male"), "male");
-        assert_eq!(normalize_team("M"), "male");
-        assert_eq!(normalize_team("female"), "female");
-        assert_eq!(normalize_team(" f "), "female");
-        assert_eq!(normalize_team(""), "");
-        assert_eq!(normalize_team("男团"), "");
-    }
-}
+/* 2026-10-14 注册功能移除：`register_route_tests`（注册页团别白名单用例）随之删除，
+   它唯一断言的 `normalize_team` 也已在 my.rs 里一并清理。 */
 
 #[cfg(test)]
 mod announcement_tests {

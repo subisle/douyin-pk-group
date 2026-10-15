@@ -203,7 +203,7 @@ async fn my_account_set_pool(
         let m = e.to_string();
         /* docs/12 §P6 记过的不一致：唯一索引已经能挡住重复手机号，但错误一直是
         一句 `写入失败：Duplicate entry ...`，运营看不出是手机号还是姓名撞了。
-        这里与注册路径（store.rs 的 my_account_register）翻成同一套中文文案。 */
+        这里把唯一索引冲突翻成中文文案（原先与注册路径共用一套，注册已移除）。 */
         if m.contains("Duplicate entry") {
             if m.contains("PRIMARY") {
                 format!("账号名「{name}」已存在（同名主播？先在台账里改名）")
@@ -757,7 +757,7 @@ pub async fn my_accounts_batch_open(
             }
             None => {
                 /* 新建：开号即绑定（bound=1、name = 台账姓名、person_id 锚定），
-                与 my_account_register 同口径 —— 主播拿到号就能登，不用再绑一次。 */
+                与单条 my_account_set 同口径 —— 主播拿到号就能登，不用再绑一次。 */
                 /* 2026-10-13 审计修复：先查后插存在并发竞态（双跑时预查"不存在"而
                 INSERT 撞主键导致整批部分失败）。改 ON CONFLICT (name) 幂等覆盖，
                 与单条 my_account_set 同口径；手机号唯一索引冲突仍会被后面的
@@ -944,18 +944,45 @@ pub fn normalize_phone(v: &str) -> String {
         .collect()
 }
 
+/// 展示端登录失败的原因（2026-10-14 用户口径：失败要说明白是哪一种）。
+///
+/// 原先登录失败一律返回 `None`，前端只能把「密码错 / 账号不存在 / 没开通」揉成一句
+/// 「账号或密码不对，或账号还没开通」。现在把原因传出去，前端照实显示 ——
+/// 代价是账号枚举面变大（能拿姓名试探谁开了号），产品已确认接受。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoginFail {
+    /// 账号（或手机号）查得到，但密码不对
+    BadPassword,
+    /// 这个账号 / 手机号根本没开通过
+    NoAccount,
+}
+
+impl LoginFail {
+    /// 给前端直接显示的文案（登录失败只有这两种，不再含糊）
+    pub fn message(self) -> &'static str {
+        match self {
+            LoginFail::BadPassword => "密码错误",
+            LoginFail::NoAccount => "账号还没开通",
+        }
+    }
+}
+
 /// 展示端登录（2026-10-10 起支持手机号+密码，姓名+密码继续兼容）：
 /// 输入「账号」先按手机号查（纯数字 5~20 位才当手机号），没命中再按姓名查。
-/// 返回命中的账号姓名（拿去台账里找人），全都没对上 → None。
-pub async fn my_account_check_login(st: &AppState, account: &str, pass: &str) -> Option<String> {
-    let pool = w(st).ok()?;
+/// 成功返回命中的账号姓名（拿去台账里找人）；失败返回 [`LoginFail`] 说明是哪一种。
+pub async fn my_account_check_login(
+    st: &AppState,
+    account: &str,
+    pass: &str,
+) -> std::result::Result<String, LoginFail> {
+    let pool = w(st).map_err(|_| LoginFail::NoAccount)?;
     let pass = pass.trim();
     if pass.is_empty() {
-        return None;
+        return Err(LoginFail::NoAccount);
     }
     let acct = account.trim();
     if acct.is_empty() {
-        return None;
+        return Err(LoginFail::NoAccount);
     }
     // 1) 手机号路径：纯数字 5~20 位
     let phone = normalize_phone(acct);
@@ -970,12 +997,14 @@ pub async fn my_account_check_login(st: &AppState, account: &str, pass: &str) ->
         .ok()
         .flatten()
         {
-            let stored: String = row.try_get("pass").ok()?;
-            let name: String = row.try_get("name").ok()?;
+            let stored: String = row.try_get("pass").map_err(|_| LoginFail::NoAccount)?;
+            let name: String = row.try_get("name").map_err(|_| LoginFail::NoAccount)?;
             if verify_my_password(pass, &stored) {
                 upgrade_my_password_if_plain(pool, &name, &stored, pass).await;
-                return Some(name);
+                return Ok(name);
             }
+            /* 手机号查得到账号、密码不对 —— 明确是密码错，不是「没开通」。 */
+            return Err(LoginFail::BadPassword);
         }
     }
     if let Some(row) = sqlx::query(&crate::pq::rewrite(
@@ -987,17 +1016,19 @@ pub async fn my_account_check_login(st: &AppState, account: &str, pass: &str) ->
     .ok()
     .flatten()
     {
-        let stored: String = row.try_get("pass").ok()?;
-        let name: String = row.try_get("name").ok()?;
+        let stored: String = row.try_get("pass").map_err(|_| LoginFail::NoAccount)?;
+        let name: String = row.try_get("name").map_err(|_| LoginFail::NoAccount)?;
         if verify_my_password(pass, &stored) {
             upgrade_my_password_if_plain(pool, &name, &stored, pass).await;
-            return Some(name);
+            return Ok(name);
         }
+        /* 姓名查得到账号、密码不对。 */
+        return Err(LoginFail::BadPassword);
     }
-    None
+    Err(LoginFail::NoAccount)
 }
 
-/* ------------------- 手机号自助注册 + 绑定主播（2026-10-10 用户口径） ------------------- */
+/* ------------- 展示端账号：绑定态 / 密码管理（2026-10-10 用户口径） ------------- */
 
 /// 展示端账号的绑定态。`name` 既是登录名也是主播姓名：
 /// 注册出来的账号还没绑主播，`name` 先是手机号占位（PRIMARY KEY 不能为空），绑定时改写。
@@ -1009,7 +1040,11 @@ pub struct MyAccountInfo {
     /// 1 = 已绑定主播（管理员手建的老账号默认 1）
     pub bound: bool,
     pub bound_at: String,
-    /// admin（后台手建）/ register（手机号自助注册）
+    /// 账号来源（008 迁移新增，只做事后审计用，不参与鉴权）。取值沿革：
+    /// - `admin`：管理端手建 / 单条 `my_account_set`（008 之前的老账号也归这一档）；
+    /// - `batch`：批量开号（`my_accounts_batch_open`）；
+    /// - `register`：手机号自助注册 —— **2026-10-14 注册功能已移除**，新账号不会再写入
+    ///   这个值，存量行保留原值以便追溯（不要按它做分支判断）。
     pub source: String,
 }
 
@@ -1024,29 +1059,21 @@ impl MyAccountInfo {
     }
 }
 
-/// 短信验证码 = 密码：6~20 位纯数字（用户口径「验证码数字就是密码」）
-///
-/// 修复6：注册密码下限统一 6（与 validate_my_account 的 6~20 对齐，原先是 4~20 不一致）。
-/// 注意**只收紧注册路径**：登录校验在 my_account_check_login（不比长度、只比哈希），
-/// 存量 4~5 位密码账号的登录不受影响；validate_my_code 只在注册时被调用，
-/// 没有其它调用点依赖 4 位下限。
-pub fn validate_my_code(code: &str) -> std::result::Result<String, String> {
-    let c = code.trim();
-    if c.is_empty() {
-        return Err("请输入短信验证码".into());
-    }
-    if !c.chars().all(|ch| ch.is_ascii_digit()) || c.len() < 6 || c.len() > 20 {
-        return Err("验证码格式不对：应为 6~20 位数字（验证码就是密码）".into());
-    }
-    Ok(c.to_string())
-}
+/* 2026-10-14 注册功能移除：`validate_my_code`（旧「短信验证码就是密码」的 6~20 位数字
+   格式校验）随注册一起删除 —— 它已无生产调用点，唯一的断言在 store/mod.rs 的单测里，
+   那个用例也一并删掉了。 */
 
 /// 忘记密码：把已登记手机号的账号密码重置为 **CSPRNG 随机临时密码**
 ///
-/// 2026-10-14 审计修复（P0）：原先重置成「手机号后四位」。该值可从手机号直接推算，
-/// 而这个重置入口（`/api/public/my/password/reset`）不带任何身份证明 ——
-/// 任何人知道手机号就能算出新密码并接管账号。改成不可推导的随机串后，
-/// 重置本身不再等价于「把密码告诉攻击者」。
+/// ⚠️ 2026-10-14 口径与残留风险（产品已确认保留此流程，故如实记录）：
+/// 本入口（`/api/public/my/password/reset`）**不带身份证明** —— 只凭手机号即可触发，
+/// 且**新密码会在响应里明文回给调用方**。因此「知道某人手机号」等价于「可以接管该账号」，
+/// 这是无短信通道下的固有缺口，不是随机化密码能解决的（随机化只挡住了「密码可从手机号
+/// 推算」，挡不住「接口把密码告诉你」）。
+/// 已做的补偿：仅限登录门调用（个人页改走已登录自助改密 —— 2026-10-15 起为
+/// `my_account_reset_password_self`，此前为 `my_account_self_set_password`）、
+/// 受 `public_password_reset_allow` 限流、失败/成功均不打明文手机号。
+/// 若要真正收口，需要服务端短信验证码或 OAuth 归属校验（见 docs/24 §P0-2）。
 ///
 /// 返回 `(新密码, 受影响账号名列表)`：新密码只在 API 响应里下发这一次（请当场转达），
 /// 账号名列表给调用方吊销该账号全部 my token（改密后旧登录态必须失效）。
@@ -1056,10 +1083,10 @@ pub async fn my_account_reset_password_random(
 ) -> std::result::Result<(String, Vec<String>), String> {
     let phone = validate_my_phone(phone)?;
     if phone.is_empty() {
-        return Err("请输入注册手机号".into());
+        return Err("请输入手机号".into());
     }
     let pool = w(st).map_err(|e| e.to_string())?;
-    /* 只认「自助注册的普通账号」（is_admin=0）：管理员观看账号不参与重置，
+    /* 只认**普通账号**（is_admin=0）：管理员观看账号不参与重置，
     否则知道手机号的人就能接管后台视角账号（审计 2026-10-11 修复）。
     文案不区分「没登记」和「管理员账号」，避免泄露台账。 */
     let names: Vec<String> = sqlx::query(&crate::pq::rewrite(
@@ -1072,8 +1099,12 @@ pub async fn my_account_reset_password_random(
     .iter()
     .filter_map(|r| r.try_get::<String, _>("name").ok())
     .collect();
+    /* 手机号查不到已登记的普通账号 = 这个号没绑定任何账号 → 直说「未绑定」
+       （2026-10-14 用户口径：没绑定就显示未绑定，不再绕成「未登记或未开通」）。
+       管理员观看账号同样不在这里命中（is_admin=0 过滤），与「未绑定」共用一句文案，
+       避免泄露某个号是不是后台账号。 */
     if names.is_empty() {
-        return Err("该手机号还没有注册或未登记".into());
+        return Err("该手机号未绑定账号".into());
     }
     /* 重置后的密码 = CSPRNG 随机串（2026-10-14 审计 P0）：不再用手机号后四位。
     手机号后四位是可推导值，配上一个不带身份证明的重置入口 = 任意账号接管。
@@ -1088,6 +1119,125 @@ pub async fn my_account_reset_password_random(
     .await
     .map_err(|e| format!("重置失败：{e}"))?;
     Ok((new_pass, names))
+}
+
+/// 已登录用户改密的**公共实现**（`my_account_self_set_password` 与新
+/// [`my_account_reset_password_self`] 共用，两条路径的账号门禁与错误语义完全一致）。
+///
+/// 身份由调用方（`public_teams::my::my_password_set`）从 `X-My-Token` 解析后传入
+/// `name` —— 本函数只改这一个账号，**不接受请求体里的账号名**，否则等于拿自己的
+/// token 改别人的密码。该门禁与「忘记密码重置」（未登录、按手机号）是两条独立路径。
+///
+/// `old_pass` 决定要不要校验旧密码：
+/// - `Some(p)` = 校验（2026-10-14 起的自助改密口径）；
+/// - `None` = 不校验（2026-10-15 起的「重置密码」口径，见 [`my_account_reset_password_self`]）。
+///
+/// 成功返回 `Ok(())`；失败返回面向用户的文案（handler 原样 400 下发），逐条对应
+/// 冻结的接口契约：
+/// 1. 账号不存在 / 管理员观看账号 / 没登记过密码
+///    → 「该账号不支持自助改密（未登记密码或属管理员账号）」
+/// 2. 当前密码不对（**仅 `Some` 时**校验，复用 verify_my_password，兼容存量明文口令）
+///    → 「当前密码不正确」
+/// 3. 新密码格式（复用 validate_my_account：4~20 位字母或数字）
+///    → 「密码必须是 4~20 位字母或数字」
+/// 4. 新旧密码相同（**仅 `Some` 时**判断）→ 「新密码不能和当前密码相同」
+async fn self_set_password_inner(
+    st: &AppState,
+    name: &str,
+    old_pass: Option<&str>,
+    new_pass: &str,
+) -> std::result::Result<(), String> {
+    let pool = w(st).map_err(|e| e.to_string())?;
+    let key = name.trim();
+    if key.is_empty() {
+        return Err("登录已过期，请重新登录".into());
+    }
+    let row = sqlx::query(&crate::pq::rewrite(
+        "SELECT pass, is_admin FROM my_accounts WHERE name = ? LIMIT 1",
+    ))
+    .bind(key)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("查账号失败：{e}"))?
+    .ok_or_else(|| "该账号不支持自助改密（未登记密码或属管理员账号）".to_string())?;
+    let stored: String = row.try_get("pass").unwrap_or_default();
+    let is_admin = row.try_get::<i16, _>("is_admin").unwrap_or(0) == 1;
+    /* 管理员观看账号不参与自助改密（同「忘记密码重置」的口径：后台视角账号不能被
+    任意登录者接管）；密码为空的账号视为「未登记密码」，同样拒绝。文案不区分两者，
+    避免泄露该账号是不是管理员。 */
+    if is_admin || stored.trim().is_empty() {
+        return Err("该账号不支持自助改密（未登记密码或属管理员账号）".into());
+    }
+    // 当前密码：只有调用方给了旧密码才校验（与登录同口径，兼容存量明文口令）
+    if let Some(old_pass) = old_pass {
+        if !verify_my_password(old_pass.trim(), &stored) {
+            return Err("当前密码不正确".into());
+        }
+    }
+    /* 新密码复用统一口令规则（4~20 位字母或数字），不在这里另写一套校验。
+    空密码 / 非法字符 / 长度越界统一给契约里的那句文案（姓名类错误原样保留）。 */
+    let (_, new_pass) = validate_my_account(key, new_pass).map_err(|e| {
+        if e.contains("姓名") {
+            e
+        } else {
+            "密码必须是 4~20 位字母或数字".to_string()
+        }
+    })?;
+    /* 「新旧不能相同」只能在拿到旧密码时判：重置路径（`None`）没有旧密码可比，
+    且冻结契约对重置只规定了「格式 / 管理员账号」两类 400，不额外加限制。 */
+    if let Some(old_pass) = old_pass {
+        if new_pass == old_pass.trim() {
+            return Err("新密码不能和当前密码相同".into());
+        }
+    }
+    sqlx::query(&crate::pq::rewrite(
+        "UPDATE my_accounts SET pass = ? WHERE name = ?",
+    ))
+    .bind(hash_my_password(&new_pass))
+    .bind(key)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("写入失败：{e}"))?;
+    Ok(())
+}
+
+/// 已登录用户**自助改密**（2026-10-14 用户口径：个人页支持设置自定义密码）。
+///
+/// 保留原签名与语义（`public_teams::admin` 等既有调用方不受影响）：**要求旧密码正确**。
+/// 实现改走 [`self_set_password_inner`]（与「重置密码」共用账号门禁 / 新密码规则 /
+/// 写库与错误文案），因此行为与 2026-10-14 逐字一致：
+/// 1. 账号不存在 / 管理员观看账号 / 没登记过密码
+///    → 「该账号不支持自助改密（未登记密码或属管理员账号）」
+/// 2. 当前密码不对 → 「当前密码不正确」
+/// 3. 新密码格式（4~20 位字母或数字）→ 「密码必须是 4~20 位字母或数字」
+/// 4. 新旧密码相同 → 「新密码不能和当前密码相同」
+pub async fn my_account_self_set_password(
+    st: &AppState,
+    name: &str,
+    old_pass: &str,
+    new_pass: &str,
+) -> std::result::Result<(), String> {
+    self_set_password_inner(st, name, Some(old_pass), new_pass).await
+}
+
+/// 已登录用户**重置密码**（2026-10-15 用户口径：点「重置密码」直接输两遍新密码）。
+///
+/// 与 [`my_account_self_set_password`] 的**唯一区别：不再校验旧密码**。
+/// 沿革：2026-10-14 个人页自助改密要求先填当前密码；2026-10-15 产品拍板改成
+/// 「重置密码」——展示端对话框只留「新密码 / 确认新密码」两个框，两次是否一致由前端
+/// 拦下，后端在同一身份下直接改密即可。
+///
+/// 这次放松**不降低身份门槛**：身份仍由调用方从 `X-My-Token` 解析后传入 `name`，
+/// 本函数不接受请求体里的账号名（否则等于拿自己的 token 改别人的密码）；管理员观看
+/// 账号继续拒绝自助改密，密码为空的账号同样拒绝（同 [`self_set_password_inner`] 口径）。
+///
+/// 成功返回 `Ok(())`；调用方负责吊销该账号全部旧 token 并换发新 token。
+pub async fn my_account_reset_password_self(
+    st: &AppState,
+    name: &str,
+    new_pass: &str,
+) -> std::result::Result<(), String> {
+    self_set_password_inner(st, name, None, new_pass).await
 }
 
 /// 查账号信息（登录名或手机号都认）。表还没跑 008 迁移时退回老查询：
@@ -1132,110 +1282,6 @@ pub async fn my_account_info(st: &AppState, key: &str) -> Option<MyAccountInfo> 
             bound_at: String::new(),
             source: "admin".to_string(),
         })
-}
-
-/// 展示端自助注册（2026-10-12 审计修订）：**手机号 = 账号，短信验证码 = 密码，注册时直接填主播姓名**。
-///
-/// 规则：
-/// - 手机号 / 验证码都是纯数字；手机号 5~20 位、验证码 6~20 位（修复6：下限 4→6，与登录密码口径统一）
-/// - **主播姓名必须能在台账（person 表）里精确查到**，查不到直接拒绝（避免随便填个名字就进站）
-/// - 手机号已存在（管理员手建或已注册）→ 拒绝，引导去登录
-/// - 该姓名已经有账号了 → 拒绝（一人一号）
-/// - **注册不再立即绑定**（2026-10-12 安全审计：自助绑定无审核会被冒领）：账号先以手机号
-///   占位名落库（`bound=0`，回到 008 迁移的原始设计），同时自动生成一条
-///   `my_bind_requests(pending)` 申请，管理员审核通过后才真正绑定。
-///
-/// 返回 `(账号登录名, 主播姓名, personId, 团别)`。审核通过前登录名 = 手机号占位，
-/// 绑定通过后由 `my_account_bind` 改写为台账姓名（登录照样支持手机号）。
-pub async fn my_account_register(
-    st: &AppState,
-    phone: &str,
-    code: &str,
-    anchor_name: &str,
-    wb_state: &str,
-) -> std::result::Result<(String, String, i64, String), String> {
-    let pool = w(st).map_err(|e| e.to_string())?;
-    let phone = validate_my_phone(phone)?;
-    if phone.is_empty() {
-        return Err("请输入手机号".into());
-    }
-    let code = validate_my_code(code)?;
-
-    /* 主播姓名：必须在台账里（全台账搜，注册时还不知道团别） */
-    let anchor = anchor_name.trim();
-    if anchor.is_empty() {
-        return Err("请输入主播姓名（艺名）".into());
-    }
-    if anchor.chars().count() > 20 {
-        return Err("姓名太长（最多 20 字）".into());
-    }
-    let Some((person_id, person_name, team)) = anchor_lookup_by_name(st, anchor).await? else {
-        return Err(format!(
-            "主播库里没有「{anchor}」这个姓名，请核对艺名；确认无误请联系管理员先加进台账"
-        ));
-    };
-    /* 一次查询覆盖三种占用（少两次往返）：同名主播已占号 / 手机号已占 / 历史「手机号占位名」。
-    真正的唯一性由主键(name) + uk_my_phone_uniq(phone) 兜底，这里只为给出准确文案。 */
-    let clashes = sqlx::query(&crate::pq::rewrite(
-        "SELECT name, phone FROM my_accounts \
-         WHERE name IN (?, ?) OR (phone <> '' AND phone = ?) LIMIT 5",
-    ))
-    .bind(&person_name)
-    .bind(&phone)
-    .bind(&phone)
-    .fetch_all(pool)
-    .await
-    .map_err(|e| format!("查重失败：{e}"))?;
-    for row in &clashes {
-        let row_name: String = row.try_get("name").unwrap_or_default();
-        let row_phone: String = row.try_get("phone").unwrap_or_default();
-        if !row_phone.is_empty() && row_phone == phone {
-            return Err("该手机号已存在（已注册），请直接登录；忘记密码请联系管理员".into());
-        }
-        if row_name == person_name {
-            return Err("该主播已经有账号了，请直接登录；忘记密码可点「忘记密码？」重置".into());
-        }
-        if row_name == phone {
-            return Err("该手机号已存在（已注册），请直接登录".into());
-        }
-    }
-    let pass_hash = hash_my_password(&code);
-    let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    /* 审计 2026-10-12：注册**不再立即绑定**（自报姓名直接 bound=1 等于无审核冒领）。
-    回到 008 的原始设计：name 先填手机号占位、bound=0，绑定走 my_bind_requests 审核流。 */
-    sqlx::query(&crate::pq::rewrite(
-        "INSERT INTO my_accounts (name, phone, pass, is_admin, created_at, bound, bound_at, source, wb_state)
-         VALUES (?, ?, ?, 0, ?, 0, '', 'register', ?)",
-    ))
-    .bind(&phone)
-    .bind(&phone)
-    .bind(&pass_hash)
-    .bind(&now)
-    .bind(wb_state.trim())
-    .execute(pool)
-    .await
-    .map_err(|e| {
-        let m = e.to_string();
-        if m.contains("Duplicate entry") {
-            /* 并发穿过上面的预检：按冲突的键给文案（PRIMARY = name，其余 = 手机号唯一键） */
-            if m.contains("PRIMARY") {
-                "该手机号已存在（已注册），请直接登录；忘记密码可点「忘记密码？」重置".to_string()
-            } else {
-                "该手机号已存在（已注册），请直接登录；忘记密码请联系管理员".to_string()
-            }
-        } else if m.contains("Unknown column") {
-            "缺少数据库迁移 008（先跑一次 pk-server migrate）".to_string()
-        } else {
-            format!("写入失败：{m}")
-        }
-    })?;
-    /* 自动生成 pending 绑定申请（注册即申请，审核通过才生效）。
-    017 未跑时申请写入失败不阻断注册 —— 账号已建好，用户登录后仍可在「我的」页手动提交。 */
-    if let Err(e) = my_bind_request_submit(st, &phone, person_id, &person_name, &team).await {
-        tracing::warn!(account = %phone, anchor = %person_name, error = %e,
-            "注册后自动生成绑定申请失败（账号已建好，可登录后手动提交）");
-    }
-    Ok((phone, person_name, person_id, team))
 }
 
 /// 绑定结果：绑定后的主播身份（前端拿它重新发 token / 换团）
@@ -1365,4 +1411,258 @@ async fn bind_inner(
         team,
         person_id,
     })
+}
+
+/* ------------------ 单元测试：登录 / 密码重置 / 自助改密的纯函数边界 ------------------ */
+///
+/// 2026-10-14 第四轮审计把这三条链路改造完，但**当时没有任何测试守住边界**：
+/// 注册移除、忘记密码改 CSPRNG 随机临时密码、个人页改走已登录自助改密，
+/// 全靠人工复核。这里把不碰数据库、可重复跑的那部分契约钉死。
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /* ------------------------- 密码规则：4~20 位字母或数字 ------------------------- */
+
+    /// 4~20 位字母数字放行（下限 4 是 2026-10-13 从 6 拍回来的）。
+    #[test]
+    fn password_rule_accepts_four_to_twenty_alphanumeric() {
+        for p in ["9282", "abcd", "1234", "13312345678", "a1b2c3d4e5f6g7h8i9j0"] {
+            assert!(
+                validate_my_account("凤夏", p).is_ok(),
+                "{p}（{} 位字母数字）应放行",
+                p.len()
+            );
+        }
+        assert_eq!("a1b2c3d4e5f6g7h8i9j0".len(), 20, "20 位是上限边界值");
+    }
+
+    /// 上限 20：超过 20 位一律拒绝。
+    #[test]
+    fn password_rule_rejects_too_long() {
+        assert!(
+            validate_my_account("凤夏", &"1".repeat(21)).is_err(),
+            "21 位数字 → 拒绝"
+        );
+        assert!(
+            validate_my_account("凤夏", &"a".repeat(21)).is_err(),
+            "21 位字母 → 拒绝"
+        );
+        assert!(
+            validate_my_account("凤夏", &"z9".repeat(11)).is_err(),
+            "22 位混合 → 拒绝"
+        );
+    }
+
+    /// 下限 4：1~3 位一律拒绝。
+    #[test]
+    fn password_rule_rejects_too_short() {
+        for p in ["1", "12", "123", "a", "ab", "abc", "a1", "1a2"] {
+            assert!(
+                validate_my_account("凤夏", p).is_err(),
+                "{p}（{} 位）少于 4 位 → 拒绝",
+                p.len()
+            );
+        }
+    }
+
+    /// 空 / 纯空白：trim 后为空走「不能为空」那条文案，不落到长度分支。
+    #[test]
+    fn password_rule_rejects_blank() {
+        assert!(validate_my_account("凤夏", "").is_err(), "空密码 → 拒绝");
+        assert!(
+            validate_my_account("凤夏", "   ").is_err(),
+            "纯空格 trim 后为空 → 拒绝"
+        );
+        assert!(
+            validate_my_account("凤夏", "\t\n ").is_err(),
+            "制表符 / 换行 trim 后为空 → 拒绝"
+        );
+        // 自助改密表单靠这条文案定位问题（留空 = 要保留原密码就传当前密码）
+        let err = validate_my_account("凤夏", "").unwrap_err();
+        assert!(err.contains("不能为空"), "实际文案：{err}");
+    }
+
+    /// 符号一律拒绝。注意长度都落在 4~20 之间，否则命中的是长度分支，
+    /// 测不到字符分支。
+    #[test]
+    fn password_rule_rejects_symbols() {
+        for p in [
+            "133-1234-5678",  // 带横线（手机号常见写法）
+            "ab_123",         // 带下划线
+            "12 34",          // 内含空格（trim 清不掉中间的）
+            "abcd!",          // 标点
+            "ab@c#",          // 邮箱常用符号
+            "密码abcd",       // 中文
+            "ab\u{1f600}cd",  // emoji（按非字母数字拒绝）
+            "a/b\\c",         // 路径分隔符
+        ] {
+            assert!(
+                validate_my_account("凤夏", p).is_err(),
+                "{p} 含非字母数字字符 → 拒绝"
+            );
+        }
+    }
+
+    /// 姓名也一并校验：空、纯空格、超 20 字拒绝；中文名不被误伤。
+    #[test]
+    fn password_rule_also_validates_name() {
+        assert!(validate_my_account("", "9282").is_err(), "姓名为空 → 拒绝");
+        assert!(
+            validate_my_account("   ", "9282").is_err(),
+            "姓名 trim 后为空 → 拒绝"
+        );
+        assert!(
+            validate_my_account(&"凤".repeat(21), "9282").is_err(),
+            "姓名超 20 字 → 拒绝"
+        );
+        assert_eq!(
+            validate_my_account("狼哲", "9282").unwrap(),
+            ("狼哲".to_string(), "9282".to_string()),
+            "中文名原样保留"
+        );
+    }
+
+    /// 返回值必须是 trim 过的：前后空格若连同哈希写进库，会造成「看着一样、
+    /// 登录不上」这种最难查的问题。
+    #[test]
+    fn password_rule_returns_trimmed_values() {
+        let (name, pass) = validate_my_account("  凤夏 ", "  9282  ").unwrap();
+        assert_eq!(name, "凤夏", "姓名要 trim");
+        assert_eq!(pass, "9282", "密码要 trim");
+        // 中间空格不属于 trim 范围，且本来就过不了字符校验
+        assert!(validate_my_account("凤夏", " 92 82 ").is_err());
+    }
+
+    /* --------------------------- 初始密码：手机号后四位 --------------------------- */
+
+    /// 分界线是「数字个数 >= 4」，够 4 位取最后四个数字。
+    #[test]
+    fn initial_password_takes_last_four_digits() {
+        assert_eq!(initial_password("15560099282"), "9282", "11 位手机号取后四位");
+        assert_eq!(initial_password("13800138000"), "8000", "末位是 0 也要补齐四位");
+        assert_eq!(initial_password("0000"), "0000", "全 0 是合法结果，不能当假值丢掉");
+        assert_eq!(initial_password("1234"), "1234", "刚好 4 位 → 原样返回");
+        // 带分隔符 / 空格的手机号：只认数字
+        assert_eq!(initial_password("138-0013-8000"), "8000");
+        assert_eq!(initial_password("138 0013 8000"), "8000");
+        // 超过 11 位（带国际区号）仍取最后四个数字
+        assert_eq!(initial_password("8613800138000"), "8000");
+    }
+
+    /// 同一手机号两次结果必须一致 —— 运营要靠电话转述给主播，不可随机。
+    #[test]
+    fn initial_password_is_stable_for_same_phone() {
+        let a = initial_password("15560099282");
+        let b = initial_password("15560099282");
+        assert_eq!(a, b, "同一手机号必须可复现，否则运营没法口头转述");
+    }
+
+    /// 手机号不足 4 位（空 / 无数字）→ 退回 CSPRNG 随机的 10 位字母数字。
+    /// 这是「没登记手机号也能开号」的兜底，断了就开不出号。
+    #[test]
+    fn initial_password_falls_back_to_random_when_under_four() {
+        for phone in ["", "1", "12", "123", "abc", "13-8", "+86"] {
+            let p = initial_password(phone);
+            assert_eq!(
+                p.len(),
+                10,
+                "{phone:?} 不足 4 位数字 → 应走随机 10 位，实际 {p:?}"
+            );
+            assert!(
+                p.chars().all(|c| c.is_ascii_alphanumeric()),
+                "{phone:?} 兜底密码 {p:?} 必须是纯字母数字"
+            );
+            assert!(
+                validate_my_account("凤夏", &p).is_ok(),
+                "{phone:?} 兜底密码 {p:?} 必须过账号校验"
+            );
+        }
+    }
+
+    /// 兜底走的确实是随机数：两次结果不同，不可预测。
+    #[test]
+    fn initial_password_fallback_is_random_each_time() {
+        let a = initial_password("1");
+        let b = initial_password("1");
+        assert_ne!(a, b, "同一短手机号两次兜底不应相同（应为 CSPRNG 随机）");
+    }
+
+    /// 两条链路的衔接保证：写库用的初始密码必须能被 `validate_my_account` 接受，
+    /// 否则主播第一次自助改密就被自己挡在门外。
+    #[test]
+    fn initial_password_always_passes_account_validation() {
+        for phone in [
+            "15560099282",
+            "13800138000",
+            "0000",
+            "1234",
+            "8613800138000",
+            "",
+            "123",
+            "abc",
+        ] {
+            let p = initial_password(phone);
+            assert!(
+                validate_my_account("凤夏", &p).is_ok(),
+                "initial_password({phone:?}) = {p:?} 应能通过账号密码校验"
+            );
+        }
+    }
+
+    /* ----------------- 忘记密码：必须是随机临时密码（不是手机号后四位） ----------------- */
+
+    /// 忘记密码下发的是 `random_password()` 的 10 位随机串，**不是**手机号后四位。
+    /// 2026-10-12 审计把这条从「可推算」改成「不可推算」，这里钉住不许回退 ——
+    /// 一旦有人为了「方便运营」改回后四位，这条就红。
+    #[test]
+    fn reset_password_is_random_not_phone_last4() {
+        const PHONE: &str = "15560099282";
+        // 开号初始密码仍走后四位（产品口径，与重置是两条不同的路）
+        assert_eq!(initial_password(PHONE), "9282");
+
+        let tmp = crate::random::random_password();
+        assert_eq!(tmp.len(), 10, "重置临时密码应为 10 位随机串");
+        assert!(
+            tmp.chars().all(|c| c.is_ascii_alphanumeric()),
+            "重置临时密码 {tmp:?} 必须是纯字母数字"
+        );
+        assert!(
+            validate_my_account("凤夏", &tmp).is_ok(),
+            "随机临时密码必须能用于登录（落在 4~20 位字母数字规则内）"
+        );
+    }
+
+    /// 重置临时密码两次不同 —— 连点两次不能拿到同一个串。
+    #[test]
+    fn reset_password_differs_between_calls() {
+        let a = crate::random::random_password();
+        let b = crate::random::random_password();
+        assert_ne!(a, b, "两次重置不应下发同一个临时密码");
+    }
+
+    /* ------------- 登录失败原因：密码错 ≠ 账号没开通（2026-10-14 用户口径） ------------- */
+
+    /// 登录失败文案只有两种，且必须能区分「密码错」和「没开通」——
+    /// 前端直接显示后端给的这句，所以这两个字面量是契约，改了要同步改前端兜底。
+    #[test]
+    fn login_fail_message_says_which_one() {
+        assert_eq!(LoginFail::BadPassword.message(), "密码错误");
+        assert_eq!(LoginFail::NoAccount.message(), "账号还没开通");
+        assert_ne!(
+            LoginFail::BadPassword.message(),
+            LoginFail::NoAccount.message(),
+            "两种失败不能塌成同一句，否则又回到「账号或密码不对，或账号还没开通」"
+        );
+    }
+
+    /// 两种失败都必须**不含**对方的字样：文案里不能出现「或」这种和稀泥的措辞，
+    /// 也不能把「没开通」塞进密码错的提示里。
+    #[test]
+    fn login_fail_messages_do_not_conflate() {
+        for m in [LoginFail::BadPassword.message(), LoginFail::NoAccount.message()] {
+            assert!(!m.contains('或'), "失败文案不应含糊：{m}");
+            assert!(!m.is_empty());
+        }
+    }
 }

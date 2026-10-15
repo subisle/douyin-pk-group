@@ -133,6 +133,73 @@ pub fn batch_interval_secs() -> u64 {
         .unwrap_or(3)
 }
 
+/* -------- 1.0.2：一次推送的总时长硬约束（PUSH_MAX_TOTAL_SECS，默认 180 秒） -------- */
+
+/// 一次推送的**总时长上限**（PUSH_MAX_TOTAL_SECS，默认 180 = 3 分钟）。
+/// 用户口径（2026-10-15）：「立即发送就是后端进行，反正在 3 分钟内发送完即可，
+/// 确保不会瞬间资源占用过多」。显式设 0 = 关掉这条约束（退回纯 env 节拍）。
+pub fn max_total_secs() -> u64 {
+    std::env::var("PUSH_MAX_TOTAL_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|v| *v <= 3600)
+        .unwrap_or(180)
+}
+
+/// 自动压缩间隔时的**保底**：绝不为赶时间把间隔压成 0（那就是用户说的
+/// 「瞬间资源占用过多」）。宁可超时尽力发，也不瞬间打满。
+pub const MIN_BATCH_INTERVAL_SECS: u64 = 1;
+
+/// 一次推送实际采用的节拍（纯函数算出来的结果，便于单测 + 日志核对）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PushPace {
+    /// 待发人数（至少 1，便于日志/计算有意义）
+    pub total: usize,
+    /// 批大小
+    pub batch: usize,
+    /// 最终采用的批间隔（秒）
+    pub interval_secs: u64,
+    /// 预计总时长 = (批数 - 1) × 间隔（最后一批发完不再等），秒
+    pub est_secs: u64,
+    /// 是否因为总时长上限而**压缩**了间隔
+    pub capped: bool,
+    /// 连保底间隔都超预算（人数极多）：已尽力而为，调用方要记警告
+    pub over_budget: bool,
+}
+
+/// 按「待发人数 + 批大小 + 期望间隔 + 总时长上限」反推**实际采用**的批间隔。
+///
+/// 批数 `n = ceil(total / batch)`，批间隔个数 `gaps = n - 1`，总时长 ≈ `gaps × interval`。
+/// - 按默认档（20 人/批、3 秒）算出来不超上限 → 原样采用（尊重 env 配置）；
+/// - 超上限 → `interval = max(上限 / gaps, MIN_BATCH_INTERVAL_SECS)` 自动缩短，
+///   `capped = true`；
+/// - 连保底间隔都超预算 → 取保底 + `over_budget = true`，按最小间隔尽力发。
+/// - `max_total_secs == 0`（显式关约束）或只有 1 批 → 完全不动间隔。
+pub fn plan_pace(total: usize, batch: usize, want_interval: u64, max_total_secs: u64) -> PushPace {
+    let batch = batch.max(1);
+    let total = total.max(1);
+    let batches = total.div_ceil(batch);
+    let gaps = batches.saturating_sub(1) as u64;
+    let mut interval = want_interval;
+    let (mut capped, mut over_budget) = (false, false);
+    if max_total_secs > 0 && gaps > 0 && gaps.saturating_mul(want_interval) > max_total_secs {
+        // 能塞进预算的间隔（向下取整），但不低于保底
+        interval = (max_total_secs / gaps)
+            .max(MIN_BATCH_INTERVAL_SECS)
+            .min(want_interval);
+        capped = interval < want_interval;
+        over_budget = gaps.saturating_mul(interval) > max_total_secs;
+    }
+    PushPace {
+        total,
+        batch,
+        interval_secs: interval,
+        est_secs: gaps.saturating_mul(interval),
+        capped,
+        over_budget,
+    }
+}
+
 /* --------------------- P1-20 / P2-21：调度器生命周期与健康状态 --------------------- */
 
 /// 调度循环的退出信号：main.rs 在 graceful shutdown 时 cancel()，循环尽快退出。
@@ -479,6 +546,49 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
         None
     };
 
+    /* 1.0.2：发送前算好**本次实际采用的节拍**（分批 + 批间隔），保证 3 分钟总时长上限。
+    这里只算一次：既避免循环里反复读 env，也让「待发人数/批大小/间隔/预计耗时」能打一条
+    INFO 日志给运营核对（用户口径：立即发送也要在 3 分钟内发完、且不瞬间打满）。 */
+    let pace = plan_pace(
+        bindings.len(),
+        batch_size(),
+        batch_interval_secs(),
+        max_total_secs(),
+    );
+    tracing::info!(
+        total = pace.total,
+        batch = pace.batch,
+        interval_secs = pace.interval_secs,
+        est_secs = pace.est_secs,
+        capped = pace.capped,
+        over_budget = pace.over_budget,
+        "推送分批节拍：待发 {} 人 / 每批 {} 人 / 批间隔 {} 秒 / 预计 {} 秒",
+        pace.total,
+        pace.batch,
+        pace.interval_secs,
+        pace.est_secs
+    );
+    if pace.capped {
+        tracing::warn!(
+            total = pace.total,
+            want_interval_secs = batch_interval_secs(),
+            got_interval_secs = pace.interval_secs,
+            est_secs = pace.est_secs,
+            max_total_secs = max_total_secs(),
+            over_budget = pace.over_budget,
+            "待发人数较多：为守住总时长上限自动压缩批间隔（{} → {} 秒，保底 {} 秒）{}",
+            batch_interval_secs(),
+            pace.interval_secs,
+            MIN_BATCH_INTERVAL_SECS,
+            if pace.over_budget {
+                "；连保底间隔也发不完，按最小间隔尽力发送（不会压成 0）"
+            } else {
+                ""
+            }
+        );
+    }
+    let run_started = std::time::Instant::now();
+
     for (idx, b) in bindings.iter().enumerate() {
         let mut sent_any = false;
 
@@ -729,23 +839,29 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
         if sent_any {
             crate::store::push_touch(st, &b.name, "").await;
         }
-        /* 1.0.1 分批节拍：150 人规模下连环群发容易触发 iLink 频控。
-        每发完 batch_size() 个人停 batch_interval_secs() 秒（env 可调）；
+        /* 分批节拍（1.0.1 起；1.0.2 起用循环外算好的 `pace`）：150 人规模下连环群发容易
+        触发 iLink 频控。每发完 pace.batch 个人停 pace.interval_secs 秒；间隔已按
+        PUSH_MAX_TOTAL_SECS（默认 180 秒）反推过，人数涨了也不会破 3 分钟。
         批内单人失败照常记日志继续，不影响整批节奏。最后一人不停。 */
-        let batch = batch_size().max(1);
-        if (idx + 1) % batch == 0 && idx + 1 < bindings.len() {
-            let interval = batch_interval_secs();
-            if interval > 0 {
+        if (idx + 1) % pace.batch == 0 && idx + 1 < bindings.len() {
+            if pace.interval_secs > 0 {
                 tracing::debug!(
                     sent = idx + 1,
                     total = bindings.len(),
-                    interval,
+                    interval = pace.interval_secs,
                     "推送分批：本批发完，暂停"
                 );
-                tokio::time::sleep(Duration::from_secs(interval)).await;
+                tokio::time::sleep(Duration::from_secs(pace.interval_secs)).await;
             }
         }
     }
+    // 实际耗时（含全部批间隔）：与开头的「预计」对照，方便核对是否真在 3 分钟内。
+    tracing::info!(
+        total = pace.total,
+        est_secs = pace.est_secs,
+        actual_secs = run_started.elapsed().as_secs(),
+        "推送分批发送完成"
+    );
     Ok(())
 }
 
@@ -813,7 +929,7 @@ pub(crate) async fn month_rank_list(
                         .unwrap_or(0),
                     r.try_get::<String, _>("name").unwrap_or_default(),
                     r.try_get::<i64, _>("wave")
-                        .or_else(|_| r.try_get::<i64, _>("wave").map(|v| v as i64))
+                        .or_else(|_| r.try_get::<i64, _>("wave"))
                         .unwrap_or(0),
                 )
             })
@@ -856,7 +972,7 @@ pub(crate) async fn daily_rank(st: &AppState, team: &str, date: &str) -> Vec<(u6
                         .unwrap_or(0),
                     r.try_get::<String, _>("name").unwrap_or_default(),
                     r.try_get::<i64, _>("wave")
-                        .or_else(|_| r.try_get::<i64, _>("wave").map(|v| v as i64))
+                        .or_else(|_| r.try_get::<i64, _>("wave"))
                         .unwrap_or(0),
                 )
             })
@@ -1037,7 +1153,7 @@ fn row_i64(r: &sqlx::postgres::PgRow, col: &str) -> i64 {
         return v;
     }
     if let Ok(v) = r.try_get::<i64, _>(col) {
-        return v as i64;
+        return v;
     }
     r.try_get::<String, _>(col)
         .ok()
@@ -1690,5 +1806,104 @@ mod tests {
 
         let t2 = daily_report_text_with_accounts("female", "2026-10-08", &items, 9, &[]);
         assert!(t2.contains("今天还没开播"), "{t2}");
+    }
+
+    /* ---------- 推送节拍反推（PUSH_MAX_TOTAL_SECS=180 硬约束） ---------- */
+
+    /// 默认档（20 人/批、3 秒/批）下的实际规模：都必须在 180 秒内，且原样采用配置
+    #[test]
+    fn pace_keeps_default_interval_within_budget() {
+        for (total, want_batches, want_est) in [(3usize, 1u64, 0u64), (150, 8, 21), (1000, 50, 147)]
+        {
+            let p = plan_pace(total, 20, 3, 180);
+            println!(
+                "[pace] total={} batch={} interval={} est={}s capped={} over={}",
+                p.total, p.batch, p.interval_secs, p.est_secs, p.capped, p.over_budget
+            );
+            assert_eq!(p.interval_secs, 3, "预算内不动默认间隔（{total} 人）");
+            assert_eq!(p.est_secs, want_est, "{total} 人预计耗时");
+            assert_eq!(
+                (p.total as u64).div_ceil(p.batch as u64),
+                want_batches,
+                "{total} 人的批数"
+            );
+            assert!(p.est_secs <= 180, "{total} 人必须 ≤180 秒");
+            assert!(!p.capped && !p.over_budget);
+        }
+    }
+
+    /// 1200 人仍在预算内（边界），1300 人开始自动压缩间隔
+    #[test]
+    fn pace_shrinks_interval_past_budget() {
+        let edge = plan_pace(1200, 20, 3, 180);
+        println!(
+            "[pace] total={} batch={} interval={} est={}s capped={} over={}",
+            edge.total, edge.batch, edge.interval_secs, edge.est_secs, edge.capped, edge.over_budget
+        );
+        assert_eq!(edge.est_secs, 177, "1200 人（59 个间隔）仍守得住");
+        assert!(!edge.capped);
+
+        let over = plan_pace(1300, 20, 3, 180);
+        println!(
+            "[pace] total={} batch={} interval={} est={}s capped={} over={}",
+            over.total, over.batch, over.interval_secs, over.est_secs, over.capped, over.over_budget
+        );
+        assert!(over.capped, "1300 人必须自动压缩间隔");
+        assert_eq!(over.interval_secs, 2, "180/64 → 2 秒");
+        assert!(over.est_secs <= 180, "压缩后要落回预算内");
+    }
+
+    /// 极端规模：连保底间隔都发不完 → 取最小间隔、over_budget=true、绝不压成 0
+    #[test]
+    fn pace_extreme_falls_back_to_min_interval_never_zero() {
+        let p = plan_pace(20000, 20, 3, 180);
+        println!(
+            "[pace] total={} batch={} interval={} est={}s capped={} over={}",
+            p.total, p.batch, p.interval_secs, p.est_secs, p.capped, p.over_budget
+        );
+        assert!(p.capped, "必须压缩");
+        assert_eq!(p.interval_secs, MIN_BATCH_INTERVAL_SECS, "取保底间隔");
+        assert!(p.interval_secs > 0, "绝不压成 0（瞬间打满）");
+        assert!(p.over_budget, "已尽力而为，调用方要记警告");
+
+        // 小批 + 大间隔的另一种极端：1000 人每批 5 个、间隔 10 秒 → 199 个间隔
+        let q = plan_pace(1000, 5, 10, 180);
+        println!(
+            "[pace] total={} batch={} interval={} est={}s capped={} over={}",
+            q.total, q.batch, q.interval_secs, q.est_secs, q.capped, q.over_budget
+        );
+        assert_eq!(q.interval_secs, MIN_BATCH_INTERVAL_SECS);
+        assert!(q.over_budget && q.interval_secs > 0);
+    }
+
+    /// 只有一批（人数 ≤ 批大小）：没有批间隔，间隔与上限都不影响
+    #[test]
+    fn pace_single_batch_has_no_gap() {
+        let p = plan_pace(5, 20, 3, 180);
+        assert_eq!((p.interval_secs, p.est_secs, p.capped), (3, 0, false));
+        // 单人
+        let one = plan_pace(1, 20, 3, 180);
+        assert_eq!((one.interval_secs, one.est_secs), (3, 0));
+    }
+
+    /// 显式关掉约束（PUSH_MAX_TOTAL_SECS=0）→ 完全尊重 env 间隔
+    #[test]
+    fn pace_zero_budget_disables_the_cap() {
+        let p = plan_pace(20000, 20, 3, 0);
+        assert_eq!(p.interval_secs, 3);
+        assert!(!p.capped && !p.over_budget);
+        // 显式配成 0 秒（运维主动关掉节拍）也原样尊重
+        let z = plan_pace(1000, 20, 0, 180);
+        assert_eq!((z.interval_secs, z.est_secs), (0, 0));
+    }
+
+    /// 环境变量默认值：PUSH_MAX_TOTAL_SECS 缺省 180（别把 delay 默认值也改了）
+    #[test]
+    fn max_total_secs_defaults_to_180() {
+        if std::env::var("PUSH_MAX_TOTAL_SECS").is_ok() {
+            return; // 本机显式设过就不测默认值，免得 CI/本地互相打脸
+        }
+        assert_eq!(max_total_secs(), 180);
+        assert_eq!(delay_minutes(), 30, "本卡不许动 PUSH_DELAY_MINUTES 默认值");
     }
 }

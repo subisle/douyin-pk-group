@@ -135,6 +135,10 @@ pub fn inline_dates(sql: &str, dates: &[String]) -> anyhow::Result<String> {
 /// 主播台账（含主号账号信息）；aliases 在业务库里，代码层合并。
 /// wechat_bound / wechat_push 来自 push_bindings（按姓名 1:1）：运营在台账里
 /// 一眼看出谁绑了微信机器人、谁开了推送，不用去「机器人」页翻会话列表。
+/// ⚠️ **这两列是 boolean**（`pb.conversation_id <> ''` / `pb.notify_target = 1 OR ...`），
+/// sqlx 按 i64/i16 读会 ColumnDecode（2026-10-14 审计 P0-2：台账两列曾经对所有人恒 false）。
+/// 读取侧统一走 `admin::read_opt_i64` 的 int2/int4/bool 类型回退，别在这里改成整数
+/// —— 语义上它就是布尔。
 /// ⚠️ 016 迁移后新增 `p.phone` 与 `a.has_account`。库**没跑 016** 时这两列不存在 →
 /// 查询报 Unknown column，`admin::streamers` 会退回 [`STREAMERS_SQL_LEGACY`]（同 admin.rs:728
 /// 的导入匹配路径，`load_local_streamers` 也要用同一套兜底）。改这里务必同步改 LEGACY 版本。
@@ -159,6 +163,7 @@ pub const STREAMERS_SQL: &str = "SELECT p.id, p.name, p.gender, p.master_id, p.g
 /// 016 / 015 未跑时的兜底：列清单逐项对齐 [`STREAMERS_SQL`]，少 `p.phone` 与 `has_account`
 /// （`my_accounts.person_id` 是 015 加的）。台账页在这套库上只是看不到手机号 / 开号状态，
 /// 其余字段与今天完全一致（这是 015 定下的"向后兼容：老库一行代码不改也能跑"口径）。
+/// ⚠️ `wechat_bound` / `wechat_push` 同样是 boolean，读取侧走 `admin::read_opt_i64` 的类型回退。
 pub const STREAMERS_SQL_LEGACY: &str = "SELECT p.id, p.name, p.gender, p.master_id, p.generation,
        p.group_name, p.avatar_url, p.status, p.hide_in_daily_report,
        TO_CHAR(p.joined_at, 'YYYY-MM-DD') AS joined,
@@ -219,6 +224,19 @@ pub const TEAM_DATE_COUNT_SQL: &str = "SELECT COUNT(*) FROM daily_metric d
 /// 不分男女团：该业务日已入库多少行（导入不分团别时用）
 pub const DATE_COUNT_SQL: &str =
     "SELECT COUNT(*) FROM daily_metric WHERE TO_CHAR(biz_date, 'YYYY-MM-DD') = ?";
+
+/// SQL 里 `?` 占位符的个数。
+///
+/// 2026-10-14 审计 P1-4 的护栏：`DATE_COUNT_SQL` 只有 1 个 `?`，`TEAM_DATE_COUNT_SQL`
+/// 有 2 个；调用方（admin::commit_import 的 reject 分支）曾经不看 SQL 就 bind 两个参数
+/// → PG 报 `bind message supplies 2 parameters, but prepared statement requires 1`
+/// → 事务第一条语句即失败、整批回滚。绑定个数一律由这个函数算出来，SQL 一改就跟着变。
+///
+/// 注意：这是朴素计数（不区分字符串字面量），只适用于本文件里这几条不含 `'?'` 的
+/// 计数 SQL；`pq::rewrite` 另有字面量跳过逻辑，别拿它去数带字面量问号的 SQL。
+pub fn placeholder_count(sql: &str) -> usize {
+    sql.matches('?').count()
+}
 
 /// 不分男女团：该业务日还没有数据的在职主播（跨男/女团）。
 /// 已离开（status='left'，如狼宸 / 狼森）不再要求当天有数据 —— 否则每天都被报「缺数据」。
@@ -454,6 +472,25 @@ mod tests {
         assert!(STREAMERS_SQL.contains("gender"));
         assert!(PREV_CUMULATIVE_SQL.contains("cumulative_wave"));
         assert!(BATCH_LIST_SQL.contains("ok_rows"), "002 迁移后的审计字段");
+    }
+
+    /// P1-4 护栏：reject 模式的绑定参数个数必须与 SQL 占位符个数一致 ——
+    /// 不分团 1 个（只有 biz_date），分团 2 个（biz_date + team）。
+    /// 谁给这两条 SQL 加/减一个 `?`，这条测试会先红，提醒同步改 bind。
+    #[test]
+    fn day_count_sql_placeholder_counts() {
+        assert_eq!(
+            placeholder_count(DATE_COUNT_SQL),
+            1,
+            "不分团只按 biz_date 过滤：只允许 1 个 ?"
+        );
+        assert_eq!(
+            placeholder_count(TEAM_DATE_COUNT_SQL),
+            2,
+            "分团是 biz_date + gender：2 个 ?"
+        );
+        assert!(DATE_COUNT_SQL.contains("FROM daily_metric"));
+        assert!(TEAM_DATE_COUNT_SQL.contains("p.gender = ?"));
     }
 
     /// 016：台账 SQL 与它的兜底版必须**逐列同构** —— 只差 `p.phone` 与 `has_account`。

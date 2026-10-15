@@ -203,7 +203,8 @@ await section('0. 接口清单（X-My-Token 头）', async () => {
   const H = { 'X-My-Token': token }
   const site = await fetch(`${BASE}/api/public/teams/all`, { headers: H }).then((r) => r.json())
   settings = site.settings || {}
-  console.log(`  --   后台开关：分组=${settings.groupEnabled !== false} 族谱=${settings.lineageEnabled !== false} 登录门=${settings.loginRequired !== false} 注册=${settings.myRegister === true}`)
+  // 2026-10-14：注册功能已下线，settings 不再下发 myRegister，日志里去掉该项
+  console.log(`  --   后台开关：分组=${settings.groupEnabled !== false} 族谱=${settings.lineageEnabled !== false} 登录门=${settings.loginRequired !== false}`)
   const date = (site.dates || [])[0] || ''
   const endpoints = [
     ['站点配置 /all', '/api/public/teams/all'],

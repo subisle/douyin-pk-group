@@ -34,11 +34,6 @@ pub struct PublicSettings {
     /// 开 = 全站要登录（现状）
     #[serde(default = "default_true")]
     pub login_required: bool,
-    /// 展示端手机号注册开关（2026-10-10 用户口径「注册先不开」）：**默认关**。
-    /// 关 = 登录门不显示「注册」页签，注册/授权接口一律拒绝（登录、绑定照常）。
-    /// 想开时在管理端「公开站点设置 → 开放手机号注册」打开即可。
-    #[serde(default)]
-    pub my_register: bool,
 }
 
 pub(super) fn default_true() -> bool {
@@ -109,8 +104,6 @@ impl Default for PublicSettings {
             lineage_enabled: true,
             group_types: Default::default(),
             login_required: true,
-            // 注册默认关（用户口径 2026-10-10「注册先不开」）
-            my_register: false,
         }
     }
 }
@@ -183,7 +176,6 @@ impl PublicSettings {
             "lineageEnabled": self.lineage_enabled,
             "groupTypes": self.group_types,
             "loginRequired": self.login_required,
-            "myRegister": self.my_register,
         })
     }
 }
@@ -221,7 +213,6 @@ pub async fn update_settings(State(st): State<ArcState>, Json(body): Json<Value>
     s.group_enabled = flag("groupEnabled", s.group_enabled);
     s.lineage_enabled = flag("lineageEnabled", s.lineage_enabled);
     s.login_required = flag("loginRequired", s.login_required);
-    s.my_register = flag("myRegister", s.my_register);
     // 分组子页：传了 groupTypes（对象）就整包替换；没传保持原样。
     // 未知类型直接存下来也没关系 —— group_type_enabled 对没配置的类型按开处理，
     // 存 false 的才关。
@@ -420,7 +411,7 @@ pub(super) fn normalize_tone(raw: &str) -> String {
 /// 迁移合成时 celebrate.name 为空就回落到这里（与 site() 的 star 解析同口径）。
 pub(super) fn star_override_name(raw: &str) -> String {
     raw.trim()
-        .splitn(3, '|')
+        .split('|')
         .nth(1)
         .map(str::trim)
         .unwrap_or("")
@@ -451,6 +442,7 @@ pub(super) fn parse_pipe3(raw: &str) -> Option<(String, String, i64)> {
 ///    title 空回落 config `star_title`，name 空回落 `star_override` 的第 2 段人名；
 /// 2. 否则 config `champ_banner` 非空（「称号|人名|音浪」）→ plain + military_tech；
 /// 3. 都没有 → None（items 保持空数组）。
+///
 /// 合成的条目 `enabled=true`，否则公开端拿不到、迁移等于没做。
 pub(super) fn synth_item(
     celebrate: &CelebrateConfig,

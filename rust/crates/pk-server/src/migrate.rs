@@ -94,6 +94,12 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "022_admin_messages",
         include_str!("migrations/022_admin_messages.sql"),
     ),
+    // 023：消息下发支持自定义上传图片（admin_messages 加 image_blob / image_mime /
+    // image_name 三列，task-14）。DDL 全 IF NOT EXISTS，可安全重放。
+    (
+        "023_send_image",
+        include_str!("migrations/023_send_image.sql"),
+    ),
 ];
 
 /// 迁移建连（migrator 账号；同样关语句缓存）

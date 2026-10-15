@@ -107,6 +107,13 @@ export type SendCreateReq = {
   imageDate?: string
   channels: SendChannel[]
   target: SendTargetSpec
+  /** task-14 上传图：裸 base64 或 dataURL 都行，后端按**文件头魔数**校验（当前只收 PNG）。
+   * **未选图时不要带这个字段** —— 缺字段 = 没带图；带空串会被后端判 400「图片内容为空」。 */
+  imageBase64?: string
+  /** 可选：声明 mime（后端以魔数为准，只作一致性校验） */
+  imageMime?: string
+  /** 可选：原始文件名（只读回显 / 审计用） */
+  imageName?: string
 }
 
 export type SendCreateResp = { ok: boolean; messageId: number; recipients: number }
@@ -125,6 +132,11 @@ export type SendMessage = {
   channels: string | string[]
   targetType: string
   counts: SendCounts
+  /** task-14 上传图只读字段：imageKind = "custom" 时才有值（渲染图 / 纯文本消息为空或 0） */
+  imageMime?: string
+  imageName?: string
+  imageBytes?: number
+  hasImage?: boolean
 }
 
 /** outbox 行：一条消息 × 每收件人 × 每渠道 = 一行，失败互不影响 */

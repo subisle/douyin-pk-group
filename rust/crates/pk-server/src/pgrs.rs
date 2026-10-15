@@ -196,6 +196,6 @@ pub trait PgResultExt {
 
 impl PgResultExt for sqlx::postgres::PgQueryResult {
     fn affected(&self) -> u64 {
-        self.rows_affected().max(0) as u64
+        self.rows_affected()
     }
 }

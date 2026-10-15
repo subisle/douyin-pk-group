@@ -106,33 +106,52 @@ button { font:inherit; cursor:pointer; }
    （沿原 .celebrate-bar 视觉）。容器 #annItems 自身无 margin/padding，
    空数组 = 无子节点 = 不占位。 */
 #annItems:empty { display:none; }
-.ann-item { display:flex; align-items:flex-start; gap:10px; margin:10px 12px;
-  padding:10px 14px; border-radius:12px; }
+/* 2026-10-15 task-9②：上下间距收窄（原 margin:10 / padding:10~12 太松），
+   行距也跟着压：整卡看起来更紧凑，一屏能装下更多内容。 */
+.ann-item { display:flex; align-items:flex-start; gap:9px; margin:6px 12px;
+  padding:7px 12px; border-radius:11px; }
 .ann-item.ai-plain { background:linear-gradient(135deg,#F5F3FF,#EDE9FE); border:1px solid #C4B5FD; }
-.ann-item.ai-brand { padding:12px 14px;
+.ann-item.ai-brand { padding:8px 12px;
   background:linear-gradient(120deg,#4C1D95 0%,#6D28D9 45%,#B45309 100%);
   border:1px solid #F59E0B; color:#FFFBEB; box-shadow:0 4px 18px rgba(109,40,217,.35); }
-.ann-item .ai-ico { font-size:22px; line-height:1.25; flex:none; color:#6D28D9; }
-.ann-item.ai-brand .ai-ico { font-size:24px; color:#FDE68A; }
+.ann-item .ai-ico { font-size:21px; line-height:1.2; flex:none; color:#6D28D9; }
+.ann-item.ai-brand .ai-ico { font-size:22px; color:#FDE68A; }
 .ann-item .ai-body { flex:1; min-width:0; }
 .ann-item .ai-head { display:flex; align-items:baseline; gap:6px; flex-wrap:wrap; }
-.ann-item .ai-title { font-weight:800; font-size:14px; color:#6D28D9; }
+.ann-item .ai-title { font-weight:800; font-size:13.5px; line-height:1.3; color:#6D28D9; }
 .ann-item.ai-brand .ai-title { color:#FDE68A; }
-.ann-item .ai-name { font-weight:700; font-size:14px; color:#101828; }
+.ann-item .ai-name { font-weight:700; font-size:13.5px; line-height:1.3; color:#101828; }
 .ann-item.ai-brand .ai-name { color:#FFFBEB; }
-.ann-item .ai-text { font-size:13px; line-height:1.65; margin-top:2px;
+.ann-item .ai-text { font-size:12.5px; line-height:1.5; margin-top:1px;
   white-space:pre-line; word-break:break-word; }
+/* 前三位姓名（人名一格写多人、按名次换行）：紧凑名次行，空名次不渲染所以不留空行 */
+.ann-item .ai-ranks { display:flex; flex-direction:column; gap:1px; margin-top:2px; }
+.ann-item .ai-rank { display:flex; align-items:center; gap:6px; line-height:1.35; }
+.ann-item .ai-rank-no { flex:none; width:14px; height:14px; border-radius:9999px; font-size:9.5px;
+  font-weight:700; display:grid; place-items:center;
+  background:rgba(109,40,217,.12); color:#6D28D9; }
+.ann-item.ai-brand .ai-rank-no { background:rgba(253,230,138,.24); color:#FDE68A; }
+.ann-item .ai-rank-nm { font-weight:700; font-size:13px; color:#101828; }
+.ann-item.ai-brand .ai-rank-nm { color:#FFFBEB; }
 
-/* 底部标签栏（看板 / 分组 / 族谱 / 我的）：毛玻璃 + 安全区 */
+/* 底部标签栏（看板 / 分组 / 族谱 / 我的 / 微信对接）：毛玻璃 + 安全区 */
 .tabbar { position:fixed; left:0; right:0; bottom:0; z-index:31;
   display:flex; background:var(--glass);
   -webkit-backdrop-filter:blur(20px) saturate(180%); backdrop-filter:blur(20px) saturate(180%);
   border-top:1px solid var(--hairline);
   padding-bottom:env(safe-area-inset-bottom,0px); }
-.tabbar button { flex:1; height:52px; border:none; background:transparent; color:var(--ink3);
-  font-size:11px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2px; }
+/* 2026-10-15 task-11：第 5 项「微信对接」加入后要 5 等分且不换行 ——
+   flex:1 + min-width:0 保证横向均分，white-space:nowrap 保证「微信对接」四字不折行。 */
+.tabbar button { flex:1; min-width:0; height:52px; border:none; background:transparent; color:var(--ink3);
+  font-size:11px; white-space:nowrap; padding:0 2px;
+  display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2px; }
 .tabbar button .ic { width:24px; height:24px; display:grid; place-items:center; }
 .tabbar button.on { color:var(--primary); font-weight:700; }
+/* 窄屏（≤375px，iPhone SE/mini 一档）5 项时再收一点字号，优先保住「微信对接」全文案 */
+@media (max-width:375px) {
+  .tabbar button { font-size:10px; letter-spacing:-.02em; }
+  .tabbar button .ic { width:22px; height:22px; }
+}
 .tabbar button:active { opacity:.55; }
 
 /* 工具栏（口径 + 日期 + 搜索 + 字段） */
@@ -633,10 +652,12 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .st-my-item .r .material-symbols-outlined { font-size:18px; }
 
 /* ===== 修复2：「我的」子页控件样式补齐 =====
-   claimCard/pushCard/pushAddHtml/pushBoundHtml 用的 .go/.sw/.tgt/.tabs2/.sr/.sr-list/
-   .sk/.my-stat/.delta 等原来依赖 .my-claim/.my-push 祖先类（旧 DOM），
-   新 Stitch DOM（.st-my-list 直接包内容）没有该祖先，样式全部丢失。这里补一套
-   独立规则，变量对齐文件头 :root（--primary/--hairline/--up/--down 等）。 */
+   claimCard/pushCard/追分卡（chaseValueBlock/chasePersonBlock/chaseRowHtml）用的
+   .go/.sw/.tgt/.sr/.sr-list/.tk-opt/.tk-sel/.sk/.my-stat/.delta 等原来依赖
+   .my-claim/.my-push 祖先类（旧 DOM），新 Stitch DOM（.st-my-list 直接包内容）
+   没有该祖先，样式全部丢失。这里补一套独立规则，变量对齐文件头 :root
+   （--primary/--hairline/--up/--down 等）。.tabs2 是旧三 tab 添加面板的遗留样式，
+   2026-10-15 契约 B 起不再有 DOM 用它（保留无副作用）。 */
 /* 主操作按钮：主色实底圆角；.go.gray 灰底次级款 */
 .go { display:block; width:100%; height:40px; margin-top:10px; border:none;
   border-radius:var(--r-md); background:var(--primary); color:var(--on-primary);
@@ -685,6 +706,20 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .sr-list > div:last-child { border-bottom:none; }
 .sr-list > div:active { background:var(--surface-container-low); }
 .sr-list .none { color:var(--on-surface-variant); font-size:12px; cursor:default; }
+/* 追分设置「目标人」多选候选行（2026-10-15 契约 B）：候选行左侧加原生 checkbox，
+   点整行也能勾。选择器带 [type=checkbox] 是为了压过上面 `.sr input` 的输入框皮肤
+   （`.sr input` 把任何后代 input 都撑成 100%×40px 的文本框）。 */
+.sr-list > div.tk-opt { display:flex; align-items:center; gap:9px; }
+.tk-opt input[type="checkbox"] { appearance:auto; -webkit-appearance:checkbox; flex:none;
+  width:16px; height:16px; margin:0; padding:0; border:none; border-radius:2px;
+  accent-color:var(--primary); cursor:pointer; }
+.tk-opt input[type="checkbox"]:disabled { opacity:.45; cursor:default; }
+/* 已选人 chip 行：点 chip = 取消选择 */
+.tk-sel { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
+.tk-sel .chip { display:inline-flex; align-items:center; gap:4px; padding:2px 9px;
+  border-radius:9999px; background:rgba(0,88,188,.10); color:var(--primary);
+  font-size:12px; line-height:1.6; cursor:pointer; }
+.tk-sel .chip:active { background:rgba(0,88,188,.2); }
 /* 骨架屏：灰底块 + shimmer 扫光动画（shimmerList 用 .sk.sk-row） */
 .sk { background:linear-gradient(90deg, var(--surface-container) 25%,
   var(--surface-container-highest) 45%, var(--surface-container) 65%);
@@ -839,10 +874,10 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .my-claim .why, .my-push .hint { font-size:11.5px; color:#b45309; background:#fff7e6;
   border-radius:8px; padding:7px 10px; margin-top:8px; line-height:1.6; }
 
-/* ===== 登录门 / 注册（stitch iOS Style · 2026-10-12 重做）
+/* ===== 登录门（stitch iOS Style · 2026-10-12 重做）
    设计稿：stitch_apple_style_mobile_showcase——iOS 卡片（28px 圆角 + 柔和投影）、
    青绿渐变圆形徽标、蓝 #0066FF 主按钮带投影、50px 输入框、红字错误行。
-   DOM/逻辑（gateHTML/bindLoginPane/bindRegPane）未动，只换皮肤。 ===== */
+   2026-10-14 注册功能已下线：登录门只剩「登录」页签 + 「忘记密码」链接。 ===== */
 #gate { position:fixed; inset:0; z-index:90; background:#F2F4F7;
   display:flex; align-items:center; justify-content:center; padding:20px; overflow:auto; }
 #gate.hidden { display:none; }
@@ -887,30 +922,12 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .gate-box .btn-main:active { transform:scale(.985); filter:brightness(.96); }
 .gate-box .btn-main:disabled { opacity:.45; box-shadow:none; }
 /* 忘记密码：下划线浅灰链接（设计稿 13px slate-400） */
-.gate-box .reg-skip { background:none; border:none; color:#94A3B8; font-size:13px;
+.gate-box .gate-forgot { background:none; border:none; color:#94A3B8; font-size:13px;
   text-decoration:underline; text-underline-offset:4px; text-decoration-color:#CBD5E1;
   cursor:pointer; padding:2px 0 0; margin:2px 0 14px; }
 /* 设计稿脚注：遇到问题？请联系管理员帅帅（12px slate-400 居中） */
 .gate-box .gate-foot { margin:14px 0 0; font-size:12px; color:#94A3B8;
   letter-spacing:.02em; }
-.gate-box .btn-sec { width:100%; height:46px; border:none; border-radius:12px;
-  background:#F2F4F7; color:#0B1C30;
-  font-size:14px; font-weight:600; margin-bottom:10px; transition:all .15s; cursor:pointer; }
-.gate-box .btn-sec:active { transform:scale(.985); }
-.gate-box .btn-sec:disabled { opacity:.45; }
-.gate-box .reg-step { display:flex; gap:9px; text-align:left; margin:0 0 10px; }
-.gate-box .reg-step .n { flex:none; width:19px; height:19px; border-radius:9999px;
-  background:#F2F4F7; color:#64748B; font-size:11px;
-  font-weight:700; display:grid; place-items:center; margin-top:1px; }
-.gate-box .reg-step.done .n { background:#0BB796; color:#fff; }
-.gate-box .reg-step .t { font-size:12px; color:#64748B; line-height:1.6; }
-.gate-box .reg-link { display:block; word-break:break-all; font-size:12px; color:#0066FF;
-  text-align:left; margin:0 0 10px; line-height:1.6; }
-.gate-box .reg-state { font-size:12px; text-align:left; margin:-4px 0 10px; line-height:1.6; }
-.gate-box .reg-state.ok { color:#0b7a3e; }
-.gate-box .reg-state.wait { color:#b45309; }
-.gate-box .reg-note { font-size:11.5px; color:#64748B; text-align:left;
-  line-height:1.7; margin:12px 0 0; }
 .team-pick .pick-title { font-weight:800; font-size:17px; margin-bottom:16px; }
 .team-pick .pick-row { display:flex; gap:12px; }
 .team-pick .pick-btn { flex:1; height:96px; border:1px solid #E2E8F0; border-radius:1rem;
@@ -1297,30 +1314,9 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
   .qr-wrap.qr-live, .qr-status.wait .dot { animation:none; }
 }
 
-/* ===== 注册（2026-10-10：手机号注册 + WorkBuddy 网关「添加账号 OAuth」+ 绑定主播） ===== */
-.gate-tabs { display:flex; margin:0 0 14px; border:1px solid var(--hairline);
-  border-radius:var(--r-md); overflow:hidden; background:#fff; }
-.gate-tabs button { flex:1; height:36px; border:none; background:transparent; cursor:pointer;
-  font:inherit; font-size:13.5px; color:var(--on-surface-variant); }
-.gate-tabs button.on { background:var(--primary); color:#fff; font-weight:700; }
-.gate-box .reg-step { display:flex; gap:9px; text-align:left; margin:0 0 10px; }
-.gate-box .reg-step .n { flex:none; width:19px; height:19px; border-radius:50%; background:#F1F5F9;
-  color:var(--on-surface-variant); font-size:11px; font-weight:700; display:grid; place-items:center;
-  margin-top:1px; }
-.gate-box .reg-step.done .n { background:#DCFCE7; color:#067647; }
-.gate-box .reg-step .t { font-size:12px; color:var(--on-surface-variant); line-height:1.6; }
-.gate-box .reg-link { display:block; word-break:break-all; font-size:12px; color:var(--primary);
-  text-align:left; margin:0 0 10px; line-height:1.6; }
-.gate-box .reg-state { font-size:12px; text-align:left; margin:-4px 0 10px; line-height:1.6; }
-.gate-box .reg-state.ok { color:#067647; }
-.gate-box .reg-state.wait { color:#B54708; }
-.gate-box .reg-skip { background:none; border:none; color:var(--ink3); font-size:12px;
-  text-decoration:underline; cursor:pointer; padding:0; margin:0 0 12px; }
-.gate-box .btn-sec { width:100%; height:40px; border:1px solid var(--hairline); border-radius:var(--r-md);
-  background:#fff; color:var(--on-surface); font-size:14px; font-weight:600; margin-bottom:10px; }
-.gate-box .btn-sec:disabled { opacity:.45; }
-.gate-box .reg-note { font-size:11.5px; color:var(--ink3); text-align:left; line-height:1.7;
-  margin:12px 0 0; }
+/* 2026-10-14 注册功能已下线：原注册段 CSS 整段删除；登录门仍在用的 .gate-tabs、
+   .gate-forgot 由上面的 stitch iOS 段（842 行起）统一定义 —— 与上面 1027 行
+   「旧样式整块删除、以 stitch 段为准」的口径一致。 */
 /* 我的页 · 绑定主播卡片 */
 .my-bind { padding:16px 16px 14px; text-align:left; }
 .my-bind .sub { font-size:12px; color:var(--ink3); line-height:1.7; }
@@ -1367,8 +1363,8 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 <body>
 
 <div class="stale hidden" id="stale">网络不太顺，显示的可能不是最新数据</div>
-<!-- 手机号注册了但还没绑主播：全站提醒（点「去绑定」进「我的」） -->
-<div class="bindbar" id="bindBar" hidden>你还没有绑定主播姓名，绑定后才能真正使用个人数据<span class="link" id="bindBarGo">去绑定</span></div>
+<!-- 账号还没绑主播（历史遗留）：全站提醒。绑定由管理员在后台处理，前端没有自助入口（2026-10-14） -->
+<div class="bindbar" id="bindBar" hidden>你还没有绑定主播，请联系管理员帅帅处理</div>
 
 <header class="masthead">
   <div class="mh-top">
@@ -1443,6 +1439,13 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
     <span class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.6-7 8-7s8 3 8 7"/></svg></span>
     我的
   </button>
+  <!-- 2026-10-15 task-11：用户点名要的一级入口「微信对接」。
+       它不是一个新视图：点进来等价于「我的 → 消息设置」子页（/my/wechat），
+       同一张 #myPushCard、同一份内容，switchView 里折算成 my + mySub='wechat'。 -->
+  <button data-v="wechat" id="navWechat">
+    <span class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.5 8.5 0 0 1-12.4 7.5L3.5 21l1.9-5.6A8.5 8.5 0 1 1 21 11.5Z"/><path d="M8.6 11.4h.01M12.4 11.4h.01M16.2 11.4h.01"/></svg></span>
+    微信对接
+  </button>
 </nav>
 
 <div id="toast">
@@ -1466,7 +1469,7 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
      /st/m/report      → 每日报告（别名）
      /st/m/group/<key> → 按赛事类型的分组页
      /st/m/lineage     → 族谱
-     /st/m/my          → 我的数据（手机号+密码登录；没账号可在登录门「注册」）
+     /st/m/my          → 我的数据（手机号+密码登录；账号由管理员在后台开通）
    刷新/直接分享子路径链接都能落到正确视图（后端对子路径渲染同一 HTML）。 */
 /* 团别（2026-10-11 改）：
    - 开启登录：登录账号的团别决定 TEAM（男团成员只看男团、女团只看女团）；
@@ -1517,7 +1520,12 @@ function parseRoute() {
   if (rest === '' || rest === 'report') return { view: 'data' };
   if (rest === 'lineage') return { view: 'lineage' };
   if (rest === 'my') return { view: 'my' };
-  const mym = rest.match(/^my\/(bind|push|chase|privacy|about)$/);
+  /* 2026-10-15 task-11：底栏一级入口「微信对接」的短路径别名 /wechat
+     （等价 /my/wechat，深链直达不 404、不落回列表；规范路径仍是 /my/wechat）。 */
+  if (rest === 'wechat') return { view: 'my', mySub: 'wechat' };
+  /* 「我的」子页（2026-10-15 契约 C）：wechat = 「消息设置」；push 为兼容别名，
+     旧链接 /my/push 仍打开同一页（不 404、不落回列表）。 */
+  const mym = rest.match(/^my\/(bind|push|chase|privacy|about|wechat)$/);
   if (mym) return { view: 'my', mySub: mym[1] };
   const gm = rest.match(/^group\/([a-z-]+)$/);
   if (gm && GROUP_PAGES.some(p => p.key === gm[1])) return { view: 'group', group: gm[1] };
@@ -1644,16 +1652,14 @@ async function api(p) {
 /* ==================== 登录门 + 全屏水印 ==================== */
 let gateResolve = null;   // 登录成功后 resolve({name,...})
 let meState = null;       // 当前登录身份（who 的结果，带 bound / needBind）
-let regCfg = null;        // 注册页能力探测：{oauth: 网关配没配}
-let regWbState = '';      // WorkBuddy 授权流水号（第 ① 步申请到的）
-let regOauthDone = false; // 授权是否已完成（账号已加入账号池）
-let regTimer = null;      // 授权结果轮询
+/* 2026-10-14 注册功能已下线：原有 4 个注册状态变量及相关页面逻辑一并删除，
+   登录门只剩「登录」+「忘记密码」。 */
 
 /* 2026-10-14：原 maskPhone() 前端打码函数已删 —— 手机号统一由后端 /my/who、
    /my/push 在服务端 mask_phone() 后下发，前端拿到即已脱敏，不再二次打码
    （对已打码值再 mask 会把 138****1234 打成 13****34，水印失真）。 */
 
-/** 登录/注册成功后统一收口：水印 + 未绑定提醒条 */
+/** 登录成功后统一收口：水印 + 未绑定提醒条 */
 function applyLoginState(me) {
   meState = me || null;
   // 登录账号的团别决定 TEAM：男团成员只看男团、女团只看女团（2026-10-11）
@@ -1675,7 +1681,6 @@ function applyLoginState(me) {
 
 /** 关登录门 + 落地登录态 */
 function closeGate(me) {
-  stopRegPoll();
   const g = $('gate');
   g.classList.add('hidden');
   g.innerHTML = '';
@@ -1690,8 +1695,6 @@ function closeGate(me) {
 }
 
 function showGate() {
-  stopRegPoll();
-  regCfg = null;   // 每次弹门重新探测：后台可能刚开/刚关注册
   const g = $('gate');
   /* 团别待定（需登录站点：登录前还不知道账号属于哪个团）→ 中性标题「数据榜」 */
   const title = TEAM ? LABEL() + '数据榜' : '数据榜';
@@ -1708,10 +1711,14 @@ function showGate() {
     '<div class="big-av" style="background:' + avColor(av) + '"><span class="material-symbols-outlined" style="font-size:28px">person</span></div>' +
     '<h3>' + esc(title) + '</h3>' +
     '<div class="gate-tabs">' +
+      '<button id="tabLogin" class="on">登录</button>' +
     '</div>' +
     '<div id="paneLogin"><p class="tip">使用「手机号 + 密码」登录（姓名也可以）</p>' +
       '<input id="gateAcct" placeholder="手机号 / 姓名" autocomplete="off">' +
-      '<button class="reg-skip" id="gateForgot">忘记密码？重置生成临时密码</button>' +
+      /* 2026-10-14：密码规则是 4~20 位字母或数字，原先 inputmode="numeric" 在手机上
+         只弹数字键盘、字母打不出来（自助设置了字母密码就登不进来）。去掉该属性用默认键盘。 */
+      '<input id="gatePass" placeholder="密码" autocomplete="off">' +
+      '<button class="gate-forgot" id="gateForgot">忘记密码？重置生成临时密码</button>' +
       '<div class="form-err hidden" id="gateErr"></div>' +
       '<button class="btn-main" id="gateGo">登 录</button>' +
       '<div class="gate-foot">遇到问题？请联系管理员帅帅</div></div>' +
@@ -1727,6 +1734,11 @@ function showGate() {
   gateTab('login');
 }
 
+/* 2026-10-14 注册功能已下线，登录门只剩「登录」一个页签，切换逻辑随之删除。
+   保留这个函数（同名同调用点）只做「显示登录面板 + 聚焦账号框」，避免调用链脱节。 */
+function gateTab() {
+  show('paneLogin', true);
+  setTimeout(() => { const el = $('gateAcct'); if (el) el.focus(); }, 30);
 }
 
 /* ------------------------------ 登录页签 ------------------------------ */
@@ -1752,14 +1764,16 @@ function bindLoginPane() {
       });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
-      if (!d.ok) throw new Error('账号或密码不对，或账号还没开通');
+      /* 2026-10-14：后端已区分「密码错误」和「账号还没开通」，这里优先显示后端下发的原因 d.error；
+         后端仍有个别分支只回 {ok:false} 不带 error（台账查无此人、管理观看账号未通过等），回落到原兜底文案 */
+      if (!d.ok) throw new Error(d.error || '账号或密码不对，或账号还没开通');
       /* token 统一存 MY_ANY_KEY；后端 all 端点接受任何绑定主播的账号 */
       const team = d.team === 'male' || d.team === 'female' ? d.team : '';
       const key = MY_ANY_KEY;
       sessionStorage.setItem(key, d.token);
       if (key !== MY_KEY()) sessionStorage.removeItem(MY_KEY());
       localStorage.setItem(team ? 'myName_' + team : MY_ANY_NAME, d.name || acct);
-      toast(d.needBind ? '登录成功，请绑定主播姓名' : '登录成功');
+      toast(d.needBind ? '登录成功，账号未绑定主播请联系管理员帅帅' : '登录成功');
       closeGate({ name: d.name || acct, personId: d.personId, bound: d.bound !== false,
         needBind: !!d.needBind, team: team, anyTeam: !team });
     } catch (e) {
@@ -1778,8 +1792,13 @@ async function forgotPassword() {
   const acct = ($('gateAcct').value || '').trim().replace(/[\s-]/g, '');
   const errEl = $('gateErr');
   errEl.classList.add('hidden');
+  /* 资格与后端 store/my_account.rs my_account_reset_password_random 对齐：
+     后端按 phone 查 my_accounts，只认 is_admin=0 且 phone 已绑定的普通账号，
+     查不到就返回「该手机号未绑定账号」（2026-10-14 后端口径：没绑定就说未绑定）。
+     管理员观看账号与未绑定手机号一律拒（文案不区分两者，避免泄露台账）。
+     所以这里必须是纯数字手机号（5~20 位，同 validate_my_phone），姓名不能重置。 */
   if (!/^\d{5,20}$/.test(acct)) {
-    errEl.textContent = '先在账号框输入注册手机号，再点重置';
+    errEl.textContent = '请先输入已绑定的手机号（5~20 位数字），再点重置；未绑定请联系管理员帅帅';
     errEl.classList.remove('hidden');
     return;
   }
@@ -1797,9 +1816,12 @@ async function forgotPassword() {
        不再是手机号后四位 —— 文案/回填/按钮态三处同步改，别再误导用户 */
     $('gatePass').value = d.password || '';
     errEl.classList.remove('hidden');
+    /* 2026-10-14：「设置里」指向不明。改密入口只在个人页那一行（id=myForgot）——
+       2026-10-15 契约 A 后该行文案改为「重置密码」，这里同步，否则用户临时密码
+       登录后按旧文案找不到地方改。 */
     errEl.textContent = d.password
-      ? '已生成临时密码：' + d.password + '（已帮你填进密码框，登录后请尽快在设置里修改）'
-      : '重置后会生成一个临时密码，登录成功后请尽快在设置里修改';
+      ? '已生成临时密码：' + d.password + '（已帮你填进密码框；登录后到「我的」页 → 「重置密码」改成自己的密码）'
+      : '重置后会生成一个临时密码；登录成功后到「我的」页 → 「重置密码」改成自己的密码';
     toast('密码已重置，临时密码见下方提示');
   } catch (e) {
     errEl.textContent = e.message || '重置失败，稍后再试';
@@ -1809,202 +1831,9 @@ async function forgotPassword() {
   }
 }
 
-/* ------------------------------ 注册页签 ------------------------------
-   用户口径（2026-10-11）：手机号 = 账号，短信验证码数字 = 密码，注册时还要填主播姓名；
-   姓名必须在主播台账（person 表）里查得到，查不到直接拒绝注册。
-   注册同时调用 WorkBuddy 网关「添加账号 (OAuth)」（那张授权页本身就是手机号登录）。
-   注册即绑定：校验通过直接以主播姓名建号，不用再走一遍「绑定主播」。 */
-function bindRegPane() {
-  $('paneReg').innerHTML =
-    '<p class="tip">手机号就是账号，短信验证码数字就是密码</p>' +
-    '<div id="regOauth" class="hidden">' +
-      '<div class="reg-step" id="regStep1"><div class="n">1</div>' +
-        '<div class="t">获取短信验证码并完成授权</div></div>' +
-      '<button class="btn-sec" id="regAuth" style="width:100%;margin:0 0 10px">获取验证码</button>' +
-      '<div id="regLinkBox"></div>' +
-      '<div class="reg-state wait hidden" id="regState"></div>' +
-    '</div>' +
-    '<div class="reg-step"><div class="n">2</div>' +
-      '<div class="t">填主播姓名、手机号和刚收到的验证码，完成注册</div></div>' +
-    '<input id="regName" placeholder="主播姓名（艺名，必须和台账一致）" autocomplete="off">' +
-    '<div class="reg-state wait hidden" id="regNameTip" style="margin:-4px 0 8px"></div>' +
-    '<input id="regPhone" placeholder="手机号" inputmode="numeric" autocomplete="off">' +
-    '<input id="regCode" placeholder="短信验证码（= 密码）" inputmode="numeric" autocomplete="off">' +
-    '<div class="form-err hidden" id="regErr"></div>' +
-    '<button class="btn-main" id="regGo">完成注册</button>' +
-    '<p class="reg-note">姓名必须是主播台账里已有的艺名（注册时会自动核对，查不到无法注册）；' +
-    '注册后手机号就是账号、验证码就是密码，忘记密码可重置生成临时密码。</p>';
-  $('regAuth').onclick = startRegOauth;
-  $('regGo').onclick = doRegister;
-  $('regName').onkeydown = (e) => { if (e.key === 'Enter') $('regPhone').focus(); };
-  $('regName').onblur = () => checkRegName();
-  $('regPhone').onkeydown = (e) => { if (e.key === 'Enter') $('regCode').focus(); };
-  $('regCode').onkeydown = (e) => { if (e.key === 'Enter') doRegister(); };
-}
-
-function setRegState(text, kind) {
-  const el = $('regState');
-  if (!el) return;
-  el.className = 'reg-state' + (kind ? ' ' + kind : '');
-  el.textContent = text;
-  el.classList.remove('hidden');
-}
-
-/** 探测注册能力：功能开没开（后台开关，默认关）+ 网关配没配 */
-async function probeRegConfig() {
-  if (regCfg === null) {
-    try {
-      regCfg = await fetch('/api/public/my/register/config').then((r) => r.json());
-    } catch (_) {
-      regCfg = { open: false, oauth: false };
-    }
-  }
-  return regCfg || { open: false, oauth: false };
-}
-
-/** 进注册页签时的收尾：功能关着不让进；开着时按网关配置决定显不显示授权步骤 */
-async function prepareRegPane() {
-  const cfg = await probeRegConfig();
-  if (!cfg.open) { gateTab('login'); return; }
-  show('regOauth', !!cfg.oauth);
-  /* 默认国内版，进入注册页即发起授权；必须加入账号池后才能完成注册 */
-  if (cfg.oauth && !regWbState && !regOauthDone) await startRegOauth();
-}
-
-async function startRegOauth() {
-  const btn = $('regAuth');
-  btn.disabled = true; btn.textContent = '获取中…';
-  $('regLinkBox').innerHTML = '';
-  regWbState = ''; regOauthDone = false;
-  stopRegPoll();
-  try {
-    const r = await fetch('/api/public/my/register/oauth/start', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ realm: 'cn' }),
-    });
-    const d = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
-    regWbState = d.state || '';
-    $('regLinkBox').innerHTML =
-      '<a class="reg-link" href="' + esc(d.authUrl) + '" target="_blank" rel="noopener">' + esc(d.authUrl) + '</a>' +
-      '<div class="reg-note" style="margin:-6px 0 10px">在打开的页面用<b>手机号</b>登录并完成授权；' +
-      '完成后这里会自动继续。</div>';
-    setRegState('等待授权完成…', 'wait');
-    btn.disabled = false; btn.textContent = '重新获取验证码';
-    try { window.open(d.authUrl, '_blank', 'noopener'); } catch (_) { /* 拦截了就点链接 */ }
-    startRegPoll();
-  } catch (e) {
-    btn.disabled = false; btn.textContent = '获取验证码';
-    setRegState('获取失败：' + (e.message || '稍后再试'), 'wait');
-  }
-}
-
-function stopRegPoll() {
-  if (regTimer) { clearInterval(regTimer); regTimer = null; }
-}
-
-function startRegPoll() {
-  stopRegPoll();
-  let tries = 0;
-  regTimer = setInterval(async () => {
-    tries += 1;
-    if (tries > 120) {   // 5 分钟没结果就别再轮了
-      stopRegPoll();
-      setRegState('验证码检测超时：可以点「重新获取验证码」再来一次', 'wait');
-      return;
-    }
-    if (!regWbState) return;
-    try {
-      const d = await fetch('/api/public/my/register/oauth/poll?state=' + encodeURIComponent(regWbState))
-        .then((r) => r.json());
-      const s = String(d.status || '');
-      if (s === 'ok') {
-        stopRegPoll();
-        regOauthDone = true;
-        const step = $('regStep1');
-        if (step) step.classList.add('done');
-        setRegState('✓ 已加入账号池' + (d.nickname ? '（' + d.nickname + '）' : '') + '，请继续第 ② 步', 'ok');
-      } else if (s === 'error' || s === 'expired' || s === 'unknown') {
-        stopRegPoll();
-        setRegState('验证码获取失败或已过期：请点「重新获取验证码」重试', 'wait');
-      }
-    } catch (_) { /* 网络抖动继续轮询 */ }
-  }, 2500);
-}
-
-/** 主播姓名实时校验：失焦就问一次台账有没有这个人（注册前先知道填错没）。
- *  审计 2026-10-11：判成败只认后端 d.ok（台账 collation 大小写不敏感，逐字比对会误报）；
- *  连续失焦时用序号丢弃过期响应，避免旧结果覆盖新输入。 */
-let regNameCheckSeq = 0;
-async function checkRegName() {
-  const el = $('regName'), tip = $('regNameTip');
-  if (!el || !tip) return;
-  const v = (el.value || '').trim();
-  if (!v) { tip.className = 'reg-state wait hidden'; tip.textContent = ''; return; }
-  const seq = ++regNameCheckSeq;
-  tip.className = 'reg-state wait';
-  tip.textContent = '核对姓名…';
-  try {
-    const d = await fetch('/api/public/my/register/check-name?q=' + encodeURIComponent(v))
-      .then((r) => r.json());
-    if (seq !== regNameCheckSeq || (el.value || '').trim() !== v) return;   // 过期响应
-    if (d.ok) {
-      tip.className = 'reg-state ok';
-      tip.textContent = '✓ 台账里有这位主播「' + (d.name || v) + '」' +
-        (d.team === 'male' ? '（男团）' : d.team === 'female' ? '（女团）' : '');
-    } else {
-      tip.className = 'reg-state wait';
-      tip.textContent = d.error || '主播库里没有这个姓名';
-    }
-  } catch (_) {
-    if (seq !== regNameCheckSeq) return;
-    tip.className = 'reg-state wait hidden';
-    tip.textContent = '';
-  }
-}
-
-async function doRegister() {
-  const name = ($('regName').value || '').trim();
-  const phone = ($('regPhone').value || '').trim().replace(/[\s-]/g, '');
-  const code = ($('regCode').value || '').trim();
-  const errEl = $('regErr');
-  const fail = (m) => {
-    errEl.textContent = m;
-    errEl.classList.remove('hidden');
-  };
-  errEl.classList.add('hidden');
-  if (!name) return fail('请输入主播姓名（艺名）');
-  if (name.length > 20) return fail('姓名太长（最多 20 字）');
-  if (!/^\d{5,20}$/.test(phone)) return fail('请输入 5~20 位数字手机号');
-  if (!/^\d{4,20}$/.test(code)) return fail('验证码应为 4~20 位数字（验证码就是密码）');
-  if (regCfg && regCfg.oauth) {
-    if (!regWbState) return fail('请先点「获取验证码」并用手机号完成授权');
-    if (!regOauthDone) return fail('验证码授权还没完成，请稍后再点完成注册');
-  }
-  const btn = $('regGo');
-  btn.disabled = true; btn.textContent = '注册中…';
-  try {
-    const r = await fetch('/api/public/my/register', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ phone, code, name, team: '', wbState: regOauthDone ? regWbState : '' }),
-    });
-    const d = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
-    if (!d.ok) throw new Error('注册失败，稍后再试');
-    /* 注册即绑定：token 统一存 MY_ANY_KEY，不再按团别分档，避免跨团跳转。 */
-    const team = d.team === 'male' || d.team === 'female' ? d.team : '';
-    sessionStorage.setItem(MY_ANY_KEY, d.token);
-    localStorage.setItem(MY_ANY_NAME, d.name || name);
-    toast('注册成功，已绑定主播「' + (d.name || name) + '」');
-    closeGate({ name: d.name || name, personId: d.personId || 0, bound: d.bound !== false,
-      needBind: false, team: team, anyTeam: !team });
-  } catch (e) {
-    btn.disabled = false; btn.textContent = '完成注册';
-    fail(e.message || '注册失败，稍后再试');
-  }
-}
+/* 2026-10-14 注册功能已下线：注册页签的 DOM + JS 已整体删除
+   （表单、网关授权步骤、姓名核对、提交建号、轮询与全部相关状态变量），
+   登录门只保留「登录」+「忘记密码」。 */
 
 /* 会话失效（接口 401）：清 token 回登录门；登录门已开着就不动 */
 function sessionExpired() {
@@ -3140,9 +2969,9 @@ function bindStGroupTabs() {
   });
 }
 
-/* ==================== 我的（手机号+密码登录 / 自助注册） ==================== */
-/* 账号来源：管理员后台手动添加，或登录门「注册」（手机号=账号、短信验证码=密码）。
-   注册出来的账号要先绑定主播，才有个人的音浪数据。
+/* ==================== 我的（手机号+密码登录） ==================== */
+/* 账号来源：只有管理员在后台手动添加这一条路径（2026-10-14 注册功能已下线）。
+   历史遗留的账号要先绑定主播，才有个人的音浪数据。
    token 存 sessionStorage，关闭浏览器后需重新登录；服务重启或失效自动退回登录卡。 */
 const MY_ANY_KEY = 'myToken_any';
 const MY_ANY_NAME = 'myName_any';
@@ -3183,6 +3012,20 @@ function myTokenHeaders(extra) {
   if (t) h['X-My-Token'] = t;
   return h;
 }
+/* 登录态换发（2026-10-15 契约 A）：重置密码成功后后端会吊销**全部**旧 token，
+   只下发一个新 token。新 token 统一写进唯一存放位 MY_ANY_KEY，并把所有历史引用
+   （旧团别 key、老版本可能落在 localStorage 的那份）一并清掉——
+   漏掉任何一处，下一次请求就会带着已吊销的死 token 打过去、全站 401。 */
+function setMyToken(token) {
+  if (!token) return;
+  sessionStorage.setItem(MY_ANY_KEY, token);
+  myTokenKeys().forEach((k) => {
+    if (k === MY_ANY_KEY) return;
+    sessionStorage.removeItem(k);
+    localStorage.removeItem(k);
+  });
+  localStorage.removeItem(MY_ANY_KEY);   // 读侧有 localStorage→sessionStorage 的迁移兜底，这里清掉避免回灌旧值
+}
 function myLogout() {
   ['myToken_male', 'myToken_female', MY_ANY_KEY].forEach((k) => {
     sessionStorage.removeItem(k);
@@ -3190,6 +3033,7 @@ function myLogout() {
   });
   localStorage.removeItem(MY_NAME_KEY());
   localStorage.removeItem(MY_ANY_NAME);
+  chasePicked.clear();   // 换账号/退出后旧的多选暂存不能跟着新账号走
 }
 
 async function loadMy() {
@@ -3197,7 +3041,12 @@ async function loadMy() {
   if (!t) { sessionExpired(); return; }
   $('mhSub').textContent = 'MY';
   try {
-    /* 手机号注册了但还没绑主播：这里只有一张绑定卡（绑定后才有个人的音浪数据）。
+    /* 账号还没绑主播（历史遗留 bound=0 / person_id=0，2026-10-14）：
+       绑定由管理员在后台做，前端没有自助入口，所以这里**仍然早退**出一张说明卡 ——
+       不能「继续拉主数据」：未绑定账号 person_id=0，后端 /my 会回 admin:true，
+       前端据此把推送/追分控件渲染成禁用态，抖音号绑定提交也会被后端硬拒
+       （binds.rs「管理员账号缺少对应的主播档案」）。与其给一堆点不动的控件，
+       不如直接说清楚去找管理员。
        token 由 api() 统一走 X-My-Token 头（2026-10-13），URL 不再带登录态。 */
     const who = await api('/api/public/teams/' + TEAM + '/my/who');
     if (who && who.needBind) { applyLoginState(who); renderBindCard(who); return; }
@@ -3242,92 +3091,21 @@ async function loadMy() {
   }
 }
 
-/* ==================== 绑定主播（注册后一次性；用户自己不能解绑） ====================
-   用户口径（2026-10-10）：注册出来只有手机号，登录后提醒绑定主播姓名；绑定后
-   不支持（自行）解绑，改绑只能走管理员。 */
-let bindTimer = null;
-
+/* ==================== 账号绑定主播（只由管理员在后台做，前端无自助入口） ====================
+   用户口径（2026-10-14）：账号 → 主播姓名的绑定由后端/管理员处理，主播自己不绑。
+   未绑定账号（历史遗留 bound=0 / person_id=0）仍能登录，但这里只出一张「联系管理员」的
+   提示卡：前端不再调用 POST /api/public/my/bind 与 GET /api/public/my/bind/search。 */
 function renderBindCard(who) {
   $('view').innerHTML = '<div class="section">' +
     '<div class="card my-bind">' +
-      '<h2 class="card-t">绑定主播姓名</h2>' +
+      '<h2 class="card-t">账号未绑定主播</h2>' +
       /* 2026-10-14：后端 /my/who 已在服务端打码（mask_phone），这里不再二次 mask */
-      '<div class="sub">账号已绑定手机号 <b>' + esc(who.phone || who.name || '') +
-        '</b>，还没有对应主播。<br>绑定后「我的」数据、水印、榜单名次都按这位主播算。</div>' +
-      '<div class="warn">绑定之后不能自行解绑或换绑；名字填错了请联系管理员改绑。</div>' +
-      '<input id="bindQ" placeholder="输入你的主播姓名（艺名）" autocomplete="off">' +
-      '<div id="bindHits"></div>' +
-      '<div class="form-err hidden" id="bindErr"></div>' +
+      '<div class="sub">账号 <b>' + esc(who.phone || who.name || '') +
+        '</b> 还没有绑定对应的主播，所以看不到个人数据。</div>' +
+      '<div class="warn">绑定主播由管理员在后台处理，你自己无法操作。<br>请联系管理员帅帅，让他在后台把你的账号绑到对应的主播上，绑定后即可正常使用。</div>' +
     '</div>' +
     '<button class="my-logout" id="myOut">退出登录</button></div>';
   $('myOut').onclick = () => { myLogout(); removeWatermark(); location.reload(); };
-  $('bindQ').oninput = () => { clearTimeout(bindTimer); bindTimer = setTimeout(searchBind, 280); };
-  $('bindQ').onkeydown = (e) => { if (e.key === 'Enter') { clearTimeout(bindTimer); searchBind(); } };
-  setTimeout(() => { const el = $('bindQ'); if (el) el.focus(); }, 60);
-}
-
-async function searchBind() {
-  const box = $('bindHits');
-  const key = ($('bindQ').value || '').trim();
-  const errEl = $('bindErr');
-  errEl.classList.add('hidden');
-  if (!key) { box.innerHTML = ''; return; }
-  box.innerHTML = '<div class="none">搜索中…</div>';
-  try {
-    const d = await fetch('/api/public/my/bind/search?q=' + encodeURIComponent(key),
-      { headers: myTokenHeaders() }).then((r) => r.json());
-    if (d.error) throw new Error(d.error);
-    const items = d.items || [];
-    if (!items.length) {
-      box.innerHTML = '<div class="none">没有找到这个名字，换个写法试试（可以只打一个字）</div>';
-      return;
-    }
-    /* 修复1：后端 bind/search 已不再下发 personId（2026-10-12 审计），
-       选中项只带 name —— 渲染行不再写 data-pid（避免打出 "undefined"） */
-    box.innerHTML = items.map((it) =>
-      '<div class="hit"><div>' + esc(it.name) +
-      '<span class="tag">' + (it.team === 'male' ? '男团' : it.team === 'female' ? '女团' : '') + '</span></div>' +
-      '<button data-name="' + esc(it.name) + '">绑定</button></div>').join('');
-    box.querySelectorAll('button[data-name]').forEach((b) => {
-      b.onclick = () => doBind(b.dataset.name);
-    });
-  } catch (e) {
-    box.innerHTML = '';
-    errEl.textContent = e.message || '搜索失败，稍后再试';
-    errEl.classList.remove('hidden');
-  }
-}
-
-/* 修复1：后端 my.rs my_bind 只认 name（缺 name → 400「请选择要绑定的主播」），
-   personId 一律被忽略；改为只传 {token, name}。 */
-async function doBind(name) {
-  if (!confirm('确认绑定到「' + name + '」吗？\n绑定之后不能自行解绑或换绑，填错了需要联系管理员。')) return;
-  const errEl = $('bindErr');
-  errEl.classList.add('hidden');
-  try {
-    const r = await fetch('/api/public/my/bind', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      /* 修复1：body 里不再传 personId（后端忽略且已不下发），只传 token + name */
-      body: JSON.stringify({ token: myToken(), name: name }),
-    });
-    const d = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
-    if (!d.ok) throw new Error('绑定失败，稍后再试');
-    /* 绑定成功后换发的 token 带主播所在团：改存到团别那一档，清掉团别待定那档 */
-    sessionStorage.setItem(MY_ANY_KEY, d.token);
-    localStorage.setItem(MY_ANY_NAME, d.name || name);
-    /* 绑定成功后保留登录时的手机号（水印还用它） */
-    /* 修复1：绑定走审核制，不再即时生效；本地登录态只更新姓名，
-       personId/bound 等身份字段以 who 接口为准（loadMy 会重拉） */
-    applyLoginState({ name: d.name || name, phone: (meState && meState.phone) || '', personId: 0, bound: false, needBind: true });
-    /* 修复1：绑定申请已提交（pending），提示文案与审核制对齐 */
-    toast(d.already ? '已有待审核的绑定申请' : '已提交绑定申请，等管理员审核');
-    loadMy();
-  } catch (e) {
-    errEl.textContent = e.message || '绑定失败，稍后再试';
-    errEl.classList.remove('hidden');
-  }
 }
 
 function renderMyLogin() {
@@ -3338,9 +3116,11 @@ function renderMyLogin() {
     '<div class="card card-pad">' +
     '<div class="big-av" style="background:' + avColor(LABEL()) + '">' + esc(LABEL().charAt(0)) + '</div>' +
     '<h3>' + esc(LABEL()) + ' · 我的数据</h3>' +
-    '<p class="tip">账号由管理员添加，或回登录门用手机号注册<br>手机号或姓名 + 密码登录</p>' +
+    '<p class="tip">账号由管理员添加<br>使用「手机号 + 密码」登录（姓名也可以）</p>' +
     '<input id="myName" placeholder="手机号 / 姓名" value="' + esc(name) + '" autocomplete="off">' +
-    '<input id="myPass" placeholder="密码" inputmode="numeric" autocomplete="off">' +
+    /* 2026-10-14：与登录门 gatePass 同口径 —— 密码是 4~20 位字母或数字，
+       inputmode="numeric" 只弹数字键盘、字母打不出来（设了字母密码就登不进来），删掉用默认键盘。 */
+    '<input id="myPass" placeholder="密码" autocomplete="off">' +
     '<div class="form-err hidden" id="myErr"></div>' +
     '<button class="btn-main" id="myGo">查看我的数据</button>' +
     '</div></div>';
@@ -3363,7 +3143,9 @@ function renderMyLogin() {
       });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
-      if (!d.ok) throw new Error('账号或密码不对，或账号还没开通');
+      /* 2026-10-14：后端已区分「密码错误」和「账号还没开通」，这里优先显示后端下发的原因 d.error；
+         后端仍有个别分支只回 {ok:false} 不带 error（台账查无此人、管理观看账号未通过等），回落到原兜底文案 */
+      if (!d.ok) throw new Error(d.error || '账号或密码不对，或账号还没开通');
       sessionStorage.setItem(MY_ANY_KEY, d.token);
       localStorage.setItem(MY_NAME_KEY(), d.name || nm);
       toast('验证通过');
@@ -3545,19 +3327,19 @@ function renderMy(d, series, claim, bound, push, accounts) {
       boundChip + '</div></div>' +
       '<div class="r"><span>' + esc(boundRight) + '</span>' +
       '<span class="material-symbols-outlined">chevron_right</span></div></div>' +
-      '<div class="st-my-item" id="myPushRow" style="cursor:pointer"><div class="l"><div class="ico"><span class="material-symbols-outlined">qr_code_scanner</span></div>' +
-      '<div style="min-width:0"><div class="t">推送机器人服务</div>' +
-      '<div class="d">扫码绑定接收实时战报与提醒</div></div></div>' +
+      '<div class="st-my-item" id="myPushRow" style="cursor:pointer"><div class="l"><div class="ico"><span class="material-symbols-outlined">notifications</span></div>' +
+      '<div style="min-width:0"><div class="t">消息设置</div>' +
+      '<div class="d">微信机器人对接与推送开关</div></div></div>' +
       '<div class="r"><span>' + esc(pushStatus) + '</span>' +
       '<span class="material-symbols-outlined">chevron_right</span></div></div>' +
       '<div class="st-my-item" id="myChaseRow" style="cursor:pointer"><div class="l"><div class="ico"><span class="material-symbols-outlined">flag</span></div>' +
       '<div style="min-width:0"><div class="t">追分设置</div>' +
-      '<div class="d">追人 · 定目标分 · 追名次，进度变化 wxbot 私聊提醒</div></div></div>' +
+      '<div class="d">追人 · 定目标分，进度变化 wxbot 私聊提醒</div></div></div>' +
       '<div class="r"><span>' + esc(chaseSummary(push)) + '</span>' +
       '<span class="material-symbols-outlined">chevron_right</span></div></div>' +
       '<div class="st-my-item" id="myForgot" style="cursor:pointer">' +
       '<div class="l"><div class="ico"><span class="material-symbols-outlined">lock_reset</span></div>' +
-      '<div class="t">忘记密码 / 重置密码</div></div>' +
+      '<div class="t">重置密码</div></div>' +
       '<div class="r"><span class="material-symbols-outlined">chevron_right</span></div></div>' +
       '<div class="st-my-item" id="myAbout" style="cursor:pointer"><div class="l"><div class="ico"><span class="material-symbols-outlined">info</span></div>' +
       '<div class="t">关于系统与内部版本</div></div>' +
@@ -3590,12 +3372,11 @@ function renderMy(d, series, claim, bound, push, accounts) {
     toast('请直接在微信里联系帅帅');
   };
   $('myForgot').onclick = () => {
-    /* 修复4（QA 实测）：原实现直接 myLogout() 清掉全部 token 再去登录门 ——
-       用户只是想改个密码却丢了登录态。改成页内重置对话框：
-       输手机号 → POST /api/public/my/password/reset {phone} → 展示返回的临时密码。
-       token 全程不动；重置接口本身会吊销全部旧 token，之后走「退出登录」重新登录。 */
-    const prePhone = meState && meState.phone ? meState.phone : '';
-    openMyResetDlg(prePhone);
+    /* 2026-10-15 契约 A：入口「重置密码」——登录态下直接换新密码，
+       不需要旧密码（POST /api/public/my/password，身份只认 X-My-Token 头，
+       body 只有 {newPass}）。成功后后端吊销全部旧 token 并下发新 token，
+       由对话框负责覆盖本地登录态。 */
+    openMyPwdDlg();
   };
   /* 列表两行滚到页内对应的操作卡：绑定行 → 绑定/审计卡，推送行 → 推送卡。
      卡片是异步渲染的（my / series / claim / push / accounts 五个请求回来才拼 DOM），
@@ -3620,13 +3401,15 @@ function renderMy(d, series, claim, bound, push, accounts) {
      （$() 找不到元素会返回 null，留着赋值会 TypeError 白屏）。 */
   $('myAbout').onclick = () => { mySub = 'about'; pushRoute(); renderMySub(); };
   $('myBindRow').onclick = () => { mySub = 'bind'; pushRoute(); renderMySub(); };
-  $('myPushRow').onclick = () => { mySub = 'push'; pushRoute(); renderMySub(); };
+  $('myPushRow').onclick = () => { mySub = 'wechat'; pushRoute(); renderMySub(); };
   $('myChaseRow').onclick = () => { mySub = 'chase'; pushRoute(); renderMySub(); };
   bindClaimCard(claim);
   renderPushBox(push);
-  /* 「追分设置」独立卡（2026-10-13）：首次渲染（bindPushBox 里也会同步，
-     这里补一次保证首页/深链任意路径进来都有内容；卡不在 DOM 时自动跳过）。 */
-  renderChaseBox(push);
+  /* 「追分设置」独立卡（2026-10-13）：**这里绝不能再补一次 renderChaseBox**（2026-10-15 task-7）。
+     renderPushBox → bindPushBox 末尾已经 renderChaseBox + bindChaseHandlers；在这里再渲染一次
+     只会把 #chaseBox 的 innerHTML 整体换新，把刚绑好的 onclick/keydown 连同旧节点一起丢掉 ——
+     真机上「添加目标分数」「批量添加」点不动、搜索不出候选就是这个二次渲染造成的。
+     追分卡是常驻 DOM（renderMy 每次都整页重建 .section），任何路径进来都已经有内容，不需要兜底。 */
   /* 深链 /my/<sub> 直接落到子页；/my 停在列表首页。
      首页只显示：头部/数据卡/服务列表/运营卡——绑定表单、推送设置等重卡只在子页出现。 */
   if (mySub) { renderMySub(); }
@@ -3657,7 +3440,11 @@ function renderMy(d, series, claim, bound, push, accounts) {
 /* 子页清单：id 元素映射 —— 列表首页的一行 ↔ 子页里要显示的那张卡 */
 const MY_SUB_CARDS = {
   bind:    { title: '抖音号绑定与审计', card: 'myClaimCard' },
-  push:    { title: '推送机器人服务',   card: 'myPushCard' },
+  /* 契约 C（2026-10-15）：原「推送机器人服务」升级为「消息设置」（微信对接 +
+     推送开关 + 追分设置入口）。push 保留为兼容别名：老链接 /my/push 与
+     新链接 /my/wechat 打开的是同一张卡。 */
+  wechat:  { title: '消息设置',         card: 'myPushCard' },
+  push:    { title: '消息设置',         card: 'myPushCard' },
   chase:   { title: '追分设置',         card: 'myChaseCard' },
 };
 const MY_SUB_INFO = {
@@ -3672,6 +3459,9 @@ function renderMySub() {
      后面统一用局部名 v，不与全局 view 撞名。 */
   const v = $('view');
   if (!v) return;
+  /* 进/出「我的」子页都先同步底栏选中态（2026-10-15 task-11）：
+     切到 /my/wechat 时底栏高亮「微信对接」，回列表首页时高亮「我的」。 */
+  syncNavActive();
   if (!mySub) { showMyHome(); return; }
   const sub = mySub;
   /* 修复6②：信息型子页要显示 myInfoCard，卡片型子页要隐藏它——
@@ -3759,71 +3549,73 @@ function showMyHome() {
   ['myClaimCard', 'myPushCard', 'myChaseCard'].forEach((id) => { const el = $(id); if (el) el.hidden = true; });
 }
 
-/* ==================== 修复4：「我的」页内重置密码对话框 ====================
-   接口（my.rs::my_password_reset）：POST /api/public/my/password/reset
-   请求体 {phone}；响应 {ok:true, password:"<CSPRNG 临时密码>"}，只在本次下发。
-   后端重置成功会吊销该账号全部 my token —— 提示用户重置后需重新登录。 */
-function openMyResetDlg(prePhone) {
-  const old = $('myResetMask');
+/* ==================== 「我的」页内：重置密码对话框（2026-10-15 契约 A） ====================
+   已登录身份下自己重置密码，不再走手机号重置（手机号重置只保留在未登录的登录门「忘记密码」）。
+   接口（冻结契约）：POST /api/public/my/password
+     Headers: X-My-Token: <token>（身份**只**认这个头）
+     Body:    {"newPass":"..."}（不再要 oldPass；带了也忽略）
+     200 → {ok:true, token:"<新的 my token>"}；400 → {error:"...具体文案..."}；401 → 登录已过期
+   成功后后端吊销全部旧 token：必须用响应里的 token 覆盖本地登录态（setMyToken），
+   否则用户会被立刻踢回登录门。
+   前端先自校验（4~20 位字母或数字 + 两次一致），不满足就地提示、不发请求。 */
+function openMyPwdDlg() {
+  const old = $('myPwdMask');
   if (old) old.remove();   // 防重复弹层
   const mask = document.createElement('div');
-  mask.id = 'myResetMask';
+  mask.id = 'myPwdMask';
   /* 行内样式：单文件 SPA 的对话框没有现成皮肤可套，照登录门 iOS 卡风格给一套 */
   mask.style.cssText = 'position:fixed;inset:0;z-index:95;background:rgba(11,28,48,.45);' +
     'display:flex;align-items:center;justify-content:center;padding:20px;';
   mask.innerHTML = '<div class="gate-box" style="max-width:360px">' +
     '<h3 style="font-size:19px">重置密码</h3>' +
-    '<p class="tip">输入注册手机号，重置后会生成一个临时密码。' +
-    '重置成功后需要用新密码重新登录（原登录态会失效）。</p>' +
-    '<input id="myResetPhone" inputmode="numeric" placeholder="注册手机号" autocomplete="off"' +
-    (prePhone ? ' value="' + esc(prePhone) + '"' : '') + '>' +
-    '<div class="form-err hidden" id="myResetErr" style="color:#F43F5E;font-size:13px;text-align:left;margin:6px 0"></div>' +
-    '<div id="myResetOk" class="hidden" style="display:none;background:#E7F7EC;border-radius:10px;' +
-    'padding:10px 12px;font-size:13px;line-height:1.7;color:#0b7a3e;text-align:left;margin:6px 0"></div>' +
+    '<p class="tip">直接设置一个新的登录密码，不需要旧密码。<br>' +
+    '改完旧的登录凭证立即失效，本机会自动换成新登录态，不用重新登录。</p>' +
+    '<input id="myPwdNew" type="password" placeholder="新密码（4~20 位字母或数字）" autocomplete="new-password">' +
+    '<input id="myPwdNew2" type="password" placeholder="确认新密码" autocomplete="new-password">' +
+    '<div class="form-err hidden" id="myPwdErr" style="color:#F43F5E;font-size:13px;text-align:left;margin:6px 0"></div>' +
     '<div style="display:flex;gap:10px;margin-top:12px">' +
-    '<button class="go gray" id="myResetCancel" style="margin-top:0">取消</button>' +
-    '<button class="go" id="myResetGo" style="margin-top:0">重置密码</button></div></div>';
+    '<button class="go gray" id="myPwdCancel" style="margin-top:0">取消</button>' +
+    '<button class="go" id="myPwdGo" style="margin-top:0">重置密码</button></div></div>';
   document.body.appendChild(mask);
   mask.addEventListener('click', (e) => { if (e.target === mask) close(); });
   const close = () => mask.remove();
-  $('myResetCancel').onclick = close;
-  $('myResetPhone').onkeydown = (e) => { if (e.key === 'Enter') $('myResetGo').click(); };
-  setTimeout(() => { const el = $('myResetPhone'); if (el) el.focus(); }, 60);
-  $('myResetGo').onclick = async () => {
-    const phone = ($('myResetPhone').value || '').trim().replace(/[\s-]/g, '');
-    const errEl = $('myResetErr');
-    const okEl = $('myResetOk');
-    errEl.classList.add('hidden');
-    if (!/^\d{5,20}$/.test(phone)) {
-      errEl.textContent = '请输入注册时用的手机号';
+  $('myPwdCancel').onclick = close;
+  ['myPwdNew', 'myPwdNew2'].forEach((id) => {
+    $(id).onkeydown = (e) => { if (e.key === 'Enter') $('myPwdGo').click(); };
+  });
+  setTimeout(() => { const el = $('myPwdNew'); if (el) el.focus(); }, 60);
+  $('myPwdGo').onclick = async () => {
+    const newPass = ($('myPwdNew').value || '');
+    const newPass2 = ($('myPwdNew2').value || '');
+    const errEl = $('myPwdErr');
+    const fail = (m) => {
+      errEl.textContent = m;
       errEl.classList.remove('hidden');
-      return;
-    }
-    const btn = $('myResetGo');
-    btn.disabled = true; btn.textContent = '重置中…';
+    };
+    errEl.classList.add('hidden');
+    /* 前端先校验（与后端同口径）：不满足直接提示，不发请求。
+       没有旧密码可比，所以不再校验「新旧相同」（后端也已不要求 oldPass）。 */
+    if (!/^[A-Za-z0-9]{4,20}$/.test(newPass)) return fail('新密码必须是 4~20 位字母或数字');
+    if (newPass !== newPass2) return fail('两次输入的新密码不一致');
+    const btn = $('myPwdGo');
+    btn.disabled = true; btn.textContent = '提交中…';
     try {
-      const r = await fetch('/api/public/my/password/reset', {
+      const r = await fetch('/api/public/my/password', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ phone: phone }),
+        headers: Object.assign({ 'Content-Type': 'application/json' }, myTokenHeaders()),
+        body: JSON.stringify({ newPass: newPass }),   // 契约 A：body 只有 newPass
       });
+      /* 401 = 登录已过期：按登录失效处理，收起对话框回登录门 */
+      if (r.status === 401) { close(); sessionExpired(); return; }
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
-      /* 成功：展示临时密码（只此一次），后端已吊销全部旧 token */
-      okEl.textContent = '✓ 临时密码：' + (d.password || '（未返回，请联系管理员）') +
-        '\n请复制保存，用新密码重新登录。';
-      okEl.style.whiteSpace = 'pre-wrap';
-      okEl.classList.remove('hidden');
-      okEl.style.display = 'block';
-      btn.textContent = '已完成';
-      $('myResetCancel').textContent = '关闭';
-      /* 重置接口已把旧 token 全部吊销：本地登录态清掉，避免半死状态（修复4 收尾） */
-      myLogout();
-      removeWatermark();
+      /* 后端已吊销全部旧 token：用新 token 覆盖本地全部 token 引用（setMyToken） */
+      setMyToken(d.token);
+      close();
+      toast(d.token ? '密码已重置' : '密码已重置，请重新登录');
     } catch (e) {
       btn.disabled = false; btn.textContent = '重置密码';
-      errEl.textContent = e.message || '重置失败，稍后再试';
-      errEl.classList.remove('hidden');
+      fail(e.message || '重置失败，稍后再试');
     }
   };
 }
@@ -3948,14 +3740,20 @@ function chaseSummary(p) {
    绑定（2026-10-10 改手机号）：扫机器人名片码加好友 → 把自己的手机号发给机器人 → 绑定完成。
    没登记手机号的人走兜底：页面出 6 位绑定码，发给机器人同样能绑。 */
 let pushState = null;
-let pushSrTimer = null;
+let pushSrTimer = null;      // 「我发了，查激活状态」的自动轮询（needActivate 时 5s 后刷一次）
+let pushChaseSrTimer = null; // 「目标人」搜索防抖（与上面的轮询分开，避免互相 clearTimeout）
 let pushScanTimer = null;
 let pushScanExpireTimer = null;
+/* 追分「目标人」多选的暂存（2026-10-15 契约 B）：chase 卡每次刷新（后台轮询 / 保存回读 /
+   删除后重拉）都会整块重渲染，勾选态放这里才不会丢；批量添加成功或用户撤销才清。 */
+let chasePicked = new Map();
 
 function pushCard(p) {
-  /* 接口失败（p == null）也要把卡渲染出来：否则「推送机器人服务」那一行
-     滚不到任何东西，用户点了没反应，还以为功能是坏的。 */
-  return '<div class="st-my-list" id="myPushCard"><div class="sec">微信推送服务</div>' +
+  /* 接口失败（p == null）也要把卡渲染出来：否则「消息设置」那一行
+     滚不到任何东西，用户点了没反应，还以为功能是坏的。
+     2026-10-15 契约 C：卡名从「微信推送服务」改成「消息设置」，页内三段由
+     pushPageHtml 组装（微信对接 / 推送开关 / 追分设置入口）。 */
+  return '<div class="st-my-list" id="myPushCard"><div class="sec">消息设置</div>' +
     '<div id="pushBox" style="padding:0 1rem 1rem"></div></div>';
 }
 
@@ -3990,10 +3788,19 @@ async function refreshPush() {
 function renderPushBox(p) {
   const box = $('pushBox');
   if (!box) return;
-  box.innerHTML = !p ? pushErrHtml()
-    : !p.channelConfigured ? pushNotReady()
-    : p.bound ? pushBoundHtml(p) : pushUnboundHtml(p);
+  box.innerHTML = !p ? pushErrHtml() : pushPageHtml(p);
   bindPushBox(p);
+}
+
+/* 「消息设置」子页三段（2026-10-15 契约 C）：
+   ① 微信对接（扫码绑定 / 绑定码 / 解绑 / 三态提示）
+   ② 推送开关（追分提醒 + 每日报告 + 师门日报）
+   ③ 追分设置入口行（点进 /my/chase）
+   后端 channelConfigured=false（管理员还没接机器人）时整页只给一句说明，
+   沿用原来的置灰/提示口径：不渲染任何可点控件。 */
+function pushPageHtml(p) {
+  if (!p.channelConfigured) return pushNotReady();
+  return wechatBindHtml(p) + pushFlagsHtml(p) + chaseEntryHtml(p);
 }
 
 function pushNotReady() {
@@ -4001,10 +3808,49 @@ function pushNotReady() {
     '微信推送暂未开放（管理员还没连接微信机器人），稍后再看。</div>';
 }
 
+/* 段标题（与推送/追分卡里的 .card-t 小标题同一口径） */
+function pushSecTitle(text) {
+  return '<div class="card-t" style="margin:12px 0 2px;font-size:13px">' + text + '</div>';
+}
+
+/* ① 微信对接：绑定三态（bound / scanBound / 未绑定）+ 扫码 + 绑定码 + 解绑。
+   三态口径沿用原实现：bound=已拿到会话可推送；scanBound+needActivate=扫码了但
+   用户还没给机器人发过消息（微信要求先有对话才能主动推）；都没有=未绑定。 */
+function wechatBindHtml(p) {
+  let h = pushSecTitle('微信对接');
+  if (p.bound) {
+    /* 显示绑的是哪个微信号：后端一直下发 scanNickname，前端原来没用上，
+       用户换了号或代绑过就搞不清推送到底发去哪。 */
+    const who = p.scanNickname ? '（' + esc(p.scanNickname) + '）' : '';
+    h += '<div class="row"><span class="st ok">✓ 已绑定微信' + who + '</span>' +
+      '<span class="sub">' + esc(p.boundAt || '') + '</span></div>';
+    /* 待激活：凭证有了但机器人还没跟用户说过话，微信要求先有对话才能主动推 */
+    if (p.needActivate) {
+      h += '<div class="hint" style="margin-top:6px">还差最后一步：在微信里给机器人发一条消息，' +
+        '收到回执后推送才会正式开始。</div>' +
+        '<button class="go gray" id="pushCheckActivate" style="margin-top:8px">我发了，查一下激活状态</button>';
+    }
+    if (p.lastError) {
+      h += '<div class="hint">上次推送没成功：' + esc(p.lastError) +
+        '<br>让对方给机器人发一条消息后再试（微信要求先有对话）</div>';
+    }
+    h += '<button class="go gray" id="pushUnbind" style="margin-top:10px">解除绑定</button>';
+  } else {
+    /* 2026-10-11：用户自己扫码绑定（官方 openclaw-weixin 协议，多账号）。
+       每个主播扫自己的码 → 确认后服务端拿到该账号的 bot 凭证 → 首次给机器人
+       发消息留下会话上下文 → 之后的推送走这个账号自己的 token。 */
+    h += pushUnboundHtml(p);
+  }
+  /* 绑定码兜底（POST /my/push/code）：没登记手机号的人把 6 位码发给机器人也能绑。
+     管理员观看账号 personId=0，没有可绑的主播身份，不给入口。 */
+  if (!p.admin) {
+    h += '<button class="go gray" id="pushCodeBtn" style="margin-top:10px">获取绑定码</button>' +
+      '<div class="hint hidden" id="pushCodeBox" style="margin-top:6px"></div>';
+  }
+  return h;
+}
+
 function pushUnboundHtml(p) {
-  /* 2026-10-11：用户自己扫码绑定（官方 openclaw-weixin 协议，多账号）。
-     每个主播扫自己的码 → 确认后服务端拿到该账号的 bot 凭证 → 首次给机器人
-     发消息留下会话上下文 → 之后的推送走这个账号自己的 token。 */
   let h = '<div class="sub" style="margin-top:8px;line-height:1.75">' +
     (p.scanBound
       ? '✅ 扫码已确认。请在微信里给机器人发送任意一条消息，收到回执后推送就激活了。'
@@ -4025,53 +3871,70 @@ function pushUnboundHtml(p) {
   return h;
 }
 
-function pushBoundHtml(p) {
-  /* 显示绑的是哪个微信号：后端一直下发 scanNickname，前端原来没用上，
-     用户换了号或代绑过就搞不清推送到底发去哪。 */
-  const who = p.scanNickname ? '（' + esc(p.scanNickname) + '）' : '';
-  let h = '<div class="row"><span class="st ok">✓ 已绑定微信' + who + '</span>' +
-    '<span class="sub">' + esc(p.boundAt || '') + '</span></div>';
-  /* 待激活：凭证有了但机器人还没跟用户说过话，微信要求先有对话才能主动推 */
-  if (p.needActivate) {
-    h += '<div class="hint" style="margin-top:6px">还差最后一步：在微信里给机器人发一条消息，' +
-      '收到回执后推送才会正式开始。</div>';
-  }
+/* ② 推送开关：bot 目前支持的全部个人开关（notifyTarget / dailyReport /
+   lineageReport）。lineageReport 仅 hasDisciples 为真时显示。
+   未绑定 / admin 观看账号：开关置灰（disabled），沿用「不得回归成可点」的口径。 */
+function pushFlagsHtml(p) {
+  const off = p.bound ? '' : ' disabled';
+  let h = pushSecTitle('推送开关');
   h += '<label class="sw"><input type="checkbox" id="swTarget"' +
-    (p.notifyTarget ? ' checked' : '') + (p.admin ? ' disabled' : '') +
+    (p.notifyTarget ? ' checked' : '') + (p.admin || !p.bound ? ' disabled' : '') +
     '> 追分提醒（追上 / 还差多少）</label>';
   h += '<label class="sw"><input type="checkbox" id="swDaily"' +
-    (p.dailyReport ? ' checked' : '') + '> 每日报告（当天音浪排行榜）</label>';
+    (p.dailyReport ? ' checked' : '') + off + '> 每日报告（当天音浪排行榜）</label>';
   /* 师门日报第三开关（docs/23 §4.3）：仅名下有直系徒弟的人显示（hasDisciples）。
      兼容期后端还没下发 hasDisciples 时按 false 处理 = 不显示，开关自然回退两开盖。 */
   if (p.hasDisciples) {
     h += '<label class="sw"><input type="checkbox" id="swLineage"' +
-      (p.lineageReport ? ' checked' : '') + '> 师门日报（徒弟音浪对比）</label>';
+      (p.lineageReport ? ' checked' : '') + off + '> 师门日报（徒弟音浪对比）</label>';
     h += '<div class="hint">开 = 每日推送名下徒弟音浪对比图；关 = 关闭后不再推送师门日报</div>';
   }
-  if (!p.notifyTarget && !p.dailyReport) {
+  if (!p.bound) {
+    h += '<div class="hint">还没绑定微信：绑定成功后这些开关才会生效，现在改不了。</div>';
+  } else if (!p.notifyTarget && !p.dailyReport) {
     h += '<div class="hint">两个开关都关着，现在不会给你推任何东西，先开一个。</div>';
   }
-  if (p.lastError) {
-    h += '<div class="hint">上次推送没成功：' + esc(p.lastError) +
-      '<br>让对方给机器人发一条消息后再试（微信要求先有对话）</div>';
-  }
-  /* 管理员观看账号说明（2026-10-13）：追分目标表单已移到「追分设置」独立卡，
-     这里只留一行提示，解释追分开关为什么置灰。 */
+  /* 管理员观看账号说明（2026-10-13）：追分目标表单在「追分设置」独立卡，
+     这里解释追分开关为什么置灰。 */
   if (p.admin) {
     h += '<div class="sub" style="margin-top:10px;line-height:1.7">管理员观看账号没有自己的音浪，' +
       '不能设置追分目标，只能收每日报告。</div>';
   }
-  h += '<button class="go gray" id="pushUnbind">解除绑定</button>';
   return h;
 }
 
-/* 「追分设置」子页内容（2026-10-13 用户口径）：追分目标管理 + 状态提示，
-   从 pushBoundHtml 拆出来，填进 #chaseBox；推送卡不再出现追分表单。 */
+/* ③ 追分设置入口行（2026-10-15 契约 C）：一行，点进 /my/chase 子页，
+   与「我的」列表页那一行同一跳转口径（pushRoute + renderMySub）。 */
+function chaseEntryHtml(p) {
+  return pushSecTitle('追分设置') +
+    '<div class="hint">追人 · 目标分，进度变化 wxbot 私聊提醒（当前：' +
+    esc(chaseSummary(p)) + '）</div>' +
+    '<button class="go gray" id="pushChaseGo" style="margin-top:8px">进入追分设置</button>';
+}
+
+/* 2026-10-15 契约 C：原 pushBoundHtml 被拆成两段 ——
+   绑定状态/解绑 → wechatBindHtml（段①「微信对接」）；
+   三个推送开关 → pushFlagsHtml（段②「推送开关」）。 */
+
+/* 「追分设置」子页内容（2026-10-15 契约 B 口径：分数是分数，追人是追人）：
+   拆成「目标分数」「目标人」两块，各自独立上限（GET /my/push 的 counts 字段），
+   外加只读可删的「名次目标」。填进 #chaseBox，与「消息设置」卡各管各的。
+   2026-10-15 task-7：「渲染 + 绑定」收敛到本函数内完成（末尾 bindChaseHandlers）——
+   之前渲染在这里、绑定在 bindPushBox，结果 renderMy 里的一次二次渲染只换壳不绑事件，
+   真机上追分按钮全部点不动。 */
 function renderChaseBox(p) {
   const box = $('chaseBox');
   if (!box) return;
   /* 顶部状态行：绑定状态决定能不能真的收到提醒，目标本身任何时候都能设 */
   if (!p) { box.innerHTML = chaseErrHtml(); bindChaseRetry(); return; }
+  const max = p.maxTargets || 5;
+  const list = p.targets || [];
+  const counts = p.counts || {};
+  /* counts 是契约新增字段；后端没上线时按 targets 里 kind 现算兜底 */
+  const cnt = (k) => {
+    const v = counts[k];
+    return Number.isFinite(Number(v)) ? Number(v) : list.filter((t) => t.kind === k).length;
+  };
   let h = '';
   if (!p.bound) {
     h += !p.channelConfigured
@@ -4079,7 +3942,7 @@ function renderChaseBox(p) {
         '激活前设置的追分目标会先存着，推送通了再发。</div>'
       : p.scanBound
         ? '<div class="hint">微信还在待激活，激活后提醒才会发过来；目标可以先设好。</div>'
-        : '<div class="hint">还没绑定微信推送：先去「推送机器人服务」扫码绑定，目标可以先设好。</div>';
+        : '<div class="hint">还没绑定微信推送：先去「消息设置」扫码绑定，目标可以先设好。</div>';
   }
   if (p.admin) {
     h += '<div class="sub" style="margin-top:6px;line-height:1.7">管理员观看账号没有自己的音浪，' +
@@ -4087,31 +3950,89 @@ function renderChaseBox(p) {
     box.innerHTML = h;
     return;
   }
-  const list = p.targets || [];
-  h += '<div class="card-t" style="margin:8px 0 2px;font-size:13px">追分目标（最多 ' +
-    (p.maxTargets || 5) + ' 个 · 一律比本月累计）</div>';
-  if (!list.length) {
-    h += '<div class="sub" style="padding:6px 0">还没设置。加一个，追上或差多少都会推给你。</div>';
-  }
-  h += list.map((t) => {
-    /* 2026-10-12：person 目标 targetValue>0 = 用户设了自定义目标分（后端存的是原始值），
-       label 里要把它显出来，不然用户看不出这个目标按什么比 */
-    const label = t.kind === 'value' ? '🎯 本月音浪 ' + wan(t.targetValue)
-      : t.kind === 'rank' ? '🏅 本月第 ' + t.targetValue + ' 名'
-      : (t.targetValue > 0 ? '🏃 ' + esc(t.targetName) + ' · 目标 ' + wan(t.targetValue)
-                           : '🏃 ' + esc(t.targetName));
-    const state = t.hit ? '<span class="st ok">已达成</span>'
-      : t.kind === 'rank'
-        ? (t.lastGap > 0 ? '<span class="sub">还差 ' + t.lastGap + ' 名</span>' : '<span class="sub">未进榜</span>')
-        : (t.lastGap > 0 ? '<span class="sub">还差 ' + wan(t.lastGap) + '</span>' : '');
-    return '<div class="tgt"><span>' + label + '</span>' +
-      '<span style="margin-left:auto">' + state + '</span>' +
-      '<button class="x" data-del="' + t.id + '">✕</button></div>';
-  }).join('');
-  if (list.length < (p.maxTargets || 5)) h += pushAddHtml();
+  const byKind = (k) => list.filter((t) => t.kind === k);
+  h += chaseValueBlock(byKind('value'), cnt('value'), max);
+  h += chasePersonBlock(byKind('person'), cnt('person'), max);
+  h += chaseRankBlock(byKind('rank'), cnt('rank'));
   box.innerHTML = h;
-  /* 事件绑定不在这里做：bindPushBox 统一调 bindChaseHandlers，
-     避免 enterSubmit 的 addEventListener 被挂两份（Enter 会重复提交）。 */
+  /* 绑定必须紧跟这次 innerHTML，作为本函数的收尾动作（2026-10-15 task-7）：
+     事件只对当前 DOM 节点有效，谁换了 innerHTML 谁就负责重绑。
+     本函数是 #chaseBox 内容的唯一写入点，所以绑定放在这里 = 任何渲染路径都自带事件，
+     且重复调用不会重复挂监听（innerHTML 换新节点，addEventListener 随旧节点一起消失），
+     Enter 不会双提交。admin / 无卡 / 兜底重试三条早退路径在 return 之前，不经过这里。 */
+  bindChaseHandlers(p);
+}
+
+/* 一行目标（三类共用）：目标文案 + 达成/还差状态 + 单个删除按钮 */
+function chaseRowHtml(t) {
+  /* 2026-10-12：person 目标 targetValue>0 = 用户设了自定义目标分（后端存的是原始值），
+     label 里要把它显出来，不然用户看不出这个目标按什么比 */
+  const label = t.kind === 'value' ? '🎯 本月音浪 ' + wan(t.targetValue)
+    : t.kind === 'rank' ? '🏅 本月第 ' + t.targetValue + ' 名'
+    : (t.targetValue > 0 ? '🏃 ' + esc(t.targetName) + ' · 目标 ' + wan(t.targetValue)
+                         : '🏃 ' + esc(t.targetName));
+  const state = t.hit ? '<span class="st ok">已达成</span>'
+    : t.kind === 'rank'
+      ? (t.lastGap > 0 ? '<span class="sub">还差 ' + t.lastGap + ' 名</span>' : '<span class="sub">未进榜</span>')
+      : (t.lastGap > 0 ? '<span class="sub">还差 ' + wan(t.lastGap) + '</span>' : '');
+  return '<div class="tgt"><span>' + label + '</span>' +
+    '<span style="margin-left:auto">' + state + '</span>' +
+    '<button class="x" data-del="' + t.id + '">✕</button></div>';
+}
+
+/* 目标分数块：输入框（单位万）+ 添加；满额置灰 + 「最多 N 个」 */
+function chaseValueBlock(items, used, max) {
+  const full = used >= max;
+  let h = '<div class="card-t" style="margin:12px 0 2px;font-size:13px">目标分数（最多 ' + max +
+    ' 个 · 已设 ' + used + ' 个 · 一律比本月累计）</div>';
+  if (!items.length) {
+    h += '<div class="sub" style="padding:6px 0">还没设目标分。填一个（单位：万），追上或差多少都会推给你。</div>';
+  }
+  h += items.map(chaseRowHtml).join('');
+  if (full) {
+    h += '<div class="hint">目标分数已满 ' + max + ' 个，先删掉一个再加。</div>' +
+      '<input id="tkVal" inputmode="decimal" placeholder="本月音浪目标（万）" disabled>' +
+      '<button class="go" id="tkValAdd" disabled>最多 ' + max + ' 个</button>';
+  } else {
+    h += '<input id="tkVal" inputmode="decimal" placeholder="本月音浪目标（万），例如 50">' +
+      '<button class="go" id="tkValAdd">添加目标分数</button>';
+  }
+  return h;
+}
+
+/* 目标人块：本团主播搜索 + 多选勾选（一次最多 5 个）+ 批量添加；满额置灰 */
+function chasePersonBlock(items, used, max) {
+  const full = used >= max;
+  let h = '<div class="card-t" style="margin:14px 0 2px;font-size:13px">目标人（最多 ' + max +
+    ' 个 · 已设 ' + used + ' 个）</div>';
+  if (!items.length) {
+    h += '<div class="sub" style="padding:6px 0">还没追人。搜本团主播，勾选后一次加进去。</div>';
+  }
+  h += items.map(chaseRowHtml).join('');
+  if (full) {
+    h += '<div class="hint">目标人已满 ' + max + ' 个，先删掉一个再加。</div>' +
+      '<div class="sr"><input id="tkQ" placeholder="搜本团主播名字" autocomplete="off" disabled>' +
+      '<div class="sr-list hidden" id="tkList"></div></div>' +
+      '<button class="go" id="tkBatchAdd" disabled>最多 ' + max + ' 个</button>';
+    return h;
+  }
+  /* 剩下的额度：一次最多 5 个，且不能超过这一类剩余名额（后端按 person 计数硬拦） */
+  const room = Math.min(5, max - used);
+  return h +
+    '<div class="sub" style="margin-top:6px">搜本团主播，可多选，一次最多 ' + room + ' 个</div>' +
+    '<div class="sr"><input id="tkQ" placeholder="搜本团主播名字" autocomplete="off">' +
+    '<div class="sr-list hidden" id="tkList"></div></div>' +
+    '<div class="tk-sel" id="tkSel"><span class="sub">还没选人</span></div>' +
+    '<div class="hint" id="tkPickedHint"></div>' +
+    '<button class="go" id="tkBatchAdd" disabled>批量添加</button>';
+}
+
+/* 名次目标块：契约 B —— 只展示 + 可删，**不给新增入口**；没有则整块不渲染 */
+function chaseRankBlock(items, used) {
+  if (!items.length) return '';
+  return '<div class="card-t" style="margin:14px 0 2px;font-size:13px">名次目标（' + used +
+    ' 个 · 已停止新增，只可删除）</div>' +
+    items.map(chaseRowHtml).join('');
 }
 
 /* 追分状态取不到时的兜底内容（照 pushErrHtml 口径，重试按钮独立命名避免撞车） */
@@ -4138,21 +4059,8 @@ function bindChaseRetry() {
   };
 }
 
-function pushAddHtml() {
-  return '<div class="tabs2"><button class="on" data-tk="person">追主播</button>' +
-    '<button data-tk="value">定音浪</button><button data-tk="rank">追名次</button></div>' +
-    '<div id="tkPerson"><div class="sr">' +
-    '<input id="tkQ" placeholder="搜本团主播名字" autocomplete="off">' +
-    '<div class="sr-list hidden" id="tkList"></div></div>' +
-    '<input id="tkWan" inputmode="decimal" placeholder="目标分（万，选填）——不填 = 追上他本人">' +
-    '<button class="go" id="tkAdd" disabled>添加</button></div>' +
-    '<div id="tkValue" class="hidden">' +
-    '<input id="tkVal" inputmode="decimal" placeholder="本月音浪目标（万），例如 50">' +
-    '<button class="go" id="tkValAdd">添加目标</button></div>' +
-    '<div id="tkRank" class="hidden">' +
-    '<input id="tkRankVal" inputmode="numeric" placeholder="想进本月第几名，例如 3">' +
-    '<button class="go" id="tkRankAdd">添加名次目标</button></div>';
-}
+/* 2026-10-15 契约 B：原 pushAddHtml（三 tab：追主播 / 定音浪 / 追名次）整体移除——
+   两个添加面板现在分别长在 chaseValueBlock / chasePersonBlock 里，名次不再有新增入口。 */
 
 function bindPushBoundHandlers(p) {
   const swT = $('swTarget'), swD = $('swDaily'), swL = $('swLineage');
@@ -4160,16 +4068,17 @@ function bindPushBoundHandlers(p) {
     try {
       await fetch('/api/public/teams/' + TEAM + '/my/push/settings', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: Object.assign({ 'Content-Type': 'application/json' }, myTokenHeaders()),
         body: JSON.stringify({
           token: myToken(),
-          /* 三个开关每次全量带当前值：后端 my_push_settings 缺省字段按 false 落库
-             （wx.rs flag() unwrap_or(false) → push_set_flags 整行 UPDATE），
-             只传改动的一个会把另外两个覆盖成关。 */
-          notifyTarget: !!(swT && swT.checked),
-          dailyReport: !!(swD && swD.checked),
-          /* 师门日报（docs/23 §4.3）：旧后端不认这个字段（忽略）不影响前两个开关。 */
-          lineageReport: !!(swL && swL.checked),
+          /* 三个开关每次全量带**当前值**（契约 C.2）：后端 my_push_settings 对
+             notifyTarget/dailyReport 缺省按 false 落库（整行 UPDATE），只传改动的一个
+             会把另外两个覆盖成关；lineageReport 缺省 = 不改动现值，所以更不能漏。
+             开关没渲染（例如无徒弟时第三开关不显示）就回落到接口下发的现值，
+             保证不会把线上的值静默改掉。 */
+          notifyTarget: swT ? !!swT.checked : !!p.notifyTarget,
+          dailyReport: swD ? !!swD.checked : !!p.dailyReport,
+          lineageReport: swL ? !!swL.checked : !!p.lineageReport,
         }),
       }).then(async (r) => {
         const d = await r.json().catch(() => ({}));
@@ -4209,15 +4118,18 @@ function bindPushBoundHandlers(p) {
   }
 }
 
-/* 「追分设置」卡的事件（2026-10-13 从 bindPushBoundHandlers 拆出，逻辑不变，
-   只是选择器从 #pushBox 换到 #chaseBox）：目标删除、三个添加面板、搜索。 */
+/* 「追分设置」卡的事件（2026-10-15 契约 B 重写）：单个删除 + 目标分添加 +
+   目标人「搜索 → 多选勾选 → 批量添加」。
+   这里只绑事件，DOM 由 renderChaseBox 生成；bindPushBox 每次刷新都会重新调本函数，
+   所以不要用 addEventListener（会叠加），统一用 onclick/oninput 覆盖式绑定。 */
 function bindChaseHandlers(p) {
+  /* 单个删除：三类目标共用（名次目标可删、不可新增） */
   document.querySelectorAll('#chaseBox [data-del]').forEach((b) => {
     b.onclick = async () => {
       try {
         await fetch('/api/public/teams/' + TEAM + '/my/push/targets/delete', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: Object.assign({ 'Content-Type': 'application/json' }, myTokenHeaders()),
           body: JSON.stringify({ token: myToken(), id: Number(b.dataset.del) }),
         }).then(async (r) => {
           const d = await r.json().catch(() => ({}));
@@ -4231,86 +4143,20 @@ function bindChaseHandlers(p) {
     };
   });
 
-  /* 追主播 / 定音浪 / 追名次 三个子面板 */
-  let picked = null;
-  document.querySelectorAll('#chaseBox .tabs2 button').forEach((b) => {
-    b.onclick = () => {
-      document.querySelectorAll('#chaseBox .tabs2 button').forEach((x) => x.classList.toggle('on', x === b));
-      show('tkPerson', b.dataset.tk === 'person');
-      show('tkValue', b.dataset.tk === 'value');
-      show('tkRank', b.dataset.tk === 'rank');
-    };
-  });
-  /* Enter 直提（2026-10-12）：三个输入框分别触发对应添加按钮，减少一次点按 */
+  /* Enter 直提（2026-10-12）：目标分输入框回车 = 点添加 */
   const enterSubmit = (inputId, btnId) => {
     const el = $(inputId), btn = btnId && $(btnId);
     if (el && btn) el.addEventListener('keydown', (e) => { if (e.key === 'Enter') btn.click(); });
   };
-  enterSubmit('tkWan', 'tkAdd');
   enterSubmit('tkVal', 'tkValAdd');
-  enterSubmit('tkRankVal', 'tkRankAdd');
-  const q = $('tkQ'), listEl = $('tkList'), addBtn = $('tkAdd');
-  if (q) {
-    q.oninput = () => {
-      picked = null;
-      if (addBtn) addBtn.disabled = true;
-      const key = q.value.trim();
-      clearTimeout(pushSrTimer);
-      if (!key) { listEl.classList.add('hidden'); listEl.innerHTML = ''; return; }
-      pushSrTimer = setTimeout(async () => {
-        try {
-          const d = await api('/api/public/teams/' + TEAM + '/my/push/search?q=' +
-            encodeURIComponent(key));
-          const items = d.items || [];
-          listEl.innerHTML = items.length
-            ? items.map((a) => '<div data-pid="' + a.personId + '">' + esc(a.name) + '</div>').join('')
-            : '<div class="none">本团没搜到这个人</div>';
-          listEl.classList.remove('hidden');
-          listEl.querySelectorAll('[data-pid]').forEach((row) => {
-            row.onclick = () => {
-              picked = { id: Number(row.dataset.pid), name: row.textContent };
-              q.value = picked.name;
-              listEl.classList.add('hidden');
-              addBtn.disabled = false;
-            };
-          });
-        } catch (e) {
-          listEl.innerHTML = '<div class="none">' + esc(e.message || '搜索失败') + '</div>';
-          listEl.classList.remove('hidden');
-        }
-      }, 220);
-    };
-    q.onblur = () => setTimeout(() => listEl.classList.add('hidden'), 180);
-  }
-  if (addBtn) {
-    addBtn.onclick = async () => {
-      if (!picked) return;
-      addBtn.disabled = true;
-      addBtn.textContent = '添加中…';
-      try {
-        const wanRaw = parseFloat(($('tkWan') || {}).value);
-        const payload = { kind: 'person', personId: picked.id };
-        if (!isNaN(wanRaw)) {
-          if (!(wanRaw > 0)) { toast('目标分要大于 0（万）'); addBtn.disabled = false; addBtn.textContent = '添加'; return; }
-          payload.targetWan = wanRaw;
-        }
-        await postPush('/my/push/targets', payload);
-        if ($('tkWan')) $('tkWan').value = '';
-        q.value = '';
-        picked = null;
-        addBtn.disabled = true;
-        addBtn.textContent = '添加';
-        toast('已添加');
-        await refreshPush();
-      } catch (e) {
-        addBtn.disabled = false;
-        addBtn.textContent = '添加';
-        toast(e.message || '添加失败');
-      }
-    };
-  }
-  const valAdd = $('tkValAdd');
-  if (valAdd) {
+
+  /* ── 目标分数（kind=value）── */
+  const valAdd = $('tkValAdd'), valInput = $('tkVal');
+  /* 与下面「目标人」同口径（task-8 自查）：判满额看**输入框**是否 disabled，
+     不看按钮的 disabled —— 按钮的 disabled 还可能是「提交中…」这类临时态，
+     拿它当早退条件就是 task-8 那个真机缺陷的同型写法。
+     满额时 chaseValueBlock 把输入框和按钮一起 disabled 并写「最多 N 个」，这里就不绑事件。 */
+  if (valAdd && valInput && !valInput.disabled) {
     valAdd.onclick = async () => {
       const v = parseFloat($('tkVal').value);
       if (!(v > 0)) { toast('请输入大于 0 的目标（万）'); return; }
@@ -4319,42 +4165,168 @@ function bindChaseHandlers(p) {
       try {
         await postPush('/my/push/targets', { kind: 'value', valueWan: v });
         toast('已添加');
-        $('tkVal').value = '';
         await refreshPush();
       } catch (e) {
         valAdd.disabled = false;
-        valAdd.textContent = '添加目标';
+        valAdd.textContent = '添加目标分数';
         toast(e.message || '添加失败');
       }
     };
   }
-  const rankAdd = $('tkRankAdd');
-  if (rankAdd) {
-    rankAdd.onclick = async () => {
-      const n = parseInt($('tkRankVal').value, 10);
-      if (!(n > 0)) { toast('请输入要追的名次（如 3）'); return; }
-      if (n > 999) { toast('名次太大了'); return; }
-      rankAdd.disabled = true;
-      rankAdd.textContent = '添加中…';
+
+  /* ── 目标人（kind=person）：多选勾选 + 批量添加 ── */
+  const q = $('tkQ'), listEl = $('tkList'), batchBtn = $('tkBatchAdd');
+  /* 只有「满额」才早退：满额时输入框和按钮一起 disabled、按钮文案是「最多 N 个」。
+     ⚠️ 2026-10-15 task-8 真机缺陷：这里原来多了个 `batchBtn.disabled` 条件，可
+     #tkBatchAdd 渲染出来**默认就是 disabled**（语义 =「还没选人」，由下面末尾的
+     renderSel() 在选中后放开）——于是首次绑定直接 return，q.oninput / batchBtn.onclick /
+     renderSel() 全都没执行：真机上搜索不出候选、选不了人、批量添加永远点不动。
+     判满额只看输入框（q.disabled），「未选人」交给 renderSel() 管。 */
+  if (!q || !listEl || !batchBtn || q.disabled) return;
+  const max = (p && p.maxTargets) || 5;
+  const listAll = (p && p.targets) || [];
+  const counts = (p && p.counts) || {};
+  const personUsed = Number.isFinite(Number(counts.person))
+    ? Number(counts.person)
+    : listAll.filter((t) => t.kind === 'person').length;
+  /* 一次最多 5 个，且不超过「追人」这一类的剩余额度（后端按 person 计数硬拦） */
+  const canPick = Math.max(0, Math.min(5, max - personUsed));
+  const sel = chasePicked;   // 模块级暂存：刷新重渲染后勾选不丢
+  let lastItems = [];        // 最近一次搜索结果：重渲染候选行时复用，避免再打请求
+
+  const renderSel = () => {
+    const selBox = $('tkSel');
+    if (selBox) {
+      selBox.innerHTML = sel.size
+        ? Array.from(sel.entries()).map(([id, name]) =>
+            '<span class="chip" data-unpick="' + id + '">' + esc(name) + ' ✕</span>').join('')
+        : '<span class="sub">还没选人</span>';
+      /* 点 chip 撤销该人 */
+      selBox.querySelectorAll('[data-unpick]').forEach((el) => {
+        el.onclick = () => { sel.delete(Number(el.dataset.unpick)); renderList(); renderSel(); };
+      });
+    }
+    const hint = $('tkPickedHint');
+    if (hint) hint.textContent = sel.size
+      ? '已选 ' + sel.size + ' 个，还能再选 ' + Math.max(0, canPick - sel.size) + ' 个'
+      : '';
+    batchBtn.disabled = sel.size === 0;
+    batchBtn.textContent = sel.size ? '批量添加（' + sel.size + ' 个）' : '批量添加';
+  };
+
+  const renderList = () => {
+    if (!lastItems.length) { listEl.classList.add('hidden'); listEl.innerHTML = ''; return; }
+    listEl.innerHTML = lastItems.map((a) => {
+      const id = Number(a.personId);
+      const on = sel.has(id);
+      return '<div class="tk-opt" data-pid="' + id + '">' +
+        '<input type="checkbox"' + (on ? ' checked' : '') +
+        (!on && sel.size >= canPick ? ' disabled' : '') + '>' +
+        '<span>' + esc(a.name) + '</span></div>';
+    }).join('');
+    listEl.classList.remove('hidden');
+    listEl.querySelectorAll('.tk-opt').forEach((row) => {
+      const id = Number(row.dataset.pid);
+      const cb = row.querySelector('input');
+      row.onclick = () => {
+        if (sel.has(id)) {
+          sel.delete(id);
+        } else {
+          /* 已选满（一次 5 个或本类剩余额度）→ 拒绝勾选并提示 */
+          if (sel.size >= canPick) {
+            toast(canPick <= 0 ? '追人目标已满 ' + max + ' 个'
+              : '一次最多选 ' + canPick + ' 个（追人目标上限 ' + max + ' 个）');
+            return;
+          }
+          const hit = lastItems.find((a) => Number(a.personId) === id) || {};
+          sel.set(id, hit.name || String(id));
+        }
+        renderList(); renderSel();
+      };
+      /* checkbox 自身的 click 会再冒泡到 row.onclick 造成「勾一下又取消」：
+         stopPropagation 后手动调一次行点击，保证只切换一次 */
+      if (cb) cb.onclick = (e) => { e.stopPropagation(); row.onclick(); };
+    });
+  };
+
+  q.oninput = () => {
+    const key = q.value.trim();
+    clearTimeout(pushChaseSrTimer);
+    if (!key) { lastItems = []; renderList(); return; }
+    pushChaseSrTimer = setTimeout(async () => {
       try {
-        await postPush('/my/push/targets', { kind: 'rank', targetRank: n });
-        toast('已添加');
-        $('tkRankVal').value = '';
-        await refreshPush();
+        const d = await api('/api/public/teams/' + TEAM + '/my/push/search?q=' +
+          encodeURIComponent(key));
+        lastItems = d.items || [];
+        if (!lastItems.length) {
+          listEl.innerHTML = '<div class="none">本团没搜到这个人</div>';
+          listEl.classList.remove('hidden');
+          return;
+        }
+        renderList();
       } catch (e) {
-        rankAdd.disabled = false;
-        rankAdd.textContent = '添加名次目标';
-        toast(e.message || '添加失败');
+        listEl.innerHTML = '<div class="none">' + esc(e.message || '搜索失败') + '</div>';
+        listEl.classList.remove('hidden');
       }
-    };
-  }
+    }, 220);
+  };
+
+  batchBtn.onclick = async () => {
+    if (!sel.size) return;
+    const ids = Array.from(sel.keys());
+    batchBtn.disabled = true;
+    batchBtn.textContent = '添加中…';
+    try {
+      const d = await postPush('/my/push/targets/batch', { personIds: ids });
+      const added = d.added == null ? ids.length : d.added;
+      const skipped = d.skipped || 0;
+      toast('已添加 ' + added + ' 个' + (skipped ? '，跳过 ' + skipped + ' 个已有的' : ''));
+      sel.clear();
+      lastItems = [];
+      q.value = '';
+      await refreshPush();
+    } catch (e) {
+      batchBtn.disabled = false;
+      batchBtn.textContent = '批量添加';
+      toast(e.message || '添加失败');
+    }
+  };
+  renderSel();
 }
 
-/** 推送设置的写接口（统一带 token 与错误处理） */
+/* 段①「绑定码」按钮（POST /my/push/code）：把 6 位码发给机器人也能完成绑定，
+   没登记手机号 / 扫码不顺的人走这条兜底。 */
+function bindPushCodeBtn() {
+  const btn = $('pushCodeBtn'), box = $('pushCodeBox');
+  if (!btn) return;
+  btn.onclick = async () => {
+    btn.disabled = true;
+    btn.textContent = '获取中…';
+    try {
+      const d = await postPush('/my/push/code', {});
+      if (box) {
+        box.classList.remove('hidden');
+        box.innerHTML = '绑定码 <b style="font-size:18px;letter-spacing:2px">' +
+          esc(d.code || '—') + '</b>（30 分钟内有效）<br>' +
+          '在微信里把这段数字发给机器人即可完成绑定。';
+      }
+      btn.disabled = false;
+      btn.textContent = '重新获取绑定码';
+    } catch (e) {
+      btn.disabled = false;
+      btn.textContent = '获取绑定码';
+      toast(e.message || '获取绑定码失败');
+    }
+  };
+}
+
+/** 推送设置的写接口（统一带 token 与错误处理）。
+    身份同时给 body.token（既有后端一律读 body）与 X-My-Token 头（契约里
+    targets/batch 等新路由指定走头）：两条路都留，少一条就会 401。 */
 async function postPush(path, extra) {
   const r = await fetch('/api/public/teams/' + TEAM + path, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: Object.assign({ 'Content-Type': 'application/json' }, myTokenHeaders()),
     body: JSON.stringify(Object.assign({ token: myToken() }, extra)),
   });
   const d = await r.json().catch(() => ({}));
@@ -4390,14 +4362,21 @@ function bindPushBox(p) {
       }
     };
   }
+  /* 段①的「获取绑定码」：未绑定/已绑定都能用（admin 不渲染这个按钮） */
+  bindPushCodeBtn();
+  /* 段③「追分设置」入口行：与「我的」列表页那一行同一跳转口径 */
+  const chaseGo = $('pushChaseGo');
+  if (chaseGo) {
+    chaseGo.onclick = () => { mySub = 'chase'; pushRoute(); renderMySub(); };
+  }
   if (p && p.bound) bindPushBoundHandlers(p);
   /* 「追分设置」独立卡（2026-10-13）：内容渲染 + 事件都跟着推送状态走，
      每次推送卡刷新（renderPushBox → 这里）都同步刷一遍 chase 卡。
-     chase 卡不存在（首页藏着也存在于 DOM）时 renderChaseBox 自己会跳过。 */
+     chase 卡不存在（首页藏着也存在于 DOM）时 renderChaseBox 自己会跳过。
+     2026-10-15 task-7：绑定已在 renderChaseBox 末尾完成（渲染即绑定），这里**不要再调**
+     bindChaseHandlers —— 那会在没换 innerHTML 的情况下把事件挂第二遍（enterSubmit 的
+     addEventListener 会让 Enter 双提交）。 */
   renderChaseBox(p);
-  /* 非 admin 一律绑（目标满员没有添加表单，但 data-del 删除按钮仍在）；
-     admin 卡只有一行说明，无可绑元素 */
-  if (p && !p.admin) bindChaseHandlers(p);
 }
 
 /* 扫码二维码有效期：官方约 5 分钟。前端只做「展示倒计时 + 到期提示刷新」，
@@ -4572,8 +4551,19 @@ function syncHeaderOffset() {
 }
 window.addEventListener('resize', syncHeaderOffset);
 
+/* 底栏选中态（2026-10-15 task-11）：底栏「微信对接」与「我的」共用 view='my'，
+   靠 mySub 区分 —— 停在 /my/wechat 子页时高亮「微信对接」，其余情况高亮 view 对应项。
+   子页切换（点「我的」列表行 / popstate 只重渲染子页、不走 switchView）也要调本函数。 */
+function syncNavActive() {
+  const key = (view === 'my' && mySub === 'wechat') ? 'wechat' : view;
+  document.querySelectorAll('[data-v]').forEach(b => b.classList.toggle('on', b.dataset.v === key));
+}
+
 function switchView(v, opts) {
   opts = opts || {};
+  /* 2026-10-15 task-11：底栏「微信对接」一级入口不新增视图 —— 折算成
+     my + mySub='wechat'，复用「我的 → 消息设置」那张 #myPushCard（不出现第二份渲染）。 */
+  if (v === 'wechat') { mySub = 'wechat'; v = 'my'; }
   /* 后台关掉的页面不许进（popstate / 深链兜底）：改道到还开着的第一个页 */
   const s = (site && site.settings) || {};
   if (v === 'data' && s.dataEnabled === false) v = 'group';
@@ -4590,7 +4580,7 @@ function switchView(v, opts) {
   if (v === 'lineage' && (s.lineageEnabled === false || TEAM === 'female')) v = 'data';
   if (v === 'my' && s.loginRequired === false) v = 'data';
   view = v;
-  document.querySelectorAll('[data-v]').forEach(b => b.classList.toggle('on', b.dataset.v === v));
+  syncNavActive();
   document.querySelectorAll('#subnav button').forEach(b => b.classList.toggle('on', b.dataset.g === curGroup));
   show('toolbar', v === 'data');
   /* 看板公告条跟 toolbar 一起显隐：公告挂在数据看板（运营触达位），
@@ -4606,6 +4596,8 @@ function switchView(v, opts) {
     clearTimeout(pushScanTimer); pushScanTimer = null;
     clearInterval(pushScanExpireTimer); pushScanQrExpire = 0;
     clearTimeout(pushSrTimer);
+    clearTimeout(pushChaseSrTimer);
+    chasePicked.clear();     // 离开「我的」页：多选暂存作废（下次进来重新选）
   }
   $('view').innerHTML = '';
   if (opts.push !== false) pushRoute(opts.replace === true);
@@ -4700,6 +4692,8 @@ function syncNav() {
   show('navData', dataOn);
   show('navLineage', linOn);
   show('navMy', s.loginRequired !== false);   // 关登录 = 全面开放，没有「我的」页
+  /* 「微信对接」是「我的」子页的一级入口：跟「我的」同生共死（关登录时一起消失） */
+  show('navWechat', s.loginRequired !== false);
 }
 
 /* ==================== 启动（统一展示端） ====================
@@ -4781,7 +4775,7 @@ function announceTargetView(sel) {
     var b = null;
     try { b = document.querySelector(sel); } catch (_) {}
     var v = b && b.dataset ? b.dataset.v : null;
-    return (v === 'group' || v === 'lineage' || v === 'my') ? v : null;
+    return (v === 'group' || v === 'lineage' || v === 'my' || v === 'wechat') ? v : null;
   }
   if (/^\.seg\b|^\.st-row/.test(sel)) return 'data';
   return null;
@@ -5473,12 +5467,27 @@ function annBarHtml(id, cfg, defIcon) {
   '</div>';
 }
 
+/** 人名 → 名次姓名（2026-10-15 task-9②）：运营把前三位写在同一格时用
+    「、,，/;；」或空白分隔（例如「狼哲、狼九、狼仔」），也可能留空位
+    （「狼哲、、狼仔」= 第 2 名空缺）。这里切分 → trim → 只取前 3 个位置，
+    **保留名次位置**（空位留成 ''）：这样第 3 名不会被顶成第 2 名；
+    调用方只渲染非空项，所以空名次不占行。
+    ⚠️ 分隔符里**不含 `|`**：`|` 是 champBanner 三段式（称号|人名|音浪）的专用分隔符，
+    人名再按 `|` 切会和它撞车、串位（Lead 2026-10-15 复核口径）。 */
+function splitRankNames(raw) {
+  return String(raw == null ? '' : raw)
+    .split(/[、,，\/;；\n]|\s+/)
+    .map((s) => s.trim())
+    .slice(0, 3);
+}
+
 /** 📣 公告条渲染（2026-10-14）：页面顶部唯一渲染入口，按 items 数组顺序一条一个
     .ann-item，几条就渲染几条。
     契约（每条）：{ enabled, icon, title, name, wave, text, tone:'brand'|'plain' }
-    · 只渲染 enabled=true 的（公开接口已过滤一遍，这里再兜一道，防管理端形态误喂）
+    · 只渲染 enabled=true 的（公开接口已过滤一遍，这里再兜一道，防管理端形态喂）
     · tone=brand → 紫金渐变；其余/非法 → plain 白底描边（与后端 normalize_tone 同口径）
     · wave>0 → 人名后补 ' · ' + wan(wave)（wan 是页面已有函数）
+    · name 里写了多人（task-9②）→ 按名次最多渲染前 3 位，一人一行，空名次不占行
     · title/name 都空而 text 有值 → 纯文本条；text 支持换行（CSS white-space:pre-line）
     · 三条都空 → 该条直接跳过，不占位
     安全：全程 createElement + textContent，后端字符串一律不进 innerHTML（零注入面）；
@@ -5493,9 +5502,12 @@ function renderAnnounceItems(items) {
   for (const it of list) {
     if (!it || !it.enabled) continue;
     const title = String(it.title == null ? '' : it.title);
-    const name = String(it.name == null ? '' : it.name);
     const text = String(it.text == null ? '' : it.text);
-    if (!title && !name && !text) continue;   // 全空条：跳过，别留一条空壳占位
+    /* 人名先切成「按名次的前三位」：names 保留名次位置（空位是 ''），
+       picked 是其中真正写了名字的（只用它判断有没有人、以及是不是只有一位）。 */
+    const names = splitRankNames(it.name);
+    const picked = names.filter((s) => s.length > 0);
+    if (!title && !picked.length && !text) continue;   // 全空条：跳过，别留一条空壳占位
     const brand = it.tone === 'brand';
     const row = document.createElement('div');
     row.className = 'ann-item ' + (brand ? 'ai-brand' : 'ai-plain');
@@ -5507,7 +5519,7 @@ function renderAnnounceItems(items) {
     row.appendChild(ico);
     const body = document.createElement('div');
     body.className = 'ai-body';
-    if (title || name) {
+    if (title || picked.length) {
       const head = document.createElement('div');
       head.className = 'ai-head';
       if (title) {
@@ -5516,13 +5528,41 @@ function renderAnnounceItems(items) {
         t.textContent = title;
         head.appendChild(t);
       }
-      if (name) {
-        const n = document.createElement('span');
-        n.className = 'ai-name';
-        n.textContent = name + (Number(it.wave) > 0 ? ' · ' + wan(it.wave) : '');
-        head.appendChild(n);
+      if (picked.length <= 1) {
+        /* 只有一位（或没写人名）：保持原来的一行形态：title + 人名 · 音浪 */
+        if (picked.length === 1) {
+          const n = document.createElement('span');
+          n.className = 'ai-name';
+          n.textContent = picked[0] + (Number(it.wave) > 0 ? ' · ' + wan(it.wave) : '');
+          head.appendChild(n);
+        }
+        body.appendChild(head);
+      } else {
+        /* 前三位姓名（2026-10-15 task-9②）：人名一格写了多人 → 按名次一人一行、
+           序号 + 名字紧凑排列。空的名次（names 里的 ''）直接跳过，不占行；
+           序号用它在 names 里的原始位置，所以第 3 名不会被顶成第 2 名。
+           音浪只有一个数（是冠军的），挂在**第一行**名字后面。 */
+        body.appendChild(head);
+        const ranks = document.createElement('div');
+        ranks.className = 'ai-ranks';
+        let waveLeft = Number(it.wave) > 0 ? wan(it.wave) : '';
+        names.forEach((nm, i) => {
+          if (!nm) return;                     // 空名次：不占行
+          const rk = document.createElement('div');
+          rk.className = 'ai-rank';
+          const no = document.createElement('span');
+          no.className = 'ai-rank-no';
+          no.textContent = String(i + 1);
+          const tx = document.createElement('span');
+          tx.className = 'ai-rank-nm';
+          tx.textContent = nm + (waveLeft ? ' · ' + waveLeft : '');
+          waveLeft = '';
+          rk.appendChild(no);
+          rk.appendChild(tx);
+          ranks.appendChild(rk);
+        });
+        body.appendChild(ranks);
       }
-      body.appendChild(head);
     }
     if (text) {
       const tx = document.createElement('div');
@@ -5559,10 +5599,18 @@ function renderMyAnnouncement(my) {
 
 /* ---- 🎉 彩带：全屏 canvas 粒子（零依赖，rAF 驱动；样式全内联不碰其它元素） ---- */
 
-/** 发射彩带：顶部两侧喷射 80~120 个彩色矩形/圆片，重力下落 + 旋转，
-    durationMs 后自动停止并移除 canvas（重复调用会先清掉上一场） */
+/** 彩带雨（2026-10-15 task-9①）：粒子从**视口顶部上方**随机 x 落下（纸屑雨），
+    重力很弱 + 左右轻摆 + 自转，落到底部渐隐并回收到顶部继续下，
+    durationMs 后自动停止并移除 canvas（重复调用会先清掉上一场）。
+    ⚠️ 不再有「从两个喷射点向中心外放射/爆炸」的初速度 —— 那版是 task-9 要改掉的形态。
+    尊重系统「减弱动态效果」：prefers-reduced-motion 时整场不放。
+    彩带层 pointer-events:none，绝不挡点击。 */
 function fireConfetti(durationMs) {
   durationMs = Number(durationMs) > 0 ? Number(durationMs) : 2500;
+  /* 尊重 prefers-reduced-motion：用户要求减弱动态效果时直接不放（比放个静态定格更省事） */
+  try {
+    if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  } catch (_) { /* 老浏览器没有 matchMedia：按正常放 */ }
   /* 上一场还没结束就再点：直接掐掉旧的 rAF 和 canvas，保证全场只有一份 */
   if (fireConfetti._raf) { cancelAnimationFrame(fireConfetti._raf); fireConfetti._raf = null; }
   const old = document.getElementById('confettiCanvas');
@@ -5582,27 +5630,32 @@ function fireConfetti(durationMs) {
   /* 配色：金/蓝/紫/粉，与整站庆祝视觉（items 里 tone=brand 那条紫金公告条）一致 */
   const COLORS = ['#F59E0B', '#FBBF24', '#3B82F6', '#8B5CF6', '#EC4899', '#F472B6', '#FDE68A'];
   const rnd = (a, b) => a + Math.random() * (b - a);
-
-  /* 80~120 个粒子：从左上 / 右上两个喷射点往外上方抛，带随机初速、角速度与形状 */
-  const N = 80 + Math.floor(Math.random() * 41);
   const W = cv.width, H = cv.height;
-  const parts = [];
-  for (let i = 0; i < N; i++) {
-    const left = i % 2 === 0;                       // 偶数从左侧喷、奇数从右侧喷
-    parts.push({
-      x: left ? rnd(0, W * 0.12) : rnd(W * 0.88, W),
-      y: rnd(-20, H * 0.08),
-      vx: (left ? 1 : -1) * rnd(2, 7),              // 左点朝右上喷、右点朝左上喷
-      vy: -rnd(7, 13),                              // 先向上抛，重力再拉下来
-      w: rnd(6, 11), h: rnd(8, 16),                 // 矩形尺寸
-      r: rnd(0, Math.PI * 2),                       // 当前旋转角
-      vr: rnd(-0.22, 0.22),                         // 角速度
-      round: Math.random() < 0.35,                  // 35% 圆片、其余矩形
-      color: COLORS[Math.floor(Math.random() * COLORS.length)],
-    });
-  }
 
-  const g = 0.22;                                   // 重力（px/帧²）
+  /* 一片纸屑：x 全宽随机；初始 y 落在视口上方 10% 以内（≈ -0.1H ~ 0）；
+     初速只有**向下**的落速（1.6~3.4 px/帧，慢），横向初速接近 0，
+     摆动靠 sway 正弦，不是从中心向外的放射速度。 */
+  const spawn = (p) => {
+    p.x = rnd(0, W);
+    p.y = rnd(-H * 0.1, 0);
+    p.vx = rnd(-0.2, 0.2);          // 几乎没有横向初速
+    p.vy = rnd(1.6, 3.4);           // 只向下、慢速
+    p.sway = rnd(0.3, 1.1);         // 左右摆动幅度（px/帧）
+    p.swayPhase = rnd(0, Math.PI * 2);
+    p.swaySpeed = rnd(0.008, 0.022);
+    p.w = rnd(5, 10); p.h = rnd(7, 14);
+    p.r = rnd(0, Math.PI * 2);
+    p.vr = rnd(-0.12, 0.12);        // 自转
+    p.round = Math.random() < 0.35; // 35% 圆片、其余矩形
+    p.color = COLORS[Math.floor(Math.random() * COLORS.length)];
+    return p;
+  };
+  /* 90~120 片（上限 ≤120）：足够密的雨，又不至于压垮低端机 */
+  const N = 90 + Math.floor(Math.random() * 31);
+  const parts = [];
+  for (let i = 0; i < N; i++) parts.push(spawn({}));
+
+  const g = 0.02;                                   // 极弱重力：全程近似匀速飘
   const t0 = performance.now();
   const tick = (now) => {
     const el = now - t0;
@@ -5612,11 +5665,24 @@ function fireConfetti(durationMs) {
       return;
     }
     /* 最后 500ms 整体淡出，避免彩带凭空消失 */
+    const fade = el > durationMs - 500 ? Math.max(0, (durationMs - el) / 500) : 1;
     ctx.clearRect(0, 0, W, H);
-    ctx.globalAlpha = el > durationMs - 500 ? Math.max(0, (durationMs - el) / 500) : 1;
     for (const p of parts) {
-      p.vy += g; p.x += p.vx; p.y += p.vy; p.r += p.vr;
-      if (p.y > H + 24) continue;                   // 已落出屏：不再画
+      p.vy += g;
+      p.y += p.vy;
+      p.swayPhase += p.swaySpeed;
+      p.x += p.vx + Math.sin(p.swayPhase) * p.sway;   // 左右轻摆
+      p.r += p.vr;
+      /* 落到底部：先渐隐（最后 15% 屏高），再回收到顶部继续下，保持「一直在飘」的雨感；
+         收场前 700ms 内不再回收，让雨自然落完 */
+      let a = 1;
+      if (p.y > H * 0.85) a = Math.max(0, (H + p.h - p.y) / (H * 0.15 + p.h));
+      if (p.y > H + p.h) {
+        if (el < durationMs - 700) { spawn(p); continue; }
+        continue;                                     // 收场阶段：落出屏就不再画
+      }
+      if (a <= 0) continue;
+      ctx.globalAlpha = fade * a;
       ctx.save();
       ctx.translate(p.x, p.y);
       ctx.rotate(p.r);
@@ -5721,7 +5787,13 @@ function dismissAnnounce() {
 async function bootRest() {
 
   /* 主导航 + 分组子导航 + 前进/后退 */
-  document.querySelectorAll('[data-v]').forEach(b => b.onclick = () => switchView(b.dataset.v));
+  document.querySelectorAll('[data-v]').forEach(b => b.onclick = () => {
+    /* 2026-10-15 task-11：底栏「我的」是列表首页入口 —— 先清掉上次停留的子页
+       （否则从「微信对接」点「我的」会又落回消息设置，「我的」看着像没反应）；
+       「微信对接」则反着来，由 switchView 把 mySub 置成 'wechat'。 */
+    if (b.dataset.v === 'my') mySub = null;
+    switchView(b.dataset.v);
+  });
   document.querySelectorAll('#subnav button').forEach(b =>
     b.onclick = () => { if (!b.disabled) { curGroup = b.dataset.g; switchView('group'); } });
   window.addEventListener('popstate', () => {
@@ -5730,7 +5802,9 @@ async function bootRest() {
     /* 「我的」子页进出（浏览器返回键 / 子页内返回按钮共用） */
     if (r.view === 'my') {
       const next = r.mySub || null;
-      if (view === 'my') { mySub = next; renderMySub(); return; }
+      /* 只重渲染子页、不走 switchView，底栏选中态要自己同步
+         （/my/wechat ↔ /my 来回时「微信对接」/「我的」高亮切换，task-11） */
+      if (view === 'my') { mySub = next; syncNavActive(); renderMySub(); return; }
       mySub = next;
     } else if (view === 'my') {
       mySub = null;
@@ -5806,8 +5880,7 @@ async function bootRest() {
     await ensureLogin().then(applyLoginState);
     site = await fetchSite();
   }
-  /* 未绑定主播的提醒条：点「去绑定」直接进「我的」绑定卡 */
-  $('bindBarGo').onclick = () => switchView('my');
+  /* 未绑定主播的提醒条只作提示（文案指向联系管理员帅帅），没有可点的自助入口 */
   syncHeaderOffset();
 
   // 后台级开关：关掉的口径直接从界面消失（后端也不下发）

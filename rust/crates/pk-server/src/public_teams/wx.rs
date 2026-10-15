@@ -1,6 +1,7 @@
 //! public_teams::wx —— 自 public_teams.rs 按业务域拆分（对外语义不变）。
 
 use super::*;
+use crate::store::{DupPolicy, NewTarget, TargetAddError};
 
 /* ------------------ 我的页面 · 微信推送（绑定 + 追分目标 + 每日报告） ------------------ */
 
@@ -16,6 +17,92 @@ pub(super) fn my_ident(team: &str, token: &str) -> Result<(u64, String, String),
     Ok((pid, my_team, name))
 }
 
+/// `target_counts` → 契约里统一的 `"counts":{"person":n,"value":n,"rank":n}`
+/// （`GET /my/push` 与批量添加的响应共用，避免两处口径漂移）。
+fn counts_json(counts: (i64, i64, i64)) -> Value {
+    json!({ "person": counts.0, "value": counts.1, "rank": counts.2 })
+}
+
+/// 上限 400 文案里的量词（按 kind 分类计数，三种 kind 各一句）。
+fn unit_of(kind: &str) -> &'static str {
+    match kind {
+        "value" => "个目标分数",
+        "rank" => "个名次",
+        _ => "个人",
+    }
+}
+
+/// 同 kind 重复时的 400 文案（`DupPolicy::Reject` 用；value 不判重所以不需要）。
+fn dup_msg_of(kind: &str) -> &'static str {
+    match kind {
+        "rank" => "已经在追这个名次了",
+        _ => "已经在追这个主播了",
+    }
+}
+
+/// 写库失败日志里的人话业务名。
+fn what_of(kind: &str) -> &'static str {
+    match kind {
+        "value" => "自定义分",
+        "rank" => "名次",
+        _ => "追人",
+    }
+}
+
+/// `valueWan`（单位万）→ 原始音浪。
+///
+/// FIX3（2026-10-15 qa）：原来只校验 `> 0`，`valueWan=1e300` 会 200 且
+/// `target_value` 饱和成 `i64::MAX`。这里补上与 person 分支 `targetWan` 同量级的
+/// 1e8「万」上限（= 1e12 音浪，远超真实量级），合法区间行为不变。
+fn value_wan_to_raw(body: &Value) -> Result<i64, ApiError> {
+    let wan = body
+        .get("valueWan")
+        .and_then(|v| v.as_f64())
+        .filter(|v| *v > 0.0)
+        .ok_or_else(|| ApiError::bad_request("请输入本月目标（万），要大于 0"))?;
+    // `!(x <= 上限)` 写法同时挡住 inf（JSON 里 1e400 会解析成 inf）
+    if !(wan <= 100_000_000.0) {
+        return Err(ApiError::bad_request("目标分太大了，检查一下单位（万）"));
+    }
+    Ok((wan * 10_000.0).round() as i64)
+}
+
+/// 追分目标写入的唯一出口：调 [`crate::store::targets_add_serialized`]
+/// （FIX1：上限校验 + 判重 + 插入在同一事务里按账号串行化），
+/// 并把结构化错误映射成既有口径的 400 / 500 文案。
+async fn add_targets(
+    st: &ArcState,
+    name: &str,
+    team_scope: &str,
+    kind: &str,
+    items: &[NewTarget],
+    dup: DupPolicy,
+) -> Result<usize, ApiError> {
+    crate::store::targets_add_serialized(
+        st,
+        name,
+        team_scope,
+        kind,
+        items,
+        crate::push::MAX_TARGETS,
+        dup,
+    )
+    .await
+    .map_err(|e| match e {
+        TargetAddError::OverLimit => ApiError::bad_request(format!(
+            "最多只能追 {} {}，请先删掉一个",
+            crate::push::MAX_TARGETS,
+            unit_of(kind)
+        )),
+        TargetAddError::Duplicate => ApiError::bad_request(dup_msg_of(kind)),
+        TargetAddError::Db(err) => {
+            // 底层写库失败：原文留日志，客户端给通用提示（不再靠「失败」关键词兜）
+            tracing::error!(error = %err, "保存追分目标（{}）失败", what_of(kind));
+            ApiError::from(anyhow::anyhow!("保存失败：{err}"))
+        }
+    })
+}
+
 /// GET /api/public/teams/{team}/my/push（token 走 X-My-Token 头）：推送设置全量状态
 /// （绑定状态 + 两个开关 + 追分目标 + 是否已配机器人二维码）
 pub async fn my_push(
@@ -28,6 +115,7 @@ pub async fn my_push(
     let (person_id, _my_team, name) = my_ident(&team, &token)?;
     let mut state = crate::store::push_state(&st, &name).await;
     let targets = crate::store::targets_list(&st, &name).await;
+    let counts = crate::store::target_counts(&st, &name).await;
     let has_qr = crate::store::config_get(&st, "wechat_add_qr")
         .await
         .map(|s| !s.is_empty())
@@ -35,6 +123,9 @@ pub async fn my_push(
     if let Some(obj) = state.as_object_mut() {
         obj.insert("targets".into(), json!(targets));
         obj.insert("maxTargets".into(), json!(crate::push::MAX_TARGETS));
+        // 契约 B 节（2026-10-15）：上限按 kind 分类 —— 追人 / 追分数各自独立计数，
+        // 前端据此判断哪一类已满（maxTargets 仍复用为**单类**上限，既有字段不变）。
+        obj.insert("counts".into(), counts_json(counts));
         obj.insert("hasQr".into(), json!(has_qr));
         obj.insert("personId".into(), json!(person_id));
         // 管理员观看账号（personId=0）没有自己的音浪，追分对比没有意义
@@ -472,31 +563,29 @@ pub async fn my_push_target_add(
             "管理员观看账号没有音浪数据，不能设置追分目标",
         ));
     }
-    if crate::store::target_count(&st, &name).await >= crate::push::MAX_TARGETS {
-        return Err(ApiError::bad_request(format!(
-            "最多只能追 {} 个人，请先删掉一个",
-            crate::push::MAX_TARGETS
-        )));
-    }
     let kind = body
         .get("kind")
         .and_then(|v| v.as_str())
         .unwrap_or("person");
+    /* 上限按 kind 分类计数（契约 B 节，用户口径「分数是分数，追人是追人」）：
+       person / value / rank 各自独立比单类上限（都复用 push::MAX_TARGETS），互不挤占。
+       rank 前端已无新增入口，这里仍按单类上限兜底（不改它旧有的 ≤5 有效行为）。
+
+       FIX1（2026-10-15 qa 并发穿透）：这个上限校验 + 判重 + 插入**全部下沉到**
+       `store::targets_add_serialized`，在同一事务里按账号串行化。原实现在这里先
+       `target_count`、再查重、再逐条 INSERT（check-then-insert，且 my_targets 无唯一
+       约束），6 路并发单条 kind=value 实测能插 6 行（应 ≤5）、3 路并发同 id 插 2 行。
+       所以这里不再自己计数/查重，只把「要写什么」交给那次事务。 */
     match kind {
         "value" => {
-            let wan = body
-                .get("valueWan")
-                .and_then(|v| v.as_f64())
-                .filter(|v| *v > 0.0)
-                .ok_or_else(|| ApiError::bad_request("请输入本月目标（万），要大于 0"))?;
-            let raw = (wan * 10_000.0).round() as i64;
-            let t = crate::store::target_add(&st, &name, team_scope, "value", 0, "", raw)
-                .await;
-            if let Err(e) = t {
-                // 底层写库失败：原文留日志，客户端给通用提示（不再靠「失败」关键词兜）
-                tracing::error!(error = %e, "保存追分目标（自定义分）失败");
-                return Err(anyhow::anyhow!("保存失败：{e}").into());
-            }
+            let raw = value_wan_to_raw(&body)?;
+            let items = [crate::store::NewTarget {
+                person_id: 0,
+                name: String::new(),
+                value: raw,
+            }];
+            // value 历史上允许同一个数值目标并存，所以不加判重（DupPolicy::Ignore）
+            add_targets(&st, &name, team_scope, "value", &items, DupPolicy::Ignore).await?;
         }
         // 追名次（2026-10-10）：target_value 存目标名次，名字列存展示文案
         "rank" => {
@@ -505,27 +594,12 @@ pub async fn my_push_target_add(
                 .and_then(|v| v.as_i64())
                 .filter(|v| (1..=999).contains(v))
                 .ok_or_else(|| ApiError::bad_request("请输入要追的名次（1~999）"))?;
-            let dup = crate::store::targets_for_push(&st, &name)
-                .await
-                .into_iter()
-                .any(|t| t.kind == "rank" && t.target_value == rank);
-            if dup {
-                return Err(ApiError::bad_request("已经在追这个名次了"));
-            }
-            let t = crate::store::target_add(
-                &st,
-                &name,
-                team_scope,
-                "rank",
-                0,
-                &format!("第 {rank} 名"),
-                rank,
-            )
-            .await;
-            if let Err(e) = t {
-                tracing::error!(error = %e, "保存追分目标（名次）失败");
-                return Err(anyhow::anyhow!("保存失败：{e}").into());
-            }
+            let items = [crate::store::NewTarget {
+                person_id: 0,
+                name: format!("第 {rank} 名"),
+                value: rank,
+            }];
+            add_targets(&st, &name, team_scope, "rank", &items, DupPolicy::Reject).await?;
         }
         _ => {
             let tid = body
@@ -574,26 +648,144 @@ pub async fn my_push_target_add(
             } else {
                 tname.clone()
             };
-            // 同一个人不重复追
-            let dup = crate::store::targets_for_push(&st, &name)
-                .await
-                .into_iter()
-                .any(|t| t.kind == "person" && t.target_person_id == tid);
-            if dup {
-                return Err(ApiError::bad_request("已经在追这个主播了"));
-            }
-            let t =
-                crate::store::target_add(&st, &name, team_scope, "person", tid, &display, custom_raw)
-                    .await;
-            if let Err(e) = t {
-                tracing::error!(error = %e, "保存追分目标（追人）失败");
-                return Err(anyhow::anyhow!("保存失败：{e}").into());
-            }
+            let items = [crate::store::NewTarget {
+                person_id: tid,
+                name: display,
+                value: custom_raw,
+            }];
+            // 同一个人不重复追：DupPolicy::Reject 在事务里判重 → 400「已经在追这个主播了」
+            add_targets(&st, &name, team_scope, "person", &items, DupPolicy::Reject).await?;
         }
     }
     Ok(Json(
         json!({ "targets": crate::store::targets_list(&st, &name).await }),
     ))
+}
+
+/// 单次批量提交的主播数上限。
+///
+/// FIX2（2026-10-15 qa）：body 上限 4MB（约 55 万个 id），而 push 系路由不吃
+/// public_write_allow 限流；旧实现用 `Vec::contains` 去重是 O(n²)，实测 4 万唯一 id
+/// 要 4.71s（元素 ×4 → 耗时 ×16），外推 4MB 单请求就是千秒级 CPU。
+const MAX_BATCH_IDS: usize = 100;
+
+/// `personIds` 原始数组 → 校验 + 去重后的 id 列表（纯函数，便于单测）。
+///
+/// 空数组、`0`、负数、非整数一律 `400`（契约 B 节「personId 非法」）；
+/// 重复出现的同一个 id 只保留第一次出现的位置 —— 这就是「同一个 personId 重复出现
+/// 计入 skipped」的去重来源（handler 用 `请求条数 - added` 算出 skipped）。
+///
+/// FIX2：① 长度上限**在最前面**判，超限立刻 400（不能遍历完 4 万条再拒，那正是要修的
+/// CPU 放大）；② 去重换 `HashSet`（O(n)）而不是 `Vec::contains`（O(n²)），
+/// `HashSet::insert` 返回 false 即重复，`want` 里仍是首次出现的顺序。
+fn parse_person_ids(raw: &[Value]) -> Result<Vec<u64>, ApiError> {
+    if raw.is_empty() {
+        return Err(ApiError::bad_request("请先选择要追的主播"));
+    }
+    if raw.len() > MAX_BATCH_IDS {
+        return Err(ApiError::bad_request(format!(
+            "一次最多提交 {MAX_BATCH_IDS} 个主播"
+        )));
+    }
+    let mut seen: std::collections::HashSet<u64> =
+        std::collections::HashSet::with_capacity(raw.len());
+    let mut want: Vec<u64> = Vec::with_capacity(raw.len());
+    for v in raw {
+        let id = v
+            .as_u64()
+            .filter(|id| *id > 0)
+            .ok_or_else(|| ApiError::bad_request("personId 不合法（需要正整数）"))?;
+        if seen.insert(id) {
+            want.push(id);
+        }
+    }
+    Ok(want)
+}
+
+/// POST /api/public/teams/{team}/my/push/targets/batch
+/// （契约 B 节 2026-10-15）：追人目标**批量多选**添加。token 走 `X-My-Token` 头，
+/// body `{"personIds":[1,2,3]}`。
+///
+/// 响应：
+/// - `200 {"ok":true,"added":n,"skipped":n,"counts":{...},"targets":[...]}`
+///   `targets` = 操作后的最新完整列表（前端直接重渲染）；`skipped` = 请求里被跳过的条数
+///   （请求内重复 + 已经在追的），用于「选了 5 个、只加上 3 个」时给用户对账。
+/// - `400`：空数组 / 超过追人上限 / 含非本团在册主播 / personId 非法（0 或不存在）/
+///   追自己 / 一次提交超过 100 个
+/// - `401`：登录已过期
+///
+/// 口径与单条 `my_push_target_add` 完全一致：personId 一律用 `team_anchor_search`
+/// 兜底校验「本团在册主播」（防止越权追别团的人）、不能追自己；上限按 kind 分类计数
+/// （这里只加 person，所以比的是现有追人条数 + 本次新增条数 ≤ push::MAX_TARGETS）。
+///
+/// 先全校验、后统一落库：身份/参数/名额校验都在写库**之前**返回 400，不会插一半；
+/// 落库走 [`crate::store::targets_add_serialized`] 的**单个事务**（FIX1，
+/// `pg_advisory_xact_lock` 按账号串行化），所以并发请求要么整批成功、要么整批回滚，
+/// 也不再可能把单类上限撑爆或插出重复行。重试安全——已存在的会被计成 skipped。
+pub async fn my_push_targets_batch(
+    State(st): State<ArcState>,
+    Path(team): Path<String>,
+    headers: HeaderMap,
+    axum::Json(body): axum::Json<Value>,
+) -> ApiResult {
+    let token = header_my_token(&headers).unwrap_or_default();
+    let (person_id, actual_team, name) = my_ident(&team, &token)?;
+    let team_scope = if team == "all" {
+        actual_team.as_str()
+    } else {
+        team.as_str()
+    };
+    if person_id == 0 {
+        return Err(ApiError::bad_request(
+            "管理员观看账号没有音浪数据，不能设置追分目标",
+        ));
+    }
+    let raw_ids = body
+        .get("personIds")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| ApiError::bad_request("缺少 personIds"))?;
+    let want = parse_person_ids(raw_ids)?;
+    if want.contains(&person_id) {
+        return Err(ApiError::bad_request("不能追自己"));
+    }
+    // 本团在册主播兜底校验（与单条添加同一处、同一 limit=1000 口径），一次取全团名单。
+    let anchors: std::collections::HashMap<u64, String> =
+        crate::store::team_anchor_search(&st, &sid(&st), team_scope, "", 1000)
+            .await
+            .into_iter()
+            .filter_map(|a| {
+                let id = a.get("personId").and_then(|v| v.as_u64())?;
+                let n = a
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                Some((id, n))
+            })
+            .collect();
+    if want.iter().any(|id| !anchors.contains_key(id)) {
+        return Err(ApiError::bad_request(
+            "没有找到这个主播（只能追本团在册主播）",
+        ));
+    }
+    // 已经在追的 person 撞车 / 上限 / 插入：全部交给那次事务（FIX1）。
+    // 这里只把「想加谁」按勾选顺序准备好；`skipped` 仍按契约 = 请求原始条数 − added。
+    let items: Vec<NewTarget> = want
+        .iter()
+        .map(|id| NewTarget {
+            person_id: *id,
+            name: anchors.get(id).cloned().unwrap_or_default(),
+            value: 0,
+        })
+        .collect();
+    let added = add_targets(&st, &name, team_scope, "person", &items, DupPolicy::Skip).await?;
+    Ok(Json(json!({
+        "ok": true,
+        "added": added,
+        "skipped": raw_ids.len().saturating_sub(added),
+        "counts": counts_json(crate::store::target_counts(&st, &name).await),
+        "targets": crate::store::targets_list(&st, &name).await,
+    })))
 }
 
 /// POST /api/public/teams/{team}/my/push/targets/delete {token, id}
@@ -699,4 +891,113 @@ pub fn decode_data_url(data_url: &str) -> Option<(String, Vec<u8>)> {
         .decode(b64.trim())
         .ok()?;
     Some((mime.to_string(), bytes))
+}
+
+/* --------------- 批量追人（契约 B 节）的纯逻辑单测：无 IO，覆盖去重/上限口径 --------------- */
+
+#[cfg(test)]
+mod batch_target_tests {
+    use super::{parse_person_ids, value_wan_to_raw, MAX_BATCH_IDS};
+
+    // ApiError 没实现 Debug（routes.rs，不在本任务写范围），所以不能 unwrap/unwrap_err，
+    // 统一走这个小助手断言成功。
+    fn parse_ok(raw: &[serde_json::Value]) -> Vec<u64> {
+        match parse_person_ids(raw) {
+            Ok(v) => v,
+            Err(_) => panic!("期望解析成功，实际返回了 400"),
+        }
+    }
+
+    fn wan_ok(v: serde_json::Value) -> i64 {
+        match value_wan_to_raw(&v) {
+            Ok(raw) => raw,
+            Err(_) => panic!("期望通过换算，实际 400：{v}"),
+        }
+    }
+
+    #[test]
+    fn parse_rejects_empty_and_illegal() {
+        assert!(parse_person_ids(&[]).is_err(), "空数组必须 400");
+        assert!(parse_person_ids(&[serde_json::json!(0)]).is_err(), "0 必须 400");
+        assert!(parse_person_ids(&[serde_json::json!(-1)]).is_err(), "负数必须 400");
+        assert!(parse_person_ids(&[serde_json::json!("3")]).is_err(), "字符串必须 400");
+        assert!(parse_person_ids(&[serde_json::json!(1.5)]).is_err(), "小数必须 400");
+        assert!(parse_person_ids(&[serde_json::json!(null)]).is_err(), "null 必须 400");
+    }
+
+    #[test]
+    fn parse_dedupes_keeping_first_position() {
+        let raw = [
+            serde_json::json!(3),
+            serde_json::json!(1),
+            serde_json::json!(3),
+            serde_json::json!(2),
+        ];
+        assert_eq!(parse_ok(&raw), vec![3, 1, 2]);
+    }
+
+    /// FIX2：入口长度上限（恰好 100 通过、101 立刻 400）。
+    #[test]
+    fn parse_rejects_over_length_cap() {
+        let ok: Vec<serde_json::Value> = (1..=MAX_BATCH_IDS as u64)
+            .map(|i| serde_json::json!(i))
+            .collect();
+        assert_eq!(parse_ok(&ok).len(), MAX_BATCH_IDS);
+        let over: Vec<serde_json::Value> = (1..=MAX_BATCH_IDS as u64 + 1)
+            .map(|i| serde_json::json!(i))
+            .collect();
+        assert!(
+            parse_person_ids(&over).is_err(),
+            "超过 {MAX_BATCH_IDS} 个必须 400"
+        );
+    }
+
+    /// FIX2：5000 个唯一 id 必须在长度上限那一步**立刻**拒绝。
+    /// 旧实现 `Vec::contains` 去重是 O(n²)（qa 实测 4 万 id = 4.71s，元素 ×4 → 耗时 ×16），
+    /// 上限前置后这里应该是微秒级；留 50ms 只防回归，不是性能目标。
+    #[test]
+    fn parse_rejects_5000_ids_under_50ms() {
+        let raw: Vec<serde_json::Value> = (1..=5000u64).map(|i| serde_json::json!(i)).collect();
+        let t0 = std::time::Instant::now();
+        assert!(parse_person_ids(&raw).is_err(), "5000 个必须 400");
+        let dt = t0.elapsed();
+        println!("[FIX2] parse_person_ids 拒绝 5000 个唯一 id 耗时 {dt:?}");
+        assert!(
+            dt < std::time::Duration::from_millis(50),
+            "超长必须在上限处立刻拒绝，实测 {dt:?}"
+        );
+    }
+
+    /// FIX3：value 分支补 1e8「万」上限，堵住 `target_value` 饱和成 i64::MAX。
+    #[test]
+    fn value_wan_cap_rejects_saturation() {
+        // 合法区间行为不变：12.5 万 → 125000 音浪
+        assert_eq!(wan_ok(serde_json::json!({"valueWan": 12.5})), 125_000);
+        // 边界 1e8 万 → 1e12 音浪，仍允许
+        assert_eq!(
+            wan_ok(serde_json::json!({"valueWan": 1e8})),
+            1_000_000_000_000
+        );
+        // qa 实测缺陷：1e300 原来 200 且落库 i64::MAX
+        assert!(
+            value_wan_to_raw(&serde_json::json!({"valueWan": 1e300})).is_err(),
+            "1e300 必须 400"
+        );
+        assert!(
+            value_wan_to_raw(&serde_json::json!({"valueWan": 1.1e8})).is_err(),
+            "超过 1e8 万必须 400"
+        );
+        assert!(value_wan_to_raw(&serde_json::json!({"valueWan": 0})).is_err(), "0 必须 400");
+        assert!(value_wan_to_raw(&serde_json::json!({})).is_err(), "缺字段必须 400");
+    }
+
+    #[test]
+    fn counts_json_shape_is_frozen() {
+        // 既有字段不能少、不能改名：counts 固定三键
+        let v = super::counts_json((2, 3, 1));
+        assert_eq!(v["person"], serde_json::json!(2));
+        assert_eq!(v["value"], serde_json::json!(3));
+        assert_eq!(v["rank"], serde_json::json!(1));
+        assert_eq!(v.as_object().map(|o| o.len()), Some(3));
+    }
 }

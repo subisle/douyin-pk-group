@@ -77,7 +77,7 @@ async fn person_count(pool: &sqlx::PgPool) -> Option<i64> {
         .ok()
         .and_then(|r| {
             r.try_get::<i64, _>(0)
-                .or_else(|_| r.try_get::<i64, _>(0).map(|v| v as i64))
+                .or_else(|_| r.try_get::<i64, _>(0))
                 .ok()
         })
 }
