@@ -286,6 +286,11 @@ pub struct AnnounceItem {
     pub text: String,
     /// "brand"（紫金渐变）| "plain"（白底描边）；空/非法归一为 "plain"
     pub tone: String,
+    /// 弹窗标记（2026-10-15）：true = 该条公告除横幅外在展示端以弹窗形式弹出一次。
+    /// 与横幅互不排斥（同一条两个位置都展示）；旧数据缺字段 serde(default) 回落
+    /// false，纯横幅行为不变。布尔值无白名单可言，写入端只读 bool。
+    #[serde(default)]
+    pub popup: bool,
 }
 
 /// 三处公告位（2026-10-13）：登录页（login）/ 展示页看板顶部（home）/ 个人页顶部（my）。
@@ -471,6 +476,8 @@ pub(super) fn synth_item(
             wave: celebrate.wave.max(0),
             text: String::new(),
             tone: "brand".to_string(),
+            // 迁移合成条目固定不带弹窗（2026-10-15）：弹窗只给运营显式配置的条目
+            popup: false,
         });
     }
     let (title, name, wave) = parse_pipe3(champ_banner)?;
@@ -486,6 +493,8 @@ pub(super) fn synth_item(
         wave,
         text: String::new(),
         tone: "plain".to_string(),
+        // 迁移合成条目固定不带弹窗（2026-10-15），与 celebrate 分支同口径
+        popup: false,
     })
 }
 
@@ -534,6 +543,8 @@ pub(super) fn parse_items(arr: &[Value]) -> Vec<AnnounceItem> {
                 wave: v.get("wave").and_then(|x| x.as_i64()).unwrap_or(0).max(0),
                 text: text.chars().take(500).collect(),
                 tone: normalize_tone(v.get("tone").and_then(|x| x.as_str()).unwrap_or("")),
+                // 弹窗标记（2026-10-15）：布尔直读，缺省 false = 纯横幅（旧前端不传也一样）
+                popup: v.get("popup").and_then(|x| x.as_bool()).unwrap_or(false),
             })
         })
         .collect()
@@ -608,6 +619,9 @@ impl Announcement {
 
     /// 单条公告条 → 下发 JSON（公开/管理端同口径）：icon trim 后不在白名单 → ""、
     /// tone 归一为 brand|plain、wave 负数 → 0，text 原样下发（支持换行）。
+    /// popup（2026-10-15）原样下发：管理端全量（all_items_json，含 enabled=false）
+    /// 与公开过滤（public_items_json）都走本函数，改这一处即全覆盖
+    /// （GET /api/public/announcements 与 GET /api/public/teams/{team} 都经它）。
     pub(super) fn item_json(it: &AnnounceItem) -> Value {
         let icon = it.icon.trim();
         let icon = if STEP_ICON_WHITELIST.contains(&icon) { icon } else { "" };
@@ -619,6 +633,8 @@ impl Announcement {
             "wave": it.wave.max(0),
             "text": it.text,
             "tone": normalize_tone(&it.tone),
+            // 弹窗标记：true = 展示端除横幅外再弹窗一次；与横幅不互斥
+            "popup": it.popup,
         })
     }
 
@@ -688,7 +704,8 @@ pub async fn get_announcement(State(st): State<ArcState>) -> ApiResult {
 /// {enabled?, steps?: [{title, content, icon?, target?}],
 ///  placements?: {login|home|my: {enabled?, text?, icon?}},   // 2026-10-13 公告位
 ///  celebrate?: {enabled?, confetti?, title?, name?, wave?},  // 2026-10-13 庆祝
-///  items?: [{enabled?, icon?, title?, name?, wave?, text?, tone?}]}  // 2026-10-14 公告条
+///  items?: [{enabled?, icon?, title?, name?, wave?, text?, tone?, popup?}]}
+///  // 2026-10-14 公告条；popup 为 2026-10-15 弹窗标记（bool，缺省 false，纯横幅不变）
 /// 部分更新语义：没传的字段/公告位保持原样（与 enabled/steps 同一套口径）；
 /// 传了 items 就**整包替换**（顺序即展示顺序）。
 pub async fn update_announcement(State(st): State<ArcState>, Json(body): Json<Value>) -> ApiResult {
@@ -827,6 +844,8 @@ mod announcement_items_tests {
             wave: 0,
             text: String::new(),
             tone: tone.into(),
+            // 弹窗默认关（2026-10-15）：存量测试语义不变，popup 单独有用例覆盖
+            popup: false,
         }
     }
 
@@ -1089,5 +1108,71 @@ mod announcement_items_tests {
         assert_eq!(back.items.len(), 1);
         assert_eq!(back.items[0].title, "标题");
         assert_eq!(back.items[0].tone, "brand");
+    }
+
+    /// ⑦ popup 字段（2026-10-15）：旧 JSON 没有 popup 键 → serde(default) 回落 false，
+    /// 下发（管理端全量与公开过滤同一 item_json）也输出 "popup":false，
+    /// 存量纯横幅行为不变。
+    #[test]
+    fn old_json_without_popup_defaults_false_and_downlinks_false() {
+        // 反序列化：缺 popup 键回落 false
+        let ann: Announcement = serde_json::from_str(
+            r#"{"items":[{"enabled":true,"title":"冠军","name":"狼哲","tone":"brand"}]}"#,
+        )
+        .expect("无 popup 字段的旧 JSON 必须能反序列化");
+        assert_eq!(ann.items.len(), 1);
+        assert!(!ann.items[0].popup, "旧数据缺 popup 字段必须回落 false");
+
+        // 下发：to_json（管理端全量形态）与公开过滤形态都输出 "popup":false
+        let a = Announcement {
+            items: vec![item("冠军", "狼哲", "brand", true)],
+            ..Default::default()
+        };
+        assert_eq!(a.to_json()["items"][0]["popup"], false);
+        assert_eq!(a.public_items_json()[0]["popup"], false);
+    }
+
+    /// ⑧ popup 保存 roundtrip（2026-10-15）：保存入口 parse_items 读 bool，
+    /// "popup":true 的条目 roundtrip 后保持 true，且公开下发（site /
+    /// GET /api/public/announcements 共用的 public_items_json）可见。
+    /// 语义：popup 与横幅互不排斥，同一条两个位置都展示。
+    #[test]
+    fn popup_true_survives_save_roundtrip_and_is_publicly_visible() {
+        // 保存路径：update_announcement 的 items 整包替换走 parse_items
+        let parsed = parse_items(&[json!({
+            "enabled": true,
+            "title": "夺冠快讯",
+            "name": "狼哲",
+            "tone": "brand",
+            "popup": true
+        })]);
+        assert_eq!(parsed.len(), 1);
+        assert!(parsed[0].popup, "保存带 popup:true 必须解析成 true");
+
+        // serde roundtrip（save/load 同一形态）后保持 true
+        let a = Announcement {
+            items: parsed,
+            ..Default::default()
+        };
+        let back: Announcement =
+            serde_json::from_value(a.to_json()).expect("popup:true roundtrip 必须无损");
+        assert!(back.items[0].popup, "roundtrip 后 popup 不得丢失");
+
+        // 公开下发可见（enabled=true 的条目走同一 item_json）
+        let pub_items = a.public_items_json();
+        assert_eq!(pub_items.as_array().unwrap().len(), 1);
+        assert_eq!(pub_items[0]["popup"], true, "公开下发必须带 popup:true");
+
+        // 反向对照：不传 popup 的保存条目仍是 false（前端旧版不传不受影响）
+        let plain = parse_items(&[json!({"enabled": true, "title": "纯横幅"})]);
+        assert!(!plain[0].popup, "缺省 popup 必须 false");
+        assert_eq!(
+            Announcement {
+                items: plain,
+                ..Default::default()
+            }
+            .public_items_json()[0]["popup"],
+            false
+        );
     }
 }

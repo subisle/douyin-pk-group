@@ -69,7 +69,9 @@ const EMPTY_CELEBRATE: CelebrateCfg = { enabled: false, confetti: false, title: 
 /** 展示页公告条（2026-10-14）：可配多条，数组顺序 = 展示端从上到下。
     对应后端 Announcement.items[idx]；tone：brand = 紫金渐变（原庆祝条样式）、
     plain = 白底描边（原冠军条样式）。wave 同 celebrate 存字符串方便 number 输入框，
-    保存时转数字（0 = 不显示数值）。 */
+    保存时转数字（0 = 不显示数值）。
+    popup（2026-10-15 后端新增）：true = 该条除横幅外在展示端弹窗弹出一次；
+    老后端不下发该字段（undefined），按 false 处理。 */
 type AnnounceTone = 'brand' | 'plain'
 type AnnounceItemCfg = {
   enabled: boolean
@@ -79,9 +81,11 @@ type AnnounceItemCfg = {
   wave: string
   text: string
   tone: AnnounceTone
+  popup?: boolean
 }
 
-/** 「+ 添加公告条」的新条目：默认不启用，免得文案还没填就在展示端顶出一条空公告 */
+/** 「+ 添加公告条」的新条目：默认不启用，免得文案还没填就在展示端顶出一条空公告
+    （popup 默认 false：不弹窗，只走横幅） */
 const EMPTY_ANNOUNCE_ITEM: AnnounceItemCfg = {
   enabled: false,
   icon: '',
@@ -90,6 +94,7 @@ const EMPTY_ANNOUNCE_ITEM: AnnounceItemCfg = {
   wave: '0',
   text: '',
   tone: 'plain',
+  popup: false,
 }
 
 /** 公告配置页：📢 公告位 / 📣 展示页公告条 / 🎉 庆祝配置 三个编辑区块
@@ -163,6 +168,8 @@ export default function AnnouncePage() {
         wave?: number | string
         text?: string
         tone?: string
+        /** 2026-10-15 后端新增；老后端不下发（undefined） */
+        popup?: boolean
       }[]
     }>('/api/admin/announcement')
       .then((d) => {
@@ -190,7 +197,8 @@ export default function AnnouncePage() {
           wave: String(c.wave ?? 0),
         })
         // 公告条初始化：数组整体替换（顺序即展示顺序）；老后端没有 items key 时保持空列表，
-        // 且不标 loaded —— 保存时不发 items，防止把库里的多条整包清空
+        // 且不标 loaded —— 保存时不发 items，防止把库里的多条整包清空。
+        // popup 兜底 !!：老后端不下发该字段 = undefined → false（不弹窗）
         if (Array.isArray(d.items)) {
           setItems(
             d.items.map((it) => ({
@@ -201,6 +209,7 @@ export default function AnnouncePage() {
               wave: String(it?.wave ?? 0),
               text: it?.text ?? '',
               tone: it?.tone === 'brand' ? 'brand' : 'plain',
+              popup: !!it?.popup,
             })),
           )
           setItemsLoaded(true)
@@ -279,7 +288,8 @@ export default function AnnouncePage() {
         celebrate: { ...ce, wave: Math.max(0, Math.round(Number(ce.wave) || 0)) },
       }
       if (itemsLoaded) {
-        // 展示页公告条：数组顺序 = 展示端从上到下；wave 转数字，tone 只收 brand / plain
+        // 展示页公告条：数组顺序 = 展示端从上到下；wave 转数字，tone 只收 brand / plain。
+        // popup（2026-10-15 新增）布尔原样上传；老后端 state 里可能是 undefined → 按 false 发
         body.items = its.map((it) => ({
           enabled: it.enabled,
           icon: it.icon.trim(),
@@ -288,6 +298,7 @@ export default function AnnouncePage() {
           wave: Math.max(0, Math.round(Number(it.wave) || 0)),
           text: it.text,
           tone: it.tone === 'brand' ? 'brand' : 'plain',
+          popup: !!it.popup,
         }))
       }
       const d = await api<{ announcement: { version: number } }>('/api/admin/announcement', {
@@ -403,6 +414,8 @@ export default function AnnouncePage() {
         <p className="ann-sec-sub">
           这里的每一条 = 展示端顶部一条公告，数组顺序即展示顺序（用「↑ / ↓」调）。
           文本框失焦 / 开关切换后自动整体保存；「启用」关掉的条目会留在配置里，但展示端不显示。
+          {/* 2026-10-15 后端新增 popup 字段说明 */}
+          开启弹窗后，该条公告在展示端除横幅外还会以弹窗形式弹出一次（直到下次保存）。
         </p>
         <p className="hint" style={{ margin: 0 }}>
           样式「紫金渐变」= 原庆祝条的紫底金字，样式「白底描边」= 原冠军条的白底带边框。
@@ -427,6 +440,17 @@ export default function AnnouncePage() {
                     className="switch"
                     checked={it.enabled}
                     onChange={(e) => setItemSaved(i, { enabled: e.target.checked })}
+                  />
+                </label>
+                {/* 弹窗提醒（2026-10-15 后端新增 popup）：开启后该条除横幅外还会在展示端
+                    弹窗弹出一次；同样走 setItemSaved 即时保存，模式与「启用」开关一致 */}
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: 12, color: 'var(--ink3)' }}>
+                  弹窗提醒
+                  <input
+                    type="checkbox"
+                    className="switch"
+                    checked={!!it.popup}
+                    onChange={(e) => setItemSaved(i, { popup: e.target.checked })}
                   />
                 </label>
                 <button className="ghost" title="上移" disabled={i === 0} onClick={() => moveItem(i, -1)}>

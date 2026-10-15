@@ -545,7 +545,9 @@ async fn handle_msg(st: &Arc<AppState>, acct: &WxPushAccount, m: &Value) {
             n => format!("你好，{n}"),
         };
         let text = format!(
-            "{greeting}\n\n✅ 微信推送已绑定\n\n以后数据更新后会给你推送：\n· 追分提醒\n· 每日报告\n\n要开哪一项、要追谁，到展示页「我的」里设置。回复「解绑」可以断开。"
+            // 2026-10-15 文案改版：两行式要点列表更像「人发的简报」；明确两类推送
+            // 会自动来（旧版「会给你推送」偏被动），开关入口与解绑指令原样保留。
+            "{greeting}\n\n✅ 微信推送已绑定\n\n以后数据更新会自动推给你：\n· 追分提醒\n· 每日报告\n\n开关与追分目标在展示页「我的」里设置。回复「解绑」断开推送。"
         );
         if let Err(e) = user_send_text(
             &acct.base_url,

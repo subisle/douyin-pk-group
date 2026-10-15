@@ -355,6 +355,15 @@ async fn main() -> anyhow::Result<()> {
         .route("/report", get(public_teams::st_root))
         .route("/lineage", get(public_teams::st_root))
         .route("/my", get(public_teams::st_root))
+        /* 「我的」子页（2026-10-15）：前端 parseRoute 白名单只认
+        my/(bind|push|chase|privacy|about|wechat)（st_page.html 的 mym 正则），
+        其余 key 前端自然回落首页数据视图，所以服务端不用枚举 key，
+        统一渲染同一份 st_page.html 即可，/my/{key} 与上面的 /my 并存不冲突。 */
+        .route("/my/{key}", get(public_teams::st_root))
+        /* 「微信对接」独立短路径（2026-10-15 用户口径）：底栏一级入口的深链路由，
+        等价 /my/wechat（前端 parseRoute 把 rest === 'wechat' 折算成 my + mySub='wechat'）。
+        深链/刷新落在这里，不再掉进 spa fallback 拿到 React 管理端 index.html。 */
+        .route("/wechat", get(public_teams::st_root))
         .route("/group", get(public_teams::st_root))
         .route("/group/{key}", get(public_teams::st_root))
         .route("/1", get(public_teams::st_m))

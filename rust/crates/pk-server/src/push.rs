@@ -706,18 +706,19 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
                         eval_target(t, my, rival, month_rank_for_caption.as_deref(), b.person_id);
                     if gap <= 0 {
                         if !t.hit {
-                            lines.push(format!("🚀 已追上「{label}」！\n   {detail}",));
+                            // 2026-10-15：文案抽成纯函数 line_target_reached（见函数注释）
+                            lines.push(line_target_reached(&label, &detail));
                             event = true;
                         }
                         crate::store::target_set_state(st, t.id, true, 0, date).await;
                     } else {
                         if t.hit {
-                            lines.push(format!(
-                                "⚠️ 「{label}」又差回来了\n   {detail}，还差 {gap_text}",
-                            ));
+                            // 2026-10-15：文案抽成纯函数 line_target_regained
+                            lines.push(line_target_regained(&label, &detail, &gap_text));
                             event = true;
                         } else if t.last_notice_date != date {
-                            lines.push(format!("· 距「{label}」还差 {gap_text}（{detail}）"));
+                            // 2026-10-15：文案抽成纯函数 line_target_pending
+                            lines.push(line_target_pending(&label, &detail, &gap_text));
                         }
                         if t.last_notice_date != date {
                             due = true;
@@ -728,11 +729,13 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
                     }
                 }
                 if !lines.is_empty() && (event || due) {
-                    let text = format!(
-                        "📈 追分进度（{} 数据）\n{}\n\n你本月累计 {}",
-                        date.get(5..).unwrap_or(date),
-                        lines.join("\n"),
-                        fmt_wan(my)
+                    // 2026-10-15：整条文案抽成纯函数 target_push_text（头部/完成度/尾部
+                    // 口径见函数注释）；触发条件 event||due 与落库逻辑原样不动。
+                    let text = target_push_text(
+                        date,
+                        &lines,
+                        my,
+                        value_completion_pct(&targets, my),
                     );
                     tracing::info!(account = %b.name, text = %text.replace('\n', " | "), "推送·追分提醒");
                     match send_binding(st, b, wx_global.as_ref(), &text).await {
@@ -1268,9 +1271,63 @@ pub(crate) fn eval_target(
     }
 }
 
+/* --------------------- 追分提醒文案（2026-10-15 改版：纯函数拼装） --------------------- */
+
+/// 追分提醒「已追上」行（纯函数）。2026-10-15 文案改版：
+/// - 缩进用全角空格替代两个半角空格——微信里半角空格易被吞/错位，等宽显示更稳；
+/// - 去掉句尾感叹号：简报语气，不喊口号。
+fn line_target_reached(label: &str, detail: &str) -> String {
+    format!("🎉 已追上「{label}」\n　{detail}")
+}
+
+/// 追分提醒「被反超」行（纯函数）：曾追上又差回来，是事件，语气最重（⚠️）。
+/// 旧文案「又差回来了」偏口语，改成「被反超」更直接点出原因。
+fn line_target_regained(label: &str, detail: &str, gap_text: &str) -> String {
+    format!("⚠️ 「{label}」被反超\n　{detail}，还差 {gap_text}")
+}
+
+/// 追分提醒「进行中」行（纯函数）：日常进度播报。改成两行式（目标一行、
+/// 现状+差距一行），比旧的「距 X 还差 N（详情）」单行更易扫读。
+fn line_target_pending(label: &str, detail: &str, gap_text: &str) -> String {
+    format!("· {label}\n　{detail}，还差 {gap_text}")
+}
+
+/// 数值目标（kind=="value" 且 target_value>0）的完成度，0-100 四舍五入取整，
+/// 超额封顶 100（不出「180%」这种）。多个数值目标取第一个（生产上一个账号
+/// 基本只设一个数值目标）；没有符合条件的目标返回 None，文案就不出完成度行。
+fn value_completion_pct(targets: &[crate::store::PushTarget], my: i64) -> Option<u32> {
+    let t = targets
+        .iter()
+        .find(|t| t.kind == "value" && t.target_value > 0)?;
+    // i128 中间量防 my*100 溢出；+target_value/2 实现四舍五入（target_value>0）
+    let num = my as i128 * 100 + t.target_value as i128 / 2;
+    let pct = (num / t.target_value as i128).clamp(0, 100) as u32;
+    Some(pct)
+}
+
+/// 追分提醒整条文案（纯函数，2026-10-15 改版）：
+/// 头部「📈 追分进度（MM-DD）」（去掉旧版「数据」二字，更短）+ 各目标行 +
+/// 【完成度行（仅有数值目标时）】+ 空行 + 尾部「你本月累计 X」+「调整目标」指引。
+/// 完成度行放尾部前：它是本月小结性质，与逐目标进度行分开，放空行前更顺。
+fn target_push_text(date: &str, lines: &[String], my: i64, completion_pct: Option<u32>) -> String {
+    let mut out = format!("📈 追分进度（{}）", date.get(5..).unwrap_or(date));
+    out.push('\n');
+    out.push_str(&lines.join("\n"));
+    if let Some(p) = completion_pct {
+        out.push_str(&format!("\n本月目标完成度 {p}%"));
+    }
+    out.push_str(&format!(
+        "\n\n你本月累计 {}\n调整目标：展示页 → 我的 → 追分设置",
+        fmt_wan(my)
+    ));
+    out
+}
+
 /// 每日报告文案：TOP10 + 我的名次 + 我的抖音号分号明细（2026-10-12）。
 ///
 /// 明细挂在「我：第 N 名 · X」之后：先给人一个总览名次，再看每个号各挣多少。
+/// 2026-10-15 起名次行后按名次补一句：≤3 名给「🏆 上榜 TOP3」肯定行，
+/// >3 名且上一名可算时给「距上一名」差距行（我未开播则两者都不出）。
 /// `accounts` 为空 / 只有 1 个号时 [`account_waves_section`] 返回空串，文案与旧版一致。
 pub(crate) fn daily_report_text_with_accounts(
     team: &str,
@@ -1295,6 +1352,16 @@ pub(crate) fn daily_report_text_with_accounts(
             pos + 1,
             fmt_wan(items[pos].2)
         ));
+        // 2026-10-15 新增：名次行后的正向反馈 / 追赶提示
+        if pos < 3 {
+            // 上榜 TOP3：先给一句肯定（简报也要有情绪价值）
+            out.push_str("\n🏆 上榜 TOP3，继续保持！");
+        } else {
+            // 3 名开外：给一个可执行的追赶目标（上一名的音浪差）。
+            // 榜单按音浪降序，above >= my，这里 max(0) 只兜异常排序的脏数据。
+            let above = items[pos - 1].2;
+            out.push_str(&format!("\n距上一名 {}", fmt_wan((above - items[pos].2).max(0))));
+        }
     } else if me > 0 {
         out.push_str("\n\n我：今天还没开播");
     }
@@ -1526,11 +1593,12 @@ mod tests {
             ""
         );
         // 没有分号数据时就是原本那一条文案（2026-10-12 起唯一的实现只有这个函数，
-        // 所以这里**钉死基线字符串**，改动文案时会立刻红）
+        // 所以这里**钉死基线字符串**，改动文案时会立刻红）。
+        // 2026-10-15：第 1 名 ≤3 → 名次行后新增「🏆 上榜 TOP3」行，基线随之更新。
         let items = vec![(1u64, "阿甲".to_string(), 100_000)];
         assert_eq!(
             daily_report_text_with_accounts("male", "2026-10-08", &items, 1, &[]),
-            "📊 男团 10-08 音浪榜（1 人开播）\n1. 阿甲 10 万\n\n我：第 1 名 · 10 万"
+            "📊 男团 10-08 音浪榜（1 人开播）\n1. 阿甲 10 万\n\n我：第 1 名 · 10 万\n🏆 上榜 TOP3，继续保持！"
         );
     }
 
@@ -1806,6 +1874,147 @@ mod tests {
 
         let t2 = daily_report_text_with_accounts("female", "2026-10-08", &items, 9, &[]);
         assert!(t2.contains("今天还没开播"), "{t2}");
+    }
+
+    /* ---------- 追分提醒文案（2026-10-15 改版，纯函数） ---------- */
+
+    /// 三种行各归其位：已追上（🎉）/ 被反超（⚠️）/ 进行中（·），
+    /// 整条文案的头、尾、完成度行、调整入口一个不缺（钉死基线字符串）
+    #[test]
+    fn target_push_text_mixes_three_line_kinds() {
+        let lines = vec![
+            line_target_reached("本月目标 50 万", "你 52 万"),
+            line_target_regained("浩冬", "你 30 万 / TA 40 万", "10 万"),
+            line_target_pending("本月第 3 名", "你第 5 名", "2 名"),
+        ];
+        let t = target_push_text("2026-10-15", &lines, 520_000, Some(104));
+        assert_eq!(
+            t,
+            "📈 追分进度（10-15）\n\
+             🎉 已追上「本月目标 50 万」\n　你 52 万\n\
+             ⚠️ 「浩冬」被反超\n　你 30 万 / TA 40 万，还差 10 万\n\
+             · 本月第 3 名\n　你第 5 名，还差 2 名\n\
+             本月目标完成度 104%\n\
+             \n\
+             你本月累计 52 万\n\
+             调整目标：展示页 → 我的 → 追分设置",
+            "{t}"
+        );
+        // 头部只带 MM-DD，不再带「数据」二字（2026-10-15 口径）
+        assert!(!t.contains("数据）"), "{t}");
+        // 缩进必须是全角空格（微信等宽显示更稳），不能退回两个半角空格
+        assert!(!t.contains("\n  "), "不允许两个半角空格缩进：{t}");
+    }
+
+    /// 没有数值目标 → 不出完成度行（person / rank 目标都不算完成度）
+    #[test]
+    fn target_push_text_omits_completion_without_value_target() {
+        let lines = vec![line_target_pending("浩冬", "你 30 万 / TA 40 万", "10 万")];
+        let t = target_push_text("2026-10-15", &lines, 300_000, None);
+        assert!(!t.contains("完成度"), "{t}");
+        assert!(t.contains("你本月累计 30 万"), "{t}");
+        assert!(t.ends_with("调整目标：展示页 → 我的 → 追分设置"), "{t}");
+    }
+
+    /// 完成度百分比边界：0 / 四舍五入 / 恰好 100 / 超额封顶 100
+    #[test]
+    fn value_completion_pct_boundaries() {
+        let tv = |v: i64| vec![crate::store::PushTarget {
+            id: 1,
+            kind: "value".to_string(),
+            target_person_id: 0,
+            target_name: String::new(),
+            target_value: v,
+            hit: false,
+            last_notice_date: String::new(),
+        }];
+        // 0 → 0%
+        assert_eq!(value_completion_pct(&tv(500_000), 0), Some(0));
+        // 22.74% 四舍五入 → 23%
+        assert_eq!(value_completion_pct(&tv(500_000), 113_700), Some(23));
+        // 恰好 100%
+        assert_eq!(value_completion_pct(&tv(500_000), 500_000), Some(100));
+        // 超额封顶 100%（不出 180%）
+        assert_eq!(value_completion_pct(&tv(500_000), 900_000), Some(100));
+        // target_value <= 0（脏数据）不出完成度
+        assert_eq!(value_completion_pct(&tv(0), 123), None);
+        assert_eq!(value_completion_pct(&tv(-5), 123), None);
+        // kind 不是 value 不算（rank / person 目标没有「完成度」概念）
+        let rank = vec![crate::store::PushTarget {
+            kind: "rank".to_string(),
+            target_value: 3,
+            ..tv(1).remove(0)
+        }];
+        assert_eq!(value_completion_pct(&rank, 500_000), None);
+        // 空目标列表同样 None
+        assert_eq!(value_completion_pct(&[], 500_000), None);
+        // 多个数值目标取第一个（约定见函数注释）
+        let two = [tv(400_000), tv(800_000)].concat();
+        assert_eq!(value_completion_pct(&two, 200_000), Some(50));
+    }
+
+    /* ---------- 每日报告：TOP3 行 / 距上一名行（2026-10-15 新增） ---------- */
+
+    /// 第 1-3 名补「🏆 上榜 TOP3」；3 名开外补「距上一名」；未开播两者都不出
+    #[test]
+    fn daily_report_text_top3_line_and_gap_to_above() {
+        let items = vec![
+            (1u64, "阿甲".to_string(), 1_200_000),
+            (2u64, "阿乙".to_string(), 900_000),
+            (3u64, "阿丙".to_string(), 700_000),
+            (4u64, "阿丁".to_string(), 500_000),
+            (9u64, "我".to_string(), 113_700),
+        ];
+        // 第 2 名：有 TOP3 行，没有距上一名行
+        let t2 = daily_report_text_with_accounts("male", "2026-10-15", &items, 2, &[]);
+        assert!(t2.contains("🏆 上榜 TOP3，继续保持！"), "{t2}");
+        assert!(!t2.contains("距上一名"), "{t2}");
+        // 第 3 名：同样只给 TOP3 行（≤3 的口径含第 3）
+        let t3 = daily_report_text_with_accounts("male", "2026-10-15", &items, 3, &[]);
+        assert!(t3.contains("我：第 3 名 · 70 万"), "{t3}");
+        assert!(t3.contains("🏆 上榜 TOP3"), "{t3}");
+
+        // 第 5 名：距上一名 = 50 万 - 11.37 万 ≈ 38.6 万（fmt_wan 四舍五入到 38.6 万）
+        let t5 = daily_report_text_with_accounts("male", "2026-10-15", &items, 9, &[]);
+        assert!(t5.contains("我：第 5 名 · 11.4 万"), "{t5}");
+        assert!(t5.contains("\n距上一名 38.6 万"), "{t5}");
+        assert!(!t5.contains("TOP3"), "{t5}");
+
+        // 距上一名行必须紧贴「我：第 N 名」之后、分号明细（若有）之前
+        let accs = vec![
+            aw("cyl765", true, 80_000, 500_000, 3_000_000),
+            aw("abc123", false, 20_000, 100_000, 900_000),
+        ];
+        let t5b = daily_report_text_with_accounts("male", "2026-10-15", &items, 9, &accs);
+        let gap_pos = t5b.find("距上一名").unwrap();
+        let my_pos = t5b.find("我：第 5 名").unwrap();
+        let sec_pos = t5b.find("我的抖音号").unwrap();
+        assert!(my_pos < gap_pos && gap_pos < sec_pos, "{t5b}");
+
+        // 榜首（pos==0）不补距上一名，只给 TOP3（第 1 名必然 ≤3，不会走到差距分支）
+        let t1 = daily_report_text_with_accounts("male", "2026-10-15", &items, 1, &[]);
+        assert!(t1.contains("🏆 上榜 TOP3"), "{t1}");
+        assert!(!t1.contains("距上一名"), "{t1}");
+
+        // 未开播：两个新增行都不出
+        let t404 = daily_report_text_with_accounts("male", "2026-10-15", &items, 404, &[]);
+        assert!(t404.contains("我：今天还没开播"), "{t404}");
+        assert!(!t404.contains("TOP3") && !t404.contains("距上一名"), "{t404}");
+    }
+
+    /// 与上一名打平（差距 0）：按口径「差距可算就出」，出「距上一名 0」——
+    /// 打平本身是有用信息（再涨 1 就能反超），不像脏数据需要隐藏
+    #[test]
+    fn daily_report_text_tied_with_above_shows_zero_gap() {
+        let items = vec![
+            (1u64, "阿甲".to_string(), 500_000),
+            (2u64, "阿乙".to_string(), 500_000),
+            (3u64, "阿丙".to_string(), 400_000),
+            (4u64, "我".to_string(), 400_000),
+        ];
+        let t = daily_report_text_with_accounts("male", "2026-10-15", &items, 4, &[]);
+        assert!(t.contains("我：第 4 名 · 40 万"), "{t}");
+        assert!(t.contains("\n距上一名 0"), "打平要出 0 差距行：{t}");
     }
 
     /* ---------- 推送节拍反推（PUSH_MAX_TOTAL_SECS=180 硬约束） ---------- */

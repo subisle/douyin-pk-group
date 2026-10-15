@@ -134,6 +134,69 @@ button { font:inherit; cursor:pointer; }
 .ann-item .ai-rank-nm { font-weight:700; font-size:13px; color:#101828; }
 .ann-item.ai-brand .ai-rank-nm { color:#FFFBEB; }
 
+/* ===== 📣 公告弹窗（2026-10-15 任务三：items 里 popup:true 的条目用弹窗触达） =====
+   视觉复用 .ann-item 横幅的骨架（.ip-* 独立类名，不与横幅互抢样式）：
+   tone=brand → 紫金渐变头 + 米金字；其余 → plain 紫调白底。
+   z-index 89：低于登录门 #gate(90)（登录门打开时被盖住，open 前还有 gate 检查兜底）、
+   低于引导(100)与消息弹窗(95)，高于普通内容/toast(40)。 */
+#itemPopup { position:fixed; inset:0; z-index:89; background:rgba(11,15,23,.55);
+  display:flex; align-items:center; justify-content:center; padding:20px;
+  -webkit-backdrop-filter:blur(18px) saturate(150%); backdrop-filter:blur(18px) saturate(150%); }
+#itemPopup.hidden { display:none; }
+@keyframes ipOverlayIn { from { opacity:0; } to { opacity:1; } }
+@keyframes ipCardIn {
+  from { opacity:0; transform:translateY(24px) scale(.96); }
+  60%  { opacity:1; transform:translateY(0) scale(1.005); }
+  to   { opacity:1; transform:none; }
+}
+#itemPopup.ip-overlay-in { animation:ipOverlayIn .22s ease both; }
+.ip-box { max-width:352px; width:100%; max-height:calc(100dvh - 40px);
+  background:#fff; border-radius:22px; overflow:hidden; text-align:center;
+  box-shadow:0 24px 70px rgb(0 0 0 / 28%);
+  display:flex; flex-direction:column; animation:ipCardIn .34s cubic-bezier(.22,1,.36,1) both; }
+/* 品牌渐变头：tone=brand 走横幅 .ai-brand 同款紫金渐变，plain 走引导头的主色渐变 */
+.ip-box .ip-head { position:relative; padding:22px 20px 16px; flex:none;
+  background:var(--primary);
+  background:linear-gradient(160deg, var(--primary) 0%, #6d5bd0 100%);
+  color:var(--on-primary); border-radius:22px 22px 0 0; }
+.ip-box.ip-brand .ip-head {
+  background:linear-gradient(120deg,#4C1D95 0%,#6D28D9 45%,#B45309 100%); }
+.ip-box .ip-ico { width:52px; height:52px; border-radius:16px; margin:0 auto 12px;
+  background:rgb(255 255 255 / 18%); color:#fff; display:grid; place-items:center;
+  font-size:26px; }
+.ip-box .ip-chip { display:inline-block; padding:3px 10px; border-radius:9999px;
+  background:rgb(255 255 255 / 20%); color:#fff; font-size:11px; font-weight:700;
+  letter-spacing:.04em; margin-bottom:8px; }
+.ip-box .ip-head h3 { margin:0; font-size:18px; font-weight:800; line-height:1.4; }
+.ip-box .ip-name { margin-top:2px; font-size:13.5px; font-weight:700; color:#FFFBEB; }
+/* 正文：白名单富文本（<p>/<ul>/</b>）与纯文本两种形态，与引导 .a-body 同口径 */
+.ip-box .ip-body { margin:0; padding:16px 20px 18px; font-size:14px;
+  color:var(--on-surface-variant); line-height:1.8; text-align:left;
+  white-space:pre-wrap; word-break:break-word; overflow-y:auto; flex:1 1 auto;
+  -webkit-overflow-scrolling:touch; }
+.ip-box .ip-body.rich { white-space:normal; }
+.ip-box .ip-body.rich p { margin:0 0 8px; }
+.ip-box .ip-body.rich p:last-child { margin-bottom:0; }
+.ip-box .ip-body.rich ul { margin:4px 0 8px; padding-left:4px; list-style:none; }
+.ip-box .ip-body.rich ul:last-child { margin-bottom:0; }
+.ip-box .ip-body.rich li { position:relative; padding-left:14px; margin:3px 0; }
+.ip-box .ip-body.rich li::before { content:''; position:absolute; left:2px; top:.62em;
+  width:4px; height:4px; border-radius:9999px; background:var(--primary); }
+.ip-box .ip-body.rich b { color:var(--on-surface); font-weight:700; }
+.ip-box .ip-actions { display:flex; gap:8px; padding:0 20px 18px; flex:none; }
+.ip-box .ip-ok { flex:1; height:46px; border:none; border-radius:var(--r-md);
+  font-size:15px; font-weight:700; cursor:pointer; background:var(--primary);
+  color:var(--on-primary); transition:transform .12s ease, opacity .12s ease; }
+.ip-box .ip-ok:active { transform:scale(.97); }
+.ip-box .ip-ok:disabled { opacity:.4; cursor:default; }
+.ip-box .ip-hint { margin:0 20px 12px; font-size:11px; color:var(--ink3); flex:none; }
+@media (prefers-reduced-motion: reduce) {
+  #itemPopup.ip-overlay-in, .ip-box { animation:none; }
+}
+@media (max-width:360px) {
+  .ip-box { max-width:100%; }
+}
+
 /* 底部标签栏（看板 / 分组 / 族谱 / 我的 / 微信对接）：毛玻璃 + 安全区 */
 .tabbar { position:fixed; left:0; right:0; bottom:0; z-index:31;
   display:flex; background:var(--glass);
@@ -585,21 +648,28 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .st-my-acct > .sec { padding:.5rem 1rem; font-size:11px; color:var(--outline);
   display:flex; align-items:center; justify-content:space-between; }
 .st-my-acct > .sec .n { text-transform:none; letter-spacing:0; }
-/* 合计条：与 /my 大数字卡一致的口径（surface-container-low 圆角条） */
-.st-my-acct .sum { margin:0 1rem .5rem; background:var(--surface-container-low); border-radius:.5rem;
+/* 合计条（2026-10-15 任务五）：原 surface-container-low 灰底升级为 primary-fixed
+   淡主色底 + 同色内描边，与上面的普通行区分开，「合计」一眼可辨
+   （仍是 Stitch 低饱和底色，不引入新颜色体系）。 */
+.st-my-acct .sum { margin:0 1rem .5rem; background:var(--primary-fixed);
+  box-shadow:inset 0 0 0 1px rgba(0,88,188,.12); border-radius:.5rem;
   padding:.5rem .75rem; display:flex; align-items:center; justify-content:space-between; gap:.5rem;
   font-size:12px; font-weight:500; color:var(--on-surface); }
 .st-my-acct .sum .g { flex:1; min-width:0; display:grid;
   grid-template-columns:repeat(2,minmax(0,1fr)); gap:.25rem .75rem; }
-.st-my-acct .sum .c { display:flex; align-items:baseline; gap:.25rem; font-size:11px;
-  font-weight:400; color:var(--on-surface-variant); }
+.st-my-acct .sum .c { display:flex; align-items:baseline; justify-content:flex-end; gap:.25rem;
+  font-size:11px; font-weight:400; color:var(--on-surface-variant); }
 .st-my-acct .sum .c b { font-size:13px; font-weight:600; color:var(--on-surface);
-  font-variant-numeric:tabular-nums; }
-/* 单个抖音号行：.st-my-item 口径（左图标 + 主/副标题，右数值），不可点、无 chevron。
-   窄屏兜底：撑不下时四格整块换行到下一行（左块有 8rem 基宽，不会把主标题挤没） */
+  font-variant-numeric:tabular-nums; text-align:right; min-width:3.5em; }
+/* 单个抖音号行：.st-my-item 口径（左图标 + 主/副标题，右数值），无 chevron。
+   窄屏兜底：撑不下时四格整块换行到下一行（左块有 8rem 基宽，不会把主标题挤没）。
+   2026-10-15 任务五：行可点（点击复制抖音号），.copiable 挂 cursor + hover/active 反馈。 */
 .st-my-acct .row { display:flex; flex-wrap:wrap; align-items:center;
   justify-content:space-between; gap:.25rem .75rem;
   padding:.875rem 1rem; border-top:1px solid var(--surface-container); }
+.st-my-acct .row.copiable { cursor:pointer; -webkit-tap-highlight-color:transparent; }
+.st-my-acct .row.copiable:hover { background:var(--surface-container-low); }
+.st-my-acct .row.copiable:active { background:var(--surface-container); }
 .st-my-acct .row .l { display:flex; align-items:center; gap:1rem; flex:1 1 8rem; min-width:0; }
 .st-my-acct .row .ico { width:2rem; height:2rem; border-radius:.5rem;
   background:var(--surface-container); color:var(--on-surface-variant);
@@ -607,26 +677,35 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .st-my-acct .row .ico .material-symbols-outlined { font-size:20px; }
 .st-my-acct .row .t { font-size:15px; font-weight:500; color:var(--on-surface);
   overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; max-width:100%; }
+/* 主号 chip（2026-10-15 任务五微调）：加一圈淡主色描边，与开播 pill 的灰底区分更明显 */
 .st-my-acct .row .chip { padding:0 .375rem; border-radius:9999px; background:rgba(0,88,188,.10);
-  color:var(--primary); font-size:11px; font-weight:500; line-height:1.5; flex:none; }
-/* 开播状态点：复用 .st-my-head .sync .dot 的脉冲语义，未开播不闪也不用绿 */
-.st-my-acct .row .st { display:inline-flex; align-items:center; gap:.25rem; font-size:11px;
-  color:var(--on-surface-variant); flex:none; white-space:nowrap; }
+  border:1px solid rgba(0,88,188,.18);
+  color:var(--primary); font-size:11px; font-weight:600; line-height:1.5; flex:none; }
+/* 开播状态点（2026-10-15 任务五：强化对比的小圆点 pill）：
+   灰底灰点灰字 = 未开播；浅主色底 + 主色点（保留脉冲）+ 主色字 = 已开播 */
+.st-my-acct .row .st { display:inline-flex; align-items:center; gap:.3rem; font-size:10.5px;
+  font-weight:600; line-height:1.5; padding:.1rem .5rem; border-radius:9999px;
+  background:var(--surface-container); color:var(--on-surface-variant); flex:none;
+  white-space:nowrap; }
 .st-my-acct .row .st i { width:.375rem; height:.375rem; border-radius:9999px;
   background:var(--outline-variant); flex:none; }
+.st-my-acct .row .st.on { background:rgba(0,88,188,.10); color:var(--primary); }
 .st-my-acct .row .st.on i { background:var(--primary); animation:stPulse 1.6s ease-in-out infinite; }
 .st-my-acct .row .d { font-size:11px; color:var(--outline); margin-top:.125rem; }
 /* 四格音浪：恒 2×2 小网格 —— 与左侧「标题+副标题」两行等高，且不抢占主标题宽度；
    2026-10-14 防挤：列宽 minmax(max-content,1fr)，数值格至少占满自身内容宽
    （「4万3892」这类带万字的值永不截断、永不和「日/月/年/累计」标签重叠），
    基宽 9rem→11rem 并允许 shrink，富余空间才均分；与 .l 的 8rem 基宽相加超容器时
-   才整块换行（320px 屏折到第二行，绝不横向溢出） */
+   才整块换行（320px 屏折到第二行，绝不横向溢出）。
+   2026-10-15 任务五：数值 b 加 text-align:right + min-width:3.5em 统一右对齐宽度，
+   配合 tabular-nums 四行读数逐位对齐。 */
 .st-my-acct .row .wg { display:grid; grid-template-columns:repeat(2,minmax(max-content,1fr));
   gap:.25rem .75rem; flex:0 1 11rem; margin-left:auto; }
 .st-my-acct .row .wg .c { display:flex; align-items:baseline; justify-content:flex-end; gap:.25rem;
   font-size:11px; color:var(--on-surface-variant); white-space:nowrap; }
 .st-my-acct .row .wg .c b { font-size:13px; font-weight:600; color:var(--on-surface);
-  font-variant-numeric:tabular-nums; white-space:nowrap; }
+  font-variant-numeric:tabular-nums; white-space:nowrap;
+  text-align:right; min-width:3.5em; }
 .st-my-acct .fail { padding:.75rem 1rem; font-size:11px; color:var(--outline); text-align:center; }
 .st-my-acct .none { padding:1rem; font-size:12px; color:var(--on-surface-variant);
   text-align:center; line-height:1.7; }
@@ -1459,6 +1538,10 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 <!-- 管理员消息弹窗（docs/23 §6.1）：容器常驻，DOM 由 openMsgModal 重建。
      z-index 95 低于引导(100)高于内容/toast(40)；登录门打开时 dismissMsgModal 主动让位。 -->
 <div id="msgModal" class="hidden"></div>
+<!-- 2026-10-15 任务三：展示端公告弹窗（items 里 popup:true 的第一条）。
+     容器常驻、DOM 由 maybeAnnounceItemsPopup 重建；z-index 89：低于登录门 #gate(90)
+     登录门打开时被自然盖住，也低于引导(100)与消息弹窗(95)，各层互不叠架。 -->
+<div id="itemPopup" class="hidden"></div>
 <div id="wm" hidden></div>
 
 <script>
@@ -3168,6 +3251,8 @@ function renderMyLogin() {
 function myAccountsCard(accounts) {
   if (!accounts || accounts.published === false) return '';
   const wave = (o) => o == null || o.wave == null ? '—' : wan(o.wave);
+  /* 2026-10-15 任务五：数值格右对齐 + tabular-nums（CSS 在 .wg .c b / .sum .c b 上），
+     标签「日/月/年/累计」包一层 <i>（font-style:normal;min-width:2em）防被数值挤压。 */
   const cell = (label, o) => '<span class="c">' + label + '<b>' + esc(wave(o)) + '</b></span>';
   if (accounts.__err) {
     return '<div class="st-my-acct">' +
@@ -3190,10 +3275,18 @@ function myAccountsCard(accounts) {
       ? String(a.douyinNo)
       : (a.anchorId ? 'ID ' + String(a.anchorId) : '');
     const title = (a.anchorName ? String(a.anchorName) : '') || no;
+    /* 2026-10-15 任务五：日期只动展示 —— 2026-10-15 缩写成 10-15（MM-DD），
+       只认 YYYY-MM-DD 形态的才缩，其它格式原样透传；lastDate 为空仍显示「暂无数据」。
+       数据字段（a.lastDate）原样保留，不参与任何请求。 */
+    const lastDate = a.lastDate ? String(a.lastDate) : '';
+    const dateShown = /^\d{4}-\d{2}-\d{2}$/.test(lastDate) ? lastDate.slice(5) : lastDate;
     const sub = (no && a.anchorName ? no + ' · ' : '') +
-      (a.lastDate ? String(a.lastDate) : '暂无数据') +
+      (lastDate ? dateShown : '暂无数据') +
       (Number(a.days) > 0 ? ' · ' + a.days + ' 天有数据' : '');
-    return '<div class="row">' +
+    /* 2026-10-15 任务五：整行可点复制抖音号。复制的是 douyinNo 本体（no 前缀是
+       「ID 」兜底展示形态，带出去没意义）；no 为空不挂 .copiable、不绑事件。 */
+    const copyable = no && a.douyinNo;
+    return '<div class="row' + (copyable ? ' copiable" data-copy="' + esc(no) : '') + '">' +
       '<div class="l"><div class="ico"><span class="material-symbols-outlined">smart_display</span></div>' +
       '<div style="min-width:0">' +
         '<div style="display:flex;align-items:center;min-width:0"><span class="t">' + esc(title) + '</span>' +
@@ -3312,11 +3405,9 @@ function renderMy(d, series, claim, bound, push, accounts) {
     ? '<span class="chip">已绑定 ' + boundList.length + ' 个</span>' : '';
   /* 推送状态走 /my/push 的真实字段（后端没有 configured 这个键）：
      bound=已拿到会话可推送；scanBound+needActivate=扫码了但还没给机器人发过消息。 */
-  /* 2026-10-13 用户口径：只接微信推送，不显示 QQ */
-  const pushStatus = !push ? '微信未同步'
-    : push.bound ? '微信已同步'
-    : push.scanBound ? (push.needActivate ? '待激活' : '已扫码')
-    : '微信未同步';
+  /* 2026-10-13 用户口径：只接微信推送，不显示 QQ。
+     2026-10-15 任务二：三态文案抽成 pushStatusText(p)，与追分卡「微信对接」入口行共用（行为不变）。 */
+  const pushStatus = pushStatusText(push);
 
   $('view').innerHTML = '<div class="section tab-content-enter">' +
     head + big + trend + myAccountsCard(accounts) +
@@ -3371,6 +3462,22 @@ function renderMy(d, series, claim, bound, push, accounts) {
     /* 没有站内私信通道（运营在微信里），这里只指路不跳转 */
     toast('请直接在微信里联系帅帅');
   };
+  /* 我的抖音号：整行点击复制抖音号（2026-10-15 任务五）。
+     行 DOM 由 myAccountsCard 生成（.row.copiable[data-copy]，douyinNo 为空的行不挂），
+     复制成功 toast('已复制抖音号')；无 clipboard API 的老浏览器降级 toast 失败提示。 */
+  document.querySelectorAll('.st-my-acct .row.copiable').forEach((rowEl) => {
+    rowEl.onclick = async () => {
+      const no = rowEl.dataset.copy || '';
+      if (!no) return;
+      try {
+        if (!navigator.clipboard) throw new Error('clipboard unavailable');
+        await navigator.clipboard.writeText(no);
+        toast('已复制抖音号');
+      } catch (_) {
+        toast('复制失败，请手动复制');
+      }
+    };
+  });
   $('myForgot').onclick = () => {
     /* 2026-10-15 契约 A：入口「重置密码」——登录态下直接换新密码，
        不需要旧密码（POST /api/public/my/password，身份只认 X-My-Token 头，
@@ -3725,15 +3832,36 @@ function bindClaimCard(claim) {
   };
 }
 
-/* 追分设置入口行的右侧摘要（2026-10-12）：没开追分开关 = 关；开了看目标数 */
+/* 追分设置入口行的右侧摘要（2026-10-12：没开追分开关 = 关；开了看目标数）。
+   2026-10-15 任务一：未绑定不再返回「未绑定」装禁用 —— 后端 POST /my/push/targets
+   本就不校验绑定状态，未绑定也能设目标，摘要要反映真实状态：
+   · p 为 null（接口失败）→ 维持「未绑定」（真的什么状态都拿不到）；
+   · 未绑定 → 「未绑定微信 · N 个目标 / 未绑定微信 · 未设目标」；
+   · 已绑定 → 按既有口径：没开追分开关 = 关；开了看目标数。 */
 function chaseSummary(p) {
   if (!p) return '未绑定';
+  if (!p.bound) {
+    const n = (p.targets || []).length;
+    return n ? '未绑定微信 · ' + n + ' 个目标' : '未绑定微信 · 未设目标';
+  }
   if (!p.notifyTarget) return '已关';
   const n = (p.targets || []).length;
   return n ? n + ' 个目标' : '已开 · 未设目标';
 }
 
 /* ==================== 微信推送（绑定机器人 + 追分目标） ==================== */
+/* 微信对接状态三态文案（2026-10-15 任务二抽出共用）：
+   bound=微信已同步；scanBound+needActivate=待激活；其余（含 p 为 null/接口失败）
+   =微信未同步。「我的」列表页 pushStatus 与「追分设置」卡「微信对接」入口行
+   （chaseWechatGo 那行）两处复用本函数，行为与原内联三态完全一致。 */
+function pushStatusText(p) {
+  return !p ? '微信未同步'
+    : p.bound ? '微信已同步'
+    : p.scanBound ? (p.needActivate ? '待激活' : '已扫码')
+    : '微信未同步';
+}
+
+/* ==================== 微信推送（绑定机器人 + 追分目标）数据源 ==================== */
 /* 2026-10-10：数据入库约 30 分钟后由微信机器人私聊推送，两类内容各自开关（都关着就不推）：
    · 追分提醒 —— 追主播 / 定音浪目标 / 追名次（一律比本月累计），追上/还差多少都推给你
    · 每日报告 —— 当天音浪排行榜
@@ -3891,6 +4019,9 @@ function pushFlagsHtml(p) {
   }
   if (!p.bound) {
     h += '<div class="hint">还没绑定微信：绑定成功后这些开关才会生效，现在改不了。</div>';
+    /* 2026-10-15 任务一：推送开关仍依赖绑定（这个口径不动、开关保持置灰），
+       但追分目标可以先设 —— 开关下方补一行指路 hint，把人送到「追分设置」去。 */
+    h += '<div class="hint">未绑定微信也能先设追分目标：去「追分设置」添加，绑定后提醒自动生效。</div>';
   } else if (!p.notifyTarget && !p.dailyReport) {
     h += '<div class="hint">两个开关都关着，现在不会给你推任何东西，先开一个。</div>';
   }
@@ -3936,13 +4067,18 @@ function renderChaseBox(p) {
     return Number.isFinite(Number(v)) ? Number(v) : list.filter((t) => t.kind === k).length;
   };
   let h = '';
+  /* 2026-10-15 任务一：未绑定路径只提示、不禁用 —— 后端 POST /my/push/targets
+     不校验绑定状态，目标先存着、绑定后提醒自动生效，所以三个目标块的输入框
+     照常可编辑（绝不 disabled）。提示口径统一为「未绑定微信也能先设目标」；
+     admin 观看账号仍维持禁止口径不动（下面那个 if）。 */
   if (!p.bound) {
     h += !p.channelConfigured
       ? '<div class="hint">微信推送暂未开放（管理员还没连接微信机器人），' +
-        '激活前设置的追分目标会先存着，推送通了再发。</div>'
+        '未绑定微信也能先设目标，绑定后提醒自动生效。</div>'
       : p.scanBound
-        ? '<div class="hint">微信还在待激活，激活后提醒才会发过来；目标可以先设好。</div>'
-        : '<div class="hint">还没绑定微信推送：先去「消息设置」扫码绑定，目标可以先设好。</div>';
+        ? '<div class="hint">微信还在待激活：未绑定微信也能先设目标，绑定后提醒自动生效。</div>'
+        : '<div class="hint">未绑定微信也能先设目标，绑定后提醒自动生效；' +
+          '也可以先去「消息设置」扫码绑定。</div>';
   }
   if (p.admin) {
     h += '<div class="sub" style="margin-top:6px;line-height:1.7">管理员观看账号没有自己的音浪，' +
@@ -3954,6 +4090,15 @@ function renderChaseBox(p) {
   h += chaseValueBlock(byKind('value'), cnt('value'), max);
   h += chasePersonBlock(byKind('person'), cnt('person'), max);
   h += chaseRankBlock(byKind('rank'), cnt('rank'));
+  /* 「微信对接」入口行（2026-10-15 任务二）：三张卡互相可达的最后一跳 ——
+     追分设置卡 → 消息设置卡（/my/wechat）。跳转口径与 pushChaseGo / myChaseRow
+     完全一致（mySub='wechat' + pushRoute + renderMySub）；
+     状态文案复用 pushStatusText(p) 的三态（微信已同步/待激活/微信未同步）。
+     admin 观看账号走上面的早退分支，永远到不了这里，不受影响。 */
+  h += pushSecTitle('微信对接') +
+    '<div class="hint">绑定微信机器人、开关推送提醒（当前：' +
+    esc(pushStatusText(p)) + '）</div>' +
+    '<button class="go gray" id="chaseWechatGo" style="margin-top:8px">进入微信对接</button>';
   box.innerHTML = h;
   /* 绑定必须紧跟这次 innerHTML，作为本函数的收尾动作（2026-10-15 task-7）：
      事件只对当前 DOM 节点有效，谁换了 innerHTML 谁就负责重绑。
@@ -4142,6 +4287,16 @@ function bindChaseHandlers(p) {
       }
     };
   });
+
+  /* 2026-10-15 任务二：追分卡「微信对接」入口行 → /my/wechat 子页。
+     与「消息设置」卡的 pushChaseGo（追分入口反向跳）同一跳转口径：
+     mySub='wechat' + pushRoute + renderMySub。
+     绑定放在函数最前面（在 admin / 满额等任何 return 之前）：
+     renderChaseBox 的 admin 分支早退时不会生成这个按钮，但只要按钮在 DOM 里
+     （非 admin 路径）就必须绑上 —— 与上面 [data-del] 同一层级，绝不能落在
+     下面「目标人」块的满额早退之后。onclick 覆盖式绑定，不会叠加。 */
+  const wechatGo = $('chaseWechatGo');
+  if (wechatGo) wechatGo.onclick = () => { mySub = 'wechat'; pushRoute(); renderMySub(); };
 
   /* Enter 直提（2026-10-12）：目标分输入框回车 = 点添加 */
   const enterSubmit = (inputId, btnId) => {
@@ -5597,16 +5752,188 @@ function renderMyAnnouncement(my) {
   if (box) box.insertAdjacentHTML('afterbegin', html);
 }
 
+/* ==================== 📣 公告弹窗（2026-10-15 任务三：items 支持 popup 触达） ====================
+   数据契约：site 接口与 /api/public/announcements 下发的 items 每条新增
+   popup:boolean（后端未上线时 undefined = false）。横幅（renderAnnounceItems）
+   仍渲染全部 enabled 条目、与弹窗互不排斥；弹窗只取**第一条** enabled && popup 的。
+   已读锁与引导弹窗 maybeAnnounce 的版本锁同口径：
+   key = 'pk_item_popup_v' + (siteAnnouncements.version || site.announcement?.version || 0)，
+   值相等不弹；「知道了」/ 点遮罩关闭都写锁。引导弹开了（announceCtx 非空）本次让位不弹。
+   安全：全程 createElement + textContent / 白名单标记（加粗 + 行首列表），
+   后端字符串绝不进 innerHTML（与 renderAnnounceItems 同一口径）。 */
+
+/* 公告正文白名单富文本（2026-10-15 任务三）：与引导弹窗 maybeAnnounce 闭包内的
+   bodyHtml 同一套标记口径（*星号* = 加粗；行首 ·/•/-/1. = 列表项），但那个函数
+   是闭包内的，不能复用也不去改它 —— 这里独立实现等价逻辑。
+   支持两种编辑习惯（运营在后台 textarea 里自然写的）：
+     · 「· 」「- 」「1. 」开头的行 → 列表项
+     · *星号包起来* → 加粗
+   其余字符（含 < > & " '）一律走 esc 转义，所以注入面只剩这两个标记本身。 */
+function ipBodyHtml(item) {
+  const raw = item && item.text != null ? String(item.text) : '';
+  /* 快路：没有任何标记字符时直接转义返回，省掉拆行/建 DOM 的开销。
+     命中判断必须覆盖全部三种标记（换行、星号、行首列表符）——与引导弹窗同款。 */
+  if (raw.indexOf('\n') < 0 && raw.indexOf('*') < 0
+      && !/^\s*(?:[\u00b7\u2022-]|\d+[.、)])\s/.test(raw)) return esc(raw);
+  const lines = raw.split('\n').map((ln) => {
+    const m = /^\s*(?:[·•\-]|\d+[.、)])\s+/.exec(ln);
+    const li = m ? '<li>' + esc(ln.slice(m[0].length)).replace(/\*([^*\n]+)\*/g, '<b>$1</b>') + '</li>'
+                 : esc(ln).replace(/\*([^*\n]+)\*/g, '<b>$1</b>');
+    return { li: !!m, html: li };
+  });
+  let out = '', inList = false;
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].li && !inList) { out += '<ul>'; inList = true; }
+    if (!lines[i].li && inList) { out += '</ul>'; inList = false; }
+    out += lines[i].li ? lines[i].html : '<p>' + (lines[i].html || '&nbsp;') + '</p>';
+  }
+  if (inList) out += '</ul>';
+  return out;
+}
+
+/** 公告弹窗：bootRest 末尾（maybeAnnounce() 之后）调用一次。拿不到可弹条目 /
+    已读过 / 引导开着 / 登录门开着，全部静默返回，绝不挡启动。 */
+function maybeAnnounceItemsPopup() {
+  /* 条目来源：siteAnnouncements.items 优先，site.items 兜底（与 bootRest 里横幅
+     的两个来源一致；bootRest 在两者都齐了之后才调用本函数）。 */
+  const items = Array.isArray(siteAnnouncements.items) && siteAnnouncements.items.length
+    ? siteAnnouncements.items
+    : (site && Array.isArray(site.items) ? site.items : []);
+  const hit = items.find((it) => it && it.enabled && it.popup);
+  if (!hit) return;
+  /* 引导让位：引导弹窗开着（announceCtx 非空）本次不弹，别叠两层遮罩 */
+  if (announceCtx) return;
+  /* 登录门兜底：#gate 不是 hidden（登录门开着）就不弹，z-index 89 会被 90 盖住但
+     别留一个关不掉的层在底下 */
+  const gate = $('gate');
+  if (gate && !gate.classList.contains('hidden')) return;
+  /* 已读锁：与引导弹窗 maybeAnnounce 的版本锁同口径。version 取
+     siteAnnouncements.version，兜底 site.announcement?.version（后端从 site 带 version
+     而从 announcements 不带时的口径），都没有 = 0。 */
+  const ver = siteAnnouncements.version != null ? siteAnnouncements.version
+    : (site && site.announcement && site.announcement.version != null)
+      ? site.announcement.version : 0;
+  const key = 'pk_item_popup_v' + ver;
+  try {
+    if (localStorage.getItem(key) === String(ver)) return;
+  } catch (_) {}
+  const box = $('itemPopup');
+  if (!box) return;
+
+  /* 关闭：写已读锁 + 收动画 + 清 DOM（点遮罩与「知道了」共用） */
+  const close = () => {
+    try { localStorage.setItem(key, String(ver)); } catch (_) {}
+    box.classList.add('hidden');
+    box.classList.remove('ip-overlay-in');
+    box.innerHTML = '';
+    unlockScroll();
+  };
+
+  /* 视觉复用 .announce-box 风格但类名独立（.ip-box/.ip-head/.ip-body）。
+     全程 createElement + textContent / 白名单标记，后端字符串不进 innerHTML。 */
+  const card = document.createElement('div');
+  card.className = 'ip-box' + (hit.tone === 'brand' ? ' ip-brand' : '');
+  card.setAttribute('role', 'dialog');
+  card.setAttribute('aria-modal', 'true');
+  card.setAttribute('aria-labelledby', 'ipTitle');
+
+  const head = document.createElement('div');
+  head.className = 'ip-head';
+  const chip = document.createElement('span');
+  chip.className = 'ip-chip';
+  chip.textContent = '公告';
+  head.appendChild(chip);
+  /* icon 只认 ANNOUNCE_ICONS 白名单 + tone 默认图标，口径与 renderAnnounceItems 一致 */
+  const ico = document.createElement('div');
+  ico.className = 'ip-ico';
+  const icoSpan = document.createElement('span');
+  icoSpan.className = 'material-symbols-outlined';
+  const ic = String(hit.icon == null ? '' : hit.icon).trim();
+  icoSpan.textContent = ANNOUNCE_ICONS.indexOf(ic) >= 0
+    ? ic : (hit.tone === 'brand' ? 'emoji_events' : 'military_tech');
+  ico.appendChild(icoSpan);
+  head.appendChild(ico);
+  const h3 = document.createElement('h3');
+  h3.id = 'ipTitle';
+  h3.textContent = String(hit.title == null ? '' : hit.title) || '公告';
+  head.appendChild(h3);
+  /* 人名 · 音浪（wave>0 时用 wan()）：多人与横幅同口径只展示拼接，不做名次拆行 */
+  const picked = splitRankNames(hit.name).filter((s) => s.length > 0);
+  if (picked.length) {
+    const nm = document.createElement('div');
+    nm.className = 'ip-name';
+    nm.textContent = picked.slice(0, 3).join('、') +
+      (Number(hit.wave) > 0 ? ' · ' + wan(hit.wave) : '');
+    head.appendChild(nm);
+  }
+  card.appendChild(head);
+
+  if (String(hit.text == null ? '' : hit.text)) {
+    const body = document.createElement('div');
+    body.className = 'ip-body';
+    const html = ipBodyHtml(hit);
+    /* 纯文本才挂 rich：只有一行的文本加 rich 会丢掉用户手打的换行（与引导同口径） */
+    if (/<(p|ul|li|b)>/.test(html)) {
+      body.classList.add('rich');
+      body.innerHTML = html;   // 白名单产物：esc 转义 + <p>/<ul>/<li>/<b> 四种标记
+    } else {
+      body.textContent = String(hit.text);   // 纯文本直接 textContent
+    }
+    card.appendChild(body);
+  }
+
+  const actions = document.createElement('div');
+  actions.className = 'ip-actions';
+  const okBtn = document.createElement('button');
+  okBtn.type = 'button';
+  okBtn.className = 'ip-ok';
+  okBtn.textContent = '知道了';
+  okBtn.onclick = close;
+  actions.appendChild(okBtn);
+  card.appendChild(actions);
+
+  const hint = document.createElement('div');
+  hint.className = 'ip-hint';
+  hint.textContent = '点空白处也可以关闭';
+  card.appendChild(hint);
+
+  box.innerHTML = '';
+  box.appendChild(card);
+  box.classList.remove('hidden');
+  box.classList.add('ip-overlay-in');
+  lockScroll();   // 弹窗开着锁背景滚动（close 里配对 unlockScroll，与引导/消息弹窗同口径）
+  /* 点遮罩关闭：点在卡片内不关（避免误触把公告吃掉） */
+  box.onclick = (e) => { if (e.target === box) close(); };
+  try { okBtn.focus({ preventScroll: true }); } catch (_) { okBtn.focus(); }
+}
+
 /* ---- 🎉 彩带：全屏 canvas 粒子（零依赖，rAF 驱动；样式全内联不碰其它元素） ---- */
 
-/** 彩带雨（2026-10-15 task-9①）：粒子从**视口顶部上方**随机 x 落下（纸屑雨），
-    重力很弱 + 左右轻摆 + 自转，落到底部渐隐并回收到顶部继续下，
-    durationMs 后自动停止并移除 canvas（重复调用会先清掉上一场）。
-    ⚠️ 不再有「从两个喷射点向中心外放射/爆炸」的初速度 —— 那版是 task-9 要改掉的形态。
-    尊重系统「减弱动态效果」：prefers-reduced-motion 时整场不放。
-    彩带层 pointer-events:none，绝不挡点击。 */
+/* 2026-10-15 任务四：彩带改为「双侧礼炮」——整段替换原「纸屑雨」实现。
+   移植自 canvas-confetti ConfettiSideCannons 样例（MIT）：左右两个炮位
+   （origin x:0,y:0.5 与 x:1,y:0.5）分别按 angle 60°（向右上）/ 120°（向左上）、
+   spread 55°、startVelocity 60、colors ['#a786ff','#fd8bbc','#eca184','#f8deb1']，
+   触发后持续 durationMs（默认 3000ms），期间每帧向每个炮位各发射 2 片。
+   粒子物理按 canvas-confetti v1 的 fetti 实现移植：
+   · radAngle/radSpread 角度换弧度；wobble=Math.random()*10、
+     wobbleSpeed=Math.min(0.11, Math.random()*0.1+0.05)、
+     velocity=startVelocity*0.5+Math.random()*startVelocity、
+     angle2D=-radAngle+(0.5*radSpread-Math.random()*radSpread)、
+     tiltAngle=(Math.random()*(0.75-0.25)+0.25)*Math.PI、gravity=默认 1×3=3（恒定）、
+     decay=0.9、tick/ticks=200；
+   · 每帧 velocity*=decay、gravity 恒定、x+=cos(angle2D)*velocity、
+     y+=sin(angle2D)*velocity+gravity、wobble+=wobbleSpeed、tiltAngle+=0.1、tick++；
+     alpha=1-tick/ticks，tick 用尽或出屏即移除。
+   说明：任务口径里的 drag=0.03 在 v1 fetti 库内不存在（库内速度阻尼就是 decay=0.9、
+   重力恒定不衰减），为忠实移植按库内实现，未给 gravity 加 drag 衰减。
+   粒子形状：v1 updateFetti 的方片四边形（x/y + wobbleX/wobbleY + tilt 偏移），
+   即带 tilt/rotation 的扁平小纸片（w≈10、h≈10·scalar，scalar=1）。
+   全场总粒子上限 400：超限不再发射，等存量粒子消亡后再继续补发。
+   保留旧接口口径：函数名 fireConfetti(durationMs)、prefers-reduced-motion 直接不放、
+   重复调用先掐旧场（fireConfetti._raf）、canvas id=confettiCanvas、
+   pointer-events:none、z-index 9999；fireConfettiOnce/celebrate 锁等调用方全部不动。 */
 function fireConfetti(durationMs) {
-  durationMs = Number(durationMs) > 0 ? Number(durationMs) : 2500;
+  durationMs = Number(durationMs) > 0 ? Number(durationMs) : 3000;
   /* 尊重 prefers-reduced-motion：用户要求减弱动态效果时直接不放（比放个静态定格更省事） */
   try {
     if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
@@ -5627,70 +5954,102 @@ function fireConfetti(durationMs) {
   document.body.appendChild(cv);
   const ctx = cv.getContext('2d');
 
-  /* 配色：金/蓝/紫/粉，与整站庆祝视觉（items 里 tone=brand 那条紫金公告条）一致 */
-  const COLORS = ['#F59E0B', '#FBBF24', '#3B82F6', '#8B5CF6', '#EC4899', '#F472B6', '#FDE68A'];
-  const rnd = (a, b) => a + Math.random() * (b - a);
+  /* 样例配色（紫/粉/橘/米）：ConfettiSideCannons 官方样例同款。
+     颜色按库内 hexToRgb 预解析成 {r,g,b}：updateFetti 每帧直接拼 rgba 字符串 */
+  const COLORS = ['#a786ff', '#fd8bbc', '#eca184', '#f8deb1'].map((hex) => {
+    const v = String(hex).replace(/[^0-9a-f]/gi, '');
+    return {
+      r: parseInt(v.substring(0, 2), 16),
+      g: parseInt(v.substring(2, 4), 16),
+      b: parseInt(v.substring(4, 6), 16)
+    };
+  });
+  const START_VELOCITY = 60;      // 样例口径：startVelocity=60
+  const SPREAD_DEG = 55;          // 样例口径：spread=55°
+  const DECAY = 0.9;              // 库内默认 decay：velocity 每帧 ×0.9
+  const GRAVITY = 3;              // 库内口径：gravity 默认 1 × 3 = 3（恒定）
+  const TOTAL_TICKS = 200;        // 库内默认 ticks：一片纸屑的寿命（帧）
+  const MAX_PARTS = 400;          // 全场总粒子上限：超限不再发射
   const W = cv.width, H = cv.height;
+  const END_AT = Date.now() + durationMs;
 
-  /* 一片纸屑：x 全宽随机；初始 y 落在视口上方 10% 以内（≈ -0.1H ~ 0）；
-     初速只有**向下**的落速（1.6~3.4 px/帧，慢），横向初速接近 0，
-     摆动靠 sway 正弦，不是从中心向外的放射速度。 */
-  const spawn = (p) => {
-    p.x = rnd(0, W);
-    p.y = rnd(-H * 0.1, 0);
-    p.vx = rnd(-0.2, 0.2);          // 几乎没有横向初速
-    p.vy = rnd(1.6, 3.4);           // 只向下、慢速
-    p.sway = rnd(0.3, 1.1);         // 左右摆动幅度（px/帧）
-    p.swayPhase = rnd(0, Math.PI * 2);
-    p.swaySpeed = rnd(0.008, 0.022);
-    p.w = rnd(5, 10); p.h = rnd(7, 14);
-    p.r = rnd(0, Math.PI * 2);
-    p.vr = rnd(-0.12, 0.12);        // 自转
-    p.round = Math.random() < 0.35; // 35% 圆片、其余矩形
-    p.color = COLORS[Math.floor(Math.random() * COLORS.length)];
-    return p;
+  /* 一片纸屑的初态：fetti.randomPhysics 的移植。
+     cannon: 0=左炮（angle 60°，origin x:0，向右上）、1=右炮（angle 120°，origin x:1，向左上） */
+  const spawnFetti = (cannon) => {
+    const radAngle = (cannon === 0 ? 60 : 120) * (Math.PI / 180);
+    const radSpread = SPREAD_DEG * (Math.PI / 180);
+    return {
+      x: (cannon === 0 ? 0 : 1) * W,   // origin.x 0 / 1 → 像素（origin.y 0.5 → 视口半高）
+      y: 0.5 * H,
+      wobble: Math.random() * 10,
+      wobbleSpeed: Math.min(0.11, Math.random() * 0.1 + 0.05),
+      velocity: (START_VELOCITY * 0.5) + (Math.random() * START_VELOCITY),
+      angle2D: -radAngle + ((0.5 * radSpread) - (Math.random() * radSpread)),
+      tiltAngle: (Math.random() * (0.75 - 0.25) + 0.25) * Math.PI,
+      color: COLORS[Math.floor(Math.random() * COLORS.length)],
+      tick: 0,
+      totalTicks: TOTAL_TICKS,
+      decay: DECAY,
+      random: Math.random() + 2,       // v1.6+ 口径（1.0 时代是 +5，统一按现行版）
+      tiltSin: 0,
+      tiltCos: 0,
+      wobbleX: 0,
+      wobbleY: 0,
+      gravity: GRAVITY,
+      scalar: 1
+    };
   };
-  /* 90~120 片（上限 ≤120）：足够密的雨，又不至于压垮低端机 */
-  const N = 90 + Math.floor(Math.random() * 31);
-  const parts = [];
-  for (let i = 0; i < N; i++) parts.push(spawn({}));
 
-  const g = 0.02;                                   // 极弱重力：全程近似匀速飘
-  const t0 = performance.now();
-  const tick = (now) => {
-    const el = now - t0;
-    if (el >= durationMs || !cv.isConnected) {      // 到点 / canvas 被移除：收场
+  /* 存量粒子池：礼炮期间每帧从两侧各补 2 片，直到 durationMs 到点或总粒子到上限 */
+  let parts = [];
+
+  /* 一帧的粒子推进 + 绘制：updateFetti 的移植（方片 = x/y 与 wobbleX/wobbleY
+     两个摆动点 + tilt 偏移构成的四边形，天然是带 tilt/rotation 的扁平纸片）。
+     返回 false 表示这片已经消亡（tick 用尽），调用方把它从池里剔除。 */
+  const updateFetti = (f) => {
+    f.x += Math.cos(f.angle2D) * f.velocity;
+    f.y += Math.sin(f.angle2D) * f.velocity + f.gravity;
+    f.velocity *= f.decay;
+    f.wobble += f.wobbleSpeed;
+    f.wobbleX = f.x + ((10 * f.scalar) * Math.cos(f.wobble));
+    f.wobbleY = f.y + ((10 * f.scalar) * Math.sin(f.wobble));
+    f.tiltAngle += 0.1;
+    f.tiltSin = Math.sin(f.tiltAngle);
+    f.tiltCos = Math.cos(f.tiltAngle);
+    f.random = Math.random() + 2;
+    const progress = (f.tick++) / f.totalTicks;
+    /* 出屏即移除（礼炮从边角往外打，飞出视口就没有画的意义了） */
+    if (f.tick >= f.totalTicks || f.x < -30 || f.x > W + 30 || f.y > H + 30 || f.y < -30) {
+      return false;
+    }
+    const x1 = f.x + (f.random * f.tiltCos);
+    const y1 = f.y + (f.random * f.tiltSin);
+    const x2 = f.wobbleX + (f.random * f.tiltCos);
+    const y2 = f.wobbleY + (f.random * f.tiltSin);
+    ctx.fillStyle = 'rgba(' + f.color.r + ', ' + f.color.g + ', ' + f.color.b + ', ' +
+      (1 - progress) + ')';
+    ctx.beginPath();
+    ctx.moveTo(Math.floor(f.x), Math.floor(f.y));
+    ctx.lineTo(Math.floor(f.wobbleX), Math.floor(y1));
+    ctx.lineTo(Math.floor(x2), Math.floor(y2));
+    ctx.lineTo(Math.floor(x1), Math.floor(f.wobbleY));
+    ctx.closePath();
+    ctx.fill();
+    return true;
+  };
+
+  const tick = () => {
+    if (Date.now() >= END_AT || !cv.isConnected) {   // 到点 / canvas 被移除：收场
       cv.remove();
       fireConfetti._raf = null;
       return;
     }
-    /* 最后 500ms 整体淡出，避免彩带凭空消失 */
-    const fade = el > durationMs - 500 ? Math.max(0, (durationMs - el) / 500) : 1;
     ctx.clearRect(0, 0, W, H);
-    for (const p of parts) {
-      p.vy += g;
-      p.y += p.vy;
-      p.swayPhase += p.swaySpeed;
-      p.x += p.vx + Math.sin(p.swayPhase) * p.sway;   // 左右轻摆
-      p.r += p.vr;
-      /* 落到底部：先渐隐（最后 15% 屏高），再回收到顶部继续下，保持「一直在飘」的雨感；
-         收场前 700ms 内不再回收，让雨自然落完 */
-      let a = 1;
-      if (p.y > H * 0.85) a = Math.max(0, (H + p.h - p.y) / (H * 0.15 + p.h));
-      if (p.y > H + p.h) {
-        if (el < durationMs - 700) { spawn(p); continue; }
-        continue;                                     // 收场阶段：落出屏就不再画
-      }
-      if (a <= 0) continue;
-      ctx.globalAlpha = fade * a;
-      ctx.save();
-      ctx.translate(p.x, p.y);
-      ctx.rotate(p.r);
-      ctx.fillStyle = p.color;
-      if (p.round) { ctx.beginPath(); ctx.arc(0, 0, p.w / 2, 0, Math.PI * 2); ctx.fill(); }
-      else ctx.fillRect(-p.w / 2, -p.h / 2, p.w, p.h);
-      ctx.restore();
+    /* 礼炮持续发射：每帧向左右两个炮位各发 2 片（总粒子超上限就先憋着） */
+    if (parts.length + 4 <= MAX_PARTS) {
+      parts.push(spawnFetti(0), spawnFetti(0), spawnFetti(1), spawnFetti(1));
     }
+    parts = parts.filter(updateFetti);
     fireConfetti._raf = requestAnimationFrame(tick);
   };
   fireConfetti._raf = requestAnimationFrame(tick);
@@ -5941,6 +6300,9 @@ async function bootRest() {
   /* 引导放最后：它依赖 site.settings / site.announcement，且必须让位给登录门。
      登录成功后 gateResolve 会 reload，二次进来时 localStorage 已记住版本就不弹了。 */
   maybeAnnounce();
+  /* 2026-10-15 任务三：公告弹窗（items 里 popup:true 的第一条）。
+     引导弹开了就让位，本次不弹（announceCtx 非空时 maybeAnnounceItemsPopup 直接返回）。 */
+  if (!announceCtx) maybeAnnounceItemsPopup();
 }
 
 /* 字段面板已随「严格按排行榜版式」移除：显示内容固定，后台级开关仍在后端生效。 */
