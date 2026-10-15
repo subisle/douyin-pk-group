@@ -24,6 +24,7 @@ import {
   type SendTarget,
 } from './api'
 import { isoLocal } from './lib/date'
+import Pager, { usePager } from './Pager'
 
 /** outbox 四态 → 徽标（配色沿用 styles.css 的 badge 系列） */
 const OUTBOX_STATUS: Record<SendOutboxRow['status'], { label: string; cls: string }> = {
@@ -635,6 +636,7 @@ export default function SendPage() {
                     disciplesOf={disciplesOf}
                     fullReady={full.length > 0}
                     onAddDisciples={addMasterWithDisciples}
+                    filtering={`${q}|${tab}`}
                   />
                 </>
               ) : (
@@ -716,8 +718,8 @@ export default function SendPage() {
                     onClick={() => setView({ kind: 'detail', id: m.id })}
                   >
                     <td className="hint">{fmtTime(m.createdAt)}</td>
-                    <td>
-                      {m.title || <span className="hint">（无标题）</span>}
+                    <td title={m.title || undefined}>
+                      <span className="cell-clip">{m.title || <span className="hint">（无标题）</span>}</span>
                       <div className="hint send-clamp">{m.content}</div>
                     </td>
                     <td className="hint">{imageText(m)}</td>
@@ -806,49 +808,60 @@ function TargetTable(props: {
   disciplesOf: (masterId: number) => SendTarget[]
   fullReady: boolean
   onAddDisciples: (master: SendTarget) => void
+  /** 客户端筛选口径（搜索词 + 圈人 Tab）：一变就回第 1 页 */
+  filtering: string
 }) {
-  const { hits, tab, isPicked, onToggle, expanded, onExpand, disciplesOf, fullReady, onAddDisciples } =
+  const { hits, tab, isPicked, onToggle, expanded, onExpand, disciplesOf, fullReady, onAddDisciples, filtering } =
     props
+  /* 客户端分页（2026-10-16 表格规范）：全量名单时这张表能有几百行。
+     勾选集合在父级（Map<personId>），切片只影响渲染，翻页不丢选中；
+     展开态是 personId，翻到别页时那一行不在切片里，自然不渲染、也不报错。 */
+  const pager = usePager(hits.length, filtering)
+  const rows = pager.slice(hits)
   if (hits.length === 0)
     return <div className="empty">没有匹配的主播（换个关键字，或清空搜索看全部）</div>
   return (
-    <div className="table-scroll" style={{ maxHeight: 420, overflow: 'auto' }}>
-      <table className="send-table">
-        <thead>
-          <tr>
-            <th>{tab === 'masters' ? '选为师傅' : '选'}</th>
-            <th>姓名</th>
-            <th>团别</th>
-            <th>师傅</th>
-            <th title="微信机器人私聊推送">wxbot</th>
-            <th title="展示端「我的」页弹窗">弹窗</th>
-            <th title="直系徒弟数">徒弟</th>
-            {tab === 'multi' && <th></th>}
-          </tr>
-        </thead>
-        <tbody>
-          {hits.map((t) => {
-            const disciples = disciplesOf(t.personId)
-            const isopen = expanded === t.personId
-            return (
-              <FragmentRow
-                key={t.personId}
-                t={t}
-                tab={tab}
-                picked={isPicked(t)}
-                onToggle={onToggle}
-                open={isopen}
-                onExpand={onExpand}
-                disciples={disciples}
-                fullReady={fullReady}
-                onAddDisciples={onAddDisciples}
-                isPicked={isPicked}
-              />
-            )
-          })}
-        </tbody>
-      </table>
-    </div>
+    <>
+      <div className="table-scroll" style={{ maxHeight: 420, overflow: 'auto' }}>
+        <table className="send-table">
+          <thead>
+            <tr>
+              <th>{tab === 'masters' ? '选为师傅' : '选'}</th>
+              <th>姓名</th>
+              <th>团别</th>
+              <th>师傅</th>
+              <th title="微信机器人私聊推送">wxbot</th>
+              <th title="展示端「我的」页弹窗">弹窗</th>
+              <th className="num" title="直系徒弟数">徒弟</th>
+              {tab === 'multi' && <th className="col-actions"></th>}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((t) => {
+              const disciples = disciplesOf(t.personId)
+              const isopen = expanded === t.personId
+              return (
+                <FragmentRow
+                  key={t.personId}
+                  t={t}
+                  tab={tab}
+                  picked={isPicked(t)}
+                  onToggle={onToggle}
+                  open={isopen}
+                  onExpand={onExpand}
+                  disciples={disciples}
+                  fullReady={fullReady}
+                  onAddDisciples={onAddDisciples}
+                  isPicked={isPicked}
+                />
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+      {/* 分页条放滚动容器外：不跟着表头一起被滚走 */}
+      <Pager {...pager} />
+    </>
   )
 }
 
@@ -879,25 +892,31 @@ function FragmentRow(props: {
         <td onClick={(e) => e.stopPropagation()}>
           <input type="checkbox" checked={picked} onChange={() => onToggle(t)} />
         </td>
-        <td>
-          <span style={{ fontWeight: 600 }}>{t.name}</span>
-          {canExpand && <span className="hint" style={{ marginLeft: 6 }}>{open ? '▾' : '▸'}</span>}
+        <td title={t.name}>
+          <span style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+            <span className="cell-clip" style={{ fontWeight: 600 }}>
+              {t.name}
+            </span>
+            {canExpand && <span className="hint">{open ? '▾' : '▸'}</span>}
+          </span>
         </td>
         <td>
           <span className={`badge ${t.team === 'female' ? 'b-female' : 'b-male'}`}>
             {teamLabel(t.team)}
           </span>
         </td>
-        <td className="hint">{t.masterName || '—'}</td>
+        <td className="hint" title={t.masterName || undefined}>
+          <span className="cell-clip">{t.masterName || '—'}</span>
+        </td>
         <td>
           <Mark ok={t.hasWx} tip={t.hasWx ? '已绑定微信机器人，可私聊推送' : '未绑定微信机器人，发送时该渠道记跳过'} />
         </td>
         <td>
           <Mark ok={t.hasPopup} tip={t.hasPopup ? '已开通「我的」页账号，可弹窗' : '未开通「我的」页账号，发送时该渠道记跳过'} />
         </td>
-        <td className="hint">{t.discipleCount || '—'}</td>
+        <td className="hint num">{t.discipleCount || '—'}</td>
         {tab === 'multi' && (
-          <td onClick={(e) => e.stopPropagation()}>
+          <td className="row-actions" onClick={(e) => e.stopPropagation()}>
             {(t.discipleCount > 0 || disciples.length > 0) && (
               <button
                 title="把该师傅本人 + 全部直系徒弟并入下方选择"
@@ -967,6 +986,11 @@ function CountBadges({ counts }: { counts?: SendMessage['counts'] }) {
 function DetailCard({ id, onBack }: { id: number; onBack: () => void }) {
   const [data, setData] = useState<SendMessageDetail | null>(null)
   const [err, setErr] = useState('')
+
+  /* 收件人明细一次最多 500 行（批量圈人的展开上限），同样客户端分页。
+     该表没有客户端筛选 → resetKey 传空串（不因 3s 轮询刷新而跳页）。 */
+  const outbox = data?.outbox ?? []
+  const pager = usePager(outbox.length, '')
 
   useEffect(() => {
     let alive = true
@@ -1038,16 +1062,20 @@ function DetailCard({ id, onBack }: { id: number; onBack: () => void }) {
                 </tr>
               </thead>
               <tbody>
-                {(data?.outbox ?? []).map((r) => (
+                {pager.slice(outbox).map((r) => (
                   <tr key={r.id}>
-                    <td style={{ fontWeight: 600 }}>{r.recipientName}</td>
+                    <td style={{ fontWeight: 600 }} title={r.recipientName}>
+                      <span className="cell-clip">{r.recipientName}</span>
+                    </td>
                     <td className="hint">{CHANNEL_LABEL[r.channel] ?? r.channel}</td>
                     <td>
                       <span className={OUTBOX_STATUS[r.status]?.cls ?? 'badge'}>
                         {OUTBOX_STATUS[r.status]?.label ?? r.status}
                       </span>
                     </td>
-                    <td className="hint">{r.error || '—'}</td>
+                    <td className="hint" title={r.error || undefined}>
+                      <span className="cell-clip">{r.error || '—'}</span>
+                    </td>
                     <td className="hint">{fmtTime(r.sentAt)}</td>
                     <td className="hint">
                       {r.channel === 'popup'
@@ -1060,9 +1088,9 @@ function DetailCard({ id, onBack }: { id: number; onBack: () => void }) {
                     </td>
                   </tr>
                 ))}
-                {(data?.outbox ?? []).length === 0 && (
+                {outbox.length === 0 && (
                   <tr>
-                    <td colSpan={6} className="hint">
+                    <td colSpan={6} className="hint empty-cell">
                       还没有 outbox 记录（worker 尚未展开收件人）
                     </td>
                   </tr>
@@ -1070,6 +1098,7 @@ function DetailCard({ id, onBack }: { id: number; onBack: () => void }) {
               </tbody>
             </table>
           </div>
+          <Pager {...pager} />
         </>
       )}
     </section>
@@ -1085,6 +1114,9 @@ const SEND_CSS = `
 .send-tabs button.on { background: #fff; color: var(--brand); font-weight: 600; box-shadow: var(--shadow-card); }
 
 .send-table th, .send-table td { padding: 6px 8px; text-align: left; white-space: normal; }
+/* 数字列（徒弟数）：全局 td.num 的右对齐与上面的 .send-table td 同权重、被后者压成
+   左对齐，这里按表格规范补回右对齐 + 等宽数字（不改全局 styles.css） */
+.send-table td.num, .send-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .send-row-link { cursor: pointer; }
 .send-row-link:hover td { background: var(--brand-soft); }
 .send-clamp { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

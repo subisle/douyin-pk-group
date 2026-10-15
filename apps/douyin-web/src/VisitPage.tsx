@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api, ApiError } from './api'
+import Pager, { usePager } from './Pager'
 import { useAutoRefresh } from './useAutoRefresh'
 
 /* 访客日志（2026-10-10）：展示端只对河南 / 安徽 / 江苏开放，这里是所有访问 / 登录记录。
@@ -94,6 +95,10 @@ export default function VisitPage() {
   const [wlBusy, setWlBusy] = useState(false)
   const [wlError, setWlError] = useState('')
 
+  /* 客户端分页（2026-10-16 表格规范）：接口一次给 300 条，页面切片渲染。
+     第二参传筛选条件组合串 —— 「只看拦截」或搜索词一变就回第 1 页。 */
+  const pager = usePager(items.length, `${onlyBlocked ? 'blocked' : 'all'}|${q}`)
+
   const load = useCallback(() => {
     const params = new URLSearchParams({ limit: '300' })
     if (onlyBlocked) params.set('blocked', '1')
@@ -183,27 +188,27 @@ export default function VisitPage() {
         <div className="cards cards-kpi">
           <div className="card kpi">
             <span className="hint">今日访问</span>
-            <b>{stats.today}</b>
+            <b className="num">{stats.today}</b>
             <span className="hint">累计 {stats.all} 条</span>
           </div>
           <div className="card kpi k-violet">
             <span className="hint">今日独立 IP</span>
-            <b>{stats.todayUniq}</b>
+            <b className="num">{stats.todayUniq}</b>
             <span className="hint">按 IP 去重</span>
           </div>
           <div className="card kpi k-good">
             <span className="hint">今日放行</span>
-            <b>{stats.todayAllowed}</b>
+            <b className="num">{stats.todayAllowed}</b>
             <span className="hint">白名单 / 地区</span>
           </div>
           <div className="card kpi k-warn">
             <span className="hint">今日拦截</span>
-            <b>{stats.todayBlocked}</b>
+            <b className="num">{stats.todayBlocked}</b>
             <span className="hint">不在授权范围</span>
           </div>
           <div className="card kpi">
             <span className="hint">今日登录</span>
-            <b>{stats.todayLogins}</b>
+            <b className="num">{stats.todayLogins}</b>
             <span className="hint">含失败尝试</span>
           </div>
         </div>
@@ -290,16 +295,20 @@ export default function VisitPage() {
                 <th>IP</th>
                 <th>备注</th>
                 <th>添加时间</th>
-                <th></th>
+                <th className="col-actions"></th>
               </tr>
             </thead>
             <tbody>
               {allowlist.map((a) => (
                 <tr key={a.id}>
-                  <td>{a.ip}</td>
-                  <td>{a.note || '—'}</td>
+                  <td title={a.ip}>
+                    <span className="cell-clip">{a.ip}</span>
+                  </td>
+                  <td title={a.note || undefined}>
+                    <span className="cell-clip">{a.note || '—'}</span>
+                  </td>
                   <td>{a.createdAt}</td>
-                  <td>
+                  <td className="row-actions">
                     <button className="ghost" disabled={wlBusy} onClick={() => removeAllowlist(a.id)}>
                       删除
                     </button>
@@ -389,57 +398,63 @@ export default function VisitPage() {
             {onlyBlocked || q ? '没有符合条件的记录。' : '还没有访问记录。'}
           </p>
         ) : (
-          <div className="table-scroll">
-            <table>
-              <thead>
-                <tr>
-                  <th>时间</th>
-                <th>类型</th>
-                <th>IP</th>
-                <th>归属地</th>
-                <th>运营商</th>
-                <th>结果</th>
-                <th>账号</th>
-                <th>团别</th>
-              </tr>
-            </thead>
-            <tbody>
-              {items.map((v) => (
-                <tr key={v.id}>
-                  <td>{v.createdAt}</td>
-                  <td>{KIND_LABEL[v.kind] ?? v.kind}</td>
-                  <td
-                    title={v.ip ? '点击查询该 IP' : undefined}
-                    style={{ cursor: v.ip ? 'pointer' : undefined }}
-                    onClick={() => {
-                      if (!v.ip) return
-                      setIpDraft(v.ip)
-                      lookupIp(v.ip)
-                    }}
-                  >
-                    {v.ip || '—'}
-                  </td>
-                  <td title={v.source ? `来源：${v.source}` : undefined}>{place(v)}</td>
-                  <td>{v.isp || '—'}</td>
-                  <td>
-                    {v.allowed ? (
-                      <span className="badge b-active">放行</span>
-                    ) : (
-                      <span className="badge b-left">拦截</span>
-                    )}
-                    {v.kind === 'login' && (
-                      <span className={v.loginOk ? 'badge b-active' : 'badge b-paused'}>
-                        {v.loginOk ? '成功' : '失败'}
-                      </span>
-                    )}
-                  </td>
-                  <td>{v.account || '—'}</td>
-                  <td>{TEAM_LABEL[v.team] ?? (v.team || '—')}</td>
-                </tr>
-              ))}
-              </tbody>
-            </table>
-          </div>
+          <>
+            <div className="table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th>时间</th>
+                    <th>类型</th>
+                    <th>IP</th>
+                    <th>归属地</th>
+                    <th>运营商</th>
+                    <th>结果</th>
+                    <th>账号</th>
+                    <th>团别</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pager.slice(items).map((v) => (
+                    <tr key={v.id}>
+                      <td>{v.createdAt}</td>
+                      <td>{KIND_LABEL[v.kind] ?? v.kind}</td>
+                      <td
+                        title={v.ip ? `${v.ip} · 点击查询该 IP` : undefined}
+                        style={{ cursor: v.ip ? 'pointer' : undefined }}
+                        onClick={() => {
+                          if (!v.ip) return
+                          setIpDraft(v.ip)
+                          lookupIp(v.ip)
+                        }}
+                      >
+                        <span className="cell-clip">{v.ip || '—'}</span>
+                      </td>
+                      <td title={v.source ? `来源：${v.source}` : undefined}>{place(v)}</td>
+                      <td>{v.isp || '—'}</td>
+                      <td>
+                        {v.allowed ? (
+                          <span className="badge b-active">放行</span>
+                        ) : (
+                          <span className="badge b-left">拦截</span>
+                        )}
+                        {v.kind === 'login' && (
+                          <span className={v.loginOk ? 'badge b-active' : 'badge b-paused'}>
+                            {v.loginOk ? '成功' : '失败'}
+                          </span>
+                        )}
+                      </td>
+                      <td title={v.account || undefined}>
+                        <span className="cell-clip">{v.account || '—'}</span>
+                      </td>
+                      <td>{TEAM_LABEL[v.team] ?? (v.team || '—')}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {/* 分页条放滚动容器外：不跟着表头一起被滚走 */}
+            <Pager {...pager} />
+          </>
         )}
       </div>
     </div>

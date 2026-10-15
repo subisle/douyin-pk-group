@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { api } from './api'
+import Pager, { usePager } from './Pager'
 import { useAutoRefresh } from './useAutoRefresh'
 
 /** 抖音号单元格：douyinNos 按 ' / ' 拆开竖排，第一个标「主号」；douyinCount 缺失时退化用号数判断。 */
@@ -25,7 +26,8 @@ function renderDouyinCell(s: any) {
   if (numCount === 0) {
     return (
       <td className="hint" title="名下已有账号，但还没登记抖音号（可右键 → 查看多抖音号 补充）">
-        未登记抖音号{s.anchorId ? `（采集号 ${s.anchorId}）` : ''}
+        {/* 长标识文本单行省略（完整内容在 title），避免整行被两行文本撑高 */}
+        <span className="cell-clip">未登记抖音号{s.anchorId ? `（采集号 ${s.anchorId}）` : ''}</span>
       </td>
     )
   }
@@ -118,6 +120,41 @@ function renderWxbotCell(s: any) {
 }
 
 
+/** 危险操作二次确认（2026-10-16）：window.confirm 的按钮由浏览器写死成「确定 / 取消」，
+    既写不下「删的是谁、删完会怎样」，也做不到 DESIGN §4.3 的「二次确认不用同一个确定」。
+    改成页内确认弹窗：标题写对象（名字 + 编号）、正文写后果、按钮写具体动作。
+    合并走自己的弹窗（mergePop，要先选人），这里只管「对象已经在手上」的几类。
+
+    弹窗按钮规范（2026-10-16 Lead 定，起因：按位置猜选择器把 danger 当成了取消）：
+    ① 危险按钮永远 `className="danger"`，文案必须写「动作 + 对象」（如「删除「三宝」」），
+       禁止用「确定 / 确认」这类不带对象的词；
+    ② 取消按钮永远排在**最后一位**，并给 `className="ghost"`；
+    ③ 正文必须给出对象（名字 + 编号）与后果（软删 / 数据保留 / 踢下线等）。
+    自动化验收只准用 `.mask .master-pop .row button.ghost` 点取消，禁止用「第一个按钮」定位。 */
+type DangerConfirm =
+  | { kind: 'remove'; personId: number; name: string }
+  | { kind: 'batchRemove'; ids: number[]; names: string[] }
+  | { kind: 'unbind'; personId: number; personName: string; accountId: number; accountLabel: string }
+  | { kind: 'removeMyAccount'; name: string }
+
+/** 账号在确认文案里的叫法：优先抖音号，没登记抖音号就用采集 ID，再没有就用行号 ——
+    台账里有「只有采集号、没登记抖音号」的行，直接拼 a.douyinNo 会写出「抖音号 」这种空对象。 */
+function accountLabel(a: any) {
+  const no = String(a?.douyinNo ?? '').trim()
+  if (no) return `抖音号 ${no}`
+  const anchor = String(a?.anchorId ?? '').trim()
+  if (anchor) return `采集号 ${anchor}`
+  return `账号 #${a?.id ?? '?'}`
+}
+
+/** 批量删除的对象摘要：前 3 个名字 + 「等」+ 总数（勾选跨分页保留，items 是全量名单）。
+    勾选的人都不在当前筛选结果里时退回「共 N 人」，不让弹窗出现空对象。 */
+function batchTargetText(names: string[], total: number) {
+  const head = names.slice(0, 3).join('、')
+  if (!head) return `共 ${total} 人（不在当前筛选结果里）`
+  return `${head}${total > 3 ? ' 等' : ''}（共 ${total} 人）`
+}
+
 export default function StreamerPage() {
   const [items, setItems] = useState<any[]>([])
   const [selected, setSelected] = useState<Set<number>>(new Set())
@@ -131,6 +168,8 @@ export default function StreamerPage() {
   const [douyinNo, setDouyinNo] = useState('')
   const [newTeam, setNewTeam] = useState('male')
   const [error, setError] = useState('')
+  // 分页（2026-10-16）：筛选条件（q/team）变化时自动回第 1 页
+  const pager = usePager(items.length, `${q}|${team}`)
   const [msg, setMsg] = useState('')
   const [masterEdit, setMasterEdit] = useState<{ id: number; name: string; masterId: number | null } | null>(null)
   const [mq, setMq] = useState('')
@@ -143,8 +182,19 @@ export default function StreamerPage() {
   /** 合并弹窗：把「别人」并进 target（保留 target，账号与历史数据都归到 TA 名下） */
   const [mergePop, setMergePop] = useState<{ targetId: number; targetName: string; sourceId: number | null; q: string } | null>(null)
   const [merging, setMerging] = useState(false)
+  /** 危险操作确认弹窗的待确认对象（删除 / 批量删除 / 解绑 / 删账号）；null = 没有待确认动作。
+      非空时才会渲染确认弹窗，confirmBusy = 正在提交，期间按钮禁用、点遮罩不关闭。 */
+  const [confirmPop, setConfirmPop] = useState<DangerConfirm | null>(null)
+  const [confirmBusy, setConfirmBusy] = useState(false)
   /** 「我的」页面账号弹窗（右键主播 → 设置手机号/密码；主播用 姓名+密码 登录） */
-  const [myAccPop, setMyAccPop] = useState<{ name: string; phone: string; pass: string; exists: boolean } | null>(null)
+  const [myAccPop, setMyAccPop] = useState<{
+    name: string
+    phone: string
+    pass: string
+    exists: boolean
+    viewTeam: string
+    isAdmin: boolean
+  } | null>(null)
   /** 批量开号弹窗：给勾选的主播批量建展示端登录账号（result 非空 = 展示结果表） */
   const [batchAcc, setBatchAcc] = useState<{ defaultPass: string; forceReset: boolean; result: any | null } | null>(null)
   const [batchAccBusy, setBatchAccBusy] = useState(false)
@@ -176,6 +226,10 @@ export default function StreamerPage() {
 
   // 别名增删 / 别处改了台账时自动刷新
   useAutoRefresh(load, ['roster'])
+
+  /** 主播名字：列表里找不到时退回 #id —— 确认文案里不允许出现空白对象 */
+  const nameOf = (personId: number) =>
+    items.find((i) => i.personId === personId)?.name ?? `#${personId}`
 
   /* 对外显隐开关：勾上 = 显示；取消 = 隐藏（hide_in_daily_report=1，榜单接口不下发此人） */
   async function toggleVisible(s: any) {
@@ -242,6 +296,9 @@ export default function StreamerPage() {
         phone: d.found ? d.phone ?? '' : '',
         pass: '',
         exists: !!d.found,
+        // 可看团别（迁移 024）：'' 沿用旧口径（绑了主播按主播所在团）
+        viewTeam: d.found ? d.viewTeam ?? '' : '',
+        isAdmin: !!d.isAdmin,
       })
     } catch (e: any) {
       setError(e.message ?? String(e))
@@ -261,6 +318,14 @@ export default function StreamerPage() {
           ...(myAccPop.pass.trim() ? { pass: myAccPop.pass.trim() } : {}),
         }),
       })
+      /* 可看团别走**专用端点**：上面那个 POST 不传 pass 时会自动生成新密码
+         （手机号后四位），把 viewTeam 塞进去会顺手把密码重置掉。 */
+      if (myAccPop.exists) {
+        await api(`/api/admin/my-accounts/${encodeURIComponent(myAccPop.name)}/view-team`, {
+          method: 'PUT',
+          body: JSON.stringify({ viewTeam: myAccPop.viewTeam }),
+        })
+      }
       setMsg(`已保存「${myAccPop.name}」的我的页面账号`)
       setMyAccPop(null)
     } catch (e: any) {
@@ -268,16 +333,24 @@ export default function StreamerPage() {
     }
   }
 
-  async function removeMyAccount() {
+  /** 删除「我的」页面登录账号：先弹确认（对象 = 哪个账号、后果 = 登录失效 + 踢下线）。
+      以前这个 danger 按钮点了就直接删，没有任何二次确认。 */
+  function askRemoveMyAccount() {
     if (!myAccPop || !myAccPop.exists) return
     setError('')
     setMsg('')
+    setConfirmPop({ kind: 'removeMyAccount', name: myAccPop.name })
+  }
+
+  async function doRemoveMyAccount(name: string) {
     try {
-      await api('/api/admin/my-accounts/' + encodeURIComponent(myAccPop.name), { method: 'DELETE' })
-      setMsg(`已删除「${myAccPop.name}」的我的页面账号`)
+      await api('/api/admin/my-accounts/' + encodeURIComponent(name), { method: 'DELETE' })
+      setMsg(`已删除「${name}」的我的页面登录账号`)
       setMyAccPop(null)
+      return true
     } catch (e: any) {
       setError(e.message ?? String(e))
+      return false
     }
   }
 
@@ -379,21 +452,33 @@ export default function StreamerPage() {
     }
   }
 
-  /** 解绑一个抖音号（主号解绑后自动把剩下的第一个提为主号） */
-  async function unbindAccount(accountId: number, douyinNo: string) {
+  /** 解绑一个抖音号（主号解绑后自动把剩下的第一个提为主号）。
+      先弹页内确认：对象 = 谁名下的哪个号，后果 = 之后的音浪不再并入。 */
+  function askUnbind(a: any) {
     if (!detail) return
-    if (!confirm(`确认解绑「${detail.name}」的抖音号 ${douyinNo}？该号之后的音浪不再并入 TA 名下。`))
-      return
     setError('')
+    setMsg('')
+    setConfirmPop({
+      kind: 'unbind',
+      personId: detail.personId,
+      personName: detail.name,
+      accountId: a.id,
+      accountLabel: accountLabel(a),
+    })
+  }
+
+  async function doUnbind(personId: number, accountId: number) {
     try {
-      await api(`/api/admin/streamers/${detail.personId}/accounts/${accountId}`, {
+      await api(`/api/admin/streamers/${personId}/accounts/${accountId}`, {
         method: 'DELETE',
       })
-      const d = await api(`/api/admin/streamers/${detail.personId}/detail`)
+      const d = await api(`/api/admin/streamers/${personId}/detail`)
       setDetail(d)
       load()
+      return true
     } catch (e: any) {
       setError(e.message ?? String(e))
+      return false
     }
   }
 
@@ -418,20 +503,29 @@ export default function StreamerPage() {
     }
   }
 
-  async function batchDelete() {
+  /** 批量删除：先弹确认，写清条数 + 前 3 个名字（对象来自勾选集合，跨分页保留） */
+  function askBatchDelete() {
     if (selected.size === 0) return
-    if (!confirm(`确认批量删除选中的 ${selected.size} 个主播？（软删）`)) return
     setError('')
+    setMsg('')
+    const ids = [...selected]
+    const names = items.filter((i) => selected.has(i.personId)).map((i) => String(i.name ?? ''))
+    setConfirmPop({ kind: 'batchRemove', ids, names })
+  }
+
+  async function doBatchDelete(ids: number[]) {
     try {
       await api('/api/admin/streamers/batch-delete', {
         method: 'POST',
-        body: JSON.stringify({ ids: [...selected] }),
+        body: JSON.stringify({ ids }),
       })
       setSelected(new Set())
       load()
       loadDupes()
+      return true
     } catch (e: any) {
       setError(e.message ?? String(e))
+      return false
     }
   }
 
@@ -477,14 +571,82 @@ export default function StreamerPage() {
     )
   }
 
-  async function remove(personId: number, streamerName: string) {
-    if (!confirm(`确认删除主播「${streamerName}」？（软删，历史数据保留）`)) return
+  /** 单个删除 = 软删（后端 deleted_at，历史数据保留）。
+      这里只负责开确认弹窗：对象写「名字 + 编号 #personId」，后果写「台账不再显示、历史数据保留」 */
+  function askRemove(personId: number, streamerName: string) {
     setError('')
+    setMsg('')
+    setConfirmPop({ kind: 'remove', personId, name: streamerName })
+  }
+
+  /** 确认后真正执行：接口与刷新顺序不变（DELETE → load） */
+  async function doRemove(personId: number) {
     try {
       await api(`/api/admin/streamers/${personId}`, { method: 'DELETE' })
       load()
+      return true
     } catch (e: any) {
       setError(e.message ?? String(e))
+      return false
+    }
+  }
+
+  /** 确认弹窗的文案：标题写对象、正文写后果、按钮写动作（按 kind 现算，不用同一个「确定」） */
+  function confirmCopy(c: DangerConfirm): { title: string; body: string; label: string } {
+    switch (c.kind) {
+      case 'remove':
+        return {
+          title: `删除主播「${c.name}」（编号 #${c.personId}）`,
+          body:
+            '软删：确认后 TA 从主播台账里消失（不再出现在名单里），已入库的历史数据' +
+            '（音浪、账号、别名）保留在库里，不做物理删除。',
+          label: `删除「${c.name}」`,
+        }
+      case 'batchRemove':
+        return {
+          title: `批量删除 ${c.ids.length} 个主播`,
+          body:
+            `对象：${batchTargetText(c.names, c.ids.length)}。` +
+            '软删：确认后这些人从主播台账里消失，已入库的历史数据保留在库里，不做物理删除。',
+          label: `删除这 ${c.ids.length} 个主播`,
+        }
+      case 'unbind':
+        return {
+          title: `解绑「${c.personName}」（编号 #${c.personId}）的 ${c.accountLabel}`,
+          body:
+            `对象：「${c.personName}」（编号 #${c.personId}）名下的 ${c.accountLabel}。` +
+            '确认后该号之后的音浪不再并入 TA 名下（已入库的历史数据保留）；如果解绑的是主号，' +
+            '剩下的第一个号会自动提为主号。',
+          label: `解绑 ${c.accountLabel}`,
+        }
+      case 'removeMyAccount':
+        return {
+          title: `删除「${c.name}」的展示端登录账号`,
+          body:
+            `对象：姓名「${c.name}」的「我的」页面登录账号。` +
+            '确认后该账号立即失效（已经登录的会被踢下线），不能再用「姓名 + 密码」登录；' +
+            '主播台账与音浪数据不受影响。',
+          label: `删除「${c.name}」的登录账号`,
+        }
+    }
+  }
+
+  /** 确认弹窗里点主按钮：按对象类型调对应的执行函数；成功才关闭弹窗，
+      失败保留弹窗并把原因（error）显示在弹窗里，运营可以直接再点一次重试。 */
+  async function runConfirm() {
+    const c = confirmPop
+    if (!c || confirmBusy) return
+    setConfirmBusy(true)
+    setError('')
+    try {
+      let ok = false
+      if (c.kind === 'remove') ok = await doRemove(c.personId)
+      else if (c.kind === 'batchRemove') ok = await doBatchDelete(c.ids)
+      else if (c.kind === 'unbind') ok = await doUnbind(c.personId, c.accountId)
+      else ok = await doRemoveMyAccount(c.name)
+      if (ok) setConfirmPop(null)
+    } finally {
+      setConfirmBusy(false)
     }
   }
 
@@ -520,6 +682,9 @@ export default function StreamerPage() {
       setSavingMaster(false)
     }
   }
+
+  /** 待确认动作的文案（null = 没弹窗；渲染时直接取，不在 state 里存 JSX） */
+  const confirmCopyView = confirmPop ? confirmCopy(confirmPop) : null
 
   return (
     <div className="page">
@@ -567,7 +732,7 @@ export default function StreamerPage() {
           </select>
         </div>
         <div className="row">
-          <button disabled={selected.size === 0} onClick={batchDelete}>
+          <button disabled={selected.size === 0} onClick={askBatchDelete}>
             批量删除（已选 {selected.size}）
           </button>
           <button
@@ -587,6 +752,7 @@ export default function StreamerPage() {
         {items.length === 0 ? (
           <div className="empty">还没有主播，先在上面建档或导入数据</div>
         ) : (
+          <>
           <div className="table-scroll">
             <table style={{ minWidth: 1000 }}>
               <thead>
@@ -599,11 +765,11 @@ export default function StreamerPage() {
                   <th>状态</th>
                   <th title="是否出现在对外展示的每日报告/月榜/年榜里">对外</th>
                   <th>别名</th>
-                  <th></th>
+                  <th className="col-actions"></th>
               </tr>
             </thead>
             <tbody>
-              {items.map((s) => (
+              {pager.slice(items).map((s) => (
                 <tr
                   key={s.personId}
                   style={{ opacity: s.status === 'left' ? 0.55 : undefined }}
@@ -697,16 +863,21 @@ export default function StreamerPage() {
                     />
                   </td>
                   <td className="hint">{s.aliases?.join('、') || '—'}</td>
-                  <td>
+                  {/* 操作列（2026-10-16 规范）：勾选 + 账号 + 删除一行内联、靠右、不换行 */}
+                  <td className="row-actions">
                     <input
                       type="checkbox"
                       checked={selected.has(s.personId)}
                       onChange={() => toggleSel(s.personId)}
                     />
-                    <button style={{ marginLeft: 6 }} onClick={() => showDetail(s.personId)}>
+                    <button onClick={() => showDetail(s.personId)}>
                       账号
                     </button>
-                    <button className="danger" onClick={() => remove(s.personId, s.name)}>
+                    <button
+                      className="danger"
+                      title={`删除「${s.name}」（编号 #${s.personId}）：软删，台账不再显示，历史数据保留`}
+                      onClick={() => askRemove(s.personId, s.name)}
+                    >
                       删除
                     </button>
                   </td>
@@ -715,6 +886,8 @@ export default function StreamerPage() {
               </tbody>
             </table>
           </div>
+          <Pager {...pager} />
+          </>
         )}
       </section>
 
@@ -737,7 +910,7 @@ export default function StreamerPage() {
                 <th>采集 ID</th>
                 <th title="导入时 daily_metric.anchor_id 回填用这个号">主号</th>
                 <th>状态</th>
-                <th></th>
+                <th className="col-actions"></th>
               </tr>
             </thead>
             <tbody>
@@ -762,7 +935,8 @@ export default function StreamerPage() {
                   <td>
                     <button
                       className="danger"
-                      onClick={() => unbindAccount(a.id, a.douyinNo)}
+                      title={`解绑「${detail.name}」（编号 #${detail.personId}）的 ${accountLabel(a)}`}
+                      onClick={() => askUnbind(a)}
                     >
                       解绑
                     </button>
@@ -912,11 +1086,11 @@ export default function StreamerPage() {
           <button
             className="danger"
             onClick={() => {
-              remove(ctxMenu.person.personId, ctxMenu.person.name)
+              askRemove(ctxMenu.person.personId, ctxMenu.person.name)
               setCtxMenu(null)
             }}
           >
-            🗑 删除（软删）
+            🗑 删除「{ctxMenu.person.name}」（软删）
           </button>
         </div>
       )}
@@ -1001,13 +1175,32 @@ export default function StreamerPage() {
               placeholder="4~20 位数字"
               onChange={(e) => setMyAccPop({ ...myAccPop, pass: e.target.value })}
             />
+            {/* 可看团别（2026-10-15）：只对**管理员观看账号**开放 —— 普通主播账号
+                按绑定主播所在团走（'' 沿用旧口径），改了反而会和台账不一致。 */}
+            {myAccPop.isAdmin && (
+              <>
+                <label className="hint" style={{ display: 'block', marginTop: 8 }}>可看团别</label>
+                <select
+                  value={myAccPop.viewTeam}
+                  onChange={(e) => setMyAccPop({ ...myAccPop, viewTeam: e.target.value })}
+                >
+                  <option value="any">全团（男团女团都能看，且可自己切换）</option>
+                  <option value="male">只看男团</option>
+                  <option value="female">只看女团</option>
+                  <option value="">沿用旧口径（按绑定主播所在团）</option>
+                </select>
+                <div className="hint" style={{ marginTop: 6 }}>
+                  改完会立即吊销该账号的登录态（旧登录还挂着原来的团别）。
+                </div>
+              </>
+            )}
             <div className="hint" style={{ marginTop: 8 }}>
               保存后主播在展示端「我的」页用 姓名 + 密码 登录看自己的数据；没有注册，账号只在这里设置。
               {myAccPop.exists ? ' 该主播已有账号：新密码留空则保持原密码，填写后覆盖更新。' : ''}
             </div>
             <div className="row" style={{ marginTop: 10 }}>
               {myAccPop.exists && (
-                <button className="danger" onClick={removeMyAccount}>
+                <button className="danger" onClick={askRemoveMyAccount}>
                   删除账号
                 </button>
               )}
@@ -1020,20 +1213,73 @@ export default function StreamerPage() {
         </div>
       )}
 
-      {/* 合并弹窗：选一个「被并入」的主播 */}
-      {mergePop && (
-        <div className="mask" onClick={() => !merging && setMergePop(null)}>
+      {/* 危险操作确认弹窗（删除 / 批量删除 / 解绑 / 删登录账号）：
+          标题 = 对象（名字 + 编号），正文 = 后果，主按钮 = 具体动作（不是「确定」）。
+          失败时不关弹窗，把 error 显示在弹窗里，运营可以再点一次重试或取消。 */}
+      {confirmPop && confirmCopyView && (
+        <div className="mask" onClick={() => !confirmBusy && setConfirmPop(null)}>
           <div className="master-pop" onClick={(e) => e.stopPropagation()}>
             <h2 style={{ marginBottom: 0 }}>
-              合并到「{mergePop.targetName}」
+              {confirmCopyView.title}
+              <button
+                className="linkish"
+                style={{ float: 'right' }}
+                disabled={confirmBusy}
+                onClick={() => setConfirmPop(null)}
+              >
+                关闭
+              </button>
+            </h2>
+            <p className="hint" style={{ margin: 0 }}>
+              {confirmCopyView.body}
+            </p>
+            {error && <div className="alert bad">{error}</div>}
+            <div className="row" style={{ marginTop: 10 }}>
+              {/* 危险按钮（danger）+ 取消（ghost，固定最后一位）：见文件上方「弹窗按钮规范」 */}
+              <button className="danger" disabled={confirmBusy} onClick={runConfirm}>
+                {confirmBusy ? '处理中…' : confirmCopyView.label}
+              </button>
+              <button className="ghost" disabled={confirmBusy} onClick={() => setConfirmPop(null)}>
+                取消
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 合并弹窗：选一个「被并入」的主播。标题直接写「把 A 并入 B」，
+          正文按后端既有语义交代账号 / 音浪 / 别名怎么处理（不写「确定要」这类空话）。 */}
+      {mergePop && (
+        <div className="mask" onClick={() => !merging && setMergePop(null)}>
+          {/* 内联 maxHeight + 内部滚动：候选人列表本来就长（100+ 行 × .master-list 320px），
+              加上「合并后怎么算」三条说明后，矮视口（实测 633px 高）会把底部主按钮/取消顶出屏幕。
+              .mask 是 fixed 且不可滚动，所以让弹窗自己在视口内滚（不新增 CSS，不改全局 .master-pop）。 */}
+          <div
+            className="master-pop"
+            style={{ maxHeight: 'calc(100vh - 96px)', overflowY: 'auto' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 style={{ marginBottom: 0 }}>
+              {mergePop.sourceId
+                ? `把「${nameOf(mergePop.sourceId)}」并入「${mergePop.targetName}」（编号 #${mergePop.targetId}）`
+                : `合并到「${mergePop.targetName}」（编号 #${mergePop.targetId}）`}
               <button className="linkish" style={{ float: 'right' }} onClick={() => setMergePop(null)}>
                 关闭
               </button>
             </h2>
             <p className="hint">
               一个人有两个 / 三个抖音号、被建档成多条记录时：在这里选出<b>多余的记录</b>，
-              它的账号、别名和全部历史数据会并进「{mergePop.targetName}」，然后被软删。
+              它会并入「{mergePop.targetName}」，然后被软删（台账不再显示，数据保留在库里）。
             </p>
+            {/* 合并后到底怎么算（2026-10-16 按后端 merge_person 的既有语义写，没有新增规则）：
+                账号改绑（同 anchor 去重）、同日指标求和并入（音浪/时长求和、累计取较大值）、
+                其余日期整条改绑、my_accounts 一人一号时 source 账号不动留给人工处理。 */}
+            <div className="hint" style={{ marginTop: -2 }}>
+              合并后：
+              <br />· 账号：多余记录名下的抖音号改绑到「{mergePop.targetName}」名下；TA 已经绑过的同一个号不重复绑。
+              <br />· 音浪：同一天两边都有数据时，当天音浪与时长相加（累计取较大值）；其余日期整条转到 TA 名下。
+              <br />· 若「{mergePop.targetName}」已开过展示端登录账号（我的页面），多余记录的登录账号不会自动改绑，事后到「我的页面账号」里人工处理。
+            </div>
             <input
               autoFocus
               placeholder="搜索要合并掉的主播…"
@@ -1056,7 +1302,9 @@ export default function StreamerPage() {
                     >
                       <b>{p.name}</b>
                       <span className="hint">
-                        {p.team === 'male' ? '男团' : p.team === 'female' ? '女团' : p.team}
+                        {/* 重名时靠编号区分对象（台账里有重名提示） */}
+                        （#{p.personId}）
+                        {p.team === 'male' ? ' 男团' : p.team === 'female' ? ' 女团' : ` ${p.team}`}
                         {p.douyinNos || p.douyinNo ? ` · ${p.douyinNos || p.douyinNo}` : ''}
                       </span>
                     </button>
@@ -1073,14 +1321,15 @@ export default function StreamerPage() {
               )}
             </ul>
             <div className="row" style={{ marginTop: 10 }}>
-              <button className="primary" disabled={!mergePop.sourceId || merging} onClick={doMerge}>
+              {/* 合并 = 破坏性（source 会被软删）→ 危险按钮走 danger；取消固定最后一位 + ghost */}
+              <button className="danger" disabled={!mergePop.sourceId || merging} onClick={doMerge}>
                 {merging
                   ? '合并中…'
                   : mergePop.sourceId
-                    ? `确认把「${items.find((i) => i.personId === mergePop.sourceId)?.name ?? ''}」并进去`
+                    ? `把「${nameOf(mergePop.sourceId)}」并入「${mergePop.targetName}」`
                     : '先在上面选一个要合并掉的主播'}
               </button>
-              <button disabled={merging} onClick={() => setMergePop(null)}>
+              <button className="ghost" disabled={merging} onClick={() => setMergePop(null)}>
                 取消
               </button>
             </div>

@@ -57,7 +57,9 @@ class ClaimErrorBoundary extends Component<{ children: ReactNode }, { error: Err
       return (
         <div className="card">
           <div className="alert bad">
-            ⚠️ 页面渲染出错：{this.state.error.message}
+            ⚠️ 这一块没能渲染出来：{this.state.error.message}
+            <br />
+            点「重试」重新渲染；若反复出现，请刷新页面并把上面这句报错告诉开发。
           </div>
           <button onClick={() => this.setState({ error: null })}>重试</button>
         </div>
@@ -71,6 +73,8 @@ const kb = (n: number) => `${Math.max(1, Math.round(n / 1024))} KB`
 
 export default function ClaimPage() {
   const [items, setItems] = useState<Claim[]>([])
+  /** 首屏读取完成前不渲染空态（否则「没有申请」会先闪一下假空态） */
+  const [loaded, setLoaded] = useState(false)
   const [filter, setFilter] = useState('pending')
   const [msg, setMsg] = useState('')
   const [error, setError] = useState('')
@@ -82,8 +86,12 @@ export default function ClaimPage() {
       .then((d) => {
         setItems(d.items ?? [])
         setError('')
+        setLoaded(true)
       })
-      .catch((e) => setError(e.message ?? String(e)))
+      .catch((e) => {
+        setError(e.message ?? String(e))
+        setLoaded(true)
+      })
   }, [filter])
 
   useEffect(load, [load])
@@ -140,6 +148,9 @@ export default function ClaimPage() {
     }
   }
 
+  /** 当前筛选的中文名，用于空态文案（不把 pending / approved 这类内名显示出来） */
+  const filterLabel = FILTERS.find((f) => f.key === filter)?.label ?? ''
+
   return (
     <div className="page">
       <h1>抖音号绑定审计</h1>
@@ -148,12 +159,11 @@ export default function ClaimPage() {
         之后导入的音浪按抖音号精确匹配落到该主播名下。
       </p>
 
-      <div className="row" style={{ marginBottom: 12 }}>
+      <div className="row">
         {FILTERS.map((f) => (
           <button
             key={f.key}
             className={filter === f.key ? 'primary' : 'ghost'}
-            style={{ marginRight: 8 }}
             onClick={() => setFilter(f.key)}
           >
             {f.label}
@@ -166,8 +176,14 @@ export default function ClaimPage() {
 
       <ClaimErrorBoundary>
         <div className="card">
-        {items.length === 0 ? (
-          <p className="hint">没有{FILTERS.find((f) => f.key === filter)?.label ?? ''}的申请。</p>
+        {!loaded ? (
+          <p className="hint">正在读取申请…</p>
+        ) : items.length === 0 ? (
+          <div className="empty">
+            {filter ? `当前没有「${filterLabel}」的申请。` : '当前还没有任何申请。'}
+            <br />
+            主播在展示端「我的」页提交抖音号 + 主页截图后，会出现在这里等裁决。
+          </div>
         ) : (
           <div className="table-scroll">
             <table>
@@ -179,7 +195,7 @@ export default function ClaimPage() {
                 <th>抖音号</th>
                 <th>状态</th>
                 <th>截图</th>
-                <th>操作</th>
+                <th className="col-actions">操作</th>
               </tr>
             </thead>
             <tbody>
@@ -187,7 +203,7 @@ export default function ClaimPage() {
                 const badge = badgeOf(c.status)
                 return (
                   <tr key={c.id}>
-                    <td className="num" style={{ whiteSpace: 'nowrap' }}>
+                    <td className="num nowrap">
                       {c.createdAt}
                       {c.status === 'pending' && (
                         <div className="hint">{kb(c.screenshotBytes || 0)}</div>
@@ -216,7 +232,7 @@ export default function ClaimPage() {
                         看截图
                       </button>
                     </td>
-                    <td>
+                    <td className="row-actions">
                       {c.status === 'pending' ? (
                         <>
                           <button
@@ -225,7 +241,7 @@ export default function ClaimPage() {
                             onClick={() => decide(c, true)}
                           >
                             通过
-                          </button>{' '}
+                          </button>
                           <button
                             className="danger"
                             disabled={busyId === c.id}
@@ -249,31 +265,13 @@ export default function ClaimPage() {
       </ClaimErrorBoundary>
 
       {shot && (
-        <div
-          style={{
-            position: 'fixed',
-            inset: 0,
-            background: 'rgba(15,23,42,.55)',
-            display: 'grid',
-            placeItems: 'center',
-            zIndex: 50,
-          }}
-          onClick={() => setShot(null)}
-        >
-          <div
-            className="card"
-            style={{ maxWidth: 420, padding: 16, textAlign: 'center' }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h2 style={{ marginTop: 0 }}>
+        <div className="mask" onClick={() => setShot(null)}>
+          <div className="shot-pop" onClick={(e) => e.stopPropagation()}>
+            <h2>
               {shot.claim.personName} · {shot.claim.douyinNo}
             </h2>
-            <img
-              src={shot.url}
-              alt="抖音主页截图"
-              style={{ maxWidth: '100%', maxHeight: '65vh', borderRadius: 10 }}
-            />
-            <div style={{ marginTop: 12 }}>
+            <img src={shot.url} alt="抖音主页截图" />
+            <div className="shot-actions">
               {shot.claim.status === 'pending' && (
                 <>
                   <button
@@ -282,7 +280,7 @@ export default function ClaimPage() {
                     onClick={() => decide(shot.claim, true)}
                   >
                     通过
-                  </button>{' '}
+                  </button>
                   <button
                     className="danger"
                     disabled={busyId === shot.claim.id}
@@ -291,7 +289,7 @@ export default function ClaimPage() {
                     驳回
                   </button>
                 </>
-              )}{' '}
+              )}
               <button className="ghost" onClick={() => setShot(null)}>
                 关闭
               </button>

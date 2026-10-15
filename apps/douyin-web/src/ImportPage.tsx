@@ -171,6 +171,8 @@ export default function ImportPage() {
   const [notice, setNotice] = useState('')
   const [report, setReport] = useState<CommitReport | null>(() => importDraft?.report ?? null)
   const [batches, setBatches] = useState<any[]>([])
+  /** 首屏读取完成前不渲染空态（否则「还没有导入记录」会先闪一下假空态） */
+  const [batchesLoaded, setBatchesLoaded] = useState(false)
   /** 拖拽悬停高亮 */
   const [dragOver, setDragOver] = useState(false)
   /** 该日已有数据状态：rows == null 表示还没查/没选 */
@@ -231,10 +233,14 @@ export default function ImportPage() {
 
   const loadBatches = useCallback(() => {
     api('/api/admin/import/batches')
-      .then((d) => setBatches(d.items ?? []))
+      .then((d) => {
+        setBatches(d.items ?? [])
+        setBatchesLoaded(true)
+      })
       .catch((e) => {
         console.error('批次列表加载失败', e)
         setError(String(e.message ?? e))
+        setBatchesLoaded(true)
       })
   }, [])
 
@@ -495,7 +501,7 @@ export default function ImportPage() {
     if (!err) return null
     return (
       <div className="row">
-        <span className="alert warn" style={{ flex: 1 }}>
+        <span className="alert warn">
           ⚠️ 已导入状态获取失败：{err}
         </span>
         <button onClick={() => setStatusNonce((n) => n + 1)}>重试</button>
@@ -511,12 +517,12 @@ export default function ImportPage() {
     const lastTxt = last ? `（上次导入：${last.at} ${last.filename}）` : ''
     if (n === 0)
       return (
-        <span className="alert good" style={{ flex: 1 }}>
+        <span className="alert good">
           📭 {bizDate} {teamWord}还没有数据，这次导入是<b>新增</b>
         </span>
       )
     return (
-      <span className="alert warn" style={{ flex: 1 }}>
+      <span className="alert warn">
         ⚠️ {bizDate} {teamWord}已有 <b>{n}</b> 行数据{lastTxt}
         {mode === 'merge' ? (
           <>
@@ -605,7 +611,7 @@ export default function ImportPage() {
         {errorBox}
         {noticeBox}
         {/* 状态获取失败提示挂在主卡片（删除按钮旁边）：P2-5 —— 失败可见 + 重试，不再静默 */}
-        {statusErrorHint && <div style={{ marginTop: 8 }}>{statusErrorHint}</div>}
+        {statusErrorHint}
         <div className="row">
           <button className="danger" disabled={!canDelete} onClick={deleteDay}>
             {kind === 'month'
@@ -674,38 +680,42 @@ export default function ImportPage() {
       <section className="card">
         <h2>导入批次</h2>
         <p className="hint">数据一律以本地库为准（远程库只是开发期同步参考，已不再使用）。</p>
-        {batches.length === 0 ? (
-          <p className="hint">还没有导入记录</p>
+        {!batchesLoaded ? (
+          <p className="hint">正在读取导入批次…</p>
+        ) : batches.length === 0 ? (
+          <div className="empty">
+            还没有导入记录：把 CSV / TSV 拖到上面的投放区，预览确认后就会出现在这里。
+          </div>
         ) : (
           <div className="table-scroll">
             <table>
               <thead>
                 <tr>
-                  <th>#</th>
-                <th>业务日期</th>
-                <th>团别</th>
-                <th>解析</th>
-                <th>成功</th>
-                <th>失败</th>
-                <th>备注</th>
-                <th>时间</th>
-              </tr>
-            </thead>
-            <tbody>
+                  <th className="num">#</th>
+                  <th>业务日期</th>
+                  <th>团别</th>
+                  <th className="num">解析</th>
+                  <th className="num">成功</th>
+                  <th className="num">失败</th>
+                  <th>备注</th>
+                  <th>时间</th>
+                </tr>
+              </thead>
+              <tbody>
               {batches.map((b) => (
                 <tr key={b.id}>
-                  <td>{b.id}</td>
-                  <td>
+                  <td className="num">{b.id}</td>
+                  <td className="nowrap">
                     {b.source === 'admin-import-month'
                       ? `${String(b.bizDate ?? '').slice(0, 7)} · 月度时长`
                       : (b.bizDate ?? '—')}
                   </td>
-                  <td>{b.team ? teamLabel(b.team) : '—'}</td>
-                  <td>{b.importedRows}</td>
+                  <td className="nowrap">{b.team ? teamLabel(b.team) : '—'}</td>
+                  <td className="num">{b.importedRows}</td>
                   <td className="num">{b.okRows}</td>
                   <td className={b.failedRows > 0 ? 'bad-num' : 'num'}>{b.failedRows}</td>
                   <td className="hint">{b.note ?? '—'}</td>
-                  <td className="hint">{b.createdAt}</td>
+                  <td className="hint nowrap">{b.createdAt}</td>
                 </tr>
               ))}
               </tbody>
@@ -735,22 +745,26 @@ export default function ImportPage() {
             </div>
 
             {/* 导入类型：音浪按日 / 时长按月（用户口径 2026-10-10：每日不能导入时长，只有月时长） */}
-            <div className="row">
-              <span className="hint">导入类型</span>
-              <button
-                className={kind === 'daily' ? 'primary' : ''}
-                disabled={busy}
-                onClick={() => setKind('daily')}
-              >
-                音浪（按日）
-              </button>
-              <button
-                className={kind === 'month' ? 'primary' : ''}
-                disabled={busy}
-                onClick={() => setKind('month')}
-              >
-                时长（按月）
-              </button>
+            <div className="row row-top">
+              <div className="field">
+                <span className="field-head">导入类型</span>
+                <span className="field-ctl">
+                  <button
+                    className={kind === 'daily' ? 'primary' : ''}
+                    disabled={busy}
+                    onClick={() => setKind('daily')}
+                  >
+                    音浪（按日）
+                  </button>
+                  <button
+                    className={kind === 'month' ? 'primary' : ''}
+                    disabled={busy}
+                    onClick={() => setKind('month')}
+                  >
+                    时长（按月）
+                  </button>
+                </span>
+              </div>
               {suggest?.kind === 'month-duration' && kind === 'daily' && (
                 <span className="hint">
                   ⚠️ 这个文件只有「时长」列（没有音浪列），建议切到「时长（按月）」
@@ -768,9 +782,9 @@ export default function ImportPage() {
               </p>
             )}
 
-            <div className="row">
-              <label>
-                团别{' '}
+            <div className="row row-top">
+              <label className="field">
+                团别
                 <select value={team} onChange={(e) => setTeam(e.target.value)}>
                   <option value="auto">自动（不分男女团）</option>
                   <option value="male">只按男团校验</option>
@@ -779,8 +793,8 @@ export default function ImportPage() {
               </label>
               {kind === 'month' ? (
                 <>
-                  <label>
-                    年份{' '}
+                  <label className="field">
+                    年份
                     <select value={year} onChange={(e) => setYear(Number(e.target.value))}>
                       {yearOptions.map((y) => (
                         <option key={y} value={y}>
@@ -789,8 +803,8 @@ export default function ImportPage() {
                       ))}
                     </select>
                   </label>
-                  <label>
-                    月份{' '}
+                  <label className="field">
+                    月份
                     <select value={monthNum} onChange={(e) => setMonthNum(Number(e.target.value))}>
                       {Array.from({ length: 12 }, (_, i) => i + 1).map((m) => (
                         <option key={m} value={m}>
@@ -801,8 +815,8 @@ export default function ImportPage() {
                   </label>
                 </>
               ) : (
-                <label>
-                  业务日期{' '}
+                <label className="field">
+                  业务日期
                   <input
                     type="date"
                     value={bizDate}
@@ -811,11 +825,11 @@ export default function ImportPage() {
                       setDateFromFile(false)
                     }}
                   />
-                  {dateFromFile && <span className="hint">（取自文件名）</span>}
+                  {dateFromFile && <span className="field-hint">取自文件名</span>}
                 </label>
               )}
-              <label>
-                模式{' '}
+              <label className="field">
+                模式
                 <select value={mode} onChange={(e) => setMode(e.target.value)}>
                   <option value="merge">覆盖（幂等）</option>
                   <option value="reject">{kind === 'month' ? '该月已有则拒绝' : '当日已有则拒绝'}</option>
@@ -824,11 +838,11 @@ export default function ImportPage() {
             </div>
 
             {kind === 'daily' && dayHint && <div className="row">{dayHint}</div>}
-            {statusErrorHint && <div className="row" style={{ marginTop: 8 }}>{statusErrorHint}</div>}
+            {statusErrorHint}
 
             {kind === 'month' && monthPreview && (
               <div className="row">
-                <span className="alert good" style={{ flex: 1 }}>
+                <span className="alert good">
                   📅 {monthPreview.period}：匹配 <b>{monthPreview.matched}</b> / {monthPreview.total} 人
                   {monthPreview.unmatched > 0 && (
                     <>
@@ -844,7 +858,7 @@ export default function ImportPage() {
             {kind === 'month' && monthStatus && (
               <div className="row">
                 {monthStatus.rows > 0 ? (
-                  <span className="alert warn" style={{ flex: 1 }}>
+                  <span className="alert warn">
                     ⚠️ {monthStatus.period} 已有 <b>{monthStatus.rows}</b> 人的整月时长（合计{' '}
                     {hourText(monthStatus.minutes)}）
                     {monthStatus.lastBatch
@@ -853,7 +867,7 @@ export default function ImportPage() {
                     ：这次导入会覆盖值不同的记录，值相同的保持不动
                   </span>
                 ) : (
-                  <span className="alert good" style={{ flex: 1 }}>
+                  <span className="alert good">
                     📭 {monthStatus.period} 还没有月度时长，这次导入是<b>新增</b>
                   </span>
                 )}
@@ -862,7 +876,7 @@ export default function ImportPage() {
 
             {kind === 'month' && !!monthPreview?.diffs.length && (
               <div className="row">
-                <span className="alert warn" style={{ flex: 1 }}>
+                <span className="alert warn">
                   ⚖️ {monthPreview.diffs.length} 人该月既有日明细时长又与月报不一致（
                   {monthPreview.diffs
                     .slice(0, 5)

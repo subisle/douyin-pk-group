@@ -14,6 +14,27 @@ const PHASE_LABEL: Record<string, string> = {
   disconnected: '未连接',
 }
 
+/** 后端 phase 是 idle / awaiting_scan 这类内名：表里没有的状态一律显示中文兜底，
+ *  不把英文内名漏到界面上（DESIGN §4.1）。 */
+const phaseText = (phase: string) => PHASE_LABEL[phase] ?? '状态未知'
+
+/** 扫码状态机（后端 wait / scaned / need_verifycode / verify_code_blocked /
+ *  expired / confirmed / scaned_but_redirect / binded_redirect）→ 运营看得懂的中文。 */
+const QR_STATUS_LABEL: Record<string, string> = {
+  wait: '等待扫码',
+  scaned: '已扫码，请在手机上确认',
+  confirmed: '已确认，正在保存登录',
+  need_verifycode: '需要在手机上输入验证码',
+  verify_code_blocked: '验证码错误次数过多，稍后再试',
+  expired: '二维码已过期，请重新生成',
+  scaned_but_redirect: '已扫码，正在切换服务器',
+  binded_redirect: '已绑定，正在切换服务器',
+}
+const qrStatusText = (status: string) => QR_STATUS_LABEL[status] ?? '状态未知'
+
+/** 团别 → 中文（后端给 male / female；未知值不把英文原样漏到界面） */
+const teamText = (team?: string) => (team === 'female' ? '女团' : team === 'male' ? '男团' : '—')
+
 export default function BotPage() {
   const [status, setStatus] = useState<any>(null)
   const [sessions, setSessions] = useState<any[]>([])
@@ -285,7 +306,7 @@ export default function BotPage() {
           <section className="card">
             <h2>QQ 机器人</h2>
             <p>
-              状态：<b className={qq.connected ? 'ok' : 'warn'}>{PHASE_LABEL[qq.phase] ?? qq.phase}</b>
+              状态：<b className={qq.connected ? 'ok' : 'warn'}>{phaseText(qq.phase)}</b>
               {qq.note && <span className="hint">（{qq.note}）</span>}
               <span className="hint"> · 消息数 {qq.messageCount ?? 0}</span>
             </p>
@@ -293,20 +314,26 @@ export default function BotPage() {
               只需要填开放平台的 <b>AppID</b> 和 <b>AppSecret</b>（QQ 开放平台 → 机器人管理页可查），
               保存后点「启动」即可，全程实时在线。
             </p>
-            <div className="row">
-              <input
-                placeholder="AppID"
-                style={{ maxWidth: 200 }}
-                value={qqAppId}
-                onChange={(e) => setQqAppId(e.target.value)}
-              />
-              <input
-                type="password"
-                placeholder={qqCred?.secretSet ? 'AppSecret（已设置，不改留空）' : 'AppSecret'}
-                style={{ maxWidth: 240 }}
-                value={qqAppSecret}
-                onChange={(e) => setQqAppSecret(e.target.value)}
-              />
+            <div className="row row-end">
+              <label className="field">
+                AppID
+                <input
+                  placeholder="如 1027xxxxxx"
+                  style={{ maxWidth: 200 }}
+                  value={qqAppId}
+                  onChange={(e) => setQqAppId(e.target.value)}
+                />
+              </label>
+              <label className="field">
+                AppSecret
+                <input
+                  type="password"
+                  placeholder={qqCred?.secretSet ? '已设置，不改留空' : '开放平台机器人管理页可查'}
+                  style={{ maxWidth: 240 }}
+                  value={qqAppSecret}
+                  onChange={(e) => setQqAppSecret(e.target.value)}
+                />
+              </label>
               <button
                 disabled={!((qqAppId.trim() || qqCred?.appId) && qqAppSecret.trim())}
                 onClick={saveCred}
@@ -337,7 +364,7 @@ export default function BotPage() {
           <section className="card">
             <h2>微信机器人</h2>
             <p>
-              状态：<b className={wx.connected ? 'ok' : 'warn'}>{PHASE_LABEL[wx.phase] ?? wx.phase}</b>
+              状态：<b className={wx.connected ? 'ok' : 'warn'}>{phaseText(wx.phase)}</b>
               {wx.nickname && <span>（{wx.nickname}）</span>}
               {wx.note && <span className="hint">（{wx.note}）</span>}
             </p>
@@ -353,7 +380,6 @@ export default function BotPage() {
                   <img
                     alt="微信登录二维码"
                     src={qr.imgContent.startsWith('data:') ? qr.imgContent : `data:image/png;base64,${qr.imgContent}`}
-                    style={{ maxWidth: 240, borderRadius: 8 }}
                   />
                 ) : qr.url ? (
                   <p>
@@ -364,29 +390,35 @@ export default function BotPage() {
                 ) : null}
                 <p className="hint">
                   二维码标识：{qr.qrcode}
-                  {qrStatus && <> · 状态：{qrStatus}</>}
+                  {qrStatus && <> · 状态：{qrStatusText(qrStatus)}</>}
                 </p>
                 {needVerify && (
                   <div className="row">
-                    <input
-                      placeholder="微信发来的验证码"
-                      value={verifyCode}
-                      onChange={(e) => setVerifyCode(e.target.value)}
-                      style={{ maxWidth: 200 }}
-                    />
-                    <span className="hint">输入后轮询会自动带上重新校验</span>
+                    <label className="field">
+                      微信发来的验证码
+                      <input
+                        placeholder="如 1234"
+                        value={verifyCode}
+                        onChange={(e) => setVerifyCode(e.target.value)}
+                        style={{ maxWidth: 200 }}
+                      />
+                      <span className="field-hint">填完不用点保存，下一轮轮询会自动带上重新校验。</span>
+                    </label>
                   </div>
                 )}
               </div>
             )}
-            <div className="row">
-              <input
-                placeholder="或手工粘贴 iLink token"
-                value={manualToken}
-                onChange={(e) => setManualToken(e.target.value)}
-              />
+            <div className="row row-end">
+              <label className="field">
+                手工粘贴登录令牌（token）
+                <input
+                  placeholder="粘贴 iLink 登录令牌"
+                  value={manualToken}
+                  onChange={(e) => setManualToken(e.target.value)}
+                />
+              </label>
               <button disabled={!manualToken.trim()} onClick={saveToken}>
-                保存 token
+                保存令牌
               </button>
             </div>
           </section>
@@ -446,9 +478,14 @@ export default function BotPage() {
           )}
         </p>
         {!lineageBind ? (
-          <p className="hint">师门概览没取到（台账接口不可用会自动重试）。</p>
+          <div className="alert warn">
+            ⚠️ 师门概览没读出来：主播台账接口暂时不可用（每 60 秒会自动重试一次）
+            <button onClick={loadLineageBind}>重试</button>
+          </div>
         ) : lineageBind.items.length === 0 ? (
-          <p className="hint">已绑定微信的账号里，还没有名下有直系徒弟的人。</p>
+          <div className="empty">
+            已绑定微信的账号里，还没有名下有直系徒弟的人；等师徒关系建立后会自动出现在这里。
+          </div>
         ) : (
           <div className="table-scroll">
             <table>
@@ -464,9 +501,7 @@ export default function BotPage() {
                 {lineageBind.items.map((a) => (
                   <tr key={a.name}>
                     <td>{a.name}</td>
-                    <td>
-                      {a.team === 'female' ? '女团' : a.team === 'male' ? '男团' : a.team || '—'}
-                    </td>
+                    <td>{teamText(a.team)}</td>
                     <td>{a.disciples}</td>
                     <td className="hint">在展示端「我的」页查看 / 设置</td>
                   </tr>
@@ -488,7 +523,9 @@ export default function BotPage() {
           暂停接收每日推送 / 开启接收每日推送 / 帮助）。群聊和私聊各自独立勾选。
         </p>
         {sessions.length === 0 ? (
-          <p className="hint">还没有会话记录：在 QQ / 微信里给机器人发一条消息即可出现</p>
+          <div className="empty">
+            还没有会话记录：在 QQ / 微信里给机器人发一条消息，这里就会出现该会话。
+          </div>
         ) : (
           <div className="table-scroll">
             <table>
@@ -696,41 +733,41 @@ function PublicSettingsCard() {
           </div>
 
           <h3 className="flag-title">🚩 流动小红旗条（每日推送图头部）</h3>
-          <div style={{ display: 'grid', gap: 8, margin: '4px 0 12px' }}>
-            <label style={{ fontSize: 12.5, color: 'var(--muted, #667085)' }}>
-              称号（默认「每日之星」，可改成如「初级争霸赛冠军」；清空恢复默认）
+          <div className="field-list">
+            <label className="field">
+              称号
               <input
                 defaultValue={settings.starTitle ?? ''}
                 placeholder="每日之星"
                 onBlur={(e) => {
                   if (e.target.value !== (settings.starTitle ?? '')) saveStarText('starTitle', e.target.value)
                 }}
-                style={{ display: 'block', width: '100%', height: 34, marginTop: 4, border: '1px solid var(--hairline, #EAECF0)', borderRadius: 8, padding: '0 10px', fontSize: 13 }}
               />
+              <span className="field-hint">
+                留空 = 恢复默认「每日之星」；也可以改成如「初级争霸赛冠军」。失焦即保存。
+              </span>
             </label>
-            <label style={{ fontSize: 12.5, color: 'var(--muted, #667085)' }}>
-              手动指定（可选）：「称号|人名|音浪」或「称号|人名」或只写称号；留空 = 自动取当日音浪第一
+            <label className="field">
+              手动指定（可选）
               <input
                 defaultValue={settings.starOverride ?? ''}
                 placeholder="初级争霸赛冠军|狼哲|285917"
                 onBlur={(e) => {
                   if (e.target.value !== (settings.starOverride ?? '')) saveStarText('starOverride', e.target.value)
                 }}
-                style={{ display: 'block', width: '100%', height: 34, marginTop: 4, border: '1px solid var(--hairline, #EAECF0)', borderRadius: 8, padding: '0 10px', fontSize: 13 }}
               />
+              <span className="field-hint">
+                按「称号|人名|音浪」「称号|人名」或只写称号；留空 = 自动取当日音浪第一。
+              </span>
             </label>
-            <label style={{ fontSize: 12.5, color: 'var(--muted, #667085)' }}>
-              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+            <label className="field">
+              <span className="field-head">
                 小红旗图标（可选）
                 {typeof settings.starIcon === 'string' && settings.starIcon && (
                   <>
-                    <img src={settings.starIcon} width={28} height={28} style={{ borderRadius: 6, verticalAlign: 'middle' }} />
-                    <button
-                      type="button"
-                      onClick={() => saveStarText('starIcon', '')}
-                      style={{ fontSize: 12, padding: '2px 8px', border: '1px solid var(--hairline, #EAECF0)', borderRadius: 6, background: 'transparent', color: 'var(--muted, #667085)', cursor: 'pointer' }}
-                    >
-                      清除
+                    <img src={settings.starIcon} width={28} height={28} alt="当前小红旗图标" />
+                    <button type="button" className="linkish" onClick={() => saveStarText('starIcon', '')}>
+                      清除图标
                     </button>
                   </>
                 )}
@@ -742,16 +779,12 @@ function PublicSettingsCard() {
                   onStarIconFile(e.target.files?.[0])
                   e.target.value = ''
                 }}
-                style={{ display: 'block', width: '100%', height: 34, marginTop: 4, border: '1px solid var(--hairline, #EAECF0)', borderRadius: 8, fontSize: 13 }}
               />
-              <span style={{ display: 'block', marginTop: 2, fontSize: 11.5 }}>
-                留空 = 默认 🚩 emoji；上传图片后推送图头部用该图标。
-              </span>
+              <span className="field-hint">留空 = 默认 🚩 emoji；上传图片后推送图头部用该图标。</span>
             </label>
-          <div style={{ margin: '4px 0 12px', fontSize: 11.5, color: 'var(--muted)' }}>
-            🏆 争霸赛冠军横幅已挪到独立的公告配置页（展示页公告条，可配多条）——这里不再单独设置，避免两处撞车。
-          </div>
-
+            <p className="hint">
+              🏆 争霸赛冠军横幅已挪到独立的公告配置页（展示页公告条，可配多条）——这里不再单独设置，避免两处撞车。
+            </p>
           </div>
 
           <h3 className="flag-title">分组子页显隐（按赛事类型）</h3>
@@ -775,13 +808,11 @@ function PublicSettingsCard() {
         </>
       ) : loadError ? (
         <div className="alert warn">
-          ⚠️ 设置加载失败：{loadError}
-          <button style={{ marginLeft: 8 }} onClick={load}>
-            重试
-          </button>
+          ⚠️ 设置没读出来：{loadError}（点「重试」再读一次；一直失败说明服务端接口不可用）
+          <button onClick={load}>重试</button>
         </div>
       ) : (
-        <p className="hint">加载中…</p>
+        <p className="hint">正在读取公开站点设置…</p>
       )}
       {msg && <div className="alert good">{msg}</div>}
     </section>
@@ -794,6 +825,8 @@ function PublicSettingsCard() {
     绑定后用户自己不能解绑，只有这里能改绑。 */
 function MyAccountsCard() {
   const [items, setItems] = useState<any[]>([])
+  /** 首屏读取完成前不渲染空态（否则「还没有账号」会先闪一下假空态） */
+  const [accLoaded, setAccLoaded] = useState(false)
   const [name, setName] = useState('')
   const [phone, setPhone] = useState('')
   const [pass, setPass] = useState('')
@@ -805,12 +838,16 @@ function MyAccountsCard() {
 
   const load = useCallback(() => {
     api('/api/admin/my-accounts')
-      .then((d) => setItems(d.items ?? []))
+      .then((d) => {
+        setItems(d.items ?? [])
+        setAccLoaded(true)
+      })
       .catch((e) => {
         // P2-5：失败显示出来（别渲染成「还没有账号」的假空态）
         console.error('「我的」账号列表加载失败', e)
         setItems([])
         setErr(String(e?.message ?? e))
+        setAccLoaded(true)
       })
   }, [])
 
@@ -844,6 +881,24 @@ function MyAccountsCard() {
       await api('/api/admin/my-accounts/' + encodeURIComponent(name), { method: 'DELETE' })
       setMsg('已删除')
       setTimeout(() => setMsg(''), 1500)
+      load()
+    } catch (e: any) {
+      setErr(e.message ?? String(e))
+    }
+  }
+
+  /** 改「可看团别」（迁移 024）：走专用端点，不动密码 —— 上面的 POST 不传 pass
+      会自动生成新密码（手机号后四位），用它改范围等于顺手把人家密码重置了。 */
+  async function setViewTeam(name: string, viewTeam: string) {
+    setErr('')
+    setMsg('')
+    try {
+      await api(`/api/admin/my-accounts/${encodeURIComponent(name)}/view-team`, {
+        method: 'PUT',
+        body: JSON.stringify({ viewTeam }),
+      })
+      setMsg(`「${name}」可看团别已更新（旧登录态已吊销）`)
+      setTimeout(() => setMsg(''), 2500)
       load()
     } catch (e: any) {
       setErr(e.message ?? String(e))
@@ -886,7 +941,7 @@ function MyAccountsCard() {
 
   return (
     <section className="card">
-      <h2>「我的」页面账号（/st/m · /st/f）</h2>
+      <h2>「我的」页面账号（展示端登录用）</h2>
       <p className="hint">
         账号由<b>这里手动设置</b>（姓名要跟主播台账里的一致，姓名已存在时保存 = 覆盖更新）。
         <b>手机号不只是登录方式，也是微信绑定的凭证</b>：填了手机号，主播加机器人后发手机号就能绑定推送；
@@ -894,26 +949,35 @@ function MyAccountsCard() {
         历史自助注册遗留的账号是「待绑定」状态：主播在「我的」页绑定主播姓名后才能看个人数据，
         <b>绑定后主播自己不能解绑，只有这里能改绑</b>。
       </p>
-      <div className="row">
-        <input
-          placeholder="姓名（与台账一致）"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && name.trim() && pass.trim() && add()}
-        />
-        <input
-          placeholder="手机号（选填）"
-          inputMode="numeric"
-          value={phone}
-          onChange={(e) => setPhone(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && name.trim() && pass.trim() && add()}
-        />
-        <input
-          placeholder="密码（4~20 位字母或数字）"
-          value={pass}
-          onChange={(e) => setPass(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && name.trim() && pass.trim() && add()}
-        />
+      <div className="row row-end">
+        <label className="field">
+          姓名
+          <input
+            placeholder="与主播台账里的一致"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && name.trim() && pass.trim() && add()}
+          />
+        </label>
+        <label className="field">
+          手机号（选填）
+          <input
+            placeholder="如 13800000000"
+            inputMode="numeric"
+            value={phone}
+            onChange={(e) => setPhone(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && name.trim() && pass.trim() && add()}
+          />
+        </label>
+        <label className="field">
+          密码
+          <input
+            placeholder="4~20 位字母或数字"
+            value={pass}
+            onChange={(e) => setPass(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && name.trim() && pass.trim() && add()}
+          />
+        </label>
         <button className="primary" disabled={!name.trim() || !pass.trim()} onClick={add}>
           保存
         </button>
@@ -927,8 +991,9 @@ function MyAccountsCard() {
               <th>手机号</th>
               <th>来源</th>
               <th>绑定状态</th>
+              <th>可看团别</th>
               <th>添加时间</th>
-              <th></th>
+              <th className="col-actions"></th>
             </tr>
           </thead>
           <tbody>
@@ -948,13 +1013,34 @@ function MyAccountsCard() {
                     <span className="badge b-paused">待绑定</span>
                   )}
                 </td>
-                <td className="hint">{a.createdAt}</td>
                 <td>
-                  {a.isAdmin ? null : (
+                  {/* 可看团别只对**管理员观看账号**开放：普通主播账号按绑定主播
+                      所在团走，改了反而会和台账不一致，所以只展示不提供下拉。
+                      注意 td 上不能挂 .hint —— 控件层是 `font: inherit`，12.5px 的提示字号
+                      会把下拉框缩小一档，和页面其它控件不一致。 */}
+                  {a.isAdmin ? (
+                    <select
+                      value={a.viewTeam ?? ''}
+                      onChange={(e) => setViewTeam(a.name, e.target.value)}
+                    >
+                      <option value="any">全团（可切换）</option>
+                      <option value="male">只看男团</option>
+                      <option value="female">只看女团</option>
+                      <option value="">沿用旧口径</option>
+                    </select>
+                  ) : (
+                    <span className="hint">按绑定主播</span>
+                  )}
+                </td>
+                <td className="hint">{a.createdAt}</td>
+                <td className="row-actions">
+                  {a.isAdmin ? (
+                    <span className="hint">管理员账号不能改绑</span>
+                  ) : (
                     <button onClick={() => setRebindFor(rebindFor === a.name ? '' : a.name)}>
                       {a.bound ? '改绑' : '绑定主播'}
                     </button>
-                  )}{' '}
+                  )}
                   <button className="danger" onClick={() => remove(a.name)}>
                     删除
                   </button>
@@ -964,36 +1050,37 @@ function MyAccountsCard() {
             </tbody>
           </table>
         </div>
+      ) : !accLoaded ? (
+        <p className="hint">正在读取「我的」账号…</p>
       ) : (
-        <p className="hint">还没有账号。添加后主播才能登录「我的」页。</p>
+        <div className="empty">
+          还没有账号：用上面的「姓名 + 密码」添加一个，主播才能登录展示端「我的」页。
+        </div>
       )}
       {rebindFor && (
-        <div className="row" style={{ alignItems: 'flex-start', flexWrap: 'wrap' }}>
-          <div style={{ flex: 1, minWidth: 220 }}>
+        <div className="row row-top">
+          <label className="field" style={{ flex: 1, minWidth: 220 }}>
+            把「{rebindFor}」改绑到哪位主播
             <input
-              placeholder={`「${rebindFor}」改绑到哪位主播？输入名字搜索`}
+              placeholder="输入姓名搜索，如：狼哲"
               value={rebindQ}
               onChange={(e) => searchRebind(e.target.value)}
               style={{ width: '100%' }}
             />
             {rebindHits.length ? (
-              <div className="hint" style={{ marginTop: 6 }}>
+              <span className="field-hint hint-btns">
                 {rebindHits.map((h) => (
-                  <button
-                    key={h.personId}
-                    style={{ marginRight: 6, marginBottom: 6 }}
-                    onClick={() => doRebind(rebindFor, h.personId, h.name)}
-                  >
-                    {h.name}（{h.team === 'male' ? '男团' : '女团'}）
+                  <button key={h.personId} onClick={() => doRebind(rebindFor, h.personId, h.name)}>
+                    {h.name}（{h.team === 'female' ? '女团' : '男团'}）
                   </button>
                 ))}
-              </div>
+              </span>
             ) : (
-              <div className="hint" style={{ marginTop: 6 }}>
+              <span className="field-hint">
                 输入主播姓名开始搜索；改绑后账号名会跟着变成主播姓名，登录仍可用手机号。
-              </div>
+              </span>
             )}
-          </div>
+          </label>
           <button onClick={() => { setRebindFor(''); setRebindQ(''); setRebindHits([]) }}>取消</button>
         </div>
       )}

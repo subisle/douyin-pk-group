@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react'
+import { useCallback, useEffect, useState, type CSSProperties } from 'react'
 import { api } from './api'
+import IconSelect from './IconSelect'
 
 /** 公告配置页（2026-10-14）：从「机器人」页整体搬出来的公告 UI。状态与保存逻辑不变——
     仍由一个组件持有全部状态，一次整包 POST /api/admin/announcement。底部 ann-savebar 统一保存。
@@ -7,36 +8,15 @@ import { api } from './api'
     state 与 load / save 保留——save 是整包 POST，把后端已有的引导配置原样回传，
     别把库里的 steps / enabled 清掉。） */
 
-/** 引导图标白名单：与后端 pk-server/src/public_teams.rs 的 STEP_ICON_WHITELIST
-    保持一致。展示端 st_page.html 里也有一份同名表做双重校验；两边同步改。 */
-const ANNOUNCE_ICONS = [
-  'auto_awesome', 'military_tech', 'qr_code_scanner', 'notifications_active',
-  'insights', 'tips_and_updates', 'campaign', 'star', 'bolt', 'groups',
-  'emoji_events', 'local_fire_department', 'trending_up', 'calendar_month',
-  'chat_bubble', 'lock', 'person', 'smart_toy', 'workspace_premium',
+/** 图标白名单 / 中文名已抽到 `announceIcons.ts`（2026-10-16）：
+    图标控件统一走 `<IconSelect>`，界面上只见中文名与图形，不再回显 campaign 这类内名。 */
+/** 横幅对齐三选项（2026-10-16）：值 = 后端 AnnounceItem.align，图标 = 左/中/右对齐。
+    「点图标即设置」——和样式/图标一样走 setItemSaved 即时保存。 */
+const ANNOUNCE_ALIGNS: { v: AnnounceAlign; i: string; t: string }[] = [
+  { v: 'left', i: 'format_align_left', t: '居左（原版式）' },
+  { v: 'center', i: 'format_align_center', t: '居中' },
+  { v: 'right', i: 'format_align_right', t: '居右' },
 ]
-/** 图标英文内名 → 运营看的中文显示名（下拉里显示「中文名（内名）」，值仍传英文名） */
-const ICON_LABELS: Record<string, string> = {
-  auto_awesome: '闪光',
-  military_tech: '勋章',
-  qr_code_scanner: '扫码',
-  notifications_active: '铃铛',
-  insights: '数据洞察',
-  tips_and_updates: '提示灯泡',
-  campaign: '喇叭公告',
-  star: '星标',
-  bolt: '闪电',
-  groups: '群组',
-  emoji_events: '奖杯',
-  local_fire_department: '火焰',
-  trending_up: '上升趋势',
-  calendar_month: '日历',
-  chat_bubble: '对话气泡',
-  lock: '锁',
-  person: '人形',
-  smart_toy: '机器人',
-  workspace_premium: '高级徽章',
-}
 
 /* -------------- 公告系统 v2（2026-10-13）类型定义 -------------- */
 
@@ -52,10 +32,13 @@ type PlacementsMap = Record<PlacementKey, PlacementCfg>
 type CelebrateCfg = { enabled: boolean; confetti: boolean; title: string; name: string; wave: string }
 
 /** 公告位 v2 三个位置：key 与后端 Announcement.placements 的字段一一对应 */
-const PLACEMENTS: { key: PlacementKey; label: string }[] = [
-  { key: 'login', label: '登录页' },
-  { key: 'home', label: '看板' },
-  { key: 'my', label: '个人页' },
+/** 公告位三处（2026-10-16）：`defIcon` = 展示端该位置**留空时的默认图标**
+    （st_page.html 的 annBarHtml 第三参：登录页 campaign / 看板 notifications / 个人页 person）。
+    管理端头部预览按它显示，避免以前一律显示 `campaign` 造成「预览与展示端不一致」。 */
+const PLACEMENTS: { key: PlacementKey; label: string; defIcon: string }[] = [
+  { key: 'login', label: '登录页', defIcon: 'campaign' },
+  { key: 'home', label: '看板', defIcon: 'notifications_active' },
+  { key: 'my', label: '个人页', defIcon: 'person' },
 ]
 
 /** v2 加载前 / 加载失败时的缺省值：全部关闭 + 空文案（GET 成功后被真实数据覆盖） */
@@ -71,8 +54,11 @@ const EMPTY_CELEBRATE: CelebrateCfg = { enabled: false, confetti: false, title: 
     plain = 白底描边（原冠军条样式）。wave 同 celebrate 存字符串方便 number 输入框，
     保存时转数字（0 = 不显示数值）。
     popup（2026-10-15 后端新增）：true = 该条除横幅外在展示端弹窗弹出一次；
-    老后端不下发该字段（undefined），按 false 处理。 */
+    老后端不下发该字段（undefined），按 false 处理。
+    align（2026-10-16 后端新增）：横幅对齐 left（默认，原版式）/ center / right，
+    展示端把「图标 + 文案」整组靠中/靠右；老后端不下发 → left。 */
 type AnnounceTone = 'brand' | 'plain'
+type AnnounceAlign = 'left' | 'center' | 'right'
 type AnnounceItemCfg = {
   enabled: boolean
   icon: string
@@ -82,10 +68,11 @@ type AnnounceItemCfg = {
   text: string
   tone: AnnounceTone
   popup?: boolean
+  align?: AnnounceAlign
 }
 
 /** 「+ 添加公告条」的新条目：默认不启用，免得文案还没填就在展示端顶出一条空公告
-    （popup 默认 false：不弹窗，只走横幅） */
+    （popup 默认 false：不弹窗，只走横幅；align 默认 left：保持原版式） */
 const EMPTY_ANNOUNCE_ITEM: AnnounceItemCfg = {
   enabled: false,
   icon: '',
@@ -95,6 +82,15 @@ const EMPTY_ANNOUNCE_ITEM: AnnounceItemCfg = {
   text: '',
   tone: 'plain',
   popup: false,
+  align: 'left',
+}
+
+/** 本地时间 HH:MM:SS（保存成功时间戳用）。
+    手写而不用 toLocaleTimeString：后者跟随浏览器 locale，英文环境下会变成 12 小时制
+    「02:03:22 PM」，运营读不出「刚存的是哪一次」，也跟中文界面不一致。 */
+function fmtClock(d: Date) {
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
 }
 
 /** 公告配置页：📢 公告位 / 📣 展示页公告条 / 🎉 庆祝配置 三个编辑区块
@@ -118,34 +114,39 @@ export default function AnnouncePage() {
   const [items, setItems] = useState<AnnounceItemCfg[]>([])
   /** GET 里有没有 items 这个 key：老后端不下发时保存不发 items，避免整包替换把已有配置清空 */
   const [itemsLoaded, setItemsLoaded] = useState(false)
-  const [msg, setMsg] = useState('')
+  /** 加载失败原因（只有整包 GET 失败才写这里，顶部「配置加载失败 + 重试」用它） */
   const [err, setErr] = useState('')
+  /** 保存失败原因（2026-10-16）：与 err 分开 —— 本页到处「失焦即保存」，
+      保存失败必须挂在保存条上（红字 + 重试），不能被「加载失败」的文案语义混用。 */
+  const [saveErr, setSaveErr] = useState('')
+  /** 最近一次保存成功的本地时间；null = 本次会话还没成功保存过 / 上一次保存失败。
+      持续显示不自动消失（DESIGN §7.5：缺的是「保存中 / 已保存 / 失败」的持续状态），
+      连续保存时秒数会变，运营据此确认这次确实发出去了。 */
+  const [savedAt, setSavedAt] = useState<Date | null>(null)
   const [busy, setBusy] = useState(false)
-  /** 保存成功提示的自动消失定时器（卸载时清理，避免对已卸载组件 setState） */
-  const msgTimer = useRef<number | null>(null)
-  useEffect(
-    () => () => {
-      if (msgTimer.current) window.clearTimeout(msgTimer.current)
-    },
-    [],
-  )
 
+  /** 公告位字段的控件样式（2026-10-16 统一解剖）：块级 + 满宽 + 34px + 8px 圆角，
+      label 在上、控件在下，与「展示页公告条」区块的字段一致（此前是行内宽度、两套尺寸）。 */
   const ctl: CSSProperties = {
+    display: 'block',
+    width: '100%',
+    minHeight: 34,
+    marginTop: 4,
     padding: '7px 10px',
-    border: '1px solid var(--hairline)',
+    border: '1px solid var(--line)',
     borderRadius: 8,
     background: '#fff',
     font: 'inherit',
   }
 
-  // 公告系统 v2：单行输入框样式，对齐上面 starTitle / starIcon 的内联写法
-  // （height 34 + hairline 边框 + 圆角 8），让新区块和旧区块视觉一致
+  // 公告系统 v2：单行输入框样式，与全站控件层同一套 token（34px 高 + 发丝线 + 8px 圆角），
+  // label 在上、控件在下（marginTop 4），让各区块字段解剖保持一致。
   const input34: CSSProperties = {
     display: 'block',
     width: '100%',
     height: 34,
     marginTop: 4,
-    border: '1px solid var(--hairline, #EAECF0)',
+    border: '1px solid var(--line)',
     borderRadius: 8,
     padding: '0 10px',
     fontSize: 13,
@@ -170,6 +171,8 @@ export default function AnnouncePage() {
         tone?: string
         /** 2026-10-15 后端新增；老后端不下发（undefined） */
         popup?: boolean
+        /** 2026-10-16 后端新增：left（默认）/ center / right；老后端不下发 → left */
+        align?: string
       }[]
     }>('/api/admin/announcement')
       .then((d) => {
@@ -199,6 +202,7 @@ export default function AnnouncePage() {
         // 公告条初始化：数组整体替换（顺序即展示顺序）；老后端没有 items key 时保持空列表，
         // 且不标 loaded —— 保存时不发 items，防止把库里的多条整包清空。
         // popup 兜底 !!：老后端不下发该字段 = undefined → false（不弹窗）
+        // align 同口径兜底：只认 center / right，其余（含老后端 undefined）= left（原版式）
         if (Array.isArray(d.items)) {
           setItems(
             d.items.map((it) => ({
@@ -210,6 +214,7 @@ export default function AnnouncePage() {
               text: it?.text ?? '',
               tone: it?.tone === 'brand' ? 'brand' : 'plain',
               popup: !!it?.popup,
+              align: it?.align === 'center' ? 'center' : it?.align === 'right' ? 'right' : 'left',
             })),
           )
           setItemsLoaded(true)
@@ -274,8 +279,7 @@ export default function AnnouncePage() {
     const ce = overrides?.celebrate ?? celebrate
     const its = overrides?.items ?? items
     setBusy(true)
-    setMsg('')
-    setErr('') // 每次保存先清掉上一次的失败提示，避免旧错误一直挂着
+    setSaveErr('') // 每次保存先清掉上一次的失败提示，避免旧错误一直挂着
     try {
       // items 是整包替换语义：只在「GET 下发过 items」或运营手动加过条目时才带上，
       // 老后端 / 未加载时省略该字段，避免把库里的多条清空
@@ -290,6 +294,7 @@ export default function AnnouncePage() {
       if (itemsLoaded) {
         // 展示页公告条：数组顺序 = 展示端从上到下；wave 转数字，tone 只收 brand / plain。
         // popup（2026-10-15 新增）布尔原样上传；老后端 state 里可能是 undefined → 按 false 发
+        // align（2026-10-16 新增）只发 left / center / right，后端再走一遍归一白名单
         body.items = its.map((it) => ({
           enabled: it.enabled,
           icon: it.icon.trim(),
@@ -299,6 +304,7 @@ export default function AnnouncePage() {
           text: it.text,
           tone: it.tone === 'brand' ? 'brand' : 'plain',
           popup: !!it.popup,
+          align: it.align === 'center' ? 'center' : it.align === 'right' ? 'right' : 'left',
         }))
       }
       const d = await api<{ announcement: { version: number } }>('/api/admin/announcement', {
@@ -308,16 +314,19 @@ export default function AnnouncePage() {
         body: JSON.stringify(body),
       })
       setData((prev) => (prev ? { ...prev, enabled: en, version: d.announcement.version } : prev))
-      setMsg('已保存（版本 ' + d.announcement.version + '，展示端会重新弹出）')
-      // 定时器句柄存 ref：本页大量「失焦即保存」，改完立刻切页会留下悬挂定时器
-      // 对已卸载组件 setState（2026-10-14 审计修复）。
-      if (msgTimer.current) window.clearTimeout(msgTimer.current)
-      msgTimer.current = window.setTimeout(() => setMsg(''), 2200)
+      /* 保存成功：记下本地时间，紧挨按钮持续显示「已保存 · HH:MM:SS」。
+         不做「无改动就禁用按钮」的改动检测——要深比较整包 state（含 steps / 公告条数组），
+         成本高于收益；连续保存时时间戳逐次变化，运营照样能确认这一次真发出去了。
+         原先这里是绿色 .alert.good + 2.2s 自动消失，运营切页回来就看不到结果了。 */
+      setSavedAt(new Date())
     } catch (e: any) {
       /* 2026-10-14 审计修复：原先失败也进 msg，而 msg 渲染成绿色的 .alert.good ——
          本页到处是「失焦即保存」，保存失败被显示成绿色成功，运营改完切走才发现配置丢了。
-         失败改走 err（红色 .alert.bad）。 */
-      setErr(e?.message ?? String(e))
+         2026-10-16：失败挂在保存条上（红字「保存失败：原因」+ 重试按钮），
+         且不清空任何已填内容 —— state 原样保留，点「重试」就是重发同一份配置。 */
+      setSaveErr(e?.message ?? String(e))
+      // 上一次的成功时间不再代表当前这份内容，清掉避免误读成「已经存好了」
+      setSavedAt(null)
     } finally {
       setBusy(false)
     }
@@ -346,13 +355,13 @@ export default function AnnouncePage() {
           开关 / 文本框失焦即时整包保存。
         </p>
         <div className="ann-grid ann-grid-3">
-          {PLACEMENTS.map(({ key, label }) => {
+          {PLACEMENTS.map(({ key, label, defIcon }) => {
             const p = placements[key]
             return (
               <div
                 key={key}
                 style={{
-                  border: '1px solid var(--hairline)',
+                  border: '1px solid var(--line)',
                   borderRadius: 10,
                   padding: 10,
                   display: 'flex',
@@ -360,10 +369,12 @@ export default function AnnouncePage() {
                   gap: 6,
                 }}
               >
-                {/* 位置标题行：图标即时预览（Material Symbols）+ 位置名 + 启用开关 */}
+                {/* 位置标题行：图标即时预览（Material Symbols）+ 位置名 + 启用开关。
+                    预览用**该位置的真实默认图标**（展示端 annBarHtml 的 defIcon），
+                    与原来一律显示 campaign 不同 —— 空图标时所见即展示端所得。 */}
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <span className="material-symbols-outlined" style={{ fontSize: 18 }}>
-                    {p.icon || 'campaign'}
+                  <span className="material-symbols-outlined" style={{ fontSize: 18 }} aria-hidden="true">
+                    {p.icon || defIcon}
                   </span>
                   <b style={{ fontSize: 13 }}>{label}</b>
                   <label style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: 12, color: 'var(--ink3)' }}>
@@ -392,16 +403,22 @@ export default function AnnouncePage() {
                   maxLength={300}
                   style={{ ...ctl, resize: 'vertical', lineHeight: 1.6 }}
                 />
-                {/* 图标：Material Symbols 图标名，失焦保存（后端有图标白名单，
-                    白名单外回落默认喇叭）。给运营的中文对照见 ICON_LABELS / 下拉版本。 */}
-                <input
-                  placeholder="图标（可不填）：如「喇叭公告」「铃铛」「人形」，留空用默认喇叭"
-                  value={p.icon}
-                  onChange={(e) => setPlacements((prev) => ({ ...prev, [key]: { ...prev[key], icon: e.target.value } }))}
-                  onBlur={() => save()}
-                  maxLength={48}
-                  style={ctl}
-                />
+                {/* 图标（2026-10-16 改）：原来是自由文本输入，运营看到的是回显的
+                    `campaign` / `person` 内名（用户点单去掉）。现在只给白名单内的
+                    中文名 + 图形预览，选完即时保存；留空 = 展示端用该位置的默认图标。 */}
+                <label style={{ fontSize: 12.5, color: 'var(--ink3)' }}>
+                  图标
+                  <IconSelect
+                    value={p.icon}
+                    onChange={(v) => {
+                      const next = { ...placements, [key]: { ...placements[key], icon: v } }
+                      setPlacements(next)
+                      save({ placements: next })
+                    }}
+                    emptyLabel="不显示（用默认图标）"
+                    style={{ marginTop: 4 }}
+                  />
+                </label>
               </div>
             )
           })}
@@ -425,7 +442,7 @@ export default function AnnouncePage() {
           {items.map((it, i) => (
             <div
               key={i}
-              style={{ border: '1px solid var(--hairline)', borderRadius: 10, padding: 10, display: 'flex', flexDirection: 'column', gap: 6 }}
+              style={{ border: '1px solid var(--line)', borderRadius: 10, padding: 10, display: 'flex', flexDirection: 'column', gap: 6 }}
             >
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                 <span className="material-symbols-outlined" style={{ fontSize: 18 }}>
@@ -476,18 +493,51 @@ export default function AnnouncePage() {
                     <option value="plain">白底描边（原冠军条样式）</option>
                   </select>
                 </label>
-                {/* 图标：只列后端白名单内的 Material Symbols 名，空 = 不带图标（下拉即保存） */}
+                {/* 图标：与公告位共用同一个选择器（只列白名单中文名 + 图形预览，选完即存） */}
                 <label style={{ fontSize: 12.5, color: 'var(--ink3)' }}>
-                  图标（可不选）
-                  <select value={it.icon} onChange={(e) => setItemSaved(i, { icon: e.target.value })} style={input34}>
-                    <option value="">不显示图标</option>
-                    {ANNOUNCE_ICONS.map((n) => (
-                      <option key={n} value={n}>
-                        {ICON_LABELS[n] ?? n}（{n}）
-                      </option>
-                    ))}
-                  </select>
+                  图标
+                  <IconSelect
+                    value={it.icon}
+                    onChange={(v) => setItemSaved(i, { icon: v })}
+                    style={{ marginTop: 4 }}
+                  />
                 </label>
+                {/* 对齐（2026-10-16 后端新增 align）：三个对齐图标 = 居左/居中/居右，点了即保存。
+                    center/right 时展示端把「图标 + 文案」整组靠中/靠右；left = 原版式（默认） */}
+                <div style={{ fontSize: 12.5, color: 'var(--ink3)' }}>
+                  对齐
+                  <div style={{ display: 'flex', gap: 4, marginTop: 2 }}>
+                    {ANNOUNCE_ALIGNS.map((o) => {
+                      const on = (it.align ?? 'left') === o.v
+                      return (
+                        <button
+                          key={o.v}
+                          type="button"
+                          className="ghost"
+                          title={o.t}
+                          aria-pressed={on}
+                          onClick={() => setItemSaved(i, { align: o.v })}
+                          style={{
+                            width: 36,
+                            height: 30,
+                            padding: 0,
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            /* 管理端的变量名是 --brand/--line（不是展示端的 --primary/--hairline） */
+                            border: `1px solid ${on ? 'var(--brand)' : 'var(--line)'}`,
+                            background: on ? 'var(--brand)' : 'transparent',
+                            color: on ? '#fff' : 'var(--ink3)',
+                          }}
+                        >
+                          <span className="material-symbols-outlined" style={{ fontSize: 16 }}>
+                            {o.i}
+                          </span>
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
                 <label style={{ fontSize: 12.5, color: 'var(--ink3)' }}>
                   标题
                   <input
@@ -550,7 +600,7 @@ export default function AnnouncePage() {
         </p>
         <div
           style={{
-            border: '1px solid var(--hairline)',
+            border: '1px solid var(--line)',
             borderRadius: 10,
             padding: 10,
             display: 'grid',
@@ -632,19 +682,66 @@ export default function AnnouncePage() {
       {/* 保存区：三个编辑区块共用一次整包保存（公告位 + 公告条 + 庆祝；引导只回传不编辑） */}
       <div className="ann-savebar">
         {/* 手动保存按钮：save 现在带 overrides 参数，onClick 必须包一层箭头函数，
-            否则 click 事件对象会被当成 overrides 传进去 */}
-        <button className="primary" disabled={busy} onClick={() => save()}>
+            否则 click 事件对象会被当成 overrides 传进去。
+            保存中：disabled + 文案变「保存中…」（DESIGN §6：disabled 必须能看出是哪种状态）。
+            busy 时按钮不可点 = 不会重入，连续保存只能一次一次来，时间戳也就一次一次更新。 */}
+        <button className="primary" disabled={busy} aria-busy={busy} onClick={() => save()}>
           {busy ? '保存中…' : '保存全部（公告位 / 公告条 / 庆祝）'}
         </button>
+        {/* 保存成功：按钮旁持续显示「已保存 · HH:MM:SS」（本地时间，24 小时制）。
+            状态变化用图标 + 文本，不只靠颜色（DESIGN §4.6）；role=status 让读屏也能收到。
+            不自动消失：本页到处「失焦即保存」，一闪而过的提示等于没有。 */}
+        {savedAt && (
+          <span
+            role="status"
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 4,
+              fontSize: 12.5,
+              color: 'var(--good)',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            <span className="material-symbols-outlined" style={{ fontSize: 16 }} aria-hidden="true">
+              check_circle
+            </span>
+            已保存 · {fmtClock(savedAt)}
+          </span>
+        )}
         {data && <span className="hint">当前版本 {data.version}</span>}
         <span style={{ fontSize: 11.5, color: 'var(--ink3)' }}>
-          文本框失焦或开关切换后自动保存（公告位 + 公告条 + 庆祝整体一起保存，版本前进；
-          原有引导配置会原样保留一并回传）。
+          文本框失焦或开关切换后自动保存（公告位 + 公告条 + 庆祝整体一起保存，版本前进，
+          展示端会重新弹出引导；原有引导配置会原样保留一并回传）。
         </span>
-        {msg && <div className="alert good">{msg}</div>}
-        {/* 2026-10-14 审计修复：保存失败现在走 err，这里补上红色提示条
-            （原先错误文案被套进绿色的 .alert.good，运营以为保存成功了） */}
-        {err && <div className="alert bad">{err}</div>}
+        {/* 保存失败：红字原因 + 「重试」按钮（DESIGN §4.5：失败给重试入口与原因，不给「出错了」）。
+            已在页面上的内容一个字段都不清 —— 失败后 state 保持原样，重试就是重发同一份。
+            独占一行（flex 1 1 100%）与既有 .ann-savebar > .alert 的排版一致。 */}
+        {saveErr && (
+          <span
+            role="alert"
+            style={{
+              flex: '1 1 100%',
+              display: 'inline-flex',
+              alignItems: 'center',
+              flexWrap: 'wrap',
+              gap: 8,
+              fontSize: 12.5,
+              color: 'var(--bad)',
+            }}
+          >
+            <span className="material-symbols-outlined" style={{ fontSize: 16 }} aria-hidden="true">
+              error
+            </span>
+            保存失败：{saveErr}
+            <button onClick={() => save()} disabled={busy}>
+              重试
+            </button>
+            <span className="hint" style={{ color: 'var(--ink3)' }}>
+              已填内容没有丢，可直接重试；连续失败先把上面红字原因发给技术。
+            </span>
+          </span>
+        )}
       </div>
     </div>
   )
