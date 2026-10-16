@@ -16,7 +16,7 @@ import { buildExportNode, disposeExportNode, downloadBlob, nodeToPngBlob } from 
 import { REVIVAL_MINUTES, revivalAfterGroup, rulesOf } from './rules';
 import { useAutoRefresh } from '../useAutoRefresh';
 import { isoLocal } from '../lib/date';
-import { registerLeaveGuard } from '../lib/router';
+import { openFullscreen, registerLeaveGuard } from '../lib/router';
 import type {
   BalanceStat,
   BreakRule,
@@ -1357,6 +1357,11 @@ export default function GroupPage() {
           </button>
           <button disabled={busy === 'export'} onClick={exportImage}>
             {busy === 'export' ? '导出中…' : '导出长图'}
+          </button>
+          {/* PK 展板（2026-10-16 用户口径）：全屏独立页，不在侧边栏 —— 跳转新标签打开。
+              展板要投屏/占满整屏，新标签里没有后台导航（地址栏除外）。 */}
+          <button onClick={() => openFullscreen('pk-board')} title="在新标签打开展板（全屏无导航，可投屏）">
+            打开展板 ↗
           </button>
         </div>
         <div className="row">

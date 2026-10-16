@@ -1,28 +1,29 @@
 import { useEffect, useState } from 'react'
 import { hasToken, login, logout, UNAUTHORIZED_EVENT } from './api'
 import { subscribeChanges } from './useAutoRefresh'
-import { ROUTES, routeHref, useRoute, type RouteKey } from './lib/router'
+import { FULLSCREEN_ROUTES, ROUTES, routeHref, useRoute, type RouteKey } from './lib/router'
 import DashboardPage from './DashboardPage'
 import ImportPage from './ImportPage'
 import StreamerPage from './StreamerPage'
-import ClaimPage from './ClaimPage'
 import VisitPage from './VisitPage'
 import LineagePage from './LineagePage'
 import AnnouncePage from './AnnouncePage'
 import BotPage from './BotPage'
 import SendPage from './SendPage'
 import GroupPage from './pk/GroupPage'
+import BoardPage from './pk/BoardPage'
 import './pk/pk.css'
 
-/** 侧边栏导航图标（emoji，零依赖；与 router.ts 的 RouteKey 一一对应） */
+/** 侧边栏导航图标（emoji，零依赖；与 router.ts 的 ROUTES 一一对应，
+ *  全屏独立页（PK 展板）不在侧边栏里，因此没有图标项）。 */
 const NAV_ICONS: Record<RouteKey, string> = {
   data: '📊',
   import: '📥',
   streamers: '👤',
-  claims: '🔗',
   visits: '👁️',
   lineage: '🌳',
   group: '⚔️',
+  'pk-board': '🏆',
   announce: '📣',
   bots: '🤖',
   send: '📢',
@@ -102,6 +103,13 @@ export default function App() {
     )
   }
 
+  /* 全屏独立页（2026-10-16 用户口径）：PK 展板不套后台壳（无侧边栏导航），
+     整屏只渲染展板本身 —— 展板要投屏/占满整屏，后台导航是干扰。
+     地址仍在 /admin/pk-board（可收藏、刷新不丢、鉴权同后台一套）。 */
+  if (FULLSCREEN_ROUTES.some((r) => r.key === route)) {
+    return <BoardPage />
+  }
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -153,7 +161,6 @@ export default function App() {
         {route === 'data' && <DashboardPage />}
         {route === 'import' && <ImportPage />}
         {route === 'streamers' && <StreamerPage />}
-        {route === 'claims' && <ClaimPage />}
         {route === 'visits' && <VisitPage />}
         {route === 'lineage' && <LineagePage />}
         {route === 'group' && <GroupPage />}
