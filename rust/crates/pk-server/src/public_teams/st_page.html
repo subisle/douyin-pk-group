@@ -319,6 +319,9 @@ button { font:inherit; cursor:pointer; }
 .ip-ava-core { width:100%; height:100%; border-radius:50%; background:#1b0a3b; border:2px solid #391973;
   display:grid; place-items:center; overflow:hidden; box-sizing:border-box;
   color:#fff; font-weight:800; font-size:18px; letter-spacing:.05em; }
+/* 抖音真头像：铺满圆形容器（与领奖台头像同口径：无白框、cover 裁圆） */
+.ip-ava-core .ip-ava-img { width:100%; height:100%; object-fit:cover; display:block;
+  user-select:none; -webkit-user-drag:none; }
 .ip-ava-core .material-symbols-outlined { font-size:24px; color:#d8b4fe; }
 .ip-ava-rank { position:absolute; right:-4px; bottom:-4px; width:20px; height:20px; border-radius:50%;
   display:grid; place-items:center; border:2px solid #0f172a; box-sizing:border-box;
@@ -4047,9 +4050,9 @@ function pushStatusText(p) {
 /* 2026-10-10：数据入库约 30 分钟后由微信机器人私聊推送，两类内容各自开关（都关着就不推）：
    · 追分提醒 —— 追主播 / 定音浪目标 / 追名次（一律比本月累计），追上/还差多少都推给你
    · 每日报告 —— 当天音浪排行榜
-   绑定（2026-10-16 口径）：页面显示机器人加好友二维码 → 扫码加机器人 →
+   绑定（2026-10-16 口径）：页面点「显示二维码」→ 扫码加机器人 →
    点「获取绑定码」拿 4 位数字 → 在微信里发给机器人 → 绑定完成（不再要手机号；
-   扫码只负责加好友，不能完成绑定）。 */
+   扫码只负责加好友，不能完成绑定；二维码默认不显示，点了才出现）。 */
 let pushState = null;
 let pushSrTimer = null;      // 「我发了，查激活状态」的自动轮询（needActivate 时 5s 后刷一次）
 let pushChaseSrTimer = null; // 「目标人」搜索防抖（与上面的轮询分开，避免互相 clearTimeout）
@@ -4124,8 +4127,8 @@ function pushSecTitle(text) {
 
 /* ① 微信对接：绑定三态（bound / scanBound / 未绑定）+ 加好友二维码 + 绑定码 + 解绑。
    2026-10-16 用户口径：
-   · 页面直接显示**机器人加好友二维码**（管理员后台上传的那张）—— 扫码只负责加机器人，
-     **不能完成绑定**；
+   · 二维码默认不显示，点「显示二维码」才展开（懒加载图片，不点不发请求）——
+     扫码只负责加机器人，**不能完成绑定**；
    · 绑定 = 点「获取绑定码」拿 4 位数字，在微信里发给机器人（不再要手机号）；
    · 官方「扫码登录绑定」入口收起（后端端点保留，页面不再渲染）。
    三态口径：bound=已拿到会话可推送；scanBound=历史扫码用户（扫了码还没给机器人发过消息，
@@ -4164,7 +4167,8 @@ function wechatBindHtml(p) {
 /* 未绑定时的引导，两种人分开走：
    · 历史扫码用户（scanBound）→ 只差「给机器人发一条消息」，给查激活入口，别让他重扫
      （官方扫码入口已收起，页面上已经没有「重新扫码」可点了）；
-   · 其余人 → 加好友二维码 + 三步说明（扫码加好友 → 取 4 位码 → 发给机器人）。
+   · 其余人 → 点「显示二维码」展开加好友二维码 + 三步说明（展开扫码加好友 →
+     取 4 位码 → 发给机器人）。
      二维码取不到（管理员没配 / 图片端点失败）也要把绑定码路走通，不能整块卡死。 */
 function pushUnboundHtml(p) {
   if (p.scanBound) {
@@ -4175,19 +4179,24 @@ function pushUnboundHtml(p) {
       '<button class="go gray" id="pushCheckActivate" style="margin-top:8px">我发了，查一下激活状态</button>';
   }
   let h = '<div class="sub" style="margin-top:8px;line-height:1.75">' +
-    '用微信扫下面的二维码加机器人为好友，再点「获取绑定码」，把 4 位数字发给它就绑定好了。' +
+    '点「显示二维码」用微信扫码加机器人为好友，再点「获取绑定码」，把 4 位数字发给它就绑定好了。' +
     '</div>';
   if (p.hasQr) {
-    h += '<div class="qr-frame" style="margin-top:10px">' +
-      '<div class="qr-wrap" id="pushAddQrWrap">' +
-      '<img class="qrcode" id="pushAddQr" alt="微信机器人二维码"></div></div>';
+    /* 2026-10-16 用户口径：二维码默认不显示，点「显示二维码」才展开（再点收起）。
+       图片也跟着懒加载 —— 不点不发 GET /my/push/qr 请求。 */
+    h += '<button class="go gray" id="pushQrShow" style="margin-top:10px">显示二维码</button>' +
+      '<div id="pushQrArea" class="hidden" style="margin-top:10px">' +
+      '<div class="qr-frame"><div class="qr-wrap" id="pushAddQrWrap">' +
+      '<img class="qrcode" id="pushAddQr" alt="微信机器人二维码"></div></div>' +
+      '<div class="hint" style="margin-top:6px">扫码只负责加机器人为好友，不完成绑定；' +
+      '加完好友走下面的绑定码。</div></div>';
   } else {
     h += '<div class="hint" style="margin-top:8px">管理员还没配机器人二维码；' +
       '如果你已经加过机器人，直接用下面的 4 位绑定码也能绑。</div>';
   }
   h += '<div class="qr-steps">' +
-    '<div class="qr-step"><span class="qr-n">1</span><span class="qr-txt">用微信「扫一扫」加机器人为好友</span></div>' +
-    '<div class="qr-step"><span class="qr-n">2</span><span class="qr-txt">点下面的「获取绑定码」，拿到 4 位数字</span></div>' +
+    '<div class="qr-step"><span class="qr-n">1</span><span class="qr-txt">点「显示二维码」，用微信「扫一扫」加机器人为好友</span></div>' +
+    '<div class="qr-step"><span class="qr-n">2</span><span class="qr-txt">点「获取绑定码」，拿到 4 位数字</span></div>' +
     '<div class="qr-step"><span class="qr-n">3</span><span class="qr-txt">在微信里把这 4 位数字发给机器人，绑定完成</span></div>' +
     '</div>';
   h += '<div class="hint" style="margin-top:8px">推送是你个人的：只有你自己绑定微信后才会收到。</div>';
@@ -4196,7 +4205,8 @@ function pushUnboundHtml(p) {
 
 /* 加好友二维码：图片端点（GET /my/push/qr）要 X-My-Token 头，<img> 带不了 →
    fetch 成 blob 再转 objectURL（口径同 myTokenHeaders 的注释，token 不进 URL）。
-   拉失败就把破图位置换成一句提示，绑定码那条路照常能用。 */
+   2026-10-16 起只在用户点「显示二维码」时才加载（懒加载，不点不发请求）。
+   拉失败就把破图位置换成一句提示 + 重试按钮，绑定码那条路照常能用。 */
 let pushAddQrUrl = '';
 async function loadPushAddQr() {
   const img = $('pushAddQr');
@@ -4211,8 +4221,32 @@ async function loadPushAddQr() {
   } catch (e) {
     const wrap = $('pushAddQrWrap');
     if (wrap) wrap.outerHTML =
-      '<div class="hint">二维码没取到，稍后重试；也可以直接用下面的 4 位绑定码。</div>';
+      '<div class="hint" id="pushQrMiss">二维码没取到，稍后重试；也可以直接用下面的 4 位绑定码。<br>' +
+      '<button class="go gray" id="pushQrRetry" style="margin-top:6px">重试</button></div>';
+    const retry = $('pushQrRetry');
+    if (retry) retry.onclick = () => {
+      /* 重试 = 把占位提示换回 <img> 骨架再拉一次（旧节点已被换掉，得现查现用） */
+      const miss = $('pushQrMiss');
+      if (miss) miss.outerHTML =
+        '<div class="qr-wrap" id="pushAddQrWrap">' +
+        '<img class="qrcode" id="pushAddQr" alt="微信机器人二维码"></div>';
+      loadPushAddQr();
+    };
   }
+}
+
+/* 「显示二维码」按钮（2026-10-16 用户口径）：点一下展开二维码并懒加载图片，
+   再点一下收起（图片 objectURL 保留，收起再展开不重复请求）。 */
+function bindPushQrShow() {
+  const btn = $('pushQrShow'), area = $('pushQrArea');
+  if (!btn || !area) return;
+  btn.onclick = () => {
+    const opening = area.classList.contains('hidden');
+    area.classList.toggle('hidden');
+    btn.textContent = opening ? '收起二维码' : '显示二维码';
+    /* 只在第一次展开时加载一次图片；此后展开/收起不再打接口 */
+    if (opening && !$('pushAddQr')?.src) loadPushAddQr();
+  };
 }
 
 /* ② 推送开关：bot 目前支持的全部个人开关（notifyTarget / dailyReport /
@@ -4706,8 +4740,10 @@ async function postPush(path, extra) {
 }
 
 function bindPushBox(p) {
-  /* 加好友二维码随卡渲染（<img> 带不了 X-My-Token，走 fetch → objectURL） */
-  loadPushAddQr();
+  /* 2026-10-16 用户口径：二维码默认收起，点「显示二维码」才展开（懒加载图片）。
+     不再随卡渲染就自动拉图 —— renderPushBox 每次轮询回来都会走这里，自动拉会把
+     「不点不显示」变成事实上的每次轮询都打一次图片接口。 */
+  bindPushQrShow();
   // 已扫码但还没激活：轮询一下状态，用户发完消息后自动刷新
   if (p && p.needActivate) {
     clearTimeout(pushSrTimer);
@@ -6135,7 +6171,31 @@ function maybeAnnounceItemsPopup() {
     const avaCore = document.createElement('div');
     avaCore.className = 'ip-ava-core';
     const picked = splitRankNames(it.name).filter((s) => s.length > 0);
-    if (picked.length) {
+    /* 抖音头像（2026-10-16 用户口径「头像使用抖音头像」）：item.avatar 是后端白名单
+       里的本站同源头像路径（/api/public/avatars/{pid}?v={hash}，选主播时带出）。
+       只认这个前缀才发 <img>（任意字符串不进 src）；onerror / 空串回落首字色块
+       （头像 404 语义与领奖台一致：装饰性资源缺图不破版）。 */
+    const avaPath = String(it.avatar == null ? '' : it.avatar);
+    if (avaPath.startsWith('/api/public/avatars/')) {
+      const img = document.createElement('img');
+      img.className = 'ip-ava-img';
+      img.alt = '';
+      img.draggable = false;
+      img.loading = 'lazy';
+      img.referrerPolicy = 'no-referrer';
+      img.src = avaPath;
+      img.onerror = () => {
+        img.remove();
+        avaCore.textContent = picked.length ? ipAvatarChar(it.name) : '';
+        if (!picked.length) {
+          const avaIco = document.createElement('span');
+          avaIco.className = 'material-symbols-outlined';
+          avaIco.textContent = 'person';
+          avaCore.appendChild(avaIco);
+        }
+      };
+      avaCore.appendChild(img);
+    } else if (picked.length) {
       avaCore.textContent = ipAvatarChar(it.name);
     } else {
       const avaIco = document.createElement('span');

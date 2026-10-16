@@ -117,6 +117,9 @@ paths:
       responses:
         "200":
           description: Soft-deleted
+  /api/admin/announcement/items-avatar:
+    description: "状态：已实现（2026-10-16）。Announcement.items 每条新增 avatar 字段（选主播时由 seat-options 带出并保存的抖音头像同源路径）。写入校验：只收 /api/public/avatars/ 开头、≤120 字符、无路径穿越的 ASCII 路径，其余丢弃为空串；下发原样带出（空 = 展示端回落首字色块）。详见 /api/admin/announcement 的 items 定义。"
+
   /api/admin/announcement/seat-options:
     get:
       operationId: announcementSeatOptions
@@ -146,6 +149,9 @@ paths:
                         name: { type: string }
                         team: { type: string }
                         wave: { type: integer }
+                        avatar:
+                          type: string
+                          description: "抖音头像同源地址 /api/public/avatars/{pid}?v={hash}；无图（表未建/未同步）= null，前端回落首字色块。"
 
   /api/admin/import/upload:
     post:

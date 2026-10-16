@@ -306,6 +306,12 @@ pub struct AnnounceItem {
     /// 带出该月成绩自动填 wave；本字段只是记录口径，展示端仍只认 wave 数字。
     #[serde(default)]
     pub period: String,
+    /// 抖音头像同源地址（2026-10-16 用户口径「头像使用抖音头像」）：选主播时由
+    /// seat-options 带出（`/api/public/avatars/{pid}?v={hash}`）存进来，弹窗选手卡
+    /// 直接渲染真头像（401/无图时前端回落首字色块）。白名单校验：只收本站
+    /// `/api/public/avatars/` 开头的路径，任意 URL / 外域一律丢弃（零注入面）。
+    #[serde(default)]
+    pub avatar: String,
 }
 
 /// 三处公告位（2026-10-13）：登录页（login）/ 展示页看板顶部（home）/ 个人页顶部（my）。
@@ -512,9 +518,10 @@ pub(super) fn synth_item(
             popup: false,
             // 迁移合成条目固定左对齐（2026-10-16）：与原版式一字不差
             align: "left".to_string(),
-            // 合成条目不属于三甲配置：席位未指定（弹窗按数组顺序兜底）、无月份
+            // 合成条目不属于三甲配置：席位未指定（弹窗按数组顺序兜底）、无月份、无头像
             seat: -1,
             period: String::new(),
+            avatar: String::new(),
         });
     }
     let (title, name, wave) = parse_pipe3(champ_banner)?;
@@ -534,9 +541,10 @@ pub(super) fn synth_item(
         popup: false,
         // 迁移合成条目固定左对齐（2026-10-16），与 celebrate 分支同口径
         align: "left".to_string(),
-        // 合成条目不属于三甲配置：席位未指定（弹窗按数组顺序兜底）、无月份
+        // 合成条目不属于三甲配置：席位未指定（弹窗按数组顺序兜底）、无月份、无头像
         seat: -1,
         period: String::new(),
+        avatar: String::new(),
     })
 }
 
@@ -604,6 +612,16 @@ pub(super) fn parse_items(arr: &[Value]) -> Vec<AnnounceItem> {
                         && digits_ok(&p[..4])
                         && digits_ok(&p[5..]);
                     if ok { p.to_string() } else { String::new() }
+                },
+                // 抖音头像（2026-10-16）：只收本站同源头像路径 `/api/public/avatars/...`
+                // （选人端点带出的形态），任意字符串 / 外域 URL / 相对跳转一律丢弃
+                avatar: {
+                    let a = v.get("avatar").and_then(|x| x.as_str()).unwrap_or("").trim();
+                    let ok = a.starts_with("/api/public/avatars/")
+                        && !a.contains("..")
+                        && a.chars().all(|c| c.is_ascii_alphanumeric()
+                            || "/?=&._-".contains(c));
+                    if ok && a.len() <= 120 { a.to_string() } else { String::new() }
                 },
             })
         })
@@ -701,6 +719,8 @@ impl Announcement {
             // 成绩月份 YYYY-MM（空 = 不指定）。管理端编辑回显用，公开端多两个字段无害。
             "seat": it.seat,
             "period": it.period,
+            // 抖音头像同源地址（2026-10-16）：弹窗选手卡渲染真头像；空 = 首字色块
+            "avatar": it.avatar,
         })
     }
 
@@ -896,6 +916,25 @@ pub async fn update_announcement(State(st): State<ArcState>, Json(body): Json<Va
 
 /* ---------------- 三甲席位选人（2026-10-16 用户口径「直接选择主播 x 月成绩」） ---------------- */
 
+/// person_id → 头像 hash 表（seat_options 用）：只读 `person_avatar`（image 非空行），
+/// 与 avatars.rs 的 404 语义同口径 —— 表缺失 / 查询失败一律空 map（头像缺失 =
+/// 前端回落首字色块，绝不把榜单打挂）。
+async fn avatar_hash_map(st: &AppState) -> std::collections::HashMap<u64, String> {
+    let sql = "SELECT person_id, hash FROM person_avatar WHERE image IS NOT NULL";
+    match crate::pgrs::query(&st.pools, "LOCAL", sql).await {
+        Ok(rows) => rows
+            .iter()
+            .filter_map(|r| {
+                let pid = r.try_get::<i64, _>("person_id").ok()?.max(0) as u64;
+                let hash = r.try_get::<Option<String>, _>("hash").ok().flatten()?;
+                Some((pid, hash))
+            })
+            .collect(),
+        Err(_) => std::collections::HashMap::new(),
+    }
+}
+
+
 /// GET /api/admin/announcement/seat-options?period=YYYY-MM
 ///
 /// 给公告页「席位配置」的选择器用：返回该月的主播成绩榜（personId/name/team/wave），
@@ -937,17 +976,27 @@ pub async fn seat_options(
         "wave DESC",
     )
     .await?;
+    // 头像地址表（2026-10-16 用户口径「头像使用抖音头像」）：person_avatar 的内容
+    // hash → 同源 `/api/public/avatars/{pid}?v={hash}`（site.rs::avatar_url 同一形态）。
+    // 表不存在（迁移未跑）→ 空 map，avatar 一律 null，前端回落首字色块。
+    let avatars: std::collections::HashMap<u64, String> = avatar_hash_map(&st)
+        .await
+        .into_iter()
+        .map(|(pid, hash)| (pid, super::site::avatar_url(pid, &hash)))
+        .collect();
     let items: Vec<Value> = rows
         .iter()
         .map(|r| {
+            let pid = r.try_get::<i64, _>("person_id").map(|v| v.max(0) as u64).unwrap_or(0);
             json!({
-                "personId": r.try_get::<i64, _>("person_id").map(|v| v.max(0) as u64).unwrap_or(0),
+                "personId": pid,
                 "name": r.try_get::<Option<String>, _>("name").ok().flatten().unwrap_or_default(),
                 "team": r.try_get::<String, _>("gender").unwrap_or_default(),
                 "wave": r
                     .try_get::<i64, _>("wave")
                     .map(|v| v.max(0) as u64)
                     .unwrap_or(0),
+                "avatar": avatars.get(&pid),
             })
         })
         .collect();
@@ -974,9 +1023,10 @@ mod announcement_items_tests {
             popup: false,
             // 对齐默认居左（2026-10-16）：存量用例语义不变，align 单独有用例覆盖
             align: "left".to_string(),
-            // 席位未指定 / 无月份（2026-10-16）：存量用例语义不变，seat/period 有专测
+            // 席位未指定 / 无月份 / 无头像（2026-10-16）：存量用例语义不变，有专测
             seat: -1,
             period: String::new(),
+            avatar: String::new(),
         }
     }
 
@@ -1364,7 +1414,17 @@ mod announcement_items_tests {
         assert_eq!(bad[1].period, "");
         assert_eq!(bad[2].period, "");
 
-        // 下发带 seat / period；roundtrip 无损
+        // 头像（2026-10-16）：只收本站同源头像路径；外域 / 任意串 / 路径穿越丢弃
+        let av = parse_items(&[
+            json!({"title": "正", "avatar": "/api/public/avatars/31?v=abc123"}),
+            json!({"title": "外域", "avatar": "https://evil.example/x.png"}),
+            json!({"title": "穿越", "avatar": "/api/public/avatars/../secret"}),
+            json!({"title": "乱串", "avatar": "javascript:alert(1)"}),
+        ]);
+        assert_eq!(av[0].avatar, "/api/public/avatars/31?v=abc123");
+        assert!(av[1].avatar.is_empty() && av[2].avatar.is_empty() && av[3].avatar.is_empty());
+
+        // 下发带 seat / period / avatar；roundtrip 无损
         let a = Announcement {
             items: parsed,
             ..Default::default()
@@ -1375,6 +1435,15 @@ mod announcement_items_tests {
         let back: Announcement = serde_json::from_value(js).expect("seat roundtrip 必须无损");
         assert_eq!(back.items[0].seat, 0);
         assert_eq!(back.items[0].period, "2026-09");
+
+        // avatar roundtrip（合法路径无损下发）
+        let av_a = Announcement {
+            items: av,
+            ..Default::default()
+        };
+        let av_js = av_a.to_json();
+        assert_eq!(av_js["items"][0]["avatar"], "/api/public/avatars/31?v=abc123");
+        assert_eq!(av_js["items"][1]["avatar"], "");
 
         // 旧数据没有这两个字段：serde(default) 回落 -1 / 空串，不炸
         let legacy: Announcement =

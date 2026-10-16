@@ -74,6 +74,9 @@ type AnnounceItemCfg = {
   align?: AnnounceAlign
   seat?: number
   period?: string
+  /** 抖音头像同源地址（2026-10-16）：选主播时带出 `/api/public/avatars/{pid}?v={hash}`；
+      空 / 404 时展示端回落首字色块。 */
+  avatar?: string
 }
 
 /** 席位选项（2026-10-16）：值 = 后端 seat 字段；展示端弹窗徽章图按席位走。 */
@@ -85,7 +88,7 @@ const ANNOUNCE_SEATS: { v: number; t: string }[] = [
 ]
 
 /** 席位选项的月榜行（GET /api/admin/announcement/seat-options 下发） */
-type SeatRow = { personId: number; name: string; team: string; wave: number }
+type SeatRow = { personId: number; name: string; team: string; wave: number; avatar?: string }
 
 /** 「+ 添加公告条」的新条目：默认不启用，免得文案还没填就在展示端顶出一条空公告
     （popup 默认 false：不弹窗，只走横幅；align 默认 left：保持原版式） */
@@ -101,6 +104,7 @@ const EMPTY_ANNOUNCE_ITEM: AnnounceItemCfg = {
   align: 'left',
   seat: -1,
   period: '',
+  avatar: '',
 }
 
 /** 当月 YYYY-MM（席位月份选择器的缺省值）：本机时区，与后端 seat-options 同口径。 */
@@ -230,6 +234,8 @@ export default function AnnouncePage() {
         seat?: number
         /** 2026-10-16 后端新增：成绩月份 YYYY-MM；老后端不下发 → '' */
         period?: string
+        /** 2026-10-16 后端新增：抖音头像同源地址；老后端不下发 → '' */
+        avatar?: string
       }[]
     }>('/api/admin/announcement')
       .then((d) => {
@@ -279,6 +285,11 @@ export default function AnnouncePage() {
                 align: it?.align === 'center' ? 'center' : it?.align === 'right' ? 'right' : 'left',
                 seat: seat === 0 || seat === 1 || seat === 2 ? seat : -1,
                 period: /^\d{4}-\d{2}$/.test(period) ? period : '',
+                avatar:
+                  typeof it?.avatar === 'string' &&
+                  it.avatar.startsWith('/api/public/avatars/')
+                    ? it.avatar
+                    : '',
               }
             }),
           )
@@ -373,6 +384,7 @@ export default function AnnouncePage() {
           align: it.align === 'center' ? 'center' : it.align === 'right' ? 'right' : 'left',
           seat: it.seat === 0 || it.seat === 1 || it.seat === 2 ? it.seat : -1,
           period: /^\d{4}-\d{2}$/.test(String(it.period ?? '')) ? it.period : '',
+          avatar: String(it.avatar ?? '').startsWith('/api/public/avatars/') ? it.avatar : '',
         }))
       }
       const d = await api<{ announcement: { version: number } }>('/api/admin/announcement', {
@@ -662,11 +674,12 @@ export default function AnnouncePage() {
                     onChange={(e) => {
                       const row = seatRows.find((r) => String(r.personId) === e.target.value)
                       if (!row) return
-                      // 选人即带出：人名 + 该月音浪 + 成绩月份（period 记录口径）
+                      // 选人即带出：人名 + 该月音浪 + 成绩月份 + 抖音头像（period 记录口径）
                       setItemSaved(i, {
                         name: row.name,
                         wave: String(row.wave),
                         period: /^\d{4}-\d{2}$/.test(it.period ?? '') ? it.period : seatPeriod,
+                        avatar: row.avatar ?? '',
                       })
                     }}
                     style={input34}
