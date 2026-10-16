@@ -10,6 +10,7 @@ import {
   metricLabel,
   metricOfStrategy,
   pk,
+  type BoardConfig,
   type EventType,
 } from './api';
 import { buildExportNode, disposeExportNode, downloadBlob, nodeToPngBlob } from './exportImage';
@@ -91,6 +92,82 @@ export default function GroupPage() {
   const [groupSize, setGroupSize] = useState(8);
   const [startTime, setStartTime] = useState('12:15');
   const [intervalMin, setIntervalMin] = useState(15);
+  const [strengthMode, setStrengthMode] = useState<StrengthMode | 'off'>('top');
+
+  /* ---------------- 展板配置（2026-10-16 用户口径「这个配置是后端进行设置」） ----------------
+     展板页（/admin/pk-board 全屏独立页）不再带配置表单，只读展示这里保存的参数。
+     一份整包配置存后端（GET/PUT /api/group/board-config，后端白名单校验），
+     字段与本页「名单与配置」卡一一对应 —— 加载时从后端回填到本页控件，
+     运营在后台改这里、保存，展板页一键分组即用新参数。 */
+  const [boardCfg, setBoardCfg] = useState<BoardConfig | null>(null);
+  const [boardCfgLoaded, setBoardCfgLoaded] = useState(false);
+  const [boardSaving, setBoardSaving] = useState(false);
+  /** 展板配置与本页「名单与配置」的差异条数（保存按钮提示用） */
+  const boardDirty = useMemo(() => {
+    if (!boardCfg) return 0;
+    let n = 0;
+    if (boardCfg.eventType !== eventType) n++;
+    if (boardCfg.metric !== metric) n++;
+    if (boardCfg.days !== days) n++;
+    if (boardCfg.strategy !== strategy) n++;
+    if (boardCfg.strengthMode !== strengthMode) n++;
+    if (boardCfg.groupSize !== groupSize) n++;
+    if (boardCfg.startTime !== startTime) n++;
+    if (boardCfg.intervalMin !== intervalMin) n++;
+    return n;
+  }, [boardCfg, eventType, metric, days, strategy, strengthMode, groupSize, startTime, intervalMin]);
+
+  /** 拉展板配置并回填本页控件（没存过保持本页默认值）。 */
+  const loadBoardCfg = useCallback(async () => {
+    try {
+      const r = await pk.getBoardConfig();
+      if (r.saved && r.config) {
+        const c = r.config;
+        setBoardCfg(c);
+        // 回填本页同名控件：展板配置 = 后台配置的持久化，两处看同一份
+        setEventType(c.eventType);
+        setMetric(c.metric);
+        setDays(c.days);
+        setStrategy(c.strategy);
+        setStrengthMode(c.strengthMode);
+        setGroupSize(c.groupSize);
+        setStartTime(c.startTime);
+        setIntervalMin(c.intervalMin);
+      }
+    } catch {
+      /* 拉不到不挡页面：后台照常用本页默认值分组，保存时再报后端错误 */
+    } finally {
+      setBoardCfgLoaded(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadBoardCfg();
+  }, [loadBoardCfg]);
+
+  /** 保存展板配置（整包 PUT）：字段直接取本页当前控件值，展板页只读展示这份。 */
+  async function saveBoardCfg() {
+    setBoardSaving(true);
+    try {
+      await pk.saveBoardConfig({
+        eventType,
+        metric: metric as BoardConfig['metric'],
+        days,
+        strategy,
+        strengthMode: strengthMode as BoardConfig['strengthMode'],
+        groupSize,
+        startTime,
+        intervalMin,
+        longBreak: boardCfg?.longBreak ?? 20,
+      });
+      const r = await pk.getBoardConfig();
+      if (r.saved && r.config) setBoardCfg(r.config);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBoardSaving(false);
+    }
+  }
 
   /* ---------------- 数据 ---------------- */
   const [players, setPlayers] = useState<Player[]>([]);
@@ -117,7 +194,6 @@ export default function GroupPage() {
   const [menuFor, setMenuFor] = useState<string | null>(null);
   /** 强度位次形态：默认「每组一个最强」（第 3 组头牌最强、第 4 组次之、第 1 组最弱）；
    *  off = 不排位次只做均衡。强制条件始终优先满足。 */
-  const [strengthMode, setStrengthMode] = useState<StrengthMode | 'off'>('top');
   const strengthOn = strengthMode !== 'off';
   /** 第 3 组打完到下组开赛的间隔（加长休息），与常规间隔分开配。
    *  只在**没有复活赛**的赛事生效（月终争霸赛、两级晋级赛）；小组赛的 20 分钟由复活赛占。 */
@@ -1088,6 +1164,34 @@ export default function GroupPage() {
               <div className="hint">改规则要动 Rust 的 constraints.rs，前端改不了</div>
             </div>
           </details>
+        )}
+      </section>
+
+      {/* ============ 展板配置（2026-10-16 用户口径「这个配置是后端进行设置」） ============
+          展板页 /admin/pk-board 是全屏独立页、不再自带配置表单 —— 参数在这里设置并存
+          后端（GET/PUT /api/group/board-config），展板页只读展示 + 一键分组用这份。
+          控件就是上面的「名单与配置」卡（同一份 state），这里只做「存进后端」的动作。 */}
+      <section className="card">
+        <h2>
+          展板配置
+          <span className="hint">
+            供「打开展板 ↗」打开的全屏展板页使用；参数在上面「名单与配置」里改，这里保存
+          </span>
+        </h2>
+        <div className="row">
+          <span className="hint" style={{ flex: 1 }}>
+            {boardCfgLoaded && boardCfg
+              ? `已保存：${boardCfg.eventType} · ${metricLabel(boardCfg.metric, boardCfg.days)} · ${boardCfg.strategy} · 每组 ${boardCfg.groupSize} 人 · ${boardCfg.startTime} 起 / 隔 ${boardCfg.intervalMin} 分`
+              : boardCfgLoaded
+                ? '后端还没存过展板配置（展板页首次一键分组前必须先在这里保存一次）'
+                : '展板配置加载中…'}
+          </span>
+          <button className="primary" disabled={boardSaving} onClick={saveBoardCfg}>
+            {boardSaving ? '保存中…' : '保存展板配置'}
+          </button>
+        </div>
+        {boardCfgLoaded && boardCfg && boardDirty > 0 && (
+          <p className="hint">上面「名单与配置」有 {boardDirty} 处改动还没存进展板配置（改完记得保存）</p>
         )}
       </section>
 
