@@ -117,13 +117,43 @@ paths:
       responses:
         "200":
           description: Soft-deleted
+  /api/admin/announcement/seat-options:
+    get:
+      operationId: announcementSeatOptions
+      description: "状态：已实现（2026-10-16）。三甲席位选人：按月返回主播成绩榜（personId/name/team/wave），公告条「选主播」自动带出人名与该月成绩。口径与展示端月榜一致（monthly_wave 导入整月值优先，daily_metric 日明细求和兜底，wave_reliable=1）。period 缺省 = 当月。"
+      parameters:
+        - name: period
+          in: query
+          schema:
+            type: string
+          description: "成绩月份 YYYY-MM；缺省 = 当月（本机时区）。"
+      responses:
+        "200":
+          description: "该月成绩榜（wave DESC）"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  period:
+                    type: string
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        personId: { type: integer }
+                        name: { type: string }
+                        team: { type: string }
+                        wave: { type: integer }
+
   /api/admin/import/upload:
     post:
       operationId: uploadImport
-      description: "状态：已实现（multipart 文件上传）（CSV/TSV/文本），解析返回行预览；确认后走 commit。"
+      description: "状态：已实现（multipart 文件上传）（CSV/TSV/文本），解析返回行预览；确认后走 commit。响应 rows 是按日解析结果，monthRows 是按月解析结果（2026-10-16 起时长 / 音浪两类列都带，同一行可同时有 minutes 与 wave）；suggest.kind 取值 daily / month（2026-10-16 由 month-duration 更名，因为按月导入不止时长一种指标），只有「有时长列、没有音浪列」的文件才建议 month —— 时长 + 总音浪同表的概览列表默认 daily，运营在弹窗里手动切「按月」。"
       responses:
         "200":
-          description: Parsed rows
+          description: Parsed rows (rows + monthRows + suggest)
   /api/admin/import/preview:
     post:
       operationId: previewImport
@@ -159,6 +189,82 @@ paths:
       responses:
         "200":
           description: Import batch list
+  /api/admin/import/month/preview:
+    post:
+      operationId: previewMonthImport
+      description: "状态：已实现（2026-10-16）。按月指标预览（时长 / 音浪），解析 + 匹配 + 与日明细对账，不落库；period 为 YYYY-MM。响应在 total / matched / minutesTotal 之外补齐：waveTotal；rowsWithMinutes / rowsWithWave（文件里各有多少行带该指标）与 hasMinutes / hasWave（前端据此自动勾选指标）；existingRows / existingMinutes 与 existingWaveRows / existingWave（该月已导入的整月值）；dailyMinutes / dailyWave（该月日明细合计）；diffs / waveDiffs（与日明细不一致的人，各最多 30 条）。文件里时长列与音浪列都没有时返回 400。"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImportPreview"
+      responses:
+        "200":
+          description: Parsed month rows with match status, existing month values and daily reconciliation
+        "400":
+          description: period 格式非 YYYY-MM，或文件里既没有时长列也没有音浪列
+  /api/admin/import/month/commit:
+    post:
+      operationId: commitMonthImport
+      description: "状态：已实现（2026-10-16）。按月入库：事务写 monthly_duration（时长）/ monthly_wave（音浪）+ import_batch 审计（source=admin-import-month）。请求体 metrics = minutes / wave 的任意子集，勾哪个写哪个（不带 = 两种都导，**空数组 400**，不静默当成都导）。同月同指标幂等「值相同不覆盖、值不同才覆盖」，两种指标各自判定；未匹配主播的整月值不进 import_pending 暂存区。响应含 minutesTotal / waveTotal / okRows / unchanged / skipped / failures / batchId。"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImportPreview"
+      responses:
+        "200":
+          description: Batch id with per-metric totals and ok/skipped/failed rows
+        "400":
+          description: period 非法、metrics 为空数组或含未知指标，或没有任何数据行
+  /api/admin/import/month-status:
+    get:
+      operationId: monthImportStatus
+      description: "状态：已实现（2026-10-16）。该月已导入的整月值：rows / minutes（月度时长行数与分钟合计）、waveRows / wave（月度音浪行数与合计，2026-10-16 新增）、lastBatch（最近批次文件名与时间）。"
+      parameters:
+        - name: period
+          in: query
+          required: true
+          schema:
+            type: string
+            pattern: '^\d{4}-\d{2}$'
+        - name: team
+          in: query
+          required: true
+          description: "团别过滤：auto（不限团别，前端默认）/ male / female。MonthQuery 里是必填字段，缺参会 400。"
+          schema:
+            type: string
+            enum: [auto, male, female]
+      responses:
+        "200":
+          description: Imported month duration and wave for the period
+        "400":
+          description: period 格式非 YYYY-MM，或缺 team 参数
+  /api/admin/import/month:
+    delete:
+      operationId: deleteMonthImport
+      description: "状态：已实现（2026-10-16）。删除某月已导入的整月时长**与**整月音浪（team 可选，限团别）：一次删两张表，避免只删一个留下幽灵月值；响应 rows / waveRows（两张表各删行数）与 batches（批次记录数）。"
+      parameters:
+        - name: period
+          in: query
+          required: true
+          schema:
+            type: string
+            pattern: '^\d{4}-\d{2}$'
+        - name: team
+          in: query
+          required: true
+          description: "团别过滤：auto（不限团别，前端默认）/ male / female —— 与 GET month-status 同一套必填口径。"
+          schema:
+            type: string
+            enum: [auto, male, female]
+      responses:
+        "200":
+          description: Deleted row counts per month table and batch count
+        "400":
+          description: period 格式非 YYYY-MM，或缺 team 参数
   /api/public/teams/{team}:
     get:
       operationId: publicTeamSite
@@ -169,24 +275,48 @@ paths:
   /api/public/teams/{team}/daily:
     get:
       operationId: publicTeamDaily
-      description: "状态：已实现（阶段 D）。每日榜，DTO 白名单绝无抖音号。"
+      description: "状态：已实现（阶段 D）。每日榜，DTO 白名单绝无抖音号；item 含 avatar（同源头像路径，可为 null）。"
       responses:
         "200":
           description: Daily ranking
   /api/public/teams/{team}/monthly:
     get:
       operationId: publicTeamMonthly
-      description: "状态：已实现（阶段 D）。月榜。"
+      description: "状态：已实现（阶段 D）。月榜；item 含 avatar（同源头像路径，可为 null）。"
       responses:
         "200":
           description: Monthly ranking
   /api/public/teams/{team}/yearly:
     get:
       operationId: publicTeamYearly
-      description: "状态：已实现（阶段 D）。年榜。"
+      description: "状态：已实现（阶段 D）。年榜；item 含 avatar（同源头像路径，可为 null）。"
       responses:
         "200":
           description: Yearly ranking
+  /api/public/avatars/{person_id}:
+    get:
+      operationId: publicAvatar
+      description: "状态：已实现（2026-10-16）。主播抖音头像本地留存副本：有图返回 200 image/jpeg（JPEG 原图，带 Cache-Control: public, max-age=31536000, immutable 长缓存），无图/无该行/查询异常一律 404 空体；person_id 非数字时由框架返回 400（不是 404）。榜单 item.avatar 即此路径，带 ?v=<hash> 内容版本号（图变 URL 变），可放心长缓存；不下发抖音号或任何内部 id 字段。"
+      parameters:
+        - name: person_id
+          in: path
+          required: true
+          schema:
+            # 整数（axum Path<i64>）：非数字路径参数由框架直接 400 text/plain，
+            # 不走下面的 404 分支 —— P2-3（2026-10-16 独立验证）按真实行为改口径，
+            # 不为了对齐文档再加一层路由 fallback。
+            type: integer
+            format: int64
+      responses:
+        "200":
+          description: Avatar JPEG (locally stored copy)
+          content:
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+        "404":
+          description: No stored avatar for this person
   /api/public/teams/{team}/verify:
     post:
       operationId: publicTeamVerify
@@ -415,6 +545,13 @@ components:
               minutes: { type: number }
               isLive: { type: boolean }
         bizDate: { type: string, pattern: '^\d{4}-\d{2}-\d{2}$' }
+        period: { type: string, pattern: '^\d{4}-\d{2}$', description: "按月导入的业务月份（/import/month/* 用；按日导入不看它）" }
+        metrics:
+          type: array
+          description: "按月导入要写的指标（2026-10-16）：minutes / wave 的任意子集；不带 = 两种都导，空数组 400"
+          items:
+            type: string
+            enum: [minutes, wave]
         team: { type: string, enum: [male, female] }
         mode: { type: string, enum: [merge, reject] }
         filename: { type: string }

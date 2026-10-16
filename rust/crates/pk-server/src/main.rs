@@ -92,6 +92,41 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    /* 抖音头像同步子命令（2026-10-16）：`pk-server sync-avatars`
+    展示端主界面的「主播列表」要显示抖音真实头像 → 把头像**留存**进 person_avatar
+    （图 + 原图 URL + hash + synced_at，详见 src/avatar_sync.rs 与 docs/25）。
+    服务里自动定时器**默认关闭**（纯手动口径，显式 AVATAR_SYNC_ENABLED=1 才开，
+    见下面 spawn_scheduler），这里是手工口。 */
+    if std::env::args().any(|a| a == "sync-avatars") {
+        let rest: Vec<String> = std::env::args()
+            .skip_while(|a| a != "sync-avatars")
+            .skip(1)
+            .collect();
+        // -h/--help 走 stdout + exit 0（help 不是错误，跟 migrate 那种子命令口径一致）
+        if rest.iter().any(|a| a == "-h" || a == "--help") {
+            println!("{}", avatar_sync::USAGE);
+            return Ok(());
+        }
+        let opt = match avatar_sync::Options::from_args(rest) {
+            Ok(o) => o,
+            Err(e) => {
+                eprintln!("参数错误：{e}");
+                std::process::exit(2);
+            }
+        };
+        let ep = config::load_writer()?;
+        tracing::info!(
+            user = %ep.user,
+            host = %ep.host,
+            database = %ep.database,
+            "以写库账号同步主播抖音头像"
+        );
+        let pool = writer::connect(&ep).await?;
+        let sum = avatar_sync::run(&pool, &opt).await?;
+        println!("{}", sum.report(opt.dry_run, opt.days));
+        return Ok(());
+    }
+
     /* PostgreSQL 只读数据源 */
     let sources = config::load_sources()?;
     let pools = pgrs::build_pools(&sources).await?;
@@ -185,6 +220,44 @@ async fn main() -> anyhow::Result<()> {
     /* 内置主播名册：person 表为空（全新部署）时自动装载 105 人种子数据 */
     roster_seed::seed_if_empty(&st).await;
 
+    /* 抖音头像：**默认关闭，手动为主**（2026-10-16 用户口径，docs/25）。
+    头像更新走两条手动路径：管理端「同步头像」按钮（POST /api/admin/avatars/sync）
+    或 `pk-server sync-avatars` CLI。自动定时器只在显式设 AVATAR_SYNC_ENABLED=1
+    时才开（开关默认 0，见 config::avatar_sync_enabled）：
+      - 开的时候启动即先检查一次（本地重启频繁，等 7 天反而永远轮不到）；
+      - 之后每 AVATAR_SYNC_CHECK_SECS（默认 6 小时）检查一次，**只有**存在
+        「没有头像行 / synced_at 超过 AVATAR_SYNC_DAYS 天」且登记了抖音号的主播时
+        才真去请求抖音（检查本身零外网请求）；
+      - 新加的主播、后来才补登记抖音号的主播，天然就是候选（无行 = 候选）；
+      - 同步失败（网络/接口变了）不写库 → 保留上一次留存的图，页面不会突然没图。
+    写库走写池；没配写库就是只读部署，跳过并留一条 warn。 */
+    if config::avatar_sync_enabled() {
+        match st.writer.clone() {
+            Some(pool) => {
+                let days = config::avatar_sync_days();
+                let every = std::time::Duration::from_secs(config::avatar_sync_check_secs());
+                avatar_sync::spawn_scheduler(pool, days, every);
+                // 人话化间隔：本地验证常把 CHECK_SECS 设成十几秒，直接写「每 0 小时」会误导
+                let every_txt = if every.as_secs() >= 3600 {
+                    format!("{} 小时", every.as_secs() / 3600)
+                } else {
+                    format!("{} 秒", every.as_secs())
+                };
+                tracing::info!(
+                    days,
+                    check_secs = every.as_secs(),
+                    "主播头像定时同步已启动（每 {} 天重刷，每 {} 检查）",
+                    days,
+                    every_txt
+                );
+            }
+            None => tracing::warn!("没有写库连接，主播头像定时同步不启动（展示端按无头像渲染）"),
+        }
+    } else {
+        // 默认路径（开关默认 0）：纯手动口径，同步只从管理端按钮 / sync-avatars CLI 触发
+        tracing::info!("AVATAR_SYNC_ENABLED=0：主播头像自动刷新已关闭（默认纯手动，管理端按钮 / sync-avatars CLI 触发）");
+    }
+
     /* 内置展示端账号（shuai/shuai，账号=密码、管理员观看账号）：每次启动补齐。
     换库 / 全新部署 / 库被清空都不怕；已有同名账号只补 is_admin，不动运营改过的密码。 */
     let (builtin_created, builtin_skipped) = store::ensure_builtin_my_accounts(&st).await;
@@ -243,6 +316,10 @@ async fn main() -> anyhow::Result<()> {
         // 阶段 D：团别公开站点（/st/m、/st/f 的数据接口）
         .route("/api/public/teams/{team}", get(public_teams::site))
         .route("/api/public/teams/{team}/daily", get(public_teams::daily))
+        /* 主播头像（2026-10-16）：展示端「主播列表」的真头像。
+        同源、按 person_id 取库里留存的图片字节；URL 里带内容 hash（?v=）所以可长缓存。
+        与榜单同一个公开数据面（不额外鉴权），拿不到图一律 404，前端回落姓名首字。 */
+        .route("/api/public/avatars/{person_id}", get(public_teams::avatar))
         .route(
             "/api/public/teams/{team}/lineage",
             get(public_teams::lineage),
@@ -271,12 +348,8 @@ async fn main() -> anyhow::Result<()> {
             "/api/public/teams/{team}/my/accounts",
             get(public_teams::my_accounts),
         )
-        // 登录门轻量身份 + 抖音号绑定申请（展示端，本人 token）
+        // 登录门轻量身份（展示端，本人 token）
         .route("/api/public/teams/{team}/my/who", get(public_teams::my_who))
-        .route(
-            "/api/public/teams/{team}/my/claim",
-            get(public_teams::my_claim_get).post(public_teams::my_claim_post),
-        )
         // 我的页面 · 微信推送（绑定机器人 + 追分目标 + 每日报告开关，2026-10-09）
         .route(
             "/api/public/teams/{team}/my/push",
@@ -336,11 +409,6 @@ async fn main() -> anyhow::Result<()> {
             "/api/public/my/password/reset",
             post(public_teams::my_password_reset),
         )
-        .route(
-            "/api/public/my/bind/search",
-            get(public_teams::my_bind_search),
-        )
-        .route("/api/public/my/bind", post(public_teams::my_bind))
         .layer(axum::middleware::from_fn_with_state(
             st.clone(),
             ipinfo::ip_gate_mw,
@@ -421,11 +489,19 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/group/inspect", post(grouping::inspect))
         .route("/api/group/polish", post(grouping::polish))
         .route("/api/group/constraints", get(grouping::constraints_meta))
+        // PK 展板：配置存取（请求体 = 配置本体，不包一层）
+        .route(
+            "/api/group/board-config",
+            get(grouping::board_config_get).put(grouping::board_config_put),
+        )
         // B 阶段管理端数据域：主播台账 + 导入三步流（写走 douyin_writer 池）
         .route(
             "/api/admin/streamers",
             get(admin::streamers).post(admin::create_streamer),
         )
+        // 头像手动同步（2026-10-16 纯手动口径）：管理端按钮触发一轮同步，
+        // 鉴权走下面统一的 auth::require_admin 层（与本段其他 admin 接口一致）
+        .route("/api/admin/avatars/sync", post(admin::avatar_sync_now))
         .route(
             "/api/admin/streamers/{id}",
             axum::routing::put(admin::update_streamer).delete(admin::delete_streamer),
@@ -539,6 +615,11 @@ async fn main() -> anyhow::Result<()> {
             "/api/admin/my-accounts/{name}/bind",
             post(public_teams::admin_my_account_bind),
         )
+        // 只改「可看团别」（迁移 024）：与改口令分开，避免顺手重置密码
+        .route(
+            "/api/admin/my-accounts/{name}/view-team",
+            axum::routing::put(public_teams::admin_my_account_set_view_team),
+        )
         // 批量开号（2026-10-11 docs/13）：一次给多个在职主播开「展示端登录账号」，
         // 初始密码 = 手机号后四位；单条 /api/admin/my-accounts 保持原样（向后兼容）
         .route(
@@ -550,33 +631,11 @@ async fn main() -> anyhow::Result<()> {
             "/api/admin/streamers/{id}/phone",
             axum::routing::put(admin::set_person_phone),
         )
-        // 抖音号绑定审计（展示端提交 + 截图凭证 → 管理端裁决）
-        .route(
-            "/api/admin/anchor-claims",
-            get(public_teams::admin_anchor_claims),
-        )
-        .route(
-            "/api/admin/anchor-claims/{id}/screenshot",
-            get(public_teams::admin_anchor_claim_screenshot),
-        )
-        .route(
-            "/api/admin/anchor-claims/{id}/decide",
-            post(public_teams::admin_anchor_claim_decide),
-        )
-        // 展示端主播绑定申请的裁决（2026-10-12 审计 L1 同款遗漏：
-        // handler 与导出都在，路由一直没挂，申请永远停在 pending）
-        .route(
-            "/api/admin/my-bind-requests",
-            get(public_teams::admin_my_bind_requests),
-        )
-        .route(
-            "/api/admin/my-bind-requests/{id}/approve",
-            post(public_teams::admin_my_bind_request_approve),
-        )
-        .route(
-            "/api/admin/my-bind-requests/{id}/reject",
-            post(public_teams::admin_my_bind_request_reject),
-        )
+        /* 2026-10-16 抖音号审计整页下线：`/api/admin/anchor-claims*`（截图裁决）与
+           `/api/admin/my-bind-requests*`（展示端绑定申请审核）的路由 + handler 一并移除
+           —— 两者在管理端都没有独立入口，且展示端已不再调用绑定申请接口。
+           `my_bind_requests` / `anchor_claims` 两张表与迁移保留不删，只停用代码路径
+           （历史数据仍可用 SQL 查）。 */
         .route("/api/admin/collect/status", get(admin::collect_status))
         // 访客日志（2026-10-10）：展示端访问 / 登录记录，含外省被拒的
         .route("/api/admin/visits", get(ipinfo::admin_visits))
@@ -595,6 +654,11 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/admin/announcement",
             get(public_teams::get_announcement).post(public_teams::update_announcement),
+        )
+        // 三甲席位选人（2026-10-16 用户口径）：按月返回主播成绩榜，公告条选主播自动带出成绩
+        .route(
+            "/api/admin/announcement/seat-options",
+            get(public_teams::seat_options),
         )
         // 管理员消息下发（docs/23 §5）：收件人解析 + outbox 队列 + 限速 worker
         // task-14：这条路由收自定义上传图（base64），要按单条路由放宽 body limit

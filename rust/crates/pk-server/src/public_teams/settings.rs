@@ -291,6 +291,21 @@ pub struct AnnounceItem {
     /// false，纯横幅行为不变。布尔值无白名单可言，写入端只读 bool。
     #[serde(default)]
     pub popup: bool,
+    /// 横幅对齐（2026-10-16 用户口径）：`"left"`（默认，原版式）/ `"center"` / `"right"`，
+    /// 空 / 非法 / 大小写不符一律归一为 `"left"`（写入与下发共用 [`normalize_align`]）。
+    /// 只影响展示端**横幅**（图标 + 文案整组靠中/靠右），公告弹窗不动。
+    #[serde(default)]
+    pub align: String,
+    /// 三甲席位序号（2026-10-16 用户口径「直接选择主播 x 月成绩」）：0 = 冠军 / 1 = 亚军 /
+    /// 2 = 季军；缺省 / 越界 = 未指定（弹窗按数组顺序兜底 0/1/2，横幅不受影响）。
+    /// 管理端选席位后保存；展示端弹窗的徽章图按它走（同序号时以数组顺序兜底）。
+    /// 默认 -1（不能用 serde(default) 的 i8 零值：0 是「冠军」，旧数据会被误标）。
+    #[serde(default = "announce_seat_default")]
+    pub seat: i8,
+    /// 成绩月份（2026-10-16）：`YYYY-MM`，空 = 不指定。管理端「选主播 + 选月份」时
+    /// 带出该月成绩自动填 wave；本字段只是记录口径，展示端仍只认 wave 数字。
+    #[serde(default)]
+    pub period: String,
 }
 
 /// 三处公告位（2026-10-13）：登录页（login）/ 展示页看板顶部（home）/ 个人页顶部（my）。
@@ -404,11 +419,28 @@ pub const STEP_ICON_WHITELIST: &[&str] = &[
 
 /// tone 归一：只有 `"brand"` 走紫金渐变，其余（空 / 非法 / `"plain"`）一律 `"plain"`
 ///（白底描边）。写入与下发共用这一道关口。
+/// [`AnnounceItem::seat`] 的缺省值：-1 = 未指定（写函数是因为 serde(default) 对
+/// i8 取类型零值 0，而 0 有「冠军」语义）。
+fn announce_seat_default() -> i8 {
+    -1
+}
+
 pub(super) fn normalize_tone(raw: &str) -> String {
     if raw.trim() == "brand" {
         "brand".to_string()
     } else {
         "plain".to_string()
+    }
+}
+
+/// align 归一（2026-10-16）：只有 `"center"` / `"right"` 原样保留，其余（空 / 非法 /
+/// 大小写不符 / `"left"`）一律 `"left"` —— 旧数据（没有该字段）天然是原版式左对齐。
+/// 与 tone 同口径：写入与下发共用这一道关口，管理端/存量脏数据都挡得住。
+pub(super) fn normalize_align(raw: &str) -> String {
+    match raw.trim() {
+        "center" => "center".to_string(),
+        "right" => "right".to_string(),
+        _ => "left".to_string(),
     }
 }
 
@@ -478,6 +510,11 @@ pub(super) fn synth_item(
             tone: "brand".to_string(),
             // 迁移合成条目固定不带弹窗（2026-10-15）：弹窗只给运营显式配置的条目
             popup: false,
+            // 迁移合成条目固定左对齐（2026-10-16）：与原版式一字不差
+            align: "left".to_string(),
+            // 合成条目不属于三甲配置：席位未指定（弹窗按数组顺序兜底）、无月份
+            seat: -1,
+            period: String::new(),
         });
     }
     let (title, name, wave) = parse_pipe3(champ_banner)?;
@@ -495,6 +532,11 @@ pub(super) fn synth_item(
         tone: "plain".to_string(),
         // 迁移合成条目固定不带弹窗（2026-10-15），与 celebrate 分支同口径
         popup: false,
+        // 迁移合成条目固定左对齐（2026-10-16），与 celebrate 分支同口径
+        align: "left".to_string(),
+        // 合成条目不属于三甲配置：席位未指定（弹窗按数组顺序兜底）、无月份
+        seat: -1,
+        period: String::new(),
     })
 }
 
@@ -545,6 +587,24 @@ pub(super) fn parse_items(arr: &[Value]) -> Vec<AnnounceItem> {
                 tone: normalize_tone(v.get("tone").and_then(|x| x.as_str()).unwrap_or("")),
                 // 弹窗标记（2026-10-15）：布尔直读，缺省 false = 纯横幅（旧前端不传也一样）
                 popup: v.get("popup").and_then(|x| x.as_bool()).unwrap_or(false),
+                // 横幅对齐（2026-10-16）：白名单归一，缺省/非法 = left（原版式）
+                align: normalize_align(v.get("align").and_then(|x| x.as_str()).unwrap_or("")),
+                // 三甲席位（2026-10-16）：0/1/2 之外一律 -1（未指定），防任意整数进配置
+                seat: {
+                    let s = v.get("seat").and_then(|x| x.as_i64()).unwrap_or(-1);
+                    if (0..=2).contains(&s) { s as i8 } else { -1 }
+                },
+                // 成绩月份（2026-10-16）：只收 YYYY-MM 形状（月必须两位，01-12 之外不拦——
+                // 导入口径容错），其余丢弃（空 = 不指定）
+                period: {
+                    let p = v.get("period").and_then(|x| x.as_str()).unwrap_or("").trim();
+                    let digits_ok = |s: &str| s.chars().all(|c| c.is_ascii_digit());
+                    let ok = p.len() == 7
+                        && p.as_bytes()[4] == b'-'
+                        && digits_ok(&p[..4])
+                        && digits_ok(&p[5..]);
+                    if ok { p.to_string() } else { String::new() }
+                },
             })
         })
         .collect()
@@ -633,8 +693,14 @@ impl Announcement {
             "wave": it.wave.max(0),
             "text": it.text,
             "tone": normalize_tone(&it.tone),
+            // 横幅对齐（2026-10-16）：left（默认）/ center / right，非法值下发时也归一
+            "align": normalize_align(&it.align),
             // 弹窗标记：true = 展示端除横幅外再弹窗一次；与横幅不互斥
             "popup": it.popup,
+            // 三甲席位（2026-10-16）：0=冠军 / 1=亚军 / 2=季军 / -1=未指定；
+            // 成绩月份 YYYY-MM（空 = 不指定）。管理端编辑回显用，公开端多两个字段无害。
+            "seat": it.seat,
+            "period": it.period,
         })
     }
 
@@ -828,6 +894,66 @@ pub async fn update_announcement(State(st): State<ArcState>, Json(body): Json<Va
     Ok(Json(json!({ "ok": true, "announcement": saved.to_json() })))
 }
 
+/* ---------------- 三甲席位选人（2026-10-16 用户口径「直接选择主播 x 月成绩」） ---------------- */
+
+/// GET /api/admin/announcement/seat-options?period=YYYY-MM
+///
+/// 给公告页「席位配置」的选择器用：返回该月的主播成绩榜（personId/name/team/wave），
+/// 运营直接选主播 + 选月份，成绩自动带出填进 wave，不用手抄数字。
+///
+/// 口径与展示端月榜完全一致：走 [`crate::dialect::query_period`]（monthly_wave
+/// 导入的整月值优先，没有才 daily_metric 日明细求和，wave_reliable=1 过滤），
+/// `ORDER BY wave DESC` —— 选中即所见，弹窗里显示的数字就是这个榜的数字。
+#[derive(Deserialize)]
+pub struct SeatOptionsQuery {
+    /// 成绩月份 YYYY-MM；缺省 = 当月（本机时区，与 metrics::monthly 同口径）
+    pub period: Option<String>,
+}
+
+pub async fn seat_options(
+    State(st): State<ArcState>,
+    Query(q): Query<SeatOptionsQuery>,
+) -> ApiResult {
+    let period = match q.period.as_deref() {
+        Some(p) if !p.trim().is_empty() => p.trim().to_string(),
+        _ => chrono::Local::now().format("%Y-%m").to_string(),
+    };
+    // 只收 YYYY-MM 形状（7 位、第 5 位是 '-'、其余是数字），注入面归零
+    let ok = period.len() == 7
+        && period.as_bytes()[4] == b'-'
+        && period.chars().enumerate().all(|(i, c)| i == 4 || c.is_ascii_digit());
+    if !ok {
+        return Err(anyhow::anyhow!("period 格式应为 YYYY-MM").into());
+    }
+    // 月榜同一份查询（ADMIN_PERIOD_SELECT：personId/name/gender/wave/minutes/...），
+    // 这里只需要选人字段，全量列也无妨（同人一个月一行，行数 ≤ 主播数）
+    let rows = crate::dialect::query_period(
+        &st.pools,
+        "LOCAL",
+        crate::dialect::ADMIN_PERIOD_SELECT,
+        &period,
+        "",
+        "",
+        "wave DESC",
+    )
+    .await?;
+    let items: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            json!({
+                "personId": r.try_get::<i64, _>("person_id").map(|v| v.max(0) as u64).unwrap_or(0),
+                "name": r.try_get::<Option<String>, _>("name").ok().flatten().unwrap_or_default(),
+                "team": r.try_get::<String, _>("gender").unwrap_or_default(),
+                "wave": r
+                    .try_get::<i64, _>("wave")
+                    .map(|v| v.max(0) as u64)
+                    .unwrap_or(0),
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "period": period, "items": items })))
+}
+
 /* ==================== 公告条 items 单测（2026-10-14） ==================== */
 
 #[cfg(test)]
@@ -846,6 +972,11 @@ mod announcement_items_tests {
             tone: tone.into(),
             // 弹窗默认关（2026-10-15）：存量测试语义不变，popup 单独有用例覆盖
             popup: false,
+            // 对齐默认居左（2026-10-16）：存量用例语义不变，align 单独有用例覆盖
+            align: "left".to_string(),
+            // 席位未指定 / 无月份（2026-10-16）：存量用例语义不变，seat/period 有专测
+            seat: -1,
+            period: String::new(),
         }
     }
 
@@ -1031,6 +1162,38 @@ mod announcement_items_tests {
         assert_eq!(Announcement::item_json(&dirty)["tone"], "plain");
     }
 
+    /// ⑤b align 归一（2026-10-16）：只有 center / right 原样，空 / 非法 / 大小写不符
+    /// 一律 left —— 老库没有该字段 = 原版式左对齐，行为一字不变。
+    #[test]
+    fn align_is_normalized_to_left_center_or_right() {
+        let items = parse_items(&[
+            json!({"title": "a", "align": "center"}),
+            json!({"title": "b", "align": " right "}),
+            json!({"title": "c", "align": ""}),
+            json!({"title": "d"}),
+            json!({"title": "e", "align": "CENTER"}),
+            json!({"title": "f", "align": "middle"}),
+        ]);
+        assert_eq!(
+            items.iter().map(|i| i.align.as_str()).collect::<Vec<_>>(),
+            vec!["center", "right", "left", "left", "left", "left"]
+        );
+        assert_eq!(Announcement::item_json(&items[0])["align"], "center");
+        assert_eq!(Announcement::item_json(&items[1])["align"], "right");
+        // 存量脏 align 在下发时也归一
+        let dirty = AnnounceItem {
+            title: "x".into(),
+            align: "靠右".into(),
+            ..Default::default()
+        };
+        assert_eq!(Announcement::item_json(&dirty)["align"], "left");
+        assert_eq!(
+            Announcement::item_json(&AnnounceItem::default())["align"],
+            "left",
+            "旧数据（没有该字段）= 原版式左对齐"
+        );
+    }
+
     /// ⑥ enabled=false 保存在配置里（管理端可编辑）但不进公开下发；顺序 = 配置顺序。
     #[test]
     fn disabled_items_stay_for_admin_but_are_not_downlinked_publicly() {
@@ -1174,5 +1337,50 @@ mod announcement_items_tests {
             .public_items_json()[0]["popup"],
             false
         );
+    }
+
+    /// 三甲席位 seat / period（2026-10-16 用户口径「直接选择主播 x 月成绩」）：
+    /// ① 0/1/2 原样收、越界/负数/非数字归 -1；② period 只收 YYYY-MM 形状；
+    /// ③ item_json 下发带 seat/period（管理端回显）；④ roundtrip 无损。
+    #[test]
+    fn seat_and_period_roundtrip() {
+        // 合法席位 + 合法月份：原样收
+        let parsed = parse_items(&[json!({
+            "enabled": true, "title": "初级争霸赛冠军", "name": "狼哲",
+            "wave": 285917, "popup": true, "seat": 0, "period": "2026-09"
+        })]);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].seat, 0);
+        assert_eq!(parsed[0].period, "2026-09");
+
+        // 越界席位（3 / -5 / 字符串"0"）归 -1（未指定）；坏月份丢弃（「甲」的合法月份保留）
+        let bad = parse_items(&[
+            json!({"title": "甲", "seat": 3, "period": "2026-09"}),
+            json!({"title": "乙", "seat": -5, "period": "2026-9"}),
+            json!({"title": "丙", "seat": "0", "period": "202609"}),
+        ]);
+        assert!(bad.iter().all(|it| it.seat == -1));
+        assert_eq!(bad[0].period, "2026-09");   // 合法月份不受坏席位牵连
+        assert_eq!(bad[1].period, "");
+        assert_eq!(bad[2].period, "");
+
+        // 下发带 seat / period；roundtrip 无损
+        let a = Announcement {
+            items: parsed,
+            ..Default::default()
+        };
+        let js = a.to_json();
+        assert_eq!(js["items"][0]["seat"], 0);
+        assert_eq!(js["items"][0]["period"], "2026-09");
+        let back: Announcement = serde_json::from_value(js).expect("seat roundtrip 必须无损");
+        assert_eq!(back.items[0].seat, 0);
+        assert_eq!(back.items[0].period, "2026-09");
+
+        // 旧数据没有这两个字段：serde(default) 回落 -1 / 空串，不炸
+        let legacy: Announcement =
+            serde_json::from_str(r#"{"items":[{"enabled":true,"title":"旧数据"}]}"#)
+                .expect("旧数据必须能反序列化");
+        assert_eq!(legacy.items[0].seat, -1);
+        assert!(legacy.items[0].period.is_empty());
     }
 }

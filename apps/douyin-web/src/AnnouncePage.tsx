@@ -56,7 +56,10 @@ const EMPTY_CELEBRATE: CelebrateCfg = { enabled: false, confetti: false, title: 
     popup（2026-10-15 后端新增）：true = 该条除横幅外在展示端弹窗弹出一次；
     老后端不下发该字段（undefined），按 false 处理。
     align（2026-10-16 后端新增）：横幅对齐 left（默认，原版式）/ center / right，
-    展示端把「图标 + 文案」整组靠中/靠右；老后端不下发 → left。 */
+    展示端把「图标 + 文案」整组靠中/靠右；老后端不下发 → left。
+    seat / period（2026-10-16 后端新增）：三甲席位（0 冠军 / 1 亚军 / 2 季军 / -1 未指定）
+    与成绩月份（YYYY-MM，空 = 不指定）。管理端「选主播 + 选月份」自动带出该月成绩，
+    老后端不下发 → -1 / ''。 */
 type AnnounceTone = 'brand' | 'plain'
 type AnnounceAlign = 'left' | 'center' | 'right'
 type AnnounceItemCfg = {
@@ -69,7 +72,20 @@ type AnnounceItemCfg = {
   tone: AnnounceTone
   popup?: boolean
   align?: AnnounceAlign
+  seat?: number
+  period?: string
 }
+
+/** 席位选项（2026-10-16）：值 = 后端 seat 字段；展示端弹窗徽章图按席位走。 */
+const ANNOUNCE_SEATS: { v: number; t: string }[] = [
+  { v: 0, t: '🥇 冠军' },
+  { v: 1, t: '🥈 亚军' },
+  { v: 2, t: '🥉 季军' },
+  { v: -1, t: '不指定（按顺序）' },
+]
+
+/** 席位选项的月榜行（GET /api/admin/announcement/seat-options 下发） */
+type SeatRow = { personId: number; name: string; team: string; wave: number }
 
 /** 「+ 添加公告条」的新条目：默认不启用，免得文案还没填就在展示端顶出一条空公告
     （popup 默认 false：不弹窗，只走横幅；align 默认 left：保持原版式） */
@@ -83,6 +99,14 @@ const EMPTY_ANNOUNCE_ITEM: AnnounceItemCfg = {
   tone: 'plain',
   popup: false,
   align: 'left',
+  seat: -1,
+  period: '',
+}
+
+/** 当月 YYYY-MM（席位月份选择器的缺省值）：本机时区，与后端 seat-options 同口径。 */
+function curMonth() {
+  const d = new Date()
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
 }
 
 /** 本地时间 HH:MM:SS（保存成功时间戳用）。
@@ -124,6 +148,35 @@ export default function AnnouncePage() {
       连续保存时秒数会变，运营据此确认这次确实发出去了。 */
   const [savedAt, setSavedAt] = useState<Date | null>(null)
   const [busy, setBusy] = useState(false)
+  /* ---- 三甲席位选人（2026-10-16 后端 seat-options）：月份 + 该月成绩榜缓存 ----
+     seatPeriod：选择器当前月份（整页一份，选人时按它拉榜）；seatRows / seatLoading /
+     seatErr：该月榜行 / 拉取中 / 失败原因。换月即拉，失败不阻塞手填。 */
+  const [seatPeriod, setSeatPeriod] = useState(curMonth())
+  const [seatRows, setSeatRows] = useState<SeatRow[]>([])
+  const [seatLoading, setSeatLoading] = useState(false)
+  const [seatErr, setSeatErr] = useState('')
+
+  /** 拉某月成绩榜（失败静默置 seatErr，不阻塞手填路径）。 */
+  const loadSeatRows = useCallback((period: string) => {
+    setSeatLoading(true)
+    setSeatErr('')
+    api<{ items: SeatRow[] }>(
+      `/api/admin/announcement/seat-options?period=${encodeURIComponent(period)}`,
+    )
+      .then((d) => {
+        setSeatRows(Array.isArray(d.items) ? d.items : [])
+        setSeatLoading(false)
+      })
+      .catch((e) => {
+        setSeatRows([])
+        setSeatErr(e?.message ?? String(e))
+        setSeatLoading(false)
+      })
+  }, [])
+
+  useEffect(() => {
+    loadSeatRows(seatPeriod)
+  }, [loadSeatRows, seatPeriod])
 
   /** 公告位字段的控件样式（2026-10-16 统一解剖）：块级 + 满宽 + 34px + 8px 圆角，
       label 在上、控件在下，与「展示页公告条」区块的字段一致（此前是行内宽度、两套尺寸）。 */
@@ -173,6 +226,10 @@ export default function AnnouncePage() {
         popup?: boolean
         /** 2026-10-16 后端新增：left（默认）/ center / right；老后端不下发 → left */
         align?: string
+        /** 2026-10-16 后端新增：三甲席位 0/1/2；老后端不下发 → -1（未指定） */
+        seat?: number
+        /** 2026-10-16 后端新增：成绩月份 YYYY-MM；老后端不下发 → '' */
+        period?: string
       }[]
     }>('/api/admin/announcement')
       .then((d) => {
@@ -203,19 +260,27 @@ export default function AnnouncePage() {
         // 且不标 loaded —— 保存时不发 items，防止把库里的多条整包清空。
         // popup 兜底 !!：老后端不下发该字段 = undefined → false（不弹窗）
         // align 同口径兜底：只认 center / right，其余（含老后端 undefined）= left（原版式）
+        // seat / period（2026-10-16）兜底：seat 只认 0/1/2，其余（含老后端 undefined）= -1；
+        // period 只收 YYYY-MM 形状，其余 = ''（与后端 parse_items 同一白名单）
         if (Array.isArray(d.items)) {
           setItems(
-            d.items.map((it) => ({
-              enabled: !!it?.enabled,
-              icon: it?.icon ?? '',
-              title: it?.title ?? '',
-              name: it?.name ?? '',
-              wave: String(it?.wave ?? 0),
-              text: it?.text ?? '',
-              tone: it?.tone === 'brand' ? 'brand' : 'plain',
-              popup: !!it?.popup,
-              align: it?.align === 'center' ? 'center' : it?.align === 'right' ? 'right' : 'left',
-            })),
+            d.items.map((it) => {
+              const seat = it?.seat
+              const period = String(it?.period ?? '')
+              return {
+                enabled: !!it?.enabled,
+                icon: it?.icon ?? '',
+                title: it?.title ?? '',
+                name: it?.name ?? '',
+                wave: String(it?.wave ?? 0),
+                text: it?.text ?? '',
+                tone: it?.tone === 'brand' ? 'brand' : 'plain',
+                popup: !!it?.popup,
+                align: it?.align === 'center' ? 'center' : it?.align === 'right' ? 'right' : 'left',
+                seat: seat === 0 || seat === 1 || seat === 2 ? seat : -1,
+                period: /^\d{4}-\d{2}$/.test(period) ? period : '',
+              }
+            }),
           )
           setItemsLoaded(true)
         } else {
@@ -295,6 +360,7 @@ export default function AnnouncePage() {
         // 展示页公告条：数组顺序 = 展示端从上到下；wave 转数字，tone 只收 brand / plain。
         // popup（2026-10-15 新增）布尔原样上传；老后端 state 里可能是 undefined → 按 false 发
         // align（2026-10-16 新增）只发 left / center / right，后端再走一遍归一白名单
+        // seat / period（2026-10-16 新增）：seat 只发 -1/0/1/2，period 只发 YYYY-MM（空串可发）
         body.items = its.map((it) => ({
           enabled: it.enabled,
           icon: it.icon.trim(),
@@ -305,6 +371,8 @@ export default function AnnouncePage() {
           tone: it.tone === 'brand' ? 'brand' : 'plain',
           popup: !!it.popup,
           align: it.align === 'center' ? 'center' : it.align === 'right' ? 'right' : 'left',
+          seat: it.seat === 0 || it.seat === 1 || it.seat === 2 ? it.seat : -1,
+          period: /^\d{4}-\d{2}$/.test(String(it.period ?? '')) ? it.period : '',
         }))
       }
       const d = await api<{ announcement: { version: number } }>('/api/admin/announcement', {
@@ -549,8 +617,78 @@ export default function AnnouncePage() {
                     style={input34}
                   />
                 </label>
+                {/* 三甲席位（2026-10-16 后端 seat）：冠军/亚军/季军，展示端弹窗徽章图按它走；
+                    下拉即保存（与样式/图标同口径）。「不指定」= 按数组顺序兜底 */}
                 <label style={{ fontSize: 12.5, color: 'var(--ink3)' }}>
-                  人名
+                  席位
+                  <select
+                    value={it.seat ?? -1}
+                    onChange={(e) => {
+                      const v = Number(e.target.value)
+                      setItemSaved(i, { seat: v === 0 || v === 1 || v === 2 ? v : -1 })
+                    }}
+                    style={input34}
+                  >
+                    {ANNOUNCE_SEATS.map((o) => (
+                      <option key={o.v} value={o.v}>
+                        {o.t}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                {/* 选主播（2026-10-16 用户口径「直接选择主播 x 月成绩」）：选月份拉当月榜，
+                    选人自动带出人名 + 成绩（可再手改）；period 一并保存记录成绩口径 */}
+                <label style={{ fontSize: 12.5, color: 'var(--ink3)' }}>
+                  成绩月份（选人自动带出成绩）
+                  <input
+                    type="month"
+                    value={/^\d{4}-\d{2}$/.test(it.period ?? '') ? it.period! : seatPeriod}
+                    onChange={(e) => {
+                      const p = e.target.value
+                      if (/^\d{4}-\d{2}$/.test(p)) {
+                        setItem(i, { period: p })
+                        setSeatPeriod(p)
+                      }
+                    }}
+                    onBlur={() => save()}
+                    style={input34}
+                  />
+                </label>
+                <label style={{ fontSize: 12.5, color: 'var(--ink3)' }}>
+                  选主播（{seatPeriod} 月榜）
+                  <select
+                    value=""
+                    disabled={seatLoading || seatRows.length === 0}
+                    onChange={(e) => {
+                      const row = seatRows.find((r) => String(r.personId) === e.target.value)
+                      if (!row) return
+                      // 选人即带出：人名 + 该月音浪 + 成绩月份（period 记录口径）
+                      setItemSaved(i, {
+                        name: row.name,
+                        wave: String(row.wave),
+                        period: /^\d{4}-\d{2}$/.test(it.period ?? '') ? it.period : seatPeriod,
+                      })
+                    }}
+                    style={input34}
+                  >
+                    <option value="">
+                      {seatLoading
+                        ? '成绩加载中…'
+                        : seatErr
+                          ? `加载失败（可手填）：${seatErr}`
+                          : seatRows.length === 0
+                            ? '该月暂无成绩数据'
+                            : `选人自动填人名与成绩（共 ${seatRows.length} 人）`}
+                    </option>
+                    {seatRows.map((r) => (
+                      <option key={r.personId} value={String(r.personId)}>
+                        {r.name} · {r.team === 'male' ? '男团' : r.team === 'female' ? '女团' : '未分团'} · {r.wave.toLocaleString('zh-CN')}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label style={{ fontSize: 12.5, color: 'var(--ink3)' }}>
+                  人名（可手改）
                   <input
                     value={it.name}
                     placeholder="狼哲"
@@ -560,7 +698,7 @@ export default function AnnouncePage() {
                     style={input34}
                   />
                 </label>
-                {/* 音浪数：数字输入，0 = 不显示；state 存字符串，保存时统一转数字 */}
+                {/* 音浪数：数字输入，0 = 不显示；选主播自动带出，也可手填覆盖 */}
                 <label style={{ fontSize: 12.5, color: 'var(--ink3)' }}>
                   音浪（0 = 不显示）
                   <input
