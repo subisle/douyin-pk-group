@@ -153,7 +153,15 @@ pub const STREAMERS_SQL: &str = "SELECT p.id, p.name, p.gender, p.master_id, p.g
        (SELECT pb.conversation_id <> '' FROM push_bindings pb WHERE pb.name = p.name
           LIMIT 1) AS wechat_bound,
        (SELECT pb.notify_target = 1 OR pb.daily_report = 1 FROM push_bindings pb
-          WHERE pb.name = p.name LIMIT 1) AS wechat_push
+          WHERE pb.name = p.name LIMIT 1) AS wechat_push,
+       /* 抖音头像本地留存（person_avatar，见 avatar_sync.rs）：管理端只下发
+          「有没有图 + 内容指纹」，不把 BYTEA 塞进台账 JSON（几十 KB × 全员会撑爆响应）。
+          前端拿 hasAvatar 决定是否渲染 img（/api/public/avatars/{id}），
+          avatarHash 给前端做缓存校验（变了才重拉）。 */
+       (SELECT pa.image IS NOT NULL FROM person_avatar pa
+          WHERE pa.person_id = p.id) AS has_avatar,
+       (SELECT pa.hash FROM person_avatar pa
+          WHERE pa.person_id = p.id) AS avatar_hash
      FROM person p
      LEFT JOIN account a ON a.person_id = p.id AND a.is_primary = 1
      LEFT JOIN person m ON m.id = p.master_id
@@ -174,7 +182,14 @@ pub const STREAMERS_SQL_LEGACY: &str = "SELECT p.id, p.name, p.gender, p.master_
        (SELECT pb.conversation_id <> '' FROM push_bindings pb WHERE pb.name = p.name
           LIMIT 1) AS wechat_bound,
        (SELECT pb.notify_target = 1 OR pb.daily_report = 1 FROM push_bindings pb
-          WHERE pb.name = p.name LIMIT 1) AS wechat_push
+          WHERE pb.name = p.name LIMIT 1) AS wechat_push,
+       /* 头像两列与 STREAMERS_SQL 保持一致：person_avatar 是 025 加的表，若遇到连该表
+          都没有的更老库，这里会整条查询报错 → admin::streamers 退回更早的兜底路径
+          （当前没有更早的路径，本地库均 ≥025，先不对齐更老版本，避免兜底层数爆炸）。 */
+       (SELECT pa.image IS NOT NULL FROM person_avatar pa
+          WHERE pa.person_id = p.id) AS has_avatar,
+       (SELECT pa.hash FROM person_avatar pa
+          WHERE pa.person_id = p.id) AS avatar_hash
      FROM person p
      LEFT JOIN account a ON a.person_id = p.id AND a.is_primary = 1
      LEFT JOIN person m ON m.id = p.master_id
@@ -268,36 +283,47 @@ pub fn trend_sql(start: &str, end: &str) -> String {
     )
 }
 
-/// 月 / 年聚合的公共骨架（2026-10-10 月度时长导入）。
+/// 月 / 年聚合的公共骨架（2026-10-10 月度时长导入；2026-10-16 月度音浪导入）。
 ///
-/// 时长口径（用户口径）：某月**有导入的整月时长**（monthly_duration，平台月报）就用它，
-/// 没有（历史月份 / 只有日明细）才回落到 daily_metric 求和 —— 所以必须先把日明细聚合到
-/// 「每人每月」中间表 t，再按人合计；直接 SUM(d.minutes) 会把月报口径丢掉。
+/// 整月口径（用户口径）：某月**有导入的整月值**（monthly_duration 时长 / monthly_wave 音浪）
+/// 就用它，没有（历史月份 / 只有日明细）才回落到 daily_metric 求和 —— 所以必须先把日明细
+/// 聚合到「每人每月」中间表 t，再按人合计；直接 SUM(d.wave) / SUM(d.minutes) 会把整月口径丢掉。
 ///
-/// 中间表 t 的列：pid / m（YYYY-MM）/ w（音浪合计）/ dm（日明细时长求和）/
-/// live（开播天数）/ days（有数据天数）。
+/// 中间表 t 的列：pid / m（YYYY-MM）/ w（音浪日明细求和）/ dm（时长日明细求和）/
+/// live（开播天数）/ off（未播天数）/ days（有数据天数）。
 ///
-/// - `select`：要吐出的列；时长那一列写 `{minutes}` 占位，由本函数决定口径
-///   （with_monthly = true → `COALESCE(md.minutes, t.dm)`，false → `t.dm`）
+/// **导入了整月音浪、当月却没有日明细行的月份也要进榜**：t 里补一行占位（w/dm/live/off/days 全 0），
+/// 音浪由 LEFT JOIN 的整月值填上。平台月报本来就常用来补采「没有按日导入」的历史月份，
+/// 只认日明细的话这些人在月榜/年榜上根本不出现，等于导入白做。补齐行只带音浪值，
+/// 开播 / 未播天数一律 0（未播天数继续走日明细口径，见文件头 NOT_LIVE_WAVE_THRESHOLD 注释）。
+/// ⚠️ 时长**不**做同样的补齐（用户口径：时长保持现有逻辑），所以只有月度时长、没有日明细、
+/// 也没有整月音浪的人照旧不进榜。
+///
+/// - `select`：要吐出的列；音浪写 `{wave}`、时长写 `{minutes}` 占位，由本函数决定口径
+///   （with_wave = true → `COALESCE(mw.wave, t.w)`，false → `t.w`；
+///    with_duration = true → `COALESCE(md.minutes, t.dm)`，false → `t.dm`）
 /// - `like`：`2026-09%`（月）或 `2026%`（年），调用前已过字符白名单
 /// - `team`：male / female / 空（空 = 不限团别）
 /// - `extra_where`：额外过滤（如公开端的 `AND p.status <> 'left'`），已内联
 /// - `order_by`：排序键（后面固定跟 `ORDER BY`），一般写 `wave DESC`
-/// - `with_monthly`：是否带上 monthly_duration（库没跑 007 迁移时只能 false）
+/// - `with_duration` / `with_wave`：是否带上两张整月表（库没跑 007 / 026 迁移时只能 false）。
+///   **两个开关互相独立**：只跑了 007 没跑 026 的库上，时长照旧用整月值、音浪回落日明细，
+///   而不是一起退回日明细（逐张表的回落判定见 [`query_period`]）。
 pub fn period_rollup_sql(
     select: &str,
     like: &str,
     team: &str,
     extra_where: &str,
     order_by: &str,
-    with_monthly: bool,
+    with_duration: bool,
+    with_wave: bool,
 ) -> String {
     let team_clause = if team.is_empty() {
         String::new()
     } else {
         format!(" AND p.gender = '{team}'")
     };
-    let (minutes_expr, monthly_join) = if with_monthly {
+    let (minutes_expr, duration_join) = if with_duration {
         (
             "COALESCE(md.minutes, t.dm)",
             " \
@@ -306,7 +332,36 @@ pub fn period_rollup_sql(
     } else {
         ("t.dm", "")
     };
-    let select = select.replace("{minutes}", minutes_expr);
+    let (wave_expr, wave_join) = if with_wave {
+        (
+            "COALESCE(mw.wave, t.w)",
+            " \
+         LEFT JOIN monthly_wave mw ON mw.person_id = t.pid AND mw.period = t.m",
+        )
+    } else {
+        ("t.w", "")
+    };
+    /* 有整月音浪、当月没有（可信）日明细行的人：补一行占位，让月 / 年榜上能看见导进来的整月值。
+    NOT EXISTS 与本查询内层同一过滤（wave_reliable=1 + 同一个 {like} 窗口形状），
+    保证同一人同一月只可能有一路，日明细与整月值绝不会双算。 */
+    let month_wave_only = if with_wave {
+        format!(
+            " \
+         UNION ALL \
+         SELECT mw0.person_id AS pid, mw0.period AS m, 0 AS w, 0 AS dm, \
+                0 AS live, 0 AS off, 0 AS days \
+           FROM monthly_wave mw0 \
+          WHERE mw0.period LIKE '{like}' \
+            AND NOT EXISTS (SELECT 1 FROM daily_metric d0 \
+                             WHERE d0.person_id = mw0.person_id AND d0.wave_reliable = 1 \
+                               AND TO_CHAR(d0.biz_date, 'YYYY-MM') = mw0.period)"
+        )
+    } else {
+        String::new()
+    };
+    let select = select
+        .replace("{minutes}", minutes_expr)
+        .replace("{wave}", wave_expr);
     format!(
         "SELECT {select} FROM ( \
            SELECT d.person_id AS pid, TO_CHAR(d.biz_date, 'YYYY-MM') AS m, \
@@ -317,33 +372,52 @@ pub fn period_rollup_sql(
            FROM daily_metric d \
            WHERE d.wave_reliable = 1 \
              AND TO_CHAR(d.biz_date, 'YYYY-MM') LIKE '{like}' \
-           GROUP BY pid, m \
+           GROUP BY pid, m{month_wave_only} \
          ) t \
-         JOIN person p ON p.id = t.pid{monthly_join} \
+         JOIN person p ON p.id = t.pid{duration_join}{wave_join} \
          WHERE p.deleted_at IS NULL{team_clause}{extra_where} \
          GROUP BY p.id, p.name, p.gender \
          ORDER BY {order_by}"
     )
 }
 
-/// 管理端月 / 年聚合要吐的列（`{minutes}` 由 period_rollup_sql 按口径替换）
+/// 管理端月 / 年聚合要吐的列（`{wave}` / `{minutes}` 由 period_rollup_sql 按口径替换）
 pub const ADMIN_PERIOD_SELECT: &str = "p.id AS person_id, p.name, p.gender, \
-     (SUM(t.w))::BIGINT AS wave, \
+     (SUM({wave}))::BIGINT AS wave, \
      (SUM({minutes}))::BIGINT AS minutes, \
      (SUM(t.live))::BIGINT AS live_days, \
      (SUM(t.days))::BIGINT AS data_days";
 
-/// 错误是不是「monthly_duration 表不存在」（库还没跑 007 迁移）
-pub fn is_missing_month_table(e: &anyhow::Error) -> bool {
+/// 从错误信息里认「哪张整月表不存在」→ `(缺 monthly_duration[007], 缺 monthly_wave[026])`。
+///
+/// PG 报缺表一律点名关系（`relation "monthly_wave" does not exist`），所以**点名优先**：
+/// 两张表各自回落、互不牵连。不点名表名的模糊判据（`doesn't exist` / `Unknown table`）
+/// 留给历史错误格式，这时两张表都当缺 —— 一起回落日明细最保守，也不会把页面打挂。
+fn missing_month_tables(e: &anyhow::Error) -> (bool, bool) {
     let m = e.to_string();
-    m.contains("monthly_duration")
-        || m.contains("doesn't exist")
-        || m.contains("does not exist")
-        || m.contains("Unknown table")
+    let names_duration = m.contains("monthly_duration");
+    let names_wave = m.contains("monthly_wave");
+    let generic =
+        m.contains("doesn't exist") || m.contains("does not exist") || m.contains("Unknown table");
+    let unnamed = generic && !names_duration && !names_wave;
+    (names_duration || unnamed, names_wave || unnamed)
 }
 
-/// 月 / 年聚合查询：先按「导入的整月时长优先」查，库还没建 monthly_duration（007 迁移没跑）时
-/// 退回纯日明细口径 —— 别让少一张表把整个展示页/数据页打不开。
+/// 错误是不是「monthly_duration 表不存在」（库还没跑 007 迁移）。
+/// 只认这一张表：报错点名 monthly_wave 时返回 false，时长不跟着一起降级。
+pub fn is_missing_month_table(e: &anyhow::Error) -> bool {
+    missing_month_tables(e).0
+}
+
+/// 错误是不是「monthly_wave 表不存在」（库还没跑 026 迁移）。与 [`is_missing_month_table`]
+/// 互为独立开关：哪张表缺就关哪个，另一张的整月口径照旧生效。
+pub fn is_missing_month_wave_table(e: &anyhow::Error) -> bool {
+    missing_month_tables(e).1
+}
+
+/// 月 / 年聚合查询：先按「整月导入值优先」查，库缺哪张整月表就关掉哪个开关重试
+/// （007 没跑 → 时长回落日明细；026 没跑 → 音浪回落日明细；两张都缺 → 都回落），
+/// 别让少一张表把整个展示页 / 数据页打不开。与缺表无关的错误原样上报，不吞成空榜。
 pub async fn query_period(
     pools: &crate::pgrs::Pools,
     source: &str,
@@ -353,15 +427,59 @@ pub async fn query_period(
     extra_where: &str,
     order_by: &str,
 ) -> anyhow::Result<Vec<sqlx::postgres::PgRow>> {
-    let sql = period_rollup_sql(select, like, team, extra_where, order_by, true);
-    match crate::pgrs::query(pools, source, &sql).await {
+    let (mut with_duration, mut with_wave) = (true, true);
+    loop {
+        let sql = period_rollup_sql(
+            select,
+            like,
+            team,
+            extra_where,
+            order_by,
+            with_duration,
+            with_wave,
+        );
+        match crate::pgrs::query(pools, source, &sql).await {
+            Ok(rows) => return Ok(rows),
+            Err(e) => {
+                let (lack_duration, lack_wave) = missing_month_tables(&e);
+                let next_duration = with_duration && !lack_duration;
+                let next_wave = with_wave && !lack_wave;
+                if next_duration == with_duration && next_wave == with_wave {
+                    return Err(e);
+                }
+                if with_duration && !next_duration {
+                    tracing::warn!(
+                        "monthly_duration 表不存在，月/年时长按日明细口径回落（请先跑 pk-server migrate）"
+                    );
+                }
+                if with_wave && !next_wave {
+                    tracing::warn!(
+                        "monthly_wave 表不存在，月/年音浪按日明细口径回落（请先跑 pk-server migrate 026）"
+                    );
+                }
+                with_duration = next_duration;
+                with_wave = next_wave;
+            }
+        }
+    }
+}
+
+/// 跑一条「月 / 年音浪优先整月导入值」的 SQL：库还没跑 026 迁移（没有 monthly_wave）时，
+/// 用调用方给的纯日明细 SQL 重试 —— 与 [`query_period`] 同一套探测，但**只管 monthly_wave
+/// 这一张表**（时长表缺不缺与音浪无关，两张整月表互不牵连）。
+pub async fn query_month_wave_fallback(
+    pools: &crate::pgrs::Pools,
+    source: &str,
+    prefer_month_sql: &str,
+    daily_only_sql: &str,
+) -> anyhow::Result<Vec<sqlx::postgres::PgRow>> {
+    match crate::pgrs::query(pools, source, prefer_month_sql).await {
         Ok(rows) => Ok(rows),
-        Err(e) if is_missing_month_table(&e) => {
+        Err(e) if is_missing_month_wave_table(&e) => {
             tracing::warn!(
-                "monthly_duration 表不存在，月/年时长按日明细口径回落（请先跑 pk-server migrate）"
+                "monthly_wave 表不存在，月/年音浪按日明细口径回落（请先跑 pk-server migrate 026）"
             );
-            let sql = period_rollup_sql(select, like, team, extra_where, order_by, false);
-            crate::pgrs::query(pools, source, &sql).await
+            crate::pgrs::query(pools, source, daily_only_sql).await
         }
         Err(e) => Err(e),
     }
@@ -378,11 +496,17 @@ pub const DUP_NAMES_SQL: &str = "SELECT name, COUNT(*) AS n,
      FROM person WHERE deleted_at IS NULL GROUP BY name HAVING COUNT(*) > 1";
 
 /// 同抖音号（重复检测）
-pub const DUP_DOUYIN_SQL: &str = "SELECT a.douyin_no, COUNT(*) AS n,
-       string_agg(p.id::text, ',' ORDER BY p.id) AS ids, string_agg(p.name, ',' ORDER BY p.id) AS names
-     FROM account a JOIN person p ON p.id = a.person_id
-     WHERE p.deleted_at IS NULL AND a.douyin_no <> ''
-     GROUP BY a.douyin_no HAVING COUNT(*) > 1";
+///
+/// 口径：**一个抖音号挂在 ≥2 个不同在册主播名下**才算重复（需要人工核对归属）。
+/// 同一个主播名下同一个号存两行 account（主号/副号、历史重复导入）是常态，
+/// 不是重复 —— 所以先在子查询里按 (douyin_no, person) 去重，`n` 数的是「人」而不是 account 行，
+/// `ids` / `names` 里同一个人也只出现一次。
+pub const DUP_DOUYIN_SQL: &str = "SELECT douyin_no, COUNT(*) AS n,
+       string_agg(id::text, ',' ORDER BY id) AS ids, string_agg(name, ',' ORDER BY id) AS names
+     FROM (SELECT DISTINCT a.douyin_no, p.id, p.name
+             FROM account a JOIN person p ON p.id = a.person_id
+            WHERE p.deleted_at IS NULL AND a.douyin_no <> '') d
+     GROUP BY douyin_no HAVING COUNT(*) > 1";
 
 /// 团内当天缺数据的主播（导入完整度报告）；已离开 / 榜单隐藏的不报（与 MISSING_ALL_SQL 同口径）
 pub const MISSING_SQL: &str = "SELECT p.name FROM person p
@@ -472,6 +596,36 @@ mod tests {
         assert!(STREAMERS_SQL.contains("gender"));
         assert!(PREV_CUMULATIVE_SQL.contains("cumulative_wave"));
         assert!(BATCH_LIST_SQL.contains("ok_rows"), "002 迁移后的审计字段");
+    }
+
+    /// 同抖音号重复检测的口径：**同一个抖音号挂在 ≥2 个不同主播名下**才算重复。
+    /// 一个主播名下同一个号存两行 account（主号/副号、历史重复导入）是常态，
+    /// 曾经只 `COUNT(*) > 1` 导致把这类行报成「重复：同抖音号 2 组」的误报。
+    #[test]
+    fn dup_douyin_counts_people_not_account_rows() {
+        assert!(
+            DUP_DOUYIN_SQL.contains("SELECT DISTINCT a.douyin_no, p.id"),
+            "必须先按 (douyin_no, person) 去重：同一主播名下同一个号多行 account 不算重复\n{DUP_DOUYIN_SQL}"
+        );
+        assert!(
+            DUP_DOUYIN_SQL.contains("HAVING COUNT(*) > 1"),
+            "阈值仍是 ≥2，但这里的「行」已是去重后的人\n{DUP_DOUYIN_SQL}"
+        );
+        // 去重后计数：n 是人数；ids / names 里同一人只出现一次（外层只能从去重子查询取列）
+        assert!(DUP_DOUYIN_SQL.contains("COUNT(*) AS n"));
+        assert!(DUP_DOUYIN_SQL.contains("string_agg(id::text, ',' ORDER BY id) AS ids"));
+        assert!(DUP_DOUYIN_SQL.contains("string_agg(name, ',' ORDER BY id) AS names"));
+        assert!(
+            DUP_DOUYIN_SQL.contains(") d\n     GROUP BY douyin_no"),
+            "GROUP BY / HAVING 必须作用在去重子查询的结果上，别退回「直接 JOIN 再 GROUP BY」的老写法\n{DUP_DOUYIN_SQL}"
+        );
+        // 字段名是 admin.rs / 前端契约：改列名会 500，这里钉死
+        for col in ["douyin_no", "n", "ids", "names"] {
+            assert!(DUP_DOUYIN_SQL.contains(col), "接口按列名取值，缺 {col}");
+        }
+        // 同名检测是同表 person 的重名，语义本来就对，不许被顺手改掉
+        assert!(DUP_NAMES_SQL.contains("FROM person WHERE deleted_at IS NULL"));
+        assert!(DUP_NAMES_SQL.contains("GROUP BY name HAVING COUNT(*) > 1"));
     }
 
     /// P1-4 护栏：reject 模式的绑定参数个数必须与 SQL 占位符个数一致 ——
@@ -628,5 +782,164 @@ mod tests {
                 "月未播天数不得按日历天补零（缺采 ≠ 未播）：{month_sql}"
             );
         }
+    }
+
+    // ---- 月 / 年骨架的整月口径（2026-10-16 月度音浪导入）----
+
+    /// 月榜骨架：某月有导入的整月音浪（monthly_wave）就用它，没有该月的整月值才回落
+    /// 日明细求和 —— 与月度时长同一套 COALESCE 写法。
+    #[test]
+    fn month_rollup_prefers_imported_wave_over_daily_sum() {
+        let sql = period_rollup_sql(
+            "{wave} AS wave, {minutes} AS minutes",
+            "2999-01%",
+            "",
+            "",
+            "wave DESC",
+            true,
+            true,
+        );
+        assert!(
+            sql.contains("COALESCE(mw.wave, t.w)"),
+            "音浪要「整月优先、缺月回落日明细」：{sql}"
+        );
+        assert!(
+            sql.contains("LEFT JOIN monthly_wave mw ON mw.person_id = t.pid AND mw.period = t.m"),
+            "整月音浪按 (人, 月) 对齐：{sql}"
+        );
+        // 回落的来源必须是「每人每月」的日明细求和，不是全期一把 SUM
+        assert!(sql.contains("SUM(d.wave) AS w"), "{sql}");
+        assert!(
+            sql.contains("TO_CHAR(d.biz_date, 'YYYY-MM') LIKE '2999-01%'"),
+            "{sql}"
+        );
+        assert!(sql.contains("GROUP BY pid, m"), "{sql}");
+        // 两个占位符都必须被替换干净（写错占位名会留下 {wave} 进 SQL → PG 语法错）
+        assert!(
+            !sql.contains("{wave}") && !sql.contains("{minutes}"),
+            "{sql}"
+        );
+        // 时长开关没关：仍用整月时长
+        assert!(sql.contains("COALESCE(md.minutes, t.dm)"), "{sql}");
+    }
+
+    /// 只有整月音浪、当月没有日明细行的月份也要进榜（平台月报补采历史月份的场景），
+    /// 且同一人同一月只走一路 —— 日明细与整月值绝不双算。
+    #[test]
+    fn month_rollup_includes_month_wave_only_rows() {
+        let sql = period_rollup_sql(
+            "{wave} AS wave",
+            "2999-01%",
+            "",
+            "",
+            "wave DESC",
+            false,
+            true,
+        );
+        assert!(sql.contains("FROM monthly_wave mw0"), "{sql}");
+        assert!(
+            sql.contains("NOT EXISTS (SELECT 1 FROM daily_metric d0"),
+            "有日明细的月份不能再补一行（否则日明细 + 整月值双算）：{sql}"
+        );
+        assert!(
+            sql.contains("0 AS live, 0 AS off, 0 AS days"),
+            "补齐行不带开播 / 未播天数（未播天数继续走日明细口径）：{sql}"
+        );
+        assert!(
+            sql.contains("mw0.period LIKE '2999-01%'"),
+            "补齐行只认窗口内的月份：{sql}"
+        );
+    }
+
+    /// 库没跑 026（monthly_wave 缺）关掉音浪开关后：SQL 里不能再出现这张表 / 这个别名，
+    /// 但时长的整月口径必须照旧（两个开关互不牵连）。
+    #[test]
+    fn month_rollup_without_wave_table_keeps_duration_month_value() {
+        let sql = period_rollup_sql(
+            "{wave} AS wave, {minutes} AS minutes",
+            "2999%",
+            "",
+            "",
+            "wave DESC",
+            true,
+            false,
+        );
+        assert!(!sql.contains("monthly_wave"), "{sql}");
+        assert!(!sql.contains("mw."), "{sql}");
+        assert!(sql.contains("t.w AS wave"), "音浪回落成日明细求和：{sql}");
+        assert!(
+            sql.contains("COALESCE(md.minutes, t.dm)"),
+            "音浪表缺不该把时长也降级：{sql}"
+        );
+        assert!(sql.contains("LEFT JOIN monthly_duration md"), "{sql}");
+    }
+
+    /// 库没跑 007（monthly_duration 缺）关掉时长开关后：音浪的整月口径照旧生效。
+    #[test]
+    fn month_rollup_without_duration_table_keeps_wave_month_value() {
+        let sql = period_rollup_sql(
+            "{wave} AS wave, {minutes} AS minutes",
+            "2999%",
+            "",
+            "",
+            "wave DESC",
+            false,
+            true,
+        );
+        assert!(!sql.contains("monthly_duration"), "{sql}");
+        assert!(!sql.contains("md."), "{sql}");
+        assert!(
+            sql.contains("t.dm AS minutes"),
+            "时长回落成日明细求和：{sql}"
+        );
+        assert!(
+            sql.contains("COALESCE(mw.wave, t.w)"),
+            "时长表缺不该把音浪也降级：{sql}"
+        );
+    }
+
+    /// 管理端月 / 年聚合用的是同一份列清单（metrics.rs 直接传 ADMIN_PERIOD_SELECT）：
+    /// 两个占位必须都在 —— 少一个要么留着 `{wave}` 进 SQL（PG 语法错），
+    /// 要么静默退化成「只按日明细」而没人发现。
+    #[test]
+    fn admin_period_select_uses_both_placeholders() {
+        assert!(
+            ADMIN_PERIOD_SELECT.contains("{wave}"),
+            "管理端月/年榜的音浪列也要走整月优先口径：{ADMIN_PERIOD_SELECT}"
+        );
+        assert!(
+            ADMIN_PERIOD_SELECT.contains("{minutes}"),
+            "时长列占位不能丢：{ADMIN_PERIOD_SELECT}"
+        );
+    }
+
+    /// 两张整月表各自独立回落：报错点名哪张表就只关哪个开关，互不牵连。
+    #[test]
+    fn missing_month_table_probes_are_independent() {
+        let wave_gone = anyhow::anyhow!(
+            "error returned from database: relation \"monthly_wave\" does not exist"
+        );
+        assert!(is_missing_month_wave_table(&wave_gone));
+        assert!(
+            !is_missing_month_table(&wave_gone),
+            "音浪表缺 → 不能把时长的整月口径也一起降级"
+        );
+
+        let duration_gone = anyhow::anyhow!(
+            "error returned from database: relation \"monthly_duration\" does not exist"
+        );
+        assert!(is_missing_month_table(&duration_gone));
+        assert!(
+            !is_missing_month_wave_table(&duration_gone),
+            "时长表缺 → 不能把音浪的整月口径也一起降级"
+        );
+
+        // 不点名表名的历史错误格式：两张都当缺（一起回落日明细，最保守）
+        let vague = anyhow::anyhow!("Unknown table 'monthly'");
+        assert!(is_missing_month_table(&vague) && is_missing_month_wave_table(&vague));
+
+        // 与缺表无关的错误绝不能触发回落（否则真错误会被吞成空榜）
+        let other = anyhow::anyhow!("syntax error at or near \"FROM\"");
+        assert!(!is_missing_month_table(&other) && !is_missing_month_wave_table(&other));
     }
 }

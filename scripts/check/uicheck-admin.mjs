@@ -3,7 +3,8 @@
  *
  * 为什么不用 tsc / vite build：那两个只保证「能编译」，保证不了「运行时路由对不对」。
  * 这里断言的是路由契约本身：
- *   1. 每个页面一个地址：/admin/data|import|streamers|claims|lineage|group|bots 深链直达
+ *   1. 每个页面一个地址：/admin/data|import|streamers|lineage|group|bots|announcements|send 深链直达
+ *      （/claims「抖音号审计」已于 2026-10-16 整页下线，不再纳入页面清单）
  *   2. 重新导航（= 刷新）不丢页；点导航走 pushState（不整页刷新）；前进后退回到原页
  *   3. 认不出的路径落回 /admin/data；未登录时深链留在地址栏，登录后照旧
  *   4. 导入页没有粘贴入口；上传后弹预览弹窗；确认入库 → 批次列表出现 → 删掉当天数据收尾
@@ -51,12 +52,15 @@ const PAGES = [
   { path: '/data', label: '数据概况', marker: ['当日总音浪', '还没有采集到任何日期'] },
   { path: '/import', label: '数据导入', marker: '导入数据' },
   { path: '/streamers', label: '主播管理', marker: '主播台账' },
-  { path: '/claims', label: '抖音号审计', marker: '抖音号绑定审计' },
   { path: '/visits', label: '访客日志', marker: '访客日志' },
   { path: '/lineage', label: '族谱', marker: '师门关系' },
   { path: '/group', label: 'PK 分组', marker: '名单与配置' },
-  { path: '/announcements', label: '公告', marker: '引导弹窗' },
+  /* 公告页 2026-10-14 起「引导弹窗编辑区」已下线（只保留状态回传），
+     原来的 marker '引导弹窗' 永远等不到 → 换成该页仍在的稳定文案。 */
+  { path: '/announcements', label: '公告', marker: '公告' },
   { path: '/bots', label: '机器人', marker: 'QQ 机器人' },
+  /* 2026-10-16：新增的「消息下发」页并入清单（此前漏登 → 导航 href 对不上）。 */
+  { path: '/send', label: '消息下发', marker: '编辑消息' },
 ]
 
 function passwordFromEnv() {

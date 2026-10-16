@@ -129,11 +129,7 @@ async fn upload_image(
         .send()
         .await
         .context("CDN 上传请求失败")?;
-    anyhow::ensure!(
-        r.status().is_success(),
-        "CDN 上传失败 HTTP {}",
-        r.status()
-    );
+    anyhow::ensure!(r.status().is_success(), "CDN 上传失败 HTTP {}", r.status());
     let download_param = r
         .headers()
         .get("x-encrypted-param")
@@ -184,6 +180,9 @@ async fn send_item(
 }
 
 /// 发图片 + 前置说明文字。`caption` 可空。
+///
+/// 2026-10-16：与 `weixin::user_send_text` 同一道测试阶段出网闸门（开关
+/// `PUSH_OUT_ENABLED`）。图片通道会先上传 CDN，未开开关时连上传都不做。
 pub async fn user_send_image(
     base_url: &str,
     token: &str,
@@ -192,6 +191,14 @@ pub async fn user_send_image(
     caption: &str,
     png: &[u8],
 ) -> anyhow::Result<()> {
+    if !crate::push::push_out_enabled() {
+        let preview: String = caption.chars().take(120).collect();
+        tracing::warn!(
+            to_user_id, bytes = png.len(), preview = %preview,
+            "【测试阶段】已拦截微信图片发送（未发）；要真实发送请设 PUSH_OUT_ENABLED=1"
+        );
+        return Ok(());
+    }
     let up = upload_image(base_url, token, to_user_id, png).await?;
     if !caption.is_empty() {
         send_item(

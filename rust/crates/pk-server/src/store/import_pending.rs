@@ -69,6 +69,10 @@ mod tests {
         assert_eq!(valid_prune_days(-100), None);
         assert_eq!(valid_prune_days(7), Some(7));
         assert_eq!(valid_prune_days(30), Some(30));
-        assert_eq!(valid_prune_days(3650), Some(3650), "大天数合法（= 基本不删）");
+        assert_eq!(
+            valid_prune_days(3650),
+            Some(3650),
+            "大天数合法（= 基本不删）"
+        );
     }
 }

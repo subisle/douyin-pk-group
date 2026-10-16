@@ -24,10 +24,12 @@
 # ---------- Class A：本机权威（push 本机 → 64）----------
 person|A|id|id|name,gender,master_id,generation,group_name,avatar_url,hide_in_daily_report,phone,status,joined_at|upsert|
 account|A|anchor_id|anchor_id|person_id,anchor_id,douyin_no,anchor_name,is_primary,status|upsert|
+person_avatar|A|person_id|person_id|image,mime,source_url,hash,note|upsert|
 daily_metric|A|person_id,biz_date|person_id,biz_date|anchor_id,wave,cumulative_wave,minutes,cumulative_minutes,is_live,tier|upsert|
 import_batch|A|id|id|source,filename,biz_date,team,imported_rows,ok_rows,failed_rows,note|upsert|
 import_pending|A|douyin_no,biz_date|douyin_no,biz_date|name,wave,cumulative_wave,minutes,is_live,absorbed_person_id|upsert|
 monthly_duration|A|person_id,period|person_id,period|minutes|upsert|
+monthly_wave|A|person_id,period|person_id,period|wave|upsert|
 monthly_metric|A|id|person_id,period|wave,live_days,best_day_wave,best_day_date|upsert|
 plans|A|id|id|title,metric,days,published,event_type,payload|upsert|
 aliases|A|alias|alias|real_name|upsert|

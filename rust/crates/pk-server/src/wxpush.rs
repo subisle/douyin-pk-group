@@ -14,7 +14,8 @@
 //!   - 收到全局 shutdown token 后各轮询在等待点立即退出并 flush cursor。
 //!
 //! 断连风险对应的加固（2026-10-11）：
-//!   1. 非 SESSION_EXPIRED 错误走指数退避 + 抖动（[`Backoff`]），成功一次归零；
+//!   1. 非 SESSION_EXPIRED 错误走官方节律重试（bot::weixin 的 monitor_failure_delay：
+//!      单次 2s、连续 3 次退避 30s），成功一次归零；
 //!      抖动种子混入账号名哈希，100+ bot 不会同一秒一起重试。
 //!   2. HTTP 连接池参数见 `bot/weixin.rs` 的 `shared_http()`（显式池上限 + 空闲超时）。
 //!   3. cursor 只在内存推进，按 60 秒 / 每 20 轮节流落库，退出时强制 flush
@@ -24,7 +25,7 @@
 use std::collections::{HashMap, HashSet};
 use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use futures_util::FutureExt;
 use serde_json::Value;
@@ -36,77 +37,21 @@ use crate::bot::weixin::{
 use crate::state::AppState;
 use crate::store::WxPushAccount;
 
-/* ------------------------------ 退避（风险 1） ------------------------------ */
+/* ------------------- 轮询失败节律（对齐官方 2.4.10） ------------------- */
+/*
+   原来这里是自造的指数退避（5s 起步翻倍、60s 封顶 + 按账号名抖动）。
+   2026-10-16 用户口径「限制根据官方来」：整体换成官方
+   `@tencent-weixin/openclaw-weixin@2.4.10` `dist/src/monitor/monitor.js` 的节律 ——
+     · 单次失败等 2s（RETRY_DELAY_MS）
+     · 连续 3 次（MAX_CONSECUTIVE_FAILURES）退避 30s（BACKOFF_DELAY_MS），计数清零
+     · 成功一轮计数归零
+   常量与换算函数的唯一事实来源在 bot::weixin（`RETRY_DELAY` / `MAX_CONSECUTIVE_FAILURES`
+   / `BACKOFF_DELAY` / `monitor_failure_delay`），这里直接引用，避免两处漂移。
+   官方没有按账号抖动（它一个客户端只跑自己一个账号；我们 100+ 账号会同时失败，
+   抖动仍有价值 —— 但官方常量是硬口径，不再加料，靠 START_STAGGER_MAX 的启动错峰兜底）。
+*/
 
-/// 退避起点：第一次失败等 ~5 秒（抖动后 2.5–5 秒）
-const BACKOFF_BASE: Duration = Duration::from_secs(5);
-/// 退避上限：再怎么失败也不超过 60 秒，避免账号长时间静默
-const BACKOFF_MAX: Duration = Duration::from_secs(60);
-/// 2 的幂最大位移（5s << 8 已远超上限，纯防溢出）
-const BACKOFF_MAX_SHIFT: u32 = 8;
-
-/// 连续失败计数 → 基础退避时长（指数增长，封顶 [`BACKOFF_MAX`]）。
-/// failures = 0（没失败过）按起点算。
-fn backoff_base_delay(failures: u32) -> Duration {
-    let shift = failures.saturating_sub(1).min(BACKOFF_MAX_SHIFT);
-    BACKOFF_BASE.saturating_mul(1u32 << shift).min(BACKOFF_MAX)
-}
-
-/// 在基础退避上加抖动：`base * (0.5 + 0.5 * jitter)`，落在 `[base/2, base]`。
-/// 只往下抖不往上抖，保证不会突破 [`BACKOFF_MAX`]。
-fn backoff_delay(failures: u32, jitter: f64) -> Duration {
-    let base = backoff_base_delay(failures);
-    let factor = 0.5 + 0.5 * jitter.clamp(0.0, 1.0);
-    let ms = base.as_millis() as f64 * factor;
-    Duration::from_millis(ms as u64).min(BACKOFF_MAX)
-}
-
-/// splitmix64：把种子打散成 [0,1) 的抖动比例（纯函数，可单测）
-fn jitter_ratio(seed: u64) -> f64 {
-    let mut x = seed;
-    x ^= x >> 30;
-    x = x.wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    x ^= x >> 27;
-    x = x.wrapping_mul(0x94d0_49bb_1331_11eb);
-    x ^= x >> 31;
-    ((x >> 11) as f64) / ((1u64 << 53) as f64)
-}
-
-/// FNV-1a：账号名 → 稳定哈希（同一账号每轮抖动位置不同，但不同账号互不相同）
-fn name_hash(s: &str) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in s.as_bytes() {
-        h ^= *b as u64;
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    h
-}
-
-/// 抖动种子 = 账号名哈希 ^ 纳秒时间：账号之间天然错开，同一账号逐轮也不同
-fn jitter_seed(name: &str) -> u64 {
-    let ns = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.subsec_nanos() as u64)
-        .unwrap_or(0);
-    name_hash(name) ^ ns.wrapping_mul(0x9e37_79b9_7f4a_7c15)
-}
-
-/// 连续失败退避状态：成功一次立即归零。
-#[derive(Debug, Default)]
-struct Backoff {
-    failures: u32,
-}
-
-impl Backoff {
-    /// 记录一次失败并返回本次该等多久
-    fn record_failure(&mut self, name: &str) -> Duration {
-        self.failures = self.failures.saturating_add(1);
-        backoff_delay(self.failures, jitter_ratio(jitter_seed(name)))
-    }
-    fn reset(&mut self) {
-        self.failures = 0;
-    }
-}
+use crate::bot::weixin::{monitor_failure_delay, MAX_CONSECUTIVE_FAILURES};
 
 /* --------------------------- cursor 落库节流（风险 3） --------------------------- */
 
@@ -226,6 +171,16 @@ const START_STAGGER_MAX: Duration = Duration::from_secs(5);
 fn start_stagger(name: &str) -> Duration {
     let max_ms = START_STAGGER_MAX.as_millis() as u64;
     Duration::from_millis(name_hash(name) % max_ms.max(1))
+}
+
+/// FNV-1a：账号名 → 稳定哈希（启动错峰用：不同账号摊开在 0~5s，不同秒打 getupdates）
+fn name_hash(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
 }
 
 /// 清掉已经结束的句柄，返回这些账号名（供调用方记日志 / 决定重启）
@@ -380,10 +335,40 @@ async fn poll_loop(st: Arc<AppState>, name: String) {
     }
 }
 
+/// 单账号轮询的**最小间隔**（用户口径 2026-10-16：正常限制一下一分钟，防服务器占用过高）。
+/// 空轮询本来就睡 longpolling_timeout_ms（一圈 ≈ 35s 挂住 + 30s 睡 ≈ 1 次/分钟），
+/// 这条下限管的是两头热循环：有消息时循环不睡会连打（实测单次请求仅 ~0.2s），
+/// 失败重试 2s 也偏密。任何一轮结束后没到 60s 就在下一轮顶补睡。
+/// 100 账号 × 1 次/分钟 ≈ 1.7 请求/秒，服务器毫无压力；首条消息走长轮询即时到达，不受影响。
+const POLL_MIN_INTERVAL: Duration = Duration::from_secs(60);
+
+/// 距上一轮开始过了 `elapsed`，下一轮之前还该等多久（纯函数，可单测）
+fn poll_floor_wait(elapsed: Duration) -> Duration {
+    POLL_MIN_INTERVAL.saturating_sub(elapsed)
+}
+
 async fn poll_body(st: &Arc<AppState>, name: &str, cursor: &mut CursorBuf) {
-    let mut backoff = Backoff::default();
+    // 失败节律对齐官方 @tencent-weixin/openclaw-weixin@2.4.10 monitor.js：
+    // 单次失败 2s、连续 3 次退避 30s 并清零（原来是自造的 5s→60s 指数退避）。
+    // -14（登录过期）仍走下面专门的 1 小时暂停分支，不在这条计数里。
+    // 在官方节律之上再叠一条 [`POLL_MIN_INTERVAL`] 下限（用户口径：一分钟一次封顶），
+    // 官方没有入站限流概念，这是本服务自己的资源保护。
+    let mut consecutive_failures = 0u32;
     let mut expired_streak = 0u32;
+    // 首轮不等：last_round 预回拨一个完整间隔
+    let mut last_round = Instant::now() - POLL_MIN_INTERVAL;
     loop {
+        // 一分钟下限（用户口径）：不管上一轮是空转、有消息还是失败，没到 60s 就补睡。
+        // 睡前先落游标（session_stagger 场景下退出也不丢进度）。
+        let floor = poll_floor_wait(last_round.elapsed());
+        if !floor.is_zero() {
+            cursor.flush(st, name).await;
+            if !sleep_or_shutdown(floor).await {
+                cursor.flush(st, name).await;
+                return;
+            }
+        }
+        last_round = Instant::now();
         let Some(acct) = crate::store::wx_push_account_get(st, name).await else {
             tracing::info!(account = %name, "扫码账号已解绑，停止轮询");
             return; // 已解绑 / 被删除
@@ -395,8 +380,8 @@ async fn poll_body(st: &Arc<AppState>, name: &str, cursor: &mut CursorBuf) {
         let cursor_snapshot = cursor.value().to_string();
         match user_poll_updates(&acct.base_url, &acct.bot_token, &cursor_snapshot).await {
             Ok(out) => {
-                // 一轮成功：退避与过期计数都归零
-                backoff.reset();
+                // 一轮成功：失败与过期计数都归零
+                consecutive_failures = 0;
                 expired_streak = 0;
                 cursor.update(&str_of(&out, "get_updates_buf"));
                 cursor.maybe_flush(st, name).await;
@@ -435,8 +420,14 @@ async fn poll_body(st: &Arc<AppState>, name: &str, cursor: &mut CursorBuf) {
                         return;
                     }
                 } else {
-                    let delay = backoff.record_failure(name);
-                    tracing::warn!(account = %name, error = %msg, delay = ?delay, "扫码账号 getupdates 失败，退避后重试");
+                    // 官方节律（monitor.js）：失败 +1；前 2 次 2s，连续第 3 次起 30s
+                    //（官方退避后把计数清零，这里同步清零，避免从此固定 30s）
+                    consecutive_failures += 1;
+                    let delay = monitor_failure_delay(consecutive_failures);
+                    if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                        consecutive_failures = 0;
+                    }
+                    tracing::warn!(account = %name, error = %msg, delay_ms = delay.as_millis() as u64, "扫码账号 getupdates 失败，按官方节律重试");
                     if !sleep_or_shutdown(delay).await {
                         cursor.flush(st, name).await;
                         return;
@@ -530,13 +521,19 @@ async fn handle_msg(st: &Arc<AppState>, acct: &WxPushAccount, m: &Value) {
         Some(true) => {}
     }
 
-    let first_message = acct.conversation_id.is_empty();
+    /* 「是否首次激活」的口径 = **push_bindings 里记的是不是这个会话**。
+    不能用 `acct.conversation_id`（wx_push_accounts）判：那张表的列更宽、先写成功，
+    一旦 push_bindings 那次写失败（列长不够 / 写库抖动），旧写法会永远判成「已激活」，
+    激活分支再也不跑 → 展示端卡在「未绑定」且不自愈（2026-10-16 用户报障根因）。
+    现在只要 push_bindings 还没接上这个会话，本人消息就重跑一次激活（幂等 upsert）。 */
+    let already_bound =
+        crate::store::push_binding_conversation(st, &acct.name).await == conversation;
     // 会话绑定只在本人分支里做：非本人消息不能覆盖 conversation_id 抢占绑定
     // （旧逻辑无条件调用，等于「最后说话的人」都能改写绑定目标）。
     crate::store::wx_push_account_bind_conversation(st, &acct.name, &conversation, &from_user)
         .await;
     // 扫码后的第一条本人消息 = 推送激活：把展示端账号接到该会话，并回执一次
-    if first_message {
+    if !already_bound {
         crate::store::push_bind_account(st, &acct.name, &acct.team, &conversation, &from_user)
             .await;
         // 2026-10-13 用户口径：激活回执先问候「你好，艺名」；艺名空白则兜底只发「你好」
@@ -604,6 +601,8 @@ async fn handle_msg(st: &Arc<AppState>, acct: &WxPushAccount, m: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // 官方节律常量只在测试断言里直接比对（生产路径经 monitor_failure_delay 间接使用）
+    use crate::bot::weixin::{BACKOFF_DELAY, RETRY_DELAY};
 
     fn acct(name: &str, token: &str) -> WxPushAccount {
         WxPushAccount {
@@ -613,71 +612,23 @@ mod tests {
         }
     }
 
-    /* ------------------------------ 风险 1：退避 ------------------------------ */
+    /* ------------------- 风险 1：失败节律（官方 2.4.10 口径） ------------------- */
 
     #[test]
-    fn backoff_grows_exponentially_and_caps_at_max() {
-        // 失败次数 → 基础时长：5s → 10s → 20s → 40s → 60s（封顶）
-        assert_eq!(backoff_base_delay(0), Duration::from_secs(5));
-        assert_eq!(backoff_base_delay(1), Duration::from_secs(5));
-        assert_eq!(backoff_base_delay(2), Duration::from_secs(10));
-        assert_eq!(backoff_base_delay(3), Duration::from_secs(20));
-        assert_eq!(backoff_base_delay(4), Duration::from_secs(40));
-        assert_eq!(backoff_base_delay(5), BACKOFF_MAX);
-        assert_eq!(backoff_base_delay(50), BACKOFF_MAX, "再多次也不超过 60 秒");
-        // 溢出保护：5s << 8 仍在 u64 内且被 min 到上限
-        assert_eq!(backoff_base_delay(u32::MAX), BACKOFF_MAX);
-    }
-
-    #[test]
-    fn backoff_jitter_stays_within_half_base_and_max() {
-        // 抖动只往下加：落在 [base/2, base]，永不超上限
-        for failures in 0..8u32 {
-            let base = backoff_base_delay(failures);
-            let lo = backoff_delay(failures, 0.0);
-            let hi = backoff_delay(failures, 1.0);
-            assert_eq!(lo, Duration::from_millis(base.as_millis() as u64 / 2));
-            assert!(hi <= base && lo <= hi, "{lo:?} <= {hi:?} <= {base:?}");
-            assert!(hi <= BACKOFF_MAX);
-            // 非法 jitter 被 clamp，不会算出负数 / 超大值
-            assert_eq!(backoff_delay(failures, -5.0), lo);
-            assert_eq!(backoff_delay(failures, 9.0), hi);
-        }
-    }
-
-    #[test]
-    fn backoff_resets_on_success() {
-        let mut b = Backoff::default();
-        let d1 = b.record_failure("a");
-        let d2 = b.record_failure("a");
-        assert!(d2 >= Duration::from_millis(backoff_base_delay(2).as_millis() as u64 / 2));
-        assert_eq!(b.failures, 2);
-        b.reset();
-        assert_eq!(b.failures, 0);
-        let d3 = b.record_failure("a");
-        let half = Duration::from_millis(BACKOFF_BASE.as_millis() as u64 / 2);
-        assert!(d3 >= half && d3 <= BACKOFF_BASE, "归零后回到起点: {d3:?}");
-        let _ = d1;
-    }
-
-    #[test]
-    fn jitter_ratio_is_unit_range_and_seed_stable() {
-        for seed in [0u64, 1, 42, u64::MAX] {
-            let r = jitter_ratio(seed);
-            assert!((0.0..1.0).contains(&r), "seed {seed} → {r}");
-            assert_eq!(r, jitter_ratio(seed), "同一种子必须稳定");
-        }
-        // 不同种子要真的散开（100+ bot 才不会同秒重试）
-        let mut vals: Vec<f64> = (0..64).map(jitter_ratio).collect();
-        vals.sort_by(f64::total_cmp);
-        vals.dedup();
-        assert!(vals.len() > 60, "抖动值几乎不重复");
-        // 账号名参与种子：不同账号的第一轮等待不同
-        assert_ne!(name_hash("鹏先生"), name_hash("浩冬"));
-        assert_ne!(
-            jitter_ratio(name_hash("鹏先生")),
-            jitter_ratio(name_hash("浩冬"))
+    fn failure_delay_follows_official_monitor_rhythm() {
+        // 官方 monitor.js：单次失败 2s，连续第 3 次退避 30s
+        assert_eq!(RETRY_DELAY, Duration::from_secs(2));
+        assert_eq!(MAX_CONSECUTIVE_FAILURES, 3);
+        assert_eq!(BACKOFF_DELAY, Duration::from_secs(30));
+        assert_eq!(monitor_failure_delay(0), RETRY_DELAY);
+        assert_eq!(monitor_failure_delay(1), RETRY_DELAY, "第 1 次失败 → 2s");
+        assert_eq!(monitor_failure_delay(2), RETRY_DELAY, "第 2 次失败 → 2s");
+        assert_eq!(
+            monitor_failure_delay(3),
+            BACKOFF_DELAY,
+            "连续第 3 次 → 30s（官方退避档）"
         );
+        assert_eq!(monitor_failure_delay(50), BACKOFF_DELAY, "再多也是 30s（官方计数清零后的同一档）");
     }
 
     /* --------------------------- 风险 3：cursor 落库 --------------------------- */
@@ -768,6 +719,24 @@ mod tests {
         seen.sort_unstable();
         seen.dedup();
         assert!(seen.len() > 50, "不同账号的错峰延迟要真的散开");
+    }
+
+    #[test]
+    fn poll_floor_caps_one_round_per_minute() {
+        // 用户口径（2026-10-16）：单账号一分钟最多一轮。
+        assert_eq!(POLL_MIN_INTERVAL, Duration::from_secs(60));
+        // 刚跑完一轮 → 补睡满 60s；过了 35s（长轮询挂住）→ 再睡 25s；超时 → 不睡
+        assert_eq!(poll_floor_wait(Duration::from_secs(0)), Duration::from_secs(60));
+        assert_eq!(
+            poll_floor_wait(Duration::from_secs(35)),
+            Duration::from_secs(25)
+        );
+        assert_eq!(poll_floor_wait(Duration::from_secs(60)), Duration::ZERO);
+        assert_eq!(
+            poll_floor_wait(Duration::from_secs(3600)),
+            Duration::ZERO,
+            "超时不回拨（saturating）"
+        );
     }
 
     /* --------------------- 审计整改（2026-10-11）：群消息 / 本人判定 --------------------- */

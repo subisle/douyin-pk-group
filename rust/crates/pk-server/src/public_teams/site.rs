@@ -141,8 +141,56 @@ pub async fn public_announcements(State(st): State<ArcState>) -> ApiResult {
     })))
 }
 
+/// person_id → **同源头像地址**（`/api/public/avatars/<pid>?v=<hash>`）。
+///
+/// 数据源是本地留存的 `person_avatar`（抖音头像字节 + 内容 md5 前 16 位，见 migration 025），
+/// 由 `pk-server sync-avatars` **每 7 天**同步一遍（7 天判定靠 `synced_at`，见 avatar_sync.rs）。
+/// 展示端「主播列表」（领奖台 + 名次行）用：图片走本站 `/api/public/avatars/{person_id}`
+/// 同源下发（跨域抖音 CDN 一旦改策略/封 Referer，页面就有本地兜底），`?v=<hash>` 用来破缓存 ——
+/// 图一变 hash 就变、URL 就变，所以这个端点是 immutable 长缓存（见 avatars.rs 头注释）。
+///
+/// 只有主播列表里的人有真头像：没同步过 / 账号已注销 / 没登记抖音号的人不入 map，
+/// 前端回落姓名首字色块。`image IS NULL` 的人本就不该出现在这里（下发端也是 404）。
+/// hash 为空（历史行 / 同步异常）时退化成不带 `?v=` 的地址：仍然出图，只是失去换图破缓存。
+///
+/// 装饰性字段：表不存在（迁移没跑）或查询失败只 debug + 空 map，不让榜单整体 500。
+async fn avatar_map(st: &ArcState, source: &str) -> HashMap<u64, String> {
+    let sql = "SELECT person_id, hash FROM person_avatar WHERE image IS NOT NULL";
+    match pgrs::query(&st.pools, source, sql).await {
+        Ok(rows) => rows.iter().fold(HashMap::new(), |mut m, r| {
+            let pid = row_pid(r, "person_id");
+            if pid == 0 {
+                return m;
+            }
+            // hash 列 NOT NULL DEFAULT ''，正常都能读；读不出只当没有 hash
+            let hash = r.try_get::<String, _>("hash").unwrap_or_default();
+            m.insert(pid, avatar_url(pid, &hash));
+            m
+        }),
+        Err(e) => {
+            /* 表不存在（迁移未跑）也走这里：榜单照常下发 avatar=null，前端回落首字色块。
+            用 debug 而不是 warn，避免「迁移没跑」期间每次刷榜都刷一屏告警。 */
+            tracing::debug!(error = %e, "本地留存头像读取失败，主播列表按无头像渲染");
+            HashMap::new()
+        }
+    }
+}
+
+/// 头像地址（纯函数，抽出只为把「URL 形状」这条前后端契约钉进单测）：
+/// hash 非空 → `/api/public/avatars/<pid>?v=<hash>`（换图破缓存）；
+/// hash 为空（历史行 / 同步异常）→ 退化成不带 query 的地址，仍然出图。
+/// 注意：这里**不判**图片是否存在 —— 端点自己会对 `image IS NULL` 的人 404。
+pub(super) fn avatar_url(person_id: u64, hash: &str) -> String {
+    let hash = hash.trim();
+    if hash.is_empty() {
+        format!("/api/public/avatars/{person_id}")
+    } else {
+        format!("/api/public/avatars/{person_id}?v={hash}")
+    }
+}
+
 /// GET /api/public/teams/{team}/daily?date=
-/// DTO 白名单：名次 / 名字 / 音浪 / 分钟 / 开播——绝无抖音号
+/// DTO 白名单：名次 / 名字 / 音浪 / 分钟 / 开播 / 头像——绝无抖音号
 pub async fn daily(
     State(st): State<ArcState>,
     Path(team): Path<String>,
@@ -171,6 +219,8 @@ pub async fn daily(
         return Err(ApiError::bad_request("暂未公布数据"));
     }
     let source = sid(&st);
+    // 头像（主播列表用）：一次查完，两百行以内，跟 total/absent 一样在内存 join
+    let avatars = avatar_map(&st, &source).await;
     // 前一业务日（用于名次变动 ↑↓）
     let idx = dates.iter().position(|d| d == &date);
     let prev_date = idx.and_then(|i| dates.get(i + 1)).cloned();
@@ -283,6 +333,13 @@ pub async fn daily(
             "totalWave": total_map.get(&pid).copied().unwrap_or(0),
             "rank": rank,
         });
+        /* 抖音头像（2026-10-16）：主播列表渲染真头像用，本地留存 + 同源地址；没有就是 null，
+        前端回落姓名首字色块。地址里只有 person_id 与内容 hash（不是抖音号、不是 CDN 契约 URL），
+        所以「公开 DTO 不下发 personId」的白名单口径不受影响。 */
+        item["avatar"] = match avatars.get(&pid) {
+            Some(u) => json!(u),
+            None => Value::Null,
+        };
         if s.duration {
             item["minutes"] = json!(row_i64(r, "minutes"));
         }
@@ -370,8 +427,10 @@ pub async fn lineage(
             team.clone()
         }
     } else {
-        // 普通账号：token 团别与路径团别不符照旧 401（与登录门同口径）
-        if !my_team.is_empty() && my_team != team && team != "all" {
+        // 普通账号：token 团别与路径团别不符照旧 401（与登录门同口径）。
+        // 空团别（团别待定 / view_team=any）放行任何路径团别 —— 与 /my* 系列共用
+        // super::my_team_allows，两处口径必须一致，否则「看板切了男团再点我的」会 401。
+        if !super::my_team_allows(&my_team, &team) {
             return ApiError::auth("该账号不属于本团").into_response();
         }
         let (has_master, disciples) = match person_lineage_membership(&st, pid).await {
@@ -401,10 +460,17 @@ pub async fn lineage(
         Err(e) => return ApiError::from(e).into_response(),
     };
 
-    // 个人音浪（2026-10-12 改按 period/date 窗口过滤；与榜单口径一致 wave_reliable=1）
-    let wave_sql = lineage_wave_window_sql(&period, &base_date);
+    // 个人音浪（2026-10-12 改按 period/date 窗口过滤；与榜单口径一致 wave_reliable=1。
+    // 2026-10-16：月 / 年优先用导入的整月音浪，库没跑 026 迁移时按日明细口径回落）
     let mut wave_map: HashMap<u64, i64> = Default::default();
-    match pgrs::query(&st.pools, &sid(&st), &wave_sql).await {
+    match dialect::query_month_wave_fallback(
+        &st.pools,
+        &sid(&st),
+        &lineage_wave_window_sql(&period, &base_date, true),
+        &lineage_wave_window_sql(&period, &base_date, false),
+    )
+    .await
+    {
         Ok(rs) => {
             for r in &rs {
                 wave_map.insert(row_pid(r, "person_id"), row_i64(r, "total"));
@@ -500,7 +566,18 @@ pub(super) fn lineage_window(
 /// 族谱音浪 SQL（纯函数，2026-10-12）：按 period 窗口条件聚合。
 /// monthly/yearly 由基准日推出窗口（TO_CHAR 前缀匹配），daily 精确到日。
 /// base_date 已由 lineage_window 白名单校验后才拼进 SQL。
-pub(super) fn lineage_wave_window_sql(period: &str, base_date: &str) -> String {
+///
+/// 整月口径（2026-10-16 月度音浪导入）：monthly / yearly 优先用导入的整月音浪
+/// （monthly_wave），**只有该月没导过整月值才回落日明细求和** —— 与月榜 / 个人月卡
+/// （dialect::period_rollup_sql、minutes::my_wave_sql）同一套 COALESCE 口径。
+/// daily 口径不动（就是当天日明细）；累计（totalWave）也不动（走日明细，累计再叠整月值 = 双算）。
+/// `with_monthly_wave = false`（库没跑 026 迁移）时退回纯日明细 SQL —— 由调用方
+/// [lineage] 走 dialect::query_month_wave_fallback 探测后决定，别让少一张表把族谱打挂。
+pub(super) fn lineage_wave_window_sql(
+    period: &str,
+    base_date: &str,
+    with_monthly_wave: bool,
+) -> String {
     /* 双保险：调用方 lineage_window 已校验，但纯函数直接被测试/复用时也挡一道。
     日期形状非法 → 退回无窗口条件（空库口径）；绝不把外部字符串带进 SQL。 */
     let base_date = if base_date.len() == 10
@@ -528,9 +605,42 @@ pub(super) fn lineage_wave_window_sql(period: &str, base_date: &str) -> String {
             ),
         }
     };
+    // daily 口径 / 缺表回落 / 库没数据：老 SQL 一字不动（月年口径才有整月音浪这回事）
+    if !with_monthly_wave || base_date.is_empty() || (period != "monthly" && period != "yearly") {
+        return format!(
+            "SELECT person_id, (SUM(wave))::BIGINT AS total \
+             FROM daily_metric {where_clause} GROUP BY person_id"
+        );
+    }
+    /* 月 / 年：日明细按「每人每月」聚合后 LEFT JOIN monthly_wave，有整月值的月份用整月值，
+    没有才用日明细的那一份（NOT EXISTS 与本支同一过滤，保证同一人同一月只走一路）。
+    另外补上「导入了整月音浪、当月却没有可信日明细行」的人（平台月报常用来补采历史月份，
+    否则这些人在族谱上永远是 0）—— 补齐行 mw 值由 LEFT JOIN 填上，不会与日明细双算。 */
+    let month_rollup = format!(
+        "SELECT d.person_id AS person_id, TO_CHAR(d.biz_date, 'YYYY-MM') AS m, SUM(d.wave) AS w \
+         FROM daily_metric d {where_clause} GROUP BY d.person_id, m"
+    );
+    let month_pred = if period == "monthly" {
+        format!("mw0.period = '{}'", base_date.get(..7).unwrap_or(base_date))
+    } else {
+        format!(
+            "mw0.period LIKE '{}-%'",
+            base_date.get(..4).unwrap_or(base_date)
+        )
+    };
     format!(
-        "SELECT person_id, (SUM(wave))::BIGINT AS total \
-         FROM daily_metric {where_clause} GROUP BY person_id"
+        "SELECT t.person_id, (SUM(COALESCE(mw.wave, t.w)))::BIGINT AS total FROM ( \
+           {month_rollup} \
+           UNION ALL \
+           SELECT mw0.person_id AS person_id, mw0.period AS m, mw0.wave AS w \
+             FROM monthly_wave mw0 \
+            WHERE {month_pred} \
+              AND NOT EXISTS (SELECT 1 FROM daily_metric d0 \
+                               WHERE d0.person_id = mw0.person_id AND d0.wave_reliable = 1 \
+                                 AND TO_CHAR(d0.biz_date, 'YYYY-MM') = mw0.period) \
+         ) t \
+         LEFT JOIN monthly_wave mw ON mw.person_id = t.person_id AND mw.period = t.m \
+         GROUP BY t.person_id"
     )
 }
 
@@ -755,13 +865,15 @@ pub(super) async fn period_public(
     // 与 daily 口径对齐：离队的人不进榜（P2-19：也不再下发 personId，
     // 前端月/年榜只按 name/rank/wave 渲染）。
     // P1-7：period_rollup_sql 内层已统一按 wave_reliable=1 过滤。
-    // 时长口径 2026-10-10：月 / 年里的「时长」优先用按月导入的整月值（monthly_duration，
-    // 平台月报），没有整月记录的月份才用日明细求和 —— 见 dialect::period_rollup_sql。
+    // 整月口径 2026-10-10 / 2026-10-16（用户口径）：月 / 年里的「时长」优先用按月导入的整月值
+    // （monthly_duration，平台月报）、「音浪」优先用整月音浪（monthly_wave），没有整月记录的
+    // 月份才用日明细求和 —— 见 dialect::period_rollup_sql。缺哪张整月表就只回落哪一项
+    // （dialect::query_period 里两个开关互相独立）。
     let rows = dialect::query_period(
         &st.pools,
         &sid(st),
         "p.id AS person_id, p.name, \
-         (SUM(t.w))::BIGINT AS wave, \
+         (SUM({wave}))::BIGINT AS wave, \
          (SUM({minutes}))::BIGINT AS minutes, \
          (SUM(t.live))::BIGINT AS live_days, \
          (SUM(t.off))::BIGINT AS off_days",
@@ -771,11 +883,14 @@ pub(super) async fn period_public(
         "wave DESC, p.name ASC",
     )
     .await?;
+    // 头像（主播列表用）：与 daily 同口径，一次查完在内存 join
+    let avatars = avatar_map(st, &sid(st)).await;
     // 名次：同音浪并列，下一档跳号（与 daily / 分组页的名次算法一致）
     let mut last_wave: Option<i64> = None;
     let mut last_rank = 0usize;
     let mut items: Vec<Value> = Vec::with_capacity(rows.len());
     for (i, r) in rows.iter().enumerate() {
+        let pid = row_pid(r, "person_id");
         let wave = row_i64(r, "wave");
         let rank = if Some(wave) == last_wave {
             last_rank
@@ -790,6 +905,13 @@ pub(super) async fn period_public(
             "wave": wave,
             "rank": rank,
         });
+        /* 抖音头像（2026-10-16）：与 daily 同口径 —— 本地留存、同源地址，没有就是 null
+        （前端回落姓名首字色块）。不设 personId 的白名单口径不变：URL 里只有 person_id
+        与内容 hash，不含抖音号。 */
+        item["avatar"] = match avatars.get(&pid) {
+            Some(u) => json!(u),
+            None => Value::Null,
+        };
         if s.duration {
             item["minutes"] = json!(row_i64(r, "minutes"));
             item["liveDays"] = json!(row_i64(r, "live_days"));
@@ -970,5 +1092,18 @@ mod tests {
             &[(1, 1), (2, 2), (3, 3), (4, 4)],
         );
         assert_eq!(total(1, &children, &wave), 10);
+    }
+
+    /// 头像 URL 契约（2026-10-16）：`?v=<hash>` 只在 hash 非空时出现。
+    /// 前端（T3 主播列表）与 `public_teams::avatars` 端点按这个形状对接：
+    /// hash 为空时必须退化成不带 query 的地址（仍出图，只是换图不破缓存）。
+    #[test]
+    fn avatar_url_shape() {
+        assert_eq!(
+            avatar_url(1027, "0f1e2d3c4b5a6978"),
+            "/api/public/avatars/1027?v=0f1e2d3c4b5a6978"
+        );
+        assert_eq!(avatar_url(1027, ""), "/api/public/avatars/1027");
+        assert_eq!(avatar_url(1027, "   "), "/api/public/avatars/1027");
     }
 }

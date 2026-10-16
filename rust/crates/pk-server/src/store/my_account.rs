@@ -9,7 +9,7 @@ pub fn validate_douyin_no(v: &str) -> std::result::Result<String, String> {
         && v.chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.');
     if !ok {
-        return Err("抖音号格式不对：6~20 位字母、数字、下划线或点".into());
+        return Err(biz("抖音号格式不对：6~20 位字母、数字、下划线或点"));
     }
     Ok(v.to_string())
 }
@@ -28,23 +28,56 @@ pub fn validate_douyin_no(v: &str) -> std::result::Result<String, String> {
 ///   以及开号后按惯例改密全部被拒，与既有 39 个账号口径不一致。
 /// 折中：下限回 4 兼容惯例；撞库风险交给登录限流（5 次/分/IP、
 /// 失败 5 次锁 10 分钟）承担，不再用密码长度当第一道防线。
+/// 业务拒绝（**面向用户的人话**）与库层故障的分流标记（2026-10-16）。
+///
+/// 背景：`my_account_set` / `bind_inner` / `my_accounts_batch_open` 返回
+/// `Result<_, String>`，路由层以前要么 `anyhow::anyhow!(e)`（= safe=false，
+/// 「该主播已存在绑定的账号，请联系管理员」这类可执行的业务文案被抹成
+/// 400 通用话术「请求参数有误」，真实原因只进日志），要么整包
+/// `ApiError::bad_request`（= 库层报错里的表名/约束名/SQL 片段会原样外发，
+/// 违反 2026-10-14 审计 P2「不外发底层细节」的口径）。
+///
+/// 现在的约定：store 层把**业务拒绝**（校验失败 / 状态冲突，文案是人话）
+/// 统一包上 `BIZ::` 前缀（[`biz`] / [`is_biz`] / [`biz_msg`]）；库层故障
+/// （`format!("…失败：{e}")`，内容是 sqlx/PG 原文）保持无前缀。
+/// 路由层 `split_my_account_err` 一处分流：有前缀 → 400 原文原样下发；
+/// 无前缀 → 500 走通用文案兜底（原文留日志）。与
+/// [`crate::store::WxBindConflict`] 的 typed-error 范式同目标，
+/// 这里选前缀是为了不改动 `Result<_, String>` 签名 —— 波及面最小。
+pub const BIZ_PREFIX: &str = "BIZ::";
+
+/// 业务拒绝文案 → 带标记的错误串。
+pub(crate) fn biz(msg: impl Into<String>) -> String {
+    format!("{BIZ_PREFIX}{}", msg.into())
+}
+
+/// 是否业务拒绝（带 `BIZ::` 前缀）。
+pub fn is_biz(err: &str) -> bool {
+    err.starts_with(BIZ_PREFIX)
+}
+
+/// 取出去掉标记的业务文案（非业务错误返回原文，调用方无需先判 is_biz）。
+pub fn biz_msg(err: &str) -> &str {
+    err.strip_prefix(BIZ_PREFIX).unwrap_or(err)
+}
+
 pub fn validate_my_account(
     name: &str,
     pass: &str,
 ) -> std::result::Result<(String, String), String> {
     let name = name.trim();
     if name.is_empty() {
-        return Err("姓名不能为空".into());
+        return Err(biz("姓名不能为空"));
     }
     if name.chars().count() > 20 {
-        return Err("姓名太长（最多 20 字）".into());
+        return Err(biz("姓名太长（最多 20 字）"));
     }
     let pass = pass.trim();
     if pass.is_empty() {
-        return Err("密码不能为空；已有账号要保留原密码请传当前密码".into());
+        return Err(biz("密码不能为空；已有账号要保留原密码请传当前密码"));
     }
     if !pass.chars().all(|c| c.is_ascii_alphanumeric()) || pass.len() < 4 || pass.len() > 20 {
-        return Err("密码必须是 4~20 位字母或数字".into());
+        return Err(biz("密码必须是 4~20 位字母或数字"));
     }
     Ok((name.to_string(), pass.to_string()))
 }
@@ -94,9 +127,87 @@ pub fn validate_my_phone(phone: &str) -> std::result::Result<String, String> {
         return Ok(String::new());
     }
     if !p.chars().all(|c| c.is_ascii_digit()) || p.len() < 5 || p.len() > 20 {
-        return Err("手机号格式不对：应为 5~20 位数字".into());
+        return Err(biz("手机号格式不对：应为 5~20 位数字"));
     }
     Ok(p)
+}
+
+/* ─────────────── 可看团别 view_team（迁移 024，2026-10-15） ───────────────
+ *
+ * 管理员观看账号原先只有 is_admin 一个开关，登录后固定落「任意团」token，
+ * 没法按团收敛。用户口径要求分权：
+ *   帅帅   总管理员：男女团都能看，且页内可切「全团 / 男团 / 女团」
+ *   饭团   女团：只看女团
+ *   鹏先生 全团：和帅帅同款（两个团都能看 + 可切）
+ *
+ * 取值（列里存的是这里 `code()` 的字符串）：
+ *   ""（默认/缺省）沿用旧口径：绑了主播按主播所在团，没绑 / is_admin 按任意团
+ *   "any"     全团账号：两个团都能看，**且允许页内切换**
+ *   "male"    只看男团（钉死，不受改绑影响）
+ *   "female"  只看女团（钉死，不受改绑影响）
+ *
+ * 落进 my token 的团别 = `override(base)`：Any 落 ""（gate_team 见空串放行两团），
+ * Male/Female 落死值，Inherit 用 base（旧逻辑算出来的团）。
+ */
+
+/// 账号的「可看团别」。数据库里存字符串，代码里一律用这个枚举，
+/// 避免 "male " / "MALE" / 拼写错误之类的脏值一路裸奔到鉴权判断里。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+pub enum ViewTeam {
+    /// 未设置：沿用旧口径（按绑定主播所在团；没绑/is_admin 则是任意团）
+    Inherit,
+    /// 全团：两个团都能看，并允许在页内切换视角
+    Any,
+    Male,
+    Female,
+}
+
+impl ViewTeam {
+    /// 存库字符串。空串表示未设置（与迁移的 DEFAULT '' 对齐）。
+    pub fn code(self) -> &'static str {
+        match self {
+            ViewTeam::Inherit => "",
+            ViewTeam::Any => "any",
+            ViewTeam::Male => "male",
+            ViewTeam::Female => "female",
+        }
+    }
+
+    /// 从库里读出的原始字符串解析。**任何非法值一律回落 Inherit**（不报错）：
+    /// 列是 2026-10-15 才加的，存量行全是空串；将来万一有脏数据，宁可退回
+    /// 「按绑定主播走」的旧行为，也不能让一个账号因为一列脏值彻底登不进去。
+    pub fn parse(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "any" => ViewTeam::Any,
+            "male" => ViewTeam::Male,
+            "female" => ViewTeam::Female,
+            _ => ViewTeam::Inherit,
+        }
+    }
+
+    /// 这个账号登录后能不能在页内切团（全团账号才行；钉死某团的不能越界切）
+    pub fn switchable(self) -> bool {
+        matches!(self, ViewTeam::Any)
+    }
+
+    /// 落进 my token 的团别。`base` 是旧逻辑算出来的团（绑了主播 = 主播所在团，
+    /// 没绑/is_admin = 空串）。
+    /// - `Any` → 空串（gate_team 见空串一律放行，前端因此可以切着看）；
+    /// - `Male`/`Female` → 钉死该团，**无视 base**（即使账号后来被改绑到别团的主播）；
+    /// - `Inherit` → 原样用 base（旧行为，一字不改）。
+    pub fn token_team(self, base: &str) -> String {
+        match self {
+            ViewTeam::Any => String::new(),
+            ViewTeam::Male => "male".to_string(),
+            ViewTeam::Female => "female".to_string(),
+            ViewTeam::Inherit => base.to_string(),
+        }
+    }
+}
+
+/// 把任意输入收敛成合法存库值（管理端写入前用）。非法/空一律 ""（= Inherit）。
+pub fn normalize_view_team(raw: &str) -> String {
+    ViewTeam::parse(raw).code().to_string()
 }
 
 /// 全部账号（管理端列表用），按添加时间倒序。
@@ -106,7 +217,7 @@ pub async fn my_account_list(st: &AppState) -> Vec<serde_json::Value> {
         return Vec::new();
     };
     let rows = match sqlx::query(
-        "SELECT name, phone, is_admin, created_at, bound, bound_at, source \
+        "SELECT name, phone, is_admin, created_at, bound, bound_at, source, view_team \
          FROM my_accounts ORDER BY created_at DESC, name ASC",
     )
     .fetch_all(pool)
@@ -123,6 +234,7 @@ pub async fn my_account_list(st: &AppState) -> Vec<serde_json::Value> {
                     "bound": r.try_get::<i16, _>(4).unwrap_or(1) == 1,
                     "boundAt": r.try_get::<String, _>(5).unwrap_or_default(),
                     "source": r.try_get::<String, _>(6).unwrap_or_default(),
+                    "viewTeam": r.try_get::<String, _>(7).unwrap_or_default(),
                 })
             })
             .collect::<Vec<_>>(),
@@ -143,6 +255,7 @@ pub async fn my_account_list(st: &AppState) -> Vec<serde_json::Value> {
                         "bound": true,
                         "boundAt": "",
                         "source": "admin",
+                        "viewTeam": "",
                     })
                 })
                 .collect::<Vec<_>>()
@@ -185,7 +298,7 @@ async fn my_account_set_pool(
         .map_err(|e| format!("查重失败：{e}"))?
         .is_some();
         if dup_phone {
-            return Err("手机号已存在（已绑定其它姓名）".into());
+            return Err(biz("手机号已存在（已绑定其它姓名）"));
         }
     }
     let pass_hash = hash_my_password(&pass);
@@ -219,6 +332,45 @@ async fn my_account_set_pool(
     Ok(())
 }
 
+/// 设置账号的「可看团别」（迁移 024）。账号不存在返回 false。
+///
+/// 注意：改这个等于改账号的数据可见范围，**调用方必须同时吊销该账号的全部
+/// my token**（`public_teams::admin::my_tokens_revoke`），否则旧 token 里还挂着
+/// 改之前算出来的团别，范围限制当场就被绕过去了。
+pub async fn my_account_set_view_team(st: &AppState, name: &str, vt: ViewTeam) -> bool {
+    let Ok(pool) = w(st) else {
+        return false;
+    };
+    matches!(
+        sqlx::query(&crate::pq::rewrite(
+            "UPDATE my_accounts SET view_team = ? WHERE name = ?"
+        ))
+        .bind(vt.code())
+        .bind(name.trim())
+        .execute(pool)
+        .await,
+        Ok(r) if r.rows_affected() > 0
+    )
+}
+
+/// 读账号的「可看团别」。列不存在 / 账号不存在 / 值非法 → Inherit（旧口径）。
+pub async fn my_account_view_team(st: &AppState, name: &str) -> ViewTeam {
+    let Ok(pool) = w(st) else {
+        return ViewTeam::Inherit;
+    };
+    sqlx::query(&crate::pq::rewrite(
+        "SELECT view_team FROM my_accounts WHERE name = ?",
+    ))
+    .bind(name.trim())
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .and_then(|r| r.try_get::<String, _>("view_team").ok())
+    .map(|v| ViewTeam::parse(&v))
+    .unwrap_or(ViewTeam::Inherit)
+}
+
 /// 某账号登记的手机号（没登记 = 空串）。展示端用来判断能不能走「发手机号」绑定。
 pub async fn my_account_phone(st: &AppState, name: &str) -> String {
     let Ok(pool) = w(st) else {
@@ -241,8 +393,10 @@ pub async fn my_account_phone(st: &AppState, name: &str) -> String {
 pub async fn my_account_get(st: &AppState, name: &str) -> Option<serde_json::Value> {
     let pool = w(st).ok()?;
     let key = name.trim();
+    /* 带 view_team 的新查询（迁移 024）。列不存在时整句失败 → 走下面老查询，
+    viewTeam 回落 ""（前端按「沿用旧口径」显示）。 */
     let row = sqlx::query(&crate::pq::rewrite(
-        "SELECT name, phone, is_admin, created_at, bound, bound_at, source \
+        "SELECT name, phone, is_admin, created_at, bound, bound_at, source, view_team \
          FROM my_accounts WHERE name = ?",
     ))
     .bind(key)
@@ -260,6 +414,7 @@ pub async fn my_account_get(st: &AppState, name: &str) -> Option<serde_json::Val
             "bound": row.try_get::<i16, _>("bound").unwrap_or(1) == 1,
             "boundAt": row.try_get::<String, _>("bound_at").unwrap_or_default(),
             "source": row.try_get::<String, _>("source").unwrap_or_default(),
+            "viewTeam": row.try_get::<String, _>("view_team").unwrap_or_default(),
         }));
     }
     // 兜底：表还没跑 008 迁移（没有 bound/source 列）时退回老查询
@@ -280,6 +435,7 @@ pub async fn my_account_get(st: &AppState, name: &str) -> Option<serde_json::Val
         "bound": true,
         "boundAt": "",
         "source": "admin",
+        "viewTeam": "",
     }))
 }
 
@@ -355,13 +511,12 @@ pub async fn person_set_phone(
     phone: &str,
 ) -> std::result::Result<(), String> {
     if person_id == 0 {
-        return Err("无效的主播 id".into());
+        return Err(biz("无效的主播 id"));
     }
     let phone = validate_my_phone(phone)?;
     let pool = w(st).map_err(|e| e.to_string())?;
     if !phone.is_empty() {
-        let taken_person =
-            sqlx::query(&crate::pq::rewrite(crate::dialect::PERSON_PHONE_TAKEN_SQL))
+        let taken_person = sqlx::query(&crate::pq::rewrite(crate::dialect::PERSON_PHONE_TAKEN_SQL))
             .bind(&phone)
             .bind(person_id as i64)
             .fetch_optional(pool)
@@ -370,7 +525,7 @@ pub async fn person_set_phone(
             .flatten()
             .is_some();
         if taken_person {
-            return Err(PhoneClash::Person.message(&phone));
+            return Err(biz(PhoneClash::Person.message(&phone)));
         }
         let taken_account = sqlx::query(&crate::pq::rewrite(
             "SELECT 1 FROM my_accounts WHERE phone <> '' AND phone = ? LIMIT 1",
@@ -382,7 +537,7 @@ pub async fn person_set_phone(
         .flatten()
         .is_some();
         if taken_account {
-            return Err(PhoneClash::Account.message(&phone));
+            return Err(biz(PhoneClash::Account.message(&phone)));
         }
     }
     sqlx::query(&crate::pq::rewrite(
@@ -457,14 +612,14 @@ pub async fn my_accounts_batch_open(
     let _ = default_pass;
     let pool = w(st).map_err(|e| e.to_string())?;
     if inputs.is_empty() {
-        return Err("名单为空".into());
+        return Err(biz("名单为空"));
     }
     if inputs.len() > BATCH_ACCOUNT_MAX {
-        return Err(format!(
+        return Err(biz(format!(
             "一次最多开 {} 个账号（本次 {} 个，请分批提交）",
             BATCH_ACCOUNT_MAX,
             inputs.len()
-        ));
+        )));
     }
     /* 016 没跑时 person.phone 不存在 → 退回 LEGACY 列清单（手机号一律当"未登记"）。
     批量开号是 104 人的唯一入口，不能因为少跑一次迁移就整个不可用。 */
@@ -650,12 +805,13 @@ pub async fn my_accounts_batch_open(
         只在响应里下发一次（initialPass），请管理员当场转达。 */
         let pass = initial_password(&want_phone);
         if let Err(e) = validate_my_account(&name, &pass) {
+            // note 直接展示给运营（批量开号结果表），剥掉 BIZ:: 内部标记
             out.push(BatchAccountRow {
                 person_id: pid,
                 name,
                 phone: want_phone,
                 status: "failed",
-                note: e,
+                note: biz_msg(&e).to_string(),
                 initial_pass: None,
             });
             continue;
@@ -1046,6 +1202,15 @@ pub struct MyAccountInfo {
     /// - `register`：手机号自助注册 —— **2026-10-14 注册功能已移除**，新账号不会再写入
     ///   这个值，存量行保留原值以便追溯（不要按它做分支判断）。
     pub source: String,
+    /// 可看团别（迁移 024）。库里列可能不存在（没跑到迁移）或值非法，
+    /// 一律按 [`ViewTeam::Inherit`] 处理——退回「按绑定主播走」的旧行为。
+    pub view_team: ViewTeam,
+}
+
+impl Default for ViewTeam {
+    fn default() -> Self {
+        ViewTeam::Inherit
+    }
 }
 
 impl MyAccountInfo {
@@ -1060,8 +1225,8 @@ impl MyAccountInfo {
 }
 
 /* 2026-10-14 注册功能移除：`validate_my_code`（旧「短信验证码就是密码」的 6~20 位数字
-   格式校验）随注册一起删除 —— 它已无生产调用点，唯一的断言在 store/mod.rs 的单测里，
-   那个用例也一并删掉了。 */
+格式校验）随注册一起删除 —— 它已无生产调用点，唯一的断言在 store/mod.rs 的单测里，
+那个用例也一并删掉了。 */
 
 /// 忘记密码：把已登记手机号的账号密码重置为 **CSPRNG 随机临时密码**
 ///
@@ -1083,7 +1248,7 @@ pub async fn my_account_reset_password_random(
 ) -> std::result::Result<(String, Vec<String>), String> {
     let phone = validate_my_phone(phone)?;
     if phone.is_empty() {
-        return Err("请输入手机号".into());
+        return Err(biz("请输入手机号"));
     }
     let pool = w(st).map_err(|e| e.to_string())?;
     /* 只认**普通账号**（is_admin=0）：管理员观看账号不参与重置，
@@ -1100,11 +1265,11 @@ pub async fn my_account_reset_password_random(
     .filter_map(|r| r.try_get::<String, _>("name").ok())
     .collect();
     /* 手机号查不到已登记的普通账号 = 这个号没绑定任何账号 → 直说「未绑定」
-       （2026-10-14 用户口径：没绑定就显示未绑定，不再绕成「未登记或未开通」）。
-       管理员观看账号同样不在这里命中（is_admin=0 过滤），与「未绑定」共用一句文案，
-       避免泄露某个号是不是后台账号。 */
+    （2026-10-14 用户口径：没绑定就显示未绑定，不再绕成「未登记或未开通」）。
+    管理员观看账号同样不在这里命中（is_admin=0 过滤），与「未绑定」共用一句文案，
+    避免泄露某个号是不是后台账号。 */
     if names.is_empty() {
-        return Err("该手机号未绑定账号".into());
+        return Err(biz("该手机号未绑定账号"));
     }
     /* 重置后的密码 = CSPRNG 随机串（2026-10-14 审计 P0）：不再用手机号后四位。
     手机号后四位是可推导值，配上一个不带身份证明的重置入口 = 任意账号接管。
@@ -1150,7 +1315,7 @@ async fn self_set_password_inner(
     let pool = w(st).map_err(|e| e.to_string())?;
     let key = name.trim();
     if key.is_empty() {
-        return Err("登录已过期，请重新登录".into());
+        return Err(biz("登录已过期，请重新登录"));
     }
     let row = sqlx::query(&crate::pq::rewrite(
         "SELECT pass, is_admin FROM my_accounts WHERE name = ? LIMIT 1",
@@ -1159,35 +1324,37 @@ async fn self_set_password_inner(
     .fetch_optional(pool)
     .await
     .map_err(|e| format!("查账号失败：{e}"))?
-    .ok_or_else(|| "该账号不支持自助改密（未登记密码或属管理员账号）".to_string())?;
+    .ok_or_else(|| biz("该账号不支持自助改密（未登记密码或属管理员账号）"))?;
     let stored: String = row.try_get("pass").unwrap_or_default();
     let is_admin = row.try_get::<i16, _>("is_admin").unwrap_or(0) == 1;
     /* 管理员观看账号不参与自助改密（同「忘记密码重置」的口径：后台视角账号不能被
     任意登录者接管）；密码为空的账号视为「未登记密码」，同样拒绝。文案不区分两者，
     避免泄露该账号是不是管理员。 */
     if is_admin || stored.trim().is_empty() {
-        return Err("该账号不支持自助改密（未登记密码或属管理员账号）".into());
+        return Err(biz("该账号不支持自助改密（未登记密码或属管理员账号）"));
     }
     // 当前密码：只有调用方给了旧密码才校验（与登录同口径，兼容存量明文口令）
     if let Some(old_pass) = old_pass {
         if !verify_my_password(old_pass.trim(), &stored) {
-            return Err("当前密码不正确".into());
+            return Err(biz("当前密码不正确"));
         }
     }
     /* 新密码复用统一口令规则（4~20 位字母或数字），不在这里另写一套校验。
-    空密码 / 非法字符 / 长度越界统一给契约里的那句文案（姓名类错误原样保留）。 */
+    空密码 / 非法字符 / 长度越界统一给契约里的那句文案（姓名类错误原样保留）。
+    2026-10-16：validate_my_account 的错误现在带 BIZ:: 前缀，contains 判断
+    改用剥掉前缀后的文案（biz_msg），分流逻辑不变。 */
     let (_, new_pass) = validate_my_account(key, new_pass).map_err(|e| {
-        if e.contains("姓名") {
+        if biz_msg(&e).contains("姓名") {
             e
         } else {
-            "密码必须是 4~20 位字母或数字".to_string()
+            biz("密码必须是 4~20 位字母或数字")
         }
     })?;
     /* 「新旧不能相同」只能在拿到旧密码时判：重置路径（`None`）没有旧密码可比，
     且冻结契约对重置只规定了「格式 / 管理员账号」两类 400，不额外加限制。 */
     if let Some(old_pass) = old_pass {
         if new_pass == old_pass.trim() {
-            return Err("新密码不能和当前密码相同".into());
+            return Err(biz("新密码不能和当前密码相同"));
         }
     }
     sqlx::query(&crate::pq::rewrite(
@@ -1248,8 +1415,10 @@ pub async fn my_account_info(st: &AppState, key: &str) -> Option<MyAccountInfo> 
     if key.is_empty() {
         return None;
     }
-    let sql = "SELECT name, phone, is_admin, bound, bound_at, source FROM my_accounts \
-               WHERE name = ? OR (phone <> '' AND phone = ?) LIMIT 1";
+    /* view_team（迁移 024）单列查询：列不存在时**整体失败**，这时走下面的老查询
+    路径（view_team 回落 Inherit），保证没跑迁移的库照常能登录。 */
+    let sql = "SELECT name, phone, is_admin, bound, bound_at, source, view_team \
+               FROM my_accounts WHERE name = ? OR (phone <> '' AND phone = ?) LIMIT 1";
     if let Ok(Some(r)) = sqlx::query(&crate::pq::rewrite(sql))
         .bind(key)
         .bind(key)
@@ -1263,6 +1432,10 @@ pub async fn my_account_info(st: &AppState, key: &str) -> Option<MyAccountInfo> 
             bound: r.try_get::<i16, _>("bound").unwrap_or(1) == 1,
             bound_at: r.try_get::<String, _>("bound_at").unwrap_or_default(),
             source: r.try_get::<String, _>("source").unwrap_or_default(),
+            view_team: r
+                .try_get::<String, _>("view_team")
+                .map(|v| ViewTeam::parse(&v))
+                .unwrap_or_default(),
         });
     }
     let sql = "SELECT name, phone, is_admin FROM my_accounts \
@@ -1281,6 +1454,7 @@ pub async fn my_account_info(st: &AppState, key: &str) -> Option<MyAccountInfo> 
             bound: true,
             bound_at: String::new(),
             source: "admin".to_string(),
+            view_team: ViewTeam::Inherit,
         })
 }
 
@@ -1319,7 +1493,7 @@ async fn bind_inner(
 ) -> std::result::Result<MyBindResult, String> {
     let pool = w(st).map_err(|e| e.to_string())?;
     if login_name.is_empty() {
-        return Err("请先登录".into());
+        return Err(biz("请先登录"));
     }
     let row = sqlx::query(&crate::pq::rewrite(
         "SELECT name, bound FROM my_accounts WHERE name = ? LIMIT 1",
@@ -1337,7 +1511,7 @@ async fn bind_inner(
     .ok_or_else(|| "账号不存在，请重新登录".to_string())?;
     let bound = row.try_get::<i16, _>("bound").unwrap_or(1) == 1;
     if bound && !admin {
-        return Err("该账号已绑定主播，不能自行更改（需要改绑请联系管理员）".into());
+        return Err(biz("该账号已绑定主播，不能自行更改（需要改绑请联系管理员）"));
     }
 
     let p = crate::pgrs::query_with_binds(
@@ -1355,10 +1529,10 @@ async fn bind_inner(
     let team = p.try_get::<String, _>("gender").unwrap_or_default();
     let status = p.try_get::<String, _>("status").unwrap_or_default();
     if person_name.is_empty() {
-        return Err("该主播不存在或已删除".to_string());
+        return Err(biz("该主播不存在或已删除"));
     }
     if status == "left" {
-        return Err("该主播已离团，不能绑定".into());
+        return Err(biz("该主播已离团，不能绑定"));
     }
 
     let taken = sqlx::query(&crate::pq::rewrite(
@@ -1371,7 +1545,7 @@ async fn bind_inner(
     .map_err(|e| format!("查重失败：{e}"))?
     .is_some();
     if taken {
-        return Err("该主播已存在绑定的账号，请联系管理员".into());
+        return Err(biz("该主播已存在绑定的账号，请联系管理员"));
     }
 
     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
@@ -1392,7 +1566,7 @@ async fn bind_inner(
     .affected();
     if affected == 0 && !admin {
         // 并发下被别人先绑走了：用户侧不允许覆盖
-        return Err("该账号已绑定主播，不能自行更改（需要改绑请联系管理员）".into());
+        return Err(biz("该账号已绑定主播，不能自行更改（需要改绑请联系管理员）"));
     }
     if affected == 0 {
         sqlx::query(&crate::pq::rewrite(
@@ -1413,8 +1587,7 @@ async fn bind_inner(
     })
 }
 
-/* ------------------ 单元测试：登录 / 密码重置 / 自助改密的纯函数边界 ------------------ */
-///
+/* ------------------ 单元测试：登录 / 密码重置 / 自助改密的纯函数边界 ------------------ *////
 /// 2026-10-14 第四轮审计把这三条链路改造完，但**当时没有任何测试守住边界**：
 /// 注册移除、忘记密码改 CSPRNG 随机临时密码、个人页改走已登录自助改密，
 /// 全靠人工复核。这里把不碰数据库、可重复跑的那部分契约钉死。
@@ -1422,12 +1595,119 @@ async fn bind_inner(
 mod tests {
     use super::*;
 
+    /* --------------------- BIZ:: 业务错误标记（2026-10-16） --------------------- */
+
+    /// 契约：业务拒绝带 `BIZ::` 前缀，库层故障不带 —— 路由层靠它分流 400/500。
+    /// 改绑报障（2026-10-16）的回归锚点：别让「该主播已存在绑定的账号」再被
+    /// 抹成 400 通用话术「请求参数有误」。
+    #[test]
+    fn biz_marker_roundtrip() {
+        let e = biz("该主播已存在绑定的账号，请联系管理员");
+        assert!(is_biz(&e), "业务拒绝必须带 {BIZ_PREFIX} 前缀");
+        assert_eq!(biz_msg(&e), "该主播已存在绑定的账号，请联系管理员");
+        // 库层故障（模拟 format!("查账号失败：{e}") 的产物）不带前缀
+        let db = format!("查账号失败：duplicate key …");
+        assert!(!is_biz(&db));
+        assert_eq!(biz_msg(&db), db, "非业务错误 biz_msg 应返回原文");
+    }
+
+    /// 校验器（人话文案）一律走 biz 标记；这里钉死三个入口，防止有人改回去。
+    #[test]
+    fn validators_mark_biz() {
+        assert!(is_biz(&validate_my_account("", "abc123").unwrap_err()));
+        assert!(is_biz(
+            &validate_my_account("狼哲", "短").unwrap_err()
+        ));
+        assert!(is_biz(&validate_my_phone("abc").unwrap_err()));
+        assert!(is_biz(&validate_douyin_no("中文抖音号").unwrap_err()));
+    }
+
+    /* --------------------- 可看团别 view_team（迁移 024） --------------------- */
+
+    /// 解析：**任何非法值都回落 Inherit**，绝不因为一列脏值让账号登不进去。
+    #[test]
+    fn view_team_parse_falls_back_on_garbage() {
+        for raw in [
+            "", "  ", "MALE", "Female", " male ", "any", "zzz", "0", "男团",
+        ] {
+            let v = ViewTeam::parse(raw);
+            assert!(
+                matches!(
+                    v,
+                    ViewTeam::Inherit | ViewTeam::Any | ViewTeam::Male | ViewTeam::Female
+                ),
+                "{raw:?} 应是合法枚举"
+            );
+        }
+        assert_eq!(ViewTeam::parse(""), ViewTeam::Inherit, "空串 = 未设置");
+        assert_eq!(ViewTeam::parse("zzz"), ViewTeam::Inherit, "脏值 → Inherit");
+        assert_eq!(ViewTeam::parse("男团"), ViewTeam::Inherit, "中文 → Inherit");
+        // 大小写与空格容忍（运营在后台手填 / 脚本写入时不至于静默失效）
+        assert_eq!(ViewTeam::parse("MALE"), ViewTeam::Male);
+        assert_eq!(ViewTeam::parse(" Female "), ViewTeam::Female);
+    }
+
+    /// code() 与 parse() 必须互为逆运算（存库 → 读库不漂移）。
+    #[test]
+    fn view_team_code_roundtrips() {
+        for v in [
+            ViewTeam::Inherit,
+            ViewTeam::Any,
+            ViewTeam::Male,
+            ViewTeam::Female,
+        ] {
+            assert_eq!(ViewTeam::parse(v.code()), v, "{v:?} 存库后读回来应一致");
+        }
+        // 未设置必须落成空串，与迁移的 DEFAULT '' 对齐（非空串会被当成真配置）
+        assert_eq!(ViewTeam::Inherit.code(), "");
+    }
+
+    /// token_team：Any 落空串（gate_team 放行两团）；钉死团别**无视绑定关系**。
+    #[test]
+    fn view_team_token_team_override() {
+        // 全团账号：不管绑了谁，都落空串 = 两团放行 + 前端可切
+        assert_eq!(ViewTeam::Any.token_team("male"), "");
+        assert_eq!(ViewTeam::Any.token_team("female"), "");
+        assert_eq!(ViewTeam::Any.token_team(""), "");
+        // 钉死女团：即使账号绑着男团主播（base=male），也只给女团
+        assert_eq!(ViewTeam::Female.token_team("male"), "female");
+        assert_eq!(ViewTeam::Male.token_team("female"), "male");
+        // Inherit：原样沿用旧逻辑算出来的团（这条路径的语义必须与改动前完全一致）
+        assert_eq!(ViewTeam::Inherit.token_team("male"), "male");
+        assert_eq!(ViewTeam::Inherit.token_team(""), "");
+    }
+
+    /// 只有全团账号能页内切团；钉死某团 / 未设置的都不可切。
+    #[test]
+    fn view_team_switchable_only_for_any() {
+        assert!(ViewTeam::Any.switchable());
+        assert!(!ViewTeam::Male.switchable());
+        assert!(!ViewTeam::Female.switchable());
+        assert!(!ViewTeam::Inherit.switchable());
+    }
+
+    /// 写入前收敛：脏值一律变空串（= Inherit），不把垃圾带进库。
+    #[test]
+    fn normalize_view_team_sanitizes() {
+        assert_eq!(normalize_view_team("any"), "any");
+        assert_eq!(normalize_view_team("female"), "female");
+        assert_eq!(normalize_view_team("MALE"), "male");
+        assert_eq!(normalize_view_team("zzz"), "");
+        assert_eq!(normalize_view_team(""), "");
+    }
+
     /* ------------------------- 密码规则：4~20 位字母或数字 ------------------------- */
 
     /// 4~20 位字母数字放行（下限 4 是 2026-10-13 从 6 拍回来的）。
     #[test]
     fn password_rule_accepts_four_to_twenty_alphanumeric() {
-        for p in ["9282", "abcd", "1234", "13312345678", "a1b2c3d4e5f6g7h8i9j0"] {
+        for p in [
+            "9282",
+            "abcd",
+            "1234",
+            "13312345678",
+            "a1b2c3d4e5f6g7h8i9j0",
+        ] {
             assert!(
                 validate_my_account("凤夏", p).is_ok(),
                 "{p}（{} 位字母数字）应放行",
@@ -1488,14 +1768,14 @@ mod tests {
     #[test]
     fn password_rule_rejects_symbols() {
         for p in [
-            "133-1234-5678",  // 带横线（手机号常见写法）
-            "ab_123",         // 带下划线
-            "12 34",          // 内含空格（trim 清不掉中间的）
-            "abcd!",          // 标点
-            "ab@c#",          // 邮箱常用符号
-            "密码abcd",       // 中文
-            "ab\u{1f600}cd",  // emoji（按非字母数字拒绝）
-            "a/b\\c",         // 路径分隔符
+            "133-1234-5678", // 带横线（手机号常见写法）
+            "ab_123",        // 带下划线
+            "12 34",         // 内含空格（trim 清不掉中间的）
+            "abcd!",         // 标点
+            "ab@c#",         // 邮箱常用符号
+            "密码abcd",      // 中文
+            "ab\u{1f600}cd", // emoji（按非字母数字拒绝）
+            "a/b\\c",        // 路径分隔符
         ] {
             assert!(
                 validate_my_account("凤夏", p).is_err(),
@@ -1539,9 +1819,21 @@ mod tests {
     /// 分界线是「数字个数 >= 4」，够 4 位取最后四个数字。
     #[test]
     fn initial_password_takes_last_four_digits() {
-        assert_eq!(initial_password("15560099282"), "9282", "11 位手机号取后四位");
-        assert_eq!(initial_password("13800138000"), "8000", "末位是 0 也要补齐四位");
-        assert_eq!(initial_password("0000"), "0000", "全 0 是合法结果，不能当假值丢掉");
+        assert_eq!(
+            initial_password("15560099282"),
+            "9282",
+            "11 位手机号取后四位"
+        );
+        assert_eq!(
+            initial_password("13800138000"),
+            "8000",
+            "末位是 0 也要补齐四位"
+        );
+        assert_eq!(
+            initial_password("0000"),
+            "0000",
+            "全 0 是合法结果，不能当假值丢掉"
+        );
         assert_eq!(initial_password("1234"), "1234", "刚好 4 位 → 原样返回");
         // 带分隔符 / 空格的手机号：只认数字
         assert_eq!(initial_password("138-0013-8000"), "8000");
@@ -1660,7 +1952,10 @@ mod tests {
     /// 也不能把「没开通」塞进密码错的提示里。
     #[test]
     fn login_fail_messages_do_not_conflate() {
-        for m in [LoginFail::BadPassword.message(), LoginFail::NoAccount.message()] {
+        for m in [
+            LoginFail::BadPassword.message(),
+            LoginFail::NoAccount.message(),
+        ] {
             assert!(!m.contains('或'), "失败文案不应含糊：{m}");
             assert!(!m.is_empty());
         }

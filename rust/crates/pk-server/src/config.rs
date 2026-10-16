@@ -136,6 +136,42 @@ pub fn wave_cache_ttl_secs() -> u64 {
     env_or("WAVE_CACHE_TTL", "600").parse().unwrap_or(600)
 }
 
+/* --------------------------- 主播头像同步（2026-10-16） --------------------------- */
+
+/// 头像同步总开关：`AVATAR_SYNC_ENABLED=1/true/on` 才开（**默认关**）。
+/// 2026-10-16 用户口径：头像改为**纯手动**更新 —— 管理端「同步头像」按钮
+/// （`POST /api/admin/avatars/sync`）或 `pk-server sync-avatars` CLI；
+/// 显式设 `AVATAR_SYNC_ENABLED=1` 可重新打开自动定时器。
+/// 关掉只影响**自动**刷新；手工两条路径照跑。
+pub fn avatar_sync_enabled() -> bool {
+    !matches!(
+        env_or("AVATAR_SYNC_ENABLED", "0")
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "0" | "false" | "off" | "no"
+    )
+}
+
+/// 头像新鲜度阈值（天）：`synced_at` 超过它就重刷（默认 7 天，最小 1）。
+pub fn avatar_sync_days() -> i64 {
+    env_or("AVATAR_SYNC_DAYS", "7")
+        .trim()
+        .parse()
+        .unwrap_or(7)
+        .max(1)
+}
+
+/// 后台检查间隔（秒，默认 21600 = 6 小时；本地验证可以设 20）。
+/// 检查本身不请求抖音：只有真有「缺图 / 超期」的主播时才跑一轮同步。
+pub fn avatar_sync_check_secs() -> u64 {
+    env_or("AVATAR_SYNC_CHECK_SECS", "21600")
+        .trim()
+        .parse()
+        .unwrap_or(21600)
+        .max(10)
+}
+
 /* ------------------------------- Redis（P0） ------------------------------- */
 
 /// Redis 连接串：`redis://[user:password@]host:port/db`（docs/17 §7.6）。

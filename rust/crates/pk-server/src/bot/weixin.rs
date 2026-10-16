@@ -37,6 +37,35 @@ const SESSION_EXPIRED: i64 = -14;
 pub(crate) const SESSION_EXPIRED_RETRY: Duration = Duration::from_secs(3600);
 /// 连续多少次 -14 之前先等一小时重试；超过才认定凭据彻底失效、回到等待扫码
 pub(crate) const SESSION_EXPIRED_MAX_RETRY: u32 = 4;
+
+/* ------- 轮询失败节律：逐条对齐官方 @tencent-weixin/openclaw-weixin@2.4.10 -------
+   源：官方 dist/src/monitor/monitor.js（2026-10-16 从 npm tarball 核对）：
+     · RETRY_DELAY_MS = 2_000          单次失败等 2s 再轮
+     · MAX_CONSECUTIVE_FAILURES = 3    连续失败阈值
+     · BACKOFF_DELAY_MS = 30_000       连续 3 次退避 30s，且计数清零（不是指数增长）
+     · DEFAULT_LONG_POLL_TIMEOUT_MS = 35_000，且跟随服务端 longpolling_timeout_ms
+   注意官方**没有**入站消息限流的概念（它是客户端）；我们的 BOT_RATE_LIMIT 是
+   4 位绑定码防爆破的自身闸门，不属于协议节律，两者各管各的。 */
+
+/// 单次失败后的重试间隔（官方 `RETRY_DELAY_MS`）
+pub(crate) const RETRY_DELAY: Duration = Duration::from_secs(2);
+/// 连续失败达到该次数后退避（官方 `MAX_CONSECUTIVE_FAILURES`）
+pub(crate) const MAX_CONSECUTIVE_FAILURES: u32 = 3;
+/// 连续失败退避时长（官方 `BACKOFF_DELAY_MS`）
+pub(crate) const BACKOFF_DELAY: Duration = Duration::from_secs(30);
+
+/// getupdates 失败第 n 次该等多久（官方 monitor.js 节律）。
+/// 前 `MAX_CONSECUTIVE_FAILURES - 1` 次 2s，第 3 次起 30s（官方退避后把计数清零）。
+pub(crate) fn monitor_failure_delay(failures: u32) -> Duration {
+    if failures == 0 {
+        return RETRY_DELAY;
+    }
+    if failures >= MAX_CONSECUTIVE_FAILURES {
+        BACKOFF_DELAY
+    } else {
+        RETRY_DELAY
+    }
+}
 /// 媒体 CDN（下载兜底模板 / 上传 host 提示）
 pub(crate) const CDN_BASE_URL: &str = "https://novac2c.cdn.weixin.qq.com/c2c";
 
@@ -231,6 +260,11 @@ pub async fn user_poll_updates(base_url: &str, token: &str, cursor: &str) -> any
 }
 
 /// 单账号主动发文本（扫码用户的推送走这里，不经过全局机器人 token）
+///
+/// 2026-10-16：**这里是所有微信出网的必经窄口**（push.rs 的推送、admin_send.rs 的
+/// 管理员下发最终都调到这里），所以测试阶段的出网闸门装在这一层最稳 ——
+/// 上层任何新增发送路径都不可能绕过它。开关 `PUSH_OUT_ENABLED`（语义见
+/// `push::push_out_enabled`）：未开时只记 WARN 日志、不发消息、返回 Ok。
 pub async fn user_send_text(
     base_url: &str,
     token: &str,
@@ -238,6 +272,14 @@ pub async fn user_send_text(
     context_token: &str,
     text: &str,
 ) -> anyhow::Result<()> {
+    if !crate::push::push_out_enabled() {
+        let preview: String = text.chars().take(120).collect();
+        tracing::warn!(
+            to_user_id, preview = %preview,
+            "【测试阶段】已拦截微信文本发送（未发）；要真实发送请设 PUSH_OUT_ENABLED=1"
+        );
+        return Ok(());
+    }
     let out = wx_json(
         reqwest::Method::POST,
         base_url,
@@ -641,9 +683,14 @@ impl WxTransport {
 
     /// 长轮询收消息循环。游标仅非空才更新（对齐 openclaw：空游标会把进度打回去）。
     /// -14 → 暂停一小时重试（不清凭据），连续 SESSION_EXPIRED_MAX_RETRY 次仍过期
-    /// 才回落等待扫码。其它错误退避 3s 继续。
+    /// 才回落等待扫码。
+    /// 其它失败节律**对齐官方 `@tencent-weixin/openclaw-weixin@2.4.10`
+    /// `dist/src/monitor/monitor.js`**：单次失败等 [`RETRY_DELAY_MS`]（2s），
+    /// 连续 [`MAX_CONSECUTIVE_FAILURES`]（3）次退避 [`BACKOFF_DELAY_MS`]（30s）
+    /// 并把计数清零（不是指数增长）。成功一轮计数归零。
     async fn poll_loop(self: Arc<Self>) {
         let mut expired_streak: u32 = 0;
+        let mut consecutive_failures: u32 = 0;
         loop {
             let cursor = self.inner.lock().await.cursor.clone();
             match self
@@ -673,11 +720,19 @@ impl WxTransport {
                             self.inner.lock().await.phase = "running".into();
                             continue;
                         }
+                        // 官方口径：API 错误与网络错误同一节律（monitor.js 的 catch 分支）
+                        consecutive_failures += 1;
                         self.set_note(format!("getupdates 错误: {msg}")).await;
-                        tokio::time::sleep(Duration::from_secs(3)).await;
+                        let delay = monitor_failure_delay(consecutive_failures);
+                        tracing::warn!(
+                            failures = consecutive_failures, delay_ms = delay.as_millis() as u64,
+                            "微信全局通道 getupdates 失败，按官方节律重试"
+                        );
+                        tokio::time::sleep(delay).await;
                         continue;
                     }
                     expired_streak = 0;
+                    consecutive_failures = 0;
                     // 服务端返回空游标说明没有推进，存空串会把进度打回去
                     let new_cursor = str_of(&out, &["get_updates_buf"]);
                     let timeout_ms = out
@@ -695,15 +750,26 @@ impl WxTransport {
                             self.handle_msg(m).await;
                         }
                     }
-                    // 服务端没消息时立刻再轮；有下发超时就按服务端节奏空转等待
+                    // 服务端没消息时按下发超时空转等待；**有消息也不能裸奔连打**
+                    //（用户口径 2026-10-16：批间至少隔 2s，借用官方 RETRY_DELAY 档）。
+                    // 全局通道承载所有绑定码与管理员命令，压到 1 分钟会让用户等码，不能照搬
+                    // 扫码账号的 60s 下限；单条流 + 人的手速，2s 批间隔足够防占用。
                     if msgs_empty(&out) {
                         tokio::time::sleep(Duration::from_millis(timeout_ms.min(35_000))).await;
+                    } else {
+                        tokio::time::sleep(RETRY_DELAY).await;
                     }
                 }
                 Err(e) => {
-                    // 超时/网络抖动按无消息处理（对齐 openclaw：不当作致命错误）
+                    // 超时/网络抖动按官方节律处理（monitor.js：失败 +1，连续 3 次退避 30s）
+                    consecutive_failures += 1;
+                    let delay = monitor_failure_delay(consecutive_failures);
                     self.set_note(format!("轮询失败: {e}")).await;
-                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    tracing::warn!(
+                        failures = consecutive_failures, delay_ms = delay.as_millis() as u64,
+                        "微信全局通道轮询失败，按官方节律重试"
+                    );
+                    tokio::time::sleep(delay).await;
                 }
             }
         }
@@ -802,6 +868,16 @@ impl WxTransport {
     /// 会话 id = 私聊的 from_user_id，与 to_user_id 相同。
     pub async fn send_proactive(&self, conversation_id: &str, text: &str) -> anyhow::Result<()> {
         anyhow::ensure!(self.configured(), "微信渠道未初始化");
+        /* 2026-10-16：测试阶段出网闸门（与 user_send_text 同一开关）。
+           这条是管理员全局机器人通道（旧手机号/绑定码绑定的人走这里）。 */
+        if !crate::push::push_out_enabled() {
+            let preview: String = text.chars().take(120).collect();
+            tracing::warn!(
+                conversation_id, preview = %preview,
+                "【测试阶段】已拦截微信主动推送（未发）；要真实发送请设 PUSH_OUT_ENABLED=1"
+            );
+            return Ok(());
+        }
         let (to_user, token) = match crate::store::wx_session_get(&self.st, conversation_id).await {
             Some(v) => v,
             None => {

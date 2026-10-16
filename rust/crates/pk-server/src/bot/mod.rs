@@ -577,16 +577,18 @@ pub async fn weixin_add_qr_set(
     ))
 }
 
-/// 微信推送绑定（2026-10-10 审计 P1-1 改二要素：手机号 + 「我的」页 6 位绑定码）。
+/// 微信推送绑定（2026-10-16 用户口径：**只发 4 位数字绑定码即可**，不再要手机号）。
 /// 命中返回回复文案，没命中返回 None（继续走管理员判定）。
 ///
 /// 消息格式（给 Lead 写文档用）：
-/// - 一条消息：「绑定 13800000000 123456」（绑定/bind/bd + 手机号 + 6 位码）
-/// - 分两条：先发「绑定 13800000000」（或只发手机号），30 秒内再发 6 位码即可黏合成一条
-/// - 只发手机号（P1-1 前的单要素口径）→ 不再直接绑定，回复提示需要绑定码（不泄露该号是否登记过）
+/// - 直接发 4 位数字：「1234」——展示端「我的」页的文案就是这么写的
+/// - 带关键词：「绑定 1234」/「bind 1234」/「bd 1234」
+/// - 旧写法「绑定 13800000000 1234」也认：手机号被忽略，起作用的只有码
+/// - 只发手机号 → 回一句「现在不用手机号了，发 4 位绑定码即可」（不查库、不泄露该号是否登记过）
 ///
-/// 安全口径：绑定码 = 「我的」页 push_set_code 生成的 30 分钟一次性码；错误文案统一，
-/// 不区分「手机号没登记」「码不对」「码过期」，避免枚举已登记手机号。
+/// 安全口径：绑定码 = 「我的」页 push_rotate_code 生成的 **4 位数字、30 分钟一次性、库里全局唯一**
+/// 的码（见迁移 028）。错误文案统一，不区分「码不对」「码过期」，避免枚举。
+/// **裸 4 位数字没对上码时静默**：否则正常聊天里随便一个 4 位数都会收到一句「绑定失败」。
 /// 绑定成功回复不带姓名（审计要求：机器人会话可能被截图外传）。
 async fn try_bind_weixin(st: &Arc<AppState>, inbound: &Inbound) -> Option<Outbound> {
     let conversation = inbound.conversation_id.clone();
@@ -598,59 +600,48 @@ async fn try_bind_weixin(st: &Arc<AppState>, inbound: &Inbound) -> Option<Outbou
         return Some(Outbound::to(
             &conversation,
             match name {
-                Some(_) => "已解绑，不会再收到推送。\n要重新绑定，在展示端「我的」页生成 6 位绑定码，\n再发「绑定 你的手机号 绑定码」即可。".to_string(),
+                Some(_) => "已解绑，不会再收到推送。\n要重新绑定，打开展示端「我的」页，点「获取绑定码」，\n把 4 位数字发给我即可。".to_string(),
                 None => "这条会话还没有绑定过，不用解绑。".to_string(),
             },
         ));
     }
 
-    // ① 二要素绑定：手机号 + 6 位绑定码。两种写法：
-    //    一条消息「绑定 13800000000 123456」，或先发手机号再发码（PENDING_PHONE 黏合）。
-    let phone = extract_phone(text);
-    let code = extract_bind_code(text);
-    let (phone, code) = match (&phone, &code) {
-        (Some(p), Some(c)) => (p.clone(), c.clone()),
-        (Some(p), None) => {
-            // 只有手机号：先黏住等 30 秒内的第二条（6 位码），不查库、不回是否登记
-            pending_phone_put(&conversation, p);
+    // 绑定：认 4 位数字绑定码（带不带「绑定」关键词都行）
+    let has_kw = is_bind_keyword(text);
+    let Some(code) = extract_bind_code(text) else {
+        // 没认出码：只发手机号时给一句指引（不查库、不泄露登记状态），其余静默
+        if extract_phone(text).is_some() {
             return Some(Outbound::to(
                 &conversation,
-                "收到手机号。为保护账号安全，还需要一个 6 位绑定码：\n\
-                 打开展示端 → 「我的」页 → 「推送设置」→ 点「生成绑定码」，\n\
-                 30 秒内把 6 位绑定码发给我（过期请重新发送手机号；\n\
-                 也可以一条发全：绑定 13800000000 123456）。",
+                "收到手机号。现在绑定不用手机号了：\n\
+                 打开展示端 →「我的」页 → 点「获取绑定码」，\n\
+                 把页面上那 4 位数字直接发给我即可（30 分钟内有效，用一次就作废）。",
             ));
         }
-        (None, Some(c)) => {
-            // 只有码：看是不是上一条的另一半
-            match pending_phone_take(&conversation) {
-                Some(p) => (p, c.clone()),
-                None => return None, // 不带手机号的孤立码：静默（避免对聊天里的 6 位串回话）
-            }
-        }
-        (None, None) => return None, // 不是绑定消息：继续走管理员判定
+        return None; // 不是绑定消息：继续走管理员判定
     };
 
-    let bind =
-        crate::store::push_bind_by_phone_code(st, &phone, &code, &conversation, &conversation)
-            .await;
+    let bind = crate::store::push_bind_by_code(st, &code, &conversation, &conversation).await;
     let (name, team_opt) = match bind {
         Some(pair) => pair,
         None => {
-            // 统一文案：不泄露手机号是否登记过、码是否过期（P1-1 审计口径）
+            if !has_kw {
+                // 裸数字没对上：静默，别把正常聊天里的 4 位数变成一句「绑定失败」
+                return None;
+            }
+            // 统一文案：不泄露码是否过期（P1-1 审计口径）
             tracing::warn!(
                 conversation = %conversation,
-                "微信绑定失败（手机号未登记 / 码不对 / 码过期），统一回复"
+                "微信绑定失败（码不对 / 码过期），统一回复"
             );
             return Some(Outbound::to(
                 &conversation,
-                "绑定没有成功：手机号和绑定码要配对使用。\n\
-                 打开展示端 → 「我的」页 → 「推送设置」→ 点「生成绑定码」，\n\
-                 再发「绑定 你的手机号 绑定码」（码 30 分钟内有效，用一次就作废）。",
+                "绑定没有成功：这个 4 位绑定码不对或已经过期。\n\
+                 打开展示端 →「我的」页 → 点「获取绑定码」，\n\
+                 把新出的 4 位数字发给我（30 分钟内有效，用一次就作废）。",
             ));
         }
     };
-
     // 绑定行团别为空（台账建档晚于绑定）会导致推送按团捞不到这个人、
     // 永远收不到推送。这里回查一次台账补上（沿用绑定码路径的修复）。
     if team_opt.is_empty() {
@@ -660,10 +651,10 @@ async fn try_bind_weixin(st: &Arc<AppState>, inbound: &Inbound) -> Option<Outbou
         }
     }
     // 只记内部日志（姓名可能敏感），回复不带姓名（P1-1）
-    tracing::info!(conversation = %conversation, "微信推送绑定成功（手机号+绑定码）");
+    tracing::info!(conversation = %conversation, account = %name, "微信推送绑定成功（4 位绑定码）");
     crate::events::emit(
         crate::events::SCOPE_BOT,
-        format!("微信推送已绑定（{}）", mask_phone(&phone)),
+        format!("微信推送已绑定（{name}）"),
     );
     Some(Outbound::to(
         &conversation,
@@ -711,26 +702,14 @@ async fn try_promote_weixin(st: &Arc<AppState>, inbound: &Inbound) -> Option<Out
     Some(Outbound::to(&inbound.conversation_id, "已成为管理员"))
 }
 
-/// 手机号脱敏（日志 / 事件用）：138****0000
-fn mask_phone(phone: &str) -> String {
-    let chars: Vec<char> = phone.chars().collect();
-    if chars.len() < 7 {
-        return "****".into();
-    }
-    format!(
-        "{}****{}",
-        chars[..3].iter().collect::<String>(),
-        chars[chars.len() - 4..].iter().collect::<String>()
-    )
-}
-
-/// 从消息里认手机号（P1-1 二要素）：`绑定 13800000000 123456` / `bd 13800000000` /
-/// 单独一串数字。只认 7~15 位纯数字，带关键词时后面第二段如果是 6 位码不算（那是码）。
+/// 从消息里认手机号：`绑定 13800000000 1234` / `bd 13800000000` / 单独一串数字。
+/// 只认 7~15 位纯数字（4 位绑定码长度对不上，不会被误认）。
 /// 不带关键词时必须只有一段，避免把「查 3 月数据」这类文本误判成绑定。
+/// 2026-10-16 起手机号不再是绑定凭据，只用来给「只发了手机号」的人回一句指引。
 fn extract_phone(text: &str) -> Option<String> {
     let mut toks = text.split_whitespace();
     let first = toks.next()?;
-    let has_kw = matches!(first.to_lowercase().as_str(), "绑定" | "bind" | "bd");
+    let has_kw = is_bind_keyword(first);
     let cand = if has_kw { toks.next()? } else { first };
     // 不带关键词时不许有第二段；带关键词时第二段只可能是码（交给码提取器处理）
     if !has_kw && toks.next().is_some() {
@@ -744,63 +723,43 @@ fn extract_phone(text: &str) -> Option<String> {
     Some(digits)
 }
 
-/// 从消息里认绑定码（P1-1 二要素）：`绑定 13800000000 ABC234` 里的第三段 / `bind ABC234`
-/// 里的第二段 / 单独一串 6 位码。码表排除易混字符（0/O/1/I），手机号不会被当成码。
+/// 这条消息是不是以绑定关键词开头（`绑定` / `bind` / `bd`）。
+/// 用途：区分「用户明确在绑定」和「聊天里恰好出现一个 4 位数」——
+/// 后者没对上码时静默，前者才回失败文案。
+fn is_bind_keyword(text: &str) -> bool {
+    matches!(
+        text.split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .to_lowercase()
+            .as_str(),
+        "绑定" | "bind" | "bd"
+    )
+}
+
+/// 从消息里认 4 位数字绑定码（2026-10-16 口径）：
+/// - 带关键词：「绑定 1234」/「bind 1234」；也容忍旧写法「绑定 13800000000 1234」
+///   （扫关键词后面所有段，取第一个像码的 —— 手机号 11 位，长度就对不上，不会被误认）；
+/// - 不带关键词：整条消息只有一段、且正好 4 位数字才认（避免把正常聊天误判成绑定码）。
 fn extract_bind_code(text: &str) -> Option<String> {
     let mut toks = text.split_whitespace();
     let first = toks.next()?;
-    let has_kw = matches!(first.to_lowercase().as_str(), "绑定" | "bind" | "bd");
-    // 带关键词时：跳过手机号段（7~15 位纯数字），码可能是第二或第三段；
-    // 不带关键词时：只有一段且像码才认，避免把正常聊天误判成绑定码
-    let cand = if has_kw {
-        let mut next = toks.next()?;
-        if next.chars().all(|c| c.is_ascii_digit()) && next.len() >= 7 && next.len() <= 15 {
-            next = toks.next()?;
-        }
-        next
-    } else {
+    if !is_bind_keyword(first) {
         if toks.next().is_some() {
             return None;
         }
-        first
-    };
-    // 带关键词时后面再有多段不认（「绑定 13800000000 ABC234 备注」这种不算）
-    if has_kw && toks.next().is_some() {
-        return None;
+        return crate::push::looks_like_bind_code(first).then(|| first.to_string());
     }
-    let code = cand.trim().to_ascii_uppercase();
-    crate::push::looks_like_bind_code(&code).then_some(code)
+    toks.find(|t| crate::push::looks_like_bind_code(t))
+        .map(|t| t.to_string())
 }
 
-/* ------------------- 二要素绑定：手机号黏合（P1-1） ------------------- */
-
-/// 先发手机号再发码的分两条场景：手机号先黏住 30 秒，等码到了合成一条。
-/// key = 会话 id，值 = (手机号, 时间)；到点没等到码就丢（无副作用，纯内存）。
-static PENDING_PHONES: std::sync::OnceLock<Mutex<HashMap<String, (String, Instant)>>> =
-    std::sync::OnceLock::new();
-const PENDING_PHONE_TTL: Duration = Duration::from_secs(30);
-
-fn pending_phones() -> &'static Mutex<HashMap<String, (String, Instant)>> {
-    PENDING_PHONES.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn pending_phone_put(conversation: &str, phone: &str) {
-    let mut m = pending_phones().lock().expect("pending_phone 锁 poisoned");
-    m.retain(|_, (_, at)| at.elapsed() < PENDING_PHONE_TTL);
-    m.insert(
-        conversation.to_string(),
-        (phone.to_string(), Instant::now()),
-    );
-}
-
-fn pending_phone_take(conversation: &str) -> Option<String> {
-    let mut m = pending_phones().lock().expect("pending_phone 锁 poisoned");
-    match m.remove(conversation) {
-        Some((p, at)) if at.elapsed() < PENDING_PHONE_TTL => Some(p),
-        Some(_) => None,
-        None => None,
-    }
-}
+/* ------------------- 二要素绑定：手机号黏合（P1-1，2026-10-16 已下线） ------------------- */
+/*
+   原来「先发手机号、30 秒内再发绑定码」靠这里的内存黏合（PENDING_PHONES）。
+   2026-10-16 改成「只发 4 位数字绑定码即可」后不再需要：码本身就唯一指向一个账号，
+   用户不必再先报手机号。整个黏合机制连同它的 TTL 一起删掉，少一处内存态。
+*/
 
 /// 处理一条入站消息。返回 None = 静默忽略（非管理员 / 空消息）。
 pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Option<Outbound> {
@@ -828,7 +787,7 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
             "消息太频繁了，稍后再试（限流 10 条/分钟）",
         ));
     }
-    // 展示端「我的」页微信绑定（2026-10-10 审计 P1-1 改二要素：手机号 + 绑定码）。
+    // 展示端「我的」页微信绑定（2026-10-16 口径：只发 4 位绑定码即可）。
     // 必须在管理员白名单之前处理——来绑定的都是普通主播，不是管理员；
     // 限流已经在上一步生效，绑定码暴力尝试会被限流挡住。
     if inbound.channel == "weixin" && !inbound.is_group {
@@ -943,10 +902,13 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
             .map(|a| a.file_name.clone())
             .unwrap_or_else(|| "文件".into());
 
-        /* 月度时长文件（2026-10-10 用户口径：每日不能导入时长，只有月时长）：
+        /* 只有时长的月度文件（2026-10-10 用户口径：每日不能导入时长，只有月时长）：
         只有「时长」列、没有音浪列的附件不能按日导 —— 那会「成功 0 行」，看着像成功其实什么都没进。
-        文件名带月份（9月份时长.csv）就直接按那个月导；没带月份让运营改名或去管理端选月份。 */
-        let month_rows = admin::parse_month_duration_text(&attachment_text);
+        文件名带月份（9月份时长.csv）就直接按那个月导；没带月份让运营改名或去管理端选月份。
+        2026-10-16 起按月导入也支持音浪（admin 的「按月导入」可选两种指标），但机器人这边
+        只对「只有时长」的文件自动分流：带音浪的概览列表既可能是按日快照也可能是月报，
+        机器判不出来，交给管理端弹窗里人工选。 */
+        let month_rows = admin::parse_month_metrics_text(&attachment_text);
         if admin::is_month_duration_file(&month_rows, &rows) {
             let Some((y, m)) = crate::csvparse::month_from_filename(&filename) else {
                 return Some(Outbound::to(
@@ -964,13 +926,14 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
                 rows = month_rows.len(),
                 "机器人月度时长导入"
             );
-            let reply = match admin::commit_month_duration(
+            let reply = match admin::commit_month_metrics(
                 st,
                 &period,
                 "auto",
                 month_rows,
                 "merge",
                 &format!("机器人·{filename}"),
+                admin::MonthMetrics::MINUTES_ONLY,
             )
             .await
             {
@@ -2070,11 +2033,29 @@ mod tests {
     }
 
     #[test]
-    fn bind_code_still_works_as_fallback() {
-        assert_eq!(extract_bind_code("ABC234").as_deref(), Some("ABC234"));
-        assert_eq!(extract_bind_code("绑定 ABC234").as_deref(), Some("ABC234"));
-        // 手机号格式不会被当成绑定码（码表里没有纯数字组合里的小写，且长度固定 6）
+    fn bind_code_is_four_digits() {
+        // 2026-10-16 口径：4 位数字，带不带「绑定」关键词都认
+        assert_eq!(extract_bind_code("1234").as_deref(), Some("1234"));
+        assert_eq!(extract_bind_code("绑定 1234").as_deref(), Some("1234"));
+        assert_eq!(extract_bind_code("bind 1234").as_deref(), Some("1234"));
+        assert_eq!(extract_bind_code("bd 1234").as_deref(), Some("1234"));
+        // 旧写法「绑定 手机号 码」也认：手机号 11 位不会被当成码
+        assert_eq!(
+            extract_bind_code("绑定 13800138000 1234").as_deref(),
+            Some("1234")
+        );
+        // 手机号本身不是码
         assert_eq!(extract_bind_code("13800138000"), None);
+        // 位数不对 / 非数字不认
+        for s in ["123", "12345", "12a4", "ABCD", "绑定 12", "绑定"] {
+            assert_eq!(extract_bind_code(s), None, "不该认成绑定码：{s}");
+        }
+        // 不带关键词时多段文本不认（避免正常聊天被误判）
+        assert_eq!(extract_bind_code("今天 1234 分"), None);
+        // 关键词判定：决定「没对上码」时是回失败文案还是静默
+        assert!(is_bind_keyword("绑定 1234"));
+        assert!(!is_bind_keyword("1234"));
+        assert!(!is_bind_keyword("今天 1234 分"));
     }
 
     /* ---------------- 业务日期来源（2026-10-12 用户口径） ----------------

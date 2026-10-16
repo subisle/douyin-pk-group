@@ -83,14 +83,17 @@ pub async fn connect(ep: &DbEndpoint) -> anyhow::Result<PgPool> {
         .url()
         .parse()
         .map_err(|e| anyhow::anyhow!("写库连接串解析失败: {e}"))?;
-    PgPoolOptions::new()
-        .max_connections(ep.pool_limit)
-        .min_connections(0)
-        .acquire_timeout(std::time::Duration::from_secs(10))
-        .idle_timeout(std::time::Duration::from_secs(30))
-        .connect_with(opts)
-        .await
-        .map_err(|e| anyhow::anyhow!("写库连接失败（账号 {}）: {e}", ep.user))
+    // 会话时区与读池一致（Asia/Shanghai）：否则写入后由读池 TO_CHAR 出来的时间戳会差 8 小时
+    crate::pgrs::with_local_timezone(
+        PgPoolOptions::new()
+            .max_connections(ep.pool_limit)
+            .min_connections(0)
+            .acquire_timeout(std::time::Duration::from_secs(10))
+            .idle_timeout(std::time::Duration::from_secs(30)),
+    )
+    .connect_with(opts)
+    .await
+    .map_err(|e| anyhow::anyhow!("写库连接失败（账号 {}）: {e}", ep.user))
 }
 
 #[cfg(test)]

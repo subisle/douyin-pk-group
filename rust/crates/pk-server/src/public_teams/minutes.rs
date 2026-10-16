@@ -38,7 +38,47 @@ pub fn prev_periods_of(today: &str) -> PrevPeriods {
 }
 
 /// 本人三个上期音浪（一条 SQL 条件聚合）。零行 / 无数据 → 对应项 NULL（显示 —，区别于真 0）。
+///
+/// 口径（2026-10-16 月度音浪导入）：
+/// - **pm（上月同期）**：与月卡同口径 —— 上月**有导入的整月音浪**（`monthly_wave`）就用它，
+///   没有该月的整月值才回落 `daily_metric` 日明细求和（`wave_reliable = 1`）。子查询优先、
+///   没有整月行（NULL）才回落，与 `my_wave_sql` / `period_rollup_sql` 是同一套 COALESCE 口径；
+/// - **pd（前一日）**：保持日明细口径 —— 前一日是**单日**窗口，整月值只到「月」这一档，
+///   拿它当单日值会把整月音浪算成一天的量；
+/// - **py（去年同期）**：保持日明细口径 —— 这是**去年年初至去年今天**的 YTD 部分窗口，
+///   整月值无法与部分窗口对齐（会把这个月整月的量算进只过了几天的窗口里，凭空虚高），
+///   所以只有整月窗口（pm）走整月优先，部分窗口一律日明细。
+///
+/// 库没跑 026 迁移时用 [`self_prev_wave_sql_daily`] 重试（见调用点），个人页不因缺表打不开。
 pub fn self_prev_wave_sql(p: &PrevPeriods) -> String {
+    let day_clause = match &p.day {
+        Some(d) => format!(
+            "(SUM(CASE WHEN TO_CHAR(biz_date, 'YYYY-MM-DD') = '{d}' THEN wave END))::BIGINT AS pd"
+        ),
+        None => "(NULL)::BIGINT AS pd".to_string(),
+    };
+    let until = p
+        .year_until
+        .as_ref()
+        .map(|u| format!(" AND biz_date <= '{u}'"))
+        .unwrap_or_default();
+    format!(
+        "SELECT {day_clause}, \
+         (COALESCE((SELECT SUM(mw.wave) FROM monthly_wave mw \
+           WHERE mw.person_id = {{pid}} AND mw.period = '{m}'), \
+          (SELECT SUM(d2.wave) FROM daily_metric d2 \
+           WHERE d2.person_id = {{pid}} AND d2.wave_reliable = 1 \
+             AND TO_CHAR(d2.biz_date, 'YYYY-MM') = '{m}')))::BIGINT AS pm, \
+         (SUM(CASE WHEN TO_CHAR(biz_date, 'YYYY') = '{y}'{until} THEN wave END))::BIGINT AS py \
+         FROM daily_metric WHERE person_id = {{pid}} AND wave_reliable = 1",
+        m = p.month,
+        y = p.year,
+    )
+}
+
+/// [`self_prev_wave_sql`] 的纯日明细版：库还没跑 026 迁移（`monthly_wave` 不存在）时用，
+/// 三个窗口全部按日明细算（与 026 之前的 shape 逐字一致），由调用点按缺表探测重试。
+pub fn self_prev_wave_sql_daily(p: &PrevPeriods) -> String {
     let day_clause = match &p.day {
         Some(d) => format!(
             "(SUM(CASE WHEN TO_CHAR(biz_date, 'YYYY-MM-DD') = '{d}' THEN wave END))::BIGINT AS pd"
@@ -112,6 +152,53 @@ pub(super) fn my_minutes_sql(
     )
 }
 
+/// 个人「音浪」SQL（2026-10-16 月度音浪导入）：某月有导入的整月音浪（monthly_wave）就用它，
+/// 没有该月的整月值才回落日明细求和 —— 与 [my_minutes_sql] 同一套 COALESCE 口径，
+/// 同一段音浪不会既算整月值又算日明细。with_monthly = false（库没跑 026 迁移）时退回纯日明细。
+/// 日明细侧只算可信行（wave_reliable = 1，与榜单 / WAVES_A 同口径；基线日是累计值，
+/// 混进来会把历史音浪算大）。
+///
+/// ⚠️ 只给 Month / Year 两个窗口用：**累计（Total）口径不变**（历史累计总音浪 = 日明细求和）。
+/// 整月值只是「月内日明细」的替代口径，累计再叠加一遍整月值会把同一个月算两次 ——
+/// 所以 Total 在这里直接按日明细算，真被误用时也不会双重计数。
+pub(super) fn my_wave_sql(person_id: u64, scope: &MinutesScope<'_>, with_monthly: bool) -> String {
+    let daily = scope.daily_where();
+    let daily_only = format!(
+        "SELECT (COALESCE((SELECT SUM(d.wave) FROM daily_metric d \
+         WHERE d.person_id = {person_id} AND d.wave_reliable = 1{daily}), 0))::BIGINT AS wave"
+    );
+    if !with_monthly || matches!(scope, MinutesScope::Total) {
+        return daily_only;
+    }
+    let period = scope.period_where();
+    format!(
+        "SELECT (COALESCE((SELECT SUM(wave) FROM monthly_wave \
+          WHERE person_id = {person_id}{period}), 0) \
+         + COALESCE((SELECT SUM(d.wave) FROM daily_metric d \
+          WHERE d.person_id = {person_id} AND d.wave_reliable = 1{daily} \
+            AND TO_CHAR(d.biz_date, 'YYYY-MM') NOT IN \
+              (SELECT period FROM monthly_wave WHERE person_id = {person_id}{period})), 0))::BIGINT AS wave"
+    )
+}
+
+/// 个人「音浪」（月 / 年 / 累计）：库还没跑 026 迁移（monthly_wave 不存在）时退回日明细口径，
+/// 个人页不因为少一张表打不开（与 [my_minutes] 对 007 的处理同款）。
+pub async fn my_wave(
+    st: &AppState,
+    person_id: u64,
+    scope: &MinutesScope<'_>,
+) -> anyhow::Result<i64> {
+    let source = sid(st);
+    let rows = dialect::query_month_wave_fallback(
+        &st.pools,
+        &source,
+        &my_wave_sql(person_id, scope, true),
+        &my_wave_sql(person_id, scope, false),
+    )
+    .await?;
+    Ok(rows.first().map(|r| row_i64(r, "wave")).unwrap_or(0))
+}
+
 /// 个人「时长」（月 / 年 / 累计）：库还没跑 007 迁移（monthly_duration 不存在）时退回日明细口径，
 /// 个人页不因为少一张表打不开。
 pub async fn my_minutes(
@@ -147,7 +234,7 @@ pub async fn my(
         return Ok(Json(json!({ "published": false })));
     }
     let (person_id, my_team, _) = my_token_required(&headers)?;
-    if my_team != team && team != "all" {
+    if !super::my_team_allows(&my_team, &team) {
         return Err(ApiError::bad_request("该账号不属于本团"));
     }
 
@@ -206,36 +293,8 @@ pub async fn my(
     } else {
         None
     };
-    let mut monthly = if s.monthly {
-        Some(
-            one(
-                &st,
-                format!(
-                    "SELECT (SUM(wave))::BIGINT AS wave, (SUM(minutes))::BIGINT AS minutes \
-             FROM daily_metric WHERE person_id = {person_id} AND wave_reliable = 1 \
-             AND TO_CHAR(biz_date, 'YYYY-MM') = '{month}'"
-                ),
-            )
-            .await?,
-        )
-    } else {
-        None
-    };
-    let mut yearly = if s.yearly {
-        Some(
-            one(
-                &st,
-                format!(
-                    "SELECT (SUM(wave))::BIGINT AS wave, (SUM(minutes))::BIGINT AS minutes \
-             FROM daily_metric WHERE person_id = {person_id} AND wave_reliable = 1 \
-             AND TO_CHAR(biz_date, 'YYYY') = '{year}'"
-                ),
-            )
-            .await?,
-        )
-    } else {
-        None
-    };
+    let mut monthly = if s.monthly { Some(zero()) } else { None };
+    let mut yearly = if s.yearly { Some(zero()) } else { None };
     let mut total = one(
         &st,
         format!(
@@ -245,27 +304,38 @@ pub async fn my(
     )
     .await?;
 
-    /* 时长口径（2026-10-10 月度时长导入）：日明细里已经没有时长（每日不能导入时长），
-    时长只有按月的整月值。所以月 / 年 / 累计的「时长」按「某月有整月导入值就用它、
-    没有才用日明细求和」算，音浪仍走 daily_metric（音浪不按月导入）。 */
+    /* 月 / 年口径（2026-10-10 月度时长导入，2026-10-16 月度音浪导入）：
+    「某月有导入的整月值就用它，没有才用日明细求和」—— 音浪（monthly_wave）与时长
+    （monthly_duration）同一套 COALESCE 口径，两张整月表缺哪张就各自回落哪张。
+    所以月 / 年块先建成空的（只走开关判定），数值统一由 my_wave / my_minutes 填，
+    不再单独跑一条日明细 SQL（那条查出来的 wave / minutes 都会被覆盖，白跑一次）。
+    **累计（total）口径不变**：整月值只是月内日明细的替代，累计再加一遍会把同一个月算两次。 */
     if let Some(v) = monthly.as_mut() {
+        v["wave"] = json!(my_wave(&st, person_id, &MinutesScope::Month(&month)).await?);
         v["minutes"] = json!(my_minutes(&st, person_id, &MinutesScope::Month(&month)).await?);
     }
     if let Some(v) = yearly.as_mut() {
+        v["wave"] = json!(my_wave(&st, person_id, &MinutesScope::Year(&year)).await?);
         v["minutes"] = json!(my_minutes(&st, person_id, &MinutesScope::Year(&year)).await?);
     }
     total["minutes"] = json!(my_minutes(&st, person_id, &MinutesScope::Total).await?);
 
-    /* 同期对照（1.0.1）：本人三个上期音浪，一条 SQL。上期没数据 → NULL → 前端不显示差值。 */
+    /* 同期对照（1.0.1）：本人三个上期音浪，一条 SQL。上期没数据 → NULL → 前端不显示差值。
+    2026-10-16：pm（上月同期）走「整月导入值优先」口径；库没跑 026（monthly_wave 缺）时
+    由 dialect::query_month_wave_fallback 换纯日明细版重试 —— 与 my_wave / my_minutes
+    同一套缺表探测，个人页不因为少一张表打不开。pd / py 仍是日明细口径（原因见函数注释）。 */
     let mut prev_wave_map: HashMap<&str, Option<i64>> = HashMap::new();
     if s.wave && !today.is_empty() {
-        let sql = self_prev_wave_sql(&prev).replace("{pid}", &person_id.to_string());
         let source = sid(&st);
-        if let Some(r) = pgrs::query(&st.pools, &source, &sql)
-            .await?
-            .into_iter()
-            .next()
-        {
+        let pid = person_id.to_string();
+        let rows = dialect::query_month_wave_fallback(
+            &st.pools,
+            &source,
+            &self_prev_wave_sql(&prev).replace("{pid}", &pid),
+            &self_prev_wave_sql_daily(&prev).replace("{pid}", &pid),
+        )
+        .await?;
+        if let Some(r) = rows.into_iter().next() {
             let get = |col: &str| -> Option<i64> {
                 r.try_get::<i64, _>(col)
                     .ok()
@@ -422,7 +492,7 @@ pub async fn my_series(
         return Ok(Json(json!({ "published": false })));
     }
     let (person_id, my_team, _) = my_token_required(&headers)?;
-    if my_team != team && team != "all" {
+    if !super::my_team_allows(&my_team, &team) {
         return Err(ApiError::bad_request("该账号不属于本团"));
     }
     let days = q.days.unwrap_or(14).clamp(1, 30);
@@ -659,7 +729,7 @@ pub async fn my_accounts(
         return Ok(Json(json!({ "published": false })));
     }
     let (person_id, my_team, _) = my_token_required(&headers)?;
-    if my_team != team && team != "all" {
+    if !super::my_team_allows(&my_team, &team) {
         return Err(ApiError::auth("该账号不属于本团"));
     }
     // 管理员观看账号（personId=0）没有主播档案，也就没有抖音号：给空列表而不是报错，
@@ -698,8 +768,8 @@ pub async fn my_accounts(
 
 /// GET /api/public/teams/{team}/my/who（token 走 X-My-Token 头）：轻量身份
 /// （展示端登录门启动时用），只回姓名 + personId，不拉任何业务数据。
-/// 2026-10-12 起附带 `bindRequest`（该账号最新一条绑定申请：{status, personName,
-/// reason, createdAt} | null）——绑定改管理员审核制后，前端轮询这里展示审核进度。
+/// 2026-10-16：原先附带的 `bindRequest`（绑定申请审核进度）随「抖音号审计」整页下线
+/// 一并去掉 —— 展示端已不再提交绑定申请，前端也不再读这个字段。
 pub async fn my_who(
     State(st): State<ArcState>,
     Path(team): Path<String>,
@@ -710,10 +780,14 @@ pub async fn my_who(
     // 24h 内的登录不再被强制二次登录。
     let (person_id, my_team, token_name) =
         my_token_required_with_restore(&st, &headers).await?;
-    if my_team != team && team != "all" {
+    if !super::my_team_allows(&my_team, &team) {
         return Err(ApiError::auth("该账号不属于本团"));
     }
-    let bind_req = crate::store::my_bind_request_latest(&st, &token_name).await;
+    /* 可看团别（迁移 024）：who 是前端每次启动/恢复登录态都要问的身份接口，
+       `switchable` 在这里补发一次 —— 用户刷新页面时不会重新走登录接口，
+       切换器只能靠这里重建（否则刷新一次切换器就没了）。 */
+    let view_team = crate::store::my_account_view_team(&st, &token_name).await;
+    let switchable = view_team.switchable();
     // personId=0 有两种：管理员观看账号（is_admin=1，姓名直接来自登录账号），
     // 以及「手机号注册了、还没绑主播」的账号（bound=0，前端要提示去绑定）
     if person_id == 0 {
@@ -722,19 +796,19 @@ pub async fn my_who(
                 return Ok(Json(json!({
                     "ok": true, "personId": 0, "name": info.phone, "team": my_team,
                     "phone": info.phone, "admin": false, "bound": false, "needBind": true,
-                    "bindRequest": bind_req,
+                    "switchable": switchable,
                 })));
             }
             if info.is_admin {
                 return Ok(Json(json!({
                     "ok": true, "personId": 0, "name": token_name, "team": my_team,
-                    "admin": true, "bound": true, "bindRequest": bind_req,
+                    "admin": true, "bound": true, "switchable": switchable,
                 })));
             }
         }
         return Ok(Json(json!({
             "ok": true, "personId": 0, "name": token_name, "team": my_team,
-            "admin": true, "bound": true, "bindRequest": bind_req,
+            "admin": true, "bound": true, "switchable": switchable,
         })));
     }
     let sql = "SELECT name FROM person WHERE id = ? AND deleted_at IS NULL".to_string();
@@ -757,6 +831,146 @@ pub async fn my_who(
     let phone_masked = super::wx::mask_phone(&phone);
     Ok(Json(json!({
         "ok": true, "personId": person_id, "name": name, "team": my_team,
-        "phone": phone_masked, "bound": true, "bindRequest": bind_req,
+        "phone": phone_masked, "bound": true, "switchable": switchable,
     })))
+}
+
+/* --------------------------------- 单测 --------------------------------- */
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 月卡音浪（2026-10-16 用户口径）：某月有导入的整月音浪就用它，没有才回落日明细求和 ——
+    /// 与「时长」同一套 COALESCE 写法，同一段音浪不会既算整月值又算日明细。
+    #[test]
+    fn my_wave_prefers_monthly_import_over_daily_sum() {
+        let sql = my_wave_sql(1027, &MinutesScope::Month("2999-01"), true);
+        assert!(sql.contains("FROM monthly_wave"), "{sql}");
+        assert!(sql.contains("AND period = '2999-01'"), "{sql}");
+        assert!(
+            sql.contains("NOT IN"),
+            "有整月值的月份不能再算一遍日明细：{sql}"
+        );
+        assert!(
+            sql.contains("TO_CHAR(d.biz_date, 'YYYY-MM') = '2999-01'"),
+            "回落窗口要带年份，否则跨年串月：{sql}"
+        );
+        assert!(
+            sql.contains("AND d.wave_reliable = 1"),
+            "日明细侧只算可信行（基线日是累计值，混进来会算大）：{sql}"
+        );
+        assert!(
+            sql.matches("person_id = 1027").count() >= 3,
+            "整月值 / 日明细 / NOT IN 三处都只查本人：{sql}"
+        );
+    }
+
+    /// 年卡音浪同理：整月值按 `YYYY-%` 前缀取，日明细按年窗口取，缺月才回落。
+    #[test]
+    fn my_wave_year_window_uses_period_prefix() {
+        let sql = my_wave_sql(1027, &MinutesScope::Year("2999"), true);
+        assert!(sql.contains("AND period LIKE '2999-%'"), "{sql}");
+        assert!(
+            sql.contains("TO_CHAR(d.biz_date, 'YYYY') = '2999'"),
+            "{sql}"
+        );
+        assert!(sql.contains("FROM monthly_wave"), "{sql}");
+    }
+
+    /// 库没跑 026（monthly_wave 不存在）→ 退回纯日明细口径，SQL 里不能再出现这张表。
+    #[test]
+    fn my_wave_without_month_table_is_daily_only() {
+        let sql = my_wave_sql(1027, &MinutesScope::Month("2999-01"), false);
+        assert!(!sql.contains("monthly_wave"), "{sql}");
+        assert!(sql.contains("FROM daily_metric"), "{sql}");
+        assert!(sql.contains("AND d.wave_reliable = 1"), "{sql}");
+        assert!(
+            sql.contains("AND TO_CHAR(d.biz_date, 'YYYY-MM') = '2999-01'"),
+            "{sql}"
+        );
+    }
+
+    /// 累计口径不改：历史累计总音浪仍是日明细求和（整月值只是月内替代，累计叠加 = 双算）。
+    #[test]
+    fn my_wave_total_stays_daily_sum() {
+        let sql = my_wave_sql(1027, &MinutesScope::Total, true);
+        assert!(!sql.contains("monthly_wave"), "累计不许走整月口径：{sql}");
+        assert!(!sql.contains("NOT IN"), "{sql}");
+        assert!(sql.contains("FROM daily_metric"), "{sql}");
+        assert!(sql.contains("AND d.wave_reliable = 1"), "{sql}");
+        // 与当月那版对照：同一个函数在 Total 下退化成无窗口的日明细求和
+        assert_eq!(sql, my_wave_sql(1027, &MinutesScope::Total, false));
+    }
+
+    /// 上月同期（pm）走整月优先口径（2026-10-16 月度音浪导入）：上月有导入的整月音浪
+    /// （monthly_wave）就用它，没有才回落日明细求和 —— 与月卡 / 展示端月榜同一口径。
+    #[test]
+    fn self_prev_wave_month_prefers_monthly_import() {
+        let mut prev = prev_periods_of("2999-09-15");
+        prev.day = Some("2999-09-14".to_string());
+        assert_eq!(prev.month, "2999-08", "上月同期 = 上一个自然月");
+        let sql = self_prev_wave_sql(&prev);
+        assert!(
+            sql.contains("COALESCE((SELECT SUM(mw.wave) FROM monthly_wave mw"),
+            "pm 要整月优先、没有才回落：{sql}"
+        );
+        assert!(sql.contains("AND mw.period = '2999-08'"), "{sql}");
+        assert!(
+            sql.contains("(SELECT SUM(d2.wave) FROM daily_metric d2"),
+            "回落来源是日明细求和：{sql}"
+        );
+        assert!(
+            sql.contains("AND d2.wave_reliable = 1"),
+            "回落侧只算可信行（基线日是累计值）：{sql}"
+        );
+        assert!(
+            sql.contains("TO_CHAR(d2.biz_date, 'YYYY-MM') = '2999-08'"),
+            "回落窗口要带年份，否则跨年串月：{sql}"
+        );
+        assert!(
+            sql.contains("{pid}"),
+            "person_id 占位符留给调用方替换：{sql}"
+        );
+    }
+
+    /// pd（前一日）与 py（去年同期）**保持日明细口径**：前一日是单日窗口、去年同期是
+    /// 「去年年初至去年今天」的 YTD 部分窗口，整月值无法与部分窗口对齐（会把整月音浪
+    /// 算成一天 / 塞进只过了几天的窗口里，凭空虚高）。所以 monthly_wave 只能出现在 pm 一处。
+    #[test]
+    fn self_prev_wave_day_and_year_stay_daily_only() {
+        let prev = PrevPeriods {
+            day: Some("2999-09-14".to_string()),
+            month: "2999-08".to_string(),
+            year: "2998".to_string(),
+            year_until: Some("2998-09-15".to_string()),
+        };
+        let sql = self_prev_wave_sql(&prev);
+        // pd：仍是单日条件聚合
+        assert!(
+            sql.contains("TO_CHAR(biz_date, 'YYYY-MM-DD') = '2999-09-14' THEN wave"),
+            "{sql}"
+        );
+        // py：仍是 YTD 部分窗口（带 until 上限）
+        assert!(sql.contains("AND biz_date <= '2998-09-15'"), "{sql}");
+        assert!(sql.contains("TO_CHAR(biz_date, 'YYYY') = '2998'"), "{sql}");
+        // 整月表只出现在 pm 那一段（在 py 之前）
+        assert_eq!(sql.matches("monthly_wave").count(), 1, "{sql}");
+        assert!(
+            sql.find("monthly_wave").unwrap() < sql.find("AS py").unwrap(),
+            "整月值只允许 pm 用：{sql}"
+        );
+
+        // 库没跑 026（monthly_wave 缺）→ 纯日明细版：三个窗口全走 daily_metric
+        let daily = self_prev_wave_sql_daily(&prev);
+        assert!(!daily.contains("monthly_wave"), "{daily}");
+        assert!(
+            daily.contains("AS pd") && daily.contains("AS pm") && daily.contains("AS py"),
+            "三个列名不能变（调用方按 pd/pm/py 读）：{daily}"
+        );
+        assert!(
+            daily.contains("TO_CHAR(biz_date, 'YYYY-MM') = '2999-08' THEN wave"),
+            "pm 回落成日明细口径：{daily}"
+        );
+    }
 }

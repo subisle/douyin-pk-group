@@ -5,7 +5,8 @@ use super::*; // 共享 w() / now_str() / AppState 等内部工具
 /* --------------------- 展示端「我的」页微信推送（绑定 + 追分目标） --------------------- */
 /*
    2026-10-09 新增。链路：
-     展示端「我的」页生成绑定码 → 用户扫码加微信机器人 → 把绑定码发给机器人
+     展示端「我的」页显示机器人加好友二维码 → 用户扫码加微信机器人 →
+     点「获取绑定码」拿 4 位数字 → 把 4 位数字发给机器人
      → 私聊会话 id 与展示端账号绑定（push_bindings）→ 数据导入完成后按目标推送
    iLink 只能被动回复，所以每次私聊入站都把 to_user_id / context_token 落到 wx_sessions，
    主动推送时从这里取（服务重启不丢会话上下文）。
@@ -24,6 +25,29 @@ pub struct PushBinding {
     pub lineage_report: bool,
     /// 同业务日去重：师门日报只推一次（对齐 last_report_date）
     pub last_lineage_date: String,
+}
+
+/// 读 push_bindings 里当前记着的会话 id（空串 = 还没接上任何会话 / 未激活）。
+///
+/// 为什么单独有这一个读：`push_bindings.conversation_id` 是展示端「已绑定」的
+/// 唯一口径（[`push_state`] 的 bound 就是它非空）。扫码激活的判定不能拿
+/// `wx_push_accounts.conversation_id` 当代理 —— 那张表的列更宽、先写成功，
+/// 一旦 push_bindings 这次写失败（列长不够 / 抖动），判定就会永远为「已激活」，
+/// 状态卡死在「未绑定」且不再自愈（2026-10-16 实测踩到）。
+pub async fn push_binding_conversation(st: &AppState, name: &str) -> String {
+    let Some(pool) = w(st).ok() else {
+        return String::new();
+    };
+    sqlx::query(&crate::pq::rewrite(
+        "SELECT conversation_id FROM push_bindings WHERE name = ?",
+    ))
+    .bind(name.trim())
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .and_then(|r| r.try_get::<String, _>("conversation_id").ok())
+    .unwrap_or_default()
 }
 
 /// 展示端「我的」页看到的推送状态（不含会话 id 等内部字段）
@@ -114,6 +138,64 @@ pub async fn push_set_code(
     .execute(pool)
     .await?;
     Ok(())
+}
+
+/// 该绑定码是否已被**别的**账号占着（空码不算冲突）。
+async fn push_code_taken(st: &AppState, code: &str, name: &str) -> bool {
+    let Ok(pool) = w(st) else {
+        return false;
+    };
+    sqlx::query(&crate::pq::rewrite(
+        "SELECT 1 FROM push_bindings WHERE bind_code = ? AND name <> ?",
+    ))
+    .bind(code)
+    .bind(name.trim())
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .is_some()
+}
+
+/// 摇一个新绑定码并落库，撞号自动重摇。
+///
+/// 为什么不能「生成 → 直接写」：4 位数字只有 10^4 种取值，而 [`push_bind_by_code`]
+/// 是 `WHERE bind_code = ?` 单行取账号 —— 两行同码时会把微信绑到**别人**的账号上
+/// （收到别人的推送）。双保险：
+/// 1. 写前先查一次（本函数），撞了就重摇；
+/// 2. 库侧 `028_push_bind_code_unique` 的部分唯一索引兜住并发竞态，写入撞唯一约束
+///    （23505）也当撞号处理，继续重摇，而不是把 500 抛给用户。
+pub async fn push_rotate_code(
+    st: &AppState,
+    name: &str,
+    team: &str,
+    person_id: u64,
+) -> Result<String> {
+    for _ in 0..32 {
+        let code = crate::push::new_bind_code();
+        if push_code_taken(st, &code, name).await {
+            continue;
+        }
+        match push_set_code(st, name, team, person_id, &code).await {
+            Ok(()) => return Ok(code),
+            Err(e) if is_unique_violation(&e) => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(anyhow::anyhow!(
+        "绑定码生成失败：连续撞号，请稍后重试"
+    ))
+}
+
+/// PG 唯一约束冲突（SQLSTATE 23505）——绑定码撞号重摇的判据
+fn is_unique_violation(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<sqlx::Error>()
+        .and_then(|se| match se {
+            sqlx::Error::Database(db) => db.code(),
+            _ => None,
+        })
+        .map(|c| c == "23505")
+        .unwrap_or(false)
 }
 
 /// 绑定码 → 绑定：把微信私聊会话接到展示端账号上。
@@ -280,11 +362,11 @@ pub async fn push_set_daily_report(st: &AppState, name: &str, on: bool) -> bool 
     sqlx::query_scalar::<_, i64>(&crate::pq::rewrite(
         "SELECT COUNT(*) FROM push_bindings WHERE name = ?",
     ))
-        .bind(name)
-        .fetch_one(pool)
-        .await
-        .map(|n| n > 0)
-        .unwrap_or(false)
+    .bind(name)
+    .fetch_one(pool)
+    .await
+    .map(|n| n > 0)
+    .unwrap_or(false)
 }
 
 /// 只改「师门日报」开关（docs/23 §4.3；「我的」页第三开关，仅名下有徒弟的人可见）。
@@ -443,20 +525,26 @@ pub async fn push_set_last_report_date(st: &AppState, name: &str, date: &str) {
     }
 }
 
-/* --------------------- 微信绑定：手机号（2026-10-10） --------------------- */
+/* --------------------- 微信绑定：绑定码（2026-10-16 口径） --------------------- */
 /*
-   旧口径是「页面出 6 位码 → 用户把码发给机器人」。改成扫码加好友后**直接发手机号**绑定：
-   手机号在 my_accounts 里本来就是一个手机号只绑一个姓名，拿到手机号就能确定账号，
-   用户不用再回页面抄码。「我的」页仍保留绑定码入口作为兜底（没登记手机号时用）。
+   2026-10-16 用户口径：**主播在微信里只发 4 位绑定码即可绑定**（不再要求手机号）。
+   页面（展示端「我的」页）直接显示机器人加好友二维码，扫码只负责加机器人；
+   绑定动作由 [`push_bind_by_code`] 完成 —— 码一次性、30 分钟有效、用掉即清。
 
-   2026-10-10 审计 P1-1：只发手机号就能绑定 = 知道手机号即可冒绑 + 枚举登记状态。
-   机器人侧已改成二要素（手机号 + 6 位绑定码），本文件提供 push_bind_by_phone_code：
-   my_accounts 查手机号 → push_bindings 校验绑定码（一次性 + 30 分钟有效）→ 绑定。
+   历史沿革（都保留在代码里，别再走回去）：
+   - 最早：页面出 6 位字母数字码 → 发码绑定；
+   - 2026-10-10：改「扫码加好友 → 直接发手机号」绑定，码降为兜底；
+   - 2026-10-10 审计 P1-1：只发手机号 = 知道手机号即可冒绑 + 枚举登记状态，
+     改成二要素（手机号 + 6 位码），即 [`push_bind_by_phone_code`]（**现已不在机器人路径上**，
+     保留给历史调用方与 e2e）；
+   - 2026-10-16：二维码回归「加好友」用途（不再扫码即绑定），绑定回归单要素
+     —— 但凭据是 4 位随机码而不是手机号，所以 P1-1 的「知道手机号就能冒绑」不成立。
 */
 
-/// 二要素绑定（P1-1）：手机号（my_accounts 里登记过的）+ 6 位一次性绑定码
-/// （「我的」页 push_set_code 生成的，30 分钟有效）。两条都命中才绑，码用掉即清。
-/// 任一环节不匹配返回 None，调用方统一文案、不区分具体原因。
+/// 二要素绑定（P1-1 历史口径，2026-10-16 起机器人不再走这条路）：
+/// 手机号（my_accounts 里登记过的）+ 一次性绑定码（「我的」页生成的，30 分钟有效）。
+/// 两条都命中才绑，码用掉即清。任一环节不匹配返回 None，调用方统一文案、不区分具体原因。
+#[allow(dead_code)]
 pub async fn push_bind_by_phone_code(
     st: &AppState,
     phone: &str,
@@ -502,8 +590,8 @@ pub async fn push_bind_by_phone_code(
 }
 
 /// 按手机号绑定微信会话（单要素）。返回 Some((账号姓名, 团别))。
-/// 【2026-10-10 审计 P1-1 后线上路径不再用它】单凭手机号即可绑定 = 冒绑/枚举漏洞，
-/// 机器人改走 push_bind_by_phone_code（手机号 + 绑定码二要素）。
+/// 【2026-10-10 审计 P1-1 后线上路径不再用它】单凭手机号即可绑定 = 冒绑/枚举漏洞；
+/// 2026-10-16 起机器人统一走 push_bind_by_code（4 位绑定码单要素）。
 /// 保留原因：集成测试 store_e2e.rs 仍在直接调用它覆盖绑定表读写。
 #[allow(dead_code)]
 pub async fn push_bind_by_phone(
@@ -636,6 +724,31 @@ pub fn wx_push_clash_of(
     None
 }
 
+/// 扫码绑定的**业务冲突**（微信已绑别的账号 / 该主播已有微信账号 / 唯一索引兜底）。
+///
+/// 为什么单独建一个类型（2026-10-16）：这类拒绝是写给用户看的**人话**
+/// （「请先解绑旧的再扫」），但它从 store 层经 `anyhow` 抛到路由层后，
+/// `From<anyhow::Error>` 一律算 `safe=false` → 500 + 通用文案「服务器开小差了，请稍后重试」，
+/// 用户既看不到原因、展示端还会把它当网络抖动每 3 秒重试 10 次（2026-10-16 实测）。
+/// 带上本类型后，路由层能 `downcast_ref` 出来按 400 原样下发 ——
+/// 与 routes.rs「不靠中文关键词猜状态码」的口径一致，也不泄露 PG 细节。
+#[derive(Debug)]
+pub struct WxBindConflict(pub String);
+
+impl std::fmt::Display for WxBindConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for WxBindConflict {}
+
+/// 冲突文案 → 带类型的业务冲突错误（路由层 downcast 出来下发 400）。
+/// 单独抽一层是为了能单测「文案进、typed error 出」这段映射（不需要 DB）。
+fn bind_conflict(msg: String) -> anyhow::Error {
+    WxBindConflict(msg).into()
+}
+
 /// 落扫码凭证前把「别人的行」捞出来查重（排除自身，见 [`wx_push_clash_of`]）。
 /// 018 没跑时 `ilink_user_id` 列存在（013 就有）、`person_id` 也在（015 才加），
 /// 所以 015 未跑的库这里会拿到空列表 → 查重自然退化，不影响写入。
@@ -676,7 +789,8 @@ pub async fn wx_push_account_save(st: &AppState, a: &WxPushAccount) -> Result<()
     查重失败（表结构缺列 / 连不上）不阻断 —— 唯一索引仍在，最坏退回英文报错。 */
     let others = wx_push_others(st).await;
     if let Some(msg) = wx_push_clash_of(&a.name, a.person_id, &a.ilink_user_id, &others) {
-        return Err(anyhow::anyhow!("{msg}"));
+        // 业务冲突：带上类型，路由层按 400 原样下发（见 WxBindConflict）
+        return Err(bind_conflict(msg));
     }
     sqlx::query(&crate::pq::rewrite(
         "INSERT INTO wx_push_accounts
@@ -708,13 +822,15 @@ pub async fn wx_push_account_save(st: &AppState, a: &WxPushAccount) -> Result<()
         （018 的两个软唯一索引：微信侧 uk_wx_push_user_uniq / 主播侧 uk_wx_push_person_uniq）。 */
         let m = e.to_string();
         if m.contains("Duplicate entry") {
-            if m.contains("uk_wx_push_user_uniq") {
-                anyhow::anyhow!("该微信已经绑定过别的账号，一个微信只能绑一个主播")
+            // 唯一索引兜底文案同上：全是用户可执行的人话，一律按业务冲突下发 400
+            let msg = if m.contains("uk_wx_push_user_uniq") {
+                "该微信已经绑定过别的账号，一个微信只能绑一个主播"
             } else if m.contains("uk_wx_push_person_uniq") {
-                anyhow::anyhow!("该主播已经有一个微信推送账号，要换微信请先解绑旧的")
+                "该主播已经有一个微信推送账号，要换微信请先解绑旧的"
             } else {
-                anyhow::anyhow!("该微信推送账号已存在，请刷新后重试")
-            }
+                "该微信推送账号已存在，请刷新后重试"
+            };
+            bind_conflict(msg.to_string())
         } else {
             anyhow::anyhow!("写入微信推送凭证失败：{m}")
         }
@@ -1051,7 +1167,12 @@ pub async fn push_bind_account(
     // 修复3·健壮：与 push_set_code 同一口径的 team 白名单（team 会落 push_bindings.team，
     // report.rs 用 `p.gender='{team}'` 内联拼 SQL）。合法值只有 male/female/all，
     // 空串（台账查不到的观看账号）按 all 归一，其余一律拒绝写库。
-    let team = normalize_push_team(team);
+    // 2026-10-16：非法值原先会被 .bind(None) 落成 NULL → NOT NULL 约束报错，而下面的
+    // 写入是 `let _ =`（静默）→ 「绑定看似成功、库里没行」。这里显式拒绝 + 记 warn。
+    let Some(team) = normalize_push_team(team) else {
+        tracing::warn!(account = %name, "push_bindings 未写入：团别非法（只认 male/female/all/空）");
+        return;
+    };
     let Ok(pool) = w(st) else {
         return;
     };
@@ -1067,7 +1188,9 @@ pub async fn push_bind_account(
     .bind(name.trim())
     .execute(pool)
     .await;
-    let _ = sqlx::query(&crate::pq::rewrite(
+    // 静默吞错改记 warn（2026-10-16 报障：这里写失败时展示端永远显示未绑定，
+    // 而日志里一条线索都没有——根因是 conversation_id 列长不够，见迁移 027）。
+    if let Err(e) = sqlx::query(&crate::pq::rewrite(
         "INSERT INTO push_bindings (name, team, conversation_id, to_user_id, bound_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT (name) DO UPDATE SET team = CASE
@@ -1085,7 +1208,13 @@ pub async fn push_bind_account(
     .bind(now_str())
     .bind(now_str())
     .execute(pool)
-    .await;
+    .await
+    {
+        tracing::warn!(
+            account = %name, error = %e, conv_len = conversation_id.chars().count(),
+            "push_bindings 写入失败（展示端会一直显示未绑定）"
+        );
+    }
 }
 
 /* ------------- 追分目标写入单测：plan_inserts 纯逻辑 + 真库并发回归（FIX1） ------------- */
@@ -1099,20 +1228,20 @@ mod target_write_tests {
         v.iter().copied().collect()
     }
 
-    fn plan_ok(
-        keys: &[i64],
-        existing: &[i64],
-        used: i64,
-        max: i64,
-        dup: DupPolicy,
-    ) -> Vec<usize> {
+    fn plan_ok(keys: &[i64], existing: &[i64], used: i64, max: i64, dup: DupPolicy) -> Vec<usize> {
         match plan_inserts(keys, &set(existing), used, max, dup) {
             Ok(v) => v,
             Err(e) => panic!("期望通过，实际 {e:?}"),
         }
     }
 
-    fn plan_err(keys: &[i64], existing: &[i64], used: i64, max: i64, dup: DupPolicy) -> TargetAddError {
+    fn plan_err(
+        keys: &[i64],
+        existing: &[i64],
+        used: i64,
+        max: i64,
+        dup: DupPolicy,
+    ) -> TargetAddError {
         match plan_inserts(keys, &set(existing), used, max, dup) {
             Ok(v) => panic!("期望报错，实际通过 {v:?}"),
             Err(e) => e,
@@ -1183,7 +1312,10 @@ mod target_write_tests {
     /// Ignore（单条 value）：不查重，同一个数值可以并存（保持历史行为），只受上限约束。
     #[test]
     fn ignore_policy_allows_same_value_twice() {
-        assert_eq!(plan_ok(&[100, 100], &[100], 1, 5, DupPolicy::Ignore), vec![0, 1]);
+        assert_eq!(
+            plan_ok(&[100, 100], &[100], 1, 5, DupPolicy::Ignore),
+            vec![0, 1]
+        );
         assert!(matches!(
             plan_err(&[1, 2, 3, 4, 5, 6], &[], 0, 5, DupPolicy::Ignore),
             TargetAddError::OverLimit
@@ -1316,7 +1448,10 @@ mod target_write_tests {
              DB person 行数={a_rows}；重复 id 组={a_dups}；清理后残留={a_left}"
         );
         assert_eq!(a_left, 0, "临时数据必须删净");
-        assert!(a_rows <= 5, "person 行数必须 ≤5（旧实现实测 10），实际 {a_rows}");
+        assert!(
+            a_rows <= 5,
+            "person 行数必须 ≤5（旧实现实测 10），实际 {a_rows}"
+        );
         assert!(added_sum <= 5, "added 之和必须 ≤5，实际 {added_sum}");
         assert_eq!(a_dups, 0, "不允许重复 target_person_id");
 
@@ -1419,24 +1554,47 @@ mod target_write_tests {
         }
         let c_rows = count_kind(&pool, &name, "value").await;
         cleanup(&pool, &name).await;
-        println!("[C] 6 路并发单条 value：成功×{c_ok} / 400(OverLimit)×{c_over}；DB value 行数={c_rows}");
-        assert!(c_rows <= 5, "value 行数必须 ≤5（旧实现实测 6），实际 {c_rows}");
+        println!(
+            "[C] 6 路并发单条 value：成功×{c_ok} / 400(OverLimit)×{c_over}；DB value 行数={c_rows}"
+        );
+        assert!(
+            c_rows <= 5,
+            "value 行数必须 ≤5（旧实现实测 6），实际 {c_rows}"
+        );
         assert_eq!(c_ok, c_rows as usize, "成功数必须等于落库行数");
 
         // ---- D) 分类互不挤占：person 满 5 后 value 仍能加满 5 ----
         cleanup(&pool, &name).await;
         let p_ids: Vec<u64> = (0..5).map(|i| 9000 + i).collect();
         targets_add_serialized_pool(
-            &pool, &name, "male", "person", &items(&p_ids), 5, DupPolicy::Skip,
+            &pool,
+            &name,
+            "male",
+            "person",
+            &items(&p_ids),
+            5,
+            DupPolicy::Skip,
         )
         .await
         .expect("person 5 个应成功");
         let mut v_ok = 0usize;
         for i in 1..=5i64 {
-            let one = [NewTarget { person_id: 0, name: String::new(), value: i * 1_000 }];
-            if targets_add_serialized_pool(&pool, &name, "male", "value", &one, 5, DupPolicy::Ignore)
-                .await
-                .is_ok()
+            let one = [NewTarget {
+                person_id: 0,
+                name: String::new(),
+                value: i * 1_000,
+            }];
+            if targets_add_serialized_pool(
+                &pool,
+                &name,
+                "male",
+                "value",
+                &one,
+                5,
+                DupPolicy::Ignore,
+            )
+            .await
+            .is_ok()
             {
                 v_ok += 1;
             }
@@ -1444,7 +1602,8 @@ mod target_write_tests {
         let d_person = count_kind(&pool, &name, "person").await;
         let d_value = count_kind(&pool, &name, "value").await;
         cleanup(&pool, &name).await;
-        let d_left = count_kind(&pool, &name, "person").await + count_kind(&pool, &name, "value").await;
+        let d_left =
+            count_kind(&pool, &name, "person").await + count_kind(&pool, &name, "value").await;
         println!(
             "[D] person 满 5 后加 value：value 成功×{v_ok}；person={d_person} value={d_value}；清理后残留={d_left}"
         );
@@ -1452,5 +1611,55 @@ mod target_write_tests {
         assert_eq!(d_left, 0, "临时数据必须删净");
 
         println!("[done] 真库并发回归全部通过，临时账号 {name} 已清空");
+    }
+}
+
+/* --------------- 扫码绑定的业务冲突（2026-10-16）：必须带类型，路由层才能给 400 人话 --------------- */
+
+#[cfg(test)]
+mod wx_bind_conflict_tests {
+    use super::{bind_conflict, wx_push_clash_of, WxBindConflict};
+
+    fn others() -> Vec<(String, u64, String)> {
+        vec![
+            ("shuai4444".to_string(), 0, "o9cq808v597x".to_string()),
+            ("狼征".to_string(), 1, "o9cq800cQBnO".to_string()),
+            // 同一主播（person_id=1）换过账号名 / 换过微信后留下的旧行
+            ("狼征-旧号".to_string(), 1, "o9cqOldWechat".to_string()),
+        ]
+    }
+
+    /// 同一台微信（uid 相同）绑到**别的**账号名下：必须拒，且是带类型的业务冲突 ——
+    /// 不带类型就会走 anyhow 兜底 = 500「服务器开小差了，请稍后重试」，用户看不到
+    /// 「请先解绑旧的再扫」（2026-10-16 用户报障的根因就是这个）。
+    #[test]
+    fn other_account_same_wechat_is_typed_conflict() {
+        let msg = wx_push_clash_of("帅帅", 0, "o9cq808v597x", &others()).expect("应判为冲突");
+        assert!(msg.contains("shuai4444"), "文案要点名占用的账号：{msg}");
+        let e = bind_conflict(msg);
+        let c = e
+            .downcast_ref::<WxBindConflict>()
+            .expect("必须是 WxBindConflict，否则路由层降级成 500 通用文案");
+        assert!(c.0.contains("请先解绑旧的再扫"), "{}", c.0);
+    }
+
+    /// 自己更新自己（同名重扫）不算冲突：supervisor 重连 / token 刷新会反复 save。
+    #[test]
+    fn self_update_is_not_conflict() {
+        assert!(wx_push_clash_of("shuai4444", 0, "o9cq808v597x", &others()).is_none());
+    }
+
+    /// 同一主播已有微信账号（person_id 命中）同样拒，文案指向主播而不是微信。
+    #[test]
+    fn same_person_second_wechat_is_conflict() {
+        let msg = wx_push_clash_of("狼征", 1, "o9cqFresh", &others()).expect("应判为冲突");
+        assert!(msg.contains("该主播已经有"), "{msg}");
+    }
+
+    /// 空 uid / person_id=0 是「未激活 / 管理员观看账号」哨兵，不参与判重。
+    #[test]
+    fn sentinel_empties_do_not_clash() {
+        assert!(wx_push_clash_of("帅帅", 0, "", &others()).is_none());
+        assert!(wx_push_clash_of("帅帅", 0, "o9cqFresh", &[]).is_none());
     }
 }

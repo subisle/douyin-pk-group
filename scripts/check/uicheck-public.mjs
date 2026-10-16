@@ -216,7 +216,6 @@ await section('0. 接口清单（X-My-Token 头）', async () => {
     ['我的 /my', '/api/public/teams/all/my'],
     ['趋势 /my/series', '/api/public/teams/all/my/series?days=14'],
     ['推送 /my/push', '/api/public/teams/all/my/push'],
-    ['绑定状态 /my/claim', '/api/public/teams/all/my/claim'],
     ['抖音号 /my/accounts', '/api/public/teams/all/my/accounts'],
   ]
   for (const [label, path] of endpoints) {

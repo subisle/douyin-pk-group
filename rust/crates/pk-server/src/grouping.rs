@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use crate::routes::ApiError;
 use crate::state::AppState;
+use crate::store;
 
 /// 前端可配的约束子集（互斥/固定位/间隔写死，只放开赛时间）
 #[derive(Deserialize, Serialize, Clone, Debug)]
@@ -211,4 +212,176 @@ pub async fn polish(
         groups,
         slots,
     }))
+}
+
+/* ------------------------------ PK 展板 ------------------------------ */
+
+/// 展板配置的 key（config 表单键，沿用「不建新表」的口径——展板配置本质
+/// 也是跨重启保留的偏好项，和机器人 token 一个待遇）。
+pub const BOARD_CONFIG_KEY: &str = "pk_board_config";
+
+/// PK 展板的分组配置：前端「展板」页把整份配置原样存后端，
+/// 换设备/重开页面再取回来。字段语义与 /api/group/arrange 的请求一一对应，
+/// 所以单独落一份白名单校验，避免坏配置把 arrange 调用打挂。
+#[derive(Deserialize, Serialize, Clone, Debug)]
+pub struct BoardConfig {
+    #[serde(rename = "eventType")]
+    pub event_type: String,
+    pub metric: String,
+    pub days: i64,
+    pub strategy: String,
+    #[serde(rename = "strengthMode")]
+    pub strength_mode: String,
+    #[serde(rename = "groupSize")]
+    pub group_size: usize,
+    #[serde(rename = "startTime")]
+    pub start_time: String,
+    #[serde(rename = "intervalMin")]
+    pub interval_min: i64,
+    #[serde(rename = "longBreak")]
+    pub long_break: i64,
+}
+
+/// 展板配置白名单校验。单独拆成纯函数（Value 进、BoardConfig 出），
+/// 方便单测直接喂 JSON；handler 也走它，保证「存进去的一定合法」。
+pub fn validate_board_config(v: &mut serde_json::Value) -> Result<BoardConfig, String> {
+    let config: BoardConfig = serde_json::from_value(v.take())
+        .map_err(|e| format!("展板配置字段缺失或类型不对：{e}"))?;
+
+    // 赛事类型：先归一（兼容老叫法），归一后仍不在白名单才算非法
+    let ev = store::normalize_event_type(&config.event_type);
+    if !store::EVENT_TYPES.contains(&ev.as_str()) {
+        return Err("不认识的赛事类型".into());
+    }
+    let mut config = config;
+    config.event_type = ev;
+
+    if !matches!(config.metric.as_str(), "lastN" | "last1" | "month" | "total") {
+        return Err("取数口径只能是 lastN / last1 / month / total".into());
+    }
+    // last1 时天数前端自己管（本来就不看），这里只卡 lastN 的范围
+    if config.metric != "last1" && !(1..=30).contains(&config.days) {
+        return Err("统计天数要在 1~30 之间".into());
+    }
+    if !matches!(
+        config.strategy.as_str(),
+        "snake" | "snake-no-master" | "sequential" | "sequential-last-n" | "random"
+    ) {
+        return Err("不认识的分组策略".into());
+    }
+    if !matches!(config.strength_mode.as_str(), "top" | "total" | "off") {
+        return Err("不认识的强度模式".into());
+    }
+    if !(2..=20).contains(&config.group_size) {
+        return Err("每组人数要在 2~20 之间".into());
+    }
+    // 手工校验 HH:MM，避免引正则依赖；HH<24 MM<60 才算合法时刻
+    let t = config.start_time.as_bytes();
+    let ok_time = t.len() == 5
+        && t[0].is_ascii_digit()
+        && t[1].is_ascii_digit()
+        && t[2] == b':'
+        && t[3].is_ascii_digit()
+        && t[4].is_ascii_digit()
+        && t[0..2] < b"24"[..] // 逐位比较 == 按十进制比大小
+        && t[3..5] < b"60"[..];
+    if !ok_time {
+        return Err("开赛时间要是 HH:MM 格式（如 12:15）".into());
+    }
+    if !(1..=120).contains(&config.interval_min) {
+        return Err("每组间隔要在 1~120 分钟之间".into());
+    }
+    if !(0..=120).contains(&config.long_break) {
+        return Err("加长休息要在 0~120 分钟之间（0 = 不插）".into());
+    }
+    Ok(config)
+}
+
+/// 读展板配置：没存过按 `{saved:false}` 处理，坏 JSON 也不 500——
+/// 配置读不出来顶多让前端用默认值，不该把整个展板页打挂。
+pub async fn board_config_get(
+    State(st): State<Arc<AppState>>,
+) -> GroupResult<serde_json::Value> {
+    let config = match store::config_get(&st, BOARD_CONFIG_KEY).await {
+        Some(raw) => match serde_json::from_str::<serde_json::Value>(&raw) {
+            Ok(v) => Some(v),
+            // 理论上不会发生（PUT 侧只存合法 JSON），防御一下
+            Err(e) => {
+                tracing::error!(error = %e, "展板配置 JSON 解析失败，按没存过处理");
+                None
+            }
+        },
+        None => None,
+    };
+    Ok(Json(serde_json::json!({
+        "saved": config.is_some(),
+        "config": config,
+    })))
+}
+
+/// 存展板配置：请求体就是配置本体（不包一层），校验通过才落库
+pub async fn board_config_put(
+    State(st): State<Arc<AppState>>,
+    Json(mut body): Json<serde_json::Value>,
+) -> GroupResult<serde_json::Value> {
+    let config = validate_board_config(&mut body).map_err(ApiError::bad_request)?;
+    store::config_set(&st, BOARD_CONFIG_KEY, &serde_json::to_string(&config)?).await;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 合法配置原样通过（eventType 老叫法顺带被归一到新白名单值）
+    #[test]
+    fn board_config_accepts_valid() {
+        let mut v: serde_json::Value = serde_json::from_str(
+            r#"{
+                "eventType": "初级",
+                "metric": "lastN", "days": 3,
+                "strategy": "snake", "strengthMode": "top",
+                "groupSize": 8, "startTime": "12:15",
+                "intervalMin": 15, "longBreak": 20
+            }"#,
+        )
+        .unwrap();
+        let cfg = validate_board_config(&mut v).unwrap();
+        assert_eq!(cfg.event_type, "初级争霸赛小组赛");
+        assert_eq!(cfg.group_size, 8);
+    }
+
+    /// 每组人数越界（这里 21）必须被拒，且带中文说明
+    #[test]
+    fn board_config_rejects_group_size_out_of_range() {
+        let mut v: serde_json::Value = serde_json::from_str(
+            r#"{
+                "eventType": "初级争霸赛小组赛",
+                "metric": "lastN", "days": 3,
+                "strategy": "snake", "strengthMode": "top",
+                "groupSize": 21, "startTime": "12:15",
+                "intervalMin": 15, "longBreak": 0
+            }"#,
+        )
+        .unwrap();
+        let err = validate_board_config(&mut v).unwrap_err();
+        assert!(err.contains("2~20"), "实际报错：{err}");
+    }
+
+    /// 白名单外的赛事类型必须被拒（归一救不回来的那种）
+    #[test]
+    fn board_config_rejects_unknown_event_type() {
+        let mut v: serde_json::Value = serde_json::from_str(
+            r#"{
+                "eventType": "周五娱乐赛",
+                "metric": "lastN", "days": 3,
+                "strategy": "snake", "strengthMode": "off",
+                "groupSize": 8, "startTime": "12:15",
+                "intervalMin": 15, "longBreak": 0
+            }"#,
+        )
+        .unwrap();
+        let err = validate_board_config(&mut v).unwrap_err();
+        assert_eq!(err, "不认识的赛事类型");
+    }
 }

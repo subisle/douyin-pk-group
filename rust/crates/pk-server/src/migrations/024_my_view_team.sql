@@ -1,0 +1,24 @@
+-- 024 · 展示端账号的「可看团别」（view_team）
+--
+-- 背景（2026-10-15 用户口径）：管理员观看账号要能分范围——
+--   帅帅   总管理员：男女团都能看，且能在「全团 / 男团 / 女团」之间自己切
+--   饭团   女团：只看女团
+--   鹏先生 全团：和帅帅一样两个团都能看，也能自己切
+-- 原先 my_accounts 只有 is_admin 一个开关，语义是「不绑主播也能登录的观看账号」，
+-- 登录时固定落「任意团」token（my_team 为空串），没有任何按团收敛的余地。
+--
+-- 新增列：my_accounts.view_team VARCHAR(8) NOT NULL DEFAULT ''
+--   ''（默认）   = 沿用旧口径：绑了主播就按主播所在团，没绑/is_admin 就任意团
+--   'any'        = 全团账号：两个团都能看（与旧「任意团」一致），且**允许页内切换**
+--   'male'       = 只能看男团
+--   'female'     = 只能看女团
+--   'all'        = 只能看全团口径（/api/public/teams/all 的合并视图）
+--
+-- 说明：'male'/'female' 与「绑定了某团主播」的最终效果一致，区别只是**不受改绑
+-- 影响**——运营可以在后台给一个观看账号钉死团别，即使它后来被改绑到别团的主播。
+-- 非法值（含大小写/空格以外的任何写法）一律按 '' 处理（服务端收敛，见
+-- normalize_view_team），数据库侧不做 CHECK 约束，避免历史脏数据把整表写入挡住。
+--
+-- 幂等：ADD COLUMN IF NOT EXISTS，可安全重放。
+
+ALTER TABLE my_accounts ADD COLUMN IF NOT EXISTS view_team VARCHAR(8) NOT NULL DEFAULT '';

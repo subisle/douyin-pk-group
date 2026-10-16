@@ -3,7 +3,9 @@
 //! 拆分自单体 store.rs（按业务域）：
 //! - [`self`]（mod.rs）别名 / 名单 / 分组方案 / 配置项 / 机器人会话 / 工具
 //! - [`my_account`] 展示端账号：台账、批量开号、登录、注册
-//! - [`bind_requests`] 绑定申请审核 + 抖音号绑定审计
+//! - 绑定申请审核 / 抖音号绑定审计：**2026-10-16 随「抖音号审计」整页下线**
+//!   （导航、路由、handler 与管理端页面一并移除）；表 `my_bind_requests` /
+//!   `anchor_claims` 与迁移**保留不删**，对应的数据访问模块（`bind_requests`）已删除
 //! - [`wxpush`] 「我的」页微信推送 / 手机号绑定 / 扫码账号
 //! - [`push_jobs`] 延迟推送队列 + 追分目标
 //! - [`wx_sessions`] 微信私聊会话上下文
@@ -23,7 +25,6 @@
 //! - 表结构见 migrations/003_runtime.sql；列名差异（key→cfg_key、text→body）都是方言原因
 
 mod admin_messages;
-mod bind_requests;
 /// Redis 缓存 / 锁封装（P0）：不做 `pub use cache::*`，避免 get/set/del 这类
 /// 通用名与下面各业务模块的 re-export 撞名；调用方一律写 `store::cache::xxx`。
 pub mod cache;
@@ -39,7 +40,6 @@ mod wxpush;
 
 pub use admin_messages::*;
 
-pub use bind_requests::*;
 pub use import_pending::import_pending_prune;
 pub use legacy::*;
 pub use my_account::*;
@@ -114,9 +114,7 @@ pub async fn list_aliases(st: &AppState) -> AliasMap {
     let Ok(pool) = w(st) else {
         return AliasMap::new();
     };
-    match sqlx::query(&crate::pq::rewrite(
-"SELECT alias, real_name FROM aliases"
-        ))
+    match sqlx::query(&crate::pq::rewrite("SELECT alias, real_name FROM aliases"))
         .fetch_all(pool)
         .await
     {
@@ -677,7 +675,7 @@ mod phone_batch_open_tests {
     use super::*;
 
     /* 2026-10-14 注册功能移除：`my_code_is_digits_only`（注册验证码格式用例）已删 ——
-       它断言的 `validate_my_code` 随注册一起清理了。手机号相关用例仍保留在下面。 */
+    它断言的 `validate_my_code` 随注册一起清理了。手机号相关用例仍保留在下面。 */
 
     /// 手机号：5~20 位数字，允许空格/横线（归一化后）——与管理员手建账号同一套口径
     #[test]
@@ -708,7 +706,10 @@ mod phone_batch_open_tests {
         );
         // 手机号太短（取不出 4 位）→ 退回随机密码，且仍要过校验
         let r = initial_password("123");
-        assert!(validate_my_account("啸帆", &r).is_ok(), "随机兜底也要过校验");
+        assert!(
+            validate_my_account("啸帆", &r).is_ok(),
+            "随机兜底也要过校验"
+        );
     }
 
     /// 密码下限回到 4（2026-10-13）：手机号后四位的账号能正常设置/重置
@@ -716,16 +717,6 @@ mod phone_batch_open_tests {
     fn password_min_len_is_four() {
         assert!(validate_my_account("凤夏", "9282").is_ok(), "4 位应放行");
         assert!(validate_my_account("凤夏", "123").is_err(), "3 位仍拒绝");
-    }
-
-    /// 绑定申请状态机：只有 pending 能被裁决（防重复审批 / 已裁决改写）
-    #[test]
-    fn bind_request_only_pending_is_decidable() {
-        assert_eq!(bind_request_next_status("pending", true), Some("approved"));
-        assert_eq!(bind_request_next_status("pending", false), Some("rejected"));
-        assert_eq!(bind_request_next_status("approved", true), None);
-        assert_eq!(bind_request_next_status("rejected", false), None);
-        assert_eq!(bind_request_next_status("", true), None);
     }
 
     /// 台账手机号与登录账号手机号必须同一套格式口径（docs/13 §2.2）
@@ -768,6 +759,7 @@ mod phone_batch_open_tests {
             bound: false,
             bound_at: String::new(),
             source: "register".into(),
+            view_team: ViewTeam::Inherit,
         };
         assert_eq!(unbound.bind_name(), "");
         let bound = MyAccountInfo {

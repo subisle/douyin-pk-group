@@ -350,18 +350,21 @@ pub fn parse(text: &str) -> anyhow::Result<(Kind, ParseOut)> {
         ParseOut {
             rows,
             has_dur_col: dur_col >= 0,
+            has_wave_col: wave_col >= 0,
         },
     ))
 }
 
-/// [`parse`] 的结果：解析出的行 + 表头里有没有时长列。
+/// [`parse`] 的结果：解析出的行 + 表头里有没有时长列 / 音浪列。
 ///
-/// 为什么要把 `has_dur_col` 带出来：月度时长入口靠它区分两种「这一行没有时长」——
-/// 文件压根没有时长列（不是月时长文件，应整体判空，让前端提示换文件）vs
-/// 有时长列但这一行写坏了（必须报出来，否则那个人整月时长在月榜上是 0 且无提示）。
+/// 为什么要把这两个「有没有这一列」带出来：月度入口靠它区分两种
+/// 「这一行没有时长」——文件压根没有时长列（不是月度指标文件，应整体判空，
+/// 让前端提示换文件）vs 有时长列但这一行写坏了（必须报出来，否则那个人
+/// 整月时长在月榜上是 0 且无提示）。音浪列同理（2026-10-16 起月度也能导音浪）。
 pub struct ParseOut {
     pub rows: Vec<CsvRow>,
     pub has_dur_col: bool,
+    pub has_wave_col: bool,
 }
 
 // 让 `parse(...)` 的结果能像以前那样直接当行的集合用（len / 下标 / 迭代），
@@ -373,29 +376,57 @@ impl std::ops::Deref for ParseOut {
     }
 }
 
-/// 月度时长文件解析：只保留「时长」列有值的行，绝不把音浪列当数据。
+/// 月度指标文件解析结果：行 + 表头里有没有时长列 / 音浪列。
 ///
-/// 抖音公会后台导出的月度文件（如「9月份时长.csv」）表头是
-/// `主播ID,主播昵称,抖音号,…,分成比-直播音浪收益,开播有效时长,主播标签`：
-/// 里面有「分成比-直播音浪收益」这种含「音浪」字样的比例列，按音浪解析会把这个
-/// 比例（35 / 40 / 50）当成每人的音浪值，所以月度时长走独立入口，只取时长。
-pub fn parse_duration_only(text: &str) -> Vec<CsvRow> {
-    match parse(text) {
-        Ok((_, out)) => {
-            if !out.has_dur_col {
-                // 没有时长列 → 不是月度时长文件，整体判空（前端据此提示换文件 / 切回按日）
-                return Vec::new();
-            }
-            out.rows
-                .into_iter()
-                // 有名字/认人信息就行：时长解析失败的行保留，err 里带着原因，
-                // 由上层计进 skipped 报告——否则整人静默消失，月榜上显示为 0。
-                .filter(|r| {
-                    !r.name.is_empty() || !r.anchor_id.is_empty() || !r.douyin_no.is_empty()
-                })
-                .collect()
+/// 上层靠 `has_dur_col` / `has_wave_col` 决定：文件里根本没有这类列
+/// （不是月度指标文件 → 前端提示换文件）vs 有列但这一行没值 / 写坏了
+/// （进 skipped 报告，否则整人静默消失、月榜上显示为 0）。
+pub struct MonthParseOut {
+    pub rows: Vec<CsvRow>,
+    pub has_dur_col: bool,
+    pub has_wave_col: bool,
+}
+
+impl MonthParseOut {
+    fn empty() -> Self {
+        Self {
+            rows: Vec::new(),
+            has_dur_col: false,
+            has_wave_col: false,
         }
-        Err(_) => Vec::new(),
+    }
+}
+
+/// 月度指标文件解析：**时长列或音浪列任一存在**就保留行，两种指标一起带出来。
+///
+/// 用户口径 2026-10-16：「时长或者音浪都支持按月进行导入和显示」。抖音公会后台
+/// 导出的文件有两种长相：
+/// - 纯月时长（`9月份时长.csv`）：`…,分成比-直播音浪收益,开播有效时长,主播标签`；
+/// - 概览列表（`主播概览列表_*.csv` / `10.14….csv`）：
+///   `…,分成比-直播音浪收益,总音浪,会员订阅音浪,开播有效时长,feed看播时长,…`
+///   两种指标同在一张表里，按月导入时哪个都不该丢。
+///
+/// 「分成比-直播音浪收益」这种含「音浪」字样的比例列由 [`find_wave_column`] 的
+/// 排除表挡掉（否则 35 / 40 / 50 会被人人当成年纪音浪值），这里不重复判断。
+pub fn parse_month_metrics(text: &str) -> MonthParseOut {
+    let Ok((_, out)) = parse(text) else {
+        return MonthParseOut::empty();
+    };
+    if !out.has_dur_col && !out.has_wave_col {
+        // 两列都没有 → 不是月度指标文件，整体判空（前端据此提示换文件 / 切回按日）
+        return MonthParseOut::empty();
+    }
+    let rows = out
+        .rows
+        .into_iter()
+        // 有名字/认人信息就行：时长或音浪解析失败的行保留，err 里带着原因，
+        // 由上层计进 skipped 报告。
+        .filter(|r| !r.name.is_empty() || !r.anchor_id.is_empty() || !r.douyin_no.is_empty())
+        .collect();
+    MonthParseOut {
+        rows,
+        has_dur_col: out.has_dur_col,
+        has_wave_col: out.has_wave_col,
     }
 }
 
@@ -543,15 +574,38 @@ mod tests {
         assert_eq!(rows[0].douyin_no, "cyl765");
     }
 
+    /// 概览列表（2026-10-16 用户给的导入样例：`10.14….csv` / `10.11 22222.csv`）。
+    /// 与月时长文件的区别是它同时带「总音浪」：按月导入时两种指标都要留住。
+    const OVERVIEW_CSV: &str =
+        "主播ID,主播昵称,抖音号,粉丝数,签约类型,分成比-直播音浪收益,总音浪,会员订阅音浪,开播有效时长,feed看播时长,主播标签\n\
+         2855887229949241,双狼呈音,75995728462,58,普通主播,35,5508,0,1小时48分钟15秒,7小时26分钟3秒,\n\
+         2416047830865369,狼霆🎹,56874096680,363,普通主播,35,3193,0,1小时2分钟31秒,4小时1分钟26秒,\n";
+
     #[test]
-    fn duration_only_keeps_rows_with_minutes() {
-        let rows = parse_duration_only(MONTH_CSV);
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].name, "浩龙🎹");
-        assert_eq!(rows[0].minutes, Some(4529.0));
-        // 没有时长列 / 空文件：解析不出行，调用方据此提示「不是月度时长文件」
-        assert!(parse_duration_only("主播名,音浪\n浩龙,1000\n").is_empty());
-        assert!(parse_duration_only("").is_empty());
+    fn month_metrics_keep_both_duration_and_wave() {
+        // 纯月时长文件：只有时长列
+        let m = parse_month_metrics(MONTH_CSV);
+        assert_eq!(m.rows.len(), 2);
+        assert_eq!(m.rows[0].name, "浩龙🎹");
+        assert_eq!(m.rows[0].minutes, Some(4529.0));
+        assert_eq!(m.rows[0].wave, None, "分成比不是音浪");
+        assert!(m.has_dur_col && !m.has_wave_col);
+        // 概览列表：时长 + 音浪同在一张表
+        let m = parse_month_metrics(OVERVIEW_CSV);
+        assert_eq!(m.rows.len(), 2);
+        assert!(m.has_dur_col && m.has_wave_col);
+        assert_eq!(m.rows[0].wave, Some(5508.0), "音浪要取「总音浪」列");
+        assert_eq!(m.rows[0].minutes, Some(108.0), "1小时48分钟15秒 → 108 分钟（秒丢掉）");
+        assert_eq!(m.rows[1].wave, Some(3193.0));
+        assert_eq!(m.rows[1].minutes, Some(62.0));
+        // 只有音浪列的月度文件也认（月度音浪导入）
+        let m = parse_month_metrics("主播昵称,音浪\n浩龙,12000\n");
+        assert_eq!(m.rows.len(), 1);
+        assert!(!m.has_dur_col && m.has_wave_col);
+        assert_eq!(m.rows[0].wave, Some(12000.0));
+        // 两类列都没有 / 空文件：解析不出行，调用方据此提示「不是月度指标文件」
+        assert!(parse_month_metrics("主播名\n浩龙\n").rows.is_empty());
+        assert!(parse_month_metrics("").rows.is_empty());
     }
 
     /// 抖音后台导出的 CSV 带 UTF-8 BOM：不能让「主播ID」列因此认不出来

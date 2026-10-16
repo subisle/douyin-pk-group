@@ -100,6 +100,39 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "023_send_image",
         include_str!("migrations/023_send_image.sql"),
     ),
+    // 024：展示端账号的「可看团别」（my_accounts.view_team：''/any/male/female/all）。
+    // 让管理员观看账号能按团收敛（如饭团只看女团），并允许全团账号在页内切团。
+    (
+        "024_my_view_team",
+        include_str!("migrations/024_my_view_team.sql"),
+    ),
+    // 025：主播抖音头像**本地留存**（person_avatar：图 + 原图 URL + hash + synced_at）。
+    // 展示端「主播列表」显示真头像；抖音接口以后改/封了也有本地副本；
+    // 每 7 天刷新靠 synced_at 判定（见 src/avatar_sync.rs、docs/25）。
+    (
+        "025_person_avatar",
+        include_str!("migrations/025_person_avatar.sql"),
+    ),
+    // 026：月度音浪导入（monthly_wave 一人一月一行）。用户口径 2026-10-16：
+    // 「时长或者音浪都支持按月进行导入和显示」—— 月度音浪与月度时长同构，
+    // 查询端统一「某月有导入月值就用它，没有才回落日明细求和」。
+    (
+        "026_monthly_wave",
+        include_str!("migrations/026_monthly_wave.sql"),
+    ),
+    // 027：微信 iLink 会话 key 放不下（conversation_id 64 → 191）。2026-10-16
+    // 「二维码绑定有问题」的根因：key `wxacct:{bot_id}:{user_id}` 实测 65 字符，
+    // 落在 wx_sessions / push_bindings / bot_sessions 的 VARCHAR(64) 上写不进去。
+    (
+        "027_weixin_conversation_len",
+        include_str!("migrations/027_weixin_conversation_len.sql"),
+    ),
+    // 028：绑定码改 4 位数字（10^4 空间）→ push_bindings(bind_code) 加部分唯一索引，
+    // 保证「一个活码只挂一个账号」（两行同码会把微信绑到别人的账号上）。
+    (
+        "028_push_bind_code_unique",
+        include_str!("migrations/028_push_bind_code_unique.sql"),
+    ),
 ];
 
 /// 迁移建连（migrator 账号；同样关语句缓存）

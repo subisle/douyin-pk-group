@@ -23,7 +23,7 @@ pub async fn wx_session_upsert(
         return;
     };
     /* 2026-10-14：写失败必须留痕。iLink 只能被动回复，主动推送全靠这里落下的
-       to_user_id + context_token；静默失败等于推送悄悄全挂且无人知晓。 */
+    to_user_id + context_token；静默失败等于推送悄悄全挂且无人知晓。 */
     if let Err(e) = sqlx::query(&crate::pq::rewrite(
         "INSERT INTO wx_sessions (conversation_id, to_user_id, context_token)
          VALUES (?, ?, ?)

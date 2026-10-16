@@ -2,6 +2,23 @@
 
 use super::*;
 
+/// 展示端账号 store 层 `Result<_, String>` 错误 → ApiError 的统一分流口（2026-10-16）。
+///
+/// store 层（`store::my_account`）把**业务拒绝**包上 `BIZ::` 前缀（见
+/// `store::my_account::BIZ_PREFIX` 的文档）：那是给人看的人话，400 原文原样下发
+/// —— 修复「管理端改绑失败只看到『请求参数有误』」的报障（真实原因
+/// 「该主播已存在绑定的账号」只进了日志，运营无从下手）。
+/// 无前缀 = 库层故障（sqlx/PG 原文，可能带表名/约束名/SQL 片段）→ 500 走
+/// 通用文案兜底，原文只留日志（2026-10-14 审计 P2 的口径不变）。
+fn account_store_err(e: String) -> ApiError {
+    if crate::store::my_account::is_biz(&e) {
+        ApiError::bad_request(crate::store::my_account::biz_msg(&e).to_string())
+    } else {
+        tracing::error!(error = %e, "展示端账号写库失败");
+        ApiError::from(anyhow::anyhow!(e))
+    }
+}
+
 /* --------------------- 我的页面账号（管理端手动添加） --------------------- */
 
 /// GET /api/admin/my-accounts：账号列表
@@ -43,7 +60,18 @@ pub async fn admin_my_account_set(
     };
     crate::store::my_account_set(&st, name, phone, &pass)
         .await
-        .map_err(|e| anyhow::anyhow!(e))?;
+        .map_err(account_store_err)?;
+    /* 可看团别（迁移 024）：**只在请求里显式带了 viewTeam 时才改**。
+       不带 = 保持原值 —— 后台「改密码」「改手机号」这些常规操作（前端表单没这个字段）
+       不能顺手把账号的可见范围清成 Inherit。非法值由 normalize 收敛成 ""（沿用旧口径）。 */
+    let view_team_written = match body.get("viewTeam").and_then(|v| v.as_str()) {
+        Some(raw) => {
+            let vt = crate::store::ViewTeam::parse(raw);
+            crate::store::my_account_set_view_team(&st, name, vt).await;
+            true
+        }
+        None => false,
+    };
     /* 写后回读校验（2026-10-13）：之前出现过「接口返回 ok 但库里没这一行」的静默失败
        （写池指向了非预期实例 / 事务被丢弃），运营看到绿色「已保存」却根本没账号。
        这里落地后立刻回读，读不到就报错，绝不再假成功。 */
@@ -58,8 +86,11 @@ pub async fn admin_my_account_set(
             "账号「{}」写入后校验失败（库里读不到），请检查写库配置后重试", name
         ).into());
     }
+    /* 改了可见范围必须吊销旧 token：旧 token 里挂着改之前算出来的团别，
+       不吊销的话范围限制当场就被绕过去了（拿着旧 token 继续看全团）。 */
     my_tokens_revoke(name);
-    tracing::info!(account = %name, generated, "管理端设置展示端账号（旧 token 已吊销，已回读校验）");
+    tracing::info!(account = %name, generated, view_team_written,
+        "管理端设置展示端账号（旧 token 已吊销，已回读校验）");
     Ok(Json(json!({
         "ok": true,
         // 随机生成的密码仅此一次下发；管理员显式指定的密码不回显
@@ -111,7 +142,7 @@ pub async fn admin_my_account_bind(
         .ok_or_else(|| anyhow::anyhow!("请选择要绑定的主播"))?;
     let r = crate::store::my_account_admin_bind(&st, &name, person_id)
         .await
-        .map_err(|e| anyhow::anyhow!(e))?;
+        .map_err(account_store_err)?;
     // 改绑后吊销旧登录态：账号名会被改写成主播姓名，新旧两个名字都吊销
     // （拿着旧 token 的人必须重新登录才能拿到新身份，审计 2026-10-12）
     my_tokens_revoke(&name);
@@ -122,84 +153,51 @@ pub async fn admin_my_account_bind(
     })))
 }
 
-/* --------------------- 绑定申请审核（管理端，017 表，2026-10-12 审计） --------------------- */
-
-/// GET /api/admin/my-bind-requests?status=pending：绑定申请列表
-/// （status 空 = 全部，pending 排最前；不含任何密码/凭证字段）
-pub async fn admin_my_bind_requests(
+/// PUT /api/admin/my-accounts/{name}/view-team {viewTeam}：**只改可看团别，不动密码**。
+///
+/// 为什么不复用 `POST /api/admin/my-accounts`：那个端点不传 `pass` 时会**自动生成
+/// 新密码**（手机号后四位，见 `admin_my_account_set`）——「只想把饭团改成女团」
+/// 会顺手把她的密码重置掉，运营当场就转达不出去了。分权限和改口令是两件事，
+/// 这里只做前者，且**不碰 pass 列**。
+///
+/// 改完吊销该账号全部 my token：旧 token 里挂着改之前算出来的团别，不吊销的话
+/// 范围限制当场就被绕过去（拿着旧 token 继续看全团）。
+pub async fn admin_my_account_set_view_team(
     State(st): State<ArcState>,
-    Query(q): Query<std::collections::HashMap<String, String>>,
-) -> ApiResult {
-    let status = q.get("status").cloned().unwrap_or_default();
-    Ok(Json(
-        json!({ "items": crate::store::my_bind_request_list(&st, &status, 200).await }),
-    ))
-}
-
-/// POST /api/admin/my-bind-requests/{id}/approve：审核通过。
-/// 事务式口径（与 anchor_claim_decide 同款）：先原子翻转 pending→approved 占住裁决权，
-/// 再执行绑定（复用 my_account_bind 的核心绑定逻辑）；绑定失败则回滚申请为 pending，
-/// 不会卡在「已通过却没绑上」。通过后吊销该账号全部 my token（强制重新登录拿新身份）。
-pub async fn admin_my_bind_request_approve(
-    State(st): State<ArcState>,
-    axum::extract::Path(id): axum::extract::Path<i64>,
-) -> ApiResult {
-    /* person_name 是申请单上的姓名快照，绑定后以主播台账现名（r.name）为准，
-    这里只做解构丢弃 —— 事件与响应都发台账现名，避免快照与现名不一致。 */
-    let Some((account, person_id, _person_name)) =
-        crate::store::my_bind_request_decide(&st, id, true, "", "admin").await
-    else {
-        return Err(anyhow::anyhow!("这笔申请不存在或已经处理过了").into());
-    };
-    match crate::store::my_account_bind(&st, &account, person_id).await {
-        Ok(r) => {
-            // 绑定把账号名从手机号占位改写成主播姓名：新旧名都吊销
-            my_tokens_revoke(&account);
-            my_tokens_revoke(&r.name);
-            tracing::info!(id, account = %account, anchor = %r.name, team = %r.team, "绑定申请审核通过（旧 token 已吊销）");
-            crate::events::emit(
-                crate::events::SCOPE_ROSTER,
-                format!("绑定审核通过：账号「{account}」→ 主播「{}」", r.name),
-            );
-            Ok(Json(json!({
-                "ok": true, "status": "approved",
-                "account": account, "name": r.name, "team": r.team,
-            })))
-        }
-        Err(e) => {
-            // 绑定失败（主播已绑别人 / 账号状态变了…）：回滚裁决，让管理员能改判或重试
-            crate::store::my_bind_request_revert(&st, id).await;
-            Err(anyhow::anyhow!(e).into())
-        }
-    }
-}
-
-/// POST /api/admin/my-bind-requests/{id}/reject {reason?}：驳回（reason 会回显给用户）
-pub async fn admin_my_bind_request_reject(
-    State(st): State<ArcState>,
-    axum::extract::Path(id): axum::extract::Path<i64>,
+    axum::extract::Path(name): axum::extract::Path<String>,
     Json(body): Json<Value>,
 ) -> ApiResult {
-    let reason = body
-        .get("reason")
+    let raw = body
+        .get("viewTeam")
         .and_then(|v| v.as_str())
-        .map(str::trim)
-        .unwrap_or_default()
-        .chars()
-        .take(255)
-        .collect::<String>();
-    let Some((account, _pid, person_name)) =
-        crate::store::my_bind_request_decide(&st, id, false, &reason, "admin").await
-    else {
-        return Err(anyhow::anyhow!("这笔申请不存在或已经处理过了").into());
-    };
-    tracing::info!(id, account = %account, anchor = %person_name, reason = %reason, "绑定申请已驳回");
-    crate::events::emit(
-        crate::events::SCOPE_ROSTER,
-        format!("绑定驳回：账号「{account}」申请的主播「{person_name}」（{reason}）"),
-    );
-    Ok(Json(json!({ "ok": true, "status": "rejected" })))
+        .ok_or_else(|| anyhow::anyhow!("请选择可看团别"))?;
+    let vt = crate::store::ViewTeam::parse(raw);
+    /* 账号不存在要明说（UPDATE 影响 0 行时静默返回 ok = 假成功）。
+       写后回读校验沿用 admin_my_account_set 的口径：库里读不到就报错。 */
+    if crate::store::my_account_get(&st, &name).await.is_none() {
+        return Err(anyhow::anyhow!("账号「{name}」不存在").into());
+    }
+    if !crate::store::my_account_set_view_team(&st, &name, vt).await {
+        return Err(anyhow::anyhow!("可看团别写入失败（库里读不到该账号）").into());
+    }
+    /* 回读复核：写的是不是真的落进去了（非法值应已被 parse 收敛）。 */
+    let saved = crate::store::my_account_view_team(&st, &name).await;
+    if saved != vt {
+        return Err(anyhow::anyhow!(
+            "可看团别写入后校验失败（期望 {}，库里是 {}）",
+            vt.code(),
+            saved.code()
+        )
+        .into());
+    }
+    my_tokens_revoke(&name);
+    tracing::info!(account = %name, view_team = vt.code(), "管理端改可看团别（旧 token 已吊销）");
+    Ok(Json(json!({ "ok": true, "viewTeam": vt.code() })))
 }
+
+/* 2026-10-16：绑定申请审核（`/api/admin/my-bind-requests*`，表 my_bind_requests）
+   随「抖音号审计」整页一起下线 —— 管理端本来就没有入口，展示端也已不再调用绑定申请
+   接口。三个 handler 已删除，表与迁移保留不删（历史申请记录仍可用 SQL 查）。 */
 
 /* ------------------------------- 防遍历限流 ------------------------------- */
 

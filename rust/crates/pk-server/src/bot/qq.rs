@@ -515,6 +515,17 @@ impl QqTransport {
     }
 
     async fn send(&self, out: &Outbound) -> anyhow::Result<()> {
+        /* 2026-10-16：测试阶段出网闸门（与微信同一开关 PUSH_OUT_ENABLED）。
+           QQ 侧同样可能在本地真发出去（机器人已连接 gateway 且会回复群消息），
+           未开开关时只记日志、不发。 */
+        if !crate::push::push_out_enabled() {
+            let preview: String = out.text.chars().take(120).collect();
+            tracing::warn!(
+                conversation_id = %out.conversation_id, preview = %preview,
+                "【测试阶段】已拦截 QQ 发送（未发）；要真实发送请设 PUSH_OUT_ENABLED=1"
+            );
+            return Ok(());
+        }
         let (group, user, msg_id, in_window) = {
             let inner = self.inner.lock().await;
             match inner.sessions.get(&out.conversation_id) {

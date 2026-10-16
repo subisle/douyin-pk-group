@@ -7,7 +7,7 @@
 
 | 文件 | 职责 |
 |---|---|
-| `tables.manifest` | **唯一分类来源**：26 张表 → A/B 类 + 冲突键 + 对账键 + 追加表判重键（对应 docs/17 §5.1/§5.2） |
+| `tables.manifest` | **唯一分类来源**：27 张表 → A/B 类 + 冲突键 + 对账键 + 追加表判重键（对应 docs/17 §5.1/§5.2；2026-10-16 新增 A 类 `person_avatar`（`check_cols` 不含 `synced_at`）与 `monthly_wave`（按月导入的整月音浪，026）） |
 | `common.sh` | 传输层：源/目标两端执行器、备份、清单解析、安全检查 |
 | `engine.sh` | 同步引擎：COPY + `\copy` + `ON CONFLICT` upsert、config 按键同步、identity 序列复位 |
 | `local.env.example` | 本地参数模板（复制为 `local.env`，**不入库**） |

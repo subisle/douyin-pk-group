@@ -11,7 +11,7 @@ pub(super) fn my_ident(team: &str, token: &str) -> Result<(u64, String, String),
     let Some((pid, my_team, name)) = my_token_take(token) else {
         return Err(ApiError::auth("登录已过期，请重新登录"));
     };
-    if my_team != team && team != "all" {
+    if !super::my_team_allows(&my_team, &team) {
         return Err(ApiError::auth("该账号不属于本团"));
     }
     Ok((pid, my_team, name))
@@ -134,13 +134,23 @@ pub async fn my_push(
         // 用户自助扫码（2026-10-11）：凭证已保存 = 可推送；等待首次消息才有会话上下文
         let wxacct = crate::store::wx_push_account_get(&st, &name).await;
         obj.insert("scanBound".into(), json!(wxacct.is_some()));
-        obj.insert(
-            "needActivate".into(),
-            json!(wxacct
-                .as_ref()
-                .map(|a| a.conversation_id.is_empty())
-                .unwrap_or(false)),
-        );
+        /* 「待激活」= **还缺会话语境（context_token）**，不是「wx_push_accounts 里没会话」。
+           2026-10-16 修正：原来拿 `wx_push_accounts.conversation_id` 判，而那列在
+           push_bindings 写失败时照样是满的 → 页面既不显示「未绑定」（bound=false）
+           也不显示「还差最后一步」（needActivate=false），用户完全不知道该做什么。
+           现在直接问推送真正要用的那张表（wx_sessions 的 context_token）：
+           · 扫了码、会话已记 → 看 wx_sessions 有没有 context_token；
+           · 扫了码、还没会话 → 待激活；
+           · 没扫码 → false（走「未绑定」分支）。 */
+        let need_activate = match wxacct.as_ref() {
+            None => false,
+            Some(a) if a.conversation_id.is_empty() => true,
+            Some(a) => crate::store::wx_session_get(&st, &a.conversation_id)
+                .await
+                .map(|(_, ctx)| ctx.is_empty())
+                .unwrap_or(true),
+        };
+        obj.insert("needActivate".into(), json!(need_activate));
         obj.insert(
             "scanNickname".into(),
             json!(wxacct
@@ -309,6 +319,22 @@ pub async fn my_push_wechat_start(
     })))
 }
 
+/// 保存扫码凭证失败的出口（2026-10-16 用户报障：扫码一直提示「服务器开小差了，请稍后重试」）。
+///
+/// 问题：微信已绑别处 / 该主播已有微信账号这类**业务拒绝**也是 `anyhow` 抛出来的，
+/// `From<anyhow::Error>` = `safe=false` → 500 + 通用文案，真实原因（「该微信已经绑定在
+/// 「xxx」的账号上；请先解绑旧的再扫」）只进了服务端日志；展示端拿到 500 又当网络抖动，
+/// 每 3 秒重试 10 次 → 用户看到的就是「重试中…」空转，且永远不知道该做什么。
+///
+/// 现在：业务冲突带 [`crate::store::WxBindConflict`] 类型 → 400 原样下发（这是可执行的人话）；
+/// 其它错误（PG / 写池 / 网络）保持 anyhow 兜底 = 500 + 通用文案，底层细节只留日志不出去。
+fn wx_save_failure(e: anyhow::Error) -> ApiError {
+    if let Some(c) = e.downcast_ref::<crate::store::WxBindConflict>() {
+        return ApiError::bad_request(c.0.clone());
+    }
+    ApiError::from(anyhow::anyhow!("保存微信凭证失败：{e}"))
+}
+
 /// POST /api/public/teams/{team}/my/push/wechat/poll {token, qrcode, verifyCode?}
 /// 轮询扫码状态；confirmed 后保存账号凭证并拉起长轮询
 pub async fn my_push_wechat_poll(
@@ -376,8 +402,19 @@ pub async fn my_push_wechat_poll(
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
-    if bot_token.is_empty() || bot_id.is_empty() || user_id.is_empty() {
+    // 官方 2.4.10 只要求 bot_token + ilink_bot_id（`ilink_user_id` 在类型里是可选，
+    // 见 @tencent-weixin/openclaw-weixin 的 login-qr.ts）。原先我们把 user_id 也当硬条件，
+    // 上游偶发不下发时会把一次成功的扫码判成「凭证不完整」——绑定白扫。
+    // 这里只收紧到「必须有 token + bot_id」；user_id 缺失记 warn 继续，
+    // 激活侧的 activation_owner_ok 本来就有「无 user_id 的历史兼容分支」。
+    if bot_token.is_empty() || bot_id.is_empty() {
         return Err(ApiError::bad_request("扫码已确认，但微信没有返回完整凭证，请重试"));
+    }
+    if user_id.is_empty() {
+        tracing::warn!(
+            account = %name,
+            "扫码已确认但上游未返回 ilink_user_id：继续保存绑定，激活按历史兼容口径校验发送者"
+        );
     }
     // 重扫不丢已激活绑定（2026-10-13 用户口径：配置还要和之前一样）：
     // 覆盖凭证前先取库里已有账号，下面重申 push_bindings 时带上旧会话。
@@ -434,12 +471,10 @@ pub async fn my_push_wechat_poll(
         acct.conversation_id.clear();
         crate::store::wx_push_account_delete(&st, &name).await;
     }
-    crate::store::wx_push_account_save(&st, &acct)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "保存微信凭证失败");
-            anyhow::anyhow!("保存微信凭证失败：{e}")
-        })?;
+    if let Err(e) = crate::store::wx_push_account_save(&st, &acct).await {
+        tracing::error!(error = %e, "保存微信凭证失败");
+        return Err(wx_save_failure(e));
+    }
     if rescan_new_wechat {
         if let Some(e) = &existing {
             let old_conv =
@@ -469,7 +504,8 @@ pub async fn my_push_wechat_poll(
     })))
 }
 
-/// POST /api/public/teams/{team}/my/push/code {token}：生成/刷新绑定码（30 分钟有效）
+/// POST /api/public/teams/{team}/my/push/code {token}：生成/刷新 **4 位数字**绑定码
+/// （2026-10-16 用户口径：主播把 4 位数字发给机器人即可绑定，不再要手机号；30 分钟有效）。
 pub async fn my_push_code(
     State(st): State<ArcState>,
     Path(team): Path<String>,
@@ -480,8 +516,9 @@ pub async fn my_push_code(
         .and_then(|v| v.as_str())
         .unwrap_or_default();
     let (person_id, _t, name) = my_ident(&team, token)?;
-    let code = crate::push::new_bind_code();
-    crate::store::push_set_code(&st, &name, &team, person_id, &code)
+    // 4 位数字只有 10^4 种取值：撞号由 store 侧重摇（库里还有部分唯一索引兜底），
+    // 这里不再自己 new_bind_code 后直接写。
+    let code = crate::store::push_rotate_code(&st, &name, &team, person_id)
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "生成绑定码失败");
@@ -490,7 +527,7 @@ pub async fn my_push_code(
     let state = crate::store::push_state(&st, &name).await;
     Ok(Json(json!({
         "ok": true,
-        "code": state.get("code").cloned().unwrap_or(Value::Null),
+        "code": state.get("code").cloned().unwrap_or(Value::String(code)),
         "codeExpires": state.get("codeExpires").cloned().unwrap_or(Value::Null),
     })))
 }
@@ -813,9 +850,9 @@ pub async fn my_push_target_del(
 /// 本团主播搜索（只回 id + 名字）
 ///
 /// 关于 `personId`（2026-10-14 审计复核结论：**保持下发，不改**）：
-/// 审计疑此处与 `my_bind_search`（my.rs）口径不一致（后者 2026-10-12 起剥掉 personId）。
-/// 复核后判定两者场景不同，不必也不该统一：
-/// - `my_bind_search` 是**绑定前**、无团别、跨全台账的模糊搜，personId 等于冒领绑定的弹药；
+/// 审计曾疑此处与已下线的「绑定抖音号」搜索（原 `my_bind_search`，2026-10-16 随
+/// 抖音号审计整页下线删除）口径不一致。复核后判定两者场景不同，不必也不该统一：
+/// - 已删的那个是**绑定前**、无团别、跨全台账的模糊搜，personId 等于冒领绑定的弹药；
 /// - 这里是**已登录且已限定本团**的搜索，且 `my_push_target_add` 服务端会再用
 ///   team_anchor_search 兜底校验 tid 必须是本团在册主播（wx.rs 的 `_ =>` 分支），
 ///   所以拿到 id 也不带来额外能力；
@@ -999,5 +1036,43 @@ mod batch_target_tests {
         assert_eq!(v["value"], serde_json::json!(3));
         assert_eq!(v["rank"], serde_json::json!(1));
         assert_eq!(v.as_object().map(|o| o.len()), Some(3));
+    }
+}
+
+/* --------------- 扫码保存失败的出口（2026-10-16）：业务冲突 400 / 基础设施 500 --------------- */
+
+#[cfg(test)]
+mod wx_save_failure_tests {
+    use super::wx_save_failure;
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    /// 业务冲突（微信已绑别处 / 该主播已有微信账号）→ 400 + 原样人话。
+    /// 回归（2026-10-16 用户报障）：以前这类拒绝走 anyhow 兜底 = 500
+    /// 「服务器开小差了，请稍后重试」，用户看不到「请先解绑旧的再扫」，
+    /// 展示端还会把它当网络抖动每 3 秒重试 10 次。
+    #[test]
+    fn bind_conflict_maps_to_400() {
+        let e: anyhow::Error = crate::store::WxBindConflict(
+            "该微信已经绑定在「shuai4444」的账号上；一个微信只能绑一个主播，请先解绑旧的再扫".into(),
+        )
+        .into();
+        assert_eq!(
+            wx_save_failure(e).into_response().status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    /// 非业务错误（PG / 写池 / 网络）仍是 500：文案由 routes 层统一换成通用话术，
+    /// 底层报错（表名 / 约束名）绝不外发。
+    #[test]
+    fn infra_error_stays_500() {
+        let e = anyhow::anyhow!(
+            "error returned from database: relation \"wx_push_accounts\" does not exist"
+        );
+        assert_eq!(
+            wx_save_failure(e).into_response().status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 }

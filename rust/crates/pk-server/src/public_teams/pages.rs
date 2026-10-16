@@ -488,34 +488,67 @@ mod lineage_window_tests {
     }
 
     /// 族谱音浪窗口 SQL（2026-10-12）：daily/monthly/yearly 条件 + 防注入双保险。
+    /// 2026-10-16 起月 / 年优先用导入的整月音浪（第三参 = 库有没有 026 这张表）。
     #[test]
     pub(super) fn lineage_wave_window_sql_period_and_fallbacks() {
-        // daily：精确业务日
-        let daily = lineage_wave_window_sql("daily", "2026-10-09");
+        // daily：精确业务日（不受整月音浪开关影响，逐字保持老口径）
+        let daily = lineage_wave_window_sql("daily", "2026-10-09", true);
         assert!(daily.contains("WHERE wave_reliable = 1"), "{daily}");
         assert!(
             daily.contains("TO_CHAR(biz_date, 'YYYY-MM-DD') = '2026-10-09'"),
             "{daily}"
         );
+        assert!(!daily.contains("monthly_wave"), "daily 口径不动：{daily}");
+        assert_eq!(daily, lineage_wave_window_sql("daily", "2026-10-09", false));
 
-        // monthly：该业务日所在月（业务日口径，不用自然日）
-        let monthly = lineage_wave_window_sql("monthly", "2026-10-09");
+        // monthly：该业务日所在月（业务日口径，不用自然日）+ 整月音浪优先、缺月回落日明细
+        let monthly = lineage_wave_window_sql("monthly", "2026-10-09", true);
         assert!(
             monthly.contains("TO_CHAR(biz_date, 'YYYY-MM') = '2026-10'"),
             "{monthly}"
         );
         assert!(!monthly.contains("'2026-10-09'"), "{monthly}");
+        assert!(
+            monthly.contains("COALESCE(mw.wave, t.w)"),
+            "有整月音浪就用整月值：{monthly}"
+        );
+        assert!(monthly.contains("LEFT JOIN monthly_wave mw"), "{monthly}");
+        assert!(monthly.contains("mw0.period = '2026-10'"), "{monthly}");
+        assert!(
+            monthly.contains("NOT EXISTS (SELECT 1 FROM daily_metric d0"),
+            "同一人同一月只走一路，不能日明细 + 整月值双算：{monthly}"
+        );
 
-        // yearly：该业务日所在年
-        let yearly = lineage_wave_window_sql("yearly", "2026-10-09");
+        // 库没跑 026（monthly_wave 缺）→ 纯日明细老口径，SQL 里不能出现这张表
+        let monthly_legacy = lineage_wave_window_sql("monthly", "2026-10-09", false);
+        assert!(!monthly_legacy.contains("monthly_wave"), "{monthly_legacy}");
+        assert!(
+            monthly_legacy
+                .contains("FROM daily_metric WHERE wave_reliable = 1 AND TO_CHAR(biz_date, 'YYYY-MM') = '2026-10'"),
+            "{monthly_legacy}"
+        );
+
+        // yearly：该业务日所在年 + 每年 12 个月各自「整月优先、缺月回落」
+        let yearly = lineage_wave_window_sql("yearly", "2026-10-09", true);
         assert!(
             yearly.contains("TO_CHAR(biz_date, 'YYYY') = '2026'"),
             "{yearly}"
         );
+        assert!(
+            yearly.contains("TO_CHAR(d.biz_date, 'YYYY-MM') AS m"),
+            "{yearly}"
+        );
+        assert!(yearly.contains("mw0.period LIKE '2026-%'"), "{yearly}");
+        let yearly_legacy = lineage_wave_window_sql("yearly", "2026-10-09", false);
+        assert!(!yearly_legacy.contains("monthly_wave"), "{yearly_legacy}");
+        assert!(
+            yearly_legacy.contains("TO_CHAR(biz_date, 'YYYY') = '2026'"),
+            "{yearly_legacy}"
+        );
 
         // 非法 period 回落 daily
-        assert_eq!(lineage_wave_window_sql("weekly", "2026-10-09"), daily);
-        assert_eq!(lineage_wave_window_sql("", "2026-10-09"), daily);
+        assert_eq!(lineage_wave_window_sql("weekly", "2026-10-09", true), daily);
+        assert_eq!(lineage_wave_window_sql("", "2026-10-09", true), daily);
 
         // date 非法不能进 SQL：没有业务日时空库查询，不能带用户输入
         for bad in [
@@ -524,19 +557,21 @@ mod lineage_window_tests {
             "2026-01-01 OR 1=1",
             "2026-01-01; DROP TABLE x",
         ] {
-            let sql = lineage_wave_window_sql("daily", bad);
-            assert!(
-                sql.contains("FROM daily_metric WHERE wave_reliable = 1 GROUP BY person_id"),
-                "{bad} -> {sql}"
-            );
-            assert!(!sql.contains(bad), "{bad} 不许进 SQL: {sql}");
-            assert!(
-                !sql.contains("TO_CHAR(biz_date, 'YYYY-MM-DD') ="),
-                "非法 date 不许进窗口条件：{sql}"
-            );
+            for with_month_wave in [true, false] {
+                let sql = lineage_wave_window_sql("daily", bad, with_month_wave);
+                assert!(
+                    sql.contains("FROM daily_metric WHERE wave_reliable = 1 GROUP BY person_id"),
+                    "{bad} -> {sql}"
+                );
+                assert!(!sql.contains(bad), "{bad} 不许进 SQL: {sql}");
+                assert!(
+                    !sql.contains("TO_CHAR(biz_date, 'YYYY-MM-DD') ="),
+                    "非法 date 不许进窗口条件：{sql}"
+                );
+            }
         }
-        // monthly/yearly 也一样：非法 date 退回空库口径
-        assert!(!lineage_wave_window_sql("monthly", "DROP TABLE x").contains("DROP"));
-        assert!(!lineage_wave_window_sql("yearly", "DROP TABLE x").contains("DROP"));
+        // monthly/yearly 也一样：非法 date 退回空库口径（此时不带整月音浪条件）
+        assert!(!lineage_wave_window_sql("monthly", "DROP TABLE x", true).contains("DROP"));
+        assert!(!lineage_wave_window_sql("yearly", "DROP TABLE x", true).contains("DROP"));
     }
 }

@@ -208,6 +208,35 @@ const FONT: &str = "-apple-system, 'PingFang SC', 'Noto Sans SC', 'Microsoft YaH
 const MONO: &str = "SF Mono, Menlo, Consolas, monospace";
 const WATERMARK: &str = "内部数据 · 请勿外传";
 
+/// 日报月榜的「本月累计音浪」SQL（2026-10-16 月度音浪导入）：该月**有导入的整月音浪**
+/// （monthly_wave）优先，没有才回落 daily_metric 日明细求和 —— 与展示端
+/// [`crate::dialect::period_rollup_sql`]、推送月榜同一口径，免得日报与展示端对不上。
+/// `(person_id, period)` 唯一，所以 `MAX(mw.wave)` 就是那一个整月值；没有整月行时它是 NULL
+/// → COALESCE 落到日明细（只算可信行 wave_reliable=1）。返回 person_id / wave，
+/// 没有数据的人不进结果集（调用方按缺省 0 处理，语义不变）。
+fn month_wave_sql(month: &str) -> String {
+    format!(
+        "SELECT p.id AS person_id, (COALESCE(MAX(mw.wave), SUM(d.wave), 0))::BIGINT AS wave \
+         FROM person p \
+         LEFT JOIN daily_metric d ON d.person_id = p.id \
+           AND TO_CHAR(d.biz_date, 'YYYY-MM') = '{month}' \
+           AND d.wave_reliable = 1 \
+         LEFT JOIN monthly_wave mw ON mw.person_id = p.id AND mw.period = '{month}' \
+         WHERE p.deleted_at IS NULL \
+         GROUP BY p.id"
+    )
+}
+
+/// 库没跑 026 迁移（monthly_wave 不存在）时的纯日明细版：与旧口径逐字一致，
+/// 由 [`crate::dialect::query_month_wave_fallback`] 在缺表时自动换用，日报不被打挂。
+fn month_wave_sql_daily(month: &str) -> String {
+    format!(
+        "SELECT person_id, (SUM(wave))::BIGINT AS wave \
+         FROM daily_metric WHERE wave_reliable = 1 \
+           AND TO_CHAR(biz_date, 'YYYY-MM') = '{month}' GROUP BY person_id"
+    )
+}
+
 /// 渲染日报 SVG（apple 风模板，720 宽，行高 48）
 /// 月榜构建（2026-10-12 微信推送口径）：rows = 本月累计音浪降序（含未开播者），
 /// absent_days = 当月未播天数，total_wave = 本月累计（同值复用），daily_star = 🚩 当日之星。
@@ -220,10 +249,9 @@ pub async fn build_month(
 ) -> anyhow::Result<DailyReport> {
     use crate::dialect::is_live_wave;
     let month = date.get(..7).unwrap_or(date).to_string();
-    // 本月累计（可信行）
-    let month_sql = format!(
-        "SELECT person_id, (SUM(wave))::BIGINT AS wave          FROM daily_metric WHERE wave_reliable = 1            AND TO_CHAR(biz_date, 'YYYY-MM') = '{month}' GROUP BY person_id"
-    );
+    // 本月累计（可信行）：整月导入值优先、缺月回落日明细；缺表自动降级（见上面两个函数）
+    let month_sql = month_wave_sql(&month);
+    let month_sql_daily = month_wave_sql_daily(&month);
     // 名册 + 师傅
     let roster_sql = format!(
         "SELECT p.id, p.name, m.name AS master_name FROM person p          LEFT JOIN person m ON m.id = p.master_id          WHERE p.deleted_at IS NULL AND p.gender = '{team}'            AND p.hide_in_daily_report = 0 AND p.status <> 'left'"
@@ -232,7 +260,14 @@ pub async fn build_month(
     let month_absent_sql = crate::dialect::month_absent_sql(&month);
 
     let mut wave_map: HashMap<u64, i64> = Default::default();
-    for r in pgrs::query(&st.pools, "LOCAL", &month_sql).await? {
+    for r in crate::dialect::query_month_wave_fallback(
+        &st.pools,
+        "LOCAL",
+        &month_sql,
+        &month_sql_daily,
+    )
+    .await?
+    {
         wave_map.insert(id_of(&r, "person_id"), signed(&r, "wave"));
     }
     let mut absent_map: HashMap<u64, i64> = Default::default();
@@ -681,6 +716,11 @@ fn format_cn_date(iso: &str) -> String {
 }
 
 /// 机器人「日报」命令的文本版
+///
+/// 时长口径（2026-10-16 用户口径「机器人推送的也改」）：与展示端同一条 `x时x分` 规则
+/// （[`crate::push::fmt_minutes`]，不带秒、不用「分钟」长词）。**时长为 0 时不显示**——
+/// 按日导入不写时长（每日只有月口径），0 = 没数据，拼出来只会是噪音「X / 0分」；
+/// 这与展示端领奖台 / 榜单行对 `minutes === 0` 的隐藏语义一致。
 pub fn render_text(rep: &DailyReport) -> String {
     let team_label = if rep.team == "male" {
         "男团"
@@ -690,7 +730,10 @@ pub fn render_text(rep: &DailyReport) -> String {
     let mut out = format!("{} {} 日报（{}）\n", team_label, rep.date, rep.rows.len());
     for (i, r) in rep.rows.iter().take(15).enumerate() {
         let status = if r.is_live {
-            format!("{} / {} 分钟", fmt_wan(r.wave), r.minutes)
+            match r.minutes {
+                0 => fmt_wan(r.wave),
+                m => format!("{} / 时长{}", fmt_wan(r.wave), crate::push::fmt_minutes(m)),
+            }
         } else {
             format!("未开播（当月第 {} 天）", r.absent_days)
         };
@@ -792,6 +835,47 @@ mod tests {
             let month = s.get(..7).unwrap_or(s);
             assert_eq!(month.len(), 7);
         }
+    }
+
+    /// 日报月榜的月口径（2026-10-16 月度音浪导入）：该月有导入的整月音浪
+    /// （monthly_wave）就用它，没有才回落日明细求和 —— 与展示端 period_rollup_sql /
+    /// 推送 month_wave_map 同一套 COALESCE，否则日报的「本月累计音浪」会与展示端对不上。
+    /// 缺表（026 未跑）时由 query_month_wave_fallback 换纯日明细版。
+    #[test]
+    fn month_wave_sql_prefers_monthly_import_over_daily_sum() {
+        let sql = month_wave_sql("2999-01");
+        assert!(
+            sql.contains("COALESCE(MAX(mw.wave), SUM(d.wave), 0)"),
+            "整月优先、缺月回落日明细：{sql}"
+        );
+        assert!(
+            sql.contains(
+                "LEFT JOIN monthly_wave mw ON mw.person_id = p.id AND mw.period = '2999-01'"
+            ),
+            "整月音浪按 (人, 月) 对齐：{sql}"
+        );
+        assert!(
+            sql.contains("AND TO_CHAR(d.biz_date, 'YYYY-MM') = '2999-01'"),
+            "回落窗口要带年份，否则跨年串月：{sql}"
+        );
+        assert!(sql.contains("AND d.wave_reliable = 1"), "只算可信行：{sql}");
+        // 列名不变（wave_map 按 person_id / wave 读，缺省 0）
+        assert!(
+            sql.contains("AS person_id") && sql.contains("AS wave"),
+            "{sql}"
+        );
+
+        let daily = month_wave_sql_daily("2999-01");
+        assert!(
+            !daily.contains("monthly_wave") && !daily.contains("mw."),
+            "缺表回落版不能带整月表 / 别名：{daily}"
+        );
+        assert!(daily.contains("(SUM(wave))::BIGINT AS wave"), "{daily}");
+        assert!(daily.contains("WHERE wave_reliable = 1"), "{daily}");
+        assert!(
+            daily.contains("TO_CHAR(biz_date, 'YYYY-MM') = '2999-01'"),
+            "{daily}"
+        );
     }
 
     /// 取 SVG 中包含 `label` 的完整 `<text>` 元素（含起始标签），便于断言表头锚点。
@@ -1011,5 +1095,42 @@ mod tests {
         // 图标为图片时标题/名字整体右移（title x=68）
         let title = text_element_of(&svg, "每日之星");
         assert!(title.contains("x=\"68\""), "data:image 时称号应右移到 x=68: {title}");
+    }
+
+    /// 机器人「日报」文本的时长口径（2026-10-16 用户口径「机器人推送的也改」）：
+    /// 与展示端同一条 `x时x分` 规则、不带「分钟」长词；**时长 0 不显示**
+    /// （按日导入不写时长，0 = 没数据，拼出来是「X / 0分」这种噪音）。
+    #[test]
+    fn bot_daily_report_text_formats_duration_like_display() {
+        let mk = |name: &str, wave: i64, minutes: i64| ReportRow {
+            name: name.into(),
+            wave,
+            minutes,
+            is_live: true,
+            absent_days: 0,
+            total_wave: wave,
+        };
+        let rep = DailyReport {
+            date: "2026-10-16".into(),
+            team: "male".into(),
+            rows: vec![
+                mk("浩龙", 63_531, 117),  // 1时57分（10.13.csv 的真实值）
+                mk("玖玉", 23_403, 0),    // 没有时长数据 → 只显示音浪
+                mk("狼霆", 3_193, 75 * 60 + 29), // 75时29分
+            ],
+            master_groups: vec![],
+            no_master: vec![],
+            daily_star: None,
+        };
+        let t = render_text(&rep);
+        assert!(t.contains("1. 浩龙 6.4 万 / 时长1时57分"), "{t}");
+        assert!(t.contains("2. 玖玉 2.3 万"), "{t}");
+        assert!(
+            !t.lines().any(|l| l.contains("2. 玖玉") && l.contains("0分")),
+            "时长 0 不显示：{t}"
+        );
+        assert!(t.contains("3. 狼霆 3193 / 时长75时29分"), "{t}");
+        // 全文不许再出现旧口径的「分钟」长词（未播行、统计行都不带）
+        assert!(!t.contains("分钟"), "机器人日报文本不应再用「分钟」：{t}");
     }
 }

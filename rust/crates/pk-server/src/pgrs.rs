@@ -70,19 +70,47 @@ pub async fn build_pools(sources: &[SourceConfig]) -> anyhow::Result<Pools> {
     Ok(Pools { map, errors })
 }
 
+/// 把会话时区钉成 `Asia/Shanghai`（2026-10-16 修「导入批次时间早 8 小时」）。
+///
+/// 问题：sqlx 建出来的 PG 会话时区是 **UTC**（实测 `SHOW timezone` = UTC），
+/// 而库里 `import_batch.created_at` / `person_avatar.synced_at` / `admin_messages.created_at`
+/// 这些都是 `timestamptz`：所有 `TO_CHAR(created_at, 'YYYY-MM-DD HH24:MI')` 按 UTC 渲染。
+/// 结果是导入批次列表的「时间」列比本地时间**早 8 小时**（本地 14:44 显示 06:44），
+/// 凌晨导入的批次连**日期**都会少一天 —— 运营看到的就是「业务日期不对」。
+///
+/// 为什么用 `after_connect` 而不是连接串的 `options(-c timezone=…)`：
+/// 后者在 sqlx 0.8 + 本机 PG 上实测**不生效**（`SHOW timezone` 仍是 UTC），
+/// `after_connect` 里 SET 一次对**池里每条连接**都成立（实测 3/3）。
+/// 读池与写池共用这一个函数，保证同一份数据在哪条连接上渲染都一致。
+pub fn with_local_timezone(pool: PgPoolOptions) -> PgPoolOptions {
+    pool.after_connect(|conn, _meta| {
+        Box::pin(async move {
+            sqlx::query("SET TIME ZONE 'Asia/Shanghai'")
+                .execute(conn)
+                .await?;
+            Ok(())
+        })
+    })
+}
+
+/// 会话时区（与 docs/16「会话时区 Asia/Shanghai」同一口径）
+pub const SESSION_TIMEZONE: &str = "Asia/Shanghai";
+
 pub async fn connect_pool(s: &SourceConfig) -> anyhow::Result<PgPool> {
     let opts: PgConnectOptions = s
         .url()
         .parse()
         .map_err(|e| anyhow::anyhow!("数据源 {} 连接串解析失败: {e}", s.id))?;
-    PgPoolOptions::new()
-        .max_connections(s.pool_limit)
-        .min_connections(0)
-        .acquire_timeout(std::time::Duration::from_secs(10))
-        .idle_timeout(std::time::Duration::from_secs(30))
-        .connect_with(opts)
-        .await
-        .map_err(|e| anyhow::anyhow!("数据源 {} 连接失败: {e}", s.id))
+    with_local_timezone(
+        PgPoolOptions::new()
+            .max_connections(s.pool_limit)
+            .min_connections(0)
+            .acquire_timeout(std::time::Duration::from_secs(10))
+            .idle_timeout(std::time::Duration::from_secs(30)),
+    )
+    .connect_with(opts)
+    .await
+    .map_err(|e| anyhow::anyhow!("数据源 {} 连接失败: {e}", s.id))
 }
 
 /// 写操作关键字——只读连接一律拒绝（按词边界匹配，`deleted_at` 这种列名不算）

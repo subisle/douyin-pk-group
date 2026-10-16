@@ -833,6 +833,37 @@ tbody tr td.empty-cell {
   background: color-mix(in srgb, var(--pink) 9%, transparent);
 }
 
+/* ---------------- 主播列表头像 ----------------
+   32px 圆形固定尺寸 + flex 对齐：行高由姓名文字决定，头像不撑高表格行。 */
+.avatar-cell {
+  display: inline-flex;
+  align-items: center;
+  vertical-align: middle;
+  margin-right: 6px;
+}
+.avatar-cell .avatar-img {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  object-fit: cover;
+  display: block;
+  /* 浅色描边把深色头像从浅背景里衬出来 */
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--ink) 8%, transparent);
+}
+.avatar-cell .avatar-block {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1;
+  user-select: none;
+}
+
 /* ---------------- 提示 ---------------- */
 .hint {
   color: var(--ink3);
@@ -1517,4 +1548,62 @@ input.switch:focus-visible {
   .ann-sec .row textarea {
     min-width: 0 !important;
   }
+}
+
+/* ---------------- 团别音浪趋势折线图（手绘内联 SVG，零依赖） ----------------
+   viewBox + width:100% 等比自适应：窄屏整体缩小，不写死 px 宽，页面不会横向滚动。
+   max-width 与 viewBox 逻辑宽（760）同宽 → 桌面端 1:1 渲染，刻度字不会被放大成巨字。 */
+.trend-chart {
+  margin-top: 10px;
+}
+.trend-chart svg {
+  display: block;
+  width: 100%;
+  max-width: 760px;
+  height: auto;
+  margin: 0 auto;
+}
+.trend-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 4px 16px;
+  margin-top: 8px;
+  font-size: 12.5px;
+  color: var(--ink2);
+}
+.trend-legend > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+/* 图例色块：颜色走行内 style 的 currentColor，与对应曲线同色 */
+.trend-legend i {
+  width: 16px;
+  height: 0;
+  border-top: 2px solid currentColor;
+}
+.trend-legend .lg-dashed i {
+  border-top-style: dashed;
+  border-top-width: 1.5px;
+}
+.trend-note {
+  text-align: center;
+  margin-top: 4px;
+}
+/* 明细表折叠区：默认收起，保住原来的逐日数值 */
+.trend-detail {
+  margin-top: 12px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+.trend-detail > summary {
+  cursor: pointer;
+  font-size: 12.5px;
+  color: var(--ink3);
+  user-select: none;
+}
+.trend-detail > summary:hover {
+  color: var(--ink2);
 }

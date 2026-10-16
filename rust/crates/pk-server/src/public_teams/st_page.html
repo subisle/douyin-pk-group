@@ -4050,9 +4050,9 @@ function pushStatusText(p) {
 /* 2026-10-10：数据入库约 30 分钟后由微信机器人私聊推送，两类内容各自开关（都关着就不推）：
    · 追分提醒 —— 追主播 / 定音浪目标 / 追名次（一律比本月累计），追上/还差多少都推给你
    · 每日报告 —— 当天音浪排行榜
-   绑定（2026-10-16 口径）：页面点「显示二维码」→ 扫码加机器人 →
-   点「获取绑定码」拿 4 位数字 → 在微信里发给机器人 → 绑定完成（不再要手机号；
-   扫码只负责加好友，不能完成绑定；二维码默认不显示，点了才出现）。 */
+   绑定（2026-10-16 口径，第二轮）：页面点「显示二维码和绑定码」→ 扫码加机器人 →
+   把给出的 4 位数字在微信里发给机器人 → 绑定完成（不再要手机号；
+   扫码只负责加好友，不能完成绑定；默认不显示，点了才出现）。 */
 let pushState = null;
 let pushSrTimer = null;      // 「我发了，查激活状态」的自动轮询（needActivate 时 5s 后刷一次）
 let pushChaseSrTimer = null; // 「目标人」搜索防抖（与上面的轮询分开，避免互相 clearTimeout）
@@ -4126,10 +4126,10 @@ function pushSecTitle(text) {
 }
 
 /* ① 微信对接：绑定三态（bound / scanBound / 未绑定）+ 加好友二维码 + 绑定码 + 解绑。
-   2026-10-16 用户口径：
-   · 二维码默认不显示，点「显示二维码」才展开（懒加载图片，不点不发请求）——
-     扫码只负责加机器人，**不能完成绑定**；
-   · 绑定 = 点「获取绑定码」拿 4 位数字，在微信里发给机器人（不再要手机号）；
+   2026-10-16 用户口径（第二轮）：
+   · 一个按钮「显示二维码和绑定码」：点开同时给加好友二维码与 4 位绑定码，
+     默认收起，图片与码都是点开时才取 —— 扫码只负责加机器人，**不能完成绑定**；
+   · 绑定 = 在微信里把 4 位绑定码发给机器人（不再要手机号）；
    · 官方「扫码登录绑定」入口收起（后端端点保留，页面不再渲染）。
    三态口径：bound=已拿到会话可推送；scanBound=历史扫码用户（扫了码还没给机器人发过消息，
    微信要求先有对话才能主动推）；都没有=未绑定。 */
@@ -4155,20 +4155,17 @@ function wechatBindHtml(p) {
   } else {
     h += pushUnboundHtml(p);
   }
-  /* 绑定码（POST /my/push/code）：4 位数字，发给机器人即完成绑定。
-     管理员观看账号 personId=0，没有可绑的主播身份，不给入口。 */
-  if (!p.admin) {
-    h += '<button class="go gray" id="pushCodeBtn" style="margin-top:10px">获取绑定码</button>' +
-      '<div class="hint hidden" id="pushCodeBox" style="margin-top:6px"></div>';
-  }
+  /* 绑定码（POST /my/push/code）2026-10-16 第二轮起不再单独给按钮：
+     并进未绑定引导的「显示二维码和绑定码」展开区（pushUnboundHtml），
+     点开时一并取码。已绑定（p.bound）的账号不需要再绑，什么都不加。 */
   return h;
 }
 
 /* 未绑定时的引导，两种人分开走：
    · 历史扫码用户（scanBound）→ 只差「给机器人发一条消息」，给查激活入口，别让他重扫
      （官方扫码入口已收起，页面上已经没有「重新扫码」可点了）；
-   · 其余人 → 点「显示二维码」展开加好友二维码 + 三步说明（展开扫码加好友 →
-     取 4 位码 → 发给机器人）。
+   · 其余人 → 点「显示二维码和绑定码」一个按钮展开：加好友二维码 + 4 位绑定码
+     （展开扫码加好友 → 发码给机器人）。
      二维码取不到（管理员没配 / 图片端点失败）也要把绑定码路走通，不能整块卡死。 */
 function pushUnboundHtml(p) {
   if (p.scanBound) {
@@ -4179,24 +4176,37 @@ function pushUnboundHtml(p) {
       '<button class="go gray" id="pushCheckActivate" style="margin-top:8px">我发了，查一下激活状态</button>';
   }
   let h = '<div class="sub" style="margin-top:8px;line-height:1.75">' +
-    '点「显示二维码」用微信扫码加机器人为好友，再点「获取绑定码」，把 4 位数字发给它就绑定好了。' +
+    '点下面的按钮：用微信扫码加机器人为好友，再把给出的 4 位绑定码发给它，就绑定好了。' +
     '</div>';
-  if (p.hasQr) {
-    /* 2026-10-16 用户口径：二维码默认不显示，点「显示二维码」才展开（再点收起）。
-       图片也跟着懒加载 —— 不点不发 GET /my/push/qr 请求。 */
-    h += '<button class="go gray" id="pushQrShow" style="margin-top:10px">显示二维码</button>' +
-      '<div id="pushQrArea" class="hidden" style="margin-top:10px">' +
-      '<div class="qr-frame"><div class="qr-wrap" id="pushAddQrWrap">' +
-      '<img class="qrcode" id="pushAddQr" alt="微信机器人二维码"></div></div>' +
-      '<div class="hint" style="margin-top:6px">扫码只负责加机器人为好友，不完成绑定；' +
-      '加完好友走下面的绑定码。</div></div>';
+  /* 2026-10-16 用户口径（第二轮）：一个按钮搞定 —— 点「显示二维码和绑定码」同时
+     展开加好友二维码与要发给机器人的 4 位绑定码，不再分两个按钮。
+     二维码懒加载（不点不发 GET /my/push/qr）；绑定码也是点开时才取（30 分钟有效）。
+     管理员观看账号没有可绑身份：只给二维码不给绑定码；两者都没有就不出按钮。 */
+  const showBtn = p.hasQr || !p.admin;
+  if (showBtn) {
+    h += '<button class="go gray" id="pushQrShow" style="margin-top:10px">显示二维码和绑定码</button>' +
+      '<div id="pushQrArea" class="hidden" style="margin-top:10px">';
+    if (p.hasQr) {
+      h += '<div class="qr-frame"><div class="qr-wrap" id="pushAddQrWrap">' +
+        '<img class="qrcode" id="pushAddQr" alt="微信机器人二维码"></div></div>' +
+        '<div class="hint" style="margin-top:6px">用微信「扫一扫」加机器人为好友' +
+        '（扫码只加好友，不完成绑定）。</div>';
+    } else {
+      h += '<div class="hint">管理员还没配机器人二维码；' +
+        '如果你已经加过机器人，直接把下面的绑定码发给它也能绑。</div>';
+    }
+    if (!p.admin) {
+      h += '<div class="hint hidden" id="pushCodeBox" style="margin-top:10px"></div>' +
+        '<button class="go gray hidden" id="pushCodeRetry" style="margin-top:6px">重新获取绑定码</button>';
+    }
+    h += '</div>';
   } else {
-    h += '<div class="hint" style="margin-top:8px">管理员还没配机器人二维码；' +
-      '如果你已经加过机器人，直接用下面的 4 位绑定码也能绑。</div>';
+    h += '<div class="hint" style="margin-top:8px">管理员还没配机器人二维码，' +
+      '暂时没法在页面里出绑定码，请先联系管理员。</div>';
   }
   h += '<div class="qr-steps">' +
-    '<div class="qr-step"><span class="qr-n">1</span><span class="qr-txt">点「显示二维码」，用微信「扫一扫」加机器人为好友</span></div>' +
-    '<div class="qr-step"><span class="qr-n">2</span><span class="qr-txt">点「获取绑定码」，拿到 4 位数字</span></div>' +
+    '<div class="qr-step"><span class="qr-n">1</span><span class="qr-txt">点上面的按钮，拿到二维码和 4 位绑定码</span></div>' +
+    '<div class="qr-step"><span class="qr-n">2</span><span class="qr-txt">用微信「扫一扫」加机器人为好友</span></div>' +
     '<div class="qr-step"><span class="qr-n">3</span><span class="qr-txt">在微信里把这 4 位数字发给机器人，绑定完成</span></div>' +
     '</div>';
   h += '<div class="hint" style="margin-top:8px">推送是你个人的：只有你自己绑定微信后才会收到。</div>';
@@ -4235,18 +4245,51 @@ async function loadPushAddQr() {
   }
 }
 
-/* 「显示二维码」按钮（2026-10-16 用户口径）：点一下展开二维码并懒加载图片，
-   再点一下收起（图片 objectURL 保留，收起再展开不重复请求）。 */
+/* 「显示二维码和绑定码」按钮（2026-10-16 用户口径第二轮）：点一下同时展开
+   加好友二维码（懒加载图片）与发给机器人的 4 位绑定码（点开时取一次），
+   再点一下收起（已拿到的图片 objectURL 与绑定码保留，不重复请求）。 */
 function bindPushQrShow() {
   const btn = $('pushQrShow'), area = $('pushQrArea');
   if (!btn || !area) return;
+  let codeFetched = false; // 绑定码只自动取一次；重取走「重新获取绑定码」按钮
   btn.onclick = () => {
     const opening = area.classList.contains('hidden');
     area.classList.toggle('hidden');
-    btn.textContent = opening ? '收起二维码' : '显示二维码';
-    /* 只在第一次展开时加载一次图片；此后展开/收起不再打接口 */
-    if (opening && !$('pushAddQr')?.src) loadPushAddQr();
+    btn.textContent = opening ? '收起' : '显示二维码和绑定码';
+    if (!opening) return;
+    /* 展开时：二维码懒加载（只第一次）+ 绑定码取一次 */
+    if (!$('pushAddQr')?.src) loadPushAddQr();
+    if (!codeFetched && !$('pushCodeBox')?.textContent.trim()) {
+      codeFetched = true;
+      fetchPushCode();
+    }
   };
+  bindPushCodeRetry();
+}
+
+/* 取 4 位绑定码（POST /my/push/code）并填进 #pushCodeBox：
+   成功显示大号数字 + 有效期；失败给出提示 + 「重新获取绑定码」按钮。
+   admin 观看账号没有 #pushCodeBox，进来直接返回（按钮展开时也不会调）。 */
+async function fetchPushCode() {
+  const box = $('pushCodeBox');
+  if (!box) return;
+  box.classList.remove('hidden');
+  box.innerHTML = '绑定码获取中…';
+  $('pushCodeRetry')?.classList.add('hidden');
+  try {
+    const d = await postPush('/my/push/code', {});
+    box.innerHTML = '把这 4 位数字发给机器人（30 分钟内有效）：<br>' +
+      '<b style="font-size:26px;letter-spacing:6px">' + esc(d.code || '—') + '</b>';
+  } catch (e) {
+    box.innerHTML = '绑定码没取到：' + esc(e.message || '未知错误');
+    $('pushCodeRetry')?.classList.remove('hidden');
+  }
+}
+
+/* 失败重取按钮：藏码盒里出错的文案时才显示 */
+function bindPushCodeRetry() {
+  const retry = $('pushCodeRetry');
+  if (retry) retry.onclick = () => fetchPushCode();
 }
 
 /* ② 推送开关：bot 目前支持的全部个人开关（notifyTarget / dailyReport /
@@ -4699,31 +4742,8 @@ function bindChaseHandlers(p) {
   renderSel();
 }
 
-/* 段①「绑定码」按钮（POST /my/push/code）：出 4 位数字，发给机器人即完成绑定。
-   2026-10-16 起这是绑定主路径（不再要手机号），也是唯一路径。 */
-function bindPushCodeBtn() {
-  const btn = $('pushCodeBtn'), box = $('pushCodeBox');
-  if (!btn) return;
-  btn.onclick = async () => {
-    btn.disabled = true;
-    btn.textContent = '获取中…';
-    try {
-      const d = await postPush('/my/push/code', {});
-      if (box) {
-        box.classList.remove('hidden');
-        box.innerHTML = '绑定码 <b style="font-size:22px;letter-spacing:4px">' +
-          esc(d.code || '—') + '</b>（30 分钟内有效）<br>' +
-          '在微信里把这 4 位数字发给机器人即可完成绑定。';
-      }
-      btn.disabled = false;
-      btn.textContent = '重新获取绑定码';
-    } catch (e) {
-      btn.disabled = false;
-      btn.textContent = '获取绑定码';
-      toast(e.message || '获取绑定码失败');
-    }
-  };
-}
+/* 旧「获取绑定码」独立按钮已撤（2026-10-16 第二轮）：取码逻辑并入
+   fetchPushCode（「显示二维码和绑定码」展开时自动调用）。 */
 
 /** 推送设置的写接口（统一带 token 与错误处理）。
     身份同时给 body.token（既有后端一律读 body）与 X-My-Token 头（契约里
@@ -4740,10 +4760,10 @@ async function postPush(path, extra) {
 }
 
 function bindPushBox(p) {
-  /* 2026-10-16 用户口径：二维码默认收起，点「显示二维码」才展开（懒加载图片）。
-     不再随卡渲染就自动拉图 —— renderPushBox 每次轮询回来都会走这里，自动拉会把
-     「不点不显示」变成事实上的每次轮询都打一次图片接口。 */
-  bindPushQrShow();
+  /* 2026-10-16 用户口径：二维码+绑定码默认收起，点「显示二维码和绑定码」才展开
+     （图片懒加载、取码一次）。不再随卡渲染就自动拉图 —— renderPushBox 每次轮询
+     回来都会走这里，自动拉会把「不点不显示」变成事实上的每次轮询都打一次接口。
+     事件绑定统一在下方那一处 bindPushQrShow()（离渲染近、注释同源）。 */
   // 已扫码但还没激活：轮询一下状态，用户发完消息后自动刷新
   if (p && p.needActivate) {
     clearTimeout(pushSrTimer);
@@ -4769,8 +4789,8 @@ function bindPushBox(p) {
       }
     };
   }
-  /* 段①的「获取绑定码」：未绑定/已绑定都能用（admin 不渲染这个按钮） */
-  bindPushCodeBtn();
+  /* 段①「显示二维码和绑定码」的展开/取码绑定（bindPushQrShow 内部含绑定码重取） */
+  bindPushQrShow();
   /* 段③「追分设置」入口行：与「我的」列表页那一行同一跳转口径 */
   const chaseGo = $('pushChaseGo');
   if (chaseGo) {

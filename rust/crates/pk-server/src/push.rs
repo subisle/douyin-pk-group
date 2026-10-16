@@ -34,26 +34,29 @@ use sqlx::Row;
 use crate::pgrs;
 use crate::state::AppState;
 
-/// 绑定码：6 位，码表剔除易混字符（0/O/1/I）
-pub const BIND_CODE_LEN: usize = 6;
+/// 绑定码：**4 位数字**（2026-10-16 用户口径：主播在微信里把 4 位数字发给机器人即可绑定，
+/// 不再要求手机号，见 [`crate::bot`] 的 `try_bind_weixin`）。
+///
+/// 只有 10^4 种取值，所以**必须**保证「一个活码只挂一个账号」：库里靠
+/// `028_push_bind_code_unique` 的部分唯一索引（`bind_code <> ''`）兜底，
+/// 写入侧 [`crate::store::push_rotate_code`] 撞号自动重摇。
+pub const BIND_CODE_LEN: usize = 4;
 /// 每人最多几个追分目标（用户口径 2026-10-09：5 个）
 pub const MAX_TARGETS: i64 = 5;
 /// 每日报告图片分页：每页行数（40 行 ≈ 微信一屏半，再长看不清）
 const PAGE_ROWS: usize = 40;
-const CODE_ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
-/// 是不是一个合法绑定码（防止把正常聊天误判成绑定）
+/// 是不是一个合法绑定码（防止把正常聊天误判成绑定）。
+/// 口径：正好 4 位 ASCII 数字。手机号（7~15 位）长度就对不上，不会被误认。
 pub fn looks_like_bind_code(s: &str) -> bool {
-    s.len() == BIND_CODE_LEN && s.bytes().all(|b| CODE_ALPHABET.contains(&b))
+    s.len() == BIND_CODE_LEN && s.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// 随机绑定码（2026-10-11 审计整改：改走 CSPRNG）。
 /// 之前用 RandomState（SipHash）拼字节 —— 它不是密码学随机源，种子弱、输出可预测，
 /// 且按字节取模有偏。现在走 crate::random（getrandom → OS CSPRNG，拒绝采样无偏）。
-/// 码表必须保持 CODE_ALPHABET：bot 侧 looks_like_bind_code 用同一码表识别绑定码，
-/// 换成纯数字会让生成的码过不了校验、还会和手机号提取撞车。
 pub fn new_bind_code() -> String {
-    crate::random::random_code(BIND_CODE_LEN, CODE_ALPHABET)
+    crate::random::random_digits(BIND_CODE_LEN)
 }
 
 /// 音浪数值按「万」表达（用户口径 2026-10-09：推送一律用万）
@@ -74,6 +77,25 @@ pub fn fmt_wan(v: i64) -> String {
         format!("{s} 万")
     } else {
         format!("{v}")
+    }
+}
+
+/// 分钟 → 「x时x分」（用户口径 2026-10-16，与展示端 `st_page.html` 的 `minFmt` 同一条规则）：
+/// `108` → `1时48分`、整点 `120` → `2时`、不足 1 小时 `45` → `45分`、`0` → `0分`；
+/// 不带秒、不用「小时 / 分钟」长词。推送 / 机器人文本与展示端必须长一个样。
+///
+/// 注意 i64 整除向零截断：负数（不该出现，纯防御）走 `m + "分"` 分支，与 JS 版一致。
+pub fn fmt_minutes(v: i64) -> String {
+    let h = v / 60;
+    let m = v % 60;
+    if h > 0 {
+        if m == 0 {
+            format!("{h}时")
+        } else {
+            format!("{h}时{m}分")
+        }
+    } else {
+        format!("{m}分")
     }
 }
 
@@ -300,6 +322,42 @@ pub async fn scheduler_loop(st: Arc<AppState>) {
     }
 }
 
+/* ─────────── 出网闸门（2026-10-16 测试阶段纪律） ───────────
+ *
+ * 用户口径：**不向任何 webot 发消息，除非是管理员三位（帅帅 / 饭团 / 鹏先生）
+ * 登录后触发**。本地现在是测试阶段，库里躺着真实绑定与待发任务，调度器每分钟
+ * 扫一次 —— 不设闸就是真发给主播。
+ *
+ * 实现：所有对外发送最终都汇聚到 `send_binding` / `send_binding_images` 这两个
+ * 函数（文本 / 图片两条通道），闸门只在这两处收口，不存在漏网路径。
+ *
+ * 开关 `PUSH_OUT_ENABLED`：
+ *   - 未配置 / `0`（默认）  = **一律不发**，只记一条 WARN 日志（含收件人与正文摘要，
+ *     便于本地验证「本来要发什么」），对调用方返回 Ok —— 不打断调度器的任务流转；
+ *   - `1`                    = 恢复真实发送（生产/64 上的既有行为，一字不改）。
+ */
+
+/// 是否允许真实出网发送。默认关（测试阶段一律不发）。
+pub fn push_out_enabled() -> bool {
+    matches!(
+        std::env::var("PUSH_OUT_ENABLED").ok().as_deref(),
+        Some("1" | "true" | "TRUE")
+    )
+}
+
+/// 闸门：不允许出网时记日志并返回 true（= 已拦截）。
+fn out_blocked(kind: &str, to: &str, preview: &str) -> bool {
+    if push_out_enabled() {
+        return false;
+    }
+    let preview: String = preview.chars().take(120).collect();
+    tracing::warn!(
+        kind, to, preview = %preview,
+        "【测试阶段】已拦截对外推送（未发）；要真实发送请设 PUSH_OUT_ENABLED=1"
+    );
+    true
+}
+
 /// 给一条绑定发消息：优先走用户自己扫码得到的微信账号（多账号），
 /// 没有扫码凭证时回落到管理员机器人（旧手机号 / 绑定码路径）。
 ///
@@ -311,6 +369,10 @@ async fn send_binding(
     wx_global: Option<&Arc<crate::bot::weixin::WxTransport>>,
     text: &str,
 ) -> anyhow::Result<()> {
+    /* 测试阶段出网闸门：未开 PUSH_OUT_ENABLED 一律不发（见函数上方的口径说明） */
+    if out_blocked("text", &b.name, text) {
+        return Ok(());
+    }
     /* 扫码账号：发文本；没有扫码凭证的旧绑定：回落管理员机器人文本通道 */
     if let Some(a) = crate::store::wx_push_account_get(st, &b.name).await {
         anyhow::ensure!(!a.bot_token.is_empty(), "扫码账号凭证为空，请重新扫码");
@@ -336,6 +398,10 @@ async fn send_binding_images(
     pngs: &[Vec<u8>],
 ) -> anyhow::Result<()> {
     anyhow::ensure!(!pngs.is_empty(), "没有可发送的图片");
+    /* 测试阶段出网闸门：图片通道同样收口（与文本同一开关，见 send_binding 上方说明） */
+    if out_blocked("image", &b.name, caption) {
+        return Ok(());
+    }
     let a = crate::store::wx_push_account_get(st, &b.name)
         .await
         .ok_or_else(|| anyhow::anyhow!("图片推送需要扫码账号（请在「我的」页重新扫码）"))?;
@@ -870,32 +936,93 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
 
 /* ------------------------------ 数据 ------------------------------ */
 
-/// 本月累计音浪：person_id → wave（只算在册且对外可见的人，与榜单口径一致）
-/// P1-7：只聚合可信行（wave_reliable=1）。
-pub(crate) async fn month_wave_map(st: &AppState, team: &str, month: &str) -> HashMap<u64, i64> {
-    let sql = "SELECT p.id AS person_id, (COALESCE(SUM(d.wave), 0))::BIGINT AS wave \
-          FROM person p \
-          LEFT JOIN daily_metric d ON d.person_id = p.id \
-            AND TO_CHAR(d.biz_date, 'YYYY-MM') = ? \
-            AND d.wave_reliable = 1 \
-          WHERE p.deleted_at IS NULL AND p.gender = ? \
-          GROUP BY p.id";
-    let mut map = HashMap::new();
-    match pgrs::query_with_binds(&st.pools, &st.active_id(), sql, |q| {
-        q.bind(month.to_string()).bind(team.to_string())
+/* 月音浪口径（2026-10-16 月度音浪导入）：某月**有导入的整月值**（monthly_wave）就用它，
+没有该月的整月值才回落 daily_metric 日明细求和 —— 与展示端
+[`crate::dialect::period_rollup_sql`]、个人卡 `my_wave_sql` 同一口径，免得推送 / 日报
+与展示端的月榜对不上。累计（历史累计）与当日口径不变。
+`(person_id, period)` 是唯一键，所以 ON 里带上 period 后 `MAX(mw.wave)` 就是那一个整月值；
+该人该月没有整月行时它是 NULL → COALESCE 落到日明细求和。行数 / 返回列与旧版逐项一致
+（仍从 person 出发、LEFT JOIN 日明细、没有人还是 0），调用方不用改。
+绑定顺序由这两条 SQL 固定：整月版 month → month → team；日明细版 month → team。
+⚠️ `HAVING` / `WHERE` 里必须写**聚合表达式本体**：PG 不认 select 别名，
+`HAVING wave > 0` 会被解析成 daily_metric.wave（42803 不在 GROUP BY 里）→ 整条查询报错。 */
+const MONTH_WAVE_MAP_SQL: &str = "SELECT p.id AS person_id, \
+      (COALESCE(MAX(mw.wave), SUM(d.wave), 0))::BIGINT AS wave \
+     FROM person p \
+     LEFT JOIN daily_metric d ON d.person_id = p.id \
+       AND TO_CHAR(d.biz_date, 'YYYY-MM') = ? \
+       AND d.wave_reliable = 1 \
+     LEFT JOIN monthly_wave mw ON mw.person_id = p.id AND mw.period = ? \
+     WHERE p.deleted_at IS NULL AND p.gender = ? \
+     GROUP BY p.id";
+/// 库没跑 026 迁移（monthly_wave 不存在）时的纯日明细版：与 026 之前的推送口径逐字一致。
+const MONTH_WAVE_MAP_SQL_DAILY: &str = "SELECT p.id AS person_id, \
+      (COALESCE(SUM(d.wave), 0))::BIGINT AS wave \
+     FROM person p \
+     LEFT JOIN daily_metric d ON d.person_id = p.id \
+       AND TO_CHAR(d.biz_date, 'YYYY-MM') = ? \
+       AND d.wave_reliable = 1 \
+     WHERE p.deleted_at IS NULL AND p.gender = ? \
+     GROUP BY p.id";
+
+/// 跑一条「月音浪优先整月导入值」的查询（带绑定参数）：库没跑 026 迁移时用纯日明细版重试 ——
+/// 与 [`crate::dialect::query_month_wave_fallback`] 同一套探测（只管 monthly_wave 这一张表），
+/// 只是这里两条 SQL 都带 `?`、走 [`pgrs::query_with_binds`]。缺表只降级不报错，推送不被打挂。
+async fn query_month_wave_binds(
+    st: &AppState,
+    prefer_sql: &str,
+    daily_only_sql: &str,
+    month: &str,
+    team: &str,
+) -> anyhow::Result<Vec<sqlx::postgres::PgRow>> {
+    match pgrs::query_with_binds(&st.pools, &st.active_id(), prefer_sql, |q| {
+        q.bind(month.to_string())
+            .bind(month.to_string())
+            .bind(team.to_string())
     })
     .await
     {
-        Ok(rows) => {
-            for r in &rows {
-                let pid = r.try_get::<i64, _>("person_id").unwrap_or(0);
-                let w = r.try_get::<i64, _>("wave").unwrap_or(0);
-                if pid > 0 {
-                    map.insert(pid as u64, w);
-                }
-            }
+        Ok(rows) => Ok(rows),
+        Err(e) if crate::dialect::is_missing_month_wave_table(&e) => {
+            tracing::warn!(
+                "monthly_wave 表不存在，推送月音浪按日明细口径回落（请先跑 pk-server migrate 026）"
+            );
+            pgrs::query_with_binds(&st.pools, &st.active_id(), daily_only_sql, |q| {
+                q.bind(month.to_string()).bind(team.to_string())
+            })
+            .await
         }
-        Err(e) => tracing::warn!(error = %e, "读本月累计失败，追分按 0 处理"),
+        Err(e) => Err(e),
+    }
+}
+
+/// 本月累计音浪：person_id → wave（只算在册且对外可见的人，与榜单口径一致）
+/// P1-7：只聚合可信行（wave_reliable=1）。2026-10-16：月口径与展示端统一成
+/// 「整月导入值优先、没有才日明细求和」（见 [`MONTH_WAVE_MAP_SQL`]）；
+/// 没有数据的人照旧是 0，map 语义不变。
+pub(crate) async fn month_wave_map(st: &AppState, team: &str, month: &str) -> HashMap<u64, i64> {
+    let rows = match query_month_wave_binds(
+        st,
+        MONTH_WAVE_MAP_SQL,
+        MONTH_WAVE_MAP_SQL_DAILY,
+        month,
+        team,
+    )
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(error = %e, "读本月累计失败，追分按 0 处理");
+            return HashMap::new();
+        }
+    };
+    let mut map = HashMap::new();
+    for r in &rows {
+        let pid = r.try_get::<i64, _>("person_id").unwrap_or(0);
+        let w = r.try_get::<i64, _>("wave").unwrap_or(0);
+        if pid > 0 {
+            map.insert(pid as u64, w);
+        }
     }
     map
 }
@@ -903,26 +1030,41 @@ pub(crate) async fn month_wave_map(st: &AppState, team: &str, month: &str) -> Ha
 /// 本月团内排名（(person_id, 名字, 音浪)，按音浪降序）。追名次目标用。
 /// 口径与月榜一致：在册 + 未离团 + 不隐藏；本月完全没有数据的不进榜。
 /// P1-7：只聚合可信行（wave_reliable=1）。P1-6：日期参数化（不再内联）。
+/// 2026-10-16：月音浪与展示端统一成「整月导入值优先、没有才日明细求和」。
+/// ⚠️ `HAVING` 必须写聚合表达式本体（PG 不认 select 别名）：原先的 `HAVING wave > 0`
+/// 被解析成 daily_metric.wave → 42803（`must appear in the GROUP BY clause`），
+/// 这条查询在 PG 上一直整条报错、月榜恒为空（2026-10-16 本地库实测复现）。
+const MONTH_RANK_SQL: &str = "SELECT p.id AS person_id, p.name, \
+      (COALESCE(MAX(mw.wave), SUM(d.wave), 0))::BIGINT AS wave \
+     FROM person p \
+     LEFT JOIN daily_metric d ON d.person_id = p.id \
+       AND TO_CHAR(d.biz_date, 'YYYY-MM') = ? \
+       AND d.wave_reliable = 1 \
+     LEFT JOIN monthly_wave mw ON mw.person_id = p.id AND mw.period = ? \
+     WHERE p.deleted_at IS NULL AND p.gender = ? AND p.status <> 'left' \
+       AND p.hide_in_daily_report = 0 \
+     GROUP BY p.id, p.name \
+     HAVING (COALESCE(MAX(mw.wave), SUM(d.wave), 0)) > 0 \
+     ORDER BY wave DESC, p.name ASC";
+/// 库没跑 026 迁移时的纯日明细版（除 HAVING 修正外，与 026 之前的形状一致）。
+const MONTH_RANK_SQL_DAILY: &str = "SELECT p.id AS person_id, p.name, \
+      (COALESCE(SUM(d.wave), 0))::BIGINT AS wave \
+     FROM person p \
+     LEFT JOIN daily_metric d ON d.person_id = p.id \
+       AND TO_CHAR(d.biz_date, 'YYYY-MM') = ? \
+       AND d.wave_reliable = 1 \
+     WHERE p.deleted_at IS NULL AND p.gender = ? AND p.status <> 'left' \
+       AND p.hide_in_daily_report = 0 \
+     GROUP BY p.id, p.name \
+     HAVING (COALESCE(SUM(d.wave), 0)) > 0 \
+     ORDER BY wave DESC, p.name ASC";
+
 pub(crate) async fn month_rank_list(
     st: &AppState,
     team: &str,
     month: &str,
 ) -> Vec<(u64, String, i64)> {
-    let sql = "SELECT p.id AS person_id, p.name, (COALESCE(SUM(d.wave), 0))::BIGINT AS wave \
-         FROM person p \
-         JOIN daily_metric d ON d.person_id = p.id \
-           AND TO_CHAR(d.biz_date, 'YYYY-MM') = ? \
-           AND d.wave_reliable = 1 \
-         WHERE p.deleted_at IS NULL AND p.gender = ? AND p.status <> 'left' \
-           AND p.hide_in_daily_report = 0 \
-         GROUP BY p.id, p.name \
-         HAVING wave > 0 \
-         ORDER BY wave DESC, p.name ASC";
-    match pgrs::query_with_binds(&st.pools, &st.active_id(), sql, |q| {
-        q.bind(month.to_string()).bind(team.to_string())
-    })
-    .await
-    {
+    match query_month_wave_binds(st, MONTH_RANK_SQL, MONTH_RANK_SQL_DAILY, month, team).await {
         Ok(rows) => rows
             .iter()
             .map(|r| {
@@ -948,17 +1090,24 @@ pub(crate) async fn month_rank_list(
 /// 在册 + 未离团 + 不隐藏（hide_in_daily_report=0），当日音浪低于
 /// [`crate::dialect::NOT_LIVE_WAVE_THRESHOLD`]（2）视为未开播（不计入榜）。
 /// P1-7：只聚合可信行（wave_reliable=1）。P1-6：日期参数化（不再内联 SQL）。
+/// ⚠️ 2026-10-16 修正 `HAVING wave >= ?`（select 别名在 PG 的 HAVING 里不可见，
+/// 会被解析成 daily_metric.wave → 42803 整条报错、当日榜恒为空，本地库实测复现）；
+/// 日口径本身不变，仍是「当日音浪 >= 阈值」，只是改写成聚合表达式本体。
+/// 绑定顺序：date → team → 阈值。
+const DAILY_RANK_SQL: &str = "SELECT p.id AS person_id, p.name, \
+      (COALESCE(SUM(d.wave), 0))::BIGINT AS wave \
+     FROM person p \
+     JOIN daily_metric d ON d.person_id = p.id \
+       AND TO_CHAR(d.biz_date, 'YYYY-MM-DD') = ? \
+       AND d.wave_reliable = 1 \
+     WHERE p.deleted_at IS NULL AND p.gender = ? AND p.status <> 'left' \
+       AND p.hide_in_daily_report = 0 \
+     GROUP BY p.id, p.name \
+     HAVING (COALESCE(SUM(d.wave), 0)) >= ? \
+     ORDER BY wave DESC, p.name ASC";
+
 pub(crate) async fn daily_rank(st: &AppState, team: &str, date: &str) -> Vec<(u64, String, i64)> {
-    let sql = "SELECT p.id AS person_id, p.name, (COALESCE(SUM(d.wave), 0))::BIGINT AS wave \
-         FROM person p \
-         JOIN daily_metric d ON d.person_id = p.id \
-           AND TO_CHAR(d.biz_date, 'YYYY-MM-DD') = ? \
-           AND d.wave_reliable = 1 \
-         WHERE p.deleted_at IS NULL AND p.gender = ? AND p.status <> 'left' \
-           AND p.hide_in_daily_report = 0 \
-         GROUP BY p.id, p.name \
-         HAVING wave >= ? \
-         ORDER BY wave DESC, p.name ASC";
+    let sql = DAILY_RANK_SQL;
     match pgrs::query_with_binds(&st.pools, &st.active_id(), sql, |q| {
         q.bind(date.to_string())
             .bind(team.to_string())
@@ -1373,6 +1522,24 @@ pub(crate) fn daily_report_text_with_accounts(
 mod tests {
     use super::*;
 
+    /// 时长格式与展示端 `minFmt` 必须是同一条规则（2026-10-16 用户口径「x时x分去掉秒」，
+    /// 机器人推送 / 日报文本与展示端长一个样）。
+    #[test]
+    fn fmt_minutes_matches_display_format() {
+        assert_eq!(fmt_minutes(0), "0分");
+        assert_eq!(fmt_minutes(45), "45分");
+        assert_eq!(fmt_minutes(59), "59分");
+        assert_eq!(fmt_minutes(60), "1时");
+        assert_eq!(fmt_minutes(108), "1时48分");
+        assert_eq!(fmt_minutes(120), "2时");
+        assert_eq!(fmt_minutes(4529), "75时29分");
+        assert_eq!(fmt_minutes(1439), "23时59分");
+        assert_eq!(fmt_minutes(1440), "24时");
+        // 防御：负数不该出现，但行为要与 JS 版一致（都不进「时」分支）
+        assert_eq!(fmt_minutes(-30), "-30分");
+        assert_eq!(fmt_minutes(-90), "-30分");
+    }
+
     fn tgt(kind: &str, name: &str, value: i64, pid: u64) -> crate::store::PushTarget {
         crate::store::PushTarget {
             id: 1,
@@ -1561,15 +1728,18 @@ mod tests {
 
     #[test]
     fn bind_code_shape() {
-        for _ in 0..20 {
+        for _ in 0..40 {
             let c = new_bind_code();
             assert_eq!(c.len(), BIND_CODE_LEN);
+            assert!(c.bytes().all(|b| b.is_ascii_digit()), "绑定码必须是纯数字: {c}");
             assert!(looks_like_bind_code(&c), "生成的码要能通过校验: {c}");
-            assert!(!c.contains('0') && !c.contains('O') && !c.contains('1') && !c.contains('I'));
         }
-        assert!(!looks_like_bind_code("ABC"));
-        assert!(!looks_like_bind_code("ABCDE1"), "1 不在码表里");
-        assert!(!looks_like_bind_code(""));
+        assert!(!looks_like_bind_code("123"), "位数不够");
+        assert!(!looks_like_bind_code("12345"), "位数超了");
+        assert!(!looks_like_bind_code("12a4"), "非数字不认");
+        assert!(!looks_like_bind_code(""), "空串不认");
+        // 手机号是 11 位，永远不会被当成 4 位绑定码
+        assert!(!looks_like_bind_code("13800138000"));
     }
 
     fn aw(douyin_no: &str, primary: bool, day: i64, month: i64, year: i64) -> AccountWave {
@@ -2114,5 +2284,162 @@ mod tests {
         }
         assert_eq!(max_total_secs(), 180);
         assert_eq!(delay_minutes(), 30, "本卡不许动 PUSH_DELAY_MINUTES 默认值");
+    }
+
+    /* ------- 月音浪口径（2026-10-16 月度音浪导入：整月优先、缺月回落日明细） ------- */
+
+    /// 月口径必须「某月有导入的整月音浪（monthly_wave）就用它，没有才日明细求和」，
+    /// 与展示端 period_rollup_sql / my_wave_sql 同一套 COALESCE —— 否则推送 / 日报
+    /// 的月榜和展示端对不上。日明细侧仍只算可信行，窗口仍是参数化月份。
+    #[test]
+    fn month_wave_sql_prefers_monthly_import_over_daily_sum() {
+        assert!(
+            MONTH_WAVE_MAP_SQL.contains("COALESCE(MAX(mw.wave), SUM(d.wave), 0)"),
+            "月累计要「整月优先、缺月回落日明细」：{MONTH_WAVE_MAP_SQL}"
+        );
+        assert!(
+            MONTH_WAVE_MAP_SQL
+                .contains("LEFT JOIN monthly_wave mw ON mw.person_id = p.id AND mw.period = ?"),
+            "整月音浪按 (人, 月) 对齐：{MONTH_WAVE_MAP_SQL}"
+        );
+        // 形状不变：仍从 person 出发、仍按团别过滤、没有数据的人仍是 0
+        assert!(
+            MONTH_WAVE_MAP_SQL.contains("FROM person p"),
+            "{MONTH_WAVE_MAP_SQL}"
+        );
+        assert!(
+            MONTH_WAVE_MAP_SQL.contains("WHERE p.deleted_at IS NULL AND p.gender = ?"),
+            "{MONTH_WAVE_MAP_SQL}"
+        );
+        assert!(
+            MONTH_WAVE_MAP_SQL.contains("GROUP BY p.id"),
+            "{MONTH_WAVE_MAP_SQL}"
+        );
+        assert!(
+            MONTH_WAVE_MAP_SQL.contains("AND d.wave_reliable = 1"),
+            "日明细侧只算可信行：{MONTH_WAVE_MAP_SQL}"
+        );
+        assert!(
+            MONTH_WAVE_MAP_SQL.contains("TO_CHAR(d.biz_date, 'YYYY-MM') = ?"),
+            "回落窗口要带年份且参数化（P1-6 不许内联）：{MONTH_WAVE_MAP_SQL}"
+        );
+        // 名次榜同一口径，且「没数据的不进榜」用聚合表达式判（不许写别名，见下一条用例）
+        assert!(
+            MONTH_RANK_SQL.contains("COALESCE(MAX(mw.wave), SUM(d.wave), 0)"),
+            "{MONTH_RANK_SQL}"
+        );
+        assert!(
+            MONTH_RANK_SQL
+                .contains("LEFT JOIN monthly_wave mw ON mw.person_id = p.id AND mw.period = ?"),
+            "{MONTH_RANK_SQL}"
+        );
+        assert!(
+            MONTH_RANK_SQL.contains("AND p.status <> 'left'")
+                && MONTH_RANK_SQL.contains("AND p.hide_in_daily_report = 0"),
+            "在册 / 可见过滤不能丢：{MONTH_RANK_SQL}"
+        );
+        assert!(
+            MONTH_RANK_SQL.contains("HAVING (COALESCE(MAX(mw.wave), SUM(d.wave), 0)) > 0"),
+            "{MONTH_RANK_SQL}"
+        );
+    }
+
+    /// 库没跑 026（monthly_wave 不存在）→ 退回纯日明细版，SQL 里不能再出现这张表 / 这个别名，
+    /// 推送不能因为少一张表打挂（query_month_wave_binds 按错误点名降级重试）。
+    #[test]
+    fn month_wave_sql_daily_fallback_has_no_month_table() {
+        for sql in [MONTH_WAVE_MAP_SQL_DAILY, MONTH_RANK_SQL_DAILY] {
+            assert!(!sql.contains("monthly_wave"), "日明细版不能带整月表：{sql}");
+            assert!(!sql.contains("mw."), "日明细版不能带 mw 别名：{sql}");
+            assert!(
+                sql.contains("(COALESCE(SUM(d.wave), 0))::BIGINT AS wave"),
+                "日明细版仍是原口径（缺省 0）：{sql}"
+            );
+            assert!(sql.contains("AND d.wave_reliable = 1"), "{sql}");
+        }
+    }
+
+    /// P1-4 同款护栏：两条月音浪 SQL 的 `?` 个数必须与 query_month_wave_binds 的绑定个数
+    /// 一致（整月版 month→month→team 三个，日明细版 month→team 两个）——谁给 SQL 加/减一个
+    /// `?` 而忘了改 bind，PG 会报「bind message supplies N parameters」整条失败。
+    #[test]
+    fn month_wave_sql_placeholder_counts() {
+        use crate::dialect::placeholder_count;
+        assert_eq!(placeholder_count(MONTH_WAVE_MAP_SQL), 3);
+        assert_eq!(placeholder_count(MONTH_WAVE_MAP_SQL_DAILY), 2);
+        assert_eq!(placeholder_count(MONTH_RANK_SQL), 3);
+        assert_eq!(placeholder_count(MONTH_RANK_SQL_DAILY), 2);
+        assert_eq!(placeholder_count(DAILY_RANK_SQL), 3, "date→team→阈值");
+    }
+
+    /// PG 的 HAVING / WHERE 里**看不到 select 别名**：`HAVING wave > 0` 会被解析成
+    /// daily_metric.wave（不在 GROUP BY 里）→ 42803，整条查询恒报错、月榜 / 当日榜恒为空。
+    /// 2026-10-16 本地库实测复现（month_rank_list 与 daily_rank 两条都中招）。
+    /// 这里钉死「一律写聚合表达式本体」，谁改回别名这条测试先红。
+    #[test]
+    fn rank_having_uses_aggregate_not_alias() {
+        for sql in [MONTH_RANK_SQL, MONTH_RANK_SQL_DAILY, DAILY_RANK_SQL] {
+            assert!(
+                !sql.contains("HAVING wave"),
+                "HAVING 里不许用 select 别名（PG 解析成 daily_metric.wave → 42803）：{sql}"
+            );
+            assert!(
+                sql.contains("HAVING (COALESCE("),
+                "HAVING 必须写聚合表达式本体：{sql}"
+            );
+        }
+        assert!(
+            DAILY_RANK_SQL.contains("HAVING (COALESCE(SUM(d.wave), 0)) >= ?"),
+            "日口径不变：当日音浪 >= 阈值（阈值仍走绑定）：{DAILY_RANK_SQL}"
+        );
+    }
+
+    /* ---------------- 出网闸门（2026-10-16 测试阶段纪律） ----------------
+     * 这三个用例都要改 PUSH_OUT_ENABLED 环境变量，而 `cargo test` 的多线程
+     * 用例共享进程环境 —— 不串行会互相污染（实测：并跑时 set_var 把另一个
+     * 用例的「未配置」变成「已开启」，断言随机失败）。统一走这把锁。
+     */
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// 在锁内跑：进来先清变量，出去一定恢复成「未设置」（不污染别的用例）。
+    fn with_push_out_env<F: FnOnce()>(f: F) {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("PUSH_OUT_ENABLED");
+        f();
+        std::env::remove_var("PUSH_OUT_ENABLED");
+    }
+
+    /// 默认（未设 PUSH_OUT_ENABLED）必须**关闭**出网 —— 这是测试阶段的安全默认值，
+    /// 谁要是把它改成默认开，本地跑测试就会真发给主播。
+    #[test]
+    fn push_out_defaults_to_disabled() {
+        with_push_out_env(|| {
+            assert!(!push_out_enabled(), "未配置时必须关闭出网");
+        });
+    }
+
+    /// 只有显式 "1"/"true" 才开；其它写法（含 "0"、空串、脏值）一律当关。
+    #[test]
+    fn push_out_only_enabled_by_explicit_on() {
+        with_push_out_env(|| {
+            for on in ["1", "true", "TRUE"] {
+                std::env::set_var("PUSH_OUT_ENABLED", on);
+                assert!(push_out_enabled(), "{on} 应开启");
+            }
+            for off in ["0", "", "false", "yes", "on"] {
+                std::env::set_var("PUSH_OUT_ENABLED", off);
+                assert!(!push_out_enabled(), "{off:?} 应保持关闭");
+            }
+        });
+    }
+
+    /// 关闭时 out_blocked 返回 true（= 拦截），开启时放行。
+    #[test]
+    fn out_blocked_gate() {
+        with_push_out_env(|| {
+            assert!(out_blocked("text", "浩冬", "测试消息"), "关闭时必须拦截");
+            std::env::set_var("PUSH_OUT_ENABLED", "1");
+            assert!(!out_blocked("text", "浩冬", "测试消息"), "开启时必须放行");
+        });
     }
 }

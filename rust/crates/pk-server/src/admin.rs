@@ -378,6 +378,14 @@ pub async fn streamers(State(st): State<ArcState>, Query(q): Query<StreamerQuery
             "generation": read_opt_i64(r, "generation"),
             "groupName": read_opt_str(r, "group_name"),
             "avatar": read_opt_str(r, "avatar_url"),
+            // 抖音头像本地留存（person_avatar，2026-10-16 管理端接入）：
+            // - hasAvatar：BOOLEAN 列，走 read_opt_i64 的布尔回退（同 wechat_bound 的教训，
+            //   sqlx 精确类型匹配，别直接 try_get::<i64>）。
+            // - avatarHash：person_avatar.hash（内容 md5 前 16 位），前端做缓存校验用；
+            //   没同步过 = null，前端此时按 hasAvatar=false 渲染占位。
+            // 图片本体不下发，前端按需 GET /api/public/avatars/{personId}。
+            "hasAvatar": read_opt_i64(r, "has_avatar").unwrap_or(0) != 0,
+            "avatarHash": read_opt_str(r, "avatar_hash"),
             "status": read_opt_str(r, "status").unwrap_or_else(|| "active".into()),
             "hideInDailyReport": read_opt_i64(r, "hide_in_daily_report").unwrap_or(0) != 0,
             "joinedAt": read_opt_str(r, "joined"),
@@ -400,6 +408,49 @@ pub async fn streamers(State(st): State<ArcState>, Query(q): Query<StreamerQuery
         }));
     }
     Ok(Json(json!({ "items": items, "total": items.len() })))
+}
+
+/// POST /api/admin/avatars/sync：手动触发一轮抖音头像同步（2026-10-16 纯手动口径）。
+///
+/// 为什么是同步执行、不做异步 job：本地 105 人量级 + 600ms/请求节流，一轮 1-3 分钟，
+/// 运营在管理端点一下按钮等得到结果（响应里直接带本轮统计），异步 job 反而要额外
+/// 做「查进度」接口，复杂度不划算。超时交给前端提示「正在同步请稍候」。
+///
+/// 参数走 `Options::default()`（days=7 / 不 force）：只抓「无图或超期」的人，
+/// 与 CLI `pk-server sync-avatars`（不带 --force）行为完全一致 —— 管理端按钮
+/// 不该无条件重抓所有人，把抖音侧请求量控制在最小。
+pub async fn avatar_sync_now(State(st): State<ArcState>) -> ApiResult {
+    require_local(&st)?;
+    let pool = writer_pool(&st)?;
+    tracing::info!("管理端手动触发头像同步开始（days=7，只抓无图/超期，600ms/请求节流）");
+    let started = std::time::Instant::now();
+    let s = crate::avatar_sync::run(pool, &crate::avatar_sync::Options::default())
+        .await
+        // 失败不写库（avatar_sync::run 内部保证），旧图仍在 → 500 带通用文案即可，
+        // 细节进日志不外发（ApiError 兜底口径，见 routes.rs 的 bool 第 3 字段注释）
+        .map_err(ApiError::from)?;
+    tracing::info!(
+        elapsed_secs = started.elapsed().as_secs(),
+        candidates = s.candidates,
+        downloaded = s.downloaded,
+        updated = s.updated,
+        unchanged = s.unchanged,
+        deregistered = s.deregistered,
+        not_found = s.not_found,
+        failed = s.failed,
+        "管理端手动头像同步结束"
+    );
+    Ok(Json(json!({
+        "ok": true,
+        "summary": s.report(false, 7),
+        "candidates": s.candidates,
+        "downloaded": s.downloaded,
+        "updated": s.updated,
+        "unchanged": s.unchanged,
+        "deregistered": s.deregistered,
+        "not_found": s.not_found,
+        "failed": s.failed,
+    })))
 }
 
 #[derive(Deserialize)]
@@ -479,7 +530,9 @@ pub async fn create_streamer(
         .filter(|s| !s.is_empty())
         .map(str::to_string);
     if let Some(p) = phone.as_deref() {
-        crate::store::validate_my_phone(p).map_err(ApiError::bad_request)?;
+        // 2026-10-16：validate_my_phone 现在业务拒绝带 BIZ:: 前缀，剥掉再下发
+        crate::store::validate_my_phone(p)
+            .map_err(|e| ApiError::bad_request(crate::store::my_account::biz_msg(&e).to_string()))?;
         // 016 没跑时这条查询会报 Unknown column：当「查不到冲突」处理。
         // 建档失败比"手机号没存上"严重得多（运营要重录一遍），不能让少跑的迁移挡住建档。
         let taken =
@@ -700,7 +753,16 @@ pub async fn update_streamer(
     if let Some(p) = phone_in.as_deref() {
         crate::store::person_set_phone(&st, id, p)
             .await
-            .map_err(ApiError::bad_request)?;
+            /* 2026-10-16：同 set_person_phone —— BIZ:: 前缀 → 400 原文；
+               库层故障 → 500 通用文案，原文留日志。 */
+            .map_err(|e| {
+                if crate::store::my_account::is_biz(&e) {
+                    ApiError::bad_request(crate::store::my_account::biz_msg(&e).to_string())
+                } else {
+                    tracing::error!(person_id = id, error = %e, "主播编辑写手机号失败");
+                    ApiError::from(anyhow::anyhow!(e))
+                }
+            })?;
     }
 
     // 抖音号：upsert 到主号账号行
@@ -783,9 +845,9 @@ pub struct ImportRow {
     pub is_live: Option<bool>,
     /// 解析失败的原因（时长/音浪列有值但解析不过）。
     ///
-    /// 月度时长导入里这个字段必须活到落库阶段：以前 `parse_duration_only` 直接把
-    /// 解析失败的行 `filter` 掉，运营只见「预览少了一个人」却没有任何线索可查，
-    /// 而漏一个人 = 他整月时长在月榜上是 0。现在带原因进 skipped 报告。
+    /// 按月导入里这个字段必须活到落库阶段：早期月度解析直接把解析失败的行 `filter` 掉，
+    /// 运营只见「预览少了一个人」却没有任何线索可查，而漏一个人 = 他整月时长 / 音浪
+    /// 在月榜上是 0。现在带原因进 skipped 报告。
     #[serde(skip_deserializing)]
     pub err: Option<String>,
 }
@@ -1153,20 +1215,23 @@ pub fn parse_any_text(text: &str) -> Vec<ImportRow> {
     parse_import_text(text)
 }
 
-/// 月度时长文件解析（用户口径 2026-10-10：时长按月导入）。
+/// 月度指标文件解析（用户口径 2026-10-10 时长按月；2026-10-16 起音浪也能按月导）。
 ///
-/// 文件样例（抖音公会后台导出「9月份时长.csv」）：
-/// `主播ID,主播昵称,抖音号,…,分成比-直播音浪收益,开播有效时长,主播标签`
-/// → 只取「时长」列（75小时29分钟41秒 = 整月累计），绝不把「分成比-直播音浪收益」
-/// 当音浪读进来（那会让每人当月音浪变成 35）。
+/// 文件两种长相都认：
+/// - 纯月时长（`9月份时长.csv`）：`主播ID,主播昵称,抖音号,…,分成比-直播音浪收益,开播有效时长,主播标签`
+///   → 只取「时长」列（75小时29分钟41秒 = 整月累计），绝不把「分成比-直播音浪收益」
+///   当音浪读进来（那会让每人当月音浪变成 35）。
+/// - 概览列表（`主播概览列表_*.csv`、`10.14….csv`）：时长与「总音浪」同在一张表，
+///   两种指标都带出来，由运营在弹窗里勾选导哪个。
 ///
 /// 不回落裸列序解析：月度文件里数字多（粉丝数 / 分成比 / 时间），
 /// 按列序猜会把粉丝数当成音浪、分成比当成累计，宁可解析不出让运营换文件。
-pub fn parse_month_duration_text(text: &str) -> Vec<ImportRow> {
+pub fn parse_month_metrics_text(text: &str) -> Vec<ImportRow> {
     if looks_like_binary(text) {
         return Vec::new();
     }
-    crate::csvparse::parse_duration_only(text)
+    crate::csvparse::parse_month_metrics(text)
+        .rows
         .into_iter()
         .map(|r| ImportRow {
             name: if r.name.is_empty() {
@@ -1176,14 +1241,77 @@ pub fn parse_month_duration_text(text: &str) -> Vec<ImportRow> {
             },
             douyin_no: (!r.douyin_no.is_empty()).then_some(r.douyin_no),
             anchor_id: (!r.anchor_id.is_empty()).then_some(r.anchor_id),
+            wave: r.wave,
             minutes: r.minutes,
             // CsvRow.err 是 String（空串 = 没问题），转成 Option 好让上层区分
-            // 「没填时长」和「填了但解析不过」——后者是运营要立刻知道的数据问题。
+            // 「没填这个指标」和「填了但解析不过」——后者是运营要立刻知道的数据问题。
             err: (!r.err.is_empty()).then_some(r.err),
             ..Default::default()
         })
         .filter(|r| !r.name.is_empty())
         .collect()
+}
+
+/// 按月导入要写哪些指标（2026-10-16 用户口径：时长和音浪都支持按月导入）。
+///
+/// 前端在弹窗里勾选，wire 值 `["minutes","wave"]` 的任意子集；**不带 metrics 时默认两种都导**
+/// （旧前端 / 机器人直连不变），只是「文件里没有的那一种」照旧进 skipped 报告。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MonthMetrics {
+    pub minutes: bool,
+    pub wave: bool,
+}
+
+impl MonthMetrics {
+    /// 时长 + 音浪都导（不带 metrics 的调用方走这个）
+    pub const BOTH: Self = Self {
+        minutes: true,
+        wave: true,
+    };
+
+    /// 只导时长（机器人附件分流：只有时长列的月报文件）
+    pub const MINUTES_ONLY: Self = Self {
+        minutes: true,
+        wave: false,
+    };
+
+    /// wire 值 → 勾选状态。带 metrics 但一个都没勾（或勾了不认识的键）直接报错，
+    /// 不能静默当成「都导」——那会把运营明确取消的指标重新写进库。
+    pub fn from_body(metrics: &Option<Vec<String>>) -> anyhow::Result<Self> {
+        let Some(list) = metrics else {
+            return Ok(Self::BOTH);
+        };
+        if list.is_empty() {
+            anyhow::bail!("至少要选一种指标（时长 / 音浪）");
+        }
+        let mut out = Self {
+            minutes: false,
+            wave: false,
+        };
+        for raw in list {
+            match raw.trim() {
+                "minutes" | "duration" | "时长" => out.minutes = true,
+                "wave" | "音浪" => out.wave = true,
+                other => anyhow::bail!("未知的月度指标：{other}（只认 minutes / wave）"),
+            }
+        }
+        Ok(out)
+    }
+
+    /// 至少勾了一种（commit 内部的兜底断言）
+    fn any(self) -> bool {
+        self.minutes || self.wave
+    }
+
+    /// 报告 / 事件里用的中文口径
+    pub fn label(self) -> &'static str {
+        match (self.minutes, self.wave) {
+            (true, true) => "时长+音浪",
+            (true, false) => "时长",
+            (false, true) => "音浪",
+            (false, false) => "（未选指标）",
+        }
+    }
 }
 
 /// 月度时长导入的月份：`YYYY-MM`
@@ -1219,6 +1347,15 @@ fn nice_400(e: anyhow::Error) -> ApiError {
         // commit_import 的两类显式拒绝：文案由代码拼好（含日期/行数/团别，不含底层细节）
         "异常文件：",
         "reject 模式：",
+        // mode 只能是 merge / reject：非法值是请求错误（与 metrics 非法同为 400，别一个 400 一个 500）
+        "mode 只能是",
+        // 按月导入的指标勾选（2026-10-16）：空数组 / 不认识的指标是请求错误，不是 500
+        "至少要选一种指标",
+        "未知的月度指标",
+        // 缺表时要带「先跑 migrate」的原文，别掉进兜底文案
+        "月度时长表不存在",
+        "月度音浪表不存在",
+        "月度指标表不存在",
     ];
     let msg = e.to_string();
     if NICE.iter().any(|k| msg.contains(k)) {
@@ -1268,8 +1405,9 @@ fn strip_minutes(rows: &mut [ImportRow]) -> usize {
     n
 }
 
-/// 月度时长导入的行：text → 只认「时长」列（parse_month_duration_text）；
-/// rows → 前端回传的结构化行，没有时长的行直接丢掉（月度导入没有时长就没意义）。
+/// 月度指标导入的行：text → 时长 / 音浪两类列都认（parse_month_metrics_text）；
+/// rows → 前端回传的结构化行，两种指标一个都没有的行直接丢掉
+/// （月度导入里一行既没时长又没音浪，落库没意义）。
 async fn month_body_rows(
     text: &Option<String>,
     rows: &Option<Vec<ImportRow>>,
@@ -1279,7 +1417,7 @@ async fn month_body_rows(
         for r in rs {
             let mut r = r.clone();
             r.name = r.name.trim().to_string();
-            if !r.name.is_empty() && r.minutes.is_some() {
+            if !r.name.is_empty() && (r.minutes.is_some() || r.wave.is_some()) {
                 out.push(r);
             }
         }
@@ -1290,7 +1428,7 @@ async fn month_body_rows(
             .map(str::trim)
             .filter(|t| !t.is_empty())
             .ok_or_else(|| anyhow::anyhow!("缺少导入内容：text（文件内容）或 rows（结构化行）至少给一个"))?;
-        out = parse_month_duration_text(text);
+        out = parse_month_metrics_text(text);
     }
     Ok(out)
 }
@@ -1303,8 +1441,11 @@ pub struct ImportBody {
     pub rows: Option<Vec<ImportRow>>,
     #[serde(rename = "bizDate")]
     pub biz_date: Option<String>,
-    /// 月度时长导入的业务月份 YYYY-MM（/import/month/* 用；按日导入不看它）
+    /// 按月导入的业务月份 YYYY-MM（/import/month/* 用；按日导入不看它）
     pub period: Option<String>,
+    /// 按月导入要写哪些指标：`["minutes","wave"]` 的任意子集（2026-10-16）。
+    /// 不传 = 两种都导；传空数组 = 报错（不能静默当成都导）。
+    pub metrics: Option<Vec<String>>,
     pub team: Option<String>,
     /// merge（幂等覆盖，默认）/ reject（当日已有数据则整批拒绝）
     pub mode: Option<String>,
@@ -1434,8 +1575,10 @@ pub struct CommitReport {
     /// 按日导入里被忽略的时长行数（用户口径 2026-10-10：每日不能导入时长，只有月时长）。
     /// HTTP 端在 body_rows 里就抹掉了 minutes（预览/提交都看得到），机器人直连这里时由本字段兜住。
     pub dropped_minutes: u32,
-    /// 本次写入的时长合计（分钟）：月度时长导入才有值，按日导入恒为 0
+    /// 本次写入的时长合计（分钟）：按月导入（且勾了时长）才有值，按日导入恒为 0
     pub minutes_total: i64,
+    /// 本次写入的音浪合计：按月导入（且勾了音浪）才有值，按日导入恒为 0
+    pub wave_total: i64,
 }
 
 /// 一行导入数据在提交阶段的去向（纯函数，方便单测覆盖）
@@ -1504,6 +1647,43 @@ pub(crate) fn ensure_not_all_same_wave(rows: &[ImportRow]) -> anyhow::Result<()>
                 wave_values.len(),
                 first
             );
+        }
+    }
+    Ok(())
+}
+
+/// 按月导入的同类防御（2026-10-16）：勾选的指标里 ≥3 人**值完全相同且不为 0**
+/// → 拒绝（拿错文件 / 勾错列，例如把「分成比-直播音浪收益」当音浪）。
+///
+/// 与按日 [ensure_not_all_same_wave] 两点不同：
+/// - 逐指标判（勾了音浪才判音浪，勾了时长才判时长）；
+/// - 全员 0 放行：整月没人开播时「全员 0」是合法数据，写 0 正好把该月口径钉住。
+fn ensure_month_values_not_all_same(
+    rows: &[ResolvedRow],
+    metrics: MonthMetrics,
+) -> anyhow::Result<()> {
+    let checks: [(bool, &str, fn(&ResolvedRow) -> Option<i64>); 2] = [
+        (metrics.wave, "音浪", |r| r.raw.wave.map(|v| v.round() as i64)),
+        (metrics.minutes, "时长", |r| {
+            r.raw.minutes.map(|v| v.round() as i64)
+        }),
+    ];
+    for (on, label, pick) in checks {
+        if !on {
+            continue;
+        }
+        let vals: Vec<i64> = rows.iter().filter_map(pick).collect();
+        if vals.len() >= 3 {
+            let first = vals[0];
+            if first != 0 && vals.iter().all(|&v| v == first) {
+                anyhow::bail!(
+                    "异常文件：全部 {} 人的{}都是同一个值（{}）——像是一份与月份无关的全员同值文件，\
+                     或勾错了列，已拒绝导入。请核对文件里的「时长 / 音浪」列后再试。",
+                    vals.len(),
+                    label,
+                    first
+                );
+            }
         }
     }
     Ok(())
@@ -1796,6 +1976,8 @@ pub async fn commit_import(
         dropped_minutes,
         // 按日导入不写时长（时长只按月导入）
         minutes_total: 0,
+        // 按日导入的当日音浪走 daily_metric，不算「月度音浪导入」
+        wave_total: 0,
     })
 }
 
@@ -2533,16 +2715,23 @@ pub async fn import_day_delete(
     ))
 }
 
-/* ------------------------ 月度时长导入（按平台月报） ------------------------ */
+/* ------------------------ 月度指标导入（按平台月报） ------------------------ */
 /*
    用户口径（2026-10-10）：「每日不能导入时长，只有月时长」。
    时长只有「按月报整月导入」一个来源 —— 按日导入不再写 daily_metric.minutes（见 strip_minutes），
    月度文件一人一行（「9月份时长.csv」里的「开播有效时长」= 整月累计，如 75小时29分钟41秒），
    落 monthly_duration(person_id, period, minutes)；月榜 / 个人月卡优先用这个整月值，
    某月没有整月记录（历史月份）才回落到 daily_metric 求和。
+
+   用户口径（2026-10-16）：「时长或者音浪都支持按月进行导入和显示」。
+   按月导入的指标从「只有时长」扩成「时长 / 音浪可勾选」：
+   - 文件里带「音浪 / 总音浪」列时，勾上音浪就落 monthly_wave(person_id, period, wave)，
+     展示端月/年口径与时长同一套规则：有导入月值用它，没有才回落日明细求和；
+   - 一次提交可同时写两种指标（勾哪个写哪个，「相同不覆盖、不同才覆盖」仍是幂等口径）；
+   - 概览列表（`10.14….csv` 这种时长 + 总音浪同表）默认仍按日建议，运营在弹窗里手动切「按月导入」。
 */
 
-/// monthly_duration 表还没建（库没跑 007 迁移）时，给一句能照做的提示，别只报 SQL 错
+/// monthly_duration / monthly_wave 表还没建（库没跑迁移）时，给一句能照做的提示，别只报 SQL 错
 fn month_table_err(e: sqlx::Error) -> anyhow::Error {
     month_missing_hint(e.into())
 }
@@ -2550,19 +2739,37 @@ fn month_table_err(e: sqlx::Error) -> anyhow::Error {
 /// 把「表不存在」翻译成可照做的提示（anyhow 版本，供 pgrs::query 的返回用）
 fn month_missing_hint(e: anyhow::Error) -> anyhow::Error {
     let msg = e.to_string();
-    if msg.contains("monthly_duration") || msg.contains("doesn't exist") {
+    if msg.contains("monthly_duration") {
         return anyhow::anyhow!(
             "月度时长表不存在：先在库里执行 `pk-server migrate`（007_monthly_duration）再导入"
+        );
+    }
+    if msg.contains("monthly_wave") {
+        return anyhow::anyhow!(
+            "月度音浪表不存在：先在库里执行 `pk-server migrate`（026_monthly_wave）再导入"
+        );
+    }
+    if msg.contains("doesn't exist") {
+        return anyhow::anyhow!(
+            "月度指标表不存在：先在库里执行 `pk-server migrate`（007_monthly_duration / 026_monthly_wave）再导入"
         );
     }
     e
 }
 
-/// 某月已导入的整月时长 →（行数, 分钟合计）。period 已过 valid_period（纯数字 + '-'）白名单。
-async fn month_existing(st: &AppState, period: &str) -> anyhow::Result<(i64, i64)> {
+/// 某月已导入的整月值 →（行数, 合计）。
+/// period 已过 valid_period（纯数字 + '-'）白名单；表名与列名是写死的字面量，不接受外部输入。
+async fn month_existing_of(
+    st: &AppState,
+    period: &str,
+    table: &'static str,
+    col: &'static str,
+) -> anyhow::Result<(i64, i64)> {
+    debug_assert!(matches!(table, "monthly_duration" | "monthly_wave"));
+    debug_assert!(matches!(col, "minutes" | "wave"));
     let sql = format!(
-        "SELECT COUNT(*) AS n, (COALESCE(SUM(minutes), 0))::BIGINT AS m \
-         FROM monthly_duration WHERE period = '{period}'"
+        "SELECT COUNT(*) AS n, (COALESCE(SUM({col}), 0))::BIGINT AS m \
+         FROM {table} WHERE period = '{period}'"
     );
     let row = pgrs::query(&st.pools, "LOCAL", &sql)
         .await
@@ -2579,11 +2786,27 @@ async fn month_existing(st: &AppState, period: &str) -> anyhow::Result<(i64, i64
     Ok((n, m))
 }
 
-/// 某月「日明细时长」求和（person_id → 分钟）。只用于对账提示：
+/// 某月已导入的整月时长 →（行数, 分钟合计）
+async fn month_existing(st: &AppState, period: &str) -> anyhow::Result<(i64, i64)> {
+    month_existing_of(st, period, "monthly_duration", "minutes").await
+}
+
+/// 某月已导入的整月音浪 →（行数, 音浪合计）
+async fn month_existing_wave(st: &AppState, period: &str) -> anyhow::Result<(i64, i64)> {
+    month_existing_of(st, period, "monthly_wave", "wave").await
+}
+
+/// 某月「日明细指标」求和（person_id → 值）。只用于对账提示：
 /// 月度口径以平台月报为准，这里的数字只是告诉运营「日明细加起来差多少」。
-async fn month_daily_minutes(st: &AppState, period: &str) -> anyhow::Result<HashMap<u64, i64>> {
+/// col 是写死的字面量（minutes / wave），不接受外部输入。
+async fn month_daily_metric(
+    st: &AppState,
+    period: &str,
+    col: &'static str,
+) -> anyhow::Result<HashMap<u64, i64>> {
+    debug_assert!(matches!(col, "minutes" | "wave"));
     let sql = format!(
-        "SELECT person_id, (SUM(minutes))::BIGINT AS m FROM daily_metric \
+        "SELECT person_id, (SUM({col}))::BIGINT AS m FROM daily_metric \
          WHERE TO_CHAR(biz_date, 'YYYY-MM') = '{period}' GROUP BY person_id"
     );
     let rows = pgrs::query(&st.pools, "LOCAL", &sql).await?;
@@ -2597,6 +2820,16 @@ async fn month_daily_minutes(st: &AppState, period: &str) -> anyhow::Result<Hash
     Ok(out)
 }
 
+/// 某月「日明细时长」求和（person_id → 分钟）
+async fn month_daily_minutes(st: &AppState, period: &str) -> anyhow::Result<HashMap<u64, i64>> {
+    month_daily_metric(st, period, "minutes").await
+}
+
+/// 某月「日明细音浪」求和（person_id → 音浪）
+async fn month_daily_wave(st: &AppState, period: &str) -> anyhow::Result<HashMap<u64, i64>> {
+    month_daily_metric(st, period, "wave").await
+}
+
 /// 月度批次备注：失败 / 跳过的摘要（note 列 VARCHAR(512)，先截断）
 fn month_note(failures: &[Value], skipped: &[String]) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
@@ -2604,7 +2837,7 @@ fn month_note(failures: &[Value], skipped: &[String]) -> Option<String> {
         parts.push(s);
     }
     if !skipped.is_empty() {
-        parts.push(format!("跳过 {} 人（文件里没有时长）", skipped.len()));
+        parts.push(format!("跳过 {} 人（文件里没有勾选的指标值）", skipped.len()));
     }
     (!parts.is_empty()).then(|| truncate_chars(&parts.join("；"), NOTE_MAX_CHARS))
 }
@@ -2624,7 +2857,7 @@ pub async fn import_month_preview(
     let raw_rows = month_body_rows(&body.text, &body.rows).await.map_err(nice_400)?;
     ensure(
         !raw_rows.is_empty(),
-        "没有解析到时长列：确认文件里有「时长 / 开播有效时长」这一列（月度时长只认时长列）",
+        "没有解析到时长 / 音浪列：确认文件里有「时长 / 开播有效时长」或「音浪 / 总音浪」至少一列",
     )?;
     let ctx = load_match_ctx(&st).await?;
     let aliases = merged_aliases(&st).await;
@@ -2645,33 +2878,51 @@ pub async fn import_month_preview(
         .collect();
     let merged = merge_rows_by_person(&resolved);
     let matched = merged.iter().filter(|r| r.matched).count();
+    // 勾选前的「文件里到底有什么」：前端据此自动勾选指标（文件只有时长就只勾时长）。
+    // 数的是行数而不是布尔，运营一眼能看出「时长 17 行 / 音浪 17 行」。
+    let rows_with_minutes = merged.iter().filter(|r| r.raw.minutes.is_some()).count();
+    let rows_with_wave = merged.iter().filter(|r| r.raw.wave.is_some()).count();
     let minutes_total: i64 = merged
         .iter()
         .filter(|r| r.matched)
         .filter_map(|r| r.raw.minutes)
         .map(|m| m as i64)
         .sum();
-    let (existing_rows, existing_minutes) = month_existing(&st, &period).await?;
-    let daily = month_daily_minutes(&st, &period).await?;
-    // 对账：该月**已有日明细时长**、且与月报不一致的人（月报优先，这里只提示，不改口径）。
-    // 日明细为 0 的不列进来：每日不导时长，0 是常态，全列出来只会刷屏。
-    let diffs: Vec<Value> = merged
+    let wave_total: i64 = merged
         .iter()
-        .filter_map(|r| {
-            let pid = r.person_id?;
-            let imported = r.raw.minutes? as i64;
-            let daily_minutes = daily.get(&pid).copied().unwrap_or(0);
-            (daily_minutes > 0 && daily_minutes != imported).then(|| {
-                json!({
-                    "personId": pid,
-                    "name": truncate_chars(&r.raw.name, 64),
-                    "imported": imported,
-                    "daily": daily_minutes,
+        .filter(|r| r.matched)
+        .filter_map(|r| r.raw.wave)
+        .map(|w| w as i64)
+        .sum();
+    // 缺表（没跑 007 / 026）时把「先跑 migrate」的原文带回前端，别掉进兜底文案
+    let (existing_rows, existing_minutes) = month_existing(&st, &period).await.map_err(nice_400)?;
+    let (existing_wave_rows, existing_wave) =
+        month_existing_wave(&st, &period).await.map_err(nice_400)?;
+    let daily = month_daily_minutes(&st, &period).await?;
+    let daily_wave = month_daily_wave(&st, &period).await?;
+    // 对账：该月**已有日明细**、且与月报不一致的人（月报优先，这里只提示，不改口径）。
+    // 日明细为 0 的不列进来：每日刚好没导到是常态，全列出来只会刷屏。
+    let diff_rows = |daily: &HashMap<u64, i64>, pick: fn(&ImportRow) -> Option<f64>| -> Vec<Value> {
+        merged
+            .iter()
+            .filter_map(|r| {
+                let pid = r.person_id?;
+                let imported = pick(&r.raw)? as i64;
+                let daily_v = daily.get(&pid).copied().unwrap_or(0);
+                (daily_v > 0 && daily_v != imported).then(|| {
+                    json!({
+                        "personId": pid,
+                        "name": truncate_chars(&r.raw.name, 64),
+                        "imported": imported,
+                        "daily": daily_v,
+                    })
                 })
             })
-        })
-        .take(30)
-        .collect();
+            .take(30)
+            .collect()
+    };
+    let diffs = diff_rows(&daily, |r| r.minutes);
+    let wave_diffs = diff_rows(&daily_wave, |r| r.wave);
     Ok(Json(json!({
         "period": period,
         "team": team,
@@ -2679,15 +2930,24 @@ pub async fn import_month_preview(
         "matched": matched,
         "unmatched": merged.len() - matched,
         "minutesTotal": minutes_total,
+        "waveTotal": wave_total,
+        "rowsWithMinutes": rows_with_minutes,
+        "rowsWithWave": rows_with_wave,
+        "hasMinutes": rows_with_minutes > 0,
+        "hasWave": rows_with_wave > 0,
         "existingRows": existing_rows,
         "existingMinutes": existing_minutes,
+        "existingWaveRows": existing_wave_rows,
+        "existingWave": existing_wave,
         "dailyMinutes": daily.values().copied().sum::<i64>(),
+        "dailyWave": daily_wave.values().copied().sum::<i64>(),
         "diffs": diffs,
+        "waveDiffs": wave_diffs,
         "rows": merged,
     })))
 }
 
-/// POST /api/admin/import/month/commit：整月时长写 monthly_duration + import_batch 审计
+/// POST /api/admin/import/month/commit：整月指标（时长 / 音浪）写库 + import_batch 审计
 pub async fn import_month_commit(
     State(st): State<ArcState>,
     Json(body): Json<ImportBody>,
@@ -2697,16 +2957,21 @@ pub async fn import_month_commit(
     valid_period(&period)?;
     let team = body.team.as_deref().unwrap_or("auto");
     let mode = body.mode.as_deref().unwrap_or("merge");
+    let metrics = MonthMetrics::from_body(&body.metrics).map_err(nice_400)?;
     let rows = month_body_rows(&body.text, &body.rows).await.map_err(nice_400)?;
-    let report = commit_month_duration(
+    let report = commit_month_metrics(
         &st,
         &period,
         team,
         rows,
         mode,
-        body.filename.as_deref().unwrap_or("月度时长导入"),
+        body.filename.as_deref().unwrap_or("月度指标导入"),
+        metrics,
     )
-    .await?;
+    .await
+    // 与按日导入同一套：显式拒绝 / 参数错误（「reject 模式：…」「没有解析到任何数据行」…）
+    // 要带原文回给运营，不能掉进兜底文案「请求参数有误，请检查后重试」。
+    .map_err(nice_400)?;
     Ok(Json(json!({
         "ok": true,
         "period": period,
@@ -2718,20 +2983,26 @@ pub async fn import_month_commit(
         "failures": report.failures,
         "skipped": report.skipped,
         "minutesTotal": report.minutes_total,
+        "waveTotal": report.wave_total,
         "pending": report.pending,
-        // 月度时长没有「当日缺数据」概念，字段留着保持前端结构一致
+        // 按月导入没有「当日缺数据」概念，字段留着保持前端结构一致
         "missing": report.missing,
     })))
 }
 
-/// 月度时长提交核心：匹配 + 合并（一人多号时长求和）+ 事务写入 + 批次审计。
-pub async fn commit_month_duration(
+/// 按月导入提交核心：匹配 + 合并（一人多号时长 / 音浪各自求和）+ 事务写入 + 批次审计。
+///
+/// 2026-10-16 用户口径「时长或者音浪都支持按月进行导入和显示」：两种指标可在一次提交里
+/// 一起写（勾哪个写哪个），落 monthly_duration / monthly_wave，展示端月/年口径
+/// 优先用导入值、没有导入的月份才回落日明细求和。
+pub async fn commit_month_metrics(
     st: &Arc<AppState>,
     period: &str,
     team: &str,
     rows: Vec<ImportRow>,
     mode: &str,
     filename: &str,
+    metrics: MonthMetrics,
 ) -> anyhow::Result<CommitReport> {
     anyhow::ensure!(
         st.sources.iter().any(|s| s.id == "LOCAL"),
@@ -2753,6 +3024,10 @@ pub async fn commit_month_duration(
         "mode 只能是 merge / reject"
     );
     anyhow::ensure!(!rows.is_empty(), "没有解析到任何数据行");
+    anyhow::ensure!(
+        metrics.any(),
+        "至少要选一种指标（时长 / 音浪）—— 两种都没勾就没有可写的数据"
+    );
     let biz_date = period_first_day(period);
 
     let ctx = load_match_ctx(st).await?;
@@ -2762,8 +3037,10 @@ pub async fn commit_month_duration(
         .iter()
         .map(|r| resolve_row(r, &ctx, &aliases, team_filter))
         .collect();
-    // 一人多号（一个主播挂 2~3 个抖音号）→ 整月时长求和，与按日导入的合并口径一致
+    // 一人多号（一个主播挂 2~3 个抖音号）→ 整月时长 / 音浪各自求和，与按日导入的合并口径一致
     let merged = merge_rows_by_person(&resolved);
+    // 全员同值防御（同按日导入口径）：拿错文件 / 勾错列时早点拒，别把 35 这种比例值当整月音浪写进去
+    ensure_month_values_not_all_same(&merged, metrics)?;
 
     let mut failures: Vec<Value> = Vec::new();
     let mut ok_rows: Vec<&ResolvedRow> = Vec::new();
@@ -2774,7 +3051,7 @@ pub async fn commit_month_duration(
             // 有抖音号 / ID 也要先建档，建完再重导这个月的文件。
             failures.push(json!({
                 "name": truncate_chars(&r.raw.name, 64),
-                "reason": "未匹配到主播（月度时长不进暂存区）：先在主播台账建档或绑定抖音号，再重导该月文件"
+                "reason": "未匹配到主播（按月导入不进暂存区）：先在主播台账建档或绑定抖音号，再重导该月文件"
             }));
             continue;
         }
@@ -2782,13 +3059,17 @@ pub async fn commit_month_duration(
             failures.push(json!({ "name": r.raw.name, "reason": reason }));
             continue;
         }
-        if r.raw.minutes.is_none() {
-            // 时长列有值但解析失败（如「未开播」「1.5h」「abc」）时 row.err 里带着原因，
-            // 一并报出来——否则运营只见预览人数少了一个，没有任何线索可查。
+        // 只认「勾了的指标」：没勾的那一种不算缺值（例如只导时长时，文件里的音浪不参与判定）
+        let has_minutes = metrics.minutes && r.raw.minutes.is_some();
+        let has_wave = metrics.wave && r.raw.wave.is_some();
+        if !has_minutes && !has_wave {
+            // 勾选的指标这一行是空的 / 解析失败（如「未开播」「1.5h」「abc」）时 row.err 里
+            // 带着原因，一并报出来——否则运营只见预览人数少了一个，没有任何线索可查。
+            let missing = metrics.label();
             skipped.push(truncate_chars(
                 &match r.raw.err.as_deref().filter(|e| !e.is_empty()) {
                     Some(e) => format!("{}（{}）", r.raw.name, e),
-                    None => format!("{}（时长列为空）", r.raw.name),
+                    None => format!("{}（文件里没有{missing}的值）", r.raw.name),
                 },
                 96,
             ));
@@ -2799,19 +3080,30 @@ pub async fn commit_month_duration(
 
     let mut tx = pool.begin().await?;
     if mode == "reject" {
-        let cnt: i64 = sqlx::query(&crate::pq::rewrite(
-            "SELECT COUNT(*) AS n FROM monthly_duration md JOIN person p ON p.id = md.person_id \
-             WHERE md.period = ?",
-        ))
-        .bind(period)
-        .map(|r: sqlx::postgres::PgRow| r.try_get::<i64, _>("n").unwrap_or(0))
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(month_table_err)?;
-        if cnt > 0 {
-            anyhow::bail!(
-                "reject 模式：{period} 已有 {cnt} 条月度时长，请改用 merge（幂等覆盖）或先删除该月时长"
+        // 勾了哪个指标就判哪个：只导时长时不该被「该月已有音浪」拦住，反之亦然。
+        // 表名是下面这两个字面量之一，不来自请求。
+        for (on, table, label) in [
+            (metrics.minutes, "monthly_duration", "月度时长"),
+            (metrics.wave, "monthly_wave", "月度音浪"),
+        ] {
+            if !on {
+                continue;
+            }
+            let sql = format!(
+                "SELECT COUNT(*) AS n FROM {table} md JOIN person p ON p.id = md.person_id \
+                 WHERE md.period = ?"
             );
+            let cnt: i64 = sqlx::query(&crate::pq::rewrite(&sql))
+                .bind(period)
+                .map(|r: sqlx::postgres::PgRow| r.try_get::<i64, _>("n").unwrap_or(0))
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(month_table_err)?;
+            if cnt > 0 {
+                anyhow::bail!(
+                    "reject 模式：{period} 已有 {cnt} 条{label}，请改用 merge（幂等覆盖）或先删除该月数据"
+                );
+            }
         }
     }
 
@@ -2831,38 +3123,79 @@ pub async fn commit_month_duration(
     let mut ok_count: u32 = 0;
     let mut unchanged: u32 = 0;
     let mut minutes_total: i64 = 0;
+    let mut wave_total: i64 = 0;
     for r in &ok_rows {
         let person_id = r.person_id.expect("调用前已保证 matched");
-        let minutes = r.raw.minutes.unwrap_or(0.0) as i64;
-        // 相同不覆盖（与按日导入同一口径）：值一样就一行不写，updated_at 也不动
-        let cur: Option<i64> = sqlx::query(&crate::pq::rewrite(
-            "SELECT minutes FROM monthly_duration WHERE person_id = ? AND period = ?",
-        ))
-        .bind(person_id as i64)
-        .bind(period)
-        .map(|row: sqlx::postgres::PgRow| row.try_get::<i64, _>(0).unwrap_or(0))
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(month_table_err)?;
-        if cur == Some(minutes) {
-            unchanged += 1;
-            minutes_total += minutes;
-            continue;
+        // 勾了哪个指标就写哪个：两种都写、都同值才算「未覆盖」。
+        // 相同不覆盖（与按日导入同一口径）：值一样就一行不写，updated_at 也不动。
+        let mut wrote = false;
+        if metrics.minutes {
+            if let Some(m) = r.raw.minutes {
+                let minutes = m as i64;
+                minutes_total += minutes;
+                let cur: Option<i64> = sqlx::query(&crate::pq::rewrite(
+                    // minutes 是 INT4：直接 try_get::<i64> 会解码失败、被 unwrap_or(0) 吞成 0，
+                    // 于是每次重导都被判成「值变了」照写一遍（幂等报告失真）。这里显式转 BIGINT。
+                    "SELECT (minutes)::BIGINT FROM monthly_duration WHERE person_id = ? AND period = ?",
+                ))
+                .bind(person_id as i64)
+                .bind(period)
+                .map(|row: sqlx::postgres::PgRow| row.try_get::<i64, _>(0).unwrap_or(0))
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(month_table_err)?;
+                if cur != Some(minutes) {
+                    sqlx::query(&crate::pq::rewrite(
+                        "INSERT INTO monthly_duration (person_id, period, minutes, source_batch_id)
+                         VALUES (?,?,?,?)
+                         ON CONFLICT (person_id, period) DO UPDATE SET minutes = EXCLUDED.minutes, source_batch_id = EXCLUDED.source_batch_id",
+                    ))
+                    .bind(person_id as i64)
+                    .bind(period)
+                    .bind(minutes)
+                    .bind(batch_id as i64)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(month_table_err)?;
+                    wrote = true;
+                }
+            }
         }
-        sqlx::query(&crate::pq::rewrite(
-            "INSERT INTO monthly_duration (person_id, period, minutes, source_batch_id)
-             VALUES (?,?,?,?)
-             ON CONFLICT (person_id, period) DO UPDATE SET minutes = EXCLUDED.minutes, source_batch_id = EXCLUDED.source_batch_id",
-        ))
-        .bind(person_id as i64)
-        .bind(period)
-        .bind(minutes)
-        .bind(batch_id as i64)
-        .execute(&mut *tx)
-        .await
-        .map_err(month_table_err)?;
-        ok_count += 1;
-        minutes_total += minutes;
+        if metrics.wave {
+            if let Some(w) = r.raw.wave {
+                let wave = w as i64;
+                wave_total += wave;
+                let cur: Option<i64> = sqlx::query(&crate::pq::rewrite(
+                    "SELECT wave FROM monthly_wave WHERE person_id = ? AND period = ?",
+                ))
+                .bind(person_id as i64)
+                .bind(period)
+                .map(|row: sqlx::postgres::PgRow| row.try_get::<i64, _>(0).unwrap_or(0))
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(month_table_err)?;
+                if cur != Some(wave) {
+                    sqlx::query(&crate::pq::rewrite(
+                        "INSERT INTO monthly_wave (person_id, period, wave, source_batch_id)
+                         VALUES (?,?,?,?)
+                         ON CONFLICT (person_id, period) DO UPDATE SET wave = EXCLUDED.wave, source_batch_id = EXCLUDED.source_batch_id",
+                    ))
+                    .bind(person_id as i64)
+                    .bind(period)
+                    .bind(wave)
+                    .bind(batch_id as i64)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(month_table_err)?;
+                    wrote = true;
+                }
+            }
+        }
+        if wrote {
+            ok_count += 1;
+        } else {
+            unchanged += 1;
+        }
     }
 
     let note = month_note(&failures, &skipped);
@@ -2879,13 +3212,24 @@ pub async fn commit_month_duration(
 
     st.clear_cache();
     spawn_post_import_backup();
+    let mut totals: Vec<String> = Vec::new();
+    if metrics.minutes {
+        totals.push(format!(
+            "时长合计 {} 小时{}分",
+            minutes_total / 60,
+            minutes_total % 60
+        ));
+    }
+    if metrics.wave {
+        totals.push(format!("音浪合计 {}", wave_total));
+    }
     crate::events::emit(
         crate::events::SCOPE_IMPORT,
         format!(
-            "{} 月度时长导入 {ok_count} 人（时长合计 {} 小时{}分）{}",
+            "{} 按月导入（{}）{ok_count} 人（{}）{}",
             period,
-            minutes_total / 60,
-            minutes_total % 60,
+            metrics.label(),
+            totals.join("，"),
             if unchanged > 0 {
                 format!("，另有 {unchanged} 人值没变未覆盖")
             } else {
@@ -2906,6 +3250,7 @@ pub async fn commit_month_duration(
         missing: Vec::new(),
         dropped_minutes: 0,
         minutes_total,
+        wave_total,
     })
 }
 
@@ -2925,7 +3270,8 @@ pub async fn import_month_status(
     require_local(&st)?;
     let period = q.period.trim().to_string();
     valid_period(&period)?;
-    let (rows, minutes) = month_existing(&st, &period).await?;
+    let (rows, minutes) = month_existing(&st, &period).await.map_err(nice_400)?;
+    let (wave_rows, wave) = month_existing_wave(&st, &period).await.map_err(nice_400)?;
     let biz_date = period_first_day(&period);
     let last = pgrs::query(
         &st.pools,
@@ -2948,13 +3294,17 @@ pub async fn import_month_status(
     });
     Ok(Json(json!({
         "period": period,
+        // 月度时长（monthly_duration）：rows = 行数，minutes = 分钟合计
         "rows": rows,
         "minutes": minutes,
+        // 月度音浪（monthly_wave）：2026-10-16 起与时长同页展示
+        "waveRows": wave_rows,
+        "wave": wave,
         "lastBatch": last,
     })))
 }
 
-/// DELETE /api/admin/import/month?period=YYYY-MM&team=：删除某月已导入的整月时长
+/// DELETE /api/admin/import/month?period=YYYY-MM&team=：删除某月已导入的整月时长 **与整月音浪**
 pub async fn import_month_delete(
     State(st): State<ArcState>,
     axum::extract::Query(q): axum::extract::Query<MonthQuery>,
@@ -2970,29 +3320,32 @@ pub async fn import_month_delete(
     let biz_date = period_first_day(&period);
     let pool = writer_pool(&st)?;
     let mut tx = pool.begin().await?;
-    let rows = if auto_team {
-        sqlx::query(&crate::pq::rewrite(
-            "DELETE FROM monthly_duration WHERE period = ?",
-        ))
-        .bind(&period)
-        .execute(&mut *tx)
-        .await
-        .map_err(month_table_err)?
-        .affected()
-    } else {
-        sqlx::query(&crate::pq::rewrite(
-            // PG 方言：DELETE … USING（MySQL 的 DELETE md FROM … JOIN 在 PG 语法不通）
-            "DELETE FROM monthly_duration md \
-             USING person p \
-             WHERE p.id = md.person_id AND md.period = ? AND p.gender = ?",
-        ))
-        .bind(&period)
-        .bind(&team)
-        .execute(&mut *tx)
-        .await
-        .map_err(month_table_err)?
-        .affected()
-    };
+    // 一次删两种指标：该月已导入的整月时长 + 整月音浪（2026-10-16 起按月导入可能写了两个表，
+    // 只删一个会留下幽灵月值，月榜显示的和「已导入状态」对不上）。
+    // 表名是写死的字面量，团别过滤走 PG 的 DELETE … USING。
+    let mut deleted = [0u64; 2];
+    for (i, table) in ["monthly_duration", "monthly_wave"].iter().enumerate() {
+        let sql = if auto_team {
+            format!("DELETE FROM {table} WHERE period = ?")
+        } else {
+            format!(
+                "DELETE FROM {table} md USING person p \
+                 WHERE p.id = md.person_id AND md.period = ? AND p.gender = ?"
+            )
+        };
+        let rewritten = crate::pq::rewrite(&sql);
+        let mut q = sqlx::query(&rewritten).bind(&period);
+        if !auto_team {
+            q = q.bind(&team);
+        }
+        deleted[i] = q
+            .execute(&mut *tx)
+            .await
+            .map_err(month_table_err)?
+            .affected();
+    }
+    let rows = deleted[0];
+    let wave_rows = deleted[1];
     let batches = if auto_team {
         sqlx::query(&crate::pq::rewrite(
             "DELETE FROM import_batch WHERE source = 'admin-import-month' AND biz_date = ?::date",
@@ -3016,14 +3369,16 @@ pub async fn import_month_delete(
     crate::events::emit(
         crate::events::SCOPE_IMPORT,
         format!(
-            "已删除「{period}」{} 的月度时长（{} 条）",
+            "已删除「{period}」{} 的月度时长（{rows} 条）与月度音浪（{wave_rows} 条）",
             if auto_team { "全部团别" } else { &team },
-            rows
         ),
     );
-    Ok(Json(
-        json!({ "ok": true, "rows": rows, "batches": batches }),
-    ))
+    Ok(Json(json!({
+        "ok": true,
+        "rows": rows,
+        "waveRows": wave_rows,
+        "batches": batches
+    })))
 }
 
 /* --------------------------------- 单测 --------------------------------- */
@@ -3194,7 +3549,17 @@ pub async fn batch_my_accounts(
         body.force_reset.unwrap_or(false),
     )
     .await
-    .map_err(ApiError::bad_request)?;
+    /* 2026-10-16：整包 bad_request 会把库层报错（表名/SQL 片段）原样外发。
+       现按 store 层 BIZ:: 前缀分流：业务拒绝（名单为空 / 超批上限）→ 400 原文；
+       库层故障 → 500 通用文案，原文留日志（public_teams::admin::account_store_err 同口径）。 */
+    .map_err(|e| {
+        if crate::store::my_account::is_biz(&e) {
+            ApiError::bad_request(crate::store::my_account::biz_msg(&e).to_string())
+        } else {
+            tracing::error!(error = %e, "批量开号写库失败");
+            ApiError::from(anyhow::anyhow!(e))
+        }
+    })?;
 
     let (mut created, mut updated, mut skipped, mut failed) = (0usize, 0usize, 0usize, 0usize);
     for r in &rows {
@@ -3248,7 +3613,17 @@ pub async fn set_person_phone(
         .ok_or_else(|| ApiError::bad_request("缺少 phone 字段"))?;
     crate::store::person_set_phone(&st, id, &phone)
         .await
-        .map_err(ApiError::bad_request)?;
+        /* 2026-10-16：同批量开号 —— BIZ:: 前缀（格式/占用类人话）→ 400 原文；
+           库层故障 → 500 通用文案，原文留日志。原先整包 bad_request 会把
+           「写入失败：…SQL 原文」外发给管理端页面。 */
+        .map_err(|e| {
+            if crate::store::my_account::is_biz(&e) {
+                ApiError::bad_request(crate::store::my_account::biz_msg(&e).to_string())
+            } else {
+                tracing::error!(person_id = id, error = %e, "主播手机号写库失败");
+                ApiError::from(anyhow::anyhow!(e))
+            }
+        })?;
     /* 写后回读校验（2026-10-13）：与 my_account_set 同口径——杜绝「返回 ok 但库里
        没写入」的静默失败（64 环境曾出现运营以为绑上了实际没绑）。 */
     let saved_phone = sqlx::query(&crate::pq::rewrite(
@@ -3291,7 +3666,8 @@ pub async fn bind_account(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .ok_or_else(|| ApiError::bad_request("抖音号必填（一人可挂多个；抖音号全局唯一）"))?;
-    let no = crate::store::validate_douyin_no(douyin_no).map_err(ApiError::bad_request)?;
+    let no = crate::store::validate_douyin_no(douyin_no)
+        .map_err(|e| ApiError::bad_request(crate::store::my_account::biz_msg(&e).to_string()))?;
     // 抖音号被别人占了 → 直接拒（不静默改绑，否则等于把别人的号抢过来）
     check_douyin_no_free(&st, Some(&no), Some(id)).await?;
     // 同一个人重复挂同一个号：幂等，不报错也不新增。
@@ -4121,6 +4497,11 @@ fn id_of(map: &mut HashMap<String, i64>, name: &str, id: i64) {
 }
 
 /// GET /api/admin/streamers/duplicates：同名 / 同抖音号重复检测
+///
+/// - `sameName`：`person` 表里的重名（同表语义，命中即需人工核对）。
+/// - `sameDouyinNo`：**同一个抖音号挂在 ≥2 个不同在册主播名下**（`n` = 不同主播数，不是 account 行数）。
+///   同一主播名下同一个号存两行 account（主号/副号）**不算**重复，SQL 已在 `dialect::DUP_DOUYIN_SQL` 里按人去重。
+/// - 返回结构 `sameName` / `sameDouyinNo` 是前端与契约依赖的形状，不要改字段名。
 pub async fn streamer_duplicates(State(st): State<ArcState>) -> ApiResult {
     require_local(&st)?;
     let names = pgrs::query(&st.pools, "LOCAL", dialect::DUP_NAMES_SQL).await?;
@@ -4298,8 +4679,10 @@ pub async fn merge_person(
     .execute(&mut *tx)
     .await?;
 
-    // 月度时长（monthly_duration）：另抽成 merge_monthly_duration，缺表的库自动跳过
+    // 月度时长（monthly_duration）与月度音浪（monthly_wave）：另抽成 merge_monthly_*，
+    // 缺表的库自动跳过
     merge_monthly_duration(&mut tx, source, id).await?;
+    merge_monthly_wave(&mut tx, source, id).await?;
 
     /* 推送绑定（push_bindings.person_id）：推送引擎按它取「我的」音浪 / 月榜
     （push.rs 的 person_account_waves / month_map 都按 person_id 查），
@@ -4354,19 +4737,10 @@ pub async fn merge_person(
         }
     }
 
-    /* 待裁决的绑定申请 / 抖音号认领：只有 **pending** 需要跟着身份走 ——
-    通过后要把号写到 person_id 上，若还挂在已软删的 source 上，等于批了也不可见；
-    已裁决的行保留原始归属作为历史记录。两张表在 person_id 上都没有唯一键，直接改绑。 */
-    for sql in [
-        "UPDATE anchor_claims SET person_id = ? WHERE person_id = ? AND status = 'pending'",
-        "UPDATE my_bind_requests SET person_id = ? WHERE person_id = ? AND status = 'pending'",
-    ] {
-        sqlx::query(&crate::pq::rewrite(sql))
-            .bind(id as i64)
-            .bind(source as i64)
-            .execute(&mut *tx)
-            .await?;
-    }
+    /* 表 `anchor_claims` / `my_bind_requests` 保留不删（历史申请与截图仍在库里），
+    但 2026-10-16「抖音号审计」整页下线后，再不会有新的 pending 行产生、也没有裁决入口，
+    原先这里「把 pending 申请改挂到合并后的 person_id」的补偿 UPDATE 已无实际作用，
+    随代码路径一起删除 —— 已裁决/历史行本来就不改归属，保留原始 person_id 作为历史记录。 */
 
     /* 逐表判断后**故意不迁**的（见审计 P1-5 的「不要盲改」要求）：
     - `monthly_metric`：只写不读的派生缓存（metrics.rs 落库，代码里没有任何 SELECT），
@@ -4407,25 +4781,50 @@ async fn merge_monthly_duration(
     source: u64,
     target: u64,
 ) -> anyhow::Result<()> {
-    if !table_exists(&mut *conn, "monthly_duration").await {
+    merge_monthly_metric(conn, source, target, "monthly_duration", "minutes", "007").await
+}
+
+/// 合并整月音浪（monthly_wave，2026-10-16 起按可月导入）：口径与整月时长一致。
+/// 库还没跑 026 的老库先探测，缺表直接返回（读路径对缺表有降级）。
+async fn merge_monthly_wave(
+    conn: &mut sqlx::PgConnection,
+    source: u64,
+    target: u64,
+) -> anyhow::Result<()> {
+    merge_monthly_metric(conn, source, target, "monthly_wave", "wave", "026").await
+}
+
+/// 整月指标表的合并骨架：`monthly_duration`(minutes) / `monthly_wave`(wave) 同构。
+/// 表名与列名只来自上面两个包装函数里的字面量，不来自请求。
+async fn merge_monthly_metric(
+    conn: &mut sqlx::PgConnection,
+    source: u64,
+    target: u64,
+    table: &'static str,
+    col: &'static str,
+    migration: &str,
+) -> anyhow::Result<()> {
+    if !table_exists(&mut *conn, table).await {
         tracing::warn!(
             source,
             target,
-            "合并主播：库没跑 007（无 monthly_duration），跳过整月时长合并"
+            table,
+            migration,
+            "合并主播：库没跑对应迁移（无该月度表），跳过整月指标合并"
         );
         return Ok(());
     }
-    let src_periods = sqlx::query(&crate::pq::rewrite(
-        "SELECT period FROM monthly_duration WHERE person_id = ?",
-    ))
+    let src_periods = sqlx::query(&crate::pq::rewrite(&format!(
+        "SELECT period FROM {table} WHERE person_id = ?"
+    )))
     .bind(source as i64)
     .fetch_all(&mut *conn)
     .await?;
     for r in &src_periods {
         let period: String = r.try_get("period").unwrap_or_default();
-        let exists: i64 = sqlx::query(&crate::pq::rewrite(
-            "SELECT COUNT(*) FROM monthly_duration WHERE person_id = ? AND period = ?",
-        ))
+        let exists: i64 = sqlx::query(&crate::pq::rewrite(&format!(
+            "SELECT COUNT(*) FROM {table} WHERE person_id = ? AND period = ?"
+        )))
         .bind(target as i64)
         .bind(&period)
         .fetch_one(&mut *conn)
@@ -4433,22 +4832,22 @@ async fn merge_monthly_duration(
         .try_get(0)
         .unwrap_or(0);
         if exists > 0 {
-            // 同 period 冲突：source 该月时长并进 target 该行，然后删源行（不再撞唯一键）
-            sqlx::query(&crate::pq::rewrite(
-                "UPDATE monthly_duration t SET minutes = t.minutes + s.m
-                 FROM (SELECT SUM(minutes) AS m FROM monthly_duration
+            // 同 period 冲突：source 该月值并进 target 该行，然后删源行（不再撞唯一键）
+            sqlx::query(&crate::pq::rewrite(&format!(
+                "UPDATE {table} t SET {col} = t.{col} + s.m
+                 FROM (SELECT SUM({col}) AS m FROM {table}
                        WHERE person_id = ? AND period = ?) s
-                 WHERE t.person_id = ? AND t.period = ?",
-            ))
+                 WHERE t.person_id = ? AND t.period = ?"
+            )))
             .bind(source as i64)
             .bind(&period)
             .bind(target as i64)
             .bind(&period)
             .execute(&mut *conn)
             .await?;
-            sqlx::query(&crate::pq::rewrite(
-                "DELETE FROM monthly_duration WHERE person_id = ? AND period = ?",
-            ))
+            sqlx::query(&crate::pq::rewrite(&format!(
+                "DELETE FROM {table} WHERE person_id = ? AND period = ?"
+            )))
             .bind(source as i64)
             .bind(&period)
             .execute(&mut *conn)
@@ -4456,9 +4855,9 @@ async fn merge_monthly_duration(
         }
     }
     // 剩下的（target 没有同 period 的）整批改绑
-    sqlx::query(&crate::pq::rewrite(
-        "UPDATE monthly_duration SET person_id = ? WHERE person_id = ?",
-    ))
+    sqlx::query(&crate::pq::rewrite(&format!(
+        "UPDATE {table} SET person_id = ? WHERE person_id = ?"
+    )))
     .bind(target as i64)
     .bind(source as i64)
     .execute(&mut *conn)
@@ -4578,9 +4977,9 @@ pub async fn import_upload(
         "文件内容为空或不是文本（请上传 CSV / TSV / 粘贴文本）",
     )?;
     let rows = parse_any_text(&text);
-    // 月度时长文件（「9月份时长.csv」这类）单独解析一份：只认时长列，
-    // 前端切到「按月」时直接拿这份预览 / 提交，不用回传原始文本。
-    let month_rows = parse_month_duration_text(&text);
+    // 按月导入的文件（「9月份时长.csv」/「主播概览列表_*.csv」这类）单独解析一份：
+    // 时长与音浪两类列都认，前端切到「按月」时直接拿这份预览 / 提交，不用回传原始文本。
+    let month_rows = parse_month_metrics_text(&text);
     ensure(
         !rows.is_empty() || !month_rows.is_empty(),
         "文件里没有解析到任何数据行",
@@ -4595,9 +4994,13 @@ pub async fn import_upload(
     })))
 }
 
-/// 附件是不是「月度时长文件」：有「时长」列、但没有音浪数值列。
-/// 用户口径 2026-10-10：每日不能导入时长，只有月时长 —— 所以「有时长、没音浪」= 平台月报文件。
-/// 管理端上传后的模式建议（month_suggest）与机器人附件分流都用这一条判据。
+/// 附件是不是「只有时长的月度文件」：有时长列、但**没有任何音浪数值**。
+/// 用户口径 2026-10-10：每日不能导入时长，只有月时长 —— 所以「有时长、没音浪」
+/// 只可能是平台月报文件，机器人可以直接按月导。
+///
+/// 2026-10-16 起「有时长也有音浪」的文件（概览列表）不再自动判成月度文件：
+/// 它同样是按日导出的长相，默认仍按日；运营要在管理端弹窗里手动切「按月导入」
+/// （那时时长 / 音浪两种指标都能勾）。判据仍被 upload 的模式建议与机器人附件分流共用。
 pub fn is_month_duration_file(month_rows: &[ImportRow], rows: &[ImportRow]) -> bool {
     !month_rows.is_empty()
         && !rows
@@ -4605,11 +5008,14 @@ pub fn is_month_duration_file(month_rows: &[ImportRow], rows: &[ImportRow]) -> b
             .any(|r| r.wave.is_some() || r.cumulative_wave.is_some())
 }
 
-/// 上传后给前端的模式建议：命中「月度时长文件」特征就预选「按月」，运营在弹窗里仍可改。
+/// 上传后给前端的模式建议：命中「只有时长的月度文件」特征就预选「按月」，运营在弹窗里仍可改。
 ///
 /// 判据见 [`is_month_duration_file`]：文件里有时长列（时长 / 开播有效时长 …），
 /// 且**没有音浪数值列**。年 / 月先按文件名猜（「9月份时长.csv」→ 当年 9 月），
 /// 猜不到就用当前月，弹窗里能改。
+///
+/// wire 值 `kind`：`daily` / `month`（2026-10-16 由 `month-duration` 更名，
+/// 因为按月导入现在不止时长一种指标）。
 fn month_suggest(filename: &str, month_rows: &[ImportRow], rows: &[ImportRow]) -> Value {
     if !is_month_duration_file(month_rows, rows) {
         return json!({ "kind": "daily", "year": Value::Null, "month": Value::Null });
@@ -4623,11 +5029,11 @@ fn month_suggest(filename: &str, month_rows: &[ImportRow], rows: &[ImportRow]) -
         )
     });
     json!({
-        "kind": "month-duration",
+        "kind": "month",
         "year": year,
         "month": month,
         "fromFilename": from_name.is_some(),
-        "reason": "文件里只有「时长」列、没有音浪列 → 按月度时长导入（时长只按月导入）",
+        "reason": "文件里只有「时长」列、没有音浪列 → 按月度时长导入（时长只按月导入；带音浪的月度文件请在弹窗里切「按月导入」）",
     })
 }
 
@@ -4931,7 +5337,7 @@ mod tests {
         assert!(row_ident(&raw).is_none());
     }
 
-    /* ---------------- 月度时长导入（2026-10-10：时长只按月导入） ---------------- */
+    /* ---------------- 月度指标导入（2026-10-10 时长；2026-10-16 起音浪也按月） ---------------- */
 
     /// 抖音公会后台「9月份时长.csv」的真实表头（只截了用得上的列）。
     const MONTH_CSV: &str =
@@ -4939,19 +5345,97 @@ mod tests {
          2436948398193464,浩龙🎹,cyl765,19526,金牌主播,35,75小时29分钟41秒,\n\
          7616689691311686705,玖玉🎹🎤,37181712726,4702,普通主播,35,120小时45分钟1秒,\n";
 
+    /// 用户给的样例格式（`10.14….csv` / `10.11 22222.csv` 的真实表头，只截了用得上的列）：
+    /// 时长与「总音浪」同在一张表 —— 按月导入时两种指标都能读。
+    const OVERVIEW_CSV: &str =
+        "主播ID,主播昵称,抖音号,粉丝数,签约类型,分成比-直播音浪收益,总音浪,会员订阅音浪,开播有效时长,feed看播时长,主播标签\n\
+         2855887229949241,双狼呈音,75995728462,58,普通主播,35,5508,0,1小时48分钟15秒,7小时26分钟3秒,\n\
+         2416047830865369,狼霆🎹,56874096680,363,普通主播,35,3193,0,1小时2分钟31秒,4小时1分钟26秒,\n";
+
     #[test]
-    fn month_duration_reads_only_duration_column() {
-        let rows = parse_month_duration_text(MONTH_CSV);
+    fn month_import_reads_duration_and_wave_columns() {
+        // 纯月时长文件：只有时长。分成比-直播音浪收益 = 35 绝不能被读成音浪
+        let rows = parse_month_metrics_text(MONTH_CSV);
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].name, "浩龙🎹");
         assert_eq!(rows[0].minutes, Some((75 * 60 + 29) as f64));
-        // 「分成比-直播音浪收益」= 35 绝不能被读成音浪
         assert_eq!(rows[0].wave, None);
         assert_eq!(rows[1].minutes, Some((120 * 60 + 45) as f64));
         assert_eq!(rows[0].douyin_no.as_deref(), Some("cyl765"));
         assert_eq!(rows[0].anchor_id.as_deref(), Some("2436948398193464"));
-        // 没有时长列的文件解析不出行：前端据此提示「换个文件 / 切回按日」
-        assert!(parse_month_duration_text("主播昵称,音浪\n浩龙,1000\n").is_empty());
+
+        // 概览列表：时长 + 音浪（总音浪）都读出来，秒丢掉
+        let rows = parse_month_metrics_text(OVERVIEW_CSV);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].wave, Some(5508.0));
+        assert_eq!(rows[0].minutes, Some(108.0));
+        assert_eq!(rows[1].wave, Some(3193.0));
+        assert_eq!(rows[1].minutes, Some(62.0));
+
+        // 只有音浪列的月度文件也认（月度音浪导入）
+        let rows = parse_month_metrics_text("主播昵称,音浪\n浩龙,1000\n");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].wave, Some(1000.0));
+        assert_eq!(rows[0].minutes, None);
+        // 时长 / 音浪两列都没有的文件解析不出行：前端据此提示「换个文件 / 切回按日」
+        assert!(parse_month_metrics_text("主播昵称,粉丝数\n浩龙,100\n").is_empty());
+    }
+
+    /// 月度指标勾选（wire 值 → 勾选状态）：空数组必须报错，不能静默当成都导。
+    #[test]
+    fn month_metrics_selection_parses_wire_values() {
+        assert_eq!(MonthMetrics::from_body(&None).unwrap(), MonthMetrics::BOTH);
+        assert!(
+            MonthMetrics::from_body(&Some(vec![])).is_err(),
+            "空 metrics 要报错，不能静默导两项"
+        );
+        let m = MonthMetrics::from_body(&Some(vec!["wave".into()])).unwrap();
+        assert!(m.wave && !m.minutes);
+        assert_eq!(m.label(), "音浪");
+        let m = MonthMetrics::from_body(&Some(vec!["minutes".into(), "wave".into()])).unwrap();
+        assert!(m.minutes && m.wave);
+        assert_eq!(m.label(), "时长+音浪");
+        assert!(
+            MonthMetrics::from_body(&Some(vec!["bogus".into()])).is_err(),
+            "不认识的指标要报错"
+        );
+    }
+
+    /// 按月导入的全员同值防御：拿错文件 / 勾错列（如分成比 35）要拒绝；全员 0 是合法数据要放行。
+    #[test]
+    fn month_import_rejects_all_same_values() {
+        let mk = |wave: Option<f64>, minutes: Option<f64>| {
+            resolved(
+                ImportRow {
+                    name: "测试".into(),
+                    wave,
+                    minutes,
+                    ..Default::default()
+                },
+                Some(7),
+                None,
+            )
+        };
+        // 3 人音浪同为 35（勾错列）→ 拒绝
+        let rows = vec![mk(Some(35.0), None), mk(Some(35.0), None), mk(Some(35.0), None)];
+        assert!(ensure_month_values_not_all_same(&rows, MonthMetrics::BOTH).is_err());
+        // 时长同为 4529（75小时29分钟41秒的月报）→ 也拒绝
+        let rows = vec![
+            mk(None, Some(4529.0)),
+            mk(None, Some(4529.0)),
+            mk(None, Some(4529.0)),
+        ];
+        assert!(ensure_month_values_not_all_same(&rows, MonthMetrics::BOTH).is_err());
+        // 值有差异 → 放行；不足 3 人 → 放行
+        let rows = vec![mk(Some(1.0), None), mk(Some(2.0), None), mk(Some(3.0), None)];
+        assert!(ensure_month_values_not_all_same(&rows, MonthMetrics::BOTH).is_ok());
+        assert!(ensure_month_values_not_all_same(&rows[..2], MonthMetrics::BOTH).is_ok());
+        // 全员 0（整月没开播）是合法数据 → 放行（写 0 正好把该月口径钉住）
+        let rows = vec![mk(Some(0.0), Some(0.0)), mk(Some(0.0), Some(0.0)), mk(Some(0.0), None)];
+        assert!(ensure_month_values_not_all_same(&rows, MonthMetrics::BOTH).is_ok());
+        // 没勾的指标不参与判定：只勾时长时，音浪全员同值不影响
+        let rows = vec![mk(Some(35.0), Some(1.0)), mk(Some(35.0), Some(2.0)), mk(Some(35.0), None)];
+        assert!(ensure_month_values_not_all_same(&rows, MonthMetrics::MINUTES_ONLY).is_ok());
     }
 
     /// 二进制护栏：xlsx 转文本漏判时，ZIP 流会被当成名字塞进暂存区，
@@ -4965,7 +5449,7 @@ mod tests {
         assert!(looks_like_binary(zip), "xlsx 二进制必须被识别");
         assert!(parse_any_text(zip).is_empty(), "二进制绝不能解析出待导入行");
         assert!(
-            parse_month_duration_text(zip).is_empty(),
+            parse_month_metrics_text(zip).is_empty(),
             "月度入口同样拒绝二进制"
         );
     }
@@ -5016,11 +5500,12 @@ mod tests {
 
     #[test]
     fn month_file_detection_requires_duration_without_wave() {
-        // 判据：有时长列、没有音浪列 → 月度时长文件（管理端预选「按月」+ 机器人附件分流共用）
-        let month_rows = parse_month_duration_text(MONTH_CSV);
+        // 判据：有时长列、没有音浪列 → 「只有时长的月度文件」（管理端预选「按月」+ 机器人分流共用）
+        let month_rows = parse_month_metrics_text(MONTH_CSV);
         let file_rows = parse_any_text(MONTH_CSV);
         assert!(is_month_duration_file(&month_rows, &file_rows));
-        // 文件里出现音浪数值 → 不是月度文件（按日文件带时长列也不切模式）
+        // 文件里出现音浪数值 → 不自动切模式（按日文件带时长列也一样；
+        // 概览列表这种「时长+总音浪」的文件同样按日，运营可手动切「按月导入」）
         let mut with_wave = file_rows.clone();
         with_wave.push(ImportRow {
             name: "浩龙".into(),
@@ -5028,13 +5513,18 @@ mod tests {
             ..Default::default()
         });
         assert!(!is_month_duration_file(&month_rows, &with_wave));
+        let overview = parse_month_metrics_text(OVERVIEW_CSV);
+        assert!(!is_month_duration_file(
+            &overview,
+            &parse_any_text(OVERVIEW_CSV)
+        ));
         // 没有时长列 → 不是
         assert!(!is_month_duration_file(&[], &file_rows));
     }
 
     #[test]
     fn month_suggest_switches_only_for_duration_only_files() {
-        let month_rows = parse_month_duration_text(MONTH_CSV);
+        let month_rows = parse_month_metrics_text(MONTH_CSV);
         // 同一份月度文件走「按日解析」：解析器不该从「分成比-直播音浪收益」里读出音浪
         let file_rows = parse_any_text(MONTH_CSV);
         assert!(file_rows.iter().all(|r| r.wave.is_none()));
@@ -5043,9 +5533,9 @@ mod tests {
             .to_string()
             .parse()
             .unwrap();
-        // 只有时长列 + 文件名带月份 → 按月，月份取自文件名
+        // 只有时长列 + 文件名带月份 → 按月，月份取自文件名（wire 值 2026-10-16 起是 "month"）
         let s = month_suggest("9月份时长.csv", &month_rows, &file_rows);
-        assert_eq!(s["kind"], "month-duration");
+        assert_eq!(s["kind"], "month");
         assert_eq!(s["month"], 9);
         assert_eq!(s["year"], now_year);
         assert_eq!(s["fromFilename"], true);

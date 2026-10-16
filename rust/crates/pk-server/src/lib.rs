@@ -3,6 +3,7 @@
 pub mod admin;
 pub mod admin_send;
 pub mod auth;
+pub mod avatar_sync;
 pub mod bot;
 pub mod config;
 pub mod csvparse;

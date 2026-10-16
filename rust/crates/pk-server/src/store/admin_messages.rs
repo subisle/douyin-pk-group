@@ -60,9 +60,7 @@ fn outbox_from_row(r: &sqlx::postgres::PgRow) -> OutboxRow {
             .try_get::<i64, _>("person_id")
             .map(|v| v.max(0) as u64)
             .unwrap_or(0),
-        recipient_name: r
-            .try_get::<String, _>("recipient_name")
-            .unwrap_or_default(),
+        recipient_name: r.try_get::<String, _>("recipient_name").unwrap_or_default(),
         channel: r.try_get::<String, _>("channel").unwrap_or_default(),
         status: r.try_get::<String, _>("status").unwrap_or_default(),
         error: r.try_get::<String, _>("error").unwrap_or_default(),

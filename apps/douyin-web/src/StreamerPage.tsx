@@ -3,6 +3,61 @@ import { api } from './api'
 import Pager, { usePager } from './Pager'
 import { useAutoRefresh } from './useAutoRefresh'
 
+/** 头像兜底色：一组柔和色，按 personId 取模挑选 —— 同一个人颜色永远一样，不同人尽量错开。 */
+const AVATAR_COLORS = [
+  '#5b8def', '#e58f5a', '#4caf8e', '#9a6fd0',
+  '#d96a93', '#5aa9c9', '#b8894a', '#6f9a52',
+]
+function avatarColor(personId: number): string {
+  return AVATAR_COLORS[Math.abs(personId) % AVATAR_COLORS.length]
+}
+
+/** 姓名首字圆形色块：没有本地留存头像（或头像加载失败）时的兜底，
+ *  保证「有图用抖音真实头像，无图回落首字色块、不得破图」（见 docs/08 展示端需求）。 */
+function NameBlock({ s }: { s: any }) {
+  const ch = String(s.name ?? '').trim().charAt(0) || '?'
+  return (
+    <span
+      className="avatar-block"
+      style={{ background: avatarColor(s.personId) }}
+      title="暂无抖音头像（本地未留存）"
+      aria-hidden
+    >
+      {ch}
+    </span>
+  )
+}
+
+/** 主播头像：hasAvatar=true（person_avatar 表有本地留存图）时请求同源头像端点；
+ *  avatarHash 作缓存破除（?v=hash），hash 为空但有图时不带 ?v=。
+ *  字段缺失（旧后端）等同无图。404/加载失败时记下失败 URL 落回首字色块 ——
+ *  存 URL 而不是布尔值，hash 变化（头像更新）后能自动再试，不用人为重置。 */
+function StreamerAvatar({ s }: { s: any }) {
+  const [failedSrc, setFailedSrc] = useState<string | null>(null)
+  const src = s.hasAvatar
+    ? `/api/public/avatars/${s.personId}${s.avatarHash ? `?v=${s.avatarHash}` : ''}`
+    : null
+  const showImg = !!src && src !== failedSrc
+  return (
+    <span className="avatar-cell">
+      {showImg && src ? (
+        <img
+          className="avatar-img"
+          src={src}
+          alt={String(s.name ?? '')}
+          title="抖音头像（本地留存）"
+          loading="lazy"
+          width={32}
+          height={32}
+          onError={() => setFailedSrc(src)}
+        />
+      ) : (
+        <NameBlock s={s} />
+      )}
+    </span>
+  )
+}
+
 /** 抖音号单元格：douyinNos 按 ' / ' 拆开竖排，第一个标「主号」；douyinCount 缺失时退化用号数判断。 */
 function renderDouyinCell(s: any) {
   const nos = String(s.douyinNos ?? '')
@@ -598,7 +653,7 @@ export default function StreamerPage() {
         return {
           title: `删除主播「${c.name}」（编号 #${c.personId}）`,
           body:
-            '软删：确认后 TA 从主播台账里消失（不再出现在名单里），已入库的历史数据' +
+            '软删：确认后 TA 从主播列表里消失（不再出现在名单里），已入库的历史数据' +
             '（音浪、账号、别名）保留在库里，不做物理删除。',
           label: `删除「${c.name}」`,
         }
@@ -607,7 +662,7 @@ export default function StreamerPage() {
           title: `批量删除 ${c.ids.length} 个主播`,
           body:
             `对象：${batchTargetText(c.names, c.ids.length)}。` +
-            '软删：确认后这些人从主播台账里消失，已入库的历史数据保留在库里，不做物理删除。',
+            '软删：确认后这些人从主播列表里消失，已入库的历史数据保留在库里，不做物理删除。',
           label: `删除这 ${c.ids.length} 个主播`,
         }
       case 'unbind':
@@ -625,7 +680,7 @@ export default function StreamerPage() {
           body:
             `对象：姓名「${c.name}」的「我的」页面登录账号。` +
             '确认后该账号立即失效（已经登录的会被踢下线），不能再用「姓名 + 密码」登录；' +
-            '主播台账与音浪数据不受影响。',
+            '主播列表与音浪数据不受影响。',
           label: `删除「${c.name}」的登录账号`,
         }
     }
@@ -716,7 +771,7 @@ export default function StreamerPage() {
           暂存落库、建档/绑号后的自动补账逻辑都不受影响，只是前端不再呈现。 */}
 
       <section className="card">
-        <h2>主播台账（{items.length} 人）</h2>
+        <h2>主播列表（{items.length} 人）</h2>
         <p className="hint">
           <b>右键点任意一行</b>：编辑资料（名字 / 团别 / 抖音号 / 手机号）、设置师傅、查看多抖音号、
           设置「我的」页面账号（手机号 / 密码）、合并他人、删除。一个主播可以挂多个抖音号（详情里绑定），
@@ -743,9 +798,19 @@ export default function StreamerPage() {
           </button>
           {dupes && (dupes.sameName?.length > 0 || dupes.sameDouyinNo?.length > 0) && (
             <span className="alert bad" style={{ flex: 1 }}>
-              ⚠️ 重复：同名 {dupes.sameName.length} 组 · 同抖音号 {dupes.sameDouyinNo.length} 组
-              （{dupes.sameName.map((d: any) => d.name).join('、')}
-              {dupes.sameDouyinNo.map((d: any) => d.douyinNo).join('、')}）
+              ⚠️ 疑似重复，请人工核对（没有重复时这条不会出现）：
+              {[
+                dupes.sameName?.length > 0 &&
+                  `同名 ${dupes.sameName.length} 组（${dupes.sameName
+                    .map((d: any) => d.name)
+                    .join('、')}）—— 可能是同一个人建了两份档案，核对后可合并`,
+                dupes.sameDouyinNo?.length > 0 &&
+                  `同抖音号 ${dupes.sameDouyinNo.length} 组（${dupes.sameDouyinNo
+                    .map((d: any) => `${d.douyinNo}＝${d.names || d.personIds}`)
+                    .join('；')}）—— 一个抖音号挂在两个不同主播名下，核对归属后把号改绑到正确的人`,
+              ]
+                .filter(Boolean)
+                .join('；')}
             </span>
           )}
         </div>
@@ -757,9 +822,9 @@ export default function StreamerPage() {
             <table style={{ minWidth: 1000 }}>
               <thead>
                 <tr>
-                  <th>姓名</th>
+                  <th title="姓名（前面显示抖音头像，本地留存；无图时显示姓名首字色块）">姓名</th>
                   <th title="一个主播可挂多个抖音号；第一个是主号（SQL 按 is_primary DESC 排序）">抖音号</th>
-                  <th title="主播手机号（展示端登录用）；已开号 = 已有登录账号">手机号</th>
+                  <th title="是否登记了手机号（展示端登录用）；具体号码在编辑资料里查看">手机号</th>
                   <th title="微信推送机器人：未绑定 / 已扫码待激活 / 已绑定（显示微信昵称）">微信机器人</th>
                   <th>师傅</th>
                   <th>状态</th>
@@ -779,6 +844,8 @@ export default function StreamerPage() {
                   }}
                 >
                   <td>
+                    {/* 头像只在列表行出现；右键菜单/详情弹窗等维持原样 */}
+                    <StreamerAvatar s={s} />
                     <span style={{ fontWeight: 600 }}>{s.name}</span>
                     <span
                       className={`badge ${s.team === 'female' ? 'b-female' : 'b-male'}`}
@@ -802,10 +869,14 @@ export default function StreamerPage() {
                     )}
                   </td>
                   {renderDouyinCell(s)}
+                  {/* 手机号只显示「有 / 没有」：号码本身是敏感信息，列表一眼扫状态即可，
+                  查看/修改走右键「编辑资料」；已开号徽标保留（它与手机号是两回事） */}
                   <td>
                     {s.phone ? (
                       <>
-                        {s.phone}
+                        <span className="badge b-active" title={s.hasAccount ? '已登记手机号，且已开展示端登录账号' : '已登记手机号'}>
+                          有
+                        </span>
                         {s.hasAccount && (
                           <span
                             className="badge b-active"
@@ -818,7 +889,7 @@ export default function StreamerPage() {
                       </>
                     ) : (
                       <span className="hint">
-                        未登记
+                        没有
                         {s.hasAccount && (
                           <span
                             className="badge b-paused"
@@ -875,7 +946,7 @@ export default function StreamerPage() {
                     </button>
                     <button
                       className="danger"
-                      title={`删除「${s.name}」（编号 #${s.personId}）：软删，台账不再显示，历史数据保留`}
+                      title={`删除「${s.name}」（编号 #${s.personId}）：软删，列表不再显示，历史数据保留`}
                       onClick={() => askRemove(s.personId, s.name)}
                     >
                       删除
@@ -1269,7 +1340,7 @@ export default function StreamerPage() {
             </h2>
             <p className="hint">
               一个人有两个 / 三个抖音号、被建档成多条记录时：在这里选出<b>多余的记录</b>，
-              它会并入「{mergePop.targetName}」，然后被软删（台账不再显示，数据保留在库里）。
+              它会并入「{mergePop.targetName}」，然后被软删（列表不再显示，数据保留在库里）。
             </p>
             {/* 合并后到底怎么算（2026-10-16 按后端 merge_person 的既有语义写，没有新增规则）：
                 账号改绑（同 anchor 去重）、同日指标求和并入（音浪/时长求和、累计取较大值）、

@@ -25,21 +25,25 @@ type CommitReport = {
   /** 已建档但当天一行数值都没有：跳过（不算失败，缺数据报告会跟踪） */
   skipped?: string[]
   missing: string[]
-  /** 月度时长：本次写入的分钟合计 */
+  /** 按月导入：本次写入的整月时长（分钟）合计 */
   minutesTotal?: number
+  /** 按月导入：本次写入的整月音浪合计 */
+  waveTotal?: number
   period?: string
   /** 按日导入时文件里的「时长」列被忽略的行数（时长只按月导入） */
   droppedMinutes?: number
 }
 
-/** 上传响应：按日走 rows；月度时长文件额外给一份只认时长列的 monthRows + 模式建议 */
+/** 上传响应：按日走 rows；月度文件额外给一份 monthRows（时长 / 音浪可能同时带）+ 模式建议 */
 type UploadResp = {
   filename: string
   total: number
   rows: Row[]
+  /** 按月导入用的行：一行可能同时有 minutes 与 wave，文件里有什么就是什么 */
   monthRows?: Row[]
   suggest?: {
-    kind: 'daily' | 'month-duration'
+    /** kind：daily = 按日音浪；month = 按月导入（2026-10-16 由 month-duration 更名，现可能含音浪） */
+    kind: 'daily' | 'month'
     year?: number | null
     month?: number | null
     fromFilename?: boolean
@@ -47,7 +51,11 @@ type UploadResp = {
   }
 }
 
-/** 月度时长预览（服务端匹配 + 与日明细对账） */
+/** 按月导入的两个指标（用户口径 2026-10-16：时长 / 音浪都支持按月导，一次提交可同时写） */
+type MonthMetrics = { minutes: boolean; wave: boolean }
+const NO_METRICS: MonthMetrics = { minutes: false, wave: false }
+
+/** 按月导入预览（服务端匹配 + 与日明细对账；时长 / 音浪都可能出现） */
 type MonthPreviewRow = {
   raw: Row
   personId?: number | null
@@ -63,23 +71,36 @@ type MonthPreview = {
   matched: number
   unmatched: number
   minutesTotal: number
+  waveTotal: number
+  /** 该月库里已有的整月值：rows / minutes 是时长，waveRows / wave 是音浪 */
   existingRows: number
   existingMinutes: number
+  existingWaveRows: number
+  existingWave: number
+  /** 该月日明细口径的合计（只用于日榜，月榜 / 月卡按月报算） */
   dailyMinutes: number
+  dailyWave: number
+  /** 文件里实际出现的指标：弹窗按它决定默认勾选与渲染哪些列 */
+  hasMinutes: boolean
+  hasWave: boolean
   diffs: { personId: number; name: string; imported: number; daily: number }[]
+  /** 音浪侧的同一份对账（月报 vs 日明细） */
+  waveDiffs: { personId: number; name: string; imported: number; daily: number }[]
   rows: MonthPreviewRow[]
 }
 
-/** 该月已导入的整月时长（选年月时实时查） */
+/** 该月已导入的整月数据（选年月时实时查；时长 / 音浪各自计数与合计） */
 type MonthStatus = {
   period: string
   rows: number
   minutes: number
+  waveRows: number
+  wave: number
   lastBatch?: { filename: string; at: string } | null
 }
 
 type DeleteDayReport = { ok: boolean; metrics: number; batches: number }
-type DeleteMonthReport = { ok: boolean; rows: number; batches: number }
+type DeleteMonthReport = { ok: boolean; rows: number; waveRows: number; batches: number }
 
 /** 导入页解析草稿（P1-12）：切页前写 sessionStorage，回页恢复。 */
 const IMPORT_DRAFT_KEY = '/admin:import-draft'
@@ -96,14 +117,21 @@ type ImportDraft = {
   monthRows: Row[]
   suggest: UploadResp['suggest'] | null
   report: CommitReport | null
+  /** 按月导入勾选的指标（时长 / 音浪），回页时接着上次的勾选 */
+  monthMetrics?: MonthMetrics
 }
 
-/** 分钟 → 「12小时34分」（运营看的是小时，不是分钟） */
+/** 分钟 → 「1时48分」（用户口径 2026-10-16：时长一律 x时x分、不要秒）
+ *  ≥60 分钟按小时显示，整点不显示 0 分（120 → 「2时」）；不足 1 小时显示「45分」。 */
 const hourText = (v: number) => {
-  const h = Math.floor(v / 60)
-  const m = Math.round(v % 60)
-  return h > 0 ? `${h}小时${m ? `${m}分` : ''}` : `${m}分`
+  const total = Math.round(v)
+  const h = Math.floor(total / 60)
+  const m = total % 60
+  return h > 0 ? `${h}时${m ? `${m}分` : ''}` : `${m}分`
 }
+
+/** 音浪数（导入页是核对场景）：千分位原值，不用「万」缩写 —— 差几千块看不出来 */
+const waveText = (v: number) => v.toLocaleString('zh-CN')
 
 /** 团别 → 中文（P2-1）：批次列表 / 删除确认等处统一走这里，不再直接渲染英文值。
  *  male→男团、female→女团、mixed 或 auto→自动·不分团；未知值原样返回兜底。 */
@@ -181,17 +209,26 @@ export default function ImportPage() {
   const [dayStatusError, setDayStatusError] = useState('')
   /** 入库后再查一次当日状态：否则「删除当前日期 / 团别数据」按钮还停在入库前的禁用态 */
   const [statusNonce, setStatusNonce] = useState(0)
-  /** 导入类型（2026-10-10）：daily = 音浪按日；month = 月度时长（平台月报整月值，时长只按月导） */
+  /** 导入类型（2026-10-16 用户口径）：daily = 音浪按日；month = 按月导入（整月时长 / 整月音浪，可同时导） */
   const [kind, setKind] = useState<'daily' | 'month'>(() => importDraft?.kind ?? 'daily')
-  /** 月度时长：业务年月 + 只认时长列的解析结果 */
+  /** 按月导入：业务年月 + 整月解析结果（每行可能同时带 minutes 与 wave） */
   const [year, setYear] = useState(() => importDraft?.year ?? new Date().getFullYear())
   const [monthNum, setMonthNum] = useState(() => importDraft?.monthNum ?? new Date().getMonth() + 1)
   const [monthRows, setMonthRows] = useState<Row[]>(() => importDraft?.monthRows ?? [])
-  /** 上传时的模式建议（文件名带月份 + 文件里只有时长列 → 建议按月） */
+  /** 按月导入要写哪几个指标：上传后按文件里实际有的列自动置位，弹窗里可改 */
+  const [monthMetrics, setMonthMetrics] = useState<MonthMetrics>(
+    // 老草稿（本次改动前写的）没有 monthMetrics 字段：按草稿里的行现推一次，别让勾选全空
+    () =>
+      importDraft?.monthMetrics ?? {
+        minutes: (importDraft?.monthRows ?? []).some((r) => r.minutes != null),
+        wave: (importDraft?.monthRows ?? []).some((r) => r.wave != null),
+      },
+  )
+  /** 上传时的模式建议（文件名带月份 + 文件里只有整月列 → 建议按月，时长 / 音浪都算） */
   const [suggest, setSuggest] = useState<UploadResp['suggest'] | null>(() => importDraft?.suggest ?? null)
-  /** 月度时长的服务端预览（匹配情况 + 与日明细对账） */
+  /** 月度时长 / 音浪的服务端预览（匹配情况 + 与日明细对账） */
   const [monthPreview, setMonthPreview] = useState<MonthPreview | null>(null)
-  /** 该月已导入的整月时长（决定「新增 / 覆盖」提示与删除按钮可用态） */
+  /** 该月已导入的整月数据（决定「新增 / 覆盖」提示与删除按钮可用态） */
   const [monthStatus, setMonthStatus] = useState<MonthStatus | null>(null)
   /** 月度状态查询失败（P2-5）：同 day-status，显示出来 + 可重试 */
   const [monthStatusError, setMonthStatusError] = useState('')
@@ -215,16 +252,23 @@ export default function ImportPage() {
       monthRows,
       suggest,
       report,
+      monthMetrics,
     }
     try {
       sessionStorage.setItem(IMPORT_DRAFT_KEY, JSON.stringify(draft))
     } catch {
       /* 隐私模式 / 容量超限：草稿存不下就算了，页面照常工作 */
     }
-  }, [kind, team, bizDate, mode, year, monthNum, dateFromFile, filename, rows, monthRows, suggest, report])
+  }, [kind, team, bizDate, mode, year, monthNum, dateFromFile, filename, rows, monthRows, suggest, report, monthMetrics])
 
-  /** 月度时长的业务月份 YYYY-MM */
+  /** 按月导入的业务月份 YYYY-MM */
   const period = `${year}-${String(monthNum).padStart(2, '0')}`
+  /** 文件里实际带了多少行时长 / 音浪（默认勾选与提示都看它；勾选框还能再改） */
+  const monthMinutesRows = monthRows.filter((r) => r.minutes != null).length
+  const monthWaveRows = monthRows.filter((r) => r.wave != null).length
+  /** 预览表格列：文件里有、或被勾选的指标列才渲染（只导时长就不显示音浪列） */
+  const showMinutes = monthMinutesRows > 0 || monthMetrics.minutes
+  const showWave = monthWaveRows > 0 || monthMetrics.wave
   /** 年份下拉：前后各留几年，运营补录去年 / 提前导下月都够用（按当前年生成，选完不会跳） */
   const yearOptions = Array.from({ length: 6 }, (_, i) => new Date().getFullYear() - 3 + i)
 
@@ -284,7 +328,7 @@ export default function ImportPage() {
     return () => window.removeEventListener('keydown', onKey)
   }, [previewOpen])
 
-  /** 月度时长：选了年月就查「该月已导入情况」+ 服务端匹配预览（弹窗里看匹配 / 未建档 / 差异）。
+  /** 按月导入：选了年月就查「该月已导入情况」+ 服务端匹配预览（弹窗里看匹配 / 未建档 / 差异）。
       文件几秒内连着换也可能，300ms 抖一下省请求。 */
   useEffect(() => {
     if (kind !== 'month') {
@@ -302,7 +346,7 @@ export default function ImportPage() {
       })
         .then(setMonthPreview)
         .catch((e) => {
-          console.error('月度时长预览失败', e)
+          console.error('按月导入预览失败', e)
           setMonthPreview(null)
           setError(String(e.message ?? e))
         })
@@ -310,7 +354,7 @@ export default function ImportPage() {
     return () => clearTimeout(t)
   }, [kind, monthRows, period, team, filename, statusNonce])
 
-  /** 该月已导入的整月时长（决定「新增 / 覆盖」提示与删除按钮可用态） */
+  /** 该月已导入的整月数据（决定「新增 / 覆盖」提示与删除按钮可用态） */
   useEffect(() => {
     if (kind !== 'month') {
       setMonthStatus(null)
@@ -355,9 +399,15 @@ export default function ImportPage() {
       setMonthRows(monthList)
       setFilename(d.filename)
       setSuggest(d.suggest ?? null)
-      // 月度时长文件（只有时长列、没有音浪列）直接预选「时长（按月）」，
+      // 按月指标默认勾选（用户口径 2026-10-16）：文件里有什么就勾什么 ——
+      // 只有时长就只勾时长，只有音浪就只勾音浪，两者都有就都勾（弹窗里可改）
+      setMonthMetrics({
+        minutes: monthList.some((r) => r.minutes != null),
+        wave: monthList.some((r) => r.wave != null),
+      })
+      // 月度文件（整月值、没有当日值）直接预选「按月导入」，
       // 年份 / 月份按文件名猜（「9月份时长.csv」→ 当年 9 月），弹窗里还能改
-      if (d.suggest?.kind === 'month-duration') {
+      if (d.suggest?.kind === 'month') {
         setKind('month')
         if (d.suggest.year) setYear(d.suggest.year)
         if (d.suggest.month) setMonthNum(d.suggest.month)
@@ -375,11 +425,16 @@ export default function ImportPage() {
     setBusy(true)
     reset()
     try {
+      // 按月：metrics 是勾选指标的子集（时长 / 音浪可同时写），两个都没勾时按钮已禁用
+      const metrics = [
+        ...(monthMetrics.minutes ? ['minutes'] : []),
+        ...(monthMetrics.wave ? ['wave'] : []),
+      ]
       const d =
         kind === 'month'
           ? await api<CommitReport>('/api/admin/import/month/commit', {
               method: 'POST',
-              body: JSON.stringify({ rows: monthRows, period, team, mode, filename }),
+              body: JSON.stringify({ rows: monthRows, period, team, mode, filename, metrics }),
             })
           : await api<CommitReport>('/api/admin/import/commit', {
               method: 'POST',
@@ -397,10 +452,14 @@ export default function ImportPage() {
   }
 
   async function deleteDay() {
-    // 月度时长：删的是「某月已导入的整月值」，与按日删某天分开
+    // 按月：删的是「某月已导入的整月时长与整月音浪」，与按日删某天分开
     if (kind === 'month') {
       const label = `${period} ${teamLabel(team)}`
-      if (!confirm(`确认删除 ${label} 已导入的月度时长？对应导入批次也会删除，操作不可恢复。`))
+      if (
+        !confirm(
+          `确认删除 ${label} 已导入的整月时长与整月音浪？对应导入批次也会删除，操作不可恢复。`,
+        )
+      )
         return
       setBusy(true)
       reset()
@@ -411,7 +470,9 @@ export default function ImportPage() {
         )
         setStatusNonce((n) => n + 1)
         loadBatches()
-        setNotice(`已删除 ${d.rows} 条月度时长、${d.batches} 个导入批次。`)
+        setNotice(
+          `已删除 ${d.rows} 条整月时长、${d.waveRows} 条整月音浪、${d.batches} 个导入批次。`,
+        )
       } catch (e: any) {
         setError(e.message ?? String(e))
       } finally {
@@ -452,6 +513,8 @@ export default function ImportPage() {
     setFilename('')
     setSuggest(null)
     setDateFromFile(false)
+    // 指标勾选跟着这次解析结果一起丢：下次上传按新文件的列重新自动置位
+    setMonthMetrics(NO_METRICS)
   }
 
   /* 投放区：拖进来（dragenter/over 高亮，drop 解析）或点一下选文件。
@@ -482,13 +545,17 @@ export default function ImportPage() {
 
   const canCommit =
     kind === 'month'
-      ? monthRows.length > 0 && !!team && !busy
+      ? // 按月：至少要勾一个指标 —— metrics 传空数组后端会直接报错
+        monthRows.length > 0 && !!team && !busy && (monthMetrics.minutes || monthMetrics.wave)
       : rows.length > 0 && !!team && !!bizDate && !busy
   /** 删除按钮可用态（P2-5）：状态查询失败时不再永久灰 —— 失败也能按（后端会按真实
    *  数据口径返回删除报告），页面上同时给出「状态获取失败 + 重试」提示。 */
   const canDelete =
     kind === 'month'
-      ? !busy && (!!monthStatusError || (monthStatus?.rows ?? 0) > 0)
+      ? !busy &&
+        (!!monthStatusError ||
+          (monthStatus?.rows ?? 0) > 0 ||
+          (monthStatus?.waveRows ?? 0) > 0)
       : !!bizDate && !!team && !busy && (!!dayStatusError || (dayStatus.checked && (dayStatus.rows ?? 0) > 0))
 
   const errorBox = error ? <div className="alert bad">{error}</div> : null
@@ -603,8 +670,10 @@ export default function ImportPage() {
           <b>音浪按日导</b>：列序不严格，名字必填，数字按「当日音浪 → 累计音浪」依次识别，开播 / 未开播自动识别；
           <b>默认归属前一天（数据晚一天）；文件名带日期（如 2026-10-07-男团.csv）会自动填好。</b>
           <br />
-          <b>时长按月导</b>：拖入月度时长文件（如 <code>9月份时长.csv</code>）会自动切到「时长（按月）」，
+          <b>按月导入</b>：拖入月度文件（如 <code>9月份时长.csv</code>）会自动切到「按月导入」，
           选好年份 + 月份后入库；整月时长是月榜 / 个人月卡在用的时长，值相同的记录不会被覆盖。
+          <b>时长和音浪都支持按月导入</b>：文件里有什么列就默认勾什么（只有时长就只勾时长，
+          两者都有就都勾，弹窗里可改），一次提交可把整月时长与整月音浪一起写进去。
           解析结果先在弹窗里逐行核对，确认才入库。
         </p>
 
@@ -615,14 +684,14 @@ export default function ImportPage() {
         <div className="row">
           <button className="danger" disabled={!canDelete} onClick={deleteDay}>
             {kind === 'month'
-              ? `删除 ${period} 月度时长${team === 'auto' ? '（不限团别）' : ''}`
+              ? `删除 ${period} 整月时长 / 音浪${team === 'auto' ? '（不限团别）' : ''}`
               : team === 'auto'
                 ? '删除当前日期数据（不限团别）'
                 : '删除当前日期 / 团别数据'}
           </button>
           <span className="hint">
             {kind === 'month'
-              ? `删除 ${period} 已导入的整月时长（月榜 / 个人月卡立刻回落成日明细口径）；没有解析中的文件也可以操作。`
+              ? `删除 ${period} 已导入的整月时长与整月音浪（月榜 / 个人月卡立刻回落成日明细口径）；没有解析中的文件也可以操作。`
               : team === 'auto'
                 ? '删除该业务日期的全部音浪数据（男女团一起）；没有解析中的文件也可以操作。'
                 : '按上方业务日期和团别删除已入库的音浪数据；没有解析中的文件也可以操作。'}
@@ -633,19 +702,21 @@ export default function ImportPage() {
             导入完成：成功 {report.okRows} 行，失败 {report.failedRows} 行（批次 #{report.batchId}）
             {!!report.period && (
               <div>
-                ⏱️ 月度时长口径 {report.period}，本次写入时长合计{' '}
-                <b>{hourText(report.minutesTotal ?? 0)}</b>（月榜 / 个人月卡以它为准）
+                ⏱️ 按月导入口径 {report.period}，本次写入：时长合计{' '}
+                <b>{hourText(report.minutesTotal ?? 0)}</b>
+                {report.waveTotal == null ? '' : <>、音浪合计 <b>{waveText(report.waveTotal)}</b></>}
+                （月榜 / 个人月卡以它为准）
               </div>
             )}
             {!!report.droppedMinutes && (
               <div>
-                ⏱️ 文件里有 {report.droppedMinutes} 行的「时长」列已忽略：<b>每日不导时长，只有月时长</b>
-                —— 要导时长请用「时长（按月）」。
+                ⏱️ 文件里有 {report.droppedMinutes} 行的「时长」列已忽略：<b>按日导入不写时长，时长只按月导</b>
+                —— 要导时长请切到「按月导入（时长 / 音浪）」。
               </div>
             )}
             {!!report.unchanged && (
               <div>
-                ♻️ 另有 {report.unchanged} 行{report.period ? '月度时长' : '音浪值'}与库里完全相同，未覆盖（改过的值才会覆盖）
+                ♻️ 另有 {report.unchanged} 行{report.period ? '整月值（时长 / 音浪）' : '音浪值'}与库里完全相同，未覆盖（改过的值才会覆盖）
               </div>
             )}
             {/* 导入结果里的「另有 N 行已暂存」一行已移除（2026-10-14 用户口径：
@@ -654,7 +725,7 @@ export default function ImportPage() {
             {!!report.skipped?.length && (
               <div>
                 ⏭️ 跳过 {report.skipped.length} 行
-                {report.period ? '（文件里没有时长）' : '（主播已建档但当天没有数值）'}：
+                {report.period ? '（文件里这一行没有勾选的指标值）' : '（主播已建档但当天没有数值）'}：
                 {report.skipped.slice(0, 8).join('、')}
                 {report.skipped.length > 8 ? ` 等 ${report.skipped.length} 行` : ''}
               </div>
@@ -664,7 +735,7 @@ export default function ImportPage() {
                 · {f.name}：{f.reason}
               </div>
             ))}
-            {/* 「当日缺数据」只对按日导入有意义；月度时长没有「某一天」的概念 */}
+            {/* 「当日缺数据」只对按日导入有意义；按月导入没有「某一天」的概念 */}
             {!report.period &&
               (report.missing.length === 0 ? (
                 <div>✅ 该团当天数据已齐</div>
@@ -707,7 +778,7 @@ export default function ImportPage() {
                   <td className="num">{b.id}</td>
                   <td className="nowrap">
                     {b.source === 'admin-import-month'
-                      ? `${String(b.bizDate ?? '').slice(0, 7)} · 月度时长`
+                      ? `${String(b.bizDate ?? '').slice(0, 7)} · 按月导入`
                       : (b.bizDate ?? '—')}
                   </td>
                   <td className="nowrap">{b.team ? teamLabel(b.team) : '—'}</td>
@@ -738,13 +809,13 @@ export default function ImportPage() {
               <span className="hint">
                 {filename} ·{' '}
                 {kind === 'month'
-                  ? `解析到 ${monthRows.length} 人整月时长`
+                  ? `解析到 ${monthRows.length} 人整月数据`
                   : `解析到 ${rows.length} 行`}
                 ，核对无误再入库
               </span>
             </div>
 
-            {/* 导入类型：音浪按日 / 时长按月（用户口径 2026-10-10：每日不能导入时长，只有月时长） */}
+            {/* 导入类型：音浪按日 / 按月导入（用户口径 2026-10-16：时长与音浪都支持按月导入） */}
             <div className="row row-top">
               <div className="field">
                 <span className="field-head">导入类型</span>
@@ -761,17 +832,25 @@ export default function ImportPage() {
                     disabled={busy}
                     onClick={() => setKind('month')}
                   >
-                    时长（按月）
+                    按月导入（时长 / 音浪）
                   </button>
                 </span>
               </div>
-              {suggest?.kind === 'month-duration' && kind === 'daily' && (
+              {suggest?.kind === 'month' && kind === 'daily' && (
                 <span className="hint">
-                  ⚠️ 这个文件只有「时长」列（没有音浪列），建议切到「时长（按月）」
+                  ⚠️ 这个文件是整月数据（
+                  {monthMinutesRows && monthWaveRows
+                    ? '有整月时长和整月音浪列'
+                    : monthWaveRows
+                      ? '只有整月音浪列'
+                      : '只有整月时长列'}
+                  ），建议切到「按月导入（时长 / 音浪）」
                 </span>
               )}
               {kind === 'month' && !monthRows.length && (
-                <span className="hint">⚠️ 这个文件里没解析到时长列，换个文件或切回「音浪（按日）」</span>
+                <span className="hint">
+                  ⚠️ 这个文件里没解析到整月数据列（时长 / 音浪），换个文件或切回「音浪（按日）」
+                </span>
               )}
             </div>
 
@@ -835,6 +914,37 @@ export default function ImportPage() {
                   <option value="reject">{kind === 'month' ? '该月已有则拒绝' : '当日已有则拒绝'}</option>
                 </select>
               </label>
+              {kind === 'month' && (
+                <div className="field">
+                  <span className="field-head">导入指标</span>
+                  <span className="field-ctl">
+                    <label>
+                      <input
+                        type="checkbox"
+                        disabled={busy}
+                        checked={monthMetrics.minutes}
+                        onChange={(e) =>
+                          setMonthMetrics((m) => ({ ...m, minutes: e.target.checked }))
+                        }
+                      />{' '}
+                      整月时长
+                    </label>
+                    <label>
+                      <input
+                        type="checkbox"
+                        disabled={busy}
+                        checked={monthMetrics.wave}
+                        onChange={(e) => setMonthMetrics((m) => ({ ...m, wave: e.target.checked }))}
+                      />{' '}
+                      整月音浪
+                    </label>
+                  </span>
+                  <span className="field-hint">
+                    文件里有 {monthMinutesRows} 行时长 / {monthWaveRows} 行音浪（按文件自动勾选，可改）；
+                    两个都不勾就没法导入
+                  </span>
+                </div>
+              )}
             </div>
 
             {kind === 'daily' && dayHint && <div className="row">{dayHint}</div>}
@@ -846,21 +956,44 @@ export default function ImportPage() {
                   📅 {monthPreview.period}：匹配 <b>{monthPreview.matched}</b> / {monthPreview.total} 人
                   {monthPreview.unmatched > 0 && (
                     <>
-                      ，未建档 <b>{monthPreview.unmatched}</b> 人（提交时会报失败：月度时长不进暂存区，
+                      ，未建档 <b>{monthPreview.unmatched}</b> 人（提交时会报失败：整月数据不进暂存区，
                       先在「主播台账」建档再重导）
                     </>
                   )}
-                  ；整月时长合计 <b>{hourText(monthPreview.minutesTotal)}</b>
+                  {showMinutes && (
+                    <>
+                      ；整月时长合计 <b>{hourText(monthPreview.minutesTotal)}</b>
+                    </>
+                  )}
+                  {showWave && (
+                    <>
+                      ；整月音浪合计 <b>{waveText(monthPreview.waveTotal ?? 0)}</b>
+                    </>
+                  )}
                 </span>
               </div>
             )}
 
             {kind === 'month' && monthStatus && (
               <div className="row">
-                {monthStatus.rows > 0 ? (
+                {monthStatus.rows > 0 || monthStatus.waveRows > 0 ? (
                   <span className="alert warn">
-                    ⚠️ {monthStatus.period} 已有 <b>{monthStatus.rows}</b> 人的整月时长（合计{' '}
-                    {hourText(monthStatus.minutes)}）
+                    ⚠️ {monthStatus.period} 已导入：
+                    {monthStatus.rows > 0 ? (
+                      <>
+                        整月时长 <b>{monthStatus.rows}</b> 人（合计 {hourText(monthStatus.minutes)}）
+                      </>
+                    ) : (
+                      <>整月时长<b>还没有</b></>
+                    )}
+                    ；
+                    {monthStatus.waveRows > 0 ? (
+                      <>
+                        整月音浪 <b>{monthStatus.waveRows}</b> 人（合计 {waveText(monthStatus.wave ?? 0)}）
+                      </>
+                    ) : (
+                      <>整月音浪<b>还没有</b></>
+                    )}
                     {monthStatus.lastBatch
                       ? `（上次导入：${monthStatus.lastBatch.at} ${monthStatus.lastBatch.filename}）`
                       : ''}
@@ -868,7 +1001,7 @@ export default function ImportPage() {
                   </span>
                 ) : (
                   <span className="alert good">
-                    📭 {monthStatus.period} 还没有月度时长，这次导入是<b>新增</b>
+                    📭 {monthStatus.period} 还没有整月时长与整月音浪，这次导入是<b>新增</b>
                   </span>
                 )}
               </div>
@@ -888,6 +1021,21 @@ export default function ImportPage() {
               </div>
             )}
 
+            {/* waveDiffs 用可选链：旧后端（未升级）不返回该字段时页面不能炸 */}
+            {kind === 'month' && !!monthPreview?.waveDiffs?.length && (
+              <div className="row">
+                <span className="alert warn">
+                  ⚖️ {monthPreview.waveDiffs.length} 人该月既有日明细音浪又与月报不一致（
+                  {monthPreview.waveDiffs
+                    .slice(0, 5)
+                    .map((x) => `${x.name} 月报 ${waveText(x.imported)} / 日明细 ${waveText(x.daily)}`)
+                    .join('、')}
+                  {monthPreview.waveDiffs.length > 5 ? ' 等' : ''}
+                  ）：月榜按<b>月报</b>算，日明细只用于日榜
+                </span>
+              </div>
+            )}
+
             <div className="pop-table">
               {kind === 'month' ? (
                 <table>
@@ -895,8 +1043,9 @@ export default function ImportPage() {
                     <tr>
                       <th>#</th>
                       <th>名字</th>
-                      <th>整月时长</th>
-                      <th>分钟</th>
+                      {/* 指标列只渲染「文件里有」或「已勾选」的：只导时长就不显示音浪列 */}
+                      {showMinutes && <th>整月时长(x时x分)</th>}
+                      {showWave && <th>整月音浪</th>}
                       <th>匹配</th>
                       <th>抖音号</th>
                     </tr>
@@ -906,10 +1055,16 @@ export default function ImportPage() {
                       <tr key={i}>
                         <td className="hint">{i + 1}</td>
                         <td>{r.name}</td>
-                        <td className="num">
-                          {r.raw.minutes == null ? '—' : hourText(r.raw.minutes)}
-                        </td>
-                        <td className="num">{r.raw.minutes ?? '—'}</td>
+                        {showMinutes && (
+                          <td className="num">
+                            {r.raw.minutes == null ? '—' : hourText(r.raw.minutes)}
+                          </td>
+                        )}
+                        {showWave && (
+                          <td className="num">
+                            {r.raw.wave == null ? '—' : waveText(r.raw.wave)}
+                          </td>
+                        )}
                         <td>
                           {r.teamConflict
                             ? '⚠️ 团别冲突'
@@ -957,7 +1112,7 @@ export default function ImportPage() {
             <div className="pop-foot">
               <span className="hint">
                 {kind === 'month'
-                  ? '入库后不可撤销；导错可先「删除该月月度时长」再重导。'
+                  ? '入库后不可撤销；导错可先「删除该月整月时长 / 音浪」再重导。'
                   : '入库后不可撤销；同一天导错可先「删除当前日期 / 团别数据」再重导。'}
               </span>
               <button disabled={busy} onClick={closePreview}>
@@ -967,7 +1122,13 @@ export default function ImportPage() {
                 {busy
                   ? '导入中…'
                   : kind === 'month'
-                    ? `确认导入 ${period} 整月时长（${monthRows.length} 人）`
+                    ? `确认导入 ${period} 整月${
+                        monthMetrics.minutes && monthMetrics.wave
+                          ? '时长 + 音浪'
+                          : monthMetrics.wave
+                            ? '音浪'
+                            : '时长'
+                      }（${monthRows.length} 人）`
                     : `确认导入 ${rows.length} 行`}
               </button>
             </div>

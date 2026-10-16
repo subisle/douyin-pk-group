@@ -100,6 +100,8 @@ pub async fn verify(
 
     /* 2. 台账里按姓名找本团的人。找不到 = 管理员加了账号但台账还没有这个人
     （或名字打错了），同样返回统一失败。绑定用 bind，姓名是用户输入不能拼 SQL。 */
+    /* 可看团别（迁移 024）：与 my_login 同一套口径，Inherit 时行为一字不变。 */
+    let view_team = crate::store::my_account_view_team(&st, &account_name).await;
     let sql = "SELECT p.id, p.name, p.gender FROM person p \
          WHERE p.deleted_at IS NULL AND p.name = ? \
          ORDER BY CASE WHEN p.status = 'left' THEN 1 ELSE 0 END, p.id \
@@ -113,13 +115,15 @@ pub async fn verify(
                 .try_get::<i64, _>("id")
                 .map(|v| v.max(0) as u64)
                 .unwrap_or(0);
-            let token_team = row.try_get::<String, _>("gender").unwrap_or_default();
+            let person_team = row.try_get::<String, _>("gender").unwrap_or_default();
+            let token_team = view_team.token_team(&person_team);
             let token = my_token_put(pid, token_team.clone(), account_name.clone());
             Ok(Json(json!({
                 "ok": true, "personId": pid, "name": account_name, "token": token, "bound": true,
                 // 登录一次就切对团：前端 applyLoginState 按这个字段设 TEAM，避免登录后
                 // 还用默认团拉数据 → 401 → 二次弹登录门
-                "team": token_team
+                "team": token_team,
+                "switchable": view_team.switchable(),
             })))
         }
         None => {
@@ -128,10 +132,12 @@ pub async fn verify(
             if !crate::store::my_account_is_admin(&st, &account_name).await {
                 return Ok(Json(json!({ "ok": false })));
             }
-            let token = my_token_put(0, team, account_name.clone());
+            let token_team = view_team.token_team(&team);
+            let token = my_token_put(0, token_team.clone(), account_name.clone());
             Ok(Json(json!({
-                "ok": true, "personId": 0, "name": account_name, "token": token,
-                "admin": true, "bound": true
+                "ok": true, "personId": 0, "name": account_name, "token": token, "team": token_team,
+                "admin": true, "bound": true,
+                "switchable": view_team.switchable(),
             })))
         }
     }
@@ -300,6 +306,10 @@ pub async fn my_login(
     // 账号密码正确 → 清零失败计数（与 /api/auth/login 同口径：成功即解锁）
     st.auth.login_record_success(&login_key);
     /* 1.5 账号没绑主播：两个团都放行，token 挂 MY_ANY_KEY（登录后强制绑定） */
+    /* 可看团别（迁移 024）：一次性取出来给下面三个分支共用。
+       Inherit 时完全沿用旧逻辑（token_team 原样返回 base），分权只在显式配了的
+       账号上生效 —— 存量 50 多个账号的行为一个字节都不能变。 */
+    let view_team = crate::store::my_account_view_team(&st, &account_name).await;
     if let Some(info) = crate::store::my_account_info(&st, &account_name).await {
         if !info.bound && !info.is_admin {
             crate::ipinfo::log_login_path(
@@ -352,10 +362,15 @@ pub async fn my_login(
                 true,
             )
             .await;
-            let token = my_token_put(pid, team.clone(), name.clone());
+            /* view_team 优先级高于绑定关系：钉死女团的账号即使绑着男团主播也只给女团
+               （Inherit 时 token_team 原样返回 team，行为与改动前一致）。 */
+            let token_team = view_team.token_team(&team);
+            let token = my_token_put(pid, token_team.clone(), name.clone());
             Ok(Json(json!({
-                "ok": true, "personId": pid, "name": name, "team": team,
-                "token": token, "bound": true
+                "ok": true, "personId": pid, "name": name, "team": token_team,
+                "token": token, "bound": true,
+                // 前端据此渲染「全团 / 男团 / 女团」切换器（只有全团账号 true）
+                "switchable": view_team.switchable(),
             })))
         }
         None => {
@@ -373,10 +388,16 @@ pub async fn my_login(
                 true,
             )
             .await;
-            let token = my_token_put(0, String::new(), account_name.clone());
+            /* 观看账号没有绑定主播，base 是空串（旧口径 = 任意团）：
+               - Any     → 空串（两团放行 + 可切）
+               - Female  → "female"（饭团：只看女团）
+               - Inherit → 空串（旧行为不变） */
+            let token_team = view_team.token_team("");
+            let token = my_token_put(0, token_team.clone(), account_name.clone());
             Ok(Json(json!({
-                "ok": true, "personId": 0, "name": account_name,
-                "token": token, "admin": true, "bound": true
+                "ok": true, "personId": 0, "name": account_name, "team": token_team,
+                "token": token, "admin": true, "bound": true,
+                "switchable": view_team.switchable(),
             })))
         }
     }
@@ -449,14 +470,15 @@ pub async fn my_password_set(
     crate::store::my_account_reset_password_self(&st, &account_name, new_pass)
         .await
         .map_err(|e| {
-            /* 与 my_password_reset 同口径：业务拒绝（密码格式 / 不支持自助改密）
-            → 400 原样下发；库层故障 → 500 走通用文案，不把 sqlx/PG 的表名、SQL 片段
-            回传客户端（审计 2026-10-11 / 2026-10-14 P2 的口径）。 */
-            if e.starts_with("查账号失败") || e.starts_with("写入失败") {
+            /* 2026-10-16 起 store 层用 BIZ:: 前缀分流（store::my_account::BIZ_PREFIX）：
+            业务拒绝（密码格式 / 不支持自助改密 / 当前密码不对）→ 400 原样下发；
+            库层故障（「查账号失败」「写入失败」打头，sqlx/PG 原文）→ 500 走通用文案，
+            不把表名、SQL 片段回传客户端（审计 2026-10-11 / 2026-10-14 P2 的口径）。 */
+            if crate::store::my_account::is_biz(&e) {
+                ApiError::bad_request(crate::store::my_account::biz_msg(&e).to_string())
+            } else {
                 tracing::error!(error = %e, "展示端自助改密写入失败");
                 ApiError::from(anyhow::anyhow!(e))
-            } else {
-                ApiError::bad_request(e)
             }
         })?;
     // 改密成功 → 该账号旧 token 全部吊销，再给当前用户换发同身份的新 token
@@ -504,13 +526,14 @@ pub async fn my_password_reset(
     let (password, names) = crate::store::my_account_reset_password_random(&st, phone)
         .await
         .map_err(|e| {
-            /* 与注册同口径：业务拒绝 400，库层故障 500（审计 2026-10-11） */
-            if e.starts_with("查询账号失败") || e.starts_with("重置失败") {
-                // 底层库故障（500 走通用文案）；原文细节留日志
+            /* 2026-10-16 起与自助改密同口径：按 store 层 BIZ:: 前缀分流 ——
+            业务拒绝（「请输入手机号」「该手机号未绑定账号」）→ 400 原样下发；
+            库层故障（sqlx/PG 原文）→ 500 走通用文案，原文细节留日志（审计 2026-10-11）。 */
+            if crate::store::my_account::is_biz(&e) {
+                ApiError::bad_request(crate::store::my_account::biz_msg(&e).to_string())
+            } else {
                 tracing::error!(error = %e, "重置展示端账号密码失败");
                 ApiError::from(anyhow::anyhow!(e))
-            } else {
-                ApiError::bad_request(e)
             }
         })?;
     // 改密后旧登录态必须立刻失效（审计 2026-10-12：内存 token 原本无撤销手段）
@@ -525,120 +548,11 @@ pub async fn my_password_reset(
     Ok(Json(json!({ "ok": true, "password": password })))
 }
 
-#[derive(Deserialize)]
-pub struct BindSearchQuery {
-    pub q: Option<String>,
-}
-
-/// GET /api/public/my/bind/search?q=（token 走 X-My-Token 头）：绑定页搜主播
-/// （全台账，注册账号还没有团别）。
-/// 2026-10-12 审计：**不再下发 personId**（模糊搜全台账 + 内部 id = 冒领绑定的弹药）；
-/// 绑定改审核制后按姓名提交，前端其实不再需要这个 id（可考虑停用本接口改用 check-name）。
-pub async fn my_bind_search(
-    State(st): State<ArcState>,
-    Query(q): Query<BindSearchQuery>,
-    headers: HeaderMap,
-) -> ApiResult {
-    let Some(token) = header_my_token(&headers) else {
-        return Err(ApiError::auth("登录已过期，请重新登录"));
-    };
-    if my_token_take(&token).is_none() {
-        return Err(ApiError::auth("登录已过期，请重新登录"));
-    }
-    let items = crate::store::all_anchor_search(&st, &sid(&st), q.q.as_deref().unwrap_or(""), 20)
-        .await
-        .into_iter()
-        .map(|mut a| {
-            if let Some(o) = a.as_object_mut() {
-                o.remove("personId");
-            }
-            a
-        })
-        .collect::<Vec<_>>();
-    Ok(Json(json!({ "items": items })))
-}
-
-/// POST /api/public/my/bind {token, name}：提交主播绑定申请（**2026-10-12 起改管理员审核**）。
-///
-/// 旧口径「自报 personId 直接绑」被废（安全审计：check-name / bind/search 都泄露过
-/// personId，任何人拿别人的 id 就能冒领身份）。现在只收姓名，服务端精确查台账
-/// （排除已软删/已离团）后落 my_bind_requests(pending)，管理员审核通过才真正绑定。
-/// 兼容期：老前端传的 personId 一律忽略，只按 name 处理；name 缺失 → 400。
-///
-/// 响应：{ok:true, status:"pending", already?, personName, team}；
-/// 已有 pending → already:true（幂等）；账号已绑定 / 主播已被他人绑定 → 409。
-/// 返回 Response 而不是 ApiResult：409 需要带 code 字段（ApiError 错误体只有 {error}）。
-pub async fn my_bind(State(st): State<ArcState>, axum::Json(body): axum::Json<Value>) -> Response {
-    let token = body
-        .get("token")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
-    let Some((_, _, token_name)) = my_token_take(token.trim()) else {
-        return ApiError::auth("登录已过期，请重新登录").into_response();
-    };
-    let name = body
-        .get("name")
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .unwrap_or_default();
-    if name.is_empty() {
-        return ApiError::bad_request("请选择要绑定的主播").into_response();
-    }
-    let Some(info) = crate::store::my_account_info(&st, &token_name).await else {
-        return ApiError::auth("账号不存在，请重新登录").into_response();
-    };
-    if info.bound || info.is_admin {
-        return (
-            axum::http::StatusCode::CONFLICT,
-            Json(json!({
-                "error": "该账号已绑定主播，不能自行更改（需要改绑请联系管理员）",
-                "code": "already_bound",
-            })),
-        )
-            .into_response();
-    }
-    // 服务端按姓名精确查台账；内部 personId 不出服务端（不随响应下发）
-    let (person_id, person_name, team) = match crate::store::anchor_lookup_by_name(&st, name).await
-    {
-        Ok(Some(v)) => v,
-        Ok(None) => {
-            return ApiError::bad_request(format!("主播库里没有「{name}」这个姓名，请核对艺名"))
-                .into_response()
-        }
-        Err(e) => return ApiError::bad_request(e).into_response(),
-    };
-    if crate::store::my_account_bound_for_person(&st, person_id, &person_name).await {
-        return (
-            axum::http::StatusCode::CONFLICT,
-            Json(json!({
-                "error": "该主播已存在绑定的账号，如有疑问请联系管理员",
-                "code": "person_bound",
-            })),
-        )
-            .into_response();
-    }
-    match crate::store::my_bind_request_submit(&st, &token_name, person_id, &person_name, &team)
-        .await
-    {
-        Ok(already) => {
-            if !already {
-                tracing::info!(account = %token_name, anchor = %person_name, "展示端绑定申请已提交（待审核）");
-                crate::events::emit(
-                    crate::events::SCOPE_ROSTER,
-                    format!(
-                        "绑定申请：账号「{token_name}」申请绑定主播「{person_name}」（待审核）"
-                    ),
-                );
-            }
-            Json(json!({
-                "ok": true, "status": "pending", "already": already,
-                "personName": person_name, "team": team,
-            }))
-            .into_response()
-        }
-        Err(e) => ApiError::bad_request(e).into_response(),
-    }
-}
+/* 2026-10-16：`my_bind_search`（GET /api/public/my/bind/search）与 `my_bind`
+   （POST /api/public/my/bind）随「抖音号审计」整页下线一并删除 —— 用户口径已改为
+   「账号 → 主播的绑定只由管理员在后台做」，展示端在 2026-10-14 就停止调用这两个接口
+   （st_page.html 只剩一张「联系管理员」提示卡），留着就是可被脚本调用的死接口。
+   `my_bind_requests` 表与迁移保留不删，历史申请记录仍在库里。 */
 
 /* 2026-10-14 注册功能移除：`normalize_team`（注册页团别白名单）随注册一起删除 ——
    它已无任何生产调用点，仅剩 pages.rs 的 register_route_tests 在断言，那个测试模块

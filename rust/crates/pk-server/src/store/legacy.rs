@@ -11,14 +11,13 @@ pub async fn carry_legacy_sqlite(pool: &PgPool, sqlite_path: &str) -> Result<()>
     use sqlx::Row;
 
     // 1. 已搬过 → 跳过
-    let carried =
-        sqlx::query(&crate::pq::rewrite(
-            "SELECT cfg_value FROM config WHERE cfg_key = 'sqlite_carried'",
-        ))
-        .fetch_optional(pool)
-        .await
-        .ok()
-        .flatten();
+    let carried = sqlx::query(&crate::pq::rewrite(
+        "SELECT cfg_value FROM config WHERE cfg_key = 'sqlite_carried'",
+    ))
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
     if let Some(r) = carried {
         if r.try_get::<String, _>(0).map(|v| v == "1").unwrap_or(false) {
             tracing::info!("旧 SQLite 数据已搬家过，跳过（config.sqlite_carried=1）");
