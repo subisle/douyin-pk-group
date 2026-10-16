@@ -43,7 +43,10 @@ async fn setup() -> Option<AppState> {
         }
         if let Ok(w) = config::load_writer() {
             if prod_hit(&w.host, &w.database) {
-                eprintln!("拒绝运行：writer 指向生产库（{} / {}）。e2e 测试必须用独立测试库", w.host, w.database);
+                eprintln!(
+                    "拒绝运行：writer 指向生产库（{} / {}）。e2e 测试必须用独立测试库",
+                    w.host, w.database
+                );
                 return None;
             }
         }
@@ -163,7 +166,9 @@ async fn month_metrics_import_then_display_e2e() {
         .find(|s| s.id == "LOCAL")
         .map(|s| format!("{}:{}/{}", s.host, s.port, s.database))
         .unwrap_or_else(|| "LOCAL 未配置".into());
-    eprintln!("[monthly_metric_e2e] 真跑断言（非跳过）：person_id={pid} period={PERIOD} db={local}");
+    eprintln!(
+        "[monthly_metric_e2e] 真跑断言（非跳过）：person_id={pid} period={PERIOD} db={local}"
+    );
 
     // 一行数据：name 命中主播（无需账号行）；时长 + 音浪都给值
     let row = admin::ImportRow {
@@ -185,8 +190,16 @@ async fn month_metrics_import_then_display_e2e() {
     )
     .await
     .expect("首次按月导入");
-    assert_eq!(r1.ok_rows, 1, "首次导入应写 1 行（期望 ok_rows=1，实际 {}）", r1.ok_rows);
-    assert_eq!(r1.unchanged, 0, "首次导入不该有未覆盖行（期望 unchanged=0，实际 {}）", r1.unchanged);
+    assert_eq!(
+        r1.ok_rows, 1,
+        "首次导入应写 1 行（期望 ok_rows=1，实际 {}）",
+        r1.ok_rows
+    );
+    assert_eq!(
+        r1.unchanged, 0,
+        "首次导入不该有未覆盖行（期望 unchanged=0，实际 {}）",
+        r1.unchanged
+    );
     assert_eq!(
         r1.minutes_total, 120,
         "报告时长合计应为 120 分钟（期望 120，实际 {}）",
@@ -241,11 +254,11 @@ async fn month_metrics_import_then_display_e2e() {
     );
 
     /* ── 3. 幂等：同参数重导 → 一行不写、数值不翻倍 ──
-       本断言是回归闸门：首次运行时真的抓到过生产 bug —— commit_month_metrics 读
-       monthly_duration.minutes（INT4）用的是 `try_get::<i64>`，sqlx 的 INT8 与 INT4
-       不兼容 → 解码失败被 `unwrap_or(0)` 吞成 0 → 每次重导都判成「值变了」照写一遍，
-       表现为 ok_rows=1 / unchanged=0（库里数值倒是对的，只有幂等报告与 updated_at 失真）。
-       该处现已修为 `SELECT (minutes)::BIGINT`；这条断言守住它不许回退。 */
+    本断言是回归闸门：首次运行时真的抓到过生产 bug —— commit_month_metrics 读
+    monthly_duration.minutes（INT4）用的是 `try_get::<i64>`，sqlx 的 INT8 与 INT4
+    不兼容 → 解码失败被 `unwrap_or(0)` 吞成 0 → 每次重导都判成「值变了」照写一遍，
+    表现为 ok_rows=1 / unchanged=0（库里数值倒是对的，只有幂等报告与 updated_at 失真）。
+    该处现已修为 `SELECT (minutes)::BIGINT`；这条断言守住它不许回退。 */
     let r2 = admin::commit_month_metrics(
         &st,
         PERIOD,
@@ -300,13 +313,21 @@ async fn month_metrics_import_then_display_e2e() {
     )
     .await
     .expect("只导音浪");
-    assert_eq!(r3.ok_rows, 1, "只导音浪时音浪变了应写 1 行（实际 {}）", r3.ok_rows);
+    assert_eq!(
+        r3.ok_rows, 1,
+        "只导音浪时音浪变了应写 1 行（实际 {}）",
+        r3.ok_rows
+    );
     assert_eq!(
         r3.minutes_total, 0,
         "没勾时长时报告时长合计必须为 0（期望 0，实际 {}）",
         r3.minutes_total
     );
-    assert_eq!(r3.wave_total, 7777, "只导音浪时音浪合计应为 7777（实际 {}）", r3.wave_total);
+    assert_eq!(
+        r3.wave_total, 7777,
+        "只导音浪时音浪合计应为 7777（实际 {}）",
+        r3.wave_total
+    );
     assert_eq!(
         q_wave(pid).await,
         Some(7777),
@@ -321,16 +342,16 @@ async fn month_metrics_import_then_display_e2e() {
     );
 
     /* ── 5. 展示端口径：月榜音浪取整月导入值 ──
-       本用例**没有造任何 daily_metric 行**，该主播能出现在月榜上完全靠
-       period_rollup_sql 的 monthly_wave 补行分支 —— 正好一并验证
-       「只导整月音浪、当月没有日明细的人也进榜」。 */
+    本用例**没有造任何 daily_metric 行**，该主播能出现在月榜上完全靠
+    period_rollup_sql 的 monthly_wave 补行分支 —— 正好一并验证
+    「只导整月音浪、当月没有日明细的人也进榜」。 */
     let rows = dialect::query_period(
         &st.pools,
         "LOCAL",
         dialect::ADMIN_PERIOD_SELECT,
         &format!("{PERIOD}%"),
-        "",  // 不限团别
-        "",  // 无额外过滤
+        "", // 不限团别
+        "", // 无额外过滤
         "wave DESC",
     )
     .await
@@ -365,13 +386,14 @@ async fn month_metrics_import_then_display_e2e() {
 
     /* ── 6. 清理 + 断言清干净 ── */
     cleanup_month_e2e(&st).await;
-    let still_minutes: i64 = sqlx::query("SELECT COUNT(*) FROM monthly_duration WHERE person_id = $1")
-        .bind(pid)
-        .fetch_one(pool)
-        .await
-        .expect("查残留 monthly_duration")
-        .try_get(0)
-        .expect("count");
+    let still_minutes: i64 =
+        sqlx::query("SELECT COUNT(*) FROM monthly_duration WHERE person_id = $1")
+            .bind(pid)
+            .fetch_one(pool)
+            .await
+            .expect("查残留 monthly_duration")
+            .try_get(0)
+            .expect("count");
     let still_wave: i64 = sqlx::query("SELECT COUNT(*) FROM monthly_wave WHERE person_id = $1")
         .bind(pid)
         .fetch_one(pool)
@@ -379,13 +401,14 @@ async fn month_metrics_import_then_display_e2e() {
         .expect("查残留 monthly_wave")
         .try_get(0)
         .expect("count");
-    let still_batch: i64 = sqlx::query("SELECT COUNT(*) FROM import_batch WHERE strpos(filename, $1) = 1")
-        .bind(MONTH_PREFIX)
-        .fetch_one(pool)
-        .await
-        .expect("查残留 import_batch")
-        .try_get(0)
-        .expect("count");
+    let still_batch: i64 =
+        sqlx::query("SELECT COUNT(*) FROM import_batch WHERE strpos(filename, $1) = 1")
+            .bind(MONTH_PREFIX)
+            .fetch_one(pool)
+            .await
+            .expect("查残留 import_batch")
+            .try_get(0)
+            .expect("count");
     let still_person: i64 = sqlx::query("SELECT COUNT(*) FROM person WHERE id = $1")
         .bind(pid)
         .fetch_one(pool)
@@ -393,11 +416,20 @@ async fn month_metrics_import_then_display_e2e() {
         .expect("查残留 person")
         .try_get(0)
         .expect("count");
-    assert_eq!(still_minutes, 0, "monthly_duration 应清空（person={pid}，实际剩 {still_minutes} 行）");
-    assert_eq!(still_wave, 0, "monthly_wave 应清空（person={pid}，实际剩 {still_wave} 行）");
+    assert_eq!(
+        still_minutes, 0,
+        "monthly_duration 应清空（person={pid}，实际剩 {still_minutes} 行）"
+    );
+    assert_eq!(
+        still_wave, 0,
+        "monthly_wave 应清空（person={pid}，实际剩 {still_wave} 行）"
+    );
     assert_eq!(
         still_batch, 0,
         "import_batch 应清空（filename 前缀 {MONTH_PREFIX}，实际剩 {still_batch} 行）"
     );
-    assert_eq!(still_person, 0, "person 应清空（id={pid}，实际剩 {still_person} 行）");
+    assert_eq!(
+        still_person, 0,
+        "person 应清空（id={pid}，实际剩 {still_person} 行）"
+    );
 }

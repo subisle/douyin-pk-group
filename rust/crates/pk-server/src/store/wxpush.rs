@@ -248,8 +248,154 @@ fn is_unique_violation(e: &anyhow::Error) -> bool {
         .unwrap_or(false)
 }
 
+/* --------------------------- 对接码防爆破（2026-10-17 审计 4-P1-2） ---------------------------
+ * 对接码只有 4 位（10^4、30 分钟、一次性），机器人层唯一限流是「每会话 10 条/分」——
+ * 多微信号并行即 N×10 次/分，30 分钟窗口单号可试 300 次，命中即把受害者的推送通道
+ * 绑到攻击者。三层防线（迁移 033 的 bind_code_fails 计数表）：
+ * 1. 按码失败 ≥5 次 → 立即作废该码（[`bind_code_invalidate`]）；
+ * 2. 全局 1 小时窗口失败 ≥600 次 → 冷却 10 分钟拒绝一切兑换（唯一挡分布式试码的闸）；
+ * 3. 绑定成功时旧会话收到「你的账号刚被新微信绑定」告警（接管的唯一用户侧通知）。
+ * 查不到的码也计数（否则攻击者先撞真码的计数就失效）；计数窗口过期自动归一。
+ * ---------------------------------------------------------------- themore-- */
+
+/// bind_code_fails 里的全局哨兵行 code
+const BIND_FAIL_GLOBAL: &str = "__global__";
+/// 同一码失败达到该次数 → 作废该码
+const BIND_FAIL_CODE_MAX: i32 = 5;
+/// 全局 1 小时窗口失败达到该次数 → 进入冷却
+const BIND_FAIL_GLOBAL_MAX: i32 = 600;
+/// 全局冷却时长（分钟）
+const BIND_FAIL_COOLDOWN_MIN: i64 = 10;
+
+/// 记一次兑换失败：按码与全局哨兵各 +1（1 小时窗口，过期归 1 重计）。
+/// 返回 (该码是否达到作废阈值, 全局是否刚刚越线)。
+async fn bind_code_record_fail(st: &AppState, code: &str) -> (bool, bool) {
+    async fn upsert_one(pool: &sqlx::Pool<sqlx::Postgres>, key: &str) -> Option<i32> {
+        sqlx::query(&crate::pq::rewrite(
+            "INSERT INTO bind_code_fails (code, fails, window_at, updated_at) \
+             VALUES (?, 1, now(), now()) \
+             ON CONFLICT (code) DO UPDATE SET \
+               fails = CASE WHEN bind_code_fails.window_at < now() - INTERVAL '1 hour' \
+                            THEN 1 ELSE bind_code_fails.fails + 1 END, \
+               window_at = CASE WHEN bind_code_fails.window_at < now() - INTERVAL '1 hour' \
+                            THEN now() ELSE bind_code_fails.window_at END, \
+               updated_at = now() \
+             RETURNING fails",
+        ))
+        .bind(key)
+        .fetch_one(pool)
+        .await
+        .ok()
+        .and_then(|r| r.try_get::<i32, _>("fails").ok())
+    }
+    let Ok(pool) = w(st) else {
+        return (false, false);
+    };
+    let code_fails = upsert_one(pool, code).await.unwrap_or(0);
+    let global_fails = upsert_one(pool, BIND_FAIL_GLOBAL).await.unwrap_or(0);
+    (
+        code_fails >= BIND_FAIL_CODE_MAX,
+        global_fails == BIND_FAIL_GLOBAL_MAX,
+    )
+}
+
+/// 全局冷却中？（哨兵行 1 小时窗口内失败达阈值，且 10 分钟冷却未过）
+async fn bind_code_global_cooling(st: &AppState) -> bool {
+    let Ok(pool) = w(st) else {
+        return false;
+    };
+    sqlx::query(&crate::pq::rewrite(
+        "SELECT 1 FROM bind_code_fails \
+          WHERE code = ? AND fails >= ? \
+            AND window_at > now() - INTERVAL '1 hour' \
+            AND updated_at > now() - make_interval(mins => ?)",
+    ))
+    .bind(BIND_FAIL_GLOBAL)
+    .bind(BIND_FAIL_GLOBAL_MAX)
+    .bind(BIND_FAIL_COOLDOWN_MIN)
+    .fetch_optional(pool)
+    .await
+    .map(|r| r.is_some())
+    .unwrap_or(false)
+}
+
+/// 该码是否已被失败计数判死（≥5 次失败且仍在 1 小时窗口内）
+async fn bind_code_dead(st: &AppState, code: &str) -> bool {
+    let Ok(pool) = w(st) else {
+        return false;
+    };
+    sqlx::query(&crate::pq::rewrite(
+        "SELECT 1 FROM bind_code_fails \
+          WHERE code = ? AND fails >= ? AND window_at > now() - INTERVAL '1 hour'",
+    ))
+    .bind(code)
+    .bind(BIND_FAIL_CODE_MAX)
+    .fetch_optional(pool)
+    .await
+    .map(|r| r.is_some())
+    .unwrap_or(false)
+}
+
+/// 作废一个码（失败次数达到阈值）：真码一并清掉，本人重新点「获取绑定码」即可
+async fn bind_code_invalidate(st: &AppState, code: &str) {
+    if let Ok(pool) = w(st) {
+        let _ = sqlx::query(&crate::pq::rewrite(
+            "UPDATE push_bindings SET bind_code = '', code_expires = '', updated_at = ? \
+              WHERE bind_code = ?",
+        ))
+        .bind(now_str())
+        .bind(code)
+        .execute(pool)
+        .await;
+        tracing::warn!(code_len = code.len(), "对接码失败次数过多，已作废");
+    }
+}
+
+/// 绑定成功后清该码的失败计数（换新码 / 成功兑换都算「这个码没被围猎」）
+async fn bind_code_clear(st: &AppState, code: &str) {
+    if let Ok(pool) = w(st) {
+        let _ = sqlx::query(&crate::pq::rewrite(
+            "DELETE FROM bind_code_fails WHERE code = ?",
+        ))
+        .bind(code)
+        .execute(pool)
+        .await;
+    }
+}
+
+/// 绑定成功 → 给被顶掉的旧会话发告警（审计 4-P1-2 第三层）。
+/// 这是「微信通道被别人接管」时受害者收到的唯一通知；尽力而为，
+/// 任何失败只记日志，绝不影响绑定本身。走的是已装闸的 user_send_text。
+async fn notify_old_session(st: &AppState, name: &str, old_conv: &str, new_conv: &str) {
+    if old_conv.is_empty() || old_conv == new_conv {
+        return;
+    }
+    let Some(a) = crate::store::wx_push_account_get(st, name).await else {
+        return;
+    };
+    if a.bot_token.is_empty() {
+        return;
+    }
+    let (old_to, ctx) = crate::store::wx_session_get(st, old_conv)
+        .await
+        .unwrap_or_default();
+    if old_to.is_empty() {
+        return;
+    }
+    let text = "⚠️ 你的账号刚被一个新的微信会话绑定。\n\
+                如果这不是你本人操作，请立即在展示端「我的」页解绑并联系管理员。";
+    match crate::bot::weixin::user_send_text(st, &a.base_url, &a.bot_token, &old_to, &ctx, text)
+        .await
+    {
+        Ok(()) => tracing::info!(account = %name, "旧会话已收到换绑告警"),
+        Err(e) => {
+            tracing::warn!(account = %name, error = %e, "旧会话换绑告警发送失败（不影响绑定）")
+        }
+    }
+}
+
 /// 绑定码 → 绑定：把微信私聊会话接到展示端账号上。
-/// 返回 Some((账号姓名, 团别))，没命中/已过期返回 None。码一次性，用掉即清。
+/// 返回 Some((账号姓名, 团别))，没命中/已过期/被防爆破闸拦下返回 None。码一次性，用掉即清。
 pub async fn push_bind_by_code(
     st: &AppState,
     code: &str,
@@ -261,6 +407,16 @@ pub async fn push_bind_by_code(
     if code.is_empty() {
         return None;
     }
+    // 防爆破第一层：全局冷却（1 小时失败过多 → 10 分钟内拒绝一切兑换，不计数）
+    if bind_code_global_cooling(st).await {
+        tracing::warn!(code_len = code.len(), "对接码全局冷却中，拒绝兑换");
+        return None;
+    }
+    // 防爆破第二层：该码已被失败计数判死（≥5 次）→ 直接拒绝并作废
+    if bind_code_dead(st, &code).await {
+        bind_code_invalidate(st, &code).await;
+        return None;
+    }
     let row = sqlx::query(&crate::pq::rewrite(
         "SELECT name, team, code_expires FROM push_bindings WHERE bind_code = ? AND bind_code <> ''",
     ))
@@ -268,13 +424,43 @@ pub async fn push_bind_by_code(
     .fetch_optional(pool)
     .await
     .ok()
-    .flatten()?;
+    .flatten();
+    let Some(row) = row else {
+        // 查不到码也要计数：不数的话，攻击者对「还不存在/已过期」的码狂试，
+        // 等真人生成同码时计数已被清场（4 位空间里这段窗口很真实）
+        let (kill, global) = bind_code_record_fail(st, &code).await;
+        if kill {
+            bind_code_invalidate(st, &code).await;
+        }
+        if global {
+            tracing::warn!("对接码全局失败速率越线（600/小时），冷却 10 分钟");
+        }
+        return None;
+    };
     let expires: String = row.try_get::<String, _>("code_expires").unwrap_or_default();
     if !push_code_is_live(&expires) {
+        let (kill, global) = bind_code_record_fail(st, &code).await;
+        if kill {
+            bind_code_invalidate(st, &code).await;
+        }
+        if global {
+            tracing::warn!("对接码全局失败速率越线（600/小时），冷却 10 分钟");
+        }
         return None;
     }
     let name: String = row.try_get::<String, _>("name").ok()?;
     let team: String = row.try_get::<String, _>("team").unwrap_or_default();
+    // 旧会话接线要在覆盖前读出来（防爆破第三层：换绑后给旧渠道发告警）
+    let old_conv: String = sqlx::query(&crate::pq::rewrite(
+        "SELECT conversation_id FROM push_bindings WHERE name = ?",
+    ))
+    .bind(&name)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .and_then(|r| r.try_get::<String, _>("conversation_id").ok())
+    .unwrap_or_default();
     // 会话抢占（2026-10-10 审计补）：绑定码路径与手机号路径口径一致——
     // 同一个微信会话只挂一个账号，先把占着这个会话的其它绑定清掉，
     // 否则换号 / 误发码会让两个账号同时往一个微信号推。
@@ -306,6 +492,9 @@ pub async fn push_bind_by_code(
         tracing::error!(error = %e, "写入微信绑定失败");
         return None;
     }
+    // 绑定成功：清该码失败计数（这个码没被围猎）+ 给旧会话发换绑告警
+    bind_code_clear(st, &code).await;
+    notify_old_session(st, &name, &old_conv, conversation_id).await;
     Some((name, team))
 }
 
@@ -577,6 +766,75 @@ pub async fn push_set_last_report_date(st: &AppState, name: &str, date: &str) {
     }
 }
 
+/* --------------------- 同日去重标记的原子占位（2026-10-17 审计 6-P2-3） ---------------------
+ * 原先「读 last_report_date → 发送 → 无条件写」三步之间没有原子性：调度循环与
+ * 管理端「立即推送」并发（或双实例）时两边都读到旧标记 → 同日双推。
+ * 现在发送**前**先用条件 UPDATE 占位（WHERE last_report_date <> date），
+ * 只有一个并发方能占住；发送失败（含闸门拦截）再把标记还原成旧值，
+ * 下轮照常重推 —— 「宁重不漏」语义不变，只是把重复窗口从「整次发送」缩到零。 */
+
+/// 占住某账号当天的每日报告去重标记。true = 占位成功（可以发送）；false = 已被并发方占走。
+pub async fn push_claim_report_date(st: &AppState, name: &str, date: &str) -> bool {
+    let Ok(pool) = w(st) else {
+        return false;
+    };
+    sqlx::query(&crate::pq::rewrite(
+        "UPDATE push_bindings SET last_report_date = ? \
+          WHERE name = ? AND last_report_date <> ?",
+    ))
+    .bind(date)
+    .bind(name.trim())
+    .bind(date)
+    .execute(pool)
+    .await
+    .map(|r| r.affected() > 0)
+    .unwrap_or(false)
+}
+
+/// 发送失败后还原每日报告标记（old = 占位前读到的旧值）。
+pub async fn push_restore_report_date(st: &AppState, name: &str, old: &str) {
+    if let Ok(pool) = w(st) {
+        let _ = sqlx::query(&crate::pq::rewrite(
+            "UPDATE push_bindings SET last_report_date = ? WHERE name = ?",
+        ))
+        .bind(old)
+        .bind(name.trim())
+        .execute(pool)
+        .await;
+    }
+}
+
+/// 占住某账号当天的师门日报去重标记（语义同 [`push_claim_report_date`]）。
+pub async fn push_claim_lineage_date(st: &AppState, name: &str, date: &str) -> bool {
+    let Ok(pool) = w(st) else {
+        return false;
+    };
+    sqlx::query(&crate::pq::rewrite(
+        "UPDATE push_bindings SET last_lineage_date = ? \
+          WHERE name = ? AND last_lineage_date <> ?",
+    ))
+    .bind(date)
+    .bind(name.trim())
+    .bind(date)
+    .execute(pool)
+    .await
+    .map(|r| r.affected() > 0)
+    .unwrap_or(false)
+}
+
+/// 发送失败后还原师门日报标记（old = 占位前读到的旧值）。
+pub async fn push_restore_lineage_date(st: &AppState, name: &str, old: &str) {
+    if let Ok(pool) = w(st) {
+        let _ = sqlx::query(&crate::pq::rewrite(
+            "UPDATE push_bindings SET last_lineage_date = ? WHERE name = ?",
+        ))
+        .bind(old)
+        .bind(name.trim())
+        .execute(pool)
+        .await;
+    }
+}
+
 /* --------------------- 微信绑定：绑定码（2026-10-16 口径） --------------------- */
 /*
    2026-10-16 用户口径：**主播在微信里只发 4 位对接码即可对接**（不再要求手机号）。
@@ -717,6 +975,11 @@ pub struct WxPushAccount {
     /// 没有绑定行的账号按未暂停 false 处理）。true = supervisor 不补拉、
     /// poll_body 退出，重新对接（push_bind_account / push_bind_by_code）时置回 0。
     pub paused: bool,
+    /// 历史无主凭证标记（2026-10-17 审计 4-P2-2，迁移 035）：扫码时上游没下发
+    /// userId 的行。激活侧 activation_owner_ok 的「无法判定 → 放行」兼容分支
+    /// **只对 legacy_no_uid=1 的行保留**——新扫码已改为 user_id 缺失直接拒绝，
+    /// 不再产生可被任意首条消息冒认激活的新行。
+    pub legacy_no_uid: bool,
 }
 
 fn wx_push_account_from_row(row: &sqlx::postgres::PgRow) -> WxPushAccount {
@@ -739,6 +1002,7 @@ fn wx_push_account_from_row(row: &sqlx::postgres::PgRow) -> WxPushAccount {
             .unwrap_or_default(),
         updates_buf: row.try_get::<String, _>("updates_buf").unwrap_or_default(),
         bound_at: row.try_get::<String, _>("bound_at").unwrap_or_default(),
+        legacy_no_uid: row.try_get::<i16, _>("legacy_no_uid").unwrap_or(0) == 1,
         paused: row
             .try_get::<i16, _>("paused")
             .map(|v| v == 1)
@@ -857,13 +1121,14 @@ pub async fn wx_push_account_save(st: &AppState, a: &WxPushAccount) -> Result<()
     sqlx::query(&crate::pq::rewrite(
         "INSERT INTO wx_push_accounts
            (name, team, person_id, ilink_bot_id, ilink_user_id, bot_token, base_url,
-            nickname, conversation_id, updates_buf, bound_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            nickname, conversation_id, updates_buf, bound_at, updated_at, legacy_no_uid)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (name) DO UPDATE SET
            team = EXCLUDED.team, person_id = EXCLUDED.person_id,
            ilink_bot_id = EXCLUDED.ilink_bot_id, ilink_user_id = EXCLUDED.ilink_user_id,
            bot_token = EXCLUDED.bot_token, base_url = EXCLUDED.base_url,
-           nickname = EXCLUDED.nickname, updated_at = EXCLUDED.updated_at",
+           nickname = EXCLUDED.nickname, updated_at = EXCLUDED.updated_at,
+           legacy_no_uid = EXCLUDED.legacy_no_uid",
     ))
     .bind(a.name.trim())
     .bind(&a.team)
@@ -877,6 +1142,7 @@ pub async fn wx_push_account_save(st: &AppState, a: &WxPushAccount) -> Result<()
     .bind(&a.updates_buf)
     .bind(&a.bound_at)
     .bind(now_str())
+    .bind(a.legacy_no_uid as i16)
     .execute(pool)
     .await
     .map_err(|e| {
@@ -946,7 +1212,7 @@ pub async fn wx_push_account_get(st: &AppState, name: &str) -> Option<WxPushAcco
     let row = sqlx::query(&crate::pq::rewrite(
         "SELECT a.name, a.team, a.person_id, a.ilink_bot_id, a.ilink_user_id, a.bot_token,
                 a.base_url, a.nickname, a.conversation_id, a.updates_buf, a.bound_at,
-                COALESCE(pb.paused, 0) AS paused
+                a.legacy_no_uid, COALESCE(pb.paused, 0) AS paused
          FROM wx_push_accounts a
          LEFT JOIN push_bindings pb ON pb.name = a.name
          WHERE a.name = ? LIMIT 1",
@@ -977,13 +1243,14 @@ pub async fn wx_push_account_name_of(st: &AppState, to_user_id: &str) -> Option<
 /// 启动时恢复全部扫码账号（各自跑一条长轮询）。
 /// LEFT JOIN push_bindings 带 paused（口径同 [`wx_push_account_get`]）：
 /// supervisor 的 accounts_to_start 用它过滤解绑暂停的账号，不为其补拉。
-pub async fn wx_push_accounts_all(st: &AppState) -> Vec<WxPushAccount> {    let Ok(pool) = w(st) else {
+pub async fn wx_push_accounts_all(st: &AppState) -> Vec<WxPushAccount> {
+    let Ok(pool) = w(st) else {
         return Vec::new();
     };
     sqlx::query(
         "SELECT a.name, a.team, a.person_id, a.ilink_bot_id, a.ilink_user_id, a.bot_token,
                 a.base_url, a.nickname, a.conversation_id, a.updates_buf, a.bound_at,
-                COALESCE(pb.paused, 0) AS paused
+                a.legacy_no_uid, COALESCE(pb.paused, 0) AS paused
          FROM wx_push_accounts a
          LEFT JOIN push_bindings pb ON pb.name = a.name
          ORDER BY a.name",

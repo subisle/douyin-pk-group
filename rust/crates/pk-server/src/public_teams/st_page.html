@@ -2292,17 +2292,13 @@ async function forgotPassword() {
     });
     const d = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
-    /* 修复3：后端 my.rs 重置为 CSPRNG 随机密码（响应 d.password 只下发一次），
-       不再是手机号后四位 —— 文案/回填/按钮态三处同步改，别再误导用户 */
-    $('gatePass').value = d.password || '';
+    /* 2026-10-17 审计 4-P1-1：后端不再明文回传临时密码（免登录重置 + 明文回显 =
+       知道手机号的任何人可接管账号）。改管理员中介口径：主播点「忘记密码」→
+       密码已重置 → 联系管理员领临时密码 → 登录后到「我的」页改自己的密码。 */
     errEl.classList.remove('hidden');
-    /* 2026-10-14：「设置里」指向不明。改密入口只在个人页那一行（id=myForgot）——
-       2026-10-15 契约 A 后该行文案改为「重置密码」，这里同步，否则用户临时密码
-       登录后按旧文案找不到地方改。 */
-    errEl.textContent = d.password
-      ? '已生成临时密码：' + d.password + '（已帮你填进密码框；登录后到「我的」页 → 「重置密码」改成自己的密码）'
-      : '重置后会生成一个临时密码；登录成功后到「我的」页 → 「重置密码」改成自己的密码';
-    toast('密码已重置，临时密码见下方提示');
+    errEl.textContent = '密码已重置。请联系管理员领取临时密码，' +
+      '登录后到「我的」页 → 「重置密码」改成自己的密码';
+    toast('密码已重置，请联系管理员领取临时密码');
   } catch (e) {
     errEl.textContent = e.message || '重置失败，稍后再试';
     errEl.classList.remove('hidden');
@@ -4858,7 +4854,9 @@ function bindPushBoundHandlers(p) {
       try {
         await fetch('/api/public/teams/' + TEAM + '/my/push/unbind', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          /* 2026-10-17 审计 4-N15：后端 5 个 push 接口 token 收口到 X-My-Token 头，
+          这里是唯一漏带头的前端调用点，必须补上（body 里的 token 后端已不读）。 */
+          headers: Object.assign({ 'Content-Type': 'application/json' }, myTokenHeaders()),
           body: JSON.stringify({ token: myToken() }),
         }).then(async (r) => {
           const d = await r.json().catch(() => ({}));

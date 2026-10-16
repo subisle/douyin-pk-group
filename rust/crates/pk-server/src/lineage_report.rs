@@ -111,7 +111,9 @@ fn cn_md(iso: &str) -> String {
 
 /// person_id 列 BIGINT → u64（负值钳到 0）
 fn id_of(r: &sqlx::postgres::PgRow, col: &str) -> u64 {
-    r.try_get::<i64, _>(col).map(|v| v.max(0) as u64).unwrap_or(0)
+    r.try_get::<i64, _>(col)
+        .map(|v| v.max(0) as u64)
+        .unwrap_or(0)
 }
 
 /// SUM 结果 BIGINT → i64
@@ -143,9 +145,8 @@ pub async fn build(
     let month = date.get(..7).unwrap_or(date);
 
     // a) 师傅本人（查不到 = 师傅不存在）
-    let master_sql = format!(
-        "SELECT id, name FROM person WHERE id = {master_person_id} AND deleted_at IS NULL"
-    );
+    let master_sql =
+        format!("SELECT id, name FROM person WHERE id = {master_person_id} AND deleted_at IS NULL");
     let master_rows = pgrs::query(&st.pools, "LOCAL", &master_sql).await?;
     let Some(mrow) = master_rows.first() else {
         anyhow::bail!("师傅不存在");
@@ -188,13 +189,9 @@ pub async fn build(
     }
     let mut month_map: HashMap<u64, i64> = HashMap::new();
     // 缺表（库没跑 026 迁移）时自动回落到纯日明细版，师门日报不被打挂
-    for r in crate::dialect::query_month_wave_fallback(
-        &st.pools,
-        "LOCAL",
-        &month_sql,
-        &month_sql_daily,
-    )
-    .await?
+    for r in
+        crate::dialect::query_month_wave_fallback(&st.pools, "LOCAL", &month_sql, &month_sql_daily)
+            .await?
     {
         month_map.insert(id_of(&r, "person_id"), signed(&r, "wave"));
     }
@@ -378,10 +375,22 @@ fn render_page(
             if r.is_master { "（师）" } else { "" },
         ));
         // 今日音浪
-        s.push_str(&text_cell(240.0, text_y, "middle", &fmt_wan(r.today), COLOR_TEXT));
+        s.push_str(&text_cell(
+            240.0,
+            text_y,
+            "middle",
+            &fmt_wan(r.today),
+            COLOR_TEXT,
+        ));
         // 昨日音浪（昨日无数据 = —）
         match r.yesterday {
-            Some(yv) => s.push_str(&text_cell(345.0, text_y, "middle", &fmt_wan(yv), COLOR_TEXT)),
+            Some(yv) => s.push_str(&text_cell(
+                345.0,
+                text_y,
+                "middle",
+                &fmt_wan(yv),
+                COLOR_TEXT,
+            )),
             None => s.push_str(&text_cell(345.0, text_y, "middle", "—", COLOR_MUTED)),
         }
         // 较昨日（行内 diff = today - yesterday）
@@ -411,7 +420,13 @@ fn render_page(
             }
         }
         // 本月累计
-        s.push_str(&text_cell(565.0, text_y, "middle", &fmt_wan(r.month_total), "#475467"));
+        s.push_str(&text_cell(
+            565.0,
+            text_y,
+            "middle",
+            &fmt_wan(r.month_total),
+            "#475467",
+        ));
         // 状态：未播红字 / 开播黑字
         if r.live {
             s.push_str(&text_cell(692.0, text_y, "end", "开播", COLOR_TEXT));
@@ -455,7 +470,8 @@ fn text_cell(x: f64, y: f64, anchor: &str, text: &str, fill: &str) -> String {
 
 /* ------------------------------ 文本摘要 ------------------------------ */
 
-/// 机器人文本版摘要（单行）
+/// 机器人文本版师门日报（多行逐徒弟明细；2026-10-17 起口径「有文字就不发图片」，
+/// 师门日报只发这段文字、不再发图）。
 pub fn render_text(rep: &LineageReport) -> String {
     let mut out = format!(
         "👨‍🏫 {} 师门 · {}：门下 {} 人，今日合计 {}",
@@ -479,9 +495,29 @@ pub fn render_text(rep: &LineageReport) -> String {
         };
         out.push_str(&format!("（{sym}{body}）"));
     }
+    // 逐徒弟明细：师傅行固定第一（后缀「（师）」），徒弟按今日音浪降序；
+    // 未播的今日显示「未播」，有昨日数据的附「较昨日▲/▼差」，持平不显示。
+    for r in &rep.rows {
+        let tag = if r.is_master { "（师）" } else { "" };
+        let today = if r.live {
+            fmt_wan(r.today)
+        } else {
+            "未播".to_string()
+        };
+        out.push_str(&format!("\n{}{} {}", r.name, tag, today));
+        if let Some(yv) = r.yesterday {
+            let d = r.today - yv;
+            if d > 0 {
+                out.push_str(&format!(" 较昨日▲{}", fmt_wan(d)));
+            } else if d < 0 {
+                out.push_str(&format!(" 较昨日▼{}", fmt_wan(-d)));
+            }
+            // d == 0（持平）不显示较昨日
+        }
+    }
     if !rep.absent_names.is_empty() {
         out.push_str(&format!(
-            "，未播 {} 人（{}）",
+            "\n未播 {} 人：{}",
             rep.absent_names.len(),
             rep.absent_names.join("、")
         ));
@@ -521,8 +557,8 @@ mod tests {
             rows: vec![
                 row("冷师傅", 50_000, Some(45_000), 900_000, true, true), // ▲
                 row("阿三", 120_000, Some(100_000), 1_200_000, true, false), // ▲
-                row("小<李&仔", 8_000, Some(9_500), 300_000, true, false),   // ▼
-                row("小王", 0, None, 50_000, false, false), // yesterday None + 未播
+                row("小<李&仔", 8_000, Some(9_500), 300_000, true, false), // ▼
+                row("小王", 0, None, 50_000, false, false),               // yesterday None + 未播
             ],
             total_today: 178_000,
             total_yesterday: Some(154_500),
@@ -610,22 +646,42 @@ mod tests {
         assert!(t.contains("冷师傅"));
         assert!(t.contains("今日合计"));
         assert!(t.contains("万"));
+        // 合计较昨日 ▲
         assert!(t.contains('▲'));
-        // 未播名单在文本里
-        assert!(t.contains("未播 1 人（小王）"));
+        // 师傅行后缀「（师）」
+        assert!(t.contains("（师）"));
+        // 逐徒弟明细里有 ▼（小李）与「未播」（小王）
+        assert!(t.contains('▼'));
+        assert!(t.contains("未播"));
+        // 底部未播名单（冒号分隔）
+        assert!(t.contains("未播 1 人：小王"));
     }
 
     #[test]
-    fn text_no_yesterday_no_diff() {
+    fn text_rows_list_every_disciple() {
+        let rep = fixture();
+        let t = render_text(&rep);
+        // 师傅 + 三个徒弟都在明细里
+        assert!(t.contains("阿三"));
+        assert!(t.contains("小<李&仔"));
+        assert!(t.contains("小王"));
+        // 逐徒弟较昨日：阿三 ▲、小李 ▼（名字 + 今日 + 较昨日）
+        assert!(t.contains("阿三 12 万 较昨日▲2 万"));
+        assert!(t.contains("小<李&仔 8000 较昨日▼1500"));
+    }
+
+    #[test]
+    fn text_no_yesterday_omits_diff() {
         let mut rep = fixture();
+        // 所有行昨日无数据 → 合计 diff None，逐徒弟也不显示「较昨日/▲/▼」
+        for r in &mut rep.rows {
+            r.yesterday = None;
+        }
         rep.total_yesterday = None;
-        rep.absent_names.clear();
         let t = render_text(&rep);
         assert!(!t.contains("较昨日"));
         assert!(!t.contains('▲'));
         assert!(!t.contains('▼'));
-        // 未播为空不拼后缀
-        assert!(!t.contains("未播"));
     }
 
     #[test]

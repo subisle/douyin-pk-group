@@ -338,7 +338,7 @@ pub async fn scheduler_loop(st: Arc<AppState>) {
  *
  * 2026-10-17 用户口径（本地灰度）：开关开着时也**只对白名单账号真发**，
  * 其余收件人照旧拦截记 WARN。白名单 = `PUSH_OUT_ALLOW`（逗号分隔的展示端账号名，
- * 空 = 谁都不发，等价于只靠总开关）。当前本地只放 浩雨（管理员，本人要求开推送验证）。
+ * 空 = 不额外限制、全部放行 —— 2026-10-17 起上线口径全开，本机与生产一致）。
  */
 
 /// 出网白名单（PUSH_OUT_ALLOW，逗号分隔展示端账号名）。空 = 没有白名单，
@@ -372,7 +372,10 @@ pub(crate) fn push_out_allowed_for(name: &str) -> bool {
 /// 窄口层的判定（weixin.rs / wxmedia.rs 只有 to_user_id，没有账号名）：
 /// to_user_id → wx_push_accounts.name → 白名单。查不到账号（非扫码通道，
 /// 如管理员全局机器人）按「白名单非空 = 一律不发」处理 —— 灰度期宁可少发。
-pub(crate) async fn push_out_allowed_for_account(st: &crate::state::AppState, to_user_id: &str) -> bool {
+pub(crate) async fn push_out_allowed_for_account(
+    st: &crate::state::AppState,
+    to_user_id: &str,
+) -> bool {
     if !push_out_enabled() {
         return false;
     }
@@ -564,52 +567,6 @@ async fn wx_proactive(
 
 /* ------------------------------ 主流程 ------------------------------ */
 
-/// 按推送时刻的问候语（2026-10-12 用户口径：晚上好，浩月）。
-/// 时段：5-11 早上好 / 11-13 中午好 / 13-18 下午好 / 18-23 晚上好 / 23-5 夜深了。
-/// 时区用服务器本地时间（147 = EDT，部署机随 TZ env；与导入运维同时区）。
-fn greeting(name: &str) -> String {
-    use chrono::Timelike;
-    let h = chrono::Local::now().hour();
-    let word = match h {
-        5..=10 => "早上好",
-        11..=12 => "中午好",
-        13..=17 => "下午好",
-        18..=22 => "晚上好",
-        _ => "夜深了",
-    };
-    format!("{word}，{name}")
-}
-
-/// 图片推送的 caption：问候语 + 我的名次行（图里已有完整榜单，文字只给关键信息）。
-fn greeting_with_rank(
-    name: &str,
-    items: &[(u64, String, i64)],
-    me: u64,
-    my_month: i64,
-    star: Option<&crate::report::StarBanner>,
-) -> String {
-    let mut out = greeting(name);
-    // 🚩 流动小红旗：称号（后台可配）+ 名字
-    if let Some(st) = star {
-        let mut line = format!("🚩 {} {}", st.title, st.name);
-        if st.wave > 0 {
-            line.push_str(&format!(" {}", fmt_wan(st.wave)));
-        }
-        out.push_str(&format!("\n{line}"));
-    }
-    // 我在月榜的位置 + 本月累计
-    let rank_in_month = items
-        .iter()
-        .position(|(pid, _, _)| *pid == me)
-        .map(|i| i + 1);
-    match rank_in_month {
-        Some(r) => out.push_str(&format!("\n本月第 {} 名 · 累计 {}", r, fmt_wan(my_month))),
-        None => out.push_str("\n本月还没开播"),
-    }
-    out.push_str("\n（本月累计榜见图，含未播天数）");
-    out
-}
-
 /// 日报 SVG → PNG 字节（resvg 纯 Rust 渲染，服务器零系统依赖）。
 /// 宽 720 逻辑像素 ×2 输出（1440），微信长图清晰度够用。
 /// pub(crate)：lineage_report.rs 与 admin_send.rs 的图片渲染共用同一份调用。
@@ -619,7 +576,10 @@ pub(crate) fn svg_to_png(svg: &str) -> anyhow::Result<Vec<u8>> {
     let tree = resvg::usvg::Tree::from_str(svg, &opt)?;
     let size = tree.size();
     let scale = 2.0f32;
-    let (w, h) = ((size.width() * scale).round() as u32, (size.height() * scale).round() as u32);
+    let (w, h) = (
+        (size.width() * scale).round() as u32,
+        (size.height() * scale).round() as u32,
+    );
     let mut pixmap = resvg::tiny_skia::Pixmap::new(w, h).context("PNG 画布创建失败")?;
     pixmap.fill(resvg::tiny_skia::Color::from_rgba8(255, 255, 255, 255));
     resvg::render(
@@ -653,8 +613,10 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
     };
     // 2026-10-12 审计 M6：图片推送 caption 的「本月第 N 名」必须用**月榜**排名。
     // 原来把当日榜 rank_items 传给 greeting_with_rank 算名次——文字与月榜图对不上。
-    // 只要有 daily_report 订阅者就要有月榜名次（month_rank_opt 可能没算过，补一次）。
-    let month_rank_for_caption = if bindings.iter().any(|b| b.daily_report) {
+    // 2026-10-17 口径改版（审计 6-P3-9/11）：caption 已删（有图不发文字），
+    // 月榜名次只剩**追分提醒**的 eval_target 用 —— 触发条件与命名都改为
+    // notify_target，只开日报不开追分的团不再白跑一次全团月榜聚合。
+    let month_rank_for_targets = if bindings.iter().any(|b| b.notify_target) {
         Some(match month_rank_opt {
             Some(list) => list,
             None => month_rank_list(st, team, &month).await,
@@ -679,9 +641,7 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
     行为与原先逐人失败一致。 */
     let star = if bindings.iter().any(|b| b.daily_report) {
         let ov = crate::store::config_get(st, "star_override").await;
-        let auto = rank_items
-            .first()
-            .map(|(_, name, w)| (name.clone(), *w));
+        let auto = rank_items.first().map(|(_, name, w)| (name.clone(), *w));
         let (title, def) = parse_star_override(ov.as_deref(), auto);
         let icon = crate::store::config_get(st, "star_icon")
             .await
@@ -759,6 +719,10 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
             let last = crate::store::push_last_report_date(st, &b.name).await;
             if last == date {
                 tracing::debug!(account = %b.name, date = %date, "每日报告同日已推过，跳过");
+            } else if !crate::store::push_claim_report_date(st, &b.name, date).await {
+                /* 2026-10-17 审计 6-P2-3：占位失败 = 另一个调度循环 / 手动「立即推送」
+                正在发同一天的报告 —— 让位，不双推（发送前原子占位替代读-改-写）。 */
+                tracing::debug!(account = %b.name, date = %date, "每日报告被并发方占位，跳过");
             } else {
                 // 图片版（2026-10-12）：日报按「每页 40 行」分页渲染（榜单太长微信看不清），
                 // 每人一份带艺名水印的 PNG（防转发扩散），逐张发送；
@@ -772,11 +736,11 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
                     &accounts,
                 );
                 /* 月榜口径（2026-10-12 用户要求）：图里发本月累计音浪 + 当月未播天数，
-                   日榜不发；头部 🚩 流动小红旗条，称号/人名后台可配：
-                   - config star_title：称号（如「初级争霸赛冠军」），缺省「每日之星」
-                   - config star_override：手动指定「称号|人名|音浪」（ Trophy 人工颁奖），
-                   没配 override 就自动取当日音浪第一。
-                   - config star_icon：小红旗条旁的 Material Symbols 图标名，空 = 不带图标。 */
+                日榜不发；头部 🚩 流动小红旗条，称号/人名后台可配：
+                - config star_title：称号（如「初级争霸赛冠军」），缺省「每日之星」
+                - config star_override：手动指定「称号|人名|音浪」（ Trophy 人工颁奖），
+                没配 override 就自动取当日音浪第一。
+                - config star_icon：小红旗条旁的 Material Symbols 图标名，空 = 不带图标。 */
                 /* 🚩 小红旗条与月榜数据已在循环外算好（修复1·性能）：rep 对全团相同，
                 这里只按收件人 render_month_svg_pages（personal_mark 水印因人而异）
                 并转 PNG。 */
@@ -793,9 +757,10 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
                             tracing::info!(account = %b.name, "每日报告已推送");
                         }
                         Err(e) => {
-                            /* 被闸门拦下 ≠ 发送成功：不写 last_report_date，
+                            /* 被闸门拦下 ≠ 发送成功：还原占位标记（审计 6-P2-3），
                             也不记失败原因（避免运营看到一堆「失败」其实是没开闸）。
                             消息留到开闸后再推，不会因去重标记被消耗而永久丢失。 */
+                            crate::store::push_restore_report_date(st, &b.name, &last).await;
                             if is_blocked(&e) {
                                 tracing::warn!(account = %b.name, "每日报告：出网闸门拦截，未发（去重标记不推进，开闸后会补推）");
                             } else {
@@ -805,13 +770,8 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
                         }
                     }
                 } else {
-                    let caption = greeting_with_rank(
-                        &b.name,
-                        month_rank_for_caption.as_deref().unwrap_or(&[]),
-                        b.person_id,
-                        month_map.get(&b.person_id).copied().unwrap_or(0),
-                        star.as_ref(),
-                    );
+                    // 2026-10-17 口径：有图就不发文字 —— 每日报告只发榜单图（带水印），
+                    // 不再前置文字 caption（问候语/名次/小红旗都在图里，避免文字与图重复）。
                     let pngs: Vec<Vec<u8>> = svgs
                         .iter()
                         .filter_map(|svg| match svg_to_png(svg) {
@@ -830,6 +790,7 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
                                 crate::store::push_set_last_report_date(st, &b.name, date).await;
                             }
                             Err(e2) => {
+                                crate::store::push_restore_report_date(st, &b.name, &last).await;
                                 if is_blocked(&e2) {
                                     tracing::warn!(account = %b.name, "每日报告：闸门拦截，未发（去重标记不推进）");
                                 } else {
@@ -840,7 +801,7 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
                         }
                     } else {
                         tracing::info!(account = %b.name, pages = pngs.len(), bytes = pngs.iter().map(|p| p.len()).sum::<usize>(), "推送·每日报告(图片)");
-                        match send_binding_images(st, b, &caption, &pngs).await {
+                        match send_binding_images(st, b, "", &pngs).await {
                             Ok(()) => {
                                 sent_any = true;
                                 crate::store::push_set_last_report_date(st, &b.name, date).await;
@@ -849,22 +810,36 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
                             Err(e) => {
                                 /* 图片被闸门拦下时**不要退回文本**重试：文本走同一闸门，
                                 重试只是又一次空跑（还会多一条「已拦截」日志）。
-                                这里不写去重标记即可，继续处理后面的订阅者。 */
+                                这里还原占位标记即可，继续处理后面的订阅者。 */
                                 if is_blocked(&e) {
+                                    crate::store::push_restore_report_date(st, &b.name, &last)
+                                        .await;
                                     tracing::warn!(account = %b.name, "每日报告(图片)：闸门拦截，未发（去重标记不推进）");
                                 } else {
                                     tracing::warn!(account = %b.name, error = %e, "每日报告图片推送失败，退回文本");
                                     match send_binding(st, b, wx_global.as_ref(), &text).await {
                                         Ok(()) => {
                                             sent_any = true;
-                                            crate::store::push_set_last_report_date(st, &b.name, date).await;
+                                            crate::store::push_set_last_report_date(
+                                                st, &b.name, date,
+                                            )
+                                            .await;
                                         }
                                         Err(e2) => {
+                                            crate::store::push_restore_report_date(
+                                                st, &b.name, &last,
+                                            )
+                                            .await;
                                             if is_blocked(&e2) {
                                                 tracing::warn!(account = %b.name, "每日报告：闸门拦截，未发（去重标记不推进）");
                                             } else {
                                                 tracing::warn!(account = %b.name, error = %e2, "每日报告文本兜底也失败");
-                                                crate::store::push_touch(st, &b.name, &e2.to_string()).await;
+                                                crate::store::push_touch(
+                                                    st,
+                                                    &b.name,
+                                                    &e2.to_string(),
+                                                )
+                                                .await;
                                             }
                                         }
                                     }
@@ -894,7 +869,7 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
                 for t in &targets {
                     let rival = month_map.get(&t.target_person_id).copied().unwrap_or(0);
                     let (gap, label, detail, gap_text) =
-                        eval_target(t, my, rival, month_rank_for_caption.as_deref(), b.person_id);
+                        eval_target(t, my, rival, month_rank_for_targets.as_deref(), b.person_id);
                     if gap <= 0 {
                         if !t.hit {
                             // 2026-10-15：文案抽成纯函数 line_target_reached（见函数注释）
@@ -922,12 +897,8 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
                 if !lines.is_empty() && (event || due) {
                     // 2026-10-15：整条文案抽成纯函数 target_push_text（头部/完成度/尾部
                     // 口径见函数注释）；触发条件 event||due 与落库逻辑原样不动。
-                    let text = target_push_text(
-                        date,
-                        &lines,
-                        my,
-                        value_completion_pct(&targets, my),
-                    );
+                    let text =
+                        target_push_text(date, &lines, my, value_completion_pct(&targets, my));
                     tracing::info!(account = %b.name, text = %text.replace('\n', " | "), "推送·追分提醒");
                     match send_binding(st, b, wx_global.as_ref(), &text).await {
                         Ok(()) => {
@@ -955,75 +926,49 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
             }
         }
 
-        // ③ 师门日报（docs/23 §4，2026-10-14）：名下有直系徒弟的师傅收徒弟音浪对比图。
-        /* 与 daily_report 完全同构的三层保护：
+        // ③ 师门日报（docs/23 §4，2026-10-14）：名下有直系徒弟的师傅收徒弟音浪对比。
+        // 2026-10-17 口径：有文字就不发图片 —— 师门日报只发纯文字（逐徒弟明细），不发图。
+        /* 三层保护（与 daily_report 同构）：
         - 开关：b.lineage_report（「我的」页第三开关 / 管理端一键开启）；
         - 同业务日去重：b.last_lineage_date == date → skip（对齐 last_report_date，
           补数重排队列时不重复发）；
         - 有徒弟才算师傅：build() 报「师傅不存在」或名下只有师傅本人一行（无徒弟）
-          → 记 debug 跳过，不推空图；person_id == 0（管理员观看账号）直接跳过。
-        图片路径：按人 build（师傅不同、水印不同，循环内不可外提；同师傅在同一团
-        只有一行绑定，天然不重复算）→ render_svg_pages(rep, PAGE_ROWS, 收件人名)
-        → 逐页 svg_to_png → send_binding_images(caption = render_text)。
-        渲染/PNG 失败降级 wx_proactive 纯文本（同 daily_report 图片失败退文本）；
+          → 记 debug 跳过，不推空文字；person_id == 0（管理员观看账号）直接跳过。
         发送成功后才写 last_lineage_date（幂等，失败下次再推）。 */
         if b.lineage_report {
             if b.person_id == 0 {
                 tracing::debug!(account = %b.name, "师门日报：管理员观看账号（person_id=0），跳过");
             } else if b.last_lineage_date == date {
                 tracing::debug!(account = %b.name, date = %date, "师门日报同日已推过，跳过");
+            } else if !crate::store::push_claim_lineage_date(st, &b.name, date).await {
+                /* 2026-10-17 审计 6-P2-3：占位失败 = 并发方（另一循环 / 管理端手动
+                下发）正在发同一天师门日报 —— 让位，不双推。 */
+                tracing::debug!(account = %b.name, date = %date, "师门日报被并发方占位，跳过");
             } else {
                 match crate::lineage_report::build(st, date, b.person_id).await {
                     Ok(rep) if rep.rows.len() > 1 => {
-                        let caption = crate::lineage_report::render_text(&rep);
-                        let svgs =
-                            crate::lineage_report::render_svg_pages(&rep, PAGE_ROWS, &b.name);
-                        let pngs: Vec<Vec<u8>> = svgs
-                            .iter()
-                            .filter_map(|svg| match svg_to_png(svg) {
-                                Ok(p) => Some(p),
-                                Err(e) => {
-                                    tracing::warn!(account = %b.name, error = %e, "师门日报 SVG 转 PNG 失败");
-                                    None
-                                }
-                            })
-                            .collect();
-                        if pngs.is_empty() {
-                            // 全部页面转 PNG 失败 → 退回文本摘要（同 daily_report 图片失败退文本）
-                            tracing::warn!(account = %b.name, "师门日报全部页面转 PNG 失败，退回文本推送");
-                            match send_binding(st, b, wx_global.as_ref(), &caption).await {
-                                Ok(()) => {
-                                    sent_any = true;
-                                    crate::store::push_set_lineage_date(st, &b.name, date).await;
-                                    tracing::info!(account = %b.name, "师门日报(文本)已推送");
-                                }
-                                Err(e2) => {
-                                    tracing::warn!(account = %b.name, error = %e2, "师门日报文本推送失败");
-                                    crate::store::push_touch(st, &b.name, &e2.to_string()).await;
-                                }
+                        let text = crate::lineage_report::render_text(&rep);
+                        tracing::info!(account = %b.name, text = %text.replace('\n', " | "), "推送·师门日报(文本)");
+                        match send_binding(st, b, wx_global.as_ref(), &text).await {
+                            Ok(()) => {
+                                sent_any = true;
+                                crate::store::push_set_lineage_date(st, &b.name, date).await;
+                                tracing::info!(account = %b.name, "师门日报(文本)已推送");
                             }
-                        } else {
-                            tracing::info!(account = %b.name, pages = pngs.len(), bytes = pngs.iter().map(|p| p.len()).sum::<usize>(), "推送·师门日报(图片)");
-                            match send_binding_images(st, b, &caption, &pngs).await {
-                                Ok(()) => {
-                                    sent_any = true;
-                                    crate::store::push_set_lineage_date(st, &b.name, date).await;
-                                    tracing::info!(account = %b.name, pages = pngs.len(), "师门日报(图片)已推送");
-                                }
-                                Err(e) => {
-                                    tracing::warn!(account = %b.name, error = %e, "师门日报图片推送失败，退回文本");
-                                    match send_binding(st, b, wx_global.as_ref(), &caption).await {
-                                        Ok(()) => {
-                                            sent_any = true;
-                                            crate::store::push_set_lineage_date(st, &b.name, date)
-                                                .await;
-                                        }
-                                        Err(e2) => {
-                                            tracing::warn!(account = %b.name, error = %e2, "师门日报文本兜底也失败");
-                                            crate::store::push_touch(st, &b.name, &e2.to_string())
-                                                .await;
-                                        }
-                                    }
+                            Err(e) => {
+                                /* 被闸门拦下 ≠ 发送成功：还原占位标记，
+                                消息留到开闸后再推，不会因去重标记被消耗而永久丢失。 */
+                                crate::store::push_restore_lineage_date(
+                                    st,
+                                    &b.name,
+                                    &b.last_lineage_date,
+                                )
+                                .await;
+                                if is_blocked(&e) {
+                                    tracing::warn!(account = %b.name, "师门日报：闸门拦截，未发（去重标记不推进）");
+                                } else {
+                                    tracing::warn!(account = %b.name, error = %e, "师门日报文本推送失败");
+                                    crate::store::push_touch(st, &b.name, &e.to_string()).await;
                                 }
                             }
                         }
@@ -1680,7 +1625,10 @@ pub(crate) fn daily_report_text_with_accounts(
             // 3 名开外：给一个可执行的追赶目标（上一名的音浪差）。
             // 榜单按音浪降序，above >= my，这里 max(0) 只兜异常排序的脏数据。
             let above = items[pos - 1].2;
-            out.push_str(&format!("\n距上一名 {}", fmt_wan((above - items[pos].2).max(0))));
+            out.push_str(&format!(
+                "\n距上一名 {}",
+                fmt_wan((above - items[pos].2).max(0))
+            ));
         }
     } else if me > 0 {
         out.push_str("\n\n我：今天还没开播");
@@ -1734,7 +1682,8 @@ mod tests {
     /// 「称号|人名|音浪」三段：全手动指定
     #[test]
     fn star_override_full() {
-        let (title, def) = parse_star_override(Some("初级争霸赛冠军|狼哲|285917"), Some(("甲".into(), 1)));
+        let (title, def) =
+            parse_star_override(Some("初级争霸赛冠军|狼哲|285917"), Some(("甲".into(), 1)));
         assert_eq!(title, "初级争霸赛冠军");
         assert_eq!(def, Some(("狼哲".to_string(), 285917)));
     }
@@ -1902,7 +1851,10 @@ mod tests {
         for _ in 0..40 {
             let c = new_bind_code();
             assert_eq!(c.len(), BIND_CODE_LEN);
-            assert!(c.bytes().all(|b| b.is_ascii_digit()), "绑定码必须是纯数字: {c}");
+            assert!(
+                c.bytes().all(|b| b.is_ascii_digit()),
+                "绑定码必须是纯数字: {c}"
+            );
             assert!(looks_like_bind_code(&c), "生成的码要能通过校验: {c}");
         }
         assert!(!looks_like_bind_code("123"), "位数不够");
@@ -2260,15 +2212,17 @@ mod tests {
     /// 完成度百分比边界：0 / 四舍五入 / 恰好 100 / 超额封顶 100
     #[test]
     fn value_completion_pct_boundaries() {
-        let tv = |v: i64| vec![crate::store::PushTarget {
-            id: 1,
-            kind: "value".to_string(),
-            target_person_id: 0,
-            target_name: String::new(),
-            target_value: v,
-            hit: false,
-            last_notice_date: String::new(),
-        }];
+        let tv = |v: i64| {
+            vec![crate::store::PushTarget {
+                id: 1,
+                kind: "value".to_string(),
+                target_person_id: 0,
+                target_name: String::new(),
+                target_value: v,
+                hit: false,
+                last_notice_date: String::new(),
+            }]
+        };
         // 0 → 0%
         assert_eq!(value_completion_pct(&tv(500_000), 0), Some(0));
         // 22.74% 四舍五入 → 23%
@@ -2340,7 +2294,10 @@ mod tests {
         // 未开播：两个新增行都不出
         let t404 = daily_report_text_with_accounts("male", "2026-10-15", &items, 404, &[]);
         assert!(t404.contains("我：今天还没开播"), "{t404}");
-        assert!(!t404.contains("TOP3") && !t404.contains("距上一名"), "{t404}");
+        assert!(
+            !t404.contains("TOP3") && !t404.contains("距上一名"),
+            "{t404}"
+        );
     }
 
     /// 与上一名打平（差距 0）：按口径「差距可算就出」，出「距上一名 0」——
@@ -2388,7 +2345,12 @@ mod tests {
         let edge = plan_pace(1200, 20, 3, 180);
         println!(
             "[pace] total={} batch={} interval={} est={}s capped={} over={}",
-            edge.total, edge.batch, edge.interval_secs, edge.est_secs, edge.capped, edge.over_budget
+            edge.total,
+            edge.batch,
+            edge.interval_secs,
+            edge.est_secs,
+            edge.capped,
+            edge.over_budget
         );
         assert_eq!(edge.est_secs, 177, "1200 人（59 个间隔）仍守得住");
         assert!(!edge.capped);
@@ -2396,7 +2358,12 @@ mod tests {
         let over = plan_pace(1300, 20, 3, 180);
         println!(
             "[pace] total={} batch={} interval={} est={}s capped={} over={}",
-            over.total, over.batch, over.interval_secs, over.est_secs, over.capped, over.over_budget
+            over.total,
+            over.batch,
+            over.interval_secs,
+            over.est_secs,
+            over.capped,
+            over.over_budget
         );
         assert!(over.capped, "1300 人必须自动压缩间隔");
         assert_eq!(over.interval_secs, 2, "180/64 → 2 秒");
@@ -2615,7 +2582,10 @@ mod tests {
         assert!(is_blocked(&e), "Blocked 必须能被认出来");
         // 普通的发送失败不能被误判成「被拦截」
         let real = anyhow::anyhow!("扫码账号凭证为空，请重新扫码");
-        assert!(!is_blocked(&real), "真失败不能被当成拦截（否则会漏记失败原因）");
+        assert!(
+            !is_blocked(&real),
+            "真失败不能被当成拦截（否则会漏记失败原因）"
+        );
         // 嵌套（anyhow 上下文包一层）也能认出来
         let wrapped = anyhow::Error::from(Blocked).context("每日报告");
         assert!(is_blocked(&wrapped), "包了上下文也要能认出来");

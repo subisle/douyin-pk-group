@@ -53,12 +53,19 @@ pub async fn push_job_take(st: &AppState, now: &str) -> Option<(i64, String, Str
     /* 2026-10-13 审计修复：列在部分环境是 varchar、部分是 timestamptz（灌库丢类型）。
     原写法 run_at <= ?（varchar 环境隐式转换 OK）但 created_at < ?::timestamptz
     在 varchar 环境直接报 operator 不存在且被 .ok()? 吞掉 → 调度器静默瘫痪。
-    改为 NULLIF(col,'')::timestamptz 统一转换 + SQL 端 now()，两种列型都成立。 */
+    改为 NULLIF(col,'')::timestamptz 统一转换 + SQL 端 now()，两种列型都成立。
+
+    2026-10-17 审计 6-P2-2（承第二轮 P2-4）：running 的 stale 判定改看 **taken_at**
+    （进入 running 的时刻，迁移 034）。原先用 created_at（入队时间）——
+    它通常比 run_at 早 30 分钟，任务一旦 running 该条件恒真，第二个调度循环
+    60 秒后就把它当死任务重抢 → 长任务（150 人图片推送）必被并发重跑、
+    主播重复收推送。 */
     let row = match sqlx::query(
         "SELECT id, team, biz_date, status FROM push_jobs
          WHERE (status = 'pending' AND NULLIF(run_at,'')::timestamptz <= now())
-            OR (status = 'running' AND done_at = '' AND NULLIF(run_at,'')::timestamptz <= now()
-                AND created_at <> '' AND NULLIF(created_at,'')::timestamptz < now() - INTERVAL '5 minutes')
+            OR (status LIKE 'running%' AND done_at = '' AND NULLIF(run_at,'')::timestamptz <= now()
+                AND (NULLIF(taken_at,'') IS NULL
+                     OR NULLIF(taken_at,'')::timestamptz < now() - INTERVAL '5 minutes'))
             OR (status LIKE 'failed:%' AND done_at <> '' AND NULLIF(done_at,'')::timestamptz <= now()
                 - make_interval(mins => 5 * (1 << LEAST(
                      GREATEST(SUBSTRING(status FROM 8)::int - 1, 0), 5))))
@@ -85,12 +92,16 @@ pub async fn push_job_take(st: &AppState, now: &str) -> Option<(i64, String, Str
         return None;
     }
     /* 抢占用 CAS（`AND status = ?`）：把上面读到的状态原样写回去比对，
-    多实例并发时只有一个能改成 running。同时把已重试次数带过去（failed:N → running:N）。 */
+    多实例并发时只有一个能改成 running。同时把已重试次数带过去（failed:N → running:N）。
+    2026-10-17 审计 6-P2-2：CAS 同值 UPDATE（'running'→'running'）在 PG 里
+    rows_affected 仍为 1，抢不占不住 —— 现在 UPDATE 顺带刷新 taken_at，
+    stale 分支的抢占必然伴随 taken_at 变化，两个实例只有一个能把 5 分钟窗口重置。 */
     let next_status = running_status_for(&prev_status);
     let taken = match sqlx::query(&crate::pq::rewrite(
-        "UPDATE push_jobs SET status = ? WHERE id = ? AND status = ?",
+        "UPDATE push_jobs SET status = ?, taken_at = ? WHERE id = ? AND status = ?",
     ))
     .bind(&next_status)
+    .bind(now_str())
     .bind(id)
     .bind(&prev_status)
     .execute(pool)

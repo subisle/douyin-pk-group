@@ -198,7 +198,10 @@ fn allowed_upload_ext(filename: &str) -> bool {
         .and_then(|e| e.to_str())
         .unwrap_or_default()
         .to_ascii_lowercase();
-    matches!(ext.as_str(), "csv" | "tsv" | "txt" | "xlsx" | "xlsm" | "xls")
+    matches!(
+        ext.as_str(),
+        "csv" | "tsv" | "txt" | "xlsx" | "xlsm" | "xls"
+    )
 }
 
 /// multipart 字段读取失败 → ApiError：保留 axum 已分类的状态码（超限 → 413）。
@@ -519,7 +522,9 @@ pub async fn create_streamer(
     .await?;
     if let Some(row) = dup.into_iter().next() {
         let exist = read_str(&row, "name");
-        return Err(ApiError::bad_request(format!("同名主播「{exist}」已存在，请改用别名映射")));
+        return Err(ApiError::bad_request(format!(
+            "同名主播「{exist}」已存在，请改用别名映射"
+        )));
     }
 
     // 抖音号全局唯一（docs/06：重复时行内红字提示）
@@ -539,8 +544,9 @@ pub async fn create_streamer(
         .map(str::to_string);
     if let Some(p) = phone.as_deref() {
         // 2026-10-16：validate_my_phone 现在业务拒绝带 BIZ:: 前缀，剥掉再下发
-        crate::store::validate_my_phone(p)
-            .map_err(|e| ApiError::bad_request(crate::store::my_account::biz_msg(&e).to_string()))?;
+        crate::store::validate_my_phone(p).map_err(|e| {
+            ApiError::bad_request(crate::store::my_account::biz_msg(&e).to_string())
+        })?;
         // 016 没跑时这条查询会报 Unknown column：当「查不到冲突」处理。
         // 建档失败比"手机号没存上"严重得多（运营要重录一遍），不能让少跑的迁移挡住建档。
         let taken =
@@ -551,7 +557,9 @@ pub async fn create_streamer(
             .unwrap_or_default();
         if let Some(row) = taken.into_iter().next() {
             let owner = read_str(&row, "name");
-            return Err(ApiError::bad_request(format!("手机号已被在职主播「{owner}」登记")));
+            return Err(ApiError::bad_request(format!(
+                "手机号已被在职主播「{owner}」登记"
+            )));
         }
     }
 
@@ -629,9 +637,9 @@ async fn check_douyin_no_free(
         let taken_id = read_u64(&r, "id").unwrap_or(0);
         if except_person != Some(taken_id) {
             let holder = read_str(&r, "name");
-            return Err(
-                ApiError::bad_request(format!("抖音号 {no} 已被「{holder}」使用，抖音号必须全局唯一")),
-            );
+            return Err(ApiError::bad_request(format!(
+                "抖音号 {no} 已被「{holder}」使用，抖音号必须全局唯一"
+            )));
         }
     }
     Ok(())
@@ -755,14 +763,16 @@ pub async fn update_streamer(
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
-        Some(new_name) => sqlx::query(&crate::pq::rewrite(
-            "SELECT name FROM person WHERE id = ? AND name <> ?",
-        ))
-        .bind(id as i64)
-        .bind(new_name)
-        .map(|r: sqlx::postgres::PgRow| r.try_get::<String, _>(0).unwrap_or_default())
-        .fetch_optional(pool)
-        .await?,
+        Some(new_name) => {
+            sqlx::query(&crate::pq::rewrite(
+                "SELECT name FROM person WHERE id = ? AND name <> ?",
+            ))
+            .bind(id as i64)
+            .bind(new_name)
+            .map(|r: sqlx::postgres::PgRow| r.try_get::<String, _>(0).unwrap_or_default())
+            .fetch_optional(pool)
+            .await?
+        }
         None => None,
     };
     if !sets.is_empty() {
@@ -797,6 +807,14 @@ pub async fn update_streamer(
         ] {
             // 单表失败不回滚整次改名（人名已经改了），只记日志让运营能看到
             let sql = format!("UPDATE {tbl} SET name = ? WHERE name = ?");
+            // 动态 SQL 统一过写守卫（2026-10-17 审计 3-P3-A）：这是全仓第二处
+            // 直连 writer 池的拼 SQL，`{tbl}` 当前来自硬编码白名单数组，
+            // 守卫此刻拦不到什么 —— 要的是把「动态 SQL 必过 write_guard」
+            // 的先例保住，未来改这段时绕不过防线。
+            if let Err(guard_err) = crate::writer::write_guard(&sql) {
+                tracing::warn!(table = tbl, error = %guard_err, "改名同步 SQL 被写守卫拒绝");
+                continue;
+            }
             if let Err(e) = sqlx::query(&crate::pq::rewrite(&sql))
                 .bind(new_name)
                 .bind(old_name)
@@ -819,7 +837,7 @@ pub async fn update_streamer(
         crate::store::person_set_phone(&st, id, p)
             .await
             /* 2026-10-16：同 set_person_phone —— BIZ:: 前缀 → 400 原文；
-               库层故障 → 500 通用文案，原文留日志。 */
+            库层故障 → 500 通用文案，原文留日志。 */
             .map_err(|e| {
                 if crate::store::my_account::is_biz(&e) {
                     ApiError::bad_request(crate::store::my_account::biz_msg(&e).to_string())
@@ -1449,7 +1467,9 @@ async fn body_rows(
             .as_deref()
             .map(str::trim)
             .filter(|t| !t.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("缺少导入内容：text（粘贴文本）或 rows（结构化行）至少给一个"))?;
+            .ok_or_else(|| {
+                anyhow::anyhow!("缺少导入内容：text（粘贴文本）或 rows（结构化行）至少给一个")
+            })?;
         out = parse_any_text(text);
     }
     let dropped = strip_minutes(&mut out);
@@ -1492,7 +1512,9 @@ async fn month_body_rows(
             .as_deref()
             .map(str::trim)
             .filter(|t| !t.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("缺少导入内容：text（文件内容）或 rows（结构化行）至少给一个"))?;
+            .ok_or_else(|| {
+                anyhow::anyhow!("缺少导入内容：text（文件内容）或 rows（结构化行）至少给一个")
+            })?;
         out = parse_month_metrics_text(text);
     }
     Ok(out)
@@ -1553,8 +1575,7 @@ pub async fn import_preview(State(st): State<ArcState>, Json(body): Json<ImportB
     if !team.is_empty() {
         valid_team(team)?;
     }
-    let (raw_rows, dropped_minutes) =
-        body_rows(&body.text, &body.rows).await.map_err(nice_400)?;
+    let (raw_rows, dropped_minutes) = body_rows(&body.text, &body.rows).await.map_err(nice_400)?;
     ensure(!raw_rows.is_empty(), "没有解析到任何数据行")?;
     let ctx = load_match_ctx(&st).await?;
     let aliases = merged_aliases(&st).await;
@@ -1593,8 +1614,7 @@ pub async fn import_commit(State(st): State<ArcState>, Json(body): Json<ImportBo
     // 不分男女团是默认：team 不传 / 传 auto 都按主播档案逐行归属
     let team = body.team.as_deref().unwrap_or("auto");
     let mode = body.mode.as_deref().unwrap_or("merge");
-    let (rows, dropped_minutes) =
-        body_rows(&body.text, &body.rows).await.map_err(nice_400)?;
+    let (rows, dropped_minutes) = body_rows(&body.text, &body.rows).await.map_err(nice_400)?;
     // commit_import 的「异常文件 / reject 模式」两类拒绝是代码拼好的运营提示
     //（安全、可操作），经 nice_400 白名单保住 400；其余错误照旧 500 通用文案。
     let report = commit_import(
@@ -1728,7 +1748,9 @@ fn ensure_month_values_not_all_same(
     metrics: MonthMetrics,
 ) -> anyhow::Result<()> {
     let checks: [(bool, &str, fn(&ResolvedRow) -> Option<i64>); 2] = [
-        (metrics.wave, "音浪", |r| r.raw.wave.map(|v| v.round() as i64)),
+        (metrics.wave, "音浪", |r| {
+            r.raw.wave.map(|v| v.round() as i64)
+        }),
         (metrics.minutes, "时长", |r| {
             r.raw.minutes.map(|v| v.round() as i64)
         }),
@@ -1788,9 +1810,9 @@ pub async fn commit_import(
     anyhow::ensure!(!rows.is_empty(), "没有解析到任何数据行");
 
     /* 异常文件防御（2026-10-13 QQ 机器人导入口径）：
-       文件里所有数据行的音浪值完全相同（≥3 行）→ 几乎可以断定是拿错了文件 /
-       列错位（例如把固定值列当成了音浪，或把「某一日」的快照当成全员当日数据）。
-       这种文件一旦导入，全团所有人的当日音浪会变成同一个数——拒绝并提示运营。 */
+    文件里所有数据行的音浪值完全相同（≥3 行）→ 几乎可以断定是拿错了文件 /
+    列错位（例如把固定值列当成了音浪，或把「某一日」的快照当成全员当日数据）。
+    这种文件一旦导入，全团所有人的当日音浪会变成同一个数——拒绝并提示运营。 */
     ensure_not_all_same_wave(&rows)?;
 
     let ctx = load_match_ctx(st).await?;
@@ -2580,10 +2602,14 @@ pub async fn import_pending_delete(
     // 两个语义混在一发请求里只会让运维数不清删了什么）
     if let Some(days) = q.prune_days {
         if q.id.is_some() || q.douyin_no.is_some() {
-            return Err(ApiError::bad_request("pruneDays 与 id / douyinNo 不能同时给"));
+            return Err(ApiError::bad_request(
+                "pruneDays 与 id / douyinNo 不能同时给",
+            ));
         }
         let Some(days) = crate::store::import_pending::valid_prune_days(days) else {
-            return Err(ApiError::bad_request("pruneDays 必须 > 0（例如 ?pruneDays=30）"));
+            return Err(ApiError::bad_request(
+                "pruneDays 必须 > 0（例如 ?pruneDays=30）",
+            ));
         };
         let deleted = crate::store::import_pending_prune(&st, days).await;
         return Ok(Json(json!({ "ok": true, "deleted": deleted })));
@@ -2909,7 +2935,10 @@ fn month_note(failures: &[Value], skipped: &[String]) -> Option<String> {
         parts.push(s);
     }
     if !skipped.is_empty() {
-        parts.push(format!("跳过 {} 人（文件里没有勾选的指标值）", skipped.len()));
+        parts.push(format!(
+            "跳过 {} 人（文件里没有勾选的指标值）",
+            skipped.len()
+        ));
     }
     (!parts.is_empty()).then(|| truncate_chars(&parts.join("；"), NOTE_MAX_CHARS))
 }
@@ -2926,7 +2955,9 @@ pub async fn import_month_preview(
     if !team.is_empty() && !is_auto_team(team) {
         valid_team(team)?;
     }
-    let raw_rows = month_body_rows(&body.text, &body.rows).await.map_err(nice_400)?;
+    let raw_rows = month_body_rows(&body.text, &body.rows)
+        .await
+        .map_err(nice_400)?;
     ensure(
         !raw_rows.is_empty(),
         "没有解析到时长 / 音浪列：确认文件里有「时长 / 开播有效时长」或「音浪 / 总音浪」至少一列",
@@ -2974,25 +3005,26 @@ pub async fn import_month_preview(
     let daily_wave = month_daily_wave(&st, &period).await?;
     // 对账：该月**已有日明细**、且与月报不一致的人（月报优先，这里只提示，不改口径）。
     // 日明细为 0 的不列进来：每日刚好没导到是常态，全列出来只会刷屏。
-    let diff_rows = |daily: &HashMap<u64, i64>, pick: fn(&ImportRow) -> Option<f64>| -> Vec<Value> {
-        merged
-            .iter()
-            .filter_map(|r| {
-                let pid = r.person_id?;
-                let imported = pick(&r.raw)? as i64;
-                let daily_v = daily.get(&pid).copied().unwrap_or(0);
-                (daily_v > 0 && daily_v != imported).then(|| {
-                    json!({
-                        "personId": pid,
-                        "name": truncate_chars(&r.raw.name, 64),
-                        "imported": imported,
-                        "daily": daily_v,
+    let diff_rows =
+        |daily: &HashMap<u64, i64>, pick: fn(&ImportRow) -> Option<f64>| -> Vec<Value> {
+            merged
+                .iter()
+                .filter_map(|r| {
+                    let pid = r.person_id?;
+                    let imported = pick(&r.raw)? as i64;
+                    let daily_v = daily.get(&pid).copied().unwrap_or(0);
+                    (daily_v > 0 && daily_v != imported).then(|| {
+                        json!({
+                            "personId": pid,
+                            "name": truncate_chars(&r.raw.name, 64),
+                            "imported": imported,
+                            "daily": daily_v,
+                        })
                     })
                 })
-            })
-            .take(30)
-            .collect()
-    };
+                .take(30)
+                .collect()
+        };
     let diffs = diff_rows(&daily, |r| r.minutes);
     let wave_diffs = diff_rows(&daily_wave, |r| r.wave);
     Ok(Json(json!({
@@ -3030,7 +3062,9 @@ pub async fn import_month_commit(
     let team = body.team.as_deref().unwrap_or("auto");
     let mode = body.mode.as_deref().unwrap_or("merge");
     let metrics = MonthMetrics::from_body(&body.metrics).map_err(nice_400)?;
-    let rows = month_body_rows(&body.text, &body.rows).await.map_err(nice_400)?;
+    let rows = month_body_rows(&body.text, &body.rows)
+        .await
+        .map_err(nice_400)?;
     let report = commit_month_metrics(
         &st,
         &period,
@@ -3290,7 +3324,10 @@ pub async fn commit_month_metrics(
         长图、机器人推送的「x时x分」口径不一致（docs/08 要求全局同一条规则）。
         直接复用 `push::fmt_minutes`（与前端 st_page.html 的 minFmt 逐字符等价、有单测钉死），
         运营在管理端看到的就是主播看到的样子。 */
-        totals.push(format!("时长合计 {}", crate::push::fmt_minutes(minutes_total)));
+        totals.push(format!(
+            "时长合计 {}",
+            crate::push::fmt_minutes(minutes_total)
+        ));
     }
     if metrics.wave {
         totals.push(format!("音浪合计 {}", wave_total));
@@ -3622,8 +3659,8 @@ pub async fn batch_my_accounts(
     )
     .await
     /* 2026-10-16：整包 bad_request 会把库层报错（表名/SQL 片段）原样外发。
-       现按 store 层 BIZ:: 前缀分流：业务拒绝（名单为空 / 超批上限）→ 400 原文；
-       库层故障 → 500 通用文案，原文留日志（public_teams::admin::account_store_err 同口径）。 */
+    现按 store 层 BIZ:: 前缀分流：业务拒绝（名单为空 / 超批上限）→ 400 原文；
+    库层故障 → 500 通用文案，原文留日志（public_teams::admin::account_store_err 同口径）。 */
     .map_err(|e| {
         if crate::store::my_account::is_biz(&e) {
             ApiError::bad_request(crate::store::my_account::biz_msg(&e).to_string())
@@ -3686,8 +3723,8 @@ pub async fn set_person_phone(
     crate::store::person_set_phone(&st, id, &phone)
         .await
         /* 2026-10-16：同批量开号 —— BIZ:: 前缀（格式/占用类人话）→ 400 原文；
-           库层故障 → 500 通用文案，原文留日志。原先整包 bad_request 会把
-           「写入失败：…SQL 原文」外发给管理端页面。 */
+        库层故障 → 500 通用文案，原文留日志。原先整包 bad_request 会把
+        「写入失败：…SQL 原文」外发给管理端页面。 */
         .map_err(|e| {
             if crate::store::my_account::is_biz(&e) {
                 ApiError::bad_request(crate::store::my_account::biz_msg(&e).to_string())
@@ -3697,12 +3734,16 @@ pub async fn set_person_phone(
             }
         })?;
     /* 写后回读校验（2026-10-13）：与 my_account_set 同口径——杜绝「返回 ok 但库里
-       没写入」的静默失败（64 环境曾出现运营以为绑上了实际没绑）。 */
+    没写入」的静默失败（64 环境曾出现运营以为绑上了实际没绑）。 */
     let saved_phone = sqlx::query(&crate::pq::rewrite(
         "SELECT phone FROM person WHERE id = ? AND deleted_at IS NULL",
     ))
     .bind(id as i64)
-    .fetch_optional(st.writer.as_ref().ok_or_else(|| anyhow::anyhow!("写库不可用"))?)
+    .fetch_optional(
+        st.writer
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("写库不可用"))?,
+    )
     .await
     .map_err(|e| anyhow::anyhow!("回读失败：{e}"))?
     .and_then(|r| r.try_get::<String, _>("phone").ok())
@@ -4074,14 +4115,12 @@ async fn check_master_choice(
         return Err(MasterChoiceError::Reject("不能把自己设为师傅".into()));
     }
     // 目标存在且未删除：只取 id / name（不碰 person.phone，老库没跑 016 也能用）
-    let rows = pgrs::query_with_binds(&st.pools, "LOCAL", MASTER_NAME_SQL, |q| {
-        q.bind(mid as i64)
-    })
-    .await
-    .map_err(|e| {
-        tracing::error!(error = %e, master_id = mid, "师门校验：查师傅失败");
-        MasterChoiceError::Db
-    })?;
+    let rows = pgrs::query_with_binds(&st.pools, "LOCAL", MASTER_NAME_SQL, |q| q.bind(mid as i64))
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, master_id = mid, "师门校验：查师傅失败");
+            MasterChoiceError::Db
+        })?;
     let Some(mrow) = rows.into_iter().next() else {
         return Err(MasterChoiceError::Reject(format!(
             "要设为师傅的主播不存在或已删除（id={mid}）"
@@ -5031,7 +5070,10 @@ pub async fn import_upload(
             }
             Some("file") => {
                 let fname = field.file_name().unwrap_or("上传文件").to_string();
-                ensure(allowed_upload_ext(&fname), format_args!("不支持的文件类型：{fname}，请上传 csv 或 Excel 文件"))?;
+                ensure(
+                    allowed_upload_ext(&fname),
+                    format_args!("不支持的文件类型：{fname}，请上传 csv 或 Excel 文件"),
+                )?;
                 filename = fname;
                 let bytes = field.bytes().await.map_err(multipart_error_to_api)?;
                 text = match maybe_spreadsheet_text(&filename, &bytes)? {
@@ -5489,7 +5531,11 @@ mod tests {
             )
         };
         // 3 人音浪同为 35（勾错列）→ 拒绝
-        let rows = vec![mk(Some(35.0), None), mk(Some(35.0), None), mk(Some(35.0), None)];
+        let rows = vec![
+            mk(Some(35.0), None),
+            mk(Some(35.0), None),
+            mk(Some(35.0), None),
+        ];
         assert!(ensure_month_values_not_all_same(&rows, MonthMetrics::BOTH).is_err());
         // 时长同为 4529（75小时29分钟41秒的月报）→ 也拒绝
         let rows = vec![
@@ -5499,14 +5545,26 @@ mod tests {
         ];
         assert!(ensure_month_values_not_all_same(&rows, MonthMetrics::BOTH).is_err());
         // 值有差异 → 放行；不足 3 人 → 放行
-        let rows = vec![mk(Some(1.0), None), mk(Some(2.0), None), mk(Some(3.0), None)];
+        let rows = vec![
+            mk(Some(1.0), None),
+            mk(Some(2.0), None),
+            mk(Some(3.0), None),
+        ];
         assert!(ensure_month_values_not_all_same(&rows, MonthMetrics::BOTH).is_ok());
         assert!(ensure_month_values_not_all_same(&rows[..2], MonthMetrics::BOTH).is_ok());
         // 全员 0（整月没开播）是合法数据 → 放行（写 0 正好把该月口径钉住）
-        let rows = vec![mk(Some(0.0), Some(0.0)), mk(Some(0.0), Some(0.0)), mk(Some(0.0), None)];
+        let rows = vec![
+            mk(Some(0.0), Some(0.0)),
+            mk(Some(0.0), Some(0.0)),
+            mk(Some(0.0), None),
+        ];
         assert!(ensure_month_values_not_all_same(&rows, MonthMetrics::BOTH).is_ok());
         // 没勾的指标不参与判定：只勾时长时，音浪全员同值不影响
-        let rows = vec![mk(Some(35.0), Some(1.0)), mk(Some(35.0), Some(2.0)), mk(Some(35.0), None)];
+        let rows = vec![
+            mk(Some(35.0), Some(1.0)),
+            mk(Some(35.0), Some(2.0)),
+            mk(Some(35.0), None),
+        ];
         assert!(ensure_month_values_not_all_same(&rows, MonthMetrics::MINUTES_ONLY).is_ok());
     }
 

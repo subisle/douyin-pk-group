@@ -328,10 +328,7 @@ pub fn like_to_date_range(like: &str) -> (String, String) {
         if let (Ok(y), Ok(m)) = (y.parse::<u32>(), m.parse::<u32>()) {
             if (1..=12).contains(&m) {
                 let (ny, nm) = if m == 12 { (y + 1, 1) } else { (y, m + 1) };
-                return (
-                    format!("{y:04}-{m:02}-01"),
-                    format!("{ny:04}-{nm:02}-01"),
-                );
+                return (format!("{y:04}-{m:02}-01"), format!("{ny:04}-{nm:02}-01"));
             }
         }
     }
@@ -355,6 +352,19 @@ pub fn period_rollup_sql(
     with_duration: bool,
     with_wave: bool,
 ) -> String {
+    /* like 形状显式断言（2026-10-17 审计 3-P3-B）：`{like}` 会被原样拼进
+    `mw0.period LIKE '{like}'`，当前三个调用点（settings/site/metrics）都先做了
+    「digits + '-' + 可选 %」白名单，但那是**隐性前提** —— 未来新增调用者忘校验
+    即成真注入。这里把前提钉成显性：形状不对直接 panic（这是程序员错误，
+    不是用户输入错误），把隐患挡在上线前。允许的字符集：数字、'-'、'%'，长度 ≤ 8。 */
+    debug_assert!(
+        !like.is_empty()
+            && like.len() <= 8
+            && like
+                .bytes()
+                .all(|b| b.is_ascii_digit() || b == b'-' || b == b'%'),
+        "period_rollup_sql: like 窗口必须先过字符白名单（got {like:?}）"
+    );
     let team_clause = if team.is_empty() {
         String::new()
     } else {

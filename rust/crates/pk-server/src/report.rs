@@ -159,15 +159,12 @@ pub async fn build(st: &Arc<AppState>, date: &str, team: &str) -> anyhow::Result
     rows.sort_by(|a, b| b.wave.cmp(&a.wave).then(a.name.cmp(&b.name)));
     let mut master_groups: Vec<(String, Vec<String>)> = master_groups.into_iter().collect();
     master_groups.sort();
-    let daily_star = rows
-        .iter()
-        .find(|r| r.is_live)
-        .map(|r| StarBanner {
-            title: "每日之星".to_string(),
-            name: r.name.clone(),
-            wave: r.wave,
-            icon: String::new(),
-        });
+    let daily_star = rows.iter().find(|r| r.is_live).map(|r| StarBanner {
+        title: "每日之星".to_string(),
+        name: r.name.clone(),
+        wave: r.wave,
+        icon: String::new(),
+    });
     Ok(DailyReport {
         date: date.to_string(),
         team: team.to_string(),
@@ -264,13 +261,9 @@ pub async fn build_month(
     let month_absent_sql = crate::dialect::month_absent_sql(&month);
 
     let mut wave_map: HashMap<u64, i64> = Default::default();
-    for r in crate::dialect::query_month_wave_fallback(
-        &st.pools,
-        "LOCAL",
-        &month_sql,
-        &month_sql_daily,
-    )
-    .await?
+    for r in
+        crate::dialect::query_month_wave_fallback(&st.pools, "LOCAL", &month_sql, &month_sql_daily)
+            .await?
     {
         wave_map.insert(id_of(&r, "person_id"), signed(&r, "wave"));
     }
@@ -334,11 +327,17 @@ pub fn render_svg_pages(rep: &DailyReport, per_page: usize, personal_mark: &str)
     }
     if per_page == 0 || rep.rows.len() <= per_page {
         // 单页/首页：名次从 1 开始，row_offset = 0（修复2）
-        return vec![render_svg_labeled(rep, "", rep.rows.len(), personal_mark, 0)];
+        return vec![render_svg_labeled(
+            rep,
+            "",
+            rep.rows.len(),
+            personal_mark,
+            0,
+        )];
     }
     /* 排序口径与 render_svg 一致：音浪降序（rows 已按此排好，不重复排）。
-       第 1 页取已开播者（保持名次），第 2 页放未开播者。开播者超过一页时
-       第 1 页装满 per_page 行，剩余开播者继续占用第 2 页开头（名次连续）。 */
+    第 1 页取已开播者（保持名次），第 2 页放未开播者。开播者超过一页时
+    第 1 页装满 per_page 行，剩余开播者继续占用第 2 页开头（名次连续）。 */
     let mut pages_rows: Vec<Vec<ReportRow>> = Vec::new();
     let mut cur: Vec<ReportRow> = Vec::new();
     for r in &rep.rows {
@@ -370,13 +369,21 @@ pub fn render_svg_pages(rep: &DailyReport, per_page: usize, personal_mark: &str)
                 String::new()
             };
             /* 未开播统计口径：全量数据里的未播者（不是本页的）。
-               警示条只在含未播者的页出现（即最后一页），避免重复。 */
+            警示条只在含未播者的页出现（即最后一页），避免重复。 */
             let is_last = pi + 1 == page_count;
             let page_rep = DailyReport {
                 date: rep.date.clone(),
                 team: rep.team.clone(),
-                master_groups: if is_last { rep.master_groups.clone() } else { Vec::new() },
-                no_master: if is_last { rep.no_master.clone() } else { Vec::new() },
+                master_groups: if is_last {
+                    rep.master_groups.clone()
+                } else {
+                    Vec::new()
+                },
+                no_master: if is_last {
+                    rep.no_master.clone()
+                } else {
+                    Vec::new()
+                },
                 // 🚩 冠军条每页都带（2026-10-12 用户口径：每页都要显示）
                 daily_star: rep.daily_star.clone(),
                 rows,
@@ -411,7 +418,14 @@ pub fn render_month_svg_pages(
         return Vec::new();
     }
     if per_page == 0 || rep.rows.len() <= per_page {
-        return vec![render_svg_labeled_inner(rep, "", rep.rows.len(), personal_mark, true, 0)];
+        return vec![render_svg_labeled_inner(
+            rep,
+            "",
+            rep.rows.len(),
+            personal_mark,
+            true,
+            0,
+        )];
     }
     let mut pages_rows: Vec<Vec<ReportRow>> = Vec::new();
     let mut cur: Vec<ReportRow> = Vec::new();
@@ -446,14 +460,29 @@ pub fn render_month_svg_pages(
             let page_rep = DailyReport {
                 date: rep.date.clone(),
                 team: rep.team.clone(),
-                master_groups: if is_last { rep.master_groups.clone() } else { Vec::new() },
-                no_master: if is_last { rep.no_master.clone() } else { Vec::new() },
+                master_groups: if is_last {
+                    rep.master_groups.clone()
+                } else {
+                    Vec::new()
+                },
+                no_master: if is_last {
+                    rep.no_master.clone()
+                } else {
+                    Vec::new()
+                },
                 // 🚩 冠军条每页都带（2026-10-12 用户口径：每页都要显示）
                 daily_star: rep.daily_star.clone(),
                 rows,
             };
             // 修复2：第 pi 页的名次从「前面页行数之和」起编（pi*per_page），跨页连续
-            render_svg_labeled_inner(&page_rep, &page_label, total, personal_mark, true, pi * per_page)
+            render_svg_labeled_inner(
+                &page_rep,
+                &page_label,
+                total,
+                personal_mark,
+                true,
+                pi * per_page,
+            )
         })
         .collect()
 }
@@ -471,13 +500,17 @@ fn render_svg_labeled_inner(
 ) -> String {
     let n = rep.rows.len();
     // 头部高度：有每日之星条时多 42px（表头/行整体下移）
-    let header_h = if rep.daily_star.is_some() { 168.0f64 } else { 126.0f64 };
+    let header_h = if rep.daily_star.is_some() {
+        168.0f64
+    } else {
+        126.0f64
+    };
     let list_h = n as f64 * 48.0;
     let footer_y = header_h + list_h + 20.0;
     let total_h = footer_y + 50.0;
     let max_wave = rep.rows.iter().map(|r| r.wave).max().unwrap_or(1).max(1);
-    let th_y = header_h - 40.0;   // 表头背景 y
-    let ty_y = header_h - 22.0;   // 表头文字 y
+    let th_y = header_h - 40.0; // 表头背景 y
+    let ty_y = header_h - 22.0; // 表头文字 y
     let team_label = if rep.team == "male" {
         "男团"
     } else {
@@ -525,7 +558,10 @@ fn render_svg_labeled_inner(
     };
     let mut watermark_layer = String::new();
     let mut wi: u64 = 0;
-    for (si, x) in [-30.0f64, 90.0, 210.0, 330.0, 450.0, 570.0, 690.0].into_iter().enumerate() {
+    for (si, x) in [-30.0f64, 90.0, 210.0, 330.0, 450.0, 570.0, 690.0]
+        .into_iter()
+        .enumerate()
+    {
         for (yi, y) in (0..((total_h / 52.0).ceil() as i64 + 1)).enumerate() {
             let y = y as f64 * 52.0 - 30.0;
             let mark = &marks[(si + yi) % marks.len()];
@@ -561,8 +597,7 @@ fn render_svg_labeled_inner(
         s.push_str(
             "<rect x=\"12\" y=\"68\" width=\"696\" height=\"40\" fill=\"#FFFAEB\" rx=\"10\" stroke=\"#FEDF89\"/>",
         );
-        let use_image_icon =
-            !star.icon.is_empty() && star.icon.starts_with("data:image");
+        let use_image_icon = !star.icon.is_empty() && star.icon.starts_with("data:image");
         if use_image_icon {
             s.push_str(&format!(
                 "<image x=\"24\" y=\"72\" width=\"32\" height=\"32\" href=\"{}\" preserveAspectRatio=\"xMidYMid meet\"/>",
@@ -595,13 +630,21 @@ fn render_svg_labeled_inner(
     s.push_str(&format!(
         "<rect y=\"{th_y:.0}\" width=\"720\" height=\"34\" fill=\"#F2F4F7\"/>"
     ));
-    let wave_col_label = if is_month { "本月累计音浪" } else { "当日音浪" };
+    let wave_col_label = if is_month {
+        "本月累计音浪"
+    } else {
+        "当日音浪"
+    };
     /* 最后一列的表头（2026-10-17 修复，审计 2-P2-7）：
     月榜这一列填的其实是**本月累计**（`total_wave: wave` 同值复用），
     但表头沿用日榜的「累计总音浪」—— 主播看到月榜「累计总音浪 50 万」
     会理解成历史累计，实际是本月，两榜同表头不同义。
     月榜改标「本月累计（总）」，明确它就是左边那列的同一个数。 */
-    let total_col_label = if is_month { "本月累计（总）" } else { "累计总音浪" };
+    let total_col_label = if is_month {
+        "本月累计（总）"
+    } else {
+        "累计总音浪"
+    };
     for (x, label, anchor) in [
         (32.3, "排名", "middle"),
         (72.6, "主播姓名", "start"),
@@ -716,7 +759,6 @@ pub fn render_svg(rep: &DailyReport) -> String {
     // 单页渲染：名次从 1 开始，row_offset = 0（修复2 新增参数）
     render_svg_labeled(rep, "", rep.rows.len(), "", 0)
 }
-
 
 fn format_cn_date(iso: &str) -> String {
     match chrono::NaiveDate::parse_from_str(iso, "%Y-%m-%d") {
@@ -905,34 +947,90 @@ mod tests {
     #[test]
     fn preview_push_svg_pages() {
         let rows: Vec<ReportRow> = [
-            ("浩龙", 547_308, 1), ("狼澈", 301_154, 1), ("狼哲", 285_917, 0),
-            ("凤九", 277_929, 0), ("南方楠", 234_259, 1), ("浩冬", 221_000, 1),
-            ("狼兴", 169_000, 0), ("玖玥", 148_000, 1), ("狼俊", 141_000, 0),
-            ("浩鸣", 137_000, 2), ("狼小宝", 136_000, 0), ("啸恒", 122_000, 0),
-            ("浩艺", 116_000, 1), ("玖柒", 113_000, 0), ("狼辰", 108_000, 1),
-            ("浩辰", 100_000, 1), ("浩雨", 99_000, 1), ("浩沐", 97_000, 0),
-            ("啸帆", 93_000, 1), ("浩阳", 82_000, 0), ("浩玟", 78_000, 1),
-            ("啸辰", 78_000, 0), ("狼赫", 75_000, 1), ("狼泽", 73_000, 0),
-            ("狼岳", 69_000, 0), ("玖雪", 67_000, 0), ("玖豆", 61_000, 0),
-            ("啸森", 58_000, 0), ("浩楠", 56_000, 1), ("狼仔", 55_000, 1),
-            ("浩艺2", 53_000, 0), ("啸宇", 52_000, 0), ("玖妹", 50_000, 0),
-            ("狼辉", 50_000, 1), ("啸安", 49_000, 1), ("浩然", 49_000, 0),
-            ("浩森2", 49_000, 1), ("狼腾", 45_000, 0), ("狼九", 45_000, 0),
-            ("狼明", 41_000, 2), ("狼轩", 38_000, 1), ("啸弘", 37_000, 0),
-            ("浩运", 35_000, 1), ("狼征", 35_000, 2), ("凤瑶", 30_000, 0),
-            ("狼艺", 29_000, 1), ("啸阳", 28_000, 1), ("浩泽", 28_000, 1),
-            ("浩杰", 27_000, 1), ("浩宁", 25_000, 1), ("狼影", 24_000, 1),
-            ("狼雨", 21_000, 0), ("啸昭", 19_000, 0), ("啸寻", 16_000, 0),
-            ("狼耀", 16_000, 0), ("狼瑞", 14_000, 0), ("啸钰", 13_000, 0),
-            ("浩启", 11_000, 2), ("啸升", 10_000, 0), ("浩月", 9_945, 1),
-            ("啸泽2", 9_942, 1), ("浩延", 9_403, 2), ("狼旭", 8_441, 1),
-            ("啸强", 7_850, 1), ("啸燃", 7_051, 1), ("凤夏", 6_196, 0),
-            ("狼帅", 5_974, 1), ("玖久", 2_977, 0), ("狼彬", 1_922, 0),
-            ("玖安", 1_169, 0), ("玖忆", 917, 0), ("狼途", 895, 1),
-            ("狼鑫", 763, 0), ("啸墨", 405, 2), ("浩鑫", 296, 1),
-            ("啸鸣", 225, 0), ("狼卓", 6, 1), ("狼霞", 0, 2),
-            ("啸沐", 0, 2), ("玖玉", 0, 2), ("狼裕", 0, 2),
-            ("狼航", 0, 2), ("玖依", 0, 2), ("浩坤", 0, 2),
+            ("浩龙", 547_308, 1),
+            ("狼澈", 301_154, 1),
+            ("狼哲", 285_917, 0),
+            ("凤九", 277_929, 0),
+            ("南方楠", 234_259, 1),
+            ("浩冬", 221_000, 1),
+            ("狼兴", 169_000, 0),
+            ("玖玥", 148_000, 1),
+            ("狼俊", 141_000, 0),
+            ("浩鸣", 137_000, 2),
+            ("狼小宝", 136_000, 0),
+            ("啸恒", 122_000, 0),
+            ("浩艺", 116_000, 1),
+            ("玖柒", 113_000, 0),
+            ("狼辰", 108_000, 1),
+            ("浩辰", 100_000, 1),
+            ("浩雨", 99_000, 1),
+            ("浩沐", 97_000, 0),
+            ("啸帆", 93_000, 1),
+            ("浩阳", 82_000, 0),
+            ("浩玟", 78_000, 1),
+            ("啸辰", 78_000, 0),
+            ("狼赫", 75_000, 1),
+            ("狼泽", 73_000, 0),
+            ("狼岳", 69_000, 0),
+            ("玖雪", 67_000, 0),
+            ("玖豆", 61_000, 0),
+            ("啸森", 58_000, 0),
+            ("浩楠", 56_000, 1),
+            ("狼仔", 55_000, 1),
+            ("浩艺2", 53_000, 0),
+            ("啸宇", 52_000, 0),
+            ("玖妹", 50_000, 0),
+            ("狼辉", 50_000, 1),
+            ("啸安", 49_000, 1),
+            ("浩然", 49_000, 0),
+            ("浩森2", 49_000, 1),
+            ("狼腾", 45_000, 0),
+            ("狼九", 45_000, 0),
+            ("狼明", 41_000, 2),
+            ("狼轩", 38_000, 1),
+            ("啸弘", 37_000, 0),
+            ("浩运", 35_000, 1),
+            ("狼征", 35_000, 2),
+            ("凤瑶", 30_000, 0),
+            ("狼艺", 29_000, 1),
+            ("啸阳", 28_000, 1),
+            ("浩泽", 28_000, 1),
+            ("浩杰", 27_000, 1),
+            ("浩宁", 25_000, 1),
+            ("狼影", 24_000, 1),
+            ("狼雨", 21_000, 0),
+            ("啸昭", 19_000, 0),
+            ("啸寻", 16_000, 0),
+            ("狼耀", 16_000, 0),
+            ("狼瑞", 14_000, 0),
+            ("啸钰", 13_000, 0),
+            ("浩启", 11_000, 2),
+            ("啸升", 10_000, 0),
+            ("浩月", 9_945, 1),
+            ("啸泽2", 9_942, 1),
+            ("浩延", 9_403, 2),
+            ("狼旭", 8_441, 1),
+            ("啸强", 7_850, 1),
+            ("啸燃", 7_051, 1),
+            ("凤夏", 6_196, 0),
+            ("狼帅", 5_974, 1),
+            ("玖久", 2_977, 0),
+            ("狼彬", 1_922, 0),
+            ("玖安", 1_169, 0),
+            ("玖忆", 917, 0),
+            ("狼途", 895, 1),
+            ("狼鑫", 763, 0),
+            ("啸墨", 405, 2),
+            ("浩鑫", 296, 1),
+            ("啸鸣", 225, 0),
+            ("狼卓", 6, 1),
+            ("狼霞", 0, 2),
+            ("啸沐", 0, 2),
+            ("玖玉", 0, 2),
+            ("狼裕", 0, 2),
+            ("狼航", 0, 2),
+            ("玖依", 0, 2),
+            ("浩坤", 0, 2),
         ]
         .into_iter()
         .map(|(name, wave, absent)| ReportRow {
@@ -973,7 +1071,11 @@ mod tests {
             }
         }
         // 全页输出（原行为，收件人固定第一个名字）
-        let pages = render_month_svg_pages(&rep, 40, names.first().map(String::as_str).unwrap_or("浩月"));
+        let pages = render_month_svg_pages(
+            &rep,
+            40,
+            names.first().map(String::as_str).unwrap_or("浩月"),
+        );
         for (i, svg) in pages.iter().enumerate() {
             let path = format!("/tmp/preview-new-{}.svg", i + 1);
             if std::fs::write(&path, svg).is_ok() {
@@ -1051,7 +1153,10 @@ mod tests {
         // 2026-10-17（审计 2-P2-7）：月榜末列表头改「本月累计（总）」——
         // 月榜这一列其实是本月累计，沿用日榜的「累计总音浪」会让主播理解成历史累计。
         let h_name = text_element_of(&svg, "主播姓名");
-        assert!(h_name.contains("x=\"72.6\""), "姓名表头 x 应与列值同为 72.6: {h_name}");
+        assert!(
+            h_name.contains("x=\"72.6\""),
+            "姓名表头 x 应与列值同为 72.6: {h_name}"
+        );
         assert!(
             h_name.contains("text-anchor=\"start\""),
             "姓名表头要 start 对齐: {h_name}"
@@ -1061,7 +1166,10 @@ mod tests {
             "月榜不该再用日榜的「累计总音浪」表头（语义是本月累计）"
         );
         let h_total = text_element_of(&svg, "本月累计（总）");
-        assert!(h_total.contains("x=\"708\""), "总音浪表头 x 应与列值同为 708: {h_total}");
+        assert!(
+            h_total.contains("x=\"708\""),
+            "总音浪表头 x 应与列值同为 708: {h_total}"
+        );
         assert!(
             h_total.contains("text-anchor=\"end\""),
             "总音浪列头要 end 对齐"
@@ -1107,10 +1215,16 @@ mod tests {
         assert!(svg.contains(
             "<image x=\"24\" y=\"72\" width=\"32\" height=\"32\" href=\"data:image/png;base64,iVBOR&amp;x&lt;y\" preserveAspectRatio=\"xMidYMid meet\"/>"
         ));
-        assert!(!svg.contains(">🚩</text>"), "有 data:image 图标时不应再画 🚩 emoji");
+        assert!(
+            !svg.contains(">🚩</text>"),
+            "有 data:image 图标时不应再画 🚩 emoji"
+        );
         // 图标为图片时标题/名字整体右移（title x=68）
         let title = text_element_of(&svg, "每日之星");
-        assert!(title.contains("x=\"68\""), "data:image 时称号应右移到 x=68: {title}");
+        assert!(
+            title.contains("x=\"68\""),
+            "data:image 时称号应右移到 x=68: {title}"
+        );
     }
 
     /// 机器人「日报」文本的时长口径（2026-10-16 用户口径「机器人推送的也改」）：
@@ -1130,8 +1244,8 @@ mod tests {
             date: "2026-10-16".into(),
             team: "male".into(),
             rows: vec![
-                mk("浩龙", 63_531, 117),  // 1时57分（10.13.csv 的真实值）
-                mk("玖玉", 23_403, 0),    // 没有时长数据 → 只显示音浪
+                mk("浩龙", 63_531, 117),         // 1时57分（10.13.csv 的真实值）
+                mk("玖玉", 23_403, 0),           // 没有时长数据 → 只显示音浪
                 mk("狼霆", 3_193, 75 * 60 + 29), // 75时29分
             ],
             master_groups: vec![],
@@ -1142,7 +1256,8 @@ mod tests {
         assert!(t.contains("1. 浩龙 6.4 万 / 时长1时57分"), "{t}");
         assert!(t.contains("2. 玖玉 2.3 万"), "{t}");
         assert!(
-            !t.lines().any(|l| l.contains("2. 玖玉") && l.contains("0分")),
+            !t.lines()
+                .any(|l| l.contains("2. 玖玉") && l.contains("0分")),
             "时长 0 不显示：{t}"
         );
         assert!(t.contains("3. 狼霆 3193 / 时长75时29分"), "{t}");

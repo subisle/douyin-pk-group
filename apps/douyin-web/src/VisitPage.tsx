@@ -276,7 +276,7 @@ export default function VisitPage() {
             }}
           >
             <input
-              placeholder="IP，如 121.8.215.106 或 10.0.0.0/24"
+              placeholder="IP，如 203.0.113.106 或 10.0.0.0/24"
               value={wlDraft}
               onChange={(e) => setWlDraft(e.target.value)}
               style={{ width: 240 }}
@@ -347,7 +347,7 @@ export default function VisitPage() {
             }}
           >
             <input
-              placeholder="输入 IP，如 121.8.215.106"
+              placeholder="输入 IP，如 203.0.113.106"
               value={ipDraft}
               onChange={(e) => setIpDraft(e.target.value)}
               style={{ width: 220 }}

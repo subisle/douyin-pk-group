@@ -24,7 +24,12 @@ type ApiResult = Result<Json<serde_json::Value>, ApiError>;
 /// 2026-10-14 审计 P2：原先靠中文关键词猜 400，结果 PG 报错里含「不存在」「唯一」
 /// 就被当成 400 把原文（表名/约束名/SQL 片段）回传客户端；反过来真正的用户错误
 /// （「不支持的文件类型」「无效的主播 id」）不含关键词，落 500 只能看到通用文案。
-pub struct ApiError(anyhow::Error, Option<StatusCode>, bool, Option<serde_json::Value>);
+pub struct ApiError(
+    anyhow::Error,
+    Option<StatusCode>,
+    bool,
+    Option<serde_json::Value>,
+);
 
 impl ApiError {
     /// 登录态问题（未登录 / 过期 / 团别不符）→ 401，展示端登录门据此弹登录卡

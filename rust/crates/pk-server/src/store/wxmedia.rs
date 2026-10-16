@@ -193,12 +193,20 @@ pub async fn user_send_image(
     png: &[u8],
 ) -> anyhow::Result<()> {
     if !crate::push::push_out_allowed_for_account(st, to_user_id).await {
-        let preview: String = caption.chars().take(120).collect();
+        // preview 用页数字节兜底（审计 6-P3-8）：每日报告改空 caption 后
+        // 原先这里恒打空串，排查日志看不出本该发的是什么图
+        let preview = if caption.is_empty() {
+            format!("（无说明文字，{} 字节图片）", png.len())
+        } else {
+            caption.chars().take(120).collect()
+        };
         tracing::warn!(
             to_user_id, bytes = png.len(), preview = %preview,
             "【测试阶段】已拦截微信图片发送（未发）；要真实发送请设 PUSH_OUT_ENABLED=1"
         );
-        return Ok(());
+        /* 2026-10-17 审计 6-P2-1：拦截返回 Err(Blocked)（同 user_send_text）——
+        admin_send.rs 手动下发据此落 failed、不推进去重标记。 */
+        return Err(crate::push::Blocked.into());
     }
     let up = upload_image(base_url, token, to_user_id, png).await?;
     if !caption.is_empty() {

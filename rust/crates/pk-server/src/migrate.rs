@@ -160,6 +160,26 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "032_query_indexes",
         include_str!("migrations/032_query_indexes.sql"),
     ),
+    // 033：对接码防爆破计数表（2026-10-17 审计 4-P1-2）。按码失败 ≥5 次作废该码、
+    // 全局 1 小时失败 ≥600 次冷却 10 分钟，语义在 store/wxpush.rs::bind_code_fail_*。
+    (
+        "033_bind_code_fails",
+        include_str!("migrations/033_bind_code_fails.sql"),
+    ),
+    // 034：推送队列 stale 抢占修复（2026-10-17 审计 6-P2-2）。push_jobs 加 taken_at
+    // （进入 running 的时刻），stale 判定改看它 —— 原先用 created_at（入队时间）
+    // 恒命中 5 分钟条件，长任务 60 秒必被并发重抢 → 重复推送。
+    (
+        "034_push_jobs_taken_at",
+        include_str!("migrations/034_push_jobs_taken_at.sql"),
+    ),
+    // 035：扫码无主凭证收紧（2026-10-17 审计 4-P2-2）。wx_push_accounts 加
+    // legacy_no_uid —— 激活的「无主兼容分支」只对历史存量行保留，
+    // 新扫码（user_id 缺失）已在 wx.rs 确认侧直接拒绝，不再产生可冒认激活的行。
+    (
+        "035_wx_legacy_no_uid",
+        include_str!("migrations/035_wx_legacy_no_uid.sql"),
+    ),
 ];
 
 /// 迁移建连（migrator 账号；同样关语句缓存）
@@ -249,25 +269,23 @@ fn detect_ownership_error(msg: &str) -> (bool, Option<String>) {
         || m.contains("must have create privilege on schema")
         || m.contains("must be superuser")
         || m.contains("permission denied to change owner");
-    let table = ["table ", "relation "]
-        .iter()
-        .find_map(|tag| {
-            let idx = m.find(tag)?;
-            let rest = msg[idx + tag.len()..].trim_start();
-            // 带引号的对象名（可含空格/标点，PG 对大小写敏感名会加引号）：取到配对引号为止
-            if let Some(quoted) = rest.strip_prefix('"') {
-                let end = quoted.find('"')?;
-                let name = &quoted[..end];
-                return (!name.is_empty()).then(|| name.to_string());
-            }
-            // 裸对象名：字母数字 + _ $ .（schema 限定名含点）；结尾标点不属于名字
-            let name: String = rest
-                .chars()
-                .take_while(|c| c.is_alphanumeric() || "_$.".contains(*c))
-                .collect();
-            let name = name.trim_end_matches('.').to_string();
-            (!name.is_empty()).then_some(name)
-        });
+    let table = ["table ", "relation "].iter().find_map(|tag| {
+        let idx = m.find(tag)?;
+        let rest = msg[idx + tag.len()..].trim_start();
+        // 带引号的对象名（可含空格/标点，PG 对大小写敏感名会加引号）：取到配对引号为止
+        if let Some(quoted) = rest.strip_prefix('"') {
+            let end = quoted.find('"')?;
+            let name = &quoted[..end];
+            return (!name.is_empty()).then(|| name.to_string());
+        }
+        // 裸对象名：字母数字 + _ $ .（schema 限定名含点）；结尾标点不属于名字
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || "_$.".contains(*c))
+            .collect();
+        let name = name.trim_end_matches('.').to_string();
+        (!name.is_empty()).then_some(name)
+    });
     (hit, table)
 }
 
@@ -309,11 +327,11 @@ pub async fn run_with(pool: &PgPool, user: &str) -> anyhow::Result<Vec<String>> 
 
     let applied_before: Vec<String> =
         sqlx::query(&crate::pq::rewrite("SELECT version FROM schema_migrations"))
-        .fetch_all(pool)
-        .await?
-        .iter()
-        .filter_map(|r| r.try_get::<String, _>(0).ok())
-        .collect();
+            .fetch_all(pool)
+            .await?
+            .iter()
+            .filter_map(|r| r.try_get::<String, _>(0).ok())
+            .collect();
 
     let mut applied_now = Vec::new();
     for (version, sql) in MIGRATIONS {
@@ -392,10 +410,22 @@ mod tests {
     fn ownership_error_detection() {
         // PG 真实报错原文（sqlx Display 里就是这段）
         for (msg, table) in [
-            ("must be owner of table monthly_metric", Some("monthly_metric")),
-            ("error returned from database: must be owner of relation monthly_metric", Some("monthly_metric")),
-            ("permission denied for table import_pending", Some("import_pending")),
-            ("permission denied for relation wave_snapshot", Some("wave_snapshot")),
+            (
+                "must be owner of table monthly_metric",
+                Some("monthly_metric"),
+            ),
+            (
+                "error returned from database: must be owner of relation monthly_metric",
+                Some("monthly_metric"),
+            ),
+            (
+                "permission denied for table import_pending",
+                Some("import_pending"),
+            ),
+            (
+                "permission denied for relation wave_snapshot",
+                Some("wave_snapshot"),
+            ),
             ("must have create privilege on schema public", None),
             ("must be superuser to alter owners", None),
             ("permission denied to change owner", None),
@@ -429,7 +459,10 @@ mod tests {
         assert!(hit);
         assert_eq!(got.as_deref(), Some("monthly_metric"));
         // 摸不到对象名 → None，不硬猜
-        assert_eq!(detect_ownership_error("must have create privilege on schema public").1, None);
+        assert_eq!(
+            detect_ownership_error("must have create privilege on schema public").1,
+            None
+        );
     }
 
     /// 提示文案：点名账号与表、给出 ALTER TABLE 语句和 runbook 指引。

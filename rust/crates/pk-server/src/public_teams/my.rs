@@ -47,6 +47,23 @@ pub async fn verify(
             "尝试太频繁，请稍后再试",
         ));
     }
+    /* 2026-10-17 审计 4-P1-1：verify 接入 LoginLimiter（与 /my/login、/api/auth/login
+    同一套「连续失败 5 次锁 10 分钟」，key 加 myverify: 前缀分桶）。
+    原先这里只有上面的 5 次/分 IP 滑窗 —— 换 IP 即重置，攻击者可对纯数字密码
+    （初始密码 = 手机号后四位的产品口径仍在）慢速匀速撞库。锁定期间不跑
+    argon2、不查库，直接 429。 */
+    let verify_key = format!("myverify:{}", client_ip_for_limit(addr, &headers));
+    if st.auth.login_locked(&verify_key) {
+        let wait = st.auth.login_locked_seconds(&verify_key);
+        tracing::warn!(ip = %client_ip, wait_s = wait, "展示端 verify 失败次数过多，来源被临时锁定");
+        return Err(ApiError::with_json(
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            json!({
+                "error": format!("失败次数过多，请 {wait} 秒后再试"),
+                "lockedFor": wait,
+            }),
+        ));
+    }
     // 账号 = 手机号或姓名：新前端传 account，老前端传 name，两者都行
     let acct = body
         .get("account")
@@ -72,14 +89,21 @@ pub async fn verify(
     }
 
     /* 1. 账号校验：手机号+密码 或 姓名+密码（my_accounts 名单，管理员后台开通）
-       2026-10-14：失败要说明白是哪一种（密码错 / 账号没开通），不再统一糊成一句。 */
+    2026-10-14：失败要说明白是哪一种（密码错 / 账号没开通），不再统一糊成一句。 */
     let account_name = match crate::store::my_account_check_login(&st, &acct, &pass).await {
         Ok(name) => name,
         Err(why) => {
             crate::ipinfo::log_login(&st, &client_ip, &geo, &team, &acct, false).await;
+            // 连续失败计数（2026-10-17 审计 4-P1-1）：第 5 次失败锁 10 分钟
+            let now_locked = st.auth.login_record_failure(&verify_key);
+            if now_locked {
+                tracing::warn!(ip = %client_ip, "展示端 verify 连续失败达到阈值，锁定 10 分钟");
+            }
             return Ok(Json(json!({ "ok": false, "error": why.message() })));
         }
     };
+    // 验证通过 → 清零该来源失败计数（与 /my/login 同口径：成功即解锁）
+    st.auth.login_record_success(&verify_key);
     crate::ipinfo::log_login(&st, &client_ip, &geo, &team, &account_name, true).await;
 
     /* 1.5 手机号自助注册还没绑主播的账号：先放进来（personId=0），登录后「我的」页
@@ -285,7 +309,7 @@ pub async fn my_login(
     }
 
     /* 1. 账号校验（与 verify 同一套 my_accounts）
-       2026-10-14：失败原因（密码错 / 账号没开通）下发前端照实显示。 */
+    2026-10-14：失败原因（密码错 / 账号没开通）下发前端照实显示。 */
     let account_name = match crate::store::my_account_check_login(&st, &acct, &pass).await {
         Ok(name) => name,
         Err(why) => {
@@ -307,8 +331,8 @@ pub async fn my_login(
     st.auth.login_record_success(&login_key);
     /* 1.5 账号没绑主播：两个团都放行，token 挂 MY_ANY_KEY（登录后强制绑定） */
     /* 可看团别（迁移 024）：一次性取出来给下面三个分支共用。
-       Inherit 时完全沿用旧逻辑（token_team 原样返回 base），分权只在显式配了的
-       账号上生效 —— 存量 50 多个账号的行为一个字节都不能变。 */
+    Inherit 时完全沿用旧逻辑（token_team 原样返回 base），分权只在显式配了的
+    账号上生效 —— 存量 50 多个账号的行为一个字节都不能变。 */
     let view_team = crate::store::my_account_view_team(&st, &account_name).await;
     if let Some(info) = crate::store::my_account_info(&st, &account_name).await {
         if !info.bound && !info.is_admin {
@@ -363,7 +387,7 @@ pub async fn my_login(
             )
             .await;
             /* view_team 优先级高于绑定关系：钉死女团的账号即使绑着男团主播也只给女团
-               （Inherit 时 token_team 原样返回 team，行为与改动前一致）。 */
+            （Inherit 时 token_team 原样返回 team，行为与改动前一致）。 */
             let token_team = view_team.token_team(&team);
             let token = my_token_put(pid, token_team.clone(), name.clone());
             Ok(Json(json!({
@@ -389,9 +413,9 @@ pub async fn my_login(
             )
             .await;
             /* 观看账号没有绑定主播，base 是空串（旧口径 = 任意团）：
-               - Any     → 空串（两团放行 + 可切）
-               - Female  → "female"（饭团：只看女团）
-               - Inherit → 空串（旧行为不变） */
+            - Any     → 空串（两团放行 + 可切）
+            - Female  → "female"（饭团：只看女团）
+            - Inherit → 空串（旧行为不变） */
             let token_team = view_team.token_team("");
             let token = my_token_put(0, token_team.clone(), account_name.clone());
             Ok(Json(json!({
@@ -545,18 +569,27 @@ pub async fn my_password_reset(
         accounts = names.len(),
         "展示端账号密码已重置为随机临时密码（旧 token 已吊销）"
     );
-    Ok(Json(json!({ "ok": true, "password": password })))
+    /* 2026-10-17 审计 4-P1-1：不再把临时密码**明文回显**进响应。
+    原先「免登录 + 只凭手机号 + 12 次/分/IP（换 IP 绕过）」的端点把新密码原文交给
+    调用者 = 知道主播手机号的任何人都能直接接管其展示端账号（攻击链：重置拿密码
+    → 登录得 24h token → 取对接码改绑微信推送）。改成管理员中介口径：
+    服务端不回密码，临时密码只落 argon2id 哈希；主播重置后找管理员取临时密码
+    （管理员用后台「我的页面账号」改密下发，或直接告知新临时密码）。
+    兼容：老前端会把 d.password 回填密码框 —— 空值时前端走「请联系管理员」分支
+    （st_page.html 已同步改）。响应仍返回 ok + names 数量，不泄露账号名单。 */
+    let _ = password; // 新密码只以哈希落库，不再出服务端（见上）
+    Ok(Json(json!({ "ok": true, "names": names.len() })))
 }
 
 /* 2026-10-16：`my_bind_search`（GET /api/public/my/bind/search）与 `my_bind`
-   （POST /api/public/my/bind）随「抖音号审计」整页下线一并删除 —— 用户口径已改为
-   「账号 → 主播的绑定只由管理员在后台做」，展示端在 2026-10-14 就停止调用这两个接口
-   （st_page.html 只剩一张「联系管理员」提示卡），留着就是可被脚本调用的死接口。
-   `my_bind_requests` 表与迁移保留不删，历史申请记录仍在库里。 */
+（POST /api/public/my/bind）随「抖音号审计」整页下线一并删除 —— 用户口径已改为
+「账号 → 主播的绑定只由管理员在后台做」，展示端在 2026-10-14 就停止调用这两个接口
+（st_page.html 只剩一张「联系管理员」提示卡），留着就是可被脚本调用的死接口。
+`my_bind_requests` 表与迁移保留不删，历史申请记录仍在库里。 */
 
 /* 2026-10-14 注册功能移除：`normalize_team`（注册页团别白名单）随注册一起删除 ——
-   它已无任何生产调用点，仅剩 pages.rs 的 register_route_tests 在断言，那个测试模块
-   也一并删掉了（见 public_teams/pages.rs）。 */
+它已无任何生产调用点，仅剩 pages.rs 的 register_route_tests 在断言，那个测试模块
+也一并删掉了（见 public_teams/pages.rs）。 */
 
 /// 「我的」系列 GET 接口的查询参数（2026-10-12 起 token 只走 X-My-Token 头，不再收
 /// `?token=` —— URL 会进访问日志/浏览器历史/Referer，等价于把登录态写进日志）。

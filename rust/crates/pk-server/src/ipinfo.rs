@@ -1201,7 +1201,11 @@ pub async fn log_access(st: &ArcState, e: AccessLog<'_>) {
     if kind == "login" || rows_affected > 0 {
         crate::events::emit(
             crate::events::SCOPE_VISITS,
-            if kind == "login" { "新的登录记录" } else { "新的访问记录" },
+            if kind == "login" {
+                "新的登录记录"
+            } else {
+                "新的访问记录"
+            },
         );
     }
 }
@@ -1233,7 +1237,9 @@ pub async fn log_login_path(
             geo,
             team,
             path,
-            account,
+            // 2026-10-17 审计 4-P2-8：失败分支记的是用户输入原文，落库前统一清洗
+            //（成功分支的 account_name 本就是库内规范名，清洗对它无损）
+            account: &sanitize_log_account(account),
             allowed,
             login_ok: ok,
         },
@@ -1524,6 +1530,30 @@ fn truncate_name(name: &str) -> String {
     name.trim().chars().take(MAX_LOG_NAME).collect()
 }
 
+/// 登录日志的账号清洗（2026-10-17 审计 4-P2-8）：access_logs.account_name 会经
+/// 「访客日志」页与管理端搜索回显给运营，而登录失败分支记的是**用户输入原文** ——
+/// 攻击者可以借 account 字段把 XSS payload / SQL 片段 / 任意串写进运营可见的日志。
+/// 字符白名单：手机号数字、中文名、常见账号字符保留，其余替换 `?`，长度截 24
+/// （正常手机号 11 位 / 姓名两三个字都够用）。只影响日志展示，不参与鉴权判定。
+fn sanitize_log_account(account: &str) -> String {
+    let cleaned: String = account
+        .trim()
+        .chars()
+        .take(MAX_LOG_NAME)
+        .map(|c| {
+            if c.is_ascii_alphanumeric()
+                || ('\u{4e00}'..='\u{9fff}').contains(&c)
+                || matches!(c, '@' | '+' | '.' | '-' | '_' | '*')
+            {
+                c
+            } else {
+                '?'
+            }
+        })
+        .collect();
+    cleaned.chars().take(24).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1806,7 +1836,7 @@ mod tests {
     #[ignore]
     async fn live_ip_lookup() {
         let ips = std::env::var("IPCHECK")
-            .unwrap_or_else(|_| "123.15.57.1,218.22.0.1,121.8.215.106".into());
+            .unwrap_or_else(|_| "123.15.57.1,218.22.0.1,203.0.113.106".into());
         let all = matches!(
             std::env::var("IPCHECK_ALL").as_deref(),
             Ok("1") | Ok("true") | Ok("yes")

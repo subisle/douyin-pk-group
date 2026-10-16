@@ -304,7 +304,10 @@ fn parse_upload_image(body: &Value) -> Result<Option<(Vec<u8>, String, String)>,
     let (payload, data_mime) = split_data_url(raw)?;
     // 去掉换行等空白（有些前端会按 76 列折行）
     let payload: String = if payload.bytes().any(|b| b.is_ascii_whitespace()) {
-        payload.chars().filter(|c| !c.is_ascii_whitespace()).collect()
+        payload
+            .chars()
+            .filter(|c| !c.is_ascii_whitespace())
+            .collect()
     } else {
         payload.to_string()
     };
@@ -331,9 +334,7 @@ fn parse_upload_image(body: &Value) -> Result<Option<(Vec<u8>, String, String)>,
         )));
     }
     if !is_png(&bytes) {
-        return Err(ApiError::bad_request(
-            "只支持 PNG 格式的图片（image/png）",
-        ));
+        return Err(ApiError::bad_request("只支持 PNG 格式的图片（image/png）"));
     }
     // 声明的 mime（body.imageMime 优先，其次 dataURL 前缀）必须也是 PNG
     let declared = body
@@ -485,8 +486,14 @@ fn parse_send_body(body: &Value) -> Result<MsgInput, ApiError> {
         image_kind: image_kind.to_string(),
         image_date,
         image_blob: upload.as_ref().map(|(b, _, _)| b.clone()),
-        image_mime: upload.as_ref().map(|(_, m, _)| m.clone()).unwrap_or_default(),
-        image_name: upload.as_ref().map(|(_, _, n)| n.clone()).unwrap_or_default(),
+        image_mime: upload
+            .as_ref()
+            .map(|(_, m, _)| m.clone())
+            .unwrap_or_default(),
+        image_name: upload
+            .as_ref()
+            .map(|(_, _, n)| n.clone())
+            .unwrap_or_default(),
         channels,
         target,
         raw_target,
@@ -539,9 +546,13 @@ async fn expand_targets(st: &AppState, spec: &TargetSpec) -> Result<Vec<Recipien
             )
             .await?
         }
-        TargetSpec::Masters { ids, include_master } => {
+        TargetSpec::Masters {
+            ids,
+            include_master,
+        } => {
             let mids: Vec<i64> = ids.iter().map(|v| *v as i64).collect();
-            let mut merged: std::collections::BTreeMap<u64, String> = std::collections::BTreeMap::new();
+            let mut merged: std::collections::BTreeMap<u64, String> =
+                std::collections::BTreeMap::new();
             // 直系徒弟（离职/删除不发，docs/23 §5.2 与 §3.1 同口径）
             for p in persons_by_sql(
                 st,
@@ -631,9 +642,10 @@ pub async fn send_targets(State(st): State<ArcState>, Query(q): Query<SendQuery>
         LEFT JOIN person m ON m.id = p.master_id \
         WHERE p.deleted_at IS NULL AND p.status <> 'left' AND (? = '' OR p.name LIKE ?) \
         ORDER BY p.id LIMIT 200";
-    let rows =
-        pgrs::query_with_binds(&st.pools, "LOCAL", sql, |qb| qb.bind(key.clone()).bind(like))
-            .await?;
+    let rows = pgrs::query_with_binds(&st.pools, "LOCAL", sql, |qb| {
+        qb.bind(key.clone()).bind(like)
+    })
+    .await?;
     let items: Vec<Value> = rows
         .iter()
         .map(|r| {
@@ -858,7 +870,9 @@ struct MsgCore {
 /// `image_mime + image_blob` 两列）。worker 每批 20 行、同消息主档每批只查一次
 /// （上面 `msgs` 缓存），所以同一条消息的原图每批最多读一遍。
 async fn msg_core_of(st: &AppState, message_id: i64) -> Option<MsgCore> {
-    let v = crate::store::admin_message_get(st, message_id).await.ok()??;
+    let v = crate::store::admin_message_get(st, message_id)
+        .await
+        .ok()??;
     let image_kind = v
         .get("imageKind")
         .and_then(Value::as_str)
@@ -925,7 +939,19 @@ pub(crate) async fn worker(st: Arc<AppState>) {
                 },
                 None => (false, "消息主档不存在".to_string()),
             };
-            if !error.is_empty() {
+            if !ok {
+                /* 2026-10-17 审计 6-P2-1：拦截≠成功。窄口（user_send_text /
+                user_send_image）现在返回 Err(Blocked)，send_wxbot_row 把它折成
+                (false, …) —— 这里落 failed 终态（failed 行不会被去重标记覆盖，
+                开闸后管理员在页面重发即可），不再把「没发出去」当 sent。 */
+                tracing::info!(
+                    outbox = r.id,
+                    message = r.message_id,
+                    recipient = %r.recipient_name,
+                    error = %error,
+                    "消息下发行失败"
+                );
+            } else if !error.is_empty() {
                 tracing::info!(
                     outbox = r.id,
                     message = r.message_id,
@@ -979,8 +1005,9 @@ async fn wx_session_ctx(
     acct: Option<&crate::store::WxPushAccount>,
     conv: &str,
 ) -> anyhow::Result<(String, String)> {
-    let (to_user, context_token) =
-        crate::store::wx_session_get(st, conv).await.unwrap_or_default();
+    let (to_user, context_token) = crate::store::wx_session_get(st, conv)
+        .await
+        .unwrap_or_default();
     let to_user = if to_user.is_empty() {
         acct.map(|a| a.ilink_user_id.clone()).unwrap_or_default()
     } else {
@@ -1004,8 +1031,15 @@ async fn wx_send_text(
 ) -> anyhow::Result<()> {
     if let Some(a) = acct {
         let (to_user, ctx) = wx_session_ctx(st, Some(a), conv).await?;
-        return crate::bot::weixin::user_send_text(st, &a.base_url, &a.bot_token, &to_user, &ctx, text)
-            .await;
+        return crate::bot::weixin::user_send_text(
+            st,
+            &a.base_url,
+            &a.bot_token,
+            &to_user,
+            &ctx,
+            text,
+        )
+        .await;
     }
     let Some(wx) = wx_global else {
         anyhow::bail!("没有可用的微信推送通道（请先在「我的」页扫码绑定）");
@@ -1040,8 +1074,16 @@ async fn wx_send_lineage_images(
         } else {
             format!("📄 师门日报第 {} 页（接上条）", i + 1)
         };
-        crate::store::wxmedia::user_send_image(st, &a.base_url, &a.bot_token, &to_user, &ctx, &cap, &png)
-            .await?;
+        crate::store::wxmedia::user_send_image(
+            st,
+            &a.base_url,
+            &a.bot_token,
+            &to_user,
+            &ctx,
+            &cap,
+            &png,
+        )
+        .await?;
         pages += 1;
     }
     anyhow::ensure!(pages > 0, "全部页面转 PNG 失败");
@@ -1057,16 +1099,18 @@ async fn wx_send_uploaded_image(
     png: &[u8],
 ) -> anyhow::Result<()> {
     let (to_user, ctx) = wx_session_ctx(st, Some(a), conv).await?;
-    crate::store::wxmedia::user_send_image(st, &a.base_url, &a.bot_token, &to_user, &ctx, "", png).await
+    crate::store::wxmedia::user_send_image(st, &a.base_url, &a.bot_token, &to_user, &ctx, "", png)
+        .await
 }
 
 /// 发送一行 wxbot 任务。返回 (是否成功, error 备注)。
 ///
-/// 语义（docs/23 §5.4 / §8 边界与降级）：
-/// - 文本先发（消息正文是主载荷）；正文失败 = 整行失败
-/// - image_kind=lineage：正文后按收件人实时渲染发图；无徒弟 / 构建失败 / 转码失败
-///   一律降级为已发的纯文本，原因记进 outbox.error（状态仍是 sent）
-/// - image_kind=daily/month：本期图片未开放，降级纯文本并备注
+/// 语义（docs/23 §5.4 / §8 边界与降级；2026-10-17 口径改版）：
+/// - **有图只发图、没图才发文字**，文字与图不同时发（内容不重复）；
+/// - image_kind=none：纯文字（标题 + 正文）；正文失败 = 整行失败；
+/// - image_kind=lineage/custom：只发图、不发文字；无徒弟 / 构建失败 / 转码失败 /
+///   无扫码账号 / 图缺失等一律**降级发纯文本**兜底，原因记进 outbox.error（状态 sent）；
+/// - image_kind=daily/month：本期图片未开放，降级纯文本并备注。
 async fn send_wxbot_row(
     st: &Arc<AppState>,
     r: &OutboxRow,
@@ -1087,20 +1131,29 @@ async fn send_wxbot_row(
         .unwrap_or(bconv);
     let text = message_text(&msg.title, &msg.content);
 
-    if let Err(e) = wx_send_text(st, acct.as_ref(), wx_global, &conv, &text).await {
-        return (false, e.to_string());
-    }
-
     match msg.image_kind.as_str() {
         "lineage" => {
             if r.person_id == 0 {
-                return (true, "管理员观看账号没有师门数据，已发纯文本".into());
+                return fallback_text(
+                    st,
+                    acct.as_ref(),
+                    wx_global,
+                    &conv,
+                    &text,
+                    "管理员观看账号没有师门数据".into(),
+                )
+                .await;
             }
             let Some(a) = acct.as_ref() else {
-                return (
-                    true,
-                    "图片推送需要扫码账号（请在「我的」页重新扫码），已发纯文本".into(),
-                );
+                return fallback_text(
+                    st,
+                    acct.as_ref(),
+                    wx_global,
+                    &conv,
+                    &text,
+                    "图片推送需要扫码账号（请在「我的」页重新扫码）".into(),
+                )
+                .await;
             };
             let date = if valid_date_str(&msg.image_date) {
                 msg.image_date.clone()
@@ -1116,62 +1169,160 @@ async fn send_wxbot_row(
                             （怕顶掉自动推送的去重），结果是同一天同一人收到**两份**
                             师门日报：定时自动一条 + 管理员手动一条。
                             改成发送成功后写同日标记 —— 自动推送看到标记就跳过当天，
-                            不再重复推；发送失败不写（下次还能重发 / 自动补推）。 */
+                            不再重复推；发送失败/被闸拦截都不写（见 fallback_or_blocked，
+                            拦截折成 false → outbox failed，去重标记不推进）。 */
                             crate::store::push_set_lineage_date(st, &bname, &date).await;
                             (true, String::new())
                         }
-                        Err(e) => (true, format!("图片发送失败，已发纯文本：{e}")),
+                        Err(e) => {
+                            fallback_or_blocked(
+                                st,
+                                acct.as_ref(),
+                                wx_global,
+                                &conv,
+                                &text,
+                                e,
+                                "图片发送失败",
+                            )
+                            .await
+                        }
                     }
                 }
-                Ok(_) => (true, "名下没有在职徒弟，已降级纯文本".into()),
-                Err(e) => (true, format!("图片生成失败，已发纯文本：{e}")),
+                Ok(_) => {
+                    fallback_text(
+                        st,
+                        acct.as_ref(),
+                        wx_global,
+                        &conv,
+                        &text,
+                        "名下没有在职徒弟".into(),
+                    )
+                    .await
+                }
+                Err(e) => {
+                    fallback_text(
+                        st,
+                        acct.as_ref(),
+                        wx_global,
+                        &conv,
+                        &text,
+                        format!("图片生成失败：{e}"),
+                    )
+                    .await
+                }
             }
         }
         // 管理员上传的自定义图：只收 PNG（task-15，iLink 的图片上传本来就只按 PNG 走），
-        // 所以这里**原样透传**、没有任何转码。发失败只降级纯文本。
+        // 所以这里**原样透传**、没有任何转码。只发图、不发文字；失败才降级纯文本。
         "custom" => {
             let Some(a) = acct.as_ref() else {
-                return (
-                    true,
-                    "图片推送需要扫码账号（请在「我的」页重新扫码），已发纯文本".into(),
-                );
+                return fallback_text(
+                    st,
+                    acct.as_ref(),
+                    wx_global,
+                    &conv,
+                    &text,
+                    "图片推送需要扫码账号（请在「我的」页重新扫码）".into(),
+                )
+                .await;
             };
             let Some(png) = msg.image_blob.as_ref() else {
-                return (true, "消息图片缺失，已发纯文本".into());
+                return fallback_text(
+                    st,
+                    acct.as_ref(),
+                    wx_global,
+                    &conv,
+                    &text,
+                    "消息图片缺失".into(),
+                )
+                .await;
             };
             match wx_send_uploaded_image(st, a, &conv, png).await {
                 Ok(()) => (true, String::new()),
-                Err(e) => (true, format!("图片发送失败，已发纯文本：{e}")),
+                Err(e) => {
+                    fallback_or_blocked(
+                        st,
+                        acct.as_ref(),
+                        wx_global,
+                        &conv,
+                        &text,
+                        e,
+                        "图片发送失败",
+                    )
+                    .await
+                }
             }
         }
         // daily / month 渲染器本期未接，一律降级纯文本并备注（docs/23 §5.4）
-        "daily" | "month" => (true, "图片类型暂未开放".into()),
-        _ => (true, String::new()),
+        "daily" | "month" => {
+            fallback_text(
+                st,
+                acct.as_ref(),
+                wx_global,
+                &conv,
+                &text,
+                "图片类型暂未开放".into(),
+            )
+            .await
+        }
+        // none：只发文字（wxbot 纯文本通道）
+        _ => match wx_send_text(st, acct.as_ref(), wx_global, &conv, &text).await {
+            Ok(()) => (true, String::new()),
+            Err(e) => (false, e.to_string()),
+        },
     }
+}
+
+/// 图发不了时的降级：改发纯文本兜底。返回 (成功, 备注)。
+/// `reason` 是降级原因；成功时备注 = 「{reason}，已改发纯文本」，
+/// 失败时备注 = 「{reason}，纯文本兜底也失败：{err}」。
+/// 2026-10-17 审计 6-P3-11：图是被**闸门**拦下时不再空跑文本兜底 —— 文本走同一闸门，
+/// 结果必然也是 Blocked（还多一条「已拦截」WARN）。直接把 Blocked 语义往外传，
+/// 调用方折成 (false, …)，outbox 落 failed、不推进去重。
+async fn fallback_text(
+    st: &AppState,
+    acct: Option<&crate::store::WxPushAccount>,
+    wx_global: Option<&Arc<crate::bot::weixin::WxTransport>>,
+    conv: &str,
+    text: &str,
+    reason: String,
+) -> (bool, String) {
+    match wx_send_text(st, acct, wx_global, conv, text).await {
+        Ok(()) => (true, format!("{reason}，已改发纯文本")),
+        Err(e) => (false, format!("{reason}，纯文本兜底也失败：{e}")),
+    }
+}
+
+/// 图发送失败的统一处理：闸门拦截 → 不降级直接返回失败；真失败 → 降级纯文本。
+async fn fallback_or_blocked(
+    st: &AppState,
+    acct: Option<&crate::store::WxPushAccount>,
+    wx_global: Option<&Arc<crate::bot::weixin::WxTransport>>,
+    conv: &str,
+    text: &str,
+    err: anyhow::Error,
+    reason_prefix: &str,
+) -> (bool, String) {
+    if crate::push::is_blocked(&err) {
+        return (false, format!("{reason_prefix}：出网闸门拦截，未发"));
+    }
+    fallback_text(st, acct, wx_global, conv, text, reason_prefix.to_string()).await
 }
 
 /* ------------------------------ §6 公开接口（我的页弹窗） ------------------------------ */
 
-/// 从请求头 / query / body 里取 my token。优先 X-My-Token 头（唯一正规入口）；
-/// query `?token=` 兜底（图片端点等带不了自定义头的场景，只在本模块三个公开口上认）；
-/// body.token 仅 read 接口用（POST JSON body 不进 URL/日志）。
-fn my_token_of(
-    headers: &HeaderMap,
-    query_token: Option<&str>,
-    body_token: Option<&str>,
-) -> Option<String> {
+/// 从请求头取 my token（2026-10-17 审计 4-P2-9 收口）。
+/// 原先是 头→query→body 三级兜底：24h 登录态挂在 URL query 上会落反向代理 /
+/// 网关访问日志。审计盘点全仓调用方（st_page.html 三个口、uicheck 脚本、e2e）
+/// 已全部走 X-My-Token 头（图片端点用 fetch+blob 取图，不依赖 <img> 丢头行为），
+/// query 兜底无消费者 → 删除。body 兜底保留给 read 接口（POST JSON 不进 URL/日志）。
+fn my_token_of(headers: &HeaderMap, body_token: Option<&str>) -> Option<String> {
     headers
         .get("x-my-token")
         .and_then(|v| v.to_str().ok())
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(String::from)
-        .or_else(|| {
-            query_token
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(String::from)
-        })
         .or_else(|| {
             body_token
                 .map(str::trim)
@@ -1192,20 +1343,13 @@ async fn my_ident(st: &AppState, token: &str) -> Result<(u64, String, String), A
     Err(ApiError::auth("登录已过期，请重新登录"))
 }
 
-#[derive(Deserialize)]
-pub struct MyMsgQuery {
-    pub token: Option<String>,
-}
+/* 2026-10-17 审计 4-P2-9：MyMsgQuery（query token 兜底）随 query 分支一起删除。 */
 
 /// GET /api/public/my/messages —— 该人未读弹窗消息（最新在前）。
 /// 按 (recipient_name, person_id) 双重过滤：同名不同人也绝不串。
-pub async fn my_messages(
-    State(st): State<ArcState>,
-    Query(q): Query<MyMsgQuery>,
-    headers: HeaderMap,
-) -> ApiResult {
-    let token = my_token_of(&headers, q.token.as_deref(), None)
-        .ok_or_else(|| ApiError::auth("缺少验证 token，请先登录"))?;
+pub async fn my_messages(State(st): State<ArcState>, headers: HeaderMap) -> ApiResult {
+    let token =
+        my_token_of(&headers, None).ok_or_else(|| ApiError::auth("缺少验证 token，请先登录"))?;
     let (person_id, _team, name) = my_ident(&st, &token).await?;
     let items = crate::store::admin_unread_for(&st, &name, person_id).await?;
     Ok(Json(json!({ "items": items })))
@@ -1216,7 +1360,6 @@ pub async fn my_messages(
 pub async fn my_message_read(
     State(st): State<ArcState>,
     Path(id): Path<i64>,
-    Query(q): Query<MyMsgQuery>,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> ApiResult {
@@ -1225,12 +1368,8 @@ pub async fn my_message_read(
     } else {
         serde_json::from_slice(&body).unwrap_or(Value::Null)
     };
-    let token = my_token_of(
-        &headers,
-        q.token.as_deref(),
-        body_val.get("token").and_then(Value::as_str),
-    )
-    .ok_or_else(|| ApiError::auth("缺少验证 token，请先登录"))?;
+    let token = my_token_of(&headers, body_val.get("token").and_then(Value::as_str))
+        .ok_or_else(|| ApiError::auth("缺少验证 token，请先登录"))?;
     let (person_id, _team, name) = my_ident(&st, &token).await?;
     let recipient = crate::store::admin_popup_recipient_exists(&st, id, &name, person_id).await?;
     if !recipient {
@@ -1250,17 +1389,10 @@ pub async fn my_message_read(
 pub async fn my_message_image(
     State(st): State<ArcState>,
     Path(id): Path<i64>,
-    Query(q): Query<MyMsgQuery>,
     headers: HeaderMap,
 ) -> Response {
-    let not_found = || {
-        (
-            axum::http::StatusCode::NOT_FOUND,
-            "图片不可用",
-        )
-            .into_response()
-    };
-    let Some(token) = my_token_of(&headers, q.token.as_deref(), None) else {
+    let not_found = || (axum::http::StatusCode::NOT_FOUND, "图片不可用").into_response();
+    let Some(token) = my_token_of(&headers, None) else {
         return (axum::http::StatusCode::UNAUTHORIZED, "请先登录").into_response();
     };
     let Ok((person_id, _team, name)) = my_ident(&st, &token).await else {
@@ -1280,7 +1412,10 @@ pub async fn my_message_image(
     let Ok(Some(msg)) = crate::store::admin_message_get(&st, id).await else {
         return not_found();
     };
-    let kind = msg.get("imageKind").and_then(Value::as_str).unwrap_or("none");
+    let kind = msg
+        .get("imageKind")
+        .and_then(Value::as_str)
+        .unwrap_or("none");
     // 管理员上传的自定义图：只收 PNG，原样回传（不做任何转码）。mime 与落库值一致才下发，
     // 响应头用静态 HeaderValue（不把库里的字符串直接塞头，防 CRLF 注入）。
     if kind == "custom" {
@@ -1404,7 +1539,10 @@ mod tests {
         .ok()
         .unwrap();
         match m.target {
-            TargetSpec::Masters { ids, include_master } => {
+            TargetSpec::Masters {
+                ids,
+                include_master,
+            } => {
                 assert_eq!(ids, vec![5]);
                 assert!(include_master, "includeMaster 缺省应为 true");
             }
@@ -1421,7 +1559,10 @@ mod tests {
         .ok()
         .unwrap();
         match m.target {
-            TargetSpec::Masters { ids, include_master } => {
+            TargetSpec::Masters {
+                ids,
+                include_master,
+            } => {
                 assert_eq!(ids, vec![5, 6], "ids 去重保序");
                 assert!(!include_master);
             }
@@ -1621,10 +1762,15 @@ mod tests {
         // ApiError 的字段私有、也不实现 Display：转成响应再读 JSON error 文案
         let resp = e.into_response();
         let body: Value = serde_json::from_slice(
-            &axum::body::to_bytes(resp.into_body(), 64 * 1024).await.unwrap(),
+            &axum::body::to_bytes(resp.into_body(), 64 * 1024)
+                .await
+                .unwrap(),
         )
         .unwrap();
-        let msg = body.get("error").and_then(Value::as_str).unwrap_or_default();
+        let msg = body
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         assert!(msg.contains("501"), "错误文案要带人数：{msg}");
         assert!(msg.contains("缩小范围"));
     }

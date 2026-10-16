@@ -424,8 +424,9 @@ pub async fn admin_popup_recipient_exists(
 
 /* ------------------------------ 一键开启师门日报 ------------------------------ */
 
-/// 管理端「为所有师傅开启师门日报」：名下有在职徒弟（直系、未删除）且还没开的
-/// 绑定批量置 1，返回影响行数。幂等：已开的不重算。
+/// 管理端「为所有师傅开启师门日报」：名下有**会进日报的**徒弟（直系、未删除、
+/// 在职、未隐藏 —— 与推送侧 lineage_report::build 的名册过滤同口径，审计 6-P3-9）
+/// 且还没开的绑定批量置 1，返回影响行数。幂等：已开的不重算。
 pub async fn admin_lineage_enable_all(st: &AppState) -> Result<u64> {
     let pool = w(st)?;
     let res = sqlx::query(&crate::pq::rewrite(
@@ -434,7 +435,9 @@ pub async fn admin_lineage_enable_all(st: &AppState) -> Result<u64> {
          WHERE lineage_report = 0 AND person_id > 0
            AND EXISTS (SELECT 1 FROM person c
                        WHERE c.master_id = push_bindings.person_id
-                         AND c.deleted_at IS NULL)",
+                         AND c.deleted_at IS NULL
+                         AND c.status <> 'left'
+                         AND c.hide_in_daily_report = 0)",
     ))
     .bind(now_str())
     .execute(pool)

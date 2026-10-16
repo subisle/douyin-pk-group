@@ -516,24 +516,26 @@ impl QqTransport {
 
     async fn send(&self, out: &Outbound) -> anyhow::Result<()> {
         /* 2026-10-16：测试阶段出网闸门（与微信同一开关 PUSH_OUT_ENABLED）。
-           QQ 侧同样可能在本地真发出去（机器人已连接 gateway 且会回复群消息），
-           未开开关时只记日志、不发。
-           2026-10-17 本地灰度：总开关开着但 PUSH_OUT_ALLOW 白名单非空时，
-           QQ 一律拦截 —— 白名单是微信扫码账号名，QQ 会话对不上号，宁可少发。 */
+        QQ 侧同样可能在本地真发出去（机器人已连接 gateway 且会回复群消息），
+        未开开关时只记日志、不发。
+        2026-10-17 本地灰度：总开关开着但 PUSH_OUT_ALLOW 白名单非空时，
+        QQ 一律拦截 —— 白名单是微信扫码账号名，QQ 会话对不上号，宁可少发。 */
         let preview: String = out.text.chars().take(120).collect();
         if !crate::push::push_out_enabled() {
             tracing::warn!(
                 conversation_id = %out.conversation_id, preview = %preview,
                 "【测试阶段】已拦截 QQ 发送（未发）；要真实发送请设 PUSH_OUT_ENABLED=1"
             );
-            return Ok(());
+            // 2026-10-17 审计 6-P2-1：拦截返回 Err(Blocked)（「被拦 ≠ 发送成功」），
+            // 上层回复链会把 error 记进 note，不会误判已发送。
+            return Err(crate::push::Blocked.into());
         }
         if crate::push::push_out_allow_nonempty() {
             tracing::warn!(
                 conversation_id = %out.conversation_id, preview = %preview,
                 "【本地灰度】PUSH_OUT_ALLOW 白名单只对微信扫码账号生效，QQ 发送已拦截（未发）"
             );
-            return Ok(());
+            return Err(crate::push::Blocked.into());
         }
         let (group, user, msg_id, in_window) = {
             let inner = self.inner.lock().await;

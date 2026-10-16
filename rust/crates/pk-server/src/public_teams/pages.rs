@@ -45,7 +45,7 @@ pub(super) fn st_page_for(team: &str) -> Response {
 }
 
 /* 2026-10-14 注册功能移除：`register_route_tests`（注册页团别白名单用例）随之删除，
-   它唯一断言的 `normalize_team` 也已在 my.rs 里一并清理。 */
+它唯一断言的 `normalize_team` 也已在 my.rs 里一并清理。 */
 
 #[cfg(test)]
 mod announcement_tests {
@@ -81,7 +81,7 @@ mod announcement_tests {
                 title: "x".into(),
                 icon: bad.into(),
                 target: String::new(),
-            content: "y".into(),
+                content: "y".into(),
             };
             let got = Announcement::icon_for(&s, 0);
             assert_eq!(got, DEFAULT_STEP_ICONS[0], "{bad:?} 该回落默认");
@@ -144,13 +144,13 @@ mod announcement_tests {
                     title: "a".into(),
                     icon: String::new(),
                     target: String::new(),
-            content: "1".into(),
+                    content: "1".into(),
                 },
                 AnnounceStep {
                     title: "b".into(),
                     icon: "  ".into(),
                     target: String::new(),
-            content: "2".into(),
+                    content: "2".into(),
                 },
             ],
             version: 1,
@@ -205,7 +205,11 @@ mod announcement_tests {
                     text: "第一行\n第二行".into(),
                     icon: " campaign ".into(),
                 },
-                home: Placement { enabled: false, text: "看板".into(), icon: String::new() },
+                home: Placement {
+                    enabled: false,
+                    text: "看板".into(),
+                    icon: String::new(),
+                },
                 my: Placement::default(),
             },
             celebrate: CelebrateConfig {
@@ -242,10 +246,18 @@ mod announcement_tests {
     /// 任意字符串不进前端 DOM（与引导弹窗 icon_for 同一道关口）。
     #[test]
     pub(super) fn placement_json_whitelists_icon() {
-        let ok = Placement { enabled: true, text: String::new(), icon: " star ".into() };
+        let ok = Placement {
+            enabled: true,
+            text: String::new(),
+            icon: " star ".into(),
+        };
         assert_eq!(Announcement::placement_json(&ok)["icon"], "star");
         for bad in ["<script>", "foo", "STAR", "star twist", ""] {
-            let p = Placement { enabled: true, text: String::new(), icon: bad.into() };
+            let p = Placement {
+                enabled: true,
+                text: String::new(),
+                icon: bad.into(),
+            };
             assert_eq!(
                 Announcement::placement_json(&p)["icon"],
                 "",

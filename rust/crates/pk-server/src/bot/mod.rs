@@ -838,9 +838,7 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
     let qq_admin_ok = if cfg.qq_admins.is_empty() {
         true // 未配置 = 旧行为：QQ 全放开
     } else {
-        cfg.qq_admins
-            .iter()
-            .any(|a| a == &inbound.conversation_id)
+        cfg.qq_admins.iter().any(|a| a == &inbound.conversation_id)
     };
     let role = if (inbound.channel == "qq" && qq_admin_ok)
         || cfg.wechat_admins.contains(&inbound.conversation_id)
@@ -1020,9 +1018,7 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
         现在按「消息文本里的团别 > 文件名里的团别 > auto」三级取：
         文本优先（运营当下说的算），文件名兜底（老习惯 `2026-10-07-男团.csv`），
         都没有才 auto（一个文件男女混着也能导，团别按档案归属）。 */
-        let msg_team = text
-            .split_whitespace()
-            .find_map(team_of);
+        let msg_team = text.split_whitespace().find_map(team_of);
         let team = msg_team.or(_file_team).unwrap_or("auto");
         tracing::info!(
             file = %filename,

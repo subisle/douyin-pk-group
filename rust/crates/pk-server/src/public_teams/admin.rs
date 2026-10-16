@@ -53,17 +53,14 @@ pub async fn admin_my_account_set(
     {
         Some(p) => (p.to_string(), false),
         // 2026-10-13：未指定密码时按运营惯例生成**手机号后四位**（原先是随机 10 位）。
-        None => (
-            crate::store::my_account::initial_password(phone),
-            true,
-        ),
+        None => (crate::store::my_account::initial_password(phone), true),
     };
     crate::store::my_account_set(&st, name, phone, &pass)
         .await
         .map_err(account_store_err)?;
     /* 可看团别（迁移 024）：**只在请求里显式带了 viewTeam 时才改**。
-       不带 = 保持原值 —— 后台「改密码」「改手机号」这些常规操作（前端表单没这个字段）
-       不能顺手把账号的可见范围清成 Inherit。非法值由 normalize 收敛成 ""（沿用旧口径）。 */
+    不带 = 保持原值 —— 后台「改密码」「改手机号」这些常规操作（前端表单没这个字段）
+    不能顺手把账号的可见范围清成 Inherit。非法值由 normalize 收敛成 ""（沿用旧口径）。 */
     let view_team_written = match body.get("viewTeam").and_then(|v| v.as_str()) {
         Some(raw) => {
             let vt = crate::store::ViewTeam::parse(raw);
@@ -73,21 +70,23 @@ pub async fn admin_my_account_set(
         None => false,
     };
     /* 写后回读校验（2026-10-13）：之前出现过「接口返回 ok 但库里没这一行」的静默失败
-       （写池指向了非预期实例 / 事务被丢弃），运营看到绿色「已保存」却根本没账号。
-       这里落地后立刻回读，读不到就报错，绝不再假成功。 */
+    （写池指向了非预期实例 / 事务被丢弃），运营看到绿色「已保存」却根本没账号。
+    这里落地后立刻回读，读不到就报错，绝不再假成功。 */
     let saved = crate::store::my_account_get(&st, name).await;
     /* 判据是「查得到这一行」而不是 JSON 里的 found 键：
-       found 是 admin_my_account_get（GET 单条）自己补的展示字段，
-       store::my_account_get 返回的裸值里没有它 —— 上一版读 v["found"] 恒 false，
-       导致每次开号/改密明明成功却一律 500「写入后校验失败」（2026-10-13 修复）。 */
+    found 是 admin_my_account_get（GET 单条）自己补的展示字段，
+    store::my_account_get 返回的裸值里没有它 —— 上一版读 v["found"] 恒 false，
+    导致每次开号/改密明明成功却一律 500「写入后校验失败」（2026-10-13 修复）。 */
     let verified = saved.is_some();
     if !verified {
         return Err(anyhow::anyhow!(
-            "账号「{}」写入后校验失败（库里读不到），请检查写库配置后重试", name
-        ).into());
+            "账号「{}」写入后校验失败（库里读不到），请检查写库配置后重试",
+            name
+        )
+        .into());
     }
     /* 改了可见范围必须吊销旧 token：旧 token 里挂着改之前算出来的团别，
-       不吊销的话范围限制当场就被绕过去了（拿着旧 token 继续看全团）。 */
+    不吊销的话范围限制当场就被绕过去了（拿着旧 token 继续看全团）。 */
     my_tokens_revoke(name);
     tracing::info!(account = %name, generated, view_team_written,
         "管理端设置展示端账号（旧 token 已吊销，已回读校验）");
@@ -173,7 +172,7 @@ pub async fn admin_my_account_set_view_team(
         .ok_or_else(|| anyhow::anyhow!("请选择可看团别"))?;
     let vt = crate::store::ViewTeam::parse(raw);
     /* 账号不存在要明说（UPDATE 影响 0 行时静默返回 ok = 假成功）。
-       写后回读校验沿用 admin_my_account_set 的口径：库里读不到就报错。 */
+    写后回读校验沿用 admin_my_account_set 的口径：库里读不到就报错。 */
     if crate::store::my_account_get(&st, &name).await.is_none() {
         return Err(anyhow::anyhow!("账号「{name}」不存在").into());
     }
@@ -196,8 +195,8 @@ pub async fn admin_my_account_set_view_team(
 }
 
 /* 2026-10-16：绑定申请审核（`/api/admin/my-bind-requests*`，表 my_bind_requests）
-   随「抖音号审计」整页一起下线 —— 管理端本来就没有入口，展示端也已不再调用绑定申请
-   接口。三个 handler 已删除，表与迁移保留不删（历史申请记录仍可用 SQL 查）。 */
+随「抖音号审计」整页一起下线 —— 管理端本来就没有入口，展示端也已不再调用绑定申请
+接口。三个 handler 已删除，表与迁移保留不删（历史申请记录仍可用 SQL 查）。 */
 
 /* ------------------------------- 防遍历限流 ------------------------------- */
 
@@ -317,7 +316,9 @@ fn mytok_name_key(name: &str) -> String {
 /// put/take/revoke 之后的 Redis 同步（拿不到 Redis 就静默跳过，退化为纯内存）。
 /// 异步工厂：让调用点用 async 块传进来（block_on 里再驱动）
 trait FutureFactory: Send + 'static {
-    fn future(self) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>>;
+    fn future(
+        self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>>;
 }
 
 impl<F, Fut> FutureFactory for F
@@ -325,7 +326,9 @@ where
     F: FnOnce() -> Fut + Send + 'static,
     Fut: std::future::Future<Output = anyhow::Result<()>> + Send + 'static,
 {
-    fn future(self) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>> {
+    fn future(
+        self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>> {
         Box::pin(self())
     }
 }
@@ -359,7 +362,10 @@ async fn mytok_redis_set(
     // 2026-10-13 安全修复：同步登记反向索引（SADD + 与 token 键同 TTL 的 EXPIRE），
     // 让「按账号名吊销」能在不依赖内存枚举的情况下覆盖 Redis 侧全部 token。
     let members: Vec<&str> = vec![token];
-    if crate::store::cache::sadd(st, &mytok_name_key(name), &members).await.is_some() {
+    if crate::store::cache::sadd(st, &mytok_name_key(name), &members)
+        .await
+        .is_some()
+    {
         crate::store::cache::expire(st, &mytok_name_key(name), MYTOK_TTL).await;
     }
     Ok(())
@@ -386,7 +392,10 @@ pub(super) fn my_token_put(person_id: u64, team: String, name: String) -> String
     let token = my_token_random();
     let mut m = my_tokens().lock().expect("my token 锁 poisoned");
     m.retain(|_, (_, _, _, at)| at.elapsed() < Duration::from_secs(24 * 3600));
-    m.insert(token.clone(), (person_id, team.clone(), name.clone(), Instant::now()));
+    m.insert(
+        token.clone(),
+        (person_id, team.clone(), name.clone(), Instant::now()),
+    );
     drop(m);
     let t = token.clone();
     let tm = team.clone();
@@ -409,7 +418,10 @@ pub(super) fn my_token_take(token: &str) -> Option<(u64, String, String)> {
 /// 内存 miss 时从 Redis 回填（2026-10-12 登录态持久化）：
 /// who/token 校验路径（async）在 take 失败后调用，命中即回填内存。
 /// 只回填不消费（take 语义是只读），让 token 继续在 TTL 内可用。
-pub(crate) async fn my_token_restore(st: &crate::state::AppState, token: &str) -> Option<(u64, String, String)> {
+pub(crate) async fn my_token_restore(
+    st: &crate::state::AppState,
+    token: &str,
+) -> Option<(u64, String, String)> {
     if my_token_take(token).is_some() {
         return my_token_take(token); // 内存里有，直接用
     }
@@ -429,7 +441,10 @@ pub(crate) async fn my_token_restore(st: &crate::state::AppState, token: &str) -
     let name = v.get("name")?.as_str()?.to_string();
     // 回填内存（Instant=now；TTL 由 Redis 端 24h 控制，内存侧随写随清）
     let mut m = my_tokens().lock().expect("my token 锁 poisoned");
-    m.insert(token.to_string(), (pid, team.clone(), name.clone(), Instant::now()));
+    m.insert(
+        token.to_string(),
+        (pid, team.clone(), name.clone(), Instant::now()),
+    );
     Some((pid, team, name))
 }
 

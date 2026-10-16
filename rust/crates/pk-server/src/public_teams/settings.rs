@@ -186,13 +186,19 @@ impl PublicSettings {
 pub async fn get_settings(State(st): State<ArcState>) -> ApiResult {
     let mut v = PublicSettings::load(&st).await.to_json();
     // 🚩 流动小红旗条（2026-10-12）：称号 / 手动指定，存 config 表
-    v["starTitle"] = json!(crate::store::config_get(&st, "star_title").await.unwrap_or_default());
-    v["starOverride"] =
-        json!(crate::store::config_get(&st, "star_override").await.unwrap_or_default());
+    v["starTitle"] = json!(crate::store::config_get(&st, "star_title")
+        .await
+        .unwrap_or_default());
+    v["starOverride"] = json!(crate::store::config_get(&st, "star_override")
+        .await
+        .unwrap_or_default());
     /* 🏆 争霸赛冠军横幅（2026-10-13）：整条文案可编（「称号|人名|音浪」），空 = 不显示 */
-    v["champBanner"] =
-        json!(crate::store::config_get(&st, "champ_banner").await.unwrap_or_default());
-    v["starIcon"] = json!(crate::store::config_get(&st, "star_icon").await.unwrap_or_default());
+    v["champBanner"] = json!(crate::store::config_get(&st, "champ_banner")
+        .await
+        .unwrap_or_default());
+    v["starIcon"] = json!(crate::store::config_get(&st, "star_icon")
+        .await
+        .unwrap_or_default());
     Ok(Json(v))
 }
 
@@ -602,28 +608,48 @@ pub(super) fn parse_items(arr: &[Value]) -> Vec<AnnounceItem> {
                 // 三甲席位（2026-10-16）：0/1/2 之外一律 -1（未指定），防任意整数进配置
                 seat: {
                     let s = v.get("seat").and_then(|x| x.as_i64()).unwrap_or(-1);
-                    if (0..=2).contains(&s) { s as i8 } else { -1 }
+                    if (0..=2).contains(&s) {
+                        s as i8
+                    } else {
+                        -1
+                    }
                 },
                 // 成绩月份（2026-10-16）：只收 YYYY-MM 形状（月必须两位，01-12 之外不拦——
                 // 导入口径容错），其余丢弃（空 = 不指定）
                 period: {
-                    let p = v.get("period").and_then(|x| x.as_str()).unwrap_or("").trim();
+                    let p = v
+                        .get("period")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .trim();
                     let digits_ok = |s: &str| s.chars().all(|c| c.is_ascii_digit());
                     let ok = p.len() == 7
                         && p.as_bytes()[4] == b'-'
                         && digits_ok(&p[..4])
                         && digits_ok(&p[5..]);
-                    if ok { p.to_string() } else { String::new() }
+                    if ok {
+                        p.to_string()
+                    } else {
+                        String::new()
+                    }
                 },
                 // 抖音头像（2026-10-16）：只收本站同源头像路径 `/api/public/avatars/...`
                 // （选人端点带出的形态），任意字符串 / 外域 URL / 相对跳转一律丢弃
                 avatar: {
-                    let a = v.get("avatar").and_then(|x| x.as_str()).unwrap_or("").trim();
+                    let a = v
+                        .get("avatar")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .trim();
                     let ok = a.starts_with("/api/public/avatars/")
                         && !a.contains("..")
-                        && a.chars().all(|c| c.is_ascii_alphanumeric()
-                            || "/?=&._-".contains(c));
-                    if ok && a.len() <= 120 { a.to_string() } else { String::new() }
+                        && a.chars()
+                            .all(|c| c.is_ascii_alphanumeric() || "/?=&._-".contains(c));
+                    if ok && a.len() <= 120 {
+                        a.to_string()
+                    } else {
+                        String::new()
+                    }
                 },
             })
         })
@@ -704,7 +730,11 @@ impl Announcement {
     /// （GET /api/public/announcements 与 GET /api/public/teams/{team} 都经它）。
     pub(super) fn item_json(it: &AnnounceItem) -> Value {
         let icon = it.icon.trim();
-        let icon = if STEP_ICON_WHITELIST.contains(&icon) { icon } else { "" };
+        let icon = if STEP_ICON_WHITELIST.contains(&icon) {
+            icon
+        } else {
+            ""
+        };
         json!({
             "enabled": it.enabled,
             "icon": icon,
@@ -748,7 +778,11 @@ impl Announcement {
     pub(super) fn placement_json(p: &Placement) -> Value {
         // 归一化先算好再进 json!（宏的值位置放不了语句块）
         let icon = p.icon.trim();
-        let icon = if STEP_ICON_WHITELIST.contains(&icon) { icon } else { "" };
+        let icon = if STEP_ICON_WHITELIST.contains(&icon) {
+            icon
+        } else {
+            ""
+        };
         json!({
             "enabled": p.enabled,
             "text": p.text,
@@ -813,11 +847,16 @@ pub async fn update_announcement(State(st): State<ArcState>, Json(body): Json<Va
                 }
                 let icon = s.get("icon").and_then(|v| v.as_str()).unwrap_or("").trim();
                 // spotlight 目标选择器：只收合法字符，长度兜底，不让任意长串进配置
-                let target = s.get("target").and_then(|v| v.as_str()).unwrap_or("").trim();
+                let target = s
+                    .get("target")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim();
                 let target_ok = !target.is_empty()
                     && target.len() <= 120
-                    && target.chars().all(|c| c.is_ascii_alphanumeric()
-                        || " _-#.[\"]>:()~*=^|,$".contains(c));
+                    && target
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || " _-#.[\"]>:()~*=^|,$".contains(c));
                 Some(AnnounceStep {
                     title: title.trim().chars().take(64).collect(),
                     // 白名单外的图标名直接丢掉（回落默认），任意字符串不进配置
@@ -827,7 +866,11 @@ pub async fn update_announcement(State(st): State<ArcState>, Json(body): Json<Va
                         String::new()
                     },
                     content: content.trim().chars().take(2000).collect(),
-                    target: if target_ok { target.to_string() } else { String::new() },
+                    target: if target_ok {
+                        target.to_string()
+                    } else {
+                        String::new()
+                    },
                 })
             })
             .collect();
@@ -936,7 +979,6 @@ async fn avatar_hash_map(st: &AppState) -> std::collections::HashMap<u64, String
     }
 }
 
-
 /// GET /api/admin/announcement/seat-options?period=YYYY-MM
 ///
 /// 给公告页「席位配置」的选择器用：返回该月的主播成绩榜（personId/name/team/wave），
@@ -962,7 +1004,10 @@ pub async fn seat_options(
     // 只收 YYYY-MM 形状（7 位、第 5 位是 '-'、其余是数字），注入面归零
     let ok = period.len() == 7
         && period.as_bytes()[4] == b'-'
-        && period.chars().enumerate().all(|(i, c)| i == 4 || c.is_ascii_digit());
+        && period
+            .chars()
+            .enumerate()
+            .all(|(i, c)| i == 4 || c.is_ascii_digit());
     if !ok {
         return Err(anyhow::anyhow!("period 格式应为 YYYY-MM").into());
     }
@@ -994,7 +1039,10 @@ pub async fn seat_options(
     let items: Vec<Value> = rows
         .iter()
         .map(|r| {
-            let pid = r.try_get::<i64, _>("person_id").map(|v| v.max(0) as u64).unwrap_or(0);
+            let pid = r
+                .try_get::<i64, _>("person_id")
+                .map(|v| v.max(0) as u64)
+                .unwrap_or(0);
             json!({
                 "personId": pid,
                 "name": r.try_get::<Option<String>, _>("name").ok().flatten().unwrap_or_default(),
@@ -1083,7 +1131,10 @@ mod announcement_items_tests {
         };
         let eff = with_synth_items(a, "每日之星", "称号|阿哲|999", "");
         assert_eq!(eff.items.len(), 1);
-        assert_eq!(eff.items[0].title, "每日之星", "celebrate.title 空 → 回落 star_title");
+        assert_eq!(
+            eff.items[0].title, "每日之星",
+            "celebrate.title 空 → 回落 star_title"
+        );
         assert_eq!(eff.items[0].name, "狼哲");
 
         let a = Announcement {
@@ -1119,7 +1170,12 @@ mod announcement_items_tests {
     /// ② 空 items + 只有 champ_banner → 合成恰好一条 plain；缺段 / 脏音浪 / 空串按兜底。
     #[test]
     fn empty_items_with_only_champ_banner_synth_exactly_one_plain() {
-        let eff = with_synth_items(Announcement::default(), "", "", "初级争霸赛冠军|狼哲|123456");
+        let eff = with_synth_items(
+            Announcement::default(),
+            "",
+            "",
+            "初级争霸赛冠军|狼哲|123456",
+        );
         assert_eq!(eff.items.len(), 1);
         let it = &eff.items[0];
         assert!(it.enabled);
@@ -1417,7 +1473,7 @@ mod announcement_items_tests {
             json!({"title": "丙", "seat": "0", "period": "202609"}),
         ]);
         assert!(bad.iter().all(|it| it.seat == -1));
-        assert_eq!(bad[0].period, "2026-09");   // 合法月份不受坏席位牵连
+        assert_eq!(bad[0].period, "2026-09"); // 合法月份不受坏席位牵连
         assert_eq!(bad[1].period, "");
         assert_eq!(bad[2].period, "");
 
@@ -1449,7 +1505,10 @@ mod announcement_items_tests {
             ..Default::default()
         };
         let av_js = av_a.to_json();
-        assert_eq!(av_js["items"][0]["avatar"], "/api/public/avatars/31?v=abc123");
+        assert_eq!(
+            av_js["items"][0]["avatar"],
+            "/api/public/avatars/31?v=abc123"
+        );
         assert_eq!(av_js["items"][1]["avatar"], "");
 
         // 旧数据没有这两个字段：serde(default) 回落 -1 / 空串，不炸

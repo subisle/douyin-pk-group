@@ -59,6 +59,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 
 # ---------- 阶段 4：运行时（只有 COPY，无 RUN） ----------
 FROM debian:bookworm-slim
+# 非 root 运行（2026-10-17 审计：原先容器以 root 跑，纵深防御缺口）。
+# 只挂 /app/data 写运行时状态，属主预先建好；监听 8787 非特权端口无需 CAP。
+RUN groupadd -r pk --gid=1000 && useradd -r -g pk --uid=1000 --home-dir=/app --shell=/usr/sbin/nologin pk \
+    && mkdir -p /app/data && chown -R pk:pk /app
 ENV TZ=Asia/Shanghai
 WORKDIR /app
 COPY --from=base /etc/ssl/certs /etc/ssl/certs
@@ -69,6 +73,7 @@ ENV WEB_DIST=/app/web \
     PORT=8787 \
     SQLITE_PATH=/app/data/app.db
 VOLUME ["/app/data"]
+USER pk
 EXPOSE 8787
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s \
   CMD ["/usr/local/bin/pk-server", "--health-check"]

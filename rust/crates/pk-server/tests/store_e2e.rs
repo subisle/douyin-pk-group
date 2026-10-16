@@ -42,7 +42,10 @@ async fn setup() -> Option<AppState> {
         }
         if let Ok(w) = config::load_writer() {
             if prod_hit(&w.host, &w.database) {
-                eprintln!("拒绝运行：writer 指向生产库（{} / {}）。e2e 测试必须用独立测试库", w.host, w.database);
+                eprintln!(
+                    "拒绝运行：writer 指向生产库（{} / {}）。e2e 测试必须用独立测试库",
+                    w.host, w.database
+                );
                 return None;
             }
         }
@@ -105,17 +108,17 @@ async fn cleanup_admin_e2e(st: &AppState) {
 }
 
 /* ══════════ 暂存补账幂等性（2026-10-14） ══════════
-   后台「导入暂存区」的 UI 入口已移除：运营不再能手工挨行「建档 / 丢弃」。
-   这条链路现在完全依赖 absorb 自动补账，因此它的**幂等性**成了唯一防线 ——
-   一旦重复补账，音浪会静默翻倍且没有任何前端提示能让运营察觉。
+后台「导入暂存区」的 UI 入口已移除：运营不再能手工挨行「建档 / 丢弃」。
+这条链路现在完全依赖 absorb 自动补账，因此它的**幂等性**成了唯一防线 ——
+一旦重复补账，音浪会静默翻倍且没有任何前端提示能让运营察觉。
 
-   触发点共 5 处（create_streamer / update_streamer / bind_account ×3 / 绑定审核通过），
-   建档后往往会紧跟一次绑号（或二次编辑），同一个 person_id 会被 absorb 多次。
-   本测试把「连续两次 absorb」钉死：第二次必须补 0 行、daily_metric 数值不变。
+触发点共 5 处（create_streamer / update_streamer / bind_account ×3 / 绑定审核通过），
+建档后往往会紧跟一次绑号（或二次编辑），同一个 person_id 会被 absorb 多次。
+本测试把「连续两次 absorb」钉死：第二次必须补 0 行、daily_metric 数值不变。
 
-   本用例用 **PG 原生 $n** 占位符，是在真实 PostgreSQL 上真跑真断言的 e2e
-   （原文件其余 MySQL 方言用例已于 2026-10-14 删除，见文件头注释）；
-   新增用例请照此写法。 */
+本用例用 **PG 原生 $n** 占位符，是在真实 PostgreSQL 上真跑真断言的 e2e
+（原文件其余 MySQL 方言用例已于 2026-10-14 删除，见文件头注释）；
+新增用例请照此写法。 */
 
 #[tokio::test]
 async fn absorb_pending_is_idempotent_across_repeated_calls() {
@@ -230,7 +233,10 @@ async fn absorb_pending_is_idempotent_across_repeated_calls() {
     .expect("查未命中行")
     .try_get::<i64, _>(0)
     .unwrap_or(0);
-    assert_eq!(still, 1, "对不上号的暂存行不该被 absorb 吞掉（实际剩 {still}）");
+    assert_eq!(
+        still, 1,
+        "对不上号的暂存行不该被 absorb 吞掉（实际剩 {still}）"
+    );
 
     cleanup_admin_e2e(&st).await;
 }

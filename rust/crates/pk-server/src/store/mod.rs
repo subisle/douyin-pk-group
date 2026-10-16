@@ -698,9 +698,9 @@ mod phone_batch_open_tests {
     /// 同一个手机号两次结果必须一致（可预期，主播自己能推出来），且能通过账号密码校验。
     #[test]
     fn initial_password_is_phone_last4_and_valid() {
-        let a = initial_password("15560099282");
-        let b = initial_password("15560099282");
-        assert_eq!(a, "9282", "应取手机号后四位");
+        let a = initial_password("13800138000");
+        let b = initial_password("13800138000");
+        assert_eq!(a, "8000", "应取手机号后四位");
         assert_eq!(a, b, "同一手机号两次结果必须一致（可预期）");
         assert_eq!(initial_password("13800138000"), "8000");
         // 带分隔符/空格的手机号也能正确取后四位

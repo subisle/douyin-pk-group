@@ -279,7 +279,11 @@ pub async fn user_send_text(
             to_user_id, preview = %preview,
             "【测试阶段】已拦截微信文本发送（未发）；要真实发送请设 PUSH_OUT_ENABLED=1"
         );
-        return Ok(());
+        /* 2026-10-17 审计 6-P2-1：拦截返回 Err(Blocked) 而不是 Ok ——
+        「被闸拦下 ≠ 发送成功」。原先返回 Ok 会让 admin_send.rs 的手动下发把
+        outbox 落成 sent 并推进 last_lineage_date（师门日报当天被永久吞掉）。
+        push.rs 的自动推送已用 is_blocked() 识别，不会把 Blocked 当失败重试。 */
+        return Err(crate::push::Blocked.into());
     }
     let out = wx_json(
         reqwest::Method::POST,
@@ -852,8 +856,8 @@ impl WxTransport {
 
     async fn send(&self, out: &Outbound) -> anyhow::Result<()> {
         /* 2026-10-17 本地灰度：这是管理员全局机器人通道（不是用户扫码账号），
-           会话对不上 PUSH_OUT_ALLOW 白名单的账号名 —— 白名单非空时一律拦截
-           （灰度期只放白名单里的扫码账号，宁可少发）。 */
+        会话对不上 PUSH_OUT_ALLOW 白名单的账号名 —— 白名单非空时一律拦截
+        （灰度期只放白名单里的扫码账号，宁可少发）。 */
         let preview: String = out.text.chars().take(120).collect();
         if !crate::push::push_out_enabled() {
             tracing::warn!(

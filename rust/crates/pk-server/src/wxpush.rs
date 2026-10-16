@@ -476,6 +476,12 @@ fn activation_owner_ok(acct: &WxPushAccount, from_user: &str, conversation: &str
         // 历史已激活账号（无 ilink_user_id）：只认已绑定会话的发送者
         return Some(acct.conversation_id == conversation);
     }
+    /* 2026-10-17 审计 4-P2-2：无主行的兼容放行收窄到 legacy_no_uid=1 的存量 ——
+    新扫码在确认侧已拒绝 user_id 缺失（wx.rs），不会再产生「双空」行；
+    改动前落库的历史无主行仍放行（否则老账号永远激活不了），但记 warn。 */
+    if !acct.legacy_no_uid {
+        return Some(false);
+    }
     // 老数据从未激活过：无据可查，交给调用方按兼容口径处理
     None
 }
@@ -644,7 +650,11 @@ mod tests {
             BACKOFF_DELAY,
             "连续第 3 次 → 30s（官方退避档）"
         );
-        assert_eq!(monitor_failure_delay(50), BACKOFF_DELAY, "再多也是 30s（官方计数清零后的同一档）");
+        assert_eq!(
+            monitor_failure_delay(50),
+            BACKOFF_DELAY,
+            "再多也是 30s（官方计数清零后的同一档）"
+        );
     }
 
     /* --------------------------- 风险 3：cursor 落库 --------------------------- */
@@ -753,7 +763,10 @@ mod tests {
         // 用户口径（2026-10-16）：单账号一分钟最多一轮。
         assert_eq!(POLL_MIN_INTERVAL, Duration::from_secs(60));
         // 刚跑完一轮 → 补睡满 60s；过了 35s（长轮询挂住）→ 再睡 25s；超时 → 不睡
-        assert_eq!(poll_floor_wait(Duration::from_secs(0)), Duration::from_secs(60));
+        assert_eq!(
+            poll_floor_wait(Duration::from_secs(0)),
+            Duration::from_secs(60)
+        );
         assert_eq!(
             poll_floor_wait(Duration::from_secs(35)),
             Duration::from_secs(25)
@@ -815,9 +828,20 @@ mod tests {
         // 老数据从未激活（两个字段都空）：无法判定 → None（调用方放行但记 warn）
         let mut empty = acct("老账号", "tok");
         empty.ilink_bot_id = bot.into();
+        empty.legacy_no_uid = true; // 迁移 035：历史存量无主行才保留兼容放行
         assert_eq!(
             activation_owner_ok(&empty, "whoever", &conv_of("whoever")),
             None
+        );
+        // 2026-10-17 审计 4-P2-2：新口径下**非 legacy** 的无主行（双空）一律拒绝激活
+        // —— 新扫码已改为 user_id 缺失直接拒绝保存，这类行不应再出现；
+        // 一旦出现（比如手工插库），绝不能让「第一个说话的人」冒认激活。
+        let mut ownerless = acct("新账号", "tok");
+        ownerless.ilink_bot_id = bot.into();
+        assert_eq!(
+            activation_owner_ok(&ownerless, "whoever", &conv_of("whoever")),
+            Some(false),
+            "无主新行不能被任意首条消息激活"
         );
     }
 

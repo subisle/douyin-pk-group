@@ -381,7 +381,9 @@ export default function BotPage() {
                     alt="微信登录二维码"
                     src={qr.imgContent.startsWith('data:') ? qr.imgContent : `data:image/png;base64,${qr.imgContent}`}
                   />
-                ) : qr.url ? (
+                ) : qr.url && /^https?:\/\//i.test(qr.url) ? (
+                  /* 2026-10-17 审计 5-P3（遗留 N3）：上游微信协议响应原样透传的 url
+                  必须过 scheme 白名单才进 href，javascript: 一律不渲染。 */
                   <p>
                     <a href={qr.url} target="_blank" rel="noreferrer">
                       打开二维码链接
@@ -616,10 +618,18 @@ function PushQueueCard() {
     }
   }
 
-  const statusText = (s: string) =>
-    ({ pending: '待发', sending: '发送中', done: '已完成', failed: '失败' } as Record<string, string>)[
-      s
-    ] ?? s
+  const statusText = (s: string) => {
+    // 2026-10-17 审计 5-P2：后端真实状态集是 pending / running / running:N（重试中）/
+    // failed:N（退避等待重试）/ done / failed（终态）—— 原映射里的 `sending` 不存在，
+    // 重试态会裸显原始码。`failed:N` 与终态 `failed` 同样显示「失败」+ 重试说明。
+    if (s === 'pending') return '待发'
+    if (s === 'running') return '发送中'
+    if (s === 'done') return '已完成'
+    if (s === 'failed') return '失败'
+    if (s.startsWith('running:')) return '发送中（重试）'
+    if (s.startsWith('failed:')) return '失败（等待重试）'
+    return s
+  }
 
   return (
     <section className="card">
@@ -629,9 +639,11 @@ function PushQueueCard() {
         这里能看队列有没有推出去，也能手动立刻再推一次（仍受出网闸门控制）。
       </p>
       {stats && (
+        /* 2026-10-17 审计 5-P2：后端 push_stats 返回的是 {bound, enabled}
+        （已绑定微信人数 / 已开推送人数），原先读 pending/sending/done/failed
+        四个不存在的字段 → 统计行恒显示 0。 */
         <p className="hint">
-          待发 {stats.pending ?? 0} · 发送中 {stats.sending ?? 0} · 已完成 {stats.done ?? 0} · 失败{' '}
-          {stats.failed ?? 0}
+          已绑定微信 {stats.bound ?? 0} 人 · 已开推送 {stats.enabled ?? 0} 人
         </p>
       )}
       <div className="row" style={{ gap: 8, alignItems: 'flex-end', flexWrap: 'wrap' }}>

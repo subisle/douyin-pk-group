@@ -30,8 +30,23 @@ rsync -rlz --delete \
   --exclude='.workbuddy/' \
   --exclude='*.tsbuildinfo' \
   --exclude='.env' \
+  --exclude='.env.*' \
   --exclude='deploy/.env' \
   --exclude='deploy/data/' \
+  --exclude='.dbmerge/' \
+  --exclude='backups/' \
+  --exclude='*.dump' \
+  --exclude='*.sql.gz' \
+  --exclude='*.sha256' \
+  --exclude='.local-assets/' \
+  --exclude='design-previews/' \
+  --exclude='.stitch/' \
+  --exclude='音浪数据/' \
+  --exclude='audit-*.md' \
+  --exclude='dsh-审计报告-*.md' \
+  --exclude='dsh-入库报告-*.md' \
+  --exclude='.playwright-cli/' \
+  --exclude='.uicheck/' \
   -e "sshpass -p '$PASS' ssh -o StrictHostKeyChecking=accept-new" \
   "$ROOT/" "root@$HOST:$REMOTE/"
 

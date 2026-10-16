@@ -245,8 +245,8 @@ pub struct BoardConfig {
 /// 展板配置白名单校验。单独拆成纯函数（Value 进、BoardConfig 出），
 /// 方便单测直接喂 JSON；handler 也走它，保证「存进去的一定合法」。
 pub fn validate_board_config(v: &mut serde_json::Value) -> Result<BoardConfig, String> {
-    let config: BoardConfig = serde_json::from_value(v.take())
-        .map_err(|e| format!("展板配置字段缺失或类型不对：{e}"))?;
+    let config: BoardConfig =
+        serde_json::from_value(v.take()).map_err(|e| format!("展板配置字段缺失或类型不对：{e}"))?;
 
     // 赛事类型：先归一（兼容老叫法），归一后仍不在白名单才算非法
     let ev = store::normalize_event_type(&config.event_type);
@@ -256,7 +256,10 @@ pub fn validate_board_config(v: &mut serde_json::Value) -> Result<BoardConfig, S
     let mut config = config;
     config.event_type = ev;
 
-    if !matches!(config.metric.as_str(), "lastN" | "last1" | "month" | "total") {
+    if !matches!(
+        config.metric.as_str(),
+        "lastN" | "last1" | "month" | "total"
+    ) {
         return Err("取数口径只能是 lastN / last1 / month / total".into());
     }
     // last1 时天数前端自己管（本来就不看），这里只卡 lastN 的范围
@@ -302,9 +305,7 @@ pub fn validate_board_config(v: &mut serde_json::Value) -> Result<BoardConfig, S
 
 /// 读展板配置：没存过按 `{saved:false}` 处理，坏 JSON 也不 500——
 /// 配置读不出来顶多让前端用默认值，不该把整个展板页打挂。
-pub async fn board_config_get(
-    State(st): State<Arc<AppState>>,
-) -> GroupResult<serde_json::Value> {
+pub async fn board_config_get(State(st): State<Arc<AppState>>) -> GroupResult<serde_json::Value> {
     let config = match store::config_get(&st, BOARD_CONFIG_KEY).await {
         Some(raw) => match serde_json::from_str::<serde_json::Value>(&raw) {
             Ok(v) => Some(v),

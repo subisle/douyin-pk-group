@@ -182,10 +182,14 @@ pub async fn my_push(
         // 开启并收到师门日报，页面上却**不显示这个开关** —— 他自己关不掉。
         // 现在按原注释预留的方向放宽，与推送侧对齐。
         let has_disciples = if person_id > 0 {
+            // 2026-10-17 审计 6-P3-9：徒弟过滤与推送侧 build() 同口径
+            //（在职 + 未隐藏），否则只有离团/隐藏徒弟的师傅看得到开关、
+            // 却永远收不到日报（rows.len()==1 → 跳过），开关成了摆设。
             let sql = "SELECT COUNT(*) AS n FROM person p \
               WHERE p.id = ? AND p.deleted_at IS NULL \
                 AND EXISTS (SELECT 1 FROM person c \
-                     WHERE c.master_id = p.id AND c.deleted_at IS NULL)";
+                     WHERE c.master_id = p.id AND c.deleted_at IS NULL \
+                       AND c.status <> 'left' AND c.hide_in_daily_report = 0)";
             let res =
                 pgrs::query_with_binds(&st.pools, &sid(&st), sql, |q| q.bind(person_id as i64))
                     .await;
@@ -495,21 +499,19 @@ pub async fn my_push_wechat_poll(
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
-    // 官方 2.4.10 只要求 bot_token + ilink_bot_id（`ilink_user_id` 在类型里是可选，
-    // 见 @tencent-weixin/openclaw-weixin 的 login-qr.ts）。原先我们把 user_id 也当硬条件，
-    // 上游偶发不下发时会把一次成功的扫码判成「凭证不完整」——绑定白扫。
-    // 这里只收紧到「必须有 token + bot_id」；user_id 缺失记 warn 继续，
-    // 激活侧的 activation_owner_ok 本来就有「无 user_id 的历史兼容分支」。
-    if bot_token.is_empty() || bot_id.is_empty() {
+    /* 2026-10-17 审计 4-P2-2：user_id 缺失**直接拒绝保存**（收窄 2026-10-16 的
+    「warn 后继续」口径）。原因：无 user_id 的行落库后 ilink_user_id 与
+    conversation_id 双空，激活侧 activation_owner_ok 无法证明发送者身份 ——
+    任何能私聊到 bot 的人发第一条消息就能冒认激活，此后该主播的音浪/追分/日报
+    全部推给陌生人，还能以本人身份「解绑」。上游偶发不下发 userId 是可重试的
+    偶发故障（重扫一次即可），与「绑定白扫」相比宁可严格。 */
+    if bot_token.is_empty() || bot_id.is_empty() || user_id.is_empty() {
+        if user_id.is_empty() {
+            tracing::warn!(account = %name, "扫码已确认但上游未返回 ilink_user_id，拒绝保存（防无主凭证被冒认激活）");
+        }
         return Err(ApiError::bad_request(
             "扫码已确认，但微信没有返回完整凭证，请重试",
         ));
-    }
-    if user_id.is_empty() {
-        tracing::warn!(
-            account = %name,
-            "扫码已确认但上游未返回 ilink_user_id：继续保存绑定，激活按历史兼容口径校验发送者"
-        );
     }
     // 重扫不丢已激活绑定（2026-10-13 用户口径：配置还要和之前一样）：
     // 覆盖凭证前先取库里已有账号，下面重申 push_bindings 时带上旧会话。
@@ -519,7 +521,7 @@ pub async fn my_push_wechat_poll(
         team: team_scope.clone(),
         person_id,
         ilink_bot_id: bot_id,
-        ilink_user_id: user_id,
+        ilink_user_id: user_id.clone(),
         bot_token,
         // baseUrl 可能为空；本次轮询实际是走 pending 会话记录的 redirect base（poll_base）
         // 成功的（poll_base 为空时本就走默认主机），空串回落它，
@@ -546,6 +548,13 @@ pub async fn my_push_wechat_poll(
         // 刚扫码的账号未暂停；若此前解绑过，下面 push_bind_account 的 upsert 会把
         // push_bindings.paused 置回 0（重新对接 = 恢复，迁移 029 口径）。
         paused: false,
+        /* 2026-10-17 审计 4-P2-2：新扫码凭证不再打 legacy 标（user_id 缺失已在
+        上面直接拒绝保存）。重扫历史 legacy 行且这次上游补发了 userId 时，
+        标记随之清除 —— activation_owner_ok 从此走严格比对。 */
+        legacy_no_uid: match &existing {
+            Some(e) => e.legacy_no_uid && user_id.is_empty(),
+            None => false,
+        },
     };
     // save 的 DO UPDATE 不覆盖 conversation_id；已有账号时把内存结构与库对齐
     if let Some(e) = &existing {
@@ -615,6 +624,11 @@ pub async fn my_push_wechat_poll(
                 welcomed = true;
                 tracing::info!(account = %name, "对接完成欢迎语已发送（含姓名）");
             }
+            Err(e) if crate::push::is_blocked(&e) => {
+                // 2026-10-17 审计 6-P2-1：闸门拦截不算发送失败 —— 只是不发，
+                // 不落「等对方发第一条消息再回执」的误导日志。
+                tracing::info!(account = %name, "对接完成欢迎语被出网闸门拦截（未发）");
+            }
             Err(e) => tracing::warn!(
                 account = %name,
                 error = %e,
@@ -638,13 +652,13 @@ pub async fn my_push_wechat_poll(
 pub async fn my_push_code(
     State(st): State<ArcState>,
     Path(team): Path<String>,
-    axum::Json(body): axum::Json<Value>,
+    headers: HeaderMap,
+    axum::Json(_body): axum::Json<Value>,
 ) -> ApiResult {
-    let token = body
-        .get("token")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
-    let (person_id, _t, name) = my_ident(&st, &team, token).await?;
+    /* 2026-10-17 审计 4-N15：token 收口到 X-My-Token 头（与 targets_batch 同口径），
+    24h 登录态不再过 POST body。前端 postPush 本就两头都带，无破坏。 */
+    let token = header_my_token(&headers).unwrap_or_default();
+    let (person_id, _t, name) = my_ident(&st, &team, &token).await?;
     if person_id == 0 {
         return Err(ApiError::bad_request("该账号没有主播档案，不能生成对接码"));
     }
@@ -677,13 +691,11 @@ pub async fn my_push_code(
 pub async fn my_push_settings(
     State(st): State<ArcState>,
     Path(team): Path<String>,
+    headers: HeaderMap,
     axum::Json(body): axum::Json<Value>,
 ) -> ApiResult {
-    let token = body
-        .get("token")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
-    let (_pid, _t, name) = my_ident(&st, &team, token).await?;
+    let token = header_my_token(&headers).unwrap_or_default();
+    let (_pid, _t, name) = my_ident(&st, &team, &token).await?;
     let flag = |k: &str| body.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
     crate::store::push_set_flags(&st, &name, flag("notifyTarget"), flag("dailyReport")).await;
     // 师门日报第三开关：body 里带了才改（含显式 false），缺省不动现值。
@@ -707,13 +719,11 @@ pub async fn my_push_settings(
 pub async fn my_push_unbind(
     State(st): State<ArcState>,
     Path(team): Path<String>,
-    axum::Json(body): axum::Json<Value>,
+    headers: HeaderMap,
+    axum::Json(_body): axum::Json<Value>,
 ) -> ApiResult {
-    let token = body
-        .get("token")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
-    let (_pid, _t, name) = my_ident(&st, &team, token).await?;
+    let token = header_my_token(&headers).unwrap_or_default();
+    let (_pid, _t, name) = my_ident(&st, &team, &token).await?;
     crate::store::push_unbind(&st, &name).await;
     Ok(Json(json!({ "ok": true })))
 }
@@ -723,13 +733,11 @@ pub async fn my_push_unbind(
 pub async fn my_push_target_add(
     State(st): State<ArcState>,
     Path(team): Path<String>,
+    headers: HeaderMap,
     axum::Json(body): axum::Json<Value>,
 ) -> ApiResult {
-    let token = body
-        .get("token")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
-    let (person_id, actual_team, name) = my_ident(&st, &team, token).await?;
+    let token = header_my_token(&headers).unwrap_or_default();
+    let (person_id, actual_team, name) = my_ident(&st, &team, &token).await?;
     let team_scope = if team == "all" {
         actual_team.as_str()
     } else {
@@ -969,13 +977,11 @@ pub async fn my_push_targets_batch(
 pub async fn my_push_target_del(
     State(st): State<ArcState>,
     Path(team): Path<String>,
+    headers: HeaderMap,
     axum::Json(body): axum::Json<Value>,
 ) -> ApiResult {
-    let token = body
-        .get("token")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
-    let (_pid, _t, name) = my_ident(&st, &team, token).await?;
+    let token = header_my_token(&headers).unwrap_or_default();
+    let (_pid, _t, name) = my_ident(&st, &team, &token).await?;
     let id = body
         .get("id")
         .and_then(|v| v.as_u64())

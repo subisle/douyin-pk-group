@@ -595,7 +595,11 @@ mod tests {
         assert_eq!(m.rows.len(), 2);
         assert!(m.has_dur_col && m.has_wave_col);
         assert_eq!(m.rows[0].wave, Some(5508.0), "音浪要取「总音浪」列");
-        assert_eq!(m.rows[0].minutes, Some(108.0), "1小时48分钟15秒 → 108 分钟（秒丢掉）");
+        assert_eq!(
+            m.rows[0].minutes,
+            Some(108.0),
+            "1小时48分钟15秒 → 108 分钟（秒丢掉）"
+        );
         assert_eq!(m.rows[1].wave, Some(3193.0));
         assert_eq!(m.rows[1].minutes, Some(62.0));
         // 只有音浪列的月度文件也认（月度音浪导入）

@@ -443,6 +443,10 @@ async fn main() -> anyhow::Result<()> {
         等价 /my/wechat（前端 parseRoute 把 rest === 'wechat' 折算成 my + mySub='wechat'）。
         深链/刷新落在这里，不再掉进 spa fallback 拿到 React 管理端 index.html。 */
         .route("/wechat", get(public_teams::st_root))
+        /* 2026-10-17 审计 5-P3：/wechat/{子路径} 经 OPEN_PREFIXES 的前缀规则免鉴权
+        放行后，原先掉进 spa fallback 回管理端 index.html —— 展示页用户看到的是
+        要口令的后台壳。补一条子路径路由接到展示页同款处理。 */
+        .route("/wechat/{*rest}", get(public_teams::st_page_sub))
         .route("/group", get(public_teams::st_root))
         .route("/group/{key}", get(public_teams::st_root))
         .route("/1", get(public_teams::st_m))
@@ -643,10 +647,10 @@ async fn main() -> anyhow::Result<()> {
             axum::routing::put(admin::set_person_phone),
         )
         /* 2026-10-16 抖音号审计整页下线：`/api/admin/anchor-claims*`（截图裁决）与
-           `/api/admin/my-bind-requests*`（展示端绑定申请审核）的路由 + handler 一并移除
-           —— 两者在管理端都没有独立入口，且展示端已不再调用绑定申请接口。
-           `my_bind_requests` / `anchor_claims` 两张表与迁移保留不删，只停用代码路径
-           （历史数据仍可用 SQL 查）。 */
+        `/api/admin/my-bind-requests*`（展示端绑定申请审核）的路由 + handler 一并移除
+        —— 两者在管理端都没有独立入口，且展示端已不再调用绑定申请接口。
+        `my_bind_requests` / `anchor_claims` 两张表与迁移保留不删，只停用代码路径
+        （历史数据仍可用 SQL 查）。 */
         .route("/api/admin/collect/status", get(admin::collect_status))
         // 访客日志（2026-10-10）：展示端访问 / 登录记录，含外省被拒的
         .route("/api/admin/visits", get(ipinfo::admin_visits))
@@ -677,8 +681,9 @@ async fn main() -> anyhow::Result<()> {
         // extensions 里 insert，内层覆盖外层，所以这里比全局那层更靠内 → 生效 8MB。
         .route(
             "/api/admin/send",
-            post(admin_send::send_create)
-                .layer(axum::extract::DefaultBodyLimit::max(admin_send::SEND_BODY_LIMIT)),
+            post(admin_send::send_create).layer(axum::extract::DefaultBodyLimit::max(
+                admin_send::SEND_BODY_LIMIT,
+            )),
         )
         .route("/api/admin/send/targets", get(admin_send::send_targets))
         .route("/api/admin/send/messages", get(admin_send::send_messages))

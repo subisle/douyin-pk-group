@@ -11,3 +11,29 @@ apps/douyin-web/dist
 *.jpg
 *.jpeg
 *.xlsx
+
+# ---- 2026-10-17 上线前审计补齐：敏感文件与现场产物一律不进 build context ----
+# 环境变量文件（rust/.env、deploy/.env*、scripts/db-align/local.env 等）
+# 镜像构建只走环境注入，.env 进 context = 凭证进构建机（GitHub Actions）
+.env
+.env.*
+**/.env
+**/.env.*
+# 数据库 dump / 合并现场（sub2api.dump 曾含第三方凭证，40MB+ 也拖慢构建）
+.dbmerge
+backups
+**/*.dump
+**/*.sql.gz
+**/*.sha256
+# 运营数据与审计/入库现场报告（含真实手机号、口令、内网拓扑）
+音浪数据
+audit-*.md
+dsh-审计报告-*.md
+dsh-入库报告-*.md
+dsh-*.svg
+# 设计现场产物与部署编排（镜像构建用不到 deploy/ 的脚本与 compose）
+.stitch
+design-previews
+deploy
+docs
+scripts

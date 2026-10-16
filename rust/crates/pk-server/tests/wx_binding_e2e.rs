@@ -82,7 +82,9 @@ async fn setup() -> Option<AppState> {
 }
 
 async fn cleanup(st: &AppState) {
-    let Some(pool) = st.writer.as_ref() else { return };
+    let Some(pool) = st.writer.as_ref() else {
+        return;
+    };
     for sql in [
         format!("DELETE FROM wx_sessions WHERE conversation_id = '{CONV}'"),
         format!("DELETE FROM push_bindings WHERE name = '{NAME}'"),
@@ -106,17 +108,25 @@ async fn weixin_65char_conversation_key_roundtrip() {
     cleanup(&st).await;
 
     assert_eq!(CONV.chars().count(), 65, "本用例的被测前提：key 必须 >64");
-    println!("[wx_binding_e2e] 真跑断言（非跳过）：key 长度={}", CONV.chars().count());
+    println!(
+        "[wx_binding_e2e] 真跑断言（非跳过）：key 长度={}",
+        CONV.chars().count()
+    );
 
     // 1. 私聊上下文（主动推送要用的 context_token 存在这里）
     pk_server::store::wx_session_upsert(&st, CONV, USER, "ctx-token-e2e").await;
-    let row = sqlx::query("SELECT to_user_id, context_token FROM wx_sessions WHERE conversation_id = $1")
-        .bind(CONV)
-        .fetch_optional(pool)
-        .await
-        .expect("查 wx_sessions");
+    let row =
+        sqlx::query("SELECT to_user_id, context_token FROM wx_sessions WHERE conversation_id = $1")
+            .bind(CONV)
+            .fetch_optional(pool)
+            .await
+            .expect("查 wx_sessions");
     let row = row.expect("wx_sessions 必须能存下 65 字符 key（迁移 027）");
-    assert_eq!(row.try_get::<String, _>("context_token").unwrap_or_default(), "ctx-token-e2e");
+    assert_eq!(
+        row.try_get::<String, _>("context_token")
+            .unwrap_or_default(),
+        "ctx-token-e2e"
+    );
 
     // 2. 绑定落 push_bindings（展示端「已绑定」的唯一口径）
     pk_server::store::push_bind_account(&st, NAME, "male", CONV, USER).await;
@@ -127,7 +137,10 @@ async fn weixin_65char_conversation_key_roundtrip() {
         .expect("查 push_bindings")
         .try_get("conversation_id")
         .unwrap_or_default();
-    assert_eq!(saved, CONV, "push_bindings 必须原样存下 key（旧写法静默失败 → 一直显示未绑定）");
+    assert_eq!(
+        saved, CONV,
+        "push_bindings 必须原样存下 key（旧写法静默失败 → 一直显示未绑定）"
+    );
     assert_eq!(
         pk_server::store::push_binding_conversation(&st, NAME).await,
         CONV,
@@ -201,7 +214,10 @@ async fn four_digit_bind_code_roundtrip_and_uniqueness() {
         .await
         .expect("摇第一个码");
     assert_eq!(code1.len(), 4, "绑定码必须是 4 位：{code1}");
-    assert!(code1.bytes().all(|b| b.is_ascii_digit()), "绑定码必须是纯数字：{code1}");
+    assert!(
+        code1.bytes().all(|b| b.is_ascii_digit()),
+        "绑定码必须是纯数字：{code1}"
+    );
     println!("[wx_binding_e2e] 账号1 码={code1}");
 
     // ② 唯一性：另一个账号摇码，不允许与 code1 相同（部分唯一索引 + 重摇兜底）
@@ -220,7 +236,11 @@ async fn four_digit_bind_code_roundtrip_and_uniqueness() {
         .fetch_one(pool)
         .await
         .expect("查绑定行");
-    assert_eq!(row.try_get::<String, _>("conversation_id").unwrap_or_default(), CONV2);
+    assert_eq!(
+        row.try_get::<String, _>("conversation_id")
+            .unwrap_or_default(),
+        CONV2
+    );
     assert_eq!(
         row.try_get::<String, _>("bind_code").unwrap_or_default(),
         "",
@@ -228,13 +248,17 @@ async fn four_digit_bind_code_roundtrip_and_uniqueness() {
     );
     // 同一个码第二次用：绑不上
     assert!(
-        pk_server::store::push_bind_by_code(&st, &code1, CONV2, "e2e-user").await.is_none(),
+        pk_server::store::push_bind_by_code(&st, &code1, CONV2, "e2e-user")
+            .await
+            .is_none(),
         "码是一次性的，第二次必须失败"
     );
 
     // ④ 错码 / 过期码绑不上
     assert!(
-        pk_server::store::push_bind_by_code(&st, "0000", CONV2, "e2e-user").await.is_none()
+        pk_server::store::push_bind_by_code(&st, "0000", CONV2, "e2e-user")
+            .await
+            .is_none()
             || code2 == "0000",
         "随机错码不该绑上（极小概率撞上 code2，撞上则本轮跳过断言）"
     );
@@ -246,11 +270,12 @@ async fn four_digit_bind_code_roundtrip_and_uniqueness() {
     ))
     .execute(pool)
     .await;
-    let left: i64 = sqlx::query("SELECT COUNT(*) AS n FROM push_bindings WHERE name LIKE '__e2e微信绑定%'")
-        .fetch_one(pool)
-        .await
-        .expect("清理后核查")
-        .try_get("n")
-        .unwrap_or(-1);
+    let left: i64 =
+        sqlx::query("SELECT COUNT(*) AS n FROM push_bindings WHERE name LIKE '__e2e微信绑定%'")
+            .fetch_one(pool)
+            .await
+            .expect("清理后核查")
+            .try_get("n")
+            .unwrap_or(-1);
     assert_eq!(left, 0, "清理不干净会污染真实数据");
 }

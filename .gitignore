@@ -47,10 +47,9 @@ pk-board.png
 
 # .dbmerge：拉取/合并数据库的现场产物（dump、转换中间 SQL、灌库前备份）
 # 脚本 scripts/pull-db-147.sh、scripts/mysql2pg.py 入库，数据产物只在本地
-.dbmerge/*.dump
-.dbmerge/*.sql
-.dbmerge/*.sql.gz
-.dbmerge/*.log
+# 2026-10-17 审计补：整目录忽略 —— 原先后缀规则漏掉 sha256/verification.sql，
+# 导致 sub2api.dump、含内网 root 口令的 merge.py 等 6 个文件曾被跟踪入库
+.dbmerge/
 
 # 数据库对齐（scripts/db-align）：本地参数与现场备份产物不入库
 scripts/db-align/local.env
@@ -64,6 +63,12 @@ backups/
 dsh-审计报告-*.md
 dsh-入库报告-*.md
 dsh-*.svg
+
+# 安全审计报告（含真实口令引用/攻击链/内网拓扑，本地保留不入库；2026-10-17 补）
+audit-*.md
+
+# 设计现场产物（2026-10-17 审计补）
+.stitch/
 
 # MCP 配置（含 API Key，绝不入库）
 .mcp.json

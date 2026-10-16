@@ -97,7 +97,7 @@ apps/server          pk-server (Rust) 的 pnpm 包装：`pnpm dev:api` 直接跑
   改范围走 **专用端点 `PUT /api/admin/my-accounts/{name}/view-team`**（只改团别、不动密码 ——
   复用 `POST /api/admin/my-accounts` 会在不传 `pass` 时自动生成新密码，等于顺手重置）；
   后台两处入口：机器人页「我的页面账号」列表管理员行下拉、主播台账右键弹窗。
-  改动会吊销该账号全部登录态。当前配置：浩雨=any（总管理员，2026-10-16 开发期由「帅帅」改绑台账主播浩雨，口令 shuai4444）、饭团=female、鹏先生=any。
+  改动会吊销该账号全部登录态。当前配置：浩雨=any（总管理员，2026-10-16 开发期由「帅帅」改绑台账主播浩雨，口令 shuai****）、饭团=female、鹏先生=any。
   完整口径见 [docs/09 §5.4](docs/09-机器人口令与权限结构.md)
 
 **对外展示页**（`rust/crates/pk-server/src/public.rs`）

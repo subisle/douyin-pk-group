@@ -56,6 +56,18 @@ pub fn is_biz(err: &str) -> bool {
     err.starts_with(BIZ_PREFIX)
 }
 
+/// 绑定 UPDATE 的错误分流（2026-10-17 审计 4-N14）：唯一约束冲突（23505，
+/// `uk_my_person_uniq`——并发下另一个账号先绑走了同一主播）折成业务文案，
+/// 不再把 PG 原文（表名/约束名）拼进返回串；其余错误照旧透传给上层分流 500。
+fn bind_update_err(e: sqlx::Error) -> String {
+    if let sqlx::Error::Database(db) = &e {
+        if db.code().as_deref() == Some("23505") {
+            return biz("该主播刚被其它账号绑定，请刷新后重试");
+        }
+    }
+    format!("绑定失败：{e}")
+}
+
 /// 取出去掉标记的业务文案（非业务错误返回原文，调用方无需先判 is_biz）。
 pub fn biz_msg(err: &str) -> &str {
     err.strip_prefix(BIZ_PREFIX).unwrap_or(err)
@@ -194,13 +206,20 @@ impl ViewTeam {
     /// 没绑/is_admin = 空串）。
     /// - `Any` → 空串（gate_team 见空串一律放行，前端因此可以切着看）；
     /// - `Male`/`Female` → 钉死该团，**无视 base**（即使账号后来被改绑到别团的主播）；
-    /// - `Inherit` → 原样用 base（旧行为，一字不改）。
+    /// - `Inherit` → 归一化后用 base：只认 male/female，其余（unknown / 脏值）收敛成
+    ///   空串（= 不限团）。2026-10-17 审计 4-P2-1：token 里的团别会被
+    ///   site/minutes/dialect 内联进 SQL（`p.gender = '{team}'`），原先靠
+    ///   「gender 写面已全收口」这一隐性前提挡注入，这里把前提钉成显性 ——
+    ///   正常账号行为一字不变，未来任何写路径漏过白名单也进不了 SQL。
     pub fn token_team(self, base: &str) -> String {
         match self {
             ViewTeam::Any => String::new(),
             ViewTeam::Male => "male".to_string(),
             ViewTeam::Female => "female".to_string(),
-            ViewTeam::Inherit => base.to_string(),
+            ViewTeam::Inherit => match base {
+                "male" | "female" => base.to_string(),
+                _ => String::new(),
+            },
         }
     }
 }
@@ -1533,7 +1552,9 @@ async fn bind_inner(
     .ok_or_else(|| "账号不存在，请重新登录".to_string())?;
     let bound = row.try_get::<i16, _>("bound").unwrap_or(1) == 1;
     if bound && !admin {
-        return Err(biz("该账号已绑定主播，不能自行更改（需要改绑请联系管理员）"));
+        return Err(biz(
+            "该账号已绑定主播，不能自行更改（需要改绑请联系管理员）",
+        ));
     }
 
     let p = crate::pgrs::query_with_binds(
@@ -1584,11 +1605,13 @@ async fn bind_inner(
     .bind(login_name)
     .execute(pool)
     .await
-    .map_err(|e| format!("绑定失败：{e}"))?
+    .map_err(|e| bind_update_err(e))?
     .affected();
     if affected == 0 && !admin {
         // 并发下被别人先绑走了：用户侧不允许覆盖
-        return Err(biz("该账号已绑定主播，不能自行更改（需要改绑请联系管理员）"));
+        return Err(biz(
+            "该账号已绑定主播，不能自行更改（需要改绑请联系管理员）",
+        ));
     }
     if affected == 0 {
         sqlx::query(&crate::pq::rewrite(
@@ -1600,7 +1623,7 @@ async fn bind_inner(
         .bind(login_name)
         .execute(pool)
         .await
-        .map_err(|e| format!("绑定失败：{e}"))?;
+        .map_err(bind_update_err)?;
     }
     Ok(MyBindResult {
         name: person_name,
@@ -1609,7 +1632,8 @@ async fn bind_inner(
     })
 }
 
-/* ------------------ 单元测试：登录 / 密码重置 / 自助改密的纯函数边界 ------------------ *////
+/* ------------------ 单元测试：登录 / 密码重置 / 自助改密的纯函数边界 ------------------ */
+///
 /// 2026-10-14 第四轮审计把这三条链路改造完，但**当时没有任何测试守住边界**：
 /// 注册移除、忘记密码改 CSPRNG 随机临时密码、个人页改走已登录自助改密，
 /// 全靠人工复核。这里把不碰数据库、可重复跑的那部分契约钉死。
@@ -1637,9 +1661,7 @@ mod tests {
     #[test]
     fn validators_mark_biz() {
         assert!(is_biz(&validate_my_account("", "abc123").unwrap_err()));
-        assert!(is_biz(
-            &validate_my_account("狼哲", "短").unwrap_err()
-        ));
+        assert!(is_biz(&validate_my_account("狼哲", "短").unwrap_err()));
         assert!(is_biz(&validate_my_phone("abc").unwrap_err()));
         assert!(is_biz(&validate_douyin_no("中文抖音号").unwrap_err()));
     }
@@ -1696,7 +1718,13 @@ mod tests {
         assert_eq!(ViewTeam::Male.token_team("female"), "male");
         // Inherit：原样沿用旧逻辑算出来的团（这条路径的语义必须与改动前完全一致）
         assert_eq!(ViewTeam::Inherit.token_team("male"), "male");
+        assert_eq!(ViewTeam::Inherit.token_team("female"), "female");
         assert_eq!(ViewTeam::Inherit.token_team(""), "");
+        // 2026-10-17 审计 4-P2-1：Inherit 对非 male/female 一律归一成空串 ——
+        // token 里的团别会被内联进 SQL，脏值（unknown / 未来写路径漏网的）进不了 SQL
+        assert_eq!(ViewTeam::Inherit.token_team("unknown"), "");
+        assert_eq!(ViewTeam::Inherit.token_team("male'--"), "");
+        assert_eq!(ViewTeam::Inherit.token_team("male OR 1=1"), "");
     }
 
     /// 只有全团账号能页内切团；钉死某团 / 未设置的都不可切。
@@ -1842,8 +1870,8 @@ mod tests {
     #[test]
     fn initial_password_takes_last_four_digits() {
         assert_eq!(
-            initial_password("15560099282"),
-            "9282",
+            initial_password("13800138000"),
+            "8000",
             "11 位手机号取后四位"
         );
         assert_eq!(
@@ -1867,8 +1895,8 @@ mod tests {
     /// 同一手机号两次结果必须一致 —— 运营要靠电话转述给主播，不可随机。
     #[test]
     fn initial_password_is_stable_for_same_phone() {
-        let a = initial_password("15560099282");
-        let b = initial_password("15560099282");
+        let a = initial_password("13800138000");
+        let b = initial_password("13800138000");
         assert_eq!(a, b, "同一手机号必须可复现，否则运营没法口头转述");
     }
 
@@ -1907,7 +1935,7 @@ mod tests {
     #[test]
     fn initial_password_always_passes_account_validation() {
         for phone in [
-            "15560099282",
+            "13800138000",
             "13800138000",
             "0000",
             "1234",
@@ -1931,9 +1959,9 @@ mod tests {
     /// 一旦有人为了「方便运营」改回后四位，这条就红。
     #[test]
     fn reset_password_is_random_not_phone_last4() {
-        const PHONE: &str = "15560099282";
+        const PHONE: &str = "13800138000";
         // 开号初始密码仍走后四位（产品口径，与重置是两条不同的路）
-        assert_eq!(initial_password(PHONE), "9282");
+        assert_eq!(initial_password(PHONE), "8000");
 
         let tmp = crate::random::random_password();
         assert_eq!(tmp.len(), 10, "重置临时密码应为 10 位随机串");
@@ -1991,19 +2019,31 @@ mod tests {
     /// 这是三位管理员（浩雨=any / 饭团=female / 鹏先生=any）能一次配到位的基础。
     #[test]
     fn builtin_accounts_parses_view_team() {
-        std::env::set_var("BUILTIN_MY_ACCOUNTS", "浩雨:haoyu2026:any,饭团:fantuan2026:female,鹏先生:peng2026:any");
+        std::env::set_var(
+            "BUILTIN_MY_ACCOUNTS",
+            "浩雨:haoyu2026:any,饭团:fantuan2026:female,鹏先生:peng2026:any",
+        );
         let got = builtin_my_accounts_from_env();
         assert_eq!(got.len(), 3, "三位管理员：{got:?}");
         assert_eq!(got[0], ("浩雨".into(), "haoyu2026".into(), "any".into()));
-        assert_eq!(got[1], ("饭团".into(), "fantuan2026".into(), "female".into()));
+        assert_eq!(
+            got[1],
+            ("饭团".into(), "fantuan2026".into(), "female".into())
+        );
         assert_eq!(got[2], ("鹏先生".into(), "peng2026".into(), "any".into()));
 
         // 旧两段式：viewTeam 缺省 = any
         std::env::set_var("BUILTIN_MY_ACCOUNTS", "old:pwd");
-        assert_eq!(builtin_my_accounts_from_env(), vec![("old".into(), "pwd".into(), "any".into())]);
+        assert_eq!(
+            builtin_my_accounts_from_env(),
+            vec![("old".into(), "pwd".into(), "any".into())]
+        );
         // 只有名字：密码 = 账号名，viewTeam = any
         std::env::set_var("BUILTIN_MY_ACCOUNTS", "solo");
-        assert_eq!(builtin_my_accounts_from_env(), vec![("solo".into(), "solo".into(), "any".into())]);
+        assert_eq!(
+            builtin_my_accounts_from_env(),
+            vec![("solo".into(), "solo".into(), "any".into())]
+        );
         // 大小写容错 + 脏值兜底
         std::env::set_var("BUILTIN_MY_ACCOUNTS", "a:p:Male,b:p:FEMALE,c:p:weird,d:p:");
         let g = builtin_my_accounts_from_env();

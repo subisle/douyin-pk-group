@@ -127,7 +127,11 @@ pub async fn public_announcements(State(st): State<ArcState>) -> ApiResult {
     let ann = Announcement::load_effective(&st).await;
     // 登录页图标归一化先算好再进 json!（宏的值位置放不了语句块），与 placement_json 同口径
     let login_icon = ann.placements.login.icon.trim();
-    let login_icon = if STEP_ICON_WHITELIST.contains(&login_icon) { login_icon } else { "" };
+    let login_icon = if STEP_ICON_WHITELIST.contains(&login_icon) {
+        login_icon
+    } else {
+        ""
+    };
     Ok(Json(json!({
         "login": {
             "enabled": ann.placements.login.enabled,
@@ -972,13 +976,17 @@ pub(super) fn row_i64(r: &sqlx::postgres::PgRow, col: &str) -> i64 {
 /// 自动冠军：最近一个业务日的当日音浪第一（绕过登录门，直接查只读池）
 async fn star_auto(st: &AppState, team: &str, date: &str) -> (String, i64) {
     /* 2026-10-13：按所选日期取每日之星（前端切换日期时横幅跟随）；
-       date 为空 = 最近业务日。all 团全量口径，male/female 按团过滤。 */
+    date 为空 = 最近业务日。all 团全量口径，male/female 按团过滤。 */
     let date_filter = if date.is_empty() {
         "TO_CHAR(d.biz_date,'YYYY-MM-DD') = (SELECT MAX(TO_CHAR(biz_date,'YYYY-MM-DD')) FROM daily_metric)".to_string()
     } else {
         format!("TO_CHAR(d.biz_date,'YYYY-MM-DD') = '{date}'")
     };
-    let team_filter = if team == "all" { String::new() } else { format!("AND p.gender = '{team}' ") };
+    let team_filter = if team == "all" {
+        String::new()
+    } else {
+        format!("AND p.gender = '{team}' ")
+    };
     let sql = format!(
         "SELECT p.name, SUM(d.wave)::BIGINT AS w \
          FROM daily_metric d JOIN person p ON p.id = d.person_id \
@@ -1010,15 +1018,23 @@ pub async fn star_of_day(
         return Ok(Json(json!({ "published": false })));
     }
     let date = q.get("date").cloned().unwrap_or_default();
-    let date = if date.is_empty() { String::new() } else {
+    let date = if date.is_empty() {
+        String::new()
+    } else {
         // 简单格式校验（防注入：只允许数字与连字符）
-        if date.chars().all(|c| c.is_ascii_digit() || c == '-') { date } else { String::new() }
+        if date.chars().all(|c| c.is_ascii_digit() || c == '-') {
+            date
+        } else {
+            String::new()
+        }
     };
     let (name, wave) = star_auto(&st, &team, &date).await;
     if name.is_empty() {
         return Ok(Json(json!({ "title": "每日之星", "name": "", "wave": 0 })));
     }
-    Ok(Json(json!({ "title": "每日之星", "name": name, "wave": wave })))
+    Ok(Json(
+        json!({ "title": "每日之星", "name": name, "wave": wave }),
+    ))
 }
 
 fn auto_json(a: &(String, i64)) -> serde_json::Value {

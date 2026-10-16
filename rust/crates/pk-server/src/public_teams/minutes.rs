@@ -654,7 +654,11 @@ pub fn my_accounts_sql(person_id: u64, p: &AccountPeriods) -> String {
 /// （2026-10-17 修复，审计 P0-2）。与 [`my_wave_sql`] 同口径，两处不会双算：
 /// 上面的日明细侧已经排掉「该月导过整月值」的行，所以这里可以直接取整，
 /// 整月值缺失时标量为 0 → COALESCE 落到日明细。
-pub(super) fn account_month_wave(r: &sqlx::postgres::PgRow, monthly: i64, yearly: i64) -> (i64, i64) {
+pub(super) fn account_month_wave(
+    r: &sqlx::postgres::PgRow,
+    monthly: i64,
+    yearly: i64,
+) -> (i64, i64) {
     let is_primary = r
         .try_get::<i16, _>("is_prim")
         .or_else(|_| r.try_get::<i16, _>("is_primary"))
@@ -665,7 +669,10 @@ pub(super) fn account_month_wave(r: &sqlx::postgres::PgRow, monthly: i64, yearly
     }
     let mw_m = r.try_get::<i64, _>("mw_m").unwrap_or(0);
     let mw_y = r.try_get::<i64, _>("mw_y").unwrap_or(0);
-    (if mw_m > 0 { mw_m } else { monthly }, if mw_y > 0 { mw_y } else { yearly })
+    (
+        if mw_m > 0 { mw_m } else { monthly },
+        if mw_y > 0 { mw_y } else { yearly },
+    )
 }
 
 /// 一行查询结果 → 一个抖音号的 DTO（数值部分先全给，开关过滤在 [my_accounts_gate] 里统一做）。
@@ -818,14 +825,13 @@ pub async fn my_who(
 ) -> ApiResult {
     // 登录态持久化（2026-10-12）：内存 miss 时从 Redis 回填——服务重启后
     // 24h 内的登录不再被强制二次登录。
-    let (person_id, my_team, token_name) =
-        my_token_required_with_restore(&st, &headers).await?;
+    let (person_id, my_team, token_name) = my_token_required_with_restore(&st, &headers).await?;
     if !super::my_team_allows(&my_team, &team) {
         return Err(ApiError::auth("该账号不属于本团"));
     }
     /* 可看团别（迁移 024）：who 是前端每次启动/恢复登录态都要问的身份接口，
-       `switchable` 在这里补发一次 —— 用户刷新页面时不会重新走登录接口，
-       切换器只能靠这里重建（否则刷新一次切换器就没了）。 */
+    `switchable` 在这里补发一次 —— 用户刷新页面时不会重新走登录接口，
+    切换器只能靠这里重建（否则刷新一次切换器就没了）。 */
     let view_team = crate::store::my_account_view_team(&st, &token_name).await;
     let switchable = view_team.switchable();
     // personId=0 有两种：管理员观看账号（is_admin=1，姓名直接来自登录账号），
