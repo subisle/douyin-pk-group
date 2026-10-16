@@ -4,7 +4,6 @@ import {
   METRICS,
   STRATEGIES,
   STRENGTH_MODES,
-  metricLabel,
   metricOfStrategy,
   pk,
   type BoardConfig,
@@ -81,9 +80,6 @@ interface DragState {
 export default function BoardPage() {
   /* ---------------- 配置（整包一份，与后端 board-config 契约一一对应） ---------------- */
   const [config, setConfig] = useState<BoardConfig>(DEFAULT_BOARD_CONFIG);
-  /** 配置来源标记（2026-10-16 用户口径「这个配置是后端进行设置」）：展板不再带配置
-      表单 —— 参数在后台「PK 分组 → 展板配置」卡设置并存后端，这里只读展示。 */
-  const [cfgSaved, setCfgSaved] = useState(false);
 
   /* ---------------- 数据 ---------------- */
   const [buckets, setBuckets] = useState<Bucket[]>([]);
@@ -99,6 +95,10 @@ export default function BoardPage() {
   const [msg, setMsg] = useState('');
   const [past, setPast] = useState<Snapshot[]>([]);
   const [future, setFuture] = useState<Snapshot[]>([]);
+  /** 名字飞入动画（2026-10-16 用户口径「点击一键分组后有特效，名字随机飞入分组框」）：
+      groupNow 成功后置 true，动画只播这一轮（replayKey 变化重触发）；拖动开始即停。 */
+  const [flyIn, setFlyIn] = useState(false);
+  const [flyKey, setFlyKey] = useState(0);
   /* 拖拽：指针事件实现（鼠标 / 触屏 / 触控笔同一套），从 GroupPage 原样搬来——
      不用 HTML5 draggable，后者在触屏上完全不触发，也没有跟手的幽灵卡片。 */
   const [drag, setDrag] = useState<DragState | null>(null);
@@ -124,7 +124,6 @@ export default function BoardPage() {
   useEffect(() => {
     pk.getBoardConfig()
       .then((r) => {
-        setCfgSaved(!!r.saved && !!r.config);
         if (r.saved && r.config) setConfig({ ...DEFAULT_BOARD_CONFIG, ...r.config });
       })
       .catch(() => {}); // 拉不到配置不挡页面，一键分组时还会再拉一次并给出明确报错
@@ -314,6 +313,9 @@ export default function BoardPage() {
       setBalance(arranged.balance);
       setViolations(arranged.violations || []);
       setSlots(arranged.slots || []);
+      // 特效：名字随机飞入分组框（每轮换 key 重触发；首次进入不播，重分组才播）
+      setFlyKey((k) => k + 1);
+      setFlyIn(true);
       setMsg(
         `已分组 ${active.length} 人，共 ${arranged.groups.length} 组` +
           (unmatchedN > 0 ? ` · ${unmatchedN} 行识别不到，去 PK 分组页处理` : ''),
@@ -465,35 +467,8 @@ export default function BoardPage() {
     return set;
   }, [violations]);
 
-  /** 配置摘要一行：收起时让运营一眼确认参数，点开才见表单 */
-  const cfgSummary = useMemo(() => {
-    const metricText = metricLabel(config.metric, config.days);
-    const strategyText = STRATEGIES.find((s) => s.value === config.strategy)?.label ?? config.strategy;
-    const breakText = revivalEvent
-      ? `复活赛 ${REVIVAL_MINUTES} 分`
-      : config.longBreak > 0
-        ? `第 ${BREAK_AFTER_GROUP} 组后休 ${config.longBreak} 分`
-        : '不插长休';
-    return (
-      `${config.eventType} · ${metricText} · ${strategyText} · 每组 ${config.groupSize} 人 · ` +
-      `${config.startTime} 起 / 隔 ${config.intervalMin} 分 · ${breakText}`
-    );
-  }, [config, revivalEvent]);
-
   return (
     <div className="page pk">
-      {/* ① 配置条（只读，2026-10-16 用户口径「这个配置是后端进行设置」）：
-          参数在后台「PK 分组 → 展板配置」卡设置并存后端，这里只展示不可改。 */}
-      <section className="card">
-        <div className="row pk-board-summary">
-          <span className="pk-board-toggle" title="配置来自后台（PK 分组 → 展板配置），展板页只读">
-            ▸ 配置
-          </span>
-          <span className="pk-board-summary-text">{cfgSummary}</span>
-          <span className="hint">{cfgSaved ? '来自后台' : '后台还没保存配置'}</span>
-        </div>
-      </section>
-
       {/* ② 一键分组：展板唯一的主按钮 */}
       <div className="pk-board-primary-row">
         <button className="primary pk-board-primary" disabled={loading} onClick={groupNow}>
@@ -576,9 +551,27 @@ export default function BoardPage() {
                             'pk-card' +
                             (isBad ? ' bad' : '') +
                             (drag?.key === p.key ? ' dragging' : '') +
-                            (isTarget ? (drag?.after ? ' drop-after' : ' drop-before') : '')
+                            (isTarget ? (drag?.after ? ' drop-after' : ' drop-before') : '') +
+                            (flyIn && !drag ? ' pk-fly-in' : '')
                           }
-                          onPointerDown={(e) => startDrag(e, p)}
+                          style={
+                            flyIn && !drag
+                              ? ({
+                                  /* 随机飞入：水平起点 -60~60px、垂直起点 -80~-160px，延迟 0~0.5s
+                                     —— 每张卡独立随机，重分组换 flyKey 重新随机 */
+                                  '--fly-x': `${(Math.random() * 120 - 60).toFixed(0)}px`,
+                                  '--fly-y': `${(-(Math.random() * 80 + 80)).toFixed(0)}px`,
+                                  animationDelay: `${(Math.random() * 0.5).toFixed(2)}s`,
+                                } as React.CSSProperties)
+                              : undefined
+                          }
+                          onAnimationEnd={(e) => {
+                            if (flyIn && e.animationName === 'pkFlyIn') setFlyIn(false);
+                          }}
+                          onPointerDown={(e) => {
+                            if (flyIn) setFlyIn(false); // 拖动开始：特效立刻收
+                            startDrag(e, p);
+                          }}
                         >
                           <span className="pk-grip" data-grip title="按住拖动（触屏从这里起拖）">
                             ⋮⋮

@@ -454,3 +454,30 @@ body.pk-dragging .pk-card {
   padding: 12px 40px;
   border-radius: 10px;
 }
+
+/* ---------- 名字飞入特效（2026-10-16 用户口径「点击一键分组后有特效」） ----------
+   一键分组成功后，每张名字卡从随机起点（水平 ±60px、垂直上方 80~160px）带随机延迟
+   飞入自己的分组框：透明度 0→1 + 位移归零 + 轻微缩放。动画只播一轮（最后一卡播完
+   onAnimationEnd 关 pk-fly-in），拖动一开始立刻收，不影响拖拽交互。 */
+@keyframes pkFlyIn {
+  from {
+    opacity: 0;
+    transform: translate(var(--fly-x, 0px), var(--fly-y, -120px)) scale(1.15);
+  }
+  60% {
+    opacity: 1;
+  }
+  to {
+    opacity: 1;
+    transform: translate(0, 0) scale(1);
+  }
+}
+.pk .pk-card.pk-fly-in {
+  animation: pkFlyIn 0.55s cubic-bezier(0.22, 1, 0.36, 1) both;
+  will-change: transform, opacity;
+}
+@media (prefers-reduced-motion: reduce) {
+  .pk .pk-card.pk-fly-in {
+    animation: none;
+  }
+}
