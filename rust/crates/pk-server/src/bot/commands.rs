@@ -238,9 +238,9 @@ pub fn help_for(role: Role) -> String {
         }
     }
     out.push_str(
-        "\n\n绑定 / 解绑：\n\
-         直接发 4 位绑定码 —— 展示端「我的」页点「获取绑定码」后把数字发过来（30 分钟内有效）\n\
-         解绑 —— 断开微信与账号的绑定，随时可以重新绑定",
+        "\n\n对接 / 解绑：\n\
+         直接发 4 位对接码 —— 展示端「我的」页点「获取二维码」后把数字发过来（30 分钟内有效）\n\
+         解绑 —— 断开微信与账号的对接，随时可以重新对接",
     );
     if role == Role::Admin {
         // 运营口径：日期黏住 / CSV 附件导入 / 默认日期（原帮助文案的等价信息）
@@ -400,7 +400,7 @@ mod tests {
             );
         }
         // 绑定 / 解绑说明
-        assert!(text.contains("绑定码"), "{text}");
+        assert!(text.contains("对接码"), "{text}");
         assert!(text.contains("解绑"), "{text}");
     }
 
@@ -437,7 +437,7 @@ mod tests {
         ] {
             assert!(text.contains(key), "管理员帮助缺关键信息 {key}：{text}");
         }
-        assert!(text.contains("绑定码"), "{text}");
+        assert!(text.contains("对接码"), "{text}");
     }
 
     /// 防漂移：帮助文案里出现的每个命令名都能被 parse 命中

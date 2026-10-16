@@ -39,13 +39,13 @@ pub(crate) const SESSION_EXPIRED_RETRY: Duration = Duration::from_secs(3600);
 pub(crate) const SESSION_EXPIRED_MAX_RETRY: u32 = 4;
 
 /* ------- 轮询失败节律：逐条对齐官方 @tencent-weixin/openclaw-weixin@2.4.10 -------
-   源：官方 dist/src/monitor/monitor.js（2026-10-16 从 npm tarball 核对）：
-     · RETRY_DELAY_MS = 2_000          单次失败等 2s 再轮
-     · MAX_CONSECUTIVE_FAILURES = 3    连续失败阈值
-     · BACKOFF_DELAY_MS = 30_000       连续 3 次退避 30s，且计数清零（不是指数增长）
-     · DEFAULT_LONG_POLL_TIMEOUT_MS = 35_000，且跟随服务端 longpolling_timeout_ms
-   注意官方**没有**入站消息限流的概念（它是客户端）；我们的 BOT_RATE_LIMIT 是
-   4 位绑定码防爆破的自身闸门，不属于协议节律，两者各管各的。 */
+源：官方 dist/src/monitor/monitor.js（2026-10-16 从 npm tarball 核对）：
+  · RETRY_DELAY_MS = 2_000          单次失败等 2s 再轮
+  · MAX_CONSECUTIVE_FAILURES = 3    连续失败阈值
+  · BACKOFF_DELAY_MS = 30_000       连续 3 次退避 30s，且计数清零（不是指数增长）
+  · DEFAULT_LONG_POLL_TIMEOUT_MS = 35_000，且跟随服务端 longpolling_timeout_ms
+注意官方**没有**入站消息限流的概念（它是客户端）；我们的 BOT_RATE_LIMIT 是
+4 位绑定码防爆破的自身闸门，不属于协议节律，两者各管各的。 */
 
 /// 单次失败后的重试间隔（官方 `RETRY_DELAY_MS`）
 pub(crate) const RETRY_DELAY: Duration = Duration::from_secs(2);
@@ -725,7 +725,8 @@ impl WxTransport {
                         self.set_note(format!("getupdates 错误: {msg}")).await;
                         let delay = monitor_failure_delay(consecutive_failures);
                         tracing::warn!(
-                            failures = consecutive_failures, delay_ms = delay.as_millis() as u64,
+                            failures = consecutive_failures,
+                            delay_ms = delay.as_millis() as u64,
                             "微信全局通道 getupdates 失败，按官方节律重试"
                         );
                         tokio::time::sleep(delay).await;
@@ -766,7 +767,8 @@ impl WxTransport {
                     let delay = monitor_failure_delay(consecutive_failures);
                     self.set_note(format!("轮询失败: {e}")).await;
                     tracing::warn!(
-                        failures = consecutive_failures, delay_ms = delay.as_millis() as u64,
+                        failures = consecutive_failures,
+                        delay_ms = delay.as_millis() as u64,
                         "微信全局通道轮询失败，按官方节律重试"
                     );
                     tokio::time::sleep(delay).await;
@@ -848,6 +850,14 @@ impl WxTransport {
     }
 
     async fn send(&self, out: &Outbound) -> anyhow::Result<()> {
+        if !crate::push::push_out_enabled() {
+            let preview: String = out.text.chars().take(120).collect();
+            tracing::warn!(
+                conversation = %out.conversation_id, preview = %preview,
+                "【测试阶段】已拦截微信回复发送（未发）；要真实发送请设 PUSH_OUT_ENABLED=1"
+            );
+            return Ok(());
+        }
         let (to_user, group, context_token) = {
             let inner = self.inner.lock().await;
             match inner.sessions.get(&out.conversation_id) {
@@ -869,7 +879,7 @@ impl WxTransport {
     pub async fn send_proactive(&self, conversation_id: &str, text: &str) -> anyhow::Result<()> {
         anyhow::ensure!(self.configured(), "微信渠道未初始化");
         /* 2026-10-16：测试阶段出网闸门（与 user_send_text 同一开关）。
-           这条是管理员全局机器人通道（旧手机号/绑定码绑定的人走这里）。 */
+        这条是管理员全局机器人通道（旧手机号/绑定码绑定的人走这里）。 */
         if !crate::push::push_out_enabled() {
             let preview: String = text.chars().take(120).collect();
             tracing::warn!(

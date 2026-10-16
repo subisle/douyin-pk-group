@@ -4,9 +4,9 @@ use super::*; // 共享 w() / now_str() / AppState 等内部工具
 
 /* --------------------- 展示端「我的」页微信推送（绑定 + 追分目标） --------------------- */
 /*
-   2026-10-09 新增。链路：
-     展示端「我的」页显示机器人加好友二维码 → 用户扫码加微信机器人 →
-     点「获取绑定码」拿 4 位数字 → 把 4 位数字发给机器人
+   2026-10-09 新增。链路（2026-10-16 深夜用户口径：页面统一叫「对接码」）：
+     展示端「我的」页点「获取二维码」→ 得到二维码 + 4 位对接码 →
+     扫码对接（或把 4 位对接码发给机器人）
      → 私聊会话 id 与展示端账号绑定（push_bindings）→ 数据导入完成后按目标推送
    iLink 只能被动回复，所以每次私聊入站都把 to_user_id / context_token 落到 wx_sessions，
    主动推送时从这里取（服务重启不丢会话上下文）。
@@ -76,11 +76,17 @@ pub async fn push_state(st: &AppState, name: &str) -> serde_json::Value {
     let conv: String = r
         .try_get::<String, _>("conversation_id")
         .unwrap_or_default();
+    let mut code: String = r.try_get::<String, _>("bind_code").unwrap_or_default();
+    let mut code_expires: String = r.try_get::<String, _>("code_expires").unwrap_or_default();
+    if !code.is_empty() && !push_code_is_live(&code_expires) {
+        code.clear();
+        code_expires.clear();
+    }
     serde_json::json!({
         "bound": !conv.is_empty(),
         "nickname": r.try_get::<String, _>("nickname").unwrap_or_default(),
-        "code": r.try_get::<String, _>("bind_code").unwrap_or_default(),
-        "codeExpires": r.try_get::<String, _>("code_expires").unwrap_or_default(),
+        "code": code,
+        "codeExpires": code_expires,
         "boundAt": r.try_get::<String, _>("bound_at").unwrap_or_default(),
         "notifyTarget": r.try_get::<i16, _>("notify_target").unwrap_or(0) == 1,
         "dailyReport": r.try_get::<i16, _>("daily_report").unwrap_or(0) == 1,
@@ -157,6 +163,52 @@ async fn push_code_taken(st: &AppState, code: &str, name: &str) -> bool {
     .is_some()
 }
 
+/// 对接码仍在有效期内返回 `true`；空过期时间一律视为已失效。
+fn push_code_is_live(code_expires: &str) -> bool {
+    !code_expires.trim().is_empty()
+        && chrono::NaiveDateTime::parse_from_str(code_expires, "%Y-%m-%d %H:%M:%S")
+            .map(|expires| expires > chrono::Local::now().naive_local())
+            .unwrap_or(false)
+}
+
+/// 当前有效对接码；没有则摇一个新码。同一账号在 30 分钟内幂等，
+/// 「获取二维码」并行调用 start/code 时两边拿到的是同一个 4 位码。
+pub async fn push_code_current_or_rotate(
+    st: &AppState,
+    name: &str,
+    team: &str,
+    person_id: u64,
+) -> Result<(String, String)> {
+    static CODE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _lock = CODE_LOCK.lock().await;
+    let state = push_state(st, name).await;
+    let code = state
+        .get("code")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let code_expires = state
+        .get("codeExpires")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    if !code.is_empty() && push_code_is_live(code_expires) {
+        return Ok((code.to_string(), code_expires.to_string()));
+    }
+    let code = push_rotate_code(st, name, team, person_id).await?;
+    let state = push_state(st, name).await;
+    Ok((
+        state
+            .get("code")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(&code)
+            .to_string(),
+        state
+            .get("codeExpires")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+    ))
+}
+
 /// 摇一个新绑定码并落库，撞号自动重摇。
 ///
 /// 为什么不能「生成 → 直接写」：4 位数字只有 10^4 种取值，而 [`push_bind_by_code`]
@@ -182,9 +234,7 @@ pub async fn push_rotate_code(
             Err(e) => return Err(e),
         }
     }
-    Err(anyhow::anyhow!(
-        "绑定码生成失败：连续撞号，请稍后重试"
-    ))
+    Err(anyhow::anyhow!("对接码生成失败：连续撞号，请稍后重试"))
 }
 
 /// PG 唯一约束冲突（SQLSTATE 23505）——绑定码撞号重摇的判据
@@ -220,13 +270,8 @@ pub async fn push_bind_by_code(
     .ok()
     .flatten()?;
     let expires: String = row.try_get::<String, _>("code_expires").unwrap_or_default();
-    if !expires.is_empty() {
-        let ok = chrono::NaiveDateTime::parse_from_str(&expires, "%Y-%m-%d %H:%M:%S")
-            .map(|t| t > chrono::Local::now().naive_local())
-            .unwrap_or(false);
-        if !ok {
-            return None;
-        }
+    if !push_code_is_live(&expires) {
+        return None;
     }
     let name: String = row.try_get::<String, _>("name").ok()?;
     let team: String = row.try_get::<String, _>("team").unwrap_or_default();
@@ -527,9 +572,10 @@ pub async fn push_set_last_report_date(st: &AppState, name: &str, date: &str) {
 
 /* --------------------- 微信绑定：绑定码（2026-10-16 口径） --------------------- */
 /*
-   2026-10-16 用户口径：**主播在微信里只发 4 位绑定码即可绑定**（不再要求手机号）。
-   页面（展示端「我的」页）直接显示机器人加好友二维码，扫码只负责加机器人；
-   绑定动作由 [`push_bind_by_code`] 完成 —— 码一次性、30 分钟有效、用掉即清。
+   2026-10-16 用户口径：**主播在微信里只发 4 位对接码即可对接**（不再要求手机号）。
+   页面（展示端「我的」页）点「获取二维码」直接给二维码 + 对接码；
+   对接动作由 [`push_bind_by_code`] 完成 —— 码一次性、30 分钟有效、用掉即清。
+   表列名仍叫 `bind_code`（历史命名，不动库），对外文案一律「对接码」。
 
    历史沿革（都保留在代码里，别再走回去）：
    - 最早：页面出 6 位字母数字码 → 发码绑定；

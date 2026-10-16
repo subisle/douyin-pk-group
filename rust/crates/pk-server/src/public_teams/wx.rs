@@ -6,9 +6,17 @@ use crate::store::{DupPolicy, NewTarget, TargetAddError};
 /* ------------------ 我的页面 · 微信推送（绑定 + 追分目标 + 每日报告） ------------------ */
 
 /// 登录态 → (personId, 团别, 账号姓名)。推送相关接口全部走这一处校验。
-pub(super) fn my_ident(team: &str, token: &str) -> Result<(u64, String, String), ApiError> {
+pub(super) async fn my_ident(
+    st: &ArcState,
+    team: &str,
+    token: &str,
+) -> Result<(u64, String, String), ApiError> {
     let token = token.trim();
-    let Some((pid, my_team, name)) = my_token_take(token) else {
+    let ident = match my_token_take(token) {
+        Some(ident) => Some(ident),
+        None => super::admin::my_token_restore(st, token).await,
+    };
+    let Some((pid, my_team, name)) = ident else {
         return Err(ApiError::auth("登录已过期，请重新登录"));
     };
     if !super::my_team_allows(&my_team, &team) {
@@ -112,7 +120,7 @@ pub async fn my_push(
     headers: HeaderMap,
 ) -> ApiResult {
     let token = header_my_token(&headers).unwrap_or_default();
-    let (person_id, _my_team, name) = my_ident(&team, &token)?;
+    let (person_id, _my_team, name) = my_ident(&st, &team, &token).await?;
     let mut state = crate::store::push_state(&st, &name).await;
     let targets = crate::store::targets_list(&st, &name).await;
     let counts = crate::store::target_counts(&st, &name).await;
@@ -135,13 +143,13 @@ pub async fn my_push(
         let wxacct = crate::store::wx_push_account_get(&st, &name).await;
         obj.insert("scanBound".into(), json!(wxacct.is_some()));
         /* 「待激活」= **还缺会话语境（context_token）**，不是「wx_push_accounts 里没会话」。
-           2026-10-16 修正：原来拿 `wx_push_accounts.conversation_id` 判，而那列在
-           push_bindings 写失败时照样是满的 → 页面既不显示「未绑定」（bound=false）
-           也不显示「还差最后一步」（needActivate=false），用户完全不知道该做什么。
-           现在直接问推送真正要用的那张表（wx_sessions 的 context_token）：
-           · 扫了码、会话已记 → 看 wx_sessions 有没有 context_token；
-           · 扫了码、还没会话 → 待激活；
-           · 没扫码 → false（走「未绑定」分支）。 */
+        2026-10-16 修正：原来拿 `wx_push_accounts.conversation_id` 判，而那列在
+        push_bindings 写失败时照样是满的 → 页面既不显示「未绑定」（bound=false）
+        也不显示「还差最后一步」（needActivate=false），用户完全不知道该做什么。
+        现在直接问推送真正要用的那张表（wx_sessions 的 context_token）：
+        · 扫了码、会话已记 → 看 wx_sessions 有没有 context_token；
+        · 扫了码、还没会话 → 待激活；
+        · 没扫码 → false（走「未绑定」分支）。 */
         let need_activate = match wxacct.as_ref() {
             None => false,
             Some(a) if a.conversation_id.is_empty() => true,
@@ -229,7 +237,17 @@ pub(super) fn mask_phone(p: &str) -> String {
  * 落 wx_push_accounts 并拉起该账号的 getupdates 长轮询；用户首次给机器人
  * 发消息时留下 context_token，随后推送走该账号自己的 token。 */
 
-pub(super) type PendingWxLogin = (String, u64, String, String, Instant);
+#[derive(Clone)]
+pub(super) struct PendingWxLogin {
+    name: String,
+    person_id: u64,
+    team: String,
+    poll_base: String,
+    img_content: String,
+    url: String,
+    created: Instant,
+}
+
 pub(super) type PendingWxLoginMap = HashMap<String, PendingWxLogin>;
 
 pub(super) fn pending_wx_logins() -> &'static Mutex<PendingWxLoginMap> {
@@ -237,21 +255,42 @@ pub(super) fn pending_wx_logins() -> &'static Mutex<PendingWxLoginMap> {
     M.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-pub(super) fn pending_wx_put(qrcode: &str, name: &str, person_id: u64, team: &str) {
+pub(super) fn pending_wx_put(
+    qrcode: &str,
+    name: &str,
+    person_id: u64,
+    team: &str,
+    img_content: &str,
+    url: &str,
+) {
     let mut m = pending_wx_logins()
         .lock()
         .expect("pending wx login 锁 poisoned");
-    m.retain(|_, (_, _, _, _, at)| at.elapsed() < Duration::from_secs(5 * 60));
+    m.retain(|_, login| login.created.elapsed() < Duration::from_secs(5 * 60));
+    m.retain(|_, login| login.name != name);
     m.insert(
         qrcode.to_string(),
-        (
-            name.to_string(),
+        PendingWxLogin {
+            name: name.to_string(),
             person_id,
-            team.to_string(),
-            String::new(),
-            Instant::now(),
-        ),
+            team: team.to_string(),
+            poll_base: String::new(),
+            img_content: img_content.to_string(),
+            url: url.to_string(),
+            created: Instant::now(),
+        },
     );
+}
+
+/// 同一账号还有未过期的二维码会话时，直接复用它，避免反复向上游要新码。
+pub(super) fn pending_wx_cached(name: &str) -> Option<(String, String, String)> {
+    let mut m = pending_wx_logins()
+        .lock()
+        .expect("pending wx login 锁 poisoned");
+    m.retain(|_, login| login.created.elapsed() < Duration::from_secs(5 * 60));
+    m.iter()
+        .find(|(_, login)| login.name == name)
+        .map(|(qrcode, login)| (qrcode.clone(), login.img_content.clone(), login.url.clone()))
 }
 
 /// 读一次未过期的扫码会话（保留在 map 里，轮询可重复调用）；
@@ -260,9 +299,11 @@ pub(super) fn pending_wx_take(qrcode: &str, name: &str) -> Option<(u64, String, 
     let mut m = pending_wx_logins()
         .lock()
         .expect("pending wx login 锁 poisoned");
-    m.retain(|_, (_, _, _, _, at)| at.elapsed() < Duration::from_secs(5 * 60));
+    m.retain(|_, login| login.created.elapsed() < Duration::from_secs(5 * 60));
     match m.get(qrcode) {
-        Some((n, pid, team, base, _)) if n == name => Some((*pid, team.clone(), base.clone())),
+        Some(login) if login.name == name => {
+            Some((login.person_id, login.team.clone(), login.poll_base.clone()))
+        }
         _ => None,
     }
 }
@@ -275,13 +316,26 @@ pub(super) fn pending_wx_set_base(qrcode: &str, base_url: &str) {
     let mut m = pending_wx_logins()
         .lock()
         .expect("pending wx login 锁 poisoned");
-    if let Some(v) = m.get_mut(qrcode) {
-        v.3 = base_url.trim().to_string();
+    if let Some(login) = m.get_mut(qrcode) {
+        login.poll_base = base_url.trim().to_string();
     }
 }
 
+/// 二维码终态（上游失效 / 已确认保存成功）后必须移除，防止继续轮询旧会话。
+pub(super) fn pending_wx_remove(qrcode: &str) {
+    pending_wx_logins()
+        .lock()
+        .expect("pending wx login 锁 poisoned")
+        .remove(qrcode);
+}
+
 /// POST /api/public/teams/{team}/my/push/wechat/start {token}
-/// 取官方协议的用户扫码登录二维码（默认国内 API Base）
+/// 取官方协议（openclaw-weixin / iLink）的用户扫码对接二维码（默认国内 API Base）。
+///
+/// 2026-10-16 深夜用户口径：展示端「微信对接」段只留一个按钮「获取二维码」——
+/// 点一下**直接**给二维码与 4 位对接码（对接码走并行的 `POST /my/push/code`，
+/// 两个接口各自独立，少一个也不挡住另一个）。所以这里不改响应形状，只保证
+/// `imgContent`（data:image/svg+xml;base64,… 的二维码图）拿到就能直接 <img> 渲染。
 pub async fn my_push_wechat_start(
     State(st): State<ArcState>,
     Path(team): Path<String>,
@@ -291,31 +345,65 @@ pub async fn my_push_wechat_start(
         .get("token")
         .and_then(|v| v.as_str())
         .unwrap_or_default();
-    let (person_id, _actual_team, name) = my_ident(&team, token)?;
+    let (person_id, _actual_team, name) = my_ident(&st, &team, token).await?;
     if person_id == 0 && !crate::store::my_account_is_admin(&st, &name).await {
         // 登录账号缺主播档案（管理员观看账号）：请求态不能做这个操作 → 显式 400
-        return Err(ApiError::bad_request("该账号没有主播档案，不能绑定微信推送"));
+        return Err(ApiError::bad_request(
+            "该账号没有主播档案，不能绑定微信推送",
+        ));
     }
     // 管理员观看账号（personId=0）也允许扫码绑定；团别留空，绑定后可看「我的」页推送入口。
     let team_scope = crate::store::person_team_of_name(&st, &name)
         .await
         .unwrap_or_default();
-    let out = crate::bot::weixin::user_login_qrcode().await?;
-    let qrcode = out
-        .get("qrcode")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    if qrcode.is_empty() {
-        // 上游微信接口没吐二维码（上游故障或参数被拒）：给用户引导话术 400，细节留上游日志
-        return Err(ApiError::bad_request("微信接口没有返回二维码，请稍后再试"));
-    }
-    pending_wx_put(&qrcode, &name, person_id, &team_scope);
+    let (qrcode, img_content, url) = if let Some(cached) = pending_wx_cached(&name) {
+        cached
+    } else {
+        let out = crate::bot::weixin::user_login_qrcode().await?;
+        let qrcode = out
+            .get("qrcode")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        if qrcode.is_empty() {
+            // 上游微信接口没吐二维码（上游故障或参数被拒）：给用户引导话术 400
+            return Err(ApiError::bad_request("微信接口没有返回二维码，请稍后再试"));
+        }
+        let img_content = out
+            .get("imgContent")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        if img_content.is_empty() {
+            return Err(ApiError::bad_request(
+                "微信接口没有返回可用二维码，请稍后再试",
+            ));
+        }
+        let url = out
+            .get("url")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        pending_wx_put(&qrcode, &name, person_id, &team_scope, &img_content, &url);
+        (qrcode, img_content, url)
+    };
+    let (code, code_expires) = if person_id == 0 {
+        (String::new(), String::new())
+    } else {
+        crate::store::push_code_current_or_rotate(&st, &name, &team_scope, person_id)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "生成对接码失败");
+                anyhow::anyhow!("生成对接码失败：{e}")
+            })?
+    };
     Ok(Json(json!({
         "ok": true,
         "qrcode": qrcode,
-        "imgContent": out.get("imgContent").cloned().unwrap_or(Value::Null),
-        "url": out.get("url").cloned().unwrap_or(Value::Null),
+        "imgContent": img_content,
+        "url": url,
+        "code": code,
+        "codeExpires": code_expires,
     })))
 }
 
@@ -346,7 +434,7 @@ pub async fn my_push_wechat_poll(
         .get("token")
         .and_then(|v| v.as_str())
         .unwrap_or_default();
-    let (person_id, _actual_team, name) = my_ident(&team, token)?;
+    let (person_id, _actual_team, name) = my_ident(&st, &team, token).await?;
     let qrcode = body
         .get("qrcode")
         .and_then(|v| v.as_str())
@@ -385,6 +473,9 @@ pub async fn my_push_wechat_poll(
         .unwrap_or("wait")
         .to_string();
     if status != "confirmed" {
+        if matches!(status.as_str(), "expired" | "verify_code_blocked") {
+            pending_wx_remove(&qrcode);
+        }
         return Ok(Json(json!({ "status": status, "tokenSaved": false })));
     }
     let bot_token = out
@@ -408,7 +499,9 @@ pub async fn my_push_wechat_poll(
     // 这里只收紧到「必须有 token + bot_id」；user_id 缺失记 warn 继续，
     // 激活侧的 activation_owner_ok 本来就有「无 user_id 的历史兼容分支」。
     if bot_token.is_empty() || bot_id.is_empty() {
-        return Err(ApiError::bad_request("扫码已确认，但微信没有返回完整凭证，请重试"));
+        return Err(ApiError::bad_request(
+            "扫码已确认，但微信没有返回完整凭证，请重试",
+        ));
     }
     if user_id.is_empty() {
         tracing::warn!(
@@ -462,10 +555,7 @@ pub async fn my_push_wechat_poll(
     // 所以换微信时要把旧行删掉重插，清空才真正落库。
     let rescan_new_wechat = existing
         .as_ref()
-        .map(|e| {
-            !e.ilink_user_id.is_empty()
-                && e.ilink_user_id != acct.ilink_user_id
-        })
+        .map(|e| !e.ilink_user_id.is_empty() && e.ilink_user_id != acct.ilink_user_id)
         .unwrap_or(false);
     if rescan_new_wechat {
         acct.conversation_id.clear();
@@ -477,8 +567,7 @@ pub async fn my_push_wechat_poll(
     }
     if rescan_new_wechat {
         if let Some(e) = &existing {
-            let old_conv =
-                format!("wxacct:{}:{}", e.ilink_bot_id, e.ilink_user_id);
+            let old_conv = format!("wxacct:{}:{}", e.ilink_bot_id, e.ilink_user_id);
             crate::store::wx_session_delete(&st, &old_conv).await;
         }
     }
@@ -497,15 +586,49 @@ pub async fn my_push_wechat_poll(
     crate::store::push_bind_account(&st, &name, &team_scope, bind_conv, bind_uid).await;
     crate::wxpush::ensure_account(&st, &name).await;
     tracing::info!(account = %name, bot = %acct.ilink_bot_id, "用户扫码登录微信推送账号成功，等待首次消息激活");
-    Ok(Json(json!({
+
+    /* 对接完成欢迎语（2026-10-16 深夜用户口径：**对接完成发送欢迎语加名字**）。
+    这一刻刚拿到该账号的 bot_token，iLink 的私聊是「会话上下文」形态 —— 用户还没给
+    机器人发过消息，所以没有 context_token；官方协议允许缺省尝试（`send_raw` 同口径），
+    发不出去也不影响对接本身（真正的兜底是 wxpush 的「首次入站激活回执」，同样带名字）。
+    出网闸门在 `user_send_text` 里：测试阶段（PUSH_OUT_ENABLED 未开）只记 WARN、不真发，
+    返回值仍是 Ok —— 所以 welcome 只是「试过了」，不代表对方一定收到。 */
+    let mut welcomed = false;
+    if !acct.ilink_user_id.is_empty() {
+        let text = crate::bot::wx_dock_welcome(&name);
+        match crate::bot::weixin::user_send_text(
+            &acct.base_url,
+            &acct.bot_token,
+            &acct.ilink_user_id,
+            "",
+            &text,
+        )
+        .await
+        {
+            Ok(()) => {
+                welcomed = true;
+                tracing::info!(account = %name, "对接完成欢迎语已发送（含姓名）");
+            }
+            Err(e) => tracing::warn!(
+                account = %name,
+                error = %e,
+                "对接完成欢迎语发送失败：等对方给机器人发第一条消息时再回执（wxpush 激活回执）"
+            ),
+        }
+    }
+    let response = json!({
         "status": "confirmed",
         "tokenSaved": true,
         "needActivate": true,
-    })))
+        "welcome": welcomed,
+    });
+    pending_wx_remove(&qrcode);
+    Ok(Json(response))
 }
 
-/// POST /api/public/teams/{team}/my/push/code {token}：生成/刷新 **4 位数字**绑定码
-/// （2026-10-16 用户口径：主播把 4 位数字发给机器人即可绑定，不再要手机号；30 分钟有效）。
+/// POST /api/public/teams/{team}/my/push/code {token}：生成/刷新 **4 位数字**对接码
+/// （2026-10-16 用户口径：主播把 4 位数字发给机器人即可对接，不再要手机号；30 分钟有效）。
+/// 展示端「获取二维码」展开时与二维码并行取一次（页面文案统一叫「对接码」，表列仍是 bind_code）。
 pub async fn my_push_code(
     State(st): State<ArcState>,
     Path(team): Path<String>,
@@ -515,20 +638,23 @@ pub async fn my_push_code(
         .get("token")
         .and_then(|v| v.as_str())
         .unwrap_or_default();
-    let (person_id, _t, name) = my_ident(&team, token)?;
+    let (person_id, _t, name) = my_ident(&st, &team, token).await?;
+    if person_id == 0 {
+        return Err(ApiError::bad_request("该账号没有主播档案，不能生成对接码"));
+    }
     // 4 位数字只有 10^4 种取值：撞号由 store 侧重摇（库里还有部分唯一索引兜底），
     // 这里不再自己 new_bind_code 后直接写。
-    let code = crate::store::push_rotate_code(&st, &name, &team, person_id)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "生成绑定码失败");
-            anyhow::anyhow!("生成绑定码失败：{e}")
-        })?;
-    let state = crate::store::push_state(&st, &name).await;
+    let (code, code_expires) =
+        crate::store::push_code_current_or_rotate(&st, &name, &team, person_id)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "生成对接码失败");
+                anyhow::anyhow!("生成对接码失败：{e}")
+            })?;
     Ok(Json(json!({
         "ok": true,
-        "code": state.get("code").cloned().unwrap_or(Value::String(code)),
-        "codeExpires": state.get("codeExpires").cloned().unwrap_or(Value::Null),
+        "code": code,
+        "codeExpires": code_expires,
     })))
 }
 
@@ -551,7 +677,7 @@ pub async fn my_push_settings(
         .get("token")
         .and_then(|v| v.as_str())
         .unwrap_or_default();
-    let (_pid, _t, name) = my_ident(&team, token)?;
+    let (_pid, _t, name) = my_ident(&st, &team, token).await?;
     let flag = |k: &str| body.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
     crate::store::push_set_flags(&st, &name, flag("notifyTarget"), flag("dailyReport")).await;
     // 师门日报第三开关：body 里带了才改（含显式 false），缺省不动现值。
@@ -563,6 +689,13 @@ pub async fn my_push_settings(
 }
 
 /// POST /api/public/teams/{team}/my/push/unbind {token}
+///
+/// 2026-10-17 用户口径：页面「解除绑定」只断开推送绑定（push_bindings 的会话接线），
+/// **不注销扫码登录状态** —— `wx_push_accounts` 的凭证（bot_token / ilink_user_id）
+/// 原样保留，长轮询继续跑；之后重新对接不用再扫码，把新的 4 位对接码发给机器人
+/// 即可（本人消息会按「push_bindings 未接上该会话 → 重跑激活」的幂等口径自动回接）。
+/// 与机器人里回复「解绑」（push_unbind_by_conversation）的行为对齐 —— 那条路本来
+/// 就不动登录态。唯一还删凭证的地方：换了微信号重扫（wx.rs rescan_new_wechat）。
 pub async fn my_push_unbind(
     State(st): State<ArcState>,
     Path(team): Path<String>,
@@ -572,9 +705,8 @@ pub async fn my_push_unbind(
         .get("token")
         .and_then(|v| v.as_str())
         .unwrap_or_default();
-    let (_pid, _t, name) = my_ident(&team, token)?;
+    let (_pid, _t, name) = my_ident(&st, &team, token).await?;
     crate::store::push_unbind(&st, &name).await;
-    crate::store::wx_push_account_delete(&st, &name).await;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -589,7 +721,7 @@ pub async fn my_push_target_add(
         .get("token")
         .and_then(|v| v.as_str())
         .unwrap_or_default();
-    let (person_id, actual_team, name) = my_ident(&team, token)?;
+    let (person_id, actual_team, name) = my_ident(&st, &team, token).await?;
     let team_scope = if team == "all" {
         actual_team.as_str()
     } else {
@@ -605,14 +737,14 @@ pub async fn my_push_target_add(
         .and_then(|v| v.as_str())
         .unwrap_or("person");
     /* 上限按 kind 分类计数（契约 B 节，用户口径「分数是分数，追人是追人」）：
-       person / value / rank 各自独立比单类上限（都复用 push::MAX_TARGETS），互不挤占。
-       rank 前端已无新增入口，这里仍按单类上限兜底（不改它旧有的 ≤5 有效行为）。
+    person / value / rank 各自独立比单类上限（都复用 push::MAX_TARGETS），互不挤占。
+    rank 前端已无新增入口，这里仍按单类上限兜底（不改它旧有的 ≤5 有效行为）。
 
-       FIX1（2026-10-15 qa 并发穿透）：这个上限校验 + 判重 + 插入**全部下沉到**
-       `store::targets_add_serialized`，在同一事务里按账号串行化。原实现在这里先
-       `target_count`、再查重、再逐条 INSERT（check-then-insert，且 my_targets 无唯一
-       约束），6 路并发单条 kind=value 实测能插 6 行（应 ≤5）、3 路并发同 id 插 2 行。
-       所以这里不再自己计数/查重，只把「要写什么」交给那次事务。 */
+    FIX1（2026-10-15 qa 并发穿透）：这个上限校验 + 判重 + 插入**全部下沉到**
+    `store::targets_add_serialized`，在同一事务里按账号串行化。原实现在这里先
+    `target_count`、再查重、再逐条 INSERT（check-then-insert，且 my_targets 无唯一
+    约束），6 路并发单条 kind=value 实测能插 6 行（应 ≤5）、3 路并发同 id 插 2 行。
+    所以这里不再自己计数/查重，只把「要写什么」交给那次事务。 */
     match kind {
         "value" => {
             let raw = value_wan_to_raw(&body)?;
@@ -653,7 +785,9 @@ pub async fn my_push_target_add(
                 .into_iter()
                 .find(|a| a.get("personId").and_then(|v| v.as_u64()) == Some(tid));
             let Some(anchor) = anchor else {
-                return Err(ApiError::bad_request("没有找到这个主播（只能追本团在册主播）"));
+                return Err(ApiError::bad_request(
+                    "没有找到这个主播（只能追本团在册主播）",
+                ));
             };
             let tname = anchor
                 .get("name")
@@ -672,9 +806,7 @@ pub async fn my_push_target_add(
                         return Err(ApiError::bad_request("目标分要大于 0（万）"));
                     }
                     if w > 100_000_000.0 {
-                        return Err(ApiError::bad_request(
-                            "目标分太大了，检查一下单位（万）",
-                        ));
+                        return Err(ApiError::bad_request("目标分太大了，检查一下单位（万）"));
                     }
                     (w * 10_000.0).round() as i64
                 }
@@ -766,7 +898,7 @@ pub async fn my_push_targets_batch(
     axum::Json(body): axum::Json<Value>,
 ) -> ApiResult {
     let token = header_my_token(&headers).unwrap_or_default();
-    let (person_id, actual_team, name) = my_ident(&team, &token)?;
+    let (person_id, actual_team, name) = my_ident(&st, &team, &token).await?;
     let team_scope = if team == "all" {
         actual_team.as_str()
     } else {
@@ -835,7 +967,7 @@ pub async fn my_push_target_del(
         .get("token")
         .and_then(|v| v.as_str())
         .unwrap_or_default();
-    let (_pid, _t, name) = my_ident(&team, token)?;
+    let (_pid, _t, name) = my_ident(&st, &team, token).await?;
     let id = body
         .get("id")
         .and_then(|v| v.as_u64())
@@ -864,7 +996,7 @@ pub async fn my_push_search(
     headers: HeaderMap,
 ) -> ApiResult {
     let token = header_my_token(&headers).unwrap_or_default();
-    let (person_id, actual_team, _name) = my_ident(&team, &token)?;
+    let (person_id, actual_team, _name) = my_ident(&st, &team, &token).await?;
     let team_scope = if team == "all" {
         actual_team.as_str()
     } else {
@@ -899,7 +1031,10 @@ pub async fn my_push_qr(
     headers: HeaderMap,
 ) -> Response {
     let s = PublicSettings::load(&st).await;
-    if gate_team(&st, s.login_required, &team, &headers).await.is_err() {
+    if gate_team(&st, s.login_required, &team, &headers)
+        .await
+        .is_err()
+    {
         return (axum::http::StatusCode::UNAUTHORIZED, "请先登录").into_response();
     }
     let Some(data_url) = crate::store::config_get(&st, "wechat_add_qr").await else {
@@ -955,11 +1090,26 @@ mod batch_target_tests {
     #[test]
     fn parse_rejects_empty_and_illegal() {
         assert!(parse_person_ids(&[]).is_err(), "空数组必须 400");
-        assert!(parse_person_ids(&[serde_json::json!(0)]).is_err(), "0 必须 400");
-        assert!(parse_person_ids(&[serde_json::json!(-1)]).is_err(), "负数必须 400");
-        assert!(parse_person_ids(&[serde_json::json!("3")]).is_err(), "字符串必须 400");
-        assert!(parse_person_ids(&[serde_json::json!(1.5)]).is_err(), "小数必须 400");
-        assert!(parse_person_ids(&[serde_json::json!(null)]).is_err(), "null 必须 400");
+        assert!(
+            parse_person_ids(&[serde_json::json!(0)]).is_err(),
+            "0 必须 400"
+        );
+        assert!(
+            parse_person_ids(&[serde_json::json!(-1)]).is_err(),
+            "负数必须 400"
+        );
+        assert!(
+            parse_person_ids(&[serde_json::json!("3")]).is_err(),
+            "字符串必须 400"
+        );
+        assert!(
+            parse_person_ids(&[serde_json::json!(1.5)]).is_err(),
+            "小数必须 400"
+        );
+        assert!(
+            parse_person_ids(&[serde_json::json!(null)]).is_err(),
+            "null 必须 400"
+        );
     }
 
     #[test]
@@ -1024,8 +1174,14 @@ mod batch_target_tests {
             value_wan_to_raw(&serde_json::json!({"valueWan": 1.1e8})).is_err(),
             "超过 1e8 万必须 400"
         );
-        assert!(value_wan_to_raw(&serde_json::json!({"valueWan": 0})).is_err(), "0 必须 400");
-        assert!(value_wan_to_raw(&serde_json::json!({})).is_err(), "缺字段必须 400");
+        assert!(
+            value_wan_to_raw(&serde_json::json!({"valueWan": 0})).is_err(),
+            "0 必须 400"
+        );
+        assert!(
+            value_wan_to_raw(&serde_json::json!({})).is_err(),
+            "缺字段必须 400"
+        );
     }
 
     #[test]
@@ -1054,7 +1210,8 @@ mod wx_save_failure_tests {
     #[test]
     fn bind_conflict_maps_to_400() {
         let e: anyhow::Error = crate::store::WxBindConflict(
-            "该微信已经绑定在「shuai4444」的账号上；一个微信只能绑一个主播，请先解绑旧的再扫".into(),
+            "该微信已经绑定在「shuai4444」的账号上；一个微信只能绑一个主播，请先解绑旧的再扫"
+                .into(),
         )
         .into();
         assert_eq!(

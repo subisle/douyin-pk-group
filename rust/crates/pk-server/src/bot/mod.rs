@@ -577,19 +577,21 @@ pub async fn weixin_add_qr_set(
     ))
 }
 
-/// 微信推送绑定（2026-10-16 用户口径：**只发 4 位数字绑定码即可**，不再要手机号）。
+/// 微信推送对接（2026-10-16 用户口径：**只发 4 位数字对接码即可**，不再要手机号）。
 /// 命中返回回复文案，没命中返回 None（继续走管理员判定）。
 ///
 /// 消息格式（给 Lead 写文档用）：
 /// - 直接发 4 位数字：「1234」——展示端「我的」页的文案就是这么写的
 /// - 带关键词：「绑定 1234」/「bind 1234」/「bd 1234」
 /// - 旧写法「绑定 13800000000 1234」也认：手机号被忽略，起作用的只有码
-/// - 只发手机号 → 回一句「现在不用手机号了，发 4 位绑定码即可」（不查库、不泄露该号是否登记过）
+/// - 只发手机号 → 回一句「现在不用手机号了，发 4 位对接码即可」（不查库、不泄露该号是否登记过）
 ///
-/// 安全口径：绑定码 = 「我的」页 push_rotate_code 生成的 **4 位数字、30 分钟一次性、库里全局唯一**
+/// 安全口径：对接码 = 「我的」页 push_rotate_code 生成的 **4 位数字、30 分钟一次性、库里全局唯一**
 /// 的码（见迁移 028）。错误文案统一，不区分「码不对」「码过期」，避免枚举。
 /// **裸 4 位数字没对上码时静默**：否则正常聊天里随便一个 4 位数都会收到一句「绑定失败」。
-/// 绑定成功回复不带姓名（审计要求：机器人会话可能被截图外传）。
+/// 对接成功的回复 = [`wx_dock_welcome`]（**带账号姓名**）：P1-1 审计原口径是「回复不带姓名，
+/// 防会话被截图外传」，2026-10-16 深夜用户口径改为**欢迎语带名字** —— 主播自己一眼确认
+/// 绑对了号，比防外传更值。要退回匿名口径只改这一个函数即可（扫码路径的入站回执同理）。
 async fn try_bind_weixin(st: &Arc<AppState>, inbound: &Inbound) -> Option<Outbound> {
     let conversation = inbound.conversation_id.clone();
     let text = inbound.text.trim();
@@ -600,7 +602,7 @@ async fn try_bind_weixin(st: &Arc<AppState>, inbound: &Inbound) -> Option<Outbou
         return Some(Outbound::to(
             &conversation,
             match name {
-                Some(_) => "已解绑，不会再收到推送。\n要重新绑定，打开展示端「我的」页，点「获取绑定码」，\n把 4 位数字发给我即可。".to_string(),
+                Some(_) => "已解绑，不会再收到推送。\n要重新对接，打开展示端「我的」页 →「消息设置」→ 微信对接，\n点「获取二维码」，把 4 位对接码发给我即可。".to_string(),
                 None => "这条会话还没有绑定过，不用解绑。".to_string(),
             },
         ));
@@ -613,9 +615,9 @@ async fn try_bind_weixin(st: &Arc<AppState>, inbound: &Inbound) -> Option<Outbou
         if extract_phone(text).is_some() {
             return Some(Outbound::to(
                 &conversation,
-                "收到手机号。现在绑定不用手机号了：\n\
-                 打开展示端 →「我的」页 → 点「获取绑定码」，\n\
-                 把页面上那 4 位数字直接发给我即可（30 分钟内有效，用一次就作废）。",
+                "收到手机号。现在对接不用手机号了：\n\
+                 打开展示端 →「我的」页 →「消息设置」→ 点「获取二维码」，\n\
+                 把页面上那 4 位对接码直接发给我即可（30 分钟内有效，用一次就作废）。",
             ));
         }
         return None; // 不是绑定消息：继续走管理员判定
@@ -636,9 +638,9 @@ async fn try_bind_weixin(st: &Arc<AppState>, inbound: &Inbound) -> Option<Outbou
             );
             return Some(Outbound::to(
                 &conversation,
-                "绑定没有成功：这个 4 位绑定码不对或已经过期。\n\
-                 打开展示端 →「我的」页 → 点「获取绑定码」，\n\
-                 把新出的 4 位数字发给我（30 分钟内有效，用一次就作废）。",
+                "对接没有成功：这个 4 位对接码不对或已经过期。\n\
+                 打开展示端 →「我的」页 →「消息设置」→ 点「获取二维码」，\n\
+                 把新出的 4 位对接码发给我（30 分钟内有效，用一次就作废）。",
             ));
         }
     };
@@ -656,15 +658,30 @@ async fn try_bind_weixin(st: &Arc<AppState>, inbound: &Inbound) -> Option<Outbou
         crate::events::SCOPE_BOT,
         format!("微信推送已绑定（{name}）"),
     );
-    Some(Outbound::to(
-        &conversation,
-        "✅ 绑定成功\n\n\
-         之后每天数据入库约 30 分钟后会给你推送：\n\
+    Some(Outbound::to(&conversation, wx_dock_welcome(&name)))
+}
+
+/// 微信对接完成欢迎语（唯一出口：机器人回对接码、扫码确认两个入口共用一份文案）。
+///
+/// 2026-10-16 用户口径：「对接完成发送欢迎语加名字」——直接叫名字（账号姓名 =
+/// 展示端登录的那个姓名），比通用文案更像「系统认识你」，主播一眼确认绑对了号。
+/// 曾经 P1-1 审计要求不带姓名（防会话截图外传），本次由用户明确改回带姓名；
+/// 要恢复匿名口径，把 `你好，{name}！` 换成 `你好！` 即可，两个入口同时生效。
+pub(crate) fn wx_dock_welcome(name: &str) -> String {
+    let who = name.trim();
+    let greeting = if who.is_empty() {
+        "你好！".to_string()
+    } else {
+        format!("你好，{who}！")
+    };
+    format!(
+        "{greeting}\n\n✅ 微信对接成功\n\n\
+         以后数据更新会自动推给你：\n\
          · 追分提醒 —— 追上对手 / 还差多少\n\
          · 每日报告 —— 当天的音浪排行榜\n\n\
-         要开哪一项、要追谁，到「我的」页面里设置（两个开关默认关着）。\n\
-         回复「解绑」可以断开。",
-    ))
+         要开哪一项、要追谁，到展示端「我的」页面里设置（两个开关默认关着）。\n\
+         回复「解绑」可以断开。"
+    )
 }
 
 /// 微信提权口令（2026-10-11 审计整改）：不再硬编码在源码里，
@@ -1108,7 +1125,7 @@ async fn route_command(
 
 /// User 命令取绑定失败时的兜底（理论上 handle 已按绑定放行，这里防解绑竞态）
 const NO_BINDING_HINT: &str =
-    "没有找到你的推送绑定。\n打开展示端「我的」页 →「推送设置」重新绑定，或发「帮助」。";
+    "没有找到你的推送绑定。\n打开展示端「我的」页 →「消息设置」→ 微信对接，或发「帮助」。";
 
 /// 当前会话的推送绑定（User 命令专用）
 async fn current_binding(
@@ -2213,6 +2230,21 @@ mod tests {
         match saved {
             Some(v) => std::env::set_var(KEY, v),
             None => std::env::remove_var(KEY),
+        }
+    }
+
+    /// 对接完成欢迎语（2026-10-16 深夜用户口径：**欢迎语带名字**）。
+    /// 两个对接入口（机器人回对接码 / 扫码确认后的 poll）共用这一份文案，
+    /// 口径回归到「不带姓名」时只改 wx_dock_welcome，改这里就能一起守住。
+    #[test]
+    fn dock_welcome_carries_name() {
+        let t = wx_dock_welcome("浩雨");
+        assert_eq!(t.lines().next().unwrap(), "你好，浩雨！");
+        assert!(t.contains("微信对接成功"), "{t}");
+        assert!(t.contains("解绑"), "要留解绑指引：{t}");
+        // 空名 / 纯空格（历史脏数据）不得出现「你好，！」
+        for blank in [wx_dock_welcome(""), wx_dock_welcome("   ")] {
+            assert_eq!(blank.lines().next().unwrap(), "你好！", "{blank}");
         }
     }
 }

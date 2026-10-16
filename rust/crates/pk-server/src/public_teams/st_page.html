@@ -4239,7 +4239,11 @@ function wechatBindHtml(p) {
       h += '<div class="hint">上次推送没成功：' + esc(p.lastError) +
         '<br>让对方给机器人发一条消息后再试（微信要求先有对话）</div>';
     }
-    h += '<button class="go gray" id="pushUnbind" style="margin-top:10px">解除绑定</button>';
+    /* 2026-10-17 口径：解绑只断推送接线，不注销扫码登录 —— 重新对接不用再扫码，
+       把新的 4 位对接码发给机器人即可（扫码凭证原样保留）。 */
+    h += '<button class="go gray" id="pushUnbind" style="margin-top:10px">解除绑定</button>' +
+      '<div class="hint" style="margin-top:4px">解绑后不再收到推送；重新对接不用重新扫码，' +
+      '把「我的」页新出的 4 位对接码发给机器人就行。</div>';
   } else {
     h += pushUnboundHtml(p);
   }
@@ -4851,7 +4855,7 @@ function bindPushBoundHandlers(p) {
   const unbind = $('pushUnbind');
   if (unbind) {
     unbind.onclick = async () => {
-      if (!confirm('解除绑定后不再收到推送，确定吗？')) return;
+      if (!confirm('解除绑定后不再收到推送（扫码登录保留，重新对接不用再扫码），确定吗？')) return;
       unbind.disabled = true;
       try {
         await fetch('/api/public/teams/' + TEAM + '/my/push/unbind', {
