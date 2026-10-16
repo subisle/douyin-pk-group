@@ -4,14 +4,26 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
 <title>主播数据</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&family=Inter:wght@100..900&display=swap" rel="stylesheet">
+<!-- Material Symbols Outlined 自托管子集（2026-10-17）：不再走 Google Fonts。
+     原 <link rel=stylesheet> 是渲染阻塞 + 4MB 可变字体，国内网络一慢整页白屏。
+     子集由 scripts/fonts/subset-material-symbols.py 从两处前端用到的 45 个图标裁出
+     （静态 6.6KB，固定 outlined/400/24/0 轴值，base64 内联到本页，零外部依赖）。
+     顺带删掉了原来一起拉却从未用到的 Inter 字体。加新图标：改脚本 ICONS 重跑，
+     再更新这里的 base64。 -->
+<style>
+@font-face {
+  font-family: 'Material Symbols Outlined';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url(data:font/woff2;base64,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) format('woff2');
+}
+</style>
 <style>
 ::-webkit-scrollbar { display:none; }
 .tab-content-enter { animation:stFadeIn 150ms ease-out forwards; }
 @keyframes stFadeIn { from { opacity:0; transform:translateY(3px); } to { opacity:1; transform:none; } }
-.material-symbols-outlined { font-variation-settings:'FILL' 0,'wght' 400,'GRAD' 0,'opsz' 24; }
+.material-symbols-outlined { font-family:'Material Symbols Outlined'; font-weight:normal; font-style:normal; font-size:24px; line-height:1; letter-spacing:normal; text-transform:none; display:inline-block; white-space:nowrap; word-wrap:normal; direction:ltr; -webkit-font-smoothing:antialiased; font-variation-settings:'FILL' 0,'wght' 400,'GRAD' 0,'opsz' 24; }
 </style>
 <style>
 /* ===== Stitch Apple Style Mobile Showcase 精确 token ===== */
@@ -95,6 +107,31 @@ button { font:inherit; cursor:pointer; }
 /* 副标题行：整行居中（长文本走省略号，不挡右侧胶囊） */
 .mh-sub { margin-top:2px; font-size:11px; color:var(--ink3); font-family:Menlo,monospace;
   text-align:center; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+/* 📣 头部公告行（2026-10-17 用户口径）：原来公告内容占三块竖排大卡（#annItems 两条
+   紫金横幅 + #home-ann 蓝色通知条，合计近半屏、滚走前一直占位），现在全部收进
+   masthead 内的**单行胶囊**：随头部吸顶、只占一行 22px。多条公告 4 秒轮换单行
+   淡入淡出（JS 侧 renderAnnounceItems / renderHomeAnnouncement）。
+   单行省略：nowrap + ellipsis，行内居中；max-width 95% 与头部同宽感。 */
+.mh-ann { display:flex; align-items:center; justify-content:center; gap:4px;
+  height:22px; margin:4px auto 6px; max-width:95%; padding:2px 10px;
+  border-radius:9999px; font-size:11px; line-height:1.2; text-align:center;
+  overflow:hidden; white-space:nowrap; text-overflow:ellipsis;
+  background:#F5F3FF; border:1px solid #C4B5FD; color:#4C1D95; }
+/* 品牌条（tone=brand）：沿 .ann-item.ai-brand 的紫金渐变，整体调淡一档适配头部小字 */
+.mh-ann.ai-brand { background:linear-gradient(120deg,#6D28D9 0%,#8B5CF6 45%,#B45309 100%);
+  border-color:rgba(245,158,11,.55); color:#FFFBEB;
+  box-shadow:0 2px 10px rgba(109,40,217,.25); }
+/* 蓝色通知条（renderHomeAnnouncement 并入的 placements.home）：沿原 .ann-bar 浅蓝 */
+.mh-ann.ai-home { background:linear-gradient(135deg,#EAF3FF,#E0EDFF);
+  border-color:var(--primary-fixed-dim); color:var(--on-surface); }
+.mh-ann .material-symbols-outlined { font-size:14px; line-height:1; flex:none;
+  color:inherit; opacity:.85; }
+/* 单行内多条轮换的淡入淡出（同一行内换内容，不换行不撑高） */
+.mh-ann .mha-tx { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  transition:opacity .45s ease; }
+.mh-ann .mha-tx.mha-fade { opacity:0; }
+/* 轮换角标「1/3」：只有多条时渲染，字号压到 9.5px */
+.mh-ann .mha-idx { flex:none; font-size:9.5px; opacity:.65; font-family:Menlo,monospace; }
 /* 换团条（2026-10-15）：头部右侧三胶囊，只给「全团」账号。
     2026-10-16：改成网格右栏 + 右对齐（原来是 flex:1 的标题挤着它）；同时收紧一档 ——
     原自然宽 140px 比右栏（390 屏上 127px）还宽，按钮会被压成两行。 */
@@ -120,12 +157,9 @@ button { font:inherit; cursor:pointer; }
   font-size:12.5px; }
 .subnav button.on { background:var(--primary); border-color:var(--primary); color:#fff; font-weight:600; }
 
-/* 📣 公告条（2026-10-14）：页面顶部只按后端下发的 items 渲染，有几条渲染几条、
-   顺序 = 数组顺序。原来的 champ-banner / celebrate-bar 两条独立渲染路径已删除，
-   避免同一条冠军信息在顶部上下重复出现。
-   tone=plain → 白底描边（沿原 .champ-banner 视觉）；tone=brand → 紫金渐变
-   （沿原 .celebrate-bar 视觉）。容器 #annItems 自身无 margin/padding，
-   空数组 = 无子节点 = 不占位。 */
+/* 📣 公告大卡（2026-10-14 → 2026-10-17 停用）：原顶部竖排公告大卡样式整组保留不删
+   （弹窗与别的块仍引用其中部分类名），但顶部已不再渲染 —— 公告内容收进头部单行
+   胶囊 .mh-ann（见上方 2026-10-17 注释块），#annItems 容器保留、不再写入。 */
 #annItems:empty { display:none; }
 /* 2026-10-15 task-9②：上下间距收窄（原 margin:10 / padding:10~12 太松），
    行距也跟着压：整卡看起来更紧凑，一屏能装下更多内容。 */
@@ -1709,9 +1743,9 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 #gate .gate-col { display:flex; flex-direction:column; align-items:center;
   justify-content:center; width:100%; max-width:390px; margin:auto; }
 #gate-ann { margin:0 0 14px; width:100%; }
-/* 看板公告条：插在 toolbar 之前（#annItems 公告条下方），与公告条同一布局节奏。
-   2026-10-16：与上方冠军横幅同步收窄（两侧各 20px + 居中 + 限宽 520px），两条对齐。 */
-#home-ann { margin:10px auto 0; width:calc(100% - 40px); max-width:520px; }
+/* 看板蓝色通知条 #home-ann 已于 2026-10-17 并入头部公告行 #mhAnn（renderHomeAnnouncement
+   直接往 #mhAnn 追加一条、参与 4 秒轮换），本条 CSS 删除；#gate-ann / #my-ann 两处公告位
+   （登录门 / 「我的」页）保持原样不动。 */
 /* 「我的」页公告条：插在 view 内容顶部（section 内第一个元素） */
 #my-ann { margin:0 0 10px; }
 </style>
@@ -1737,6 +1771,11 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
   </div>
   <!-- 副标题（2026-10-16）：单占一行、整行居中，不跟标题抢中间那栏 -->
   <div class="mh-sub"><span id="mhSub">LOADING</span><span id="mhSpin" aria-hidden="true"></span></div>
+  <!-- 📣 头部公告行（2026-10-17 用户口径）：公告内容收进头部单行胶囊，随 masthead 吸顶。
+       renderAnnounceItems(items) 与 renderHomeAnnouncement(home) 都往这里写；多条 = 4 秒
+       轮换单行淡入淡出；非数据视图 / 空公告 → hidden 不占位。原竖排的 #annItems 大卡与
+       #home-ann 蓝条已取消渲染（元素与旧 CSS 保留不删，别处不再使用）。 -->
+  <div class="mh-ann" id="mhAnn" hidden></div>
   <div class="subnav hidden" id="subnav">
     <button data-g="junior">初级小组赛</button>
     <button data-g="mid">中级小组赛</button>
@@ -1746,9 +1785,10 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
   </div>
 </header>
 
-<!-- 📣 公告条容器（2026-10-14）：页面顶部唯一入口，由 renderAnnounceItems(items)
-     按后端下发的数组顺序渲染，有几条渲染几条；空数组 = 容器空且不占位。
-     原来这里是一条写死的冠军条，与庆祝横幅重复，已删除。 -->
+<!-- 📣 公告条容器（2026-10-14）：原页面顶部唯一入口，2026-10-17 起停用 ——
+     公告内容改由 renderAnnounceItems / renderHomeAnnouncement 写进 masthead 内的
+     单行胶囊 #mhAnn（见头部）。本元素与 .ann-items/.ann-item 系列旧 CSS 保留不删
+     （弹窗、别的页面块还引用部分类名），只是不再往这里渲染任何子节点。 -->
 <div class="ann-items" id="annItems"></div>
 
 <div class="toolbar hidden" id="toolbar">
@@ -2128,7 +2168,9 @@ function closeGate(me) {
   /* 引导在登录门弹出时被 dismissAnnounce 收掉了，登录成功要补弹一次。
      用 rAF 等一帧：登录门的 hidden 和引导的 remove('hidden') 要在同一帧后
      再改 class，否则浏览器可能把两层遮罩的过渡叠在一起闪一下。
-     localStorage 已记住版本的（老用户 / 已读过）这里自然不再弹。 */
+     localStorage 已记住版本的（老用户 / 已读过）这里自然不再弹。
+     2026-10-17：maybeAnnounce 内 GUIDE_ENABLED=false 总闸兜住，正常登录不再弹；
+     调用保留不动（恢复引导时无需回改此处）。 */
   requestAnimationFrame(() => { try { maybeAnnounce(); } catch (_) {} });
 }
 
@@ -5064,10 +5106,11 @@ function bindPushBox(p) {
 
 /* ==================== 视图切换 ==================== */
 /* 顶部导航 sticky 后，工具条吸顶位置要跟头部实际高度走（分组页多一条子导航）。
-   公告条容器 #annItems 夹在 masthead 与 toolbar 之间，但它跟正文一起滚走、自身不吸顶，
-   所以**不把**它的高度算进 --mh-h（算了会在吸顶的 masthead 下面留一条空隙）；
-   这里只量真正吸顶的 .masthead。renderAnnounceItems 每次改完条数会再调一次本函数，
-   保证站点初始化后第一次渲染出来的高度变化也能同步。 */
+   2026-10-17 口径：公告行 #mhAnn 在 masthead **内部**，随头部一起吸顶、高度天然计入
+   .masthead 的 offsetHeight，量到的就是真实值，不需要（也不能）单独排除；
+   原来竖排在 masthead 与 toolbar 之间的 #annItems / #home-ann 已取消渲染，不存在
+   「吸顶下方留空隙」的问题了。renderAnnounceItems 每次渲染完仍调一次本函数，
+   保证公告行显隐导致头部高度变化时 --mh-h 同步。 */
 function syncHeaderOffset() {
   const h = document.querySelector('.masthead')?.offsetHeight || 0;
   if (h) document.documentElement.style.setProperty('--mh-h', h + 'px');
@@ -5106,10 +5149,13 @@ function switchView(v, opts) {
   syncNavActive();
   document.querySelectorAll('#subnav button').forEach(b => b.classList.toggle('on', b.dataset.g === curGroup));
   show('toolbar', v === 'data');
-  /* 看板公告条跟 toolbar 一起显隐：公告挂在数据看板（运营触达位），
-     切到分组/族谱/我的时收起，进「我的」由 renderMyAnnouncement 挂自己的条 */
-  const homeAnn = $('home-ann');
-  if (homeAnn) show(homeAnn, v === 'data');
+  /* 📣 头部公告行 #mhAnn 显隐（2026-10-17，任务口径 e 选「switchView 控制显隐」）：
+     mhAnn 在 masthead 里是全局的，公告挂数据看板 —— 非数据视图统一收口：停轮换 +
+     清行 + hidden；数据视图按 mhAnnQueue 原样恢复（不等网络，bootRest 静默刷新 /
+     renderAnnounceItems 后续整包覆盖会再校准内容）。原 #home-ann 蓝条显隐逻辑随
+     并入 #mhAnn 一并删除。 */
+  if (v === 'data') mhAnnRestore();
+  else mhAnnCollapse();
   show('subnav', v === 'group');
   show('foot', v !== 'lineage');
   syncHeaderOffset();
@@ -5415,6 +5461,12 @@ function maybeAnnounce() {
   var closing = false;
   var deep = announceDeepStep(steps.length);
   var deepLinked = deep >= 0;
+  /* 2026-10-17 用户口径「新手引导默认关闭」：前端总闸 GUIDE_ENABLED=false，
+     正常进入不再弹引导（库里存量 announcement 配置 enabled=true 也被这道闸兜住）。
+     return 插在深链计算之后、已读锁之前 —— 深链 ?announce=N 预览不受总闸影响仍能看。
+     要恢复引导：把 GUIDE_ENABLED 改回 true 即可，后端 announcement 配置不用动。 */
+  var GUIDE_ENABLED = false;
+  if (!GUIDE_ENABLED && !deepLinked) return;
   /* 深链优先于已读判断：已读用户也要能通过别人发的链接预览某一步，
      所以这一行必须在版本守卫之前算出来，不能等 return 之后再解析。 */
   var idx = deepLinked ? deep : 0;
@@ -5963,10 +6015,23 @@ async function probeMyMessages() {
        placements: { home:{enabled,text,icon}, my:{enabled,text,icon} }
        celebrate:  { enabled, confetti, title, name, wave }
        items:      [{enabled,icon,title,name,wave,text,tone}]   ← 公告条主数据源（顺序即从上到下）
-   页面顶部**只**渲染 items（renderAnnounceItems）；site.champ / site.celebrate 兼容期
+   页面顶部公告（2026-10-17 口径）= renderAnnounceItems(items) + renderHomeAnnouncement(placements.home)
+   都收进头部单行 #mhAnn；site.champ / site.celebrate 兼容期
    后端仍下发，但前端不再单独渲染横幅（否则同一条冠军信息会上下重复）。 */
 
 let siteAnnouncements = {};   // /announcements 探测结果（失败 = {}，所有消费点 falsy 兜底）
+
+/* 📣 头部公告行 #mhAnn 的轮换计时句柄（2026-10-17）：**全局唯一** —— 任何重渲染
+   （bootRest 静默刷新 / 切视图回来）都先 mhAnnStopRotate() 清掉旧的再起新的，
+   杜绝双份 interval 导致的单行公告闪烁与错拍。 */
+let mhAnnRotateTimer = null;
+/* 写入序号令牌：mhAnnShowItem 每次调用自增取号，挂起的 450ms 淡出重建到期时对号 ——
+   号不对（期间又发生过收起 / 重渲染 / 更新一次轮换）就丢弃这帧，防止过期闭包把
+   旧内容写回已经清空或换新的公告行（闪烁 / 幽灵内容）。 */
+let mhAnnSeq = 0;
+/* 最近一次 renderAnnounceItems 建好的单行轮换队列（含 renderHomeAnnouncement 追加的
+   home 条）：switchView 切走时保留，切回数据视图时据此原样恢复（不用等网络）。 */
+let mhAnnQueue = [];
 
 /** 拉 announcements 配置：任何失败（404/网络/后端未上线）都回落为空对象，绝不挡启动 */
 async function fetchAnnouncements() {
@@ -5977,13 +6042,17 @@ async function fetchAnnouncements() {
 }
 
 /** 公告条统一 HTML（文案经 esc 转义；icon 只认文件内 ANNOUNCE_ICONS 白名单，
-    白名单外的名字一律回默认图标 —— 与后端 STEP_ICON_WHITELIST 同一口径，防注入） */
+    白名单外的名字一律回默认图标 —— 与后端 STEP_ICON_WHITELIST 同一口径，防注入）
+    2026-10-17 口径变更：cfg.icon 为空串或白名单外 → **不渲染图标 span**（设置
+    「不显示图标」就真不显示，不再回默认图标兜底）。defIcon 参数保留在签名里
+    （gate/my 两处调用方不动），函数内已不再使用。布局由 .ann-bar 的 flex 自然收缩，
+    ann-ico 样式无需改动。 */
 function annBarHtml(id, cfg, defIcon) {
   cfg = cfg || {};
   if (!cfg.enabled || !cfg.text) return '';   // 关着 / 没文案：不出（调用方空串直拼）
-  const icon = ANNOUNCE_ICONS.indexOf(cfg.icon) >= 0 ? cfg.icon : defIcon;
+  const icon = ANNOUNCE_ICONS.indexOf(cfg.icon) >= 0 ? cfg.icon : '';
   return '<div class="ann-bar" id="' + id + '">' +
-    '<span class="material-symbols-outlined ann-ico">' + esc(icon) + '</span>' +
+    (icon ? '<span class="material-symbols-outlined ann-ico">' + esc(icon) + '</span>' : '') +
     '<span class="ann-tx">' + esc(cfg.text) + '</span>' +
   '</div>';
 }
@@ -6002,115 +6071,222 @@ function splitRankNames(raw) {
     .slice(0, 3);
 }
 
-/** 📣 公告条渲染（2026-10-14）：页面顶部唯一渲染入口，按 items 数组顺序一条一个
-    .ann-item，几条就渲染几条。
-    契约（每条）：{ enabled, icon, title, name, wave, text, tone:'brand'|'plain', align:'left'|'center'|'right' }
+/** 📣 头部公告行渲染（2026-10-17 用户口径改版）：原来把每条 enabled 渲染成一张竖排
+    .ann-item 大卡（#annItems 顶部占近半屏、滚走前一直占位），现在全部压缩进 masthead
+    内的单行胶囊 #mhAnn —— 随头部吸顶、只占一行；多条 = 4 秒间隔自动轮换，同一行内
+    淡入淡出（interval 存全局句柄，重渲染先清，杜绝双份计时器闪烁）。
+    契约（每条）：{ enabled, icon, title, name, wave, text, tone:'brand'|'plain', align, popup, seat, avatar }
     · 只渲染 enabled=true 的（公开接口已过滤一遍，这里再兜一道，防管理端形态喂）
-    · tone=brand → 紫金渐变；其余/非法 → plain 白底描边（与后端 normalize_tone 同口径）
-    · align=center/right → 加 ai-center / ai-right 类（图标 + 文案整组靠中/靠右）；
-      其余/非法 → 原版式左对齐（ai-left，与后端 normalize_align 同口径）
-    · wave>0 → 人名后补 ' · ' + wan(wave)（wan 是页面已有函数）
-    · name 里写了多人（task-9②）→ 按名次最多渲染前 3 位，一人一行，空名次不占行
-    · title/name 都空而 text 有值 → 纯文本条；text 支持换行（CSS white-space:pre-line）
-    · 三条都空 → 该条直接跳过，不占位
+    · 单条口径：一行取核心信息「🏆 title name·wave text」（🏆 = emoji_events 符号占位，
+      name 切前三位取第一位 + wave>0 补 wan(wave)，段与段之间用 ' · ' 连接；text 换行压空格）
+    · 多条：按数组顺序 4 秒轮换，行尾小字「当前序号/总数」；同一条内淡入淡出
+    · tone=brand → 紫金渐变胶囊（.mh-ann.ai-brand）；其余/非法 → 浅紫白底胶囊
+    · align / popup / seat / avatar 字段单行轮播条**不用**（弹窗逻辑走
+      maybeAnnounceItemsPopup，保持原样；align 是大卡版式字段，单行无意义）
+    · 图标按条目配置（2026-10-17 改口径）：item.icon 空串/未配 → **不出图标 span**；
+      icon 有值且在 ANNOUNCE_ICONS 白名单内才显示 —— 不再回落 emoji_events/military_tech 默认图标
+    · title/name/wave/text 全空 → 该条直接跳过
+    · 显隐口径（2026-10-17，任务口径 e 选「switchView 控制显隐」）：渲染只填
+      view==='data'；switchView 切走时 mhAnnCollapse 收起、切回 mhAnnRestore 按队列
+      （mhAnnQueue）恢复，内容随 bootRest 静默刷新整包校准
     安全：全程 createElement + textContent，后端字符串一律不进 innerHTML（零注入面）；
-    icon 只认页面 ANNOUNCE_ICONS 白名单（与后端 STEP_ICON_WHITELIST 同一口径），
-    白名单外/空串 → 按 tone 回默认图标。
-    空数组/全关 → 容器清空且不占位（#annItems 自身无 margin，CSS :empty 再兜一层）。 */
+    icon 只认页面 ANNOUNCE_ICONS 白名单（与后端 STEP_ICON_WHITELIST 同一口径）。 */
 function renderAnnounceItems(items) {
-  const box = $('annItems');
+  const box = $('mhAnn');
   if (!box) return;
-  box.textContent = '';   // 先清空（赋值 textContent 一次性摘掉所有子节点）
-  const list = Array.isArray(items) ? items : [];
-  for (const it of list) {
-    if (!it || !it.enabled) continue;
+  /* 公告挂数据看板：只填数据视图。非数据视图切走时由 switchView 统一收口
+     （mhAnnCollapse：停轮换 + 清行 + hidden，队列 mhAnnQueue 保留供切回恢复）；
+     若这里发现 view 已不是 data（深链 / bootRest 改道后的首次渲染），同样收起并返回。 */
+  if (view !== 'data') {
+    mhAnnCollapse();
+    return;
+  }
+  /* 收集 enabled 且有内容的条目（跳过全空条），压成单行轮换队列 */
+  const list = (Array.isArray(items) ? items : []).filter((it) => {
+    if (!it || !it.enabled) return false;
     const title = String(it.title == null ? '' : it.title);
     const text = String(it.text == null ? '' : it.text);
-    /* 人名先切成「按名次的前三位」：names 保留名次位置（空位是 ''），
-       picked 是其中真正写了名字的（只用它判断有没有人、以及是不是只有一位）。 */
-    const names = splitRankNames(it.name);
-    const picked = names.filter((s) => s.length > 0);
-    if (!title && !picked.length && !text) continue;   // 全空条：跳过，别留一条空壳占位
-    const brand = it.tone === 'brand';
-    /* 对齐（2026-10-16）：只认 center / right，其余一律 left（原版式） */
-    const al = it.align === 'center' ? 'center' : it.align === 'right' ? 'right' : 'left';
-    const row = document.createElement('div');
-    row.className = 'ann-item ' + (brand ? 'ai-brand' : 'ai-plain') + ' ai-' + al;
-    const ico = document.createElement('span');
-    ico.className = 'material-symbols-outlined ai-ico';
+    const picked = splitRankNames(it.name).filter((s) => s.length > 0);
+    return !!(title || picked.length || text);
+  });
+  /* 空数组 / 全关：不在这里直接收起 —— placements.home 可能还开着（home 条自己
+     就能撑起这一行）。只清掉 items 队列，行显隐交给行尾的「队列空则收起」兜底
+     或 renderHomeAnnouncement（有 home 条时它会把行撑开并显示）。 */
+  /* 队列条目 → 单行文本（🏆 title name·wave text 组合）+ 视觉档（brand/plain）+ 图标 */
+  const queue = list.map((it) => {
+    const title = String(it.title == null ? '' : it.title);
+    const text = String(it.text == null ? '' : it.text).replace(/\s*\n+\s*/g, ' ').trim();
+    const picked = splitRankNames(it.name).filter((s) => s.length > 0);
+    const nm = picked.length ? picked[0] + (Number(it.wave) > 0 ? ' · ' + wan(it.wave) : '') : '';
+    const segs = [title, nm, text].filter((s) => s.length > 0).map((s) => s.trim())
+      .filter((s) => s.length > 0);
     const ic = String(it.icon == null ? '' : it.icon).trim();
-    ico.textContent = ANNOUNCE_ICONS.indexOf(ic) >= 0
-      ? ic : (brand ? 'emoji_events' : 'military_tech');
-    row.appendChild(ico);
-    const body = document.createElement('div');
-    body.className = 'ai-body';
-    if (title || picked.length) {
-      const head = document.createElement('div');
-      head.className = 'ai-head';
-      if (title) {
-        const t = document.createElement('span');
-        t.className = 'ai-title';
-        t.textContent = title;
-        head.appendChild(t);
-      }
-      if (picked.length <= 1) {
-        /* 只有一位（或没写人名）：保持原来的一行形态：title + 人名 · 音浪 */
-        if (picked.length === 1) {
-          const n = document.createElement('span');
-          n.className = 'ai-name';
-          n.textContent = picked[0] + (Number(it.wave) > 0 ? ' · ' + wan(it.wave) : '');
-          head.appendChild(n);
-        }
-        body.appendChild(head);
-      } else {
-        /* 前三位姓名（2026-10-15 task-9②）：人名一格写了多人 → 按名次一人一行、
-           序号 + 名字紧凑排列。空的名次（names 里的 ''）直接跳过，不占行；
-           序号用它在 names 里的原始位置，所以第 3 名不会被顶成第 2 名。
-           音浪只有一个数（是冠军的），挂在**第一行**名字后面。 */
-        body.appendChild(head);
-        const ranks = document.createElement('div');
-        ranks.className = 'ai-ranks';
-        let waveLeft = Number(it.wave) > 0 ? wan(it.wave) : '';
-        names.forEach((nm, i) => {
-          if (!nm) return;                     // 空名次：不占行
-          const rk = document.createElement('div');
-          rk.className = 'ai-rank';
-          const no = document.createElement('span');
-          no.className = 'ai-rank-no';
-          no.textContent = String(i + 1);
-          const tx = document.createElement('span');
-          tx.className = 'ai-rank-nm';
-          tx.textContent = nm + (waveLeft ? ' · ' + waveLeft : '');
-          waveLeft = '';
-          rk.appendChild(no);
-          rk.appendChild(tx);
-          ranks.appendChild(rk);
-        });
-        body.appendChild(ranks);
-      }
-    }
-    if (text) {
-      const tx = document.createElement('div');
-      tx.className = 'ai-text';
-      tx.textContent = text;
-      body.appendChild(tx);
-    }
-    row.appendChild(body);
-    box.appendChild(row);
+    return {
+      icon: (ic && ANNOUNCE_ICONS.indexOf(ic) >= 0) ? ic : '',   // 空 = 无图标（不出 span）
+      brand: it.tone === 'brand',
+      text: segs.join(' · ')
+    };
+  });
+  /* 空数组 / 全关：items 部分直接清队列收起；placements.home 若还开着，紧接着的
+     renderHomeAnnouncement 发现 mhAnnQueue 空但 home 有内容，会把行重新撑起并
+     只显示 home 条（见其内注释）。同一 bootRest 帧内先后完成，不会闪。 */
+  if (!queue.length) {
+    mhAnnQueue = [];
+    mhAnnCollapse();
+    syncHeaderOffset();
+    return;
   }
-  /* 条数变化会改公告区高度（虽然它不吸顶、--mh-h 只量 masthead），
-     这里仍重算一次吸顶偏移，保证切换视图/初始化后的首帧布局口径一致。 */
+  mhAnnQueue = queue;   // 存全局：switchView 切走/切回时据此收起/恢复
+  box.hidden = false;
+  if (queue.length === 1) {   // 只有一条：直接显示，不轮换
+    mhAnnStopRotate();
+    mhAnnShowItem(box, queue[0], 0, 1);
+    syncHeaderOffset();
+    return;
+  }
+  /* 多条：4 秒间隔自动轮换。interval 是全局唯一句柄，任何重渲染（静默刷新 /
+     切视图回来）都先 mhAnnStopRotate() 清掉旧的再起新的，杜绝双计时器闪烁。 */
+  mhAnnStopRotate();
+  let qi = 0;
+  mhAnnShowItem(box, queue[0], 1, queue.length);
+  mhAnnRotateTimer = setInterval(() => {
+    qi = (qi + 1) % queue.length;
+    mhAnnShowItem(box, queue[qi], qi + 1, queue.length);
+  }, 4000);
   syncHeaderOffset();
 }
 
-/** 看板公告条：插在 toolbar 之前（#annItems 公告条下方）。每次 bootRest 都重建 = 每次进看板都显示 */
+/** 头部公告行：把第 idx/total 条 queue item 写进 #mhAnn（原地淡出→换内容→淡入）。
+    内容全量重建（icon span + 文案 span + 多条时的序号角标），textContent 安全口径。
+    竞态防护（2026-10-17）：取全局写入序号令牌，450ms 淡出重建到期时对号，号过期
+    （期间发生过收起 / 重渲染 / 更新一次轮换）整帧丢弃 —— 挂起的旧闭包绝不回写。 */
+function mhAnnShowItem(box, q, idx, total) {
+  const seq = ++mhAnnSeq;
+  const homeCls = q.home ? ' ai-home' : '';   // home 蓝条视觉档（并入的 placements.home）
+  const tx = box.querySelector('.mha-tx');
+  const apply = () => {
+    if (seq !== mhAnnSeq) return;   // 令牌过期：这一帧作废，不写 DOM
+    box.className = 'mh-ann' + (q.brand ? ' ai-brand' : '') + homeCls;
+    box.textContent = '';
+    if (q.icon) {   // icon 空串 = 这条不渲染图标（2026-10-17 口径，无默认兜底）
+      const ico = document.createElement('span');
+      ico.className = 'material-symbols-outlined';
+      ico.textContent = q.icon;
+      box.appendChild(ico);
+    }
+    const t = document.createElement('span');
+    t.className = 'mha-tx';
+    t.textContent = q.text;
+    box.appendChild(t);
+    if (total > 1) {   // 多条轮换：行尾小字序号角标「1/3」
+      const ix = document.createElement('span');
+      ix.className = 'mha-idx';
+      ix.textContent = idx + '/' + total;
+      box.appendChild(ix);
+    }
+    t.classList.remove('mha-fade');
+  };
+  if (tx) {   // 轮换切换：先淡出再整体重建（淡入），一行内完成、不撑高
+    tx.classList.add('mha-fade');
+    setTimeout(apply, 450);
+  } else {
+    apply();
+  }
+}
+
+/** 全局唯一轮换句柄：重渲染 / 切视图前先清，杜绝双份 interval（闪烁 + 错拍）。 */
+function mhAnnStopRotate() {
+  if (mhAnnRotateTimer) { clearInterval(mhAnnRotateTimer); mhAnnRotateTimer = null; }
+}
+
+/** 切走数据视图时收起头部公告行（switchView 调用）：停轮换 + 清行 + hidden。
+    同时递增写入序号令牌 —— 挂起中的 450ms 淡出重建帧到期对不上号，整帧作废，
+    绝不会把内容写回已收起的行。轮换队列 mhAnnQueue 保留，切回时 mhAnnRestore 恢复。 */
+function mhAnnCollapse() {
+  mhAnnSeq++;
+  const box = $('mhAnn');
+  if (!box) return;
+  mhAnnStopRotate();
+  box.textContent = '';
+  box.hidden = true;
+  box.className = 'mh-ann';
+}
+
+/** 切回数据视图时恢复头部公告行（switchView 调用）：按 mhAnnQueue 原样重建 ——
+    单条直显 / 多条 4 秒轮换，口径与 renderAnnounceItems 完全一致；队列空（没渲染过
+    或公告全关）→ 保持 hidden。 */
+function mhAnnRestore() {
+  const box = $('mhAnn');
+  if (!box) return;
+  const queue = mhAnnQueue || [];
+  if (view !== 'data' || !queue.length) {   // 非数据视图 / 无公告：收起
+    mhAnnCollapse();
+    return;
+  }
+  box.hidden = false;
+  mhAnnStopRotate();
+  if (queue.length === 1) {
+    mhAnnShowItem(box, queue[0], 0, 1);
+    return;
+  }
+  let qi = 0;
+  mhAnnShowItem(box, queue[0], 1, queue.length);
+  mhAnnRotateTimer = setInterval(() => {
+    qi = (qi + 1) % queue.length;
+    mhAnnShowItem(box, queue[qi], qi + 1, queue.length);
+  }, 4000);
+}
+
+/* 看板公告条历史版本说明（2026-10-14 → 2026-10-17）：原来此处按 items 逐条渲染
+   .ann-item 大卡到 #annItems（竖排大卡，顶部占近半屏），已由上方头部公告行替代；
+   #annItems 容器与旧 CSS 保留不再写入。 */
+
+/** 看板公告条（2026-10-17 并入口径）：placements.home 不再插成 toolbar 上方的
+    #home-ann 蓝色大条，改为压成一条与 items 同构的队列条目**并进**头部公告行
+    #mhAnn 的全局轮换队列（普通浅蓝条 .ai-home），一起参与单条直显 / 多条 4 秒轮换。
+    每次静默刷新先走 renderAnnounceItems 整包重建队列（mhAnnQueue 不含 home 条），
+    再由本函数把 home 条接回队尾 —— 天然无重复、每次进看板都显示。
+    cfg.icon 空串/白名单外 → 不出图标（与 renderAnnounceItems 同口径）。 */
 function renderHomeAnnouncement(home) {
-  const old = $('home-ann');
-  if (old) old.remove();   // 静默刷新重复调用时先摘旧的，避免叠两条
-  const html = annBarHtml('home-ann', home, 'notifications');
-  if (!html) return;
-  const tb = $('toolbar');
-  if (tb && tb.parentNode) tb.insertAdjacentHTML('beforebegin', html);
+  const box = $('mhAnn');
+  if (!box) return;
+  const cfg = home || {};
+  if (!cfg.enabled || !cfg.text) return;   // 关着 / 没文案：不出
+  /* 非数据视图：不追加（公告挂数据看板，回看板时整条渲染链路重跑）。
+     mhAnnQueue 为空（items 全关）不算拦 —— home 条自己就能撑起这一行：
+     renderAnnounceItems 刚收起，这里重新 unhide 并只显示 home 条。 */
+  if (view !== 'data') return;
+  /* home 条压成与 items 同构的队列条目（text 换行压空格；icon 空串/白名单外 = 无图标），
+     蓝色通知条视觉用 .mh-ann.ai-home（沿原 #home-ann / .ann-bar 浅蓝渐变）。 */
+  const ic = String(cfg.icon == null ? '' : cfg.icon).trim();
+  const homeItem = {
+    icon: (ic && ANNOUNCE_ICONS.indexOf(ic) >= 0) ? ic : '',
+    brand: false, home: true,
+    text: String(cfg.text).replace(/\s*\n+\s*/g, ' ').trim()
+  };
+  /* 并进全局轮换队列：mhAnnQueue 里还没有 home 条 → 追加到队尾；已有（静默刷新
+     重复调用）→ 原位替换，杜绝同一条蓝通知重复占两个轮换位。 */
+  const at = mhAnnQueue.findIndex((q) => q.home);
+  if (at >= 0) mhAnnQueue[at] = homeItem;
+  else mhAnnQueue.push(homeItem);
+  /* 追加/替换后按队列长度重建展示：1 条 → 单条直显；>1 条 → 重启 4 秒轮换并先显示
+     刚并进来的 home 条。全局唯一句柄，重渲染先 mhAnnStopRotate 清旧。
+     行可能刚被 renderAnnounceItems 收起（items 全关）—— 这里必须重新 unhide。 */
+  mhAnnStopRotate();
+  const queue = mhAnnQueue;
+  box.hidden = false;
+  if (queue.length === 1) {
+    mhAnnShowItem(box, queue[0], 0, 1);
+    syncHeaderOffset();
+    return;
+  }
+  let qi = queue.findIndex((q) => q === homeItem);
+  mhAnnShowItem(box, queue[qi], qi + 1, queue.length);
+  mhAnnRotateTimer = setInterval(() => {
+    qi = (qi + 1) % queue.length;
+    mhAnnShowItem(box, queue[qi], qi + 1, queue.length);
+  }, 4000);
+  syncHeaderOffset();
 }
 
 /** 「我的」页公告条：renderMy 渲染完成后调用，插在 view 内容最顶上。
@@ -6974,10 +7150,10 @@ async function bootRest() {
     go();
   }
 
-  /* 📣 公告条先垫一帧（2026-10-14）：site 还没回来，先用 boot 里探测到的
-     /api/public/announcements.items（登录前就能拿到，与 site.items 同源同口径）。
-     site 到了以后由下面的 renderAnnounceItems(site.items) 整包覆盖；
-     site.items 不是数组（旧后端）时才回落到这份兜底。 */
+  /* 📣 头部公告行先垫一帧（2026-10-14 建条 / 2026-10-17 收进头部单行 #mhAnn）：
+     site 还没回来，先用 boot 里探测到的 /api/public/announcements.items
+     （登录前就能拿到，与 site.items 同源同口径）。site 到了以后由下面的
+     renderAnnounceItems(site.items) 整包覆盖；site.items 不是数组（旧后端）时才回落到这份兜底。 */
   renderAnnounceItems(Array.isArray(siteAnnouncements.items) ? siteAnnouncements.items : []);
 
   /* 先拿站点配置：登录开关在 settings 里，关登录时根本不用弹登录门。
@@ -7001,13 +7177,14 @@ async function bootRest() {
       '<b>' + LABEL() + '数据暂未公布</b><br>请等管理员发布</div>';
     return;
   }
-  /* 📣 公告条（2026-10-14）：页面顶部唯一渲染入口 —— site.items 是主数据源
-     （顺序即从上到下，几条渲染几条；空数组 = 一条都不显示），整包覆盖掉上面那帧兜底。
-     旧后端没有 items 字段时才回落到 boot 探测的 /announcements.items。
+  /* 📣 头部公告行（2026-10-17 用户口径）：公告收进 masthead 单行胶囊 #mhAnn（随头部
+     吸顶、多条 4 秒轮换单行）。site.items 是主数据源（顺序即轮换顺序；空数组 = 不显示），
+     整包覆盖掉上面那帧兜底；旧后端没有 items 字段时才回落到 boot 探测的 /announcements.items。
      site.champ / site.celebrate 兼容期后端仍会下发，但这里**不再**单独渲染
      （原来是固定冠军条 + 庆祝横幅两条独立路径同时渲染 = 顶部重复一条冠军）。 */
   renderAnnounceItems(Array.isArray(site.items) ? site.items : siteAnnouncements.items);
-  /* 📣 看板公告条（2026-10-13）：placements.home 开着才渲染。不持久化关闭 ——
+  /* 📣 看板公告条（2026-10-13 建，2026-10-17 并入 #mhAnn）：placements.home 开着才
+     追加为头部公告行的一条（普通浅蓝条，与 items 一起轮换）。不持久化关闭 ——
      公告是运营触达位，每次进看板都显示。 */
   renderHomeAnnouncement(site.placements && site.placements.home);
   /* 🎉 登录庆祝彩带（2026-10-14）：只补彩带 + 两层锁，不再挂横幅（内容走 items）。 */

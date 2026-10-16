@@ -44,10 +44,22 @@ services:
       REDIS_URL: redis://pk-redis:6379/0
       # 管理口令 / 机器人凭据等沿用原 pk.env 其余项
       ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      # 内置展示端管理员账号（2026-10-17，可选）：格式 name:pass:viewTeam，逗号分隔。
+      # 服务启动幂等补齐；不配 = 不建内置账号（走管理端后台开号）。
+      BUILTIN_MY_ACCOUNTS: ${BUILTIN_MY_ACCOUNTS:-}
       PORT: "8787"
       HOST: 0.0.0.0
       TZ: Asia/Shanghai
       RUST_LOG: info
+      # 出网闸门（2026-10-17 补，审计 1-P0-1；同日用户拍板**全开**）：
+      # 原先这里**完全没有** PUSH_OUT_ENABLED，而镜像只 COPY rust（rust/.env 在
+      # .gitignore 里、进不了镜像）→ 生产必然落到代码默认「关闭」，64 上线后所有
+      # 推送只记 WARN、主播一条都收不到。现在显式注入，**默认 1 = 真实发送**：
+      #   =1 / true → 真实发送（上线口径，默认）；
+      #   显式设 0 / false → 只记日志不真发（仅排查/回滚时临时用）。
+      # PUSH_OUT_ALLOW 留空 = 不额外限制收件人；想灰度就填姓名白名单（逗号分隔）。
+      PUSH_OUT_ENABLED: ${PUSH_OUT_ENABLED:-1}
+      PUSH_OUT_ALLOW: ${PUSH_OUT_ALLOW:-}
     ports:
       - "127.0.0.1:8787:8787"
     volumes:

@@ -1185,8 +1185,24 @@ pub async fn log_access(st: &ArcState, e: AccessLog<'_>) {
         .execute(pool)
         .await
     };
-    if let Err(e) = result {
+    let Ok(res) = result.map_err(|e| {
         tracing::warn!(error = %e, ip = %ip, "访问日志写入失败");
+        e
+    }) else {
+        return;
+    };
+    // 去重挡掉的重复访问（ON CONFLICT DO NOTHING）= 0 行受影响，不广播，避免刷屏
+    let rows_affected = res.rows_affected();
+    /* 广播「访客日志有新增」（2026-10-17 修复，审计 5-P1）：
+    后台「访客日志」页原先订阅的是 import / roster 两个 scope，而访问日志的增量
+    来自展示端访问与登录 —— 这两类事件从来不广播，页面挂着**永远不自动刷新**，
+    运营会误判「今天没人访问」。现在写入成功后广播一个专用 scope。
+    去重挡掉的重复访问（ON CONFLICT DO NOTHING，0 行受影响）不广播，避免刷屏。 */
+    if kind == "login" || rows_affected > 0 {
+        crate::events::emit(
+            crate::events::SCOPE_VISITS,
+            if kind == "login" { "新的登录记录" } else { "新的访问记录" },
+        );
     }
 }
 

@@ -33,6 +33,7 @@ import type {
   StrengthMode,
   Violation,
 } from './types';
+import './pk.css';
 
 /* ============ 工具（与 GroupPage 同款，只留展板用得到的） ============ */
 

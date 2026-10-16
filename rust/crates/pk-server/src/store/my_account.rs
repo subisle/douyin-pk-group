@@ -992,9 +992,17 @@ pub async fn my_account_is_admin(st: &AppState, name: &str) -> bool {
 /// 密码缺省 = 账号本身）。`is_admin=1`（管理员观看账号：台账里没有同名主播也放行，
 /// 全站看得到、个人数据页为空）。
 ///
+/// **2026-10-17 扩展：可选第三段 `viewTeam`** —— `name:pass:viewTeam`，
+/// 给管理员账号指定「能看哪个团」：
+///   - `any` / 空 = 任意团（总管理员口径，如 浩雨、鹏先生）
+///   - `male`  = 只看男团
+///   - `female`= 只看女团（如 饭团）
+/// 不写第三段 = 保持旧行为（view_team 留空 = 沿用旧口径，按绑定主播所在团）。
+/// 这样三位管理员各自的可见范围能一次配到位，不用每次启动后手工改库。
+///
 /// **未配置环境变量时一个账号都不创建**（默认安全）：以前硬编码 shuai/shuai 随启动重建，
 /// 口令公开可猜 → 展示端登录门形同虚设。库里的存量账号不受影响，删除走管理端。
-pub fn builtin_my_accounts_from_env() -> Vec<(String, String)> {
+pub fn builtin_my_accounts_from_env() -> Vec<(String, String, String)> {
     let raw = std::env::var("BUILTIN_MY_ACCOUNTS").unwrap_or_default();
     let mut out = Vec::new();
     for pair in raw.split(',') {
@@ -1002,16 +1010,24 @@ pub fn builtin_my_accounts_from_env() -> Vec<(String, String)> {
         if pair.is_empty() {
             continue;
         }
-        let (name, pass) = match pair.split_once(':') {
-            Some((n, p)) => (n.trim(), p.trim()),
-            None => (pair, ""),
-        };
+        let mut parts = pair.splitn(3, ':');
+        let name = parts.next().unwrap_or("").trim();
+        let pass = parts.next().unwrap_or("").trim();
+        let view_team = parts.next().unwrap_or("").trim();
         if name.is_empty() {
             continue;
         }
         // 密码没写 = 账号密码相同（历史行为），但空密码不行（my_accounts.pass 非空）
         let pass = if pass.is_empty() { name } else { pass };
-        out.push((name.to_string(), pass.to_string()));
+        // 只看团别做白名单校验，非法/未知值一律按「任意团」处理（管理员不该被关死）
+        let view_team = match view_team.to_ascii_lowercase().as_str() {
+            "male" => "male",
+            "female" => "female",
+            // 显式写了 any / 未写第三段 → 'any'（全团，且允许页内切团），
+            // 比旧口径的 '' 更明确（见迁移 024 的取值说明）
+            _ => "any",
+        };
+        out.push((name.to_string(), pass.to_string(), view_team.to_string()));
     }
     out
 }
@@ -1038,7 +1054,7 @@ pub async fn ensure_builtin_my_accounts(st: &AppState) -> (usize, usize) {
     let mut created = 0usize;
     let mut skipped = 0usize;
 
-    for (name, pass) in &accounts {
+    for (name, pass, view_team) in &accounts {
         let name = name.as_str();
         let pass = pass.as_str();
         let exists = match sqlx::query(&crate::pq::rewrite(
@@ -1056,9 +1072,14 @@ pub async fn ensure_builtin_my_accounts(st: &AppState) -> (usize, usize) {
             }
         };
         if exists {
+            /* 已存在：把 is_admin 拉回 1，并按环境变量**同步 view_team**
+            （2026-10-17：饭团之类「只看女团」的口径要能靠配置修回来，
+            否则运营在界面上改错了、重启服务也修不回来）。
+            空串 = 任意团，也会一并写回（覆盖成任意团）。 */
             if let Err(e) = sqlx::query(&crate::pq::rewrite(
-                "UPDATE my_accounts SET is_admin = 1 WHERE name = ?",
+                "UPDATE my_accounts SET is_admin = 1, view_team = ? WHERE name = ?",
             ))
+            .bind(view_team)
             .bind(name)
             .execute(pool)
             .await
@@ -1071,12 +1092,13 @@ pub async fn ensure_builtin_my_accounts(st: &AppState) -> (usize, usize) {
 
         // 密码 1:1：已被别的姓名占用就不能插（否则会顶掉那个人的登录）
         match sqlx::query(&crate::pq::rewrite(
-            "INSERT INTO my_accounts (name, phone, pass, is_admin, created_at)
-             VALUES (?, '', ?, 1, ?)",
+            "INSERT INTO my_accounts (name, phone, pass, is_admin, created_at, view_team)
+             VALUES (?, '', ?, 1, ?, ?)",
         ))
         .bind(name)
         .bind(hash_my_password(pass))
         .bind(&now)
+        .bind(view_team)
         .execute(pool)
         .await
         {
@@ -1959,5 +1981,41 @@ mod tests {
             assert!(!m.contains('或'), "失败文案不应含糊：{m}");
             assert!(!m.is_empty());
         }
+    }
+
+    /* ------------- 内置管理员账号三段式解析（2026-10-17） ------------- */
+
+    /// `BUILTIN_MY_ACCOUNTS` 支持 `name:pass:viewTeam`：
+    /// - 两段（旧写法）= any；一段（只有名字）= 密码同账号名 + any
+    /// - viewTeam 只认 male / female，其它（含 any、空、脏值）一律 any（管理员不该被关死）
+    /// 这是三位管理员（浩雨=any / 饭团=female / 鹏先生=any）能一次配到位的基础。
+    #[test]
+    fn builtin_accounts_parses_view_team() {
+        std::env::set_var("BUILTIN_MY_ACCOUNTS", "浩雨:haoyu2026:any,饭团:fantuan2026:female,鹏先生:peng2026:any");
+        let got = builtin_my_accounts_from_env();
+        assert_eq!(got.len(), 3, "三位管理员：{got:?}");
+        assert_eq!(got[0], ("浩雨".into(), "haoyu2026".into(), "any".into()));
+        assert_eq!(got[1], ("饭团".into(), "fantuan2026".into(), "female".into()));
+        assert_eq!(got[2], ("鹏先生".into(), "peng2026".into(), "any".into()));
+
+        // 旧两段式：viewTeam 缺省 = any
+        std::env::set_var("BUILTIN_MY_ACCOUNTS", "old:pwd");
+        assert_eq!(builtin_my_accounts_from_env(), vec![("old".into(), "pwd".into(), "any".into())]);
+        // 只有名字：密码 = 账号名，viewTeam = any
+        std::env::set_var("BUILTIN_MY_ACCOUNTS", "solo");
+        assert_eq!(builtin_my_accounts_from_env(), vec![("solo".into(), "solo".into(), "any".into())]);
+        // 大小写容错 + 脏值兜底
+        std::env::set_var("BUILTIN_MY_ACCOUNTS", "a:p:Male,b:p:FEMALE,c:p:weird,d:p:");
+        let g = builtin_my_accounts_from_env();
+        assert_eq!(g[0].2, "male");
+        assert_eq!(g[1].2, "female");
+        assert_eq!(g[2].2, "any", "脏值按 any，不能把管理员关死");
+        assert_eq!(g[3].2, "any");
+        // 未配置 / 空串 = 不建任何账号（默认安全）
+        std::env::remove_var("BUILTIN_MY_ACCOUNTS");
+        assert!(builtin_my_accounts_from_env().is_empty());
+        std::env::set_var("BUILTIN_MY_ACCOUNTS", " , ,");
+        assert!(builtin_my_accounts_from_env().is_empty(), "空项应被跳过");
+        std::env::remove_var("BUILTIN_MY_ACCOUNTS");
     }
 }

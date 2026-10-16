@@ -30,6 +30,9 @@ pub const SCOPE_PLANS: &str = "plans";
 pub const SCOPE_SETTINGS: &str = "settings";
 pub const SCOPE_SOURCE: &str = "source";
 pub const SCOPE_BOT: &str = "bot";
+/// 访客日志新增（2026-10-17：后台「访客日志」页原先订阅的 scope 与页面数据无关，
+/// 页面永远不自动刷新；给它一个专用域，由 `ipinfo::log_access` 写入成功后广播）
+pub const SCOPE_VISITS: &str = "visits";
 
 /// 缓冲区 64：慢客户端（手机挂后台）最多落后 64 条后收到 Lagged，
 /// 前端对 Lagged 的处理就是「重新拉一次」，所以丢事件是安全的。

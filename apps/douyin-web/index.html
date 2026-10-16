@@ -6,13 +6,9 @@
     <title>抖音数据管理</title>
     <!-- Material Symbols（2026-10-16）：管理端多处用 <span class="material-symbols-outlined">
          写图标内名（公告图标、横幅对齐图标），但一直没引字体 → 页面上显示成 "emoji_events"
-         这种生字。与展示端 st_page.html 同一套字体，补上即全站生效。 -->
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&display=swap"
-      rel="stylesheet"
-    />
+         这种生字。与展示端 st_page.html 同一套字体。
+         2026-10-17 起改为自托管子集（src/fonts.css + public/fonts/），不再走 Google Fonts：
+         4MB 可变字体 + 渲染阻塞，国内网络一慢整页白屏。 -->
   </head>
   <body>
     <div id="root"></div>

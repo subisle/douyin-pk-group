@@ -596,12 +596,18 @@ fn render_svg_labeled_inner(
         "<rect y=\"{th_y:.0}\" width=\"720\" height=\"34\" fill=\"#F2F4F7\"/>"
     ));
     let wave_col_label = if is_month { "本月累计音浪" } else { "当日音浪" };
+    /* 最后一列的表头（2026-10-17 修复，审计 2-P2-7）：
+    月榜这一列填的其实是**本月累计**（`total_wave: wave` 同值复用），
+    但表头沿用日榜的「累计总音浪」—— 主播看到月榜「累计总音浪 50 万」
+    会理解成历史累计，实际是本月，两榜同表头不同义。
+    月榜改标「本月累计（总）」，明确它就是左边那列的同一个数。 */
+    let total_col_label = if is_month { "本月累计（总）" } else { "累计总音浪" };
     for (x, label, anchor) in [
         (32.3, "排名", "middle"),
         (72.6, "主播姓名", "start"),
         (253.8, "当月未播天数", "middle"),
         (433.8, wave_col_label, "middle"),
-        (708.0, "累计总音浪", "end"),
+        (708.0, total_col_label, "end"),
     ] {
         s.push_str(&format!(
             "<text x=\"{x}\" y=\"{ty_y:.0}\" font-size=\"12\" fill=\"#667085\" font-weight=\"700\" text-anchor=\"{anchor}\" dominant-baseline=\"central\" font-family=\"{FONT}\">{label}</text>"
@@ -1041,14 +1047,20 @@ mod tests {
             }),
         };
         let svg = render_svg_labeled_inner(&rep, "", 1, "浩月", true, 0);
-        // 表头锚点与列值锚点一一对应：主播姓名 start @72.6，累计总音浪 end @708
+        // 表头锚点与列值锚点一一对应：主播姓名 start @72.6，末列 end @708。
+        // 2026-10-17（审计 2-P2-7）：月榜末列表头改「本月累计（总）」——
+        // 月榜这一列其实是本月累计，沿用日榜的「累计总音浪」会让主播理解成历史累计。
         let h_name = text_element_of(&svg, "主播姓名");
         assert!(h_name.contains("x=\"72.6\""), "姓名表头 x 应与列值同为 72.6: {h_name}");
         assert!(
             h_name.contains("text-anchor=\"start\""),
             "姓名表头要 start 对齐: {h_name}"
         );
-        let h_total = text_element_of(&svg, "累计总音浪");
+        assert!(
+            !svg.contains(">累计总音浪</text>"),
+            "月榜不该再用日榜的「累计总音浪」表头（语义是本月累计）"
+        );
+        let h_total = text_element_of(&svg, "本月累计（总）");
         assert!(h_total.contains("x=\"708\""), "总音浪表头 x 应与列值同为 708: {h_total}");
         assert!(
             h_total.contains("text-anchor=\"end\""),

@@ -173,7 +173,9 @@ export interface PlanBrief {
   title: string;
   metric: string;
   days: number;
-  created_at: string;
+  /** 2026-10-17 修复（审计 5-P1）：后端 `/api/plans` 下发的是 **createdAt**（camelCase，
+   *  见 routes.rs 的 json! 宏），这里原先写成 created_at → 方案列表时间列恒显示 undefined。 */
+  createdAt: string;
   published: boolean;
   /** 赛事类型（初级/中级争霸赛小组赛、月终争霸赛、两级争霸赛晋级赛），空串 = 未分类的老方案 */
   eventType?: string;

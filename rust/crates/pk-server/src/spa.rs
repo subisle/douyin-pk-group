@@ -138,6 +138,21 @@ pub async fn handler(
     serve_dist(&dist_dir, index, path).await
 }
 
+/// 按路径给静态资源的缓存策略：
+/// - `/assets/*` 是 vite 内容哈希产物（文件名带指纹），内容不可变 → 长缓存；
+/// - `/fonts/*` 是自托管字体（无指纹），给 7 天短缓存，改字体最多一周内生效；
+/// - 其余（index.html、SPA 回退）必须 no-cache，否则前端重构建后旧 index.html
+///   会引用已被删除的旧指纹资源。
+fn cache_control(path: &str) -> &'static str {
+    if path.starts_with("/assets/") {
+        "public, max-age=31536000, immutable"
+    } else if path.starts_with("/fonts/") {
+        "public, max-age=604800"
+    } else {
+        "no-cache"
+    }
+}
+
 /// 按 dist 解析：真实文件 → 静态资源 404 → index.html 回退
 async fn serve_dist(dist_dir: &Path, index: Index, path: &str) -> Response {
     // 真实文件
@@ -147,7 +162,7 @@ async fn serve_dist(dist_dir: &Path, index: Index, path: &str) -> Response {
             return Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, ct)
-                .header(header::CACHE_CONTROL, "no-cache")
+                .header(header::CACHE_CONTROL, cache_control(path))
                 .body(Body::from(bytes))
                 .expect("构造静态资源响应失败");
         }
@@ -209,6 +224,28 @@ mod tests {
     #[test]
     fn rejects_embedded_nul() {
         assert_eq!(resolve(Path::new("/srv/web"), "/a%00.png"), None);
+    }
+
+    #[test]
+    fn cache_policy_distinguishes_assets_fonts_and_html() {
+        // vite 指纹产物可长缓存（内容不可变）
+        assert_eq!(
+            cache_control("/assets/index-DetAf99v.js"),
+            "public, max-age=31536000, immutable"
+        );
+        assert_eq!(
+            cache_control("/assets/index.css"),
+            "public, max-age=31536000, immutable"
+        );
+        // 自托管字体无指纹 → 短缓存，改字体不会卡一年
+        assert_eq!(
+            cache_control("/fonts/material-symbols-outlined.woff2"),
+            "public, max-age=604800"
+        );
+        // HTML 与 SPA 回退必须 no-cache，前端重构建后旧 index.html 不能继续用
+        assert_eq!(cache_control("/"), "no-cache");
+        assert_eq!(cache_control("/admin"), "no-cache");
+        assert_eq!(cache_control("/s/12"), "no-cache");
     }
 
     #[test]

@@ -932,11 +932,23 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
                     match send_binding(st, b, wx_global.as_ref(), &text).await {
                         Ok(()) => {
                             sent_any = true;
+                            /* 发送成功后才落库（2026-10-17 修复，审计 1-P1-3）：
+                            「追上 / 被反超」是一次性事件，原先先落库后发送，
+                            被闸门拦下或发送失败时 hit / last_notice_date 已经写死
+                            → 这条提醒**永久丢失**，主播再也收不到。
+                            现在只有真的发出去才推进目标状态。 */
+                            for (id, hit, gap) in pending_states.iter() {
+                                crate::store::target_set_state(st, *id, *hit, *gap, date).await;
+                            }
                             tracing::info!(account = %b.name, targets = targets.len(), "追分提醒已推送");
                         }
                         Err(e) => {
-                            tracing::warn!(account = %b.name, error = %e, "追分提醒推送失败");
-                            crate::store::push_touch(st, &b.name, &e.to_string()).await;
+                            if is_blocked(&e) {
+                                tracing::warn!(account = %b.name, "追分提醒：闸门拦截，未发（目标状态不推进，开闸后会补推）");
+                            } else {
+                                tracing::warn!(account = %b.name, error = %e, "追分提醒推送失败");
+                                crate::store::push_touch(st, &b.name, &e.to_string()).await;
+                            }
                         }
                     }
                 }
@@ -1071,6 +1083,12 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
 绑定顺序由这两条 SQL 固定：整月版 month → month → team；日明细版 month → team。
 ⚠️ `HAVING` / `WHERE` 里必须写**聚合表达式本体**：PG 不认 select 别名，
 `HAVING wave > 0` 会被解析成 daily_metric.wave（42803 不在 GROUP BY 里）→ 整条查询报错。 */
+/* 2026-10-17 修复（审计 2-P2-5）：人员过滤必须与 [`MONTH_RANK_SQL`] **同一口径**
+（都排除 status='left' 与 hide_in_daily_report=1）。
+原先这里只过滤 deleted_at —— 若追分对手是已离团 / 榜单隐藏的人，
+`month_wave_map` 有他的本月音浪、`month_rank_list` 却没有他 →
+`eval_target` 的 rank 分支拿不到名次、落到「哨兵 i64::MAX → 只显示未达成」，
+而月榜上根本查无此人。现在两边一致，追分目标不再指向查不到的人。 */
 const MONTH_WAVE_MAP_SQL: &str = "SELECT p.id AS person_id, \
       (COALESCE(MAX(mw.wave), SUM(d.wave), 0))::BIGINT AS wave \
      FROM person p \
@@ -1078,7 +1096,8 @@ const MONTH_WAVE_MAP_SQL: &str = "SELECT p.id AS person_id, \
        AND TO_CHAR(d.biz_date, 'YYYY-MM') = ? \
        AND d.wave_reliable = 1 \
      LEFT JOIN monthly_wave mw ON mw.person_id = p.id AND mw.period = ? \
-     WHERE p.deleted_at IS NULL AND p.gender = ? \
+     WHERE p.deleted_at IS NULL AND p.gender = ? AND p.status <> 'left' \
+       AND p.hide_in_daily_report = 0 \
      GROUP BY p.id";
 /// 库没跑 026 迁移（monthly_wave 不存在）时的纯日明细版：与 026 之前的推送口径逐字一致。
 const MONTH_WAVE_MAP_SQL_DAILY: &str = "SELECT p.id AS person_id, \
@@ -1087,7 +1106,8 @@ const MONTH_WAVE_MAP_SQL_DAILY: &str = "SELECT p.id AS person_id, \
      LEFT JOIN daily_metric d ON d.person_id = p.id \
        AND TO_CHAR(d.biz_date, 'YYYY-MM') = ? \
        AND d.wave_reliable = 1 \
-     WHERE p.deleted_at IS NULL AND p.gender = ? \
+     WHERE p.deleted_at IS NULL AND p.gender = ? AND p.status <> 'left' \
+       AND p.hide_in_daily_report = 0 \
      GROUP BY p.id";
 
 /// 跑一条「月音浪优先整月导入值」的查询（带绑定参数）：库没跑 026 迁移时用纯日明细版重试 ——
@@ -2586,6 +2606,21 @@ mod tests {
 
     /// 关闭时 out_blocked 返回 true（= 拦截），开启时放行。
     #[test]
+    /// 闸门拦截必须是**可区分的信号**（2026-10-17 修复，审计 1-P0-2）：
+    /// 拦截时 send_binding 返回 Err(Blocked)，调用方据此**不推进**去重标记；
+    /// 若仍像以前那样返回 Ok，关闸期间的消息会被永久吞掉（标记已消耗、开闸也不补推）。
+    #[test]
+    fn blocked_is_distinguishable_from_success() {
+        let e = anyhow::Error::from(Blocked);
+        assert!(is_blocked(&e), "Blocked 必须能被认出来");
+        // 普通的发送失败不能被误判成「被拦截」
+        let real = anyhow::anyhow!("扫码账号凭证为空，请重新扫码");
+        assert!(!is_blocked(&real), "真失败不能被当成拦截（否则会漏记失败原因）");
+        // 嵌套（anyhow 上下文包一层）也能认出来
+        let wrapped = anyhow::Error::from(Blocked).context("每日报告");
+        assert!(is_blocked(&wrapped), "包了上下文也要能认出来");
+    }
+
     fn out_blocked_gate() {
         with_push_out_env(|| {
             assert!(out_blocked("text", "浩冬", "测试消息"), "关闭时必须拦截");

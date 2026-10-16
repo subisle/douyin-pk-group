@@ -154,6 +154,12 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "031_fix_daily_metric_anchor",
         include_str!("migrations/031_fix_daily_metric_anchor.sql"),
     ),
+    // 032：查询索引补齐（榜单/分号/方案列表的公共过滤条件）+ 清掉 001 里重复定义的
+    // idx_name。纯索引改动，不改表结构不动语义，幂等可重跑。
+    (
+        "032_query_indexes",
+        include_str!("migrations/032_query_indexes.sql"),
+    ),
 ];
 
 /// 迁移建连（migrator 账号；同样关语句缓存）

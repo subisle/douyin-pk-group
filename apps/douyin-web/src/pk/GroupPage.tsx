@@ -39,6 +39,7 @@ import type {
   Violation,
   WaveMetric,
 } from './types';
+import './pk.css';
 
 let seq = 0;
 const newId = () => `b${++seq}`;
@@ -1611,7 +1612,7 @@ export default function GroupPage() {
                   </td>
                   <td>{p.eventType || '—'}</td>
                   <td>{metricLabel(p.metric, p.days)}</td>
-                  <td className="hint">{String(p.created_at).slice(0, 16).replace('T', ' ')}</td>
+                  <td className="hint">{String(p.createdAt).slice(0, 16).replace('T', ' ')}</td>
                   <td>{p.published ? <span className="ok">已上架</span> : '未上架'}</td>
                   <td>
                     <button disabled={busy === 'load'} onClick={() => loadPlan(p.id)}>

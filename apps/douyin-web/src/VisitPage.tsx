@@ -114,7 +114,10 @@ export default function VisitPage() {
   }, [onlyBlocked, q])
 
   useEffect(load, [load])
-  useAutoRefresh(load, ['import', 'roster'])
+  /* 2026-10-17 修复（审计 5-P1）：原先订阅 import / roster —— 那是音浪导入与主播台账
+     的域，与访客日志无关，页面挂着永远不刷新。后端新增 visits 域
+     （ipinfo::log_access 写入成功后广播），这里改订它。 */
+  useAutoRefresh(load, ['visits'])
 
   const lookupIp = useCallback((raw: string) => {
     const ip = raw.trim()

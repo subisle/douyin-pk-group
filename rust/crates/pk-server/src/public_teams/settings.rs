@@ -244,6 +244,8 @@ pub async fn update_settings(State(st): State<ArcState>, Json(body): Json<Value>
 /// 引导弹窗（config 表 cfg_key = announcement）：多步骤引导，逐步「下一步」。
 /// 展示端打开时弹一次，用户点「完成 / 跳过」后按 version 记住已读，
 /// 直到下次保存（version 自增）再弹。
+/// 2026-10-17 起展示端前端 st_page.html 的 GUIDE_ENABLED=false 总闸关闭引导，
+/// 此配置当前不生效（结构保留供恢复：前端把 GUIDE_ENABLED 改回 true 即可）。
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct Announcement {
@@ -964,13 +966,18 @@ pub async fn seat_options(
     if !ok {
         return Err(anyhow::anyhow!("period 格式应为 YYYY-MM").into());
     }
-    // 月榜同一份查询（ADMIN_PERIOD_SELECT：personId/name/gender/wave/minutes/...），
-    // 这里只需要选人字段，全量列也无妨（同人一个月一行，行数 ≤ 主播数）
+    /* 月榜同一份查询（ADMIN_PERIOD_SELECT：personId/name/gender/wave/minutes/...），
+    这里只需要选人字段，全量列也无妨（同人一个月一行，行数 ≤ 主播数）。
+
+    2026-10-17 修复（审计 2-P2-12）：`period` 是 **LIKE 通配窗口**，月榜
+    （site.rs 的 /monthly）传的是 `format!("{period}%")`；这里原先传裸 period。
+    YYYY-MM 恰好精确相等所以现在看不出差别，但一旦窗口放宽到年（`YYYY`）就会
+    `LIKE '2026'` 命中 0 行 —— 与月榜口径分叉。补上 `%` 与月榜对齐。 */
     let rows = crate::dialect::query_period(
         &st.pools,
         "LOCAL",
         crate::dialect::ADMIN_PERIOD_SELECT,
-        &period,
+        &format!("{period}%"),
         "",
         "",
         "wave DESC",

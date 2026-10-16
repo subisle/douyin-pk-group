@@ -3286,11 +3286,11 @@ pub async fn commit_month_metrics(
     spawn_post_import_backup();
     let mut totals: Vec<String> = Vec::new();
     if metrics.minutes {
-        totals.push(format!(
-            "时长合计 {} 小时{}分",
-            minutes_total / 60,
-            minutes_total % 60
-        ));
+        /* 2026-10-17 修复（审计 2-P2-6）：原先这里自己拼「75 小时29分」，与展示端
+        长图、机器人推送的「x时x分」口径不一致（docs/08 要求全局同一条规则）。
+        直接复用 `push::fmt_minutes`（与前端 st_page.html 的 minFmt 逐字符等价、有单测钉死），
+        运营在管理端看到的就是主播看到的样子。 */
+        totals.push(format!("时长合计 {}", crate::push::fmt_minutes(minutes_total)));
     }
     if metrics.wave {
         totals.push(format!("音浪合计 {}", wave_total));

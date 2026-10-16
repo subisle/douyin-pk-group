@@ -1607,3 +1607,12 @@ input.switch:focus-visible {
 .trend-detail > summary:hover {
   color: var(--ink2);
 }
+
+/* 路由懒加载占位（2026-10-17 代码分割引入）：切页瞬间的兜底，绝大多数情况
+ * 页面 chunk 已在首屏附近预载好，几乎不可见。 */
+.route-loading {
+  padding: 48px 24px;
+  text-align: center;
+  color: var(--ink3);
+  font-size: 13px;
+}

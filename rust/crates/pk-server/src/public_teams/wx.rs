@@ -172,16 +172,18 @@ pub async fn my_push(
         obj.insert("hasPhone".into(), json!(!phone.is_empty()));
         obj.insert("phoneMasked".into(), json!(mask_phone(&phone)));
         // 师门日报（docs/23 §4.3）：只有「名下有直系徒弟的人」才适用第三开关。
-        // 口径（父任务指定）：person_id > 0 且本人 master_id IS NULL（开山师傅），
-        // 且存在未删除的直系徒弟（c.master_id = person_id AND c.deleted_at IS NULL）。
+        // 口径：person_id > 0 且存在未删除的直系徒弟（c.master_id = person_id）。
         // 折成一条 COUNT 查询（结果恒 0/1），走 pgrs 只读池；档案不存在 → 0。
-        // ⚠️ 口径备注：lineage_report::build() 与 docs/23 §4.2 的跳过判定只看
-        // 「build 出来的行数 ≤ 1」（不要求本人 master_id IS NULL），若产品后续要
-        // 放宽到「中间层师傅」（自己也有师傅但名下有徒弟），删掉 p.master_id IS NULL
-        // 这半个条件即可，推送侧无需改动（它按 build 结果兜底）。
+        //
+        // 2026-10-17 修复（审计 1-P2-4）：原先额外要求「本人 master_id IS NULL」
+        // （只认开山师傅），而**推送侧**（lineage_report::build 按结果行数兜底）与
+        // 「一键为所有师傅开启」（store::admin_messages，只看有没有徒弟）都只要求
+        // **名下有徒弟**。结果：中间层师傅（自己也有师傅、但名下有徒弟）会被一键
+        // 开启并收到师门日报，页面上却**不显示这个开关** —— 他自己关不掉。
+        // 现在按原注释预留的方向放宽，与推送侧对齐。
         let has_disciples = if person_id > 0 {
             let sql = "SELECT COUNT(*) AS n FROM person p \
-              WHERE p.id = ? AND p.deleted_at IS NULL AND p.master_id IS NULL \
+              WHERE p.id = ? AND p.deleted_at IS NULL \
                 AND EXISTS (SELECT 1 FROM person c \
                      WHERE c.master_id = p.id AND c.deleted_at IS NULL)";
             let res =

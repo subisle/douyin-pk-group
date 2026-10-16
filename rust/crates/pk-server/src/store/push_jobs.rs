@@ -195,9 +195,14 @@ pub async fn push_stats(st: &AppState) -> serde_json::Value {
     .ok()
     .and_then(|r| r.try_get::<i64, _>("n").ok())
     .unwrap_or(0);
+    /* 2026-10-17 修复（审计 1-P2-5）：原先只数两列（notify_target / daily_report），
+    而推送引擎取人（wxpush.rs 的 push_bindings_for_team）是**三列**
+    （还 OR 了 lineage_report=1）。师门日报已开启的人被漏掉 → 后台统计系统性偏低，
+    运营看到的「开了推送的人数」比实际少。这里补上第三列，与引擎同口径。 */
     let enabled: i64 = sqlx::query(&crate::pq::rewrite(
         "SELECT COUNT(*) AS n FROM push_bindings \
-         WHERE conversation_id <> '' AND (notify_target = 1 OR daily_report = 1)",
+         WHERE conversation_id <> '' \
+           AND (notify_target = 1 OR daily_report = 1 OR lineage_report = 1)",
     ))
     .fetch_one(pool)
     .await
@@ -296,21 +301,14 @@ pub async fn targets_list(st: &AppState, name: &str) -> Vec<serde_json::Value> {
     }
 }
 
-/// 目标条数（上限校验用）
-pub async fn target_count(st: &AppState, name: &str) -> i64 {
-    let Ok(pool) = w(st) else {
-        return 0;
-    };
-    sqlx::query(&crate::pq::rewrite(
-        "SELECT COUNT(*) AS n FROM my_targets WHERE name = ?",
-    ))
-    .bind(name.trim())
-    .fetch_one(pool)
-    .await
-    .ok()
-    .and_then(|r| r.try_get::<i64, _>("n").ok())
-    .unwrap_or(0)
-}
+/* 2026-10-17（审计 1-P2-6）：删掉 `target_count` / `target_add` 两个**死函数**。
+它们是 2026-10-15 之前的旧口径：
+  · `target_count` 数的是**总条数**，而现在上限是**分类独立**计数
+    （追人 / 分数 / 名次各自 ≤5，见 `wxpush::target_counts`）；
+  · `target_add` 无事务、无判重、无上限校验。
+两者都没有生产调用方（唯一写入口是 `wx::my_push_target_add` →
+`wxpush::targets_add_serialized`，后者在事务内判重 + 按 kind 判单类上限 + 并发串行化）。
+留着谁图省事直接调就会绕过分类上限与并发保护，复现 FIX1 的老问题。 */
 
 /// 目标行（推送引擎用的最小集合）
 #[derive(Clone, Debug)]
@@ -360,32 +358,9 @@ pub async fn targets_for_push(st: &AppState, name: &str) -> Vec<PushTarget> {
     }
 }
 
-/// 新增目标（kind = person 追人 / value 追数值）
-pub async fn target_add(
-    st: &AppState,
-    name: &str,
-    team: &str,
-    kind: &str,
-    target_person_id: u64,
-    target_name: &str,
-    target_value: i64,
-) -> Result<u64> {
-    let pool = w(st)?;
-    let r = sqlx::query(&crate::pq::rewrite(
-        "INSERT INTO my_targets (name, team, kind, target_person_id, target_name, target_value, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id",
-    ))
-    .bind(name.trim())
-    .bind(team)
-    .bind(kind)
-    .bind(target_person_id as i64)
-    .bind(target_name)
-    .bind(target_value)
-    .bind(now_str())
-    .fetch_one(pool)
-    .await?;
-    Ok(r.try_get::<i64, _>(0)? as u64)
-}
+/// 新增目标请走 [`crate::store::wxpush::targets_add_serialized`]：
+/// 事务内判重 + 按 kind 判单类上限 + 并发串行化（旧的无校验 `target_add` 已删，
+/// 见上面「审计 1-P2-6」的说明）。
 
 /// 删除目标（只能删自己的）
 pub async fn target_delete(st: &AppState, name: &str, id: i64) -> bool {

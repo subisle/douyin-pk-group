@@ -1,18 +1,22 @@
-import { useEffect, useState } from 'react'
+import { lazy, Suspense, useEffect, useState } from 'react'
 import { hasToken, login, logout, UNAUTHORIZED_EVENT } from './api'
 import { subscribeChanges } from './useAutoRefresh'
 import { FULLSCREEN_ROUTES, ROUTES, routeHref, useRoute, type RouteKey } from './lib/router'
-import DashboardPage from './DashboardPage'
-import ImportPage from './ImportPage'
-import StreamerPage from './StreamerPage'
-import VisitPage from './VisitPage'
-import LineagePage from './LineagePage'
-import AnnouncePage from './AnnouncePage'
-import BotPage from './BotPage'
-import SendPage from './SendPage'
-import GroupPage from './pk/GroupPage'
-import BoardPage from './pk/BoardPage'
-import './pk/pk.css'
+
+/* 路由级代码分割（2026-10-17）：各页面懒加载，首屏只拉后台壳 + 数据概况页，
+ * 其余页（主播管理 / 导入 / 族谱 / 公告 / 机器人 / 下发 / PK）切到才加载。
+ * pk.css 也从 App 移到 GroupPage/BoardPage，只有进 PK 页才拉。
+ * 之前 10 个页面全打进一个 449KB 的 bundle，首屏一次全下载。 */
+const DashboardPage = lazy(() => import('./DashboardPage'))
+const ImportPage = lazy(() => import('./ImportPage'))
+const StreamerPage = lazy(() => import('./StreamerPage'))
+const VisitPage = lazy(() => import('./VisitPage'))
+const LineagePage = lazy(() => import('./LineagePage'))
+const AnnouncePage = lazy(() => import('./AnnouncePage'))
+const BotPage = lazy(() => import('./BotPage'))
+const SendPage = lazy(() => import('./SendPage'))
+const GroupPage = lazy(() => import('./pk/GroupPage'))
+const BoardPage = lazy(() => import('./pk/BoardPage'))
 
 /** 侧边栏导航图标（emoji，零依赖；与 router.ts 的 ROUTES 一一对应，
  *  全屏独立页（PK 展板）不在侧边栏里，因此没有图标项）。 */
@@ -107,7 +111,11 @@ export default function App() {
      整屏只渲染展板本身 —— 展板要投屏/占满整屏，后台导航是干扰。
      地址仍在 /admin/pk-board（可收藏、刷新不丢、鉴权同后台一套）。 */
   if (FULLSCREEN_ROUTES.some((r) => r.key === route)) {
-    return <BoardPage />
+    return (
+      <Suspense fallback={<div className="route-loading">加载中…</div>}>
+        <BoardPage />
+      </Suspense>
+    )
   }
 
   return (
@@ -158,15 +166,17 @@ export default function App() {
         </div>
       </aside>
       <main className="main">
-        {route === 'data' && <DashboardPage />}
-        {route === 'import' && <ImportPage />}
-        {route === 'streamers' && <StreamerPage />}
-        {route === 'visits' && <VisitPage />}
-        {route === 'lineage' && <LineagePage />}
-        {route === 'group' && <GroupPage />}
-        {route === 'announce' && <AnnouncePage />}
-        {route === 'bots' && <BotPage />}
-        {route === 'send' && <SendPage />}
+        <Suspense fallback={<div className="route-loading">加载中…</div>}>
+          {route === 'data' && <DashboardPage />}
+          {route === 'import' && <ImportPage />}
+          {route === 'streamers' && <StreamerPage />}
+          {route === 'visits' && <VisitPage />}
+          {route === 'lineage' && <LineagePage />}
+          {route === 'group' && <GroupPage />}
+          {route === 'announce' && <AnnouncePage />}
+          {route === 'bots' && <BotPage />}
+          {route === 'send' && <SendPage />}
+        </Suspense>
       </main>
       {toast && (
         <div className="toast" role="status">

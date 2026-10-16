@@ -257,7 +257,9 @@ CREATE TABLE IF NOT EXISTS person (
 CREATE INDEX IF NOT EXISTS idx_master ON person (master_id);
 CREATE INDEX IF NOT EXISTS idx_name ON person (name);
 CREATE INDEX IF NOT EXISTS idx_status_gender ON person (status, gender);
-CREATE INDEX IF NOT EXISTS idx_name ON person (name);
+-- 2026-10-17：这里原本**重复定义了一次** idx_name（`CREATE INDEX IF NOT EXISTS`
+-- 只认名字，第二次静默跳过，库里实际只有一个），属同源残留，已删除重复那行。
+-- 索引本身由 032_query_indexes 保证存在。
 CREATE INDEX IF NOT EXISTS idx_person_phone ON person (phone);
 
 CREATE TABLE IF NOT EXISTS plans (
