@@ -599,6 +599,19 @@ impl AccountPeriods {
 /// 没有数据的号 SUM 出来是 NULL，调用方用 COALESCE 归零（有这个号但没播 = 0，
 /// 只有后台开关关掉才下发 null，两者语义不同，前端靠它区分）。
 pub fn my_accounts_sql(person_id: u64, p: &AccountPeriods) -> String {
+    /* 月 / 年口径（2026-10-17 修复，审计 P0-2）：
+    /my 的月卡 / 年卡走 `my_wave_sql`（整月音浪 monthly_wave 优先、缺月回落日明细），
+    而这里原先**完全没有 monthly_wave**，主号那一支就是裸 `SUM(daily_metric.wave)`。
+    导了整月音浪后，同一台手机上「音浪对比」卡本月 50 万、紧挨着的「我的抖音号」卡
+    合计行本月 48 万，两卡自相矛盾（主播会截图来问）。
+
+    难点：整月值是**人**粒度，分号卡是**号**粒度，没法把整月值拆到每个号上。
+    取法（与 /my 同口径、且不双算）：
+      · 主号那一支的月 / 年 = 整月值优先（有人粒度整月值就用它，没有才用主号日明细，
+        且日明细只算「该月没导过整月值」的月份，避免同一个月算两次）；
+      · 副号那一支仍走 wave_snapshot（副号本来就没有整月值）；
+      · 日 / 累计不变（累计口径全局都是纯日明细，见 my_wave_sql 的 Total 分支）。
+    这样两个卡的月 / 年数字对齐，合计 = 整月值(或主号日明细) + 副号。 */
     format!(
         "SELECT a.id AS aid, a.anchor_id, a.douyin_no, a.anchor_name, a.is_primary, \
            (COALESCE(SUM(CASE WHEN t.d = '{day}' THEN t.w END), 0))::BIGINT AS wd, \
@@ -606,7 +619,12 @@ pub fn my_accounts_sql(person_id: u64, p: &AccountPeriods) -> String {
            (COALESCE(SUM(CASE WHEN t.d LIKE '{year}-%' THEN t.w END), 0))::BIGINT AS wy, \
            (COALESCE(SUM(t.w), 0))::BIGINT AS wt, \
            MAX(t.d) AS last_d, \
-           COUNT(DISTINCT t.d) AS days \
+           COUNT(DISTINCT t.d) AS days, \
+           (COALESCE(MIN(a.is_primary), 0))::SMALLINT AS is_prim, \
+           COALESCE((SELECT SUM(mw.wave) FROM monthly_wave mw \
+                      WHERE mw.person_id = {person_id} AND mw.period = '{month}'), 0)::BIGINT AS mw_m, \
+           COALESCE((SELECT SUM(mw.wave) FROM monthly_wave mw \
+                      WHERE mw.person_id = {person_id} AND mw.period LIKE '{year}-%'), 0)::BIGINT AS mw_y \
          FROM account a LEFT JOIN ( \
            SELECT d.anchor_id AS anchor_id, TO_CHAR(d.biz_date, 'YYYY-MM-DD') AS d, \
                   d.wave AS w \
@@ -614,6 +632,8 @@ pub fn my_accounts_sql(person_id: u64, p: &AccountPeriods) -> String {
              ON pa.person_id = d.person_id AND pa.anchor_id = d.anchor_id \
               AND pa.is_primary = 1 \
            WHERE d.person_id = {person_id} AND d.wave_reliable = 1 \
+             AND TO_CHAR(d.biz_date, 'YYYY-MM') NOT IN \
+                 (SELECT mw0.period FROM monthly_wave mw0 WHERE mw0.person_id = {person_id}) \
            UNION ALL \
            SELECT ws.anchor_id AS anchor_id, TO_CHAR(ws.biz_date, 'YYYY-MM-DD') AS d, \
                   ws.wave_value AS w \
@@ -630,6 +650,24 @@ pub fn my_accounts_sql(person_id: u64, p: &AccountPeriods) -> String {
     )
 }
 
+/// 主号那一行的月 / 年音浪：有整月音浪（monthly_wave）就用它，没有才用主号日明细
+/// （2026-10-17 修复，审计 P0-2）。与 [`my_wave_sql`] 同口径，两处不会双算：
+/// 上面的日明细侧已经排掉「该月导过整月值」的行，所以这里可以直接取整，
+/// 整月值缺失时标量为 0 → COALESCE 落到日明细。
+pub(super) fn account_month_wave(r: &sqlx::postgres::PgRow, monthly: i64, yearly: i64) -> (i64, i64) {
+    let is_primary = r
+        .try_get::<i16, _>("is_prim")
+        .or_else(|_| r.try_get::<i16, _>("is_primary"))
+        .unwrap_or(0)
+        == 1;
+    if !is_primary {
+        return (monthly, yearly);
+    }
+    let mw_m = r.try_get::<i64, _>("mw_m").unwrap_or(0);
+    let mw_y = r.try_get::<i64, _>("mw_y").unwrap_or(0);
+    (if mw_m > 0 { mw_m } else { monthly }, if mw_y > 0 { mw_y } else { yearly })
+}
+
 /// 一行查询结果 → 一个抖音号的 DTO（数值部分先全给，开关过滤在 [my_accounts_gate] 里统一做）。
 pub(super) fn my_account_row(r: &sqlx::postgres::PgRow) -> Value {
     let anchor_id = r.try_get::<String, _>("anchor_id").unwrap_or_default();
@@ -642,6 +680,8 @@ pub(super) fn my_account_row(r: &sqlx::postgres::PgRow) -> Value {
         .ok()
         .flatten()
         .filter(|s: &String| valid_date_pub(s));
+    // 主号的月 / 年走整月音浪优先（与 /my 月卡对齐，见 account_month_wave）
+    let (wm, wy) = account_month_wave(r, row_i64(r, "wm"), row_i64(r, "wy"));
     json!({
         "accountId": row_pid(r, "aid"),
         "anchorId": anchor_id,
@@ -649,8 +689,8 @@ pub(super) fn my_account_row(r: &sqlx::postgres::PgRow) -> Value {
         "anchorName": anchor_name,
         "primary": primary,
         "daily": { "wave": row_i64(r, "wd") },
-        "monthly": { "wave": row_i64(r, "wm") },
-        "yearly": { "wave": row_i64(r, "wy") },
+        "monthly": { "wave": wm },
+        "yearly": { "wave": wy },
         "total": { "wave": row_i64(r, "wt") },
         /* 当日是否开播：与全站同口径（dialect::NOT_LIVE_WAVE_THRESHOLD，音浪 >= 2）。
         注意这是「号」级的开播，副号有音浪就算播了。 */

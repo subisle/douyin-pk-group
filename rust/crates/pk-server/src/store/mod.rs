@@ -399,23 +399,28 @@ pub async fn config_get(st: &AppState, key: &str) -> Option<String> {
 
 /// 写配置项（出错只记日志——配置写失败不应打断主流程）
 pub async fn config_set(st: &AppState, key: &str, value: &str) {
-    let res = async {
-        let pool = w(st)?;
-        sqlx::query(&crate::pq::rewrite(
-            "INSERT INTO config (cfg_key, cfg_value, updated_at) VALUES (?, ?, ?)
-             ON CONFLICT (cfg_key) DO UPDATE SET cfg_value = EXCLUDED.cfg_value, updated_at = EXCLUDED.updated_at",
-        ))
-        .bind(key)
-        .bind(value)
-        .bind(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string())
-        .execute(pool)
-        .await?;
-        Ok::<(), anyhow::Error>(())
-    }
-    .await;
-    if let Err(e) = res {
+    if let Err(e) = config_set_result(st, key, value).await {
         tracing::error!(error = %e, key, "写配置失败");
     }
+}
+
+/// 写配置项并**把错误交回调用方**（2026-10-17 新增，审计 4-5）。
+///
+/// 与 [`config_set`] 同款 SQL，区别只是不吞异常：展板配置这类「保存了就必须生效」
+/// 的配置，写库失败时**必须**告诉前端失败 —— 否则运营看到「已保存」、展板页却还在用
+/// 上一次的参数（假成功 + 配置漂移，且前端会把 GET 回来的旧值当成新值存进 state）。
+pub async fn config_set_result(st: &AppState, key: &str, value: &str) -> anyhow::Result<()> {
+    let pool = w(st)?;
+    sqlx::query(&crate::pq::rewrite(
+        "INSERT INTO config (cfg_key, cfg_value, updated_at) VALUES (?, ?, ?)
+         ON CONFLICT (cfg_key) DO UPDATE SET cfg_value = EXCLUDED.cfg_value, updated_at = EXCLUDED.updated_at",
+    ))
+    .bind(key)
+    .bind(value)
+    .bind(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string())
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 /* ---------------------------- 机器人会话 ---------------------------- */

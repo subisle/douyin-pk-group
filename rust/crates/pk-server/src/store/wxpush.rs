@@ -290,7 +290,8 @@ pub async fn push_bind_by_code(
     .await;
     let res = sqlx::query(&crate::pq::rewrite(
         "UPDATE push_bindings SET conversation_id = ?, to_user_id = ?, nickname = ?,
-           bind_code = '', code_expires = '', bound_at = ?, last_error = '', updated_at = ?
+           bind_code = '', code_expires = '', bound_at = ?, last_error = '', paused = 0,
+           updated_at = ?
          WHERE name = ?",
     ))
     .bind(conversation_id)
@@ -321,10 +322,14 @@ pub async fn push_set_team(st: &AppState, name: &str, team: &str) -> bool {
         .unwrap_or(false))
 }
 
-/// 解绑（保留目标配置，只断开微信）
+/// 解绑（保留目标配置与扫码凭证，只断开微信）。
+/// 2026-10-17 用户口径「解绑 = 停止数据传输」：除清会话接线外，paused 置 1 ——
+/// wxpush::supervisor_loop 不再为该账号补拉长轮询，正在跑的 poll_body 下一轮
+/// 检查到 paused=1 即退出（最多一个轮询周期内停止收发）。重新对接时由
+/// [`push_bind_account`] / [`push_bind_by_code`] 把 paused 置回 0 恢复。
 pub async fn push_unbind(st: &AppState, name: &str) -> bool {
     matches!(w(st), Ok(pool) if sqlx::query(&crate::pq::rewrite("UPDATE push_bindings SET conversation_id = '', to_user_id = '', bound_at = '',
-           bind_code = '', code_expires = '', updated_at = ? WHERE name = ?"))
+           bind_code = '', code_expires = '', paused = 1, updated_at = ? WHERE name = ?"))
                 .bind(now_str())
         .bind(name.trim())
         .execute(pool)
@@ -333,7 +338,9 @@ pub async fn push_unbind(st: &AppState, name: &str) -> bool {
         .unwrap_or(false))
 }
 
-/// 按微信会话解绑（机器人里回复「解绑」）：返回被解绑的账号姓名
+/// 按微信会话解绑（机器人里回复「解绑」）：返回被解绑的账号姓名。
+/// 与 [`push_unbind`] 同口径：paused 置 1，停止该账号的数据传输，
+/// 重新对接时恢复。
 pub async fn push_unbind_by_conversation(st: &AppState, conversation_id: &str) -> Option<String> {
     let pool = w(st).ok()?;
     let row = sqlx::query(&crate::pq::rewrite(
@@ -347,7 +354,7 @@ pub async fn push_unbind_by_conversation(st: &AppState, conversation_id: &str) -
     let name: String = row.try_get::<String, _>("name").ok()?;
     let _ = sqlx::query(&crate::pq::rewrite(
         "UPDATE push_bindings SET conversation_id = '', to_user_id = '', bound_at = '',
-           bind_code = '', code_expires = '', updated_at = ? WHERE name = ?",
+           bind_code = '', code_expires = '', paused = 1, updated_at = ? WHERE name = ?",
     ))
     .bind(now_str())
     .bind(&name)
@@ -705,6 +712,11 @@ pub struct WxPushAccount {
     pub conversation_id: String,
     pub updates_buf: String,
     pub bound_at: String,
+    /// 解绑暂停标记（2026-10-17 用户口径「解绑 = 停止数据传输」）。
+    /// 列不在 wx_push_accounts、在 push_bindings（读侧 LEFT JOIN 补上；
+    /// 没有绑定行的账号按未暂停 false 处理）。true = supervisor 不补拉、
+    /// poll_body 退出，重新对接（push_bind_account / push_bind_by_code）时置回 0。
+    pub paused: bool,
 }
 
 fn wx_push_account_from_row(row: &sqlx::postgres::PgRow) -> WxPushAccount {
@@ -727,6 +739,10 @@ fn wx_push_account_from_row(row: &sqlx::postgres::PgRow) -> WxPushAccount {
             .unwrap_or_default(),
         updates_buf: row.try_get::<String, _>("updates_buf").unwrap_or_default(),
         bound_at: row.try_get::<String, _>("bound_at").unwrap_or_default(),
+        paused: row
+            .try_get::<i16, _>("paused")
+            .map(|v| v == 1)
+            .unwrap_or(false),
     }
 }
 
@@ -921,13 +937,19 @@ pub async fn wx_push_account_bind_conversation(
     .unwrap_or(false))
 }
 
-/// 按展示端账号名取扫码凭证
+/// 按展示端账号名取扫码凭证。
+/// LEFT JOIN push_bindings 带 paused（2026-10-17「解绑 = 停止数据传输」）：
+/// poll_body 每轮都走这里，paused=1 时任务当场退出。无绑定行的账号 LEFT JOIN
+/// 产出 NULL，COALESCE 成 0（未暂停）。列别名统一叫 paused，wx_push_account_from_row 取。
 pub async fn wx_push_account_get(st: &AppState, name: &str) -> Option<WxPushAccount> {
     let pool = w(st).ok()?;
     let row = sqlx::query(&crate::pq::rewrite(
-        "SELECT name, team, person_id, ilink_bot_id, ilink_user_id, bot_token, base_url,
-                nickname, conversation_id, updates_buf, bound_at
-         FROM wx_push_accounts WHERE name = ? LIMIT 1",
+        "SELECT a.name, a.team, a.person_id, a.ilink_bot_id, a.ilink_user_id, a.bot_token,
+                a.base_url, a.nickname, a.conversation_id, a.updates_buf, a.bound_at,
+                COALESCE(pb.paused, 0) AS paused
+         FROM wx_push_accounts a
+         LEFT JOIN push_bindings pb ON pb.name = a.name
+         WHERE a.name = ? LIMIT 1",
     ))
     .bind(name.trim())
     .fetch_optional(pool)
@@ -952,14 +974,19 @@ pub async fn wx_push_account_name_of(st: &AppState, to_user_id: &str) -> Option<
     row.try_get::<String, _>("name").ok()
 }
 
-/// 启动时恢复全部扫码账号（各自跑一条长轮询）
+/// 启动时恢复全部扫码账号（各自跑一条长轮询）。
+/// LEFT JOIN push_bindings 带 paused（口径同 [`wx_push_account_get`]）：
+/// supervisor 的 accounts_to_start 用它过滤解绑暂停的账号，不为其补拉。
 pub async fn wx_push_accounts_all(st: &AppState) -> Vec<WxPushAccount> {    let Ok(pool) = w(st) else {
         return Vec::new();
     };
     sqlx::query(
-        "SELECT name, team, person_id, ilink_bot_id, ilink_user_id, bot_token, base_url,
-                nickname, conversation_id, updates_buf, bound_at
-         FROM wx_push_accounts ORDER BY name",
+        "SELECT a.name, a.team, a.person_id, a.ilink_bot_id, a.ilink_user_id, a.bot_token,
+                a.base_url, a.nickname, a.conversation_id, a.updates_buf, a.bound_at,
+                COALESCE(pb.paused, 0) AS paused
+         FROM wx_push_accounts a
+         LEFT JOIN push_bindings pb ON pb.name = a.name
+         ORDER BY a.name",
     )
     .fetch_all(pool)
     .await
@@ -1250,6 +1277,10 @@ pub async fn push_bind_account(
     .await;
     // 静默吞错改记 warn（2026-10-16 报障：这里写失败时展示端永远显示未绑定，
     // 而日志里一条线索都没有——根因是 conversation_id 列长不够，见迁移 027）。
+    // paused = 0（2026-10-17 用户口径「重新对接 = 恢复」）：对接/激活时把解绑
+    // 标记清掉，wxpush::supervisor_loop 才会重新为该账号拉起长轮询。
+    // INSERT 不显式列 daily_report：列默认值（迁移 029 起为 1，每日报告默认开启）
+    // 在 INSERT 时生效；DO UPDATE 不写这一列，已对接用户自己改过的开关不被覆盖。
     if let Err(e) = sqlx::query(&crate::pq::rewrite(
         "INSERT INTO push_bindings (name, team, conversation_id, to_user_id, bound_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?)
@@ -1259,7 +1290,7 @@ pub async fn push_bind_account(
          END,
            conversation_id = EXCLUDED.conversation_id, to_user_id = EXCLUDED.to_user_id,
            bound_at = EXCLUDED.bound_at, bind_code = '', code_expires = '',
-           last_error = '', updated_at = EXCLUDED.updated_at",
+           paused = 0, last_error = '', updated_at = EXCLUDED.updated_at",
     ))
     .bind(name.trim())
     .bind(team)

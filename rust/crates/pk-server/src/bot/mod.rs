@@ -715,6 +715,9 @@ async fn try_promote_weixin(st: &Arc<AppState>, inbound: &Inbound) -> Option<Out
         return None;
     }
     crate::store::session_set_admin(st, inbound.channel, &inbound.conversation_id, true).await;
+    /* 广播 SCOPE_BOT（2026-10-17 修复，审计 6-12a）：
+    原先提权成功不 emit，后台「机器人」页要等 20 秒兜底轮询才看到管理员标记变化。 */
+    crate::events::emit(crate::events::SCOPE_BOT, "微信会话已提为管理员");
     tracing::info!(conversation = %inbound.conversation_id, "微信会话已通过提权口令设为管理员");
     Some(Outbound::to(&inbound.conversation_id, "已成为管理员"))
 }
@@ -799,9 +802,14 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
     let limiter = LIMITER.get_or_init(|| RateLimiter::new(cfg.rate_limit_per_min));
     let key = format!("{}:{}", inbound.channel, inbound.conversation_id);
     if !limiter.allow(&key) {
+        /* 文案带上**实际生效**的上限（2026-10-17 修复，审计 6-12b）：
+        BOT_RATE_LIMIT 可配，原先写死「10 条/分钟」，改了配置文案就在撒谎。 */
         return Some(Outbound::to(
             &inbound.conversation_id,
-            "消息太频繁了，稍后再试（限流 10 条/分钟）",
+            format!(
+                "消息太频繁了，稍后再试（限流 {} 条/分钟）",
+                cfg.rate_limit_per_min
+            ),
         ));
     }
     // 展示端「我的」页微信绑定（2026-10-16 口径：只发 4 位绑定码即可）。
@@ -820,10 +828,21 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
     // - User：微信私聊且 push_bindings 命中的已绑定主播 —— 只允许 5 条命令
     // - 其余：完全静默（不回复任何内容），日志留痕
     //
-    // QQ 是**无条件** Admin：不看 cfg.qq_admins。这是刻意的选择（QQ 号由运营
-    // 自己持有、不对外开放），不是漏配。要收口就得在这里加判定，而不是去配
-    // BOT_QQ_ADMINS——那个环境变量当前对 QQ 不生效，配了也不会生效。
-    let role = if inbound.channel == "qq"
+    // QQ 的管理员判定（2026-10-17 修复，审计 6-1）：
+    // 原先这里写死「channel == qq 就无条件 Admin」，而 `BOT_QQ_ADMINS` 从
+    // BotConfig 读出来后**全代码零引用** —— 运营配了白名单也完全不生效（死配置）。
+    // 现在改成：**配了 BOT_QQ_ADMINS 就按白名单收口**（只有名单里的 QQ 号是 Admin），
+    // **没配**才退回原来的「QQ 全部会话无条件 Admin」（QQ 号由运营自持、不对外开放，
+    // 保持旧行为不误伤现网）。
+    // 会话表标记过的管理员（后台勾选 / 微信提权口令）始终算 Admin，与渠道无关。
+    let qq_admin_ok = if cfg.qq_admins.is_empty() {
+        true // 未配置 = 旧行为：QQ 全放开
+    } else {
+        cfg.qq_admins
+            .iter()
+            .any(|a| a == &inbound.conversation_id)
+    };
+    let role = if (inbound.channel == "qq" && qq_admin_ok)
         || cfg.wechat_admins.contains(&inbound.conversation_id)
         || crate::store::session_is_admin(st, inbound.channel, &inbound.conversation_id).await
     {
@@ -995,24 +1014,35 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
             ));
         }
 
-        // 不分男女团（用户口径 2026-10-10）：一个文件里男女混着也能导，团别按主播档案逐行归属
+        /* 团别（2026-10-17 修复，审计 6-4）：
+        原先附件分支**先于**命令路由执行且硬编码 "auto"，运营发「导入 女团 2026-10-05」
+        + 附件时团别被**静默丢弃**，只会按主播档案逐行归属。
+        现在按「消息文本里的团别 > 文件名里的团别 > auto」三级取：
+        文本优先（运营当下说的算），文件名兜底（老习惯 `2026-10-07-男团.csv`），
+        都没有才 auto（一个文件男女混着也能导，团别按档案归属）。 */
+        let msg_team = text
+            .split_whitespace()
+            .find_map(team_of);
+        let team = msg_team.or(_file_team).unwrap_or("auto");
         tracing::info!(
             file = %filename,
             biz_date = %biz_date,
             date_src = %date_src,
+            team = %team,
+            team_src = if msg_team.is_some() { "消息文本" } else if _file_team.is_some() { "文件名" } else { "auto（按档案归属）" },
             rows = rows.len(),
-            "机器人文件导入（不分男女团）"
+            "机器人文件导入"
         );
         let report = admin::commit_import(
             st,
-            "auto",
+            team,
             &biz_date,
             rows,
             "merge",
             &format!("机器人·{filename}"),
         )
         .await;
-        let reply = format_report(&filename, &biz_date, "auto", report);
+        let reply = format_report(&filename, &biz_date, team, report);
         return Some(Outbound::to(&inbound.conversation_id, reply));
     }
 
@@ -1891,6 +1921,11 @@ pub async fn bots_session_admin(
         body.is_admin.unwrap_or(true),
     )
     .await;
+    /* 广播 SCOPE_BOT（2026-10-17 修复，审计 6-12a）：后台勾选管理员后立刻刷新机器人页 */
+    crate::events::emit(
+        crate::events::SCOPE_BOT,
+        format!("机器人会话管理员标记已更新：{channel}/{conversation_id}"),
+    );
     Ok(axum::Json(serde_json::json!({ "ok": true })))
 }
 

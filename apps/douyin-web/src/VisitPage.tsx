@@ -90,6 +90,7 @@ export default function VisitPage() {
   const [lookupError, setLookupError] = useState('')
   const [allowlist, setAllowlist] = useState<AllowlistItem[]>([])
   const [wlActive, setWlActive] = useState(false)
+  const [wlGateDisabled, setWlGateDisabled] = useState(false)
   const [wlDraft, setWlDraft] = useState('')
   const [wlNote, setWlNote] = useState('')
   const [wlBusy, setWlBusy] = useState(false)
@@ -134,10 +135,15 @@ export default function VisitPage() {
   }, [])
 
   const loadAllowlist = useCallback(() => {
-    api<{ items: AllowlistItem[]; active: boolean }>('/api/admin/ip-allowlist')
+    // 2026-10-17：后端新增 gateDisabled / mode，门禁是「地域 OR 白名单」四路放行，
+    // 白名单只是**附加通道**——不能把「表非空」渲染成白名单模式（审计 6-8）。
+    api<{ items: AllowlistItem[]; active: boolean; gateDisabled?: boolean; mode?: string }>(
+      '/api/admin/ip-allowlist',
+    )
       .then((d) => {
         setAllowlist(d.items ?? [])
         setWlActive(!!d.active)
+        setWlGateDisabled(!!d.gateDisabled)
         setWlError('')
       })
       .catch((e) => setWlError(e.message ?? String(e)))
@@ -282,8 +288,15 @@ export default function VisitPage() {
               {wlBusy ? '保存中…' : '添加'}
             </button>
           </form>
-          {wlActive && <span className="badge b-active">白名单 {allowlist.length} 条</span>}
-          {!wlActive && <span className="hint">白名单为空 · 仅安徽 / 河南 / 江苏可访问</span>}
+          {wlGateDisabled ? (
+            <span className="badge b-warn">地区门禁已关闭 · 任何人可访问</span>
+          ) : wlActive ? (
+            <span className="badge b-active">
+              白名单 {allowlist.length} 条（附加放行 · 安徽 / 河南 / 徐州仍可直接访问）
+            </span>
+          ) : (
+            <span className="hint">白名单为空 · 仅安徽 / 河南 / 徐州可访问</span>
+          )}
         </div>
 
         {wlError && <div className="alert bad">{wlError}</div>}

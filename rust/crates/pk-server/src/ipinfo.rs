@@ -54,10 +54,20 @@ pub struct IpGeo {
 }
 
 /// 本地开发 / 内网联调：`IP_GATE_DISABLED=1` 时不做地区拦截（访问日志照记）
+///
+/// 2026-10-17 修复（审计 6-11）：原先只认 `1/true/yes` 且**大小写敏感**，
+/// 写 `IP_GATE_DISABLED=TRUE` 会被当成没配、门禁照旧生效（运维以为关了）。
+/// 现在与 `push::push_out_enabled` 同款口径：trim + 小写后识别
+/// `1/true/yes/on`，大小写无关。
 pub fn gate_disabled() -> bool {
     matches!(
-        std::env::var("IP_GATE_DISABLED").as_deref(),
-        Ok("1") | Ok("true") | Ok("yes")
+        std::env::var("IP_GATE_DISABLED")
+            .ok()
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes" | "on"
     )
 }
 
@@ -1357,9 +1367,29 @@ pub async fn admin_ip_allowlist_list(
             })
         })
         .collect();
+    /* 门禁状态（2026-10-17 修复，审计 6-8）：
+    原先 `active = !items.is_empty()`，前端把它渲染成「白名单模式已生效 N 条」，
+    但门禁实际是 `gate_disabled || 地域命中 || IP_GATE_ALLOWLIST || ip_allowlist`
+    **四路 OR**，ip_allowlist 只是**附加放行通道**，表非空**不会**挡住外省。
+    现在下发三个字段让前端说真话：
+      - `gateDisabled`：门禁整体关闭（IP_GATE_DISABLED=1）
+      - `count`：白名单条数（附加通道，不是"模式"）
+      - `mode`：人话模式（`off` / `geo` / `geo+allowlist`），前端照着渲染 */
+    let gate_off = gate_disabled();
+    let mode = if gate_off {
+        "off"
+    } else if items.is_empty() {
+        "geo"
+    } else {
+        "geo+allowlist"
+    };
     Ok(axum::Json(serde_json::json!({
         "items": items,
+        // 兼容旧前端：仍有 active 字段，语义改为「白名单通道有条目在生效」
         "active": !items.is_empty(),
+        "gateDisabled": gate_off,
+        "count": items.len(),
+        "mode": mode,
     })))
 }
 

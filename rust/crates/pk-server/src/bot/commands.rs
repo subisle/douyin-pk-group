@@ -227,7 +227,15 @@ pub fn help_for(role: Role) -> String {
         Role::User => "可用命令（普通用户）：",
         Role::Admin => "可用命令（管理员）：",
     });
+    /* 普通用户命令（2026-10-17 修复，审计 6-3）：
+    这几条都按 conversation_id 查 push_bindings 取「我是谁」，管理员会话（QQ / 微信群 /
+    后台勾选）通常**没有绑定行**，照帮助发出去只会得到「没有找到你的推送绑定」。
+    所以管理员版帮助里仍然列出它们（管理员本人也可能是主播），但**明确标注前提**，
+    免得运营以为是命令坏了。 */
     out.push_str("\n【普通用户命令】");
+    if role == Role::Admin {
+        out.push_str("（要本会话绑过推送才有效，否则回「没有找到你的推送绑定」）");
+    }
     for spec in COMMANDS.iter().filter(|s| s.role == Role::User) {
         out.push_str(&format!("\n· {} —— {}", spec.name, spec.summary));
     }

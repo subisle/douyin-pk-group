@@ -98,6 +98,11 @@ async fn main() -> anyhow::Result<()> {
     服务里自动定时器**默认关闭**（纯手动口径，显式 AVATAR_SYNC_ENABLED=1 才开，
     见下面 spawn_scheduler），这里是手工口。 */
     if std::env::args().any(|a| a == "sync-avatars") {
+        // 2026-10-17：总闸 AVATAR_SYNC_DISABLED=1 时这条手工口也停（见 config::avatar_sync_disabled）
+        if config::avatar_sync_disabled() {
+            eprintln!("头像同步已冻结（AVATAR_SYNC_DISABLED=1）：不请求抖音、不写库。要恢复请把它设成 0。");
+            return Ok(());
+        }
         let rest: Vec<String> = std::env::args()
             .skip_while(|a| a != "sync-avatars")
             .skip(1)
@@ -230,8 +235,14 @@ async fn main() -> anyhow::Result<()> {
         才真去请求抖音（检查本身零外网请求）；
       - 新加的主播、后来才补登记抖音号的主播，天然就是候选（无行 = 候选）；
       - 同步失败（网络/接口变了）不写库 → 保留上一次留存的图，页面不会突然没图。
-    写库走写池；没配写库就是只读部署，跳过并留一条 warn。 */
-    if config::avatar_sync_enabled() {
+    写库走写池；没配写库就是只读部署，跳过并留一条 warn。
+
+    2026-10-17 用户口径：抖音头像抓取链路不稳定、且抖音号会换，**整条更新链路冻结**
+    —— 总闸 `AVATAR_SYNC_DISABLED=1` 时三条入口（定时器 / 管理端接口 / CLI）全部不跑，
+    已留存的头像照常展示。见 config::avatar_sync_disabled。 */
+    if config::avatar_sync_disabled() {
+        tracing::info!("AVATAR_SYNC_DISABLED=1：头像同步整条链路已冻结（定时器/接口/CLI 都不跑，已留存头像照常展示）");
+    } else if config::avatar_sync_enabled() {
         match st.writer.clone() {
             Some(pool) => {
                 let days = config::avatar_sync_days();

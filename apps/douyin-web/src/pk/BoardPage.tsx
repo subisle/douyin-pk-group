@@ -9,8 +9,20 @@ import {
   type BoardConfig,
   type EventType,
 } from './api';
-import { REVIVAL_MINUTES, revivalAfterGroup } from './rules';
-import { registerLeaveGuard } from '../lib/router';
+import {
+  BREAK_AFTER_GROUP,
+  REVIVAL_EVENTS,
+  REVIVAL_MINUTES,
+  revivalAfterGroup,
+} from './rules';
+import { registerLeaveGuard, routeHref } from '../lib/router';
+
+/** 后台「PK 分组」页的完整地址（2026-10-17，审计 4-10）：
+ *  展板报错时要给运营一个能点的去处，否则投屏画面卡在报错上没有任何自救入口。 */
+function adminGroupHref(): string {
+  const base = window.location.pathname.startsWith('/admin') ? '/admin' : '';
+  return `${window.location.origin}${base}${routeHref('group', base)}`;
+}
 import type {
   BalanceStat,
   BreakRule,
@@ -39,13 +51,8 @@ const wan = (n: number) => {
 
 const clone = <T,>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
 
-/** 月终争霸赛 / 两级晋级赛的加长休息点：第 3 组之后（分钟数可调） */
-const BREAK_AFTER_GROUP = 3;
-
-/** 有复活赛的赛事：初级 / 中级争霸赛小组赛。
- *  复活赛是**一场 20 分钟的比赛**（不是休息），只打一场，落在第 ceil(组数/2) 组之后；
- *  位置和时长都不可改，longBreak 配置对这类赛事不生效。 */
-const REVIVAL_EVENTS: readonly EventType[] = ['初级争霸赛小组赛', '中级争霸赛小组赛'];
+/* BREAK_AFTER_GROUP / REVIVAL_EVENTS 原先在这里各写了一份，与 GroupPage 重复
+   （2026-10-17，审计 4-8）→ 统一从 './rules' 导入，见下面 import。 */
 
 /** 后端没存过配置时的兜底值：与 GroupPage 首屏默认一致，别让展板算出非法参数。 */
 const DEFAULT_BOARD_CONFIG: BoardConfig = {
@@ -271,7 +278,7 @@ export default function BoardPage() {
 
   /* ---------------- 一键分组（展板唯一的主流程） ----------------
      配置（后端已保存）→ 名单（PK 分组页已保存）→ 解析 → 分组，一条链跑完。 */
-  async function groupNow() {
+  async function groupNow(forceRefresh = false) {
     setLoading(true);
     setError('');
     setMsg('');
@@ -279,7 +286,14 @@ export default function BoardPage() {
       // 1. 配置必须已保存：展板自己不配参数入组，没配置就没法分组
       const cfg = await pk.getBoardConfig();
       if (!cfg.saved || !cfg.config) {
-        throw new Error('展板配置还没保存：回后台「PK 分组 → 展板配置」卡保存后再来分组');
+        /* 2026-10-17 修复（审计 4-10）：展板是**全屏独立页、没有后台导航壳**，
+        投屏机器常直接收藏 /admin/pk-board 打开。这时原报错只说「回后台保存」，
+        页面上却**没有任何跳转入口**，投屏画面永远卡在这句红字上。
+        现在把后台地址一并给出（前端渲染成可点链接）。 */
+        throw new Error(
+          '展板配置还没保存：到后台「PK 分组 → 展板配置」卡保存后再来分组' +
+            `（后台地址：${adminGroupHref()}）`,
+        );
       }
       const c = { ...DEFAULT_BOARD_CONFIG, ...cfg.config };
       setConfig(c);
@@ -291,7 +305,17 @@ export default function BoardPage() {
       }
 
       // 3. 解析：取可参赛的人。识别不到的行不阻断（分组照跑），但要点名提醒
-      const parsed = await pk.parse({ text: r.text, metric: c.metric, days: c.days });
+      /* forceRefresh（2026-10-17 修复，审计 4-4）：原先这里**永远** force=false，
+      命中的是后端 10 分钟的音浪缓存（WAVE_CACHE_TTL 默认 600）。运营早上导完当天数据
+      立刻投屏分组，会按**旧音浪**排，而展板页既没有刷新入口、也没有「数据可能过期」
+      的提示 —— 投屏出去就是错的，且发现不了。现在提供「刷新音浪后分组」入口，
+      与「PK 分组」页两个按钮同款语义。 */
+      const parsed = await pk.parse({
+        text: r.text,
+        metric: c.metric,
+        days: c.days,
+        force: forceRefresh,
+      });
       const active = parsed.players.filter((p) => !p.excluded);
       if (!active.length) throw new Error('名单里没有可参赛的人');
       const unmatchedN = parsed.unmatched.length;
@@ -471,8 +495,22 @@ export default function BoardPage() {
     <div className="page pk">
       {/* ② 一键分组：展板唯一的主按钮 */}
       <div className="pk-board-primary-row">
-        <button className="primary pk-board-primary" disabled={loading} onClick={groupNow}>
+        <button
+          className="primary pk-board-primary"
+          disabled={loading}
+          onClick={() => groupNow(false)}
+        >
           {loading ? '分组中…' : '一键分组'}
+        </button>
+        {/* 刷新音浪后分组（2026-10-17，审计 4-4）：绕过后端 10 分钟音浪缓存重查，
+        导完当天数据后投屏前用它，避免按旧音浪排赛程 */}
+        <button
+          className="pk-board-primary"
+          disabled={loading}
+          onClick={() => groupNow(true)}
+          title="忽略音浪缓存、重新取数后分组（导完当天数据用这个）"
+        >
+          刷新音浪后分组
         </button>
         {buckets.length > 0 && (
           <span className="hint">

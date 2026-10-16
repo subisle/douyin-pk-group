@@ -335,8 +335,14 @@ mod my_accounts_tests {
         assert!(sql.contains("TO_CHAR(ws.biz_date, 'YYYY-MM-DD')"));
         assert!(sql.contains("t.d LIKE '2026-10-%'"));
         assert!(sql.contains("t.d LIKE '2026-%'"));
-        // 只查本人的号
-        assert_eq!(sql.matches("person_id = 86").count(), 3, "{sql}");
+        /* 只查本人的号（2026-10-17：主号的月/年改走 monthly_wave 优先后，
+        SQL 里多出几处 `person_id = 86` —— 两处整月值子查询 + 一处「排掉已导整月值的月份」，
+        合计 6 处。这里盯的是**不能出现别人的 person_id**，所以用「总数 + 无其它 id」
+        两个断言一起钉，比写死数量更抗后续改动。 */
+        assert!(sql.matches("person_id = 86").count() >= 3, "{sql}");
+        assert!(!sql.contains("person_id = 87"), "不能查别人的号：{sql}");
+        // 整月音浪优先（与 /my 月卡同口径，审计 P0-2）
+        assert!(sql.contains("monthly_wave"), "分号月/年应接整月音浪：{sql}");
         // 主号在前，其余按 id 升序（与 admin 台账 ORDER BY is_primary DESC, id 一致）
         assert!(sql.ends_with("ORDER BY a.is_primary DESC, a.id"), "{sql}");
         // 没数据的号要有 0 而不是 NULL（有号没播 = 0），所以外层 COALESCE

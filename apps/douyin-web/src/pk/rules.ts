@@ -20,6 +20,20 @@ export const REVIVAL_MINUTES = 20;
 export const revivalAfterGroup = (groupCount: number) =>
   groupCount > 0 ? Math.ceil(groupCount / 2) : 0;
 
+/** 月终争霸赛 / 两级晋级赛的加长休息点：第 3 组之后（分钟数可调）。
+ *  2026-10-17：原先 GroupPage 与 BoardPage **各自写了一份**同名常量，改一处漏一处
+ *  就会让后台与展板的休息落点不一致（审计 4-8）。统一从这里导出，单一来源。 */
+export const BREAK_AFTER_GROUP = 3;
+
+/** 有复活赛的赛事：初级 / 中级争霸赛小组赛。
+ *  复活赛是**一场 20 分钟的比赛**（不是休息），只打一场，落在第 ceil(组数/2) 组之后；
+ *  位置和时长都不可改，longBreak 配置对这类赛事不生效。
+ *  同上：原为两份拷贝，现统一由这里导出。 */
+export const REVIVAL_EVENTS: readonly EventType[] = [
+  '初级争霸赛小组赛',
+  '中级争霸赛小组赛',
+];
+
 /** 初级争霸赛小组赛 / 中级争霸赛小组赛赛制完全一样（2026-10-09 用户确认），只有参赛名单不同 */
 const 争霸赛小组赛制 = (name: string): EventRule => ({
   title: `${name} · 赛制（共四轮）`,

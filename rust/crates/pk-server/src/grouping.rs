@@ -263,10 +263,13 @@ pub fn validate_board_config(v: &mut serde_json::Value) -> Result<BoardConfig, S
     if config.metric != "last1" && !(1..=30).contains(&config.days) {
         return Err("统计天数要在 1~30 之间".into());
     }
-    if !matches!(
-        config.strategy.as_str(),
-        "snake" | "snake-no-master" | "sequential" | "sequential-last-n" | "random"
-    ) {
+    /* 策略白名单**由 pk-core 的枚举派生**（2026-10-17 修复，审计 4-2）：
+    原先这里手写了一份字符串清单，与 `pk_core::Strategy`（唯一算法权威）、前端
+    `types.ts` 的联合类型一共三份，全靠人工保持同步、没有任何编译期或单测约束。
+    pk-core 将来新增变体（如文档里提到的 balance）时，这里会静默拒绝。
+    现在改成用 serde 反序列化校验 —— 认不出的策略就是枚举里没有的。
+    （下方 `strategy_enum_matches_core` 单测把两边钉死。） */
+    if serde_json::from_str::<pk_core::Strategy>(&format!("\"{}\"", config.strategy)).is_err() {
         return Err("不认识的分组策略".into());
     }
     if !matches!(config.strength_mode.as_str(), "top" | "total" | "off") {
@@ -325,13 +328,49 @@ pub async fn board_config_put(
     Json(mut body): Json<serde_json::Value>,
 ) -> GroupResult<serde_json::Value> {
     let config = validate_board_config(&mut body).map_err(ApiError::bad_request)?;
-    store::config_set(&st, BOARD_CONFIG_KEY, &serde_json::to_string(&config)?).await;
+    /* 写失败必须报错（2026-10-17 修复，审计 4-5）：原先 `config_set` 吞掉异常、
+    这里无条件返回 {ok:true} —— 运营点保存看到「已保存」，库里却还是上一次的参数，
+    展板页一键分组也用旧参数，且前端会把 GET 回来的旧值当新值存进 state。 */
+    store::config_set_result(&st, BOARD_CONFIG_KEY, &serde_json::to_string(&config)?)
+        .await
+        .map_err(ApiError::from)?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 合法配置原样通过（eventType 老叫法顺带被归一到新白名单值）
+    #[test]
+    /// 策略白名单必须与 `pk_core::Strategy` 的**全部变体**一致（2026-10-17，审计 4-2）。
+    /// 两侧原来各写一份字符串，pk-core 新增变体时后端会静默拒绝、前端 Types 却能列出。
+    /// 这里逐个变体做「序列化 → 反序列化」往返：枚举里有的必须能通过后端校验，
+    /// 枚举里没有的（如文档提过但代码未实现的 balance）必须被拒。
+    #[test]
+    fn strategy_enum_matches_core() {
+        for s in [
+            pk_core::Strategy::Snake,
+            pk_core::Strategy::Random,
+            pk_core::Strategy::SnakeNoMaster,
+            pk_core::Strategy::Sequential,
+            pk_core::Strategy::SequentialLastN,
+        ] {
+            let name = serde_json::to_value(s)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_string))
+                .expect("策略应能序列化成字符串");
+            let parsed = serde_json::from_str::<pk_core::Strategy>(&format!("\"{name}\""));
+            assert!(parsed.is_ok(), "pk-core 的策略 {name} 必须能被后端认出来");
+        }
+        // 枚举外的字符串一律拒绝（balance 等文档提过但未实现的策略）
+        for bad in ["balance", "SNAKE", "", "snake2"] {
+            assert!(
+                serde_json::from_str::<pk_core::Strategy>(&format!("\"{bad}\"")).is_err(),
+                "{bad} 不该被当成合法策略"
+            );
+        }
+    }
 
     /// 合法配置原样通过（eventType 老叫法顺带被归一到新白名单值）
     #[test]

@@ -388,6 +388,14 @@ pub(crate) async fn push_out_allowed_for_account(st: &crate::state::AppState, to
 }
 
 /// 是否允许真实出网发送。默认关（测试阶段一律不发）。
+///
+/// ⚠️ 合法值**刻意收窄**为 `1` / `true`（`TRUE` 兼容旧写法）：这个开关一旦误开
+/// 就会真发消息到主播手机上，宁可让配错的人「配了没生效」（安全侧），
+/// 也不能让 `yes` / `on` 这类写法意外打开出网（危险侧）。
+/// 2026-10-17 曾尝试与 `ipinfo::gate_disabled` 统一成 `1/true/yes/on`，
+/// 但那会让 `PUSH_OUT_ENABLED=yes` 变成真发 —— 与 AGENTS.md「测试阶段必须保持 0」
+/// 的纪律冲突，且既有单测 `push_out_only_enabled_by_explicit_on` 钉死了这个语义，
+/// 故**撤回**统一，只在 `gate_disabled`（门禁关闭，安全侧）那边放宽写法。
 pub fn push_out_enabled() -> bool {
     matches!(
         std::env::var("PUSH_OUT_ENABLED").ok().as_deref(),
@@ -416,6 +424,28 @@ fn out_blocked(kind: &str, to: &str, preview: &str) -> bool {
     true
 }
 
+/// 出网闸门拦截（2026-10-17，审计 1-P0-2）：**不代表发送成功**。
+///
+/// 携带它的 Err 是「这轮根本没发出去」的信号，调用方必须据此**不推进**去重标记
+/// （`last_report_date` / `last_lineage_date` / `last_notice_date`），
+/// 否则关闸期间的消息会被永久吞掉（标记已消耗，开闸也不会补推）。
+/// 用 [`is_blocked`] 判定，不要靠字符串匹配。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Blocked;
+
+impl std::fmt::Display for Blocked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("出网闸门拦截（未真实发送）")
+    }
+}
+
+impl std::error::Error for Blocked {}
+
+/// 这个错误是不是「被闸门拦下」（而不是真的发送失败）。
+pub(crate) fn is_blocked(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<Blocked>().is_some()
+}
+
 /// 给一条绑定发消息：优先走用户自己扫码得到的微信账号（多账号），
 /// 没有扫码凭证时回落到管理员机器人（旧手机号 / 绑定码路径）。
 ///
@@ -427,9 +457,14 @@ async fn send_binding(
     wx_global: Option<&Arc<crate::bot::weixin::WxTransport>>,
     text: &str,
 ) -> anyhow::Result<()> {
-    /* 测试阶段出网闸门：未开 PUSH_OUT_ENABLED 一律不发（见函数上方的口径说明） */
+    /* 测试阶段出网闸门：未开 PUSH_OUT_ENABLED 一律不发（见函数上方的口径说明）。
+    2026-10-17 修复（审计 1-P0-2）：原先这里 `return Ok(())` —— 拦截被当成**发送成功**，
+    调用方立刻推进去重标记（last_report_date / last_lineage_date / last_notice_date）
+    并把任务落终态 done。后果是关闸期间本该发的消息被**永久吞掉**：
+    去重标记已被空跑消耗，就算马上开闸当天也不会重推，而日志里全是 INFO「已推送」。
+    现在返回 `Blocked` 哨兵：调用方据此**跳过**去重标记，消息留到下次再推。 */
     if out_blocked("text", &b.name, text) {
-        return Ok(());
+        return Err(Blocked.into());
     }
     /* 扫码账号：发文本；没有扫码凭证的旧绑定：回落管理员机器人文本通道 */
     if let Some(a) = crate::store::wx_push_account_get(st, &b.name).await {
@@ -457,9 +492,10 @@ async fn send_binding_images(
     pngs: &[Vec<u8>],
 ) -> anyhow::Result<()> {
     anyhow::ensure!(!pngs.is_empty(), "没有可发送的图片");
-    /* 测试阶段出网闸门：图片通道同样收口（与文本同一开关，见 send_binding 上方说明） */
+    /* 测试阶段出网闸门：图片通道同样收口（与文本同一开关，见 send_binding 上方说明）。
+    同样返回 `Blocked` 而不是 Ok —— 拦截不等于发成功，去重标记不能被空跑消耗。 */
     if out_blocked("image", &b.name, caption) {
-        return Ok(());
+        return Err(Blocked.into());
     }
     let a = crate::store::wx_push_account_get(st, &b.name)
         .await
@@ -757,8 +793,15 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
                             tracing::info!(account = %b.name, "每日报告已推送");
                         }
                         Err(e) => {
-                            tracing::warn!(account = %b.name, error = %e, "每日报告推送失败");
-                            crate::store::push_touch(st, &b.name, &e.to_string()).await;
+                            /* 被闸门拦下 ≠ 发送成功：不写 last_report_date，
+                            也不记失败原因（避免运营看到一堆「失败」其实是没开闸）。
+                            消息留到开闸后再推，不会因去重标记被消耗而永久丢失。 */
+                            if is_blocked(&e) {
+                                tracing::warn!(account = %b.name, "每日报告：出网闸门拦截，未发（去重标记不推进，开闸后会补推）");
+                            } else {
+                                tracing::warn!(account = %b.name, error = %e, "每日报告推送失败");
+                                crate::store::push_touch(st, &b.name, &e.to_string()).await;
+                            }
                         }
                     }
                 } else {
@@ -787,8 +830,12 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
                                 crate::store::push_set_last_report_date(st, &b.name, date).await;
                             }
                             Err(e2) => {
-                                tracing::warn!(account = %b.name, error = %e2, "每日报告推送失败");
-                                crate::store::push_touch(st, &b.name, &e2.to_string()).await;
+                                if is_blocked(&e2) {
+                                    tracing::warn!(account = %b.name, "每日报告：闸门拦截，未发（去重标记不推进）");
+                                } else {
+                                    tracing::warn!(account = %b.name, error = %e2, "每日报告推送失败");
+                                    crate::store::push_touch(st, &b.name, &e2.to_string()).await;
+                                }
                             }
                         }
                     } else {
@@ -800,15 +847,26 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
                                 tracing::info!(account = %b.name, pages = pngs.len(), "每日报告(图片)已推送");
                             }
                             Err(e) => {
-                                tracing::warn!(account = %b.name, error = %e, "每日报告图片推送失败，退回文本");
-                                match send_binding(st, b, wx_global.as_ref(), &text).await {
-                                    Ok(()) => {
-                                        sent_any = true;
-                                        crate::store::push_set_last_report_date(st, &b.name, date).await;
-                                    }
-                                    Err(e2) => {
-                                        tracing::warn!(account = %b.name, error = %e2, "每日报告文本兜底也失败");
-                                        crate::store::push_touch(st, &b.name, &e2.to_string()).await;
+                                /* 图片被闸门拦下时**不要退回文本**重试：文本走同一闸门，
+                                重试只是又一次空跑（还会多一条「已拦截」日志）。
+                                这里不写去重标记即可，继续处理后面的订阅者。 */
+                                if is_blocked(&e) {
+                                    tracing::warn!(account = %b.name, "每日报告(图片)：闸门拦截，未发（去重标记不推进）");
+                                } else {
+                                    tracing::warn!(account = %b.name, error = %e, "每日报告图片推送失败，退回文本");
+                                    match send_binding(st, b, wx_global.as_ref(), &text).await {
+                                        Ok(()) => {
+                                            sent_any = true;
+                                            crate::store::push_set_last_report_date(st, &b.name, date).await;
+                                        }
+                                        Err(e2) => {
+                                            if is_blocked(&e2) {
+                                                tracing::warn!(account = %b.name, "每日报告：闸门拦截，未发（去重标记不推进）");
+                                            } else {
+                                                tracing::warn!(account = %b.name, error = %e2, "每日报告文本兜底也失败");
+                                                crate::store::push_touch(st, &b.name, &e2.to_string()).await;
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -826,6 +884,13 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
                 let mut lines: Vec<String> = Vec::new();
                 let mut event = false;
                 let mut due = false;
+                /* 待落库的目标状态（2026-10-17 修复，审计 1-P1-3）：
+                原先**先落库后发送** —— `target_set_state` 在 send_binding 之前就把
+                `hit` 与 `last_notice_date=当天` 写死了。一旦发送被闸门拦下（或真的失败），
+                「追上 / 被反超」这类**一次性事件**就永久丢失：标记已消耗，
+                主播再也收不到这条提醒。
+                现在攒到这里，**发送成功后才写**（与每日报告的 last_report_date 同款顺序）。 */
+                let mut pending_states: Vec<(i64, bool, i64)> = Vec::new();
                 for t in &targets {
                     let rival = month_map.get(&t.target_person_id).copied().unwrap_or(0);
                     let (gap, label, detail, gap_text) =
@@ -836,7 +901,7 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
                             lines.push(line_target_reached(&label, &detail));
                             event = true;
                         }
-                        crate::store::target_set_state(st, t.id, true, 0, date).await;
+                        pending_states.push((t.id, true, 0));
                     } else {
                         if t.hit {
                             // 2026-10-15：文案抽成纯函数 line_target_regained
@@ -851,7 +916,7 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
                         }
                         // 追名次没进榜时 gap 是哨兵值，落库记 0（前端只显示「未达成」）
                         let store_gap = if gap == i64::MAX { 0 } else { gap };
-                        crate::store::target_set_state(st, t.id, false, store_gap, date).await;
+                        pending_states.push((t.id, false, store_gap));
                     }
                 }
                 if !lines.is_empty() && (event || due) {
@@ -1267,7 +1332,11 @@ pub(crate) fn account_waves_sql(person_id: u64, date: &str) -> Option<String> {
        a.anchor_name AS anchor_name, a.is_primary AS is_pri, \
        (COALESCE(SUM(CASE WHEN t.d = '{day}' THEN t.w ELSE 0 END), 0))::BIGINT AS wd, \
        (COALESCE(SUM(CASE WHEN t.m = '{month}' THEN t.w ELSE 0 END), 0))::BIGINT AS wm, \
-       (COALESCE(SUM(CASE WHEN t.y = '{year}' THEN t.w ELSE 0 END), 0))::BIGINT AS wy \
+       (COALESCE(SUM(CASE WHEN t.y = '{year}' THEN t.w ELSE 0 END), 0))::BIGINT AS wy, \
+       COALESCE((SELECT SUM(mw.wave) FROM monthly_wave mw \
+                  WHERE mw.person_id = {person_id} AND mw.period = '{month}'), 0)::BIGINT AS mw_m, \
+       COALESCE((SELECT SUM(mw.wave) FROM monthly_wave mw \
+                  WHERE mw.person_id = {person_id} AND mw.period LIKE '{year}-%'), 0)::BIGINT AS mw_y \
   FROM account a \
   LEFT JOIN ( \
        SELECT d.anchor_id AS ak, TO_CHAR(d.biz_date, 'YYYY-MM-DD') AS d, \
@@ -1277,6 +1346,8 @@ pub(crate) fn account_waves_sql(person_id: u64, date: &str) -> Option<String> {
          JOIN account a2 ON a2.anchor_id = d.anchor_id AND a2.person_id = d.person_id \
           AND a2.is_primary = 1 \
         WHERE d.person_id = {person_id} AND d.wave_reliable = 1 \
+          AND TO_CHAR(d.biz_date, 'YYYY-MM') NOT IN \
+              (SELECT mw0.period FROM monthly_wave mw0 WHERE mw0.person_id = {person_id}) \
        UNION ALL \
        SELECT ws.anchor_id AS ak, TO_CHAR(ws.biz_date, 'YYYY-MM-DD') AS d, \
               TO_CHAR(ws.biz_date, 'YYYY-MM') AS m, TO_CHAR(ws.biz_date, 'YYYY') AS y, \
@@ -1342,14 +1413,34 @@ pub(crate) async fn person_account_waves(
     match pgrs::query(&st.pools, &st.active_id(), &sql).await {
         Ok(rows) => rows
             .iter()
-            .map(|r| AccountWave {
-                douyin_no: r.try_get::<String, _>("douyin_no").unwrap_or_default(),
-                anchor_name: r.try_get::<String, _>("anchor_name").unwrap_or_default(),
-                anchor_id: r.try_get::<String, _>("anchor_id").unwrap_or_default(),
-                primary: row_i64(r, "is_pri") > 0,
-                day: row_i64(r, "wd"),
-                month: row_i64(r, "wm"),
-                year: row_i64(r, "wy"),
+            .map(|r| {
+                let primary = row_i64(r, "is_pri") > 0;
+                let month = row_i64(r, "wm");
+                let year = row_i64(r, "wy");
+                /* 主号的月 / 年走整月音浪优先（2026-10-17 修复，审计 P0-2）：
+                与 /my 月卡、展示端月榜同口径，免得同一条推送里 caption 说 50 万、
+                下面的「我的抖音号」明细段说 48 万。整月值是**人**粒度，只加在
+                主号那一行（副号仍走 wave_snapshot），否则每个号都加一份会翻倍。
+                日明细侧已排掉「该月导过整月值」的行，两处不会双算。 */
+                let (month, year) = if primary {
+                    let mw_m = row_i64(r, "mw_m");
+                    let mw_y = row_i64(r, "mw_y");
+                    (
+                        if mw_m > 0 { mw_m } else { month },
+                        if mw_y > 0 { mw_y } else { year },
+                    )
+                } else {
+                    (month, year)
+                };
+                AccountWave {
+                    douyin_no: r.try_get::<String, _>("douyin_no").unwrap_or_default(),
+                    anchor_name: r.try_get::<String, _>("anchor_name").unwrap_or_default(),
+                    anchor_id: r.try_get::<String, _>("anchor_id").unwrap_or_default(),
+                    primary,
+                    day: row_i64(r, "wd"),
+                    month,
+                    year,
+                }
             })
             .collect(),
         Err(e) => {

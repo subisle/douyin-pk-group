@@ -434,6 +434,14 @@ const OPEN_PREFIXES: &[&str] = &[
     "/lineage/",
     "/my/",
     "/group/",
+    /* 「微信对接」独立短路径（2026-10-17 修复，审计 5-P0）：
+    main.rs 把 `/wechat` 与 `/my/{key}` 并列注册成**公开页**路由（深链/刷新要走它），
+    但这里原先漏了它 —— 未登录访问被 require_admin 拦成
+    401 + `{"error":"需要管理员口令"}`，主播点运营发来的链接只看到一行 JSON、页面空白。
+    规范路径 `/my/wechat` 因为在 `/my/` 前缀内一直是好的，只有这条短链挂了。
+    用**精确路径**写法（open_prefix_hit 认「路径正好等于前缀」），
+    不用 starts_with，避免 `/wechat-xxx` 这类路径被顺带放过。 */
+    "/wechat",
     "/api/public/",
     "/api/auth/session",
     "/api/auth/login",

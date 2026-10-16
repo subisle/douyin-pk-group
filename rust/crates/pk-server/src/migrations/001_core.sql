@@ -326,7 +326,14 @@ CREATE TABLE IF NOT EXISTS wave_snapshot (
 );
 CREATE INDEX IF NOT EXISTS idx_snap_date ON wave_snapshot (biz_date);
 CREATE INDEX IF NOT EXISTS idx_wave_snapshot_anchor ON wave_snapshot (anchor_id);
-CREATE UNIQUE INDEX IF NOT EXISTS uk_anchor_date ON wave_snapshot (anchor_id, biz_date);
+-- 2026-10-17 修复（审计 6-9）：原先这里叫 uk_anchor_date，而上面 duration_snapshot
+-- 已先建了同名索引 —— `CREATE UNIQUE INDEX IF NOT EXISTS` **只认名字**，这行被静默跳过，
+-- wave_snapshot 一直没有唯一约束。后果：任何只跑 001_core.sql 的路径
+-- （.dbmerge/merge.py 灌库、手工建库）会得到没有唯一键的 wave_snapshot，
+-- 导入的 `ON CONFLICT (anchor_id, biz_date)` 直接报错、整轮灌库终止。
+-- 现在改成与 021 相同的名字（021 的 IF NOT EXISTS 会跳过，不冲突），
+-- 这样只跑 001 或从 001 走到 021 都能拿到这条唯一约束。
+CREATE UNIQUE INDEX IF NOT EXISTS uk_wave_snapshot_anchor_date ON wave_snapshot (anchor_id, biz_date);
 
 CREATE TABLE IF NOT EXISTS wx_push_accounts (
   name VARCHAR(64) NOT NULL,

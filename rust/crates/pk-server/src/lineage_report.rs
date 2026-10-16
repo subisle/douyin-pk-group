@@ -169,10 +169,14 @@ pub async fn build(
              WHERE wave_reliable = 1 AND TO_CHAR(biz_date, 'YYYY-MM-DD') = '{d}' GROUP BY person_id"
         )
     };
-    let month_sql = format!(
-        "SELECT person_id, (SUM(wave))::BIGINT AS wave FROM daily_metric \
-         WHERE wave_reliable = 1 AND TO_CHAR(biz_date, 'YYYY-MM') = '{month}' GROUP BY person_id"
-    );
+    /* 本月累计（2026-10-17 修复，审计 P0-1）：原先这里是裸 `SUM(daily_metric.wave)`，
+    而月榜图 / 个人月卡 / 推送 caption 早已改成「整月音浪 monthly_wave 优先、缺月回落
+    日明细」。导了整月音浪后，师傅收到的师门日报图里「本月累计」会比别处少一截
+    （只采到已导入日明细的天数）——同一天两个数字，师傅会拿图来对。
+    现在复用 [`crate::report::month_wave_sql`]（同一份 COALESCE 口径），
+    缺表场景交给 [`crate::dialect::query_month_wave_fallback`] 自动降级。 */
+    let month_sql = crate::report::month_wave_sql(&month);
+    let month_sql_daily = crate::report::month_wave_sql_daily(&month);
 
     let mut today_map: HashMap<u64, i64> = HashMap::new();
     for r in pgrs::query(&st.pools, "LOCAL", &wave_day_sql(date)).await? {
@@ -183,7 +187,15 @@ pub async fn build(
         yday_map.insert(id_of(&r, "person_id"), signed(&r, "wave"));
     }
     let mut month_map: HashMap<u64, i64> = HashMap::new();
-    for r in pgrs::query(&st.pools, "LOCAL", &month_sql).await? {
+    // 缺表（库没跑 026 迁移）时自动回落到纯日明细版，师门日报不被打挂
+    for r in crate::dialect::query_month_wave_fallback(
+        &st.pools,
+        "LOCAL",
+        &month_sql,
+        &month_sql_daily,
+    )
+    .await?
+    {
         month_map.insert(id_of(&r, "person_id"), signed(&r, "wave"));
     }
 

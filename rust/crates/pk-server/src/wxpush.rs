@@ -196,14 +196,21 @@ fn reap_finished(map: &mut HashMap<String, TaskEntry>) -> Vec<String> {
     dead
 }
 
-/// supervisor 一轮该拉起哪些账号：有凭证、且当前没有活任务在跑。
+/// supervisor 一轮该拉起哪些账号：有凭证、没在跑、且**未被解绑暂停**。
 /// 纯函数（不碰全局表），便于单测。
+/// paused（2026-10-17 用户口径「解绑 = 停止数据传输」）在 push_bindings 表上，
+/// 由 store::wx_push_account_get / wx_push_accounts_all 联表带出：
+/// 解绑后账号凭证（wx_push_accounts）保留，但不再补拉长轮询；
+/// 重新对接时 store::push_bind_account 把 paused 置回 0，这里自动恢复补拉。
 fn accounts_to_start(accounts: &[WxPushAccount], running: &HashSet<String>) -> Vec<String> {
     let mut out = Vec::new();
     for a in accounts {
         let name = a.name.trim();
         if name.is_empty() || a.bot_token.trim().is_empty() {
             continue; // 没凭证（未扫码 / 已失效）的账号不拉
+        }
+        if a.paused {
+            continue; // 解绑暂停（push_bindings.paused=1）的账号不拉，等重新对接恢复
         }
         if running.contains(name) {
             continue;
@@ -373,6 +380,13 @@ async fn poll_body(st: &Arc<AppState>, name: &str, cursor: &mut CursorBuf) {
             tracing::info!(account = %name, "扫码账号已解绑，停止轮询");
             return; // 已解绑 / 被删除
         };
+        if acct.paused {
+            // 2026-10-17 用户口径「解绑 = 停止数据传输」：paused=1（push_unbind 置位）
+            // 时立即退出任务，本账号不再收发任何数据。supervisor 因 paused 过滤不会
+            // 再补拉；重新对接（push_bind_account 置回 0）后由 supervisor 自动恢复。
+            tracing::info!(account = %name, "账号已解绑暂停，停止轮询");
+            return;
+        }
         if acct.bot_token.is_empty() {
             tracing::info!(account = %name, "扫码账号无凭证，停止轮询");
             return;
@@ -707,6 +721,17 @@ mod tests {
         let start = accounts_to_start(&accounts, &HashSet::new());
         assert_eq!(start.len(), 2);
         assert!(start.contains(&"a".to_string()) && start.contains(&"b".to_string()));
+    }
+
+    /// 2026-10-17 用户口径「解绑 = 停止数据传输」：paused=1 的账号即使有凭证、
+    /// 没在跑，supervisor 也不补拉；其余账号照常。
+    #[test]
+    fn supervisor_skips_paused_accounts() {
+        let mut paused = acct("已解绑", "tok-p");
+        paused.paused = true;
+        let accounts = vec![paused, acct("正常", "tok-1")];
+        let start = accounts_to_start(&accounts, &HashSet::new());
+        assert_eq!(start, vec!["正常".to_string()], "paused=1 不补拉，其余照常");
     }
 
     #[test]

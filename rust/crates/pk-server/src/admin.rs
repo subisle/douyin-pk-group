@@ -419,8 +419,16 @@ pub async fn streamers(State(st): State<ArcState>, Query(q): Query<StreamerQuery
 /// 参数走 `Options::default()`（days=7 / 不 force）：只抓「无图或超期」的人，
 /// 与 CLI `pk-server sync-avatars`（不带 --force）行为完全一致 —— 管理端按钮
 /// 不该无条件重抓所有人，把抖音侧请求量控制在最小。
+///
+/// 2026-10-17：总闸 `AVATAR_SYNC_DISABLED=1` 时直接 400 拒绝（不请求抖音、不写库），
+/// 已留存的头像照常展示。见 `config::avatar_sync_disabled`。
 pub async fn avatar_sync_now(State(st): State<ArcState>) -> ApiResult {
     require_local(&st)?;
+    if crate::config::avatar_sync_disabled() {
+        return Err(ApiError::bad_request(
+            "头像同步已停用（AVATAR_SYNC_DISABLED=1）：当前不再抓取抖音头像，已留存的头像照常展示",
+        ));
+    }
     let pool = writer_pool(&st)?;
     tracing::info!("管理端手动触发头像同步开始（days=7，只抓无图/超期，600ms/请求节流）");
     let started = std::time::Instant::now();
@@ -739,6 +747,24 @@ pub async fn update_streamer(
     /* 手机号不走上面的 SET 拼接：它要过格式校验 + 两侧查重 + 「016 没跑」的中文提示，
     单独在下面调 person_set_phone（失败 = 整条编辑失败，运营要看见原因）。 */
     let phone_in = body.phone.clone();
+    /* 改名前的旧名（2026-10-17 修复，审计 3-P0）：必须在 UPDATE person **之前**取，
+    否则读到的已经是新名，就没法把下面四张表的 name 从旧名改过去了。 */
+    let rename_from: Option<String> = match body
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(new_name) => sqlx::query(&crate::pq::rewrite(
+            "SELECT name FROM person WHERE id = ? AND name <> ?",
+        ))
+        .bind(id as i64)
+        .bind(new_name)
+        .map(|r: sqlx::postgres::PgRow| r.try_get::<String, _>(0).unwrap_or_default())
+        .fetch_optional(pool)
+        .await?,
+        None => None,
+    };
     if !sets.is_empty() {
         let sql = format!("UPDATE person SET {} WHERE id = ?", sets.join(", "));
         writer::write_guard(&sql)?;
@@ -748,6 +774,45 @@ pub async fn update_streamer(
             query = b.into_query(query);
         }
         query.bind(id as i64).execute(pool).await?;
+    }
+
+    /* 改名要把「拿姓名当关联键」的表一起改（2026-10-17 修复，审计 3-P0）：
+    `my_accounts` / `push_bindings` / `my_targets` / `wx_push_accounts` 四张表都用
+    **name** 关联到人，而原来改名只 `UPDATE person SET name=?` 就返回 ok ——
+    一次台账改名会静默打断该主播的三条链路：
+      · 登录：`my_login` 用 my_accounts.name 反查 person（p.name=?），库里已是新名
+        → 查不到 → 非管理员直接 {ok:false}，主播登不进去
+      · 微信推送：`person_team_of_name` 按旧名查不到 → team 落空串
+        → `push_bindings_for_team` 的 WHERE team=? 永远捞不到他 → 推送静默消失
+      · 追分目标：my_targets 按 name 存，旧目标跟着旧名留下，新名下目标为空
+    现在改名成功后把四张表的 name 同步成新名，并吊销旧 my token（与「改团别必吊销」
+    的既有纪律一致 —— 旧 token 里挂着旧名，不吊销会继续按旧身份读数据）。 */
+    if let Some(old_name) = rename_from.as_deref() {
+        let new_name = body.name.as_deref().map(str::trim).unwrap_or_default();
+        for tbl in [
+            "my_accounts",
+            "push_bindings",
+            "my_targets",
+            "wx_push_accounts",
+        ] {
+            // 单表失败不回滚整次改名（人名已经改了），只记日志让运营能看到
+            let sql = format!("UPDATE {tbl} SET name = ? WHERE name = ?");
+            if let Err(e) = sqlx::query(&crate::pq::rewrite(&sql))
+                .bind(new_name)
+                .bind(old_name)
+                .execute(pool)
+                .await
+            {
+                tracing::warn!(table = tbl, old = %old_name, new = %new_name, error = %e, "改名同步失败");
+            }
+        }
+        crate::public_teams::admin::my_tokens_revoke(old_name);
+        tracing::info!(
+            person_id = id,
+            old = %old_name,
+            new = %new_name,
+            "主播改名：已同步 my_accounts/push_bindings/my_targets/wx_push_accounts 并吊销旧 token"
+        );
     }
 
     if let Some(p) = phone_in.as_deref() {
@@ -2288,6 +2353,13 @@ async fn write_daily_row(
               wave_span, wave_reliable, minutes, is_live, source_batch_id)
          VALUES (?,?,?::date,?,?,?::date,?,?,?,?,?)
          ON CONFLICT (person_id, biz_date) DO UPDATE SET
+             /* anchor_id 也要跟着更新（2026-10-17 修复，审计 P1-4）：
+             分号口径主号分支要求 `account.anchor_id = daily_metric.anchor_id
+             AND is_primary = 1`，而这个 anchor_id 是**写库那一刻**的主号。
+             运营在台账换主号后，旧行的 anchor 还卡在老号上，老号已降为副号
+             （走 wave_snapshot）→ 两边都取不到，该主播在「我的抖音号」卡上主号=0、副号=0。
+             原来这里不写 anchor_id，**重导同一天也不会自愈**。 */
+             anchor_id = EXCLUDED.anchor_id,
              wave = EXCLUDED.wave, cumulative_wave = EXCLUDED.cumulative_wave,
              prev_snapshot_date = EXCLUDED.prev_snapshot_date, wave_span = EXCLUDED.wave_span,
              wave_reliable = EXCLUDED.wave_reliable, minutes = EXCLUDED.minutes,

@@ -133,6 +133,27 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "028_push_bind_code_unique",
         include_str!("migrations/028_push_bind_code_unique.sql"),
     ),
+    // 029：解绑 = 停止数据传输。push_bindings 加 paused 列（0/1 smallint）：
+    // push_unbind 置 1 → wxpush 补拉跳过 + poll_body 一轮内退出（不再收发任何数据）；
+    // 重新对接（push_bind_account / push_bind_by_code）置回 0 = 恢复。
+    // 顺带把 daily_report 列默认值改 1：新对接用户每日报告默认开启（存量行不动）。
+    (
+        "029_push_bindings_paused",
+        include_str!("migrations/029_push_bindings_paused.sql"),
+    ),
+    // 030：存量方案的 event_type 回写（2026-10-09 改名后落库的方案一直没人回扫，
+    // 老值在展示端与后台都按 eventType 精确过滤 → 历史方案凭空消失，见审计 4-9）。
+    // 幂等，重跑无副作用。
+    (
+        "030_normalize_plan_event_type",
+        include_str!("migrations/030_normalize_plan_event_type.sql"),
+    ),
+    // 031：daily_metric.anchor_id 回扫对齐当前主号（换主号后旧行不自愈，
+    // 分号口径主号音浪会整段消失，见审计 P1-4）。幂等。
+    (
+        "031_fix_daily_metric_anchor",
+        include_str!("migrations/031_fix_daily_metric_anchor.sql"),
+    ),
 ];
 
 /// 迁移建连（migrator 账号；同样关语句缓存）

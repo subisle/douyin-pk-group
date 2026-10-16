@@ -214,7 +214,11 @@ const WATERMARK: &str = "内部数据 · 请勿外传";
 /// `(person_id, period)` 唯一，所以 `MAX(mw.wave)` 就是那一个整月值；没有整月行时它是 NULL
 /// → COALESCE 落到日明细（只算可信行 wave_reliable=1）。返回 person_id / wave，
 /// 没有数据的人不进结果集（调用方按缺省 0 处理，语义不变）。
-fn month_wave_sql(month: &str) -> String {
+///
+/// `pub(crate)`（2026-10-17 修复，审计 P0-1）：师门日报 [`crate::lineage_report`] 原先
+/// 自己写了一份裸 `SUM(wave)`，导了整月音浪后会与月榜 / 个人卡差一截，这里统一复用，
+/// 免得再多一份口径。缺表降级走 [`crate::dialect::query_month_wave_fallback`]。
+pub(crate) fn month_wave_sql(month: &str) -> String {
     format!(
         "SELECT p.id AS person_id, (COALESCE(MAX(mw.wave), SUM(d.wave), 0))::BIGINT AS wave \
          FROM person p \
@@ -229,7 +233,7 @@ fn month_wave_sql(month: &str) -> String {
 
 /// 库没跑 026 迁移（monthly_wave 不存在）时的纯日明细版：与旧口径逐字一致，
 /// 由 [`crate::dialect::query_month_wave_fallback`] 在缺表时自动换用，日报不被打挂。
-fn month_wave_sql_daily(month: &str) -> String {
+pub(crate) fn month_wave_sql_daily(month: &str) -> String {
     format!(
         "SELECT person_id, (SUM(wave))::BIGINT AS wave \
          FROM daily_metric WHERE wave_reliable = 1 \

@@ -515,6 +515,7 @@ export default function BotPage() {
       </section>
 
       <PublicSettingsCard />
+      <PushQueueCard />
       <MyAccountsCard />
 
       <section className="card">
@@ -560,6 +561,126 @@ export default function BotPage() {
         )}
       </section>
     </div>
+  )
+}
+
+/* 推送队列（2026-10-17 新增，审计 6/P1-2）：后端 /api/admin/push/jobs 与
+   /api/admin/push/run 早就有，但前端**没有任何入口** —— 上线后推送一旦出问题，
+   运营在界面上既看不到队列、也没有「立刻再推一次」的按钮，只能登服务器 curl。
+   这里补上：看最近任务 + 手动立即推送（立即推送仍然走 PUSH_OUT_ENABLED 出网闸门）。 */
+function PushQueueCard() {
+  const [jobs, setJobs] = useState<any[]>([])
+  const [stats, setStats] = useState<any>(null)
+  const [delayMinutes, setDelayMinutes] = useState<number | null>(null)
+  const [team, setTeam] = useState('male')
+  const [bizDate, setBizDate] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [msg, setMsg] = useState('')
+  const [err, setErr] = useState('')
+
+  const load = useCallback(() => {
+    api('/api/admin/push/jobs')
+      .then((d: any) => {
+        setJobs(d?.items ?? [])
+        setStats(d?.stats ?? null)
+        setDelayMinutes(typeof d?.delayMinutes === 'number' ? d.delayMinutes : null)
+      })
+      .catch((e) => setErr(String(e?.message ?? e)))
+  }, [])
+
+  useEffect(() => {
+    load()
+  }, [load])
+  // 推送任务有变化就自动刷新（导入完成 / 别的页签推过）
+  useAutoRefresh(load, ['import', 'bot'])
+
+  async function runNow() {
+    if (!bizDate.trim()) {
+      setErr('请填业务日期（YYYY-MM-DD）')
+      return
+    }
+    setBusy(true)
+    setErr('')
+    setMsg('')
+    try {
+      await api(
+        `/api/admin/push/run?team=${encodeURIComponent(team)}&bizDate=${encodeURIComponent(bizDate.trim())}`,
+        { method: 'POST', body: '{}' },
+      )
+      setMsg(`已立即推送：${team === 'female' ? '女团' : '男团'} ${bizDate.trim()}`)
+      load()
+    } catch (e) {
+      setErr(String((e as any)?.message ?? e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const statusText = (s: string) =>
+    ({ pending: '待发', sending: '发送中', done: '已完成', failed: '失败' } as Record<string, string>)[
+      s
+    ] ?? s
+
+  return (
+    <section className="card">
+      <h2>推送队列</h2>
+      <p className="hint">
+        数据入库后按{delayMinutes == null ? '配置的延迟' : ` ${delayMinutes} 分钟 `}延迟推送；
+        这里能看队列有没有推出去，也能手动立刻再推一次（仍受出网闸门控制）。
+      </p>
+      {stats && (
+        <p className="hint">
+          待发 {stats.pending ?? 0} · 发送中 {stats.sending ?? 0} · 已完成 {stats.done ?? 0} · 失败{' '}
+          {stats.failed ?? 0}
+        </p>
+      )}
+      <div className="row" style={{ gap: 8, alignItems: 'flex-end', flexWrap: 'wrap' }}>
+        <label className="field">
+          团别
+          <select value={team} onChange={(e) => setTeam(e.target.value)}>
+            <option value="male">男团</option>
+            <option value="female">女团</option>
+          </select>
+        </label>
+        <label className="field">
+          业务日期
+          <input
+            placeholder="YYYY-MM-DD"
+            value={bizDate}
+            onChange={(e) => setBizDate(e.target.value)}
+          />
+        </label>
+        <button className="primary" disabled={busy} onClick={runNow}>
+          {busy ? '推送中…' : '立即推送'}
+        </button>
+      </div>
+      {jobs.length > 0 && (
+        <table style={{ marginTop: 8 }}>
+          <thead>
+            <tr>
+              <th>团别</th>
+              <th>业务日</th>
+              <th>状态</th>
+              <th>计划时间</th>
+              <th>备注</th>
+            </tr>
+          </thead>
+          <tbody>
+            {jobs.map((j: any, i: number) => (
+              <tr key={j.id ?? i}>
+                <td>{teamText(j.team)}</td>
+                <td>{j.bizDate ?? j.biz_date ?? '—'}</td>
+                <td>{statusText(String(j.status ?? '—'))}</td>
+                <td>{j.runAt ?? j.run_at ?? '—'}</td>
+                <td>{j.note || '—'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      {msg && <div className="alert good">{msg}</div>}
+      {err && <div className="alert bad">{err}</div>}
+    </section>
   )
 }
 

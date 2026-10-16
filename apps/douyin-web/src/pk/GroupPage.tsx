@@ -14,7 +14,13 @@ import {
   type EventType,
 } from './api';
 import { buildExportNode, disposeExportNode, downloadBlob, nodeToPngBlob } from './exportImage';
-import { REVIVAL_MINUTES, revivalAfterGroup, rulesOf } from './rules';
+import {
+  BREAK_AFTER_GROUP,
+  REVIVAL_EVENTS,
+  REVIVAL_MINUTES,
+  revivalAfterGroup,
+  rulesOf,
+} from './rules';
 import { useAutoRefresh } from '../useAutoRefresh';
 import { isoLocal } from '../lib/date';
 import { openFullscreen, registerLeaveGuard } from '../lib/router';
@@ -49,13 +55,8 @@ const wan = (n: number) => {
 
 const clone = <T,>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
 
-/** 月终争霸赛 / 两级晋级赛的加长休息点：第 3 组之后（分钟数可调） */
-const BREAK_AFTER_GROUP = 3;
-
-/** 有复活赛的赛事：初级 / 中级争霸赛小组赛。
- *  复活赛是**一场 20 分钟的比赛**（不是休息），只打一场，落在「上半程最后一组」之后：
- *  8 个组 / 7 个组 → 第 4 组后，6 个组 → 第 3 组后，即第 ceil(组数/2) 组之后。位置和时长都不可改。 */
-const REVIVAL_EVENTS: readonly EventType[] = ['初级争霸赛小组赛', '中级争霸赛小组赛'];
+/* BREAK_AFTER_GROUP / REVIVAL_EVENTS 原先在这里各写了一份，与 BoardPage 重复
+   （2026-10-17，审计 4-8）→ 统一从 './rules' 导入，见下面 import。 */
 
 /** 自动生成的标题前缀（「初级争霸赛小组赛 · PK 分组 …」）。切赛事后要能识别出来清掉，
  *  否则导出长图/方案列表会把上一场的赛事名带出去。老名字也一并认，兼容改名前的方案标题。 */
@@ -102,6 +103,10 @@ export default function GroupPage() {
   const [boardCfg, setBoardCfg] = useState<BoardConfig | null>(null);
   const [boardCfgLoaded, setBoardCfgLoaded] = useState(false);
   const [boardSaving, setBoardSaving] = useState(false);
+  /** 第 3 组打完到下组开赛的间隔（加长休息），与常规间隔分开配。
+   *  只在**没有复活赛**的赛事生效（月终争霸赛、两级晋级赛）；小组赛的 20 分钟由复活赛占。
+   *  声明提前到 boardDirty 之前：差异统计与保存都要读它（2026-10-17，审计 4-1）。 */
+  const [longBreak, setLongBreak] = useState(20);
   /** 展板配置与本页「名单与配置」的差异条数（保存按钮提示用） */
   const boardDirty = useMemo(() => {
     if (!boardCfg) return 0;
@@ -114,8 +119,22 @@ export default function GroupPage() {
     if (boardCfg.groupSize !== groupSize) n++;
     if (boardCfg.startTime !== startTime) n++;
     if (boardCfg.intervalMin !== intervalMin) n++;
+    /* 2026-10-17 修复（审计 4-1）：longBreak 原先不在差异统计里 —— 运营改了加长休息，
+    页面不提示「有 N 处改动没存」，配合保存时回写旧值的 bug，改动等于完全丢失。 */
+    if (boardCfg.longBreak !== longBreak) n++;
     return n;
-  }, [boardCfg, eventType, metric, days, strategy, strengthMode, groupSize, startTime, intervalMin]);
+  }, [
+    boardCfg,
+    eventType,
+    metric,
+    days,
+    strategy,
+    strengthMode,
+    groupSize,
+    startTime,
+    intervalMin,
+    longBreak,
+  ]);
 
   /** 拉展板配置并回填本页控件（没存过保持本页默认值）。 */
   const loadBoardCfg = useCallback(async () => {
@@ -133,6 +152,10 @@ export default function GroupPage() {
         setGroupSize(c.groupSize);
         setStartTime(c.startTime);
         setIntervalMin(c.intervalMin);
+        /* longBreak 也要回填（2026-10-17 修复，审计 4-1）：原代码只回填 8 个字段，
+        漏了加长休息 —— 刷新后控件跳回默认 20，与本页刚保存的 40 不一致。
+        后端老配置可能没有该字段（undefined），按缺省 20 兜底。 */
+        setLongBreak(typeof c.longBreak === 'number' ? c.longBreak : 20);
       }
     } catch {
       /* 拉不到不挡页面：后台照常用本页默认值分组，保存时再报后端错误 */
@@ -158,7 +181,11 @@ export default function GroupPage() {
         groupSize,
         startTime,
         intervalMin,
-        longBreak: boardCfg?.longBreak ?? 20,
+        /* 2026-10-17 修复（审计 4-1）：原先写 `boardCfg?.longBreak ?? 20`，把**后端
+        旧值**原样回写 —— 运营在本页把加长休息从 20 改成 40 后点保存，存进去的
+        还是 20，展板页按 20 分钟排赛程，与本页预览的 40 分钟不一致。
+        现在直接取本页控件当前值（与其余 8 个字段同一口径）。 */
+        longBreak,
       });
       const r = await pk.getBoardConfig();
       if (r.saved && r.config) setBoardCfg(r.config);
@@ -195,10 +222,6 @@ export default function GroupPage() {
   /** 强度位次形态：默认「每组一个最强」（第 3 组头牌最强、第 4 组次之、第 1 组最弱）；
    *  off = 不排位次只做均衡。强制条件始终优先满足。 */
   const strengthOn = strengthMode !== 'off';
-  /** 第 3 组打完到下组开赛的间隔（加长休息），与常规间隔分开配。
-   *  只在**没有复活赛**的赛事生效（月终争霸赛、两级晋级赛）；小组赛的 20 分钟由复活赛占。 */
-  const [longBreak, setLongBreak] = useState(20);
-
   /* ---------------- 交互状态 ---------------- */
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState('');
@@ -279,15 +302,40 @@ export default function GroupPage() {
     [restOn, restAfterGroup, restMin],
   );
 
+  /** 分组/体检都带上的约束：赛程（含加长休息）+ 强度位次形态。
+   *  `scheduleInputFor(n)` 按**指定组数**算复活赛/加长休息落点（n 缺省用当前 buckets 数），
+   *  用于「还没分组就要先算赛程」的场景（2026-10-17，审计 4-7）。 */
+  const scheduleInputFor = useCallback(
+    (groupCount?: number) => {
+      const n = groupCount && groupCount > 0 ? groupCount : buckets.length;
+      const revivalOnN = revivalEvent && n > 0;
+      const afterN = revivalOnN ? revivalAfterGroup(n) : BREAK_AFTER_GROUP;
+      const onN = afterN > 0 && (revivalOnN || (!revivalEvent && longBreak > 0));
+      const breaksN: BreakRule[] = onN ? [{ afterGroup: afterN, minutes: restMin }] : [];
+      return {
+        schedule: { start: startTime, intervalMin, breaks: breaksN },
+        strengthOrder: strengthOn
+          ? { enabled: true, mode: strengthMode as StrengthMode }
+          : { enabled: false },
+      };
+    },
+    [
+      buckets.length,
+      revivalEvent,
+      revivalAfterGroup,
+      longBreak,
+      restMin,
+      startTime,
+      intervalMin,
+      strengthOn,
+      strengthMode,
+    ],
+  );
+
   /** 分组/体检都带上的约束：赛程（含加长休息）+ 强度位次形态 */
   const scheduleInput = useCallback(
-    () => ({
-      schedule: { start: startTime, intervalMin, breaks },
-      strengthOrder: strengthOn
-        ? { enabled: true, mode: strengthMode as StrengthMode }
-        : { enabled: false },
-    }),
-    [startTime, intervalMin, breaks, strengthOn, strengthMode],
+    () => scheduleInputFor(),
+    [scheduleInputFor],
   );
 
   /* ---------------- 体检（拖拽后重算均衡与冲突） ---------------- */
@@ -347,12 +395,20 @@ export default function GroupPage() {
     pk.constraints()
       .then((m) => {
         setMeta(m);
+        /* 内置默认排期**不再无条件覆盖**本页控件（2026-10-17 修复，审计 4-6）：
+        这里与 `loadBoardCfg` 的展板配置回填是**两个并发 effect 抢同一批字段**，
+        谁后返回谁赢。运营把开赛时间改成 21:15 并保存后，只要 constraints 后到，
+        页面就被悄悄重置回内置的 12:15 —— 而 boardCfg 仍是已保存的 21:15，
+        boardDirty 立刻变 1（假报「有 1 处改动没存」）；若运营此时点保存，
+        还会把 12:15 真的写回展板配置，展板页排期全错。
+        现在只在**后端没存过展板配置**时才用内置默认值初始化（那时确实没有别的真值源）。 */
+        if (boardCfgLoaded && boardCfg) return;
         setStartTime(m.schedule?.start || '12:15');
         setIntervalMin(m.schedule?.intervalMin || 15);
       })
       .catch(() => {});
     // 方案列表由下面的 [eventType] effect 拉（P1-14 过滤需要跟着赛事类型走）
-  }, []);
+  }, [boardCfgLoaded, boardCfg]);
 
   /* 方案在别处（另一个页签/设备）被保存、上架、删除时自动刷新列表。
      loadPlans 每次渲染都是新函数没关系——hook 内部用 ref 持有，连接不会重建。 */
@@ -481,11 +537,17 @@ export default function GroupPage() {
       setScoredCount(res.scored || 0);
       setExcluded(res.excluded.map((e) => e.name));
       setDates(res.dates || []);
+      /* 首次分组时 `buckets` 还是空的 → 复活赛落点算不出来 → breaks 为空 →
+      arrange 返回的 slots **少算**那段加长休息（第 4 组及以后全部提前 20 分钟），
+      只有随后 inspect 回来才纠正（2026-10-17 修复，审计 4-7）。
+      这里按「人数 ÷ 每组人数」先估个组数把 breaks 算对，与展板页同款口径；
+      分完组后的 inspect 会带真实组数再算一遍。 */
+      const estimated = Math.ceil(active.length / Math.max(1, groupSize));
       const arranged = await pk.arrange({
         players: res.players,
         groupSize,
         strategy,
-        constraints: scheduleInput(),
+        constraints: scheduleInputFor(estimated),
       });
       const next = toBuckets(arranged.groups);
       setPast([]);
@@ -834,7 +896,12 @@ export default function GroupPage() {
     for (let i = 0; i + 1 < order.length; i += 1) {
       const strong = buckets[order[i] - 1];
       const weak = buckets[order[i + 1] - 1];
-      if (!(value(strong) > value(weak))) return false;
+      /* 与后端 `pk_core::constraints::rank_penalty` **同口径**（2026-10-17 修复，审计 4-3）：
+      后端判据是 `weak - strong + 1.0 > 0` 才算违约，即**留 1 的整数余量**——
+      音浪相等（并列）视为已达成，避免同分反复横跳。
+      前端原先用严格 `>`，头牌同分时判成「未达成 ⚠️」，运营以为分组出错反复重分组。
+      这里改成同样的「弱组比强组多出 1 以上才算没达成」。 */
+      if (value(weak) - value(strong) + 1 > 0) return false;
     }
     return true;
   }, [buckets, strengthOn, strengthMode]);

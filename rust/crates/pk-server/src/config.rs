@@ -138,6 +138,29 @@ pub fn wave_cache_ttl_secs() -> u64 {
 
 /* --------------------------- 主播头像同步（2026-10-16） --------------------------- */
 
+/// 头像同步**总闸**：`AVATAR_SYNC_DISABLED=1/true/yes/on` → 整条更新链路冻结
+/// （2026-10-17 用户口径：抖音头像抓取链路不稳定，且抖音号会换，先整体停用）。
+///
+/// 与 [`avatar_sync_enabled`] 的区别：
+/// - `AVATAR_SYNC_ENABLED` 只管**后台自动定时器**（本来就是默认关）；
+/// - `AVATAR_SYNC_DISABLED` 是**总闸**，三条更新入口全受它管：
+///   ① 自动定时器（`main.rs` 的 `spawn_scheduler`）
+///   ② 管理端接口 `POST /api/admin/avatars/sync`
+///   ③ CLI `pk-server sync-avatars`
+///
+/// 冻结期间**已留存的头像照常展示**（`GET /api/public/avatars/{person_id}` 只读
+/// `person_avatar`，与同步链路无关），页面不破图、不裂图，只是不再刷新。
+/// 将来要恢复更新：把这个变量设成 0 / 删掉即可，不用改代码。
+pub fn avatar_sync_disabled() -> bool {
+    matches!(
+        env_or("AVATAR_SYNC_DISABLED", "0")
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
 /// 头像同步总开关：`AVATAR_SYNC_ENABLED=1/true/on` 才开（**默认关**）。
 /// 2026-10-16 用户口径：头像改为**纯手动**更新 —— 管理端「同步头像」按钮
 /// （`POST /api/admin/avatars/sync`）或 `pk-server sync-avatars` CLI；
@@ -279,4 +302,29 @@ pub fn load_migrator() -> anyhow::Result<DbEndpoint> {
 /// 仅在明确设置 MIGRATE_ON_BOOT=true 时启用，且需要 migrator 账号。
 pub fn migrate_on_boot() -> bool {
     env("MIGRATE_ON_BOOT").as_deref() == Some("true")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 头像同步总闸 AVATAR_SYNC_DISABLED：默认必须**开启更新**（冻结是显式选择），
+    /// 识别 1/true/yes/on（大小写不敏感），其余一律不冻结。
+    /// 2026-10-17：抖音抓取链路不稳定 + 抖音号会换，生产/本机都显式设 1 冻结，
+    /// 但**代码默认值**仍是「不冻结」，免得没配变量的环境莫名其妙不更新。
+    #[test]
+    fn avatar_sync_disabled_defaults_off() {
+        std::env::remove_var("AVATAR_SYNC_DISABLED");
+        assert!(!avatar_sync_disabled(), "未配置时不应冻结");
+        for off in ["0", "false", "no", "off", "", "2", "disabled"] {
+            std::env::set_var("AVATAR_SYNC_DISABLED", off);
+            assert!(!avatar_sync_disabled(), "{off:?} 不应冻结");
+        }
+        for on in ["1", "true", "TRUE", "yes", "on", " true "] {
+            std::env::set_var("AVATAR_SYNC_DISABLED", on);
+            assert!(avatar_sync_disabled(), "{on:?} 应冻结");
+        }
+        std::env::remove_var("AVATAR_SYNC_DISABLED");
+        assert!(!avatar_sync_disabled(), "清掉变量后应恢复不冻结");
+    }
 }

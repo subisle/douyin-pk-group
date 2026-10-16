@@ -2,7 +2,9 @@
 //! + 展示端「我的」页弹窗消息接口。
 //!
 //! 触发方是管理员手动动作（/admin/send 页），与自动推送互不相干；
-//! 发送不写 last_report_date / last_lineage_date，不顶掉当日自动推送的去重。
+//! 发送不写 `last_report_date`（每日报告是管理员自拟文案，不代表自动日报已推过）；
+//! 但 **imageKind=lineage 的师门日报图**发送成功后会写 `last_lineage_date`
+//! （2026-10-17 修复，审计 6-5）—— 否则同一天会双发：定时自动一条 + 管理员手动一条。
 //!
 //! 结构：
 //! - §5.2 TargetSpec 解析与校验（纯函数，可单测）
@@ -1108,7 +1110,16 @@ async fn send_wxbot_row(
             match crate::lineage_report::build(st, &date, r.person_id).await {
                 Ok(rep) if rep.disciple_count() > 0 => {
                     match wx_send_lineage_images(st, a, &conv, &rep, &r.recipient_name).await {
-                        Ok(_) => (true, String::new()),
+                        Ok(_) => {
+                            /* 同业务日去重（2026-10-17 修复，审计 6-5）：
+                            管理员手动下发师门日报图原先**刻意不写** last_lineage_date
+                            （怕顶掉自动推送的去重），结果是同一天同一人收到**两份**
+                            师门日报：定时自动一条 + 管理员手动一条。
+                            改成发送成功后写同日标记 —— 自动推送看到标记就跳过当天，
+                            不再重复推；发送失败不写（下次还能重发 / 自动补推）。 */
+                            crate::store::push_set_lineage_date(st, &bname, &date).await;
+                            (true, String::new())
+                        }
                         Err(e) => (true, format!("图片发送失败，已发纯文本：{e}")),
                     }
                 }

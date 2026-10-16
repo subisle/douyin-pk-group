@@ -541,6 +541,9 @@ pub async fn my_push_wechat_poll(
         conversation_id: String::new(),
         updates_buf: String::new(),
         bound_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+        // 刚扫码的账号未暂停；若此前解绑过，下面 push_bind_account 的 upsert 会把
+        // push_bindings.paused 置回 0（重新对接 = 恢复，迁移 029 口径）。
+        paused: false,
     };
     // save 的 DO UPDATE 不覆盖 conversation_id；已有账号时把内存结构与库对齐
     if let Some(e) = &existing {
@@ -693,10 +696,12 @@ pub async fn my_push_settings(
 ///
 /// 2026-10-17 用户口径：页面「解除绑定」只断开推送绑定（push_bindings 的会话接线），
 /// **不注销扫码登录状态** —— `wx_push_accounts` 的凭证（bot_token / ilink_user_id）
-/// 原样保留，长轮询继续跑；之后重新对接不用再扫码，把新的 4 位对接码发给机器人
-/// 即可（本人消息会按「push_bindings 未接上该会话 → 重跑激活」的幂等口径自动回接）。
-/// 与机器人里回复「解绑」（push_unbind_by_conversation）的行为对齐 —— 那条路本来
-/// 就不动登录态。唯一还删凭证的地方：换了微信号重扫（wx.rs rescan_new_wechat）。
+/// 原样保留。长轮询立即停止（push_unbind 置 paused=1：supervisor 不再补拉，
+/// 正在跑的 poll_body 最多一个轮询周期内退出，不再收发任何数据）；之后重新对接
+/// 不用再扫码，把新的 4 位对接码发给机器人即可（重新对接 = paused 置回 0 恢复，
+/// 本人消息会按「push_bindings 未接上该会话 → 重跑激活」的幂等口径自动回接）。
+/// 与机器人里回复「解绑」（push_unbind_by_conversation）的行为对齐 —— 那条路同样
+/// 置 paused=1。唯一还删凭证的地方：换了微信号重扫（wx.rs rescan_new_wechat）。
 pub async fn my_push_unbind(
     State(st): State<ArcState>,
     Path(team): Path<String>,
