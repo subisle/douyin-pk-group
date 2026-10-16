@@ -335,7 +335,57 @@ pub async fn scheduler_loop(st: Arc<AppState>) {
  *   - 未配置 / `0`（默认）  = **一律不发**，只记一条 WARN 日志（含收件人与正文摘要，
  *     便于本地验证「本来要发什么」），对调用方返回 Ok —— 不打断调度器的任务流转；
  *   - `1`                    = 恢复真实发送（生产/64 上的既有行为，一字不改）。
+ *
+ * 2026-10-17 用户口径（本地灰度）：开关开着时也**只对白名单账号真发**，
+ * 其余收件人照旧拦截记 WARN。白名单 = `PUSH_OUT_ALLOW`（逗号分隔的展示端账号名，
+ * 空 = 谁都不发，等价于只靠总开关）。当前本地只放 浩雨（管理员，本人要求开推送验证）。
  */
+
+/// 出网白名单（PUSH_OUT_ALLOW，逗号分隔展示端账号名）。空 = 没有白名单，
+/// 行为完全由总开关 PUSH_OUT_ENABLED 决定（与原口径一致）。
+fn push_out_allow() -> Vec<String> {
+    std::env::var("PUSH_OUT_ALLOW")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// 白名单是否非空（给 QQ 这类「会话对不上账号名」的通道做保守拦截用）
+pub(crate) fn push_out_allow_nonempty() -> bool {
+    !push_out_allow().is_empty()
+}
+
+/// 这条发送（按收件人展示端账号名）是否被允许真实出网：
+/// 总开关关 = 一律否；总开关开 = 白名单为空时放行（历史行为），
+/// 白名单非空时只放行名单内账号。
+pub(crate) fn push_out_allowed_for(name: &str) -> bool {
+    if !push_out_enabled() {
+        return false;
+    }
+    let allow = push_out_allow();
+    allow.is_empty() || allow.iter().any(|a| a == name.trim())
+}
+
+/// 窄口层的判定（weixin.rs / wxmedia.rs 只有 to_user_id，没有账号名）：
+/// to_user_id → wx_push_accounts.name → 白名单。查不到账号（非扫码通道，
+/// 如管理员全局机器人）按「白名单非空 = 一律不发」处理 —— 灰度期宁可少发。
+pub(crate) async fn push_out_allowed_for_account(st: &crate::state::AppState, to_user_id: &str) -> bool {
+    if !push_out_enabled() {
+        return false;
+    }
+    let allow = push_out_allow();
+    if allow.is_empty() {
+        return true;
+    }
+    let name = crate::store::wx_push_account_name_of(st, to_user_id).await;
+    match name {
+        Some(n) => allow.iter().any(|a| a == n.trim()),
+        None => false,
+    }
+}
 
 /// 是否允许真实出网发送。默认关（测试阶段一律不发）。
 pub fn push_out_enabled() -> bool {
@@ -346,15 +396,23 @@ pub fn push_out_enabled() -> bool {
 }
 
 /// 闸门：不允许出网时记日志并返回 true（= 已拦截）。
+/// 收件人在 PUSH_OUT_ALLOW 白名单外时同样拦截（2026-10-17 本地灰度：只放 浩雨）。
 fn out_blocked(kind: &str, to: &str, preview: &str) -> bool {
-    if push_out_enabled() {
+    if push_out_allowed_for(to) {
         return false;
     }
     let preview: String = preview.chars().take(120).collect();
-    tracing::warn!(
-        kind, to, preview = %preview,
-        "【测试阶段】已拦截对外推送（未发）；要真实发送请设 PUSH_OUT_ENABLED=1"
-    );
+    if push_out_enabled() {
+        tracing::warn!(
+            kind, to, preview = %preview,
+            "【本地灰度】收件人不在 PUSH_OUT_ALLOW 白名单，已拦截（未发）"
+        );
+    } else {
+        tracing::warn!(
+            kind, to, preview = %preview,
+            "【测试阶段】已拦截对外推送（未发）；要真实发送请设 PUSH_OUT_ENABLED=1"
+        );
+    }
     true
 }
 
@@ -378,6 +436,7 @@ async fn send_binding(
         anyhow::ensure!(!a.bot_token.is_empty(), "扫码账号凭证为空，请重新扫码");
         let (to_user, context_token) = push_ctx(st, b, &a).await?;
         return crate::bot::weixin::user_send_text(
+            st,
             &a.base_url,
             &a.bot_token,
             &to_user,
@@ -415,6 +474,7 @@ async fn send_binding_images(
             format!("📄 榜单第 {} 页（接上条）", i + 1)
         };
         crate::store::wxmedia::user_send_image(
+            st,
             &a.base_url,
             &a.bot_token,
             &to_user,

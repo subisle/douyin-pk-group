@@ -547,6 +547,7 @@ async fn handle_msg(st: &Arc<AppState>, acct: &WxPushAccount, m: &Value) {
             "{greeting}\n\n✅ 微信推送已绑定\n\n以后数据更新会自动推给你：\n· 追分提醒\n· 每日报告\n\n开关与追分目标在展示页「我的」里设置。回复「解绑」断开推送。"
         );
         if let Err(e) = user_send_text(
+            st,
             &acct.base_url,
             &acct.bot_token,
             &from_user,
@@ -586,6 +587,7 @@ async fn handle_msg(st: &Arc<AppState>, acct: &WxPushAccount, m: &Value) {
         return;
     }
     if let Err(e) = user_send_text(
+        st,
         &acct.base_url,
         &acct.bot_token,
         &from_user,

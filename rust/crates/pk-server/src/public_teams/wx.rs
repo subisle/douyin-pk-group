@@ -597,6 +597,7 @@ pub async fn my_push_wechat_poll(
     if !acct.ilink_user_id.is_empty() {
         let text = crate::bot::wx_dock_welcome(&name);
         match crate::bot::weixin::user_send_text(
+            &st,
             &acct.base_url,
             &acct.bot_token,
             &acct.ilink_user_id,

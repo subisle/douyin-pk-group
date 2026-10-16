@@ -184,6 +184,7 @@ async fn send_item(
 /// 2026-10-16：与 `weixin::user_send_text` 同一道测试阶段出网闸门（开关
 /// `PUSH_OUT_ENABLED`）。图片通道会先上传 CDN，未开开关时连上传都不做。
 pub async fn user_send_image(
+    st: &crate::state::AppState,
     base_url: &str,
     token: &str,
     to_user_id: &str,
@@ -191,7 +192,7 @@ pub async fn user_send_image(
     caption: &str,
     png: &[u8],
 ) -> anyhow::Result<()> {
-    if !crate::push::push_out_enabled() {
+    if !crate::push::push_out_allowed_for_account(st, to_user_id).await {
         let preview: String = caption.chars().take(120).collect();
         tracing::warn!(
             to_user_id, bytes = png.len(), preview = %preview,

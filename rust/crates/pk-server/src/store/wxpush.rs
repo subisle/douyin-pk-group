@@ -937,9 +937,23 @@ pub async fn wx_push_account_get(st: &AppState, name: &str) -> Option<WxPushAcco
     Some(wx_push_account_from_row(&row))
 }
 
+/// to_user_id（ilink_user_id）→ 扫码账号展示端名。出网白名单窄口用；
+/// 查不到 = None（非扫码通道或收件人不是已扫码账号）。
+pub async fn wx_push_account_name_of(st: &AppState, to_user_id: &str) -> Option<String> {
+    let pool = w(st).ok()?;
+    let row = sqlx::query(&crate::pq::rewrite(
+        "SELECT name FROM wx_push_accounts WHERE ilink_user_id = ? LIMIT 1",
+    ))
+    .bind(to_user_id.trim())
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()?;
+    row.try_get::<String, _>("name").ok()
+}
+
 /// 启动时恢复全部扫码账号（各自跑一条长轮询）
-pub async fn wx_push_accounts_all(st: &AppState) -> Vec<WxPushAccount> {
-    let Ok(pool) = w(st) else {
+pub async fn wx_push_accounts_all(st: &AppState) -> Vec<WxPushAccount> {    let Ok(pool) = w(st) else {
         return Vec::new();
     };
     sqlx::query(

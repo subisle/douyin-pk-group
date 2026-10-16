@@ -1002,7 +1002,7 @@ async fn wx_send_text(
 ) -> anyhow::Result<()> {
     if let Some(a) = acct {
         let (to_user, ctx) = wx_session_ctx(st, Some(a), conv).await?;
-        return crate::bot::weixin::user_send_text(&a.base_url, &a.bot_token, &to_user, &ctx, text)
+        return crate::bot::weixin::user_send_text(st, &a.base_url, &a.bot_token, &to_user, &ctx, text)
             .await;
     }
     let Some(wx) = wx_global else {
@@ -1038,7 +1038,7 @@ async fn wx_send_lineage_images(
         } else {
             format!("📄 师门日报第 {} 页（接上条）", i + 1)
         };
-        crate::store::wxmedia::user_send_image(&a.base_url, &a.bot_token, &to_user, &ctx, &cap, &png)
+        crate::store::wxmedia::user_send_image(st, &a.base_url, &a.bot_token, &to_user, &ctx, &cap, &png)
             .await?;
         pages += 1;
     }
@@ -1055,7 +1055,7 @@ async fn wx_send_uploaded_image(
     png: &[u8],
 ) -> anyhow::Result<()> {
     let (to_user, ctx) = wx_session_ctx(st, Some(a), conv).await?;
-    crate::store::wxmedia::user_send_image(&a.base_url, &a.bot_token, &to_user, &ctx, "", png).await
+    crate::store::wxmedia::user_send_image(st, &a.base_url, &a.bot_token, &to_user, &ctx, "", png).await
 }
 
 /// 发送一行 wxbot 任务。返回 (是否成功, error 备注)。

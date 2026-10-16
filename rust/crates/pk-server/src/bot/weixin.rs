@@ -266,13 +266,14 @@ pub async fn user_poll_updates(base_url: &str, token: &str, cursor: &str) -> any
 /// 上层任何新增发送路径都不可能绕过它。开关 `PUSH_OUT_ENABLED`（语义见
 /// `push::push_out_enabled`）：未开时只记 WARN 日志、不发消息、返回 Ok。
 pub async fn user_send_text(
+    st: &AppState,
     base_url: &str,
     token: &str,
     to_user_id: &str,
     context_token: &str,
     text: &str,
 ) -> anyhow::Result<()> {
-    if !crate::push::push_out_enabled() {
+    if !crate::push::push_out_allowed_for_account(st, to_user_id).await {
         let preview: String = text.chars().take(120).collect();
         tracing::warn!(
             to_user_id, preview = %preview,
@@ -850,11 +851,21 @@ impl WxTransport {
     }
 
     async fn send(&self, out: &Outbound) -> anyhow::Result<()> {
+        /* 2026-10-17 本地灰度：这是管理员全局机器人通道（不是用户扫码账号），
+           会话对不上 PUSH_OUT_ALLOW 白名单的账号名 —— 白名单非空时一律拦截
+           （灰度期只放白名单里的扫码账号，宁可少发）。 */
+        let preview: String = out.text.chars().take(120).collect();
         if !crate::push::push_out_enabled() {
-            let preview: String = out.text.chars().take(120).collect();
             tracing::warn!(
                 conversation = %out.conversation_id, preview = %preview,
                 "【测试阶段】已拦截微信回复发送（未发）；要真实发送请设 PUSH_OUT_ENABLED=1"
+            );
+            return Ok(());
+        }
+        if crate::push::push_out_allow_nonempty() {
+            tracing::warn!(
+                conversation = %out.conversation_id, preview = %preview,
+                "【本地灰度】白名单只对微信扫码账号生效，全局机器人回复已拦截（未发）"
             );
             return Ok(());
         }
@@ -879,12 +890,20 @@ impl WxTransport {
     pub async fn send_proactive(&self, conversation_id: &str, text: &str) -> anyhow::Result<()> {
         anyhow::ensure!(self.configured(), "微信渠道未初始化");
         /* 2026-10-16：测试阶段出网闸门（与 user_send_text 同一开关）。
-        这条是管理员全局机器人通道（旧手机号/绑定码绑定的人走这里）。 */
+        这条是管理员全局机器人通道（旧手机号/绑定码绑定的人走这里）。
+        2026-10-17 本地灰度：白名单非空时全局机器人通道一律拦截（对不上账号名）。 */
+        let preview: String = text.chars().take(120).collect();
         if !crate::push::push_out_enabled() {
-            let preview: String = text.chars().take(120).collect();
             tracing::warn!(
                 conversation_id, preview = %preview,
                 "【测试阶段】已拦截微信主动推送（未发）；要真实发送请设 PUSH_OUT_ENABLED=1"
+            );
+            return Ok(());
+        }
+        if crate::push::push_out_allow_nonempty() {
+            tracing::warn!(
+                conversation_id, preview = %preview,
+                "【本地灰度】白名单只对微信扫码账号生效，全局机器人主动推送已拦截（未发）"
             );
             return Ok(());
         }
