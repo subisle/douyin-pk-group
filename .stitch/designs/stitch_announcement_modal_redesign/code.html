@@ -1,0 +1,380 @@
+<!DOCTYPE html><html lang="zh-CN"><head>
+<meta charset="utf-8">
+<meta content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" name="viewport">
+<title>初级争霸赛亚军荣誉榜单公告</title>
+<!-- Tailwind CSS v3 CDN -->
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              void: '#070314',
+              deepPurple: '#13082b',
+              accentPurple: '#9333ea',
+              brightViolet: '#c084fc',
+              goldLight: '#fef08a',
+              gold: '#f59e0b',
+              amberGlow: '#d97706',
+            }
+          },
+          animation: {
+            'spin-slow': 'spin 24s linear infinite',
+            'spin-reverse': 'spinReverse 18s linear infinite',
+            'float-soft': 'floatSoft 3.5s ease-in-out infinite',
+            'pulse-glow': 'pulseGlow 2.5s ease-in-out infinite',
+            'shimmer': 'shimmer 2.5s infinite',
+            'shimmer-card': 'shimmerCard 4s ease-in-out infinite',
+            'star-twinkle': 'twinkle 2s ease-in-out infinite',
+            'ray-breathe': 'rayBreathe 4s ease-in-out infinite',
+            'podium-glow': 'podiumPulse 3s ease-in-out infinite'
+          },
+          keyframes: {
+            spinReverse: {
+              '0%': { transform: 'rotate(0deg)' },
+              '100%': { transform: 'rotate(-360deg)' }
+            },
+            floatSoft: {
+              '0%, 100%': { transform: 'translateY(0px) scale(1)' },
+              '50%': { transform: 'translateY(-9px) scale(1.02)' }
+            },
+            pulseGlow: {
+              '0%, 100%': { opacity: 0.55, transform: 'scale(1)' },
+              '50%': { opacity: 0.95, transform: 'scale(1.1)' }
+            },
+            shimmer: {
+              '100%': { transform: 'translateX(100%)' }
+            },
+            shimmerCard: {
+              '0%, 100%': { opacity: 0.3 },
+              '50%': { opacity: 0.75 }
+            },
+            twinkle: {
+              '0%, 100%': { opacity: 0.3, transform: 'scale(0.8)' },
+              '50%': { opacity: 1, transform: 'scale(1.3)' }
+            },
+            rayBreathe: {
+              '0%, 100%': { opacity: 0.65 },
+              '50%': { opacity: 0.95 }
+            },
+            podiumPulse: {
+              '0%, 100%': { transform: 'scaleX(1) scaleY(1)', opacity: 0.8 },
+              '50%': { transform: 'scaleX(1.08) scaleY(1.15)', opacity: 1 }
+            }
+          }
+        }
+      }
+    }
+  </script>
+<!-- BEGIN: Custom Styles -->
+<style data-purpose="custom-layout">
+    body {
+      background-color: #060212;
+      font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", "Microsoft YaHei", sans-serif;
+      user-select: none;
+      -webkit-touch-callout: none;
+      -webkit-tap-highlight-color: transparent;
+      overflow: hidden;
+    }
+
+    /* 圣殿神圣天光倾泻 (Volumetric God Rays) */
+    .volumetric-rays {
+      background: conic-gradient(
+        from 240deg at 50% -10%,
+        rgba(192, 132, 252, 0) 0deg,
+        rgba(216, 180, 254, 0.18) 25deg,
+        rgba(147, 51, 234, 0.03) 40deg,
+        rgba(254, 240, 138, 0.22) 55deg,
+        rgba(192, 132, 252, 0.05) 70deg,
+        rgba(253, 224, 71, 0.18) 85deg,
+        rgba(147, 51, 234, 0.04) 100deg,
+        rgba(216, 180, 254, 0.16) 120deg,
+        rgba(192, 132, 252, 0) 140deg
+      );
+      mask-image: linear-gradient(to bottom, rgba(0,0,0,1) 10%, rgba(0,0,0,0.4) 65%, rgba(0,0,0,0) 100%);
+      -webkit-mask-image: linear-gradient(to bottom, rgba(0,0,0,1) 10%, rgba(0,0,0,0.4) 65%, rgba(0,0,0,0) 100%);
+    }
+
+    /* 烫金与秘银立体文字光影 */
+    .title-silver-gold {
+      background: linear-gradient(180deg, #FFFFFF 0%, #F8FAFC 30%, #E2E8F0 60%, #F59E0B 95%, #B45309 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      filter: drop-shadow(0 2px 10px rgba(168, 85, 247, 0.65)) drop-shadow(0 4px 20px rgba(0, 0, 0, 0.9));
+    }
+
+    /* 3D 翻转金箔紫晶粉尘粒子 */
+    .confetti-particle {
+      position: absolute;
+      pointer-events: none;
+      backface-visibility: visible;
+      will-change: transform, opacity;
+    }
+
+    @keyframes dropConfetti {
+      0% {
+        transform: translateY(-40px) rotateX(0deg) rotateY(0deg) rotateZ(0deg);
+        opacity: 0;
+      }
+      15% {
+        opacity: 0.95;
+      }
+      80% {
+        opacity: 0.85;
+      }
+      100% {
+        transform: translateY(105vh) rotateX(720deg) rotateY(540deg) rotateZ(360deg);
+        opacity: 0;
+      }
+    }
+
+    /* 立体能量星轨轨道 */
+    .orbit-ring-1 {
+      border: 1.5px solid transparent;
+      border-top-color: rgba(233, 213, 255, 0.7);
+      border-bottom-color: rgba(251, 191, 36, 0.55);
+      border-radius: 50%;
+      transform-style: preserve-3d;
+      transform: rotateX(68deg) rotateY(18deg);
+      box-shadow: 0 0 16px rgba(168, 85, 247, 0.5), inset 0 0 16px rgba(251, 191, 36, 0.35);
+    }
+    
+    .orbit-ring-2 {
+      border: 1.5px dashed transparent;
+      border-left-color: rgba(192, 132, 252, 0.75);
+      border-right-color: rgba(253, 224, 71, 0.6);
+      border-radius: 50%;
+      transform-style: preserve-3d;
+      transform: rotateX(62deg) rotateY(-22deg);
+      box-shadow: 0 0 20px rgba(192, 132, 252, 0.45);
+    }
+
+    /* 圣殿聚光地台 (Podium Stage) */
+    .podium-stage-base {
+      background: radial-gradient(ellipse 90% 45% at 50% 50%, rgba(168, 85, 247, 0.6) 0%, rgba(126, 34, 206, 0.35) 45%, rgba(217, 119, 6, 0.15) 70%, transparent 85%);
+    }
+
+    /* 专属银紫玄辉发光描边 */
+    .card-purple-silver-glow {
+      box-shadow: 0 0 24px rgba(168, 85, 247, 0.28), inset 0 0 16px rgba(216, 180, 254, 0.15);
+    }
+  </style>
+<!-- END: Custom Styles -->
+</head>
+<body class="min-h-screen w-full flex items-center justify-center p-3 relative overflow-hidden text-white cursor-pointer" onclick="handleBackgroundClick(event)">
+<!-- BEGIN: Sacred Volumetric God Rays & Ambient Atmosphere -->
+<!-- 神圣天光光束层 -->
+<div class="absolute inset-0 pointer-events-none z-0 overflow-hidden">
+<div class="absolute -top-10 left-1/2 -translate-x-1/2 w-[600px] h-[780px] volumetric-rays animate-ray-breathe"></div>
+<!-- 顶峰中央紫金聚光源 -->
+<div class="absolute top-0 left-1/2 -translate-x-1/2 w-[380px] h-[300px] bg-[radial-gradient(ellipse_at_top,rgba(216,180,254,0.4)_0%,rgba(168,85,247,0.22)_40%,transparent_75%)] blur-2xl"></div>
+<!-- 底部玄紫深邃光晕托底 -->
+<div class="absolute bottom-0 left-1/2 -translate-x-1/2 w-[480px] h-[340px] bg-[radial-gradient(ellipse_at_bottom,rgba(107,33,168,0.32)_0%,rgba(30,11,61,0.5)_50%,transparent_80%)] blur-3xl"></div>
+</div>
+<!-- END: Sacred Volumetric God Rays -->
+<!-- BEGIN: Ambient 3D Particle Rain Layer -->
+<!-- 飘落 3D 翻转金箔与紫光星尘雨 -->
+<div class="absolute inset-0 pointer-events-none z-0 overflow-hidden" id="particle-container"></div>
+<!-- END: Ambient 3D Particle Rain Layer -->
+<!-- BEGIN: Modal Container -->
+<main class="w-full max-w-[382px] relative z-10 my-auto flex flex-col items-center animate-[scaleIn_0.4s_cubic-bezier(0.16,1,0.3,1)]" data-purpose="dialog-window" onclick="stopPropagation(event)">
+<!-- 弹窗主体大卡片：双层精铸边框与暗紫琉璃质感 -->
+<section class="w-full relative rounded-[32px] p-0.5 overflow-hidden shadow-[0_15px_50px_rgba(10,3,25,0.9),0_0_35px_rgba(147,51,234,0.35)]">
+<!-- 外部边框流光高光渐变 -->
+<div class="absolute inset-0 bg-gradient-to-b from-purple-300/70 via-purple-600/35 to-amber-500/40 rounded-[32px] pointer-events-none"></div>
+<!-- 内部主体深紫圣殿背景容器 -->
+<div class="relative w-full bg-gradient-to-b from-[#1a0a38] via-[#120727] to-[#0a0318] rounded-[30px] px-5 pt-5 pb-6 flex flex-col items-center border border-purple-400/25">
+<!-- BEGIN: Header Capsule -->
+<!-- 顶部标头标签：紫晶流光胶囊质感「✦ 通报 ✦」 -->
+<header class="relative z-20 mb-1" data-purpose="top-tag">
+<div class="px-7 py-1 rounded-full bg-gradient-to-r from-purple-900/90 via-purple-700/85 to-purple-900/90 border border-purple-300/50 shadow-[0_0_15px_rgba(192,132,252,0.4),inset_0_1px_2px_rgba(255,255,255,0.4)] backdrop-blur-md">
+<span class="text-xs font-bold tracking-[0.25em] text-purple-100 flex items-center gap-1.5 drop-shadow-sm">
+<span class="text-[10px] text-amber-300 animate-star-twinkle">✦</span>
+            通报
+            <span class="text-[10px] text-amber-300 animate-star-twinkle">✦</span>
+</span>
+</div>
+</header>
+<!-- END: Header Capsule -->
+<!-- BEGIN: Visual Badge Section (殿堂级主徽章排面体系) -->
+<div class="relative w-full h-[184px] flex items-center justify-center -my-1" data-purpose="badge-visual-area">
+<!-- 圣殿弧形聚光地台 (Podium Stage) -->
+<div class="absolute -bottom-2 w-64 h-24 podium-stage-base rounded-full animate-podium-glow pointer-events-none"></div>
+<div class="absolute bottom-2 w-48 h-10 border border-purple-400/30 rounded-[100%] shadow-[0_0_20px_rgba(192,132,252,0.4)] pointer-events-none"></div>
+<!-- 顺时针回旋流光光晕 -->
+<div class="absolute w-56 h-56 rounded-full bg-[radial-gradient(circle,rgba(168,85,247,0.38)_0%,rgba(147,51,234,0.18)_45%,transparent_70%)] animate-pulse-glow pointer-events-none"></div>
+<!-- 专属立体能量双星轨旋转光环围绕主徽章 -->
+<div class="absolute w-44 h-44 orbit-ring-1 animate-spin-slow pointer-events-none">
+<!-- 轨道星辰节点 -->
+<div class="w-2.5 h-2.5 rounded-full bg-amber-300 shadow-[0_0_8px_#fde047] absolute top-1 left-8"></div>
+</div>
+<div class="absolute w-48 h-48 orbit-ring-2 animate-spin-reverse pointer-events-none">
+<div class="w-2 h-2 rounded-full bg-purple-200 shadow-[0_0_8px_#e9d5ff] absolute bottom-3 right-8"></div>
+</div>
+<!-- 主视觉徽章：专属紫盾 IMAGE_10 + 呼吸浮动动效 -->
+<div class="relative z-10 animate-float-soft filter drop-shadow-[0_12px_24px_rgba(147,51,234,0.55)]">
+<img alt="初级争霸赛亚军紫盾徽章" class="w-[136px] h-[136px] object-contain transform hover:scale-105 transition-transform duration-300" src="https://lh3.googleusercontent.com/aida-public/AB6AXuATYoyw-lLpPBAfEhf3EzBuhmTj9EV4C9z8ZeCkIXdgaHKZr17XwtZ1X-JHCcnRuiR4i0kGeWphvblG-9eVdFPkaxh8sUOdiwiLZXCEM6ceuNp73nUyk6klE9gLnu9K50-kplpAGxbKYAKs3LApAO3XUi6sk7w6wk9Av9SK_gPgCVld81xHBWi-5GpfqwoqdtcbfDWyJV5agyfWewGFs8e42yXiUcIr-mW6n6dZ16mGGa_KMXv5YEiQ">
+</div>
+<!-- 璀璨点缀星辉 -->
+<span class="absolute top-5 left-12 text-amber-300 text-xs animate-star-twinkle drop-shadow-[0_0_6px_#fde047]">✦</span>
+<span class="absolute top-10 right-11 text-purple-200 text-base animate-star-twinkle drop-shadow-[0_0_8px_#c084fc]" style="animation-delay: 0.8s;">✦</span>
+<span class="absolute bottom-8 left-14 text-purple-300 text-[11px] animate-star-twinkle drop-shadow" style="animation-delay: 1.4s;">★</span>
+<span class="absolute bottom-7 right-14 text-amber-300 text-xs animate-star-twinkle drop-shadow" style="animation-delay: 1.9s;">★</span>
+</div>
+<!-- END: Visual Badge Section -->
+<!-- BEGIN: Titles (规范赛事名称，绝无王者争霸) -->
+<div class="text-center mt-0 mb-4" data-purpose="competition-titles">
+<h1 class="text-[25px] font-black tracking-wider title-silver-gold mb-1">
+          初级争霸赛亚军
+        </h1>
+<p class="text-xs text-purple-200/90 tracking-widest font-semibold flex items-center justify-center gap-1.5 drop-shadow">
+<span class="text-amber-400 text-xs animate-pulse">★</span>
+          锐不可当 · 傲视群雄
+          <span class="text-amber-400 text-xs animate-pulse">★</span>
+</p>
+</div>
+<!-- END: Titles -->
+<!-- BEGIN: Runner-up Player Card (亚军选手荣耀卡片) -->
+<div class="w-full bg-gradient-to-r from-purple-950/70 via-purple-900/50 to-indigo-950/70 rounded-2xl p-4 border border-purple-400/40 card-purple-silver-glow backdrop-blur-md relative overflow-hidden mb-4" data-purpose="runner-up-card">
+<!-- 卡片右上角专属折射光芒角标 -->
+<div class="absolute top-0 right-0 w-20 h-20 bg-gradient-to-bl from-purple-400/20 via-transparent to-transparent pointer-events-none"></div>
+<div class="flex items-center justify-between">
+<!-- 选手头像与信息 -->
+<div class="flex items-center gap-3">
+<!-- 头像框：紫银流光与“亚”字专属角标 -->
+<div class="relative">
+<div class="w-14 h-14 rounded-full p-[2.5px] bg-gradient-to-tr from-amber-400 via-purple-300 to-indigo-400 shadow-[0_0_12px_rgba(168,85,247,0.5)]">
+<div class="w-full h-full rounded-full bg-[#1b0a3b] border-2 border-[#391973] flex items-center justify-center text-white font-extrabold text-lg tracking-wider">
+                  狼
+                </div>
+</div>
+<!-- 专属“亚”字角标 -->
+<div class="absolute -bottom-1 -right-1 w-5 h-5 rounded-full bg-gradient-to-br from-purple-400 via-indigo-600 to-purple-800 border-2 border-slate-900 flex items-center justify-center shadow">
+<span class="text-[10px] font-black text-white leading-none">亚</span>
+</div>
+</div>
+<!-- 选手昵称与佩戴称号 -->
+<div class="flex flex-col gap-1.5">
+<div class="flex items-center gap-2">
+<span class="font-extrabold text-base text-slate-100 tracking-wide drop-shadow-[0_1px_4px_rgba(0,0,0,0.8)]">夜幕孤狼</span>
+</div>
+<!-- 头衔徽章 -->
+<div class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-purple-900/80 border border-purple-400/40 w-fit shadow-inner">
+<span class="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse shadow-[0_0_5px_#22d3ee]"></span>
+<span class="text-[10px] text-purple-200 font-semibold tracking-wide">战区次席 · 绝世奇才</span>
+</div>
+</div>
+</div>
+<!-- 登顶成绩展示 -->
+<div class="text-right flex flex-col justify-center pl-2">
+<span class="text-[11px] text-purple-300/90 font-medium tracking-tight">登顶成绩</span>
+<div class="flex items-baseline justify-end">
+<span class="text-3xl font-black text-amber-300 tracking-tight drop-shadow-[0_2px_8px_rgba(251,191,36,0.5)]">26</span>
+<span class="text-base font-extrabold text-amber-200 ml-0.5">万</span>
+</div>
+</div>
+</div>
+<!-- 卡片底部奖励派发小字提示 -->
+<div class="mt-3 pt-2.5 border-t border-purple-500/25 flex items-center justify-between text-[11px] text-purple-200/90">
+<span class="flex items-center gap-1.5 font-medium">
+<svg class="w-3.5 h-3.5 text-purple-300" fill="currentColor" viewBox="0 0 20 20">
+<path clip-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" fill-rule="evenodd"></path>
+</svg>
+            专属银辉头像框 &amp; 稀有战将称号
+          </span>
+<span class="text-emerald-300 font-bold bg-emerald-950/80 px-2 py-0.5 rounded-full border border-emerald-500/40 text-[10px] tracking-wider shadow-sm">已派发</span>
+</div>
+</div>
+<!-- END: Runner-up Player Card -->
+<!-- BEGIN: Action Button Section -->
+<div class="w-full flex flex-col items-center gap-2" data-purpose="action-group">
+<!-- 主操作按钮：下一页 · 季军荣耀 ❯ (带鎏金流光微动效) -->
+<button class="relative w-full h-12 rounded-2xl font-black text-base bg-gradient-to-r from-amber-400 via-amber-300 to-yellow-500 shadow-[0_6px_22px_rgba(245,158,11,0.38)] active:scale-[0.98] transition-transform overflow-hidden group cursor-pointer border border-amber-200/50" data-purpose="primary-button" onclick="handleNextPage(event)" type="button">
+<!-- 按钮内部鎏金扫光动效 -->
+<div class="absolute inset-0 -translate-x-full group-hover:translate-x-full animate-shimmer bg-gradient-to-r from-transparent via-white/50 to-transparent pointer-events-none"></div>
+<span class="relative z-10 flex items-center justify-center gap-1.5 tracking-wider text-purple-950 font-black">
+            下一页 · 季军荣耀
+            <svg class="w-4 h-4 ml-0.5 stroke-[2.5]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+<path d="M9 5l7 7-7 7" stroke-linecap="round" stroke-linejoin="round"></path>
+</svg>
+</span>
+</button>
+<!-- 底部序列进度提示小字 -->
+<p class="text-[11px] text-purple-300/80 font-medium tracking-wide text-center pt-0.5" data-purpose="footer-footnote">
+          2/3 全公会三甲荣誉通报 · 点击进入下一席位
+        </p>
+</div>
+<!-- END: Action Button Section -->
+</div>
+</section>
+<!-- 规范底部暗标提示：点击空白处进入下一页 -->
+<div class="mt-4 text-xs text-purple-300/60 hover:text-purple-200 transition-colors py-1 px-4 cursor-pointer flex items-center gap-1 select-none" data-purpose="dismiss-tip" onclick="handleNextPage(event)">
+<span>点击空白处进入下一页</span>
+<span class="text-[10px]">❯</span>
+</div>
+</main>
+<!-- END: Modal Container -->
+<!-- BEGIN: Interactive Logic & 3D Confetti Particles Script -->
+<script data-purpose="particles-generator">
+    // 动态生成3D翻转飘落金箔、紫晶碎片与高亮星尘粒子雨
+    document.addEventListener("DOMContentLoaded", () => {
+      const container = document.getElementById("particle-container");
+      const confettiCount = 34;
+      const palette = [
+        { bg: '#fde047', shadow: 'rgba(253, 224, 71, 0.7)' }, // 金黄
+        { bg: '#fbbf24', shadow: 'rgba(251, 191, 36, 0.7)' }, // 亮琥珀金
+        { bg: '#c084fc', shadow: 'rgba(192, 132, 252, 0.7)' }, // 晶莹紫
+        { bg: '#e9d5ff', shadow: 'rgba(233, 213, 255, 0.6)' }, // 浅紫光
+        { bg: '#ffffff', shadow: 'rgba(255, 255, 255, 0.9)' }  // 闪亮白星
+      ];
+
+      for (let i = 0; i < confettiCount; i++) {
+        const p = document.createElement("div");
+        p.className = "confetti-particle";
+
+        const isLeaf = Math.random() > 0.45;
+        const width = isLeaf ? Math.random() * 5 + 4 : Math.random() * 3 + 2;
+        const height = isLeaf ? Math.random() * 8 + 6 : width;
+        const round = isLeaf ? (Math.random() > 0.5 ? '2px' : '50% 2px') : '50%';
+        const col = palette[Math.floor(Math.random() * palette.length)];
+
+        const left = Math.random() * 100;
+        const duration = Math.random() * 4.5 + 4.5;
+        const delay = Math.random() * 5;
+
+        p.style.width = `${width}px`;
+        p.style.height = `${height}px`;
+        p.style.left = `${left}%`;
+        p.style.borderRadius = round;
+        p.style.backgroundColor = col.bg;
+        p.style.boxShadow = `0 0 6px ${col.shadow}`;
+        p.style.animation = `dropConfetti ${duration}s linear ${delay}s infinite`;
+
+        container.appendChild(p);
+      }
+    });
+
+    // 阻止卡片内部点击事件穿透到背景
+    function stopPropagation(e) {
+      if (e) {
+        e.stopPropagation();
+      }
+    }
+
+    // 点击空白背景区域响应进入下一页（季军页）
+    function handleBackgroundClick(e) {
+      handleNextPage(e);
+    }
+
+    // 下一页季军事件处理
+    function handleNextPage(e) {
+      if (e) {
+        e.stopPropagation();
+      }
+      console.log("Navigating to: 初级争霸赛季军通报 (3/3)");
+      alert("正在为您展示【初级争霸赛季军】荣誉通报...");
+    }
+  </script>
+<!-- END: Interactive Logic & 3D Confetti Particles Script -->
+</body></html>
