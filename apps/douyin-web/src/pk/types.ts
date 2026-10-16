@@ -26,6 +26,26 @@ export interface BreakRule {
 
 export type Strategy = 'snake' | 'snake-no-master' | 'sequential' | 'sequential-last-n' | 'random';
 
+/** PK 展板的一键分组配置：整包存取（GET / PUT /api/group/board-config），
+ *  字段与 GroupPage 页面上散着的配置一一对应，只是搬进了后端，展板页不再自带输入名单。 */
+export interface BoardConfig {
+  eventType: import('./api').EventType;
+  metric: WaveMetric;
+  /** 口径为 lastN 时的天数（1..30） */
+  days: number;
+  strategy: Strategy;
+  /** 'top' | 'total' 排位次，'off' 只做均衡 */
+  strengthMode: 'top' | 'total' | 'off';
+  /** 每组人数（2..20） */
+  groupSize: number;
+  /** 开赛时间 'HH:MM' */
+  startTime: string;
+  /** 组间间隔分钟（1..120） */
+  intervalMin: number;
+  /** 第 3 组后的加长休息分钟（0..120，0 = 不插；小组赛是固定复活赛，此值不生效） */
+  longBreak: number;
+}
+
 export interface Player {
   key: string;
   raw?: string;

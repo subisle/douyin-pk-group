@@ -10,6 +10,7 @@ import type {
   PolishResponse,
   RosterState,
   SavedPlan,
+  BoardConfig,
   Strategy,
   BreakRule,
   StrengthMode,
@@ -31,7 +32,7 @@ export const STRENGTH_MODES: Array< { value: 'off' | StrengthMode; label: string
   { value: 'off', label: '不排位次', hint: '只做均衡，各组实力平均' },
 ];
 
-export type { Player, Strategy, WaveMetric };
+export type { Player, Strategy, WaveMetric, BoardConfig };
 
 /** 赛事类型（2026-10-09 用户定名）：
  *  - 初级争霸赛小组赛（月初）、中级争霸赛小组赛（月中）：白天的分组赛，
@@ -128,6 +129,12 @@ export const pk = {
     api<PolishResponse>('/api/group/polish', { method: 'POST', body: JSON.stringify(body) }),
 
   constraints: () => api<ConstraintsMeta>('/api/group/constraints'),
+
+  /** PK 展板的一键分组配置：整包读写（没存过时 saved=false、config=null） */
+  getBoardConfig: () =>
+    api<{ saved: boolean; config: BoardConfig | null }>('/api/group/board-config'),
+  saveBoardConfig: (config: BoardConfig) =>
+    api<{ ok: boolean }>('/api/group/board-config', { method: 'PUT', body: JSON.stringify(config) }),
   refreshCache: () => api< { ok: boolean } >('/api/cache/refresh', { method: 'POST', body: '{}' }),
 
   /** 别名表：把名单里认不出来的写法钉到库里真名（「识别不到」列表点候选一键修） */

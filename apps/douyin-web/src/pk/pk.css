@@ -405,3 +405,52 @@ body.pk-dragging .pk-card {
   opacity: 0.5;
   cursor: default;
 }
+
+/* ---------- PK 展板（/pk-board 轻量展示页）：只补三小块，其余全复用上面的样式 ---------- */
+/* ① 配置摘要行：默认收起时的一行，整行可点展开/收起 */
+.pk .pk-board-summary {
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  align-items: center;
+  gap: 10px;
+}
+.pk .pk-board-toggle {
+  flex: none;
+  font-weight: 600;
+  color: var(--brand);
+  background: none;
+  border: 0;
+  cursor: pointer;
+  padding: 2px 6px;
+}
+.pk .pk-board-summary-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+/* 展开后的表单：两行控件，与摘要之间隔出层次 */
+.pk .pk-board-config {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--line);
+  display: grid;
+  gap: 8px;
+}
+/* ② 一键分组主按钮行：大号 primary，占满卡片宽度的一格 */
+.pk .pk-board-primary-row {
+  margin: 12px 0 10px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.pk .pk-board-primary {
+  font-size: 16px;
+  padding: 12px 40px;
+  border-radius: 10px;
+}
