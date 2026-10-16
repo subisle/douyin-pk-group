@@ -254,9 +254,17 @@ button { font:inherit; cursor:pointer; }
   -webkit-overflow-scrolling:touch; scrollbar-width:none; }
 .ip-main::-webkit-scrollbar { display:none; }
 .ip-page { width:100%; display:flex; flex-direction:column; align-items:center; animation:ipPageIn .3s ease both; }
-/* 徽章排面：聚光地台（-bottom-2 256×96 + bottom-2 192×40 细环）+ 光环 224 + 双星轨 + 徽章 136 */
+/* 徽章排面：聚光地台（-bottom-2 256×96 + bottom-2 192×40 细环）+ 光环 224 + 双星轨 + 徽章 136
+   2026-10-16 三甲分化：同一套骨架，三页各自换主题色与星轨形态（Stitch 三稿）——
+   · ip-theme-gold   冠军（殿堂至尊光环）：鎏金日冕双环 + 太阳芒羽 + 金色能量核
+   · ip-theme-purple 亚军（殿堂排面）：紫晶双星轨（默认原有体系）
+   · ip-theme-ice    季军（殿堂透视星轨）：冰蓝倾斜透视椭圆星轨 + 双能量星体 */
 .ip-visual { position:relative; flex:none; width:100%; height:184px; margin:-4px 0;
   display:flex; align-items:center; justify-content:center; }
+/* 主题化：星辉四芒星默认金色；冰蓝主题换星蓝、紫主题换浅紫 */
+.ip-visual.ip-theme-gold .ip-spark { color:#fcd34d; text-shadow:0 0 8px rgba(253,224,71,.9); }
+.ip-visual.ip-theme-purple .ip-spark { color:#d8b4fe; text-shadow:0 0 8px rgba(192,132,252,.9); }
+.ip-visual.ip-theme-ice .ip-spark { color:#7dd3fc; text-shadow:0 0 8px rgba(125,211,252,.9); }
 .ip-podium { position:absolute; bottom:-8px; left:50%; width:256px; height:96px;
   transform:translateX(-50%); border-radius:50%; pointer-events:none;
   background:radial-gradient(ellipse 90% 45% at 50% 50%, rgba(168,85,247,.6) 0%, rgba(126,34,206,.35) 45%, rgba(217,119,6,.15) 70%, transparent 85%);
@@ -267,6 +275,15 @@ button { font:inherit; cursor:pointer; }
 .ip-halo { position:absolute; width:224px; height:224px; border-radius:50%; pointer-events:none;
   background:radial-gradient(circle, rgba(168,85,247,.38) 0%, rgba(147,51,234,.18) 45%, transparent 70%);
   animation:ipPulseGlow 2.5s ease-in-out infinite; }
+/* 主题色分化（Stitch 三稿）：地台细环 / 光晕 / 徽章投影按席位换色 */
+.ip-theme-gold .ip-podium-ring { border-color:rgba(253,224,71,.45);
+  box-shadow:0 0 20px rgba(251,191,36,.5); }
+.ip-theme-gold .ip-halo { background:radial-gradient(circle, rgba(251,191,36,.4) 0%, rgba(217,119,6,.2) 45%, transparent 70%); }
+.ip-theme-gold .ip-badge { filter:drop-shadow(0 12px 24px rgba(245,158,11,.6)); }
+.ip-theme-ice .ip-podium-ring { border-color:rgba(125,211,252,.4);
+  box-shadow:0 0 20px rgba(56,189,248,.4); }
+.ip-theme-ice .ip-halo { background:radial-gradient(circle, rgba(56,189,248,.32) 0%, rgba(14,116,222,.16) 45%, transparent 70%); }
+.ip-theme-ice .ip-badge { filter:drop-shadow(0 12px 24px rgba(14,116,222,.55)); }
 /* 星轨一：顺时针 24s（上缘浅紫 / 下缘琥珀，含内发光），星点琥珀 top-1 left-8 */
 .ip-orbit { position:absolute; width:176px; height:176px; border-radius:50%; pointer-events:none;
   border:1.5px solid transparent;
@@ -283,6 +300,66 @@ button { font:inherit; cursor:pointer; }
   animation:ipSpinReverse 18s linear infinite; }
 .ip-orbit2 i { position:absolute; bottom:12px; right:32px; width:8px; height:8px; border-radius:50%;
   background:#E9D5FF; box-shadow:0 0 8px #E9D5FF; }
+/* ---- 冠军专属（Stitch 冠军稿）：鎏金日冕双环 + 太阳芒羽 + 金色能量核 ---- */
+/* 日冕外环：逆时针 22s 精密金色能量环（上缘亮金 / 下缘深金，内发光） */
+.ip-theme-gold .ip-corona { position:absolute; width:212px; height:212px; border-radius:50%;
+  pointer-events:none; border:2px solid transparent;
+  border-top-color:rgba(254,243,138,.85); border-bottom-color:rgba(217,119,6,.6);
+  box-shadow:0 0 22px rgba(251,191,36,.5), inset 0 0 22px rgba(253,224,71,.35);
+  animation:ipSpinReverse 22s linear infinite; }
+/* 日冕四芒星与能量星珠（随环旋转） */
+.ip-theme-gold .ip-corona i { position:absolute; font-style:normal; color:#fde047;
+  text-shadow:0 0 8px #fde047; animation:ipTwinkle 2s ease-in-out infinite; }
+.ip-theme-gold .ip-corona .dot { position:absolute; top:2px; right:36px; width:9px; height:9px;
+  border-radius:50%; background:#fde047; box-shadow:0 0 10px #fbbf24; }
+/* 鎏金星轨：顺时针 16s 粒子环（左缘琥珀 / 右缘亮金虚线） */
+.ip-theme-gold .ip-orbit { width:178px; height:178px;
+  border-top-color:rgba(253,224,71,.75); border-bottom-color:rgba(245,158,11,.55);
+  box-shadow:0 0 18px rgba(251,191,36,.5), inset 0 0 18px rgba(253,224,71,.3);
+  animation:ipSpinSlow 16s linear infinite; }
+.ip-theme-gold .ip-orbit i { background:#fbbf24; box-shadow:0 0 10px #fbbf24; }
+.ip-theme-gold .ip-orbit2 { border-left-color:rgba(251,191,36,.7); border-right-color:rgba(254,240,138,.6);
+  box-shadow:0 0 20px rgba(245,158,11,.45);
+  animation:ipSpinReverse 24s linear infinite; }
+.ip-theme-gold .ip-orbit2 i { background:#fef08a; box-shadow:0 0 8px #fef08a; }
+/* 太阳芒羽：徽章背后放射状金色佛光，周期旋转 + 缩放呼吸 */
+.ip-sunburst { position:absolute; width:260px; height:260px; border-radius:50%; pointer-events:none;
+  opacity:.85; z-index:0;
+  background:repeating-conic-gradient(from 0deg at 50% 50%,
+    rgba(253,224,71,.28) 0deg 4deg, transparent 4deg 12deg);
+  -webkit-mask-image:radial-gradient(circle, #000 0%, #000 30%, transparent 68%);
+  mask-image:radial-gradient(circle, #000 0%, #000 30%, transparent 68%);
+  animation:ipSunspin 40s linear infinite, ipPulseGlow 4s ease-in-out infinite; }
+@keyframes ipSunspin { to { transform:rotate(360deg); } }
+/* 金色能量核：徽章正后方耀斑光团，让徽章宛如悬浮在耀日中心 */
+.ip-glowcore { position:absolute; width:150px; height:150px; border-radius:50%; pointer-events:none;
+  z-index:1;
+  background:radial-gradient(circle, rgba(254,240,138,.55) 0%, rgba(251,191,36,.32) 40%, transparent 70%);
+  animation:ipPulseGlow 3s ease-in-out infinite; }
+/* ---- 季军专属（Stitch 季军稿）：冰蓝倾斜透视椭圆星轨 + 双能量星体 ---- */
+/* 透视星轨：rotateX(68deg) + rotate(-15deg) 的立体椭圆，发光描边，绕椭圆公转 */
+.ip-ice-orbit { position:absolute; width:200px; height:200px; border-radius:50%; pointer-events:none;
+  z-index:0; border:1.5px solid rgba(125,211,252,.55);
+  box-shadow:0 0 18px rgba(56,189,248,.45), inset 0 0 18px rgba(56,189,248,.25);
+  transform:rotateX(68deg) rotate(-15deg);
+  animation:ipIceSpin 14s linear infinite; }
+@keyframes ipIceSpin { to { transform:rotateX(68deg) rotate(345deg); } }
+/* 沿轨能量星体：椭圆前后各一颗（前亮后暗），公转由父级旋转带动 */
+.ip-ice-orbit i { position:absolute; top:50%; left:-4px; width:9px; height:9px; margin-top:-4px;
+  border-radius:50%; background:#7dd3fc; box-shadow:0 0 12px #38bdf8; }
+.ip-ice-orbit i:nth-child(2) { left:auto; right:-4px; top:50%; margin-top:-4px;
+  background:#bae6fd; box-shadow:0 0 10px rgba(186,230,253,.9); }
+/* 冰蓝虚线内环：反向慢转，丰富层次 */
+.ip-ice-orbit2 { position:absolute; width:168px; height:168px; border-radius:50%; pointer-events:none;
+  z-index:0; border:1.5px dashed rgba(186,230,253,.4);
+  transform:rotateX(68deg) rotate(-15deg);
+  animation:ipIceSpin2 20s linear infinite reverse; }
+@keyframes ipIceSpin2 { to { transform:rotateX(68deg) rotate(345deg); } }
+/* 冰蓝暗幕光晕（星轨背后的圆形暗部遮罩 + 极光扩散） */
+.ip-ice-veil { position:absolute; width:224px; height:224px; border-radius:50%; pointer-events:none;
+  z-index:0;
+  background:radial-gradient(circle, rgba(2,6,23,.55) 0%, rgba(8,47,90,.35) 45%, rgba(14,116,222,.18) 62%, transparent 75%);
+  animation:ipPulseGlow 3.5s ease-in-out infinite; }
 /* 主徽章：设计稿原 Poster 图 136×136 + 呼吸浮动 + 紫晶投影 */
 .ip-badge { position:relative; z-index:2; width:136px; height:136px;
   animation:ipFloatSoft 3.5s ease-in-out infinite;
@@ -300,7 +377,9 @@ button { font:inherit; cursor:pointer; }
 .ip-sub { margin:0; display:flex; align-items:center; justify-content:center; gap:6px;
   font-size:12px; line-height:16px; font-weight:600; letter-spacing:.1em; color:rgba(233,213,255,.9); }
 .ip-sub i { font-style:normal; color:#fbbf24; animation:ipPulseGlow 2.5s ease-in-out infinite; }
-/* 选手荣耀卡：定高 134（设计稿实测 p-4），内部上排 + 奖励行 */
+/* 选手荣耀卡：定高 134（设计稿实测 p-4），内部上排 + 奖励行。
+   2026-10-16 用户口径：上排 space-between 的中段空洞过大 → space-evenly 把
+   头像↔成绩的中缝收到与两侧边缘一致，名字短也显得排满合适。 */
 .ip-player { position:relative; flex:none; width:100%; height:134px; box-sizing:border-box;
   padding:16px; border-radius:16px; margin-bottom:16px; overflow:hidden; text-align:left;
   display:flex; flex-direction:column;
@@ -310,7 +389,7 @@ button { font:inherit; cursor:pointer; }
   -webkit-backdrop-filter:blur(8px); backdrop-filter:blur(8px); }
 .ip-player::before { content:''; position:absolute; top:0; right:0; width:80px; height:80px;
   background:linear-gradient(225deg, rgba(192,132,252,.2) 0%, transparent 70%); pointer-events:none; }
-.ip-p-row { flex:1 1 auto; min-height:0; display:flex; align-items:center; justify-content:space-between; gap:8px; }
+.ip-p-row { flex:1 1 auto; min-height:0; display:flex; align-items:center; justify-content:space-evenly; gap:8px; }
 .ip-p-left { display:flex; align-items:center; gap:12px; min-width:0; }
 .ip-ava { position:relative; flex:none; }
 .ip-ava-ring { width:56px; height:56px; border-radius:50%; padding:2.5px; box-sizing:border-box;
@@ -323,11 +402,9 @@ button { font:inherit; cursor:pointer; }
 .ip-ava-core .ip-ava-img { width:100%; height:100%; object-fit:cover; display:block;
   user-select:none; -webkit-user-drag:none; }
 .ip-ava-core .material-symbols-outlined { font-size:24px; color:#d8b4fe; }
-.ip-ava-rank { position:absolute; right:-4px; bottom:-4px; width:20px; height:20px; border-radius:50%;
-  display:grid; place-items:center; border:2px solid #0f172a; box-sizing:border-box;
-  background:linear-gradient(135deg, #c084fc 0%, #4f46e5 55%, #6b21a8 100%);
-  box-shadow:0 1px 3px rgba(0,0,0,.5); }
-.ip-ava-rank b { font-size:10px; font-weight:900; color:#fff; line-height:1; }
+/* 头像角标（2026-10-16 用户口径「去除金字」：DOM 不再生成，样式保留仅为
+   旧结构兜底，等下一轮清理可删）。 */
+.ip-ava-rank { display:none; }
 .ip-p-info { min-width:0; display:flex; flex-direction:column; align-items:flex-start; gap:6px; }
 .ip-p-name { font-size:16px; line-height:24px; font-weight:800; letter-spacing:.025em; color:#F1F5F9;
   text-shadow:0 1px 4px rgba(0,0,0,.8);
@@ -386,6 +463,8 @@ button { font:inherit; cursor:pointer; }
 @media (prefers-reduced-motion: reduce) {
   #itemPopup.ip-overlay-in, .ip-box, .ip-page, .ip-rays, .ip-particles span,
   .ip-podium, .ip-halo, .ip-orbit, .ip-orbit2, .ip-badge, .ip-spark,
+  .ip-theme-gold .ip-corona, .ip-sunburst, .ip-glowcore,
+  .ip-ice-orbit, .ip-ice-orbit2, .ip-ice-veil,
   .ip-sub i, .ip-capsule i, .ip-chip i, .ip-next i.sweep { animation:none !important; }
   .ip-next i.sweep { display:none; }
 }
@@ -1581,6 +1660,11 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
   background:#EEF2FF; color:var(--primary);
   font-size:11px; font-weight:700; display:grid; place-items:center; margin-top:1px; }
 .qr-steps .qr-txt { font-size:12.5px; color:var(--on-surface-variant); line-height:1.6; }
+.wx-code-card { max-width:260px; margin:12px auto 0; padding:12px 14px;
+  background:var(--surface-container-low); border:1px solid var(--hairline); border-radius:14px; }
+.wx-code-main { display:flex; align-items:center; justify-content:center; gap:10px; margin-top:6px; }
+.wx-code-main b { min-width:88px; font-size:26px; letter-spacing:6px; color:var(--on-surface); }
+.wx-code-main button { height:32px; padding:0 12px; border-radius:9999px; font-size:12px; }
 @media (prefers-reduced-motion: reduce) {
   .qr-wrap.qr-live, .qr-status.wait .dot { animation:none; }
 }
@@ -4050,9 +4134,10 @@ function pushStatusText(p) {
 /* 2026-10-10：数据入库约 30 分钟后由微信机器人私聊推送，两类内容各自开关（都关着就不推）：
    · 追分提醒 —— 追主播 / 定音浪目标 / 追名次（一律比本月累计），追上/还差多少都推给你
    · 每日报告 —— 当天音浪排行榜
-   绑定（2026-10-16 口径，第二轮）：页面点「显示二维码和绑定码」→ 扫码加机器人 →
-   把给出的 4 位数字在微信里发给机器人 → 绑定完成（不再要手机号；
-   扫码只负责加好友，不能完成绑定；默认不显示，点了才出现）。 */
+   对接（2026-10-16 深夜口径，第三轮）：页面点「获取二维码」→ **直接**给二维码
+   （openclaw-weixin 官方接口现取，不再依赖管理员上传的静态图）+ 4 位对接码 →
+   扫码并在手机上确认就对接完成（服务端自动落凭证，机器人随即私聊欢迎语，带名字）；
+   也可以把 4 位对接码发给机器人完成对接（不用扫码）。 */
 let pushState = null;
 let pushSrTimer = null;      // 「我发了，查激活状态」的自动轮询（needActivate 时 5s 后刷一次）
 let pushChaseSrTimer = null; // 「目标人」搜索防抖（与上面的轮询分开，避免互相 clearTimeout）
@@ -4100,12 +4185,15 @@ async function refreshPush() {
 function renderPushBox(p) {
   const box = $('pushBox');
   if (!box) return;
+  /* 每次重渲染都换掉 #pushBox 的 DOM：先把二维码轮询 / 倒计时停掉，
+     否则旧计时器会在已卸载的节点上继续打接口（2026-10-16 深夜，段①二维码）。 */
+  clearWxDock();
   box.innerHTML = !p ? pushErrHtml() : pushPageHtml(p);
   bindPushBox(p);
 }
 
 /* 「消息设置」子页三段（2026-10-15 契约 C）：
-   ① 微信对接（加好友二维码 / 4 位绑定码 / 解绑 / 三态提示）
+   ① 微信对接（获取二维码：官方二维码 + 4 位对接码 / 解绑 / 三态提示）
    ② 推送开关（追分提醒 + 每日报告 + 师门日报）
    ③ 追分设置入口行（点进 /my/chase）
    后端 channelConfigured=false（管理员还没接机器人）时整页只给一句说明，
@@ -4125,14 +4213,14 @@ function pushSecTitle(text) {
   return '<div class="card-t" style="margin:12px 0 2px;font-size:13px">' + text + '</div>';
 }
 
-/* ① 微信对接：绑定三态（bound / scanBound / 未绑定）+ 加好友二维码 + 绑定码 + 解绑。
-   2026-10-16 用户口径（第二轮）：
-   · 一个按钮「显示二维码和绑定码」：点开同时给加好友二维码与 4 位绑定码，
-     默认收起，图片与码都是点开时才取 —— 扫码只负责加机器人，**不能完成绑定**；
-   · 绑定 = 在微信里把 4 位绑定码发给机器人（不再要手机号）；
-   · 官方「扫码登录绑定」入口收起（后端端点保留，页面不再渲染）。
-   三态口径：bound=已拿到会话可推送；scanBound=历史扫码用户（扫了码还没给机器人发过消息，
-   微信要求先有对话才能主动推）；都没有=未绑定。 */
+/* ① 微信对接：三态（bound / scanBound / 未绑定）+ 二维码 + 4 位对接码 + 解绑。
+   2026-10-16 深夜用户口径（第三轮）：
+   · 一个按钮「获取二维码」：点一下就**直接**给二维码与 4 位对接码
+     （二维码 = openclaw-weixin 官方接口现取，不再依赖管理员先上传一张静态码）；
+   · 对接两条路都通：扫码并在手机上确认（服务端自动落凭证）或把 4 位对接码发给机器人；
+   · 对接完成由机器人私聊欢迎语（带姓名，见后端 bot::wx_dock_welcome）。
+   三态口径：bound=已拿到会话可推送；scanBound=已对接但还没给机器人发过消息
+   （微信要求先有对话才能主动推）；都没有=未对接。 */
 function wechatBindHtml(p) {
   let h = pushSecTitle('微信对接');
   if (p.bound) {
@@ -4155,133 +4243,361 @@ function wechatBindHtml(p) {
   } else {
     h += pushUnboundHtml(p);
   }
-  /* 绑定码（POST /my/push/code）2026-10-16 第二轮起不再单独给按钮：
-     并进未绑定引导的「显示二维码和绑定码」展开区（pushUnboundHtml），
-     点开时一并取码。已绑定（p.bound）的账号不需要再绑，什么都不加。 */
+  /* 对接码（POST /my/push/code）2026-10-16 起不单独给按钮：
+     并进未绑定引导的「获取二维码」展开区（pushUnboundHtml），点开时与二维码并行取一次。
+     已对接（p.bound）的账号不需要再来一次，什么都不加。 */
   return h;
 }
 
-/* 未绑定时的引导，两种人分开走：
-   · 历史扫码用户（scanBound）→ 只差「给机器人发一条消息」，给查激活入口，别让他重扫
-     （官方扫码入口已收起，页面上已经没有「重新扫码」可点了）；
-   · 其余人 → 点「显示二维码和绑定码」一个按钮展开：加好友二维码 + 4 位绑定码
-     （展开扫码加好友 → 发码给机器人）。
-     二维码取不到（管理员没配 / 图片端点失败）也要把绑定码路走通，不能整块卡死。 */
+/* 未对接时的引导，两种人分开走：
+   · 已对接未激活（scanBound）→ 只差「给机器人发一条消息」，给查激活入口，别让他重扫；
+   · 其余人 → 点「获取二维码」一个按钮展开：官方二维码 + 4 位对接码
+     （扫码确认即对接完成；也可以把对接码发给机器人）。
+     二维码取不到（上游抖动）也要把对接码那条路走通，不能整块卡死。 */
 function pushUnboundHtml(p) {
   if (p.scanBound) {
-    return '<div class="sub" style="margin-top:8px;line-height:1.75">' +
+    /* 刚在本次会话里点完「获取二维码」并扫码确认：先报一句成功（欢迎语已由后端发出），
+       下面的「还差一步」是推送真正生效要的会话语境，两回事分开说，别让用户以为没成功。 */
+    const justDocked = wxDockConfirmed
+      ? '<div class="sub" style="margin-top:8px;line-height:1.75">✅ 对接成功！' +
+        '机器人已经在微信里给你发了欢迎语（带着你的名字）。</div>'
+      : '';
+    return justDocked +
+      '<div class="sub" style="margin-top:8px;line-height:1.75">' +
       '✅ 扫码已确认。请在微信里给机器人发送任意一条消息，收到回执后推送就激活了。</div>' +
       '<div class="hint" style="margin-top:8px">已经扫过码了，激活只差一步：' +
       '在微信里给机器人随便发一条消息，收到回执就通了。</div>' +
       '<button class="go gray" id="pushCheckActivate" style="margin-top:8px">我发了，查一下激活状态</button>';
   }
   let h = '<div class="sub" style="margin-top:8px;line-height:1.75">' +
-    '点下面的按钮：用微信扫码加机器人为好友，再把给出的 4 位绑定码发给它，就绑定好了。' +
+    '点下面的按钮，页面直接给出二维码和 4 位对接码：用微信「扫一扫」扫二维码，' +
+    '在手机上确认就对接好了。' +
     '</div>';
-  /* 2026-10-16 用户口径（第二轮）：一个按钮搞定 —— 点「显示二维码和绑定码」同时
-     展开加好友二维码与要发给机器人的 4 位绑定码，不再分两个按钮。
-     二维码懒加载（不点不发 GET /my/push/qr）；绑定码也是点开时才取（30 分钟有效）。
-     管理员观看账号没有可绑身份：只给二维码不给绑定码；两者都没有就不出按钮。 */
-  const showBtn = p.hasQr || !p.admin;
+  /* 2026-10-16 深夜用户口径（第三轮）：点「获取二维码」**直接**给二维码 + 对接码，
+     不再分两个按钮、也不再依赖管理员先上传一张静态二维码 ——
+     · 二维码：openclaw-weixin 官方接口现取（POST /my/push/wechat/start，返回
+       data:image/svg+xml 的 imgContent）→ 就地 <img> 渲染 + 2 秒轮询对接状态 + 5 分钟倒计时；
+     · 对接码：既有 POST /my/push/code（4 位、30 分钟有效、用掉即清），与二维码并行取。
+     两条路都能完成对接：扫码并在手机上确认（服务端自动落凭证）或把 4 位对接码发给机器人。
+     管理员观看账号没有可绑身份：只给二维码不给对接码；什么都没有就不出按钮。 */
+  /* 2026-10-17 用户口径：备用「机器人加好友二维码」整段撤掉（openclaw 官方对接码
+     一条路走通：扫码确认或发 4 位对接码），hasQr / 管理员上传图不再参与本段。 */
+  const showBtn = true;
   if (showBtn) {
-    h += '<button class="go gray" id="pushQrShow" style="margin-top:10px">显示二维码和绑定码</button>' +
-      '<div id="pushQrArea" class="hidden" style="margin-top:10px">';
-    if (p.hasQr) {
-      h += '<div class="qr-frame"><div class="qr-wrap" id="pushAddQrWrap">' +
-        '<img class="qrcode" id="pushAddQr" alt="微信机器人二维码"></div></div>' +
-        '<div class="hint" style="margin-top:6px">用微信「扫一扫」加机器人为好友' +
-        '（扫码只加好友，不完成绑定）。</div>';
-    } else {
-      h += '<div class="hint">管理员还没配机器人二维码；' +
-        '如果你已经加过机器人，直接把下面的绑定码发给它也能绑。</div>';
-    }
+    h += '<button class="go gray" id="pushQrShow" style="margin-top:10px">获取二维码</button>' +
+      '<div id="pushQrArea" class="hidden" style="margin-top:10px">' +
+      /* 二维码卡（.qr-* 一套样式是原「扫码绑定」卡留下的：208px 白底 + 四角取景框 +
+         状态行 + 倒计时），二维码与状态行由 startWxDock/pollWxDock 现填。 */
+      '<div class="qr-frame"><i></i><div class="qr-wrap" id="pushWxQrWrap">' +
+      '<img class="qrcode" id="pushWxQr" alt="微信对接二维码"></div><i></i></div>' +
+      '<div class="qr-status wait" id="pushWxStatus"><span class="dot"></span>' +
+      '<span id="pushWxStatusTx">二维码获取中…</span></div>' +
+      '<div class="qr-expire" id="pushWxExpire"></div>' +
+      '<button class="go gray hidden" id="pushWxRefresh" style="margin-top:8px">刷新二维码</button>' +
+      /* 上游要求验证码时才出现（status = need_verifycode） */
+      '<div class="hidden" id="pushWxVerifyWrap" style="margin-top:8px;text-align:left">' +
+      '<div class="hint">微信让你输验证码：把微信里显示的数字填到这里。</div>' +
+      '<input id="pushWxVerify" inputmode="numeric" autocomplete="one-time-code" ' +
+      'placeholder="微信里显示的验证码" style="width:100%;height:42px;border:1px solid var(--hairline);' +
+      'border-radius:12px;padding:0 12px;font-size:14px;margin-top:6px;background:#fff;color:var(--on-surface)">' +
+      '<button class="go gray" id="pushWxVerifyGo" style="margin-top:6px">提交验证码</button></div>';
     if (!p.admin) {
-      h += '<div class="hint hidden" id="pushCodeBox" style="margin-top:10px"></div>' +
-        '<button class="go gray hidden" id="pushCodeRetry" style="margin-top:6px">重新获取绑定码</button>';
+      h += '<div class="hint wx-code-card hidden" id="pushCodeBox">' +
+        '<div class="sub">4 位对接码（30 分钟内有效）</div>' +
+        '<div class="wx-code-main"><b id="pushCodeValue">—</b>' +
+        '<button class="go gray" id="pushCodeCopy" disabled>复制对接码</button></div>' +
+        '<div class="qr-expire" id="pushCodeExpire">把对接码发给机器人也能对接</div>' +
+        '<div id="pushCodeError" class="hidden" style="margin-top:6px;color:#b42318;font-weight:600"></div>' +
+        '</div>' +
+        '<button class="go gray hidden" id="pushCodeRetry" style="margin-top:6px">重新获取对接码</button>';
     }
     h += '</div>';
   } else {
-    h += '<div class="hint" style="margin-top:8px">管理员还没配机器人二维码，' +
-      '暂时没法在页面里出绑定码，请先联系管理员。</div>';
+    h += '<div class="hint" style="margin-top:8px">微信推送暂未开放，' +
+      '暂时没法在页面里出对接码，请先联系管理员。</div>';
   }
   h += '<div class="qr-steps">' +
-    '<div class="qr-step"><span class="qr-n">1</span><span class="qr-txt">点上面的按钮，拿到二维码和 4 位绑定码</span></div>' +
-    '<div class="qr-step"><span class="qr-n">2</span><span class="qr-txt">用微信「扫一扫」加机器人为好友</span></div>' +
-    '<div class="qr-step"><span class="qr-n">3</span><span class="qr-txt">在微信里把这 4 位数字发给机器人，绑定完成</span></div>' +
+    '<div class="qr-step"><span class="qr-n">1</span><span class="qr-txt">点上面的按钮，拿到二维码和 4 位对接码</span></div>' +
+    '<div class="qr-step"><span class="qr-n">2</span><span class="qr-txt">用微信「扫一扫」扫二维码，在手机上确认（也可以把 4 位对接码发给机器人）</span></div>' +
+    '<div class="qr-step"><span class="qr-n">3</span><span class="qr-txt">对接完成后机器人会私聊你，欢迎语带着你的名字</span></div>' +
     '</div>';
-  h += '<div class="hint" style="margin-top:8px">推送是你个人的：只有你自己绑定微信后才会收到。</div>';
+  h += '<div class="hint" style="margin-top:8px">推送是你个人的：只有你自己对接微信后才会收到。</div>';
   return h;
 }
 
-/* 加好友二维码：图片端点（GET /my/push/qr）要 X-My-Token 头，<img> 带不了 →
-   fetch 成 blob 再转 objectURL（口径同 myTokenHeaders 的注释，token 不进 URL）。
-   2026-10-16 起只在用户点「显示二维码」时才加载（懒加载，不点不发请求）。
-   拉失败就把破图位置换成一句提示 + 重试按钮，绑定码那条路照常能用。 */
-let pushAddQrUrl = '';
-async function loadPushAddQr() {
-  const img = $('pushAddQr');
-  if (!img) return;
-  try {
-    const r = await fetch('/api/public/teams/' + TEAM + '/my/push/qr', { headers: myTokenHeaders() });
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    const blob = await r.blob();
-    if (pushAddQrUrl) URL.revokeObjectURL(pushAddQrUrl);
-    pushAddQrUrl = URL.createObjectURL(blob);
-    img.src = pushAddQrUrl;
-  } catch (e) {
-    const wrap = $('pushAddQrWrap');
-    if (wrap) wrap.outerHTML =
-      '<div class="hint" id="pushQrMiss">二维码没取到，稍后重试；也可以直接用下面的 4 位绑定码。<br>' +
-      '<button class="go gray" id="pushQrRetry" style="margin-top:6px">重试</button></div>';
-    const retry = $('pushQrRetry');
-    if (retry) retry.onclick = () => {
-      /* 重试 = 把占位提示换回 <img> 骨架再拉一次（旧节点已被换掉，得现查现用） */
-      const miss = $('pushQrMiss');
-      if (miss) miss.outerHTML =
-        '<div class="qr-wrap" id="pushAddQrWrap">' +
-        '<img class="qrcode" id="pushAddQr" alt="微信机器人二维码"></div>';
-      loadPushAddQr();
-    };
-  }
-}
-
-/* 「显示二维码和绑定码」按钮（2026-10-16 用户口径第二轮）：点一下同时展开
-   加好友二维码（懒加载图片）与发给机器人的 4 位绑定码（点开时取一次），
-   再点一下收起（已拿到的图片 objectURL 与绑定码保留，不重复请求）。 */
+/* 「获取二维码」按钮（2026-10-16 深夜用户口径，第三轮）：点一下**直接**出二维码 + 4 位对接码，
+   再点一下收起（收起时把轮询与倒计时停掉，别在看不见的节点上继续打接口）。 */
 function bindPushQrShow() {
   const btn = $('pushQrShow'), area = $('pushQrArea');
   if (!btn || !area) return;
-  let codeFetched = false; // 绑定码只自动取一次；重取走「重新获取绑定码」按钮
   btn.onclick = () => {
     const opening = area.classList.contains('hidden');
     area.classList.toggle('hidden');
-    btn.textContent = opening ? '收起' : '显示二维码和绑定码';
-    if (!opening) return;
-    /* 展开时：二维码懒加载（只第一次）+ 绑定码取一次 */
-    if (!$('pushAddQr')?.src) loadPushAddQr();
-    if (!codeFetched && !$('pushCodeBox')?.textContent.trim()) {
-      codeFetched = true;
-      fetchPushCode();
-    }
+    btn.textContent = opening ? '收起' : '获取二维码';
+    if (!opening) { clearWxDock(); clearPushCodeTimer(); return; } // 收起：停掉轮询 / 倒计时
+    /* 展开时：后端一次返回二维码 + 对接码，前端就地渲染。 */
+    startWxDock();
   };
+  const refresh = $('pushWxRefresh');
+  if (refresh) refresh.onclick = () => startWxDock();
+  const verifyGo = $('pushWxVerifyGo');
+  if (verifyGo) verifyGo.onclick = () => wxDockPollNow();
+  const copy = $('pushCodeCopy');
+  if (copy) copy.onclick = copyPushCode;
   bindPushCodeRetry();
 }
 
-/* 取 4 位绑定码（POST /my/push/code）并填进 #pushCodeBox：
-   成功显示大号数字 + 有效期；失败给出提示 + 「重新获取绑定码」按钮。
+/* ===== 微信对接二维码（2026-10-16 深夜用户口径，第三轮）=====
+   点「获取二维码」→ POST /my/push/wechat/start（后端转 openclaw-weixin 官方
+   get_bot_qrcode）→ imgContent 是 data:image/svg+xml 的二维码图，直接塞 <img>。
+   拿到就 2 秒一轮 POST /my/push/wechat/poll 看状态：wait/scaned/need_verifycode/
+   expired/verify_code_blocked/scaned_but_redirect/binded_redirect/confirmed。
+   confirmed = 后端已保存凭证 + 拉长轮询 + 试发欢迎语。
+   计时器必须显式清（clearWxDock）：renderPushBox 每次重渲染都会换掉 #pushBox 的 DOM，
+   残留的 setInterval/setTimeout 只会在已卸载节点上白写文案。 */
+const WX_QR_TTL_MS = 5 * 60 * 1000; // 官方二维码约 5 分钟有效（与页面文案一致）
+const PUSH_CODE_TTL_MS = 30 * 60 * 1000; // 后端对接码固定 30 分钟有效（兜底用）
+let wxDockTimer = null;      // 状态轮询句柄
+let wxDockTick = null;       // 有效期倒计时句柄
+let pushCodeTick = null;     // 对接码倒计时句柄
+let wxDockQr = '';           // 当前二维码标识（轮询必须带上）
+let wxDockDeadline = 0;      // 有效期截止（毫秒时间戳）
+let wxDockConfirmed = false; // 本次会话刚对接成功：重渲染后仍显示一句「对接成功」
+
+function clearWxDock() {
+  clearTimeout(wxDockTimer); clearInterval(wxDockTick);
+  wxDockTimer = null; wxDockTick = null;
+}
+
+function clearPushCodeTimer() {
+  clearInterval(pushCodeTick);
+  pushCodeTick = null;
+}
+
+/* 状态行（.qr-status 三态色：wait 琥珀呼吸 / scaned 绿 / ok 绿加粗 / bad 红） */
+function wxStatusSet(kind, text) {
+  const box = $('pushWxStatus'), tx = $('pushWxStatusTx');
+  if (!box) return;
+  box.className = 'qr-status ' + kind;
+  if (tx) tx.textContent = text;
+}
+
+/* 二维码倒计时：每 5 分钟失效一次（官方口径），剩 30 秒变红，到点给「刷新」 */
+function startWxCountdown() {
+  clearInterval(wxDockTick);
+  const render = () => {
+    const exp = $('pushWxExpire');
+    if (!exp) { clearInterval(wxDockTick); return; }   // 节点没了（收起/重渲染）
+    const left = Math.max(0, wxDockDeadline - Date.now());
+    if (!left) { clearInterval(wxDockTick); onWxQrExpired(); return; }
+    const sec = Math.ceil(left / 1000);
+    exp.textContent = '二维码 ' + Math.floor(sec / 60) + ' 分 ' + pad2(sec % 60) + ' 秒后失效';
+    exp.classList.toggle('soon', sec <= 30);
+  };
+  render();
+  wxDockTick = setInterval(render, 1000);
+}
+
+/* 取二维码：失败（上游抖动 / 401 之外的 400）也要给「刷新」按钮，不能把这块卡死 */
+async function startWxDock() {
+  clearWxDock();
+  wxDockQr = '';
+  wxDockConfirmed = false;
+  const img = $('pushWxQr');
+  if (img) { img.removeAttribute('src'); img.alt = '微信对接二维码'; }
+  const wrap = $('pushWxQrWrap');
+  if (wrap) wrap.classList.remove('qr-live');
+  $('pushWxRefresh')?.classList.add('hidden');
+  $('pushWxVerifyWrap')?.classList.add('hidden');
+  if ($('pushWxVerify')) $('pushWxVerify').value = '';
+  const exp = $('pushWxExpire');
+  if (exp) { exp.textContent = ''; exp.classList.remove('soon'); }
+  wxStatusSet('wait', '二维码获取中…');
+  try {
+    const d = await postPush('/wechat/start', {});
+    if (!$('pushWxStatus')) return;          // 展开期间被收起 / 重渲染：结果丢掉
+    wxDockQr = d.qrcode || '';
+    if (!wxDockQr) throw new Error('微信接口没有返回二维码');
+    const imgContent = typeof d.imgContent === 'string' ? d.imgContent.trim() : '';
+    if (!imgContent) throw new Error('微信接口没有返回二维码图形');
+    if (img) img.src = imgContent;
+    if (wrap) wrap.classList.add('qr-live');
+    wxDockDeadline = Date.now() + WX_QR_TTL_MS;
+    if (typeof d.code === 'string' && /^\d{4}$/.test(d.code.trim())) {
+      fetchPushCode(d);
+    }
+    wxStatusSet('wait', '等待扫码…');
+    startWxCountdown();
+    pollWxDock();
+  } catch (e) {
+    wxStatusSet('bad', '二维码没取到：' + (e.message || '未知错误'));
+    $('pushWxRefresh')?.classList.remove('hidden');
+  }
+}
+
+/* 安排下一轮状态轮询（2 秒一轮）。节点没了就自然停（收起 / 重渲染都会清计时器）。 */
+function pollWxDock() {
+  clearTimeout(wxDockTimer);
+  wxDockTimer = setTimeout(wxDockPollOnce, 2000);
+}
+
+/* 立刻轮询一次（点「提交验证码」走这里：等 2 秒才发像是卡住了，用户会连点）。
+   排队的下一轮先取消，跑完由 wxDockPollOnce 末尾照常续上，任何时刻至多一个待触发计时器。 */
+function wxDockPollNow() {
+  clearTimeout(wxDockTimer);
+  wxDockPollOnce();
+}
+
+/* 轮询一次状态，末尾自己续下一轮。有验证码输入时按 verify_code 一起带上
+   （need_verifycode 的解法：后端透传给官方 get_qrcode_status）。 */
+async function wxDockPollOnce() {
+  if (!wxDockQr || !$('pushWxStatus')) return;  // 收起 / 重渲染：不再续轮询
+  const verify = $('pushWxVerify') ? $('pushWxVerify').value.trim() : '';
+  let d;
+  try {
+    d = await postPush('/wechat/poll', verify
+      ? { qrcode: wxDockQr, verifyCode: verify }
+      : { qrcode: wxDockQr });
+  } catch (e) {
+    /* 400 = 后端判定二维码会话已过期（pending 会话 5 分钟 TTL）→ 给刷新 */
+    if (e.status !== 400) {
+      wxStatusSet('bad', '状态查询暂时失败，继续等待…');
+      pollWxDock();
+      return;
+    }
+    clearWxDock();
+    wxStatusSet('bad', '二维码已失效，点下面刷新');
+    $('pushWxRefresh')?.classList.remove('hidden');
+    return;
+  }
+  const st = d.status || 'wait';
+  if (st === 'confirmed') { onWxDockConfirmed(d); return; }
+  if (st === 'expired') { onWxQrExpired(); return; }
+  if (st === 'scaned') wxStatusSet('scaned', '已扫码，请在手机上确认…');
+  else if (st === 'need_verifycode') {
+    $('pushWxVerifyWrap')?.classList.remove('hidden');
+    wxStatusSet('wait', '微信要求输入验证码');
+  } else if (st === 'verify_code_blocked') {
+    clearWxDock();
+    wxStatusSet('bad', '验证码连续不对，二维码作废了');
+    $('pushWxRefresh')?.classList.remove('hidden');
+    return;
+  } else if (st === 'scaned_but_redirect') {
+    wxStatusSet('scaned', '已扫码，正在切换服务器继续等待…');
+  } else if (st === 'binded_redirect') {
+    /* 官方语义：这个微信之前已经连过本机器人。凭证这次拿不到，只能等上游再给
+       confirmed；一直不来的话倒计时到点会引导刷新（换一个二维码再扫）。 */
+    wxStatusSet('scaned', '这个微信之前对接过，正在同步…');
+  } else wxStatusSet('wait', '等待扫码…');
+  pollWxDock();
+}
+
+function onWxQrExpired() {
+  clearWxDock();
+  wxStatusSet('bad', '二维码已失效');
+  const exp = $('pushWxExpire');
+  if (exp) { exp.textContent = '二维码 5 分钟有效，点下面刷新'; exp.classList.remove('soon'); }
+  const wrap = $('pushWxQrWrap');
+  if (wrap) wrap.classList.remove('qr-live');
+  $('pushWxRefresh')?.classList.remove('hidden');
+}
+
+/* 对接成功：停轮询、报成功、顺手刷新推送状态（重渲染后走 scanBound 分支，
+   那里会显示「已对接，只差在微信里给机器人发一条消息」）。 */
+function onWxDockConfirmed(d) {
+  clearWxDock();
+  clearPushCodeTimer();
+  wxDockConfirmed = true;
+  wxStatusSet('ok', '✅ 对接成功');
+  const wrap = $('pushWxQrWrap');
+  if (wrap) wrap.classList.remove('qr-live');
+  const exp = $('pushWxExpire');
+  if (exp) { exp.textContent = ''; exp.classList.remove('soon'); }
+  $('pushWxVerifyWrap')?.classList.add('hidden');
+  $('pushWxRefresh')?.classList.add('hidden');
+  $('pushCodeBox')?.classList.add('hidden');
+  $('pushCodeRetry')?.classList.add('hidden');
+  toast(d && d.welcome === false ? '对接成功（欢迎语稍后到）' : '对接成功');
+  refreshPush();
+}
+
+/* 取 4 位对接码（POST /my/push/code）并填进 #pushCodeBox：
+   成功显示大号数字 + 可复制按钮 + 有效期倒计时；失败给出提示 + 重试按钮。
    admin 观看账号没有 #pushCodeBox，进来直接返回（按钮展开时也不会调）。 */
-async function fetchPushCode() {
+function pushCodeDeadline(expires) {
+  const parsed = Date.parse(String(expires || '').replace(' ', 'T'));
+  return Number.isFinite(parsed) ? parsed : Date.now() + PUSH_CODE_TTL_MS;
+}
+
+function startPushCodeCountdown(deadline) {
+  clearPushCodeTimer();
+  const render = () => {
+    const exp = $('pushCodeExpire');
+    if (!exp) { clearPushCodeTimer(); return; }
+    const left = Math.max(0, deadline - Date.now());
+    if (!left) {
+      clearPushCodeTimer();
+      exp.textContent = '对接码已失效，点下面重新获取';
+      exp.classList.add('soon');
+      $('pushCodeCopy').disabled = true;
+      $('pushCodeRetry')?.classList.remove('hidden');
+      return;
+    }
+    const sec = Math.ceil(left / 1000);
+    exp.textContent = Math.floor(sec / 60) + ' 分 ' + pad2(sec % 60) + ' 秒后失效';
+    exp.classList.toggle('soon', sec <= 30);
+  };
+  render();
+  pushCodeTick = setInterval(render, 1000);
+}
+
+async function copyPushCode() {
+  const code = ($('pushCodeValue')?.textContent || '').trim();
+  if (!/^\d{4}$/.test(code)) return;
+  try {
+    if (navigator.clipboard) {
+      await navigator.clipboard.writeText(code);
+    } else {
+      const fallback = document.createElement('textarea');
+      fallback.value = code;
+      fallback.setAttribute('readonly', '');
+      fallback.style.position = 'fixed';
+      fallback.style.opacity = '0';
+      document.body.appendChild(fallback);
+      fallback.select();
+      if (!document.execCommand('copy')) throw new Error('copy failed');
+      fallback.remove();
+    }
+    toast('已复制对接码');
+  } catch (_) {
+    toast('复制失败，请手动复制');
+  }
+}
+
+async function fetchPushCode(preloaded) {
   const box = $('pushCodeBox');
   if (!box) return;
   box.classList.remove('hidden');
-  box.innerHTML = '绑定码获取中…';
+  clearPushCodeTimer();
+  $('pushCodeValue').textContent = '—';
+  $('pushCodeExpire').textContent = '获取中…';
+  $('pushCodeExpire').classList.remove('soon');
+  $('pushCodeCopy').disabled = true;
+  $('pushCodeError').textContent = '';
+  $('pushCodeError').classList.add('hidden');
   $('pushCodeRetry')?.classList.add('hidden');
   try {
-    const d = await postPush('/my/push/code', {});
-    box.innerHTML = '把这 4 位数字发给机器人（30 分钟内有效）：<br>' +
-      '<b style="font-size:26px;letter-spacing:6px">' + esc(d.code || '—') + '</b>';
+    const d = preloaded || await postPush('/my/push/code', {});
+    const code = String(d.code || '').trim();
+    if (!/^\d{4}$/.test(code)) throw new Error('对接码格式不对');
+    $('pushCodeValue').textContent = code;
+    $('pushCodeCopy').disabled = false;
+    $('pushCodeExpire').textContent = '30 分钟内有效';
+    startPushCodeCountdown(pushCodeDeadline(d.codeExpires));
   } catch (e) {
-    box.innerHTML = '绑定码没取到：' + esc(e.message || '未知错误');
+    $('pushCodeError').textContent = '对接码没取到：' + (e.message || '未知错误');
+    $('pushCodeError').classList.remove('hidden');
+    $('pushCodeExpire').textContent = '请重新获取对接码';
     $('pushCodeRetry')?.classList.remove('hidden');
   }
 }
@@ -4749,20 +5065,29 @@ function bindChaseHandlers(p) {
     身份同时给 body.token（既有后端一律读 body）与 X-My-Token 头（契约里
     targets/batch 等新路由指定走头）：两条路都留，少一条就会 401。 */
 async function postPush(path, extra) {
-  const r = await fetch('/api/public/teams/' + TEAM + path, {
+  /* 2026-10-17 修正：/wechat/start 与 /wechat/poll 在后端注册在 /my/push/wechat/*
+     下，前端拼接漏了 /my/push 段，报「接口不存在：/api/public/teams/all/wechat/start」。
+     这里按契约补全；其余 path 本来就带 /my/push 前缀，不受影响。 */
+  const prefix = path.startsWith('/my/push') ? '' : '/my/push';
+  const r = await fetch('/api/public/teams/' + TEAM + prefix + path, {
     method: 'POST',
     headers: Object.assign({ 'Content-Type': 'application/json' }, myTokenHeaders()),
     body: JSON.stringify(Object.assign({ token: myToken() }, extra)),
   });
   const d = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+  if (!r.ok) {
+    const e = new Error(d.error || ('HTTP ' + r.status));
+    e.status = r.status;
+    throw e;
+  }
   return d;
 }
 
 function bindPushBox(p) {
-  /* 2026-10-16 用户口径：二维码+绑定码默认收起，点「显示二维码和绑定码」才展开
-     （图片懒加载、取码一次）。不再随卡渲染就自动拉图 —— renderPushBox 每次轮询
-     回来都会走这里，自动拉会把「不点不显示」变成事实上的每次轮询都打一次接口。
+  /* 2026-10-16 用户口径（第三轮）：二维码 + 对接码默认收起，点「获取二维码」才现取
+     （二维码走官方接口现取、对接码取一次、备用加好友二维码懒加载）。不再随卡渲染就
+     自动拉 —— renderPushBox 每次轮询回来都会走这里，自动拉会把「不点不显示」变成
+     事实上的每次轮询都打一次上游接口。
      事件绑定统一在下方那一处 bindPushQrShow()（离渲染近、注释同源）。 */
   // 已扫码但还没激活：轮询一下状态，用户发完消息后自动刷新
   if (p && p.needActivate) {
@@ -4789,7 +5114,7 @@ function bindPushBox(p) {
       }
     };
   }
-  /* 段①「显示二维码和绑定码」的展开/取码绑定（bindPushQrShow 内部含绑定码重取） */
+  /* 段①「获取二维码」的展开/取码/轮询绑定（bindPushQrShow 内部含对接码重取） */
   bindPushQrShow();
   /* 段③「追分设置」入口行：与「我的」列表页那一行同一跳转口径 */
   const chaseGo = $('pushChaseGo');
@@ -5918,17 +6243,19 @@ const IP_BADGE_SRC = {
 
 /** 席位配置（2026-10-16 三甲通报）：弹窗按公告条在 items 里的**配置顺序**翻页，
     第 1 页就是第 1 条——运营想让谁当冠军就把谁排第一（横幅同口径）。
-    每个席位只带视觉差异（名次字 / 荣耀副行 / 缺省徽章图标），内容全部来自该条公告：
-    · char：头像角标字（金/银/铜；超出 3 条统一「荣」）
+    每个席位只带视觉差异（主题色 / 荣耀副行 / 缺省徽章图标），内容全部来自该条公告：
+    · theme：视觉主题（gold=冠军鎏金日冕 / purple=亚军紫晶星轨 / ice=季军冰蓝透视星轨，
+      与 Stitch 三稿一一对应；超出 3 条统一 fallback 紫晶）
     · name / btn：进度小字里的席位名（冠军）与下一页按钮文案（季军荣耀）
     · sub：标题下荣耀副行的缺省词（纯装饰，不接后端）
-    · icon：条目没配图标时的缺省徽章（emoji_events=冠军杯 / military_tech=奖牌 / star=星徽） */
+    · icon：条目没配图标时的缺省徽章（emoji_events=冠军杯 / military_tech=奖牌 / star=星徽）
+    （2026-10-16 用户口径：头像角标字「金/银/铜」去除，char 字段删除） */
 var IP_SEATS = [
-  { char: '金', name: '冠军', btn: '冠军荣耀', sub: '问鼎巅峰 · 一战封神', icon: 'emoji_events' },
-  { char: '银', name: '亚军', btn: '亚军荣耀', sub: '锐不可当 · 傲视群雄', icon: 'military_tech' },
-  { char: '铜', name: '季军', btn: '季军荣耀', sub: '锋芒毕露 · 再攀高峰', icon: 'star' },
+  { theme: 'gold', name: '冠军', btn: '冠军荣耀', sub: '问鼎巅峰 · 一战封神', icon: 'emoji_events' },
+  { theme: 'purple', name: '亚军', btn: '亚军荣耀', sub: '锐不可当 · 傲视群雄', icon: 'military_tech' },
+  { theme: 'ice', name: '季军', btn: '季军荣耀', sub: '锋芒毕露 · 再攀高峰', icon: 'star' },
 ];
-var IP_SEAT_REST = { char: '荣', name: '荣耀席位', btn: '下一席位', sub: '荣耀在册 · 与有荣焉', icon: 'auto_awesome' };
+var IP_SEAT_REST = { theme: 'purple', name: '荣耀席位', btn: '下一席位', sub: '荣耀在册 · 与有荣焉', icon: 'auto_awesome' };
 function ipSeat(i) { return IP_SEATS[i] || IP_SEAT_REST; }
 
 /** 席位徽章图标：条目 icon 在白名单内用条目的，否则用席位缺省（口径同横幅）。 */
@@ -6114,23 +6441,19 @@ function maybeAnnounceItemsPopup() {
     const page = document.createElement('div');
     page.className = 'ip-page';
 
-    /* 殿堂级徽章排面：地台 + 星轨 + 主徽章 + 点缀星辉 */
+    /* 殿堂级徽章排面：地台 + 主题星轨 + 主徽章 + 点缀星辉。
+       2026-10-16 三甲分化（用户口径「三个点背景是不一样的」）：主题类挂 visual，
+       星轨/光效 DOM 按席位换 —— Stitch 三稿各不相同：
+       冠军 = 鎏金日冕（太阳芒羽 + 能量核 + 金色双环）、亚军 = 紫晶双星轨（默认）、
+       季军 = 冰蓝倾斜透视椭圆星轨（双能量星体）。 */
     const visual = document.createElement('div');
-    visual.className = 'ip-visual';
+    visual.className = 'ip-visual ip-theme-' + (seat.theme || 'purple');
     const podium = document.createElement('div');
     podium.className = 'ip-podium';
     const podiumRing = document.createElement('div');
     podiumRing.className = 'ip-podium-ring';
     const halo = document.createElement('div');
     halo.className = 'ip-halo';
-    const orbit = document.createElement('div');
-    orbit.className = 'ip-orbit';
-    const orbitDot = document.createElement('i');
-    orbit.appendChild(orbitDot);
-    const orbit2 = document.createElement('div');
-    orbit2.className = 'ip-orbit2';
-    const orbit2Dot = document.createElement('i');
-    orbit2.appendChild(orbit2Dot);
     const badge = document.createElement('div');
     badge.className = 'ip-badge';
     const badgeImg = document.createElement('img');
@@ -6141,18 +6464,81 @@ function maybeAnnounceItemsPopup() {
     visual.appendChild(podium);
     visual.appendChild(podiumRing);
     visual.appendChild(halo);
-    visual.appendChild(orbit);
-    visual.appendChild(orbit2);
+    if (seat.theme === 'gold') {
+      /* 冠军：太阳芒羽 + 金色能量核压在光晕上，日冕双环（四芒星 + 星珠）+ 鎏金双星轨 */
+      const sunburst = document.createElement('div');
+      sunburst.className = 'ip-sunburst';
+      const core = document.createElement('div');
+      core.className = 'ip-glowcore';
+      const corona = document.createElement('div');
+      corona.className = 'ip-corona';
+      const coronaStar = document.createElement('i');
+      coronaStar.textContent = '✦';
+      coronaStar.style.cssText = 'top:-7px;left:96px;font-size:13px;';
+      const coronaDot = document.createElement('i');
+      coronaDot.className = 'dot';
+      corona.appendChild(coronaStar);
+      corona.appendChild(coronaDot);
+      const orbit = document.createElement('div');
+      orbit.className = 'ip-orbit';
+      orbit.appendChild(document.createElement('i'));
+      const orbit2 = document.createElement('div');
+      orbit2.className = 'ip-orbit2';
+      orbit2.appendChild(document.createElement('i'));
+      visual.appendChild(sunburst);
+      visual.appendChild(core);
+      visual.appendChild(corona);
+      visual.appendChild(orbit);
+      visual.appendChild(orbit2);
+    } else if (seat.theme === 'ice') {
+      /* 季军：冰蓝暗幕光晕 + 倾斜透视椭圆星轨（前后双能量星体）+ 反向虚线内环 */
+      const veil = document.createElement('div');
+      veil.className = 'ip-ice-veil';
+      const iceOrbit = document.createElement('div');
+      iceOrbit.className = 'ip-ice-orbit';
+      iceOrbit.appendChild(document.createElement('i'));
+      iceOrbit.appendChild(document.createElement('i'));
+      const iceOrbit2 = document.createElement('div');
+      iceOrbit2.className = 'ip-ice-orbit2';
+      visual.appendChild(veil);
+      visual.appendChild(iceOrbit);
+      visual.appendChild(iceOrbit2);
+    } else {
+      /* 亚军（默认）：紫晶双星轨 */
+      const orbit = document.createElement('div');
+      orbit.className = 'ip-orbit';
+      orbit.appendChild(document.createElement('i'));
+      const orbit2 = document.createElement('div');
+      orbit2.className = 'ip-orbit2';
+      orbit2.appendChild(document.createElement('i'));
+      visual.appendChild(orbit);
+      visual.appendChild(orbit2);
+    }
     visual.appendChild(badge);
-    /* 四角点缀星辉（字符/位置/颜色/节奏 1:1 对齐 Stitch：✦✦★★ 四枚） */
-    [['✦', 'top:20px;left:48px;font-size:12px;color:#fcd34d;text-shadow:0 0 6px #fde047;', 0],
-     ['✦', 'top:40px;right:44px;font-size:16px;color:#E9D5FF;text-shadow:0 0 8px #c084fc;', 0.8],
-     ['★', 'bottom:32px;left:56px;font-size:11px;color:#d8b4fe;', 1.4],
-     ['★', 'bottom:28px;right:56px;font-size:12px;color:#fcd34d;', 1.9]].forEach(([ch, st, delay]) => {
+    /* 四角点缀星辉（✦✦★★ 四枚，颜色/光晕随主题换 —— 与 Stitch 三稿一致） */
+    const SPARKS = seat.theme === 'gold' ? [
+      ['✦', 'top:20px;left:48px;font-size:12px;', '#fde047', '0 0 8px rgba(253,224,71,.9)', 0],
+      ['✦', 'top:40px;right:44px;font-size:16px;', '#fef08a', '0 0 10px rgba(253,224,71,.9)', 0.8],
+      ['★', 'bottom:32px;left:56px;font-size:11px;', '#fbbf24', '0 0 8px rgba(251,191,36,.9)', 1.4],
+      ['★', 'bottom:28px;right:56px;font-size:12px;', '#fde047', '0 0 8px rgba(253,224,71,.9)', 1.9],
+    ] : seat.theme === 'ice' ? [
+      ['✦', 'top:20px;left:48px;font-size:12px;', '#7dd3fc', '0 0 8px rgba(125,211,252,.9)', 0],
+      ['✦', 'top:40px;right:44px;font-size:16px;', '#bae6fd', '0 0 10px rgba(125,211,252,.9)', 0.8],
+      ['★', 'bottom:32px;left:56px;font-size:11px;', '#38bdf8', '0 0 8px rgba(56,189,248,.9)', 1.4],
+      ['★', 'bottom:28px;right:56px;font-size:12px;', '#7dd3fc', '0 0 8px rgba(125,211,252,.9)', 1.9],
+    ] : [
+      ['✦', 'top:20px;left:48px;font-size:12px;', '#fcd34d', '0 0 6px #fde047', 0],
+      ['✦', 'top:40px;right:44px;font-size:16px;', '#E9D5FF', '0 0 8px #c084fc', 0.8],
+      ['★', 'bottom:32px;left:56px;font-size:11px;', '#d8b4fe', '0 0 6px rgba(216,180,254,.8)', 1.4],
+      ['★', 'bottom:28px;right:56px;font-size:12px;', '#fcd34d', '0 0 6px #fde047', 1.9],
+    ];
+    SPARKS.forEach(([ch, st, col, glow, delay]) => {
       const sp = document.createElement('span');
       sp.className = 'ip-spark';
       sp.textContent = ch;
       sp.style.cssText = st;
+      sp.style.color = col;
+      sp.style.textShadow = glow;
       sp.style.animationDelay = delay + 's';
       visual.appendChild(sp);
     });
@@ -6224,13 +6610,8 @@ function maybeAnnounceItemsPopup() {
       avaCore.appendChild(avaIco);
     }
     avaRing.appendChild(avaCore);
-    const avaRank = document.createElement('div');
-    avaRank.className = 'ip-ava-rank';
-    const rankB = document.createElement('b');
-    rankB.textContent = seat.char;
-    avaRank.appendChild(rankB);
+    /* 2026-10-16 用户口径「去除金字」：头像角标（金/银/铜圆标）不再生成。 */
     ava.appendChild(avaRing);
-    ava.appendChild(avaRank);
     pLeft.appendChild(ava);
     const pInfo = document.createElement('div');
     pInfo.className = 'ip-p-info';
