@@ -87,6 +87,10 @@ pub async fn site(
         // 展示页公告条（2026-10-14）新增键：数组顺序 = 从上到下；只含 enabled=true，
         // 是展示端公告/冠军横幅的**唯一来源**（champ/celebrate 保留兼容，页面不再单独渲染）
         "items": ann.public_items_json(),
+        // 每日之星弹幕带（2026-10-18 v2）：常驻带配置，永远下发归一化后的完整对象
+        // （enabled=false 也下发；前端按 enabled 判断，老前端忽略新键）
+        "starDanmaku": serde_json::to_value(ann.star_danmaku.normalized())
+            .unwrap_or(serde_json::Value::Null),
         "settings": {
             "daily": s.daily,
             "monthly": s.monthly,

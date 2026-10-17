@@ -1962,6 +1962,34 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
    （登录门 / 「我的」页）保持原样不动。 */
 /* 「我的」页公告条：插在 view 内容顶部（section 内第一个元素） */
 #my-ann { margin:0 0 10px; }
+
+/* ===== 🚩 每日之星弹幕带（2026-10-18 v2）=====
+   常驻在数据视图顶部（普通文档流，不是浮层）：领奖台/榜单从它下方开始，
+   所以弹幕**不会遮挡任何原有内容**。整带 pointer-events:none，点击穿透。 */
+.dm-band { margin:0 -14px 12px; padding:8px 14px 10px; overflow:hidden;
+  background:linear-gradient(180deg,#FFFDF8 0%,#FAF7F0 100%);
+  border-bottom:1px solid rgba(180,83,9,.12); pointer-events:none; }
+.dm-head { display:flex; align-items:center; gap:6px; margin-bottom:2px; }
+.dm-title { font-size:9px; font-weight:700; letter-spacing:.08em; color:rgba(180,83,9,.55); }
+#starDm { position:relative; overflow:hidden; height:var(--dm-h,150px);
+  -webkit-mask-image:linear-gradient(90deg,transparent 0,#000 6%,#000 94%,transparent 100%);
+  mask-image:linear-gradient(90deg,transparent 0,#000 6%,#000 94%,transparent 100%); }
+.sd-item { position:absolute; top:calc(var(--sd-lane,0) * 30px); left:100%; white-space:nowrap;
+  will-change:transform; pointer-events:none;
+  animation:sdDrift var(--sd-dur,15s) linear forwards; }
+.sd-txt { display:inline-flex; align-items:center; gap:5px; font-size:13px; font-weight:700;
+  letter-spacing:.02em; opacity:var(--sd-op,.6);
+  text-shadow:0 1px 2px rgba(255,255,255,1),0 0 8px rgba(255,255,255,.85);
+  animation:sdBob 3.6s ease-in-out infinite alternate; }
+.sd-item.sd-rank-1 .sd-txt { color:#B45309; }
+.sd-item.sd-rank-2 .sd-txt { color:#475569; }
+.sd-item.sd-rank-3 .sd-txt { color:#9A3412; }
+.sd-wv { font-size:12px; font-weight:600; opacity:.75; font-variant-numeric:tabular-nums; }
+#starDm.sd-static { display:flex; align-items:center; justify-content:center; }
+.sd-note { font-size:12px; font-weight:600; color:rgba(180,83,9,.6); }
+@keyframes sdDrift { from { transform:translate3d(0,0,0); } to { transform:translate3d(calc(-100% - 100vw),0,0); } }
+@keyframes sdBob { from { transform:translateY(-2px); } to { transform:translateY(2px); } }
+@media (prefers-reduced-motion: reduce) { .sd-item { display:none !important; } }
 </style>
 </head>
 <body>
@@ -2036,6 +2064,11 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 
 <main class="wrap">
   <div class="err hidden" id="err"></div>
+  <!-- 🚩 每日之星弹幕带（2026-10-18 v2）：常驻文档流，领奖台/榜单从它下方开始，不遮挡任何内容 -->
+  <section class="dm-band hidden" id="dmBand" aria-label="今日弹幕">
+    <div class="dm-head"><span class="dm-title">今日弹幕</span></div>
+    <div id="starDm" aria-hidden="true"></div>
+  </section>
   <div id="view"></div>
   <div class="note" id="foot">数据每晚 24:00 后更新前一天 · 仅供内部参考 · 请勿外传</div>
 </main>
@@ -2789,6 +2822,100 @@ function bindRows() {
   });
 }
 
+/* ==================== 🚩 每日之星弹幕带（2026-10-18 v2：常驻、不遮挡、立即开始） ====================
+   数据：loadData() 的 listAll（/daily items），与领奖台同口径取 rank 1/2/3。
+   位置：.dm-band 常驻在数据视图顶部（普通文档流），领奖台/榜单在它下方 —— 不遮挡。
+   交互：整带 pointer-events:none，不可点击；点击/滚动不影响动画。
+   配置：site.starDanmaku（后台公告页）；缺字段 / 老后端 = 关。 */
+const starDm = (() => {
+  const RM = window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : { matches:false };
+  let seq = 0, timer = null, lastSig = '', lane = 0;
+  const cfg = () => (site && site.starDanmaku) || { enabled:false };
+  const band = () => $('dmBand');
+  const box = () => $('starDm');
+  const pick = (r) => listAll.find(x => x.hasData !== false && x.rank === r);
+  const stars = () => {
+    const c = cfg();
+    return (c.scope === 'top1' ? [pick(1)] : [pick(1), pick(2), pick(3)]).filter(Boolean);
+  };
+  const sig = (l) => l.map(x => x.rank + ':' + x.name + ':' + x.wave).join('|');
+  const isOpen = () => !!cfg().enabled && view === 'data' && period === 'daily' &&
+    !document.hidden && !($('gate') && !$('gate').classList.contains('hidden'));
+
+  function hide() {
+    const b = band(); if (b) b.classList.add('hidden');
+    const el = box(); if (el) el.innerHTML = '';
+  }
+  function stop() { seq++; clearTimeout(timer); timer = null; lastSig = ''; hide(); }
+  function layout() {
+    const c = cfg();
+    const lanes = Math.min(6, Math.max(3, +c.lanes || 5));
+    const el = box(); if (!el) return;
+    el.style.setProperty('--dm-h', (lanes * 30) + 'px');
+  }
+  function spawn(el, it, speed) {
+    const c = cfg();
+    const lanes = Math.min(6, Math.max(3, +c.lanes || 5));
+    const node = document.createElement('div');
+    node.className = 'sd-item sd-rank-' + it.rank;
+    node.style.setProperty('--sd-lane', (lane++ % lanes));
+    const txt = document.createElement('span');
+    txt.className = 'sd-txt';
+    txt.textContent = '今日第' + (['', '一', '二', '三'][it.rank] || it.rank) + '名：' + (it.name || '');
+    if (c.showWave === true && it.wave != null) {
+      const wv = document.createElement('span');
+      wv.className = 'sd-wv';
+      wv.textContent = ' · ' + wan(it.wave);
+      txt.appendChild(wv);
+    }
+    node.appendChild(txt);
+    el.appendChild(node);
+    const dur = (window.innerWidth + node.offsetWidth + 80) / speed;
+    node.style.setProperty('--sd-dur', dur.toFixed(2) + 's');
+    node.addEventListener('animationend', () => node.remove(), { once:true });
+  }
+  function showStatic() {
+    const b = band(); if (b) b.classList.remove('hidden');
+    const el = box(); if (!el) return;
+    el.classList.add('sd-static');
+    el.innerHTML = '<span class="sd-note">弹幕已按系统设置暂停</span>';
+  }
+  function run() {
+    const my = ++seq, c = cfg(), list = stars();
+    if (!list.length) { hide(); return; }
+    const el = box(); if (!el) return;
+    const b = band(); if (b) b.classList.remove('hidden');
+    el.classList.remove('sd-static');
+    layout();
+    el.innerHTML = '';
+    el.style.setProperty('--sd-op', Math.min(.9, Math.max(.3, +c.opacity || .6)));
+    const per = Math.min(9, Math.max(3, +c.perRound || 6));
+    const items = Array.from({ length: per }, (_, i) => list[i % list.length]);
+    const speed = Math.min(120, Math.max(20, +c.speed || 45));
+    lane = 0;
+    items.forEach((it, i) => setTimeout(() => { if (my === seq) spawn(el, it, speed); }, i * 1500));
+    const pass = (window.innerWidth + 260) / speed * 1000;
+    const lastIn = (items.length - 1) * 1500;
+    // 轮间隔默认 3 秒：常驻带连续飘，不长时间空着；范围 2~60 秒
+    const wait = Math.max(2000, Math.min(60000, (+c.intervalSec || 3) * 1000));
+    timer = setTimeout(() => { if (my === seq) run(); }, lastIn + pass + wait);
+  }
+  function refresh() {
+    if (!isOpen()) { stop(); return; }
+    if (RM.matches) { seq++; clearTimeout(timer); timer = null; showStatic(); return; }
+    if (!listAll.length) { hide(); return; }
+    const s = sig(stars());
+    if (!s) { hide(); return; }
+    if (s === lastSig && timer) return;   // 内容没变且正在跑：不打断
+    lastSig = s;
+    run();                                 // 立即开始（无延迟）
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) stop(); else refresh();
+  });
+  return { refresh, stop };
+})();
+
 /* ==================== 加载：数据页 ==================== */
 async function loadData() {
   if (period === 'daily') {
@@ -2836,6 +2963,7 @@ async function loadData() {
     syncStepper();
   }
   renderList();
+  starDm.refresh();
 }
 
 function renderDates() {
@@ -5519,6 +5647,7 @@ function switchView(v, opts) {
   if (v === 'lineage' && (s.lineageEnabled === false || TEAM === 'female')) v = 'data';
   if (v === 'my' && s.loginRequired === false) v = 'data';
   view = v;
+  starDm.refresh();
   syncNavActive();
   document.querySelectorAll('#subnav button').forEach(b => b.classList.toggle('on', b.dataset.g === curGroup));
   show('toolbar', v === 'data');
@@ -5546,6 +5675,7 @@ function switchView(v, opts) {
 
 function setPeriod(p) {
   period = p;
+  if (p !== 'daily') starDm.stop();
   document.querySelectorAll('#seg button').forEach(b => b.classList.toggle('on', b.dataset.p === p));
   show('dates', p === 'daily');
   show('stepper', p !== 'daily');
