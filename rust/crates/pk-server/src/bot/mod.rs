@@ -2427,6 +2427,27 @@ mod tests {
         }
     }
 
+    /// QQ 管理员必须 fail-closed（2026-10-17 第四轮审计 P1-3）：
+    /// 未配置 BOT_QQ_ADMINS = 一个都不认；配了只认名单内的会话。
+    #[test]
+    fn qq_admin_defaults_fail_closed() {
+        assert!(
+            !qq_admin_ok(&[], "12345678"),
+            "BOT_QQ_ADMINS 未配置时不应默认管理员"
+        );
+        let admins = vec!["12345678".to_string()];
+        assert!(qq_admin_ok(&admins, "12345678"));
+        assert!(!qq_admin_ok(&admins, "87654321"), "名单外的 QQ 号不是管理员");
+    }
+
+    /// 会话级失败计数 key 必须带渠道前缀，且能装进迁移 036 加宽后的 160 列。
+    #[test]
+    fn bind_fail_conv_key_shape() {
+        assert_eq!(bind_fail_conv_key("weixin", "abc"), "conv:weixin:abc");
+        let long = "x".repeat(120);
+        assert!(bind_fail_conv_key("weixin", &long).len() <= 160);
+    }
+
     /// 对接完成欢迎语（2026-10-16 深夜用户口径：**欢迎语带名字**）。
     /// 两个对接入口（机器人回对接码 / 扫码确认后的 poll）共用这一份文案，
     /// 口径回归到「不带姓名」时只改 wx_dock_welcome，改这里就能一起守住。

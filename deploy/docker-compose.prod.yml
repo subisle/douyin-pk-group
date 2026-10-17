@@ -3,6 +3,18 @@
 # 持久化全部 bind mount 到 /opt/pk-server/，宿主机 cron 每日 pg_dump 到 backups/。
 # 用法：cp .env.prod.example /opt/pk-server/.env.prod && 编辑后
 #       docker compose -f docker-compose.prod.yml --env-file .env.prod up -d
+#
+# ⚠️ 配置注入方式（2026-10-17 第四轮审计 P2-12）：本文件**故意不使用 env_file**，
+# 容器里的环境变量 = 下面 environment 段逐个 ${VAR:-} 透传的结果。因此：
+#   · 只把键写进 .env.prod 而**没有**在 environment 段登记 → 该键**不会进容器**
+#     （静默丢失、代码回落默认值，排查时极易误判）；
+#   · 新增可配置项必须**同时**改这里与 .env.prod.example，并写清默认值语义；
+#   · 一律用 ${VAR:-} 空默认：敏感项缺失时由代码默认 / 启动守卫兜底，不在编排里写死值。
+#
+# 安全加固（2026-10-17 第四轮审计 E-P2-6）：三服务均 cap_drop ALL +
+# no-new-privileges + json-file 日志限额（10m×3），避免容器日志写满 64 的
+# 8.9G 余量把 PG/服务拖停。postgres / redis 官方镜像以 root 起入口脚本再降权，
+# cap_drop ALL 后需补回最小能力（见各 service 的 cap_add 注释），否则容器起不来。
 name: douyin-pk
 
 services:
@@ -46,6 +58,40 @@ services:
       REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@pk-redis:6379/0
       # 管理口令 / 机器人凭据等沿用原 pk.env 其余项
       ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      # 管理员登录态时长（秒；留空 = 代码默认 28800 = 8 小时）
+      ADMIN_TOKEN_TTL: ${ADMIN_TOKEN_TTL:-}
+      # 跨域白名单（同源部署留空即可；多域部署才填，逗号分隔）
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+      # 机器人渠道（QQ / 微信）。2026-10-17 第四轮审计 P1-3：
+      #   · QQ 管理员改为 **fail-closed** —— BOT_QQ_ADMINS 未配置 = 一个都不认，
+      #     QQ 会话只会被静默忽略。**生产必填**（只填运营自持的 QQ 号，逗号分隔）；
+      #   · BOT_QQ_APP_ID/SECRET 不配 = QQ 渠道不启动；BOT_WECHAT_TOKEN 留空 =
+      #     未登录扫码状态（扫码成功后 token 持久化在业务库 config 表）；
+      #   · 其余键留空一律走代码默认（BOT_RATE_LIMIT 默认 10 条/分钟/会话）。
+      BOT_QQ_ADMINS: ${BOT_QQ_ADMINS:-}
+      BOT_WECHAT_ADMINS: ${BOT_WECHAT_ADMINS:-}
+      BOT_QQ_APP_ID: ${BOT_QQ_APP_ID:-}
+      BOT_QQ_APP_SECRET: ${BOT_QQ_APP_SECRET:-}
+      BOT_WECHAT_TOKEN: ${BOT_WECHAT_TOKEN:-}
+      BOT_RATE_LIMIT: ${BOT_RATE_LIMIT:-}
+      BOT_QQ_SANDBOX: ${BOT_QQ_SANDBOX:-}
+      BOT_QQ_PRIVATE_ONLY: ${BOT_QQ_PRIVATE_ONLY:-}
+      BOT_ATTACHMENT_HOSTS: ${BOT_ATTACHMENT_HOSTS:-}
+      WECHAT_ADMIN_CODE: ${WECHAT_ADMIN_CODE:-}
+      # IP 闸门（展示端访客拦截）。生产留空 = 拦截开启（本意如此）。
+      # IP_GATE_DISABLED 只供临时排障（设 1 关拦截），排障完必须关回。
+      IP_GATE_DISABLED: ${IP_GATE_DISABLED:-}
+      IP_GATE_SOURCES: ${IP_GATE_SOURCES:-}
+      IP_QUERY_SOURCES: ${IP_QUERY_SOURCES:-}
+      IP_GATE_ALLOWLIST: ${IP_GATE_ALLOWLIST:-}
+      # 推送节奏 / 头像自动同步（留空 = 代码默认；头像总闸见下方 AVATAR_SYNC_DISABLED）
+      PUSH_DELAY_MINUTES: ${PUSH_DELAY_MINUTES:-}
+      PUSH_MAX_TOTAL_SECS: ${PUSH_MAX_TOTAL_SECS:-}
+      WX_PUSH_BATCH_SIZE: ${WX_PUSH_BATCH_SIZE:-}
+      WX_PUSH_BATCH_INTERVAL_SECS: ${WX_PUSH_BATCH_INTERVAL_SECS:-}
+      AVATAR_SYNC_ENABLED: ${AVATAR_SYNC_ENABLED:-}
+      AVATAR_SYNC_DAYS: ${AVATAR_SYNC_DAYS:-}
+      AVATAR_SYNC_CHECK_SECS: ${AVATAR_SYNC_CHECK_SECS:-}
       # 内置展示端管理员账号（2026-10-17，可选）：格式 name:pass:viewTeam，逗号分隔。
       # 服务启动幂等补齐；不配 = 不建内置账号（走管理端后台开号）。
       BUILTIN_MY_ACCOUNTS: ${BUILTIN_MY_ACCOUNTS:-}
@@ -70,6 +116,19 @@ services:
     volumes:
       - /opt/pk-server/data:/app/data
     mem_limit: 512m
+    # 最小权限（2026-10-17 第四轮审计 E-P2-6）：镜像已 USER pk（非 root），
+    # 业务只需监听 8787 + 写 /app/data，不需要任何 Linux capability。
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # 日志限额（同审计 E-P2-6）：64 磁盘余量只有 ~8.9G，不限额的 json-file
+    # 可被刷屏日志写满，把 PG / 服务一起拖停。
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     healthcheck:
       test: ["CMD", "/usr/local/bin/pk-server", "--health-check"]
       interval: 30s

@@ -56,20 +56,15 @@ pub(crate) fn verify_password(input: &str, phc: &str) -> bool {
 /// 短口令在「按来源 IP 限流」下仍可能被分布式撞库；本机历史上还出现过口令复用。
 const ADMIN_PASSWORD_MIN_LEN: usize = 16;
 
-/// 已知泄露 / 开发期弱口令黑名单（2026-10-17 审计 4-P0-A）。
-/// 这些值曾出现在公开仓库的脚本注释 / 文档 / 审计记录里，属于「已泄露」；
-/// 命中即按 fail-closed 处理（不启用管理鉴权），启动日志会要求轮换。
-const KNOWN_LEAKED_ADMIN_PASSWORDS: &[&str] = &["shuai4444@", "dev12345"];
-
-/// 管理员口令强度闸门（trim 后）：长度 ≥ 16 且不在已知泄露列表。
-/// 只决定「是否允许启用管理鉴权」，不改写调用方的输入；黑名单按大小写不敏感比对
-/// （大小写变体同样是弱口令）。
+/// 管理员口令强度闸门（trim 后）：**只做长度下限**。
+///
+/// 为什么不再内置「已知泄露口令」名单（2026-10-17 审计 4-P0-A 二次整改）：
+/// 公开仓库里再写一次口令字面量，等于本轮 P0 清理白做 —— 名单本身就会成为新的泄露源。
+/// 历史上泄露的旧管理口令 / 旧开发口令**都短于 16 位**，长度下限已经能把它们挡在门外；
+/// 若以后要拦 ≥16 位的泄露值，应先在依赖里引入 sha2，然后只存 SHA-256 十六进制常量做
+/// 比对（口令明文绝不落盘）。本函数只决定「是否允许启用管理鉴权」，不改写调用方输入。
 fn admin_password_is_acceptable(p: &str) -> bool {
-    let p = p.trim();
-    p.chars().count() >= ADMIN_PASSWORD_MIN_LEN
-        && !KNOWN_LEAKED_ADMIN_PASSWORDS
-            .iter()
-            .any(|weak| p.eq_ignore_ascii_case(*weak))
+    p.trim().chars().count() >= ADMIN_PASSWORD_MIN_LEN
 }
 
 /// 随机 token：优先读 /dev/urandom，失败时退化为时间 + 计数器拼接
@@ -270,9 +265,10 @@ impl Auth {
             .filter(|p| !p.is_empty())
         {
             Some(p) => {
-                /* 2026-10-17 审计 4-P0-A：弱口令 / 已泄露口令不得当作「已配置」放行。
-                长度不足或命中黑名单时与「未配置」同语义（password_hash=None），
-                require_admin 会 503 —— 启动日志给出可执行提示，但绝不降级成无鉴权。 */
+                /* 2026-10-17 审计 4-P0-A：口令过短不得当作「已配置」放行（历史泄露值都
+                短于 16 位，一律被长度下限挡住）。不满足时与「未配置」同语义
+                （password_hash=None），require_admin 会 503 —— 启动日志给出可执行提示，
+                但绝不降级成无鉴权。 */
                 if admin_password_is_acceptable(&p) {
                     tracing::info!(
                         "管理员口令已从 ADMIN_PASSWORD 加载（argon2id 哈希驻留内存，不存明文）"
@@ -282,7 +278,7 @@ impl Auth {
                     tracing::error!(
                         len = p.chars().count(),
                         min_len = ADMIN_PASSWORD_MIN_LEN,
-                        "ADMIN_PASSWORD 过短或命中已知泄露口令：管理接口已 fail-closed 全关（503），\
+                        "ADMIN_PASSWORD 过短（<16 位）：管理接口已 fail-closed 全关（503），\
                          请立即轮换为 ≥16 位强随机口令后重启"
                     );
                     None
@@ -712,25 +708,25 @@ mod tests {
         assert!(!a.redeem_ticket("no-such-ticket"));
     }
 
-    /// 2026-10-17 审计 4-P0-A：弱口令 / 已泄露口令不得启用管理鉴权（fail-closed），
-    /// 长度足够的强口令正常启用；未配置保持原 fail-closed 行为。
+    /// 2026-10-17 审计 4-P0-A：口令过短（含历史泄露值，它们都 <16 位）不得启用管理鉴权
+    /// （fail-closed）；长度足够的强口令正常启用；未配置保持原 fail-closed 行为。
+    /// 注意：本测试**不使用任何真实口令明文**，样例一律为明显的假值。
     #[test]
-    fn admin_password_gate_fails_closed_on_weak_or_leaked() {
+    fn admin_password_gate_fails_closed_when_too_short() {
         let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let old = std::env::var("ADMIN_PASSWORD").ok();
 
-        // 过短 / 已知泄露 / 泄露值的大小写变体 / 纯空白：一律不启用
+        // 过短 / 15 位差 1 / 纯空白：一律不启用管理鉴权
         for weak in [
             "short",
-            "abc123456789012", // 15 位，差 1 位
-            "shuai4444@",      // 已随公开仓库泄露的历史口令
-            "SHUAI4444@",      // 大小写变体同样是弱口令
-            "dev12345",        // 历史开发口令
+            "weak-pass-123",       // 明显假样例：13 位，过短
+            "abc123456789012",     // 15 位，差 1 位
+            "abc1234567890123 ",   // 16 位但 trim 后 15 位（首尾空白不算强度）
             "   ",
         ] {
             std::env::set_var("ADMIN_PASSWORD", weak);
             let auth = Auth::from_env();
-            assert!(!auth.enabled(), "弱口令 {weak:?} 不应启用管理鉴权");
+            assert!(!auth.enabled(), "过短口令 {weak:?} 不应启用管理鉴权");
             assert!(!auth.check_password(weak), "fail-closed 时任何输入都不通过");
             assert!(!auth.verify("anything"));
         }
@@ -743,7 +739,7 @@ mod tests {
         let strong = "S3cure-Admin-Phrase-2026-10-17";
         std::env::set_var("ADMIN_PASSWORD", strong);
         let auth = Auth::from_env();
-        assert!(auth.enabled(), "16 位以上且不在黑名单的口令应启用管理鉴权");
+        assert!(auth.enabled(), "16 位以上口令应启用管理鉴权");
         assert!(auth.check_password(strong));
         assert!(!auth.check_password("wrong-password"));
 

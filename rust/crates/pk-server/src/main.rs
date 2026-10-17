@@ -840,12 +840,15 @@ async fn main() -> anyhow::Result<()> {
        "Content Security Policy Report Only" 提示，不阻塞页面），确认零违规后再切强制。
        源清单依据（已 grep 核对）：dist/index.html 无任何外链；st_page.html 里的
        http(s) 只有 `xmlns="http://www.w3.org/2000/svg"` 这类**命名空间字符串**
-       （不发请求）；字体/徽章/二维码/头像全部是 'self' 或 data: —— 无需第三方 CDN 源。 */
+       （不发请求）；字体/徽章/二维码/头像全部是 'self' 或 data: —— 无需第三方 CDN 源。
+       img-src 额外放行 `blob:`：展示端「我的消息」图片是 fetch+blob+createObjectURL
+       后塞进 `<img>`（st_page.html::loadMsgImage，凭证走 X-My-Token 头），不加这条
+       将来切强制会把这批消息图全部拦掉。 */
     .layer(tower_http::set_header::SetResponseHeaderLayer::overriding(
         axum::http::header::CONTENT_SECURITY_POLICY_REPORT_ONLY,
         axum::http::HeaderValue::from_static(concat!(
             "default-src 'self'; script-src 'self' 'unsafe-inline'; ",
-            "style-src 'self' 'unsafe-inline'; img-src 'self' data:; ",
+            "style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; ",
             "connect-src 'self'; font-src 'self' data:; base-uri 'self'; ",
             "object-src 'none'; form-action 'self'; frame-ancestors 'none'"
         )),
