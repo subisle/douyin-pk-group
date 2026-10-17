@@ -132,6 +132,12 @@ def build_minimal_gsub(font: TTFont, lig_map: dict) -> None:
     lig_subst = ot.LigatureSubst()
     lig_subst.ligatures = {}
     for first, entries in grouped.items():
+        # 同首字形的连字必须「组件最长优先」：shaper 按表序逐条尝试，短名排在前
+        # 会把长名截断成「短图标 + 字面剩余字母」。2026-10-17 展示端「重置密码」行
+        # 就是这样渲染成 lock 图标叠加字面 _RESET 的（ICONS 里 lock 恰好排在
+        # lock_reset 前面；notifications/notifications_active、chat/chat_bubble
+        # 只是碰巧长名在前才没炸）。
+        entries.sort(key=lambda e: len(e[0]), reverse=True)
         ligs = []
         for comps, lig in entries:
             lg = ot.Ligature()

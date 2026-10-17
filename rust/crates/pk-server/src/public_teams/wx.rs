@@ -993,7 +993,11 @@ pub async fn my_push_target_del(
 }
 
 /// GET /api/public/teams/{team}/my/push/search?q=（token 走 X-My-Token 头）：
-/// 本团主播搜索（只回 id + 名字）
+/// 本团主播搜索（回 id + 名字 + 本月累计音浪 `wave`，口径同推送月榜）。
+///
+/// q 语义（2026-10-17）：空串不再早退返回空数组，而是作为「默认候选」——
+/// team_anchor_search 对空 q 就是全团按本月音浪降序（同口径见 store::push_jobs）。
+/// limit 分档：q 空 → 50，q 非空 → 30。
 ///
 /// 关于 `personId`（2026-10-14 审计复核结论：**保持下发，不改**）：
 /// 审计曾疑此处与已下线的「绑定抖音号」搜索（原 `my_bind_search`，2026-10-16 随
@@ -1018,10 +1022,9 @@ pub async fn my_push_search(
     };
     let key = q.q.unwrap_or_default();
     let key = key.trim();
-    if key.is_empty() {
-        return Ok(Json(json!({ "items": [] })));
-    }
-    let items = crate::store::team_anchor_search(&st, &sid(&st), team_scope, key, 20)
+    // 空关键词 = 默认候选（全团按本月音浪降序），不再早退；只有非空搜索才收紧 limit。
+    let limit = if key.is_empty() { 50 } else { 30 };
+    let items = crate::store::team_anchor_search(&st, &sid(&st), team_scope, key, limit)
         .await
         .into_iter()
         .filter(|a| a.get("personId").and_then(|v| v.as_u64()) != Some(person_id))

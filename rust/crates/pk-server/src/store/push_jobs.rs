@@ -399,7 +399,41 @@ pub async fn target_set_state(st: &AppState, id: i64, hit: bool, gap: i64, notic
     }
 }
 
-/// 本团主播搜索（展示端追分选择用）：只回 id + 名字，不下发抖音号等敏感字段
+/// 本团主播搜索（展示端追分选择用）：回 id + 名字 + 本月累计音浪，不下发抖音号等敏感字段。
+///
+/// 2026-10-17：追分设置页要在候选上直接显示本月音浪，`wave` 列口径与
+/// [`crate::push`] 的 `MONTH_WAVE_MAP_SQL` **逐字同口径**（整月导入值优先、没有才
+/// 日明细求和，只算在册且对外可见的人）；库没跑 026 迁移（monthly_wave 表不存在）
+/// 时按纯日明细版降级 —— 与 `push::query_month_wave_binds` 同一套探测，缺表只降级
+/// 不报错。排序从按 name 改为 `wave DESC, name ASC`，q 为空时即「本月音浪榜」默认
+/// 候选列表。既有的两个调用方（wx.rs 单条/批量校验，q=""、limit=1000）只读
+/// personId/name，多出的 wave 字段无害。月参数由本函数内部生成（当前业务月）。
+const ANCHOR_SEARCH_SQL: &str = "SELECT p.id, p.name, \
+      (COALESCE(MAX(mw.wave), SUM(d.wave), 0))::BIGINT AS wave \
+     FROM person p \
+     LEFT JOIN daily_metric d ON d.person_id = p.id \
+       AND TO_CHAR(d.biz_date, 'YYYY-MM') = ? \
+       AND d.wave_reliable = 1 \
+     LEFT JOIN monthly_wave mw ON mw.person_id = p.id AND mw.period = ? \
+     WHERE p.deleted_at IS NULL AND (? = '' OR p.gender = ?) AND p.status <> 'left' \
+       AND p.hide_in_daily_report = 0 AND p.name LIKE ? \
+     GROUP BY p.id, p.name \
+     ORDER BY wave DESC, name ASC \
+     LIMIT ?";
+/// 库没跑 026 迁移（monthly_wave 不存在）时的纯日明细版：除无 mw join、
+/// 少一个 month bind 外与 [`ANCHOR_SEARCH_SQL`] 逐项一致。
+const ANCHOR_SEARCH_SQL_DAILY: &str = "SELECT p.id, p.name, \
+      (COALESCE(SUM(d.wave), 0))::BIGINT AS wave \
+     FROM person p \
+     LEFT JOIN daily_metric d ON d.person_id = p.id \
+       AND TO_CHAR(d.biz_date, 'YYYY-MM') = ? \
+       AND d.wave_reliable = 1 \
+     WHERE p.deleted_at IS NULL AND (? = '' OR p.gender = ?) AND p.status <> 'left' \
+       AND p.hide_in_daily_report = 0 AND p.name LIKE ? \
+     GROUP BY p.id, p.name \
+     ORDER BY wave DESC, name ASC \
+     LIMIT ?";
+
 pub async fn team_anchor_search(
     st: &AppState,
     source: &str,
@@ -407,32 +441,57 @@ pub async fn team_anchor_search(
     q: &str,
     limit: i64,
 ) -> Vec<serde_json::Value> {
-    let sql = "SELECT id, name FROM person \
-               WHERE deleted_at IS NULL AND (? = '' OR gender = ?) AND status <> 'left' AND name LIKE ? \
-               ORDER BY name LIMIT ?";
+    // 月口径与推送同源：当前业务月，函数内部生成（与 month_wave_map 的 month 参数同格式）。
+    let month = chrono::Local::now().format("%Y-%m").to_string();
     let like = format!("%{}%", q.trim());
-    match crate::pgrs::query_with_binds(&st.pools, source, sql, |qb| {
-        qb.bind(team.to_string())
-            .bind(team.to_string())
+    let gender = team.to_string();
+    let rows = match crate::pgrs::query_with_binds(&st.pools, source, ANCHOR_SEARCH_SQL, |qb| {
+        // 绑定顺序由 SQL 固定：整月版 month → month → gender → gender → like → limit。
+        qb.bind(month.clone())
+            .bind(month.clone())
+            .bind(gender.clone())
+            .bind(gender.clone())
             .bind(like.clone())
             .bind(limit)
     })
     .await
     {
-        Ok(rows) => rows
-            .iter()
-            .map(|r| {
-                serde_json::json!({
-                    "personId": r.try_get::<i64, _>("id").unwrap_or(0),
-                    "name": r.try_get::<String, _>("name").unwrap_or_default(),
-                })
+        Ok(rows) => rows,
+        Err(e) if crate::dialect::is_missing_month_wave_table(&e) => {
+            tracing::warn!(
+                "monthly_wave 表不存在，主播搜索月音浪按日明细口径回落（请先跑 pk-server migrate 026）"
+            );
+            match crate::pgrs::query_with_binds(&st.pools, source, ANCHOR_SEARCH_SQL_DAILY, |qb| {
+                // 日明细版绑定顺序：month → gender → gender → like → limit。
+                qb.bind(month.clone())
+                    .bind(gender.clone())
+                    .bind(gender.clone())
+                    .bind(like.clone())
+                    .bind(limit)
             })
-            .collect(),
+            .await
+            {
+                Ok(rows) => rows,
+                Err(e) => {
+                    tracing::error!(error = %e, "本团主播搜索失败");
+                    Vec::new()
+                }
+            }
+        }
         Err(e) => {
             tracing::error!(error = %e, "本团主播搜索失败");
             Vec::new()
         }
-    }
+    };
+    rows.iter()
+        .map(|r| {
+            serde_json::json!({
+                "personId": r.try_get::<i64, _>("id").unwrap_or(0),
+                "name": r.try_get::<String, _>("name").unwrap_or_default(),
+                "wave": r.try_get::<i64, _>("wave").unwrap_or(0),
+            })
+        })
+        .collect()
 }
 
 /* ------------------------------ 单元测试（纯函数） ------------------------------ */
@@ -528,5 +587,90 @@ mod tests {
     #[test]
     fn retry_budget_is_three() {
         assert_eq!(MAX_JOB_RETRIES, 3);
+    }
+
+    /* ------- 主播搜索的月音浪口径（2026-10-17 追分选人候选带 wave） ------- */
+
+    /// SQL 形状护栏（不连库，与 push.rs 月音浪用例同一套写法）：
+    ///
+    /// 1. `?` 个数必须与 `team_anchor_search` 的 bind 个数一致 ——
+    ///    整月版 6 个（month→month→gender→gender→like→limit）、
+    ///    日明细版 5 个（month→gender→gender→like→limit）。
+    ///    个数对不上 PG 直接报「bind message supplies N parameters」整条失败。
+    /// 2. wave 口径与 [`crate::push::MONTH_WAVE_MAP_SQL`] **逐字同口径**：下面钉的每组
+    ///    子串就是那条 SQL 的表达式本体（push.rs 的同名护栏钉的是同一组字符串），
+    ///    谁改了任何一边这条先红 —— 两边必须一起改，否则推送月榜和选人列表对不上
+    ///    （COALESCE(MAX(mw.wave), SUM(d.wave), 0)：整月导入值优先、缺月回落日明细求和、
+    ///    都没有为 0；daily_metric 只算 wave_reliable=1 的可信行；窗口是参数化业务月；
+    ///    在册 + 未离团 + 不隐藏，gender 过滤保留搜索接口固有的 `? = '' OR` 团别开关）。
+    /// 3. 排序必须是 `ORDER BY wave DESC, name ASC`（PG 的 ORDER BY 认 select 别名，
+    ///    与 HAVING 不同）—— q 为空的默认候选契约就是「本月音浪降序」，谁改回按 name
+    ///    排这条先红。
+    /// 4. 日明细降级版不得出现 monthly_wave / mw（库没跑 026 迁移时不能因为缺表整条失败，
+    ///    `team_anchor_search` 按错误点名回落到这条）。
+    #[test]
+    fn anchor_search_sql_wave_contract() {
+        // 占位符 ↔ 绑定个数
+        assert_eq!(
+            crate::dialect::placeholder_count(ANCHOR_SEARCH_SQL),
+            6,
+            "整月版绑定：month→month→gender→gender→like→limit"
+        );
+        assert_eq!(
+            crate::dialect::placeholder_count(ANCHOR_SEARCH_SQL_DAILY),
+            5,
+            "日明细版绑定：month→gender→gender→like→limit"
+        );
+
+        // 月口径（与 push::MONTH_WAVE_MAP_SQL 逐字同口径）
+        assert!(
+            ANCHOR_SEARCH_SQL.contains("(COALESCE(MAX(mw.wave), SUM(d.wave), 0))::BIGINT AS wave"),
+            "月音浪要「整月导入值优先、缺月回落日明细」：{ANCHOR_SEARCH_SQL}"
+        );
+        assert!(
+            ANCHOR_SEARCH_SQL.contains("LEFT JOIN daily_metric d ON d.person_id = p.id"),
+            "{ANCHOR_SEARCH_SQL}"
+        );
+        assert!(
+            ANCHOR_SEARCH_SQL.contains("AND TO_CHAR(d.biz_date, 'YYYY-MM') = ?"),
+            "回落窗口要带年份且参数化（不许内联）：{ANCHOR_SEARCH_SQL}"
+        );
+        assert!(
+            ANCHOR_SEARCH_SQL.contains("AND d.wave_reliable = 1"),
+            "日明细侧只算可信行：{ANCHOR_SEARCH_SQL}"
+        );
+        assert!(
+            ANCHOR_SEARCH_SQL
+                .contains("LEFT JOIN monthly_wave mw ON mw.person_id = p.id AND mw.period = ?"),
+            "整月音浪按 (人, 月) 对齐：{ANCHOR_SEARCH_SQL}"
+        );
+        assert!(
+            ANCHOR_SEARCH_SQL
+                .contains("WHERE p.deleted_at IS NULL AND (? = '' OR p.gender = ?)")
+                && ANCHOR_SEARCH_SQL.contains("AND p.status <> 'left'")
+                && ANCHOR_SEARCH_SQL.contains("AND p.hide_in_daily_report = 0"),
+            "在册 / 未离团 / 对外可见过滤不能丢（gender 保留搜索固有的团别开关）：{ANCHOR_SEARCH_SQL}"
+        );
+
+        // 排序契约：默认候选 = 本月音浪降序，同音浪再按名字
+        assert!(
+            ANCHOR_SEARCH_SQL.contains("ORDER BY wave DESC, name ASC"),
+            "q 为空的默认候选要按本月音浪降序：{ANCHOR_SEARCH_SQL}"
+        );
+
+        // 缺表降级版：纯日明细，不得带整月表
+        for sql in [ANCHOR_SEARCH_SQL_DAILY] {
+            assert!(!sql.contains("monthly_wave"), "日明细版不能带整月表：{sql}");
+            assert!(!sql.contains("mw."), "日明细版不能带 mw 别名：{sql}");
+            assert!(
+                sql.contains("(COALESCE(SUM(d.wave), 0))::BIGINT AS wave"),
+                "日明细版仍是缺省 0 的原口径：{sql}"
+            );
+            assert!(sql.contains("AND d.wave_reliable = 1"), "{sql}");
+            assert!(
+                sql.contains("ORDER BY wave DESC, name ASC"),
+                "降级版排序必须与整月版一致，否则缺表时默认候选顺序突变：{sql}"
+            );
+        }
     }
 }
