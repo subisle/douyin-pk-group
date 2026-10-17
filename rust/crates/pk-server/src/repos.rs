@@ -295,7 +295,18 @@ pub async fn load_anchors(
                 continue;
             }
         };
-        let avatar: Option<String> = r.try_get::<Option<String>, _>(2).ok().flatten();
+        // 头像：优先用 person_avatar 本地留存（迁移 025），没有本地图时回落到旧 person.avatar_url。
+        // person.avatar_url 自 2026-10-16 起不再由 avatar_sync 写入（基本恒空），仅作历史兜底。
+        let avatar: Option<String> = {
+            let legacy = r.try_get::<Option<String>, _>(2).ok().flatten();
+            let hash = r.try_get::<Option<String>, _>(4).ok().flatten();
+            match hash {
+                Some(h) if !h.trim().is_empty() => {
+                    Some(format!("/api/public/avatars/{person_id}?v={}", h.trim()))
+                }
+                _ => legacy.filter(|u| !u.trim().is_empty()),
+            }
+        };
         brief.push(AnchorBrief {
             person_id,
             name,

@@ -235,6 +235,26 @@ pub(super) fn mask_phone(p: &str) -> String {
     }
 }
 
+/// 邮箱脱敏：a***@b.com（本地部分只留首字符）。空串原样返回。日志用，不落全量邮箱。
+pub(super) fn mask_email(e: &str) -> String {
+    if let Some((local, domain)) = e.split_once('@') {
+        let mut out = String::new();
+        if let Some(c) = local.chars().next() {
+            out.push(c);
+        }
+        out.push_str("***@");
+        out.push_str(domain);
+        out
+    } else {
+        // 没有 @ 的异常值：整段打码，避免日志漏出任何可读内容
+        if e.is_empty() {
+            String::new()
+        } else {
+            "***".to_string()
+        }
+    }
+}
+
 /* ------------------ 用户自助扫码绑定微信推送（2026-10-11，多账号） ------------------
  *
  * 官方协议：POST get_bot_qrcode 取账号登录二维码；用户扫码确认后

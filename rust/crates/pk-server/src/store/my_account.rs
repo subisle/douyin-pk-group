@@ -16,24 +16,6 @@ pub fn validate_douyin_no(v: &str) -> std::result::Result<String, String> {
 
 /* ------------------------------ 我的页面账号 ------------------------------ */
 
-/// 校验姓名/密码。Err(错误文案)，Ok((姓名, 密码))。
-/// **密码为 4~20 位字母、数字或点**：去首尾空格后必须是 ASCII 字母/数字/点，
-/// 不允许空格、横线等其余分隔符。
-///
-/// 口径沿革（2026-10-13 产品拍板：**回到 4 位下限**）：
-/// - 2026-10-10 放宽为 4 位；
-/// - 2026-10-12 安全审计 M4 把下限提到 6（理由：4 位易被撞库）；
-/// - 2026-10-13 恢复 4 位 —— 运营的实际开号习惯是**手机号后四位**
-///   （xlsx 收集入库的那批账号全是 4 位），6 位下限会让后台开号、
-///   以及开号后按惯例改密全部被拒，与既有 39 个账号口径不一致。
-/// 折中：下限回 4 兼容惯例（2026-10-17 用户口径「去除登录限速」后，登录链路
-/// 的 5 次/分/IP 滑窗与「失败 5 次锁 10 分钟」均已移除 —— 4 位密码 + 无限速
-/// 是产品明确接受的风险组合：密码只靠 argon2 哈希保护，暴力面靠 access_logs
-/// 登录日志事后可查，不再用密码长度或限速当防线）。
-/// - 2026-10-17 允许「点」：主播自定义密码出现 `Aa181206..` 这类带句点的
-///   写法（音浪系统账号设置 xlsx 玖豆提交），纯字母数字规则会把人挡在
-///   自助改密门外。点不属于常见「分隔符型」弱字符（横线/空格），放宽无
-///   撞库增益损失，登录链路本来就不限字符集（argon2 全量比对）。
 /// 业务拒绝（**面向用户的人话**）与库层故障的分流标记（2026-10-16）。
 ///
 /// 背景：`my_account_set` / `bind_inner` / `my_accounts_batch_open` 返回
@@ -151,6 +133,34 @@ pub fn validate_my_phone(phone: &str) -> std::result::Result<String, String> {
         return Err(biz("手机号格式不对：应为 5~20 位数字"));
     }
     Ok(p)
+}
+
+/// 邮箱格式校验（2026-10-17 绑定邮箱）：基本形状 + 无空白/换行（防 SMTP 头注入）。
+/// 返回归一化（去首尾空格）后的邮箱；空串 = 解绑，直接放行（调用方语义：清空绑定）。
+pub fn validate_email(email: &str) -> std::result::Result<String, String> {
+    let e = email.trim();
+    if e.is_empty() {
+        return Ok(String::new());
+    }
+    if e.len() > 128 {
+        return Err(biz("邮箱过长（最多 128 字符）"));
+    }
+    // 防 SMTP 头注入：CR/LF/空格/制表符一律拒
+    if e.chars().any(|c| c.is_whitespace()) {
+        return Err(biz("邮箱格式不正确"));
+    }
+    // 基本形状：本地部分 @ 域名，域名至少含一个点
+    let Some(at) = e.find('@') else {
+        return Err(biz("邮箱格式不正确"));
+    };
+    if at == 0 || at == e.len() - 1 {
+        return Err(biz("邮箱格式不正确"));
+    }
+    let domain = &e[at + 1..];
+    if !domain.contains('.') || domain.starts_with('.') || domain.ends_with('.') {
+        return Err(biz("邮箱格式不正确"));
+    }
+    Ok(e.to_string())
 }
 
 /* ─────────────── 可看团别 view_team（迁移 024，2026-10-15） ───────────────
@@ -1255,6 +1265,9 @@ pub struct MyAccountInfo {
     /// 可看团别（迁移 024）。库里列可能不存在（没跑到迁移）或值非法，
     /// 一律按 [`ViewTeam::Inherit`] 处理——退回「按绑定主播走」的旧行为。
     pub view_team: ViewTeam,
+    /// 绑定邮箱（迁移 038，2026-10-17）。空串 = 未绑定。忘记密码重置时
+    /// 有邮箱就把随机密码发过去，没有就提示找管理员。
+    pub email: String,
 }
 
 impl Default for ViewTeam {
@@ -1278,68 +1291,78 @@ impl MyAccountInfo {
 格式校验）随注册一起删除 —— 它已无生产调用点，唯一的断言在 store/mod.rs 的单测里，
 那个用例也一并删掉了。 */
 
-/// 忘记密码：把已登记手机号的账号密码重置为 **手机号后四位**（2026-10-17 用户口径）
+/// 忘记密码重置**第一步**：按手机号定位要重置的普通账号与其绑定邮箱。
 ///
 /// 口径沿革：
-/// - 2026-10-12 审计把重置改成 CSPRNG 随机串（理由：后四位可推算 = 任意账号接管）；
+/// - 2026-10-12 审计把重置改成 CSPRNG 随机串；
 /// - 2026-10-14 随机口径继续收紧（不再明文回显新密码）；
-/// - **2026-10-17 用户口径改回手机号后四位**——与开号初始密码（`initial_password`）
-///   统一成一条口径：「重置 = 回到初始密码」。运营不用再中介转达临时密码，
-///   主播凭自己的手机号就能拿回账号（后四位就是开号时的初始口令）。
+/// - 2026-10-17 早前用户口径曾改回手机号后四位（与开号初始密码统一）；
+/// - **2026-10-17 用户口径再改**：绑了邮箱的账号 → 随机密码发邮箱（下一步）；
+///   没绑邮箱 → 直接提示「请联系管理员重置密码」，不产生可推导密码。
 ///
 /// ⚠️ 残留风险如实记录：本入口（`/api/public/my/password/reset`）**不带身份证明** ——
-/// 只凭手机号即可触发重置。知道某人手机号 = 可以把其密码重置成后四位并登录。
-/// 这与「开号初始密码就是后四位」的既有产品口径是同一等级的已知接受风险；
-/// 刷重置仍由重置限流（12/分/IP + 同号 10 分钟窗口 / 1 小时 3 次）承担。
-/// 登录链路自 2026-10-17 用户口径「去除登录限速」后不再限速 —— 撞库面
-/// 靠 access_logs 登录日志事后可查兜底，不指望限速或密码保密性。
-/// 若要真正收口，需要服务端短信验证码或 OAuth 归属校验（见 docs/24 §P0-2）。
+/// 只凭手机号即可触发重置。知道某人手机号 = 可触发「随机密码发到其绑定邮箱」。
+/// 这仍不是强归属校验（邮箱在用户自己手里，但邮箱本身也可能被社工）；
+/// 刷重置由重置限流（12/分/IP + 同号 10 分钟窗口 / 1 小时 3 次）承担，
+/// 登录链路自 2026-10-17「去除登录限速」后不再限速。
+/// 若要真正收口，仍需服务端短信验证码或 OAuth 归属校验（见 docs/24 §P0-2）。
 ///
-/// 返回 `(新密码, 受影响账号名列表)`：新密码 = 手机号后四位（可由主播自行推算，
-/// 服务端不再明文回显）；账号名列表给调用方吊销该账号全部 my token
-/// （改密后旧登录态必须失效）。
-pub async fn my_account_reset_password_random(
+/// 返回 `(账号名, 绑定邮箱)`。邮箱为空 = 该账号未绑定邮箱，直接报业务拒绝
+/// 「该账号未绑定邮箱，请联系管理员重置密码」——**不重置、不改密、不吊销 token**。
+pub async fn my_account_reset_target(
     st: &AppState,
     phone: &str,
-) -> std::result::Result<(String, Vec<String>), String> {
+) -> std::result::Result<(String, String), String> {
     let phone = validate_my_phone(phone)?;
     if phone.is_empty() {
         return Err(biz("请输入手机号"));
-    }    let pool = w(st).map_err(|e| e.to_string())?;
+    }
+    let pool = w(st).map_err(|e| e.to_string())?;
     /* 只认**普通账号**（is_admin=0）：管理员观看账号不参与重置，
-    否则知道手机号的人就能接管后台视角账号（审计 2026-10-11 修复）。
-    文案不区分「没登记」和「管理员账号」，避免泄露台账。 */
-    let names: Vec<String> = sqlx::query(&crate::pq::rewrite(
-        "SELECT name FROM my_accounts WHERE phone = ? AND phone <> '' AND is_admin = 0",
+    否则知道手机号的人就能触发后台视角账号的邮箱接管（审计 2026-10-11 修复）。
+    手机号唯一索引（uk_my_phone_uniq，非空 phone 唯一）保证最多命中一行。 */
+    let row = sqlx::query(&crate::pq::rewrite(
+        "SELECT name, email FROM my_accounts WHERE phone = ? AND phone <> '' AND is_admin = 0 LIMIT 1",
     ))
     .bind(&phone)
-    .fetch_all(pool)
+    .fetch_optional(pool)
     .await
-    .map_err(|e| format!("查询账号失败：{e}"))?
-    .iter()
-    .filter_map(|r| r.try_get::<String, _>("name").ok())
-    .collect();
-    /* 手机号查不到已登记的普通账号 = 这个号没绑定任何账号 → 直说「未绑定」
-    （2026-10-14 用户口径：没绑定就显示未绑定，不再绕成「未登记或未开通」）。
-    管理员观看账号同样不在这里命中（is_admin=0 过滤），与「未绑定」共用一句文案，
-    避免泄露某个号是不是后台账号。 */
-    if names.is_empty() {
+    .map_err(|e| format!("查询账号失败：{e}"))?;
+    let Some(row) = row else {
+        /* 手机号查不到已登记的普通账号 = 这个号没绑定任何账号 → 直说「未绑定」。
+        管理员观看账号同样不命中（is_admin=0 过滤），与「未绑定」共用一句文案，
+        避免泄露某个号是不是后台账号。 */
         return Err(biz("该手机号未绑定账号"));
+    };
+    let name: String = row.try_get("name").unwrap_or_default();
+    let email: String = row.try_get("email").unwrap_or_default();
+    if email.trim().is_empty() {
+        /* 未绑定邮箱：产品口径（2026-10-17）——不重置、不发可推导密码，直接找管理员。 */
+        return Err(biz("该账号未绑定邮箱，请联系管理员重置密码"));
     }
-    /* 重置后的密码 = 手机号后四位（2026-10-17 用户口径，与开号初始密码统一）。
-    这里能走到这一步说明手机号合法（validate_my_phone）且命中了至少一个普通账号，
-    合法手机号至少 5 位 → 后四位恒可用，不会再落到随机兜底分支；
-    即便万一不足 4 位，initial_password 也会退 CSPRNG 随机串，保证总有密码可登。 */
-    let new_pass = initial_password(&phone);
+    Ok((name, email))
+}
+
+/// 忘记密码重置**第二步**：把新密码哈希落库（调用方已确认邮件发送成功后才调用，
+/// 否则用户会拿到一封「已发邮件」却登不进的新密码）。
+/// `phone` 内部再走一遍 `validate_my_phone` 归一化，与第一步 `my_account_reset_target`
+/// 用**同一套归一**（`normalize_phone` 会多剥一个 `.`，两条路若不同源会对不上号）。
+pub async fn my_account_reset_apply(
+    st: &AppState,
+    phone: &str,
+    new_pass: &str,
+) -> std::result::Result<(), String> {
+    let phone = validate_my_phone(phone)?;
+    let pool = w(st).map_err(|e| e.to_string())?;
     sqlx::query(&crate::pq::rewrite(
         "UPDATE my_accounts SET pass = ? WHERE phone = ? AND phone <> '' AND is_admin = 0",
     ))
-    .bind(hash_my_password(&new_pass))
+    .bind(hash_my_password(new_pass))
     .bind(&phone)
     .execute(pool)
     .await
     .map_err(|e| format!("重置失败：{e}"))?;
-    Ok((new_pass, names))
+    Ok(())
 }
 
 /// 已登录用户改密的**公共实现**（`my_account_self_set_password` 与新
@@ -1472,8 +1495,9 @@ pub async fn my_account_info(st: &AppState, key: &str) -> Option<MyAccountInfo> 
         return None;
     }
     /* view_team（迁移 024）单列查询：列不存在时**整体失败**，这时走下面的老查询
-    路径（view_team 回落 Inherit），保证没跑迁移的库照常能登录。 */
-    let sql = "SELECT name, phone, is_admin, bound, bound_at, source, view_team \
+    路径（view_team 回落 Inherit），保证没跑迁移的库照常能登录。
+    email（迁移 038）同 view_team 一并读：列不存在时整个 SELECT 失败 → 回落老查询。 */
+    let sql = "SELECT name, phone, is_admin, bound, bound_at, source, view_team, email \
                FROM my_accounts WHERE name = ? OR (phone <> '' AND phone = ?) LIMIT 1";
     if let Ok(Some(r)) = sqlx::query(&crate::pq::rewrite(sql))
         .bind(key)
@@ -1492,6 +1516,7 @@ pub async fn my_account_info(st: &AppState, key: &str) -> Option<MyAccountInfo> 
                 .try_get::<String, _>("view_team")
                 .map(|v| ViewTeam::parse(&v))
                 .unwrap_or_default(),
+            email: r.try_get::<String, _>("email").unwrap_or_default(),
         });
     }
     let sql = "SELECT name, phone, is_admin FROM my_accounts \
@@ -1511,7 +1536,54 @@ pub async fn my_account_info(st: &AppState, key: &str) -> Option<MyAccountInfo> 
             bound_at: String::new(),
             source: "admin".to_string(),
             view_team: ViewTeam::Inherit,
+            email: String::new(),
         })
+}
+
+/// 读账号的绑定邮箱（按登录名）。没登记 / 列不存在（迁移 038 没跑）→ 空串。
+pub async fn my_account_email(st: &AppState, name: &str) -> String {
+    let Ok(pool) = w(st) else { return String::new() };
+    let key = name.trim();
+    if key.is_empty() {
+        return String::new();
+    }
+    sqlx::query(&crate::pq::rewrite(
+        "SELECT email FROM my_accounts WHERE name = ? LIMIT 1",
+    ))
+    .bind(key)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .and_then(|r| r.try_get::<String, _>("email").ok())
+    .unwrap_or_default()
+}
+
+/// 设置 / 清空账号的绑定邮箱（2026-10-17）。`email` 已由调用方 `validate_email`
+/// 归一化（空串 = 解绑）。只按 `name` 改这一个账号，不接受请求体里的账号名。
+pub async fn my_account_set_email(
+    st: &AppState,
+    name: &str,
+    email: &str,
+) -> std::result::Result<(), String> {
+    let pool = w(st).map_err(|e| e.to_string())?;
+    let key = name.trim();
+    if key.is_empty() {
+        return Err(biz("登录已过期，请重新登录"));
+    }
+    sqlx::query(&crate::pq::rewrite("UPDATE my_accounts SET email = ? WHERE name = ?"))
+        .bind(email)
+        .bind(key)
+        .execute(pool)
+        .await
+        .map_err(|e| {
+            if e.to_string().contains("Unknown column") {
+                biz("邮箱功能未启用：请先跑一次 pk-server migrate（038_my_account_email）")
+            } else {
+                format!("写入邮箱失败：{e}")
+            }
+        })?;
+    Ok(())
 }
 
 /// 绑定结果：绑定后的主播身份（前端拿它重新发 token / 换团）
@@ -1975,31 +2047,59 @@ mod tests {
         }
     }
 
-    /* ----------------- 忘记密码：重置为手机号后四位（2026-10-17 用户口径） ----------------- */
+    /* ----------------- 忘记密码：邮箱绑定 + 随机密码（2026-10-17 用户口径） ----------------- */
 
-    /// 忘记密码重置 = 手机号后四位（与开号初始密码同一条口径）。
-    /// 2026-10-12~10-14 期间曾是 CSPRNG 随机串；2026-10-17 用户口径改回后四位
-    /// （运营不再中介转达临时密码）。这条钉住「重置 = 回到初始密码」的口径。
+    /// 忘记密码重置 = 随机密码发绑定邮箱；没绑邮箱 → 业务拒绝「找管理员」。
+    /// 这里钉住两条契约文案（业务拒绝用 BIZ:: 前缀，handler 据此 400 原样下发），
+    /// 以及「重置用的是 CSPRNG 随机串、不是可推导的后四位」这一口径。
     #[test]
-    fn reset_password_is_phone_last4_same_as_initial() {
-        const PHONE: &str = "13800138000";
-        // 重置密码与开号初始密码必须同源：都是手机号后四位
-        assert_eq!(initial_password(PHONE), "8000");
-        // 手机号合法性由 validate_my_phone 保证（≥5 位），后四位恒可用
-        assert!(initial_password(PHONE).len() == 4);
+    fn reset_password_requires_email_and_is_random() {
+        // 未绑定邮箱的拒绝文案（契约字面量）
+        assert_eq!(
+            crate::store::my_account::biz_msg(&crate::store::my_account::biz(
+                "该账号未绑定邮箱，请联系管理员重置密码"
+            )),
+            "该账号未绑定邮箱，请联系管理员重置密码"
+        );
+        // 重置密码是随机 10 位串，不是手机号后四位（两条口径彻底分开）
+        let p = crate::random::random_password();
+        assert_eq!(p.len(), 10, "重置密码应为 10 位随机串");
+        assert_ne!(p, initial_password("13800138000"), "重置 ≠ 手机号后四位");
         assert!(
-            validate_my_account("凤夏", &initial_password(PHONE)).is_ok(),
-            "重置后的后四位必须能用于登录（落在 4~20 位字母数字规则内）"
+            validate_my_account("凤夏", &p).is_ok(),
+            "随机密码必须能用于登录（4~20 位字母数字）"
         );
     }
 
-    /// 后四位不足时（防御分支）退回随机串 —— 随机兜底两次不同。
-    /// 正常流程走不到这里（validate_my_phone 挡住 <5 位），但兜底行为本身要有覆盖。
+    /// 随机密码两次不同 —— 连点两次重置不能拿到同一个串（即便都发同一邮箱）。
     #[test]
-    fn reset_password_fallback_differs_between_calls() {
+    fn reset_password_random_differs_between_calls() {
         let a = crate::random::random_password();
         let b = crate::random::random_password();
-        assert_ne!(a, b, "随机兜底两次不应下发同一个串");
+        assert_ne!(a, b, "两次重置不应下发同一个随机密码");
+    }
+
+    /// 邮箱格式校验：合法放行、非法拒绝、空串 = 解绑放行。
+    #[test]
+    fn validate_email_accepts_and_rejects() {
+        assert_eq!(validate_email("  a@b.com  ").unwrap(), "a@b.com");
+        assert_eq!(validate_email("").unwrap(), "");
+        for bad in [
+            "a",
+            "a@",
+            "@b.com",
+            "a@b",
+            "a@b.",
+            "a@.b.com",
+            "a b@c.com",
+            "a@b.c om",
+            "a@b.com\r\nX-Header: y",
+        ] {
+            assert!(
+                is_biz(&validate_email(bad).unwrap_err()),
+                "非法邮箱应被业务拒绝：{bad:?}"
+            );
+        }
     }
 
     /* ------------- 登录失败原因：密码错 ≠ 账号没开通（2026-10-14 用户口径） ------------- */

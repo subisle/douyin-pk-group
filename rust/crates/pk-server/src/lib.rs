@@ -12,6 +12,7 @@ pub mod events;
 pub mod grouping;
 pub mod ipinfo;
 pub mod lineage_report;
+pub mod mailer;
 pub mod matching;
 pub mod metrics;
 pub mod migrate;

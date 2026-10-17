@@ -249,6 +249,12 @@ export default function StreamerPage() {
     exists: boolean
     viewTeam: string
     isAdmin: boolean
+    /** 以下三项由后端 T1/T2 在 /api/admin/my-accounts* 下发（2026-10-18 账号体系口径）：
+        只给脱敏值，管理端不显示明文 QQ / 邮箱。字段缺失（旧后端）时 qqStatusKnown=false。 */
+    emailMask: string
+    qqBound: boolean
+    mustChangePass: boolean
+    qqStatusKnown: boolean
   } | null>(null)
   /** 批量开号弹窗：给勾选的主播批量建展示端登录账号（result 非空 = 展示结果表） */
   const [batchAcc, setBatchAcc] = useState<{ defaultPass: string; forceReset: boolean; result: any | null } | null>(null)
@@ -340,12 +346,18 @@ export default function StreamerPage() {
     }
   }, [ctxMenu])
 
-  /** 右键 → 设置「我的」页面账号：手机号（选填）+ 密码（字母/数字/点，4~20 位）；主播用 姓名+密码 登录，没有注册 */
+  /** 右键 → 设置「我的」页面账号：手机号（选填）+ 密码（4~64 字符，任意字符、不 trim）；
+      主播用 姓名+密码 登录，没有注册。2026-10-18 起「凭艺名直接认领开号」由展示端完成，
+      管理端这里仍可手工开号/改密/删号。 */
   async function openMyAccount(name: string) {
     setError('')
     setMsg('')
     try {
       const d = await api(`/api/admin/my-accounts/${encodeURIComponent(name)}`)
+      // QQ 绑定状态：后端 2026-10-18 新增 emailMask/qqBound/mustChangePass（脱敏，不发明文）；
+      // 旧后端没有这三个字段时标记 qqStatusKnown=false，弹窗显示「暂不支持显示」而不是误报「未绑定」。
+      const qqStatusKnown =
+        d.qqBound !== undefined || d.emailMask !== undefined || d.mustChangePass !== undefined
       setMyAccPop({
         name,
         phone: d.found ? d.phone ?? '' : '',
@@ -354,6 +366,10 @@ export default function StreamerPage() {
         // 可看团别（迁移 024）：'' 沿用旧口径（绑了主播按主播所在团）
         viewTeam: d.found ? d.viewTeam ?? '' : '',
         isAdmin: !!d.isAdmin,
+        emailMask: d.found ? String(d.emailMask ?? '') : '',
+        qqBound: d.found ? d.qqBound === true : false,
+        mustChangePass: d.found ? d.mustChangePass === true : false,
+        qqStatusKnown: d.found && qqStatusKnown,
       })
     } catch (e: any) {
       setError(e.message ?? String(e))
@@ -370,7 +386,9 @@ export default function StreamerPage() {
         body: JSON.stringify({
           name: myAccPop.name,
           phone: myAccPop.phone.trim(),
-          ...(myAccPop.pass.trim() ? { pass: myAccPop.pass.trim() } : {}),
+          // 2026-10-18 口令口径：4~64 字符、支持中英文/特殊字符/任意符号、服务端不 trim；
+          // 这里不再 trim，避免把用户密码里的首尾空格吃掉（空串仍表示「不修改」）。
+          ...(myAccPop.pass ? { pass: myAccPop.pass } : {}),
         }),
       })
       /* 可看团别走**专用端点**：上面那个 POST 不传 pass 时会自动生成新密码
@@ -1237,12 +1255,44 @@ export default function StreamerPage() {
               placeholder="未设置"
               onChange={(e) => setMyAccPop({ ...myAccPop, phone: e.target.value })}
             />
+            {/* QQ 绑定状态（2026-10-18）：只展示后端下发的脱敏值 emailMask，管理端不出现明文 QQ / 邮箱；
+                绑定/解绑由主播在展示端「我的」页自助完成，管理员只做兜底改密。 */}
+            {myAccPop.exists && !myAccPop.isAdmin && (
+              <div className="hint" style={{ marginTop: 8 }}>
+                QQ 邮箱：
+                {!myAccPop.qqStatusKnown ? (
+                  <span title="后端尚未下发 emailMask/qqBound，升级后自动显示">—（暂不显示绑定状态）</span>
+                ) : myAccPop.qqBound ? (
+                  <span title="只显示脱敏地址，管理端不显示完整 QQ 号">
+                    {myAccPop.emailMask || '已绑定'}
+                  </span>
+                ) : (
+                  <span title="未绑定 QQ 的账号忘记密码只能联系管理员重置">
+                    未绑定（忘记密码只能联系管理员重置）
+                  </span>
+                )}
+                {myAccPop.mustChangePass && (
+                  <span
+                    className="badge b-paused"
+                    style={{ marginLeft: 6 }}
+                    title="该账号用临时密码登录过；展示端会提示修改密码（有效期内可重复登录，不做强制拦截）"
+                  >
+                    待改密
+                  </span>
+                )}
+                <div style={{ marginTop: 4 }}>
+                  绑定 / 解绑 QQ 由主播在展示端「我的」页自助完成；管理员在此改密会同时清掉「待改密」标记。
+                </div>
+              </div>
+            )}
             <label className="hint" style={{ display: 'block', marginTop: 8 }}>
-              {myAccPop.exists ? '新密码（字母/数字/点，4~20 位；留空 = 不修改）' : '密码（字母/数字/点，4~20 位）'}
+              {myAccPop.exists
+                ? '新密码（4~64 字符，支持中英文/特殊字符；留空 = 不修改）'
+                : '密码（4~64 字符，支持中英文/特殊字符；留空 = 按手机号后四位生成）'}
             </label>
             <input
               value={myAccPop.pass}
-              placeholder="4~20 位字母、数字或点"
+              placeholder="4~64 字符，任意字符均可（不自动去空格）"
               onChange={(e) => setMyAccPop({ ...myAccPop, pass: e.target.value })}
             />
             {/* 可看团别（2026-10-15）：只对**管理员观看账号**开放 —— 普通主播账号

@@ -9,7 +9,7 @@ rel=stylesheet>` 是渲染阻塞 —— 国内网络一慢/一断，整页白屏
 实现要点：
   - Material Symbols 用「必需连字 rlig」把图标名（如 chevron_right）渲染成图形；
     直接 `pyftsubset --layout-features=rlig` 会因连字闭包把 4301 个连字几乎全量
-    保留（子集仍 3MB+），所以这里手动重建只含本项目 48 个连字的 GSUB。
+    保留（子集仍 3MB+），所以这里手动重建只含本项目 49 个连字的 GSUB。
   - 两处前端只用默认轴值（FILL=0 / wght=400 / GRAD=0 / opsz=24），因此把可变
     字体实例化成静态字体（instantiateVariableFont），体积再降一个数量级。
 
@@ -52,6 +52,9 @@ ICONS = [
     "unfold_more", "playlist_play", "smart_display", "verified",
     "monetization_on", "notifications", "flag", "lock_reset", "info", "chat",
     "arrow_back", "today", "functions",
+    # 2026-10-18 账号绑定 QQ 邮箱：「我的」页 QQ 邮箱行用 mail
+    # （漏了会渲染成字面文本 mail，见 03-展示端交互设计.md 附录 B）
+    "mail",
 ]
 
 _DIGITS = ("zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine")
@@ -210,7 +213,7 @@ def main() -> int:
             font, {"FILL": 0, "wght": 400, "opsz": 24, "GRAD": 0}, inplace=True
         )
 
-        # 2) 精简 GSUB 到只含本项目 48 个连字
+        # 2) 精简 GSUB 到只含本项目 49 个连字
         build_minimal_gsub(font, lig_map)
 
         # 3) 子集：保留图标字形 + 组成字母字形，闭包只跟走精简后的 GSUB

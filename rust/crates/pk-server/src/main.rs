@@ -479,6 +479,8 @@ async fn main() -> anyhow::Result<()> {
             "/api/public/my/password/reset",
             post(public_teams::my_password_reset),
         )
+        // 绑定 / 解绑邮箱（2026-10-17 用户口径）：忘记密码重置时随机密码发到这里
+        .route("/api/public/my/email", post(public_teams::my_email_set))
         .layer(axum::middleware::from_fn_with_state(
             st.clone(),
             ipinfo::ip_gate_mw,

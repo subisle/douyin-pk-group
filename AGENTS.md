@@ -41,6 +41,19 @@
 **回滚方式**：把 `PUSH_OUT_ENABLED` 设回 `0`（或删掉该变量）即可恢复「只记日志不真发」，
 无需改代码。
 
+## 4. 部署不覆盖数据库（2026-10-17 用户口径）
+
+> **2026-10-17 用户口径**：现在**先本地开发**；部署时**不再覆盖数据库**。
+> 本地要跟生产对齐，就用「拉远程库 → 覆盖本地」的方式取数（远程只读拉取，不写回）。
+
+- 部署 = 只发代码（`docker pull` + `compose up`），生产 `pk-postgres` 数据卷**不重建、不覆盖**。
+- 本地取生产数据：`pg_dump`（64 的 `pk-postgres`/`douyin`，容器内 `douyin_admin`）→
+  本机 `pg_restore --clean --if-exists --no-owner --no-privileges` 灌入 `douyin_dev`，
+  灌完重跑 `pk-server migrate`（或手动补 038 `email` 列）把本地领先的迁移补上。
+- 本机 `douyin_dev` 表属主是 `zmy`，`pk_reader`/`pk_writer` 走默认权限
+  （`ALTER DEFAULT PRIVILEGES ... SELECT TO pk_reader / ALL TO pk_writer`），
+  `pg_restore` 重建表后默认权限自动覆盖，读写账号不受影响。
+
 ## 附：本地环境速查
 
 | 项 | 值 |

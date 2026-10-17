@@ -194,6 +194,32 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "037_push_claim_leases",
         include_str!("migrations/037_push_claim_leases.sql"),
     ),
+    // 038：展示端账号绑定邮箱（2026-10-17 用户口径）。忘记密码重置改为
+    // 「随机密码发绑定邮箱」，email 列留空 = 未绑定。幂等，可安全重放。
+    (
+        "038_my_account_email",
+        include_str!("migrations/038_my_account_email.sql"),
+    ),
+    // 039：忘记密码改「临时密码」模型（2026-10-18 用户拍板，契约
+    // docs/26-账号绑定QQ邮箱与艺名登录-设计/05-实现契约-v2.md §1）。
+    // 只加 3 列 temp_pass_hash / temp_pass_exp / must_change_pass；不新增 qq 列
+    // （QQ 号复用 038 的 email，存 <qq>@qq.com）。幂等，可安全重放。
+    (
+        "039_my_temp_pass",
+        include_str!("migrations/039_my_temp_pass.sql"),
+    ),
+    // 040：绑定邮箱（QQ 邮箱）全局唯一 —— 「同一 QQ 不能绑多个账号」的库层兜底；
+    // 应用层先查重给友好文案，并发靠 23505 映射。空串不参与唯一。幂等。
+    (
+        "040_my_email_uniq",
+        include_str!("migrations/040_my_email_uniq.sql"),
+    ),
+    // 041：在职主播艺名唯一 —— 「凭艺名认领开号」的前提（一个艺名只对应一个人）。
+    // partial unique：只约束 deleted_at IS NULL 且 name <> '' 的行（软删/空名不参与）。
+    (
+        "041_person_name_uniq",
+        include_str!("migrations/041_person_name_uniq.sql"),
+    ),
 ];
 
 /// 迁移建连（migrator 账号；同样关语句缓存）

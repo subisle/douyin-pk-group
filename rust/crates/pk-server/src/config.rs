@@ -212,6 +212,47 @@ pub fn redis_pool_limit() -> usize {
         .unwrap_or(4)
 }
 
+/* --------------------------- 邮箱发信（SMTP，2026-10-17） --------------------------- */
+
+/// SMTP 主机（发件）。163 邮箱用 smtp.163.com（收件 POP3 是 pop.163.com，不能发信）。
+pub fn smtp_host() -> String {
+    env_or("SMTP_HOST", "smtp.163.com")
+}
+
+/// SMTP 端口（隐式 TLS/SMTPS）。163 用 465（部分场景 994）。
+pub fn smtp_port() -> u16 {
+    env_or("SMTP_PORT", "465")
+        .parse()
+        .ok()
+        .filter(|p| *p > 0)
+        .unwrap_or(465)
+}
+
+/// SMTP 登录账号（发件人邮箱）。空 = 未配置，发信直接失败（fail-closed）。
+pub fn smtp_user() -> String {
+    env("SMTP_USER").unwrap_or_default()
+}
+
+/// SMTP 登录密码（163 为「授权码」，不是网页登录密码）。空 = 未配置，发信失败。
+pub fn smtp_pass() -> String {
+    env("SMTP_PASS").unwrap_or_default()
+}
+
+/// 发件人地址（From 头与 MAIL FROM）。缺省回退 SMTP_USER。
+pub fn smtp_from() -> String {
+    let f = env("SMTP_FROM").unwrap_or_default();
+    if f.is_empty() {
+        smtp_user()
+    } else {
+        f
+    }
+}
+
+/// SMTP 是否可用：账号与授权码都配了才算开（与 PUSH_OUT 的 fail-closed 同口径）。
+pub fn smtp_enabled() -> bool {
+    !smtp_user().is_empty() && !smtp_pass().is_empty()
+}
+
 /* --------------------------- 写库 / 迁移账号（B 阶段） --------------------------- */
 
 /// 写库 / 迁移库的连接端点（与只读数据源 SourceConfig 分开，职责不同）

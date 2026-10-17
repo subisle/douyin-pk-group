@@ -400,8 +400,8 @@ pub(super) fn public_password_reset_allow(ip: &str) -> bool {
  * 端点免登录、只认手机号，第四轮把「明文回显」拿掉后仍有一条可用性攻击面：
  * 任何人只要知道主播手机号，就能把账号密码重置掉并吊销其全部 token
  * （my_password_reset 的既有行为），主播本人正在用的登录态直接被踢。
- * （2026-10-17 起重置 = 手机号后四位，主播可自行推算新密码登录恢复，
- * 但「反复触发把人踢下线」的骚扰面仍在，这层闸继续保留。）
+ * （2026-10-17 起重置 = 随机密码发绑定邮箱，主播收邮件后可自行恢复，
+ * 但「反复触发把人踢下线 / 刷邮箱」的骚扰面仍在，这层闸继续保留。）
  * 反复触发即可把「忘记密码」变成定向骚扰武器，且 12 次/分/IP 的限流换 IP 就绕过。
  *
  * 这里在内存里按手机号再做一层闸（与 IP 限流并存）：
@@ -540,27 +540,26 @@ pub async fn my_password_set(
 
 /// POST /api/public/my/password/reset {phone}
 ///
-/// 2026-10-14 审计修复（P0）：原实现是**任意账号接管** —— 这个端点挂在 /api/public/
-/// 下、免管理员鉴权，handler 内也不要任何身份，只要知道（或猜到）一个主播的手机号，
-/// 就能把该账号的密码重置成「手机号后四位」，并且接口把新密码明文回显。
-/// 手机号在公会内部半公开、且重置结果可自行推算，等于忘记密码流程完全没有身份绑定。
+/// 忘记密码（未登录）：把该手机号绑定的普通账号密码重置为 **随机密码并发到绑定邮箱**。
 ///
-/// 现在四件事一起改：
-/// 1. 只保留 `public_password_reset_allow` 限流（每 IP 每分钟 12 次）挡脚本刷。
-///    （2026-10-14「彻底移除注册功能」后注册开关已不存在，原先这里那道
-///    「注册开关」运维总闸随之删掉 —— 忘记密码是未登录场景的唯一入口，
-///    不能跟着注册一起消失。）
-/// 2. 新密码 = **手机号后四位**（2026-10-17 用户口径，与开号初始密码统一）。
-///    （2026-10-14~10-16 期间曾是 CSPRNG 随机串；改回后四位后运营无需中介转达，
-///    主播凭手机号自行推算即可登录 —— 这是与「初始密码 = 后四位」同级的产品口径。）
-/// 3. 日志不再打账号名 —— 未绑定 / 自助注册账号的 name 就是手机号本身，
-///    `mask_phone` 的脱敏被 `accounts = ?names` 绕过，只打数量。
-/// 4. 新密码以哈希落库、不在响应里明文回显（2026-10-17 审计 4-P1-1）：
-///    后四位本就可由手机号推算，明文回显只是给「不知道手机号」的人省一步推导，
-///    照旧不下发；前端文案引导「用手机号后四位登录」。
+/// 口径沿革（这一条被产品反复改过，故完整记录）：
+/// - 2026-10-14 审计 P0：原是「重置成手机号后四位 + 明文回显」，任意账号接管；
+///   改 CSPRNG 随机串，但仍明文回显一次；
+/// - 2026-10-17 审计 4-P1-1：不再明文回显（管理员中介转达临时密码）；
+/// - 2026-10-17 早前用户口径：改回手机号后四位（与开号初始密码统一）；
+/// - **2026-10-17 用户口径（本轮）**：随机密码发到绑定邮箱（163 SMTP）；
+///   没绑邮箱 → 400「该账号未绑定邮箱，请联系管理员重置密码」。
 ///
-/// 且按手机号再做一层限流（2026-10-17 审计 4-P2-A，见 `PASSWORD_RESET_GUARD`）：
-/// 10 分钟内重复请求 / 1 小时超 3 次只回同形成功包，不改密、不吊销 token。
+/// 流程（成功才动库，邮件发不出去就不改密、不吊销 token，避免把用户锁死在
+/// 「已重置但没拿到密码」的中间态）：
+///   1. 每 IP 每分钟 12 次限流（`public_password_reset_allow`）；
+///   2. 同手机号 10 分钟 / 1 小时 3 次的二级闸（`PASSWORD_RESET_GUARD`，
+///      被抑制的请求回同形成功包，不改密、不吊销 token）；
+///   3. 定位账号 + 绑定邮箱（`my_account_reset_target`）；
+///   4. 生成随机密码 → SMTP 发邮箱（失败 503「邮件发送失败…」，无状态变化）；
+///   5. 哈希落库 + 吊销该账号全部 my token。
+///
+/// 响应不回任何敏感信息：成功只回 `{ok:true, sent:true}`，前端提示「已发送到邮箱」。
 pub async fn my_password_reset(
     State(st): State<ArcState>,
     axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
@@ -593,12 +592,10 @@ pub async fn my_password_reset(
         避免把限流窗口当成可用性探测信号。 */
         return Ok(Json(json!({ "ok": true, "names": accounts })));
     }
-    let (password, names) = crate::store::my_account_reset_password_random(&st, phone)
+    /* 定位账号 + 绑定邮箱。业务拒绝（未绑定手机号 / 未绑定邮箱）走 BIZ:: → 400 原样下发。 */
+    let (name, email) = crate::store::my_account_reset_target(&st, phone)
         .await
         .map_err(|e| {
-            /* 2026-10-16 起与自助改密同口径：按 store 层 BIZ:: 前缀分流 ——
-            业务拒绝（「请输入手机号」「该手机号未绑定账号」）→ 400 原样下发；
-            库层故障（sqlx/PG 原文）→ 500 走通用文案，原文细节留日志（审计 2026-10-11）。 */
             if crate::store::my_account::is_biz(&e) {
                 ApiError::bad_request(crate::store::my_account::biz_msg(&e).to_string())
             } else {
@@ -606,26 +603,89 @@ pub async fn my_password_reset(
                 ApiError::from(anyhow::anyhow!(e))
             }
         })?;
+    /* 生成随机密码 → 发邮箱。发不出去 = 不改密（下面 apply 在邮件成功后才执行）。 */
+    let new_pass = crate::random::random_password();
+    let body = format!(
+        "您的展示端账号密码已重置。\n\n新密码：{new_pass}\n\n请使用该密码登录，登录后可在「我的」页 →「重置密码」改回自己的密码。\n\n（本邮件由系统自动发送，请勿回复。）"
+    );
+    crate::mailer::send_mail(&email, "抖音PK · 密码重置通知", &body)
+        .await
+        .map_err(|e| {
+            tracing::error!(phone = %mask_phone(phone), error = %e, "重置密码邮件发送失败");
+            ApiError::with_status(
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "邮件发送失败，请稍后重试或联系管理员",
+            )
+        })?;
+    /* 邮件已发 → 哈希落库。phone 传原值：apply 内部与 target 用同一套 validate_my_phone
+    归一化，两条路对得上号。 */
+    crate::store::my_account_reset_apply(&st, phone, &new_pass)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "重置展示端账号密码落库失败");
+            ApiError::from(anyhow::anyhow!(e))
+        })?;
     /* 只有真正重置成功才登记窗口；被抑制的请求不登记，避免刷请求把封锁期越拖越长。 */
     if guard_applies {
         reset_guard_record(&guard_phone);
     }
     // 改密后旧登录态必须立刻失效（审计 2026-10-12：内存 token 原本无撤销手段）
-    for n in &names {
-        my_tokens_revoke(n);
-    }
+    my_tokens_revoke(&name);
     tracing::info!(
         phone = %mask_phone(phone),
-        accounts = names.len(),
-        "展示端账号密码已重置为手机号后四位（旧 token 已吊销）"
+        account = name,
+        "展示端账号密码已重置为随机密码并发送到绑定邮箱（旧 token 已吊销）"
     );
-    /* 2026-10-17 审计 4-P1-1：不在响应里明文回显密码 —— 即便新口径 = 手机号后四位
-    （可推算），也不给「不知道手机号」的人省那一步推导；同时与旧前端兼容：
-    老 st_page.html 会把 d.password 回填密码框 —— 空值时前端走提示分支。
-    新口径下提示直接告诉主播「用手机号后四位登录」，无需管理员中介。
-    响应仍返回 ok + names 数量，不泄露账号名单。 */
-    let _ = password; // 新密码只以哈希落库，不出服务端（见上）
-    Ok(Json(json!({ "ok": true, "names": names.len() })))
+    // 不回显密码：只告诉前端「已发送」，具体密码在用户邮箱里。
+    Ok(Json(json!({ "ok": true, "sent": true })))
+}
+
+/// POST /api/public/my/email {email}
+///
+/// 个人页（已登录）自助绑定 / 更新 / 解绑邮箱（2026-10-17 用户口径）：
+/// 忘记密码重置时，随机密码发到这里的邮箱；`email` 空串 = 解绑。
+/// 身份只认 `X-My-Token` 头，请求体里不接受账号名 —— 只能改自己的邮箱。
+pub async fn my_email_set(
+    State(st): State<ArcState>,
+    headers: HeaderMap,
+    axum::Json(body): axum::Json<Value>,
+) -> ApiResult {
+    let Some(token) = header_my_token(&headers) else {
+        return Err(ApiError::auth("登录已过期，请重新登录"));
+    };
+    /* 内存 miss 时从 Redis 回填（与 my_password_set 同口径）：
+    服务重启后 24h 内的登录态照常可以改邮箱，不必先重新登录。 */
+    let mut ident = my_token_take(&token);
+    if ident.is_none() {
+        ident = super::admin::my_token_restore(&st, &token).await;
+    }
+    let Some((_person_id, _team, account_name)) = ident else {
+        return Err(ApiError::auth("登录已过期，请重新登录"));
+    };
+    let raw = body.get("email").and_then(|v| v.as_str()).unwrap_or_default();
+    let email = crate::store::my_account::validate_email(raw).map_err(|e| {
+        if crate::store::my_account::is_biz(&e) {
+            ApiError::bad_request(crate::store::my_account::biz_msg(&e).to_string())
+        } else {
+            ApiError::from(anyhow::anyhow!(e))
+        }
+    })?;
+    crate::store::my_account_set_email(&st, &account_name, &email)
+        .await
+        .map_err(|e| {
+            if crate::store::my_account::is_biz(&e) {
+                ApiError::bad_request(crate::store::my_account::biz_msg(&e).to_string())
+            } else {
+                tracing::error!(error = %e, account = %account_name, "展示端绑定邮箱写入失败");
+                ApiError::from(anyhow::anyhow!(e))
+            }
+        })?;
+    tracing::info!(
+        account = %account_name,
+        email = %mask_email(&email),
+        "展示端账号已绑定邮箱"
+    );
+    Ok(Json(json!({ "ok": true, "email": mask_email(&email) })))
 }
 
 /* 2026-10-16：`my_bind_search`（GET /api/public/my/bind/search）与 `my_bind`

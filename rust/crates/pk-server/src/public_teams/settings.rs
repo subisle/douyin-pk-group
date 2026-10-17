@@ -687,20 +687,25 @@ impl Announcement {
     /// 三处下发点（site / public_announcements / get_announcement）统一走它，
     /// 管理员 GET 因此也能看到当前线上合成内容，保存即固化。
     pub async fn load_effective(st: &AppState) -> Self {
-        let a = Self::load(st).await;
-        if !a.items.is_empty() {
-            return a;
+        let mut a = Self::load(st).await;
+        if a.items.is_empty() {
+            let star_title = crate::store::config_get(st, "star_title")
+                .await
+                .unwrap_or_default();
+            let star_override = crate::store::config_get(st, "star_override")
+                .await
+                .unwrap_or_default();
+            let champ_banner = crate::store::config_get(st, "champ_banner")
+                .await
+                .unwrap_or_default();
+            a = with_synth_items(a, &star_title, &star_override, &champ_banner);
         }
-        let star_title = crate::store::config_get(st, "star_title")
-            .await
-            .unwrap_or_default();
-        let star_override = crate::store::config_get(st, "star_override")
-            .await
-            .unwrap_or_default();
-        let champ_banner = crate::store::config_get(st, "champ_banner")
-            .await
-            .unwrap_or_default();
-        with_synth_items(a, &star_title, &star_override, &champ_banner)
+        // 公告条头像兜底（2026-10-17 用户报障「公告页面还是没有头像」）：
+        // 存量条目的 `avatar` 是保存时冻结的字符串，早期保存的是空串。下发前按 name
+        // 回查 person_avatar 补上（内存补、不写库；管理端 GET 也看到补好的，保存即固化）。
+        // name 对不上 / 无本地留存图 → 保持空，前端照旧回落首字色块。
+        fill_empty_avatars(st, &mut a.items).await;
+        a
     }
 
     pub async fn save(&self, st: &AppState) {
@@ -994,6 +999,53 @@ async fn avatar_hash_map(st: &AppState) -> std::collections::HashMap<u64, String
             })
             .collect(),
         Err(_) => std::collections::HashMap::new(),
+    }
+}
+
+/// 公告条头像兜底（2026-10-17 用户报障「公告页面还是没有头像」）。
+///
+/// 背景：公告条条目的 `avatar` 是**配置时冻结**的字符串。早期保存的条目（avatar 功能
+/// 2026-10-16 才接入、或保存时选人没带出头像）落库即空串，展示端只能回落首字色块。
+/// 这里在下发前按 `name` 回查 `person_avatar`（本地留存图，迁移 025）补上：
+/// - 内存填充、**不写库**；管理端 GET 也能看到补好的值，管理员保存即固化；
+/// - name 对不上 / 该人无本地留存图 → 保持空串，前端照旧回落首字色块（不破版）。
+async fn fill_empty_avatars(st: &AppState, items: &mut [AnnounceItem]) {
+    let any_missing = items
+        .iter()
+        .any(|i| i.avatar.trim().is_empty() && !i.name.trim().is_empty());
+    if !any_missing {
+        return;
+    }
+    // name → 同源头像地址。只取「有本地留存图」的真人；同名取其一（公告条按姓名认人）。
+    let sql = "SELECT p.name AS name, p.id AS person_id, pa.hash AS hash \
+               FROM person p JOIN person_avatar pa ON pa.person_id = p.id \
+               WHERE pa.image IS NOT NULL AND p.deleted_at IS NULL";
+    let Ok(rows) = crate::pgrs::query(&st.pools, "LOCAL", sql).await else {
+        return;
+    };
+    let mut by_name: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for r in &rows {
+        let (Ok(name), Ok(pid), Ok(hash)) = (
+            r.try_get::<String, _>("name"),
+            r.try_get::<i64, _>("person_id"),
+            r.try_get::<Option<String>, _>("hash"),
+        ) else {
+            continue;
+        };
+        let Some(hash) = hash else { continue };
+        if hash.trim().is_empty() {
+            continue;
+        }
+        by_name
+            .entry(name)
+            .or_insert_with(|| super::site::avatar_url(pid.max(0) as u64, hash.trim()));
+    }
+    for it in items.iter_mut() {
+        if it.avatar.trim().is_empty() {
+            if let Some(url) = by_name.get(it.name.trim()) {
+                it.avatar = url.clone();
+            }
+        }
     }
 }
 

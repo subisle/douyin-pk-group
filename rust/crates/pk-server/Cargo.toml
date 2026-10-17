@@ -40,3 +40,7 @@ resvg = "0.45"
 # 微信 CDN 媒体上传的 AES-128-ECB 加密（对齐 openclaw-weixin 协议）
 aes = "0.8"
 md-5 = "0.10"
+# 邮箱发信（163 SMTP 隐式 TLS）：SMTP 走 tokio-rustls，根证书用 webpki-roots
+rustls = "0.23"
+tokio-rustls = "0.26"
+webpki-roots = "0.26"

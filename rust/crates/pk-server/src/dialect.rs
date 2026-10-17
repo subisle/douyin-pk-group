@@ -52,7 +52,10 @@ pub fn month_absent_sql(month: &str) -> String {
 }
 
 /// LOCAL：唯一业务库 —— person / account / daily_metric
-const ANCHORS_A: &str = "SELECT id, name, avatar_url, status FROM person
+const ANCHORS_A: &str = "SELECT id, name, avatar_url, status,
+       (SELECT pa.hash FROM person_avatar pa
+         WHERE pa.person_id = person.id AND pa.image IS NOT NULL) AS avatar_hash
+     FROM person
      WHERE deleted_at IS NULL AND (status IS NULL OR status <> 'left')
      ORDER BY name";
 const DATES_A: &str =

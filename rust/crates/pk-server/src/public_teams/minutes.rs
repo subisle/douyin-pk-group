@@ -841,6 +841,9 @@ pub async fn my_who(
     切换器只能靠这里重建（否则刷新一次切换器就没了）。 */
     let view_team = crate::store::my_account_view_team(&st, &token_name).await;
     let switchable = view_team.switchable();
+    /* 绑定邮箱（迁移 038，2026-10-17）：我的页要显示/编辑当前绑定邮箱，
+    未绑定 = 空串。前端据此决定「忘记密码能不能自助恢复」。 */
+    let email = crate::store::my_account_email(&st, &token_name).await;
     // personId=0 有两种：管理员观看账号（is_admin=1，姓名直接来自登录账号），
     // 以及「手机号注册了、还没绑主播」的账号（bound=0，前端要提示去绑定）
     if person_id == 0 {
@@ -849,19 +852,20 @@ pub async fn my_who(
                 return Ok(Json(json!({
                     "ok": true, "personId": 0, "name": info.phone, "team": my_team,
                     "phone": info.phone, "admin": false, "bound": false, "needBind": true,
-                    "switchable": switchable,
+                    "switchable": switchable, "email": email,
                 })));
             }
             if info.is_admin {
                 return Ok(Json(json!({
                     "ok": true, "personId": 0, "name": token_name, "team": my_team,
                     "admin": true, "bound": true, "switchable": switchable,
+                    "email": email,
                 })));
             }
         }
         return Ok(Json(json!({
             "ok": true, "personId": 0, "name": token_name, "team": my_team,
-            "admin": true, "bound": true, "switchable": switchable,
+            "admin": true, "bound": true, "switchable": switchable, "email": email,
         })));
     }
     let sql = "SELECT name FROM person WHERE id = ? AND deleted_at IS NULL".to_string();
@@ -885,6 +889,7 @@ pub async fn my_who(
     Ok(Json(json!({
         "ok": true, "personId": person_id, "name": name, "team": my_team,
         "phone": phone_masked, "bound": true, "switchable": switchable,
+        "email": email,
     })))
 }
 

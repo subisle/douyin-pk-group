@@ -769,6 +769,7 @@ mod phone_batch_open_tests {
             bound_at: String::new(),
             source: "register".into(),
             view_team: ViewTeam::Inherit,
+            email: String::new(),
         };
         assert_eq!(unbound.bind_name(), "");
         let bound = MyAccountInfo {

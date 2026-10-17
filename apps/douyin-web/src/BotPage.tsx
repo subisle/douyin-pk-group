@@ -1076,7 +1076,9 @@ function MyAccountsCard() {
     try {
       await api('/api/admin/my-accounts', {
         method: 'POST',
-        body: JSON.stringify({ name: name.trim(), phone: phone.trim(), pass: pass.trim() }),
+        // 2026-10-18 口令口径：4~64 字符、支持中英文/特殊字符/任意符号、服务端不 trim；
+        // 这里不 trim，避免吃掉密码首尾空格。
+        body: JSON.stringify({ name: name.trim(), phone: phone.trim(), pass }),
       })
       setName('')
       setPhone('')
@@ -1159,6 +1161,8 @@ function MyAccountsCard() {
       <h2>「我的」页面账号（展示端登录用）</h2>
       <p className="hint">
         账号由<b>这里手动设置</b>（姓名要跟主播台账里的一致，姓名已存在时保存 = 覆盖更新）。
+        <b>2026-10-18 起主播也可凭艺名在展示端自助认领开号</b>（登录门返回可认领 → 认领弹窗设置密码），
+        这里仍是管理员兜底入口：补手机号 / 改密 / 删号 / 改绑。
         <b>手机号只用于登录</b>：微信推送绑定 2026-10-16 起改走 4 位绑定码（主播在「我的」页
         扫码加机器人后把 4 位数字发给机器人），手机号不再是绑定凭证。
         历史自助注册遗留的账号是「待绑定」状态：主播在「我的」页绑定主播姓名后才能看个人数据，
@@ -1171,7 +1175,7 @@ function MyAccountsCard() {
             placeholder="与主播台账里的一致"
             value={name}
             onChange={(e) => setName(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && name.trim() && pass.trim() && add()}
+            onKeyDown={(e) => e.key === 'Enter' && name.trim() && pass && add()}
           />
         </label>
         <label className="field">
@@ -1181,19 +1185,19 @@ function MyAccountsCard() {
             inputMode="numeric"
             value={phone}
             onChange={(e) => setPhone(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && name.trim() && pass.trim() && add()}
+            onKeyDown={(e) => e.key === 'Enter' && name.trim() && pass && add()}
           />
         </label>
         <label className="field">
           密码
           <input
-            placeholder="4~20 位字母、数字或点"
+            placeholder="4~64 字符，任意字符（不 trim）"
             value={pass}
             onChange={(e) => setPass(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && name.trim() && pass.trim() && add()}
+            onKeyDown={(e) => e.key === 'Enter' && name.trim() && pass && add()}
           />
         </label>
-        <button className="primary" disabled={!name.trim() || !pass.trim()} onClick={add}>
+        <button className="primary" disabled={!name.trim() || !pass} onClick={add}>
           保存
         </button>
       </div>
@@ -1206,6 +1210,9 @@ function MyAccountsCard() {
               <th>手机号</th>
               <th>来源</th>
               <th>绑定状态</th>
+              {/* 2026-10-18「我的页面账号」口径：只显示脱敏后的 QQ 邮箱与是否待改密，
+                  不显示明文 QQ / 邮箱（后端 /api/admin/my-accounts 下发 emailMask/qqBound/mustChangePass）。 */}
+              <th>QQ 邮箱</th>
               <th>可看团别</th>
               <th>添加时间</th>
               <th className="col-actions"></th>
@@ -1216,7 +1223,9 @@ function MyAccountsCard() {
               <tr key={a.name}>
                 <td>{a.name}</td>
                 <td className="hint">{a.phone}</td>
-                <td className="hint">{a.source === 'register' ? '自助注册' : '后台添加'}</td>
+                <td className="hint">
+                  {a.source === 'register' ? '自助注册' : a.source === 'claim' ? '艺名认领' : '后台添加'}
+                </td>
                 <td className="hint">
                   {a.bound ? (
                     a.isAdmin ? (
@@ -1226,6 +1235,32 @@ function MyAccountsCard() {
                     )
                   ) : (
                     <span className="badge b-paused">待绑定</span>
+                  )}
+                </td>
+                <td>
+                  {/* QQ 绑定状态（脱敏）：后端新增字段缺失时显示「—」，不误报「未绑定」；
+                      管理员账号不参与 QQ 绑定，直接显示「—」。 */}
+                  {a.isAdmin ? (
+                    <span className="hint">—</span>
+                  ) : a.qqBound === undefined && a.emailMask === undefined ? (
+                    <span className="hint" title="后端尚未下发 emailMask/qqBound，升级后自动显示">
+                      —
+                    </span>
+                  ) : a.qqBound ? (
+                    <span title="只显示脱敏地址，管理端不显示完整 QQ 号">{a.emailMask || '已绑定'}</span>
+                  ) : (
+                    <span className="hint" title="未绑 QQ 的账号忘记密码只能联系管理员重置">
+                      未绑定
+                    </span>
+                  )}
+                  {a.mustChangePass && (
+                    <span
+                      className="badge b-paused"
+                      style={{ marginLeft: 6 }}
+                      title="该账号用临时密码登录过，正在等待用户自行修改密码"
+                    >
+                      待改密
+                    </span>
                   )}
                 </td>
                 <td>
