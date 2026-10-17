@@ -11,6 +11,7 @@ use std::sync::Arc;
 use sqlx::Row;
 
 use crate::pgrs;
+use crate::report::LineageReportFields;
 use crate::push::fmt_wan;
 use crate::state::AppState;
 
@@ -55,7 +56,9 @@ impl LineageReport {
 
 /* ------------------------------- 常量 -------------------------------- */
 
-const FONT: &str = "-apple-system, 'PingFang SC', 'Noto Sans SC', 'Microsoft YaHei', sans-serif";
+/* 2026-10-17 字体栈改版：与 report.rs FONT 同步（去掉 -apple-system，补 Linux CJK 家族；
+必须配合 push.rs svg_to_png 的 load_system_fonts()，resvg 0.45 默认空 fontdb）。 */
+const FONT: &str = "PingFang SC, Hiragino Sans GB, Heiti SC, STHeiti, Microsoft YaHei, Noto Sans CJK SC, Noto Sans SC, Source Han Sans SC, WenQuanYi Zen Hei, sans-serif";
 const COLOR_TEXT: &str = "#101828";
 const COLOR_MUTED: &str = "#98A2B3";
 /// 较昨日上涨：红（涨=好，运营口径与日报一致）
@@ -258,6 +261,20 @@ pub async fn build(
 /// 分页渲染：per_page <= 0 或 >= 行数 → 单页；多页时每页独立 svg 文档，
 /// 第 2 页起标题带「（第 n 页/共 m 页）」。
 pub fn render_svg_pages(rep: &LineageReport, per_page: usize, personal_mark: &str) -> Vec<String> {
+    render_svg_pages_with_fields(
+        rep,
+        per_page,
+        personal_mark,
+        &LineageReportFields::default(),
+    )
+}
+
+pub fn render_svg_pages_with_fields(
+    rep: &LineageReport,
+    per_page: usize,
+    personal_mark: &str,
+    fields: &LineageReportFields,
+) -> Vec<String> {
     if rep.rows.is_empty() {
         return Vec::new();
     }
@@ -277,7 +294,7 @@ pub fn render_svg_pages(rep: &LineageReport, per_page: usize, personal_mark: &st
             } else {
                 String::new()
             };
-            render_page(rep, chunk, &label, personal_mark)
+            render_page(rep, chunk, &label, personal_mark, fields)
         })
         .collect()
 }
@@ -288,6 +305,7 @@ fn render_page(
     rows: &[LineageRow],
     page_label: &str,
     personal_mark: &str,
+    fields: &LineageReportFields,
 ) -> String {
     let header_h = 112.0f64;
     let list_h = rows.len() as f64 * 48.0;
@@ -312,24 +330,25 @@ fn render_page(
     ));
 
     // 副标题：门下 N 人 · 今日合计 X [· 较昨日 ▲x/▼x/—]
-    let mut sub = format!(
-        "门下 {} 人 · 今日合计 {}",
-        rep.disciple_count(),
-        fmt_wan(rep.total_today)
-    );
-    match rep.total_diff() {
-        Some(d) if d > 0 => sub.push_str(&format!(
-            " · 较昨日 <tspan fill=\"{COLOR_UP}\" font-weight=\"700\">▲{}</tspan>",
-            fmt_wan(d)
-        )),
-        Some(d) if d < 0 => sub.push_str(&format!(
-            " · 较昨日 <tspan fill=\"{COLOR_DOWN}\" font-weight=\"700\">▼{}</tspan>",
-            fmt_wan(-d)
-        )),
-        Some(_) => sub.push_str(&format!(
-            " · 较昨日 <tspan fill=\"{COLOR_MUTED}\" font-weight=\"700\">—</tspan>"
-        )),
-        None => {}
+    let mut sub = format!("门下 {} 人", rep.disciple_count());
+    if fields.today_wave {
+        sub.push_str(&format!(" · 今日合计 {}", fmt_wan(rep.total_today)));
+    }
+    if fields.wave_diff {
+        match rep.total_diff() {
+            Some(d) if d > 0 => sub.push_str(&format!(
+                " · 较昨日 <tspan fill=\"{COLOR_UP}\" font-weight=\"700\">▲{}</tspan>",
+                fmt_wan(d)
+            )),
+            Some(d) if d < 0 => sub.push_str(&format!(
+                " · 较昨日 <tspan fill=\"{COLOR_DOWN}\" font-weight=\"700\">▼{}</tspan>",
+                fmt_wan(-d)
+            )),
+            Some(_) => sub.push_str(&format!(
+                " · 较昨日 <tspan fill=\"{COLOR_MUTED}\" font-weight=\"700\">—</tspan>"
+            )),
+            None => {}
+        }
     }
     s.push_str(&format!(
         "<text x=\"360\" y=\"66\" font-size=\"14\" fill=\"#475467\" text-anchor=\"middle\" dominant-baseline=\"central\" font-family=\"{FONT}\">{sub}</text>"
@@ -341,14 +360,25 @@ fn render_page(
     s.push_str(&format!(
         "<rect y=\"{th_y:.0}\" width=\"720\" height=\"32\" fill=\"#F2F4F7\"/>"
     ));
-    for (x, label, anchor) in [
+    let columns: Vec<(f64, &str, &str)> = [
         (28.0f64, "主播", "start"),
         (240.0, "今日音浪", "middle"),
         (345.0, "昨日音浪", "middle"),
         (445.0, "较昨日", "middle"),
         (565.0, "本月累计", "middle"),
         (692.0, "状态", "end"),
-    ] {
+    ]
+    .into_iter()
+    .filter(|&(_, label, _)| {
+        (label == "主播" && fields.anchor)
+            || (label == "今日音浪" && fields.today_wave)
+            || (label == "昨日音浪" && fields.yesterday_wave)
+            || (label == "较昨日" && fields.wave_diff)
+            || (label == "本月累计" && fields.month_total)
+            || (label == "状态" && fields.status)
+    })
+    .collect();
+    for (x, label, anchor) in columns {
         s.push_str(&format!(
             "<text x=\"{x}\" y=\"{ty_y:.0}\" font-size=\"12\" fill=\"#667085\" font-weight=\"700\" text-anchor=\"{anchor}\" dominant-baseline=\"central\" font-family=\"{FONT}\">{label}</text>"
         ));
@@ -369,69 +399,76 @@ fn render_page(
             "<rect y=\"{y:.0}\" width=\"720\" height=\"48\" fill=\"{row_bg}\" stroke=\"#EAECF0\" stroke-width=\"1\"/>"
         ));
         // 主播名（师傅行名字后缀「（师）」）
-        s.push_str(&format!(
-            "<text x=\"28\" y=\"{text_y:.0}\" font-size=\"14\" fill=\"{COLOR_TEXT}\" font-weight=\"700\" text-anchor=\"start\" dominant-baseline=\"central\" font-family=\"{FONT}\">{}{}</text>",
-            esc(&r.name),
-            if r.is_master { "（师）" } else { "" },
-        ));
-        // 今日音浪
-        s.push_str(&text_cell(
-            240.0,
-            text_y,
-            "middle",
-            &fmt_wan(r.today),
-            COLOR_TEXT,
-        ));
-        // 昨日音浪（昨日无数据 = —）
-        match r.yesterday {
-            Some(yv) => s.push_str(&text_cell(
-                345.0,
+        if fields.anchor {
+            s.push_str(&format!(
+                "<text x=\"28\" y=\"{text_y:.0}\" font-size=\"14\" fill=\"{COLOR_TEXT}\" font-weight=\"700\" text-anchor=\"start\" dominant-baseline=\"central\" font-family=\"{FONT}\">{}{}</text>",
+                esc(&r.name),
+                if r.is_master { "（师）" } else { "" },
+            ));
+        }
+        if fields.today_wave {
+            s.push_str(&text_cell(
+                240.0,
                 text_y,
                 "middle",
-                &fmt_wan(yv),
+                &fmt_wan(r.today),
                 COLOR_TEXT,
-            )),
-            None => s.push_str(&text_cell(345.0, text_y, "middle", "—", COLOR_MUTED)),
+            ));
         }
-        // 较昨日（行内 diff = today - yesterday）
-        match r.yesterday {
-            None => s.push_str(&text_cell(445.0, text_y, "middle", "—", COLOR_MUTED)),
-            Some(yv) => {
-                let d = r.today - yv;
-                if d > 0 {
-                    s.push_str(&text_cell(
-                        445.0,
-                        text_y,
-                        "middle",
-                        &format!("▲{}", fmt_wan(d)),
-                        COLOR_UP,
-                    ));
-                } else if d < 0 {
-                    s.push_str(&text_cell(
-                        445.0,
-                        text_y,
-                        "middle",
-                        &format!("▼{}", fmt_wan(-d)),
-                        COLOR_DOWN,
-                    ));
-                } else {
-                    s.push_str(&text_cell(445.0, text_y, "middle", "—", COLOR_MUTED));
+        if fields.yesterday_wave {
+            match r.yesterday {
+                Some(yv) => s.push_str(&text_cell(
+                    345.0,
+                    text_y,
+                    "middle",
+                    &fmt_wan(yv),
+                    COLOR_TEXT,
+                )),
+                None => s.push_str(&text_cell(345.0, text_y, "middle", "—", COLOR_MUTED)),
+            }
+        }
+        if fields.wave_diff {
+            match r.yesterday {
+                None => s.push_str(&text_cell(445.0, text_y, "middle", "—", COLOR_MUTED)),
+                Some(yv) => {
+                    let d = r.today - yv;
+                    if d > 0 {
+                        s.push_str(&text_cell(
+                            445.0,
+                            text_y,
+                            "middle",
+                            &format!("▲{}", fmt_wan(d)),
+                            COLOR_UP,
+                        ));
+                    } else if d < 0 {
+                        s.push_str(&text_cell(
+                            445.0,
+                            text_y,
+                            "middle",
+                            &format!("▼{}", fmt_wan(-d)),
+                            COLOR_DOWN,
+                        ));
+                    } else {
+                        s.push_str(&text_cell(445.0, text_y, "middle", "—", COLOR_MUTED));
+                    }
                 }
             }
         }
-        // 本月累计
-        s.push_str(&text_cell(
-            565.0,
-            text_y,
-            "middle",
-            &fmt_wan(r.month_total),
-            "#475467",
-        ));
-        // 状态：未播红字 / 开播黑字
-        if r.live {
-            s.push_str(&text_cell(692.0, text_y, "end", "开播", COLOR_TEXT));
-        } else {
-            s.push_str(&text_cell(692.0, text_y, "end", "未播", COLOR_UP));
+        if fields.month_total {
+            s.push_str(&text_cell(
+                565.0,
+                text_y,
+                "middle",
+                &fmt_wan(r.month_total),
+                "#475467",
+            ));
+        }
+        if fields.status {
+            if r.live {
+                s.push_str(&text_cell(692.0, text_y, "end", "开播", COLOR_TEXT));
+            } else {
+                s.push_str(&text_cell(692.0, text_y, "end", "未播", COLOR_UP));
+            }
         }
     }
 
@@ -608,6 +645,28 @@ mod tests {
         assert!(svg.contains("较昨日"));
         // 未播状态列
         assert!(svg.contains("未播"));
+    }
+
+    /// 2026-10-17 用户口径「字段后端支持显示和不显示」：师门日报图的列显隐来自
+    /// config `push_report_fields.lineage`，关掉的列必须连同表头一起消失。
+    #[test]
+    fn lineage_report_fields_hide_columns() {
+        let rep = fixture();
+        let all = render_svg_pages_with_fields(&rep, 0, "浩月", &LineageReportFields::default());
+        assert!(all[0].contains("今日音浪"));
+        let hidden = LineageReportFields {
+            anchor: false,
+            today_wave: false,
+            yesterday_wave: false,
+            wave_diff: false,
+            month_total: false,
+            status: false,
+        };
+        let none = render_svg_pages_with_fields(&rep, 0, "浩月", &hidden);
+        for label in ["主播", "今日音浪", "昨日音浪", "较昨日", "本月累计", "状态"] {
+            assert!(!none[0].contains(label), "关掉的列不该渲染表头：{label}");
+        }
+        assert!(!none[0].contains(">阿三</text>"), "主播列关掉后不应再出现姓名");
     }
 
     #[test]

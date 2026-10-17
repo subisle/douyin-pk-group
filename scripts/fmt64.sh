@@ -6,7 +6,7 @@
 # 如果先在 64 上 fmt 再同步，会把本地刚改的东西用 64 的旧版本覆盖掉。
 set -euo pipefail
 
-HOST="${PK64_HOST:-64.188.8.149}"
+HOST="${PK64_HOST:?请设置 PK64_HOST（64 开发机地址）}"
 PASS="${PK64_PASS:?请用环境变量提供 PK64_PASS}"
 REMOTE="${PK64_DIR:-/opt/it/douyin-pk-group}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

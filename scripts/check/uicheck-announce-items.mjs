@@ -28,7 +28,7 @@ const BASE = (process.env.BASE ?? process.argv[2] ?? 'http://127.0.0.1:8787').re
 const PORT = Number(process.env.CDP_PORT ?? 9341) // 故意不占 uicheck-admin 的 9334
 const OUT = fileURLToPath(new URL('../.uicheck/', import.meta.url))
 const CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
-// 2026-10-14 审计修复：这三个变量原先硬编码真实口令（'shuai4444@'），已随公开仓库泄露。
+// 2026-10-14 审计修复（2026-10-17 复核）：这三个变量不再内置任何口令——历史口令已移除，取值见环境变量/运维手册。
 // 脚本不再内置任何凭据，缺哪个就报哪个，避免「拿默认口令去打生产」。
 const needEnv = (name) => {
   const v = process.env[name]

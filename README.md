@@ -65,7 +65,7 @@ apps/server          pk-server (Rust) 的 pnpm 包装：`pnpm dev:api` 直接跑
 - `/api/*` 需要管理员口令，`Authorization: Bearer <token>`
 - 只有 `/api/public/*`、`/api/auth/login`、`/api/health` 免鉴权
 - 口令换 token 走 `POST /api/auth/login`，token 只存内存，进程重启即失效，空闲 8 小时自动清理
-- 管理员口令优先读 `ADMIN_PASSWORD`（可轮换、不用重编二进制）；没配时回落到内置兜底口令并打 WARN，生产请在 `.env` 里配置
+- 管理员口令只读 `ADMIN_PASSWORD`（可轮换、不用重编二进制）。**fail-closed**：没配时服务拒绝启动、管理接口全关（没有内置兜底口令，本地开发确实不想配时才可显式设 `ALLOW_NO_ADMIN_PASSWORD=1` 放行启动，此时 `/api` 不鉴权、仅限本机）
 - CORS 默认只允许同源（前后端同端口），跨域时用 `CORS_ORIGINS` 显式放行
 
 **展示端「我的」账号**（`public_teams.rs` + `store.rs`）
@@ -97,7 +97,7 @@ apps/server          pk-server (Rust) 的 pnpm 包装：`pnpm dev:api` 直接跑
   改范围走 **专用端点 `PUT /api/admin/my-accounts/{name}/view-team`**（只改团别、不动密码 ——
   复用 `POST /api/admin/my-accounts` 会在不传 `pass` 时自动生成新密码，等于顺手重置）；
   后台两处入口：机器人页「我的页面账号」列表管理员行下拉、主播台账右键弹窗。
-  改动会吊销该账号全部登录态。当前配置：浩雨=any（总管理员，2026-10-16 开发期由「帅帅」改绑台账主播浩雨，口令 shuai****）、饭团=female、鹏先生=any。
+  改动会吊销该账号全部登录态。当前配置：浩雨=any（总管理员，2026-10-16 开发期由「帅帅」改绑台账主播浩雨，口令见运维手册）、饭团=female、鹏先生=any。
   完整口径见 [docs/09 §5.4](docs/09-机器人口令与权限结构.md)
 
 **对外展示页**（`rust/crates/pk-server/src/public.rs`）
@@ -146,7 +146,7 @@ pnpm install && pnpm -F @pk/douyin-web dev  # 5173，/api 代理到 8787
 >
 > **现役生产有两处（2026-10-11）**：
 >
-> - **147**（`147.90.235.187` / Debian 12 x86_64，systemd 服务 `/opt/pk-server`，
+> - **147**（`147.90.***.***` / Debian 12 x86_64，systemd 服务 `/opt/pk-server`，
 >   对外 `https://pk.subisle.com`）—— 对外主生产；一键脚本 `scripts/deploy/147.sh`，
 >   数据上线 `scripts/deploy/upload-db-vps147.sh`（本机 `douyin_dev` 整体 dump → 灌进 147 的 `pk-mariadb`）。
 > - **rk3318**（arm64 / Docker，`/opt/pk-server`）—— arm64 生产，一键脚本 `scripts/deploy-rk3318.sh`

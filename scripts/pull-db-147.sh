@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 把 147 生产机（147.90.235.187 = https://pk.subisle.com）的 MariaDB `douyin` 库
+# 把 147 生产机（147.90.***.*** = https://pk.subisle.com）的 MariaDB `douyin` 库
 # 拉到本机，恢复进本机 PG douyin_dev（pg-migration 分支的迁移目标库）。
 #
 #   PK147_PASS='<root 口令>' scripts/pull-db-147.sh
@@ -20,7 +20,7 @@
 # 只会撞名、丢触发器。这里只搬数据。
 set -euo pipefail
 
-HOST="${PK147_HOST:-147.90.235.187}"
+HOST="${PK147_HOST:?请设置 PK147_HOST（147 生产机地址）}"
 PASS="${PK147_PASS:?请用环境变量提供 PK147_PASS（147 root 口令），例如 PK147_PASS='xxx' scripts/pull-db-147.sh}"
 PROXY="${PK147_PROXY:-127.0.0.1:7890}"        # 空则直连
 REMOTE_DIR="${PK147_REMOTE_DIR:-/opt/pk-server}"

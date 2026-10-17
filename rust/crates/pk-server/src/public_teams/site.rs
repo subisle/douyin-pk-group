@@ -767,11 +767,16 @@ pub async fn lineage_wave_summary(
     }
     let source = sid(st);
     // 本团 person 树（只认有师门归属关系的那部分，与族谱同口径）
-    let tree_sql = format!(
-        "SELECT id, master_id FROM person \
-         WHERE deleted_at IS NULL AND ('{team}' = '' OR gender = '{team}')"
-    );
-    let rows = pgrs::query(&st.pools, &source, &tree_sql).await?;
+    /* 2026-10-17 审计 4-P2-1：team 不再内联进 SQL —— 本函数由「我的」个人页用
+    token 里的团别调用（minutes.rs 的 lineage_wave_summary(&st, &my_team, …)），
+    而 token 读侧（my_token_required）没有白名单；原先 `gender = '{team}'` 是残留
+    注入面。改两处 `?` 绑定（空串 = 不过滤，与旧行为一致）。 */
+    let tree_sql = "SELECT id, master_id FROM person \
+         WHERE deleted_at IS NULL AND (? = '' OR gender = ?)";
+    let rows = pgrs::query_with_binds(&st.pools, &source, tree_sql, |q| {
+        q.bind(team.to_string()).bind(team.to_string())
+    })
+    .await?;
     let mut ids: std::collections::HashSet<u64> = Default::default();
     let mut children: HashMap<u64, Vec<u64>> = Default::default();
     for r in &rows {
@@ -855,16 +860,24 @@ pub(super) async fn period_public(
     if !enabled {
         return Ok(Json(json!({ "published": true, "periodEnabled": false })));
     }
-    let period = match q.period.as_deref() {
-        Some(p)
-            if !p.trim().is_empty()
-                && p.chars().all(|c| c.is_ascii_digit() || c == '-')
-                && p.len() == if is_month { 7 } else { 4 } =>
-        {
-            p.trim().to_string()
+    /* period 形状校验（2026-10-17 审计 4-P3-1）：原先只查「字符集 + 长度」，
+    `2026-1-`（月）/ `20-2`（年）这类畸形窗口能通过 → like_to_date_range 认不出
+    形状 → 退回「全时间范围」，月/年榜会把**全时段聚合**当该窗口返回（数值错，
+    非注入）。现在统一走 dialect::valid_period_shape（严格 YYYY-MM / YYYY），
+    非法回退当前窗口并记 debug，畸形输入不再进 period_rollup_sql。 */
+    let want_len = if is_month { 7 } else { 4 };
+    let default_period = if is_month {
+        chrono::Local::now().format("%Y-%m").to_string()
+    } else {
+        chrono::Local::now().format("%Y").to_string()
+    };
+    let period = match q.period.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(p) if dialect::valid_period_shape(p) && p.len() == want_len => p.to_string(),
+        Some(p) => {
+            tracing::debug!(period = %p, is_month, "月/年榜 period 形状非法，回退当前窗口");
+            default_period
         }
-        _ if is_month => chrono::Local::now().format("%Y-%m").to_string(),
-        _ => chrono::Local::now().format("%Y").to_string(),
+        None => default_period,
     };
     // 与 daily 口径对齐：离队的人不进榜（P2-19：也不再下发 personId，
     // 前端月/年榜只按 name/rank/wave 渲染）。

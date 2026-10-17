@@ -22,7 +22,7 @@
 - **本地参数**只放 `scripts/db-align/local.env`（已 gitignore，绝不入库）：
   `SRC_PG_*`（本机事实源）、`TARGET_MODE=local` + `DST_PG_*`（本机对练库）。
 - **线上参数**走环境变量，部署文件里不出现本地值：
-  `TARGET_MODE=docker-ssh`、`PK64_HOST=root@64.188.8.149`、`PK64_CONTAINER=pk-postgres`、`DST_PG_USER`。
+  `TARGET_MODE=docker-ssh`、`PK64_HOST=root@<64_HOST>`、`PK64_CONTAINER=pk-postgres`、`DST_PG_USER`。
 - **环境变量优先于 `local.env`**（命令行可临时覆盖，用于验证与排障）。
 
 ## 3. 本地怎么跑（不碰线上、不碰真实开发库）
@@ -72,7 +72,7 @@ CONFIRM=1 scripts/pull-b-from-64.sh
 ## 4. 线上（64）怎么跑
 
 ```bash
-export TARGET_MODE=docker-ssh PK64_HOST=root@64.188.8.149 PK64_CONTAINER=pk-postgres
+export TARGET_MODE=docker-ssh PK64_HOST=root@<64_HOST> PK64_CONTAINER=pk-postgres
 export DST_PG_DB=douyin_dev DST_PG_USER=douyin_dev
 CONFIRM=1 scripts/push-a-to-64.sh        # 本机 → 64
 CONFIRM=1 scripts/pull-b-from-64.sh      # 64 → 本机

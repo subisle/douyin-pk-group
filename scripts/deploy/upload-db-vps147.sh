@@ -27,14 +27,14 @@
 # ─────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-HOST="${RK_HOST:-147.90.235.187}"
+HOST="${RK_HOST:?请设置 RK_HOST（147 生产机地址）}"
 PASS="${RK_PASS:?请用环境变量提供 RK_PASS}"
 CONTAINER="${RK_MARIADB_CONTAINER:-pk-mariadb}"
 LOCAL_DB="${LOCAL_DB:-douyin_dev}"
 TARGET_DB="${TARGET_DB:-douyin}"
 BACKUP_DIR="${RK_BACKUP_DIR:-/opt/pk-server/backups}"  # 目标机备份目录
 BACKUP_KEEP="${RK_BACKUP_KEEP:-5}"                     # 目标机上保留的备份份数
-# 2026-10-14 审计修复：本地 MySQL 账号口令原先硬编码为 -udev -pdev12345。
+# 2026-10-14 审计修复（2026-10-17 复核）：历史本地 MySQL 口令字面量已移除，取值见环境变量/运维手册。
 # 仓库是公开的，口令等同公开；且 -p 紧跟明文会留在 ps / shell 历史里。
 # 改由环境变量注入，缺省即中止。
 LOCAL_MYSQL_USER="${LOCAL_MYSQL_USER:-dev}"

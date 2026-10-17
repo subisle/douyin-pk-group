@@ -373,19 +373,26 @@ pub async fn my(
     P1-7：只聚合可信行（wave_reliable=1）。
     2026-10-11 起按团过滤：以前不过滤，男女团同表混排，「团内名次」名不副实。
     过滤手法与 lineage 相同：团别为空串 = 全公会不过滤（保持旧行为）；
-    token 里的团别只会是 male/female/all/空串（all 归一成空串——gender 列没有
-    all 这个值，不过滤才对），与 lineage 的 query_team 同级信任，沿用 format! 拼 SQL。 */
-    let rank_team = if my_team == "all" { "" } else { &my_team };
-    let rank_sql = format!(
-        "SELECT person_id, tw FROM (SELECT p.id AS person_id, \
+    all 归一成空串（gender 列没有 all 这个值，不过滤才对）。
+    2026-10-17 审计 4-P2-1：团别**不再内联进 SQL** —— 原先 token 里的团别直拼
+    `p.gender = '{rank_team}'`，而 token 读侧（my_token_required）没有白名单，
+    脏 token / 历史 Redis token 可把值带进 SQL。改 `?` 绑定（pq::rewrite 转 $N）。 */
+    let rank_team: &str = if my_team == "all" {
+        ""
+    } else {
+        my_team.as_str()
+    };
+    let rank_sql = "SELECT person_id, tw FROM (SELECT p.id AS person_id, \
           (SUM(d.wave))::BIGINT AS tw \
          FROM daily_metric d JOIN person p ON p.id = d.person_id \
          WHERE p.deleted_at IS NULL \
-           AND ('{rank_team}' = '' OR p.gender = '{rank_team}') \
+           AND (? = '' OR p.gender = ?) \
            AND d.wave_reliable = 1 \
-         GROUP BY p.id ORDER BY tw DESC) t"
-    );
-    let ranks = pgrs::query(&st.pools, &source, &rank_sql).await?;
+         GROUP BY p.id ORDER BY tw DESC) t";
+    let ranks = pgrs::query_with_binds(&st.pools, &source, rank_sql, |q| {
+        q.bind(rank_team.to_string()).bind(rank_team.to_string())
+    })
+    .await?;
     let my_pos = ranks.iter().position(|r| id_of_pub(r) == person_id);
     let team_rank = my_pos.map(|i| i + 1).unwrap_or(0);
     /* 2026-10-12 用户口径：我的页只显示自己的排名。rankGap / teamSize 不再计算

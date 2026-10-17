@@ -343,6 +343,40 @@ pub fn like_to_date_range(like: &str) -> (String, String) {
     ("0001-01-01".to_string(), "9999-01-01".to_string())
 }
 
+/// period 形状白名单（2026-10-17 审计 4-P3-1）：只认两种形态 ——
+/// `YYYY-MM`（7 位、月份 01..=12）与 `YYYY`（4 位纯数字）。
+///
+/// 为什么要有这个函数：site/metrics 的 period 入参原先是「字符集 + 长度」校验，
+/// `2026-1-` / `20-2` 这类**字符集合法但形状畸形**的窗口能通过，随后
+/// [`like_to_date_range`] 认不出形状 → 回退到「全时间范围」，最终把
+/// **全时段聚合**当成该月 / 该年返回（数值错，不是注入）。这里把形状校验收成
+/// 唯一口径：调用方先过它再拼 LIKE 窗口；[`period_rollup_sql`] 入口再兜底一次。
+pub fn valid_period_shape(period: &str) -> bool {
+    let p = period.trim();
+    let b = p.as_bytes();
+    // YYYY-MM：第 5 位是 '-'，其余是数字，月份必须 01..=12
+    if b.len() == 7 {
+        return b[4] == b'-'
+            && b[..4].iter().all(u8::is_ascii_digit)
+            && b[5..].iter().all(u8::is_ascii_digit)
+            && matches!(p[5..].parse::<u32>(), Ok(1..=12));
+    }
+    // YYYY：4 位纯数字（年份不设上限，与 like_to_date_range 的解析口径一致）
+    if b.len() == 4 {
+        return b.iter().all(u8::is_ascii_digit);
+    }
+    false
+}
+
+/// `period_rollup_sql` 的 `{like}` 窗口形态：在 [`valid_period_shape`] 之上
+/// 要求末尾带一个 `%`（月/年都是前缀匹配窗口）。
+fn valid_like_window(like: &str) -> bool {
+    match like.strip_suffix('%') {
+        Some(base) => valid_period_shape(base),
+        None => false,
+    }
+}
+
 pub fn period_rollup_sql(
     select: &str,
     like: &str,
@@ -352,19 +386,24 @@ pub fn period_rollup_sql(
     with_duration: bool,
     with_wave: bool,
 ) -> String {
-    /* like 形状显式断言（2026-10-17 审计 3-P3-B）：`{like}` 会被原样拼进
-    `mw0.period LIKE '{like}'`，当前三个调用点（settings/site/metrics）都先做了
-    「digits + '-' + 可选 %」白名单，但那是**隐性前提** —— 未来新增调用者忘校验
-    即成真注入。这里把前提钉成显性：形状不对直接 panic（这是程序员错误，
-    不是用户输入错误），把隐患挡在上线前。允许的字符集：数字、'-'、'%'，长度 ≤ 8。 */
-    debug_assert!(
-        !like.is_empty()
-            && like.len() <= 8
-            && like
-                .bytes()
-                .all(|b| b.is_ascii_digit() || b == b'-' || b == b'%'),
-        "period_rollup_sql: like 窗口必须先过字符白名单（got {like:?}）"
-    );
+    /* like 窗口运行期校验（2026-10-17 审计 3-P3-B → 4-P3-1）：`{like}` 会被
+    原样拼进 `mw0.period LIKE '{like}'`，必须保证形状可控。原先只有
+    `debug_assert!` —— release 构建（生产 `cargo build --release`）里是 no-op，
+    等于线上没有护栏。现在改成**发布版也生效**的校验：形状不合法（非
+    `YYYY-MM%` / `YYYY%`）就记 debug 并回退到「当前月」窗口，绝不把外部字符串
+    带进 SQL，也不静默退化成全时段聚合。 */
+    let like_fallback;
+    let like = if valid_like_window(like) {
+        like
+    } else {
+        like_fallback = format!("{}%", chrono::Local::now().format("%Y-%m"));
+        tracing::debug!(
+            got = like,
+            fallback = %like_fallback,
+            "period_rollup_sql: like 窗口形状非法（应为 YYYY-MM% / YYYY%），回退当前月"
+        );
+        like_fallback.as_str()
+    };
     let team_clause = if team.is_empty() {
         String::new()
     } else {
@@ -809,6 +848,48 @@ mod tests {
         let (lo, hi) = like_to_date_range("garbage");
         assert_eq!(lo, "0001-01-01");
         assert_eq!(hi, "9999-01-01");
+    }
+
+    /// period 形状白名单（2026-10-17 审计 4-P3-1）：只认 YYYY-MM / YYYY，
+    /// 畸形但字符集合法的窗口（`2026-1-` / `20-2`）必须被拒 —— 否则
+    /// like_to_date_range 认不出会退化成全时段聚合。
+    #[test]
+    fn valid_period_shape_accepts_only_month_or_year() {
+        // 正常值
+        assert!(valid_period_shape("2026-10"));
+        assert!(valid_period_shape("2026-01"));
+        assert!(valid_period_shape("2026-12"));
+        assert!(valid_period_shape("2026"));
+        assert!(valid_period_shape("1999"));
+        // 畸形但字符集合法（原「字符集 + 长度」校验会放行的那一类）
+        assert!(!valid_period_shape("2026-1-"), "月/日缺位 + 多余 '-'");
+        assert!(!valid_period_shape("20-2"), "年份不足 4 位");
+        assert!(!valid_period_shape("2026-13"), "13 月不存在");
+        assert!(!valid_period_shape("2026-00"), "00 月不存在");
+        assert!(!valid_period_shape("202610"), "缺 '-'");
+        assert!(!valid_period_shape("2026-10-01"), "多了一段日期");
+        assert!(!valid_period_shape("----"));
+        assert!(!valid_period_shape(""));
+        assert!(!valid_period_shape("garbage"));
+        // 两侧空白容忍（调用方先 trim 再拼窗口）
+        assert!(valid_period_shape(" 2026-10 "));
+    }
+
+    /// period_rollup_sql 的 like 窗口：非法形状必须回退当前月，且回退后的 SQL
+    /// 只能是 `YYYY-MM%` 形状（release 也有护栏，取代原 debug_assert）。
+    #[test]
+    fn period_rollup_sql_falls_back_on_bad_like_window() {
+        let select = ADMIN_PERIOD_SELECT;
+        let sql = period_rollup_sql(select, "2026-1-%", "", "", "wave DESC", false, true);
+        let month = chrono::Local::now().format("%Y-%m").to_string();
+        assert!(
+            sql.contains(&format!("mw0.period LIKE '{month}%'")),
+            "非法窗口应回退当前月：{sql}"
+        );
+        assert!(!sql.contains("2026-1-"), "非法窗口不得进 SQL：{sql}");
+        // 正常窗口原样保留（不回退）
+        let ok = period_rollup_sql(select, "2999-01%", "", "", "wave DESC", false, true);
+        assert!(ok.contains("mw0.period LIKE '2999-01%'"), "{ok}");
     }
 
     #[test]

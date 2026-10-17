@@ -180,6 +180,13 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "035_wx_legacy_no_uid",
         include_str!("migrations/035_wx_legacy_no_uid.sql"),
     ),
+    // 036：对接码加固（2026-10-17 第四轮审计 P1-2 / P2-10 / P2-11）。
+    // bind_code_fails.code 放宽到 VARCHAR(160)（容纳后续会话维度键）；回填 035
+    // 的存量「双空无主行」标记（legacy_no_uid=1）。幂等，可安全重放。
+    (
+        "036_bind_code_hardening",
+        include_str!("migrations/036_bind_code_hardening.sql"),
+    ),
 ];
 
 /// 迁移建连（migrator 账号；同样关语句缓存）

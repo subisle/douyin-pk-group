@@ -11,6 +11,11 @@
 //! - **师门日报**（docs/23 §4，2026-10-14）：名下有直系徒弟的师傅收「徒弟音浪对比图」
 //!   （同一业务日只推一次，按 `last_lineage_date` 去重；无徒弟不推空图）。
 //!
+//! 2026-10-17 用户口径两条：
+//! - **合并发送**：追分提醒与师门日报都有内容时**合成一条**发（追分段在上、师门段在下），
+//!   各自开关与去重标记仍然独立；
+//! - **无数据不推**：该 (团, 业务日) 没有任何可信音浪数据时整轮跳过，不推空炮。
+//!
 //! 目标三种（2026-10-10 用户口径：一律比本月累计）：
 //! - `person` 追某个人：本月累计音浪超过 TA = 追上
 //! - `value`  追数值：本月累计达到某个音浪值
@@ -43,8 +48,28 @@ use crate::state::AppState;
 pub const BIND_CODE_LEN: usize = 4;
 /// 每人最多几个追分目标（用户口径 2026-10-09：5 个）
 pub const MAX_TARGETS: i64 = 5;
-/// 每日报告图片分页：每页行数（40 行 ≈ 微信一屏半，再长看不清）
-const PAGE_ROWS: usize = 40;
+/// 每日报告图片分页（2026-10-17 用户口径「分成两页即可」）：无论名册多少人，
+/// 固定切 2 页。按人数对半分（div_ceil），奇数时首页多一行；rows 为空时上游
+/// 本来就不进图片分支。原先 40 行/页会把 85 人团切成 3 页，第二页几乎全空。
+const DAILY_PAGE_COUNT: usize = 2;
+
+/// 两页版切页器 + 渲染：把月榜 rows 均分成至多 2 页（≤2 行时单页），
+/// 再走 report.rs 的统一页内重打包（名次跨页连续、页码标注、🚩 条每页带、
+/// 师傅分组/未播警示只在末页、收件人隐形水印）。
+fn render_daily_two_pages(
+    rep: &crate::report::DailyReport,
+    personal_mark: &str,
+    fields: &crate::report::DailyReportFields,
+) -> Vec<String> {
+    let n = rep.rows.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let per_page = n.div_ceil(DAILY_PAGE_COUNT);
+    let pages: Vec<Vec<crate::report::ReportRow>> =
+        rep.rows.chunks(per_page).map(|c| c.to_vec()).collect();
+    crate::report::render_month_svg_pages_exact(rep, pages, personal_mark, fields)
+}
 
 /// 是不是一个合法绑定码（防止把正常聊天误判成绑定）。
 /// 口径：正好 4 位 ASCII 数字。手机号（7~15 位）长度就对不上，不会被误认。
@@ -427,6 +452,25 @@ fn out_blocked(kind: &str, to: &str, preview: &str) -> bool {
     true
 }
 
+/// 师门日报图片分页：每页行数（师门名单通常个位数，几乎总是单页）。
+const PAGE_ROWS: usize = 40;
+
+fn lineage_report_pngs(
+    rep: &crate::lineage_report::LineageReport,
+    fields: &crate::report::LineageReportFields,
+) -> Vec<Vec<u8>> {
+    crate::lineage_report::render_svg_pages_with_fields(rep, PAGE_ROWS, "", fields)
+        .iter()
+        .filter_map(|svg| match svg_to_png(svg) {
+            Ok(png) => Some(png),
+            Err(e) => {
+                tracing::warn!(error = %e, "师门日报 SVG 转 PNG 失败");
+                None
+            }
+        })
+        .collect()
+}
+
 /// 出网闸门拦截（2026-10-17，审计 1-P0-2）：**不代表发送成功**。
 ///
 /// 携带它的 Err 是「这轮根本没发出去」的信号，调用方必须据此**不推进**去重标记
@@ -572,7 +616,14 @@ async fn wx_proactive(
 /// pub(crate)：lineage_report.rs 与 admin_send.rs 的图片渲染共用同一份调用。
 pub(crate) fn svg_to_png(svg: &str) -> anyhow::Result<Vec<u8>> {
     use anyhow::Context as _;
-    let opt = resvg::usvg::Options::default();
+    /* 2026-10-17 修复（用户截图：月榜图「有形无字」）：resvg 0.45 的
+    usvg Options::default() 自带一份**空 fontdb**——一个系统字体都不加载，
+    任何 font-family（含 PingFang SC / Hiragino Sans GB / emoji）都解析不到，
+    所有 <text> 被静默丢弃，PNG 只剩色块。必须显式 load_system_fonts()
+    （/System/Fonts、/Library/Fonts、~/Library/Fonts 全量入 db），
+    之后现有 FONT 栈与 emoji 全部正常渲染（/tmp/resvg-font-test 复现矩阵验证）。 */
+    let mut opt = resvg::usvg::Options::default();
+    opt.fontdb_mut().load_system_fonts();
     let tree = resvg::usvg::Tree::from_str(svg, &opt)?;
     let size = tree.size();
     let scale = 2.0f32;
@@ -601,6 +652,10 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
         .get()
         .and_then(|m| m.wechat.as_ref())
         .map(std::sync::Arc::clone);
+    let report_fields = crate::store::config_get(st, "push_report_fields")
+        .await
+        .map(|value| crate::report::PushReportFields::from_json(&value))
+        .unwrap_or_default();
 
     // 本月累计（追分口径：本月音浪，不是历史累计）
     let month = date.get(..7).unwrap_or(date).to_string();
@@ -711,6 +766,17 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
     }
     let run_started = std::time::Instant::now();
 
+    // 2026-10-17 用户口径：**当天没有任何可信音浪数据 → 整轮不推**（不推空炮）。
+    // 口径与榜单一致：daily_metric 该日 wave_reliable=1 的行数 = 0 视为无数据。
+    // 只拦「自动引擎」的推送；数据为空时 rank_items 为空、月榜也为空，各段本来就
+    // 没东西可发，这里前置一条轻量 SQL 把「没数据还跑全流程」的情况直接掐掉，
+    // 并记一条 info 方便运营核对「为什么今天没推」。
+    let has_day_data = has_reliable_data(st, team, date).await;
+    if !has_day_data {
+        tracing::info!(team = %team, date = %date, "当日无可信音浪数据，整轮推送跳过（无数据不推）");
+        return Ok(());
+    }
+
     for (idx, b) in bindings.iter().enumerate() {
         let mut sent_any = false;
 
@@ -742,10 +808,11 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
                 没配 override 就自动取当日音浪第一。
                 - config star_icon：小红旗条旁的 Material Symbols 图标名，空 = 不带图标。 */
                 /* 🚩 小红旗条与月榜数据已在循环外算好（修复1·性能）：rep 对全团相同，
-                这里只按收件人 render_month_svg_pages（personal_mark 水印因人而异）
-                并转 PNG。 */
+                这里只按收件人 render（personal_mark 水印因人而异）并转 PNG。
+                2026-10-17 用户口径「分成两页即可」：不再 40 行/页切 3 页，
+                固定两页对半分（奇数人时首页多一行）。 */
                 let svgs = match &month_rep {
-                    Some(rep) => crate::report::render_month_svg_pages(rep, PAGE_ROWS, &b.name),
+                    Some(rep) => render_daily_two_pages(rep, &b.name, &report_fields.daily),
                     None => Vec::new(), // 构建失败（循环外已 warn）→ 退回文本推送
                 };
                 if svgs.is_empty() {
@@ -851,21 +918,26 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
             }
         }
 
-        // ② 追分提醒（多个目标合成一条）
-        if b.notify_target && b.person_id > 0 {
+        /* ②③ 追分提醒 + 师门日报（2026-10-17 用户口径：**都有内容时合并成一条发送**）。
+        流程：先算追分段（无库副作用）→ 再占位并构建师门段 → 两段都有拼一条发
+        （追分在上、师门在下），只有一段单发该段，都没有就不发。
+        各自开关与去重标记保持独立：合并发送成功 = 目标状态与师门占位一起推进；
+        发送失败 / 被闸拦下 = 两边都不推进（师门占位还原、目标状态不落库），下轮再推。 */
+        let mut pending_states: Vec<(i64, bool, i64)> = Vec::new();
+        let target_text: Option<String> = if b.notify_target && b.person_id > 0 {
             let targets = crate::store::targets_for_push(st, &b.name).await;
-            if !targets.is_empty() {
+            if targets.is_empty() {
+                None
+            } else {
                 let my = month_map.get(&b.person_id).copied().unwrap_or(0);
                 let mut lines: Vec<String> = Vec::new();
                 let mut event = false;
                 let mut due = false;
                 /* 待落库的目标状态（2026-10-17 修复，审计 1-P1-3）：
-                原先**先落库后发送** —— `target_set_state` 在 send_binding 之前就把
+                原先**先落库后发送** —— `target_set_state` 在发送之前就把
                 `hit` 与 `last_notice_date=当天` 写死了。一旦发送被闸门拦下（或真的失败），
                 「追上 / 被反超」这类**一次性事件**就永久丢失：标记已消耗，
-                主播再也收不到这条提醒。
-                现在攒到这里，**发送成功后才写**（与每日报告的 last_report_date 同款顺序）。 */
-                let mut pending_states: Vec<(i64, bool, i64)> = Vec::new();
+                主播再也收不到这条提醒。现在攒到这里，**发送成功后才写**。 */
                 for t in &targets {
                     let rival = month_map.get(&t.target_person_id).copied().unwrap_or(0);
                     let (gap, label, detail, gap_text) =
@@ -894,47 +966,25 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
                         pending_states.push((t.id, false, store_gap));
                     }
                 }
+                /* 触发条件维持 event||due：没事件且当天已提醒过 → 不再打扰（口径不变）。 */
                 if !lines.is_empty() && (event || due) {
-                    // 2026-10-15：整条文案抽成纯函数 target_push_text（头部/完成度/尾部
-                    // 口径见函数注释）；触发条件 event||due 与落库逻辑原样不动。
-                    let text =
-                        target_push_text(date, &lines, my, value_completion_pct(&targets, my));
-                    tracing::info!(account = %b.name, text = %text.replace('\n', " | "), "推送·追分提醒");
-                    match send_binding(st, b, wx_global.as_ref(), &text).await {
-                        Ok(()) => {
-                            sent_any = true;
-                            /* 发送成功后才落库（2026-10-17 修复，审计 1-P1-3）：
-                            「追上 / 被反超」是一次性事件，原先先落库后发送，
-                            被闸门拦下或发送失败时 hit / last_notice_date 已经写死
-                            → 这条提醒**永久丢失**，主播再也收不到。
-                            现在只有真的发出去才推进目标状态。 */
-                            for (id, hit, gap) in pending_states.iter() {
-                                crate::store::target_set_state(st, *id, *hit, *gap, date).await;
-                            }
-                            tracing::info!(account = %b.name, targets = targets.len(), "追分提醒已推送");
-                        }
-                        Err(e) => {
-                            if is_blocked(&e) {
-                                tracing::warn!(account = %b.name, "追分提醒：闸门拦截，未发（目标状态不推进，开闸后会补推）");
-                            } else {
-                                tracing::warn!(account = %b.name, error = %e, "追分提醒推送失败");
-                                crate::store::push_touch(st, &b.name, &e.to_string()).await;
-                            }
-                        }
-                    }
+                    Some(target_push_text(
+                        date,
+                        &lines,
+                        my,
+                        value_completion_pct(&targets, my),
+                    ))
+                } else {
+                    None
                 }
             }
-        }
+        } else {
+            None
+        };
 
-        // ③ 师门日报（docs/23 §4，2026-10-14）：名下有直系徒弟的师傅收徒弟音浪对比。
-        // 2026-10-17 口径：有文字就不发图片 —— 师门日报只发纯文字（逐徒弟明细），不发图。
-        /* 三层保护（与 daily_report 同构）：
-        - 开关：b.lineage_report（「我的」页第三开关 / 管理端一键开启）；
-        - 同业务日去重：b.last_lineage_date == date → skip（对齐 last_report_date，
-          补数重排队列时不重复发）；
-        - 有徒弟才算师傅：build() 报「师傅不存在」或名下只有师傅本人一行（无徒弟）
-          → 记 debug 跳过，不推空文字；person_id == 0（管理员观看账号）直接跳过。
-        发送成功后才写 last_lineage_date（幂等，失败下次再推）。 */
+        // 师门段（docs/23 §4）：开关开 + 有 person + 当天未推过才参与推送。
+        // 2026-10-17 起师门日报与每日报告一样走图片；占位在发送前，失败/无内容还原。
+        let mut lineage_rep: Option<crate::lineage_report::LineageReport> = None;
         if b.lineage_report {
             if b.person_id == 0 {
                 tracing::debug!(account = %b.name, "师门日报：管理员观看账号（person_id=0），跳过");
@@ -947,44 +997,132 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
             } else {
                 match crate::lineage_report::build(st, date, b.person_id).await {
                     Ok(rep) if rep.rows.len() > 1 => {
-                        let text = crate::lineage_report::render_text(&rep);
-                        tracing::info!(account = %b.name, text = %text.replace('\n', " | "), "推送·师门日报(文本)");
-                        match send_binding(st, b, wx_global.as_ref(), &text).await {
-                            Ok(()) => {
-                                sent_any = true;
-                                crate::store::push_set_lineage_date(st, &b.name, date).await;
-                                tracing::info!(account = %b.name, "师门日报(文本)已推送");
-                            }
-                            Err(e) => {
-                                /* 被闸门拦下 ≠ 发送成功：还原占位标记，
-                                消息留到开闸后再推，不会因去重标记被消耗而永久丢失。 */
-                                crate::store::push_restore_lineage_date(
-                                    st,
-                                    &b.name,
-                                    &b.last_lineage_date,
-                                )
-                                .await;
-                                if is_blocked(&e) {
-                                    tracing::warn!(account = %b.name, "师门日报：闸门拦截，未发（去重标记不推进）");
-                                } else {
-                                    tracing::warn!(account = %b.name, error = %e, "师门日报文本推送失败");
-                                    crate::store::push_touch(st, &b.name, &e.to_string()).await;
-                                }
-                            }
-                        }
+                        lineage_rep = Some(rep);
                     }
-                    Ok(rep) => tracing::debug!(
-                        account = %b.name,
-                        rows = rep.rows.len(),
-                        "师门日报：名下无直系徒弟（或徒弟全隐藏/离职），skipped"
-                    ),
+                    Ok(rep) => {
+                        // 名下无直系徒弟（或徒弟全隐藏/离职）：还原占位，不推空文字。
+                        crate::store::push_restore_lineage_date(st, &b.name, &b.last_lineage_date)
+                            .await;
+                        tracing::debug!(
+                            account = %b.name,
+                            rows = rep.rows.len(),
+                            "师门日报：名下无直系徒弟（或徒弟全隐藏/离职），跳过"
+                        );
+                    }
                     Err(e) => {
-                        // 「师傅不存在」（档案被删 / person_id 失联）或库抖动：只记日志，
-                        // 不写 last_lineage_date，不影响其他订阅者。
+                        // 「师傅不存在」（档案被删 / person_id 失联）或库抖动：还原占位，
+                        // 消息留到下次再推（宁重不漏），不影响其他订阅者。
+                        crate::store::push_restore_lineage_date(st, &b.name, &b.last_lineage_date)
+                            .await;
                         tracing::warn!(account = %b.name, error = %e, "师门日报数据构建失败，跳过");
                     }
                 }
             }
+        }
+
+        /* 追分 + 师门同开：追分文字作为首张师门图的说明发送，仍是一条逻辑推送；
+        只有追分 → 文本；只有师门 → 图片；都没有 → 不发。 */
+        match (target_text, lineage_rep.as_ref()) {
+            (Some(t), Some(l)) => {
+                let pngs = lineage_report_pngs(l, &report_fields.lineage);
+                if pngs.is_empty() {
+                    crate::store::push_restore_lineage_date(st, &b.name, &b.last_lineage_date)
+                        .await;
+                    tracing::warn!(account = %b.name, "师门日报全部页面转 PNG 失败，本轮仅处理追分");
+                    match send_binding(st, b, wx_global.as_ref(), &t).await {
+                        Ok(()) => {
+                            sent_any = true;
+                            for (id, hit, gap) in pending_states.iter() {
+                                crate::store::target_set_state(st, *id, *hit, *gap, date).await;
+                            }
+                        }
+                        Err(e) => {
+                            if is_blocked(&e) {
+                                tracing::warn!(account = %b.name, "追分提醒：闸门拦截，未发（目标状态不推进）");
+                            } else {
+                                tracing::warn!(account = %b.name, error = %e, "追分提醒推送失败");
+                                crate::store::push_touch(st, &b.name, &e.to_string()).await;
+                            }
+                        }
+                    }
+                } else {
+                tracing::info!(
+                    account = %b.name,
+                    caption = %t.replace('\n', " | "),
+                    pages = pngs.len(),
+                    "推送·追分+师门(图片)"
+                );
+                match send_binding_images(st, b, &t, &pngs).await {
+                    Ok(()) => {
+                        sent_any = true;
+                        /* 发送成功后才落库：目标状态推进；师门占位已 claim，成功保留。 */
+                        for (id, hit, gap) in pending_states.iter() {
+                            crate::store::target_set_state(st, *id, *hit, *gap, date).await;
+                        }
+                        tracing::info!(account = %b.name, pages = pngs.len(), "追分+师门(图片)已推送");
+                    }
+                    Err(e) => {
+                        // 合并发送失败：师门占位还原，目标状态不推进，整条留到下轮再推。
+                        crate::store::push_restore_lineage_date(st, &b.name, &b.last_lineage_date)
+                            .await;
+                        if is_blocked(&e) {
+                            tracing::warn!(account = %b.name, "追分+师门(图片)：闸门拦截，未发（去重标记不推进，开闸后会补推）");
+                        } else {
+                            tracing::warn!(account = %b.name, error = %e, "追分+师门(图片)推送失败");
+                            crate::store::push_touch(st, &b.name, &e.to_string()).await;
+                        }
+                    }
+                }
+                }
+            }
+            (Some(t), None) => {
+                tracing::info!(account = %b.name, text = %t.replace('\n', " | "), "推送·追分提醒");
+                match send_binding(st, b, wx_global.as_ref(), &t).await {
+                    Ok(()) => {
+                        sent_any = true;
+                        for (id, hit, gap) in pending_states.iter() {
+                            crate::store::target_set_state(st, *id, *hit, *gap, date).await;
+                        }
+                        tracing::info!(account = %b.name, "追分提醒已推送");
+                    }
+                    Err(e) => {
+                        if is_blocked(&e) {
+                            tracing::warn!(account = %b.name, "追分提醒：闸门拦截，未发（目标状态不推进，开闸后会补推）");
+                        } else {
+                            tracing::warn!(account = %b.name, error = %e, "追分提醒推送失败");
+                            crate::store::push_touch(st, &b.name, &e.to_string()).await;
+                        }
+                    }
+                }
+            }
+            (None, Some(l)) => {
+                let pngs = lineage_report_pngs(l, &report_fields.lineage);
+                if pngs.is_empty() {
+                    crate::store::push_restore_lineage_date(st, &b.name, &b.last_lineage_date)
+                        .await;
+                    tracing::warn!(account = %b.name, "师门日报全部页面转 PNG 失败，本轮跳过");
+                } else {
+                    tracing::info!(account = %b.name, pages = pngs.len(), "推送·师门日报(图片)");
+                    match send_binding_images(st, b, "", &pngs).await {
+                    Ok(()) => {
+                        sent_any = true;
+                        tracing::info!(account = %b.name, pages = pngs.len(), "师门日报(图片)已推送");
+                    }
+                    Err(e) => {
+                        /* 被闸门拦下 ≠ 发送成功：还原占位标记，消息留到开闸后再推。 */
+                        crate::store::push_restore_lineage_date(st, &b.name, &b.last_lineage_date)
+                            .await;
+                        if is_blocked(&e) {
+                            tracing::warn!(account = %b.name, "师门日报(图片)：闸门拦截，未发（去重标记不推进）");
+                        } else {
+                            tracing::warn!(account = %b.name, error = %e, "师门日报(图片)推送失败");
+                            crate::store::push_touch(st, &b.name, &e.to_string()).await;
+                        }
+                    }
+                }
+                }
+            }
+            (None, None) => {}
         }
 
         if sent_any {
@@ -1195,6 +1333,33 @@ const DAILY_RANK_SQL: &str = "SELECT p.id AS person_id, p.name, \
      GROUP BY p.id, p.name \
      HAVING (COALESCE(SUM(d.wave), 0)) >= ? \
      ORDER BY wave DESC, p.name ASC";
+
+/// 该 (团, 业务日) 当天有没有**可信**音浪数据（2026-10-17 用户口径「没有数据就不要推送」）。
+/// 口径与榜单完全一致：daily_metric 该日 wave_reliable=1 的行数（不看阈值，只看有没有行）。
+/// 查询失败按「无数据」处理 —— 宁可不推，不推空炮。
+async fn has_reliable_data(st: &AppState, team: &str, date: &str) -> bool {
+    let sql = "SELECT COUNT(*)::BIGINT AS n \
+     FROM daily_metric d \
+     JOIN person p ON p.id = d.person_id \
+      AND TO_CHAR(d.biz_date, 'YYYY-MM-DD') = ? \
+      AND d.wave_reliable = 1 \
+     WHERE p.deleted_at IS NULL AND p.gender = ? AND p.status <> 'left' \
+       AND p.hide_in_daily_report = 0";
+    match pgrs::query_with_binds(&st.pools, &st.active_id(), sql, |q| {
+        q.bind(date.to_string()).bind(team.to_string())
+    })
+    .await
+    {
+        Ok(rows) => rows
+            .first()
+            .map(|r| r.try_get::<i64, _>("n").unwrap_or(0) > 0)
+            .unwrap_or(false),
+        Err(e) => {
+            tracing::warn!(error = %e, team = %team, date = %date, "查当日数据行数失败，按无数据处理");
+            false
+        }
+    }
+}
 
 pub(crate) async fn daily_rank(st: &AppState, team: &str, date: &str) -> Vec<(u64, String, i64)> {
     let sql = DAILY_RANK_SQL;
@@ -1536,25 +1701,25 @@ pub(crate) fn eval_target(
     }
 }
 
-/* --------------------- 追分提醒文案（2026-10-15 改版：纯函数拼装） --------------------- */
+/* --------------------- 追分提醒文案（2026-10-17 改版：一行式，纯函数拼装） --------------------- */
 
-/// 追分提醒「已追上」行（纯函数）。2026-10-15 文案改版：
-/// - 缩进用全角空格替代两个半角空格——微信里半角空格易被吞/错位，等宽显示更稳；
-/// - 去掉句尾感叹号：简报语气，不喊口号。
+/// 追分提醒「已追上」行（纯函数）。2026-10-17 一行式改版：
+/// 目标、状态、现状压成一行「🎉 {label} · 已达成（{detail}）」，
+/// 事件 emoji 🎉 固定行首，微信里一行扫完不用上下对照。
 fn line_target_reached(label: &str, detail: &str) -> String {
-    format!("🎉 已追上「{label}」\n　{detail}")
+    format!("🎉 {label} · 已达成（{detail}）")
 }
 
 /// 追分提醒「被反超」行（纯函数）：曾追上又差回来，是事件，语气最重（⚠️）。
-/// 旧文案「又差回来了」偏口语，改成「被反超」更直接点出原因。
+/// 一行式：差距紧跟状态（还差 X），现状括号收尾，读起来是「发生了什么 → 差多少 → 我在哪」。
 fn line_target_regained(label: &str, detail: &str, gap_text: &str) -> String {
-    format!("⚠️ 「{label}」被反超\n　{detail}，还差 {gap_text}")
+    format!("⚠️ {label} · 被反超，还差 {gap_text}（{detail}）")
 }
 
-/// 追分提醒「进行中」行（纯函数）：日常进度播报。改成两行式（目标一行、
-/// 现状+差距一行），比旧的「距 X 还差 N（详情）」单行更易扫读。
+/// 追分提醒「进行中」行（纯函数）：日常进度播报。2026-10-17 从两行式收回一行：
+/// 「· {label} · {detail}，还差 {gap_text}」，目标、现状、差距同屏一行。
 fn line_target_pending(label: &str, detail: &str, gap_text: &str) -> String {
-    format!("· {label}\n　{detail}，还差 {gap_text}")
+    format!("· {label} · {detail}，还差 {gap_text}")
 }
 
 /// 数值目标（kind=="value" 且 target_value>0）的完成度，0-100 四舍五入取整，
@@ -1570,19 +1735,19 @@ fn value_completion_pct(targets: &[crate::store::PushTarget], my: i64) -> Option
     Some(pct)
 }
 
-/// 追分提醒整条文案（纯函数，2026-10-15 改版）：
-/// 头部「📈 追分进度（MM-DD）」（去掉旧版「数据」二字，更短）+ 各目标行 +
-/// 【完成度行（仅有数值目标时）】+ 空行 + 尾部「你本月累计 X」+「调整目标」指引。
+/// 追分提醒整条文案（纯函数，2026-10-17 一行式改版）：
+/// 头部「📈 追分（MM-DD）」+ 各目标行（每目标一行）+【完成度行（仅有数值目标时，
+/// 「数值目标完成度 X%」）】+ 空行 + 尾部「你本月累计 X」+ 短指引「改目标：我的 → 追分设置」。
 /// 完成度行放尾部前：它是本月小结性质，与逐目标进度行分开，放空行前更顺。
 fn target_push_text(date: &str, lines: &[String], my: i64, completion_pct: Option<u32>) -> String {
-    let mut out = format!("📈 追分进度（{}）", date.get(5..).unwrap_or(date));
+    let mut out = format!("📈 追分（{}）", date.get(5..).unwrap_or(date));
     out.push('\n');
     out.push_str(&lines.join("\n"));
     if let Some(p) = completion_pct {
-        out.push_str(&format!("\n本月目标完成度 {p}%"));
+        out.push_str(&format!("\n数值目标完成度 {p}%"));
     }
     out.push_str(&format!(
-        "\n\n你本月累计 {}\n调整目标：展示页 → 我的 → 追分设置",
+        "\n\n你本月累计 {}\n改目标：我的 → 追分设置",
         fmt_wan(my)
     ));
     out
@@ -1657,6 +1822,56 @@ mod tests {
         // 防御：负数不该出现，但行为要与 JS 版一致（都不进「时」分支）
         assert_eq!(fmt_minutes(-30), "-30分");
         assert_eq!(fmt_minutes(-90), "-30分");
+    }
+
+    /// 每日报告两页版（2026-10-17 用户口径「分成两页即可」）：
+    /// 85 人团必须正好 2 页、对半分（首页 43 行）、名次跨页连续、页码标注正确；
+    /// 少数人时不强拆（≤2 人单页）。
+    #[test]
+    fn daily_report_two_pages_split() {
+        let mk_rows = |n: usize| {
+            (0..n)
+                .map(|i| crate::report::ReportRow {
+                    name: format!("主播{i:02}"),
+                    wave: (n - i) as i64 * 100,
+                    minutes: 0,
+                    is_live: true,
+                    absent_days: 0,
+                    total_wave: (n - i) as i64 * 100,
+                })
+                .collect::<Vec<_>>()
+        };
+        let rep = |rows: Vec<crate::report::ReportRow>| crate::report::DailyReport {
+            date: "2026-10-16".into(),
+            team: "male".into(),
+            rows,
+            master_groups: vec![("薇姐".into(), vec!["晓爱".into()])],
+            no_master: vec![],
+            daily_star: Some(crate::report::StarBanner {
+                title: "每日之星".into(),
+                name: "主播00".into(),
+                wave: 100,
+                icon: String::new(),
+            }),
+        };
+        let fields = crate::report::DailyReportFields::default();
+
+        // 85 人：正好 2 页，首页 43 行（div_ceil），名次 1..=43 / 44..=85 连续
+        let pages = render_daily_two_pages(&rep(mk_rows(85)), "浩雨", &fields);
+        assert_eq!(pages.len(), 2, "85 人团必须切成 2 页");
+        assert!(pages[0].contains("（第 1 / 2 页）"));
+        assert!(pages[1].contains("（第 2 / 2 页）"));
+        assert!(pages[0].contains(">01</text>"), "首页第一名次 01");
+        assert!(pages[1].contains(">44</text>"), "第 2 页首行名次 44（跨页连续）");
+        assert!(!pages[1].contains(">01</text>"), "第 2 页不能重置名次");
+
+        // 1 人：单页，不带页码
+        let single = render_daily_two_pages(&rep(mk_rows(1)), "浩雨", &fields);
+        assert_eq!(single.len(), 1);
+        assert!(!single[0].contains("第 1 /"));
+
+        // 0 人：空 Vec（调用方退文本推送）
+        assert!(render_daily_two_pages(&rep(vec![]), "浩雨", &fields).is_empty());
     }
 
     fn tgt(kind: &str, name: &str, value: i64, pid: u64) -> crate::store::PushTarget {
@@ -2172,7 +2387,7 @@ mod tests {
     /* ---------- 追分提醒文案（2026-10-15 改版，纯函数） ---------- */
 
     /// 三种行各归其位：已追上（🎉）/ 被反超（⚠️）/ 进行中（·），
-    /// 整条文案的头、尾、完成度行、调整入口一个不缺（钉死基线字符串）
+    /// 一行式（2026-10-17）；整条文案的头、尾、完成度行、调整入口一个不缺（钉死基线字符串）
     #[test]
     fn target_push_text_mixes_three_line_kinds() {
         let lines = vec![
@@ -2183,19 +2398,21 @@ mod tests {
         let t = target_push_text("2026-10-15", &lines, 520_000, Some(104));
         assert_eq!(
             t,
-            "📈 追分进度（10-15）\n\
-             🎉 已追上「本月目标 50 万」\n　你 52 万\n\
-             ⚠️ 「浩冬」被反超\n　你 30 万 / TA 40 万，还差 10 万\n\
-             · 本月第 3 名\n　你第 5 名，还差 2 名\n\
-             本月目标完成度 104%\n\
+            "📈 追分（10-15）\n\
+             🎉 本月目标 50 万 · 已达成（你 52 万）\n\
+             ⚠️ 浩冬 · 被反超，还差 10 万（你 30 万 / TA 40 万）\n\
+             · 本月第 3 名 · 你第 5 名，还差 2 名\n\
+             数值目标完成度 104%\n\
              \n\
              你本月累计 52 万\n\
-             调整目标：展示页 → 我的 → 追分设置",
+             改目标：我的 → 追分设置",
             "{t}"
         );
-        // 头部只带 MM-DD，不再带「数据」二字（2026-10-15 口径）
+        // 头部只带 MM-DD，不再带「数据」「进度」二字（2026-10-17 一行式口径）
         assert!(!t.contains("数据）"), "{t}");
-        // 缩进必须是全角空格（微信等宽显示更稳），不能退回两个半角空格
+        assert!(!t.contains("追分进度"), "{t}");
+        // 一行式后不再有换行缩进（全角/半角空格都不允许）
+        assert!(!t.contains("\n　"), "不允许全角空格缩进：{t}");
         assert!(!t.contains("\n  "), "不允许两个半角空格缩进：{t}");
     }
 
@@ -2206,7 +2423,7 @@ mod tests {
         let t = target_push_text("2026-10-15", &lines, 300_000, None);
         assert!(!t.contains("完成度"), "{t}");
         assert!(t.contains("你本月累计 30 万"), "{t}");
-        assert!(t.ends_with("调整目标：展示页 → 我的 → 追分设置"), "{t}");
+        assert!(t.ends_with("改目标：我的 → 追分设置"), "{t}");
     }
 
     /// 完成度百分比边界：0 / 四舍五入 / 恰好 100 / 超额封顶 100

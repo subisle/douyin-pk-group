@@ -9,7 +9,7 @@ rel=stylesheet>` 是渲染阻塞 —— 国内网络一慢/一断，整页白屏
 实现要点：
   - Material Symbols 用「必需连字 rlig」把图标名（如 chevron_right）渲染成图形；
     直接 `pyftsubset --layout-features=rlig` 会因连字闭包把 4301 个连字几乎全量
-    保留（子集仍 3MB+），所以这里手动重建只含本项目 45 个连字的 GSUB。
+    保留（子集仍 3MB+），所以这里手动重建只含本项目 48 个连字的 GSUB。
   - 两处前端只用默认轴值（FILL=0 / wght=400 / GRAD=0 / opsz=24），因此把可变
     字体实例化成静态字体（instantiateVariableFont），体积再降一个数量级。
 
@@ -41,8 +41,11 @@ ICONS = [
     "insights", "tips_and_updates", "campaign", "star", "bolt", "groups",
     "emoji_events", "local_fire_department", "trending_up", "calendar_month",
     "chat_bubble", "lock", "person", "smart_toy", "workspace_premium",
-    # 管理端其它硬编码图标
+    # 管理端其它硬编码图标（AnnouncePage 保存成功/失败提示、IconSelect 占位）
     "block", "check_circle", "error",
+    # 管理端 AnnouncePage 横幅对齐三按钮（2026-10-16 ANNOUNCE_ALIGNS 白名单外硬编码：
+    # 不在子集里会被渲染成字面 FORMATFORMAT…ALIGN_RIGHT 叠字）
+    "format_align_left", "format_align_center", "format_align_right",
     # 展示端 st_page.html 硬编码图标
     "chevron_left", "chevron_right", "close", "history_edu", "expand_less",
     "expand_more", "search", "cancel", "filter_center_focus", "unfold_less",
@@ -207,7 +210,7 @@ def main() -> int:
             font, {"FILL": 0, "wght": 400, "opsz": 24, "GRAD": 0}, inplace=True
         )
 
-        # 2) 精简 GSUB 到只含本项目 45 个连字
+        # 2) 精简 GSUB 到只含本项目 48 个连字
         build_minimal_gsub(font, lig_map)
 
         # 3) 子集：保留图标字形 + 组成字母字形，闭包只跟走精简后的 GSUB

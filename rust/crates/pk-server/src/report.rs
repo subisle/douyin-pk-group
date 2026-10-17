@@ -10,6 +10,73 @@ use sqlx::Row;
 use crate::pgrs;
 use crate::state::AppState;
 
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct PushReportFields {
+    pub daily: DailyReportFields,
+    pub lineage: LineageReportFields,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct DailyReportFields {
+    pub daily_star: bool,
+    pub rank: bool,
+    pub name: bool,
+    pub absent_days: bool,
+    pub wave: bool,
+    pub total_wave: bool,
+    pub status: bool,
+}
+
+impl Default for DailyReportFields {
+    fn default() -> Self {
+        Self {
+            daily_star: true,
+            rank: true,
+            name: true,
+            absent_days: true,
+            wave: true,
+            total_wave: true,
+            status: true,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct LineageReportFields {
+    pub anchor: bool,
+    pub today_wave: bool,
+    pub yesterday_wave: bool,
+    pub wave_diff: bool,
+    pub month_total: bool,
+    pub status: bool,
+}
+
+impl Default for LineageReportFields {
+    fn default() -> Self {
+        Self {
+            anchor: true,
+            today_wave: true,
+            yesterday_wave: true,
+            wave_diff: true,
+            month_total: true,
+            status: true,
+        }
+    }
+}
+
+impl PushReportFields {
+    pub fn from_json(value: &str) -> Self {
+        serde_json::from_str(value).unwrap_or_default()
+    }
+
+    pub fn to_json(&self) -> anyhow::Result<String> {
+        Ok(serde_json::to_string(self)?)
+    }
+}
+
 /// 日报数据（含当日指标、当月未播天数、累计音浪）
 pub struct DailyReport {
     pub date: String,
@@ -35,6 +102,7 @@ pub struct StarBanner {
     pub icon: String,
 }
 
+#[derive(Clone, Debug)]
 pub struct ReportRow {
     pub name: String,
     pub wave: i64,
@@ -67,6 +135,15 @@ fn fmt_wan(v: i64) -> String {
     } else {
         format!("{v}")
     }
+}
+
+/// SVG 文本宽度的保守估算（resvg 没有文本度量接口）：CJK / emoji 按 1.0×字号、
+/// 其余（ASCII 数字字母空格标点）按 0.55×字号。只用于「日期 + 每日之星」单行的
+/// 居中起点计算，几个像素的误差肉眼不可见，也不会影响其它列的固定 x 坐标。
+fn approx_text_width(s: &str, size: f64) -> f64 {
+    s.chars()
+        .map(|c| if (c as u32) < 0x2E80 { size * 0.55 } else { size })
+        .sum()
 }
 
 /// 拉取日报数据。date/team 已由调用方校验。
@@ -201,7 +278,11 @@ fn signed(r: &sqlx::postgres::PgRow, col: &str) -> i64 {
     0
 }
 
-const FONT: &str = "-apple-system, 'PingFang SC', 'Noto Sans SC', 'Microsoft YaHei', sans-serif";
+/* 2026-10-17 字体栈改版（子代理诊断）：去掉 CSS 专有的 -apple-system（fontdb 当普通名查
+永远 miss，白进 warn log），补全 Linux 常见 CJK 家族提高服务器命中率；本机 macOS 命中
+AssetsV2 的 PingFang SC（/tmp/resvg-font-test B9 实测与旧栈同像素）。前提是 svg_to_png
+必须先 load_system_fonts()（resvg 0.45 默认空 fontdb，见 push.rs 同日注释）。 */
+const FONT: &str = "PingFang SC, Hiragino Sans GB, Heiti SC, STHeiti, Microsoft YaHei, Noto Sans CJK SC, Noto Sans SC, Source Han Sans SC, WenQuanYi Zen Hei, sans-serif";
 const MONO: &str = "SF Mono, Menlo, Consolas, monospace";
 const WATERMARK: &str = "内部数据 · 请勿外传";
 
@@ -322,6 +403,15 @@ pub async fn build_month(
 /// `personal_mark` 非空时，斜排水印追加收件人艺名（如「浩月的专属数据」），
 /// 防转发扩散——管理员后台 /report 接口传空，推送引擎按每个用户传艺名。
 pub fn render_svg_pages(rep: &DailyReport, per_page: usize, personal_mark: &str) -> Vec<String> {
+    render_svg_pages_with_fields(rep, per_page, personal_mark, &DailyReportFields::default())
+}
+
+pub fn render_svg_pages_with_fields(
+    rep: &DailyReport,
+    per_page: usize,
+    personal_mark: &str,
+    fields: &DailyReportFields,
+) -> Vec<String> {
     if rep.rows.is_empty() {
         return Vec::new();
     }
@@ -332,6 +422,7 @@ pub fn render_svg_pages(rep: &DailyReport, per_page: usize, personal_mark: &str)
             "",
             rep.rows.len(),
             personal_mark,
+            fields,
             0,
         )];
     }
@@ -388,7 +479,15 @@ pub fn render_svg_pages(rep: &DailyReport, per_page: usize, personal_mark: &str)
                 daily_star: rep.daily_star.clone(),
                 rows,
             };
-            render_svg_labeled(&page_rep, &page_label, total, personal_mark, pi * per_page)
+            render_svg_labeled_inner(
+                &page_rep,
+                &page_label,
+                total,
+                personal_mark,
+                false,
+                fields,
+                pi * per_page,
+            )
         })
         .collect()
 }
@@ -402,9 +501,18 @@ fn render_svg_labeled(
     page_label: &str,
     total: usize,
     personal_mark: &str,
+    fields: &DailyReportFields,
     row_offset: usize,
 ) -> String {
-    render_svg_labeled_inner(rep, page_label, total, personal_mark, false, row_offset)
+    render_svg_labeled_inner(
+        rep,
+        page_label,
+        total,
+        personal_mark,
+        false,
+        fields,
+        row_offset,
+    )
 }
 
 /// 月榜分页渲染（2026-10-12 微信推送口径）：本月累计音浪 + 当月未播天数，
@@ -413,6 +521,78 @@ pub fn render_month_svg_pages(
     rep: &DailyReport,
     per_page: usize,
     personal_mark: &str,
+) -> Vec<String> {
+    render_month_svg_pages_with_fields(
+        rep,
+        per_page,
+        personal_mark,
+        &DailyReportFields::default(),
+    )
+}
+
+/// 月榜「定页数」分页渲染（2026-10-17 用户口径「每日报告分成两页即可」）：
+/// 与 `render_month_svg_pages_with_fields` 同一套页内重打包/页码/名次连续逻辑，
+/// 但切法由调用方给定（如固定 2 页对半分），不再按 per_page 均匀切。
+/// `pages_rows` 为空 = 没有行，返回空 Vec（调用方退文本）。
+pub fn render_month_svg_pages_exact(
+    rep: &DailyReport,
+    pages_rows: Vec<Vec<ReportRow>>,
+    personal_mark: &str,
+    fields: &DailyReportFields,
+) -> Vec<String> {
+    if pages_rows.is_empty() {
+        return Vec::new();
+    }
+    let total = rep.rows.len();
+    let page_count = pages_rows.len();
+    let mut offset = 0usize;
+    pages_rows
+        .into_iter()
+        .enumerate()
+        .map(|(pi, rows)| {
+            let page_label = if page_count > 1 {
+                format!("（第 {} / {} 页）", pi + 1, page_count)
+            } else {
+                String::new()
+            };
+            let is_last = pi + 1 == page_count;
+            let page_rep = DailyReport {
+                date: rep.date.clone(),
+                team: rep.team.clone(),
+                master_groups: if is_last {
+                    rep.master_groups.clone()
+                } else {
+                    Vec::new()
+                },
+                no_master: if is_last {
+                    rep.no_master.clone()
+                } else {
+                    Vec::new()
+                },
+                // 🚩 冠军条每页都带（2026-10-12 用户口径：每页都要显示）
+                daily_star: rep.daily_star.clone(),
+                rows,
+            };
+            let svg = render_svg_labeled_inner(
+                &page_rep,
+                &page_label,
+                total,
+                personal_mark,
+                true,
+                fields,
+                offset,
+            );
+            offset += page_rep.rows.len();
+            svg
+        })
+        .collect()
+}
+
+pub fn render_month_svg_pages_with_fields(
+    rep: &DailyReport,
+    per_page: usize,
+    personal_mark: &str,
+    fields: &DailyReportFields,
 ) -> Vec<String> {
     if rep.rows.is_empty() {
         return Vec::new();
@@ -424,6 +604,7 @@ pub fn render_month_svg_pages(
             rep.rows.len(),
             personal_mark,
             true,
+            fields,
             0,
         )];
     }
@@ -481,6 +662,7 @@ pub fn render_month_svg_pages(
                 total,
                 personal_mark,
                 true,
+                fields,
                 pi * per_page,
             )
         })
@@ -494,17 +676,15 @@ fn render_svg_labeled_inner(
     total: usize,
     personal_mark: &str,
     is_month: bool,
+    fields: &DailyReportFields,
     // 修复2：本页第一行的名次偏移 = 前面页行数之和（0 = 单页/首页）。
     // 原先函数内用 `total - n` 推导，只对「两页且当前是末页」成立。
     row_offset: usize,
 ) -> String {
     let n = rep.rows.len();
-    // 头部高度：有每日之星条时多 42px（表头/行整体下移）
-    let header_h = if rep.daily_star.is_some() {
-        168.0f64
-    } else {
-        126.0f64
-    };
+    // 头部高度固定 126px（2026-10-17 用户口径「每日之星放到日报头部」：
+    // 星信息并入日期行，不再单独占一条 40px 横幅，图片整体更紧凑）。
+    let header_h = 126.0f64;
     let list_h = n as f64 * 48.0;
     let footer_y = header_h + list_h + 20.0;
     let total_h = footer_y + 50.0;
@@ -584,45 +764,77 @@ fn render_svg_labeled_inner(
 
     // 标题
     s.push_str(&format!(
-        "<text x=\"360\" y=\"22\" font-size=\"25\" fill=\"#101828\" font-weight=\"700\" text-anchor=\"middle\" dominant-baseline=\"central\" font-family=\"{FONT}\">主播数据日报 · {team_label}{page_label}</text>"
+        "<text x=\"360\" y=\"21\" font-size=\"25\" fill=\"#101828\" font-weight=\"700\" text-anchor=\"middle\" dominant-baseline=\"central\" font-family=\"{FONT}\">主播数据日报 · {team_label}{page_label}</text>"
     ));
     let date_cn = format_cn_date(&rep.date);
-    s.push_str(&format!(
-        "<text x=\"360\" y=\"50\" font-size=\"13\" fill=\"#475467\" text-anchor=\"middle\" dominant-baseline=\"central\" font-family=\"{FONT}\">{date_cn}</text>"
-    ));
 
-    // 🚩 流动小红旗条（2026-10-12 用户口径）：称号后台可配，如「初级争霸赛冠军 狼哲」。
-    // icon 支持 data:image 内嵌图（后台可配）；空/非 data:image 回退 🚩 emoji。
-    if let Some(star) = &rep.daily_star {
-        s.push_str(
-            "<rect x=\"12\" y=\"68\" width=\"696\" height=\"40\" fill=\"#FFFAEB\" rx=\"10\" stroke=\"#FEDF89\"/>",
-        );
-        let use_image_icon = !star.icon.is_empty() && star.icon.starts_with("data:image");
-        if use_image_icon {
+    /* 2026-10-17 用户口径：**每日之星并入日报头部**。
+    原先是「日期一行 + 单独一条 40px 琥珀横幅」，头部会撑到 168px；现在日期与
+    每日之星同一行居中，星信息压成一颗紧凑胶囊 —— 头部恒定 126px（无星时日期
+    单独居中），图和表头都上移，第一眼仍然是「谁得了每日之星」。
+    icon 支持 data:image 内嵌图；空 / 非 data:image 回退 🚩 emoji。 */
+    let star = if fields.daily_star {
+        rep.daily_star.as_ref()
+    } else {
+        None
+    };
+    match star {
+        None => {
             s.push_str(&format!(
-                "<image x=\"24\" y=\"72\" width=\"32\" height=\"32\" href=\"{}\" preserveAspectRatio=\"xMidYMid meet\"/>",
-                esc(&star.icon)
-            ));
-        } else {
-            s.push_str(&format!(
-                "<text x=\"28\" y=\"88\" font-size=\"16\" text-anchor=\"start\" dominant-baseline=\"central\" font-family=\"{FONT}\">🚩</text>"
+                "<text x=\"360\" y=\"52\" font-size=\"13\" fill=\"#475467\" text-anchor=\"middle\" dominant-baseline=\"central\" font-family=\"{FONT}\">{date_cn}</text>"
             ));
         }
-        // 图标为图片时（32px 宽占位）文字整体右移，避免与图标重叠
-        let title_x = if use_image_icon { 68.0 } else { 56.0 };
-        s.push_str(&format!(
-            "<text x=\"{title_x}\" y=\"88\" font-size=\"14\" fill=\"#B54708\" font-weight=\"700\" text-anchor=\"start\" dominant-baseline=\"central\" font-family=\"{FONT}\">{}</text>",
-            esc(&star.title)
-        ));
-        let mut main = star.name.clone();
-        if star.wave > 0 {
-            main.push_str(&format!(" · {}", fmt_wan(star.wave)));
+        Some(star) => {
+            const SUB_SIZE: f64 = 13.0;
+            let use_image_icon = !star.icon.is_empty() && star.icon.starts_with("data:image");
+            let mut main = star.name.clone();
+            if star.wave > 0 {
+                main.push_str(&format!(" · {}", fmt_wan(star.wave)));
+            }
+            // 胶囊内边距 / 图标 / 间隙（估算宽度只影响居中，肉眼级误差可接受）
+            const PAD: f64 = 10.0;
+            const GAP: f64 = 6.0;
+            const ICON_W: f64 = 16.0;
+            let title_w = approx_text_width(&star.title, SUB_SIZE);
+            let main_w = approx_text_width(&main, SUB_SIZE);
+            // +8px 右侧余量：估算宽度对中文标点/空格偏保守，留一点呼吸位避免文字顶到描边
+            let pill_w = PAD + ICON_W + GAP + title_w + 10.0 + main_w + PAD + 8.0;
+            let pill_h = 24.0f64;
+            let pill_y = 52.0 - pill_h / 2.0;
+            let date_w = approx_text_width(&date_cn, SUB_SIZE);
+            let sep_gap = 10.0;
+            let mut x = 360.0 - (date_w + sep_gap + pill_w) / 2.0;
+            s.push_str(&format!(
+                "<text x=\"{x:.1}\" y=\"52\" font-size=\"{SUB_SIZE}\" fill=\"#475467\" text-anchor=\"start\" dominant-baseline=\"central\" font-family=\"{FONT}\">{date_cn}</text>"
+            ));
+            x += date_w + sep_gap;
+            s.push_str(&format!(
+                "<rect x=\"{x:.1}\" y=\"{pill_y:.1}\" width=\"{pill_w:.1}\" height=\"{pill_h:.1}\" fill=\"#FFFAEB\" rx=\"{:.1}\" stroke=\"#FEDF89\"/>",
+                pill_h / 2.0
+            ));
+            let icon_x = x + PAD;
+            if use_image_icon {
+                s.push_str(&format!(
+                    "<image x=\"{icon_x:.1}\" y=\"{:.1}\" width=\"{ICON_W}\" height=\"{ICON_W}\" href=\"{}\" preserveAspectRatio=\"xMidYMid meet\"/>",
+                    52.0 - ICON_W / 2.0,
+                    esc(&star.icon)
+                ));
+            } else {
+                s.push_str(&format!(
+                    "<text x=\"{icon_x:.1}\" y=\"52\" font-size=\"16\" text-anchor=\"start\" dominant-baseline=\"central\" font-family=\"{FONT}\">🚩</text>"
+                ));
+            }
+            let title_x = icon_x + ICON_W + GAP;
+            s.push_str(&format!(
+                "<text x=\"{title_x:.1}\" y=\"52\" font-size=\"{SUB_SIZE}\" fill=\"#B54708\" font-weight=\"700\" text-anchor=\"start\" dominant-baseline=\"central\" font-family=\"{FONT}\">{}</text>",
+                esc(&star.title)
+            ));
+            let main_x = title_x + title_w + 10.0;
+            s.push_str(&format!(
+                "<text x=\"{main_x:.1}\" y=\"52\" font-size=\"{SUB_SIZE}\" fill=\"#101828\" font-weight=\"700\" text-anchor=\"start\" dominant-baseline=\"central\" font-family=\"{FONT}\">{}</text>",
+                esc(&main)
+            ));
         }
-        s.push_str(&format!(
-            "<text x=\"{}\" y=\"88\" font-size=\"14\" fill=\"#101828\" font-weight=\"700\" text-anchor=\"start\" dominant-baseline=\"central\" font-family=\"{FONT}\">{}</text>",
-            title_x + star.title.chars().count() as f64 * 15.0 + 16.0,
-            esc(&main)
-        ));
     }
 
     // 表头（月榜：当日音浪列 → 本月累计音浪；未播天数/总音浪保留）
@@ -645,13 +857,25 @@ fn render_svg_labeled_inner(
     } else {
         "累计总音浪"
     };
-    for (x, label, anchor) in [
+    let columns: Vec<(f64, &str, &str)> = [
         (32.3, "排名", "middle"),
         (72.6, "主播姓名", "start"),
         (253.8, "当月未播天数", "middle"),
         (433.8, wave_col_label, "middle"),
         (708.0, total_col_label, "end"),
-    ] {
+    ]
+    .into_iter()
+    .filter(|&(_, label, _)| {
+        (label == "排名" && fields.rank)
+            || (label == "主播姓名" && fields.name)
+            || (label == "当月未播天数" && fields.absent_days)
+            || (label == "本月累计音浪" && fields.wave)
+            || (label == "当日音浪" && fields.wave)
+            || (label == "本月累计（总）" && fields.total_wave)
+            || (label == "累计总音浪" && fields.total_wave)
+    })
+    .collect();
+    for (x, label, anchor) in columns {
         s.push_str(&format!(
             "<text x=\"{x}\" y=\"{ty_y:.0}\" font-size=\"12\" fill=\"#667085\" font-weight=\"700\" text-anchor=\"{anchor}\" dominant-baseline=\"central\" font-family=\"{FONT}\">{label}</text>"
         ));
@@ -689,47 +913,61 @@ fn render_svg_labeled_inner(
             "#475467"
         };
         let badge_bg = if off_air { "#FFF1F2" } else { badge_bg };
-        s.push_str(&format!(
-            "<rect x=\"12.3\" y=\"{:.0}\" width=\"40\" height=\"24\" fill=\"{badge_bg}\" rx=\"12\" stroke=\"{badge_stroke}\"/><text x=\"32.3\" y=\"{text_y:.0}\" font-size=\"12\" fill=\"{badge_fg}\" font-weight=\"700\" text-anchor=\"middle\" dominant-baseline=\"central\" font-family=\"{MONO}\">{:02}</text>",
-            y + 12.0,
-            rank
-        ));
-        let name_fg = if off_air { "#B42318" } else { "#101828" };
-        s.push_str(&format!(
-            "<text x=\"72.6\" y=\"{text_y:.0}\" font-size=\"14\" fill=\"{name_fg}\" font-weight=\"700\" text-anchor=\"start\" dominant-baseline=\"central\" font-family=\"{FONT}\">{}</text>",
-            esc(&r.name)
-        ));
-        let absent_fg = if off_air { "#B42318" } else { "#027A48" };
-        s.push_str(&format!(
-            "<text x=\"253.8\" y=\"{text_y:.0}\" font-size=\"13\" fill=\"{absent_fg}\" font-weight=\"700\" text-anchor=\"middle\" dominant-baseline=\"central\" font-family=\"{FONT}\">{}</text>",
-            r.absent_days
-        ));
-        if off_air {
+        if fields.rank {
             s.push_str(&format!(
-                "<rect x=\"312.6\" y=\"{:.0}\" width=\"{bar_full}\" height=\"22\" fill=\"#FEE4E2\" rx=\"11\"/><text x=\"433.8\" y=\"{text_y:.0}\" font-size=\"13\" fill=\"#D92D20\" font-weight=\"700\" text-anchor=\"middle\" dominant-baseline=\"central\" font-family=\"{FONT}\">未开播</text>",
-                y + 14.0
-            ));
-        } else {
-            let w = bar_full * r.wave as f64 / max_wave as f64;
-            s.push_str(&format!(
-                "<rect x=\"312.6\" y=\"{:.0}\" width=\"{bar_full}\" height=\"22\" fill=\"#EAF3FF\" rx=\"11\"/>",
-                y + 14.0
-            ));
-            if w > 1.0 {
-                s.push_str(&format!(
-                    "<rect x=\"312.6\" y=\"{:.0}\" width=\"{w:.1}\" height=\"22\" fill=\"#007AFF\" rx=\"11\"/>",
-                    y + 14.0
-                ));
-            }
-            s.push_str(&format!(
-                "<text x=\"433.8\" y=\"{text_y:.0}\" font-size=\"13\" fill=\"#FFFFFF\" font-weight=\"700\" text-anchor=\"middle\" dominant-baseline=\"central\" font-family=\"{MONO}\">{}</text>",
-                esc(&fmt_wan(r.wave))
+                "<rect x=\"12.3\" y=\"{:.0}\" width=\"40\" height=\"24\" fill=\"{badge_bg}\" rx=\"12\" stroke=\"{badge_stroke}\"/><text x=\"32.3\" y=\"{text_y:.0}\" font-size=\"12\" fill=\"{badge_fg}\" font-weight=\"700\" text-anchor=\"middle\" dominant-baseline=\"central\" font-family=\"{MONO}\">{:02}</text>",
+                y + 12.0,
+                rank
             ));
         }
-        s.push_str(&format!(
-            "<text x=\"708\" y=\"{text_y:.0}\" font-size=\"14\" fill=\"#475467\" text-anchor=\"end\" dominant-baseline=\"central\" font-family=\"{MONO}\">{}</text>",
-            esc(&fmt_wan(r.total_wave))
-        ));
+        let name_fg = if off_air { "#B42318" } else { "#101828" };
+        if fields.name {
+            s.push_str(&format!(
+                "<text x=\"72.6\" y=\"{text_y:.0}\" font-size=\"14\" fill=\"{name_fg}\" font-weight=\"700\" text-anchor=\"start\" dominant-baseline=\"central\" font-family=\"{FONT}\">{}</text>",
+                esc(&r.name)
+            ));
+        }
+        let absent_fg = if off_air { "#B42318" } else { "#027A48" };
+        if fields.absent_days {
+            s.push_str(&format!(
+                "<text x=\"253.8\" y=\"{text_y:.0}\" font-size=\"13\" fill=\"{absent_fg}\" font-weight=\"700\" text-anchor=\"middle\" dominant-baseline=\"central\" font-family=\"{FONT}\">{}</text>",
+                r.absent_days
+            ));
+        }
+        if fields.wave {
+            if off_air {
+                s.push_str(&format!(
+                    "<rect x=\"312.6\" y=\"{:.0}\" width=\"{bar_full}\" height=\"22\" fill=\"#FEE4E2\" rx=\"11\"/><text x=\"433.8\" y=\"{text_y:.0}\" font-size=\"13\" fill=\"#D92D20\" font-weight=\"700\" text-anchor=\"middle\" dominant-baseline=\"central\" font-family=\"{FONT}\">未开播</text>",
+                    y + 14.0
+                ));
+            } else {
+                let w = bar_full * r.wave as f64 / max_wave as f64;
+                s.push_str(&format!(
+                    "<rect x=\"312.6\" y=\"{:.0}\" width=\"{bar_full}\" height=\"22\" fill=\"#EAF3FF\" rx=\"11\"/>",
+                    y + 14.0
+                ));
+                if w > 1.0 {
+                    s.push_str(&format!(
+                        "<rect x=\"312.6\" y=\"{:.0}\" width=\"{w:.1}\" height=\"22\" fill=\"#007AFF\" rx=\"11\"/>",
+                        y + 14.0
+                    ));
+                }
+                s.push_str(&format!(
+                    "<text x=\"433.8\" y=\"{text_y:.0}\" font-size=\"13\" fill=\"#FFFFFF\" font-weight=\"700\" text-anchor=\"middle\" dominant-baseline=\"central\" font-family=\"{MONO}\">{}</text>",
+                    esc(&fmt_wan(r.wave))
+                ));
+            }
+        } else if fields.status && off_air {
+            s.push_str(&format!(
+                "<text x=\"433.8\" y=\"{text_y:.0}\" font-size=\"13\" fill=\"#D92D20\" font-weight=\"700\" text-anchor=\"middle\" dominant-baseline=\"central\" font-family=\"{FONT}\">未开播</text>"
+            ));
+        }
+        if fields.total_wave {
+            s.push_str(&format!(
+                "<text x=\"708\" y=\"{text_y:.0}\" font-size=\"14\" fill=\"#475467\" text-anchor=\"end\" dominant-baseline=\"central\" font-family=\"{MONO}\">{}</text>",
+                esc(&fmt_wan(r.total_wave))
+            ));
+        }
     }
 
     // footer：数据说明 + 未播统计（全团口径）
@@ -756,8 +994,9 @@ fn render_svg_labeled_inner(
 }
 
 pub fn render_svg(rep: &DailyReport) -> String {
-    // 单页渲染：名次从 1 开始，row_offset = 0（修复2 新增参数）
-    render_svg_labeled(rep, "", rep.rows.len(), "", 0)
+    // 单页渲染：名次从 1 开始，row_offset = 0（修复2 新增参数）；
+    // 网页版固定全字段显示（推送图的字段显隐只作用于微信推送）。
+    render_svg_labeled(rep, "", rep.rows.len(), "", &DailyReportFields::default(), 0)
 }
 
 fn format_cn_date(iso: &str) -> String {
@@ -1106,8 +1345,24 @@ mod tests {
             no_master: vec![],
             daily_star: None,
         };
-        let a = render_svg_labeled_inner(&build("浩月"), "", 1, "浩月", true, 0);
-        let b = render_svg_labeled_inner(&build("狼征"), "", 1, "狼征", true, 0);
+        let a = render_svg_labeled_inner(
+            &build("浩月"),
+            "",
+            1,
+            "浩月",
+            true,
+            &DailyReportFields::default(),
+            0,
+        );
+        let b = render_svg_labeled_inner(
+            &build("狼征"),
+            "",
+            1,
+            "狼征",
+            true,
+            &DailyReportFields::default(),
+            0,
+        );
         // 隐形双层都在：白 0.35 + 黑 0.012
         assert!(a.contains("fill-opacity=\"0.35\"") && a.contains("fill-opacity=\"0.012\""));
         // 文字是各自艺名，且互不相同
@@ -1121,7 +1376,15 @@ mod tests {
         assert!(b.contains(">狼征</text>"));
         assert!(!b.contains(">浩月</text>"), "狼征的图里不能出现浩月水印");
         // 管理后台版（无 personal_mark）保持通用水印，不带个人名
-        let admin = render_svg_labeled_inner(&build(""), "", 1, "", true, 0);
+        let admin = render_svg_labeled_inner(
+            &build(""),
+            "",
+            1,
+            "",
+            true,
+            &DailyReportFields::default(),
+            0,
+        );
         assert!(admin.contains(WATERMARK));
         assert!(!admin.contains(">浩月</text>"));
     }
@@ -1148,7 +1411,7 @@ mod tests {
                 icon: String::new(),
             }),
         };
-        let svg = render_svg_labeled_inner(&rep, "", 1, "浩月", true, 0);
+        let svg = render_svg_labeled_inner(&rep, "", 1, "浩月", true, &DailyReportFields::default(), 0);
         // 表头锚点与列值锚点一一对应：主播姓名 start @72.6，末列 end @708。
         // 2026-10-17（审计 2-P2-7）：月榜末列表头改「本月累计（总）」——
         // 月榜这一列其实是本月累计，沿用日榜的「累计总音浪」会让主播理解成历史累计。
@@ -1210,21 +1473,67 @@ mod tests {
                 icon: "data:image/png;base64,iVBOR&x<y".into(),
             }),
         };
-        let svg = render_svg_labeled_inner(&rep, "", 1, "", true, 0);
-        // data:image 图标走 <image>，href 经 esc() 转义 & < >
-        assert!(svg.contains(
-            "<image x=\"24\" y=\"72\" width=\"32\" height=\"32\" href=\"data:image/png;base64,iVBOR&amp;x&lt;y\" preserveAspectRatio=\"xMidYMid meet\"/>"
-        ));
+        let svg = render_svg_labeled_inner(&rep, "", 1, "", true, &DailyReportFields::default(), 0);
+        // data:image 图标走 <image>（2026-10-17 起缩成 16×16 的头部胶囊图标），
+        // href 经 esc() 转义 & < >
+        assert!(svg.contains("<image "), "data:image 图标应渲染为 <image>");
+        assert!(
+            svg.contains("width=\"16\" height=\"16\" href=\"data:image/png;base64,iVBOR&amp;x&lt;y\""),
+            "头部胶囊图标应为 16×16 且 href 做转义"
+        );
         assert!(
             !svg.contains(">🚩</text>"),
             "有 data:image 图标时不应再画 🚩 emoji"
         );
-        // 图标为图片时标题/名字整体右移（title x=68）
+        // 2026-10-17 用户口径：每日之星并入头部日期行（不再单独占 40px 横幅）
         let title = text_element_of(&svg, "每日之星");
         assert!(
-            title.contains("x=\"68\""),
-            "data:image 时称号应右移到 x=68: {title}"
+            title.contains("y=\"52\""),
+            "每日之星要并入日报头部日期行（同一行 y=52）: {title}"
         );
+        assert!(
+            !svg.contains("width=\"696\" height=\"40\""),
+            "不应再有单独的小红旗横幅"
+        );
+    }
+
+    /// 2026-10-17 用户口径「字段后端支持显示和不显示」：推送图字段来自 config
+    /// `push_report_fields`，关掉的列必须真的从 SVG 里消失（表头 + 数值一起）。
+    #[test]
+    fn daily_report_fields_hide_columns() {
+        let rep = DailyReport {
+            date: "2026-10-11".into(),
+            team: "male".into(),
+            rows: vec![ReportRow {
+                name: "浩龙".into(),
+                wave: 100,
+                minutes: 0,
+                is_live: true,
+                absent_days: 3,
+                total_wave: 500,
+            }],
+            master_groups: vec![],
+            no_master: vec![],
+            daily_star: None,
+        };
+        let all = DailyReportFields::default();
+        let svg_all = render_svg_labeled_inner(&rep, "", 1, "", false, &all, 0);
+        assert!(svg_all.contains("排名") && svg_all.contains("主播姓名"));
+
+        let hidden = DailyReportFields {
+            daily_star: false,
+            rank: false,
+            name: false,
+            absent_days: false,
+            wave: false,
+            total_wave: false,
+            status: false,
+        };
+        let svg_none = render_svg_labeled_inner(&rep, "", 1, "", false, &hidden, 0);
+        for label in ["排名", "主播姓名", "当月未播天数", "当日音浪", "累计总音浪"] {
+            assert!(!svg_none.contains(label), "关掉的列不该渲染表头：{label}");
+        }
+        assert!(!svg_none.contains(">浩龙</text>"), "姓名列关掉后不应再出现姓名");
     }
 
     /// 机器人「日报」文本的时长口径（2026-10-16 用户口径「机器人推送的也改」）：

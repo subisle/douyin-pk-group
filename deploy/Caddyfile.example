@@ -1,30 +1,47 @@
 # pk-group 的公网入口示例。
 #
 # 服务本身只监听 127.0.0.1:8787，公网流量全部由 Caddy 收口：
-#   - /s/*   对外展示页（任何人可访问，无需口令）
-#   - 其余    管理员后台（应用层校验登录口令）
+#   - /            对外展示页（任何人可访问，无需口令；/1 /0 /report /lineage /my*
+#                  /wechat* /group* /st/* 都是同一份展示页的深链/兼容路径）
+#   - /admin*      管理员后台（应用层校验登录口令；静态壳可匿名取，数据全靠 /api 鉴权）
+#   - /api/*       接口（鉴权与缓存策略由应用自己下发，见下）
 #
 # 用法：把下面内容并到 64 上现有的 Caddyfile，重载即可。
 
 pk.example.com {
 	encode zstd gzip
 
-	# 展示页缓存短一点：音浪每小时更新，静态资源可以长缓存
-	@share path /s/*
-	header @share Cache-Control "public, max-age=60"
-
-	# 后台不要任何缓存，避免改完分组还看到旧页面
-	@admin not path /s/* /api/*
-	header @admin Cache-Control "no-store"
-
-	# 简单限流，避免有人拿展示页刷接口
-	rate_limit {
-		zone pk_group {
-			key    {remote_host}
-			events 120
-			period 10s
-		}
+	# ---------------------------------------------------------------
+	# 安全响应头（2026-10-17 第四轮审计 D 域）
+	# 应用本身也下发 XFO / nosniff / Referrer-Policy，以及 CSP（强制
+	# frame-ancestors 'none' + 完整策略的 Report-Only）；反代这里再兜一层同值头，
+	# 防「绕过反代直连后端」之外的路径漏配。
+	# ⚠️ CSP 由应用按文档类型下发（展示页是内联脚本/样式，管理端是 dist 产物），
+	#    **不要在这里重复定义 Content-Security-Policy**，否则两套策略互相覆盖、
+	#    Report-Only 的违规报告也会失真。
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
 	}
+
+	# ---------------------------------------------------------------
+	# 缓存：应用已按路径下发（spa.rs::cache_control / main.rs::cache_control_mw）——
+	#   /assets/*、/fonts/* 长缓存；展示页 HTML、/admin 壳、/api/* 为 no-store/no-cache。
+	# 反代不重复覆盖；若前面再加 CDN，按同样口径配置。
+
+	# ---------------------------------------------------------------
+	# 简单限流（可选）：依赖 caddy-ratelimit 插件（xcaddy build --with ...）。
+	# 宿主未装该插件时 `caddy validate` 会因未知指令失败，所以默认**注释掉**；
+	# 确认装好再把下面整段放开。
+	# rate_limit {
+	# 	zone pk_group {
+	# 		key    {remote_host}
+	# 		events 120
+	# 		period 10s
+	# 	}
+	# }
 
 	# Docker 部署：容器只发 127.0.0.1，用 host 网络反代
 	reverse_proxy 127.0.0.1:8787
@@ -36,9 +53,17 @@ pk.example.com {
 }
 
 # ---------------------------------------------------------------------------
-# 只想给展示页单独一个域名、后台走另一个域名时，拆成两个 site：
+# 只想给展示页单独一个域名、后台走另一个域名时，拆成两个 site ——
+# 顺带把「公开展示面」与「管理员特权面」隔到两个浏览器安全域
+# （第四轮审计 D 域 P3-3：同源时展示页任何 XSS 都能直接打管理 API）。
 #
 # share.example.com {
+# 	header {
+# 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+# 		X-Content-Type-Options "nosniff"
+# 		X-Frame-Options "DENY"
+# 		Referrer-Policy "strict-origin-when-cross-origin"
+# 	}
 # 	reverse_proxy 127.0.0.1:8787
 # }
 #

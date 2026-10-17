@@ -11,6 +11,54 @@ use std::sync::{Arc, Mutex};
 use axum::routing::{delete, get, post, put};
 use axum::Router;
 
+/* ------------------- 2026-10-17 第四轮审计 D 域：缓存策略收口 ------------------- */
+
+/// 对「不该进任何缓存」的响应统一补 `Cache-Control: no-store`（D 域 P3-5）。
+///
+/// 背景：`my` 系列接口与「我的消息」图片的身份只认 `X-My-Token` 头（不进 URL），
+/// 而消息图片端点的 URL 只含**消息 id** —— 同一条消息发给 N 个人时 URL 相同、内容
+/// 却是按收件人实时渲染的水印图。不显式声明 `no-store` 的话，换账号 / 共享浏览器
+/// 配置 / 带缓存的代理都可能有「串数据、串水印图」的理论面；这些响应本来也不依赖缓存。
+///
+/// - `/api/*` 一律 no-store；**唯一例外**是公开头像 `/api/public/avatars/*`：
+///   它自带 `public, max-age=31536000, immutable`（内容 hash 换 URL 破缓存），
+///   是纯公开数据、无登录态，覆盖成 no-store 会让展示页每次头像都回源查库。
+/// - 展示页 HTML（`/`、`/1`、`/0`、`/report`、`/lineage`、`/my*`、`/wechat*`、
+///   `/group*`、`/st/*`）同样 no-store：页面按登录态/配置实时渲染，缓存只有害处。
+/// - 其它路径（`/assets/*`、`/fonts/*`、`/admin` SPA 壳与 dist 静态资源）**不碰**，
+///   缓存策略继续由 `spa.rs::cache_control` 与反代决定。
+async fn cache_control_mw(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let path = req.uri().path().to_string();
+    let mut resp = next.run(req).await;
+    if cache_no_store(&path) {
+        resp.headers_mut().insert(
+            axum::http::header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("no-store"),
+        );
+    }
+    resp
+}
+
+/// [`cache_control_mw`] 的路径判定（纯函数，便于未来加单测）。
+fn cache_no_store(path: &str) -> bool {
+    if path.starts_with("/api/public/avatars/") {
+        return false;
+    }
+    if path.starts_with("/api/") {
+        return true;
+    }
+    matches!(
+        path,
+        "/" | "/1" | "/0" | "/report" | "/lineage" | "/my" | "/wechat" | "/group"
+    ) || path.starts_with("/my/")
+        || path.starts_with("/wechat/")
+        || path.starts_with("/group/")
+        || path.starts_with("/st/")
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Docker HEALTHCHECK 用：探活自身，不连数据库（P2-21：打一条日志便于排查误用）
@@ -783,7 +831,27 @@ async fn main() -> anyhow::Result<()> {
     .layer(tower_http::set_header::SetResponseHeaderLayer::overriding(
         axum::http::header::REFERRER_POLICY,
         axum::http::HeaderValue::from_static("strict-origin-when-cross-origin"),
-    ));
+    ))
+    /* 2026-10-17 第四轮审计 D 域 P3-2：CSP 从「只有 frame-ancestors」扩成完整策略，
+       但**先 Report-Only**（上面那条强制的 `frame-ancestors 'none'` 原样保留）：
+       展示页 st_page.html 是一整段内联脚本 + 大量内联 style，管理端也遍地
+       style={{…}} 内联样式；一旦 enforce，任何漏网的内联/外域请求会**直接白屏**
+       而不是只报一条违规。先把真实违规收集一段时间（违反项只在浏览器控制台以
+       "Content Security Policy Report Only" 提示，不阻塞页面），确认零违规后再切强制。
+       源清单依据（已 grep 核对）：dist/index.html 无任何外链；st_page.html 里的
+       http(s) 只有 `xmlns="http://www.w3.org/2000/svg"` 这类**命名空间字符串**
+       （不发请求）；字体/徽章/二维码/头像全部是 'self' 或 data: —— 无需第三方 CDN 源。 */
+    .layer(tower_http::set_header::SetResponseHeaderLayer::overriding(
+        axum::http::header::CONTENT_SECURITY_POLICY_REPORT_ONLY,
+        axum::http::HeaderValue::from_static(concat!(
+            "default-src 'self'; script-src 'self' 'unsafe-inline'; ",
+            "style-src 'self' 'unsafe-inline'; img-src 'self' data:; ",
+            "connect-src 'self'; font-src 'self' data:; base-uri 'self'; ",
+            "object-src 'none'; form-action 'self'; frame-ancestors 'none'"
+        )),
+    ))
+    /* 2026-10-17 第四轮审计 D 域 P3-5：缓存策略（见文件头 `cache_control_mw`）。 */
+    .layer(axum::middleware::from_fn(cache_control_mw));
 
     // 登录态持久化（2026-10-12）：把 AppState 注册给 token 函数，
     // my token put/take/revoke 由此落到 Redis——容器重启后 24h 内登录态自动恢复。

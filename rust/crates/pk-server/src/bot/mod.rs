@@ -1,7 +1,8 @@
 //! 机器人模块（E 阶段）：确定性命令路由 + QQ / 微信渠道适配器
 //!
 //! 边界（docs/00 §9、docs/06 §4.4）：
-//! - QQ 收到即可服务（2026-10-10 用户口径：不需要管理员白名单）；
+//! - QQ 只认 `BOT_QQ_ADMINS` 白名单（2026-10-17 第四轮审计 P1-3 起 **fail-closed**：
+//!   未配置 = 一个都不认；docs 早期「QQ 收到即可服务、不需要管理员白名单」的口径作废）；
 //!   微信私聊发送内置口令可成为管理员；已完成推送绑定的主播私聊 = 普通用户
 //!   （只有「每日报告 / 个人报告 / 暂停·开启接收每日推送 / 帮助」5 条，见 [`commands`]）；
 //!   未绑定会话静默忽略（日志留痕，不回复）
@@ -68,11 +69,11 @@ pub struct BotConfig {
     pub qq_app_secret: String,
     /// 微信 iLink token（空 = 未登录，需要扫码；扫码成功后持久化到业务库 config 表）
     pub wechat_token: String,
-    /// 管理员会话白名单（逗号分隔会话 ID / openid）
-    ///
-    /// ⚠️ 当前**只用于微信**渠道（见 [`BotRouter::handle`] 的角色判定）。
-    /// QQ 渠道按定稿口径是**无条件 Admin**（任何能私聊到该 QQ 的人都有全量权限），
-    /// 因此此处的值**不影响 QQ**。保留字段只为将来 QQ 若改分级时可直接接上。
+    /// QQ 管理员白名单（逗号分隔 QQ 号 / 会话 ID），**fail-closed**：
+    /// 只有名单里的会话才算 Admin；**未配置 = 一个都不认**。
+    /// 2026-10-17 第四轮审计 P1-3 修复 —— docs/09 早期「QQ 收到即可服务」的
+    /// 无条件 Admin 口径已作废（那等于任何能私聊 bot 的陌生 QQ 都有全量权限）。
+    /// 判定见 [`qq_admin_ok`]，生产由 compose 透传 `.env.prod` 的 `BOT_QQ_ADMINS`。
     pub qq_admins: Vec<String>,
     pub wechat_admins: Vec<String>,
     /// 每会话限流（条/分钟）
@@ -623,10 +624,31 @@ async fn try_bind_weixin(st: &Arc<AppState>, inbound: &Inbound) -> Option<Outbou
         return None; // 不是绑定消息：继续走管理员判定
     };
 
+    // 会话级尝试锁（2026-10-17 第四轮审计 P1-2）：同会话 10 分钟内失败 ≥5 次即拒绝兑换。
+    // 锁定期间：明确绑定意图（带关键词）回统一文案；裸数字照旧静默，避免正常聊天被刷屏。
+    let conv_key = bind_fail_conv_key(inbound.channel, &conversation);
+    if conv_bind_locked(st, &conv_key).await {
+        if !has_kw {
+            return None;
+        }
+        tracing::warn!(
+            conversation = %conversation,
+            "会话对接码失败次数过多，临时拒绝兑换（统一文案）"
+        );
+        return Some(Outbound::to(&conversation, BIND_FAIL_TEXT));
+    }
+
     let bind = crate::store::push_bind_by_code(st, &code, &conversation, &conversation).await;
     let (name, team_opt) = match bind {
-        Some(pair) => pair,
+        Some(pair) => {
+            // 兑换成功：清该会话的失败计数，别让历史失败把正常用户继续锁在门外
+            conv_bind_clear(st, &conv_key).await;
+            pair
+        }
         None => {
+            // 记一次会话失败。裸数字也记：攻击者不带「绑定」关键词就能绕过计数，
+            // 所以计数必须发生在「尝试兑换」这一步，而不是回复文案那一步。
+            conv_bind_record_fail(st, &conv_key).await;
             if !has_kw {
                 // 裸数字没对上：静默，别把正常聊天里的 4 位数变成一句「绑定失败」
                 return None;
@@ -636,12 +658,7 @@ async fn try_bind_weixin(st: &Arc<AppState>, inbound: &Inbound) -> Option<Outbou
                 conversation = %conversation,
                 "微信绑定失败（码不对 / 码过期），统一回复"
             );
-            return Some(Outbound::to(
-                &conversation,
-                "对接没有成功：这个 4 位对接码不对或已经过期。\n\
-                 打开展示端 →「我的」页 →「消息设置」→ 点「获取二维码」，\n\
-                 把新出的 4 位对接码发给我（30 分钟内有效，用一次就作废）。",
-            ));
+            return Some(Outbound::to(&conversation, BIND_FAIL_TEXT));
         }
     };
     // 绑定行团别为空（台账建档晚于绑定）会导致推送按团捞不到这个人、
@@ -659,6 +676,123 @@ async fn try_bind_weixin(st: &Arc<AppState>, inbound: &Inbound) -> Option<Outbou
         format!("微信推送已绑定（{name}）"),
     );
     Some(Outbound::to(&conversation, wx_dock_welcome(&name)))
+}
+
+/* ------------------ 对接码会话级尝试锁（2026-10-17 第四轮审计 P1-2） ------------------
+ * 4 位对接码只有 10^4 空间，且 30 分钟有效：攻击者可以换 N 个微信号（N 个会话）并行
+ * 试码，机器人层「每会话 10 条/分钟」挡不住 N 会话叠加。除了 `store/wxpush.rs` 里
+ * 按码 / 全局的失败计数（迁移 033）之外，这里再补一层**会话维度**的锁：
+ *   同一会话 10 分钟内兑换失败 ≥5 次 → 暂时拒绝该会话的兑换请求，统一文案回复，
+ *   不区分「码不对 / 码过期 / 试太多」，不给试码者任何状态反馈。
+ *
+ * 计数复用 bind_code_fails 表（不新建表），key = `conv:<channel>:<conversation_id>`；
+ * 迁移 036 会把 code 列从 VARCHAR(16) 加宽到 160 —— 加宽前这个 key 大概率装不下。
+ * 表不存在 / 列宽还没升级 / DB 故障 → **WARN 一次并降级放行原兑换逻辑**，
+ * 绝不因为加固层自身不可用而阻断正常绑定。
+ * ----------------------------------------------------------------------------------- */
+
+/// 同一会话在窗口内失败达到该次数 → 临时拒绝兑换
+const BIND_FAIL_CONV_MAX: i32 = 5;
+/// 会话失败计数窗口（分钟）：窗口从首次失败起算，过期后下一次失败归 1 重计
+const BIND_FAIL_CONV_WINDOW_MIN: i64 = 10;
+/// 兑换失败 / 被临时锁定的**统一文案**：不泄露码状态，也不暴露「被锁」这件事
+const BIND_FAIL_TEXT: &str = "对接没有成功：这个 4 位对接码不对或已经过期。\n\
+     打开展示端 →「我的」页 →「消息设置」→ 点「获取二维码」，\n\
+     把新出的 4 位对接码发给我（30 分钟内有效，用一次就作废）。";
+
+/// 会话计数 key（`conv:<channel>:<conversation_id>`）：与按码计数共用一张表。
+fn bind_fail_conv_key(channel: &str, conversation_id: &str) -> String {
+    format!("conv:{channel}:{conversation_id}")
+}
+
+/// 会话级计数不可用（表缺 / 列宽不够 / DB 故障）时只 WARN 一次，避免每条消息刷日志。
+fn warn_conv_bind_lock_unavailable(err: &sqlx::Error) {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        tracing::warn!(
+            error = %err,
+            "会话级对接码尝试锁不可用（bind_code_fails 表缺 / 列宽不足 / DB 故障），\
+             已降级放行原兑换逻辑；跑过迁移 036 后自动生效"
+        );
+    });
+}
+
+/// 写库池；未配置 = 无写库，直接降级（与其它写路径同语义）。
+fn bind_fail_pool(st: &AppState) -> Option<&sqlx::PgPool> {
+    st.writer.as_ref()
+}
+
+/// 该会话是否已被失败计数临时锁定（10 分钟窗口内失败 ≥5）。
+async fn conv_bind_locked(st: &AppState, key: &str) -> bool {
+    let Some(pool) = bind_fail_pool(st) else {
+        return false;
+    };
+    match sqlx::query(&crate::pq::rewrite(
+        "SELECT 1 FROM bind_code_fails \
+          WHERE code = ? AND fails >= ? \
+            AND window_at > now() - make_interval(mins => ?)",
+    ))
+    .bind(key)
+    .bind(BIND_FAIL_CONV_MAX)
+    .bind(BIND_FAIL_CONV_WINDOW_MIN)
+    .fetch_optional(pool)
+    .await
+    {
+        Ok(row) => row.is_some(),
+        // 表缺 / 列不存在都按「锁不可用」处理：放行是对业务最安全的降级。
+        Err(e) => {
+            warn_conv_bind_lock_unavailable(&e);
+            false
+        }
+    }
+}
+
+/// 记一次会话兑换失败（10 分钟窗口，过期归 1 重计）。
+async fn conv_bind_record_fail(st: &AppState, key: &str) {
+    let Some(pool) = bind_fail_pool(st) else {
+        return;
+    };
+    let sql = "INSERT INTO bind_code_fails (code, fails, window_at, updated_at) \
+               VALUES (?, 1, now(), now()) \
+               ON CONFLICT (code) DO UPDATE SET \
+                 fails = CASE WHEN bind_code_fails.window_at < now() - make_interval(mins => ?) \
+                              THEN 1 ELSE bind_code_fails.fails + 1 END, \
+                 window_at = CASE WHEN bind_code_fails.window_at < now() - make_interval(mins => ?) \
+                              THEN now() ELSE bind_code_fails.window_at END, \
+                 updated_at = now()";
+    if let Err(e) = crate::writer::write_guard(sql) {
+        tracing::warn!(error = %e, "会话对接码失败计数 SQL 未通过写守卫，跳过");
+        return;
+    }
+    if let Err(e) = sqlx::query(&crate::pq::rewrite(sql))
+        .bind(key)
+        .bind(BIND_FAIL_CONV_WINDOW_MIN)
+        .bind(BIND_FAIL_CONV_WINDOW_MIN)
+        .execute(pool)
+        .await
+    {
+        warn_conv_bind_lock_unavailable(&e);
+    }
+}
+
+/// 兑换成功 / 换新码成功 → 清掉该会话的失败计数（历史失败不该继续锁着正常用户）。
+async fn conv_bind_clear(st: &AppState, key: &str) {
+    let Some(pool) = bind_fail_pool(st) else {
+        return;
+    };
+    let sql = "DELETE FROM bind_code_fails WHERE code = ?";
+    if let Err(e) = crate::writer::write_guard(sql) {
+        tracing::warn!(error = %e, "会话对接码失败计数清理 SQL 未通过写守卫，跳过");
+        return;
+    }
+    if let Err(e) = sqlx::query(&crate::pq::rewrite(sql))
+        .bind(key)
+        .execute(pool)
+        .await
+    {
+        // 清理失败不影响本次绑定，只 warn（锁会随 10 分钟窗口自然过期）
+        tracing::warn!(error = %e, "会话对接码失败计数清理失败（不影响绑定，锁会自然过期）");
+    }
 }
 
 /// 微信对接完成欢迎语（唯一出口：机器人回对接码、扫码确认两个入口共用一份文案）。
@@ -781,6 +915,39 @@ fn extract_bind_code(text: &str) -> Option<String> {
    用户不必再先报手机号。整个黏合机制连同它的 TTL 一起删掉，少一处内存态。
 */
 
+/* ---------------- 管理员判定：QQ fail-closed（2026-10-17 第四轮审计 P1-3） ----------------
+ * 历史口径（docs/09、2026-10-10 用户口径）：QQ 渠道「收到即可服务」，任何能私聊到
+ * bot 的 QQ 都是 Admin；`BOT_QQ_ADMINS` 虽然从 env 读进 BotConfig，但**全代码零引用**
+ * —— 配了白名单也不生效（死配置），没配则等于陌生 QQ 可以直接执行导入写库 / 全量导出 /
+ * 触发推送。
+ *
+ * 审计要求改成 fail-closed：**未配置 = 没有管理员**。这与 docs 早期口径相反，是审计后的
+ * 安全收紧：上线前必须在 .env.prod 配好 `BOT_QQ_ADMINS`（生产 compose 已透传该键），
+ * 否则 QQ 会话只会被日志留痕后静默忽略。
+ * 会话表勾选 / 微信提权口令路径不受影响（与渠道无关，照旧算 Admin）。
+ * ----------------------------------------------------------------------------------- */
+
+/// 「BOT_QQ_ADMINS 未配置」进程内只提示一次，避免每条 QQ 消息刷一条 WARN。
+fn warn_qq_admins_unset_once() {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        tracing::warn!(
+            "BOT_QQ_ADMINS 未配置：QQ 渠道不再默认为管理员（fail-closed，第四轮审计 P1-3）\
+             —— 生产请在 .env.prod 配好 QQ 号白名单，否则 QQ 会话不会被处理"
+        );
+    });
+}
+
+/// QQ 管理员判定（纯函数，可单测）：**未配置 = false**（fail-closed）；
+/// 配了则只认名单内的会话 ID（QQ 号）。
+fn qq_admin_ok(qq_admins: &[String], conversation_id: &str) -> bool {
+    if qq_admins.is_empty() {
+        warn_qq_admins_unset_once();
+        return false;
+    }
+    qq_admins.iter().any(|a| a == conversation_id)
+}
+
 /// 处理一条入站消息。返回 None = 静默忽略（非管理员 / 空消息）。
 pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Option<Outbound> {
     // 登记会话（含非管理员）：管理界面据此展示群聊/私聊列表并勾选管理员
@@ -824,23 +991,19 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
         return Some(out);
     }
     // 角色判定（2026-10-10 用户口径，2026-10-11 复核确认）：
-    // - Admin：QQ 全部会话 / 微信白名单 / 会话表标记过管理员 —— 拥有全部命令
+    // - Admin：QQ 白名单 / 微信白名单 / 会话表标记过管理员 —— 拥有全部命令
     // - User：微信私聊且 push_bindings 命中的已绑定主播 —— 只允许 5 条命令
     // - 其余：完全静默（不回复任何内容），日志留痕
     //
-    // QQ 的管理员判定（2026-10-17 修复，审计 6-1）：
-    // 原先这里写死「channel == qq 就无条件 Admin」，而 `BOT_QQ_ADMINS` 从
-    // BotConfig 读出来后**全代码零引用** —— 运营配了白名单也完全不生效（死配置）。
-    // 现在改成：**配了 BOT_QQ_ADMINS 就按白名单收口**（只有名单里的 QQ 号是 Admin），
-    // **没配**才退回原来的「QQ 全部会话无条件 Admin」（QQ 号由运营自持、不对外开放，
-    // 保持旧行为不误伤现网）。
+    // QQ 的管理员判定（2026-10-17 第四轮审计 P1-3，**行为已改 fail-closed**）：
+    // 原先是「channel == qq 就无条件 Admin」+ `BOT_QQ_ADMINS` 死配置；
+    // 现在**只有配在 BOT_QQ_ADMINS 里的会话才是 Admin，没配 = 一个都不认**。
+    // 注意这与 docs/09 早期「QQ 收到即可服务」的定稿口径相反，是本轮审计后的安全收紧；
+    // 生产上线前必须在 .env.prod 配好白名单（prod compose 已透传该键）。
     // 会话表标记过的管理员（后台勾选 / 微信提权口令）始终算 Admin，与渠道无关。
-    let qq_admin_ok = if cfg.qq_admins.is_empty() {
-        true // 未配置 = 旧行为：QQ 全放开
-    } else {
-        cfg.qq_admins.iter().any(|a| a == &inbound.conversation_id)
-    };
-    let role = if (inbound.channel == "qq" && qq_admin_ok)
+    let is_qq_admin =
+        inbound.channel == "qq" && qq_admin_ok(&cfg.qq_admins, &inbound.conversation_id);
+    let role = if is_qq_admin
         || cfg.wechat_admins.contains(&inbound.conversation_id)
         || crate::store::session_is_admin(st, inbound.channel, &inbound.conversation_id).await
     {

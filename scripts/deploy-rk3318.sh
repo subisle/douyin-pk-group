@@ -7,6 +7,8 @@ cd "$(dirname "$0")/.."
 
 REPO="${REPO:-subisle/douyin-pk-group}"
 HOST="${HOST:-rk3318}"
+# 内网地址不进公开仓库：HTTP 自检的目标由环境变量提供
+HTTP_HOST="${RK3318_HTTP_HOST:?请设置 RK3318_HTTP_HOST（rk3318 局域网地址）}"
 DIR="/opt/pk-server"
 TAR="/tmp/pk-server-arm64.tar.gz"
 
@@ -32,7 +34,7 @@ ssh "$HOST" "cd $DIR && gunzip -f pk-server-arm64.tar.gz && docker load -q -i pk
 echo "==> 5/5 健康检查"
 sleep 8
 ssh "$HOST" "docker ps --filter name=pk-server --format '{{.Status}}' | grep -q healthy && echo '容器 healthy ✓' || { echo '容器异常！'; docker logs pk-server --tail 20; exit 1; }"
-curl -s -o /dev/null -w "    首页 HTTP %{http_code}\n" -m 8 http://192.168.5.12:8787/
-curl -s -o /dev/null -w "    后台 HTTP %{http_code}\n" -m 8 http://192.168.5.12:8787/admin
+curl -s -o /dev/null -w "    首页 HTTP %{http_code}\n" -m 8 http://$HTTP_HOST:8787/
+curl -s -o /dev/null -w "    后台 HTTP %{http_code}\n" -m 8 http://$HTTP_HOST:8787/admin
 
-echo "==> 部署完成：http://192.168.5.12:8787/"
+echo "==> 部署完成：http://$HTTP_HOST:8787/"

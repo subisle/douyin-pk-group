@@ -6,7 +6,7 @@
  * 两种宽度截图。
  *
  * 用法：
- *   node scripts/check/uicheck.mjs http://64.188.8.149:18791 demo-pass-2026
+ *   node scripts/check/uicheck.mjs http://127.0.0.1:18791 <ADMIN_PASSWORD>
  *
  * 只用 Node 内置能力（Node 22+ 自带 WebSocket），不需要 puppeteer/playwright。
  */

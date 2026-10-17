@@ -253,25 +253,60 @@ fn is_unique_violation(e: &anyhow::Error) -> bool {
  * 多微信号并行即 N×10 次/分，30 分钟窗口单号可试 300 次，命中即把受害者的推送通道
  * 绑到攻击者。三层防线（迁移 033 的 bind_code_fails 计数表）：
  * 1. 按码失败 ≥5 次 → 立即作废该码（[`bind_code_invalidate`]）；
- * 2. 全局 1 小时窗口失败 ≥600 次 → 冷却 10 分钟拒绝一切兑换（唯一挡分布式试码的闸）；
+ * 2. 全局 1 小时窗口失败越线 → 冷却 10 分钟拒绝一切兑换（唯一挡分布式试码的闸）。
+ *    阈值取 env `BIND_CODE_FAIL_HOURLY_MAX`（默认 120、clamp 30..=600，见
+ *    [`bind_fail_hourly_max`]）；冷却用哨兵行 code='__cooldown__' 的 window_at 记录
+ *    **截止时间**，冷却期内不再计数 —— 单条失败无法把冷却续期（第四轮审计 P2-10）；
  * 3. 绑定成功时旧会话收到「你的账号刚被新微信绑定」告警（接管的唯一用户侧通知）。
  * 查不到的码也计数（否则攻击者先撞真码的计数就失效）；计数窗口过期自动归一。
  * ---------------------------------------------------------------- themore-- */
 
-/// bind_code_fails 里的全局哨兵行 code
+/// bind_code_fails 里的全局计数哨兵行 code
 const BIND_FAIL_GLOBAL: &str = "__global__";
+/// bind_code_fails 里的全局冷却哨兵行 code（window_at = 冷却截止时间）
+const BIND_FAIL_COOLDOWN: &str = "__cooldown__";
 /// 同一码失败达到该次数 → 作废该码
 const BIND_FAIL_CODE_MAX: i32 = 5;
-/// 全局 1 小时窗口失败达到该次数 → 进入冷却
-const BIND_FAIL_GLOBAL_MAX: i32 = 600;
+/// 全局 1 小时失败阈值的默认值（env 未配 / 非法时用它）
+const BIND_FAIL_HOURLY_MAX_DEFAULT: i32 = 120;
+/// 全局阈值下限（配得再小也不能低于它，否则正常手误几下就全站冷却）
+const BIND_FAIL_HOURLY_MAX_MIN: i32 = 30;
+/// 全局阈值上限（配得再大也不超过它，否则分布式试码闸门形同虚设）
+const BIND_FAIL_HOURLY_MAX_MAX: i32 = 600;
 /// 全局冷却时长（分钟）
 const BIND_FAIL_COOLDOWN_MIN: i64 = 10;
 
+/// 解析全局 1 小时失败阈值：未配置 / 空 / 非法 → 默认 120；合法值 clamp 到 30..=600。
+/// 纯函数（env 只在 [`bind_fail_hourly_max`] 里读一次），便于单测。
+fn bind_fail_hourly_max_from(raw: Option<&str>) -> i32 {
+    let Some(raw) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return BIND_FAIL_HOURLY_MAX_DEFAULT;
+    };
+    match raw.parse::<i32>() {
+        Ok(v) => v.clamp(BIND_FAIL_HOURLY_MAX_MIN, BIND_FAIL_HOURLY_MAX_MAX),
+        Err(_) => {
+            tracing::warn!(
+                value = raw,
+                default = BIND_FAIL_HOURLY_MAX_DEFAULT,
+                "BIND_CODE_FAIL_HOURLY_MAX 不是整数，回落默认阈值"
+            );
+            BIND_FAIL_HOURLY_MAX_DEFAULT
+        }
+    }
+}
+
+/// 全局 1 小时失败阈值（每次判定读一次环境变量，运维改档不用重启）。
+fn bind_fail_hourly_max() -> i32 {
+    bind_fail_hourly_max_from(std::env::var("BIND_CODE_FAIL_HOURLY_MAX").ok().as_deref())
+}
+
 /// 记一次兑换失败：按码与全局哨兵各 +1（1 小时窗口，过期归 1 重计）。
 /// 返回 (该码是否达到作废阈值, 全局是否刚刚越线)。
+/// 全局越线时写冷却哨兵（截止 now()+10min）—— 冷却期内的兑换会在
+/// [`push_bind_by_code`] 开头被直接拒绝、**不进入本函数**，所以单条失败无法续期冷却。
 async fn bind_code_record_fail(st: &AppState, code: &str) -> (bool, bool) {
     async fn upsert_one(pool: &sqlx::Pool<sqlx::Postgres>, key: &str) -> Option<i32> {
-        sqlx::query(&crate::pq::rewrite(
+        let sql = crate::pq::rewrite(
             "INSERT INTO bind_code_fails (code, fails, window_at, updated_at) \
              VALUES (?, 1, now(), now()) \
              ON CONFLICT (code) DO UPDATE SET \
@@ -281,42 +316,95 @@ async fn bind_code_record_fail(st: &AppState, code: &str) -> (bool, bool) {
                             THEN now() ELSE bind_code_fails.window_at END, \
                updated_at = now() \
              RETURNING fails",
-        ))
-        .bind(key)
-        .fetch_one(pool)
-        .await
-        .ok()
-        .and_then(|r| r.try_get::<i32, _>("fails").ok())
+        );
+        match sqlx::query(&sql).bind(key).fetch_one(pool).await {
+            Ok(r) => r.try_get::<i32, _>("fails").ok(),
+            /* 2026-10-17 第四轮审计 P2-11：原先 `.ok()` 把 DB 错误静默吞掉，
+            计数失效 = 防爆破闸门静默 fail-open。现在至少 WARN 出来可观测；
+            本次判定仍按「未越线」兜底，不误杀正常兑换。 */
+            Err(e) => {
+                tracing::warn!(
+                    key,
+                    error = %e,
+                    "对接码失败计数写入失败，本次按未越线兜底（防爆破闸门可能失效）"
+                );
+                None
+            }
+        }
     }
     let Ok(pool) = w(st) else {
         return (false, false);
     };
+    let max = bind_fail_hourly_max();
     let code_fails = upsert_one(pool, code).await.unwrap_or(0);
     let global_fails = upsert_one(pool, BIND_FAIL_GLOBAL).await.unwrap_or(0);
-    (
-        code_fails >= BIND_FAIL_CODE_MAX,
-        global_fails == BIND_FAIL_GLOBAL_MAX,
-    )
+    let global_crossed = global_fails >= max;
+    if global_crossed {
+        // 截止时间只在「越线这一刻」写：冷却期内不会调用本函数，所以不会被续期
+        if let Err(e) = sqlx::query(&crate::pq::rewrite(
+            "INSERT INTO bind_code_fails (code, fails, window_at, updated_at) \
+             VALUES (?, 0, now() + make_interval(mins => ?), now()) \
+             ON CONFLICT (code) DO UPDATE SET \
+               fails = 0, \
+               window_at = now() + make_interval(mins => ?), \
+               updated_at = now()",
+        ))
+        .bind(BIND_FAIL_COOLDOWN)
+        .bind(BIND_FAIL_COOLDOWN_MIN)
+        .bind(BIND_FAIL_COOLDOWN_MIN)
+        .execute(pool)
+        .await
+        {
+            tracing::warn!(error = %e, "对接码全局冷却哨兵写入失败（本次仍按越线拒绝）");
+        }
+    }
+    (code_fails >= BIND_FAIL_CODE_MAX, global_crossed)
 }
 
-/// 全局冷却中？（哨兵行 1 小时窗口内失败达阈值，且 10 分钟冷却未过）
+/// 全局冷却中？**只看**冷却哨兵行 code='__cooldown__' 的 window_at（= 截止时间）。
+///
+/// 2026-10-17 第四轮审计 P2-10：原实现每次失败都 UPDATE 全局计数行的
+/// fails/updated_at，于是「1 条错码每秒试一次」就能让 10 分钟冷却一直续期 ——
+/// 永久 DoS。现在截止时间只在越线那一刻写死；冷却期内 [`push_bind_by_code`]
+/// 直接拒绝、不再计数，续期路径不存在。
+///
+/// 冷却到期时顺手清掉哨兵与全局失败行，让计数从零起算。只在「哨兵存在且已
+/// 过期」时清理 —— 若每次正常兑换都清全局计数，1 小时窗口就永远攒不满。
 async fn bind_code_global_cooling(st: &AppState) -> bool {
     let Ok(pool) = w(st) else {
         return false;
     };
-    sqlx::query(&crate::pq::rewrite(
-        "SELECT 1 FROM bind_code_fails \
-          WHERE code = ? AND fails >= ? \
-            AND window_at > now() - INTERVAL '1 hour' \
-            AND updated_at > now() - make_interval(mins => ?)",
+    let cooling = match sqlx::query_scalar::<_, bool>(&crate::pq::rewrite(
+        "SELECT window_at > now() FROM bind_code_fails WHERE code = ?",
     ))
-    .bind(BIND_FAIL_GLOBAL)
-    .bind(BIND_FAIL_GLOBAL_MAX)
-    .bind(BIND_FAIL_COOLDOWN_MIN)
+    .bind(BIND_FAIL_COOLDOWN)
     .fetch_optional(pool)
     .await
-    .map(|r| r.is_some())
-    .unwrap_or(false)
+    {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error = %e, "对接码冷却状态查询失败，按未冷却处理");
+            return false;
+        }
+    };
+    match cooling {
+        Some(true) => true,
+        Some(false) => {
+            // 冷却刚到期：清哨兵 + 全局失败行（旧窗口的高计数不能带进下一轮）
+            if let Err(e) = sqlx::query(&crate::pq::rewrite(
+                "DELETE FROM bind_code_fails WHERE code IN (?, ?)",
+            ))
+            .bind(BIND_FAIL_COOLDOWN)
+            .bind(BIND_FAIL_GLOBAL)
+            .execute(pool)
+            .await
+            {
+                tracing::warn!(error = %e, "清理对接码全局失败窗口失败");
+            }
+            false
+        }
+        None => false,
+    }
 }
 
 /// 该码是否已被失败计数判死（≥5 次失败且仍在 1 小时窗口内）
@@ -396,6 +484,8 @@ async fn notify_old_session(st: &AppState, name: &str, old_conv: &str, new_conv:
 
 /// 绑定码 → 绑定：把微信私聊会话接到展示端账号上。
 /// 返回 Some((账号姓名, 团别))，没命中/已过期/被防爆破闸拦下返回 None。码一次性，用掉即清。
+/// 2026-10-17 第四轮审计 P1-2：消费改成条件 UPDATE（`WHERE name = ? AND bind_code = ?`），
+/// affected==0 = 码已被并发请求抢先用掉 → None，杜绝同一码被双花绑到两个会话。
 pub async fn push_bind_by_code(
     st: &AppState,
     code: &str,
@@ -407,7 +497,8 @@ pub async fn push_bind_by_code(
     if code.is_empty() {
         return None;
     }
-    // 防爆破第一层：全局冷却（1 小时失败过多 → 10 分钟内拒绝一切兑换，不计数）
+    // 防爆破第一层：全局冷却（越线后 10 分钟内拒绝一切兑换，**冷却期不计数** ——
+    // 所以单条失败无法把冷却截止时间往后推，见 bind_code_global_cooling 注释）
     if bind_code_global_cooling(st).await {
         tracing::warn!(code_len = code.len(), "对接码全局冷却中，拒绝兑换");
         return None;
@@ -433,7 +524,11 @@ pub async fn push_bind_by_code(
             bind_code_invalidate(st, &code).await;
         }
         if global {
-            tracing::warn!("对接码全局失败速率越线（600/小时），冷却 10 分钟");
+            tracing::warn!(
+                max_per_hour = bind_fail_hourly_max(),
+                cooldown_min = BIND_FAIL_COOLDOWN_MIN,
+                "对接码全局失败速率越线，进入冷却"
+            );
         }
         return None;
     };
@@ -444,7 +539,11 @@ pub async fn push_bind_by_code(
             bind_code_invalidate(st, &code).await;
         }
         if global {
-            tracing::warn!("对接码全局失败速率越线（600/小时），冷却 10 分钟");
+            tracing::warn!(
+                max_per_hour = bind_fail_hourly_max(),
+                cooldown_min = BIND_FAIL_COOLDOWN_MIN,
+                "对接码全局失败速率越线，进入冷却"
+            );
         }
         return None;
     }
@@ -474,11 +573,16 @@ pub async fn push_bind_by_code(
     .bind(&name)
     .execute(pool)
     .await;
+    /* 2026-10-17 第四轮审计 P1-2：消费必须是**条件写**。
+    原来只按 name 更新、bind_code 无条件清空：两个并发请求拿着同一个码各自
+    查到 name 后都能写成功 → 同一个码双花（两个会话都拿到绑定成功）。现在
+    WHERE 再带上 bind_code = 原码，affected==0 说明另一个请求已先消费
+    （码已被清空/换码），本次作废返回 None。 */
     let res = sqlx::query(&crate::pq::rewrite(
         "UPDATE push_bindings SET conversation_id = ?, to_user_id = ?, nickname = ?,
            bind_code = '', code_expires = '', bound_at = ?, last_error = '', paused = 0,
            updated_at = ?
-         WHERE name = ?",
+         WHERE name = ? AND bind_code = ?",
     ))
     .bind(conversation_id)
     .bind(to_user_id)
@@ -486,10 +590,21 @@ pub async fn push_bind_by_code(
     .bind(now_str())
     .bind(now_str())
     .bind(&name)
+    .bind(&code)
     .execute(pool)
     .await;
-    if let Err(e) = res {
-        tracing::error!(error = %e, "写入微信绑定失败");
+    let affected = match res {
+        Ok(r) => r.affected(),
+        Err(e) => {
+            tracing::error!(error = %e, "写入微信绑定失败");
+            return None;
+        }
+    };
+    if affected == 0 {
+        tracing::warn!(
+            code_len = code.len(),
+            "对接码已被并发兑换，本次作废（不重复绑定）"
+        );
         return None;
     }
     // 绑定成功：清该码失败计数（这个码没被围猎）+ 给旧会话发换绑告警
@@ -1979,11 +2094,12 @@ mod wx_bind_conflict_tests {
     use super::{bind_conflict, wx_push_clash_of, WxBindConflict};
 
     fn others() -> Vec<(String, u64, String)> {
+        // 中性示例数据：不再使用真实历史账号名 / 口令做测试夹具（第四轮审计 P2-11 顺手项）
         vec![
-            ("shuai4444".to_string(), 0, "o9cq808v597x".to_string()),
-            ("狼征".to_string(), 1, "o9cq800cQBnO".to_string()),
+            ("admin-gate".to_string(), 0, "o9cq808v597x".to_string()),
+            ("示例主播".to_string(), 1, "o9cq800cQBnO".to_string()),
             // 同一主播（person_id=1）换过账号名 / 换过微信后留下的旧行
-            ("狼征-旧号".to_string(), 1, "o9cqOldWechat".to_string()),
+            ("示例主播-旧号".to_string(), 1, "o9cqOldWechat".to_string()),
         ]
     }
 
@@ -1992,8 +2108,8 @@ mod wx_bind_conflict_tests {
     /// 「请先解绑旧的再扫」（2026-10-16 用户报障的根因就是这个）。
     #[test]
     fn other_account_same_wechat_is_typed_conflict() {
-        let msg = wx_push_clash_of("帅帅", 0, "o9cq808v597x", &others()).expect("应判为冲突");
-        assert!(msg.contains("shuai4444"), "文案要点名占用的账号：{msg}");
+        let msg = wx_push_clash_of("示例账号", 0, "o9cq808v597x", &others()).expect("应判为冲突");
+        assert!(msg.contains("admin-gate"), "文案要点名占用的账号：{msg}");
         let e = bind_conflict(msg);
         let c = e
             .downcast_ref::<WxBindConflict>()
@@ -2004,20 +2120,60 @@ mod wx_bind_conflict_tests {
     /// 自己更新自己（同名重扫）不算冲突：supervisor 重连 / token 刷新会反复 save。
     #[test]
     fn self_update_is_not_conflict() {
-        assert!(wx_push_clash_of("shuai4444", 0, "o9cq808v597x", &others()).is_none());
+        assert!(wx_push_clash_of("admin-gate", 0, "o9cq808v597x", &others()).is_none());
     }
 
     /// 同一主播已有微信账号（person_id 命中）同样拒，文案指向主播而不是微信。
     #[test]
     fn same_person_second_wechat_is_conflict() {
-        let msg = wx_push_clash_of("狼征", 1, "o9cqFresh", &others()).expect("应判为冲突");
+        let msg = wx_push_clash_of("示例主播", 1, "o9cqFresh", &others()).expect("应判为冲突");
         assert!(msg.contains("该主播已经有"), "{msg}");
     }
 
     /// 空 uid / person_id=0 是「未激活 / 管理员观看账号」哨兵，不参与判重。
     #[test]
     fn sentinel_empties_do_not_clash() {
-        assert!(wx_push_clash_of("帅帅", 0, "", &others()).is_none());
-        assert!(wx_push_clash_of("帅帅", 0, "o9cqFresh", &[]).is_none());
+        assert!(wx_push_clash_of("示例账号", 0, "", &others()).is_none());
+        assert!(wx_push_clash_of("示例账号", 0, "o9cqFresh", &[]).is_none());
+    }
+}
+
+/* --------------- 对接码全局阈值解析（2026-10-17 第四轮审计 P2-10） --------------- */
+
+#[cfg(test)]
+mod bind_code_threshold_tests {
+    use super::{bind_fail_hourly_max_from, BIND_FAIL_HOURLY_MAX_DEFAULT};
+
+    /// 未配置 / 空串 → 默认 120（审计口径，比旧硬编码 600 收紧 5 倍）。
+    #[test]
+    fn default_when_unset_or_empty() {
+        assert_eq!(
+            bind_fail_hourly_max_from(None),
+            BIND_FAIL_HOURLY_MAX_DEFAULT
+        );
+        assert_eq!(bind_fail_hourly_max_from(Some("")), 120);
+        assert_eq!(bind_fail_hourly_max_from(Some("   ")), 120);
+    }
+
+    /// 非法值回落默认，不 panic、更不能变成「关闭闸门」。
+    #[test]
+    fn invalid_falls_back_to_default() {
+        for raw in ["abc", "12x", "1.5", "-", "999999999999999999999"] {
+            assert_eq!(bind_fail_hourly_max_from(Some(raw)), 120, "{raw}");
+        }
+    }
+
+    /// 合法值 clamp 到 30..=600（太小会误伤正常手误，太大会让闸门形同虚设）。
+    #[test]
+    fn clamps_to_safe_range() {
+        assert_eq!(bind_fail_hourly_max_from(Some("0")), 30);
+        assert_eq!(bind_fail_hourly_max_from(Some("29")), 30);
+        assert_eq!(bind_fail_hourly_max_from(Some("30")), 30);
+        assert_eq!(bind_fail_hourly_max_from(Some("120")), 120);
+        assert_eq!(bind_fail_hourly_max_from(Some("600")), 600);
+        assert_eq!(bind_fail_hourly_max_from(Some("601")), 600);
+        assert_eq!(bind_fail_hourly_max_from(Some("99999")), 600);
+        // 前后空白可以容忍
+        assert_eq!(bind_fail_hourly_max_from(Some(" 240 ")), 240);
     }
 }

@@ -1227,7 +1227,7 @@ mod wx_save_failure_tests {
     #[test]
     fn bind_conflict_maps_to_400() {
         let e: anyhow::Error = crate::store::WxBindConflict(
-            "该微信已经绑定在「shuai4444」的账号上；一个微信只能绑一个主播，请先解绑旧的再扫"
+            "该微信已经绑定在另一个账号上；一个微信只能绑一个主播，请先解绑旧的再扫"
                 .into(),
         )
         .into();

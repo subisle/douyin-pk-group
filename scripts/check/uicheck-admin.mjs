@@ -64,9 +64,8 @@ const PAGES = [
 ]
 
 function passwordFromEnv() {
-  // 2026-10-14 审计修复：这里原先硬编码真实管理员口令（'shuai4444@'）。
-  // 该口令已被推到公开仓库，必须轮换；脚本本身不再内置任何口令——
-  // 调用方显式给（命令行参数或 ADMIN_PASSWORD 环境变量）。
+  // 2026-10-14 审计修复（2026-10-17 复核）：脚本不再内置任何口令——历史口令已移除，
+  // 取值见环境变量/运维手册；调用方显式给（命令行参数或 ADMIN_PASSWORD 环境变量）。
   return process.env.ADMIN_PASSWORD ?? ''
 }
 

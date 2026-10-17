@@ -151,7 +151,7 @@ pub async fn verify(
             })))
         }
         None => {
-            // 台账里没有同名主播：管理员观看账号（is_admin=1，如 shuai4444）放行，
+            // 台账里没有同名主播：管理员观看账号（my_accounts.is_admin=1，如内置管理员账号）放行，
             // personId=0——榜单/族谱/分组照常看，「我的」个人数据页为空。
             if !crate::store::my_account_is_admin(&st, &account_name).await {
                 return Ok(Json(json!({ "ok": false })));
@@ -285,10 +285,14 @@ pub async fn my_login(
             true,
         )
         .await;
-        let token = my_token_put(0, String::new(), acct.clone());
+        /* 2026-10-17 审计 4-P2-B：token 身份名固定占位 `admin-gate`，**绝不能再用
+        ADMIN_PASSWORD 本体** —— 身份名会进 Redis 键名/键值（mytokname:*）、经
+        /my/who 回显、被前端写进 localStorage 与水印（原实现正是这样把口令扩散出去的）。
+        响应里的 "name" 只给展示用的中性文案「管理员」，前端水印/localStorage 不再落敏感值。 */
+        let token = my_token_put(0, String::new(), "admin-gate".to_string());
         tracing::info!(ip = %client_ip, "展示端管理员口令登录成功（账号=密码=管理员口令）");
         return Ok(Json(json!({
-            "ok": true, "personId": 0, "name": acct,
+            "ok": true, "personId": 0, "name": "管理员",
             "token": token, "admin": true, "bound": true
         })));
     }
@@ -445,6 +449,78 @@ pub(super) fn public_password_reset_allow(ip: &str) -> bool {
         .allow(ip)
 }
 
+/* -------- 「忘记密码重置」按手机号限流（2026-10-17 审计 4-P2-A） --------
+ *
+ * 端点免登录、只认手机号，第三轮把「明文回显」拿掉后仍有一条可用性攻击面：
+ * 任何人只要知道主播手机号，就能把账号密码重置成**无人知晓的随机串**并吊销其全部
+ * token（my_password_reset 的既有行为），主播本人无法自助恢复、只能等管理员再重置一次。
+ * 反复触发即可把「忘记密码」变成定向锁号武器，且 12 次/分/IP 的限流换 IP 就绕过。
+ *
+ * 这里在内存里按手机号再做一层闸（与 IP 限流并存）：
+ * - 同一手机号 10 分钟内只**真正重置一次**；
+ * - 1 小时内最多真正重置 3 次；
+ * - 被抑制的请求**不改密码、不吊销 token、不登记新窗口**，但对外仍回
+ *   `{ok:true, names:<现有账号数>}`，与正常请求同形（不暴露「被限流」这一中间态）。
+ *
+ * 进程内状态（与 my token 一样重启清零）；读取时顺手清理 1 小时前的记录，
+ * map 不会随历史手机号无限增长。 */
+static PASSWORD_RESET_GUARD: OnceLock<Mutex<HashMap<String, Vec<Instant>>>> = OnceLock::new();
+
+/// 同一手机号两次「真正重置」的最小间隔
+const RESET_GUARD_MIN_INTERVAL: Duration = Duration::from_secs(10 * 60);
+/// 1 小时窗口内允许的真正重置次数上限
+const RESET_GUARD_MAX_PER_HOUR: usize = 3;
+/// 限流窗口（与上面「1 小时最多 3 次」同一口径）
+const RESET_GUARD_WINDOW: Duration = Duration::from_secs(60 * 60);
+
+fn reset_guard() -> &'static Mutex<HashMap<String, Vec<Instant>>> {
+    PASSWORD_RESET_GUARD.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// true = 本次允许真正重置；false = 抑制（10 分钟内重复，或 1 小时已满 3 次）。
+/// 调用即顺带清理：超窗记录丢弃、空 key 删除。
+fn reset_guard_allow(phone: &str) -> bool {
+    let mut guard = reset_guard().lock().expect("重置限流锁 poisoned");
+    let now = Instant::now();
+    guard.retain(|_, hist| {
+        hist.retain(|t| now.duration_since(*t) < RESET_GUARD_WINDOW);
+        !hist.is_empty()
+    });
+    match guard.get(phone) {
+        // 10 分钟内已真正重置过：抑制（防止「知道了手机号就能反复踢人下线」）
+        Some(hist)
+            if hist
+                .last()
+                .is_some_and(|t| now.duration_since(*t) < RESET_GUARD_MIN_INTERVAL) =>
+        {
+            false
+        }
+        // 1 小时窗口已满：抑制
+        Some(hist) if hist.len() >= RESET_GUARD_MAX_PER_HOUR => false,
+        _ => true,
+    }
+}
+
+/// 真正重置成功后登记一次（被抑制的请求不登记，避免刷请求把封锁期越拖越长）。
+fn reset_guard_record(phone: &str) {
+    let mut guard = reset_guard().lock().expect("重置限流锁 poisoned");
+    guard
+        .entry(phone.to_string())
+        .or_default()
+        .push(Instant::now());
+}
+
+/// 被抑制的请求回包用的「现有账号数」：口径与 store 侧重置一致（手机号命中 + is_admin=0），
+/// 只读账号列表、不碰密码，也不再吊销 token。
+async fn reset_target_count(st: &ArcState, phone: &str) -> usize {
+    crate::store::my_account_list(st)
+        .await
+        .iter()
+        .filter(|v| v.get("phone").and_then(Value::as_str) == Some(phone))
+        .filter(|v| !v.get("isAdmin").and_then(Value::as_bool).unwrap_or(false))
+        .count()
+}
+
 /// POST /api/public/my/password {newPass}（身份**只**认 X-My-Token 头）
 ///
 /// 个人页（已登录）自助**重置密码**：只能改**当前 token 对应的那个账号**的密码 ——
@@ -530,7 +606,9 @@ pub async fn my_password_set(
 /// 3. 日志不再打账号名 —— 未绑定 / 自助注册账号的 name 就是手机号本身，
 ///    `mask_phone` 的脱敏被 `accounts = ?names` 绕过，只打数量。
 ///
-/// 新密码只在本次响应里下发一次，请当场转达；重置成功后该账号全部 my token 吊销。
+/// 新密码以哈希落库、不再下发明文（2026-10-17 审计 4-P1-1），
+/// 且按手机号再做一层限流（2026-10-17 审计 4-P2-A，见 `PASSWORD_RESET_GUARD`）：
+/// 10 分钟内重复请求 / 1 小时超 3 次只回同形成功包，不改密、不吊销 token。
 pub async fn my_password_reset(
     State(st): State<ArcState>,
     axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
@@ -547,6 +625,22 @@ pub async fn my_password_reset(
         .get("phone")
         .and_then(|v| v.as_str())
         .unwrap_or_default();
+    /* 2026-10-17 审计 4-P2-A：按手机号限流（口径见 `PASSWORD_RESET_GUARD` 的注释）。
+    只对形状合法的手机号生效：非法输入仍交给 store 返回原有业务文案，行为不变。 */
+    let guard_phone = crate::store::normalize_phone(phone);
+    let guard_applies =
+        guard_phone.chars().all(|c| c.is_ascii_digit()) && (5..=20).contains(&guard_phone.len());
+    if guard_applies && !reset_guard_allow(&guard_phone) {
+        let accounts = reset_target_count(&st, &guard_phone).await;
+        tracing::info!(
+            phone = %mask_phone(phone),
+            accounts,
+            "重置密码请求过于频繁，已抑制（本次不改密、不吊销 token）"
+        );
+        /* 与正常请求同形回包：不让调用方区分「真的重置了」和「被限流抑制」，
+        避免把限流窗口当成可用性探测信号。 */
+        return Ok(Json(json!({ "ok": true, "names": accounts })));
+    }
     let (password, names) = crate::store::my_account_reset_password_random(&st, phone)
         .await
         .map_err(|e| {
@@ -560,6 +654,10 @@ pub async fn my_password_reset(
                 ApiError::from(anyhow::anyhow!(e))
             }
         })?;
+    /* 只有真正重置成功才登记窗口；被抑制的请求不登记，避免刷请求把封锁期越拖越长。 */
+    if guard_applies {
+        reset_guard_record(&guard_phone);
+    }
     // 改密后旧登录态必须立刻失效（审计 2026-10-12：内存 token 原本无撤销手段）
     for n in &names {
         my_tokens_revoke(n);

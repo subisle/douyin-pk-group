@@ -199,6 +199,15 @@ pub async fn get_settings(State(st): State<ArcState>) -> ApiResult {
     v["starIcon"] = json!(crate::store::config_get(&st, "star_icon")
         .await
         .unwrap_or_default());
+    /* 推送图字段显隐（2026-10-17 用户口径）：日报 / 师门日报推送图的每一列是否显示，
+    存 config `push_report_fields`（JSON；缺省/损坏 = 全部显示）。推送引擎 push.rs
+    读同一份配置，前端只负责改。 */
+    let fields = crate::report::PushReportFields::from_json(
+        &crate::store::config_get(&st, "push_report_fields")
+            .await
+            .unwrap_or_default(),
+    );
+    v["pushReportFields"] = serde_json::to_value(&fields).unwrap_or_default();
     Ok(Json(v))
 }
 
@@ -238,6 +247,15 @@ pub async fn update_settings(State(st): State<ArcState>, Json(body): Json<Value>
         if let Some(v) = body.get(body_key) {
             let val = v.as_str().unwrap_or_default().trim().to_string();
             crate::store::config_set(&st, key, &val).await;
+        }
+    }
+    /* 推送图字段显隐（2026-10-17）：传了 `pushReportFields` 对象就整包覆盖，
+    缺字段由 #[serde(default)] 回落「显示」（与旧数据兼容，不会因为少传一个
+    键把运营没动过的列关掉）；传非对象 / 不传 = 保持原配置。 */
+    if let Some(obj) = body.get("pushReportFields").filter(|v| v.is_object()) {
+        let fields = crate::report::PushReportFields::from_json(&obj.to_string());
+        if let Ok(json) = fields.to_json() {
+            crate::store::config_set(&st, "push_report_fields", &json).await;
         }
     }
     s.save(&st).await;

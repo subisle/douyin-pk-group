@@ -163,6 +163,24 @@ impl IntoResponse for ApiError {
     }
 }
 
+/// 从 `Authorization` 头取 token（`Bearer xxx` 与裸 token 两种写法都认）。
+///
+/// 与 `auth.rs::Auth::token_of` 同口径；那边是 auth.rs 的私有函数、本轮不动
+/// auth.rs（另一进程在改），这里保留一份最小副本，只给 `/api/health` 的诊断分支用。
+fn bearer_token(headers: &axum::http::HeaderMap) -> Option<String> {
+    let raw = headers
+        .get(axum::http::header::AUTHORIZATION)?
+        .to_str()
+        .ok()?
+        .trim()
+        .to_string();
+    let token = match raw.split_once(' ') {
+        Some((scheme, rest)) if scheme.eq_ignore_ascii_case("bearer") => rest.trim(),
+        _ => raw.as_str(),
+    };
+    (!token.is_empty()).then(|| token.to_string())
+}
+
 /// `GET /api/health`：探活。P2-21 增强 —— 除了只读库连通性，还探写池与调度器：
 /// - `db`：当前数据源（只读池）连通性（沿用原口径，连不上不 500）
 /// - `writer`：douyin_writer 写池连通性；未配置/连不上时 ok=false 并带原因
@@ -171,7 +189,18 @@ impl IntoResponse for ApiError {
 /// P0（docs/17 §7.3）再加 `redis`：`"disabled"`（未配置 `REDIS_URL`）/ `"up"`（PING 通，
 /// 500ms 超时）/ `"down"`（配了但连不上）。**down 只代表缓存层降级，不影响整体 health
 /// 语义，本接口始终 200**——停 Redis 时服务行为与引入前完全一致。
-pub async fn health(State(st): State<std::sync::Arc<AppState>>) -> ApiResult {
+///
+/// 2026-10-17 第四轮审计 D 域 P3-6：**免登录只回最小 `{"status":"ok"}`**；只有带
+/// 有效管理员 `Authorization` 的调用（运维探针 / 后台诊断）才拿到上面这些细节 ——
+/// 否则匿名即可探测「写库是否配置、调度器最后运行时刻、Redis 三态」，可被用来踩点。
+pub async fn health(
+    State(st): State<std::sync::Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+) -> ApiResult {
+    let authed = bearer_token(&headers).is_some_and(|t| st.auth.verify(&t));
+    if !authed {
+        return Ok(Json(json!({ "status": "ok" })));
+    }
     let db = pgrs::health_check(&st.pools, &st.active_id()).await;
     let writer = match &st.writer {
         Some(pool) => {

@@ -9,7 +9,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 BIN_SRC="$ROOT/rust/target/aarch64-unknown-linux-gnu/release/pk-server"
 WEB_SRC="$ROOT/apps/douyin-web/dist"
-DEST="root@192.168.5.24"
+RK3328_HOST="${RK3328_HOST:?请设置 RK3328_HOST（rk3328 局域网地址）}"
+DEST="root@$RK3328_HOST"
 REMOTE_DIR="/opt/pk-dev"
 SSH="ssh -o ConnectTimeout=10 $DEST"
 

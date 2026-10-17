@@ -340,7 +340,7 @@ export default function StreamerPage() {
     }
   }, [ctxMenu])
 
-  /** 右键 → 设置「我的」页面账号：手机号（选填）+ 纯数字密码；主播用 姓名+密码 登录，没有注册 */
+  /** 右键 → 设置「我的」页面账号：手机号（选填）+ 密码（字母/数字/点，4~20 位）；主播用 姓名+密码 登录，没有注册 */
   async function openMyAccount(name: string) {
     setError('')
     setMsg('')
@@ -1238,12 +1238,11 @@ export default function StreamerPage() {
               onChange={(e) => setMyAccPop({ ...myAccPop, phone: e.target.value })}
             />
             <label className="hint" style={{ display: 'block', marginTop: 8 }}>
-              {myAccPop.exists ? '新密码（纯数字，4~20 位；留空 = 不修改）' : '密码（纯数字，4~20 位）'}
+              {myAccPop.exists ? '新密码（字母/数字/点，4~20 位；留空 = 不修改）' : '密码（字母/数字/点，4~20 位）'}
             </label>
             <input
               value={myAccPop.pass}
-              inputMode="numeric"
-              placeholder="4~20 位数字"
+              placeholder="4~20 位字母、数字或点"
               onChange={(e) => setMyAccPop({ ...myAccPop, pass: e.target.value })}
             />
             {/* 可看团别（2026-10-15）：只对**管理员观看账号**开放 —— 普通主播账号

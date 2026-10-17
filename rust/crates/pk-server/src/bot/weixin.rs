@@ -141,6 +141,76 @@ fn normalize_base(base_url: &str) -> String {
     }
 }
 
+/* --------------------- 出网闸门（HTTP 出口二级兜底） ---------------------
+ *
+ * 窄口 `user_send_text` / `send` / `send_proactive` 已按闸门返回 `Err(Blocked)`
+ * （被拦 ≠ 发送成功，见 `push::Blocked` 注释）。这里在 HTTP 出口再兜一层，
+ * 防止将来新增调用绕过窄口直接出网：
+ *   - `sendmessage`（真发消息）：未开闸 → WARN + `Err(Blocked)`，请求根本不构造；
+ *   - `msg/notifystart` / `msg/notifystop`（生命周期上报）：未开闸 → INFO 后返回
+ *     空 JSON、跳过网络调用。这两条不是用户可见消息，关闸期没必要出网；返回
+ *     Ok 是为了不让 `start()` / `stop()` 把「跳过」当成失败反复告警。
+ */
+
+/// 出网闸门对某条路由的处置（纯函数，便于单测；环境变量只在入口读一次）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutboundGate {
+    /// 照常出网
+    Allow,
+    /// 拦截：返回 `Err(Blocked)`，不发请求
+    Blocked,
+    /// 未开闸且是生命周期上报：跳过网络调用，返回空 JSON
+    Skip,
+}
+
+fn outbound_route_gate(route: &str, enabled: bool) -> OutboundGate {
+    if enabled {
+        return OutboundGate::Allow;
+    }
+    match route {
+        "sendmessage" => OutboundGate::Blocked,
+        "msg/notifystart" | "msg/notifystop" => OutboundGate::Skip,
+        _ => OutboundGate::Allow,
+    }
+}
+
+/// 在 HTTP 出口执行闸门判定：`None` = 照常出网；`Some` = 直接返回该结果。
+fn apply_outbound_route_gate(route: &str) -> Option<anyhow::Result<Value>> {
+    match outbound_route_gate(route, crate::push::push_out_enabled()) {
+        OutboundGate::Allow => None,
+        OutboundGate::Blocked => {
+            tracing::warn!(
+                route,
+                "【测试阶段】出网闸门拦截微信发送（未发请求）；要真实发送请设 PUSH_OUT_ENABLED=1"
+            );
+            Some(Err(crate::push::Blocked.into()))
+        }
+        OutboundGate::Skip => {
+            tracing::info!(
+                route,
+                "【测试阶段】出网闸门未开，跳过微信生命周期上报（未发请求）"
+            );
+            Some(Ok(Value::Null))
+        }
+    }
+}
+
+/// 管理员全局机器人通道（旧手机号 / 绑定码绑定的人走这里）能否真实出网。
+/// 这条通道的会话只有 from_user_id，对不上 `PUSH_OUT_ALLOW` 里的展示端账号名，
+/// 所以白名单非空时一律拦截（灰度期宁可少发）。扫码账号走的是
+/// `push_out_allowed_for_account`（按账号名匹配），不共用这个判断。
+fn global_bot_gate_allows(enabled: bool, allow_nonempty: bool) -> bool {
+    enabled && !allow_nonempty
+}
+
+/// `global_bot_gate_allows` 的读环境变量版本（send / send_proactive 共用）。
+fn global_bot_gate_open() -> bool {
+    global_bot_gate_allows(
+        crate::push::push_out_enabled(),
+        crate::push::push_out_allow_nonempty(),
+    )
+}
+
 /// 无状态 JSON 调用：二维码请求 / 状态轮询 / 长轮询 / 发消息共用。
 /// POST 一律带 AuthorizationType（官方协议：二维码 POST 也带）与 X-WECHAT-UIN。
 pub(crate) async fn wx_json(
@@ -151,6 +221,10 @@ pub(crate) async fn wx_json(
     token: Option<&str>,
     body: Option<Value>,
 ) -> anyhow::Result<Value> {
+    // 出网闸门二级兜底：sendmessage 未开闸时直接 Blocked，请求不构造
+    if let Some(gated) = apply_outbound_route_gate(route) {
+        return gated;
+    }
     let base = normalize_base(base_url);
     anyhow::ensure!(is_trusted_host(&base), "微信接口地址不可信: {base}");
     let mut req =
@@ -264,7 +338,8 @@ pub async fn user_poll_updates(base_url: &str, token: &str, cursor: &str) -> any
 /// 2026-10-16：**这里是所有微信出网的必经窄口**（push.rs 的推送、admin_send.rs 的
 /// 管理员下发最终都调到这里），所以测试阶段的出网闸门装在这一层最稳 ——
 /// 上层任何新增发送路径都不可能绕过它。开关 `PUSH_OUT_ENABLED`（语义见
-/// `push::push_out_enabled`）：未开时只记 WARN 日志、不发消息、返回 Ok。
+/// `push::push_out_enabled`）：未开时只记 WARN 日志、不发消息、返回
+/// `Err(push::Blocked)` —— 被拦 ≠ 发送成功，调用方据此**不推进**去重标记。
 pub async fn user_send_text(
     st: &AppState,
     base_url: &str,
@@ -475,6 +550,11 @@ impl WxTransport {
 
     /// 带信封的鉴权 POST（getupdates / sendmessage / notifystart 等）
     async fn post_json(&self, route: &str, mut body: Value) -> anyhow::Result<Value> {
+        // 出网闸门二级兜底（见 apply_outbound_route_gate 上方说明）：
+        // sendmessage 拦截为 Blocked，生命周期上报在关闸期直接跳过网络调用。
+        if let Some(gated) = apply_outbound_route_gate(route) {
+            return gated;
+        }
         let payload = body.as_object_mut().expect("body 必须是对象");
         let base_info = payload
             .remove("base_info")
@@ -857,21 +937,23 @@ impl WxTransport {
     async fn send(&self, out: &Outbound) -> anyhow::Result<()> {
         /* 2026-10-17 本地灰度：这是管理员全局机器人通道（不是用户扫码账号），
         会话对不上 PUSH_OUT_ALLOW 白名单的账号名 —— 白名单非空时一律拦截
-        （灰度期只放白名单里的扫码账号，宁可少发）。 */
-        let preview: String = out.text.chars().take(120).collect();
-        if !crate::push::push_out_enabled() {
-            tracing::warn!(
-                conversation = %out.conversation_id, preview = %preview,
-                "【测试阶段】已拦截微信回复发送（未发）；要真实发送请设 PUSH_OUT_ENABLED=1"
-            );
-            return Ok(());
-        }
-        if crate::push::push_out_allow_nonempty() {
-            tracing::warn!(
-                conversation = %out.conversation_id, preview = %preview,
-                "【本地灰度】白名单只对微信扫码账号生效，全局机器人回复已拦截（未发）"
-            );
-            return Ok(());
+        （灰度期只放白名单里的扫码账号，宁可少发）。
+        2026-10-17 第四轮审计 P1-1：拦截时返回 `Err(Blocked)` 而不是 Ok ——
+        「被闸拦下 ≠ 发送成功」，上层据此不把这次回复当成已经送达。 */
+        if !global_bot_gate_open() {
+            let preview: String = out.text.chars().take(120).collect();
+            if !crate::push::push_out_enabled() {
+                tracing::warn!(
+                    conversation = %out.conversation_id, preview = %preview,
+                    "【测试阶段】已拦截微信回复发送（未发）；要真实发送请设 PUSH_OUT_ENABLED=1"
+                );
+            } else {
+                tracing::warn!(
+                    conversation = %out.conversation_id, preview = %preview,
+                    "【本地灰度】白名单只对微信扫码账号生效，全局机器人回复已拦截（未发）"
+                );
+            }
+            return Err(crate::push::Blocked.into());
         }
         let (to_user, group, context_token) = {
             let inner = self.inner.lock().await;
@@ -895,21 +977,23 @@ impl WxTransport {
         anyhow::ensure!(self.configured(), "微信渠道未初始化");
         /* 2026-10-16：测试阶段出网闸门（与 user_send_text 同一开关）。
         这条是管理员全局机器人通道（旧手机号/绑定码绑定的人走这里）。
-        2026-10-17 本地灰度：白名单非空时全局机器人通道一律拦截（对不上账号名）。 */
-        let preview: String = text.chars().take(120).collect();
-        if !crate::push::push_out_enabled() {
-            tracing::warn!(
-                conversation_id, preview = %preview,
-                "【测试阶段】已拦截微信主动推送（未发）；要真实发送请设 PUSH_OUT_ENABLED=1"
-            );
-            return Ok(());
-        }
-        if crate::push::push_out_allow_nonempty() {
-            tracing::warn!(
-                conversation_id, preview = %preview,
-                "【本地灰度】白名单只对微信扫码账号生效，全局机器人主动推送已拦截（未发）"
-            );
-            return Ok(());
+        2026-10-17 本地灰度：白名单非空时全局机器人通道一律拦截（对不上账号名）。
+        2026-10-17 第四轮审计 P1-1：拦截返回 `Err(Blocked)`（不再返回 Ok），
+        让 push.rs 等调用方认出「这轮没发出去」、不推进去重标记。 */
+        if !global_bot_gate_open() {
+            let preview: String = text.chars().take(120).collect();
+            if !crate::push::push_out_enabled() {
+                tracing::warn!(
+                    conversation_id, preview = %preview,
+                    "【测试阶段】已拦截微信主动推送（未发）；要真实发送请设 PUSH_OUT_ENABLED=1"
+                );
+            } else {
+                tracing::warn!(
+                    conversation_id, preview = %preview,
+                    "【本地灰度】白名单只对微信扫码账号生效，全局机器人主动推送已拦截（未发）"
+                );
+            }
+            return Err(crate::push::Blocked.into());
         }
         let (to_user, token) = match crate::store::wx_session_get(&self.st, conversation_id).await {
             Some(v) => v,
@@ -1140,6 +1224,52 @@ mod tests {
     fn client_version_matches_protocol_packing() {
         // 0x0002040A = 2.4.10 → 132106
         assert_eq!(client_version_decimal(), "132106");
+    }
+
+    /* 闸门判定用的是纯函数：这里**不读写环境变量** —— push.rs 的测试模块有自己的
+    ENV_LOCK，跨模块的 PUSH_OUT_ENABLED 改动不受它保护，会随机污染那边的用例。
+    环境变量只在 global_bot_gate_open / apply_outbound_route_gate 入口读一次，
+    纯函数把「开关值 + 白名单是否非空」作为入参，语义等价且可安全并行测试。 */
+
+    #[test]
+    fn global_bot_gate_requires_open_and_no_allowlist() {
+        // 关闸：无论白名单 → 拦
+        assert!(!global_bot_gate_allows(false, false));
+        assert!(!global_bot_gate_allows(false, true));
+        // 开闸 + 无白名单 → 放行（上线口径）
+        assert!(global_bot_gate_allows(true, false));
+        // 开闸 + 白名单非空 → 全局机器人通道对不上账号名，仍然拦
+        assert!(!global_bot_gate_allows(true, true));
+    }
+
+    #[test]
+    fn outbound_route_gate_blocks_send_and_skips_lifecycle() {
+        // 关闸：真发消息必须 Blocked（不是 Ok），生命周期上报跳过网络调用
+        assert_eq!(
+            outbound_route_gate("sendmessage", false),
+            OutboundGate::Blocked
+        );
+        assert_eq!(
+            outbound_route_gate("msg/notifystart", false),
+            OutboundGate::Skip
+        );
+        assert_eq!(
+            outbound_route_gate("msg/notifystop", false),
+            OutboundGate::Skip
+        );
+        // 关闸只拦「出网发消息」类路由，扫码/轮询不受影响
+        assert_eq!(
+            outbound_route_gate("getupdates", false),
+            OutboundGate::Allow
+        );
+        assert_eq!(
+            outbound_route_gate("get_qrcode_status", false),
+            OutboundGate::Allow
+        );
+        // 开闸：一律放行
+        for route in ["sendmessage", "msg/notifystart", "msg/notifystop"] {
+            assert_eq!(outbound_route_gate(route, true), OutboundGate::Allow);
+        }
     }
 
     #[test]

@@ -72,3 +72,25 @@ audit-*.md
 
 # MCP 配置（含 API Key，绝不入库）
 .mcp.json
+
+# ---------------------------------------------------------------------------
+# 2026-10-17 第四轮安全审计（E 域）补：凭证文件与审计记录
+# ---------------------------------------------------------------------------
+# 环境变量文件：先前只有精确名 `.env` 与 `.env.local*`，漏掉 `.env.prod`
+# （deploy/docker-compose.prod.yml 文档要求 cp .env.prod.example → .env.prod）等变体。
+# 示例文件例外，继续入库。
+.env
+.env.*
+!.env.example
+!*.env.example
+
+# 生产编排凭证（147/64 上的 .env.prod 手抄件，绝不入库）
+*.env.prod
+
+# dev compose 的备份落盘目录与备份脚本配置（pg_dump 含主播手机号等 PII）
+deploy/backup-pg/
+deploy/backup.env
+backup.env
+
+# 安全审计记录（含口令/手机号/内网拓扑引用，本地保留不入库；2026-10-17 第四轮补）
+audit-conflicts/

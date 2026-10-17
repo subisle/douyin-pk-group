@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 一条命令把 main 分支发布到 147（147.90.235.187，现役生产 https://pk.subisle.com）。
+# 一条命令把 main 分支发布到 147（147.90.***.***，现役生产 https://pk.subisle.com）。
 #
 #   PK147_PASS='<root 口令>' scripts/deploy/147.sh
 #   PK147_PASS='<root 口令>' PK147_PROXY=127.0.0.1:7890 scripts/deploy/147.sh
@@ -21,7 +21,7 @@
 set -euo pipefail
 
 ARCH="${PK147_ARCH:-amd64}"
-HOST="${PK147_HOST:-147.90.235.187}"
+HOST="${PK147_HOST:?请设置 PK147_HOST（147 生产机地址）}"
 # 口令不写死：仓库是公开的，硬编码等于把 root 口令发到 GitHub。
 PASS="${PK147_PASS:?请用环境变量提供 PK147_PASS，例如 PK147_PASS='xxx' scripts/deploy/147.sh}"
 DIR="${PK147_DIR:-/opt/pk-server}"

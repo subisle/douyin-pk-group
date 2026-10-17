@@ -2,7 +2,7 @@
 # 把 main 分支发布到一台自建部署机：等 CI → 触发对应架构的镜像包 → 下载 → 导入 → 重启 → 自检。
 #
 #   scripts/deploy/host.sh                      # 用下面默认值
-#   scripts/deploy/host.sh 115.159.72.31 amd64  # 显式指定主机与架构
+#   scripts/deploy/host.sh <部署机地址> amd64   # 显式指定主机与架构
 #
 # 架构决定三件事：跑哪个 bundle 工作流、下哪个 release、docker load 什么镜像。
 #
@@ -12,7 +12,7 @@
 set -euo pipefail
 
 ARCH="${2:-amd64}"
-HOST="${RK_HOST:-115.159.72.31}"
+HOST="${RK_HOST:?请设置 RK_HOST（部署机地址，例：1.2.3.4）}"
 # 口令不写死：仓库是公开的，硬编码等于把 root 口令发到 GitHub。
 PASS="${RK_PASS:?请用环境变量提供 RK_PASS，例如 RK_PASS='xxx' scripts/deploy/host.sh}"
 DIR="${RK_DIR:-/opt/pk-server}"
@@ -96,8 +96,8 @@ sshpass -p "$PASS" ssh -o StrictHostKeyChecking=accept-new "root@$HOST" "
 
 # 5. 真跑一遍渲染自检：路由深链 / 导航 / 弹窗（只读模式，不写库）
 echo "==> 渲染自检（uicheck-admin，只读模式）"
-# 2026-10-14 审计修复：原先硬编码真实管理员口令（'shuai4444@'），已随公开仓库泄露。
-# 改由 RK_ADMIN 环境变量提供；为空时 uicheck-admin 会自己报「缺少管理员口令」并退出。
+# 2026-10-14 审计修复（2026-10-17 复核）：脚本不再内置任何口令——历史口令已移除，
+# 取值见环境变量/运维手册。管理员口令由 RK_ADMIN 提供；为空时 uicheck-admin 会报「缺少管理员口令」并退出。
 ADMIN="${RK_ADMIN:-}"
 # 部署自检默认只读（UICHECK_READONLY=1）：只跑路由与渲染断言，不写 2019-01-01 测试日。
 # 全量自检（含入库/删除回环）请在测试环境手动跑：UICHECK_READONLY= node scripts/check/uicheck-admin.mjs。

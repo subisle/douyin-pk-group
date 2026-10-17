@@ -71,6 +71,13 @@ fn resolve(dist_dir: &Path, uri_path: &str) -> Option<PathBuf> {
     }
     let mut out = dist_dir.to_path_buf();
     for seg in decoded.split('/') {
+        /* 2026-10-17 第四轮审计 D 域 P3-7：POSIX 下 `\` 只是普通文件名字符，但 Windows
+        的 `PathBuf::push` 会把 `\` 当分隔符、把 `C:` 当盘符前缀 —— 同一个 resolve 在
+        Windows 构建上就能被 `/assets/..%5c..%5cetc%5cpasswd` 逃出 dist。生产/本机
+        虽然都是 POSIX，这里统一拒掉这两类字符，把「平台差异」变成显式约束。 */
+        if seg.contains('\\') || seg.contains(':') {
+            return None;
+        }
         match seg {
             "" | "." => continue,
             // 任何试图往上跳的片段都直接拒掉，不做 normalize 兜底
@@ -224,6 +231,33 @@ mod tests {
     #[test]
     fn rejects_embedded_nul() {
         assert_eq!(resolve(Path::new("/srv/web"), "/a%00.png"), None);
+    }
+
+    /// 回归（2026-10-17 第四轮审计 D 域 P3-7）：反斜杠 / Windows 盘符前缀必须拒。
+    ///
+    /// 旧实现在 POSIX 上会把 `..%5c..%5cetc%5cpasswd` 解成**一个**合法文件名
+    /// （`..\..\etc\passwd`，`\` 在 POSIX 不是分隔符），只要 dist 里恰好存在同名文件
+    /// 就会命中；在 Windows 上更会直接跳出 dist。这里先在 dist 里真的造出这种
+    /// 「带反斜杠的文件名」，断言新实现**即使文件存在也拒**（否则测试在旧实现下也会过）。
+    /// 只在非 Windows 跑：Windows 上 `dir.join("..\\..\\x")` 本身就会跳出临时目录。
+    #[cfg(not(windows))]
+    #[test]
+    fn rejects_windows_backslash_and_drive_prefix() {
+        let dir = std::env::temp_dir().join(format!("pk-spa-winsep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("建临时目录");
+        // POSIX 允许文件名里带 `\` / `:`：旧实现 out.push(整段) 后能 is_file() 命中它们
+        std::fs::write(dir.join("..\\..\\etc\\passwd"), b"x").expect("造反斜杠文件");
+        std::fs::write(dir.join("C:windows"), b"x").expect("造盘符文件");
+
+        assert_eq!(resolve(&dir, "/..%5c..%5cetc%5cpasswd"), None);
+        assert_eq!(resolve(&dir, "/%2e%2e%5c%2e%2e%5cetc%5cpasswd"), None);
+        assert_eq!(resolve(&dir, "/C:windows"), None);
+        // 正常文件名不受影响（`-`/`.`/中文都照旧）
+        std::fs::write(dir.join("正常-文件.js"), b"x").expect("写正常文件");
+        assert!(resolve(&dir, "/正常-文件.js").is_some());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

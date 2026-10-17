@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# 直连部署到腾讯云 115.159.72.31，公网端口 6666。
+# 直连部署到腾讯云开发机（地址由 DEPLOY_HOST 提供），公网端口 6666。
 # 用法：scripts/deploy/115.sh
 # 可覆盖：DEPLOY_HOST / DEPLOY_PASS / DEPLOY_DIR / DEPLOY_PORT
 set -euo pipefail
 
-HOST="${DEPLOY_HOST:-115.159.72.31}"
+HOST="${DEPLOY_HOST:?请设置 DEPLOY_HOST（115 开发机地址）}"
 # 密码不写死：仓库是公开的，写在这里等于把 root 口令发到 GitHub。
 # 用法：DEPLOY_PASS='<root 密码>' scripts/deploy/115.sh
 PASS="${DEPLOY_PASS:?请用环境变量提供 DEPLOY_PASS，例如 DEPLOY_PASS='xxx' scripts/deploy/115.sh}"

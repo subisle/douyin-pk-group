@@ -257,25 +257,25 @@ pub async fn yearly(State(st): State<ArcState>, Query(q): Query<MetricsQuery>) -
 }
 
 async fn period_metrics(st: &AppState, q: MetricsQuery, is_month: bool) -> ApiResult {
-    let period = match q.period.as_deref() {
-        Some(p) if !p.trim().is_empty() => p.trim().to_string(),
-        _ if is_month => chrono::Local::now().format("%Y-%m").to_string(),
-        _ => chrono::Local::now().format("%Y").to_string(),
-    };
-    let ok_chars = period.chars().all(|c| c.is_ascii_digit() || c == '-');
-    let len_ok = if is_month {
-        period.len() == 7
+    /* period 形状校验（2026-10-17 审计 4-P3-1）：原先只查「字符集 + 长度」，
+    `2026-1-`（月）/ `20-2`（年）这类畸形窗口能通过，like_to_date_range 认不出
+    形状就退回「全时间范围」→ 月/年指标把全时段聚合当该窗口返回（数值错）。
+    现在统一走 dialect::valid_period_shape；非法回退当前窗口并记 debug
+    （与展示端 site::period_public 同一口径）。 */
+    let want_len = if is_month { 7 } else { 4 };
+    let default_period = if is_month {
+        chrono::Local::now().format("%Y-%m").to_string()
     } else {
-        period.len() == 4
+        chrono::Local::now().format("%Y").to_string()
     };
-    if !ok_chars || !len_ok {
-        return Err(anyhow::anyhow!(if is_month {
-            "period 格式应为 YYYY-MM"
-        } else {
-            "period 格式应为 YYYY"
-        })
-        .into());
-    }
+    let period = match q.period.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(p) if dialect::valid_period_shape(p) && p.len() == want_len => p.to_string(),
+        Some(p) => {
+            tracing::debug!(period = %p, is_month, "管理端月/年指标 period 形状非法，回退当前窗口");
+            default_period
+        }
+        None => default_period,
+    };
     let team = q.team.as_deref().unwrap_or("");
     if !team.is_empty() && team != "male" && team != "female" {
         return Err(anyhow::anyhow!("team 只能是 male / female").into());

@@ -652,7 +652,7 @@ mod tests {
     /// 存量短密码账号登录不受影响。
     #[test]
     fn my_account_password_rule() {
-        assert!(validate_my_account("shuai4444", "shuai4444").is_ok());
+        assert!(validate_my_account("example_user", "example_user").is_ok());
         assert!(validate_my_account("狼哲", "13312345678").is_ok());
         assert!(
             validate_my_account("啸帆", "133-1234-5678").is_err(),

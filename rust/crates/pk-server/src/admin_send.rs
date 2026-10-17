@@ -1058,7 +1058,12 @@ async fn wx_send_lineage_images(
     watermark: &str,
 ) -> anyhow::Result<usize> {
     let (to_user, ctx) = wx_session_ctx(st, Some(a), conv).await?;
-    let svgs = crate::lineage_report::render_svg_pages(rep, 40, watermark);
+    /* 字段显隐与推送同一份配置（2026-10-17）：管理员下发师门日报图也按后台勾选渲染 */
+    let fields = crate::store::config_get(st, "push_report_fields")
+        .await
+        .map(|v| crate::report::PushReportFields::from_json(&v))
+        .unwrap_or_default();
+    let svgs = crate::lineage_report::render_svg_pages_with_fields(rep, 40, watermark, &fields.lineage);
     anyhow::ensure!(!svgs.is_empty(), "师门日报没有可渲染的页面");
     let mut pages = 0usize;
     for (i, svg) in svgs.iter().enumerate() {
@@ -1454,7 +1459,14 @@ pub async fn my_message_image(
     let Ok(rep) = crate::lineage_report::build(&st, &date, person_id).await else {
         return not_found();
     };
-    let svgs = crate::lineage_report::render_svg_pages(&rep, 40, &name);
+    /* 预览图与推送图同一份字段配置（2026-10-17）：运营在后台关掉的列，
+    「我的」页弹窗里的师门日报图也不显示 */
+    let fields = crate::store::config_get(&st, "push_report_fields")
+        .await
+        .map(|v| crate::report::PushReportFields::from_json(&v))
+        .unwrap_or_default();
+    let svgs =
+        crate::lineage_report::render_svg_pages_with_fields(&rep, 40, &name, &fields.lineage);
     let Some(svg) = svgs.first() else {
         return not_found();
     };
