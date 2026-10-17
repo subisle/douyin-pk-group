@@ -49,31 +49,6 @@ const EMPTY_PLACEMENTS: PlacementsMap = {
 }
 const EMPTY_CELEBRATE: CelebrateCfg = { enabled: false, confetti: false, title: '', name: '', wave: '0' }
 
-/** 每日之星弹幕带（2026-10-18 v2）：展示端数据看板顶部的常驻弹幕区（普通文档流、不遮挡榜单）。
-    对应后端 Announcement.starDanmaku（camelCase）。数字字段 state 存字符串方便 number 输入框，
-    保存时转数字；opacity 后端是 0.30~0.90，管理端用百分比（30~90）编辑。
-    评论功能后续单开，本结构不含评论字段。 */
-type StarDanmakuCfg = {
-  enabled: boolean
-  scope: string
-  perRound: string
-  lanes: string
-  speed: string
-  opacity: string
-  intervalSec: string
-  showWave: boolean
-}
-const EMPTY_STAR_DM: StarDanmakuCfg = {
-  enabled: false,
-  scope: 'top3',
-  perRound: '6',
-  lanes: '5',
-  speed: '45',
-  opacity: '60',
-  intervalSec: '3',
-  showWave: false,
-}
-
 /** 展示页公告条（2026-10-14）：可配多条，数组顺序 = 展示端从上到下。
     对应后端 Announcement.items[idx]；tone：brand = 紫金渐变（原庆祝条样式）、
     plain = 白底描边（原冠军条样式）。wave 同 celebrate 存字符串方便 number 输入框，
@@ -163,8 +138,6 @@ export default function AnnouncePage() {
   const [placements, setPlacements] = useState<PlacementsMap>(EMPTY_PLACEMENTS)
   // 庆祝配置 v2：受控输入；wave 在 state 里是字符串（number 输入框好编辑），保存时转数字
   const [celebrate, setCelebrate] = useState<CelebrateCfg>(EMPTY_CELEBRATE)
-  // 每日之星弹幕带（2026-10-18 v2）：常驻带配置
-  const [starDm, setStarDm] = useState<StarDanmakuCfg>(EMPTY_STAR_DM)
   // 展示页公告条（2026-10-14）：多条列表，顺序即展示顺序
   const [items, setItems] = useState<AnnounceItemCfg[]>([])
   /** GET 里有没有 items 这个 key：老后端不下发时保存不发 items，避免整包替换把已有配置清空 */
@@ -244,17 +217,6 @@ export default function AnnouncePage() {
       version: number
       placements?: Partial<Record<PlacementKey, Partial<PlacementCfg>>>
       celebrate?: Partial<CelebrateCfg>
-      /** 每日之星弹幕带（2026-10-18 v2）：老后端不下发 → 按默认（关） */
-      starDanmaku?: {
-        enabled?: boolean
-        scope?: string
-        perRound?: number
-        lanes?: number
-        speed?: number
-        opacity?: number
-        intervalSec?: number
-        showWave?: boolean
-      }
       /** 展示页公告条（2026-10-14）：全量下发（含 enabled=false），编辑初值就是它 */
       items?: {
         enabled?: boolean
@@ -299,18 +261,6 @@ export default function AnnouncePage() {
           title: c.title ?? '',
           name: c.name ?? '',
           wave: String(c.wave ?? 0),
-        })
-        // 弹幕带初始化：逐字段兜底（老后端无字段 = 默认关）；opacity 0.30~0.90 → 30~90 百分比
-        const sd = d.starDanmaku ?? {}
-        setStarDm({
-          enabled: !!sd.enabled,
-          scope: sd.scope === 'top1' ? 'top1' : 'top3',
-          perRound: String(sd.perRound ?? 3),
-          lanes: String(sd.lanes ?? 5),
-          speed: String(sd.speed ?? 45),
-          opacity: String(Math.round((typeof sd.opacity === 'number' ? sd.opacity : 0.6) * 100)),
-          intervalSec: String(sd.intervalSec ?? 3),
-          showWave: !!sd.showWave,
         })
         // 公告条初始化：数组整体替换（顺序即展示顺序）；老后端没有 items key 时保持空列表，
         // 且不标 loaded —— 保存时不发 items，防止把库里的多条整包清空。
@@ -399,13 +349,11 @@ export default function AnnouncePage() {
     placements?: PlacementsMap
     celebrate?: CelebrateCfg
     items?: AnnounceItemCfg[]
-    starDanmaku?: StarDanmakuCfg
   }) {
     const en = overrides?.enabled ?? enabled
     const pl = overrides?.placements ?? placements
     const ce = overrides?.celebrate ?? celebrate
     const its = overrides?.items ?? items
-    const sd = overrides?.starDanmaku ?? starDm
     setBusy(true)
     setSaveErr('') // 每次保存先清掉上一次的失败提示，避免旧错误一直挂着
     try {
@@ -418,19 +366,6 @@ export default function AnnouncePage() {
         placements: pl,
         // 庆祝配置 v2：wave 转回数字（非数字 / 负数兜底 0 = 不显示）
         celebrate: { ...ce, wave: Math.max(0, Math.round(Number(ce.wave) || 0)) },
-        // 每日之星弹幕带（2026-10-18 v2）：数字转回 number；opacity 百分比 → 0.30~0.90
-        // 具体 clamp 由后端 normalized() 再做一遍（前端只保证形状）
-        starDanmaku: {
-          enabled: sd.enabled,
-          scope: sd.scope === 'top1' ? 'top1' : 'top3',
-          perRound: Math.max(3, Math.min(9, Math.round(Number(sd.perRound) || 6))),
-          lanes: Math.max(3, Math.min(6, Math.round(Number(sd.lanes) || 5))),
-          speed: Math.max(20, Math.min(120, Math.round(Number(sd.speed) || 45))),
-          opacity:
-            Math.max(30, Math.min(90, Math.round(Number(sd.opacity) || 60))) / 100,
-          intervalSec: Math.max(2, Math.min(60, Math.round(Number(sd.intervalSec) || 3))),
-          showWave: sd.showWave,
-        },
       }
       if (itemsLoaded) {
         // 展示页公告条：数组顺序 = 展示端从上到下；wave 转数字，tone 只收 brand / plain。
@@ -895,131 +830,7 @@ export default function AnnouncePage() {
         </div>
       </section>
 
-      {/* ============ 区块 5 · 每日之星弹幕带（2026-10-18 v2） ============ */}
-      <section className="card ann-sec">
-        <h2 className="ann-sec-head">🚩 每日之星弹幕带</h2>
-        <p className="ann-sec-sub">
-          展示端「数据」看板顶部的常驻弹幕区（普通文档流，不遮挡领奖台/榜单）：
-          循环飘「今日第一名：张三 / 第二名 / 第三名」，打开页面立即开始。
-          评论功能后续单独开，本版不包含。
-        </p>
-        <div
-          style={{
-            border: '1px solid var(--line)',
-            borderRadius: 10,
-            padding: 10,
-            display: 'grid',
-            gap: 8,
-          }}
-        >
-          {/* 总开关：开关即时保存 */}
-          <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 12.5 }}>
-            <input
-              type="checkbox"
-              className="switch"
-              checked={starDm.enabled}
-              onChange={(e) => {
-                const next = { ...starDm, enabled: e.target.checked }
-                setStarDm(next)
-                save({ starDanmaku: next })
-              }}
-            />
-            开启弹幕带
-          </label>
-          <div className="ann-grid ann-grid-fields">
-            <label style={{ fontSize: 12.5, color: 'var(--ink3)' }}>
-              名次范围
-              <select
-                value={starDm.scope}
-                onChange={(e) => {
-                  const next = { ...starDm, scope: e.target.value === 'top1' ? 'top1' : 'top3' }
-                  setStarDm(next)
-                  save({ starDanmaku: next })
-                }}
-                style={input34}
-              >
-                <option value="top3">前三名（冠亚季）</option>
-                <option value="top1">仅冠军</option>
-              </select>
-            </label>
-            <label style={{ fontSize: 12.5, color: 'var(--ink3)' }}>
-              每轮条数（3~9）
-              <input
-                type="number"
-                min={3}
-                max={9}
-                value={starDm.perRound}
-                onChange={(e) => setStarDm((prev) => ({ ...prev, perRound: e.target.value }))}
-                onBlur={() => save()}
-                style={input34}
-              />
-            </label>
-            <label style={{ fontSize: 12.5, color: 'var(--ink3)' }}>
-              车道数（3~6）
-              <input
-                type="number"
-                min={3}
-                max={6}
-                value={starDm.lanes}
-                onChange={(e) => setStarDm((prev) => ({ ...prev, lanes: e.target.value }))}
-                onBlur={() => save()}
-                style={input34}
-              />
-            </label>
-            <label style={{ fontSize: 12.5, color: 'var(--ink3)' }}>
-              飘动速度（px/秒，20~120）
-              <input
-                type="number"
-                min={20}
-                max={120}
-                value={starDm.speed}
-                onChange={(e) => setStarDm((prev) => ({ ...prev, speed: e.target.value }))}
-                onBlur={() => save()}
-                style={input34}
-              />
-            </label>
-            <label style={{ fontSize: 12.5, color: 'var(--ink3)' }}>
-              文字透明度（30~90%）
-              <input
-                type="number"
-                min={30}
-                max={90}
-                value={starDm.opacity}
-                onChange={(e) => setStarDm((prev) => ({ ...prev, opacity: e.target.value }))}
-                onBlur={() => save()}
-                style={input34}
-              />
-            </label>
-            <label style={{ fontSize: 12.5, color: 'var(--ink3)' }}>
-              轮间隔（秒，2~60）
-              <input
-                type="number"
-                min={2}
-                max={60}
-                value={starDm.intervalSec}
-                onChange={(e) => setStarDm((prev) => ({ ...prev, intervalSec: e.target.value }))}
-                onBlur={() => save()}
-                style={input34}
-              />
-            </label>
-          </div>
-          <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 12.5 }}>
-            <input
-              type="checkbox"
-              className="switch"
-              checked={starDm.showWave}
-              onChange={(e) => {
-                const next = { ...starDm, showWave: e.target.checked }
-                setStarDm(next)
-                save({ starDanmaku: next })
-              }}
-            />
-            名次条显示音浪
-          </label>
-        </div>
-      </section>
-
-      {/* 保存区：各编辑区块共用一次整包保存（公告位 + 公告条 + 庆祝 + 弹幕；引导只回传不编辑） */}
+      {/* 保存区：三个编辑区块共用一次整包保存（公告位 + 公告条 + 庆祝；引导只回传不编辑） */}
       <div className="ann-savebar">
         {/* 手动保存按钮：save 现在带 overrides 参数，onClick 必须包一层箭头函数，
             否则 click 事件对象会被当成 overrides 传进去。

@@ -291,11 +291,6 @@ pub struct Announcement {
     ///（彩带 / 登录庆祝逻辑仍用它）。
     #[serde(default)]
     pub items: Vec<AnnounceItem>,
-    /// 每日之星弹幕带（2026-10-18 v2）：展示端数据看板顶部的常驻弹幕区
-    /// （普通文档流、不遮挡榜单/领奖台，立即开始）。评论功能后续单开，
-    /// 本结构只在弹幕带里用；旧配置没有该键时 serde(default) 回落「关」。
-    #[serde(default, rename = "starDanmaku")]
-    pub star_danmaku: StarDanmaku,
 }
 
 /// 一条展示页公告条（2026-10-14，cfg_key='announcement' 的 `items` 元素）。
@@ -397,99 +392,6 @@ pub struct CelebrateConfig {
     /// 音浪数（0 = 不显示数值）
     #[serde(default)]
     pub wave: i64,
-}
-
-/* ---------------- 每日之星弹幕带（2026-10-18 v2） ----------------
- *
- * 展示端「数据」视图顶部的常驻弹幕带：普通文档流占位（不是 fixed 浮层），
- * 领奖台/榜单从它下方开始 —— 用户口径「不能遮挡原来的显示的内容」。
- * 文案固定「今日第X名：名字」（X = 一/二/三），打开页面立即开始。
- * 评论（用户发弹幕）后续单独开，本结构不包含评论开关/评论接口。
- */
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-pub struct StarDanmaku {
-    /// 总开关（默认 false：上线后由运营在后台打开）
-    pub enabled: bool,
-    /// 名次范围：`top3`（默认，冠亚季）/ `top1`（只飘冠军）
-    pub scope: String,
-    /// 每轮名次条数（3..9，默认 3；三个名次循环铺开）
-    pub per_round: i64,
-    /// 车道数（3..6，默认 5；常驻带高度 = 车道数 × 30px）
-    pub lanes: i64,
-    /// 飘动速度 px/s（20..120，默认 45）
-    pub speed: i64,
-    /// 文字不透明度（0.30..0.90，默认 0.60）
-    pub opacity: f64,
-    /// 每轮结束后的间隔秒（2..60，默认 3：常驻带连续飘，不留长空档）
-    pub interval_sec: i64,
-    /// 名次条是否带音浪（默认 false：只显示「今日第X名：名字」）
-    pub show_wave: bool,
-}
-
-impl Default for StarDanmaku {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            scope: "top3".to_string(),
-            per_round: 6,
-            lanes: 5,
-            speed: 45,
-            opacity: 0.60,
-            interval_sec: 3,
-            show_wave: false,
-        }
-    }
-}
-
-impl StarDanmaku {
-    /// 下发/保存前统一归一化（clamp + 值域白名单），保证前端拿到的永远是合法值。
-    pub fn normalized(&self) -> Self {
-        Self {
-            enabled: self.enabled,
-            scope: if self.scope == "top1" { "top1".to_string() } else { "top3".to_string() },
-            per_round: self.per_round.clamp(3, 9),
-            lanes: self.lanes.clamp(3, 6),
-            speed: self.speed.clamp(20, 120),
-            opacity: if self.opacity.is_finite() {
-                self.opacity.clamp(0.30, 0.90)
-            } else {
-                0.60
-            },
-            interval_sec: self.interval_sec.clamp(2, 60),
-            show_wave: self.show_wave,
-        }
-    }
-
-    /// 管理端部分更新：只覆盖传了的字段，最后统一归一化。
-    fn merged(&self, v: &Value) -> Self {
-        let mut n = self.clone();
-        if let Some(v) = v.get("enabled").and_then(Value::as_bool) {
-            n.enabled = v;
-        }
-        if let Some(v) = v.get("showWave").and_then(Value::as_bool) {
-            n.show_wave = v;
-        }
-        if let Some(v) = v.get("scope").and_then(Value::as_str) {
-            n.scope = v.to_string();
-        }
-        if let Some(v) = v.get("perRound").and_then(Value::as_i64) {
-            n.per_round = v;
-        }
-        if let Some(v) = v.get("lanes").and_then(Value::as_i64) {
-            n.lanes = v;
-        }
-        if let Some(v) = v.get("speed").and_then(Value::as_i64) {
-            n.speed = v;
-        }
-        if let Some(v) = v.get("opacity").and_then(Value::as_f64) {
-            n.opacity = v;
-        }
-        if let Some(v) = v.get("intervalSec").and_then(Value::as_i64) {
-            n.interval_sec = v;
-        }
-        n.normalized()
-    }
 }
 
 /// 引导弹窗的一步：标题 + 正文 + 图标（Material Symbols 名）。
@@ -841,10 +743,6 @@ impl Announcement {
             // 展示页公告条（2026-10-14）：管理端**全量**下发（含 enabled=false，供后台编辑）；
             // 公开前端的裁剪形态走 public_items_json()
             "items": self.all_items_json(),
-            // 每日之星弹幕带（2026-10-18 v2）：永远下发归一化后的完整对象
-            // （enabled=false 也下发，管理端编辑用；前端按 enabled 判断）
-            "starDanmaku": serde_json::to_value(self.star_danmaku.normalized())
-                .unwrap_or(Value::Null),
         })
     }
 
@@ -1075,14 +973,6 @@ pub async fn update_announcement(State(st): State<ArcState>, Json(body): Json<Va
         if let Some(v) = c.get("wave").and_then(|v| v.as_i64()) {
             a.celebrate.wave = v.max(0);
         }
-    }
-
-    /* ---------------- 每日之星弹幕带（2026-10-18 v2）：部分更新，逐字段合并 ----------------
-    没传 starDanmaku 保持原样；传了只改传入字段，最后 clamp/白名单归一化
-    （与 celebrate/placements 的部分更新语义一致）。 */
-    if let Some(v) = body.get("starDanmaku") {
-        let next = a.star_danmaku.merged(v);
-        a.star_danmaku = next;
     }
 
     a.save(&st).await;
@@ -1697,115 +1587,5 @@ mod announcement_items_tests {
                 .expect("旧数据必须能反序列化");
         assert_eq!(legacy.items[0].seat, -1);
         assert!(legacy.items[0].period.is_empty());
-    }
-}
-
-/* ==================== 每日之星弹幕带单测（2026-10-18 v2） ==================== */
-
-#[cfg(test)]
-mod star_danmaku_tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn defaults_are_off_and_sane() {
-        let d = StarDanmaku::default();
-        assert!(!d.enabled);
-        assert_eq!(d.scope, "top3");
-        assert_eq!(d.per_round, 6);
-        assert_eq!(d.lanes, 5);
-        assert_eq!(d.speed, 45);
-        assert!((d.opacity - 0.60).abs() < 1e-9);
-        assert_eq!(d.interval_sec, 3);
-        assert!(!d.show_wave);
-    }
-
-    #[test]
-    fn normalize_clamps_all_ranges() {
-        let n = StarDanmaku {
-            enabled: true,
-            scope: "nope".into(),
-            per_round: 99,
-            lanes: 1,
-            speed: 999,
-            opacity: 2.0,
-            interval_sec: 1,
-            show_wave: true,
-        }
-        .normalized();
-        assert_eq!(n.scope, "top3");
-        assert_eq!(n.per_round, 9);
-        assert_eq!(n.lanes, 3);
-        assert_eq!(n.speed, 120);
-        assert!((n.opacity - 0.9).abs() < 1e-9);
-        assert_eq!(n.interval_sec, 2);
-
-        let m = StarDanmaku {
-            per_round: 1,
-            lanes: 9,
-            speed: 1,
-            opacity: 0.1,
-            interval_sec: 99999,
-            scope: "top1".into(),
-            ..Default::default()
-        }
-        .normalized();
-        assert_eq!(m.per_round, 3);
-        assert_eq!(m.lanes, 6);
-        assert_eq!(m.speed, 20);
-        assert!((m.opacity - 0.3).abs() < 1e-9);
-        assert_eq!(m.interval_sec, 60);
-        assert_eq!(m.scope, "top1");
-
-        // NaN 不 panic，回落 0.60
-        let bad = StarDanmaku {
-            opacity: f64::NAN,
-            ..Default::default()
-        }
-        .normalized();
-        assert!((bad.opacity - 0.60).abs() < 1e-9);
-    }
-
-    #[test]
-    fn partial_merge_only_touches_given_fields() {
-        let cur = StarDanmaku {
-            enabled: true,
-            lanes: 6,
-            speed: 80,
-            ..Default::default()
-        };
-        let n = cur.merged(&json!({"perRound": 6}));
-        assert!(n.enabled);
-        assert_eq!(n.lanes, 6);
-        assert_eq!(n.speed, 80);
-        assert_eq!(n.per_round, 6);
-
-        let n2 = cur.merged(&json!({"scope": "bogus"}));
-        assert_eq!(n2.scope, "top3");
-    }
-
-    #[test]
-    fn old_json_without_key_deserializes_to_default() {
-        let a: Announcement =
-            serde_json::from_str(r#"{"enabled":true,"items":[]}"#).expect("旧配置必须能反序列化");
-        assert!(!a.star_danmaku.enabled);
-        assert_eq!(a.star_danmaku.lanes, 5);
-    }
-
-    #[test]
-    fn to_json_exposes_camel_case_object() {
-        let a = Announcement {
-            star_danmaku: StarDanmaku {
-                enabled: true,
-                per_round: 6,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let j = a.to_json();
-        assert_eq!(j["starDanmaku"]["enabled"], true);
-        assert_eq!(j["starDanmaku"]["perRound"], 6);
-        assert_eq!(j["starDanmaku"]["intervalSec"], 3);
-        assert_eq!(j["starDanmaku"]["showWave"], false);
     }
 }
