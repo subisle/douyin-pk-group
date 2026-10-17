@@ -823,6 +823,12 @@ async fn send_binding(
     if out_blocked("text", &b.name, text) {
         return Err(Blocked.into());
     }
+    /* 2026-10-18：发送前最后一道判断 —— 名单可能是几分钟前取的，期间可能刚解绑 /
+    重扫换号 / 会话上下文失效。断开就直接跳过，不发、不推进任何去重标记。 */
+    anyhow::ensure!(
+        name_can_receive_text(st, &b.name).await,
+        "未对接或连接已断开（跳过发送）"
+    );
     /* 扫码账号：发文本；没有扫码凭证的旧绑定：回落管理员机器人文本通道 */
     if let Some(a) = crate::store::wx_push_account_get(st, &b.name).await {
         anyhow::ensure!(!a.bot_token.is_empty(), "扫码账号凭证为空，请重新扫码");
@@ -854,6 +860,12 @@ async fn send_binding_images(
     if out_blocked("image", &b.name, caption) {
         return Err(Blocked.into());
     }
+    /* 2026-10-18：图片只能走扫码账号通道 —— 发送前再判「会话在 + 凭证在」，
+    断开的直接跳过（用户口径「只要断了的就不用去发了」）。 */
+    anyhow::ensure!(
+        name_can_receive_images(st, &b.name).await,
+        "未对接或连接已断开，无法发图（跳过发送）"
+    );
     let a = crate::store::wx_push_account_get(st, &b.name)
         .await
         .ok_or_else(|| anyhow::anyhow!("图片推送需要扫码账号（请在「我的」页重新扫码）"))?;
@@ -925,6 +937,15 @@ async fn wx_proactive(
 /// 宽 720 逻辑像素 ×2 输出（1440），微信长图清晰度够用。
 /// pub(crate)：lineage_report.rs 与 admin_send.rs 的图片渲染共用同一份调用。
 pub(crate) fn svg_to_png(svg: &str) -> anyhow::Result<Vec<u8>> {
+    svg_to_png_at(svg, 2.0)
+}
+
+/// 指定缩放比转 PNG（`scale = 1.0` 时输出等于 SVG 的 width×height）。
+///
+/// 为什么需要这个：榜单图 SVG 宽 1440、高 4520（逻辑像素），原先统一按 2.0 渲染
+/// 得到 **2880×9040、单页 3 MB** —— 微信显示宽度最多 1080，多出来的像素纯属浪费
+/// 磁盘和 CPU。榜单图改走 [`DAILY_PNG_SCALE`]（0.75 → 1080 宽），体积降到约 1/7。
+pub(crate) fn svg_to_png_at(svg: &str, scale: f32) -> anyhow::Result<Vec<u8>> {
     use anyhow::Context as _;
     /* 2026-10-17 修复（用户截图：月榜图「有形无字」）：resvg 0.45 的
     usvg Options::default() 自带一份**空 fontdb**——一个系统字体都不加载，
@@ -936,7 +957,6 @@ pub(crate) fn svg_to_png(svg: &str) -> anyhow::Result<Vec<u8>> {
     opt.fontdb_mut().load_system_fonts();
     let tree = resvg::usvg::Tree::from_str(svg, &opt)?;
     let size = tree.size();
-    let scale = 2.0f32;
     let (w, h) = (
         (size.width() * scale).round() as u32,
         (size.height() * scale).round() as u32,
@@ -1110,6 +1130,14 @@ async fn run_inner(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result
     for (idx, b) in bindings.iter().enumerate() {
         let mut sent_any = false;
 
+        /* 2026-10-18 用户口径「没对接的就不推送」「只要断了的就不用去发了，要判断好」：
+        发之前**现查一次**这个人的对接状态（会话上下文 + 凭证），不是只看循环外那份名单。
+        解绑 / 重扫换号 / 上下文失效 → 整轮跳过：不占位、不发、不记失败。 */
+        if !name_can_receive_text(st, &b.name).await {
+            tracing::info!(account = %b.name, team, date, "推送跳过：未对接或连接已断开");
+            continue;
+        }
+
         // ① 每日报告（同一业务日只推一次：补数据重排队列时不再重复推）
         if b.daily_report && !rank_items.is_empty() {
             let last = crate::store::push_last_report_date(st, &b.name).await;
@@ -1141,11 +1169,18 @@ async fn run_inner(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result
                 这里只按收件人 render（personal_mark 水印因人而异）并转 PNG。
                 2026-10-17 用户口径「分成两页即可」：不再 40 行/页切 3 页，
                 固定两页对半分（奇数人时首页多一行）。 */
-                let svgs = match &month_rep {
-                    Some(rep) => render_daily_two_pages(rep, &b.name, &report_fields.daily),
-                    None => Vec::new(), // 构建失败（循环外已 warn）→ 退回文本推送
+                /* 2026-10-18：优先用「导入后预渲染」的磁盘缓存（命令与推送共用同一份）；
+                没有缓存才现场渲染，渲完回填。推送一般在导入 30 分钟后，正常全是命中。 */
+                let cached_pngs = cached_daily_pngs(team, date, &b.name);
+                let svgs = if cached_pngs.is_some() {
+                    Vec::new()
+                } else {
+                    match &month_rep {
+                        Some(rep) => render_daily_two_pages(rep, &b.name, &report_fields.daily),
+                        None => Vec::new(), // 构建失败（循环外已 warn）→ 退回文本推送
+                    }
                 };
-                if svgs.is_empty() {
+                if cached_pngs.is_none() && svgs.is_empty() {
                     tracing::info!(account = %b.name, text = %text.replace('\n', " | "), "推送·每日报告(文本)");
                     match send_binding(st, b, wx_global.as_ref(), &text).await {
                         Ok(()) => {
@@ -1169,16 +1204,24 @@ async fn run_inner(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result
                 } else {
                     // 2026-10-17 口径：有图就不发文字 —— 每日报告只发榜单图（带水印），
                     // 不再前置文字 caption（问候语/名次/小红旗都在图里，避免文字与图重复）。
-                    let pngs: Vec<Vec<u8>> = svgs
-                        .iter()
-                        .filter_map(|svg| match svg_to_png(svg) {
-                            Ok(p) => Some(p),
-                            Err(e) => {
-                                tracing::warn!(account = %b.name, error = %e, "SVG 转 PNG 失败");
-                                None
-                            }
-                        })
-                        .collect();
+                    let pngs: Vec<Vec<u8>> = match cached_pngs {
+                        Some(p) => p,
+                        None => {
+                            let p: Vec<Vec<u8>> = svgs
+                                .iter()
+                                .filter_map(|svg| match svg_to_png_at(svg, DAILY_PNG_SCALE) {
+                                    Ok(png) => Some(png),
+                                    Err(e) => {
+                                        tracing::warn!(account = %b.name, error = %e, "SVG 转 PNG 失败");
+                                        None
+                                    }
+                                })
+                                .collect();
+                            // 回填缓存：机器人命令「1」随后命中，不用再渲一遍
+                            store_daily_pngs(team, date, &b.name, &p);
+                            p
+                        }
+                    };
                     if pngs.is_empty() {
                         tracing::warn!(account = %b.name, "全部页面转 PNG 失败，退回文本推送");
                         match send_binding(st, b, wx_global.as_ref(), &text).await {
@@ -1727,6 +1770,471 @@ pub(crate) async fn daily_rank(st: &AppState, team: &str, date: &str) -> Vec<(u6
             Vec::new()
         }
     }
+}
+
+/* --------------------- 2026-10-18：名下徒弟榜单（机器人命令 3） --------------------- */
+
+/// 直系徒弟（`person.master_id = 本人`），只取在册、未离团、未软删的人；按姓名排序。
+///
+/// 与展示端「我的」页 `disciple.count` 同源口径（只算直系，徒孙不计）。
+/// 取数失败只 warn 并返回空 —— 命令回一句「查不到」比让机器人 500 更稳妥。
+pub(crate) async fn direct_disciples(st: &AppState, master_id: u64) -> Vec<(u64, String)> {
+    if master_id == 0 {
+        return Vec::new();
+    }
+    let sql = "SELECT id, name FROM person \
+         WHERE master_id = ? AND deleted_at IS NULL AND status <> 'left' \
+         ORDER BY name ASC";
+    match pgrs::query_with_binds(&st.pools, &st.active_id(), sql, |q| {
+        q.bind(master_id as i64)
+    })
+    .await
+    {
+        Ok(rows) => rows
+            .iter()
+            .map(|r| {
+                (
+                    r.try_get::<i64, _>("id")
+                        .map(|v| v.max(0) as u64)
+                        .unwrap_or(0),
+                    r.try_get::<String, _>("name").unwrap_or_default(),
+                )
+            })
+            .filter(|(pid, _)| *pid > 0)
+            .collect(),
+        Err(e) => {
+            tracing::warn!(error = %e, "读直系徒弟失败，徒弟榜单按空处理");
+            Vec::new()
+        }
+    }
+}
+
+/* --------------------- 2026-10-18：机器人命令「1」的榜单图 --------------------- */
+
+/* ------------------ 榜单图磁盘缓存 / 预渲染（2026-10-18 用户口径「预渲染」） ------------------
+ *
+ * 为什么要有这层：一张榜单图 = 2 页 SVG + resvg 转 PNG（单次约 1–2 秒、约 6 MB）。
+ * 导入完成后自动推送要给几十个订阅者各渲一份（水印因人而异），机器人命令「1」也要渲。
+ * 不缓存的话每次命令都现场渲，既慢又重复。
+ *
+ * 设计（刻意简单）：
+ * - **落磁盘**而不是内存：单份 ~6 MB，几十个人放内存会吃掉几百 MB；磁盘按人一份，命中就是一次读文件。
+ * - **导入即失效**：`commit_import` 成功后清空整个缓存目录，再后台预渲染新图（`prewarm_daily_report_images`）。
+ * - **硬 TTL 12 小时**兜底：万一某条失效路径漏了，也不会永久发旧图。
+ * - 读到的文件做完整格式校验（magic / 版本 / 页数 / 每页字节上限），坏文件当没有，绝不把垃圾当图发。
+ */
+
+/// 缓存文件 magic（`PKRP` = PK Report PNG）+ 打包版本；改格式/改渲染尺寸就改版本号，旧文件自然失效。
+const IMG_CACHE_MAGIC: &[u8; 4] = b"PKRP";
+/// v2（2026-10-18）：榜单图改为按 [`DAILY_PNG_SCALE`] 渲染（1080 宽），旧尺寸图作废。
+const IMG_CACHE_VER: u8 = 2;
+/// 榜单图渲染缩放比：SVG 逻辑宽 1440 → 1080 px。
+///
+/// 取舍（2026-10-18 用户口径「每天 100 个占太多了」）：微信显示宽度上限就是 1080，
+/// 按 2.0 渲染（2880 宽）纯浪费 —— 单页 3 MB → 0.4 MB 左右，CPU 也跟着降到约 4 成。
+const DAILY_PNG_SCALE: f32 = 0.75;
+/// 缓存目录总大小上限（MB）：超过就从最旧的文件开始删。默认 256 MB。
+const IMG_CACHE_MAX_MB_DEFAULT: u64 = 256;
+/// 硬 TTL：导入会清目录，这是「清漏了」的兜底
+const IMG_CACHE_TTL_SECS: u64 = 12 * 3600;
+/// 单页 PNG 上限（防御：异常文件直接丢弃）
+const IMG_MAX_PAGE_BYTES: usize = 32 * 1024 * 1024;
+
+fn report_cache_dir() -> std::path::PathBuf {
+    let db = crate::config::sqlite_path();
+    std::path::Path::new(&db)
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("report-cache")
+}
+
+/// 缓存文件名：团 + 日期 +（收件人姓名哈希）。用哈希而不是原名，避免中文 / 特殊字符文件名。
+fn img_cache_key(team: &str, date: &str, person: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    team.hash(&mut h);
+    date.hash(&mut h);
+    person.trim().hash(&mut h);
+    format!("{team}-{date}-{:016x}.bin", h.finish())
+}
+
+/// 打包成缓存文件格式：`PKRP` + 版本 + 页数 + 每页 (长度 + 字节)。
+fn encode_pngs(pngs: &[Vec<u8>]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(pngs.iter().map(Vec::len).sum::<usize>() + 16);
+    buf.extend_from_slice(IMG_CACHE_MAGIC);
+    buf.push(IMG_CACHE_VER);
+    buf.extend_from_slice(&(pngs.len() as u32).to_le_bytes());
+    for p in pngs {
+        buf.extend_from_slice(&(p.len() as u32).to_le_bytes());
+        buf.extend_from_slice(p);
+    }
+    buf
+}
+
+fn decode_pngs(raw: &[u8]) -> Option<Vec<Vec<u8>>> {
+    if raw.len() < 9 || &raw[..4] != IMG_CACHE_MAGIC || raw[4] != IMG_CACHE_VER {
+        return None;
+    }
+    let count = u32::from_le_bytes(raw[5..9].try_into().ok()?) as usize;
+    if count == 0 || count > 8 {
+        return None;
+    }
+    let mut off = 9usize;
+    let mut out = Vec::with_capacity(count);
+    for _ in 0..count {
+        if off + 4 > raw.len() {
+            return None;
+        }
+        let len = u32::from_le_bytes(raw[off..off + 4].try_into().ok()?) as usize;
+        off += 4;
+        if len == 0 || len > IMG_MAX_PAGE_BYTES || off + len > raw.len() {
+            return None;
+        }
+        out.push(raw[off..off + len].to_vec());
+        off += len;
+    }
+    Some(out)
+}
+
+/// 读缓存（不存在 / 过期 / 格式坏 → None，调用方现场渲染）。
+pub(crate) fn cached_daily_pngs(team: &str, date: &str, person: &str) -> Option<Vec<Vec<u8>>> {
+    let path = report_cache_dir().join(img_cache_key(team, date, person));
+    let meta = std::fs::metadata(&path).ok()?;
+    let age = meta.modified().ok()?.elapsed().ok()?.as_secs();
+    if age > IMG_CACHE_TTL_SECS {
+        let _ = std::fs::remove_file(&path);
+        return None;
+    }
+    decode_pngs(&std::fs::read(&path).ok()?)
+}
+
+/// 写缓存（原子替换：先写 .tmp 再 rename；失败只 warn，不影响本次发送）。
+pub(crate) fn store_daily_pngs(team: &str, date: &str, person: &str, pngs: &[Vec<u8>]) {
+    if pngs.is_empty() || pngs.len() > 8 {
+        return;
+    }
+    let dir = report_cache_dir();
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let buf = encode_pngs(pngs);
+    let path = dir.join(img_cache_key(team, date, person));
+    let tmp = path.with_extension("tmp");
+    if std::fs::write(&tmp, &buf).is_ok() {
+        if let Err(e) = std::fs::rename(&tmp, &path) {
+            tracing::warn!(error = %e, "榜单图缓存写入失败（不影响发送）");
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
+}
+
+/// 导入完成 → 清空榜单图缓存（榜单变了，旧图必须全部作废）。
+pub fn clear_daily_image_cache() {
+    let dir = report_cache_dir();
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    let mut n = 0usize;
+    for e in rd.flatten() {
+        let p = e.path();
+        let ext = p.extension().and_then(|x| x.to_str()).unwrap_or("");
+        if (ext == "bin" || ext == "tmp") && std::fs::remove_file(&p).is_ok() {
+            n += 1;
+        }
+    }
+    if n > 0 {
+        tracing::info!(files = n, "榜单图缓存已清理（导入后失效）");
+    }
+}
+
+/// 预渲染批大小（人/批，默认 5）。
+///
+/// 2026-10-18 用户口径「导入后按批次渲染，人多了要分批」：渲染一个人要 1.5–20 秒
+/// （release/debug 差很多），串行渲 100 人会把 CPU 占满半小时。按批渲染 + 批间休息，
+/// 给 HTTP / 机器人回复 / 推送发送留出 CPU。
+pub fn render_batch_size() -> usize {
+    std::env::var("RENDER_BATCH_SIZE")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|v| (1..=50).contains(v))
+        .unwrap_or(5)
+}
+
+/// 预渲染批间隔（秒，默认 10；0 = 不休息）。上限 600 秒。
+pub fn render_batch_interval_secs() -> u64 {
+    std::env::var("RENDER_BATCH_INTERVAL_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|v| *v <= 600)
+        .unwrap_or(10)
+}
+
+/* ---------------- 「能不能收到」判定（没对接 / 断开的直接跳过） ----------------
+ *
+ * 2026-10-18 用户口径：「没对接的就不推送」「只要断了的就不用去发了，要判断好」。
+ * 口径拆成两层，避免误判：
+ *   - 能收**文本**：push_bindings 会话非空 + wx_sessions 里有 context_token
+ *     （微信 iLink 必须先有入站上下文才能主动发；扫码账号与旧全局机器人通道共用这张表）。
+ *   - 能收**图片**：在「能收文本」之上，还要有扫码账号凭证（bot_token 非空）——
+ *     图片只能走扫码账号通道（getuploadurl + CDN），旧全局机器人通道发不了图。
+ */
+
+/// 现在还能不能给这个人发文本（会话已接上且有上下文）。
+pub(crate) async fn name_can_receive_text(st: &crate::state::AppState, name: &str) -> bool {
+    let conv = crate::store::push_binding_conversation(st, name).await;
+    if conv.trim().is_empty() {
+        return false;
+    }
+    crate::store::wx_session_get(st, &conv)
+        .await
+        .map(|(_, token)| !token.trim().is_empty())
+        .unwrap_or(false)
+}
+
+/// 现在还能不能给这个人发图（在文本条件之上还要有扫码账号凭证）。
+pub(crate) async fn name_can_receive_images(st: &crate::state::AppState, name: &str) -> bool {
+    if !name_can_receive_text(st, name).await {
+        return false;
+    }
+    matches!(
+        crate::store::wx_push_account_get(st, name).await,
+        Some(a) if !a.bot_token.trim().is_empty()
+    )
+}
+
+/// 缓存目录治理：先删过期文件，再按「总大小上限」从最旧的开始删。
+///
+/// 为什么需要：一人 2 页约 1 MB（1080 宽），100 人 ≈ 100 MB；导入会清目录，但
+/// 万一清漏 / 长期不导入，缓存不能无限涨。上限可用 `REPORT_IMAGE_CACHE_MAX_MB` 调。
+fn sweep_image_cache() {
+    let dir = report_cache_dir();
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    let mut files: Vec<(std::time::SystemTime, std::path::PathBuf, u64)> = Vec::new();
+    let mut total = 0u64;
+    for e in rd.flatten() {
+        let path = e.path();
+        let ext = path.extension().and_then(|x| x.to_str()).unwrap_or("");
+        if ext != "bin" && ext != "tmp" {
+            continue;
+        }
+        let Ok(meta) = e.metadata() else { continue };
+        let size = meta.len();
+        let at = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        total += size;
+        files.push((at, path, size));
+    }
+    let max_bytes = std::env::var("REPORT_IMAGE_CACHE_MAX_MB")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|v| *v >= 16)
+        .unwrap_or(IMG_CACHE_MAX_MB_DEFAULT)
+        * 1024
+        * 1024;
+    let mut removed = 0usize;
+    // ① 过期文件（超过硬 TTL）
+    for (at, path, size) in files.iter() {
+        let stale = now
+            .duration_since(*at)
+            .map(|d| d.as_secs() > IMG_CACHE_TTL_SECS)
+            .unwrap_or(false);
+        if stale && std::fs::remove_file(path).is_ok() {
+            total = total.saturating_sub(*size);
+            removed += 1;
+        }
+    }
+    // ② 仍然超上限：从最旧的开始删
+    if total > max_bytes {
+        let mut rest: Vec<&(std::time::SystemTime, std::path::PathBuf, u64)> =
+            files.iter().filter(|(_, p, _)| p.exists()).collect();
+        rest.sort_by_key(|(at, _, _)| *at);
+        for (_, path, size) in rest {
+            if total <= max_bytes {
+                break;
+            }
+            if std::fs::remove_file(path).is_ok() {
+                total = total.saturating_sub(*size);
+                removed += 1;
+            }
+        }
+    }
+    if removed > 0 {
+        tracing::info!(removed, left_bytes = total, "榜单图缓存治理：已清理旧文件");
+    }
+}
+
+/// 导入后**预渲染**：把该业务日两个团里「能收到图的人」的榜单图提前渲好落盘。
+///
+/// 在后台任务里跑（`commit_import` 里 spawn），失败只 warn，不影响导入与推送：
+/// 命令「1」和自动推送命中缓存就秒回，没有缓存时照旧现场渲染（回填缓存）。
+pub async fn prewarm_daily_report_images(st: &std::sync::Arc<AppState>, date: &str) {
+    sweep_image_cache();
+    let started = std::time::Instant::now();
+
+    /* ① **现取名单**（2026-10-18 用户口径「每天渲染前去看一下获取名单」）：
+    每次预渲染都重新查 push_bindings，不复用任何旧快照 —— 解绑 / 换号 / 新对接
+    都要在这一刻体现。`push_bindings_for_team` 已过滤掉「没有会话」的人。 */
+    let mut targets: Vec<(String, String)> = Vec::new();
+    let mut skipped_unpaired = 0usize;
+    let mut already_cached = 0usize;
+    for team in ["male", "female"] {
+        for b in crate::store::push_bindings_for_team(st, team).await {
+            /* ② 没对接 / 断开的**不渲**：要同时满足「会话有上下文」+「有扫码账号凭证」。
+            只判 push_bindings 不够 —— 解绑后 conversation 仍可能残留、凭证可能被删。 */
+            if !name_can_receive_images(st, &b.name).await {
+                skipped_unpaired += 1;
+                tracing::debug!(account = %b.name, "预渲染跳过：未对接或连接已断开");
+                continue;
+            }
+            if cached_daily_pngs(team, date, &b.name).is_some() {
+                already_cached += 1;
+                continue;
+            }
+            targets.push((team.to_string(), b.name));
+        }
+    }
+
+    let total = targets.len();
+    if total == 0 {
+        tracing::info!(
+            date,
+            skipped_unpaired, already_cached,
+            "榜单图预渲染：没有需要渲染的人（未对接的不渲）"
+        );
+        return;
+    }
+
+    /* ③ **人多分批**：每批 render_batch_size 人，批间休息 render_batch_interval_secs 秒，
+    确保渲染不会长时间吃满 CPU（用户口径「多了就分批次确保不能太占用」）。 */
+    let batch = render_batch_size();
+    let interval = render_batch_interval_secs();
+    let batches = total.div_ceil(batch);
+    tracing::info!(
+        date,
+        total,
+        batch,
+        batches,
+        interval_secs = interval,
+        skipped_unpaired,
+        already_cached,
+        "榜单图预渲染开始（现取名单 + 分批）"
+    );
+
+    let mut rendered = 0usize;
+    for (idx, chunk) in targets.chunks(batch).enumerate() {
+        if idx > 0 && interval > 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
+        }
+        for (team, name) in chunk {
+            /* ④ 渲染前**再复核一次**：这一批可能排了几分钟，期间对方可能刚解绑 /
+            重扫换号 / 凭证失效 —— 断了的就别渲了。 */
+            if !name_can_receive_images(st, name).await {
+                skipped_unpaired += 1;
+                tracing::info!(account = %name, "预渲染跳过：渲染前发现已断开");
+                continue;
+            }
+            let pngs = render_daily_report_pngs(st, team, date, name).await;
+            if pngs.is_empty() {
+                continue;
+            }
+            store_daily_pngs(team, date, name, &pngs);
+            rendered += 1;
+            // 逐人渲染很吃 CPU：每渲完一个人让出一次，避免把 HTTP / 机器人回复卡住
+            tokio::task::yield_now().await;
+        }
+        tracing::info!(
+            date,
+            batch = idx + 1,
+            batches,
+            rendered,
+            "榜单图预渲染：一批完成"
+        );
+    }
+
+    tracing::info!(
+        date,
+        total,
+        rendered,
+        skipped_unpaired,
+        already_cached,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "榜单图预渲染结束"
+    );
+}
+
+/// 单人生成「每日报告」榜单图 PNG（与自动推送**同一套**渲染：固定两页 / 🚩 每日之星 /
+/// 收件人隐形水印 / 后台字段显隐配置）。
+///
+/// 2026-10-18 用户口径：机器人命令「1」不再发文字 TOP10，直接发榜单图（自动推送
+/// 早就是「有图不发文字」）。渲染失败返回空 Vec，调用方退回文字版本 —— 命令不会没响应。
+///
+/// 读缓存优先（导入后已预渲染）；miss 时现场渲染并回填。
+pub(crate) async fn daily_report_pngs(
+    st: &std::sync::Arc<AppState>,
+    team: &str,
+    date: &str,
+    person_name: &str,
+) -> Vec<Vec<u8>> {
+    if let Some(p) = cached_daily_pngs(team, date, person_name) {
+        tracing::debug!(team, date, person = person_name, pages = p.len(), "榜单图命中缓存");
+        return p;
+    }
+    let pngs = render_daily_report_pngs(st, team, date, person_name).await;
+    store_daily_pngs(team, date, person_name, &pngs);
+    pngs
+}
+
+/// 真正干活的渲染（无缓存）。`daily_report_pngs` 与预渲染共用。
+pub(crate) async fn render_daily_report_pngs(
+    st: &std::sync::Arc<AppState>,
+    team: &str,
+    date: &str,
+    person_name: &str,
+) -> Vec<Vec<u8>> {
+    let rank_items = daily_rank(st, team, date).await;
+    if rank_items.is_empty() {
+        return Vec::new();
+    }
+    /* 🚩 每日之星：口径与自动推送完全一致（config star_title / star_override / star_icon） */
+    let ov = crate::store::config_get(st, "star_override").await;
+    let auto = rank_items
+        .first()
+        .map(|(_, name, w)| (name.clone(), *w));
+    let (title, def) = parse_star_override(ov.as_deref(), auto);
+    let icon = crate::store::config_get(st, "star_icon")
+        .await
+        .unwrap_or_default();
+    let star = def.map(|(name, wave)| crate::report::StarBanner {
+        title,
+        name,
+        wave,
+        icon: icon.trim().to_string(),
+    });
+    let rep = match crate::report::build_month(st, date, team, star).await {
+        Ok(rep) => rep,
+        Err(e) => {
+            tracing::warn!(error = %e, team = %team, date = %date, "机器人榜单图：月榜构建失败，退回文字");
+            return Vec::new();
+        }
+    };
+    let fields = crate::store::config_get(st, "push_report_fields")
+        .await
+        .map(|v| crate::report::PushReportFields::from_json(&v))
+        .unwrap_or_default()
+        .daily;
+    render_daily_two_pages(&rep, person_name, &fields)
+        .iter()
+        .filter_map(|svg| match svg_to_png_at(svg, DAILY_PNG_SCALE) {
+            Ok(png) => Some(png),
+            Err(e) => {
+                tracing::warn!(error = %e, "机器人榜单图：SVG 转 PNG 失败，跳过该页");
+                None
+            }
+        })
+        .collect()
 }
 
 /* --------------------- 2026-10-12：我的抖音号分号明细 --------------------- */
@@ -2281,6 +2789,69 @@ mod tests {
     }
 
     /// 追人：差距 = 对方 - 我，文案要带上双方数值
+    #[test]
+    /* ---- 2026-10-18：预渲染分批配置 ---- */
+
+    #[test]
+    fn render_batch_config_is_within_bounds() {
+        // 不假设环境变量取值，只守住「不会把 CPU 打满」的上下界：
+        // 批大小 1..=50、批间隔 <= 600 秒（用户口径「多了就分批次确保不能太占用」）
+        let batch = render_batch_size();
+        assert!((1..=50).contains(&batch), "批大小越界：{batch}");
+        let interval = render_batch_interval_secs();
+        assert!(interval <= 600, "批间隔越界：{interval}");
+    }
+
+    #[test]
+    fn render_batches_split_evenly() {
+        // 与 prewarm 里 `total.div_ceil(batch)` 同一算法：100 人 / 批 5 = 20 批
+        assert_eq!(100usize.div_ceil(5), 20);
+        assert_eq!(1usize.div_ceil(5), 1);
+        assert_eq!(0usize.div_ceil(5), 0);
+        assert_eq!(6usize.div_ceil(5), 2);
+    }
+
+    /* ---- 2026-10-18：榜单图缓存格式（预渲染） ---- */
+
+    #[test]
+    fn png_cache_roundtrip() {
+        let pngs = vec![vec![1u8, 2, 3], vec![9u8; 1000]];
+        let buf = encode_pngs(&pngs);
+        assert_eq!(&buf[..4], IMG_CACHE_MAGIC, "magic");
+        assert_eq!(decode_pngs(&buf), Some(pngs), "编码→解码应还原");
+    }
+
+    #[test]
+    fn png_cache_rejects_corrupt_files() {
+        assert_eq!(decode_pngs(b""), None, "空文件");
+        assert_eq!(decode_pngs(b"XXXX\x01\x00\x00\x00\x01"), None, "magic 不对");
+        // 版本号不对
+        let mut bad = encode_pngs(&[vec![1u8; 4]]);
+        bad[4] = 99;
+        assert_eq!(decode_pngs(&bad), None, "版本不对");
+        // 截断：声明两页但只给一页
+        let mut trunc = encode_pngs(&[vec![1u8; 10], vec![2u8; 10]]);
+        trunc.truncate(14);
+        assert_eq!(decode_pngs(&trunc), None, "截断文件");
+        // 页数为 0 / 过大
+        let mut zero = encode_pngs(&[vec![1u8; 4]]);
+        zero[5..9].copy_from_slice(&0u32.to_le_bytes());
+        assert_eq!(decode_pngs(&zero), None, "页数 0");
+        let mut many = encode_pngs(&[vec![1u8; 4]]);
+        many[5..9].copy_from_slice(&99u32.to_le_bytes());
+        assert_eq!(decode_pngs(&many), None, "页数超上限");
+    }
+
+    #[test]
+    fn img_cache_key_is_stable_and_person_scoped() {
+        let a = img_cache_key("male", "2026-10-16", "浩雨");
+        assert_eq!(a, img_cache_key("male", "2026-10-16", "浩雨"), "同输入应稳定");
+        assert_ne!(a, img_cache_key("male", "2026-10-16", "浩宁"), "不同人不同键");
+        assert_ne!(a, img_cache_key("female", "2026-10-16", "浩雨"), "不同团不同键");
+        assert_ne!(a, img_cache_key("male", "2026-10-15", "浩雨"), "不同日期不同键");
+        assert!(a.ends_with(".bin"), "扩展名固定：{a}");
+    }
+
     #[test]
     fn eval_target_person() {
         let t = tgt("person", "浩冬", 0, 777);

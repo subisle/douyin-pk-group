@@ -5155,7 +5155,7 @@ function pushUnboundHtml(p) {
     h += '<div class="sub" style="margin-top:8px;line-height:1.75">' +
       (p.scanBound
         ? '等微信确认，扫码后手机上点确认即可。'
-        : '扫码对接微信后，提醒和日报会发到你的微信。') +
+        : '扫码对接微信后，给机器人随便发一条消息，会收到欢迎语，提醒和日报也发到你的微信。') +
       '</div>';
   }
   h += '<button class="go gray" id="pushQrShow" style="margin-top:10px">扫码对接</button>' +
@@ -5178,10 +5178,10 @@ function pushUnboundHtml(p) {
     /* 4 位对接码：start 响应带 4 位 code 时由 fillPushCode 解开 hidden；
        admin 观看账号没有 code，这块永远不出现（正好满足「没有 code 就不显示码块」）。 */
     '<div class="hint wx-code-card hidden" id="pushCodeBox">' +
-    '<div class="sub">4 位对接码（30 分钟内有效）</div>' +
+    '<div class="sub">4 位对接码（可选 · 30 分钟内有效）</div>' +
     '<div class="wx-code-main"><b id="pushCodeValue">—</b>' +
     '<button class="go gray" id="pushCodeCopy" disabled>复制对接码</button></div>' +
-    '<div class="qr-expire" id="pushCodeExpire">把对接码发给机器人也能对接</div>' +
+    '<div class="qr-expire" id="pushCodeExpire">不用对接码也行：扫码后给机器人发一条消息即可对接</div>' +
     '<div id="pushCodeError" class="hidden" style="margin-top:6px;color:#b42318;font-weight:600"></div>' +
     '</div>' +
     '<button class="go gray hidden" id="pushCodeRetry" style="margin-top:6px">重新获取对接码</button>' +

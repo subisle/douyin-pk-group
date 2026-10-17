@@ -552,27 +552,21 @@ async fn handle_msg(st: &Arc<AppState>, acct: &WxPushAccount, m: &Value) {
     // （旧逻辑无条件调用，等于「最后说话的人」都能改写绑定目标）。
     crate::store::wx_push_account_bind_conversation(st, &acct.name, &conversation, &from_user)
         .await;
+    let text = message_text(m);
     // 扫码后的第一条本人消息 = 推送激活：把展示端账号接到该会话，并回执一次
     if !already_bound {
         crate::store::push_bind_account(st, &acct.name, &acct.team, &conversation, &from_user)
             .await;
-        // 2026-10-13 用户口径：激活回执先问候「你好，艺名」；艺名空白则兜底只发「你好」
-        let greeting = match acct.name.trim() {
-            "" => "你好".to_string(),
-            n => format!("你好，{n}"),
-        };
-        let text = format!(
-            // 2026-10-15 文案改版：两行式要点列表更像「人发的简报」；明确两类推送
-            // 会自动来（旧版「会给你推送」偏被动），开关入口与解绑指令原样保留。
-            "{greeting}\n\n✅ 微信推送已绑定\n\n以后数据更新会自动推给你：\n· 追分提醒\n· 每日报告\n\n开关与追分目标在展示页「我的」里设置。回复「解绑」断开推送。"
-        );
+        /* 2026-10-18：欢迎语统一到 `bot::wx_dock_welcome`（随机鼓励文案 + 功能简介 + 1/2/3/4 菜单）。
+        扫码路径、4 位对接码路径、首次入站激活路径三处共用同一份文案，改文案只改一处。 */
+        let welcome = crate::bot::wx_dock_welcome(&acct.name);
         if let Err(e) = user_send_text(
             st,
             &acct.base_url,
             &acct.bot_token,
             &from_user,
             &context_token,
-            &text,
+            &welcome,
         )
         .await
         {
@@ -580,7 +574,12 @@ async fn handle_msg(st: &Arc<AppState>, acct: &WxPushAccount, m: &Value) {
         } else {
             tracing::info!(account = %acct.name, "扫码推送已激活（首次入站留下会话上下文）");
         }
-        return; // 激活消息本身不进命令路由（它只是「打个招呼」）
+        /* 2026-10-18：首条消息如果本身就是命令（主播扫完直接回「1」），欢迎语发完继续
+        往下走命令路由 —— 否则用户看到欢迎语里写着「回 1 看榜单」却回 1 没反应，
+        还得再发一遍。普通寒暄（非命令）到此为止，不进路由。 */
+        if !crate::bot::looks_like_command(&text) {
+            return; // 普通消息：打个招呼就够
+        }
     }
 
     // —— 已激活账号的本人后续消息：接入命令路由（2026-10-11 审计整改）——
@@ -588,7 +587,6 @@ async fn handle_msg(st: &Arc<AppState>, acct: &WxPushAccount, m: &Value) {
     // 与激活回执里「回复『解绑』可以断开」的承诺矛盾。
     // 复用 BotRouter：角色判定（push_bindings 命中 → User）、限流（10 条/分钟/会话）、
     // 「解绑」命令（按 conversation_id 操作 push_bindings）全部走同一份实现。
-    let text = message_text(m);
     if text.trim().is_empty() {
         return; // 非文本消息（图 / 语音 / 文件）：扫码账号是普通用户，不处理附件
     }
@@ -603,6 +601,33 @@ async fn handle_msg(st: &Arc<AppState>, acct: &WxPushAccount, m: &Value) {
     let Some(out) = crate::bot::BotRouter::handle(st, &cfg, inbound).await else {
         return; // None = 静默语义（未绑定 / 空消息），不发任何回复
     };
+    /* 2026-10-18 用户口径「文字的榜单去掉」：命令 1 现在带榜单图（`Outbound.images`）。
+    有图先发图，**发图成功就不再发文字**；图全部失败才退回文字，保证命令至少有一个回复。 */
+    if !out.images.is_empty() {
+        let mut sent = 0usize;
+        for png in &out.images {
+            match crate::store::wxmedia::user_send_image(
+                st,
+                &acct.base_url,
+                &acct.bot_token,
+                &from_user,
+                &context_token,
+                "",
+                png,
+            )
+            .await
+            {
+                Ok(()) => sent += 1,
+                Err(e) => {
+                    tracing::warn!(account = %acct.name, error = %e, "扫码账号图片回复发送失败")
+                }
+            }
+        }
+        if sent > 0 {
+            return;
+        }
+        tracing::warn!(account = %acct.name, pages = out.images.len(), "榜单图全部发送失败，退回文字");
+    }
     if out.text.trim().is_empty() {
         return;
     }

@@ -2073,6 +2073,19 @@ pub async fn commit_import(
         crate::push::schedule_after_import(st, team, biz_date);
     }
 
+    /* 2026-10-18 用户口径「预渲染」：数据一变旧图就作废，立刻清缓存，并在后台把
+    该业务日的榜单图（按收件人水印）提前渲好落盘 —— 机器人命令「1」和 30 分钟后的
+    自动推送都会命中缓存，不再现场 SVG→PNG（单份约 1–2 秒 / 6 MB）。
+    后台任务：失败只 warn，不影响导入结果与推送。 */
+    crate::push::clear_daily_image_cache();
+    {
+        let st2 = std::sync::Arc::clone(st);
+        let date = biz_date.to_string();
+        tokio::spawn(async move {
+            crate::push::prewarm_daily_report_images(&st2, &date).await;
+        });
+    }
+
     Ok(CommitReport {
         batch_id,
         // total 报合并后的行数：运营看到的行数跟落库的行数才对得上

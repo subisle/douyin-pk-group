@@ -46,6 +46,31 @@ pub fn random_password() -> String {
     )
 }
 
+/// 从 `[0, len)` 里均匀取一个下标（拒绝采样消除取模偏差）。
+///
+/// 用途：从固定文案池里随机抽一句问候语（1000 条池子）。虽然这里不是安全敏感场景，
+/// 仍统一走 OS CSPRNG —— 少一个「用 RandomState 凑合」的口子，审计时不用逐个解释。
+/// `len == 0` 返回 0（调用方自己兜底空池）。
+pub fn pick_index(len: usize) -> usize {
+    if len <= 1 {
+        return 0;
+    }
+    let mut buf = [0u8; 8];
+    // 32 位无偏：limit = floor(2^32 / len) * len，落在 [limit, 2^32) 的样本重抽
+    let limit = (u32::MAX as u64 / len as u64) * len as u64;
+    for _ in 0..64 {
+        if getrandom::getrandom(&mut buf).is_err() {
+            break;
+        }
+        let v = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as u64;
+        if v < limit {
+            return (v % len as u64) as usize;
+        }
+    }
+    // 极端兜底（getrandom 连续失败 / 一直落在拒绝区）：按字节取模，仍能返回合法下标
+    (buf[0] as usize) % len
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -73,5 +98,27 @@ mod tests {
         for d in b'0'..=b'9' {
             assert!(c.contains(d as char), "缺少数字 {}", d as char);
         }
+    }
+
+    #[test]
+    fn pick_index_stays_in_range() {
+        assert_eq!(pick_index(0), 0, "空池返回 0");
+        assert_eq!(pick_index(1), 0, "单元素恒为 0");
+        for len in [2usize, 3, 7, 1000] {
+            for _ in 0..200 {
+                let i = pick_index(len);
+                assert!(i < len, "pick_index({len}) 返回越界下标 {i}");
+            }
+        }
+    }
+
+    #[test]
+    fn pick_index_covers_all_slots() {
+        // 小池子多抽几次应当覆盖到每个下标（1000 次抽 4 个槽，漏掉某槽的概率可忽略）
+        let mut seen = [false; 4];
+        for _ in 0..1000 {
+            seen[pick_index(4)] = true;
+        }
+        assert!(seen.iter().all(|s| *s), "pick_index(4) 没能覆盖全部下标");
     }
 }

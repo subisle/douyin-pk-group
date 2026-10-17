@@ -26,8 +26,14 @@ impl Role {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CmdId {
     Help,
+    /// 每日榜单（对外主命令名 = `1`）
     DailyReport,
+    /// 个人榜单（对外主命令名 = `2`）
     MyReport,
+    /// 名下徒弟的榜单（对外主命令名 = `3`）
+    DiscipleRank,
+    /// 追分榜单（对外主命令名 = `4`）
+    TargetRank,
     PushPause,
     PushResume,
     Status,
@@ -56,26 +62,44 @@ pub struct CmdSpec {
 
 /// 全部命令（顺序 = 帮助文案里的顺序）
 pub const COMMANDS: &[CmdSpec] = &[
+    /* 2026-10-18 用户口径：普通用户的四个主命令改成**数字 1–4**
+    （主播在微信里回一个数字最省事，不用记中文命令名）。
+    主名就是数字；旧的中文名 / 英文名保留为别名，老用户发「每日报告」照旧能用。
+    注意：单数字不会和 4 位对接码冲突（`looks_like_bind_code` 要求恰好 4 位数字）。 */
+    CmdSpec {
+        id: CmdId::DailyReport,
+        name: "1",
+        aliases: &["每日榜单", "每日报告", "daily"],
+        role: Role::User,
+        summary: "每日榜单：当天 TOP10 + 你排第几",
+    },
+    CmdSpec {
+        id: CmdId::MyReport,
+        name: "2",
+        aliases: &["个人榜单", "个人报告", "me", "my"],
+        role: Role::User,
+        summary: "个人榜单：你的今日 / 本月数据 + 追分进度",
+    },
+    CmdSpec {
+        id: CmdId::DiscipleRank,
+        name: "3",
+        aliases: &["徒弟榜单", "徒弟榜", "徒弟"],
+        role: Role::User,
+        summary: "徒弟榜单：名下徒弟的本月榜单",
+    },
+    CmdSpec {
+        id: CmdId::TargetRank,
+        name: "4",
+        aliases: &["追分榜单", "追分榜", "追分"],
+        role: Role::User,
+        summary: "追分榜单：你在追的人排第几、还差多少",
+    },
     CmdSpec {
         id: CmdId::Help,
         name: "帮助",
         aliases: &["help"],
         role: Role::User,
         summary: "再看一遍这份说明",
-    },
-    CmdSpec {
-        id: CmdId::DailyReport,
-        name: "每日报告",
-        aliases: &["daily"],
-        role: Role::User,
-        summary: "当天音浪榜 TOP10 + 我的名次",
-    },
-    CmdSpec {
-        id: CmdId::MyReport,
-        name: "个人报告",
-        aliases: &["me", "my"],
-        role: Role::User,
-        summary: "我的今日 / 本月数据 + 追分目标进度",
     },
     CmdSpec {
         id: CmdId::PushPause,
@@ -156,7 +180,7 @@ pub const COMMANDS: &[CmdSpec] = &[
     },
 ];
 
-/// 8 个无参命令：支持「整句精确匹配」（忽略大小写），其余命令走 token 解析
+/// 无参命令：支持「整句精确匹配」（忽略大小写），其余命令走 token 解析
 const ARGLESS: &[CmdId] = &[
     CmdId::Help,
     CmdId::Status,
@@ -164,6 +188,8 @@ const ARGLESS: &[CmdId] = &[
     CmdId::TotalRank,
     CmdId::DailyReport,
     CmdId::MyReport,
+    CmdId::DiscipleRank,
+    CmdId::TargetRank,
     CmdId::PushPause,
     CmdId::PushResume,
 ];
@@ -194,10 +220,14 @@ fn matches_spec(candidate: &str, spec: &CmdSpec) -> bool {
 
 /// 解析一条命令文本 → (命令 ID, 参数)。
 ///
-/// - 先整句精确匹配 8 个无参命令（帮助 / 状态 / 分组 / 总榜 / 每日报告 / 个人报告 /
-///   暂停接收每日推送 / 开启接收每日推送，含英文别名，忽略大小写）
+/// - 先整句精确匹配无参命令（帮助 / 状态 / 分组 / 总榜 / 1 每日榜单 / 2 个人榜单 /
+///   3 徒弟榜单 / 4 追分榜单 / 暂停接收每日推送 / 开启接收每日推送，含中文名与英文别名，
+///   忽略大小写）
 /// - 否则取第一个 token 匹配 name / aliases（忽略大小写），其余 token 作为参数
 /// - 都不命中返回 None（路由层负责给未知命令提示）
+///
+/// ⚠️ 普通用户的四个主命令是**单个数字** `1`–`4`：与微信 4 位对接码不冲突
+/// （`push::looks_like_bind_code` 要求恰好 4 位数字，且在命令路由之前处理）。
 pub fn parse(text: &str) -> Option<(CmdId, Vec<String>)> {
     let text = text.trim();
     if text.is_empty() {
@@ -218,7 +248,7 @@ pub fn parse(text: &str) -> Option<(CmdId, Vec<String>)> {
 }
 
 /// 生成帮助文案：分「普通用户命令 / 管理员命令」两段。
-/// - [`Role::User`] 只列 5 条普通用户命令
+/// - [`Role::User`] 只列 7 条普通用户命令（四个数字主命令 + 帮助 + 两个推送开关）
 /// - [`Role::Admin`] = 全部命令 + 运营的日期黏住 / CSV 附件导入说明
 ///
 /// 两版都带绑定 / 解绑说明。
@@ -235,6 +265,10 @@ pub fn help_for(role: Role) -> String {
     out.push_str("\n【普通用户命令】");
     if role == Role::Admin {
         out.push_str("（要本会话绑过推送才有效，否则回「没有找到你的推送绑定」）");
+    }
+    /* 2026-10-18：数字命令在帮助里补一句「回数字就行」，比单看「· 1 —— …」更明确 */
+    if role == Role::User {
+        out.push_str("\n（回数字就行）");
     }
     for spec in COMMANDS.iter().filter(|s| s.role == Role::User) {
         out.push_str(&format!("\n· {} —— {}", spec.name, spec.summary));
@@ -269,6 +303,8 @@ mod tests {
         CmdId::Help,
         CmdId::DailyReport,
         CmdId::MyReport,
+        CmdId::DiscipleRank,
+        CmdId::TargetRank,
         CmdId::PushPause,
         CmdId::PushResume,
         CmdId::Status,
@@ -361,6 +397,33 @@ mod tests {
         assert_eq!(parse("total").map(|p| p.0), None, "总榜没有英文别名");
     }
 
+    /// 2026-10-18 用户口径：普通用户四个主命令 = 单个数字 1–4。
+    /// 单数字与 4 位对接码互不冲突（对接码要求恰好 4 位数字，且在命令路由之前处理）。
+    #[test]
+    fn parse_numeric_user_commands() {
+        assert_eq!(parse("1"), Some((CmdId::DailyReport, vec![])));
+        assert_eq!(parse("2"), Some((CmdId::MyReport, vec![])));
+        assert_eq!(parse("3"), Some((CmdId::DiscipleRank, vec![])));
+        assert_eq!(parse("4"), Some((CmdId::TargetRank, vec![])));
+        // 老中文命令名继续能用（保留为别名，不破坏老用户习惯）
+        assert_eq!(parse("每日报告"), Some((CmdId::DailyReport, vec![])));
+        assert_eq!(parse("个人报告"), Some((CmdId::MyReport, vec![])));
+        assert_eq!(parse("每日榜单"), Some((CmdId::DailyReport, vec![])));
+        assert_eq!(parse("徒弟榜单"), Some((CmdId::DiscipleRank, vec![])));
+        assert_eq!(parse("追分榜单"), Some((CmdId::TargetRank, vec![])));
+        // 4 位对接码不能被当成命令（「1234」走绑定码路径，不是「1」）
+        assert_eq!(parse("1234"), None, "4 位对接码不该命中数字命令");
+        // 数字命令都是普通用户权限
+        for id in [
+            CmdId::DailyReport,
+            CmdId::MyReport,
+            CmdId::DiscipleRank,
+            CmdId::TargetRank,
+        ] {
+            assert_eq!(id.required_role(), Role::User, "{id:?} 应为普通用户命令");
+        }
+    }
+
     #[test]
     fn parse_unknown_returns_none() {
         for s in [
@@ -398,7 +461,11 @@ mod tests {
             );
         }
         let names = listed_names(Role::User);
-        assert_eq!(names.len(), 5, "普通用户恰好 5 条命令：{names:?}");
+        assert_eq!(
+            names.len(),
+            7,
+            "普通用户恰好 7 条命令（1/2/3/4 + 帮助 + 两个推送开关）：{names:?}"
+        );
         for name in &names {
             let (id, _) = parse(name).unwrap_or_else(|| panic!("帮助里的 {name} 解析不到"));
             assert_eq!(

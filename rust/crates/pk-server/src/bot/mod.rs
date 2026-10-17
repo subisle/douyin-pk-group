@@ -50,6 +50,12 @@ pub struct Attachment {
 pub struct Outbound {
     pub conversation_id: String,
     pub text: String,
+    /// 随文字一起下发的图片（PNG 字节，按顺序发送）。空 = 纯文本。
+    ///
+    /// 2026-10-18 用户口径：机器人命令「1」（每日榜单）改成发**榜单图**（与自动推送
+    /// 同一套渲染）。文字版本保留作兜底 —— 能发图的渠道（微信扫码账号 / 微信全局
+    /// 机器人）优先发图、不再发文字 TOP10；发不了图的渠道（QQ）继续发文字。
+    pub images: Vec<Vec<u8>>,
 }
 
 impl Outbound {
@@ -57,7 +63,14 @@ impl Outbound {
         Self {
             conversation_id: conversation_id.to_string(),
             text: text.into(),
+            images: Vec::new(),
         }
+    }
+
+    /// 挂上待发图片（文字仍保留：渠道发不了图时用它兜底）。
+    pub fn with_images(mut self, images: Vec<Vec<u8>>) -> Self {
+        self.images = images;
+        self
     }
 }
 
@@ -798,26 +811,69 @@ async fn conv_bind_clear(st: &AppState, key: &str) {
     }
 }
 
-/// 微信对接完成欢迎语（唯一出口：机器人回对接码、扫码确认两个入口共用一份文案）。
+/* ---------------------- 对接欢迎语的鼓励文案池（2026-10-18） ---------------------- */
+
+/// 1000 条鼓励文案，一行一条（`include_str!` 零运行时 IO，编译期进二进制）。
+///
+/// 为什么单独放数据文件：文案是运营资产，改文案不该动 Rust 源码、更不该为了改一句话
+/// 重新走一遍代码评审；同时 `include_str!` 保证部署时不会因为漏拷一个 txt 而静默空池。
+const WX_GREETINGS_RAW: &str = include_str!("greetings.txt");
+
+/// 文案池（去空行 / 去注释行；首次调用解析一次，之后复用）。
+fn wx_greetings() -> &'static [&'static str] {
+    static POOL: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        WX_GREETINGS_RAW
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .collect()
+    })
+    .as_slice()
+}
+
+/// 随机抽一条鼓励文案。池子为空（文件被误清空）时兜底一句，永不让欢迎语缺句。
+fn random_greeting() -> &'static str {
+    match wx_greetings() {
+        [] => "今天也要开心一点。",
+        pool => pool[crate::random::pick_index(pool.len())],
+    }
+}
+
+/// 这段文本是不是一条已注册的命令（供扫码激活路径判断：首条消息是命令就顺便执行）。
+pub(crate) fn looks_like_command(text: &str) -> bool {
+    commands::parse(text).is_some()
+}
+
+/// 微信对接完成欢迎语（唯一出口：扫码确认 / 4 位对接码 / 首次入站激活三个入口共用）。
 ///
 /// 2026-10-16 用户口径：「对接完成发送欢迎语加名字」——直接叫名字（账号姓名 =
 /// 展示端登录的那个姓名），比通用文案更像「系统认识你」，主播一眼确认绑对了号。
 /// 曾经 P1-1 审计要求不带姓名（防会话截图外传），本次由用户明确改回带姓名；
-/// 要恢复匿名口径，把 `你好，{name}！` 换成 `你好！` 即可，两个入口同时生效。
+/// 要恢复匿名口径，把 `你好，{name}！` 换成 `你好！` 即可，三个入口同时生效。
+///
+/// 2026-10-18 用户口径：欢迎语 = **随机鼓励文案（1000 条池）+ 功能简介 + 1/2/3/4 菜单**。
+/// 主播多数是**没开播的时候**打开，第一句要先给情绪价值（鼓励/陪伴），再讲功能，
+/// 最后给最省事的入口：回一个数字。
 pub(crate) fn wx_dock_welcome(name: &str) -> String {
     let who = name.trim();
-    let greeting = if who.is_empty() {
+    let hello = if who.is_empty() {
         "你好！".to_string()
     } else {
         format!("你好，{who}！")
     };
     format!(
-        "{greeting}\n\n✅ 微信对接成功\n\n\
-         以后数据更新会自动推给你：\n\
-         · 追分提醒 —— 追上对手 / 还差多少\n\
-         · 每日报告 —— 当天的音浪排行榜\n\n\
-         要开哪一项、要追谁，到展示端「我的」页面里设置（两个开关默认关着）。\n\
-         回复「解绑」可以断开。"
+        "{hello}\n{greeting}\n\n\
+         ✅ 微信对接成功\n\n\
+         以后数据更新会自动推给你（每日报告 / 追分提醒），\n\
+         开关和追分目标都在展示端「我的」页里设置。\n\n\
+         想查什么，直接回数字：\n\
+         1 —— 每日榜单（当天 TOP10 + 你排第几）\n\
+         2 —— 个人榜单（你的今日 / 本月 + 追分进度）\n\
+         3 —— 徒弟榜单（名下徒弟本月排第几）\n\
+         4 —— 追分榜单（你在追的人排第几、还差多少）\n\n\
+         发「帮助」看全部说明，发「解绑」可断开对接。",
+        greeting = random_greeting()
     )
 }
 
@@ -1049,8 +1105,7 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
         if text.is_empty() {
             return None;
         }
-        let reply = route_command(st, cfg, &inbound, &text, role).await;
-        return Some(Outbound::to(&inbound.conversation_id, reply));
+        return Some(route_command(st, cfg, &inbound, &text, role).await);
     }
 
     // —— 以下为管理员流程（附件下载 / 日期黏住 / 命令路由）——
@@ -1212,8 +1267,7 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
         return None;
     }
 
-    let reply = route_command(st, cfg, &inbound, &text, role).await;
-    Some(Outbound::to(&inbound.conversation_id, reply))
+    Some(route_command(st, cfg, &inbound, &text, role).await)
 }
 
 /// 导入结果 → 机器人回复文本（简短：只报成败行数；失败原因给前 10 条。
@@ -1254,33 +1308,52 @@ async fn route_command(
     inbound: &Inbound,
     text: &str,
     role: Role,
-) -> String {
+) -> Outbound {
     // 命令注册表是唯一事实来源：解析不到 → 管理员沿用原提示，普通用户引导看「帮助」
     let Some((id, args)) = commands::parse(text) else {
-        return match role {
+        let msg = match role {
             Role::User => "没认出这条命令。发「帮助」看你能用的命令。".to_string(),
             Role::Admin => format!("不认识这条命令。发「帮助」看用法。\n你发的是：{text}"),
         };
+        return Outbound::to(&inbound.conversation_id, msg);
     };
     // 权限门控：不够权限只说这一句，绝不执行
     if !role.allows(id.required_role()) {
-        return format!(
-            "「{}」是管理员命令，你没有权限。\n发「帮助」看你能用的命令。",
-            id.spec().name
+        return Outbound::to(
+            &inbound.conversation_id,
+            format!(
+                "「{}」是管理员命令，你没有权限。\n发「帮助」看你能用的命令。",
+                id.spec().name
+            ),
         );
     }
 
     // 命令行字符串参数（日报 / 缺数据 / 导入沿用 &[&str] 接口）
     let args_ref: Vec<&str> = args.iter().map(String::as_str).collect();
 
-    match id {
+    // 命令 1（每日榜单）：图片版优先；文字留着给发不了图的渠道兜底
+    let mut images: Vec<Vec<u8>> = Vec::new();
+    let text = match id {
         CmdId::Help => commands::help_for(role),
         CmdId::DailyReport => match current_binding(st, inbound).await {
-            Some(b) => cmd_daily_report_user(st, &b).await,
+            Some(b) => {
+                let (t, pngs) = cmd_daily_report_user(st, &b).await;
+                images = pngs;
+                t
+            }
             None => NO_BINDING_HINT.to_string(),
         },
         CmdId::MyReport => match current_binding(st, inbound).await {
             Some(b) => cmd_my_report_user(st, &b).await,
+            None => NO_BINDING_HINT.to_string(),
+        },
+        // 2026-10-18 新增：3 = 名下徒弟的榜单，4 = 追分榜单
+        CmdId::DiscipleRank => match current_binding(st, inbound).await {
+            Some(b) => cmd_disciple_rank_user(st, &b).await,
+            None => NO_BINDING_HINT.to_string(),
+        },
+        CmdId::TargetRank => match current_binding(st, inbound).await {
+            Some(b) => cmd_target_rank_user(st, &b).await,
             None => NO_BINDING_HINT.to_string(),
         },
         CmdId::PushPause => match current_binding(st, inbound).await {
@@ -1310,7 +1383,8 @@ async fn route_command(
         CmdId::DailySquadReport => cmd_daily_report(st, &args_ref).await,
         CmdId::MissingData => cmd_missing(st, &args_ref).await,
         CmdId::Import => cmd_import(st, inbound, &args_ref).await,
-    }
+    };
+    Outbound::to(&inbound.conversation_id, text).with_images(images)
 }
 
 /* ------------------------- 普通用户命令（已绑定主播） ------------------------- */
@@ -1344,23 +1418,37 @@ async fn binding_team(st: &Arc<AppState>, b: &crate::store::PushBinding) -> Opti
 }
 
 /// 普通用户「每日报告」：最新业务日 TOP10 + 我的名次（与推送同一份文案）
-async fn cmd_daily_report_user(st: &Arc<AppState>, b: &crate::store::PushBinding) -> String {
+async fn cmd_daily_report_user(
+    st: &Arc<AppState>,
+    b: &crate::store::PushBinding,
+) -> (String, Vec<Vec<u8>>) {
     let Some(date) = latest_biz_date(st).await else {
-        return "还没有可用的业务数据，等运营导入后再来看。".into();
+        return ("还没有可用的业务数据，等运营导入后再来看。".into(), Vec::new());
     };
     let Some(team) = binding_team(st, b).await else {
-        return "还没有查到你的团别归属，稍后再试；一直这样请联系管理员。".into();
+        return (
+            "还没有查到你的团别归属，稍后再试；一直这样请联系管理员。".into(),
+            Vec::new(),
+        );
     };
-    let items = crate::push::daily_rank(st, &team, &date).await;
-    if items.is_empty() {
-        return format!("{date} 还没有音浪数据，等运营导入后再来看。");
-    }
     /* 分号明细（2026-10-12 用户口径「推送多个号带着抖音号」）：
     用户主动发的「每日报告」和定时推送走的是同一条 wxbot 通道，文案口径必须一致，
     所以这里也带上「我的抖音号」段。取数失败 push.rs 内部只 warn 并返回空 →
     自动退回不带明细的原文案，命令照常能回复。 */
+    let items = crate::push::daily_rank(st, &team, &date).await;
+    if items.is_empty() {
+        return (
+            format!("{date} 还没有音浪数据，等运营导入后再来看。"),
+            Vec::new(),
+        );
+    }
     let accounts = crate::push::person_account_waves(st, b.person_id, &date).await;
-    crate::push::daily_report_text_with_accounts(&team, &date, &items, b.person_id, &accounts)
+    let text =
+        crate::push::daily_report_text_with_accounts(&team, &date, &items, b.person_id, &accounts);
+    /* 2026-10-18 用户口径「文字的榜单去掉」：先渲染榜单图（与自动推送同一套两页版）。
+    渲染成功 → 微信渠道只发图、不发这段文字；渲染失败 → 退回文字，命令不会没响应。 */
+    let pngs = crate::push::daily_report_pngs(st, &team, &date, b.name.trim()).await;
+    (text, pngs)
 }
 
 /// 普通用户「个人报告」：今日名次/音浪 + 本月累计/名次 + 追分目标进度
@@ -1443,6 +1531,157 @@ fn render_my_report(
             out.push_str(&format!("\n· {label}：{detail}，还差 {gap_text}"));
         }
     }
+    out
+}
+
+/// 普通用户「徒弟榜单」（命令 3）：名下**直系徒弟**的本月团内排名。
+///
+/// 口径与「个人榜单 / 追分榜单」一致：本月累计音浪 + 团内名次（可信行聚合）。
+/// 只算直系（`person.master_id = 本人`），与「我的」页 `disciple.count` 同源，徒孙不计。
+async fn cmd_disciple_rank_user(st: &Arc<AppState>, b: &crate::store::PushBinding) -> String {
+    if b.person_id == 0 {
+        return "这个账号没有绑定主播档案，看不到徒弟榜单。".into();
+    }
+    let Some(date) = latest_biz_date(st).await else {
+        return "还没有可用的业务数据，等运营导入后再来看。".into();
+    };
+    let Some(team) = binding_team(st, b).await else {
+        return "还没有查到你的团别归属，稍后再试；一直这样请联系管理员。".into();
+    };
+    let month = date.get(..7).unwrap_or(&date).to_string();
+    let disciples = crate::push::direct_disciples(st, b.person_id).await;
+    if disciples.is_empty() {
+        return format!(
+            "「{}」名下目前还没有徒弟。\n徒弟在台账里挂到你名下之后，这里就能看到他们的本月排名。",
+            b.name.trim()
+        );
+    }
+    let rank = crate::push::month_rank_list(st, &team, &month).await;
+    let pos: HashMap<u64, usize> = rank
+        .iter()
+        .enumerate()
+        .map(|(i, (pid, _, _))| (*pid, i + 1))
+        .collect();
+    let wave_map = crate::push::month_wave_map(st, &team, &month).await;
+    let mut rows: Vec<(Option<usize>, String, i64)> = disciples
+        .iter()
+        .map(|(pid, dname)| {
+            (
+                pos.get(pid).copied(),
+                dname.trim().to_string(),
+                wave_map.get(pid).copied().unwrap_or(0),
+            )
+        })
+        .collect();
+    // 上榜的按名次在前；没上榜（本月没播）的排最后，内部按姓名
+    rows.sort_by(|a, b| match (a.0, b.0) {
+        (Some(x), Some(y)) => x.cmp(&y),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => a.1.cmp(&b.1),
+    });
+    render_disciple_rank(b.name.trim(), &month, &rows)
+}
+
+/// 徒弟榜单排版（纯函数，好测）。`rows` 已按名次排好：`(团内名次, 徒弟名, 本月音浪)`。
+fn render_disciple_rank(name: &str, month: &str, rows: &[(Option<usize>, String, i64)]) -> String {
+    /// 一条微信消息里最多列多少人（再多会刷屏，且微信有长度限制）
+    const MAX_ROWS: usize = 30;
+    let total: i64 = rows.iter().map(|(_, _, w)| *w).sum();
+    let mut out = format!(
+        "👥 徒弟榜单（{name} · {month}）\n共 {} 人 · 本月合计 {}",
+        rows.len(),
+        crate::push::fmt_wan(total)
+    );
+    for (pos, dname, wave) in rows.iter().take(MAX_ROWS) {
+        match pos {
+            Some(p) => out.push_str(&format!(
+                "\n· 第 {p} 名 · {dname} · {}",
+                crate::push::fmt_wan(*wave)
+            )),
+            None => out.push_str(&format!("\n· {dname} · 本月还没开播")),
+        }
+    }
+    if rows.len() > MAX_ROWS {
+        out.push_str(&format!("\n…还有 {} 人没有列出", rows.len() - MAX_ROWS));
+    }
+    out.push_str("\n\n（口径：本月累计音浪 · 团内名次；只算直系徒弟）");
+    out
+}
+
+/// 普通用户「追分榜单」（命令 4）：我在追的人现在团内第几、还差多少。
+///
+/// 与「个人榜单」底部那几行追分目标同源（`targets_for_push` + `eval_target`），
+/// 区别是把每个目标单独展开成榜单项，带对方当前名次和音浪。
+async fn cmd_target_rank_user(st: &Arc<AppState>, b: &crate::store::PushBinding) -> String {
+    if b.person_id == 0 {
+        return "这个账号没有绑定主播档案，看不到追分榜单。".into();
+    }
+    let Some(date) = latest_biz_date(st).await else {
+        return "还没有可用的业务数据，等运营导入后再来看。".into();
+    };
+    let Some(team) = binding_team(st, b).await else {
+        return "还没有查到你的团别归属，稍后再试；一直这样请联系管理员。".into();
+    };
+    let month = date.get(..7).unwrap_or(&date).to_string();
+    let targets = crate::store::targets_for_push(st, &b.name).await;
+    if targets.is_empty() {
+        return "还没有设置追分目标。\n到展示端「我的」页可以添加（最多 5 个）。".into();
+    }
+    let month_map = crate::push::month_wave_map(st, &team, &month).await;
+    let month_rank = crate::push::month_rank_list(st, &team, &month).await;
+    let pos: HashMap<u64, usize> = month_rank
+        .iter()
+        .enumerate()
+        .map(|(i, (pid, _, _))| (*pid, i + 1))
+        .collect();
+    let my_month = month_map.get(&b.person_id).copied().unwrap_or(0);
+    let my_pos = pos.get(&b.person_id).copied();
+    let mut lines: Vec<String> = Vec::new();
+    for t in &targets {
+        let rival = month_map.get(&t.target_person_id).copied().unwrap_or(0);
+        let (gap, label, detail, gap_text) =
+            crate::push::eval_target(t, my_month, rival, Some(&month_rank), b.person_id);
+        // 只有「追人」目标才有对方名次可报；追名次 / 追固定分没有对手人
+        let rival_part = if t.target_person_id > 0 {
+            match pos.get(&t.target_person_id).copied() {
+                Some(p) => format!("（对方第 {p} 名 · {}）", crate::push::fmt_wan(rival)),
+                None => "（对方本月还没开播）".to_string(),
+            }
+        } else {
+            String::new()
+        };
+        if gap <= 0 {
+            lines.push(format!("· ✅ {label} · 已达成{rival_part}"));
+        } else if gap == i64::MAX {
+            // 追名次但本月还没进榜：哨兵值，只报现状不报假差距
+            lines.push(format!("· {label} · {detail}{rival_part}"));
+        } else {
+            lines.push(format!("· {label} · {detail}{rival_part}，还差 {gap_text}"));
+        }
+    }
+    render_target_rank(b.name.trim(), &month, my_pos, my_month, &lines)
+}
+
+/// 追分榜单排版（纯函数，好测）。
+fn render_target_rank(
+    name: &str,
+    month: &str,
+    my_pos: Option<usize>,
+    my_wave: i64,
+    lines: &[String],
+) -> String {
+    let mut out = format!("🎯 追分榜单（{name} · {month}）\n我：");
+    match my_pos {
+        Some(p) => out.push_str(&format!("第 {p} 名 · {}", crate::push::fmt_wan(my_wave))),
+        None => out.push_str(&format!(
+            "本月还没开播（累计 {}）",
+            crate::push::fmt_wan(my_wave)
+        )),
+    }
+    out.push('\n');
+    out.push_str(&lines.join("\n"));
+    out.push_str("\n\n（口径：本月累计音浪 · 团内名次）");
     out
 }
 
@@ -2210,11 +2449,113 @@ mod tests {
         );
     }
 
+    /* ---- 2026-10-18：对接欢迎语 + 数字命令 3/4 ---- */
+
+    #[test]
+    fn greetings_pool_has_1000_unique_lines() {
+        let pool = wx_greetings();
+        assert_eq!(pool.len(), 1000, "鼓励文案池必须是 1000 条");
+        let mut seen = std::collections::HashSet::new();
+        for line in pool {
+            assert!(!line.is_empty(), "文案不能有空行");
+            assert!(
+                line.chars().count() <= 45,
+                "文案过长（{} 字）：{line}",
+                line.chars().count()
+            );
+            assert!(!line.contains('\n'), "文案不能含换行：{line}");
+            assert!(seen.insert(*line), "文案重复：{line}");
+        }
+    }
+
+    #[test]
+    fn random_greeting_comes_from_pool() {
+        let pool = wx_greetings();
+        for _ in 0..50 {
+            let g = random_greeting();
+            assert!(pool.contains(&g), "随机文案不在池子里：{g}");
+        }
+    }
+
+    #[test]
+    fn dock_welcome_has_greeting_intro_and_numeric_menu() {
+        let t = wx_dock_welcome("浩雨");
+        assert!(t.starts_with("你好，浩雨！"), "{t}");
+        assert!(t.contains("✅ 微信对接成功"), "{t}");
+        for line in [
+            "1 —— 每日榜单",
+            "2 —— 个人榜单",
+            "3 —— 徒弟榜单",
+            "4 —— 追分榜单",
+        ] {
+            assert!(t.contains(line), "欢迎语缺菜单项 {line}：{t}");
+        }
+        assert!(t.contains("帮助"), "{t}");
+        assert!(t.contains("解绑"), "{t}");
+        // 第二行必须来自文案池（随机鼓励语）
+        let second = t.lines().nth(1).unwrap_or_default().trim();
+        assert!(
+            wx_greetings().contains(&second),
+            "第二行不是文案池里的句子：{second}"
+        );
+        // 空姓名兜底不出现「你好，！」
+        let anon = wx_dock_welcome("  ");
+        assert!(anon.starts_with("你好！"), "{anon}");
+    }
+
+    #[test]
+    fn disciple_rank_renders_positions_and_offline() {
+        let rows = vec![
+            (Some(3usize), "狼鑫".to_string(), 500_000i64),
+            (Some(9), "狼雨".to_string(), 200_000),
+            (None, "玖汐".to_string(), 0),
+        ];
+        let t = render_disciple_rank("浩雨", "2026-10", &rows);
+        assert!(t.contains("👥 徒弟榜单（浩雨 · 2026-10）"), "{t}");
+        assert!(t.contains("共 3 人 · 本月合计 70 万"), "{t}");
+        assert!(t.contains("· 第 3 名 · 狼鑫 · 50 万"), "{t}");
+        assert!(t.contains("· 玖汐 · 本月还没开播"), "{t}");
+    }
+
+    #[test]
+    fn disciple_rank_caps_long_lists() {
+        let rows: Vec<(Option<usize>, String, i64)> = (1..=35)
+            .map(|i| (Some(i), format!("徒弟{i}"), 10_000))
+            .collect();
+        let t = render_disciple_rank("浩雨", "2026-10", &rows);
+        assert!(t.contains("…还有 5 人没有列出"), "{t}");
+    }
+
+    #[test]
+    fn target_rank_renders_gap_reached_and_offboard() {
+        let lines = vec![
+            "· 「狼鑫」· 你 20 万 / TA 30 万（对方第 3 名 · 30 万），还差 10 万".to_string(),
+            "· ✅ 浩冬 · 已达成（对方第 9 名 · 1 万）".to_string(),
+            "· 本月第 1 名 · 你还没进本月榜（对方本月还没开播）".to_string(),
+        ];
+        let t = render_target_rank("浩雨", "2026-10", Some(5), 200_000, &lines);
+        assert!(t.contains("🎯 追分榜单（浩雨 · 2026-10）"), "{t}");
+        assert!(t.contains("我：第 5 名 · 20 万"), "{t}");
+        assert!(t.contains("还差 10 万"), "{t}");
+        assert!(t.contains("已达成"), "{t}");
+        assert!(
+            !t.contains("还差 本月还没开播"),
+            "哨兵值不该拼出别扭文案：{t}"
+        );
+    }
+
+    #[test]
+    fn target_rank_when_not_on_board() {
+        let t = render_target_rank("浩雨", "2026-10", None, 0, &[]);
+        assert!(t.contains("本月还没开播"), "{t}");
+    }
+
     #[test]
     fn my_report_without_data_is_friendly() {
         let none = render_my_report("小美", "2026-10-09", None, None, 0, &[]);
         assert!(none.contains("今天还没开播"), "{none}");
         assert!(none.contains("本月还没开播"), "{none}");
+
         assert!(none.contains("追分目标：还没有设置"), "{none}");
     }
 

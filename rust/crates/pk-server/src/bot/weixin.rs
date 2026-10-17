@@ -966,6 +966,33 @@ impl WxTransport {
                 None => anyhow::bail!("找不到会话 {} 的回复上下文", out.conversation_id),
             }
         };
+        /* 2026-10-18：管理员全局机器人通道也能发图（命令「1」的榜单图）。
+        有图先发图，成功就不发文字；全失败再退回文字。 */
+        if !out.images.is_empty() {
+            let base = self.base_url.lock().await.clone();
+            let token = self.token.lock().await.clone();
+            let mut sent = 0usize;
+            for png in &out.images {
+                match crate::store::wxmedia::user_send_image(
+                    &self.st,
+                    &base,
+                    &token,
+                    &to_user,
+                    &context_token,
+                    "",
+                    png,
+                )
+                .await
+                {
+                    Ok(()) => sent += 1,
+                    Err(e) => tracing::warn!(error = %e, "微信全局通道图片回复发送失败"),
+                }
+            }
+            if sent > 0 {
+                return Ok(());
+            }
+            tracing::warn!(pages = out.images.len(), "微信全局通道榜单图全部失败，退回文字");
+        }
         self.send_raw(&to_user, &group, &context_token, &out.text)
             .await
     }

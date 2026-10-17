@@ -250,6 +250,36 @@ async fn main() -> anyhow::Result<()> {
         cache: Mutex::new(Default::default()),
         bots: std::sync::OnceLock::new(),
     });
+    /* 榜单图预渲染子命令（2026-10-18 用户口径「预渲染」）：
+     `pk-server prewarm-images [YYYY-MM-DD]`（缺省 = 最新业务日）
+    把该业务日两个团所有「能收到图的人」的榜单图提前渲好落盘；
+     机器人命令「1」与 30 分钟后的自动推送都会命中缓存，不再现场 SVG→PNG。
+     ⚠️ 需要 .env（数据源 / 写库账号）；不启动 HTTP 服务，渲完即退出。 */
+    if std::env::args().any(|a| a == "prewarm-images") {
+        let date = std::env::args()
+            .skip_while(|a| a != "prewarm-images")
+            .skip(1)
+            .find(|a| !a.starts_with('-'));
+        let date = match date {
+            Some(d) => d,
+            None => match repos::get_available_dates(&st, Some("LOCAL"), false).await {
+                Ok(ds) if !ds.is_empty() => ds[0].clone(),
+                Ok(_) => {
+                    eprintln!("没有可用的业务日期（库里还没有数据），无法预渲染。");
+                    return Ok(());
+                }
+                Err(e) => {
+                    eprintln!("读取业务日期失败：{e}");
+                    return Ok(());
+                }
+            },
+        };
+        tracing::info!(date = %date, "开始预渲染榜单图");
+        push::prewarm_daily_report_images(&st, &date).await;
+        println!("已预渲染 {date} 的榜单图（缓存目录 ./data/report-cache）");
+        return Ok(());
+    }
+
     /* Redis 30s PING 探针（P0）：刷新 store::cache 内部的降级标志，断开/恢复各留一条日志。
     未配置 REDIS_URL 时不启动；探针只做「刷新 + 记录」，不参与任何业务判断。 */
     if st.redis.is_some() {
