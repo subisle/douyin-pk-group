@@ -445,8 +445,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/wechat", get(public_teams::st_root))
         /* 2026-10-17 审计 5-P3：/wechat/{子路径} 经 OPEN_PREFIXES 的前缀规则免鉴权
         放行后，原先掉进 spa fallback 回管理端 index.html —— 展示页用户看到的是
-        要口令的后台壳。补一条子路径路由接到展示页同款处理。 */
-        .route("/wechat/{*rest}", get(public_teams::st_page_sub))
+        要口令的后台壳。展示端路由只认精确 /wechat，子路径统一渲染展示页壳
+        （用无 Path 参数的 st_root，st_page_sub 要两个 Path 参数会 500）。 */
+        .route("/wechat/{*rest}", get(public_teams::st_root))
         .route("/group", get(public_teams::st_root))
         .route("/group/{key}", get(public_teams::st_root))
         .route("/1", get(public_teams::st_m))
