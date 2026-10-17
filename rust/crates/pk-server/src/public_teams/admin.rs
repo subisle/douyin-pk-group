@@ -544,6 +544,16 @@ pub(crate) async fn my_token_restore(
     let raw = crate::store::cache::get(st, &mytok_key(token)).await?;
     let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
     let owner = v.get("name").and_then(|n| n.as_str()).unwrap_or_default();
+    /* 2026-10-17 审计 4-P2-8：回填需要的三元组从 Redis JSON 里取（原实现用未定义的
+    pid/team/name 编译不过——2026-10-17 修复时补回）；缺失按默认值处理，name 仍要能
+    对上反向索引，否则上面已经失败关闭。 */
+    let pid = v.get("pid").and_then(|x| x.as_u64()).unwrap_or(0);
+    let team = v
+        .get("team")
+        .and_then(|x| x.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let name = owner.to_string();
     let members = crate::store::cache::smembers(st, &mytok_name_key(owner)).await;
     if !members.iter().any(|t| t == token) {
         return None; // 不在反向索引里 = 已吊销：不回填内存，视为未登录

@@ -1063,7 +1063,8 @@ async fn wx_send_lineage_images(
         .await
         .map(|v| crate::report::PushReportFields::from_json(&v))
         .unwrap_or_default();
-    let svgs = crate::lineage_report::render_svg_pages_with_fields(rep, 40, watermark, &fields.lineage);
+    let svgs =
+        crate::lineage_report::render_svg_pages_with_fields(rep, 40, watermark, &fields.lineage);
     anyhow::ensure!(!svgs.is_empty(), "师门日报没有可渲染的页面");
     let mut pages = 0usize;
     for (i, svg) in svgs.iter().enumerate() {
@@ -1106,6 +1107,28 @@ async fn wx_send_uploaded_image(
     let (to_user, ctx) = wx_session_ctx(st, Some(a), conv).await?;
     crate::store::wxmedia::user_send_image(st, &a.base_url, &a.bot_token, &to_user, &ctx, "", png)
         .await
+}
+
+/// 手动师门日报「让位」备注文案（2026-10-17 第四轮审计 P2-2 / task-16）。
+///
+/// 同业务日已被自动推送或另一次手动下发占位时，本轮不重复发送；outbox 里记这句
+/// 人话，运营能看懂「不是失败、也不是没发」，而不是一条含糊的 error。
+const LINEAGE_CLAIM_SKIPPED_NOTE: &str = "同业务日已由其它推送方发送，跳过";
+
+/// 手动师门日报让位时的 outbox 结果（纯函数，便于单测钉死语义）：
+/// `ok=true` + 备注 → outbox 落 sent，不会把「并发让位」当失败反复重试。
+fn lineage_claim_skip_result() -> (bool, String) {
+    (true, LINEAGE_CLAIM_SKIPPED_NOTE.to_string())
+}
+
+/// 手动下发使用的业务日：消息里带合法 `imageDate` 就用它，否则回落今天。
+/// 与推送侧（`push::run` 的 `date` 参数）同一口径；纯逻辑，便于单测覆盖分支判定。
+fn lineage_claim_date(image_date: &str) -> String {
+    if valid_date_str(image_date) {
+        image_date.to_string()
+    } else {
+        today_str()
+    }
 }
 
 /// 发送一行 wxbot 任务。返回 (是否成功, error 备注)。
@@ -1160,26 +1183,31 @@ async fn send_wxbot_row(
                 )
                 .await;
             };
-            let date = if valid_date_str(&msg.image_date) {
-                msg.image_date.clone()
-            } else {
-                today_str()
-            };
+            let date = lineage_claim_date(&msg.image_date);
             match crate::lineage_report::build(st, &date, r.person_id).await {
                 Ok(rep) if rep.disciple_count() > 0 => {
+                    /* 2026-10-17 第四轮审计 P2-2（task-16）：手动下发与自动推送共用
+                    push_bindings.last_lineage_date 去重标记，必须走同一把租约（push.rs）。
+                    · None = 并发方（自动循环 / 另一次手动下发）已持有租约或当天已占
+                             → 本轮让位、不重复发送；outbox 记 sent + 备注（不重试风暴）；
+                    · Some = 抢到（标记已占成本业务日）→ 发送；成功 finalize（保留标记、
+                             只释放租约）；失败 / 闸门拦截先 restore 再走现有降级
+                             （还原标记并释放租约，自动推送/下一轮可重推）。
+                    claim 放在 build 之后、真正发图之前：它之前的早退（person_id==0 /
+                    无扫码账号 / build 失败 / 无在职徒弟）都不持有租约，不存在泄漏窗口。 */
+                    let Some(_prev) = crate::push::claim_lineage_date(st, &bname, &date).await
+                    else {
+                        return lineage_claim_skip_result();
+                    };
                     match wx_send_lineage_images(st, a, &conv, &rep, &r.recipient_name).await {
                         Ok(_) => {
-                            /* 同业务日去重（2026-10-17 修复，审计 6-5）：
-                            管理员手动下发师门日报图原先**刻意不写** last_lineage_date
-                            （怕顶掉自动推送的去重），结果是同一天同一人收到**两份**
-                            师门日报：定时自动一条 + 管理员手动一条。
-                            改成发送成功后写同日标记 —— 自动推送看到标记就跳过当天，
-                            不再重复推；发送失败/被闸拦截都不写（见 fallback_or_blocked，
-                            拦截折成 false → outbox failed，去重标记不推进）。 */
-                            crate::store::push_set_lineage_date(st, &bname, &date).await;
+                            // 发送成功：标记保持本业务日，只释放租约（不再无条件写标记）
+                            crate::push::finalize_lineage_claim(st, &bname).await;
                             (true, String::new())
                         }
                         Err(e) => {
+                            // 图片发送失败 / 被闸拦截：先还原标记再走现有降级（Blocked 不降级）
+                            crate::push::restore_lineage_claim(st, &bname).await;
                             fallback_or_blocked(
                                 st,
                                 acct.as_ref(),
@@ -2006,5 +2034,32 @@ mod tests {
         let mut b3 = body_no_image();
         b3["imageKind"] = json!("custom");
         assert!(parse(b3).is_err(), "没有图时不许提交 imageKind=custom");
+    }
+
+    /* ---------- 手动师门日报租约（2026-10-17 第四轮审计 P2-2 / task-16） ---------- */
+
+    /// 并发让位：不能记成失败（ok=false 会被 outbox worker 当失败反复重试），
+    /// 备注必须是人话、且钉死文案（运营按这句判断「今天已被别的推送方发过」）。
+    #[test]
+    fn lineage_claim_skip_is_sent_with_note() {
+        let (ok, note) = lineage_claim_skip_result();
+        assert!(ok, "让位不是失败：outbox 落 sent 才不会被重试");
+        assert_eq!(note, LINEAGE_CLAIM_SKIPPED_NOTE, "备注文案已冻结");
+        assert!(note.contains("同业务日"), "要说明是同业务日去重：{note}");
+        assert!(!note.contains("失败"), "不能让运营误以为发送失败：{note}");
+    }
+
+    /// 业务日分支：合法 imageDate 原样沿用（补发历史日）；空/非法回落今天。
+    #[test]
+    fn lineage_claim_date_prefers_explicit_business_date() {
+        assert_eq!(lineage_claim_date("2026-10-16"), "2026-10-16");
+        // 非法/空 → today_str()（依赖时钟，只断言形状与不把脏值原样带下去）
+        assert_eq!(lineage_claim_date("").len(), 10, "回落今天应为 YYYY-MM-DD");
+        assert_eq!(
+            lineage_claim_date("2026-13-99").len(),
+            10,
+            "非法日期不能原样使用"
+        );
+        assert_ne!(lineage_claim_date("2026-13-99"), "2026-13-99");
     }
 }

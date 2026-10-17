@@ -37,6 +37,7 @@ use std::time::Duration;
 use sqlx::Row;
 
 use crate::pgrs;
+use crate::pgrs::PgResultExt;
 use crate::state::AppState;
 
 /// 绑定码：**4 位数字**（2026-10-16 用户口径：主播在微信里把 4 位数字发给机器人即可绑定，
