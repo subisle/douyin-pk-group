@@ -693,8 +693,11 @@ async fn try_bind_weixin(st: &Arc<AppState>, inbound: &Inbound) -> Option<Outbou
 
 /// 同一会话在窗口内失败达到该次数 → 临时拒绝兑换
 const BIND_FAIL_CONV_MAX: i32 = 5;
-/// 会话失败计数窗口（分钟）：窗口从首次失败起算，过期后下一次失败归 1 重计
-const BIND_FAIL_CONV_WINDOW_MIN: i64 = 10;
+/// 会话失败计数窗口（分钟）：窗口从首次失败起算，过期后下一次失败归 1 重计。
+/// 用 i32（不是 i64）：`make_interval(mins => $n)` 的参数是 int4，i32 能精确对上；
+/// 若绑 i64，sqlx 会把参数声明成 BIGINT，而 PG 函数解析不给 int8→int4 隐式转换，
+/// 运行期会因「function make_interval(...) does not exist」而静默失败（降级放行）。
+const BIND_FAIL_CONV_WINDOW_MIN: i32 = 10;
 /// 兑换失败 / 被临时锁定的**统一文案**：不泄露码状态，也不暴露「被锁」这件事
 const BIND_FAIL_TEXT: &str = "对接没有成功：这个 4 位对接码不对或已经过期。\n\
      打开展示端 →「我的」页 →「消息设置」→ 点「获取二维码」，\n\

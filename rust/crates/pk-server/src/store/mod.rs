@@ -645,15 +645,19 @@ mod tests {
         );
     }
 
-    /// 密码规则：4~20 位字母或数字。
+    /// 密码规则：4~20 位字母、数字或点（2026-10-17 起允许点）。
     /// 下限沿革：2026-10-10 放宽为 4 → 10-12 审计 M4 提到 6 → **10-13 产品拍板回到 4**
     /// （运营开号习惯是手机号后四位，6 位下限会把后台开号全拒掉）。
     /// 符号/空格/太短仍拒绝；登录路径（my_account_check_login）不比长度，
     /// 存量短密码账号登录不受影响。
     #[test]
     fn my_account_password_rule() {
-        assert!(validate_my_account("example_user", "example_user").is_ok());
+        assert!(validate_my_account("example_user", "example123").is_ok());
         assert!(validate_my_account("狼哲", "13312345678").is_ok());
+        assert!(
+            validate_my_account("玖豆", "Aa181206..").is_ok(),
+            "带点 → 放行（2026-10-17 口径）"
+        );
         assert!(
             validate_my_account("啸帆", "133-1234-5678").is_err(),
             "带横线 → 拒绝"

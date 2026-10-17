@@ -107,6 +107,17 @@ pub async fn get(st: &AppState, key: &str) -> Option<String> {
     .flatten()
 }
 
+/// `TTL key`：返回键的**剩余**存活秒数（2026-10-17 审计 4-P2-8，my token 回填用）。
+///
+/// 语义与其它 API 一致：未配置 / 命令失败 / 超时 → `None`（调用方按「无法确认寿命」
+/// 保守处理）；键不存在或没有设置过期时间（Redis 返回 -2 / -1）同样 `None`。
+pub async fn ttl(st: &AppState, key: &str) -> Option<u64> {
+    let secs = redis_op!(st, "TTL", |c| redis::cmd("TTL")
+        .arg(key)
+        .query_async::<i64>(&mut c))?;
+    (secs > 0).then_some(secs as u64)
+}
+
 /// `SET key value EX ttl`。返回是否写入成功（失败即降级，返回 `false`）。
 pub async fn set(st: &AppState, key: &str, value: &str, ttl_secs: u64) -> bool {
     redis_op!(st, "SET", |c| redis::cmd("SET")

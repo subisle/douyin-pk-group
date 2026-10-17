@@ -15,11 +15,16 @@ pub async fn push_job_enqueue(st: &AppState, team: &str, biz_date: &str, run_at:
     let Ok(pool) = w(st) else {
         return 0;
     };
+    /* 2026-10-17 第四轮审计 B 域修复：正在 `running` 的任务**不允许**被新导入重置成
+    `pending` —— 原先 ON CONFLICT DO UPDATE 无条件重置，一条迟到导入会把在跑的长任务
+    重新排队，同一 (团, 日) 被重跑/重复推送。加 `WHERE push_jobs.status NOT LIKE
+    'running%'` 之后：running 行原样保留，本轮导入不重置队列（等这一轮跑完再入队补推）。 */
     let res = sqlx::query(&crate::pq::rewrite(
         "INSERT INTO push_jobs (team, biz_date, run_at, status, created_at)
          VALUES (?, ?, ?, 'pending', ?)
          ON CONFLICT (team, biz_date) DO UPDATE SET status = 'pending', run_at = EXCLUDED.run_at,
            done_at = '', note = ''
+         WHERE push_jobs.status NOT LIKE 'running%'
          RETURNING id",
     ))
     .bind(team)
@@ -30,7 +35,29 @@ pub async fn push_job_enqueue(st: &AppState, team: &str, biz_date: &str, run_at:
     .await;
     match res {
         Ok(Some(r)) => r.try_get::<i64, _>(0).unwrap_or(0),
-        Ok(None) => 0,
+        Ok(None) => {
+            /* 冲突行的 status LIKE 'running%' → WHERE 挡住 DO UPDATE，RETURNING 为空。
+            不新建、不重置（等本轮跑完），把已有任务 id 回给调用方，避免上层把
+            「正在跑所以没重置」误记成「排队失败」。 */
+            let existing: Option<i64> = sqlx::query(&crate::pq::rewrite(
+                "SELECT id FROM push_jobs WHERE team = ? AND biz_date = ?",
+            ))
+            .bind(team)
+            .bind(biz_date)
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|r| r.try_get::<i64, _>(0).ok());
+            if existing.is_some() {
+                tracing::info!(
+                    team,
+                    biz_date,
+                    "推送任务正在 running，本次导入不重置队列（等本轮跑完）"
+                );
+            }
+            existing.unwrap_or(0)
+        }
         Err(e) => {
             tracing::warn!(error = %e, "推送任务排队失败");
             0
@@ -256,8 +283,12 @@ pub async fn push_job_finish(st: &AppState, id: i64, ok: bool, note: &str) {
             }
         };
         let next_status = finish_status(status.as_deref().unwrap_or_default(), ok);
-        if let Err(e) = sqlx::query(&crate::pq::rewrite(
-            "UPDATE push_jobs SET status = ?, done_at = ?, note = ? WHERE id = ?",
+        /* 2026-10-17 第四轮审计 B 域修复：收尾只允许改「自己抢到的 running 行」。
+        原先 `WHERE id = ?` 会让后到的实例覆盖已 done 的终态（多实例 / 让位竞态下
+        status 互相覆盖）；加 `AND status LIKE 'running%'` 后，重复收尾只会 affected=0。 */
+        match sqlx::query(&crate::pq::rewrite(
+            "UPDATE push_jobs SET status = ?, done_at = ?, note = ? \
+              WHERE id = ? AND status LIKE 'running%'",
         ))
         .bind(next_status)
         .bind(now_str())
@@ -266,8 +297,19 @@ pub async fn push_job_finish(st: &AppState, id: i64, ok: bool, note: &str) {
         .execute(pool)
         .await
         {
-            // 写回失败 = 任务卡在 running:N，必须看得见（原来是 `let _ =` 静默丢弃）
-            tracing::error!(error = %e, job_id = id, ok, "回写推送任务终态失败");
+            Ok(r) if r.affected() == 0 => {
+                // 没命中 running 行 = 已被别的实例收尾 / 状态不是 running：不动终态，只告警。
+                tracing::warn!(
+                    job_id = id,
+                    ok,
+                    "推送任务收尾未命中 running 行（可能已被其它实例收尾），status 未改"
+                );
+            }
+            Ok(_) => {}
+            Err(e) => {
+                // 写回失败 = 任务卡在 running:N，必须看得见（原来是 `let _ =` 静默丢弃）
+                tracing::error!(error = %e, job_id = id, ok, "回写推送任务终态失败");
+            }
         }
     }
 }

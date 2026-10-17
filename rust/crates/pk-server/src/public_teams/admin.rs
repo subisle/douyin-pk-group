@@ -266,8 +266,11 @@ pub(super) fn client_ip_for_limit(addr: std::net::SocketAddr, headers: &HeaderMa
     addr.ip().to_string()
 }
 
-/// 我的 token → (personId, 团别, 账号姓名)（内存，24h 失效；前端 localStorage 保存）。
+/// 我的 token → (personId, 团别, 账号姓名, **过期时刻**)（内存；前端 sessionStorage 保存）。
 /// 管理员观看账号 personId=0（不对应台账主播，姓名直接来自 my_accounts）。
+///
+/// 2026-10-17 审计 4-P2-8：第 4 个字段语义从「创建时刻」改为「过期时刻」——
+/// put 写 `now+24h`，restore 回填写 `now+Redis 剩余 TTL`，两者都不再无条件续满 24h。
 pub(super) type MyTokenMap = HashMap<String, (u64, String, String, Instant)>;
 
 pub(super) static MY_TOKENS: std::sync::OnceLock<std::sync::Mutex<MyTokenMap>> =
@@ -313,7 +316,72 @@ fn mytok_name_key(name: &str) -> String {
     format!("mytokname:{}", name)
 }
 
-/// put/take/revoke 之后的 Redis 同步（拿不到 Redis 就静默跳过，退化为纯内存）。
+/// token 内存 TTL（Duration 形态）。**内存映射的第 4 个字段已从「创建时刻」
+/// 改成「过期时刻」**（2026-10-17 审计 4-P2-8）：restore 回填时必须用 Redis 的
+/// 剩余 TTL 续期，不能重新起算满 24h，否则接近到期的登录态会被重启无限续命。
+const MYTOK_TTL_DUR: Duration = Duration::from_secs(MYTOK_TTL);
+
+/// 进程内「吊销墓碑」：token → 吊销时刻（2026-10-17 审计 4-P2-8）。
+///
+/// 为什么需要它：`my_tokens_revoke` 对内存是同步删除，但对 Redis 是
+/// `mytok_redis_sync` 子线程里的异步删除（可能排队 / 超时 / Redis 降级）。
+/// 在这个窗口里，`my_token_restore` 若先从 Redis 读回旧 token 并回填内存，
+/// 刚吊销的登录态就被「复活」了。墓碑同步写入、take/restore 先查，
+/// 把窗口关死；24h 后自动清理（token 最大寿命），不会无限增长。
+static MYTOK_REVOKED: std::sync::OnceLock<std::sync::Mutex<HashMap<String, Instant>>> =
+    std::sync::OnceLock::new();
+
+fn mytok_revoked() -> &'static std::sync::Mutex<HashMap<String, Instant>> {
+    MYTOK_REVOKED.get_or_init(std::sync::Mutex::default)
+}
+
+/// 纯逻辑：清掉超过 token 最大寿命的墓碑（读取路径顺手调用）。
+fn revoked_prune(map: &mut HashMap<String, Instant>, now: Instant) {
+    map.retain(|_, at| now.duration_since(*at) < MYTOK_TTL_DUR);
+}
+
+/// 纯逻辑：登记一批已吊销 token；已存在的不覆盖原吊销时刻。
+fn revoked_insert(map: &mut HashMap<String, Instant>, tokens: &[String], now: Instant) {
+    revoked_prune(map, now);
+    for t in tokens {
+        map.entry(t.clone()).or_insert(now);
+    }
+}
+
+/// 纯逻辑：token 是否在墓碑里（命中即视为已吊销；顺带 prune）。
+fn revoked_contains(map: &mut HashMap<String, Instant>, token: &str, now: Instant) -> bool {
+    revoked_prune(map, now);
+    map.contains_key(token)
+}
+
+fn mytok_mark_revoked(tokens: &[String]) {
+    if tokens.is_empty() {
+        return;
+    }
+    let mut m = mytok_revoked().lock().expect("my token 墓碑锁 poisoned");
+    revoked_insert(&mut m, tokens, Instant::now());
+}
+
+fn mytok_is_revoked(token: &str) -> bool {
+    let mut m = mytok_revoked().lock().expect("my token 墓碑锁 poisoned");
+    revoked_contains(&mut m, token, Instant::now())
+}
+
+/// 日志打码：token 只留前 8 位，任何日志都不打印完整登录态。
+fn mytok_mask(token: &str) -> String {
+    let mut s: String = token.chars().take(8).collect();
+    if token.chars().count() > 8 {
+        s.push('…');
+    }
+    s
+}
+
+/// 回填内存时使用的过期时刻（纯函数，便于单测）：现在 + Redis 剩余 TTL，
+/// 并以 24h 为上限兜底（Redis 侧理论不会超，防脏数据放大寿命）。
+fn restore_expiry(now: Instant, ttl_secs: u64) -> Instant {
+    now + Duration::from_secs(ttl_secs.min(MYTOK_TTL))
+}
+
 /// 异步工厂：让调用点用 async 块传进来（block_on 里再驱动）
 trait FutureFactory: Send + 'static {
     fn future(
@@ -333,7 +401,12 @@ where
     }
 }
 
-fn mytok_redis_sync<F: FutureFactory>(f: F) {
+/// put/take/revoke 之后的 Redis 同步（拿不到 Redis 就静默跳过，退化为纯内存）。
+///
+/// 2026-10-17 审计 4-P2-8：超时/失败不再完全静默 —— 以前 `let _ = timeout(...)`
+/// 把「Redis 没删掉旧 token」这类安全相关降级吞掉了；现在打 WARN（`target` 里
+/// 只放打码后的 token / 账号，绝不打印完整凭证）。
+fn mytok_redis_sync<F: FutureFactory>(op: &'static str, target: String, f: F) {
     if APP_STATE.get().is_none() {
         return;
     }
@@ -342,11 +415,30 @@ fn mytok_redis_sync<F: FutureFactory>(f: F) {
             .enable_all()
             .build()
         else {
+            tracing::warn!(
+                op = %op,
+                target = %target,
+                "my token Redis 同步线程起不来：登录态只在本进程内存生效"
+            );
             return;
         };
-        rt.block_on(async move {
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(3), f.future()).await;
+        let res = rt.block_on(async move {
+            tokio::time::timeout(std::time::Duration::from_secs(3), f.future()).await
         });
+        match res {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::warn!(
+                op = %op,
+                target = %target,
+                error = %e,
+                "my token Redis 同步失败：本进程照常生效，但重启后登录态可能丢失/旧 token 可能复活（已由墓碑兜底）"
+            ),
+            Err(_) => tracing::warn!(
+                op = %op,
+                target = %target,
+                "my token Redis 同步超时（3s），本次写入未确认"
+            ),
+        }
     });
 }
 
@@ -390,16 +482,19 @@ pub(super) fn my_token_put(person_id: u64, team: String, name: String) -> String
     // token 不再编入 pid/时间戳（老格式可被相邻值猜中），纯随机串，映射关系只存在内存里
     // 2026-10-14 审计 P2：随机源从 RandomState 换成 CSPRNG（random::random_code）
     let token = my_token_random();
+    let now = Instant::now();
     let mut m = my_tokens().lock().expect("my token 锁 poisoned");
-    m.retain(|_, (_, _, _, at)| at.elapsed() < Duration::from_secs(24 * 3600));
+    // 第 4 个字段是**过期时刻**（2026-10-17 审计 4-P2-8，见 MYTOK_TTL_DUR 注释）
+    m.retain(|_, (_, _, _, exp)| *exp > now);
     m.insert(
         token.clone(),
-        (person_id, team.clone(), name.clone(), Instant::now()),
+        (person_id, team.clone(), name.clone(), now + MYTOK_TTL_DUR),
     );
     drop(m);
     let t = token.clone();
     let tm = team.clone();
-    mytok_redis_sync(move || async move {
+    let log_target = mytok_mask(&t);
+    mytok_redis_sync("put", log_target, move || async move {
         if let Some(st) = APP_STATE.get().cloned() {
             mytok_redis_set(&st, &t, person_id, &tm, &name).await?;
         }
@@ -409,8 +504,17 @@ pub(super) fn my_token_put(person_id: u64, team: String, name: String) -> String
 }
 
 pub(super) fn my_token_take(token: &str) -> Option<(u64, String, String)> {
+    /* 2026-10-17 审计 4-P2-8：先查吊销墓碑。墓碑是同步写入的，而 Redis DEL 在
+    mytok_redis_sync 子线程里异步发生——没有这一步，吊销后紧接着的 restore 可能先从
+    Redis 读回旧值再回填内存，把刚吊销的登录态「复活」。命中墓碑时顺手清内存残留。 */
+    if mytok_is_revoked(token) {
+        let mut m = my_tokens().lock().expect("my token 锁 poisoned");
+        m.remove(token);
+        return None;
+    }
+    let now = Instant::now();
     let mut m = my_tokens().lock().expect("my token 锁 poisoned");
-    m.retain(|_, (_, _, _, at)| at.elapsed() < Duration::from_secs(24 * 3600));
+    m.retain(|_, (_, _, _, exp)| *exp > now);
     m.get(token)
         .map(|(pid, team, name, _)| (*pid, team.clone(), name.clone()))
 }
@@ -422,8 +526,16 @@ pub(crate) async fn my_token_restore(
     st: &crate::state::AppState,
     token: &str,
 ) -> Option<(u64, String, String)> {
-    if my_token_take(token).is_some() {
-        return my_token_take(token); // 内存里有，直接用
+    /* 2026-10-17 审计 4-P2-8：墓碑优先。吊销时墓碑是**同步**写入的，Redis DEL 在
+    子线程里异步执行；若这里先读 Redis，可能把刚吊销的 token 回填进内存（复活）。
+    命中墓碑直接拒绝，并清掉可能被并发回填的内存条目。 */
+    if mytok_is_revoked(token) {
+        let mut m = my_tokens().lock().expect("my token 锁 poisoned");
+        m.remove(token);
+        return None;
+    }
+    if let Some(v) = my_token_take(token) {
+        return Some(v); // 内存里有，直接用
     }
     // 2026-10-13 安全修复：回填前先校验该 token 仍在反向索引 mytokname:<name> 里。
     // 旧 token 若已被吊销（DEL + SREM），SMEMBERS 里不会再有它——即使 Redis 侧
@@ -436,14 +548,28 @@ pub(crate) async fn my_token_restore(
     if !members.iter().any(|t| t == token) {
         return None; // 不在反向索引里 = 已吊销：不回填内存，视为未登录
     }
-    let pid = v.get("pid")?.as_u64()?;
-    let team = v.get("team")?.as_str()?.to_string();
-    let name = v.get("name")?.as_str()?.to_string();
-    // 回填内存（Instant=now；TTL 由 Redis 端 24h 控制，内存侧随写随清）
+    /* 2026-10-17 审计 4-P2-8：内存 TTL 用 Redis 的**剩余** TTL，不再重置满 24h。
+    原实现回填时 `Instant::now()` 重新起算，导致「签发后 23h 重启」会把只剩 1h 的
+    登录态续成 24h（跨重启最多 ~48h 会话）。拿不到 TTL（未配置 Redis / 命令失败 /
+    键没有过期时间）→ 无法确认寿命，保守按无效处理：宁可让用户重新登录，
+    也不放大一个寿命未知的登录态。 */
+    let Some(ttl_secs) = crate::store::cache::ttl(st, &mytok_key(token)).await else {
+        tracing::warn!(
+            token = %mytok_mask(token),
+            "my token 回填失败：拿不到 Redis 剩余 TTL，按失效处理（失败关闭）"
+        );
+        return None;
+    };
+    if ttl_secs == 0 {
+        return None;
+    }
+    let now = Instant::now();
+    let expires_at = restore_expiry(now, ttl_secs);
     let mut m = my_tokens().lock().expect("my token 锁 poisoned");
+    m.retain(|_, (_, _, _, exp)| *exp > now);
     m.insert(
         token.to_string(),
-        (pid, team.clone(), name.clone(), Instant::now()),
+        (pid, team.clone(), name.clone(), expires_at),
     );
     Some((pid, team, name))
 }
@@ -454,8 +580,8 @@ pub(crate) async fn my_token_restore(
 /// （token 挂的是**账号名**：绑定会把 name 从手机号占位改写成主播姓名，所以绑定类操作
 /// 新旧两个名字都要吊销。）
 pub(crate) fn my_tokens_revoke(name: &str) {
-    let mut m = my_tokens().lock().expect("my token 锁 poisoned");
     let revoked: Vec<String> = {
+        let mut m = my_tokens().lock().expect("my token 锁 poisoned");
         let removed: Vec<String> = m
             .iter()
             .filter(|(_, (_, _, n, _))| *n == name)
@@ -464,6 +590,10 @@ pub(crate) fn my_tokens_revoke(name: &str) {
         m.retain(|_, (_, _, n, _)| *n != name);
         removed
     };
+    /* 2026-10-17 审计 4-P2-8：内存可见的 token **同步**写进吊销墓碑。
+    Redis 侧的 DEL 要等子线程（排队/超时/Redis 降级都可能），这期间 take/restore
+    只要命中墓碑就直接拒绝，不会出现「刚吊销又被回填复活」的窗口。 */
+    mytok_mark_revoked(&revoked);
     // 2026-10-13 安全修复：内存可见的 token 照旧逐个吊销；
     // 同时必须处理「进程重启后内存为空」的情况——改密前签发的旧 token 还躺在
     // Redis 里，等 my_token_restore 回填就复活了。所以无论内存里有没有，
@@ -472,7 +602,8 @@ pub(crate) fn my_tokens_revoke(name: &str) {
     // 2026-10-13 安全修复：name 是调用方传进来的 &str，mytok_redis_sync 的异步工厂
     // 要求 'static，先克隆成 owned 再 move 进闭包，避免生命周期逃逸（E0521）。
     let name_owned = name.to_string();
-    mytok_redis_sync(move || async move {
+    let log_target = format!("name={}", mytok_mask(name));
+    mytok_redis_sync("revoke", log_target, move || async move {
         if let Some(st) = APP_STATE.get().cloned() {
             let name = name_owned;
             // 1) Redis 反向索引里的全部 token（含本进程没见过的）
@@ -484,6 +615,11 @@ pub(crate) fn my_tokens_revoke(name: &str) {
                     all.push(t);
                 }
             }
+            /* 注意：这里**不**把 Redis 侧才发现的旧 token 补进墓碑 —— 吊销是异步线程，
+            同一账号紧接着重登/改密后换发的新 token 可能已经被写进反向索引、再被本线程
+            SMEMBERS 读到；补墓碑会误杀刚签发的新 token（用户改完密码立刻 401）。
+            内存可见的 token 已在 `my_tokens_revoke` 里同步落墓碑；Redis-only 旧 token
+            靠下面的 DEL + SREM 从反向索引摘除，restore 的索引校验兜底。 */
             for token in all {
                 mytok_redis_revoke(&st, &token, &name).await?;
             }
@@ -572,5 +708,62 @@ pub(super) fn data_team<'a>(path_team: &'a str, token_team: &'a str) -> &'a str 
         token_team
     } else {
         path_team
+    }
+}
+
+#[cfg(test)]
+mod token_lifecycle_tests {
+    //! 2026-10-17 审计 4-P2-8：my token 吊销墓碑与回填 TTL 的**纯逻辑**单测。
+    //! 不依赖 Redis / 全局静态（把 map 显式传进来），并行跑也不会互相干扰。
+
+    use super::*;
+    use std::collections::HashMap;
+    use std::time::{Duration, Instant};
+
+    /// 墓碑：登记后拒绝；不同 token 不误伤；超 24h 自动清理（不无限增长）。
+    #[test]
+    fn revoked_tombstone_rejects_and_prunes() {
+        let now = Instant::now();
+        let mut map: HashMap<String, Instant> = HashMap::new();
+        let token = "my-00000000-00000000".to_string();
+
+        // 未吊销：放行
+        assert!(!revoked_contains(&mut map, &token, now));
+
+        // 吊销后：同 token 命中（take / restore 都会据此拒绝）
+        revoked_insert(&mut map, std::slice::from_ref(&token), now);
+        assert!(revoked_contains(&mut map, &token, now));
+
+        // 别的 token 不受牵连
+        assert!(!revoked_contains(&mut map, "my-ffffffff-ffffffff", now));
+
+        // 24h 后墓碑失效并被 prune 掉（token 最大寿命已过，无需再挡）
+        let later = now + MYTOK_TTL_DUR + Duration::from_secs(1);
+        assert!(!revoked_contains(&mut map, &token, later));
+        assert!(map.is_empty(), "过期墓碑应被清理，避免无限增长");
+    }
+
+    /// 回填 TTL：内存过期时刻 = now + Redis 剩余 TTL，而不是重置满 24h；
+    /// 异常大的 TTL 以 24h 为上限兜底。
+    #[test]
+    fn restore_expiry_uses_remaining_ttl_not_full_lifetime() {
+        let now = Instant::now();
+        // 只剩 60 秒：回填后也只剩 60 秒（不续命）
+        assert_eq!(restore_expiry(now, 60), now + Duration::from_secs(60));
+        // 脏数据（超过 24h）：封顶到 24h
+        assert_eq!(
+            restore_expiry(now, MYTOK_TTL + 10 * 24 * 3600),
+            now + MYTOK_TTL_DUR
+        );
+    }
+
+    /// 日志打码：只暴露前 8 位，完整 token 不进日志。
+    #[test]
+    fn token_log_mask_keeps_only_prefix() {
+        let token = "my-0123456789abcdef-0123456789abcdef";
+        let masked = mytok_mask(token);
+        assert!(masked.starts_with("my-01234"));
+        assert_eq!(masked.chars().count(), 9, "前 8 位 + 省略号");
+        assert!(!masked.contains("abcdef"), "后半段不得出现在日志里");
     }
 }

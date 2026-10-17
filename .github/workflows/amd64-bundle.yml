@@ -9,6 +9,10 @@
 # 用法：
 #   gh workflow run amd64-bundle.yml
 #   gh release download amd64-bundle     # 拿到 pk-server 的 tar.gz
+# ⚠️ 供应链风险（2026-10-17 第四轮审计 E-P2-8 / P2-16）：本文件里的 actions/* /
+# docker/* 全部用可变 tag。上游 tag 被移动 / 仓库被接管时，CI 会执行被替换的
+# 代码（本 job 带 contents:write + GITHUB_TOKEN）。修法：钉完整 40 位 commit SHA
+# （保留 `# vX.Y.Z` 注释便于升级）。本轮**离线环境取不到官方 SHA，不编造 SHA**。
 name: amd64 镜像包
 
 on:

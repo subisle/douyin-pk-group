@@ -333,14 +333,25 @@ async fn main() -> anyhow::Result<()> {
     /* 机器人模块（E 阶段）：配置了凭据的服务启动即自动连接（用户要求：启动 QQ 机器人都要启动）。
     QQ：AppID/Secret 齐 → 自动连 gateway；微信：库里有登录 token → 自动恢复轮询，
     无 token 停在等待扫码（不影响启动）。失败只告警，服务照常起。 */
+    /* 2026-10-17 第四轮审计 P2（B 域 P2-B5）：机器人**自动连接**受出网总闸约束。
+    关闸（PUSH_OUT_ENABLED 未开，通常只在回滚/排查时）期间，QQ 不再用真实凭据登录
+    gateway、微信不再长轮询 getupdates —— 否则「闸门关了，bot 还在收全量消息」，
+    与闸门的意图矛盾。管理端「机器人」页的手动 start 不受影响（管理员显式动作）。
+    注意：开闸时行为与之前完全一致（生产 PUSH_OUT_ENABLED=1）。 */
+    let bot_autostart = crate::push::push_out_enabled();
+    if !bot_autostart {
+        tracing::info!(
+            "PUSH_OUT_ENABLED 未开：机器人不自动连接（管理端可手动启动；避免关闸期仍收消息）"
+        );
+    }
     let bot_manager = Arc::new(bot::BotManager::from_env(st.clone()).await);
     let qq = bot_manager.qq.read().expect("qq 锁 poisoned").clone();
-    if let Some(qq) = qq {
+    if let Some(qq) = qq.filter(|_| bot_autostart) {
         if let Err(e) = Arc::clone(&qq).start().await {
             tracing::warn!(error = %e, "QQ 机器人自动启动失败");
         }
     }
-    if let Some(wx) = &bot_manager.wechat {
+    if let Some(wx) = bot_manager.wechat.as_ref().filter(|_| bot_autostart) {
         if let Err(e) = Arc::clone(wx).start().await {
             tracing::warn!(error = %e, "微信机器人未自动启动（等待扫码或未配置）");
         }

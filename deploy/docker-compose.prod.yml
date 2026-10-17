@@ -46,7 +46,7 @@ services:
       DB_MIGRATOR_NAME: douyin
       DB_MIGRATOR_USER: douyin_admin
       DB_MIGRATOR_PASSWORD: ${PG_PASSWORD}
-      # 音浪读源（远程 sqlpub，与现网一致）
+      # 音浪读源（远程 MySQL 读源，与现网一致；主机/账号只写 .env.prod）
       DB_A_HOST: ${DB_A_HOST}
       DB_A_PORT: ${DB_A_PORT:-3306}
       DB_A_NAME: ${DB_A_NAME}
@@ -163,6 +163,26 @@ services:
       - /opt/pk-server/pg-data:/var/lib/postgresql/data
       - /opt/pk-server/backups:/backup
     mem_limit: 512m
+    # 最小权限（2026-10-17 第四轮审计 E-P2-6）：cap_drop ALL 后再补回官方
+    # postgres 镜像启动必需的几项 —— 它的入口脚本以 root 启动，先 chown PGDATA
+    # 再 gosu 到 postgres 用户；全部丢掉会直接起不来。补回的是最小集合，其余
+    # 默认 capability 仍然全丢。若改成 `user: postgres` 直接非 root 运行可去掉
+    # cap_add，但宿主 bind mount 属主要预先 chown 到镜像内 postgres 的 UID/GID。
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U douyin_admin -d douyin"]
       interval: 10s
@@ -177,11 +197,28 @@ services:
     environment:
       REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
     command: redis-server --requirepass "$$REDIS_PASSWORD" --appendonly yes --maxmemory 96mb --maxmemory-policy allkeys-lru
-    ports:
-      - "127.0.0.1:6379:6379"
+    # 不发布宿主端口（2026-10-17 第四轮审计 P2-13 / docs/17 D3）：宿主 6379 已被
+    # systemd redis-server 占用，且缓存无外部访问需求 —— 容器间走 docker 内网即可。
+    # 原先的 ports: 127.0.0.1:6379:6379 已删除，避免上线即 bind 失败 / 实例混淆。
     volumes:
       - /opt/pk-server/redis-data:/data
     mem_limit: 128m
+    # 最小权限（2026-10-17 第四轮审计 E-P2-6）：与 postgres 同理，官方 redis 镜像
+    # 入口脚本以 root 启动后 chown /data 并 setpriv 降权到 redis 用户，故补回最小能力。
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETGID
+      - SETUID
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     healthcheck:
       test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
       interval: 10s

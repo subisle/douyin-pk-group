@@ -187,6 +187,13 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "036_bind_code_hardening",
         include_str!("migrations/036_bind_code_hardening.sql"),
     ),
+    // 037：推送去重租约（2026-10-17 第四轮审计 P2-1 / P2-2 / P2-3）。
+    // 把「谁占了哪个去重标记、占位前的旧值」持久化，崩溃/重启后可还原，
+    // 并给 run() 单飞提供跨实例互斥。幂等，可安全重放。
+    (
+        "037_push_claim_leases",
+        include_str!("migrations/037_push_claim_leases.sql"),
+    ),
 ];
 
 /// 迁移建连（migrator 账号；同样关语句缓存）

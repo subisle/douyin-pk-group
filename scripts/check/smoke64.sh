@@ -115,12 +115,25 @@ for g in d["groups"]:
 print("  ok   库不可用时名次照算（rank / group_rank 都不是 0）")
 ' || FAILED=1
 expect "/api/health 报库不通但不 500"        "$(code $B/api/health)" 200
-python3 -c "
-import json,subprocess
-h=json.loads(subprocess.run(['curl','-s','$B/api/health'],capture_output=True,text=True).stdout)
-assert h['db']['ok'] is False and h['db']['error'], h
-print('  ok   /api/health 正确报告库不可用:', h['db']['error'][:48], '...')
-" || FAILED=1
+# 2026-10-17 第四轮审计 D 域：/api/health 匿名只回 {"status":"ok"}，
+# 库/写库/调度细节只对带有效管理员 token 的请求返回 —— 这里先登录再查细节。
+PW_ADMIN="$PW" B="$B" python3 -c '
+import json, os, subprocess
+
+def curl(*args):
+    return subprocess.run(["curl", "-s", *args], capture_output=True, text=True).stdout
+
+login = curl(
+    "-X", "POST", "-H", "Content-Type: application/json",
+    "-d", json.dumps({"password": os.environ["PW_ADMIN"]}),
+    os.environ["B"] + "/api/auth/login",
+)
+token = (json.loads(login or "{}") or {}).get("token", "")
+assert token, "冒烟脚本拿不到管理员 token"
+h = json.loads(curl("-H", "Authorization: Bearer " + token, os.environ["B"] + "/api/health") or "{}")
+assert h.get("db", {}).get("ok") is False and h.get("db", {}).get("error"), h
+print("  ok   /api/health 正确报告库不可用:", h["db"]["error"][:48], "...")
+' || FAILED=1
 expect "展示页降级仍 200"                    "$(code $B/api/public/plans/$PID)" 200
 expect "  且标记 stale=true"                 "$(grep -c '"stale":true' /tmp/body)" 1
 expect "库挂时管理接口仍可用（后台能进去修）"   "$(code -H "Authorization: Bearer $TOKEN" $B/api/plans)" 200

@@ -1,3 +1,9 @@
+# ⚠️ 供应链风险（2026-10-17 第四轮审计 E-P2-8 / P2-16）：本文件里的 actions/*
+# 全部用可变 tag（@v4 / @v3 / @stable）。上游 tag 被移动 / 仓库被接管时，CI 会
+# 执行被替换的代码（这些 job 带 contents:write / packages:write + GITHUB_TOKEN）。
+# 修法：把每个 `uses:` 钉到完整 40 位 commit SHA（保留 `# vX.Y.Z` 注释便于升级）。
+# 本轮**离线环境取不到官方 SHA，不编造 SHA**；联网后统一替换，优先处理有写权限的 job。
+# 正面结论：本仓库未用 pull_request_target，workflow 里也没有硬编码 secret。
 name: CI
 
 on:

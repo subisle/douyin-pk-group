@@ -1,5 +1,10 @@
 # 发布 pk-server 双架构镜像到 GHCR（147 部署用）。
 # 触发：push v* tag 或手动。复用根 Dockerfile（交叉编译，双架构均分钟级）。
+# ⚠️ 供应链风险（2026-10-17 第四轮审计 E-P2-8 / P2-16）：本文件里的 actions/* /
+# docker/* 全部用可变 tag。上游 tag 被移动 / 仓库被接管时，CI 会执行被替换的
+# 代码（本 job 带 contents:write / packages:write + GITHUB_TOKEN）。修法：钉完整
+# 40 位 commit SHA（保留 `# vX.Y.Z` 注释便于升级）。本轮**离线环境取不到官方
+# SHA，不编造 SHA**；联网后统一替换，优先本文件的写权限 job。
 name: Docker 发布
 
 on:

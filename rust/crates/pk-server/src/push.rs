@@ -493,6 +493,315 @@ pub(crate) fn is_blocked(e: &anyhow::Error) -> bool {
     e.downcast_ref::<Blocked>().is_some()
 }
 
+/* --------------------- 推送去重租约（2026-10-17 第四轮审计 B 域修复） ---------------------
+ *
+ * 第三轮的「条件 UPDATE 占位 + 失败还原」只解决了同秒并发双推，仍有两个洞：
+ * 1) **占位后崩溃**：标记已被消耗、消息没发出去，当天永久不再补推（去重标记是消耗品）；
+ * 2) **跨进程还原无依据**：还原时写的是「进程内读到的旧值」，进程重启后没人知道该不该还原。
+ *
+ * 现在把「谁占了哪个标记、占位前的旧值」持久化到 `push_claim_leases`（迁移 037）：
+ *   - 抢租约：INSERT ... ON CONFLICT (kind,name) DO NOTHING RETURNING prev_value
+ *     （PK 天然互斥，插入成功即「我占住了」；prev_value = 占位前的标记旧值）；
+ *   - 占位：条件 UPDATE 标记列 = 业务日（`<> date` 才写）；
+ *   - 发送成功 → `finalize_lease`（删租约，标记保持新值）；
+ *   - 发送失败 / 被闸拦截 → `restore_lease`（写回 prev_value + 删租约，下轮可重推）；
+ *   - 进程崩溃留下的租约 → `recover_stale_leases` 在 15 分钟后按同一语义收尾。
+ *
+ * kind 的语义（见 [`lease_marker_column`]）：
+ *   - `report` / `lineage`：承载 `push_bindings` 上的日期标记（真正的去重）；
+ *   - `target`：追分提醒的**纯互斥锁**（目标的去重标记在 `my_targets` 逐行，发送成功后才写）；
+ *   - `run`：`run()` 单飞锁（同一 (团,业务日) 同时只允许一个执行者），不写任何标记。
+ * ---------------------------------------------------------------------------------------- */
+
+/// 租约 kind：每日报告 / 师门日报 / 追分提醒 / run 单飞
+const LEASE_KIND_REPORT: &str = "report";
+const LEASE_KIND_LINEAGE: &str = "lineage";
+const LEASE_KIND_TARGET: &str = "target";
+const LEASE_KIND_RUN: &str = "run";
+/// 租约过期分钟数：超过视为持有方崩溃。一轮推送受 PUSH_MAX_TOTAL_SECS（默认 180 秒）
+/// 约束，加上图片渲染余量，15 分钟足够宽松。
+const LEASE_STALE_MINUTES: i64 = 15;
+
+/// kind → `push_bindings` 上承载「同业务日去重日期」的列名。
+/// 列名只从这张固定白名单里取（拼进 SQL 的是常量而非外部输入，无注入面）；
+/// 返回 None = 这个 kind 是纯互斥锁，不写标记。
+fn lease_marker_column(kind: &str) -> Option<&'static str> {
+    match kind {
+        LEASE_KIND_REPORT => Some("last_report_date"),
+        LEASE_KIND_LINEAGE => Some("last_lineage_date"),
+        _ => None,
+    }
+}
+
+/// run() 单飞租约名：team + 业务日（同一 (团, 日) 同时只允许一个 run）。
+fn run_lease_name(team: &str, date: &str) -> String {
+    format!("{}:{}", team.trim(), date.trim())
+}
+
+/// 追分提醒互斥租约名：账号 + 业务日（不同业务日的补推互不阻塞）。
+fn target_lease_name(name: &str, date: &str) -> String {
+    format!("{}:{}", name.trim(), date.trim())
+}
+
+/// 抢一把**不承载标记**的租约（run / target）：INSERT 撞 PK 即「已被并发方持有」。
+/// 返回 false = 没抢到 / 写库不可用 / SQL 失败 —— 调用方一律按「让位」处理。
+async fn lease_lock(st: &AppState, kind: &str, name: &str) -> bool {
+    let Some(pool) = st.writer.as_ref() else {
+        tracing::warn!(kind, name = %name, "推送租约表不可用（写库未配置），本轮按被占用处理");
+        return false;
+    };
+    let sql = "INSERT INTO push_claim_leases (kind, name, prev_value, claimed_at) \
+               VALUES (?, ?, '', now()) ON CONFLICT (kind, name) DO NOTHING";
+    if let Err(e) = crate::writer::write_guard(sql) {
+        tracing::error!(kind, name = %name, error = %e, "推送租约 SQL 未过写守卫");
+        return false;
+    }
+    match sqlx::query(&crate::pq::rewrite(sql))
+        .bind(kind)
+        .bind(name.trim())
+        .execute(pool)
+        .await
+    {
+        Ok(r) => r.affected() > 0,
+        Err(e) => {
+            tracing::warn!(kind, name = %name, error = %e, "抢推送租约失败，本轮让位");
+            false
+        }
+    }
+}
+
+/// 删除租约：发送成功收尾 / 纯互斥锁释放 / 过期回收共用。
+async fn finalize_lease(st: &AppState, kind: &str, name: &str) -> bool {
+    let Some(pool) = st.writer.as_ref() else {
+        return false;
+    };
+    let sql = "DELETE FROM push_claim_leases WHERE kind = ? AND name = ?";
+    if let Err(e) = crate::writer::write_guard(sql) {
+        tracing::error!(kind, name = %name, error = %e, "删除推送租约 SQL 未过写守卫");
+        return false;
+    }
+    match sqlx::query(&crate::pq::rewrite(sql))
+        .bind(kind)
+        .bind(name.trim())
+        .execute(pool)
+        .await
+    {
+        Ok(r) => r.affected() > 0,
+        Err(e) => {
+            tracing::warn!(kind, name = %name, error = %e, "删除推送租约失败（等过期回收兜底）");
+            false
+        }
+    }
+}
+
+/// 发送失败 / 被闸拦截 / 过期租约回收时调用：把 `prev_value` 写回去重标记，再释放租约。
+/// 标记列由 kind 白名单决定；run / target 没有标记列，等价于直接释放。
+async fn restore_lease(st: &AppState, kind: &str, name: &str) {
+    let name = name.trim();
+    if let Some(col) = lease_marker_column(kind) {
+        let Some(pool) = st.writer.as_ref() else {
+            // 写库不可用：租约先留，交给下次 recover_stale_leases / 重启补偿
+            tracing::warn!(kind, name = %name, "写库不可用，无法还原推送去重标记（租约保留待回收）");
+            return;
+        };
+        let prev: Option<String> = match sqlx::query(&crate::pq::rewrite(
+            "SELECT prev_value FROM push_claim_leases WHERE kind = ? AND name = ?",
+        ))
+        .bind(kind)
+        .bind(name)
+        .fetch_optional(pool)
+        .await
+        {
+            Ok(Some(r)) => r.try_get::<String, _>("prev_value").ok(),
+            Ok(None) => {
+                // 没有租约行 = 占位根本没成功 / 已被别的路径收尾：不动标记（宁重不漏）
+                tracing::debug!(kind, name = %name, "还原去重标记时租约已不存在，跳过");
+                None
+            }
+            Err(e) => {
+                tracing::warn!(kind, name = %name, error = %e, "读推送租约 prev_value 失败");
+                None
+            }
+        };
+        if let Some(prev) = prev {
+            let sql = format!("UPDATE push_bindings SET {col} = ? WHERE name = ?");
+            if let Err(e) = crate::writer::write_guard(&sql) {
+                tracing::error!(kind, name = %name, error = %e, "还原去重标记 SQL 未过写守卫");
+            } else if let Err(e) = sqlx::query(&crate::pq::rewrite(&sql))
+                .bind(&prev)
+                .bind(name)
+                .execute(pool)
+                .await
+            {
+                tracing::warn!(kind, name = %name, error = %e, "还原推送去重标记失败（标记可能停在本轮）");
+            }
+        }
+    }
+    // 标记还原完（或本来就没有标记列）再删租约；删失败由过期回收兜底。
+    finalize_lease(st, kind, name).await;
+}
+
+/// 对承载去重日期的 kind 抢租约 + 原子占位。
+/// 返回 `Some(prev)` = 抢到（标记已写成 `date`，`prev` 是占位前的旧值）→ 调用方可发送；
+/// 返回 `None` = 已被并发方持有 / 同日已被别的路径占掉 / 写库不可用 → 本轮让位。
+async fn claim_date_lease(st: &AppState, kind: &str, name: &str, date: &str) -> Option<String> {
+    let col = lease_marker_column(kind)?;
+    let Some(pool) = st.writer.as_ref() else {
+        tracing::warn!(kind, name = %name, "推送租约表不可用（写库未配置），本轮不推");
+        return None;
+    };
+    let name = name.trim();
+    // ① 抢租约：一条 SQL 里把「当前标记值」写成 prev_value（绑定行不存在时不插租约）。
+    let insert = format!(
+        "INSERT INTO push_claim_leases (kind, name, prev_value, claimed_at) \
+         SELECT ?, ?, COALESCE((SELECT {col} FROM push_bindings WHERE name = ?), ''), now() \
+          WHERE EXISTS (SELECT 1 FROM push_bindings WHERE name = ?) \
+         ON CONFLICT (kind, name) DO NOTHING RETURNING prev_value"
+    );
+    if let Err(e) = crate::writer::write_guard(&insert) {
+        tracing::error!(kind, name = %name, error = %e, "抢推送租约 SQL 未过写守卫");
+        return None;
+    }
+    let prev: Option<String> = match sqlx::query(&crate::pq::rewrite(&insert))
+        .bind(kind)
+        .bind(name)
+        .bind(name)
+        .bind(name)
+        .fetch_optional(pool)
+        .await
+    {
+        Ok(Some(r)) => r.try_get::<String, _>("prev_value").ok(),
+        Ok(None) => {
+            tracing::debug!(kind, name = %name, "推送租约已被并发方持有，本轮让位");
+            return None;
+        }
+        Err(e) => {
+            tracing::warn!(kind, name = %name, error = %e, "抢推送租约失败，本轮不推");
+            return None;
+        }
+    };
+    let Some(prev) = prev else {
+        // prev_value 是 NOT NULL 列，拿不到只可能是类型/解码异常：删租约让位，不冒险发
+        tracing::warn!(kind, name = %name, "推送租约 prev_value 解码失败，按让位处理");
+        finalize_lease(st, kind, name).await;
+        return None;
+    };
+    // ② 条件占位：同业务日已经写过 → 让位（不双推），把租约还回去。
+    let update = format!(
+        "UPDATE push_bindings SET {col} = ? \
+          WHERE name = ? AND ({col} IS NULL OR {col} <> ?)"
+    );
+    if let Err(e) = crate::writer::write_guard(&update) {
+        tracing::error!(kind, name = %name, error = %e, "占位去重标记 SQL 未过写守卫");
+        finalize_lease(st, kind, name).await;
+        return None;
+    }
+    let affected = match sqlx::query(&crate::pq::rewrite(&update))
+        .bind(date)
+        .bind(name)
+        .bind(date)
+        .execute(pool)
+        .await
+    {
+        Ok(r) => r.affected(),
+        Err(e) => {
+            tracing::warn!(kind, name = %name, error = %e, "占位推送去重标记失败，本轮让位");
+            0
+        }
+    };
+    if affected == 0 {
+        // 占位失败 = 别的路径已把标记写成同一天（或绑定行消失）：还租约、不重复发。
+        finalize_lease(st, kind, name).await;
+        tracing::debug!(kind, name = %name, "去重标记同日已占，本轮让位");
+        return None;
+    }
+    Some(prev)
+}
+
+/// 每日报告去重租约占位（`last_report_date`）。
+async fn claim_report_date_lease(st: &AppState, name: &str, date: &str) -> Option<String> {
+    claim_date_lease(st, LEASE_KIND_REPORT, name, date).await
+}
+
+/// 每日报告发送成功：标记保持本轮业务日，只释放租约。
+async fn finalize_report_claim(st: &AppState, name: &str) {
+    finalize_lease(st, LEASE_KIND_REPORT, name).await;
+}
+
+/// 每日报告发送失败 / 被闸拦截：还原占位前的标记并释放租约（下轮可重推）。
+async fn restore_report_claim(st: &AppState, name: &str) {
+    restore_lease(st, LEASE_KIND_REPORT, name).await;
+}
+
+/// 师门日报去重租约占位（`last_lineage_date`）。
+///
+/// 供 push.rs 自动推送与 admin_send.rs 手动下发共用（task-16 调用同一组签名）：
+/// `Some(prev)` = 抢到并已把 `last_lineage_date` 占成 `date`；`None` = 并发方持有 /
+/// 同日已被占 / 写库不可用，调用方应直接让位（不发送）。
+pub(crate) async fn claim_lineage_date(st: &AppState, name: &str, date: &str) -> Option<String> {
+    claim_date_lease(st, LEASE_KIND_LINEAGE, name, date).await
+}
+
+/// 师门日报发送成功：标记保持业务日，只释放租约。
+pub(crate) async fn finalize_lineage_claim(st: &AppState, name: &str) {
+    finalize_lease(st, LEASE_KIND_LINEAGE, name).await;
+}
+
+/// 师门日报发送失败 / 被闸拦截：还原占位前的标记并释放租约（下轮可重推）。
+pub(crate) async fn restore_lineage_claim(st: &AppState, name: &str) {
+    restore_lease(st, LEASE_KIND_LINEAGE, name).await;
+}
+
+/// 追分提醒互斥租约（纯锁，不写标记）：false = 并发方正在发同 (账号, 业务日) 的提醒。
+async fn claim_target_lease(st: &AppState, name: &str, date: &str) -> bool {
+    lease_lock(st, LEASE_KIND_TARGET, &target_lease_name(name, date)).await
+}
+
+/// 回收过期租约（持有方崩溃 / 被 kill 留下的行）。
+/// 报告 / 师门：按 `prev_value` 还原标记（否则当天消息会被永久吞掉）；run / target：直接释放。
+/// 语义是**至少一次**：崩溃点若落在「发送成功但还没 finalize」的极小窗口里，还原会让当天
+/// 重推一次（重复）——这是刻意选择「宁可重推一次，也不能漏推」；其余崩溃点都不丢。
+/// 在 [`run`] 入口调用；单次最多处理 100 行，避免异常膨胀时拖慢推送。
+async fn recover_stale_leases(st: &AppState) {
+    let Some(pool) = st.writer.as_ref() else {
+        return;
+    };
+    let sql = format!(
+        "SELECT kind, name FROM push_claim_leases \
+          WHERE claimed_at < now() - INTERVAL '{LEASE_STALE_MINUTES} minutes' \
+          ORDER BY claimed_at LIMIT 100"
+    );
+    if let Err(e) = crate::writer::write_guard(&sql) {
+        tracing::error!(error = %e, "回收过期推送租约 SQL 未过写守卫");
+        return;
+    }
+    let rows = match sqlx::query(&crate::pq::rewrite(&sql)).fetch_all(pool).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(error = %e, "扫描过期推送租约失败");
+            return;
+        }
+    };
+    for r in rows {
+        let kind: String = r.try_get("kind").unwrap_or_default();
+        let name: String = r.try_get("name").unwrap_or_default();
+        if kind.is_empty() || name.is_empty() {
+            continue;
+        }
+        tracing::warn!(
+            kind = %kind,
+            name = %name,
+            "发现过期推送租约（>{} 分钟未释放），按语义收尾",
+            LEASE_STALE_MINUTES
+        );
+        if lease_marker_column(&kind).is_some() {
+            restore_lease(st, &kind, &name).await;
+        } else {
+            finalize_lease(st, &kind, &name).await;
+        }
+    }
+}
+
 /// 给一条绑定发消息：优先走用户自己扫码得到的微信账号（多账号），
 /// 没有扫码凭证时回落到管理员机器人（旧手机号 / 绑定码路径）。
 ///
@@ -641,7 +950,27 @@ pub(crate) fn svg_to_png(svg: &str) -> anyhow::Result<Vec<u8>> {
     pixmap.encode_png().context("PNG 编码失败")
 }
 
+/// 推送入口：`(团队, 业务日)` 单飞 + 过期租约回收。
+///
+/// 2026-10-17 第四轮审计 B 域修复：多实例 / 手动「立即推送」与调度循环并发时，
+/// 同一个 (团, 业务日) 只能有一个执行者；抢不到直接 `Ok(())` 让位（本轮不重复推送）。
+/// `Ok` 的语义不变（本轮结束，不代表一定真发过消息）；真正的错误原样上抛，
+/// 由 scheduler 的 `push_job_finish(ok=false, …)` 记重试。
 pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<()> {
+    recover_stale_leases(st).await;
+    let lease = run_lease_name(team, date);
+    if !lease_lock(st, LEASE_KIND_RUN, &lease).await {
+        tracing::debug!(team = %team, date = %date, "同一 (团,业务日) 已有推送在跑，本轮让位");
+        return Ok(());
+    }
+    let res = run_inner(st, team, date).await;
+    // 成功 / 失败 / 被闸拦截都释放：run 租约只做单飞，不承载任何去重标记
+    finalize_lease(st, LEASE_KIND_RUN, &lease).await;
+    res
+}
+
+/// 原来的推送主体（2026-10-17 起由 [`run`] 包一层单飞租约后调用）。
+async fn run_inner(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<()> {
     let bindings = crate::store::push_bindings_for_team(st, team).await;
     if bindings.is_empty() {
         return Ok(());
@@ -785,7 +1114,7 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
             let last = crate::store::push_last_report_date(st, &b.name).await;
             if last == date {
                 tracing::debug!(account = %b.name, date = %date, "每日报告同日已推过，跳过");
-            } else if !crate::store::push_claim_report_date(st, &b.name, date).await {
+            } else if claim_report_date_lease(st, &b.name, date).await.is_none() {
                 /* 2026-10-17 审计 6-P2-3：占位失败 = 另一个调度循环 / 手动「立即推送」
                 正在发同一天的报告 —— 让位，不双推（发送前原子占位替代读-改-写）。 */
                 tracing::debug!(account = %b.name, date = %date, "每日报告被并发方占位，跳过");
@@ -820,14 +1149,14 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
                     match send_binding(st, b, wx_global.as_ref(), &text).await {
                         Ok(()) => {
                             sent_any = true;
-                            crate::store::push_set_last_report_date(st, &b.name, date).await;
+                            finalize_report_claim(st, &b.name).await;
                             tracing::info!(account = %b.name, "每日报告已推送");
                         }
                         Err(e) => {
                             /* 被闸门拦下 ≠ 发送成功：还原占位标记（审计 6-P2-3），
                             也不记失败原因（避免运营看到一堆「失败」其实是没开闸）。
                             消息留到开闸后再推，不会因去重标记被消耗而永久丢失。 */
-                            crate::store::push_restore_report_date(st, &b.name, &last).await;
+                            restore_report_claim(st, &b.name).await;
                             if is_blocked(&e) {
                                 tracing::warn!(account = %b.name, "每日报告：出网闸门拦截，未发（去重标记不推进，开闸后会补推）");
                             } else {
@@ -854,10 +1183,10 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
                         match send_binding(st, b, wx_global.as_ref(), &text).await {
                             Ok(()) => {
                                 sent_any = true;
-                                crate::store::push_set_last_report_date(st, &b.name, date).await;
+                                finalize_report_claim(st, &b.name).await;
                             }
                             Err(e2) => {
-                                crate::store::push_restore_report_date(st, &b.name, &last).await;
+                                restore_report_claim(st, &b.name).await;
                                 if is_blocked(&e2) {
                                     tracing::warn!(account = %b.name, "每日报告：闸门拦截，未发（去重标记不推进）");
                                 } else {
@@ -871,7 +1200,7 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
                         match send_binding_images(st, b, "", &pngs).await {
                             Ok(()) => {
                                 sent_any = true;
-                                crate::store::push_set_last_report_date(st, &b.name, date).await;
+                                finalize_report_claim(st, &b.name).await;
                                 tracing::info!(account = %b.name, pages = pngs.len(), "每日报告(图片)已推送");
                             }
                             Err(e) => {
@@ -879,24 +1208,17 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
                                 重试只是又一次空跑（还会多一条「已拦截」日志）。
                                 这里还原占位标记即可，继续处理后面的订阅者。 */
                                 if is_blocked(&e) {
-                                    crate::store::push_restore_report_date(st, &b.name, &last)
-                                        .await;
+                                    restore_report_claim(st, &b.name).await;
                                     tracing::warn!(account = %b.name, "每日报告(图片)：闸门拦截，未发（去重标记不推进）");
                                 } else {
                                     tracing::warn!(account = %b.name, error = %e, "每日报告图片推送失败，退回文本");
                                     match send_binding(st, b, wx_global.as_ref(), &text).await {
                                         Ok(()) => {
                                             sent_any = true;
-                                            crate::store::push_set_last_report_date(
-                                                st, &b.name, date,
-                                            )
-                                            .await;
+                                            finalize_report_claim(st, &b.name).await;
                                         }
                                         Err(e2) => {
-                                            crate::store::push_restore_report_date(
-                                                st, &b.name, &last,
-                                            )
-                                            .await;
+                                            restore_report_claim(st, &b.name).await;
                                             if is_blocked(&e2) {
                                                 tracing::warn!(account = %b.name, "每日报告：闸门拦截，未发（去重标记不推进）");
                                             } else {
@@ -924,7 +1246,7 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
         各自开关与去重标记保持独立：合并发送成功 = 目标状态与师门占位一起推进；
         发送失败 / 被闸拦下 = 两边都不推进（师门占位还原、目标状态不落库），下轮再推。 */
         let mut pending_states: Vec<(i64, bool, i64)> = Vec::new();
-        let target_text: Option<String> = if b.notify_target && b.person_id > 0 {
+        let mut target_text: Option<String> = if b.notify_target && b.person_id > 0 {
             let targets = crate::store::targets_for_push(st, &b.name).await;
             if targets.is_empty() {
                 None
@@ -982,6 +1304,19 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
             None
         };
 
+        /* 追分提醒互斥租约（2026-10-17 第四轮审计 B 域修复）：手动「立即推送」与
+        调度循环并发（含跨进程多实例）时，同 (账号, 业务日) 只让一个发送方发追分提醒。
+        这是**纯互斥锁**——目标的去重标记在 my_targets 逐行、发送成功后才写；租约只防并发。
+        抢不到就把 target_text 清空（本轮不发追分，师门段照常走自己的租约）。 */
+        let mut target_lease = false;
+        if target_text.is_some() {
+            target_lease = claim_target_lease(st, &b.name, date).await;
+            if !target_lease {
+                tracing::debug!(account = %b.name, date = %date, "追分提醒被并发方占位，本轮跳过");
+                target_text = None;
+            }
+        }
+
         // 师门段（docs/23 §4）：开关开 + 有 person + 当天未推过才参与推送。
         // 2026-10-17 起师门日报与每日报告一样走图片；占位在发送前，失败/无内容还原。
         let mut lineage_rep: Option<crate::lineage_report::LineageReport> = None;
@@ -990,7 +1325,7 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
                 tracing::debug!(account = %b.name, "师门日报：管理员观看账号（person_id=0），跳过");
             } else if b.last_lineage_date == date {
                 tracing::debug!(account = %b.name, date = %date, "师门日报同日已推过，跳过");
-            } else if !crate::store::push_claim_lineage_date(st, &b.name, date).await {
+            } else if claim_lineage_date(st, &b.name, date).await.is_none() {
                 /* 2026-10-17 审计 6-P2-3：占位失败 = 并发方（另一循环 / 管理端手动
                 下发）正在发同一天师门日报 —— 让位，不双推。 */
                 tracing::debug!(account = %b.name, date = %date, "师门日报被并发方占位，跳过");
@@ -1001,8 +1336,7 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
                     }
                     Ok(rep) => {
                         // 名下无直系徒弟（或徒弟全隐藏/离职）：还原占位，不推空文字。
-                        crate::store::push_restore_lineage_date(st, &b.name, &b.last_lineage_date)
-                            .await;
+                        restore_lineage_claim(st, &b.name).await;
                         tracing::debug!(
                             account = %b.name,
                             rows = rep.rows.len(),
@@ -1012,8 +1346,7 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
                     Err(e) => {
                         // 「师傅不存在」（档案被删 / person_id 失联）或库抖动：还原占位，
                         // 消息留到下次再推（宁重不漏），不影响其他订阅者。
-                        crate::store::push_restore_lineage_date(st, &b.name, &b.last_lineage_date)
-                            .await;
+                        restore_lineage_claim(st, &b.name).await;
                         tracing::warn!(account = %b.name, error = %e, "师门日报数据构建失败，跳过");
                     }
                 }
@@ -1026,8 +1359,7 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
             (Some(t), Some(l)) => {
                 let pngs = lineage_report_pngs(l, &report_fields.lineage);
                 if pngs.is_empty() {
-                    crate::store::push_restore_lineage_date(st, &b.name, &b.last_lineage_date)
-                        .await;
+                    restore_lineage_claim(st, &b.name).await;
                     tracing::warn!(account = %b.name, "师门日报全部页面转 PNG 失败，本轮仅处理追分");
                     match send_binding(st, b, wx_global.as_ref(), &t).await {
                         Ok(()) => {
@@ -1046,33 +1378,33 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
                         }
                     }
                 } else {
-                tracing::info!(
-                    account = %b.name,
-                    caption = %t.replace('\n', " | "),
-                    pages = pngs.len(),
-                    "推送·追分+师门(图片)"
-                );
-                match send_binding_images(st, b, &t, &pngs).await {
-                    Ok(()) => {
-                        sent_any = true;
-                        /* 发送成功后才落库：目标状态推进；师门占位已 claim，成功保留。 */
-                        for (id, hit, gap) in pending_states.iter() {
-                            crate::store::target_set_state(st, *id, *hit, *gap, date).await;
+                    tracing::info!(
+                        account = %b.name,
+                        caption = %t.replace('\n', " | "),
+                        pages = pngs.len(),
+                        "推送·追分+师门(图片)"
+                    );
+                    match send_binding_images(st, b, &t, &pngs).await {
+                        Ok(()) => {
+                            sent_any = true;
+                            /* 发送成功后才落库：目标状态推进；师门租约 release 时保留本轮标记。 */
+                            for (id, hit, gap) in pending_states.iter() {
+                                crate::store::target_set_state(st, *id, *hit, *gap, date).await;
+                            }
+                            finalize_lineage_claim(st, &b.name).await;
+                            tracing::info!(account = %b.name, pages = pngs.len(), "追分+师门(图片)已推送");
                         }
-                        tracing::info!(account = %b.name, pages = pngs.len(), "追分+师门(图片)已推送");
-                    }
-                    Err(e) => {
-                        // 合并发送失败：师门占位还原，目标状态不推进，整条留到下轮再推。
-                        crate::store::push_restore_lineage_date(st, &b.name, &b.last_lineage_date)
-                            .await;
-                        if is_blocked(&e) {
-                            tracing::warn!(account = %b.name, "追分+师门(图片)：闸门拦截，未发（去重标记不推进，开闸后会补推）");
-                        } else {
-                            tracing::warn!(account = %b.name, error = %e, "追分+师门(图片)推送失败");
-                            crate::store::push_touch(st, &b.name, &e.to_string()).await;
+                        Err(e) => {
+                            // 合并发送失败：师门占位还原，目标状态不推进，整条留到下轮再推。
+                            restore_lineage_claim(st, &b.name).await;
+                            if is_blocked(&e) {
+                                tracing::warn!(account = %b.name, "追分+师门(图片)：闸门拦截，未发（去重标记不推进，开闸后会补推）");
+                            } else {
+                                tracing::warn!(account = %b.name, error = %e, "追分+师门(图片)推送失败");
+                                crate::store::push_touch(st, &b.name, &e.to_string()).await;
+                            }
                         }
                     }
-                }
                 }
             }
             (Some(t), None) => {
@@ -1098,31 +1430,36 @@ pub async fn run(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result<(
             (None, Some(l)) => {
                 let pngs = lineage_report_pngs(l, &report_fields.lineage);
                 if pngs.is_empty() {
-                    crate::store::push_restore_lineage_date(st, &b.name, &b.last_lineage_date)
-                        .await;
+                    restore_lineage_claim(st, &b.name).await;
                     tracing::warn!(account = %b.name, "师门日报全部页面转 PNG 失败，本轮跳过");
                 } else {
                     tracing::info!(account = %b.name, pages = pngs.len(), "推送·师门日报(图片)");
                     match send_binding_images(st, b, "", &pngs).await {
-                    Ok(()) => {
-                        sent_any = true;
-                        tracing::info!(account = %b.name, pages = pngs.len(), "师门日报(图片)已推送");
-                    }
-                    Err(e) => {
-                        /* 被闸门拦下 ≠ 发送成功：还原占位标记，消息留到开闸后再推。 */
-                        crate::store::push_restore_lineage_date(st, &b.name, &b.last_lineage_date)
-                            .await;
-                        if is_blocked(&e) {
-                            tracing::warn!(account = %b.name, "师门日报(图片)：闸门拦截，未发（去重标记不推进）");
-                        } else {
-                            tracing::warn!(account = %b.name, error = %e, "师门日报(图片)推送失败");
-                            crate::store::push_touch(st, &b.name, &e.to_string()).await;
+                        Ok(()) => {
+                            sent_any = true;
+                            // 发送成功：师门标记保持本轮业务日（占位时已写），只释放租约。
+                            finalize_lineage_claim(st, &b.name).await;
+                            tracing::info!(account = %b.name, pages = pngs.len(), "师门日报(图片)已推送");
+                        }
+                        Err(e) => {
+                            /* 被闸门拦下 ≠ 发送成功：还原占位标记，消息留到开闸后再推。 */
+                            restore_lineage_claim(st, &b.name).await;
+                            if is_blocked(&e) {
+                                tracing::warn!(account = %b.name, "师门日报(图片)：闸门拦截，未发（去重标记不推进）");
+                            } else {
+                                tracing::warn!(account = %b.name, error = %e, "师门日报(图片)推送失败");
+                                crate::store::push_touch(st, &b.name, &e.to_string()).await;
+                            }
                         }
                     }
                 }
-                }
             }
             (None, None) => {}
+        }
+
+        /* 追分互斥租约在发送结束（成功 / 失败 / 被闸拦截）后释放；纯锁，不承载标记。 */
+        if target_lease {
+            finalize_lease(st, LEASE_KIND_TARGET, &target_lease_name(&b.name, date)).await;
         }
 
         if sent_any {
@@ -1862,7 +2199,10 @@ mod tests {
         assert!(pages[0].contains("（第 1 / 2 页）"));
         assert!(pages[1].contains("（第 2 / 2 页）"));
         assert!(pages[0].contains(">01</text>"), "首页第一名次 01");
-        assert!(pages[1].contains(">44</text>"), "第 2 页首行名次 44（跨页连续）");
+        assert!(
+            pages[1].contains(">44</text>"),
+            "第 2 页首行名次 44（跨页连续）"
+        );
         assert!(!pages[1].contains(">01</text>"), "第 2 页不能重置名次");
 
         // 1 人：单页，不带页码
@@ -2757,11 +3097,15 @@ mod tests {
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// 在锁内跑：进来先清变量，出去一定恢复成「未设置」（不污染别的用例）。
+    /// 2026-10-17：`PUSH_OUT_ALLOW` 一并清掉 —— 否则开发机设过白名单时，
+    /// `out_blocked_gate` 的「开启 = 放行」断言会假失败。
     fn with_push_out_env<F: FnOnce()>(f: F) {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("PUSH_OUT_ENABLED");
+        std::env::remove_var("PUSH_OUT_ALLOW");
         f();
         std::env::remove_var("PUSH_OUT_ENABLED");
+        std::env::remove_var("PUSH_OUT_ALLOW");
     }
 
     /// 默认（未设 PUSH_OUT_ENABLED）必须**关闭**出网 —— 这是测试阶段的安全默认值，
@@ -2788,8 +3132,6 @@ mod tests {
         });
     }
 
-    /// 关闭时 out_blocked 返回 true（= 拦截），开启时放行。
-    #[test]
     /// 闸门拦截必须是**可区分的信号**（2026-10-17 修复，审计 1-P0-2）：
     /// 拦截时 send_binding 返回 Err(Blocked)，调用方据此**不推进**去重标记；
     /// 若仍像以前那样返回 Ok，关闸期间的消息会被永久吞掉（标记已消耗、开闸也不补推）。
@@ -2808,11 +3150,64 @@ mod tests {
         assert!(is_blocked(&wrapped), "包了上下文也要能认出来");
     }
 
+    /// 关闭时 out_blocked 返回 true（= 拦截），开启时放行。
+    /// （2026-10-17 第四轮审计 P3-B1 修复：原先这行 `#[test]` 错挂在下一个用例上，
+    /// 本函数没有测试属性 → 从未被 `cargo test` 执行。）
+    #[test]
     fn out_blocked_gate() {
         with_push_out_env(|| {
             assert!(out_blocked("text", "浩冬", "测试消息"), "关闭时必须拦截");
             std::env::set_var("PUSH_OUT_ENABLED", "1");
             assert!(!out_blocked("text", "浩冬", "测试消息"), "开启时必须放行");
         });
+    }
+
+    /* ---------------- 推送去重租约（2026-10-17 第四轮审计 B 域修复） ----------------
+     * 只测纯逻辑（kind → 标记列的固定白名单、租约名拼装）；DB 侧语义
+     * （ON CONFLICT / 条件 UPDATE 占位 / prev_value 还原）由 037 迁移 + SQL 保证。
+     */
+
+    /// kind → 去重标记列：只有 report / lineage 承载 push_bindings 日期标记，
+    /// target / run 是纯互斥锁，未知 kind 一律 None（绝不拼进 SQL）。
+    #[test]
+    fn lease_kind_maps_to_marker_columns() {
+        assert_eq!(
+            lease_marker_column(LEASE_KIND_REPORT),
+            Some("last_report_date")
+        );
+        assert_eq!(
+            lease_marker_column(LEASE_KIND_LINEAGE),
+            Some("last_lineage_date")
+        );
+        assert_eq!(lease_marker_column(LEASE_KIND_TARGET), None);
+        assert_eq!(lease_marker_column(LEASE_KIND_RUN), None);
+        assert_eq!(lease_marker_column("bogus"), None);
+        assert_eq!(lease_marker_column(""), None);
+    }
+
+    /// 租约唯一键 = kind + name：run 用 team:date、target 用 account:date，
+    /// 两端空白必须归一，不同业务日不能串（跨日补推互不阻塞）。
+    #[test]
+    fn lease_names_are_trimmed_and_scoped() {
+        assert_eq!(run_lease_name("male", "2026-10-17"), "male:2026-10-17");
+        assert_eq!(
+            run_lease_name(" female ", " 2026-10-17 "),
+            "female:2026-10-17"
+        );
+        assert_eq!(target_lease_name("浩冬", "2026-10-17"), "浩冬:2026-10-17");
+        assert_eq!(
+            target_lease_name(" 浩冬 ", " 2026-10-17 "),
+            "浩冬:2026-10-17"
+        );
+        assert_ne!(
+            target_lease_name("浩冬", "2026-10-17"),
+            target_lease_name("浩冬", "2026-10-18"),
+            "不同业务日的追分租约必须互不相干"
+        );
+        // name 内容可能撞（都是 "male:2026-10-17"），但表主键是 (kind, name)，互不冲突。
+        assert_eq!(
+            run_lease_name("male", "2026-10-17"),
+            target_lease_name("male", "2026-10-17")
+        );
     }
 }

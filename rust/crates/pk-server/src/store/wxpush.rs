@@ -274,7 +274,10 @@ const BIND_FAIL_HOURLY_MAX_MIN: i32 = 30;
 /// 全局阈值上限（配得再大也不超过它，否则分布式试码闸门形同虚设）
 const BIND_FAIL_HOURLY_MAX_MAX: i32 = 600;
 /// 全局冷却时长（分钟）
-const BIND_FAIL_COOLDOWN_MIN: i64 = 10;
+///
+/// ⚠️ 必须是 i32：`make_interval(mins => $n)` 的 mins 是 int4，sqlx 若把 i64 声明成
+/// BIGINT，PG 不会做 int8→int4 的隐式转换（2026-10-17 修复，审计 4-P2 复核发现）。
+const BIND_FAIL_COOLDOWN_MIN: i32 = 10;
 
 /// 解析全局 1 小时失败阈值：未配置 / 空 / 非法 → 默认 120；合法值 clamp 到 30..=600。
 /// 纯函数（env 只在 [`bind_fail_hourly_max`] 里读一次），便于单测。
