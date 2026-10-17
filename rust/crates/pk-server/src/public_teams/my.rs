@@ -2,6 +2,192 @@
 
 use super::*;
 
+/* ------------------ 登录 / 绑定响应同形字段与错误码（契约 §3） ------------------
+ *
+ * 2026-10-18 用户拍板后的展示端身份模型：登录（`/my/login`、`/verify`）、认领
+ * （`/my/claim`）、首次补全（`/my/profile/bind`）四个入口的**成功响应必须同形**，
+ * 前端只认一套字段；`who` 复用同一组状态字段。状态判定本身全部在 store
+ * （`my_account_auth_flags`），handler 只做投影 —— 手机号在这一层就脱敏，
+ * 任何展示端响应都不下发明文手机号 / 明文邮箱。
+ */
+
+/// 登录成功响应里的身份标志（store `MyAuthFlags` 在 handler 侧的投影）。
+pub(super) struct AuthExtra {
+    pub(super) need_profile: bool,
+    pub(super) need_qq: bool,
+    pub(super) must_change_pass: bool,
+    /// 是否已绑 QQ 邮箱（管理端列表 / 单条要显示绑定状态）
+    pub(super) qq_bound: bool,
+    /// 已脱敏手机号（服务端唯一打码点）
+    pub(super) phone: String,
+    pub(super) email_mask: String,
+}
+
+impl AuthExtra {
+    fn empty() -> Self {
+        Self {
+            need_profile: false,
+            need_qq: false,
+            must_change_pass: false,
+            qq_bound: false,
+            phone: String::new(),
+            email_mask: String::new(),
+        }
+    }
+}
+
+/// 读账号状态；账号行读不到（如管理员快捷口令身份 `admin-gate`）时回全 false / 空串，
+/// 保证响应结构不因账号类型而缺字段。
+pub(super) async fn auth_extra(st: &ArcState, name: &str) -> AuthExtra {
+    match crate::store::my_account_auth_flags(st, name).await {
+        Some(f) => AuthExtra {
+            need_profile: f.need_profile,
+            need_qq: f.need_qq,
+            must_change_pass: f.must_change_pass,
+            qq_bound: f.qq_bound,
+            phone: mask_phone(&f.phone),
+            email_mask: f.email_mask,
+        },
+        None => AuthExtra::empty(),
+    }
+}
+
+/// 登录成功响应（契约 §3.1，登录 / 认领 / 首次补全共用）。
+/// 调用方按需追加 `switchable` / `admin` 等既有字段。
+async fn login_ok(st: &ArcState, person_id: u64, name: &str, team: &str, token: &str) -> Value {
+    let x = auth_extra(st, name).await;
+    json!({
+        "ok": true,
+        "token": token,
+        "personId": person_id,
+        "name": name,
+        "team": team,
+        "bound": true,
+        "needBind": false,
+        "needProfile": x.need_profile,
+        "needQq": x.need_qq,
+        "mustChangePass": x.must_change_pass,
+        "phone": x.phone,
+        "emailMask": x.email_mask,
+    })
+}
+
+/// 登录失败响应（契约 §3.1：仍走 HTTP 200 + `ok:false`，前端按 `code` 分支）。
+fn login_fail(fail: crate::store::my_account::LoginFail) -> Value {
+    use crate::store::my_account::LoginFail as F;
+    let code = match fail {
+        F::BadPassword => "BAD_PASSWORD",
+        F::NoAccount => "NO_ACCOUNT",
+        F::TempExpired => "TEMP_EXPIRED",
+    };
+    json!({ "ok": false, "code": code, "error": fail.message() })
+}
+
+/// 登录失败响应 + 「认领账号」提示（契约 §3.1）：仅 `NO_ACCOUNT` 且台账里恰好有
+/// 一个同名在职主播、该艺名尚未被任何人认领/开号时才带 `canClaim/claimName`。
+async fn login_fail_with_claim(
+    st: &ArcState,
+    fail: crate::store::my_account::LoginFail,
+    acct: &str,
+) -> Value {
+    let mut v = login_fail(fail);
+    if matches!(fail, crate::store::my_account::LoginFail::NoAccount)
+        && crate::store::my_account_can_claim(st, acct).await
+    {
+        v["canClaim"] = json!(true);
+        v["claimName"] = json!(acct);
+    }
+    v
+}
+
+/// 展示端结构化错误体：HTTP 状态 + `{ok:false, code, error}`。
+/// `code` 取值对齐 docs/26-…/02-登录绑定与重置流程.md §3.2/§4.2/§5.6 的错误码表；
+/// `error` 是可直接展示的中文文案（store 的业务拒绝原文）。
+fn api_err(status: axum::http::StatusCode, code: &str, msg: impl Into<String>) -> ApiError {
+    ApiError::with_json(
+        status,
+        json!({ "ok": false, "code": code, "error": msg.into() }),
+    )
+}
+
+/// store `Result<_, String>` 分流：`BIZ::` 业务拒绝 → 400/403（带契约错误码）；
+/// 无前缀 = 库层故障 → 500 通用文案，原文只进日志（2026-10-14 审计 P2 口径）。
+fn store_err(e: String, code_of: fn(&str) -> &'static str) -> ApiError {
+    if crate::store::my_account::is_biz(&e) {
+        let msg = crate::store::my_account::biz_msg(&e).to_string();
+        let code = code_of(&msg);
+        let status = if code == "NEED_PROFILE" {
+            axum::http::StatusCode::FORBIDDEN
+        } else {
+            axum::http::StatusCode::BAD_REQUEST
+        };
+        api_err(status, code, msg)
+    } else {
+        tracing::error!(error = %e, "展示端账号写库失败");
+        ApiError::from(anyhow::anyhow!(e))
+    }
+}
+
+/// 绑定类写口的 BIZ 文案 → 错误码（契约 §3.3 / §3.4）。文案常量由 store 冻结导出，
+/// 精确比较避免关键词误判；`validate_my_phone` 的格式文案只在关键词层兜底
+/// （它沿用旧文案、未单独导出常量）；未命中的新文案回落 `BAD_REQUEST`（`error` 仍可读）。
+fn bind_code(msg: &str) -> &'static str {
+    use crate::store as s;
+    if msg == s::MSG_PROFILE_ALREADY_DONE {
+        "PROFILE_ALREADY_DONE"
+    } else if msg == s::MSG_NEED_PROFILE {
+        "NEED_PROFILE"
+    } else if msg == s::MSG_PHONE_REQUIRED || msg.contains("手机号格式") {
+        "INVALID_PHONE"
+    } else if msg == s::MSG_PHONE_TAKEN {
+        "PHONE_TAKEN"
+    } else if msg == s::MSG_INVALID_QQ {
+        "INVALID_QQ"
+    } else if msg == s::MSG_QQ_TAKEN {
+        "QQ_TAKEN"
+    } else if msg == s::MSG_PASS_INVALID || msg == s::MSG_PASS_BLANK || msg == s::MSG_PASS_CTRL {
+        "INVALID_PASS"
+    } else {
+        "BAD_REQUEST"
+    }
+}
+
+/// 认领写口的 BIZ 文案 → 错误码（契约 §3.2；前端主要读 `error`，`code` 只做分支）。
+///
+/// 认领失败文案是 store 新增的一批（尚未像绑定类那样冻结导出常量），这里按**语义
+/// 关键词**映射，文案小改不会让前端分支失效；完全认不出时回落 `CLAIM_FAILED`。
+fn claim_code(msg: &str) -> &'static str {
+    use crate::store as s;
+    if msg == s::MSG_PASS_INVALID || msg == s::MSG_PASS_BLANK || msg == s::MSG_PASS_CTRL {
+        "INVALID_PASS"
+    } else if msg.contains("已存在") {
+        // 并发撞主键 → 「账号已存在，请直接登录」（契约 §3.2）
+        "ACCOUNT_EXISTS"
+    } else if msg.contains("已被认领") {
+        "ALREADY_CLAIMED"
+    } else if msg.contains("已有登录账号") {
+        "PERSON_TAKEN"
+    } else if msg.contains("离团") {
+        "NAME_LEFT"
+    } else if msg.contains("多个") {
+        "NAME_DUPLICATED"
+    } else if msg.contains("性别") {
+        "BAD_GENDER"
+    } else if msg.contains("台账里没有") {
+        "NAME_NOT_FOUND"
+    } else {
+        "CLAIM_FAILED"
+    }
+}
+
+/// 重置密码成功响应（契约 §3.5）。被同号窗口闸抑制时用同形包、`emailMask` 空串。
+fn reset_ok_json(email_mask: &str) -> Value {
+    json!({
+        "ok": true, "sent": true, "channel": "qq-mail",
+        "expiresInMinutes": 15, "emailMask": email_mask,
+    })
+}
+
 /* ------------------------------- 我的（验证 + 个人数据） ------------------------------- */
 
 /// POST /api/public/teams/{team}/verify {account, pass}（account = 手机号或姓名；兼容旧 {name, pass}）
@@ -65,18 +251,28 @@ pub async fn verify(
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_string();
-    if acct.is_empty() || pass.trim().is_empty() {
-        return Err(ApiError::bad_request("请输入账号和密码"));
+    /* 密码**不 trim**（2026-10-18 用户口径：支持中英文/特殊字符/任何符号，
+    首尾空格也是密码的一部分）；只挡空串。账号标识本身 trim。 */
+    if acct.is_empty() || pass.is_empty() {
+        // 契约 §3.1 的本地可判定错误：400 + code（docs 26-02 §2.2 的同名错误码）
+        return Err(api_err(
+            axum::http::StatusCode::BAD_REQUEST,
+            "INVALID_INPUT",
+            "请输入账号和密码",
+        ));
     }
 
     /* 1. 账号校验：手机号+密码 或 姓名+密码（my_accounts 名单，管理员后台开通）
     2026-10-14：失败要说明白是哪一种（密码错 / 账号没开通），不再统一糊成一句。 */
+    /* 账号校验返回 `LoginOutcome`（契约 §2.4）：临时密码命中时同样成功，`temp_used`
+    只影响日志，`mustChangePass` 由下面的身份标志统一下发。 */
     let account_name = match crate::store::my_account_check_login(&st, &acct, &pass).await {
-        Ok(name) => name,
+        Ok(outcome) => outcome.name,
         Err(why) => {
             crate::ipinfo::log_login(&st, &client_ip, &geo, &team, &acct, false).await;
             // 2026-10-17 用户口径「去除登录限速」：失败不计数、不锁定
-            return Ok(Json(json!({ "ok": false, "error": why.message() })));
+            // 2026-10-18：失败回 `{ok:false, code, error}`；NO_ACCOUNT 且可认领时带 canClaim
+            return Ok(Json(login_fail_with_claim(&st, why, &acct).await));
         }
     };
     crate::ipinfo::log_login(&st, &client_ip, &geo, &team, &account_name, true).await;
@@ -86,6 +282,9 @@ pub async fn verify(
     if let Some(info) = crate::store::my_account_info(&st, &account_name).await {
         if !info.bound && !info.is_admin {
             let token = my_token_put(0, team.clone(), account_name.clone());
+            /* B1 未绑主播账号（旁支，旧账号形态）：保留 needBind 语义，
+            状态字段照常下发（契约 §2.4 的「未绑主播为账号名/占位」口径）。 */
+            let x = auth_extra(&st, &account_name).await;
             return Ok(Json(json!({
                 "ok": true,
                 "personId": 0,
@@ -93,6 +292,11 @@ pub async fn verify(
                 "token": token,
                 "bound": false,
                 "needBind": true,
+                "needProfile": x.need_profile,
+                "needQq": x.need_qq,
+                "mustChangePass": x.must_change_pass,
+                "phone": x.phone,
+                "emailMask": x.email_mask,
             })));
         }
     }
@@ -117,27 +321,29 @@ pub async fn verify(
             let person_team = row.try_get::<String, _>("gender").unwrap_or_default();
             let token_team = view_team.token_team(&person_team);
             let token = my_token_put(pid, token_team.clone(), account_name.clone());
-            Ok(Json(json!({
-                "ok": true, "personId": pid, "name": account_name, "token": token, "bound": true,
-                // 登录一次就切对团：前端 applyLoginState 按这个字段设 TEAM，避免登录后
-                // 还用默认团拉数据 → 401 → 二次弹登录门
-                "team": token_team,
-                "switchable": view_team.switchable(),
-            })))
+            /* 与 /my/login 同形（契约 §3.1）：verify 额外保留 switchable。
+            登录一次就切对团：前端 applyLoginState 按 team 设 TEAM，避免登录后
+            还用默认团拉数据 → 401 → 二次弹登录门。 */
+            let mut v = login_ok(&st, pid, &account_name, &token_team, &token).await;
+            v["switchable"] = json!(view_team.switchable());
+            Ok(Json(v))
         }
         None => {
             // 台账里没有同名主播：管理员观看账号（my_accounts.is_admin=1，如内置管理员账号）放行，
             // personId=0——榜单/族谱/分组照常看，「我的」个人数据页为空。
             if !crate::store::my_account_is_admin(&st, &account_name).await {
-                return Ok(Json(json!({ "ok": false })));
+                return Ok(Json(json!({
+                    "ok": false,
+                    "code": "NO_ACCOUNT",
+                    "error": "账号还没绑定主播，请联系管理员",
+                })));
             }
             let token_team = view_team.token_team(&team);
             let token = my_token_put(0, token_team.clone(), account_name.clone());
-            Ok(Json(json!({
-                "ok": true, "personId": 0, "name": account_name, "token": token, "team": token_team,
-                "admin": true, "bound": true,
-                "switchable": view_team.switchable(),
-            })))
+            let mut v = login_ok(&st, 0, &account_name, &token_team, &token).await;
+            v["admin"] = json!(true);
+            v["switchable"] = json!(view_team.switchable());
+            Ok(Json(v))
         }
     }
 }
@@ -219,8 +425,15 @@ pub async fn my_login(
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_string();
-    if acct.is_empty() || pass.trim().is_empty() {
-        return Err(ApiError::bad_request("请输入账号和密码"));
+    /* 密码**不 trim**（2026-10-18 用户口径：支持中英文/特殊字符/任何符号，
+    首尾空格也是密码的一部分）；只挡空串。账号标识本身 trim。 */
+    if acct.is_empty() || pass.is_empty() {
+        // 契约 §3.1 的本地可判定错误：400 + code（docs 26-02 §2.2 的同名错误码）
+        return Err(api_err(
+            axum::http::StatusCode::BAD_REQUEST,
+            "INVALID_INPUT",
+            "请输入账号和密码",
+        ));
     }
 
     /* 0. 管理员快捷口令（账号、密码填同一个管理员口令即可登录展示页）：
@@ -247,10 +460,12 @@ pub async fn my_login(
         响应里的 "name" 只给展示用的中性文案「管理员」，前端水印/localStorage 不再落敏感值。 */
         let token = my_token_put(0, String::new(), "admin-gate".to_string());
         tracing::info!(ip = %client_ip, "展示端管理员口令登录成功（账号=密码=管理员口令）");
-        return Ok(Json(json!({
-            "ok": true, "personId": 0, "name": "管理员",
-            "token": token, "admin": true, "bound": true
-        })));
+        /* 与账号登录同形（契约 §3.1）：管理员不参与 needProfile/needQq 引导，
+        身份标志由 auth_extra 按 `admin-gate` 查不到账号行 → 全 false/空串。 */
+        let mut v = login_ok(&st, 0, "admin-gate", "", &token).await;
+        v["name"] = json!("管理员");
+        v["admin"] = json!(true);
+        return Ok(Json(v));
     }
     /* 2026-10-17 用户口径「去除登录限速」：原先这里对「已配置口令 + 非快捷登录」
     记一次连续失败（5 次锁 10 分钟），现已整条移除 —— 不再计数、不再锁定，
@@ -259,7 +474,7 @@ pub async fn my_login(
     /* 1. 账号校验（与 verify 同一套 my_accounts）
     2026-10-14：失败原因（密码错 / 账号没开通）下发前端照实显示。 */
     let account_name = match crate::store::my_account_check_login(&st, &acct, &pass).await {
-        Ok(name) => name,
+        Ok(outcome) => outcome.name,
         Err(why) => {
             // 失败计数已在上面的门控块记过（每次请求只记一次），这里不再重复计数
             crate::ipinfo::log_login_path(
@@ -272,7 +487,8 @@ pub async fn my_login(
                 false,
             )
             .await;
-            return Ok(Json(json!({ "ok": false, "error": why.message() })));
+            // 2026-10-18：失败回 {ok:false, code, error}；NO_ACCOUNT 且可认领时带 canClaim
+            return Ok(Json(login_fail_with_claim(&st, why, &acct).await));
         }
     };
     // 账号密码正确（2026-10-17 用户口径：登录限速已去除，无失败计数可清）
@@ -294,9 +510,20 @@ pub async fn my_login(
             )
             .await;
             let token = my_token_put(0, String::new(), account_name.clone());
+            /* B1 未绑主播账号：保留 needBind 语义，状态字段照常下发（契约 §2.4）。 */
+            let x = auth_extra(&st, &account_name).await;
             return Ok(Json(json!({
-                "ok": true, "personId": 0, "name": account_name,
-                "token": token, "bound": false, "needBind": true,
+                "ok": true,
+                "personId": 0,
+                "name": account_name,
+                "token": token,
+                "bound": false,
+                "needBind": true,
+                "needProfile": x.need_profile,
+                "needQq": x.need_qq,
+                "mustChangePass": x.must_change_pass,
+                "phone": x.phone,
+                "emailMask": x.email_mask,
             })));
         }
     }
@@ -337,17 +564,19 @@ pub async fn my_login(
             （Inherit 时 token_team 原样返回 team，行为与改动前一致）。 */
             let token_team = view_team.token_team(&team);
             let token = my_token_put(pid, token_team.clone(), name.clone());
-            Ok(Json(json!({
-                "ok": true, "personId": pid, "name": name, "team": token_team,
-                "token": token, "bound": true,
-                // 前端据此渲染「全团 / 男团 / 女团」切换器（只有全团账号 true）
-                "switchable": view_team.switchable(),
-            })))
+            /* 与 verify 同形（契约 §3.1）；前端据此渲染「全团 / 男团 / 女团」切换器。 */
+            let mut v = login_ok(&st, pid, &name, &token_team, &token).await;
+            v["switchable"] = json!(view_team.switchable());
+            Ok(Json(v))
         }
         None => {
             /* 3. 管理员观看账号：两个团都放行（token 挂 MY_ANY_KEY），「我的」数据页为空 */
             if !crate::store::my_account_is_admin(&st, &account_name).await {
-                return Ok(Json(json!({ "ok": false })));
+                return Ok(Json(json!({
+                    "ok": false,
+                    "code": "NO_ACCOUNT",
+                    "error": "账号还没绑定主播，请联系管理员",
+                })));
             }
             crate::ipinfo::log_login_path(
                 &st,
@@ -365,19 +594,135 @@ pub async fn my_login(
             - Inherit → 空串（旧行为不变） */
             let token_team = view_team.token_team("");
             let token = my_token_put(0, token_team.clone(), account_name.clone());
-            Ok(Json(json!({
-                "ok": true, "personId": 0, "name": account_name, "team": token_team,
-                "token": token, "admin": true, "bound": true,
-                "switchable": view_team.switchable(),
-            })))
+            let mut v = login_ok(&st, 0, &account_name, &token_team, &token).await;
+            v["admin"] = json!(true);
+            v["switchable"] = json!(view_team.switchable());
+            Ok(Json(v))
         }
     }
 }
 
-/// 展示端写接口限流：每 IP 每分钟 5 次（当前唯一调用方 = 个人页改密写口）。
+/// POST /api/public/my/claim {name, pass}（契约 §3.2）。
+///
+/// 2026-10-18 用户拍板：**凭艺名直接认领开号** —— 台账里有、但 `my_accounts` 还没
+/// 开号（或同一主播没被占用）的在职主播，可以用艺名 + 自设密码认领，认领即建号
+/// （`store::my_account_claim` 单事务 INSERT：bound=1、phone=''、source='claim'）。
+/// 之后与登录同形返回（`needProfile:true` → 前端进首次补全强制引导）。
+///
+/// 失败一律 400 + BIZ 文案：艺名不存在 / 艺名重复 / 已离团 / 已被认领 / 主播已有账号 /
+/// 性别不合法 / 密码不合法 / 并发撞主键（「账号已存在，请直接登录」）。
+///
+/// 限流：**独立**一档 5 次/分/IP（`CLAIM_LIMITER`）。认领无身份校验，限流防批量抢注；
+/// 它与登录限速无关（登录链路 2026-10-17 起仍不限速）。
+pub async fn my_claim(
+    State(st): State<ArcState>,
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
+    axum::Json(body): axum::Json<Value>,
+) -> ApiResult {
+    let client_ip = client_ip_for_limit(addr, &headers);
+    if !claim_allow(&client_ip) {
+        return Err(api_err(
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            "RATE_LIMITED",
+            "尝试太频繁，请稍后再试",
+        ));
+    }
+    let name = body
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    /* 密码**不 trim**（任意符号/空格都是密码的一部分），只挡空串。 */
+    let pass = body.get("pass").and_then(Value::as_str).unwrap_or_default();
+    if name.is_empty() || pass.is_empty() {
+        return Err(api_err(
+            axum::http::StatusCode::BAD_REQUEST,
+            "INVALID_INPUT",
+            "请输入艺名和密码",
+        ));
+    }
+    let claimed = crate::store::my_account_claim(&st, name, pass)
+        .await
+        .map_err(|e| store_err(e, claim_code))?;
+    let person_id = claimed.person_id.max(0) as u64;
+    let token = my_token_put(person_id, claimed.team.clone(), claimed.name.clone());
+    let view_team = crate::store::my_account_view_team(&st, &claimed.name).await;
+    let mut v = login_ok(&st, person_id, &claimed.name, &claimed.team, &token).await;
+    /* needProfile 恒 true（新账号 phone=''，登录后必须先走「手机号（必填）+ QQ（选填）+
+    新密码」的首次补全）；needQq 与 `my_account_auth_flags` 一致 —— S1 阶段
+    needProfile=true 时 needQq=false（§2.2），补全后再按真实绑定态下发。
+    前端以 needProfile 优先，不受影响。 */
+    v["needProfile"] = json!(true);
+    // 与登录同形：带上切换器字段（新账号一般是 Inherit → false）
+    v["switchable"] = json!(view_team.switchable());
+    tracing::info!(
+        ip = %client_ip,
+        artist = %name,
+        person_id,
+        team = %claimed.team,
+        "展示端账号凭艺名认领成功（单事务建号，待首次补全）"
+    );
+    Ok(Json(v))
+}
+
+/// POST /api/public/my/profile/bind {phone, qq?, newPass?}（契约 §3.3）。
+///
+/// S1 首次补全：身份**只**认 `X-My-Token`（请求体里的账号名一律忽略）。只允许
+/// `phone=''` 的账号调用一次 —— store 的 `WHERE name=? AND phone=''` 守卫保证，
+/// 重复调用回 400 `PROFILE_ALREADY_DONE`。`qq` / `newPass` 选填（空 = 暂不绑 / 沿用
+/// 当前密码）。成功后吊销该账号全部旧 token 并**换发同身份新 token**：否则用户刚补全
+/// 就被自己触发的吊销踢回登录门（与改密同一纪律）。
+pub async fn my_profile_bind(
+    State(st): State<ArcState>,
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
+    axum::Json(body): axum::Json<Value>,
+) -> ApiResult {
+    /* 写口限流：每 IP 每分钟 5 次（复用 `public_write_allow`，契约 §3.3）。 */
+    if !public_write_allow(&client_ip_for_limit(addr, &headers)) {
+        return Err(api_err(
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            "RATE_LIMITED",
+            "尝试太频繁，请稍后再试",
+        ));
+    }
+    let (person_id, team, account_name) = my_token_required_with_restore(&st, &headers).await?;
+    let phone = body
+        .get("phone")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let qq = body.get("qq").and_then(Value::as_str).unwrap_or_default();
+    /* 密码**不 trim**；空串 = 不改密码（"newPass": "" 视同未传）。 */
+    let new_pass = body
+        .get("newPass")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    crate::store::my_account_profile_bind(&st, &account_name, phone, qq, new_pass.as_deref())
+        .await
+        .map_err(|e| store_err(e, bind_code))?;
+    my_tokens_revoke(&account_name);
+    let token = my_token_put(person_id, team.clone(), account_name.clone());
+    let view_team = crate::store::my_account_view_team(&st, &account_name).await;
+    let mut v = login_ok(&st, person_id, &account_name, &team, &token).await;
+    v["switchable"] = json!(view_team.switchable());
+    tracing::info!(
+        account = %account_name,
+        person_id,
+        phone = %mask_phone(phone),
+        "展示端账号完成首次补全（手机号 + QQ + 密码），旧 token 已吊销并换发"
+    );
+    Ok(Json(v))
+}
+
+/// 展示端写接口限流：每 IP 每分钟 5 次。
 ///
 /// 2026-10-17 用户口径「去除登录限速」：登录链路（verify / my_login）原先挂的
-/// 这道闸已摘除 —— 本函数现在只给已登录改密挡脚本刷，不再用于登录限速。
+/// 这道闸已摘除 —— 本函数只给**已登录**写口挡脚本刷，不再用于登录限速。
+/// 2026-10-18 起调用方：个人页改密（`my_password_set`）、首次补全
+/// （`my_profile_bind`）、绑定 QQ 邮箱（`my_email_set`）—— 三者共用同一档 5 次/分
+/// （契约 §3.3 / §3.4 都是「5 次/分/IP」）。
 pub(super) fn public_write_allow(ip: &str) -> bool {
     VERIFY_LIMITER
         .get_or_init(|| VerifyLimiter::new(5))
@@ -392,6 +737,20 @@ pub(super) fn public_write_allow(ip: &str) -> bool {
 pub(super) fn public_password_reset_allow(ip: &str) -> bool {
     PASSWORD_RESET_LIMITER
         .get_or_init(|| VerifyLimiter::new(12))
+        .allow(ip)
+}
+
+/// 「凭艺名认领开号」写口限流：每 IP 每分钟 5 次（独立一档，不与已登录写口共用桶）。
+///
+/// 为什么单独限流：认领是**无身份校验**的写接口（2026-10-18 用户拍板「凭艺名直接
+/// 认领开号」），任何人只要知道一个还没被占用的艺名就能建号 —— 限流是防批量抢注
+/// 的兜底（档位与其它写口一致：5 次/分/IP；正常用户一次就够，不会误伤）。
+pub(super) static CLAIM_LIMITER: OnceLock<VerifyLimiter> = OnceLock::new();
+
+/// true = 本次允许认领；false = 429 RATE_LIMITED。
+fn claim_allow(ip: &str) -> bool {
+    CLAIM_LIMITER
+        .get_or_init(|| VerifyLimiter::new(5))
         .allow(ip)
 }
 
@@ -458,17 +817,6 @@ fn reset_guard_record(phone: &str) {
         .push(Instant::now());
 }
 
-/// 被抑制的请求回包用的「现有账号数」：口径与 store 侧重置一致（手机号命中 + is_admin=0），
-/// 只读账号列表、不碰密码，也不再吊销 token。
-async fn reset_target_count(st: &ArcState, phone: &str) -> usize {
-    crate::store::my_account_list(st)
-        .await
-        .iter()
-        .filter(|v| v.get("phone").and_then(Value::as_str) == Some(phone))
-        .filter(|v| !v.get("isAdmin").and_then(Value::as_bool).unwrap_or(false))
-        .count()
-}
-
 /// POST /api/public/my/password {newPass}（身份**只**认 X-My-Token 头）
 ///
 /// 个人页（已登录）自助**重置密码**：只能改**当前 token 对应的那个账号**的密码 ——
@@ -494,8 +842,10 @@ pub async fn my_password_set(
     2026-10-17 用户口径「去除登录限速」只去了登录链路（verify / my_login）的
     两道闸；这里是**已登录**的改密写口，不属于登录限速，保留。 */
     if !public_write_allow(&client_ip_for_limit(addr, &headers)) {
-        return Err(ApiError::with_status(
+        // 与 profile/bind、email 同形：429 + code（前端 apiErrText 按 RATE_LIMITED 出文案）
+        return Err(api_err(
             axum::http::StatusCode::TOO_MANY_REQUESTS,
+            "RATE_LIMITED",
             "尝试太频繁，请稍后再试",
         ));
     }
@@ -532,124 +882,176 @@ pub async fn my_password_set(
         })?;
     // 改密成功 → 该账号旧 token 全部吊销，再给当前用户换发同身份的新 token
     my_tokens_revoke(&account_name);
+    /* 清临时密码与强制改密标记（契约 §3.6）由 store 的改密实现负责（`temp_pass_*`
+    与 `must_change_pass` 同一条 UPDATE 清掉，见 `self_set_password_inner`）——
+    handler 不再重复写一遍，避免一次改密跑两条 UPDATE。
+    `mustChangePass` 是展示端「临时密码登录后请改密」弹层的唯一触发源，所以下面
+    响应里恒回 false。 */
     let token = my_token_put(person_id, team, account_name);
     // 不打账号名：未绑定账号的 name 就是手机号本身（同 my_password_reset 的口径）
     tracing::info!("展示端账号已自助重置密码（旧 token 已吊销并换发新 token）");
-    Ok(Json(json!({ "ok": true, "token": token })))
+    Ok(Json(json!({
+        "ok": true, "token": token,
+        // 契约 §3.6：改密成功即清强制改密标记，前端据此关掉提示层
+        "mustChangePass": false,
+    })))
 }
 
-/// POST /api/public/my/password/reset {phone}
+/// POST /api/public/my/password/reset {phone, qq}
 ///
-/// 忘记密码（未登录）：把该手机号绑定的普通账号密码重置为 **随机密码并发到绑定邮箱**。
+/// 忘记密码（未登录）：**手机号 + QQ 号双因子**核对通过后，给账号绑定邮箱发一封
+/// 「15 分钟内有效的临时密码」。临时密码在有效期内可重复使用；落库时常密码会被
+/// 覆盖成不可知哈希（旧密码立即失效，契约 §2.5），所以用户必须走「临时密码登录 →
+/// 立即改密」这条路。
 ///
 /// 口径沿革（这一条被产品反复改过，故完整记录）：
 /// - 2026-10-14 审计 P0：原是「重置成手机号后四位 + 明文回显」，任意账号接管；
 ///   改 CSPRNG 随机串，但仍明文回显一次；
-/// - 2026-10-17 审计 4-P1-1：不再明文回显（管理员中介转达临时密码）；
-/// - 2026-10-17 早前用户口径：改回手机号后四位（与开号初始密码统一）；
-/// - **2026-10-17 用户口径（本轮）**：随机密码发到绑定邮箱（163 SMTP）；
-///   没绑邮箱 → 400「该账号未绑定邮箱，请联系管理员重置密码」。
+/// - 2026-10-17 审计 4-P1-1：不再明文回显；
+/// - **2026-10-18 用户拍板（本轮）**：改成「手机号 + QQ 号」双因子 + 邮件临时密码
+///   （契约 §3.5）。没有 QQ 的主播找管理员重置 —— 重置路径必须有 QQ。
 ///
-/// 流程（成功才动库，邮件发不出去就不改密、不吊销 token，避免把用户锁死在
-/// 「已重置但没拿到密码」的中间态）：
-///   1. 每 IP 每分钟 12 次限流（`public_password_reset_allow`）；
-///   2. 同手机号 10 分钟 / 1 小时 3 次的二级闸（`PASSWORD_RESET_GUARD`，
-///      被抑制的请求回同形成功包，不改密、不吊销 token）；
-///   3. 定位账号 + 绑定邮箱（`my_account_reset_target`）；
-///   4. 生成随机密码 → SMTP 发邮箱（失败 503「邮件发送失败…」，无状态变化）；
-///   5. 哈希落库 + 吊销该账号全部 my token。
-///
-/// 响应不回任何敏感信息：成功只回 `{ok:true, sent:true}`，前端提示「已发送到邮箱」。
+/// 严格顺序（契约 §3.5；顺序不可调换，避免半成品状态与账号枚举）：
+///   1. 每 IP 每分钟 12 次限流（`public_password_reset_allow`，档位沿用不动）；
+///   2. 手机号格式（`validate_my_phone`）→ 400 INVALID_PHONE；
+///   3. 同手机号 10 分钟 1 次 / 1 小时 3 次的二级闸（`PASSWORD_RESET_GUARD`）：
+///      被抑制回**同形成功包**（`emailMask:""`），不发信、不改库、不吊销 token；
+///   4. 双因子定位账号（`my_account_reset_target`，任一不匹配统一 400 RESET_MISMATCH，
+///      不泄露手机号是否存在 / 是否绑了 QQ）；
+///   5. 生成临时密码（CSPRNG 10 位）；
+///   6. SMTP 发信 —— **失败 503 且不落库、不改密码、不吊销 token**；
+///   7. 发信成功后才落库（`my_account_reset_apply`：写临时密码哈希 + 15 分钟有效期 +
+///      强制改密标记，并把常密码覆盖成不可知哈希）；
+///   8. 吊销该账号全部 my token。
 pub async fn my_password_reset(
     State(st): State<ArcState>,
     axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
     axum::Json(body): axum::Json<Value>,
 ) -> ApiResult {
+    /* 1. IP 限流（12 次/分，档位沿用）。 */
     if !public_password_reset_allow(&client_ip_for_limit(addr, &headers)) {
-        return Err(ApiError::with_status(
+        return Err(api_err(
             axum::http::StatusCode::TOO_MANY_REQUESTS,
+            "RATE_LIMITED",
             "尝试太频繁，请稍后再试",
         ));
     }
-    let phone = body
+    let phone_raw = body
         .get("phone")
         .and_then(|v| v.as_str())
         .unwrap_or_default();
-    /* 2026-10-17 审计 4-P2-A：按手机号限流（口径见 `PASSWORD_RESET_GUARD` 的注释）。
-    只对形状合法的手机号生效：非法输入仍交给 store 返回原有业务文案，行为不变。 */
-    let guard_phone = crate::store::normalize_phone(phone);
-    let guard_applies =
-        guard_phone.chars().all(|c| c.is_ascii_digit()) && (5..=20).contains(&guard_phone.len());
-    if guard_applies && !reset_guard_allow(&guard_phone) {
-        let accounts = reset_target_count(&st, &guard_phone).await;
-        tracing::info!(
-            phone = %mask_phone(phone),
-            accounts,
-            "重置密码请求过于频繁，已抑制（本次不改密、不吊销 token）"
-        );
-        /* 与正常请求同形回包：不让调用方区分「真的重置了」和「被限流抑制」，
-        避免把限流窗口当成可用性探测信号。 */
-        return Ok(Json(json!({ "ok": true, "names": accounts })));
+    let qq = body.get("qq").and_then(|v| v.as_str()).unwrap_or_default();
+    /* 2. 手机号格式：本地可判定，先于任何账号查询（防枚举 + 省一次 DB 查询）。 */
+    let phone = crate::store::my_account::validate_my_phone(phone_raw).map_err(|e| {
+        api_err(
+            axum::http::StatusCode::BAD_REQUEST,
+            "INVALID_PHONE",
+            crate::store::my_account::biz_msg(&e).to_string(),
+        )
+    })?;
+    if phone.is_empty() {
+        return Err(api_err(
+            axum::http::StatusCode::BAD_REQUEST,
+            "INVALID_PHONE",
+            crate::store::MSG_PHONE_REQUIRED,
+        ));
     }
-    /* 定位账号 + 绑定邮箱。业务拒绝（未绑定手机号 / 未绑定邮箱）走 BIZ:: → 400 原样下发。 */
-    let (name, email) = crate::store::my_account_reset_target(&st, phone)
+    /* 3. 同手机号窗口闸（2026-10-17 审计 4-P2-A）：抑制时回同形成功包，不做任何状态变化。 */
+    if !reset_guard_allow(&phone) {
+        tracing::info!(
+            phone = %mask_phone(&phone),
+            "重置密码请求过于频繁，已抑制（本次不发信、不改库、不吊销 token）"
+        );
+        return Ok(Json(reset_ok_json("")));
+    }
+    /* 4. 双因子：手机号 + QQ 必须命中同一普通账号，且该账号绑定的正是这个 QQ 邮箱。
+    所有不匹配分支（未绑手机号 / 未绑 QQ / QQ 不匹配 / 管理员账号 / 手机号查不到）
+    统一一句文案（防枚举），错误码 RESET_MISMATCH。 */
+    let (name, email) = crate::store::my_account_reset_target(&st, &phone, qq)
         .await
         .map_err(|e| {
             if crate::store::my_account::is_biz(&e) {
-                ApiError::bad_request(crate::store::my_account::biz_msg(&e).to_string())
+                api_err(
+                    axum::http::StatusCode::BAD_REQUEST,
+                    "RESET_MISMATCH",
+                    crate::store::my_account::biz_msg(&e).to_string(),
+                )
             } else {
-                tracing::error!(error = %e, "重置展示端账号密码失败");
+                tracing::error!(error = %e, "重置展示端账号密码定位失败");
                 ApiError::from(anyhow::anyhow!(e))
             }
         })?;
-    /* 生成随机密码 → 发邮箱。发不出去 = 不改密（下面 apply 在邮件成功后才执行）。 */
-    let new_pass = crate::random::random_password();
-    let body = format!(
-        "您的展示端账号密码已重置。\n\n新密码：{new_pass}\n\n请使用该密码登录，登录后可在「我的」页 →「重置密码」改回自己的密码。\n\n（本邮件由系统自动发送，请勿回复。）"
-    );
-    crate::mailer::send_mail(&email, "抖音PK · 密码重置通知", &body)
+    /* 5. 生成临时密码（10 位、去易混淆字符、OS CSPRNG）。 */
+    let temp_pass = crate::random::random_password();
+    /* 6. 发信。发不出去 = 什么都不改（避免把用户锁死在「已重置但没拿到密码」的中间态）。 */
+    crate::mailer::send_temp_password_mail(&email, &temp_pass)
         .await
         .map_err(|e| {
-            tracing::error!(phone = %mask_phone(phone), error = %e, "重置密码邮件发送失败");
-            ApiError::with_status(
+            tracing::error!(
+                phone = %mask_phone(&phone),
+                error = %e,
+                "重置密码临时密码邮件发送失败"
+            );
+            api_err(
                 axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                "邮件发送失败，请稍后重试或联系管理员",
+                "SMTP_UNAVAILABLE",
+                "邮件服务暂时不可用，请稍后重试或联系管理员（本次没有改密码）",
             )
         })?;
-    /* 邮件已发 → 哈希落库。phone 传原值：apply 内部与 target 用同一套 validate_my_phone
-    归一化，两条路对得上号。 */
-    crate::store::my_account_reset_apply(&st, phone, &new_pass)
+    /* 7. 邮件已发 → 才落库（契约 §3.5：发信成功后才 apply，顺序不可颠倒）。 */
+    let applied_name = crate::store::my_account_reset_apply(&st, &phone, &temp_pass)
         .await
         .map_err(|e| {
-            tracing::error!(error = %e, "重置展示端账号密码落库失败");
-            ApiError::from(anyhow::anyhow!(e))
+            if crate::store::my_account::is_biz(&e) {
+                tracing::warn!(error = %e, "重置密码落库时目标账号已消失");
+                api_err(
+                    axum::http::StatusCode::BAD_REQUEST,
+                    "RESET_MISMATCH",
+                    crate::store::my_account::biz_msg(&e).to_string(),
+                )
+            } else {
+                tracing::error!(error = %e, "重置展示端账号密码落库失败");
+                ApiError::from(anyhow::anyhow!(e))
+            }
         })?;
     /* 只有真正重置成功才登记窗口；被抑制的请求不登记，避免刷请求把封锁期越拖越长。 */
-    if guard_applies {
-        reset_guard_record(&guard_phone);
-    }
-    // 改密后旧登录态必须立刻失效（审计 2026-10-12：内存 token 原本无撤销手段）
-    my_tokens_revoke(&name);
+    reset_guard_record(&phone);
+    /* 8. 改密后旧登录态必须立刻失效（临时密码登录要重新登）。 */
+    my_tokens_revoke(&applied_name);
     tracing::info!(
-        phone = %mask_phone(phone),
-        account = name,
-        "展示端账号密码已重置为随机密码并发送到绑定邮箱（旧 token 已吊销）"
+        phone = %mask_phone(&phone),
+        account = %name,
+        "展示端账号已下发临时密码（15 分钟内有效，旧 token 已吊销）"
     );
-    // 不回显密码：只告诉前端「已发送」，具体密码在用户邮箱里。
-    Ok(Json(json!({ "ok": true, "sent": true })))
+    /* 只回脱敏邮箱，不回临时密码（密码在用户邮箱里）。 */
+    Ok(Json(reset_ok_json(&crate::store::mask_qq_email(&email))))
 }
 
-/// POST /api/public/my/email {email}
+/// POST /api/public/my/email {qq}（兼容旧 {email}，契约 §3.4）
 ///
-/// 个人页（已登录）自助绑定 / 更新 / 解绑邮箱（2026-10-17 用户口径）：
-/// 忘记密码重置时，随机密码发到这里的邮箱；`email` 空串 = 解绑。
+/// 个人页（已登录）自助绑定 / 改绑 / 解绑 **QQ 邮箱**（2026-10-18 口径）：
+/// 忘记密码重置走「手机号 + QQ」双因子，所以这里存的是 `qq@qq.com`。
+/// 入参 `{qq}`；`{qq:""}` = 解绑。旧前端传 `{email}` 时只接受 `@qq.com` 域
+/// （存量 163 等非 QQ 邮箱一律 400 INVALID_QQ —— 那些邮箱已不参与重置双因子）。
 /// 身份只认 `X-My-Token` 头，请求体里不接受账号名 —— 只能改自己的邮箱。
+///
+/// 返回 `{ok, email, emailMask}`：`email` 是脱敏值（保留旧键兼容旧前端），
+/// `emailMask` 是契约新键，两者同值，任何情况下都不回明文邮箱。
 pub async fn my_email_set(
     State(st): State<ArcState>,
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
     axum::Json(body): axum::Json<Value>,
 ) -> ApiResult {
+    /* 契约 §3.4：该写口新增 5 次/分/IP 限流（与改密同档，防脚本刷绑定）。 */
+    if !public_write_allow(&client_ip_for_limit(addr, &headers)) {
+        return Err(api_err(
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            "RATE_LIMITED",
+            "尝试太频繁，请稍后再试",
+        ));
+    }
     let Some(token) = header_my_token(&headers) else {
         return Err(ApiError::auth("登录已过期，请重新登录"));
     };
@@ -662,30 +1064,52 @@ pub async fn my_email_set(
     let Some((_person_id, _team, account_name)) = ident else {
         return Err(ApiError::auth("登录已过期，请重新登录"));
     };
-    let raw = body.get("email").and_then(|v| v.as_str()).unwrap_or_default();
-    let email = crate::store::my_account::validate_email(raw).map_err(|e| {
-        if crate::store::my_account::is_biz(&e) {
-            ApiError::bad_request(crate::store::my_account::biz_msg(&e).to_string())
-        } else {
-            ApiError::from(anyhow::anyhow!(e))
-        }
-    })?;
-    crate::store::my_account_set_email(&st, &account_name, &email)
-        .await
-        .map_err(|e| {
-            if crate::store::my_account::is_biz(&e) {
-                ApiError::bad_request(crate::store::my_account::biz_msg(&e).to_string())
-            } else {
-                tracing::error!(error = %e, account = %account_name, "展示端绑定邮箱写入失败");
-                ApiError::from(anyhow::anyhow!(e))
+    /* 入参归一：首选 `qq`（原样交给 store 的 `normalize_qq` 去空格/校验）；
+    兼容旧 `email` —— 只认 `@qq.com` 域，其它域与空串语义分别是 400 / 解绑。 */
+    let qq: String = match body.get("qq").and_then(Value::as_str) {
+        Some(q) => q.to_string(),
+        None => match body.get("email").and_then(Value::as_str) {
+            Some(mail) if !mail.trim().is_empty() => {
+                let mail = mail.trim();
+                match crate::store::qq_from_email(mail) {
+                    Some(q) => q,
+                    // 域是 qq.com 但本地部分不是合法 QQ 号 → 按「QQ 号格式」报
+                    // （与 store 同一句文案）；非 QQ 域 → 明确只支持 QQ 邮箱。
+                    None => {
+                        let qq_domain = mail
+                            .rsplit_once('@')
+                            .is_some_and(|(_, d)| d.eq_ignore_ascii_case("qq.com"));
+                        let msg = if qq_domain {
+                            crate::store::MSG_INVALID_QQ
+                        } else {
+                            "只支持 QQ 邮箱，请填写 QQ 号"
+                        };
+                        return Err(api_err(
+                            axum::http::StatusCode::BAD_REQUEST,
+                            "INVALID_QQ",
+                            msg,
+                        ));
+                    }
+                }
             }
-        })?;
+            // 旧 `{email:""}` / 两个字段都没给 = 解绑
+            _ => String::new(),
+        },
+    };
+    let email_mask = crate::store::my_account_set_qq(&st, &account_name, &qq)
+        .await
+        .map_err(|e| store_err(e, bind_code))?;
     tracing::info!(
         account = %account_name,
-        email = %mask_email(&email),
-        "展示端账号已绑定邮箱"
+        email = %email_mask,
+        "展示端账号已更新绑定 QQ 邮箱"
     );
-    Ok(Json(json!({ "ok": true, "email": mask_email(&email) })))
+    Ok(Json(json!({
+        "ok": true,
+        // `email` 保留旧键（脱敏值，非明文），`emailMask` 为契约新键（契约 §3.4）
+        "email": email_mask.clone(),
+        "emailMask": email_mask,
+    })))
 }
 
 /* 2026-10-16：`my_bind_search`（GET /api/public/my/bind/search）与 `my_bind`
@@ -734,4 +1158,117 @@ pub(super) async fn my_token_required_with_restore(
         return Ok(v);
     }
     Err(ApiError::auth("验证已过期，请重新登录"))
+}
+
+/* ------------------------------- 契约单测 -------------------------------
+ *
+ * 只测 handler 的**纯逻辑**（错误码映射 / 响应形状），不连库：
+ * store 的 QQ/密码/临时密码/双因子/脱敏由 `store::my_account` 自己的单测覆盖。
+ */
+#[cfg(test)]
+mod contract_tests {
+    use super::*;
+    use crate::store::my_account::LoginFail;
+
+    /// 契约 §3.1：登录失败仍是 HTTP 200 + `{ok:false, code, error}`，
+    /// 三个 code 与 store 的 `LoginFail` 变体一一对应（前端按 code 分支）。
+    #[test]
+    fn login_fail_codes_match_contract() {
+        let cases = [
+            (LoginFail::BadPassword, "BAD_PASSWORD"),
+            (LoginFail::NoAccount, "NO_ACCOUNT"),
+            (LoginFail::TempExpired, "TEMP_EXPIRED"),
+        ];
+        for (fail, code) in cases {
+            let v = login_fail(fail);
+            assert_eq!(v["ok"], false, "{code}");
+            assert_eq!(v["code"], code);
+            assert!(
+                v.get("error")
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| !s.is_empty()),
+                "{code} 必须带可展示文案"
+            );
+            // 失败响应绝不能带 token（否则等于失败也发了登录态）
+            assert!(v.get("token").is_none(), "{code} 不得下发 token");
+        }
+    }
+
+    /// 契约 §3.3 / §3.4：绑定类 BIZ 文案 → 错误码。直接引用 store 冻结常量，
+    /// 两边文案漂移时这条用例先红。
+    #[test]
+    fn bind_code_maps_store_text_to_contract_codes() {
+        use crate::store as s;
+        assert_eq!(bind_code(s::MSG_PHONE_REQUIRED), "INVALID_PHONE");
+        assert_eq!(
+            bind_code("手机号格式不对：应为 5~20 位数字"),
+            "INVALID_PHONE"
+        );
+        assert_eq!(bind_code(s::MSG_PHONE_TAKEN), "PHONE_TAKEN");
+        assert_eq!(bind_code(s::MSG_INVALID_QQ), "INVALID_QQ");
+        assert_eq!(bind_code(s::MSG_QQ_TAKEN), "QQ_TAKEN");
+        assert_eq!(
+            bind_code(s::MSG_PROFILE_ALREADY_DONE),
+            "PROFILE_ALREADY_DONE"
+        );
+        assert_eq!(bind_code(s::MSG_NEED_PROFILE), "NEED_PROFILE");
+        assert_eq!(bind_code(s::MSG_PASS_INVALID), "INVALID_PASS");
+        assert_eq!(bind_code(s::MSG_PASS_BLANK), "INVALID_PASS");
+        assert_eq!(bind_code(s::MSG_PASS_CTRL), "INVALID_PASS");
+        // 库里读不到账号之类的新文案：不瞎猜，回落通用码（error 原样仍可读）
+        assert_eq!(bind_code("账号不存在，请重新登录"), "BAD_REQUEST");
+    }
+
+    /// 契约 §3.2：认领失败按语义映射（批量开号/并发撞主键等场景都能归位）。
+    #[test]
+    fn claim_code_maps_claim_failures() {
+        use crate::store as s;
+        assert_eq!(claim_code(s::MSG_PASS_INVALID), "INVALID_PASS");
+        assert_eq!(claim_code("账号已存在，请直接登录"), "ACCOUNT_EXISTS");
+        assert_eq!(claim_code("该艺名已被认领，请直接登录"), "ALREADY_CLAIMED");
+        assert_eq!(
+            claim_code("该主播已有登录账号，请联系管理员"),
+            "PERSON_TAKEN"
+        );
+        assert_eq!(claim_code("该主播已离团，不能认领"), "NAME_LEFT");
+        assert_eq!(
+            claim_code("该艺名在台账里有多个主播，请联系管理员"),
+            "NAME_DUPLICATED"
+        );
+        assert_eq!(claim_code("该主播性别信息异常，请联系管理员"), "BAD_GENDER");
+        assert_eq!(
+            claim_code("台账里没有这个艺名，请联系管理员开号"),
+            "NAME_NOT_FOUND"
+        );
+        assert_eq!(claim_code("完全没见过的文案"), "CLAIM_FAILED");
+    }
+
+    /// 认领写口限流：独立一档 5 次/分/IP（防无身份校验的批量抢注），
+    /// 超限 → 429 RATE_LIMITED（handler 里由 `claim_allow` 判）。
+    #[test]
+    fn claim_limiter_allows_five_per_minute_per_ip() {
+        // 用文档保留网段当假 IP，避免与其他用例/真实访客撞桶
+        let ip = "198.51.100.77";
+        for i in 0..5 {
+            assert!(claim_allow(ip), "第 {i} 次应放行（5 次/分/IP）");
+        }
+        assert!(!claim_allow(ip), "第 6 次必须被限流");
+        // 独立桶：别的 IP 不受影响
+        assert!(claim_allow("198.51.100.78"));
+    }
+
+    /// 契约 §3.5：成功响应形状（`expiresInMinutes: 15` 固定；抑制时 emailMask 空串）。
+    #[test]
+    fn reset_ok_shape_matches_contract() {
+        let v = reset_ok_json("123***@qq.com");
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["sent"], true);
+        assert_eq!(v["expiresInMinutes"], 15);
+        assert_eq!(v["emailMask"], "123***@qq.com");
+        // 被同号闸抑制：同形包但 emailMask 空串、且绝不回临时密码
+        let suppressed = reset_ok_json("");
+        assert_eq!(suppressed["ok"], true);
+        assert_eq!(suppressed["emailMask"], "");
+        assert!(suppressed.get("tempPass").is_none());
+    }
 }

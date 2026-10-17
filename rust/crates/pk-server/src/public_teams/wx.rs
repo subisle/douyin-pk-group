@@ -236,6 +236,12 @@ pub(super) fn mask_phone(p: &str) -> String {
 }
 
 /// 邮箱脱敏：a***@b.com（本地部分只留首字符）。空串原样返回。日志用，不落全量邮箱。
+///
+/// 2026-10-18：展示端邮箱统一改存 QQ 邮箱后，日志/响应侧改用
+/// `store::mask_qq_email`（QQ 域保留前 3 位）。本函数保留 —— 它是 038 存量
+/// 非 QQ 邮箱（163 等）的原始打码口径，`mask_qq_email` 对非 QQ 域正是复刻这套
+/// 规则；留着作为口径出处与后续日志打码的备用实现。
+#[allow(dead_code)]
 pub(super) fn mask_email(e: &str) -> String {
     if let Some((local, domain)) = e.split_once('@') {
         let mut out = String::new();

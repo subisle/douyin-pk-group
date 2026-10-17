@@ -31,7 +31,10 @@ const SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 /// aws-lc-rs、tokio-tungstenite 走 ring，两个特性都被编译进来，rustls 无法自动
 /// 二选一，第一次建 ClientConfig 会 panic。这里显式安装 ring provider 兜底
 /// （与 tokio-tungstenite 同源，进程内幂等，重复调用被忽略）。
-fn ensure_crypto_provider() {
+///
+/// 2026-10-18：除 `send_mail` 外，`main` 启动时也会先调一次 —— 否则后台任务
+/// （微信长轮询/推送等）可能抢在第一次发信之前初始化 TLS，导致 worker panic。
+pub fn ensure_crypto_provider() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         let _ = rustls::crypto::ring::default_provider().install_default();
@@ -184,6 +187,38 @@ pub async fn send_mail(to: &str, subject: &str, body: &str) -> Result<(), String
         .map_err(|_| "发送邮件超时".to_string())?
 }
 
+/* ---------------------- 临时密码邮件（2026-10-18 契约 §3.5） ----------------------
+ *
+ * 忘记密码改成「手机号 + QQ」双因子后，发的是**15 分钟内有效的临时密码**，
+ * 不是直接替换常密码（常密码由 store 侧覆盖成不可知哈希）。模板口径：
+ * - 只含临时密码 / 15 分钟有效期 / 「登录后立即修改」/「不是本人操作请忽略」；
+ * - **不含账号名与手机号**（邮件可能被转发或长期留存，身份信息一律不进信体）；
+ * - 纯文本，由 [`send_mail`] 统一做 base64 正文 + RFC2047 主题编码。
+ */
+
+/// 临时密码邮件主题（契约 §3.5 冻结文案）。
+pub const TEMP_PASS_SUBJECT: &str = "抖音PK · 密码重置临时密码（15 分钟内有效）";
+
+/// 临时密码邮件正文（纯文本）。只做模板拼接，不读任何账号信息。
+pub fn temp_password_body(temp_pass: &str) -> String {
+    format!(
+        "您好：\n\n\
+您在「抖音PK」展示端申请了密码重置，本次登录临时密码为：\n\n\
+    {temp_pass}\n\n\
+该密码 15 分钟内有效。请使用它登录展示端，登录后立即在「我的」页修改为自己的密码。\n\n\
+如果这不是您本人的操作，请忽略本邮件，您的账号密码不会被修改；如连续收到本邮件，请联系管理员。\n\n\
+（本邮件由系统自动发送，请勿回复。）"
+    )
+}
+
+/// 发送临时密码邮件（复用 [`send_mail`]）。
+///
+/// 返回 `Err` 时调用方必须**不落库、不改密码、不吊销 token**（否则用户会拿到一封
+/// 「已发信」却登不进的新密码 —— 契约 §3.5 的严格顺序）。
+pub async fn send_temp_password_mail(to: &str, temp_pass: &str) -> Result<(), String> {
+    send_mail(to, TEMP_PASS_SUBJECT, &temp_password_body(temp_pass)).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,6 +256,26 @@ mod tests {
             .filter(|l| !l.is_empty() && !l.contains(':'))
             .collect();
         assert!(b64_lines.iter().all(|l| l.len() <= 76));
+    }
+
+    /// 临时密码邮件模板（契约 §3.5）：必须含临时密码与「15 分钟 / 立即修改 / 不是本人
+    /// 操作请忽略」四条信息；信体只由固定文案 + 密码拼成，不含账号名 / 手机号 / 邮箱。
+    #[test]
+    fn temp_password_mail_template_matches_contract() {
+        let body = temp_password_body("Ab3kP9xQ2m");
+        assert!(body.contains("Ab3kP9xQ2m"), "必须带临时密码：{body}");
+        assert!(body.contains("15 分钟"), "必须写有效期：{body}");
+        assert!(body.contains("立即"), "必须提示登录后立即修改：{body}");
+        assert!(body.contains("不是您本人的操作"), "必须有非本人操作提示：{body}");
+        assert_eq!(TEMP_PASS_SUBJECT, "抖音PK · 密码重置临时密码（15 分钟内有效）");
+        // 信体不含任何身份信息（模板只接受临时密码一个插值）
+        assert!(!body.contains('@'), "信体不得出现邮箱：{body}");
+        assert!(!body.contains("192."), "信体不得出现 IP/手机号片段：{body}");
+        // 主题经 RFC2047 编码后仍能解码回原文（复用 send_mail 的编码路径）
+        let header = encode_subject(TEMP_PASS_SUBJECT);
+        let inner = &header["=?UTF-8?B?".len()..header.len() - "?=".len()];
+        let decoded = B64.decode(inner).expect("主题应能解码");
+        assert_eq!(String::from_utf8(decoded).unwrap(), TEMP_PASS_SUBJECT);
     }
 
     /// 端到端实发冒烟（手动跑，不随 `cargo test` 自动执行）：

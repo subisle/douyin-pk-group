@@ -660,6 +660,33 @@ fn map_account_err(e: sqlx::Error, anchor_id: &str) -> ApiError {
     }
 }
 
+/// PG 唯一约束冲突判据（SQLSTATE 23505 / duplicate key）。
+///
+/// 2026-10-18：迁移 041 给在职主播姓名加了唯一索引（`uk_person_name_active`）——
+/// 从此「把 A 的艺名改成 B 已经在用的艺名」会被数据库挡住。改造前这条 UPDATE
+/// 直接 `?` 上抛，运营只看到 500 通用文案（真实原因只进日志）。
+fn is_unique_violation(e: &sqlx::Error) -> bool {
+    if let sqlx::Error::Database(db) = e {
+        if db.code().as_deref() == Some("23505") {
+            return true;
+        }
+    }
+    let msg = e.to_string();
+    msg.contains("duplicate key") || msg.contains("Duplicate entry") || msg.contains("23505")
+}
+
+/// 主播写库错误 → 展示端错误（2026-10-18）。
+///
+/// 唯一约束冲突（改名撞上别的在职主播的艺名）翻译成运营能直接照做的中文 400；
+/// **其余行为不变**：其它写库失败仍走 500 通用文案，PG 原文只留日志
+/// （2026-10-14 审计 P2 的口径：表名/索引名不外发）。
+fn map_person_write_err(e: sqlx::Error) -> ApiError {
+    if is_unique_violation(&e) {
+        return ApiError::bad_request("该艺名已被其他主播使用，请先改名区分");
+    }
+    ApiError::from(e)
+}
+
 /// UPDATE 语句 SET 子句的值绑定（列名白名单，值全部 bind）
 enum Bind {
     S(String),
@@ -783,7 +810,13 @@ pub async fn update_streamer(
         for b in binds {
             query = b.into_query(query);
         }
-        query.bind(id as i64).execute(pool).await?;
+        // 2026-10-18：改名撞在职主播唯一索引（041 `uk_person_name_active`）→ 中文 400，
+        // 不再让运营看到 500 通用文案；其余错误口径不变（map_person_write_err）。
+        query
+            .bind(id as i64)
+            .execute(pool)
+            .await
+            .map_err(map_person_write_err)?;
     }
 
     /* 改名要把「拿姓名当关联键」的表一起改（2026-10-17 修复，审计 3-P0）：

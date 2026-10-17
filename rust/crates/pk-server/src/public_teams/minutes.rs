@@ -821,9 +821,13 @@ pub async fn my_accounts(
 }
 
 /// GET /api/public/teams/{team}/my/who（token 走 X-My-Token 头）：轻量身份
-/// （展示端登录门启动时用），只回姓名 + personId，不拉任何业务数据。
+/// （展示端登录门启动时用），只回姓名 + personId 与账号状态字段，不拉业务数据。
 /// 2026-10-16：原先附带的 `bindRequest`（绑定申请审核进度）随「抖音号审计」整页下线
 /// 一并去掉 —— 展示端已不再提交绑定申请，前端也不再读这个字段。
+///
+/// 2026-10-18（契约 §3.7）：who 是前端启动/恢复登录态时唯一问身份的地方，必须与
+/// 登录响应**同一组状态字段**（`needProfile` / `needQq` / `mustChangePass` /
+/// `emailMask`），且**不再下发明文邮箱**（旧键 `email` 保留，但值是脱敏后的）。
 pub async fn my_who(
     State(st): State<ArcState>,
     Path(team): Path<String>,
@@ -841,31 +845,44 @@ pub async fn my_who(
     切换器只能靠这里重建（否则刷新一次切换器就没了）。 */
     let view_team = crate::store::my_account_view_team(&st, &token_name).await;
     let switchable = view_team.switchable();
-    /* 绑定邮箱（迁移 038，2026-10-17）：我的页要显示/编辑当前绑定邮箱，
-    未绑定 = 空串。前端据此决定「忘记密码能不能自助恢复」。 */
-    let email = crate::store::my_account_email(&st, &token_name).await;
+    /* 身份标志（契约 §2.2 / §3.7）：与登录响应同源（store `my_account_auth_flags`）；
+    手机号在 `auth_extra` 里已脱敏，邮箱只出 `email_mask`（明文邮箱不出网）。 */
+    let auth = super::my::auth_extra(&st, &token_name).await;
     // personId=0 有两种：管理员观看账号（is_admin=1，姓名直接来自登录账号），
     // 以及「手机号注册了、还没绑主播」的账号（bound=0，前端要提示去绑定）
     if person_id == 0 {
         if let Some(info) = crate::store::my_account_info(&st, &token_name).await {
             if !info.bound && !info.is_admin {
+                /* B1 未绑主播分支：`name` 回艺名 —— 账号名此刻是手机号占位，绝不能当
+                艺名下发（契约 §3.7「无艺名回空串」）；phone 服务端打码。 */
                 return Ok(Json(json!({
-                    "ok": true, "personId": 0, "name": info.phone, "team": my_team,
-                    "phone": info.phone, "admin": false, "bound": false, "needBind": true,
-                    "switchable": switchable, "email": email,
+                    "ok": true, "personId": 0, "name": info.bind_name(), "team": my_team,
+                    "phone": auth.phone, "admin": false, "bound": false, "needBind": true,
+                    "needProfile": auth.need_profile, "needQq": auth.need_qq,
+                    "mustChangePass": auth.must_change_pass,
+                    "switchable": switchable,
+                    // 旧键 `email` 保留但为脱敏值；新前端读 emailMask
+                    "email": auth.email_mask.clone(), "emailMask": auth.email_mask,
                 })));
             }
             if info.is_admin {
                 return Ok(Json(json!({
                     "ok": true, "personId": 0, "name": token_name, "team": my_team,
-                    "admin": true, "bound": true, "switchable": switchable,
-                    "email": email,
+                    "phone": auth.phone, "admin": true, "bound": true,
+                    "needProfile": false, "needQq": false,
+                    "mustChangePass": auth.must_change_pass,
+                    "switchable": switchable,
+                    "email": auth.email_mask.clone(), "emailMask": auth.email_mask,
                 })));
             }
         }
         return Ok(Json(json!({
             "ok": true, "personId": 0, "name": token_name, "team": my_team,
-            "admin": true, "bound": true, "switchable": switchable, "email": email,
+            "phone": auth.phone, "admin": true, "bound": true,
+            "needProfile": false, "needQq": false,
+            "mustChangePass": auth.must_change_pass,
+            "switchable": switchable,
+            "email": auth.email_mask.clone(), "emailMask": auth.email_mask,
         })));
     }
     let sql = "SELECT name FROM person WHERE id = ? AND deleted_at IS NULL".to_string();
@@ -884,12 +901,19 @@ pub async fn my_who(
     // 前端漏调（或接口被直接 curl）明文号码就出网了。改成服务端在这里就脱敏
     // （mask_phone 与 my_push 用的同一份），键名保持 phone 不变，前端两处
     // maskPhone() 调用随本日改动删除，避免二次打码把已打码的值再打一遍。
-    let phone = crate::store::my_account_phone(&st, &token_name).await;
-    let phone_masked = super::wx::mask_phone(&phone);
+    // 2026-10-18：优先用 `auth_extra` 里已脱敏的 phone；账号行读不到（auth 全空）
+    // 时回落旧的「读 phone 再打码」口径，保证换库/未迁移时不至于是空水印。
+    let phone_masked = if auth.phone.is_empty() {
+        super::wx::mask_phone(&crate::store::my_account_phone(&st, &token_name).await)
+    } else {
+        auth.phone.clone()
+    };
     Ok(Json(json!({
         "ok": true, "personId": person_id, "name": name, "team": my_team,
         "phone": phone_masked, "bound": true, "switchable": switchable,
-        "email": email,
+        "needProfile": auth.need_profile, "needQq": auth.need_qq,
+        "mustChangePass": auth.must_change_pass,
+        "email": auth.email_mask.clone(), "emailMask": auth.email_mask,
     })))
 }
 

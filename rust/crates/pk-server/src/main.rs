@@ -97,6 +97,10 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!(path = %env_path, "没有找到 .env，全部配置走环境变量");
     }
     config::load_dotenv(&env_path);
+    /* rustls 0.23：workspace 同时编译进 aws-lc-rs 与 ring 两套 provider 特性，
+    进程级 CryptoProvider 无法自动二选一；后台任务（微信长轮询等）会先于
+    mailer 初始化 TLS，晚装会让 worker panic。入口处先幂等安装 ring。 */
+    crate::mailer::ensure_crypto_provider();
     tracing_subscriber::fmt()
         .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()))
         .init();
@@ -471,6 +475,15 @@ async fn main() -> anyhow::Result<()> {
         // 展示端登录 / 密码（2026-10-14 口径：注册功能已彻底移除，保留忘记密码重置，
         // 新增已登录后的自助改密）。这几个接口不带团别。
         .route("/api/public/my/login", post(public_teams::my_login))
+        /* 凭艺名认领开号（2026-10-18 用户拍板 / 契约 §3.2）：没有账号的在职主播
+        用艺名 + 自设密码认领，认领即建号，之后进首次补全引导。 */
+        .route("/api/public/my/claim", post(public_teams::my_claim))
+        /* S1 首次补全（契约 §3.3）：手机号（必填）+ QQ（选填）+ 新密码（选填）。
+        只认 X-My-Token；只允许 phone='' 的账号调一次，成功后换发 token。 */
+        .route(
+            "/api/public/my/profile/bind",
+            post(public_teams::my_profile_bind),
+        )
         .route(
             "/api/public/my/password",
             post(public_teams::my_password_set),
@@ -479,7 +492,7 @@ async fn main() -> anyhow::Result<()> {
             "/api/public/my/password/reset",
             post(public_teams::my_password_reset),
         )
-        // 绑定 / 解绑邮箱（2026-10-17 用户口径）：忘记密码重置时随机密码发到这里
+        // 绑定 / 改绑 / 解绑 QQ 邮箱（2026-10-18 口径：忘记密码走手机号 + QQ 双因子）
         .route("/api/public/my/email", post(public_teams::my_email_set))
         .layer(axum::middleware::from_fn_with_state(
             st.clone(),

@@ -44,14 +44,20 @@ pub fn is_biz(err: &str) -> bool {
     err.starts_with(BIZ_PREFIX)
 }
 
+/// PG 唯一约束冲突（SQLSTATE 23505）。
+/// 旧代码认的是 MySQL 文案 `Duplicate entry`，PG 原文是
+/// `duplicate key value violates unique constraint "xxx"` —— 两种都认，
+/// 避免切库后运营看不到「到底是手机号还是姓名撞了」。
+fn is_unique_violation(e: &sqlx::Error) -> bool {
+    matches!(e, sqlx::Error::Database(db) if db.code().as_deref() == Some("23505"))
+}
+
 /// 绑定 UPDATE 的错误分流（2026-10-17 审计 4-N14）：唯一约束冲突（23505，
 /// `uk_my_person_uniq`——并发下另一个账号先绑走了同一主播）折成业务文案，
 /// 不再把 PG 原文（表名/约束名）拼进返回串；其余错误照旧透传给上层分流 500。
 fn bind_update_err(e: sqlx::Error) -> String {
-    if let sqlx::Error::Database(db) = &e {
-        if db.code().as_deref() == Some("23505") {
-            return biz("该主播刚被其它账号绑定，请刷新后重试");
-        }
+    if is_unique_violation(&e) {
+        return biz("该主播刚被其它账号绑定，请刷新后重试");
     }
     format!("绑定失败：{e}")
 }
@@ -61,6 +67,161 @@ pub fn biz_msg(err: &str) -> &str {
     err.strip_prefix(BIZ_PREFIX).unwrap_or(err)
 }
 
+/* ------------------- 跨层冻结文案（2026-10-18，BIZ 前缀内的人话） -------------------
+ *
+ * 这些字面量是**接口契约的一部分**：handler（`public_teams/` 下，T2）靠它们把手写的
+ * `Result<_, String>` 映射成 HTTP 错误码（INVALID_QQ / QQ_TAKEN / NEED_PROFILE …）。
+ * 导出成常量而不是让 handler 再抄一遍中文，避免两边文案漂移；改文案 = 改接口，
+ * 必须同步改 handler 的映射与 `docs/26/05-实现契约-v2.md`。
+ */
+
+/// QQ 号格式拒绝（handler → 400 INVALID_QQ）
+pub const MSG_INVALID_QQ: &str = "QQ 号格式不对：应为 5~12 位数字且不以 0 开头";
+/// QQ 邮箱已被别的账号占用（400 QQ_TAKEN）
+pub const MSG_QQ_TAKEN: &str = "该 QQ 邮箱已被其他账号绑定";
+/// 手机号已被别的账号占用（400 PHONE_TAKEN）
+pub const MSG_PHONE_TAKEN: &str = "该手机号已被其他账号绑定，请联系管理员";
+/// 首次补全缺少手机号（400 INVALID_PHONE）
+pub const MSG_PHONE_REQUIRED: &str = "请输入手机号";
+/// 已不再是「待补全」态（400 PROFILE_ALREADY_DONE）
+pub const MSG_PROFILE_ALREADY_DONE: &str = "该账号已完成绑定，如需修改手机号请联系管理员";
+/// S1（phone=''）账号试图只绑 QQ（403 NEED_PROFILE）
+pub const MSG_NEED_PROFILE: &str = "请先完成手机号绑定";
+/// 忘记密码双因子不匹配（400 RESET_MISMATCH）：账号不存在 / 未绑 QQ / QQ 不匹配 /
+/// 是管理员账号 / QQ 号格式非法，**全部共用这一句**（防手机号存在性枚举）。
+pub const MSG_RESET_MISMATCH: &str =
+    "手机号与 QQ 号不匹配，或该账号未绑定 QQ 邮箱，请联系管理员重置";
+/// 重置落库时账号消失（兜底，正常路径不该出现）
+pub const MSG_RESET_NO_TARGET: &str = "该手机号未绑定账号，请重新申请";
+/// 密码长度越界
+pub const MSG_PASS_INVALID: &str = "密码需为 4~64 个字符";
+/// 空密码 / 全空白
+pub const MSG_PASS_BLANK: &str = "密码不能为空";
+/// 含 ASCII 控制字符
+pub const MSG_PASS_CTRL: &str = "密码不能包含控制字符";
+
+/// QQ 邮箱域名（唯一允许值，小写）。
+pub const QQ_MAIL_DOMAIN: &str = "@qq.com";
+/// QQ 号长度下限 / 上限（2026-10-18 口径：5~12 位、首位非 0）。
+pub const QQ_MIN_LEN: usize = 5;
+/// QQ 号长度上限
+pub const QQ_MAX_LEN: usize = 12;
+/// 密码长度下限（按 **Unicode 字符** 计数，不是字节）
+pub const PASS_MIN_LEN: usize = 4;
+/// 密码长度上限（按 **Unicode 字符** 计数，不是字节）
+pub const PASS_MAX_LEN: usize = 64;
+
+/// 去掉末尾的 `@qq.com`（大小写不敏感）。
+/// 用 `char_indices` 切而不是 `strip_suffix`：后者只认精确字节，`@QQ.COM` 这种
+/// 脏值（用户从别处粘贴、大小写被改过）也要能剥；同时保证不会切在非 ASCII
+/// 字符中间。
+fn strip_qq_mail_suffix(s: &str) -> &str {
+    let n = QQ_MAIL_DOMAIN.chars().count();
+    match s.char_indices().rev().nth(n - 1).map(|(i, _)| i) {
+        Some(i) if s[i..].eq_ignore_ascii_case(QQ_MAIL_DOMAIN) => &s[..i],
+        _ => s,
+    }
+}
+
+/// QQ 号归一化 + 校验（2026-10-18 用户拍板）：
+/// 去掉**所有**空白（含全角空格）→ 兼容粘贴整段 QQ 邮箱（剥 `@qq.com`，大小写
+/// 不敏感）→ 必须是 5~12 位 ASCII 数字且首位非 0。
+///
+/// 全角数字（`１２３４５６`）**不自动转换**：用户看不出服务端改过什么，宁可拒绝。
+/// `Err` 带 `BIZ::` 前缀（[`MSG_INVALID_QQ`]），handler 原样 400 INVALID_QQ。
+pub fn normalize_qq(raw: &str) -> std::result::Result<String, String> {
+    let compact: String = raw.chars().filter(|c| !c.is_whitespace()).collect();
+    let digits = strip_qq_mail_suffix(&compact);
+    let ok = digits.len() >= QQ_MIN_LEN
+        && digits.len() <= QQ_MAX_LEN
+        && !digits.starts_with('0')
+        && digits.chars().all(|c| c.is_ascii_digit());
+    if !ok {
+        return Err(biz(MSG_INVALID_QQ));
+    }
+    Ok(digits.to_string())
+}
+
+/// QQ 号 → 完整邮箱（`123456` → `123456@qq.com`）。非法 QQ 号原样返回 `Err`。
+pub fn qq_to_email(qq: &str) -> std::result::Result<String, String> {
+    Ok(format!("{}{}", normalize_qq(qq)?, QQ_MAIL_DOMAIN))
+}
+
+/// 完整邮箱 → QQ 号反解：只认 `<5~12 位数字>@qq.com`（域名大小写不敏感）。
+/// 非 QQ 域名（`xx@163.com`、`123@vip.qq.com`）、本地部分不合 QQ 规则 → `None`。
+/// **不做猜测式解析** —— 把 163 邮箱的本地部分当 QQ 号会把密码发到错的地址。
+pub fn qq_from_email(email: &str) -> Option<String> {
+    let (local, domain) = email.trim().split_once('@')?;
+    if !domain.eq_ignore_ascii_case("qq.com") {
+        return None;
+    }
+    let ok = local.len() >= QQ_MIN_LEN
+        && local.len() <= QQ_MAX_LEN
+        && !local.starts_with('0')
+        && local.chars().all(|c| c.is_ascii_digit());
+    ok.then(|| local.to_string())
+}
+
+/// 是否已绑定**合法 QQ 邮箱**。038 存量非 QQ 邮箱一律 false → 视为「未绑 QQ」，
+/// 前端提示重新绑定，而不是把 163 地址当 QQ 用。
+pub fn is_qq_email(email: &str) -> bool {
+    qq_from_email(email).is_some()
+}
+
+/// 展示端统一脱敏（2026-10-18）：
+/// - QQ 邮箱 → 本地部分保留前 3 位：`123456789@qq.com` → `123***@qq.com`；
+/// - 非 QQ 邮箱（038 存量）→ 沿用 `mask_email` 口径：`a***@163.com`；
+/// - 空串 → 空串；没有 `@` 的异常值 → `***`（不泄露任何可读内容）。
+///
+/// **禁止**把完整 QQ 号或完整邮箱写进任何响应与日志。
+pub fn mask_qq_email(email: &str) -> String {
+    let e = email.trim();
+    if e.is_empty() {
+        return String::new();
+    }
+    let Some((local, domain)) = e.split_once('@') else {
+        return "***".to_string();
+    };
+    if is_qq_email(e) {
+        let head: String = local.chars().take(3).collect();
+        return format!("{head}***{QQ_MAIL_DOMAIN}");
+    }
+    // 非 QQ 域名：首字符 + ***@域名（与 public_teams::wx::mask_email 同口径）
+    let mut out = String::new();
+    if let Some(c) = local.chars().next() {
+        out.push(c);
+    }
+    out.push_str("***@");
+    out.push_str(domain);
+    out
+}
+
+/// 展示端密码校验（2026-10-18 用户拍板，**推翻** 2026-10-17 的「字母数字点」）：
+/// **4~64 个字符，允许中英文 / 特殊字符 / 任何符号（含空格）**；
+/// 拒绝 ASCII 控制字符（`\x00-\x1F`、`\x7F`，防换行/制表符混进库与日志）；
+/// **不 trim** —— 首尾空格是密码的一部分，trim 会造成「看着一样、登录不上」。
+///
+/// 空串 / 全空白仍按「密码不能为空」拒绝（全空格不是密码；长度与字符本身
+/// 一律原样，不 trim）。`Err` 带 `BIZ::` 前缀（[`MSG_PASS_*`]）。
+pub fn validate_my_password(pass: &str) -> std::result::Result<String, String> {
+    if pass.is_empty() || pass.chars().all(|c| c.is_whitespace()) {
+        return Err(biz(MSG_PASS_BLANK));
+    }
+    if pass.chars().any(|c| c.is_ascii_control()) {
+        return Err(biz(MSG_PASS_CTRL));
+    }
+    let n = pass.chars().count();
+    if !(PASS_MIN_LEN..=PASS_MAX_LEN).contains(&n) {
+        return Err(biz(MSG_PASS_INVALID));
+    }
+    Ok(pass.to_string())
+}
+
+/// 校验姓名 + 密码。`Err`(面向用户的 BIZ 文案)，`Ok`((trim 过的姓名, **原样**密码))。
+///
+/// 姓名规则不变（非空、≤20 字）；密码规则见 [`validate_my_password`]
+/// （2026-10-18 起从「4~20 位字母数字点」放宽到「4~64 任意 Unicode」）。
+/// 登录 / 改密 / 绑定等**所有**密码入口都只走这一套，不再各写一份。
 pub fn validate_my_account(
     name: &str,
     pass: &str,
@@ -72,17 +233,8 @@ pub fn validate_my_account(
     if name.chars().count() > 20 {
         return Err(biz("姓名太长（最多 20 字）"));
     }
-    let pass = pass.trim();
-    if pass.is_empty() {
-        return Err(biz("密码不能为空；已有账号要保留原密码请传当前密码"));
-    }
-    /* 2026-10-17 口径：允许「点」（`.`）—— 主播自定义密码里出现了 Aa181206..
-    这类带句点的写法。仍不允许空格 / 横线等其余分隔符（狼澈那条 H q a 5211314
-    带 U+2006 空格，入库前先人工去空格成 Hqa5211314）。 */
-    if !pass.chars().all(|c| c.is_ascii_alphanumeric() || c == '.') || pass.len() < 4 || pass.len() > 20 {
-        return Err(biz("密码必须是 4~20 位字母、数字或点"));
-    }
-    Ok((name.to_string(), pass.to_string()))
+    let pass = validate_my_password(pass)?;
+    Ok((name.to_string(), pass))
 }
 
 /// 展示端账号密码哈希：argon2id。验证码 / 手工密码都只落哈希，不再存明文。
@@ -248,62 +400,66 @@ pub fn normalize_view_team(raw: &str) -> String {
     ViewTeam::parse(raw).code().to_string()
 }
 
+/// 账号行 → 管理端 JSON（列表项 / 单条 GET 共用）。
+///
+/// 列一律**按名字**读、缺失列回落默认值：让三条不同年代的 SELECT（039 全列 /
+/// 038 有 email / 001 老列）共用同一份映射，不会因为「少跑一次迁移」就把整个
+/// 列表打成空（与 `my_account_info` 的 038 回落策略同口径）。
+///
+/// 2026-10-18 新增三个字段（契约 §2.7 / §3.8）：
+/// - `emailMask`：脱敏 QQ 邮箱（**不下发明文**，运营需要核对时让用户自报）；
+/// - `qqBound`：是否已绑合法 QQ 邮箱（038 存量非 QQ 邮箱算「未绑 QQ」）；
+/// - `mustChangePass`：是否处于「临时密码登录后待改密」状态（039，缺列 = false）。
+fn account_row_json(r: &sqlx::postgres::PgRow) -> serde_json::Value {
+    let email: String = r.try_get("email").ok().unwrap_or_default();
+    let source: String = r
+        .try_get("source")
+        .ok()
+        .unwrap_or_else(|| "admin".to_string());
+    serde_json::json!({
+        "name": r.try_get::<String, _>("name").unwrap_or_default(),
+        "phone": r.try_get::<String, _>("phone").unwrap_or_default(),
+        "isAdmin": r.try_get::<i16, _>("is_admin").unwrap_or(0) == 1,
+        "createdAt": r.try_get::<String, _>("created_at").unwrap_or_default(),
+        // bound 缺列（008 之前的库）按老口径「一律已绑定」
+        "bound": r.try_get::<i16, _>("bound").unwrap_or(1) == 1,
+        "boundAt": r.try_get::<String, _>("bound_at").unwrap_or_default(),
+        "source": source,
+        "viewTeam": r.try_get::<String, _>("view_team").unwrap_or_default(),
+        "emailMask": mask_qq_email(&email),
+        "qqBound": is_qq_email(&email),
+        "mustChangePass": r.try_get::<i16, _>("must_change_pass").unwrap_or(0) == 1,
+    })
+}
+
 /// 全部账号（管理端列表用），按添加时间倒序。
-/// `bound`/`source` 来自 008 迁移；表还没跑到 008 时退回不带这两列的查询（一律视为已绑定）。
+///
+/// 三级列清单回落（越新的迁移没跑就退一档）：
+/// 1. 039 全列（含 email/must_change_pass）；
+/// 2. 038 列（含 email，不含 039 三列）；
+/// 3. 001 老列（不含 008/024/038/039 的任何新列）。
 pub async fn my_account_list(st: &AppState) -> Vec<serde_json::Value> {
     let Ok(pool) = w(st) else {
         return Vec::new();
     };
-    let rows = match sqlx::query(
-        "SELECT name, phone, is_admin, created_at, bound, bound_at, source, view_team \
+    let sqls = [
+        "SELECT name, phone, is_admin, created_at, bound, bound_at, source, view_team, email, \
+         must_change_pass FROM my_accounts ORDER BY created_at DESC, name ASC",
+        "SELECT name, phone, is_admin, created_at, bound, bound_at, source, view_team, email \
          FROM my_accounts ORDER BY created_at DESC, name ASC",
-    )
-    .fetch_all(pool)
-    .await
-    {
-        Ok(rows) => rows
-            .iter()
-            .map(|r| {
-                serde_json::json!({
-                    "name": r.try_get::<String, _>(0).unwrap_or_default(),
-                    "phone": r.try_get::<String, _>(1).unwrap_or_default(),
-                    "isAdmin": r.try_get::<i16, _>(2).unwrap_or(0) == 1,
-                    "createdAt": r.try_get::<String, _>(3).unwrap_or_default(),
-                    "bound": r.try_get::<i16, _>(4).unwrap_or(1) == 1,
-                    "boundAt": r.try_get::<String, _>(5).unwrap_or_default(),
-                    "source": r.try_get::<String, _>(6).unwrap_or_default(),
-                    "viewTeam": r.try_get::<String, _>(7).unwrap_or_default(),
-                })
-            })
-            .collect::<Vec<_>>(),
-        Err(_) => sqlx::query(
-            "SELECT name, phone, is_admin, created_at \
-             FROM my_accounts ORDER BY created_at DESC, name ASC",
-        )
-        .fetch_all(pool)
-        .await
-        .map(|rows| {
-            rows.iter()
-                .map(|r| {
-                    serde_json::json!({
-                        "name": r.try_get::<String, _>(0).unwrap_or_default(),
-                        "phone": r.try_get::<String, _>(1).unwrap_or_default(),
-                        "isAdmin": r.try_get::<i16, _>(2).unwrap_or(0) == 1,
-                        "createdAt": r.try_get::<String, _>(3).unwrap_or_default(),
-                        "bound": true,
-                        "boundAt": "",
-                        "source": "admin",
-                        "viewTeam": "",
-                    })
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_else(|e| {
-            tracing::error!(error = %e, "查展示端账号失败");
-            Vec::new()
-        }),
-    };
-    rows
+        "SELECT name, phone, is_admin, created_at \
+         FROM my_accounts ORDER BY created_at DESC, name ASC",
+    ];
+    for sql in sqls {
+        match sqlx::query(&crate::pq::rewrite(sql)).fetch_all(pool).await {
+            Ok(rows) => return rows.iter().map(account_row_json).collect(),
+            Err(e) => {
+                tracing::warn!(error = %e, "查展示端账号失败，回落更老的列清单重试");
+            }
+        }
+    }
+    tracing::error!("查展示端账号失败（含老列清单兜底）");
+    Vec::new()
 }
 
 /// 手动设置账号（右键主播 / 管理端卡片）：存在则覆盖更新手机号+密码，不存在则新建。
@@ -340,26 +496,46 @@ async fn my_account_set_pool(
         }
     }
     let pass_hash = hash_my_password(&pass);
-    sqlx::query(&crate::pq::rewrite(
-        "INSERT INTO my_accounts (name, phone, pass, is_admin, created_at) VALUES (?, ?, ?, 0, ?)
-         ON CONFLICT (name) DO UPDATE SET phone = EXCLUDED.phone, pass = EXCLUDED.pass",
-    ))
-    .bind(&name)
-    .bind(&phone)
-    .bind(&pass_hash)
-    .bind(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string())
-    .execute(pool)
-    .await
-    .map_err(|e| {
+    let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    /* 039（2026-10-18）：**写密码的每条路径都必须清临时密码三列**，否则
+    管理员已把密码换掉、账号却还挂着「必须改密」的假锁（契约 §2.7）。
+    未跑 039 的库回落老语句（UPDATE 少三列），不让管理端建号功能整体不可用。 */
+    const UPSERT_NEW: &str = "INSERT INTO my_accounts (name, phone, pass, is_admin, created_at) \
+         VALUES (?, ?, ?, 0, ?) \
+         ON CONFLICT (name) DO UPDATE SET phone = EXCLUDED.phone, pass = EXCLUDED.pass, \
+           temp_pass_hash = '', temp_pass_exp = NULL, must_change_pass = 0";
+    const UPSERT_LEGACY: &str = "INSERT INTO my_accounts (name, phone, pass, is_admin, created_at) \
+         VALUES (?, ?, ?, 0, ?) \
+         ON CONFLICT (name) DO UPDATE SET phone = EXCLUDED.phone, pass = EXCLUDED.pass";
+    let mut res = sqlx::query(&crate::pq::rewrite(UPSERT_NEW))
+        .bind(&name)
+        .bind(&phone)
+        .bind(&pass_hash)
+        .bind(&now)
+        .execute(pool)
+        .await;
+    if matches!(&res, Err(e) if e.to_string().contains("Unknown column")) {
+        tracing::warn!("039 未跑：管理员设密码时无法清临时密码三列（先跑 pk-server migrate）");
+        res = sqlx::query(&crate::pq::rewrite(UPSERT_LEGACY))
+            .bind(&name)
+            .bind(&phone)
+            .bind(&pass_hash)
+            .bind(&now)
+            .execute(pool)
+            .await;
+    }
+    res.map_err(|e| {
         let m = e.to_string();
         /* docs/12 §P6 记过的不一致：唯一索引已经能挡住重复手机号，但错误一直是
-        一句 `写入失败：Duplicate entry ...`，运营看不出是手机号还是姓名撞了。
-        这里把唯一索引冲突翻成中文文案（原先与注册路径共用一套，注册已移除）。 */
-        if m.contains("Duplicate entry") {
-            if m.contains("PRIMARY") {
+        一句裸 SQL 文案，运营看不出是手机号还是姓名撞了。这里把唯一冲突翻成中文
+        （PG SQLSTATE 23505 + 旧 MySQL 文案两种都认）。 */
+        if is_unique_violation(&e) || m.contains("Duplicate entry") {
+            if m.contains("uk_my_phone_uniq") {
+                format!("手机号 {phone} 已存在（已绑在另一个账号上）")
+            } else if m.contains("pkey") || m.contains("PRIMARY") {
                 format!("账号名「{name}」已存在（同名主播？先在台账里改名）")
             } else {
-                format!("手机号 {phone} 已存在（已绑在另一个账号上）")
+                format!("写入失败：{m}")
             }
         } else if m.contains("Unknown column") {
             "缺少数据库迁移 008（先跑一次 pk-server migrate）".to_string()
@@ -427,54 +603,29 @@ pub async fn my_account_phone(st: &AppState, name: &str) -> String {
 }
 
 /// 单个账号（右键弹窗回填用）；没有则 None。
-/// 额外带 `bound`/`source`（008 迁移）：管理端据此显示「已绑主播 / 待绑定」。
+/// 额外带 `bound`/`source`（008 迁移）：管理端据此显示「已绑主播 / 待绑定」；
+/// 2026-10-18 起与列表同口径补 `emailMask` / `qqBound` / `mustChangePass`
+/// （契约 §3.8「单条 GET 同步返回上述字段」），列缺失时同样三级回落。
 pub async fn my_account_get(st: &AppState, name: &str) -> Option<serde_json::Value> {
     let pool = w(st).ok()?;
     let key = name.trim();
-    /* 带 view_team 的新查询（迁移 024）。列不存在时整句失败 → 走下面老查询，
-    viewTeam 回落 ""（前端按「沿用旧口径」显示）。 */
-    let row = sqlx::query(&crate::pq::rewrite(
-        "SELECT name, phone, is_admin, created_at, bound, bound_at, source, view_team \
+    let sqls = [
+        "SELECT name, phone, is_admin, created_at, bound, bound_at, source, view_team, email, \
+         must_change_pass FROM my_accounts WHERE name = ?",
+        "SELECT name, phone, is_admin, created_at, bound, bound_at, source, view_team, email \
          FROM my_accounts WHERE name = ?",
-    ))
-    .bind(key)
-    .fetch_optional(pool)
-    .await
-    .ok()
-    .flatten();
-    if let Some(row) = row {
-        let name = row.try_get::<String, _>("name").ok()?;
-        return Some(serde_json::json!({
-            "name": name,
-            "phone": row.try_get::<String, _>("phone").unwrap_or_default(),
-            "isAdmin": row.try_get::<i16, _>("is_admin").unwrap_or(0) == 1,
-            "createdAt": row.try_get::<String, _>("created_at").unwrap_or_default(),
-            "bound": row.try_get::<i16, _>("bound").unwrap_or(1) == 1,
-            "boundAt": row.try_get::<String, _>("bound_at").unwrap_or_default(),
-            "source": row.try_get::<String, _>("source").unwrap_or_default(),
-            "viewTeam": row.try_get::<String, _>("view_team").unwrap_or_default(),
-        }));
-    }
-    // 兜底：表还没跑 008 迁移（没有 bound/source 列）时退回老查询
-    let row = sqlx::query(&crate::pq::rewrite(
         "SELECT name, phone, is_admin, created_at FROM my_accounts WHERE name = ?",
-    ))
-    .bind(key)
-    .fetch_optional(pool)
-    .await
-    .ok()
-    .flatten()?;
-    let name = row.try_get::<String, _>("name").ok()?;
-    Some(serde_json::json!({
-        "name": name,
-        "phone": row.try_get::<String, _>("phone").unwrap_or_default(),
-        "isAdmin": row.try_get::<i16, _>("is_admin").unwrap_or(0) == 1,
-        "createdAt": row.try_get::<String, _>("created_at").unwrap_or_default(),
-        "bound": true,
-        "boundAt": "",
-        "source": "admin",
-        "viewTeam": "",
-    }))
+    ];
+    for sql in sqls {
+        if let Ok(Some(row)) = sqlx::query(&crate::pq::rewrite(sql))
+            .bind(key)
+            .fetch_optional(pool)
+            .await
+        {
+            return Some(account_row_json(&row));
+        }
+    }
+    None
 }
 
 /// 删除账号，返回是否存在
@@ -589,7 +740,7 @@ pub async fn person_set_phone(
         let m = e.to_string();
         if m.contains("Unknown column") {
             "主播手机号功能未启用：请先跑一次 pk-server migrate（016_streamer_phone）".into()
-        } else if m.contains("Duplicate entry") {
+        } else if is_unique_violation(&e) || m.contains("Duplicate entry") {
             format!("手机号 {phone} 已被其它主播登记")
         } else {
             format!("写入失败：{m}")
@@ -907,19 +1058,36 @@ pub async fn my_accounts_batch_open(
                 };
                 // 已存在：默认**不动密码**（重跑批量不该把所有人密码刷掉），
                 // 只有 force_reset 才重置；手机号 / person_id 一律补齐。
-                let sql = if force_reset {
-                    "UPDATE my_accounts SET phone = ?, pass = ?, person_id = ?, bound = 1
+                // 039：force_reset 写新密码后必须清临时密码三列（契约 §2.7），
+                // 否则账号会卡在「已改密但仍要求改密」的假锁。
+                let sql = crate::pq::rewrite(if force_reset {
+                    "UPDATE my_accounts SET phone = ?, pass = ?, person_id = ?, bound = 1, \
+                       temp_pass_hash = '', temp_pass_exp = NULL, must_change_pass = 0 \
                      WHERE name = ?"
                 } else {
                     "UPDATE my_accounts SET phone = ?, person_id = ?, bound = 1 WHERE name = ?"
-                };
-                let sql = crate::pq::rewrite(sql);
+                });
                 let mut q = sqlx::query(&sql).bind(&keep_phone);
                 if force_reset {
                     q = q.bind(&pass_hash);
                 }
-                q = q.bind(pid as i64).bind(&old_name);
-                match q.execute(pool).await {
+                let mut res = q.bind(pid as i64).bind(&old_name).execute(pool).await;
+                if force_reset
+                    && matches!(&res, Err(e) if e.to_string().contains("Unknown column"))
+                {
+                    tracing::warn!("039 未跑：批量 force_reset 无法清临时密码三列");
+                    res = sqlx::query(&crate::pq::rewrite(
+                        "UPDATE my_accounts SET phone = ?, pass = ?, person_id = ?, bound = 1 \
+                         WHERE name = ?",
+                    ))
+                    .bind(&keep_phone)
+                    .bind(&pass_hash)
+                    .bind(pid as i64)
+                    .bind(&old_name)
+                    .execute(pool)
+                    .await;
+                }
+                match res {
                     Ok(_) => out.push(BatchAccountRow {
                         person_id: pid,
                         name: old_name,
@@ -939,7 +1107,7 @@ pub async fn my_accounts_batch_open(
                             name: old_name,
                             phone: keep_phone.clone(),
                             status: "failed",
-                            note: if m.contains("Duplicate entry") {
+                            note: if is_unique_violation(&e) || m.contains("Duplicate entry") {
                                 format!("手机号 {keep_phone} 已被占用")
                             } else {
                                 format!("写入失败：{m}")
@@ -956,12 +1124,13 @@ pub async fn my_accounts_batch_open(
                 INSERT 撞主键导致整批部分失败）。改 ON CONFLICT (name) 幂等覆盖，
                 与单条 my_account_set 同口径；手机号唯一索引冲突仍会被后面的
                 match Err 分支捕获并逐行报「手机号已存在」。 */
-                let res = sqlx::query(&crate::pq::rewrite(
+                let mut res = sqlx::query(&crate::pq::rewrite(
                     "INSERT INTO my_accounts
                        (name, phone, pass, is_admin, created_at, bound, bound_at, source, person_id)
                      VALUES (?, ?, ?, 0, ?, 1, ?, 'batch', ?)
                      ON CONFLICT (name) DO UPDATE SET phone = EXCLUDED.phone,
-                       pass = EXCLUDED.pass, person_id = EXCLUDED.person_id",
+                       pass = EXCLUDED.pass, person_id = EXCLUDED.person_id,
+                       temp_pass_hash = '', temp_pass_exp = NULL, must_change_pass = 0",
                 ))
                 .bind(&name)
                 .bind(&want_phone)
@@ -971,6 +1140,24 @@ pub async fn my_accounts_batch_open(
                 .bind(pid as i64)
                 .execute(pool)
                 .await;
+                if matches!(&res, Err(e) if e.to_string().contains("Unknown column")) {
+                    tracing::warn!("039 未跑：批量开号 ON CONFLICT 分支无法清临时密码三列");
+                    res = sqlx::query(&crate::pq::rewrite(
+                        "INSERT INTO my_accounts
+                           (name, phone, pass, is_admin, created_at, bound, bound_at, source, person_id)
+                         VALUES (?, ?, ?, 0, ?, 1, ?, 'batch', ?)
+                         ON CONFLICT (name) DO UPDATE SET phone = EXCLUDED.phone,
+                           pass = EXCLUDED.pass, person_id = EXCLUDED.person_id",
+                    ))
+                    .bind(&name)
+                    .bind(&want_phone)
+                    .bind(&pass_hash)
+                    .bind(&now)
+                    .bind(&now)
+                    .bind(pid as i64)
+                    .execute(pool)
+                    .await;
+                }
                 match res {
                     Ok(_) => out.push(BatchAccountRow {
                         person_id: pid,
@@ -982,8 +1169,8 @@ pub async fn my_accounts_batch_open(
                     }),
                     Err(e) => {
                         let m = e.to_string();
-                        let note = if m.contains("Duplicate entry") {
-                            if m.contains("PRIMARY") {
+                        let note = if is_unique_violation(&e) || m.contains("Duplicate entry") {
+                            if m.contains("pkey") || m.contains("PRIMARY") {
                                 format!("账号名「{name}」已存在（同名主播？先改名或走单人改绑）")
                             } else {
                                 format!("手机号 {want_phone} 已被占用")
@@ -1165,34 +1352,230 @@ pub fn normalize_phone(v: &str) -> String {
 /// 原先登录失败一律返回 `None`，前端只能把「密码错 / 账号不存在 / 没开通」揉成一句
 /// 「账号或密码不对，或账号还没开通」。现在把原因传出去，前端照实显示 ——
 /// 代价是账号枚举面变大（能拿姓名试探谁开了号），产品已确认接受。
+///
+/// 2026-10-18 新增 [`LoginFail::TempExpired`]（临时密码口径）：**先验签、再判过期** ——
+/// 只有真正持有那个临时密码的人才会看到「已过期」，不向旁人泄露「这个账号有待用
+/// 临时密码」。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LoginFail {
     /// 账号（或手机号）查得到，但密码不对
     BadPassword,
     /// 这个账号 / 手机号根本没开通过
     NoAccount,
+    /// 临时密码哈希验签通过，但已过 15 分钟有效期
+    TempExpired,
 }
 
 impl LoginFail {
-    /// 给前端直接显示的文案（登录失败只有这两种，不再含糊）
+    /// 给前端直接显示的文案（登录失败只有这几种，不再含糊）
     pub fn message(self) -> &'static str {
         match self {
             LoginFail::BadPassword => "密码错误",
             LoginFail::NoAccount => "账号还没开通",
+            LoginFail::TempExpired => "临时密码已过期，请重新获取",
+        }
+    }
+
+    /// 契约 §3.1 的错误码（handler 直接下发给前端分流 UI）
+    pub fn code(self) -> &'static str {
+        match self {
+            LoginFail::BadPassword => "BAD_PASSWORD",
+            LoginFail::NoAccount => "NO_ACCOUNT",
+            LoginFail::TempExpired => "TEMP_EXPIRED",
         }
     }
 }
 
+/// 登录成功的结果（契约 docs/26/05 §2.4）。
+///
+/// 从 2026-10-18 起来落 handler 需要的全部身份信息，避免 handler 再查一遍：
+/// - `person_id`：`my_accounts.person_id`（0 = 管理员观看账号 / 未绑主播）；
+/// - `team`：台账主播 `gender`（未绑 → 空串），handler 用它 + view_team 算 token 团别；
+/// - `temp_used`：本次是否凭**临时密码**登录（handler 据此回 `mustChangePass:true`）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoginOutcome {
+    pub name: String,
+    pub person_id: i64,
+    pub team: String,
+    /// true = 这次用的是邮箱里那串临时密码
+    pub temp_used: bool,
+}
+
+/// 临时密码校验结果（契约 §2.4）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TempPassResult {
+    /// 验签通过且在有效期内（已置 must_change_pass=1；**不清 temp**，15 分钟内可重复用）
+    Valid,
+    /// 验签通过但已过期（已惰性清空 temp 两列）
+    Expired,
+    /// 没有临时密码 / 密码不对（不区分，避免泄露「有待用临时密码」）
+    Mismatch,
+}
+
+/// 登录用账号行：一次查出密码、person_id、团别与 039 的临时密码列。
+///
+/// `where_sql` 是**代码里写死的**片段（`m.phone = ?` / `m.name = ?`），不接收外部输入。
+/// 039 未跑时整句失败 → 回落老列查询（临时密码当不存在，登录照常可用），
+/// 与 038 在 `my_account_info` 里的回落策略同口径 —— 不让没迁移的库整体登不进去。
+async fn login_row(
+    pool: &PgPool,
+    where_sql: &str,
+    key: &str,
+) -> Option<sqlx::postgres::PgRow> {
+    let sql = format!(
+        "SELECT m.name, m.pass, m.person_id, COALESCE(p.gender, '') AS team, \
+                m.temp_pass_hash, m.must_change_pass, \
+                (m.temp_pass_exp IS NOT NULL AND m.temp_pass_exp > now()) AS temp_valid \
+         FROM my_accounts m LEFT JOIN person p ON p.id = m.person_id AND p.deleted_at IS NULL \
+         WHERE {where_sql} LIMIT 1"
+    );
+    match sqlx::query(&crate::pq::rewrite(&sql))
+        .bind(key)
+        .fetch_optional(pool)
+        .await
+    {
+        Ok(row) => row,
+        Err(e) => {
+            tracing::warn!(error = %e, "含 039 列的登录查询失败，回落老列（临时密码不可用）");
+            let sql = format!(
+                "SELECT m.name, m.pass, m.person_id, COALESCE(p.gender, '') AS team \
+                 FROM my_accounts m LEFT JOIN person p ON p.id = m.person_id AND p.deleted_at IS NULL \
+                 WHERE {where_sql} LIMIT 1"
+            );
+            sqlx::query(&crate::pq::rewrite(&sql))
+                .bind(key)
+                .fetch_optional(pool)
+                .await
+                .ok()
+                .flatten()
+        }
+    }
+}
+
+/// 置「必须改密」标记（临时密码登录命中）。039 未跑时静默跳过（无列可写）。
+async fn set_must_change_pass(pool: &PgPool, name: &str) -> std::result::Result<(), String> {
+    match sqlx::query(&crate::pq::rewrite(
+        "UPDATE my_accounts SET must_change_pass = 1 WHERE name = ?",
+    ))
+    .bind(name)
+    .execute(pool)
+    .await
+    {
+        Ok(_) => Ok(()),
+        Err(e) if e.to_string().contains("Unknown column") => {
+            tracing::warn!("039 未跑：无法置 must_change_pass（先跑 pk-server migrate）");
+            Ok(())
+        }
+        Err(e) => Err(format!("更新改密标记失败：{e}")),
+    }
+}
+
+/// 只清临时密码两列（保留 must_change_pass）—— 过期惰性清理用。
+async fn clear_temp_hash_only(pool: &PgPool, name: &str) -> std::result::Result<(), String> {
+    match sqlx::query(&crate::pq::rewrite(
+        "UPDATE my_accounts SET temp_pass_hash = '', temp_pass_exp = NULL WHERE name = ?",
+    ))
+    .bind(name)
+    .execute(pool)
+    .await
+    {
+        Ok(_) => Ok(()),
+        Err(e) if e.to_string().contains("Unknown column") => Ok(()),
+        Err(e) => Err(format!("清空临时密码失败：{e}")),
+    }
+}
+
+/// 清临时密码三列（含 must_change_pass）—— 改密成功 / 管理员改密 / 解绑 QQ 用。
+async fn clear_temp_pool(pool: &PgPool, name: &str) -> std::result::Result<(), String> {
+    match sqlx::query(&crate::pq::rewrite(
+        "UPDATE my_accounts SET temp_pass_hash = '', temp_pass_exp = NULL, must_change_pass = 0 \
+         WHERE name = ?",
+    ))
+    .bind(name)
+    .execute(pool)
+    .await
+    {
+        Ok(_) => Ok(()),
+        Err(e) if e.to_string().contains("Unknown column") => {
+            tracing::warn!("039 未跑：无法清临时密码三列（先跑 pk-server migrate）");
+            Ok(())
+        }
+        Err(e) => Err(format!("清空临时密码失败：{e}")),
+    }
+}
+
+/// 已取到账号行后的登录判定（手机号路径与姓名路径共用）。
+///
+/// 契约 §2.4 的顺序：**先常密码，失败再试临时密码**；
+/// - 常密码命中 → 顺带清临时态（用户已持有当前密码，不该再被要求改密）；
+/// - 常密码失败、临时密码验签通过且未过期 → 置 must_change_pass=1，
+///   **不清 temp**（15 分钟内可重复用，避免「手滑刷新就锁死」）；
+/// - 验签通过但过期 → 惰性清 temp 两列 + `TempExpired`；
+/// - 都不匹配 → `BadPassword`（不暴露「有临时密码待用」）。
+async fn login_from_row(
+    pool: &PgPool,
+    row: &sqlx::postgres::PgRow,
+    pass: &str,
+) -> std::result::Result<LoginOutcome, LoginFail> {
+    let name: String = row.try_get("name").map_err(|_| LoginFail::NoAccount)?;
+    let stored: String = row.try_get("pass").unwrap_or_default();
+    let person_id: i64 = row.try_get("person_id").unwrap_or(0);
+    let team: String = row.try_get("team").unwrap_or_default();
+    // 039 列缺失（回落老查询）时一律按「没有临时密码」处理
+    let temp_hash: String = row.try_get("temp_pass_hash").unwrap_or_default();
+    let temp_valid: bool = row.try_get("temp_valid").unwrap_or(false);
+    let must_change: i16 = row.try_get("must_change_pass").unwrap_or(0);
+
+    if !stored.is_empty() && verify_my_password(pass, &stored) {
+        upgrade_my_password_if_plain(pool, &name, &stored, pass).await;
+        /* 常密码命中：顺手清临时态（设计 02 T15）。重置会把 pass 覆盖成不可知
+        哈希，所以这里基本只会命中「管理员改过密但没清临时态」的残留；
+        清掉不会把用户挡在门外，反而避免挂着「必须改密」的假锁。 */
+        if !temp_hash.is_empty() || must_change == 1 {
+            if let Err(e) = clear_temp_pool(pool, &name).await {
+                tracing::warn!(error = %e, name, "常密码登录后清临时态失败（不阻断登录）");
+            }
+        }
+        return Ok(LoginOutcome {
+            name,
+            person_id,
+            team,
+            temp_used: false,
+        });
+    }
+
+    if !temp_hash.is_empty() && verify_my_password(pass, &temp_hash) {
+        if temp_valid {
+            /* 置「必须改密」标记失败不阻断登录：用户拿的是有效临时密码，
+            一次 DB 抖动不该把人挡在门外；只留 WARN 供排查。 */
+            if let Err(e) = set_must_change_pass(pool, &name).await {
+                tracing::warn!(error = %e, name, "临时密码登录后置 must_change_pass 失败");
+            }
+            return Ok(LoginOutcome {
+                name,
+                person_id,
+                team,
+                temp_used: true,
+            });
+        }
+        let _ = clear_temp_hash_only(pool, &name).await;
+        return Err(LoginFail::TempExpired);
+    }
+
+    Err(LoginFail::BadPassword)
+}
+
 /// 展示端登录（2026-10-10 起支持手机号+密码，姓名+密码继续兼容）：
-/// 输入「账号」先按手机号查（纯数字 5~20 位才当手机号），没命中再按姓名查。
-/// 成功返回命中的账号姓名（拿去台账里找人）；失败返回 [`LoginFail`] 说明是哪一种。
+/// 输入「账号」先按手机号查（纯数字 5~20 位才当手机号），没命中再按姓名查；
+/// 密码命中后返回 [`LoginOutcome`]（含 person_id / team / 是否临时密码登录）。
+///
+/// **密码不 trim**（2026-10-18 口径）：首尾空格是密码的一部分。
 pub async fn my_account_check_login(
     st: &AppState,
     account: &str,
     pass: &str,
-) -> std::result::Result<String, LoginFail> {
+) -> std::result::Result<LoginOutcome, LoginFail> {
     let pool = w(st).map_err(|_| LoginFail::NoAccount)?;
-    let pass = pass.trim();
     if pass.is_empty() {
         return Err(LoginFail::NoAccount);
     }
@@ -1204,44 +1587,78 @@ pub async fn my_account_check_login(
     let phone = normalize_phone(acct);
     let as_phone = phone.chars().all(|c| c.is_ascii_digit()) && (5..=20).contains(&phone.len());
     if as_phone {
-        if let Some(row) = sqlx::query(&crate::pq::rewrite(
-            "SELECT name, pass FROM my_accounts WHERE phone = ? LIMIT 1",
-        ))
-        .bind(&phone)
-        .fetch_optional(pool)
-        .await
-        .ok()
-        .flatten()
-        {
-            let stored: String = row.try_get("pass").map_err(|_| LoginFail::NoAccount)?;
-            let name: String = row.try_get("name").map_err(|_| LoginFail::NoAccount)?;
-            if verify_my_password(pass, &stored) {
-                upgrade_my_password_if_plain(pool, &name, &stored, pass).await;
-                return Ok(name);
-            }
-            /* 手机号查得到账号、密码不对 —— 明确是密码错，不是「没开通」。 */
-            return Err(LoginFail::BadPassword);
+        if let Some(row) = login_row(pool, "m.phone = ?", &phone).await {
+            /* 手机号查得到账号、密码不对 —— 明确是密码错，不再走姓名分支
+            （防止同名艺名串号）。 */
+            return login_from_row(pool, &row, pass).await;
         }
     }
-    if let Some(row) = sqlx::query(&crate::pq::rewrite(
-        "SELECT name, pass FROM my_accounts WHERE name = ? LIMIT 1",
+    // 2) 姓名（艺名）路径
+    match login_row(pool, "m.name = ?", acct).await {
+        Some(row) => login_from_row(pool, &row, pass).await,
+        None => Err(LoginFail::NoAccount),
+    }
+}
+
+/// 临时密码校验（契约 §2.4）：合法且未过期 → 置 must_change_pass=1 并返回 `Valid`
+/// （**不清 temp**，15 分钟内可重复用）；已过期 → 惰性清空 temp 两列并返回 `Expired`；
+/// 不匹配/没有临时密码 → `Mismatch`。`Err` 只用于库层故障。
+pub async fn my_account_temp_pass_try(
+    st: &AppState,
+    name: &str,
+    input: &str,
+) -> std::result::Result<TempPassResult, String> {
+    let pool = w(st).map_err(|e| e.to_string())?;
+    temp_pass_try_pool(pool, name, input).await
+}
+
+/// [`my_account_temp_pass_try`] 的池版本（登录链路直接复用，少一次 AppState 解包）。
+async fn temp_pass_try_pool(
+    pool: &PgPool,
+    name: &str,
+    input: &str,
+) -> std::result::Result<TempPassResult, String> {
+    let key = name.trim();
+    if key.is_empty() || input.is_empty() {
+        return Ok(TempPassResult::Mismatch);
+    }
+    let row = match sqlx::query(&crate::pq::rewrite(
+        "SELECT temp_pass_hash, (temp_pass_exp IS NOT NULL AND temp_pass_exp > now()) AS temp_valid \
+         FROM my_accounts WHERE name = ? LIMIT 1",
     ))
-    .bind(acct)
+    .bind(key)
     .fetch_optional(pool)
     .await
-    .ok()
-    .flatten()
     {
-        let stored: String = row.try_get("pass").map_err(|_| LoginFail::NoAccount)?;
-        let name: String = row.try_get("name").map_err(|_| LoginFail::NoAccount)?;
-        if verify_my_password(pass, &stored) {
-            upgrade_my_password_if_plain(pool, &name, &stored, pass).await;
-            return Ok(name);
+        Ok(row) => row,
+        // 039 未跑：没有临时密码这回事，按 Mismatch 处理（不把登录链路拖挂）
+        Err(e) if e.to_string().contains("Unknown column") => {
+            tracing::warn!("039 未跑：临时密码校验不可用（先跑 pk-server migrate）");
+            return Ok(TempPassResult::Mismatch);
         }
-        /* 姓名查得到账号、密码不对。 */
-        return Err(LoginFail::BadPassword);
+        Err(e) => return Err(format!("查临时密码失败：{e}")),
+    };
+    let Some(row) = row else {
+        return Ok(TempPassResult::Mismatch);
+    };
+    let hash: String = row.try_get("temp_pass_hash").unwrap_or_default();
+    if hash.is_empty() || !verify_my_password(input, &hash) {
+        return Ok(TempPassResult::Mismatch);
     }
-    Err(LoginFail::NoAccount)
+    let valid: bool = row.try_get("temp_valid").unwrap_or(false);
+    if valid {
+        set_must_change_pass(pool, key).await?;
+        Ok(TempPassResult::Valid)
+    } else {
+        clear_temp_hash_only(pool, key).await?;
+        Ok(TempPassResult::Expired)
+    }
+}
+
+/// 清空临时密码与「必须改密」标记（改密成功 / 管理员改密 / 解绑 QQ 时调用）。
+pub async fn my_account_clear_temp(st: &AppState, name: &str) -> std::result::Result<(), String> {
+    let pool = w(st).map_err(|e| e.to_string())?;
+    clear_temp_pool(pool, name.trim()).await
 }
 
 /* ------------- 展示端账号：绑定态 / 密码管理（2026-10-10 用户口径） ------------- */
@@ -1291,35 +1708,39 @@ impl MyAccountInfo {
 格式校验）随注册一起删除 —— 它已无生产调用点，唯一的断言在 store/mod.rs 的单测里，
 那个用例也一并删掉了。 */
 
-/// 忘记密码重置**第一步**：按手机号定位要重置的普通账号与其绑定邮箱。
+/* ---------- 忘记密码（2026-10-18 用户拍板：手机号 + QQ 双因子 → 临时密码） ---------- */
+
+/// 忘记密码**第一步**：按「手机号 + QQ 号」定位要重置的普通账号与其绑定邮箱。
 ///
-/// 口径沿革：
-/// - 2026-10-12 审计把重置改成 CSPRNG 随机串；
-/// - 2026-10-14 随机口径继续收紧（不再明文回显新密码）；
-/// - 2026-10-17 早前用户口径曾改回手机号后四位（与开号初始密码统一）；
-/// - **2026-10-17 用户口径再改**：绑了邮箱的账号 → 随机密码发邮箱（下一步）；
-///   没绑邮箱 → 直接提示「请联系管理员重置密码」，不产生可推导密码。
+/// 契约 docs/26/05 §2.5：先用手机号定位 `is_admin = 0` 的账号；库里 `email` 必须
+/// 非空且等于 `qq_to_email(qq)`。**任何不匹配都返回同一句** [`MSG_RESET_MISMATCH`]
+/// （账号不存在 / 未绑 QQ / QQ 不匹配 / 是管理员账号 / QQ 号格式非法）——
+/// 手机号存在性不外泄；只有同时知道正确 QQ 号才会拿到 `Ok`，等价于双因子已匹配。
 ///
-/// ⚠️ 残留风险如实记录：本入口（`/api/public/my/password/reset`）**不带身份证明** ——
-/// 只凭手机号即可触发重置。知道某人手机号 = 可触发「随机密码发到其绑定邮箱」。
-/// 这仍不是强归属校验（邮箱在用户自己手里，但邮箱本身也可能被社工）；
-/// 刷重置由重置限流（12/分/IP + 同号 10 分钟窗口 / 1 小时 3 次）承担，
-/// 登录链路自 2026-10-17「去除登录限速」后不再限速。
-/// 若要真正收口，仍需服务端短信验证码或 OAuth 归属校验（见 docs/24 §P0-2）。
+/// 返回 `(账号名, 库里存的邮箱)`：**发信必须发这个返回值里的邮箱**，不能发请求里
+/// 原样传入的字符串（防「输入 A、发到 B」与 SMTP 头注入）。
 ///
-/// 返回 `(账号名, 绑定邮箱)`。邮箱为空 = 该账号未绑定邮箱，直接报业务拒绝
-/// 「该账号未绑定邮箱，请联系管理员重置密码」——**不重置、不改密、不吊销 token**。
+/// 残留风险如实记录：本入口（`/api/public/my/password/reset`）没有持有证明 ——
+/// 知道手机号 + QQ 号即可触发重置（知识因子，非短信/OAuth）。刷重置由重置限流
+/// （12/分/IP + 同号 10 分钟窗口 / 1 小时 3 次）承担；登录链路自 2026-10-17
+/// 「去除登录限速」后不再限速。真正收口仍需短信验证码或 OAuth 归属校验。
 pub async fn my_account_reset_target(
     st: &AppState,
     phone: &str,
+    qq: &str,
 ) -> std::result::Result<(String, String), String> {
+    // 手机号格式是本地可判定的错误 → 单独给 INVALID_PHONE（不涉及账号存在性）
     let phone = validate_my_phone(phone)?;
     if phone.is_empty() {
-        return Err(biz("请输入手机号"));
+        return Err(biz(MSG_PHONE_REQUIRED));
     }
+    // QQ 号格式非法 → 也归入统一不匹配文案（不让「格式对不对」成为探测信号）
+    let Ok(email_expected) = qq_to_email(qq) else {
+        return Err(biz(MSG_RESET_MISMATCH));
+    };
     let pool = w(st).map_err(|e| e.to_string())?;
-    /* 只认**普通账号**（is_admin=0）：管理员观看账号不参与重置，
-    否则知道手机号的人就能触发后台视角账号的邮箱接管（审计 2026-10-11 修复）。
+    /* 只认**普通账号**（is_admin=0）：管理员观看账号不参与重置，否则知道手机号 +
+    QQ 的人就能接管后台视角账号（审计 2026-10-11 修复口径保留）。
     手机号唯一索引（uk_my_phone_uniq，非空 phone 唯一）保证最多命中一行。 */
     let row = sqlx::query(&crate::pq::rewrite(
         "SELECT name, email FROM my_accounts WHERE phone = ? AND phone <> '' AND is_admin = 0 LIMIT 1",
@@ -1329,40 +1750,68 @@ pub async fn my_account_reset_target(
     .await
     .map_err(|e| format!("查询账号失败：{e}"))?;
     let Some(row) = row else {
-        /* 手机号查不到已登记的普通账号 = 这个号没绑定任何账号 → 直说「未绑定」。
-        管理员观看账号同样不命中（is_admin=0 过滤），与「未绑定」共用一句文案，
-        避免泄露某个号是不是后台账号。 */
-        return Err(biz("该手机号未绑定账号"));
+        return Err(biz(MSG_RESET_MISMATCH));
     };
     let name: String = row.try_get("name").unwrap_or_default();
     let email: String = row.try_get("email").unwrap_or_default();
-    if email.trim().is_empty() {
-        /* 未绑定邮箱：产品口径（2026-10-17）——不重置、不发可推导密码，直接找管理员。 */
-        return Err(biz("该账号未绑定邮箱，请联系管理员重置密码"));
+    /* 绑定邮箱必须与输入 QQ 号拼出的邮箱一致（域名大小写不敏感）。038 存量非 QQ
+    邮箱（xx@163.com）在这一步就是不匹配 —— 不清洗、不猜 QQ，提示用户重新绑。 */
+    if email.trim().is_empty() || !email.trim().eq_ignore_ascii_case(&email_expected) {
+        return Err(biz(MSG_RESET_MISMATCH));
     }
     Ok((name, email))
 }
 
-/// 忘记密码重置**第二步**：把新密码哈希落库（调用方已确认邮件发送成功后才调用，
-/// 否则用户会拿到一封「已发邮件」却登不进的新密码）。
-/// `phone` 内部再走一遍 `validate_my_phone` 归一化，与第一步 `my_account_reset_target`
-/// 用**同一套归一**（`normalize_phone` 会多剥一个 `.`，两条路若不同源会对不上号）。
+/// 忘记密码**第二步**：发信成功后落库（契约 §2.5）。
+///
+/// 语义（2026-10-18 用户拍板 = 真正的「重置」，不是旁路凭证）：
+/// - `pass` 覆盖为**不可知 CSPRNG 哈希**（明文生成即丢）→ 旧密码立即失效，
+///   「知道旧密码的人还能登录」这条静默接管路径被彻底切断；
+/// - `temp_pass_hash = argon2id(临时密码)`、`temp_pass_exp = now() + 15 分钟`；
+/// - `must_change_pass = 1`（登录后提示改密）；
+/// - 返回账号名（handler 拿它 `my_tokens_revoke` 吊销全部旧 token）。
+///
+/// 调用顺序不能反：**先发信成功、再调本函数** —— 否则用户会拿到一封「已重置」
+/// 却登不进；本函数失败则用户可重试申请（限流仍生效）。
 pub async fn my_account_reset_apply(
     st: &AppState,
     phone: &str,
-    new_pass: &str,
-) -> std::result::Result<(), String> {
+    temp_pass: &str,
+) -> std::result::Result<String, String> {
     let phone = validate_my_phone(phone)?;
+    if phone.is_empty() {
+        return Err(biz(MSG_PHONE_REQUIRED));
+    }
+    /* 旧密码作废：生成一个谁也不知道的随机串，只把哈希写库。
+    明文 `unknown_pass` 在本函数内立即丢弃 —— 之后没有任何人能再用旧密码登录。 */
+    let unknown_pass = crate::random::random_password();
+    let unknown_hash = hash_my_password(&unknown_pass);
+    drop(unknown_pass);
+    let temp_hash = hash_my_password(temp_pass);
     let pool = w(st).map_err(|e| e.to_string())?;
-    sqlx::query(&crate::pq::rewrite(
-        "UPDATE my_accounts SET pass = ? WHERE phone = ? AND phone <> '' AND is_admin = 0",
+    let row = sqlx::query(&crate::pq::rewrite(
+        "UPDATE my_accounts \
+            SET pass = ?, temp_pass_hash = ?, \
+                temp_pass_exp = now() + interval '15 minutes', must_change_pass = 1 \
+          WHERE phone = ? AND phone <> '' AND is_admin = 0 \
+          RETURNING name",
     ))
-    .bind(hash_my_password(new_pass))
+    .bind(&unknown_hash)
+    .bind(&temp_hash)
     .bind(&phone)
-    .execute(pool)
+    .fetch_optional(pool)
     .await
-    .map_err(|e| format!("重置失败：{e}"))?;
-    Ok(())
+    .map_err(|e| {
+        if e.to_string().contains("Unknown column") {
+            biz("临时密码功能未启用：请先跑一次 pk-server migrate（039_my_temp_pass）")
+        } else {
+            format!("重置失败：{e}")
+        }
+    })?;
+    let Some(row) = row else {
+        return Err(biz(MSG_RESET_NO_TARGET));
+    };
+    Ok(row.try_get::<String, _>("name").unwrap_or_default())
 }
 
 /// 已登录用户改密的**公共实现**（`my_account_self_set_password` 与新
@@ -1382,8 +1831,8 @@ pub async fn my_account_reset_apply(
 ///    → 「该账号不支持自助改密（未登记密码或属管理员账号）」
 /// 2. 当前密码不对（**仅 `Some` 时**校验，复用 verify_my_password，兼容存量明文口令）
 ///    → 「当前密码不正确」
-/// 3. 新密码格式（复用 validate_my_account：4~20 位字母或数字）
-///    → 「密码必须是 4~20 位字母、数字或点」
+/// 3. 新密码格式（走 [`validate_my_password`]：4~64 任意 Unicode，控制字符除外）
+///    → 对应 [`MSG_PASS_INVALID`] / [`MSG_PASS_BLANK`] / [`MSG_PASS_CTRL`]
 /// 4. 新旧密码相同（**仅 `Some` 时**判断）→ 「新密码不能和当前密码相同」
 async fn self_set_password_inner(
     st: &AppState,
@@ -1412,38 +1861,44 @@ async fn self_set_password_inner(
     if is_admin || stored.trim().is_empty() {
         return Err(biz("该账号不支持自助改密（未登记密码或属管理员账号）"));
     }
-    // 当前密码：只有调用方给了旧密码才校验（与登录同口径，兼容存量明文口令）
+    // 当前密码：只有调用方给了旧密码才校验（与登录同口径，兼容存量明文口令）。
+    // 2026-10-18：**不 trim** —— 密码按原样字节比对，首尾空格属于密码本身。
     if let Some(old_pass) = old_pass {
-        if !verify_my_password(old_pass.trim(), &stored) {
+        if !verify_my_password(old_pass, &stored) {
             return Err(biz("当前密码不正确"));
         }
     }
-    /* 新密码复用统一口令规则（4~20 位字母或数字），不在这里另写一套校验。
-    空密码 / 非法字符 / 长度越界统一给契约里的那句文案（姓名类错误原样保留）。
-    2026-10-16：validate_my_account 的错误现在带 BIZ:: 前缀，contains 判断
-    改用剥掉前缀后的文案（biz_msg），分流逻辑不变。 */
-    let (_, new_pass) = validate_my_account(key, new_pass).map_err(|e| {
-        if biz_msg(&e).contains("姓名") {
-            e
-        } else {
-            biz("密码必须是 4~20 位字母、数字或点")
-        }
-    })?;
+    /* 新密码复用统一口令规则（4~64 任意 Unicode），不在这里另写一套校验。
+    错误文案原样透传（MSG_PASS_* 已带 BIZ:: 前缀），handler 400 下发。 */
+    let new_pass = validate_my_password(new_pass)?;
     /* 「新旧不能相同」只能在拿到旧密码时判：重置路径（`None`）没有旧密码可比，
     且冻结契约对重置只规定了「格式 / 管理员账号」两类 400，不额外加限制。 */
     if let Some(old_pass) = old_pass {
-        if new_pass == old_pass.trim() {
+        if new_pass == old_pass {
             return Err(biz("新密码不能和当前密码相同"));
         }
     }
-    sqlx::query(&crate::pq::rewrite(
-        "UPDATE my_accounts SET pass = ? WHERE name = ?",
+    /* 039（契约 §2.7）：改密成功必须清临时密码三列 —— 否则用户已经设了新密码，
+    下次登录仍被 `mustChangePass` 提示，甚至临时密码还能再登一次。 */
+    let mut res = sqlx::query(&crate::pq::rewrite(
+        "UPDATE my_accounts SET pass = ?, temp_pass_hash = '', temp_pass_exp = NULL, \
+           must_change_pass = 0 WHERE name = ?",
     ))
     .bind(hash_my_password(&new_pass))
     .bind(key)
     .execute(pool)
-    .await
-    .map_err(|e| format!("写入失败：{e}"))?;
+    .await;
+    if matches!(&res, Err(e) if e.to_string().contains("Unknown column")) {
+        tracing::warn!("039 未跑：改密后无法清临时密码三列（先跑 pk-server migrate）");
+        res = sqlx::query(&crate::pq::rewrite(
+            "UPDATE my_accounts SET pass = ? WHERE name = ?",
+        ))
+        .bind(hash_my_password(&new_pass))
+        .bind(key)
+        .execute(pool)
+        .await;
+    }
+    res.map_err(|e| format!("写入失败：{e}"))?;
     Ok(())
 }
 
@@ -1455,7 +1910,7 @@ async fn self_set_password_inner(
 /// 1. 账号不存在 / 管理员观看账号 / 没登记过密码
 ///    → 「该账号不支持自助改密（未登记密码或属管理员账号）」
 /// 2. 当前密码不对 → 「当前密码不正确」
-/// 3. 新密码格式（4~20 位字母、数字或点）→ 「密码必须是 4~20 位字母、数字或点」
+/// 3. 新密码格式（走 [`validate_my_password`]：4~64 任意 Unicode）
 /// 4. 新旧密码相同 → 「新密码不能和当前密码相同」
 pub async fn my_account_self_set_password(
     st: &AppState,
@@ -1583,6 +2038,518 @@ pub async fn my_account_set_email(
                 format!("写入邮箱失败：{e}")
             }
         })?;
+    Ok(())
+}
+
+/* ------------- 登录态身份标志（who / login / verify 共用，契约 §2.2） ------------- */
+
+/// 展示端账号的登录态身份标志。
+///
+/// 2026-10-18（契约 docs/26/05 §2.2）：把「要不要强制补全 / 要不要催绑 QQ /
+/// 要不要提示改密」收敛成一个结构，`who`、`login`、`verify` 三处共用，
+/// 避免各算一套口径漂移。
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct MyAuthFlags {
+    /// `my_accounts.bound = 1`（账号已绑主播；管理员手建老账号默认 1）
+    pub bound: bool,
+    /// 管理员观看账号（不参与补全 / 催绑 / 重置）
+    pub is_admin: bool,
+    /// 原始手机号（**handler 必须用 `wx::mask_phone` 打码后再下发**，不要原样外发）
+    pub phone: String,
+    /// 原始邮箱（**仅内部用**；对外一律用 `email_mask`，禁止明文下发）
+    pub email: String,
+    /// 是否已绑合法 QQ 邮箱（038 存量非 QQ 邮箱算「未绑」）
+    pub qq_bound: bool,
+    /// 脱敏邮箱：QQ → `123***@qq.com`；非 QQ → `a***@163.com`；未绑 → `""`
+    pub email_mask: String,
+    /// 需要强制补全（S1：绑了主播、非管理员、还没手机号）
+    pub need_profile: bool,
+    /// 需要提示绑 QQ（S2：已绑手机号、非管理员、不是 S1、还没 QQ）
+    pub need_qq: bool,
+    /// 临时密码登录后待改密（039；未迁移库恒 false）
+    pub must_change_pass: bool,
+}
+
+impl MyAuthFlags {
+    /// 从账号行算标志。`must_change_pass` 单独传入：039 未跑时调用方给 false。
+    fn from_row(r: &sqlx::postgres::PgRow, must_change_pass: bool) -> Self {
+        let phone: String = r.try_get("phone").unwrap_or_default();
+        let email: String = r.try_get("email").unwrap_or_default();
+        let is_admin = r.try_get::<i16, _>("is_admin").unwrap_or(0) == 1;
+        let bound = r.try_get::<i16, _>("bound").unwrap_or(1) == 1;
+        let qq_bound = is_qq_email(&email);
+        // 契约 §2.2：needProfile 优先于 needQq；管理员观看账号两者都不参与
+        let need_profile = bound && !is_admin && phone.is_empty();
+        let need_qq = bound && !is_admin && !need_profile && !qq_bound;
+        Self {
+            bound,
+            is_admin,
+            email_mask: mask_qq_email(&email),
+            email,
+            phone,
+            qq_bound,
+            need_profile,
+            need_qq,
+            must_change_pass,
+        }
+    }
+}
+
+/// 读登录态身份标志（`who` / `login` / `verify` 共用）。账号不存在 → None。
+///
+/// 逐级列回落（039 → 038 → 001 老列）：未迁移的库只失去「是否待改密 / 是否绑 QQ」
+/// 这两项新信息，**不会整体登不进去**（与 `my_account_info` 的 038 回落同口径）。
+pub async fn my_account_auth_flags(st: &AppState, name: &str) -> Option<MyAuthFlags> {
+    let pool = w(st).ok()?;
+    let key = name.trim();
+    if key.is_empty() {
+        return None;
+    }
+    let sqls = [
+        "SELECT phone, is_admin, bound, email, must_change_pass \
+         FROM my_accounts WHERE name = ? LIMIT 1",
+        "SELECT phone, is_admin, bound, email FROM my_accounts WHERE name = ? LIMIT 1",
+        "SELECT phone, is_admin, bound FROM my_accounts WHERE name = ? LIMIT 1",
+    ];
+    for sql in sqls {
+        let got = sqlx::query(&crate::pq::rewrite(sql))
+            .bind(key)
+            .fetch_optional(pool)
+            .await;
+        match got {
+            Ok(Some(r)) => {
+                let must = r.try_get::<i16, _>("must_change_pass").unwrap_or(0) == 1;
+                return Some(MyAuthFlags::from_row(&r, must));
+            }
+            Ok(None) => return None,
+            Err(e) => {
+                tracing::warn!(error = %e, name = key, "读身份标志失败，回落更老的列清单");
+            }
+        }
+    }
+    None
+}
+
+/* ------------------------- 凭艺名认领开号（契约 §2.3） ------------------------- */
+
+/// 认领成功后的主播身份（handler 直接拿去发 token / 回登录同形包）。
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct ClaimedAccount {
+    /// 台账主播 id
+    #[serde(rename = "personId")]
+    pub person_id: i64,
+    /// 艺名（= 登录名）
+    pub name: String,
+    /// 台账 `person.gender`（male / female）
+    pub team: String,
+    /// 认领时还没有手机号，恒为空串（前端据此进强制补全）
+    pub phone: String,
+}
+
+/// 认领判定（契约 §2.3）：登录门「账号不存在」时供前端显示「认领账号」按钮。
+///
+/// 可认领必须同时满足：
+/// 1. 台账里有**唯一**同名在职主播（`deleted_at IS NULL`、`status != 'left'`、`name <> ''`）；
+/// 2. 该主播 `gender ∈ {male, female}`（团别是后续一切数据的前提）；
+/// 3. `my_accounts` 里没有同名行（艺名唯一），且 `person_id` 没被别的账号占用。
+///
+/// 任何查询失败都按「不可认领」处理（登录门宁可少显示按钮，也不能给假希望）。
+pub async fn my_account_can_claim(st: &AppState, name: &str) -> bool {
+    let Ok(pool) = w(st) else {
+        return false;
+    };
+    let key = name.trim();
+    if key.is_empty() {
+        return false;
+    }
+    let rows = match sqlx::query(&crate::pq::rewrite(
+        "SELECT id, gender FROM person \
+          WHERE name = ? AND name <> '' AND deleted_at IS NULL AND status <> 'left'",
+    ))
+    .bind(key)
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(error = %e, name = key, "认领判定查台账失败");
+            return false;
+        }
+    };
+    if rows.len() != 1 {
+        return false;
+    }
+    let person_id: i64 = rows[0].try_get("id").unwrap_or(0);
+    let gender: String = rows[0].try_get("gender").unwrap_or_default();
+    if person_id <= 0 || !matches!(gender.as_str(), "male" | "female") {
+        return false;
+    }
+    match sqlx::query(&crate::pq::rewrite(
+        "SELECT 1 FROM my_accounts WHERE name = ? LIMIT 1",
+    ))
+    .bind(key)
+    .fetch_optional(pool)
+    .await
+    {
+        Ok(Some(_)) => return false,
+        Ok(None) => {}
+        Err(e) => {
+            tracing::warn!(error = %e, name = key, "认领判定查同名账号失败");
+            return false;
+        }
+    }
+    match sqlx::query(&crate::pq::rewrite(
+        "SELECT 1 FROM my_accounts WHERE person_id = ? LIMIT 1",
+    ))
+    .bind(person_id)
+    .fetch_optional(pool)
+    .await
+    {
+        Ok(Some(_)) => false,
+        Ok(None) => true,
+        Err(e) => {
+            tracing::warn!(error = %e, person_id, "认领判定查 person_id 占用失败");
+            false
+        }
+    }
+}
+
+/// 凭艺名认领开号：单事务 INSERT `my_accounts`（契约 §2.3）。
+///
+/// 写入：`name` = 台账艺名、`phone = ''`、`pass = argon2id(pass)`、`is_admin = 0`、
+/// `bound = 1`、`bound_at = now`、`source = 'claim'`、`person_id` = 台账 id。
+/// 成功返回 [`ClaimedAccount`]（team 取 `person.gender`），handler 直接发 token 并回
+/// 登录同形包（`needProfile:true`、`needQq:true`）。
+///
+/// 失败一律 `BIZ::` 中文文案（400）：艺名不存在 / 台账重名 / 已离团 / 已有人认领 /
+/// 性别不合法 / 密码不合法；并发撞主键或 `uk_my_person_uniq`（23505）统一折成
+/// 「账号已存在，请直接登录」（用户下一步就该去登录，而不是再点一次认领）。
+pub async fn my_account_claim(
+    st: &AppState,
+    name: &str,
+    pass: &str,
+) -> std::result::Result<ClaimedAccount, String> {
+    let key = name.trim();
+    if key.is_empty() {
+        return Err(biz("请填写艺名"));
+    }
+    let pass = validate_my_password(pass)?;
+    let pool = w(st).map_err(|e| e.to_string())?;
+    let mut tx = pool.begin().await.map_err(|e| format!("认领事务开启失败：{e}"))?;
+
+    // 1) 台账里找同名在职主播（含已离团行，才能给出「已离团」这条明确文案）
+    let rows = sqlx::query(&crate::pq::rewrite(
+        "SELECT id, gender, status FROM person \
+          WHERE name = ? AND name <> '' AND deleted_at IS NULL",
+    ))
+    .bind(key)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|e| format!("查台账失败：{e}"))?;
+    if rows.is_empty() {
+        return Err(biz("台账里没有这个艺名，请联系管理员开号"));
+    }
+    if rows.len() > 1 {
+        return Err(biz("该艺名在台账里有多个主播，请联系管理员"));
+    }
+    let person_id: i64 = rows[0].try_get("id").unwrap_or(0);
+    let gender: String = rows[0].try_get("gender").unwrap_or_default();
+    let status: String = rows[0].try_get("status").unwrap_or_default();
+    if person_id <= 0 {
+        return Err(biz("台账里没有这个艺名，请联系管理员开号"));
+    }
+    if status == "left" {
+        return Err(biz("该主播已离团，不能认领"));
+    }
+    /* 性别必须是 male/female：团别决定展示端能看哪半边数据，unknown 的账号进去
+    也是空页面，不如直说「联系管理员」把台账补对。 */
+    if !matches!(gender.as_str(), "male" | "female") {
+        return Err(biz("该主播性别信息异常，请联系管理员"));
+    }
+
+    // 2) 占用检查（事务内；并发最终由 my_accounts 主键与 uk_my_person_uniq 兜底）
+    let name_taken = sqlx::query(&crate::pq::rewrite(
+        "SELECT 1 FROM my_accounts WHERE name = ? LIMIT 1",
+    ))
+    .bind(key)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| format!("查账号失败：{e}"))?
+    .is_some();
+    if name_taken {
+        return Err(biz("该艺名已被认领，请直接登录"));
+    }
+    let person_taken = sqlx::query(&crate::pq::rewrite(
+        "SELECT 1 FROM my_accounts WHERE person_id = ? LIMIT 1",
+    ))
+    .bind(person_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| format!("查账号失败：{e}"))?
+    .is_some();
+    if person_taken {
+        return Err(biz("该主播已有登录账号，请联系管理员"));
+    }
+
+    // 3) 落库（开号即绑定：bound=1，source 标 claim 便于事后审计）
+    let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let res = sqlx::query(&crate::pq::rewrite(
+        "INSERT INTO my_accounts \
+           (name, phone, pass, is_admin, created_at, bound, bound_at, source, person_id) \
+         VALUES (?, '', ?, 0, ?, 1, ?, 'claim', ?)",
+    ))
+    .bind(key)
+    .bind(hash_my_password(&pass))
+    .bind(&now)
+    .bind(&now)
+    .bind(person_id)
+    .execute(&mut *tx)
+    .await;
+    match res {
+        Ok(_) => {}
+        Err(e) => {
+            if is_unique_violation(&e) {
+                /* 并发：两个请求同时认领同一艺名 → 主键（name）或
+                uk_my_person_uniq（person_id）先到先得，输家去登录即可。 */
+                return Err(biz("账号已存在，请直接登录"));
+            }
+            return Err(format!("认领失败：{e}"));
+        }
+    }
+    tx.commit()
+        .await
+        .map_err(|e| format!("认领提交失败：{e}"))?;
+    Ok(ClaimedAccount {
+        person_id,
+        name: key.to_string(),
+        team: gender,
+        phone: String::new(),
+    })
+}
+
+/* ---------------- 绑定 QQ / 首次补全（契约 §2.6，2026-10-18 用户口径） ---------------- */
+
+/// 绑定 / 改绑 / 解绑 QQ 邮箱（契约 §2.6）。
+///
+/// - `qq` 空串 = **解绑**：`email = ''`，并清掉未使用的临时密码两列
+///   （`must_change_pass` 保留：解绑不该顺手解除「必须改密」）；
+/// - 非空：`normalize_qq` → `<qq>@qq.com`，应用层查重给友好文案 + 040 唯一索引
+///   兜并发（23505 → [`MSG_QQ_TAKEN`]）；
+/// - 038 存量的非 QQ 邮箱允许被覆盖（用户重新绑 QQ 即覆盖旧值）；
+/// - S1（`phone = ''`）账号不允许只绑 QQ → [`MSG_NEED_PROFILE`]（handler → 403），
+///   防绕过 `profile_bind` 的完整校验单独把 QQ 绑上。
+///
+/// 返回**脱敏后**的邮箱（解绑 → 空串）。成功响应只给脱敏值，不下发明文。
+pub async fn my_account_set_qq(
+    st: &AppState,
+    name: &str,
+    qq: &str,
+) -> std::result::Result<String, String> {
+    let pool = w(st).map_err(|e| e.to_string())?;
+    let key = name.trim();
+    if key.is_empty() {
+        return Err(biz("登录已过期，请重新登录"));
+    }
+    let row = sqlx::query(&crate::pq::rewrite(
+        "SELECT phone FROM my_accounts WHERE name = ? LIMIT 1",
+    ))
+    .bind(key)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("查账号失败：{e}"))?;
+    let Some(row) = row else {
+        return Err(biz("账号不存在，请重新登录"));
+    };
+    let phone: String = row.try_get("phone").unwrap_or_default();
+    if phone.is_empty() {
+        return Err(biz(MSG_NEED_PROFILE));
+    }
+
+    let qq = qq.trim();
+    if qq.is_empty() {
+        // 解绑：清邮箱 + 未使用临时密码（039 未跑时回落只清邮箱）
+        let mut res = sqlx::query(&crate::pq::rewrite(
+            "UPDATE my_accounts SET email = '', temp_pass_hash = '', temp_pass_exp = NULL \
+             WHERE name = ?",
+        ))
+        .bind(key)
+        .execute(pool)
+        .await;
+        if matches!(&res, Err(e) if e.to_string().contains("Unknown column")) {
+            tracing::warn!("039 未跑：解绑 QQ 时无法清临时密码两列");
+            res = sqlx::query(&crate::pq::rewrite(
+                "UPDATE my_accounts SET email = '' WHERE name = ?",
+            ))
+            .bind(key)
+            .execute(pool)
+            .await;
+        }
+        res.map_err(|e| {
+            if e.to_string().contains("Unknown column") {
+                biz("邮箱功能未启用：请先跑一次 pk-server migrate（038_my_account_email）")
+            } else {
+                format!("解绑邮箱失败：{e}")
+            }
+        })?;
+        return Ok(String::new());
+    }
+
+    let email = qq_to_email(qq)?;
+    // 应用层查重（文案友好）；并发由 040 的 uk_my_email_uniq 兜底
+    let taken = sqlx::query(&crate::pq::rewrite(
+        "SELECT 1 FROM my_accounts WHERE email = ? AND email <> '' AND name <> ? LIMIT 1",
+    ))
+    .bind(&email)
+    .bind(key)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("查重失败：{e}"))?
+    .is_some();
+    if taken {
+        return Err(biz(MSG_QQ_TAKEN));
+    }
+    sqlx::query(&crate::pq::rewrite(
+        "UPDATE my_accounts SET email = ? WHERE name = ?",
+    ))
+    .bind(&email)
+    .bind(key)
+    .execute(pool)
+    .await
+    .map_err(|e| {
+        if is_unique_violation(&e) {
+            biz(MSG_QQ_TAKEN)
+        } else if e.to_string().contains("Unknown column") {
+            biz("邮箱功能未启用：请先跑一次 pk-server migrate（038_my_account_email）")
+        } else {
+            format!("写入邮箱失败：{e}")
+        }
+    })?;
+    Ok(mask_qq_email(&email))
+}
+
+/// 首次补全（S1 → S2/S3，契约 §2.6 / 设计 02 §3.2）。
+///
+/// 身份只认 token 传入的 `name`（**不接受请求体里的账号名**）；`phone` 必填
+/// （5~20 位数字、全局唯一）；`qq` 选填（空 = 暂不绑，登录后 `needQq` 继续提醒，
+/// 没 QQ 的用户可找管理员）；`new_pass` 选填（`Some` 时改密并清三列临时态）。
+///
+/// 单事务 `UPDATE ... WHERE name = ? AND phone = '' AND is_admin = 0`：
+/// rowcount ≠ 1 → [`MSG_PROFILE_ALREADY_DONE`]（已补全过 / 账号不存在 / 管理员账号，
+/// 统一文案，不让「是不是管理员」成为探测信号）。并发唯一冲突（23505）按索引名翻文案。
+pub async fn my_account_profile_bind(
+    st: &AppState,
+    name: &str,
+    phone: &str,
+    qq: &str,
+    new_pass: Option<&str>,
+) -> std::result::Result<(), String> {
+    let key = name.trim();
+    if key.is_empty() {
+        return Err(biz("登录已过期，请重新登录"));
+    }
+    let phone = validate_my_phone(phone)?;
+    if phone.is_empty() {
+        return Err(biz(MSG_PHONE_REQUIRED));
+    }
+    let qq = qq.trim();
+    let email = if qq.is_empty() {
+        String::new()
+    } else {
+        qq_to_email(qq)?
+    };
+    let pass_hash = match new_pass {
+        Some(p) => Some(hash_my_password(&validate_my_password(p)?)),
+        None => None,
+    };
+    let pool = w(st).map_err(|e| e.to_string())?;
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("补全事务开启失败：{e}"))?;
+
+    // 手机号唯一（排除自己）：先查一遍给友好文案，最终仍靠 uk_my_phone_uniq
+    let phone_taken = sqlx::query(&crate::pq::rewrite(
+        "SELECT 1 FROM my_accounts WHERE phone = ? AND phone <> '' AND name <> ? LIMIT 1",
+    ))
+    .bind(&phone)
+    .bind(key)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| format!("查重失败：{e}"))?
+    .is_some();
+    if phone_taken {
+        return Err(biz(MSG_PHONE_TAKEN));
+    }
+    if !email.is_empty() {
+        // QQ 唯一（排除自己）：同一 QQ 不能绑多个账号（040 索引兜底并发）
+        let qq_taken = sqlx::query(&crate::pq::rewrite(
+            "SELECT 1 FROM my_accounts WHERE email = ? AND email <> '' AND name <> ? LIMIT 1",
+        ))
+        .bind(&email)
+        .bind(key)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| format!("查重失败：{e}"))?
+        .is_some();
+        if qq_taken {
+            return Err(biz(MSG_QQ_TAKEN));
+        }
+    }
+
+    let sql = if pass_hash.is_some() {
+        "UPDATE my_accounts SET phone = ?, email = ?, pass = ?, \
+           temp_pass_hash = '', temp_pass_exp = NULL, must_change_pass = 0 \
+         WHERE name = ? AND phone = '' AND is_admin = 0"
+    } else {
+        "UPDATE my_accounts SET phone = ?, email = ? \
+         WHERE name = ? AND phone = '' AND is_admin = 0"
+    };
+    // rewrite 返回 String：必须先落成一个活到 `q` 之后的局部量，不能借临时值
+    let sql_owned = crate::pq::rewrite(sql);
+    let mut q = sqlx::query(&sql_owned).bind(&phone).bind(&email);
+    if let Some(h) = &pass_hash {
+        q = q.bind(h);
+    }
+    let mut res = q.bind(key).execute(&mut *tx).await;
+    if pass_hash.is_some() && matches!(&res, Err(e) if e.to_string().contains("Unknown column")) {
+        tracing::warn!("039 未跑：首次补全改密时无法清临时密码三列");
+        let hash = pass_hash.clone().unwrap_or_default();
+        res = sqlx::query(&crate::pq::rewrite(
+            "UPDATE my_accounts SET phone = ?, email = ?, pass = ? \
+             WHERE name = ? AND phone = '' AND is_admin = 0",
+        ))
+        .bind(&phone)
+        .bind(&email)
+        .bind(&hash)
+        .bind(key)
+        .execute(&mut *tx)
+        .await;
+    }
+    let rowcount = match res {
+        Ok(r) => r.rows_affected(),
+        Err(e) => {
+            if is_unique_violation(&e) {
+                let m = e.to_string();
+                return Err(biz(if m.contains("uk_my_email_uniq") {
+                    MSG_QQ_TAKEN
+                } else {
+                    MSG_PHONE_TAKEN
+                }));
+            }
+            if e.to_string().contains("Unknown column") {
+                return Err(biz(
+                    "邮箱功能未启用：请先跑一次 pk-server migrate（038_my_account_email）",
+                ));
+            }
+            return Err(format!("补全失败：{e}"));
+        }
+    };
+    if rowcount != 1 {
+        return Err(biz(MSG_PROFILE_ALREADY_DONE));
+    }
+    tx.commit()
+        .await
+        .map_err(|e| format!("补全提交失败：{e}"))?;
     Ok(())
 }
 
@@ -1834,102 +2801,130 @@ mod tests {
         assert_eq!(normalize_view_team(""), "");
     }
 
-    /* ------------------------- 密码规则：4~20 位字母或数字 ------------------------- */
+    /* ---------------- 密码规则：4~64 个字符，任意 Unicode（2026-10-18 用户拍板） ----------------
+     *
+     * 口径沿革：2026-10-10 放宽 4 位 → 10-12 审计提到 6 → 10-13 拍回 4 →
+     * 10-17 允许「点」 → **2026-10-18 直接放开到「4~64 个字符、允许中英文/特殊字符/
+     * 任何符号（含空格）」**（用户原话：「密码支持中英文、特殊字符、任何符号」）。
+     * 仍然拒绝 ASCII 控制字符（防换行/制表符混进日志与 SQL），**并且不 trim**。 */
 
-    /// 4~20 位字母数字放行（下限 4 是 2026-10-13 从 6 拍回来的）。
+    /// 放行：中英文、数字、符号、空格、emoji 都算「字符」——只数个数，不看字符集。
     #[test]
-    fn password_rule_accepts_four_to_twenty_alphanumeric() {
+    fn password_rule_accepts_any_unicode() {
         for p in [
-            "9282",
+            "9282",              // 手机号后四位（运营开号习惯）
             "abcd",
-            "1234",
-            "13312345678",
-            "a1b2c3d4e5f6g7h8i9j0",
+            "133-1234-5678",     // 横线（旧口径拒绝，2026-10-18 起放行）
+            "ab_123",            // 下划线
+            "12 34",             // 中间空格
+            "abcd!",
+            "ab@c#",
+            "密码abcd",          // 中文
+            "Aa181206..",        // 点
+            "ab\u{1f600}cd",     // emoji（按 1 个字符计）
+            "p@ss w0rd! 中文",   // 混排
+            "  a1b  ",           // 首尾空格也是密码的一部分（不 trim）
         ] {
             assert!(
-                validate_my_account("凤夏", p).is_ok(),
-                "{p}（{} 位字母数字）应放行",
-                p.len()
+                validate_my_password(p).is_ok(),
+                "{p:?}（{} 个字符）应放行",
+                p.chars().count()
             );
         }
-        assert_eq!("a1b2c3d4e5f6g7h8i9j0".len(), 20, "20 位是上限边界值");
     }
 
-    /// 上限 20：超过 20 位一律拒绝。
+    /// 长度边界：4 个字符是最小合法值；64 个字符是上限（**按字符数，不是字节数**）。
+    #[test]
+    fn password_rule_length_boundaries_are_char_based() {
+        assert!(validate_my_password("1234").is_ok(), "4 个字符 → 放行");
+        assert!(
+            validate_my_password(&"密".repeat(64)).is_ok(),
+            "64 个中文字符 = 192 字节，按字符计应放行（按字节算会误杀）"
+        );
+        assert_eq!("密".repeat(64).chars().count(), 64);
+        assert!(PASS_MIN_LEN == 4 && PASS_MAX_LEN == 64);
+    }
+
+    /// 下限 4：1~3 个字符一律拒绝。
+    #[test]
+    fn password_rule_rejects_too_short() {
+        for p in ["1", "12", "123", "a", "ab", "abc", "a1", "1a2", "密", "密码"] {
+            assert!(
+                validate_my_account("凤夏", p).is_err(),
+                "{p:?}（{} 个字符）少于 4 → 拒绝",
+                p.chars().count()
+            );
+        }
+        let err = validate_my_password("123").unwrap_err();
+        assert_eq!(biz_msg(&err), MSG_PASS_INVALID);
+    }
+
+    /// 上限 64：65 个字符起一律拒绝（中文同样按字符数算）。
     #[test]
     fn password_rule_rejects_too_long() {
         assert!(
-            validate_my_account("凤夏", &"1".repeat(21)).is_err(),
-            "21 位数字 → 拒绝"
+            validate_my_password(&"1".repeat(65)).is_err(),
+            "65 位数字 → 拒绝"
         );
         assert!(
-            validate_my_account("凤夏", &"a".repeat(21)).is_err(),
-            "21 位字母 → 拒绝"
+            validate_my_password(&"a".repeat(65)).is_err(),
+            "65 位字母 → 拒绝"
         );
         assert!(
-            validate_my_account("凤夏", &"z9".repeat(11)).is_err(),
-            "22 位混合 → 拒绝"
+            validate_my_password(&"z9".repeat(33)).is_err(),
+            "66 位混合 → 拒绝"
         );
+        assert!(
+            validate_my_password(&"密".repeat(65)).is_err(),
+            "65 个中文字符 → 拒绝"
+        );
+        let err = validate_my_password(&"a".repeat(65)).unwrap_err();
+        assert_eq!(biz_msg(&err), MSG_PASS_INVALID);
     }
 
-    /// 下限 4：1~3 位一律拒绝。
-    #[test]
-    fn password_rule_rejects_too_short() {
-        for p in ["1", "12", "123", "a", "ab", "abc", "a1", "1a2"] {
-            assert!(
-                validate_my_account("凤夏", p).is_err(),
-                "{p}（{} 位）少于 4 位 → 拒绝",
-                p.len()
-            );
-        }
-    }
-
-    /// 空 / 纯空白：trim 后为空走「不能为空」那条文案，不落到长度分支。
+    /// 空串 / 全空白：按「密码不能为空」拒绝（全空格不是密码；含其它字符时空格照常保留）。
     #[test]
     fn password_rule_rejects_blank() {
-        assert!(validate_my_account("凤夏", "").is_err(), "空密码 → 拒绝");
-        assert!(
-            validate_my_account("凤夏", "   ").is_err(),
-            "纯空格 trim 后为空 → 拒绝"
-        );
-        assert!(
-            validate_my_account("凤夏", "\t\n ").is_err(),
-            "制表符 / 换行 trim 后为空 → 拒绝"
-        );
-        // 自助改密表单靠这条文案定位问题（留空 = 要保留原密码就传当前密码）
-        let err = validate_my_account("凤夏", "").unwrap_err();
-        assert!(err.contains("不能为空"), "实际文案：{err}");
+        for p in ["", "   ", "\t\n ", "        "] {
+            let err = validate_my_password(p)
+                .expect_err(&format!("{p:?} 是空白密码，必须拒绝"));
+            assert!(is_biz(&err), "空密码拒绝必须是 BIZ 文案：{err}");
+            assert_eq!(biz_msg(&err), MSG_PASS_BLANK, "实际文案：{err}");
+        }
+        // validate_my_account 同样拦（空密码不能开通/改密）
+        assert!(validate_my_account("凤夏", "").is_err());
     }
 
-    /// 符号一律拒绝（点除外，2026-10-17 放开）。注意长度都落在 4~20 之间，
-    /// 否则命中的是长度分支，测不到字符分支。
+    /// ASCII 控制字符（\x00-\x1F、\x7F）一律拒绝：它们会破坏日志、终端与 SQL 文本。
     #[test]
-    fn password_rule_rejects_symbols() {
+    fn password_rule_rejects_ascii_control_chars() {
         for p in [
-            "133-1234-5678", // 带横线（手机号常见写法）
-            "ab_123",        // 带下划线
-            "12 34",         // 内含空格（trim 清不掉中间的）
-            "abcd!",         // 标点
-            "ab@c#",         // 邮箱常用符号
-            "密码abcd",      // 中文
-            "ab\u{1f600}cd", // emoji（按非字母数字拒绝）
-            "a/b\\c",        // 路径分隔符
+            "ab\ncd",       // 换行
+            "ab\tcd",       // 制表符
+            "ab\rcd",       // 回车
+            "ab\u{0}cd",    // NUL
+            "ab\u{7f}cd",   // DEL
+            "abcd\u{1}",    // SOH
         ] {
-            assert!(
-                validate_my_account("凤夏", p).is_err(),
-                "{p} 含字母数字点之外的字符 → 拒绝"
-            );
+            let err = validate_my_password(p)
+                .expect_err(&format!("{p:?} 含控制字符，必须拒绝"));
+            assert_eq!(biz_msg(&err), MSG_PASS_CTRL, "实际文案：{err}");
         }
-        // 点放行（2026-10-17：Aa181206.. 这类自定义密码要能用）
-        for p in ["Aa181206..", "a.c.d", "8888.", ".9999"] {
-            assert!(
-                validate_my_account("凤夏", p).is_ok(),
-                "{p} 含点 → 应放行"
-            );
-        }
+        // 非 ASCII 的「控制类」字符不在拒绝范围（用户口径是任意符号），例如零宽连接符
+        assert!(validate_my_password("ab\u{200d}cd").is_ok());
     }
 
-    /// 姓名也一并校验：空、纯空格、超 20 字拒绝；中文名不被误伤。
+    /// **不 trim**：首尾空格原样保留（否则会出现「看着一样、登录不上」）。
+    #[test]
+    fn password_rule_keeps_password_untrimmed() {
+        let (name, pass) = validate_my_account("  凤夏 ", "  9282  ").unwrap();
+        assert_eq!(name, "凤夏", "姓名照旧 trim");
+        assert_eq!(pass, "  9282  ", "密码不能 trim，首尾空格属于密码本身");
+        // 中间空格本来就算字符（2026-10-18 起放行）
+        assert_eq!(validate_my_password(" 92 82 ").unwrap(), " 92 82 ");
+    }
+
+    /// 姓名规则不变：空、纯空格、超 20 字拒绝；中文名不被误伤。
     #[test]
     fn password_rule_also_validates_name() {
         assert!(validate_my_account("", "9282").is_err(), "姓名为空 → 拒绝");
@@ -1948,15 +2943,94 @@ mod tests {
         );
     }
 
-    /// 返回值必须是 trim 过的：前后空格若连同哈希写进库，会造成「看着一样、
-    /// 登录不上」这种最难查的问题。
+    /* --------------- QQ 号 / QQ 邮箱 / 脱敏（2026-10-18 契约 §2.1） --------------- */
+
+    /// QQ 号归一化：去空白、兼容粘贴整段邮箱、大小写不敏感剥后缀。
     #[test]
-    fn password_rule_returns_trimmed_values() {
-        let (name, pass) = validate_my_account("  凤夏 ", "  9282  ").unwrap();
-        assert_eq!(name, "凤夏", "姓名要 trim");
-        assert_eq!(pass, "9282", "密码要 trim");
-        // 中间空格不属于 trim 范围，且本来就过不了字符校验
-        assert!(validate_my_account("凤夏", " 92 82 ").is_err());
+    fn normalize_qq_strips_whitespace_and_suffix() {
+        assert_eq!(normalize_qq("123456").unwrap(), "123456");
+        assert_eq!(normalize_qq("  123456  ").unwrap(), "123456");
+        assert_eq!(normalize_qq("123 456").unwrap(), "123456", "内部空格也去");
+        assert_eq!(normalize_qq("12345\u{3000}6").unwrap(), "123456", "全角空格也去");
+        assert_eq!(normalize_qq("123456@qq.com").unwrap(), "123456");
+        assert_eq!(normalize_qq("123456@QQ.COM").unwrap(), "123456", "域名大小写不敏感");
+        assert_eq!(normalize_qq(" 123456@qq.com ").unwrap(), "123456");
+        // 边界：5 位与 12 位合法
+        assert_eq!(normalize_qq("12345").unwrap(), "12345");
+        assert_eq!(normalize_qq("123456789012").unwrap(), "123456789012");
+    }
+
+    /// QQ 号非法形态：长度越界、首位 0、非 ASCII 数字、非 QQ 域名、空串。
+    /// 注意全角数字**不自动转换**（用户看不出服务端改过什么，宁可拒绝）。
+    #[test]
+    fn normalize_qq_rejects_bad_shapes() {
+        for raw in [
+            "",
+            "   ",
+            "1234",                 // 4 位（少一位）
+            "1234567890123",        // 13 位（多一位）
+            "012345",               // 首位 0
+            "0",
+            "12a456",
+            "12-456",               // 横线不是 QQ 号的一部分
+            "123456@163.com",       // 只收 QQ 域名
+            "123456@vip.qq.com",
+            "１２３４５６",          // 全角数字
+            "abcde",
+            "@qq.com",
+        ] {
+            let err = normalize_qq(raw)
+                .expect_err(&format!("{raw:?} 不是合法 QQ 号，必须拒绝"));
+            assert!(is_biz(&err), "必须是 BIZ 文案：{err}");
+            assert_eq!(biz_msg(&err), MSG_INVALID_QQ, "实际文案：{err}");
+        }
+    }
+
+    /// QQ ↔ 邮箱互转，以及「非 QQ 域名绝不猜」。
+    #[test]
+    fn qq_email_roundtrip_and_domain_guard() {
+        assert_eq!(qq_to_email("123456").unwrap(), "123456@qq.com");
+        assert!(qq_to_email("1234").is_err(), "非法 QQ 号不能拼出邮箱");
+        assert_eq!(qq_from_email("123456@qq.com").as_deref(), Some("123456"));
+        assert_eq!(qq_from_email("123456@QQ.com").as_deref(), Some("123456"));
+        assert!(is_qq_email("123456@qq.com"));
+        // 非 QQ 域名 / 本地部分不像 QQ 号 → None（不把 163 地址的本地部分当 QQ）
+        for raw in [
+            "",
+            "xx@163.com",
+            "123456@vip.qq.com",
+            "12345a@qq.com",
+            "012345@qq.com",
+            "1234@qq.com",
+            "1234567890123@qq.com",
+            "123456@qq.com.cn",
+            "没有at",
+        ] {
+            assert_eq!(qq_from_email(raw), None, "{raw:?} 不该被识别成 QQ 邮箱");
+            assert!(!is_qq_email(raw), "{raw:?} qqBound 应为 false");
+        }
+    }
+
+    /// 脱敏：QQ 本地部分保留前 3 位；非 QQ 走「首字符***@域名」；空串 → 空串。
+    /// **绝不允许**完整 QQ 号出现在下发值里。
+    #[test]
+    fn mask_qq_email_masks_local_part() {
+        assert_eq!(mask_qq_email("123456789@qq.com"), "123***@qq.com");
+        assert_eq!(mask_qq_email("12345@qq.com"), "123***@qq.com");
+        assert_eq!(mask_qq_email(" 123456@qq.com "), "123***@qq.com");
+        assert_eq!(mask_qq_email("a@163.com"), "a***@163.com");
+        assert_eq!(mask_qq_email("longname@corp.cn"), "l***@corp.cn");
+        assert_eq!(mask_qq_email(""), "", "未绑定 → 空串");
+        assert_eq!(mask_qq_email("   "), "");
+        assert_eq!(mask_qq_email("没有at"), "***", "异常值整段打码");
+        for email in ["123456789@qq.com", "12345@qq.com"] {
+            let masked = mask_qq_email(email);
+            let local = email.split_once('@').unwrap().0;
+            assert!(
+                !masked.contains(local),
+                "脱敏结果 {masked} 不应包含完整本地部分 {local}"
+            );
+        }
     }
 
     /* --------------------------- 初始密码：手机号后四位 --------------------------- */
@@ -2053,22 +3127,25 @@ mod tests {
     /// 这里钉住两条契约文案（业务拒绝用 BIZ:: 前缀，handler 据此 400 原样下发），
     /// 以及「重置用的是 CSPRNG 随机串、不是可推导的后四位」这一口径。
     #[test]
-    fn reset_password_requires_email_and_is_random() {
-        // 未绑定邮箱的拒绝文案（契约字面量）
+    fn reset_password_mismatch_message_and_temp_pass() {
+        /* 2026-10-18 口径：手机号 + QQ 双因子，所有不匹配分支共用同一句文案
+        （防手机号存在性枚举）。这句是 handler 映射 400 RESET_MISMATCH 的锚点。 */
         assert_eq!(
-            crate::store::my_account::biz_msg(&crate::store::my_account::biz(
-                "该账号未绑定邮箱，请联系管理员重置密码"
-            )),
-            "该账号未绑定邮箱，请联系管理员重置密码"
+            biz_msg(&biz(MSG_RESET_MISMATCH)),
+            "手机号与 QQ 号不匹配，或该账号未绑定 QQ 邮箱，请联系管理员重置"
         );
-        // 重置密码是随机 10 位串，不是手机号后四位（两条口径彻底分开）
+        assert_eq!(
+            biz_msg(&biz(MSG_RESET_MISMATCH)),
+            MSG_RESET_MISMATCH,
+            "这句是跨层冻结文案，改了必须同步 handler 的映射"
+        );
+        // 临时密码 = 10 位 CSPRNG 串（不是可推导的手机号后四位），且必须过密码规则
         let p = crate::random::random_password();
-        assert_eq!(p.len(), 10, "重置密码应为 10 位随机串");
-        assert_ne!(p, initial_password("13800138000"), "重置 ≠ 手机号后四位");
-        assert!(
-            validate_my_account("凤夏", &p).is_ok(),
-            "随机密码必须能用于登录（4~20 位字母数字）"
-        );
+        assert_eq!(p.chars().count(), 10, "临时密码应为 10 位随机串");
+        assert_ne!(p, initial_password("13800138000"), "临时密码 ≠ 手机号后四位");
+        assert!(validate_my_password(&p).is_ok(), "临时密码必须过统一密码规则");
+        // 非法 QQ 号的拒绝文案与用户填错 QQ 的提示一致
+        assert_eq!(biz_msg(&qq_to_email("abc").unwrap_err()), MSG_INVALID_QQ);
     }
 
     /// 随机密码两次不同 —— 连点两次重置不能拿到同一个串（即便都发同一邮箱）。
@@ -2110,11 +3187,24 @@ mod tests {
     fn login_fail_message_says_which_one() {
         assert_eq!(LoginFail::BadPassword.message(), "密码错误");
         assert_eq!(LoginFail::NoAccount.message(), "账号还没开通");
+        assert_eq!(
+            LoginFail::TempExpired.message(),
+            "临时密码已过期，请重新获取"
+        );
         assert_ne!(
             LoginFail::BadPassword.message(),
             LoginFail::NoAccount.message(),
             "两种失败不能塌成同一句，否则又回到「账号或密码不对，或账号还没开通」"
         );
+        assert_ne!(
+            LoginFail::TempExpired.message(),
+            LoginFail::BadPassword.message(),
+            "临时密码过期的提示不能塌成「密码错误」，否则用户不知道该重新申请"
+        );
+        // 契约 §3.1 的 code：handler 直接下发，前端按 code 分流 UI
+        assert_eq!(LoginFail::BadPassword.code(), "BAD_PASSWORD");
+        assert_eq!(LoginFail::NoAccount.code(), "NO_ACCOUNT");
+        assert_eq!(LoginFail::TempExpired.code(), "TEMP_EXPIRED");
     }
 
     /// 两种失败都必须**不含**对方的字样：文案里不能出现「或」这种和稀泥的措辞，
@@ -2124,6 +3214,7 @@ mod tests {
         for m in [
             LoginFail::BadPassword.message(),
             LoginFail::NoAccount.message(),
+            LoginFail::TempExpired.message(),
         ] {
             assert!(!m.contains('或'), "失败文案不应含糊：{m}");
             assert!(!m.is_empty());
@@ -2177,4 +3268,441 @@ mod tests {
         assert!(builtin_my_accounts_from_env().is_empty(), "空项应被跳过");
         std::env::remove_var("BUILTIN_MY_ACCOUNTS");
     }
+
+    /* --------------- 真库集成回归（默认 #[ignore]；PK_IT_DB=1 时才跑） ---------------
+     *
+     * 覆盖契约 docs/26/05 §2 的写路径：认领 → 登录（艺名 / 手机号 / 临时密码）→
+     * 首次补全 → 绑·解绑 QQ → 忘记密码双因子 → 改密清三列 → 管理端新字段 → 过期惰性清理。
+     *
+     * 跑法（本机 douyin_dev，只动下面四个常量对应的测试数据）：
+     *   cd rust && PK_IT_DB=1 cargo test -p pk-server --lib \
+     *     store::my_account::tests::my_account_flow_real_db -- --ignored --nocapture
+     *
+     * 测试数据用固定名字 + 手机号/QQ，跑前跑后各清一次；panic 造成的残留会被下一次
+     * 开头那次清理扫掉（不会碰真实账号：名字带 __t1_verify_flow_ 前缀）。
+     */
+    const IT_NAME_MALE: &str = "__t1_verify_flow_男";
+    const IT_NAME_FEMALE: &str = "__t1_verify_flow_女";
+    const IT_PHONE_MALE: &str = "19900000001";
+    const IT_PHONE_FEMALE: &str = "19900000002";
+    const IT_QQ_MALE: &str = "10000001";
+    const IT_QQ_FEMALE: &str = "10000002";
+
+    /// 按 DB_WRITER_* 环境变量建一个最小 AppState（只有 writer 池会被用到）。
+    /// 与 `store::wxpush` 的真库回归测试同一套开关（PK_IT_DB=1）。
+    async fn it_state() -> Option<crate::state::AppState> {
+        if std::env::var("PK_IT_DB").as_deref() != Ok("1") {
+            return None;
+        }
+        let host = std::env::var("DB_WRITER_HOST").ok()?;
+        let port: u16 = std::env::var("DB_WRITER_PORT").ok()?.parse().ok()?;
+        let user = std::env::var("DB_WRITER_USER").ok()?;
+        let pass = std::env::var("DB_WRITER_PASSWORD").unwrap_or_default();
+        let db = std::env::var("DB_WRITER_NAME").ok()?;
+        let opt = sqlx::postgres::PgConnectOptions::new()
+            .host(&host)
+            .port(port)
+            .username(&user)
+            .password(&pass)
+            .database(&db);
+        let pool = match sqlx::PgPool::connect_with(opt).await {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("[skip] 连写库失败：{e}");
+                return None;
+            }
+        };
+        let pools = crate::pgrs::build_pools(&[]).await.ok()?;
+        Some(crate::state::AppState {
+            auth: std::sync::Arc::new(crate::auth::Auth::from_env()),
+            sources: Vec::new(),
+            pools,
+            writer: Some(pool),
+            redis: None,
+            active: std::sync::Mutex::new("LOCAL".to_string()),
+            cache: std::sync::Mutex::new(Default::default()),
+            wave_ttl: std::time::Duration::from_secs(600),
+            bots: std::sync::OnceLock::new(),
+        })
+    }
+
+    async fn it_cleanup(st: &crate::state::AppState) {
+        let Some(pool) = st.writer.as_ref() else { return };
+        for name in [IT_NAME_MALE, IT_NAME_FEMALE] {
+            let _ = sqlx::query(&crate::pq::rewrite(
+                "DELETE FROM my_accounts WHERE name = ?",
+            ))
+            .bind(name)
+            .execute(pool)
+            .await;
+            let _ = sqlx::query(&crate::pq::rewrite("DELETE FROM person WHERE name = ?"))
+                .bind(name)
+                .execute(pool)
+                .await;
+        }
+        // 上次跑一半 panic 可能留下「占用着手机号/QQ」的行：按值再清一遍
+        for p in [IT_PHONE_MALE, IT_PHONE_FEMALE] {
+            let _ = sqlx::query(&crate::pq::rewrite(
+                "DELETE FROM my_accounts WHERE phone = ?",
+            ))
+            .bind(p)
+            .execute(pool)
+            .await;
+        }
+        for q in [IT_QQ_MALE, IT_QQ_FEMALE] {
+            let _ = sqlx::query(&crate::pq::rewrite(
+                "DELETE FROM my_accounts WHERE email = ?",
+            ))
+            .bind(format!("{q}@qq.com"))
+            .execute(pool)
+            .await;
+        }
+    }
+
+    async fn it_add_person(st: &crate::state::AppState, name: &str, gender: &str) -> i64 {
+        let pool = st.writer.as_ref().expect("writer 池");
+        sqlx::query(&crate::pq::rewrite(
+            "INSERT INTO person (name, gender, status) VALUES (?, ?, 'active') RETURNING id",
+        ))
+        .bind(name)
+        .bind(gender)
+        .fetch_one(pool)
+        .await
+        .expect("插入测试主播失败（person 表结构变了？）")
+        .try_get("id")
+        .unwrap_or(0)
+    }
+
+    #[ignore = "真库集成：需 PK_IT_DB=1 与 DB_WRITER_* 环境变量"]
+    #[tokio::test]
+    async fn my_account_flow_real_db() {
+        let Some(st) = it_state().await else {
+            eprintln!("[skip] 未设置 PK_IT_DB=1 / DB_WRITER_*，跳过真库集成回归");
+            return;
+        };
+        it_cleanup(&st).await;
+        let body: std::result::Result<(), String> = async {
+            // ---- 1) 认领开号 ----
+            let p1 = it_add_person(&st, IT_NAME_MALE, "male").await;
+            assert!(
+                my_account_can_claim(&st, IT_NAME_MALE).await,
+                "唯一在职同名主播应可认领"
+            );
+            // 041：同名在职主播不能再插第二个（否则认领无法判定是谁）
+            let dup_person = sqlx::query(&crate::pq::rewrite(
+                "INSERT INTO person (name, gender, status) VALUES (?, 'female', 'active')",
+            ))
+            .bind(IT_NAME_MALE)
+            .execute(st.writer.as_ref().unwrap())
+            .await;
+            assert!(
+                dup_person.is_err(),
+                "041 uk_person_name_active 必须挡住同名在职主播"
+            );
+
+            let claimed = my_account_claim(&st, IT_NAME_MALE, "初识密码@2026")
+                .await
+                .expect("认领应成功");
+            assert_eq!(claimed.person_id, p1);
+            assert_eq!(claimed.name, IT_NAME_MALE);
+            assert_eq!(claimed.team, "male");
+            assert_eq!(claimed.phone, "", "认领后还没手机号 → 前端进强制补全");
+            assert!(
+                !my_account_can_claim(&st, IT_NAME_MALE).await,
+                "已认领 → 不可再认领"
+            );
+            assert!(
+                is_biz(&my_account_claim(&st, IT_NAME_MALE, "初识密码@2026")
+                    .await
+                    .unwrap_err()),
+                "重复认领必须是业务拒绝（handler 400 原样下发）"
+            );
+
+            // ---- 2) 登录：艺名 + 含中文/符号/空格的密码 ----
+            let out = my_account_check_login(&st, IT_NAME_MALE, "初识密码@2026")
+                .await
+                .expect("艺名登录");
+            assert_eq!(out.name, IT_NAME_MALE);
+            assert_eq!(out.person_id, p1);
+            assert_eq!(out.team, "male");
+            assert!(!out.temp_used, "常密码登录不是临时密码登录");
+            assert_eq!(
+                my_account_check_login(&st, IT_NAME_MALE, "错密码")
+                    .await
+                    .unwrap_err(),
+                LoginFail::BadPassword
+            );
+            // 密码不 trim：前后多一个空格就登不进
+            assert_eq!(
+                my_account_check_login(&st, IT_NAME_MALE, " 初识密码@2026 ")
+                    .await
+                    .unwrap_err(),
+                LoginFail::BadPassword,
+                "密码按原样比对（不 trim）"
+            );
+
+            // ---- 3) S1 标志 + 拒绝单独绑 QQ ----
+            let f = my_account_auth_flags(&st, IT_NAME_MALE).await.expect("flags");
+            assert!(f.need_profile, "没手机号 → needProfile");
+            assert!(!f.need_qq, "S1 优先，不催 QQ");
+            assert!(!f.qq_bound);
+            assert_eq!(f.email_mask, "");
+            assert_eq!(f.phone, "", "S1 还没有手机号（handler 打码前是空串）");
+            assert_eq!(
+                biz_msg(&my_account_set_qq(&st, IT_NAME_MALE, IT_QQ_MALE)
+                    .await
+                    .unwrap_err()),
+                MSG_NEED_PROFILE,
+                "S1 只绑 QQ 必须被拦（handler → 403 NEED_PROFILE）"
+            );
+
+            // ---- 4) 首次补全：手机号 + QQ + 新密码 ----
+            my_account_profile_bind(
+                &st,
+                IT_NAME_MALE,
+                IT_PHONE_MALE,
+                IT_QQ_MALE,
+                Some("新密码!a1"),
+            )
+            .await
+            .expect("首次补全应成功");
+            assert_eq!(
+                biz_msg(&my_account_profile_bind(&st, IT_NAME_MALE, "19900000009", "", None)
+                    .await
+                    .unwrap_err()),
+                MSG_PROFILE_ALREADY_DONE,
+                "第二次补全 → PROFILE_ALREADY_DONE"
+            );
+            let f = my_account_auth_flags(&st, IT_NAME_MALE).await.expect("flags");
+            assert!(!f.need_profile && !f.need_qq);
+            assert!(f.qq_bound);
+            assert_eq!(f.email_mask, "100***@qq.com", "脱敏：本地部分留前 3 位");
+            assert!(!f.must_change_pass);
+            assert_eq!(
+                my_account_check_login(&st, IT_NAME_MALE, "初识密码@2026")
+                    .await
+                    .unwrap_err(),
+                LoginFail::BadPassword,
+                "补全时给了新密码 → 旧密码失效"
+            );
+            assert!(
+                my_account_check_login(&st, IT_NAME_MALE, "新密码!a1")
+                    .await
+                    .is_ok()
+            );
+            assert!(
+                my_account_check_login(&st, IT_PHONE_MALE, "新密码!a1")
+                    .await
+                    .is_ok(),
+                "手机号路径同样能登"
+            );
+
+            // ---- 5) 手机号 / QQ 唯一 ----
+            let _p2 = it_add_person(&st, IT_NAME_FEMALE, "female").await;
+            assert!(my_account_can_claim(&st, IT_NAME_FEMALE).await);
+            my_account_claim(&st, IT_NAME_FEMALE, "另一个密码1")
+                .await
+                .expect("第二人认领");
+            assert_eq!(
+                biz_msg(&my_account_profile_bind(
+                    &st,
+                    IT_NAME_FEMALE,
+                    IT_PHONE_FEMALE,
+                    IT_QQ_MALE,
+                    None,
+                )
+                .await
+                .unwrap_err()),
+                MSG_QQ_TAKEN,
+                "同一 QQ 不能绑多个账号（040 唯一索引 + 应用层查重）"
+            );
+            assert_eq!(
+                biz_msg(&my_account_profile_bind(&st, IT_NAME_FEMALE, IT_PHONE_MALE, "", None)
+                    .await
+                    .unwrap_err()),
+                MSG_PHONE_TAKEN,
+                "手机号唯一"
+            );
+            // 暂不绑 QQ（qq 空）→ S2：needQq=true
+            my_account_profile_bind(&st, IT_NAME_FEMALE, IT_PHONE_FEMALE, "", None)
+                .await
+                .expect("第二人补全（暂不绑 QQ）");
+            let f2 = my_account_auth_flags(&st, IT_NAME_FEMALE)
+                .await
+                .expect("flags");
+            assert!(f2.need_qq && !f2.qq_bound, "没 QQ 的用户由 needQq 引导");
+            assert_eq!(
+                biz_msg(&my_account_set_qq(&st, IT_NAME_FEMALE, IT_QQ_MALE)
+                    .await
+                    .unwrap_err()),
+                MSG_QQ_TAKEN
+            );
+            assert_eq!(
+                my_account_set_qq(&st, IT_NAME_FEMALE, IT_QQ_FEMALE)
+                    .await
+                    .expect("绑定自己的 QQ"),
+                "100***@qq.com"
+            );
+            assert!(my_account_auth_flags(&st, IT_NAME_FEMALE)
+                .await
+                .unwrap()
+                .qq_bound);
+            // 解绑 → 空串 + needQq 回归
+            assert_eq!(
+                my_account_set_qq(&st, IT_NAME_FEMALE, "")
+                    .await
+                    .expect("解绑 QQ"),
+                ""
+            );
+            assert!(my_account_auth_flags(&st, IT_NAME_FEMALE)
+                .await
+                .unwrap()
+                .need_qq);
+
+            // ---- 6) 忘记密码双因子（不匹配一律同一文案）----
+            let (t_name, t_email) = my_account_reset_target(&st, IT_PHONE_MALE, IT_QQ_MALE)
+                .await
+                .expect("手机号 + QQ 匹配");
+            assert_eq!(t_name, IT_NAME_MALE);
+            assert_eq!(t_email, "10000001@qq.com");
+            for (phone, qq, why) in [
+                (IT_PHONE_MALE, IT_QQ_FEMALE, "QQ 不匹配"),
+                (IT_PHONE_FEMALE, IT_QQ_FEMALE, "该账号未绑 QQ"),
+                (IT_PHONE_MALE, "abc", "QQ 格式非法"),
+                ("19900000000", IT_QQ_MALE, "手机号不存在"),
+            ] {
+                assert_eq!(
+                    biz_msg(&my_account_reset_target(&st, phone, qq).await.unwrap_err()),
+                    MSG_RESET_MISMATCH,
+                    "{why} → 统一 RESET_MISMATCH 文案（防枚举）"
+                );
+            }
+
+            // ---- 7) 下发临时密码：旧密码作废，临时密码 15 分钟内可重复用 ----
+            assert_eq!(
+                my_account_reset_apply(&st, IT_PHONE_MALE, "TempPass123")
+                    .await
+                    .expect("下发临时密码"),
+                IT_NAME_MALE
+            );
+            assert_eq!(
+                my_account_check_login(&st, IT_NAME_MALE, "新密码!a1")
+                    .await
+                    .unwrap_err(),
+                LoginFail::BadPassword,
+                "重置把 pass 覆盖成不可知哈希 → 旧密码立即失效"
+            );
+            let out = my_account_check_login(&st, IT_NAME_MALE, "TempPass123")
+                .await
+                .expect("临时密码登录");
+            assert!(out.temp_used);
+            assert!(
+                my_account_auth_flags(&st, IT_NAME_MALE)
+                    .await
+                    .unwrap()
+                    .must_change_pass,
+                "临时密码登录后 mustChangePass=true"
+            );
+            let again = my_account_check_login(&st, IT_NAME_MALE, "TempPass123")
+                .await
+                .expect("临时密码不消费，15 分钟内可重复用");
+            assert!(again.temp_used, "契约 §2.4：Valid 不清 temp（避免手滑锁死）");
+            assert_eq!(
+                my_account_temp_pass_try(&st, IT_NAME_MALE, "TempPass123")
+                    .await
+                    .unwrap(),
+                TempPassResult::Valid
+            );
+            assert_eq!(
+                my_account_temp_pass_try(&st, IT_NAME_MALE, "WrongTemp1")
+                    .await
+                    .unwrap(),
+                TempPassResult::Mismatch
+            );
+
+            // ---- 8) 改密：清三列，临时密码立即失效 ----
+            my_account_reset_password_self(&st, IT_NAME_MALE, "最终密码 2026")
+                .await
+                .expect("改密");
+            assert!(!my_account_auth_flags(&st, IT_NAME_MALE)
+                .await
+                .unwrap()
+                .must_change_pass);
+            assert_eq!(
+                my_account_check_login(&st, IT_NAME_MALE, "TempPass123")
+                    .await
+                    .unwrap_err(),
+                LoginFail::BadPassword,
+                "改密后临时密码失效"
+            );
+            assert!(my_account_check_login(&st, IT_NAME_MALE, "最终密码 2026")
+                .await
+                .is_ok());
+
+            // ---- 9) 管理端列表 / 单条新字段 ----
+            let list = my_account_list(&st).await;
+            let item = list
+                .iter()
+                .find(|v| v["name"].as_str() == Some(IT_NAME_MALE))
+                .expect("列表应含测试账号");
+            assert_eq!(item["qqBound"], true);
+            assert_eq!(item["emailMask"], "100***@qq.com");
+            assert_eq!(item["mustChangePass"], false);
+            let got = my_account_get(&st, IT_NAME_MALE).await.expect("单条");
+            assert_eq!(got["qqBound"], true);
+            assert_eq!(got["emailMask"], "100***@qq.com");
+            assert_eq!(got["mustChangePass"], false);
+
+            // ---- 10) clear_temp 显式清三列 ----
+            my_account_reset_apply(&st, IT_PHONE_MALE, "TempPass456")
+                .await
+                .expect("再次下发临时密码");
+            my_account_clear_temp(&st, IT_NAME_MALE)
+                .await
+                .expect("清临时密码");
+            assert_eq!(
+                my_account_check_login(&st, IT_NAME_MALE, "TempPass456")
+                    .await
+                    .unwrap_err(),
+                LoginFail::BadPassword
+            );
+            assert!(!my_account_auth_flags(&st, IT_NAME_MALE)
+                .await
+                .unwrap()
+                .must_change_pass);
+
+            // ---- 11) 过期：先验签再判过期 → TempExpired，并惰性清 temp ----
+            my_account_reset_apply(&st, IT_PHONE_MALE, "TempPass789")
+                .await
+                .expect("下发临时密码");
+            sqlx::query(&crate::pq::rewrite(
+                "UPDATE my_accounts SET temp_pass_exp = now() - interval '1 minute' WHERE name = ?",
+            ))
+            .bind(IT_NAME_MALE)
+            .execute(st.writer.as_ref().unwrap())
+            .await
+            .expect("把 expire 改到过去");
+            assert_eq!(
+                my_account_check_login(&st, IT_NAME_MALE, "TempPass789")
+                    .await
+                    .unwrap_err(),
+                LoginFail::TempExpired,
+                "过期 → TEMP_EXPIRED（handler 回「临时密码已过期，请重新获取」）"
+            );
+            assert_eq!(
+                my_account_check_login(&st, IT_NAME_MALE, "TempPass789")
+                    .await
+                    .unwrap_err(),
+                LoginFail::BadPassword,
+                "惰性清理后同一串不再认"
+            );
+            Ok(())
+        }
+        .await;
+        it_cleanup(&st).await;
+        if let Err(e) = body {
+            panic!("真库集成回归失败：{e}");
+        }
+    }
+
 }

@@ -88,6 +88,9 @@ pub async fn admin_my_account_set(
     /* 改了可见范围必须吊销旧 token：旧 token 里挂着改之前算出来的团别，
     不吊销的话范围限制当场就被绕过去了（拿着旧 token 继续看全团）。 */
     my_tokens_revoke(name);
+    /* 2026-10-18（契约 §3.8）：管理员改密后 `store::my_account_set` 已清
+    `temp_pass_hash/temp_pass_exp/must_change_pass` —— 否则临时密码态会永久卡住
+    「请修改密码」弹层。这里吊销旧 token 的口径不变（旧登录态必须立刻失效）。 */
     tracing::info!(account = %name, generated, view_team_written,
         "管理端设置展示端账号（旧 token 已吊销，已回读校验）");
     Ok(Json(json!({
@@ -98,6 +101,10 @@ pub async fn admin_my_account_set(
 }
 
 /// GET /api/admin/my-accounts/{name}：单个账号（右键弹窗回填；没有则 found:false）
+///
+/// 2026-10-18（契约 §3.8）：单条 GET 与列表同步下发 `emailMask` / `qqBound` /
+/// `mustChangePass`。store 的 `my_account_get` 若已带同名字段，这里写入同源同值；
+/// 都以 `my_account_auth_flags` 为准，避免「列表能看、弹窗看不到」。
 pub async fn admin_my_account_get(
     State(st): State<ArcState>,
     axum::extract::Path(name): axum::extract::Path<String>,
@@ -107,6 +114,10 @@ pub async fn admin_my_account_get(
         None => return Ok(Json(json!({ "found": false }))),
     };
     v["found"] = json!(true);
+    let auth = super::my::auth_extra(&st, &name).await;
+    v["emailMask"] = json!(auth.email_mask);
+    v["qqBound"] = json!(auth.qq_bound);
+    v["mustChangePass"] = json!(auth.must_change_pass);
     Ok(Json(v))
 }
 
@@ -200,10 +211,11 @@ pub async fn admin_my_account_set_view_team(
 
 /* ------------------------------- 防遍历限流 ------------------------------- */
 
-/// 展示端写接口限流器（每 IP 每分钟 5 次；当前唯一用途 = 个人页改密写口挡脚本刷）
+/// 展示端写接口限流器（每 IP 每分钟 5 次；调用方 = 展示端已登录写口：
+/// 改密 / 首次补全 / 绑定 QQ 邮箱，见 `public_teams::my::public_write_allow`）
 ///
 /// 2026-10-17 用户口径「去除登录限速」：登录链路（verify / my_login）已不再
-/// 使用这档限流 —— 名字保留（改档历史见 git），但调用方只剩改密写口。
+/// 使用这档限流 —— 名字保留（改档历史见 git），但调用方只剩已登录写口。
 pub(super) static VERIFY_LIMITER: std::sync::OnceLock<VerifyLimiter> = std::sync::OnceLock::new();
 /// 写接口限流：每 IP 每分钟 12 次（原先只给注册类接口，2026-10-14 注册功能移除后
 /// 由「忘记密码重置」`/api/public/my/password/reset` 复用；与登录撞库不是一回事，

@@ -118,7 +118,7 @@ function renderWxbotCell(s: any) {
   if (wx === undefined || (wx == null && s.wechatBound)) {
     if (!s.wechatBound) {
       return (
-        <td title="未绑定微信机器人（主播在展示端「我的」页扫码后发手机号绑定）">
+        <td title="未绑定微信机器人（主播在展示端「我的」页扫码加机器人，再用同一个微信给机器人发一条消息即自动对接）">
           <span className="hint">未绑定</span>
         </td>
       )
@@ -141,7 +141,7 @@ function renderWxbotCell(s: any) {
   }
   if (wx == null) {
     return (
-      <td title="未绑定微信机器人（主播在展示端「我的」页扫码后发手机号绑定）">
+      <td title="未绑定微信机器人（主播在展示端「我的」页扫码加机器人，再用同一个微信给机器人发一条消息即自动对接）">
         <span className="hint">未绑定</span>
       </td>
     )
@@ -912,7 +912,7 @@ export default function StreamerPage() {
                           <span
                             className="badge b-paused"
                             style={{ marginLeft: 6 }}
-                            title="已开号但没登记手机号：只能姓名登录，用不了「忘记密码」和微信绑定"
+                            title="已开号但没登记手机号：只能姓名登录，用不了「忘记密码」"
                           >
                             已开号
                           </span>
@@ -1265,6 +1265,10 @@ export default function StreamerPage() {
                 ) : myAccPop.qqBound ? (
                   <span title="只显示脱敏地址，管理端不显示完整 QQ 号">
                     {myAccPop.emailMask || '已绑定'}
+                  </span>
+                ) : myAccPop.emailMask ? (
+                  <span title="历史非 QQ 邮箱：忘记密码不支持自助重置，只能联系管理员">
+                    {myAccPop.emailMask}（非 QQ 邮箱，不能自助重置）
                   </span>
                 ) : (
                   <span title="未绑定 QQ 的账号忘记密码只能联系管理员重置">

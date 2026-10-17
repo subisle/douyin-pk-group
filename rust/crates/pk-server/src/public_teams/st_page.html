@@ -1490,6 +1490,9 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
    契约：docs/26-账号绑定QQ邮箱与艺名登录-设计/05-实现契约-v2.md §4。
    全部复用 .gate-box / .form-err / .btn-main / .go / toast 体系，不新增组件库。
    QQ 后缀用绝对定位（不用 flex 挤 input），375px 宽下不产生横向滚动。 ===== */
+.dlg-mask { position:fixed; inset:0; z-index:96; background:rgba(11,28,48,.45);
+  display:flex; align-items:center; justify-content:center; padding:20px;
+  animation:stFadeIn .15s ease-out; }
 .gate-box.dlg-box { max-width:360px; max-height:calc(100dvh - 40px);
   overflow-y:auto; -webkit-overflow-scrolling:touch; position:relative; }
 .gate-box.dlg-box h3 { font-size:19px; margin-bottom:14px; }
@@ -2261,6 +2264,114 @@ function toast(msg) {
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => $('toast').classList.remove('show'), 1800);
 }
+
+/* ==================== 账号绑定/QQ 邮箱：公共小工具（2026-10-18 契约 v2 §4） ====================
+   契约文件：docs/26-账号绑定QQ邮箱与艺名登录-设计/05-实现契约-v2.md
+   用户 2026-10-18 拍板：凭艺名认领开号；没有 QQ 找管理（QQ 不强制，忘记密码必须有 QQ）；
+   密码 4~64 个字符、支持中英文/特殊字符/任何符号、**不 trim**；同一 QQ 只能绑一个账号。 */
+
+/** 错误码 → 展示文案（契约 §4.9）。业务错误优先看 code，旧接口没 code 时回落到后端 error 文本。 */
+function apiErrText(e) {
+  const code = (e && e.code) || '';
+  const msg = String((e && e.message) || '');
+  const MAP = {
+    BAD_PASSWORD: '密码错误，请重新输入',
+    NO_ACCOUNT: '账号还没开通，请联系管理员帅帅',
+    TEMP_EXPIRED: '临时密码已过期，请重新获取',
+    INVALID_PHONE: '手机号格式不对：应为 5~20 位数字',
+    PHONE_TAKEN: '该手机号已被其他账号绑定，请联系管理员帅帅',
+    INVALID_QQ: 'QQ 号格式不对：应为 5~12 位数字，且不能以 0 开头',
+    QQ_TAKEN: '该 QQ 邮箱已被其他账号绑定，请核对后重试',
+    INVALID_PASS: '密码不符合要求：需 4~64 个字符，可用中英文、数字和任意符号',
+    RESET_MISMATCH: '手机号和 QQ 号对不上，或这个账号还没绑定 QQ 邮箱，请核对后重试（忘记绑定 QQ 的联系管理员帅帅）',
+    SMTP_UNAVAILABLE: '邮件服务暂时不可用，请稍后再试或联系管理员帅帅（本次没有改密码）',
+    RATE_LIMITED: '操作太频繁了，请 1 分钟后再试',
+    PROFILE_ALREADY_DONE: '该账号已完成绑定，如需修改手机号请联系管理员帅帅',
+    NEED_PROFILE: '请先补全手机号和密码',
+    UNAUTHORIZED: '登录已过期，请重新登录',
+  };
+  if (MAP[code]) return MAP[code];
+  if (msg) return msg;
+  return '操作失败，请稍后重试';
+}
+
+/** 判断是否为「登录态失效」类错误（api() 的 401 分支会抛不带 code 的 '请先登录'）。 */
+function isAuthError(e) {
+  if (!e) return false;
+  if (e.code === 'UNAUTHORIZED' || e.status === 401) return true;
+  return /请先登录|登录已过期/.test(String(e.message || ''));
+}
+
+/** 前端兜底脱敏（只在服务端 emailMask 为空串时用：二级闸抑制/旧后端）。
+    常规显示**只认**服务端下发的 emailMask，避免两套脱敏口径。 */
+function maskQq(qq) {
+  const s = String(qq == null ? '' : qq).trim().replace(/@qq\.com$/i, '').replace(/\s/g, '');
+  if (!/^\d+$/.test(s)) return '';
+  return (s.length >= 3 ? s.slice(0, 3) : s.slice(0, 1)) + '***@qq.com';
+}
+
+/** 手机号口径：5~20 位数字（与后端 validate_my_phone 一致） */
+function isValidPhone(p) { return /^\d{5,20}$/.test(String(p || '').trim()); }
+/** QQ 号口径：5~12 位数字且首位非 0（契约 §2.1 normalize_qq） */
+function isValidQq(q) { return /^[1-9]\d{4,11}$/.test(String(q || '').trim()); }
+/** 密码口径（契约 §2.1 validate_my_password）：4~64 个字符，允许中英文/特殊字符/任何符号，
+    不允许 ASCII 控制字符；**不 trim**（首尾空格是密码的一部分）。 */
+function isValidPass(p) {
+  if (typeof p !== 'string') return false;
+  if (p.length < 4 || p.length > 64) return false;
+  return !/[\x00-\x1F\x7F]/.test(p);
+}
+const PASS_RULE = '密码 4~64 个字符，可用中英文、数字和任意符号';
+
+/** POST JSON（统一错误码/401 处理）。失败抛 Error 且带 .code / .data（登录失败要读 data.canClaim）。 */
+async function postJson(url, body, opts) {
+  opts = opts || {};
+  const headers = Object.assign({ 'Content-Type': 'application/json' },
+    opts.auth ? myTokenHeaders() : {});
+  const r = await fetch(url, { method: 'POST', headers: headers, body: JSON.stringify(body || {}) });
+  let d = {};
+  try { d = await r.json(); } catch (_) {}
+  if (r.status === 401) {
+    const err = new Error('登录已过期，请重新登录');
+    err.code = 'UNAUTHORIZED'; err.status = 401; err.data = d;
+    throw err;
+  }
+  if (!r.ok || d.ok === false) {
+    const err = new Error(apiErrText({ code: d.code, message: d.error || ('HTTP ' + r.status) }));
+    err.code = d.code || ''; err.status = r.status; err.data = d;
+    throw err;
+  }
+  return d;
+}
+
+/** 通用弹层脚手架（复用「我的」页对话框既有做法：自建遮罩 + .gate-box 卡体）。
+    z-index 96：高于 #gate(90)/#msgModal(95)，低于 #announce(100)。
+    Esc / 点遮罩关闭（dataset.locked='1' 时不关，给强制层用）；打开锁背景滚动。 */
+function makeDialog(id, boxHtml) {
+  const old = $(id);
+  if (old) old.remove();
+  const mask = document.createElement('div');
+  mask.id = id;
+  mask.className = 'dlg-mask';
+  mask.innerHTML = '<div class="gate-box dlg-box" role="dialog" aria-modal="true">' + boxHtml + '</div>';
+  document.body.appendChild(mask);
+  lockScroll();
+  let closed = false;
+  const onKey = (e) => { if (e.key === 'Escape' && mask.dataset.locked !== '1') close(); };
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    document.removeEventListener('keydown', onKey);
+    mask.remove();
+    unlockScroll();
+  };
+  document.addEventListener('keydown', onKey);
+  mask.addEventListener('click', (e) => {
+    if (e.target === mask && mask.dataset.locked !== '1') close();
+  });
+  return { mask: mask, close: close, box: mask.firstElementChild, locked: (on) => { mask.dataset.locked = on ? '1' : ''; } };
+}
+
 async function api(p) {
   /* 登录门（2026-10-10）：带登录态请求头；401 → 弹登录门。
      2026-10-13 修「登录成功又回登录门」：token 一律走 X-My-Token 头——后端
@@ -2276,6 +2387,21 @@ async function api(p) {
      lineage_forbidden）。带 code 的是业务拒绝，抛给调用方就地展示；
      只有不带 code 的（地区门禁）才整页替换，否则页面骨架会被整个换掉。 */
   if (r.status === 403) {
+    /* 2026-10-18 契约 v2 §3.9/§4：needProfile 与 mustChangePass 后端都**不做** 403 拦截，
+       但保留兜底 —— 万一后端按旧设计拦了写接口，前端要把用户领回引导/提示层，
+       而不是只弹一条 toast 让人莫名其妙。 */
+    if (d.code === 'MUST_CHANGE_PASS') {
+      try { openMustChangeDlg(); } catch (_) {}
+      throw Object.assign(new Error(apiErrText({ code: d.code, message: d.error })), { code: d.code });
+    }
+    if (d.code === 'NEED_PROFILE') {
+      /* 后端按旧设计 403 拦截时的兜底：把用户领回「绑定账号信息」卡（#gate 复用容器） */
+      try {
+        if (meState) meState.needProfile = true;
+        if (!$('obPhone')) renderProfileGuide(meState || {});
+      } catch (_) {}
+      throw Object.assign(new Error(apiErrText({ code: d.code, message: d.error })), { code: d.code });
+    }
     if (d.code) throw Object.assign(new Error(d.error || '没有访问权限'), { code: d.code });
     regionBlocked(d.error || '您的ip不在授权范围内');
     throw new Error(d.error || '您的ip不在授权范围内');
@@ -2371,9 +2497,17 @@ function switchTeam(t) {
   go();
 }
 
-/** 关登录门 + 落地登录态 */
+/** 关登录门 + 落地登录态。
+    2026-10-18 契约 v2 §4.3：needProfile=true 时 **不关** #gate，改渲染不可关闭的
+    「绑定账号信息」一屏卡（复用同一个登录门容器 → 天然没有关闭按钮/点外关闭）；
+    补全成功后再走一次正常收尾。 */
 function closeGate(me) {
   const g = $('gate');
+  if (me && me.needProfile) {
+    applyLoginState(me);
+    renderProfileGuide(me);
+    return;
+  }
   g.classList.add('hidden');
   g.innerHTML = '';
   const fn = gateResolve; gateResolve = null;
@@ -2385,7 +2519,24 @@ function closeGate(me) {
      localStorage 已记住版本的（老用户 / 已读过）这里自然不再弹。
      2026-10-17：maybeAnnounce 内 GUIDE_ENABLED=false 总闸兜住，正常登录不再弹；
      调用保留不动（恢复引导时无需回改此处）。 */
-  requestAnimationFrame(() => { try { maybeAnnounce(); } catch (_) {} });
+  requestAnimationFrame(() => {
+    try { maybeAnnounce(); } catch (_) {}
+    /* 2026-10-18：登录后的后续编排（契约 §4.2 优先级：needProfile > mustChangePass > needQq）。
+       必须等 gate 的 hidden 生效、首屏数据先出来，否则两层遮罩叠着用户找不到东西。 */
+    try { afterGateFlow(me); } catch (_) {}
+  });
+}
+
+/** 登录门关闭后的后续编排（只处理「本次登录」；刷新恢复登录态时由 boot() 单独判定）。
+    mustChangePass（临时密码登录）优先于可关闭的 QQ nudge —— 否则用户点掉 nudge 后
+    写接口全被拦，体验更差（03 §6.6 边界）。 */
+function afterGateFlow(me) {
+  if (!me) return;
+  if (me.mustChangePass) {
+    setTimeout(() => { try { openMustChangeDlg(); } catch (_) {} }, 420);
+    return;
+  }
+  if (me.needQq) setTimeout(() => { try { maybeQqNudge(); } catch (_) {} }, 650);
 }
 
 function showGate() {
@@ -2407,13 +2558,14 @@ function showGate() {
     '<div class="gate-tabs">' +
       '<button id="tabLogin" class="on">登录</button>' +
     '</div>' +
-    '<div id="paneLogin"><p class="tip">使用「手机号 + 密码」登录（姓名也可以）</p>' +
-      '<input id="gateAcct" placeholder="手机号 / 姓名" autocomplete="off">' +
+    '<div id="paneLogin"><p class="tip">用「手机号 / 艺名 + 密码」登录。<br>没绑手机号的账号，登录后会引导你绑定手机号和 QQ 邮箱。</p>' +
+      '<input id="gateAcct" placeholder="手机号 / 艺名" autocomplete="off">' +
       /* 2026-10-14：密码规则是 4~20 位字母/数字（2026-10-17 起也允许点），原先 inputmode="numeric" 在手机上
          只弹数字键盘、字母打不出来（自助设置了字母密码就登不进来）。去掉该属性用默认键盘。 */
       /* 2026-10-17 第四轮审计 D 域 P3-4：登录密码框用 type="password"（原来裸 text，肩窥/投屏直接露密码）。 */
+      /* 2026-10-18 契约 v2：密码 4~64 个字符、支持中英文/任意符号；取 value 时**不 trim**（见 bindLoginPane）。 */
       '<input id="gatePass" type="password" placeholder="密码" autocomplete="off">' +
-      '<button class="gate-forgot" id="gateForgot">忘记密码？重置密码</button>' +
+      '<button class="gate-forgot" id="gateForgot">忘记密码？</button>' +
       '<div class="form-err hidden" id="gateErr"></div>' +
       '<button class="btn-main" id="gateGo">登 录</button>' +
       '<div class="gate-foot">遇到问题？请联系管理员帅帅</div></div>' +
@@ -2437,95 +2589,436 @@ function gateTab() {
 }
 
 /* ------------------------------ 登录页签 ------------------------------ */
+/** 登录/认领/补全的响应（与 /my/who 同形）→ 页面统一身份对象。
+    只保留脱敏后的 emailMask/phone，明文邮箱不进 DOM/存储（契约 §4.7）。 */
+function buildMe(d, fallbackName) {
+  d = d || {};
+  const team = d.team === 'male' || d.team === 'female' ? d.team : '';
+  return {
+    name: d.name || fallbackName || '',
+    personId: d.personId,
+    bound: d.bound !== false,
+    needBind: !!d.needBind,
+    needProfile: !!d.needProfile,
+    needQq: !!d.needQq,
+    mustChangePass: !!d.mustChangePass,
+    phone: d.phone || '',
+    personPhone: d.personPhone || '',
+    emailMask: d.emailMask || '',
+    email: d.emailMask || d.email || '',   // 兼容旧键；只放脱敏串
+    switchable: !!d.switchable,
+    admin: !!d.admin,
+    team: team,
+    anyTeam: !team,
+  };
+}
+
+/** 登录 / 认领成功后统一收口：存 token → 组装 me → 交给 closeGate 按状态编排。
+    契约 v2 §3.1：登录响应与 /my/who 同形（phone 打码、emailMask 脱敏、三个状态布尔）。 */
+function applyLoginSuccess(d, fallbackName) {
+  d = d || {};
+  const me = buildMe(d, fallbackName);
+  setMyToken(d.token);   // 登录/认领/补全/改密都会换发 token，统一走 setMyToken 清历史引用
+  localStorage.setItem(me.team ? 'myName_' + me.team : MY_ANY_NAME, me.name);
+  toast(me.needBind ? '登录成功，账号未绑定主播请联系管理员帅帅' : '登录成功');
+  closeGate(me);
+}
+
 function bindLoginPane() {
   const go = async () => {
-    const acct = $('gateAcct').value.trim(), pw = $('gatePass').value.trim();
+    const acct = $('gateAcct').value.trim();
+    /* 契约 v2 §4.1：密码**不 trim** —— 首尾空格是密码的一部分（后端同样不 trim） */
+    const pw = $('gatePass').value || '';
     const errEl = $('gateErr');
+    showClaimEntry('');   // 换账号重试时先收掉上一次的「首次登录？认领账号」入口
     if (!acct || !pw) {
       errEl.textContent = '请输入账号和密码';
       errEl.classList.remove('hidden');
       return;
     }
     const btn = $('gateGo');
+    const acctEl = $('gateAcct'), passEl = $('gatePass');
     btn.disabled = true; btn.textContent = '登录中…';
+    acctEl.disabled = true; passEl.disabled = true;
     errEl.classList.add('hidden');
     try {
       /* 统一免团别登录口：后端按账号反查绑定主播，前端不再按团别分流 */
-      const url = '/api/public/my/login';
-      const r = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ account: acct, pass: pw }),
-      });
-      const d = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
-      /* 2026-10-14：后端已区分「密码错误」和「账号还没开通」，这里优先显示后端下发的原因 d.error；
-         后端仍有个别分支只回 {ok:false} 不带 error（台账查无此人、管理观看账号未通过等），回落到原兜底文案 */
-      if (!d.ok) throw new Error(d.error || '账号或密码不对，或账号还没开通');
-      /* token 统一存 MY_ANY_KEY；后端 all 端点接受任何绑定主播的账号 */
-      const team = d.team === 'male' || d.team === 'female' ? d.team : '';
-      const key = MY_ANY_KEY;
-      sessionStorage.setItem(key, d.token);
-      if (key !== MY_KEY()) sessionStorage.removeItem(MY_KEY());
-      localStorage.setItem(team ? 'myName_' + team : MY_ANY_NAME, d.name || acct);
-      toast(d.needBind ? '登录成功，账号未绑定主播请联系管理员帅帅' : '登录成功');
-      closeGate({ name: d.name || acct, personId: d.personId, bound: d.bound !== false,
-        needBind: !!d.needBind, team: team, anyTeam: !team });
+      const d = await postJson('/api/public/my/login', { account: acct, pass: pw });
+      applyLoginSuccess(d, acct);
     } catch (e) {
       btn.disabled = false; btn.textContent = '登 录';
-      errEl.textContent = e.message || '登录失败，稍后再试';
+      acctEl.disabled = false; passEl.disabled = false;
+      errEl.textContent = apiErrText(e) || '登录失败，稍后再试';
       errEl.classList.remove('hidden');
+      /* 认领入口（契约 §4.2）：只有「账号不存在 + 艺名唯一 + 可认领」时后端才给 canClaim */
+      if (e.code === 'NO_ACCOUNT' && e.data && e.data.canClaim) {
+        showClaimEntry(e.data.claimName || acct);
+      }
     }
   };
   $('gateGo').onclick = go;
-  $('gateForgot').onclick = forgotPassword;
+  $('gateForgot').onclick = openForgotDlg;
   $('gateAcct').onkeydown = (e) => { if (e.key === 'Enter') $('gatePass').focus(); };
   $('gatePass').onkeydown = (e) => { if (e.key === 'Enter') go(); };
 }
 
-async function forgotPassword() {
-  const acct = ($('gateAcct').value || '').trim().replace(/[\s-]/g, '');
-  const errEl = $('gateErr');
-  errEl.classList.add('hidden');
-  /* 资格与后端 store/my_account.rs my_account_reset_target 对齐：
-     后端按 phone 查 my_accounts，只认 is_admin=0 且 phone 已绑定的普通账号，
-     查不到就返回「该手机号未绑定账号」；查得到但没绑邮箱就返回
-     「该账号未绑定邮箱，请联系管理员重置密码」（2026-10-17 口径）。
-     管理员观看账号与未绑定手机号一律拒（文案不区分两者，避免泄露台账）。
-     所以这里必须是纯数字手机号（5~20 位，同 validate_my_phone），姓名不能重置。 */
-  if (!/^\d{5,20}$/.test(acct)) {
-    errEl.textContent = '请先输入已绑定的手机号（5~20 位数字），再点重置；未绑定请联系管理员帅帅';
-    errEl.classList.remove('hidden');
-    return;
-  }
-  const btn = $('gateForgot');
-  btn.disabled = true; btn.textContent = '重置中…';
-  try {
-    const r = await fetch('/api/public/my/password/reset', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ phone: acct }),
+/* ==================== 凭艺名认领开号（契约 v2 §4.2 / §3.2） ====================
+   2026-10-18 用户拍板：凭艺名**直接认领开号**、艺名唯一、同一 QQ 不能绑多个账号。
+   入口只在登录返回 {code:'NO_ACCOUNT', canClaim:true, claimName} 时出现（后端已校验
+   「台账唯一同名在职主播 + 该主播还没被占用」），前端不做二次判定。 */
+function showClaimEntry(name) {
+  const box = document.querySelector('#gate .gate-box');
+  if (!box) return;
+  const old = $('gateClaim');
+  if (old) old.remove();
+  const nm = String(name || '').trim();
+  if (!nm) return;
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.id = 'gateClaim';
+  btn.className = 'gate-claim';
+  btn.textContent = '首次登录？认领账号“' + nm + '”';
+  btn.onclick = () => { try { openClaimDlg(nm); } catch (_) {} };
+  box.appendChild(btn);
+}
+
+function openClaimDlg(name) {
+  const dlg = makeDialog('claimMask',
+    '<button class="dialog-close" id="claimX" aria-label="关闭"><span class="material-symbols-outlined">close</span></button>' +
+    '<h3>认领账号</h3>' +
+    '<p class="tip">第一次用这个艺名登录？设置一个登录密码就能认领这个账号，手机号可以登录后补全。</p>' +
+    '<div class="field-label">艺名</div>' +
+    '<input id="claimName" class="dlg-readonly" value="' + esc(name) + '" readonly autocomplete="off">' +
+    '<div class="field-label">设置密码</div>' +
+    '<input id="claimPass" type="password" placeholder="' + PASS_RULE + '" autocomplete="new-password">' +
+    '<input id="claimPass2" type="password" placeholder="确认密码" autocomplete="new-password">' +
+    '<div class="form-err hidden" id="claimErr"></div>' +
+    '<div class="btn-row"><button class="go gray" id="claimCancel">取消</button>' +
+    '<button class="go" id="claimGo">认领并登录</button></div>');
+  $('claimX').onclick = dlg.close;
+  $('claimCancel').onclick = dlg.close;
+  ['claimPass', 'claimPass2'].forEach((id) => {
+    $(id).onkeydown = (e) => { if (e.key === 'Enter') $('claimGo').click(); };
+  });
+  setTimeout(() => { const el = $('claimPass'); if (el) el.focus(); }, 60);
+  $('claimGo').onclick = async () => {
+    const pass = $('claimPass').value || '';
+    const pass2 = $('claimPass2').value || '';
+    const errEl = $('claimErr');
+    const fail = (m) => { errEl.textContent = m; errEl.classList.remove('hidden'); };
+    errEl.classList.add('hidden');
+    if (!isValidPass(pass)) return fail(PASS_RULE);
+    if (pass !== pass2) return fail('两次输入的密码不一致');
+    const btn = $('claimGo');
+    btn.disabled = true; btn.textContent = '认领中…';
+    const p1 = $('claimPass'), p2 = $('claimPass2');
+    p1.disabled = true; p2.disabled = true;
+    try {
+      const d = await postJson('/api/public/my/claim', { name: name, pass: pass });
+      dlg.close();
+      applyLoginSuccess(d, name);   // 成功与登录同形（needProfile:true + 新 token）
+    } catch (e) {
+      btn.disabled = false; btn.textContent = '认领并登录';
+      p1.disabled = false; p2.disabled = false;
+      fail(apiErrText(e) || '认领失败，稍后再试');
+    }
+  };
+}
+
+/* ==================== 忘记密码（契约 v2 §4.5 / §3.5） ====================
+   2026-10-18 用户拍板：重置密码必须同时填**手机号 + QQ 号**，临时密码发到对应 QQ 邮箱
+   （15 分钟有效、登录后强制提示改密）；没有 QQ 邮箱的只能找管理员。
+   后端失败一律 RESET_MISMATCH 统一文案（防枚举），前端按 code 出文案。 */
+function openForgotDlg() {
+  const dlg = makeDialog('forgotMask',
+    '<button class="dialog-close" id="fpX" aria-label="关闭"><span class="material-symbols-outlined">close</span></button>' +
+    '<h3>重置密码</h3>' +
+    '<p class="tip">输入绑定时的手机号和 QQ 号，临时密码会发到你的 QQ 邮箱。</p>' +
+    '<div id="fpForm">' +
+      '<div class="field-label">手机号 <span class="req">*</span></div>' +
+      '<input id="fpPhone" inputmode="numeric" maxlength="20" placeholder="5~20 位数字手机号" autocomplete="off">' +
+      '<div class="field-label">QQ 号 <span class="req">*</span></div>' +
+      '<div class="qq-wrap"><input id="fpQq" inputmode="numeric" maxlength="12" placeholder="QQ 号" autocomplete="off">' +
+        '<span class="qq-suffix">@qq.com</span></div>' +
+      '<div class="qq-preview" id="fpPreview">将发送到：你的 QQ 邮箱</div>' +
+      '<div class="form-hint">没有 QQ 邮箱？<b>请联系管理员帅帅</b>在后台重置密码。</div>' +
+      '<div class="form-err hidden" id="fpErr"></div>' +
+      '<div class="btn-row"><button class="go gray" id="fpCancel">取消</button>' +
+      '<button class="go" id="fpGo">发送临时密码</button></div>' +
+      '<div class="form-hint" style="margin-top:10px">临时密码 <b>15 分钟内有效</b>，登录后请立即修改密码</div>' +
+    '</div>');
+  const close = dlg.close;
+  $('fpX').onclick = close;
+  $('fpCancel').onclick = close;
+  const goBtn = $('fpGo');
+  const phoneEl = $('fpPhone');
+  const qqEl = $('fpQq');
+  const errEl = $('fpErr');
+  const fail = (m) => { errEl.textContent = m; errEl.classList.remove('hidden'); };
+  const syncPreview = () => {
+    const q = String(qqEl.value || '');
+    $('fpPreview').textContent = isValidQq(q) ? '将发送到：' + q + '@qq.com' :
+      (q ? 'QQ 号应为 5~12 位数字，且不能以 0 开头' : '将发送到：你的 QQ 邮箱');
+  };
+  const syncGo = () => {
+    goBtn.disabled = !(isValidPhone(phoneEl.value) && isValidQq(qqEl.value));
+  };
+  const digitsOnly = (el, maxLen, noLeadingZero) => {
+    el.addEventListener('input', () => {
+      let v = String(el.value || '').replace(/\D/g, '');
+      if (noLeadingZero) v = v.replace(/^0+/, '');
+      el.value = v.slice(0, maxLen);
+      errEl.classList.add('hidden');
+      syncPreview(); syncGo();
     });
-    const d = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
-    /* 2026-10-17 用户口径：重置密码 = 随机密码发到绑定邮箱。
-       后端不回显密码（密码在用户自己邮箱里）；没绑邮箱会走上面 400 分支
-       「该账号未绑定邮箱，请联系管理员重置密码」。 */
+  };
+  digitsOnly(phoneEl, 20, false);
+  digitsOnly(qqEl, 12, true);
+  phoneEl.onkeydown = (e) => { if (e.key === 'Enter') qqEl.focus(); };
+  qqEl.onkeydown = (e) => { if (e.key === 'Enter' && !goBtn.disabled) goBtn.click(); };
+  syncPreview(); syncGo();
+  setTimeout(() => { const el = $('fpPhone'); if (el) el.focus(); }, 60);
+
+  goBtn.onclick = async () => {
+    const phone = String(phoneEl.value || '').trim();
+    const qq = String(qqEl.value || '').trim();
+    errEl.classList.add('hidden');
+    if (!isValidPhone(phone)) return fail('请输入 5~20 位数字的手机号');
+    if (!isValidQq(qq)) return fail('QQ 号应为 5~12 位数字，且不能以 0 开头');
+    const btn = goBtn;
+    btn.disabled = true; btn.textContent = '发送中…';
+    phoneEl.disabled = true; qqEl.disabled = true;
+    try {
+      const d = await postJson('/api/public/my/password/reset', { phone: phone, qq: qq });
+      /* 成功：优先用服务端 emailMask；二级闸抑制时它可能是空串 → 用本地 maskQq 兜底显示 */
+      const maskTxt = d.emailMask || maskQq(qq);
+      const mins = Number(d.expiresInMinutes || 15) || 15;
+      dlg.box.innerHTML =
+        '<button class="dialog-close" id="fpX2" aria-label="关闭"><span class="material-symbols-outlined">close</span></button>' +
+        '<div class="dlg-ok"><span class="material-symbols-outlined">check_circle</span></div>' +
+        '<h3>临时密码已发送</h3>' +
+        '<div class="dlg-ok-txt">已发送到 <b>' + esc(maskTxt || '你的 QQ 邮箱') + '</b>' +
+          '<div class="ok-line">· ' + mins + ' 分钟内有效；用临时密码登录后请立即修改密码</div>' +
+          '<div class="ok-line">· 没收到？先看垃圾箱；仍没有请联系管理员帅帅</div>' +
+          '<div class="ok-line">· 其他设备上的登录会退出</div></div>' +
+        '<button class="btn-main" id="fpDone" style="margin-top:16px">去登录</button>';
+      $('fpX2').onclick = close;
+      $('fpDone').onclick = () => { close(); const a = $('gateAcct'); if (a) a.focus(); };
+      toast('临时密码已发送到 QQ 邮箱');
+    } catch (e) {
+      btn.disabled = false; btn.textContent = '发送临时密码';
+      phoneEl.disabled = false; qqEl.disabled = false;
+      fail(apiErrText(e) || '发送失败，稍后再试');
+      syncGo();
+    }
+  };
+}
+
+/* ==================== 首次登录强制补全（契约 v2 §4.3 / §3.3） ====================
+   2026-10-18 用户拍板：手机号**必填**；QQ **选填**（没有 QQ 邮箱的找管理员）；
+   新密码选填（留空沿用当前密码）。**不可关闭**：复用 #gate 容器渲染（没有关闭按钮、
+   没有点外关闭、不绑 Esc），补全成功换 token + 重拉 who 之后才走正常收尾。
+   刷新页面 → ensureLogin() 重新判定 needProfile → 引导再出现（阻断逻辑自愈）。 */
+function renderProfileGuide(me) {
+  const g = $('gate');
+  if (!g) return;
+  me = me || {};
+  /* 引导会盖住整屏：让公告引导（z-index 100）与消息弹窗（95）让位，
+     否则刷新恢复登录态时它们会压在 #gate(90) 上面、把引导挡掉。 */
+  dismissAnnounce();
+  dismissMsgModal();
+  const name = String(me.name || '');
+  /* 预填：后端若下发 personPhone（台账手机号）就用它；who 的 phone 通常是打码值，
+     含 `*` 时 isValidPhone 校验不过，天然跳过（契约 §4.3「可预填 personPhone/phone」）。 */
+  const prePhone = String(me.personPhone || '').trim();
+  const phoneVal = isValidPhone(prePhone) ? prePhone
+    : (isValidPhone(String(me.phone || '').trim()) ? String(me.phone).trim() : '');
+  g.classList.remove('hidden');
+  /* 卡片高度控制：375×667 下主按钮要在首屏可见（03 §6.3「按钮不被顶出屏幕」），
+     所以这里不放圆形徽标、每条提示只留一行（2026-10-18 实测内容高 774px → 收紧后 <620px）。 */
+  g.innerHTML = '<div class="gate-col"><div class="gate-box dlg-box guide-box" role="dialog" aria-modal="true">' +
+    '<h3>绑定账号信息</h3>' +
+    '<p class="tip">第一次登录' + (name ? '「' + esc(name) + '」' : '') +
+      '，先把手机号补上（QQ 选填），之后忘记密码可以自己重置。</p>' +
+    '<div class="field-label">手机号 <span class="req">*</span></div>' +
+    '<input id="obPhone" inputmode="numeric" maxlength="20" placeholder="5~20 位数字手机号" value="' +
+      esc(phoneVal) + '" autocomplete="off">' +
+    '<div class="field-label">QQ 号（选填）</div>' +
+    '<div class="qq-wrap"><input id="obQq" inputmode="numeric" maxlength="12" placeholder="QQ 号，可留空" autocomplete="off">' +
+      '<span class="qq-suffix">@qq.com</span></div>' +
+    '<div class="qq-preview" id="obQqPreview">没有 QQ 邮箱？<b>请联系管理员帅帅</b>；不填也能继续使用。</div>' +
+    '<div class="field-label">新密码（选填，留空沿用当前密码）</div>' +
+    '<input id="obPass" type="password" placeholder="留空沿用当前密码" autocomplete="new-password">' +
+    '<input id="obPass2" type="password" placeholder="确认新密码" autocomplete="new-password">' +
+    '<div class="form-err hidden" id="obErr"></div>' +
+    '<button class="btn-main" id="obGo">完成绑定，进入数据榜</button>' +
+    '<div class="gate-foot">绑定后才能正常使用（忘记密码、接收通知都要用到手机号和 QQ 邮箱）</div>' +
+    '<button class="gate-link-plain" id="obSwitch">换个账号登录</button>' +
+    '</div></div>';
+  const phoneEl = $('obPhone'), qqEl = $('obQq');
+  const errEl = $('obErr');
+  const fail = (m) => { errEl.textContent = m; errEl.classList.remove('hidden'); };
+  const syncPreview = () => {
+    const q = String(qqEl.value || '');
+    $('obQqPreview').textContent = isValidQq(q) ? '将绑定：' + q + '@qq.com'
+      : (q ? 'QQ 号应为 5~12 位数字，且不能以 0 开头' : '没有 QQ 邮箱？请联系管理员帅帅（不填也能继续使用）');
+  };
+  const digitsOnly = (el, maxLen) => {
+    el.addEventListener('input', () => {
+      el.value = String(el.value || '').replace(/\D/g, '').slice(0, maxLen);
+      errEl.classList.add('hidden');
+      syncPreview();
+    });
+  };
+  digitsOnly(phoneEl, 20);
+  /* 手机号只收数字；QQ 号另外要求首位非 0（契约 §2.1 normalize_qq），输入时直接剔掉 */
+  qqEl.addEventListener('input', () => {
+    const v = String(qqEl.value || '').replace(/\D/g, '').replace(/^0+/, '').slice(0, 12);
+    if (v !== qqEl.value) qqEl.value = v;
+    errEl.classList.add('hidden');
+    syncPreview();
+  });
+  phoneEl.onkeydown = (e) => { if (e.key === 'Enter') qqEl.focus(); };
+  qqEl.onkeydown = (e) => { if (e.key === 'Enter') $('obPass').focus(); };
+  $('obPass').onkeydown = (e) => { if (e.key === 'Enter') $('obPass2').focus(); };
+  $('obPass2').onkeydown = (e) => { if (e.key === 'Enter') $('obGo').click(); };
+  $('obSwitch').onclick = () => { myLogout(); removeWatermark(); location.reload(); };
+  $('obGo').onclick = submitProfile;
+  setTimeout(() => { if (!phoneEl.value) phoneEl.focus(); }, 60);
+}
+
+/** 提交首次补全（契约 §3.3）：成功 → 换 token → 重拉 who → 关登录门进数据榜。 */
+async function submitProfile() {
+  const phoneEl = $('obPhone'), qqEl = $('obQq');
+  const p1 = $('obPass'), p2 = $('obPass2');
+  if (!phoneEl || !p1 || !p2) return;
+  const errEl = $('obErr');
+  const fail = (m) => {
+    if (!errEl) return;
+    errEl.textContent = m;
     errEl.classList.remove('hidden');
-    errEl.textContent = '新密码已发送到你的绑定邮箱，请查收邮件后用新密码登录。' +
-      '（未收到请检查垃圾箱，或联系管理员）';
-    toast('新密码已发送到绑定邮箱');
+  };
+  errEl.classList.add('hidden');
+  const phone = String(phoneEl.value || '').trim();
+  const qq = String(qqEl.value || '').trim();
+  const pass = p1.value || '';
+  const pass2 = p2.value || '';
+  if (!isValidPhone(phone)) return fail('手机号应为 5~20 位数字');
+  if (qq && !isValidQq(qq)) return fail('QQ 号应为 5~12 位数字，且不能以 0 开头');
+  if (pass || pass2) {
+    if (!isValidPass(pass)) return fail(PASS_RULE);
+    if (pass !== pass2) return fail('两次输入的新密码不一致');
+  }
+  const btn = $('obGo');
+  const fields = [phoneEl, qqEl, p1, p2];
+  btn.disabled = true; btn.textContent = '提交中…';
+  fields.forEach((el) => { el.disabled = true; });
+  const body = { phone: phone };
+  if (qq) body.qq = qq;
+  if (pass) body.newPass = pass;
+  const restore = () => {
+    btn.disabled = false; btn.textContent = '完成绑定，进入数据榜';
+    fields.forEach((el) => { el.disabled = false; });
+  };
+  try {
+    const d = await postJson('/api/public/my/profile/bind', body, { auth: true });
+    setMyToken(d && d.token);   // 后端吊销全部旧 token → 必须换发，否则下一个请求 401
+    let who = null;
+    try { who = await refreshWho(); } catch (_) { /* who 失败就先用响应兜底，不挡收尾 */ }
+    closeGate(who || buildMe(d, meState && meState.name));
+    toast('绑定完成，开始使用吧');
   } catch (e) {
-    errEl.textContent = e.message || '重置失败，稍后再试';
-    errEl.classList.remove('hidden');
-  } finally {
-    btn.disabled = false; btn.textContent = '忘记密码？重置密码';
+    if (isAuthError(e)) {
+      myLogout();
+      gateResolve = null;
+      showGate();
+      toast('登录已过期，请重新登录');
+      return;
+    }
+    /* 已成功但前端没收到响应（超时）再提交会拿 PROFILE_ALREADY_DONE：
+       先重拉 who，若已经补全完成就按成功收尾（契约 §4.3 第 6 步） */
+    if (e.code === 'PROFILE_ALREADY_DONE') {
+      let who = null;
+      try { who = await refreshWho(); } catch (_) {}
+      if (who && !who.needProfile) {
+        closeGate(who);
+        toast('绑定完成，开始使用吧');
+        return;
+      }
+      restore();
+      return fail('该账号已完成绑定，如需修改手机号请联系管理员帅帅');
+    }
+    restore();
+    fail(apiErrText(e) || '提交失败，稍后再试');
   }
 }
 
+/* ==================== 绑定 QQ 提醒（契约 v2 §4.4） ====================
+   2026-10-18 用户拍板：QQ **不强制**，但忘记密码必须有 QQ —— 所以提醒保留、可关闭。
+   频控（03 §4.1）：登录后首次必弹 + 7 天冷却 + 单会话一次；「我的」页常驻入口随时可绑。 */
+const QQ_NUDGE_CD = 7 * 24 * 60 * 60 * 1000;
+const QQ_NUDGE_AT_KEY = 'qqNudgeAt';
+const QQ_NUDGE_SEEN_KEY = 'qqNudged';
+function qqNudgeAllowed() {
+  try { if (sessionStorage.getItem(QQ_NUDGE_SEEN_KEY)) return false; } catch (_) {}
+  try {
+    const ts = Number(localStorage.getItem(QQ_NUDGE_AT_KEY) || 0) || 0;
+    if (ts > 0 && Date.now() - ts < QQ_NUDGE_CD) return false;
+  } catch (_) {}
+  return true;
+}
+function markQqNudged() {
+  try { sessionStorage.setItem(QQ_NUDGE_SEEN_KEY, '1'); } catch (_) {}
+  try { localStorage.setItem(QQ_NUDGE_AT_KEY, String(Date.now())); } catch (_) {}
+}
+function maybeQqNudge() {
+  if (!meState || !meState.needQq) return;
+  if ($('qqMask')) return;
+  if (!qqNudgeAllowed()) return;
+  markQqNudged();
+  openQqDlg({ source: 'nudge' });
+}
+
+/* ==================== 临时密码登录后的「请修改密码」提示层（契约 v2 §4.6） ====================
+   2026-10-18 用户拍板：临时密码登录后**提示改密**（不做单次消费、后端也不做 403 拦截）。
+   主按钮直接打开现有改密对话框（force 模式），次按钮「稍后」可关闭。 */
+let mustPwdPrompted = false;   // 本次页面生命周期内已经提示过（防止 boot 恢复登录态时重复弹）
+function openMustChangeDlg() {
+  if ($('mustPwdMask')) return;
+  mustPwdPrompted = true;
+  const dlg = makeDialog('mustPwdMask',
+    '<div class="big-av" style="background:linear-gradient(45deg,#F59E0B,#FBBF24)">' +
+      '<span class="material-symbols-outlined">lock</span></div>' +
+    '<h3>请修改密码</h3>' +
+    '<p class="tip">你正在用<strong>临时密码</strong>登录（临时密码 ' +
+      '15 分钟内有效，且会出现在邮件里）。<br>建议立即设置自己的登录密码。</p>' +
+    '<button class="btn-main" id="mustPwdGo">立即修改</button>' +
+    '<div class="btn-row"><button class="go gray" id="mustPwdLater">稍后</button></div>' +
+    '<div class="gate-foot">稍后也可以在「我的 → 重置密码」里修改</div>');
+  dlg.locked(true);   // 不锁死用户：点遮罩/Esc 不关，但「稍后」是正常出口
+  const after = () => { try { maybeQqNudge(); } catch (_) {} };
+  $('mustPwdGo').onclick = () => {
+    dlg.close();
+    openMyPwdDlg({ force: true, after: after });
+  };
+  $('mustPwdLater').onclick = () => { dlg.close(); after(); };
+}
+
+/* ==================== 重拉身份（补全 / 绑 QQ / 改密后统一刷新） ====================
+   除了让水印从艺名切成打码手机号，也保证 needQq/mustChangePass/emailMask 与服务端一致。 */
+async function refreshWho() {
+  const who = await api('/api/public/teams/' + (TEAM || 'all') + '/my/who');
+  if (!who || who.ok === false) return null;
+  if (who.anyTeam) who.team = '';
+  else if (who.team !== 'male' && who.team !== 'female') who.team = TEAM || '';
+  applyLoginState(who);
+  return who;
+}
+
+
 /* 2026-10-14 注册功能已下线：注册页签的 DOM + JS 已整体删除
    （表单、网关授权步骤、姓名核对、提交建号、轮询与全部相关状态变量），
-   登录门只保留「登录」+「忘记密码」。 */
+   登录门只保留「登录」+「忘记密码」（2026-10-18 起「忘记密码」改为弹窗，见 openForgotDlg）。 */
 
 /* 会话失效（接口 401）：清 token 回登录门；登录门已开着就不动 */
 function sessionExpired() {
@@ -3787,6 +4280,16 @@ async function loadMy() {
        token 由 api() 统一走 X-My-Token 头（2026-10-13），URL 不再带登录态。 */
     const who = await api('/api/public/teams/' + TEAM + '/my/who');
     if (who && who.needBind) { applyLoginState(who); renderBindCard(who); return; }
+    /* 2026-10-18 契约 v2 §4.7：正常账号也要把 who 的身份标志回填进 meState
+       （emailMask/needQq/mustChangePass/phone）—— 否则刚登录进「我的」页，
+       QQ 邮箱行还是「去绑定」（登录响应只带了部分字段时）。只合字段、不动 TEAM/水印，
+       避免把「全团账号」的视角切错（applyLoginState 会改 TEAM）。 */
+    if (who && meState) {
+      ['emailMask', 'email', 'needQq', 'needProfile', 'mustChangePass', 'phone',
+        'personPhone', 'bound', 'switchable'].forEach((k) => {
+        if (who[k] !== undefined) meState[k] = who[k];
+      });
+    }
     const d = await api('/api/public/teams/' + TEAM + '/my');
     myPersonId = Number(d.personId || 0) || null;
     let series = null;
@@ -3848,8 +4351,8 @@ function renderMyLogin() {
     '<div class="card card-pad">' +
     '<div class="big-av" style="background:' + avColor(LABEL()) + '">' + esc(LABEL().charAt(0)) + '</div>' +
     '<h3>' + esc(LABEL()) + ' · 我的数据</h3>' +
-    '<p class="tip">账号由管理员添加<br>使用「手机号 + 密码」登录（姓名也可以）</p>' +
-    '<input id="myName" placeholder="手机号 / 姓名" value="' + esc(name) + '" autocomplete="off">' +
+    '<p class="tip">账号由管理员添加<br>使用「手机号 / 艺名 + 密码」登录</p>' +
+    '<input id="myName" placeholder="手机号 / 艺名" value="' + esc(name) + '" autocomplete="off">' +
     /* 2026-10-14：与登录门 gatePass 同口径 —— 密码是 4~20 位字母/数字（2026-10-17 起也允许点），
        inputmode="numeric" 只弹数字键盘、字母打不出来（设了字母密码就登不进来），删掉用默认键盘。 */
     /* 2026-10-17 第四轮审计 D 域 P3-4：与 gatePass 同口径，密码框 type="password"。 */
@@ -3858,7 +4361,9 @@ function renderMyLogin() {
     '<button class="btn-main" id="myGo">查看我的数据</button>' +
     '</div></div>';
   const go = async () => {
-    const nm = $('myName').value.trim(), pw = $('myPass').value.trim();
+    const nm = $('myName').value.trim();
+    /* 契约 v2 §4.1：密码**不 trim**（与登录门同口径；首尾空格是密码的一部分） */
+    const pw = $('myPass').value || '';
     const errEl = $('myErr');
     if (!nm || !pw) {
       errEl.textContent = '请输入账号和密码';
@@ -4063,9 +4568,12 @@ function renderMy(d, series, push, accounts) {
       '<span class="material-symbols-outlined">chevron_right</span></div></div>' +
       '<div class="st-my-item" id="myEmailRow" style="cursor:pointer">' +
       '<div class="l"><div class="ico"><span class="material-symbols-outlined">mail</span></div>' +
-      '<div style="min-width:0"><div class="t">绑定邮箱</div>' +
-      '<div class="d">忘记密码时，新密码发到这个邮箱</div></div></div>' +
-      '<div class="r"><span>' + esc((meState && meState.email) || '未绑定') + '</span>' +
+      '<div style="min-width:0"><div class="t">QQ 邮箱</div>' +
+      '<div class="d">忘记密码时，临时密码发到这个邮箱</div></div></div>' +
+      /* 2026-10-18 契约 v2 §4.7：只显示服务端脱敏 emailMask；未绑显示「去绑定」（主色） */
+      '<div class="r">' + (meState && meState.emailMask
+        ? '<span>' + esc(meState.emailMask) + '</span>'
+        : '<span class="pri">去绑定</span>') +
       '<span class="material-symbols-outlined">chevron_right</span></div></div>' +
       '<div class="st-my-item" id="myForgot" style="cursor:pointer">' +
       '<div class="l"><div class="ico"><span class="material-symbols-outlined">lock_reset</span></div>' +
@@ -4123,7 +4631,8 @@ function renderMy(d, series, push, accounts) {
        由对话框负责覆盖本地登录态。 */
     openMyPwdDlg();
   };
-  $('myEmailRow').onclick = () => { openMyEmailDlg(); };
+  /* 2026-10-18 契约 v2 §4.4：我的页常驻入口，与登录后 nudge 共用同一个弹窗 */
+  $('myEmailRow').onclick = () => { openQqDlg({ source: 'my' }); };
   /* 列表两行滚到页内对应的操作卡：绑定行 → 绑定/审计卡，推送行 → 推送卡。
      卡片是异步渲染的（my / series / claim / push / accounts 五个请求回来才拼 DOM），
      所以找不到目标时短轮询等一下再滚，而不是静默 return 让用户以为点了没反应。 */
@@ -4292,153 +4801,203 @@ function showMyHome() {
   ['myPushCard', 'myChaseCard'].forEach((id) => { const el = $(id); if (el) el.hidden = true; });
 }
 
-/* ==================== 「我的」页内：重置密码对话框（2026-10-15 契约 A） ====================
-   已登录身份下自己重置密码，不再走手机号重置（手机号重置只保留在未登录的登录门「忘记密码」）。
-   接口（冻结契约）：POST /api/public/my/password
-     Headers: X-My-Token: <token>（身份**只**认这个头）
-     Body:    {"newPass":"..."}（不再要 oldPass；带了也忽略）
-     200 → {ok:true, token:"<新的 my token>"}；400 → {error:"...具体文案..."}；401 → 登录已过期
-   成功后后端吊销全部旧 token：必须用响应里的 token 覆盖本地登录态（setMyToken），
-   否则用户会被立刻踢回登录门。
-   前端先自校验（4~20 位字母/数字/点 + 两次一致），不满足就地提示、不发请求。 */
-function openMyPwdDlg() {
+/* ==================== 「我的」页内：改密对话框（2026-10-15 契约 A；2026-10-18 契约 v2 §4.8） ====================
+   已登录身份下自己改密码，不需要旧密码；也用于「临时密码登录后改密」提示层的入口
+   （opts.force=true：标题/说明换口径、去掉「取消」、点遮罩与 Esc 都不关、留「退出登录」逃生口）。
+   接口：POST /api/public/my/password  Headers: X-My-Token
+     Body: {"newPass":"..."} → 200 {ok:true, token, mustChangePass:false}；400 {code,error}；401
+   成功后后端吊销全部旧 token：必须用响应 token 覆盖本地登录态（setMyToken），否则立刻被踢回登录门。
+   密码规则（2026-10-18 用户口径）：4~64 个字符，允许中英文/特殊字符/任何符号，**不 trim**（首尾空格是密码的一部分）。 */
+function openMyPwdDlg(opts) {
+  opts = opts || {};
+  const force = !!opts.force;
   const old = $('myPwdMask');
   if (old) old.remove();   // 防重复弹层
   const mask = document.createElement('div');
   mask.id = 'myPwdMask';
-  /* 行内样式：单文件 SPA 的对话框没有现成皮肤可套，照登录门 iOS 卡风格给一套 */
-  mask.style.cssText = 'position:fixed;inset:0;z-index:95;background:rgba(11,28,48,.45);' +
+  mask.style.cssText = 'position:fixed;inset:0;z-index:96;background:rgba(11,28,48,.45);' +
     'display:flex;align-items:center;justify-content:center;padding:20px;';
-  mask.innerHTML = '<div class="gate-box" style="max-width:360px">' +
-    '<h3 style="font-size:19px">重置密码</h3>' +
-    '<p class="tip">直接设置一个新的登录密码，不需要旧密码。<br>' +
-    '改完旧的登录凭证立即失效，本机会自动换成新登录态，不用重新登录。</p>' +
-    '<input id="myPwdNew" type="password" placeholder="新密码（4~20 位字母、数字或点）" autocomplete="new-password">' +
+  mask.innerHTML = '<div class="gate-box dlg-box" style="max-width:360px">' +
+    '<h3>' + (force ? '请设置新密码' : '重置密码') + '</h3>' +
+    '<p class="tip">' + (force
+      ? '你正在用临时密码登录，请先设置自己的登录密码。<br>设置后其他设备上的登录会退出。'
+      : '直接设置一个新的登录密码，不需要旧密码。<br>改完旧的登录凭证立即失效，本机会自动换成新登录态，不用重新登录。') +
+    '</p>' +
+    '<input id="myPwdNew" type="password" placeholder="' + PASS_RULE + '" autocomplete="new-password">' +
     '<input id="myPwdNew2" type="password" placeholder="确认新密码" autocomplete="new-password">' +
-    '<div class="form-err hidden" id="myPwdErr" style="color:#F43F5E;font-size:13px;text-align:left;margin:6px 0"></div>' +
-    '<div style="display:flex;gap:10px;margin-top:12px">' +
-    '<button class="go gray" id="myPwdCancel" style="margin-top:0">取消</button>' +
-    '<button class="go" id="myPwdGo" style="margin-top:0">重置密码</button></div></div>';
+    '<div class="form-hint">支持中英文、数字和任意符号；首尾空格也算密码的一部分</div>' +
+    '<div class="form-err hidden" id="myPwdErr"></div>' +
+    '<div class="btn-row">' +
+      (force ? '' : '<button class="go gray" id="myPwdCancel">取消</button>') +
+      '<button class="go" id="myPwdGo">' + (force ? '保存新密码' : '重置密码') + '</button></div>' +
+    (force ? '<button class="gate-link-plain" id="myPwdOut">退出登录</button>' : '') +
+    '</div>';
   document.body.appendChild(mask);
-  mask.addEventListener('click', (e) => { if (e.target === mask) close(); });
-  const close = () => mask.remove();
-  $('myPwdCancel').onclick = close;
+  lockScroll();
+  let closed = false;
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    document.removeEventListener('keydown', onKey);
+    mask.remove();
+    unlockScroll();
+  };
+  const onKey = (e) => { if (e.key === 'Escape' && !force) close(); };
+  document.addEventListener('keydown', onKey);
+  mask.addEventListener('click', (e) => { if (e.target === mask && !force) close(); });
+  if (!force) $('myPwdCancel').onclick = close;
+  else $('myPwdOut').onclick = () => { close(); myLogout(); removeWatermark(); location.reload(); };
   ['myPwdNew', 'myPwdNew2'].forEach((id) => {
     $(id).onkeydown = (e) => { if (e.key === 'Enter') $('myPwdGo').click(); };
   });
   setTimeout(() => { const el = $('myPwdNew'); if (el) el.focus(); }, 60);
   $('myPwdGo').onclick = async () => {
-    const newPass = ($('myPwdNew').value || '');
-    const newPass2 = ($('myPwdNew2').value || '');
+    const newPass = $('myPwdNew').value || '';   // 契约 v2 §4.8：不 trim
+    const newPass2 = $('myPwdNew2').value || '';
     const errEl = $('myPwdErr');
     const fail = (m) => {
       errEl.textContent = m;
       errEl.classList.remove('hidden');
     };
     errEl.classList.add('hidden');
-    /* 前端先校验（与后端同口径）：不满足直接提示，不发请求。
-       没有旧密码可比，所以不再校验「新旧相同」（后端也已不要求 oldPass）。 */
-    if (!/^[A-Za-z0-9.]{4,20}$/.test(newPass)) return fail('新密码必须是 4~20 位字母、数字或点');
+    /* 前端先校验（与后端 validate_my_password 同口径）：不满足直接提示，不发请求 */
+    if (!isValidPass(newPass)) return fail(PASS_RULE);
     if (newPass !== newPass2) return fail('两次输入的新密码不一致');
     const btn = $('myPwdGo');
+    const i1 = $('myPwdNew'), i2 = $('myPwdNew2');
     btn.disabled = true; btn.textContent = '提交中…';
+    i1.disabled = true; i2.disabled = true;
     try {
-      const r = await fetch('/api/public/my/password', {
-        method: 'POST',
-        headers: Object.assign({ 'Content-Type': 'application/json' }, myTokenHeaders()),
-        body: JSON.stringify({ newPass: newPass }),   // 契约 A：body 只有 newPass
-      });
-      /* 401 = 登录已过期：按登录失效处理，收起对话框回登录门 */
-      if (r.status === 401) { close(); sessionExpired(); return; }
-      const d = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
-      /* 后端已吊销全部旧 token：用新 token 覆盖本地全部 token 引用（setMyToken） */
-      setMyToken(d.token);
+      const d = await postJson('/api/public/my/password', { newPass: newPass }, { auth: true });
+      if (d && d.token) setMyToken(d.token);   // 后端已吊销全部旧 token
+      /* 改密成功 → 清除「临时密码」标记（契约 §4.6/§4.8） */
+      if (meState) meState.mustChangePass = false;
       close();
-      toast(d.token ? '密码已重置' : '密码已重置，请重新登录');
+      toast(force ? '密码已修改' : '密码已重置');
+      refreshWho().catch(() => {});   // 重拉身份，needQq/mustChangePass 与服务端对齐
+      if (typeof opts.after === 'function') { try { opts.after(); } catch (_) {} }
     } catch (e) {
-      btn.disabled = false; btn.textContent = '重置密码';
-      fail(e.message || '重置失败，稍后再试');
+      if (e.code === 'UNAUTHORIZED') { close(); sessionExpired(); return; }
+      btn.disabled = false; btn.textContent = force ? '保存新密码' : '重置密码';
+      i1.disabled = false; i2.disabled = false;
+      fail(apiErrText(e) || '重置失败，稍后再试');
     }
   };
 }
 
-/* ==================== 「我的」页内：绑定邮箱对话框（2026-10-17 用户口径） ====================
-   已登录身份下自助绑定/更新/解绑邮箱。忘记密码重置时，随机密码发到这个邮箱。
-   接口（冻结契约）：POST /api/public/my/email
-     Headers: X-My-Token: <token>（身份**只**认这个头）
-     Body:    {"email":"..."}（空串 = 解绑）
-     200 → {ok:true, email:"<脱敏>"}；400 → {error:"..."}；401 → 登录已过期
-   前端先自校验（含 @ 与域名点、无空白），不满足就地提示、不发请求。 */
-function openMyEmailDlg() {
-  const old = $('myEmailMask');
-  if (old) old.remove();   // 防重复弹层
-  const current = (meState && meState.email) || '';
-  const mask = document.createElement('div');
-  mask.id = 'myEmailMask';
-  mask.style.cssText = 'position:fixed;inset:0;z-index:95;background:rgba(11,28,48,.45);' +
-    'display:flex;align-items:center;justify-content:center;padding:20px;';
-  mask.innerHTML = '<div class="gate-box" style="max-width:360px">' +
-    '<h3 style="font-size:19px">绑定邮箱</h3>' +
-    '<p class="tip">忘记密码时，系统会把新密码发到这个邮箱。建议使用常用邮箱，并牢记。</p>' +
-    '<input id="myEmailIn" type="email" placeholder="example@163.com" autocomplete="email"' +
-    ' value="' + esc(current) + '">' +
-    '<div class="form-err hidden" id="myEmailErr" style="color:#F43F5E;font-size:13px;text-align:left;margin:6px 0"></div>' +
-    '<div style="display:flex;gap:10px;margin-top:12px">' +
-    '<button class="go gray" id="myEmailCancel" style="margin-top:0">取消</button>' +
-    '<button class="go" id="myEmailGo" style="margin-top:0">保存</button></div>' +
-    (current
-      ? '<div style="text-align:right;margin-top:10px"><a href="javascript:void(0)" id="myEmailClear" ' +
-        'style="font-size:12px;color:var(--outline)">解绑邮箱</a></div>'
-      : '') +
-    '</div>';
-  document.body.appendChild(mask);
-  mask.addEventListener('click', (e) => { if (e.target === mask) close(); });
-  const close = () => mask.remove();
-  $('myEmailCancel').onclick = close;
-  $('myEmailIn').onkeydown = (e) => { if (e.key === 'Enter') $('myEmailGo').click(); };
-  setTimeout(() => { const el = $('myEmailIn'); if (el) el.focus(); }, 60);
+/* ==================== 绑定 / 修改 / 解绑 QQ 邮箱（契约 v2 §4.4/§4.7 / §3.4） ====================
+   登录后的 nudge 与「我的」页的 QQ 邮箱行共用同一个弹窗（source: 'nudge' | 'my'）。
+   接口：POST /api/public/my/email  {"qq":"12345678"}；{"qq":""} = 解绑
+     200 {ok:true, emailMask:"123***@qq.com"}；400 INVALID_QQ / QQ_TAKEN / NEED_PROFILE；401
+   2026-10-18 用户口径：同一 QQ 不能绑多个账号；没有 QQ 邮箱的找管理员。
+   脱敏只用服务端 emailMask 回填，**不用输入原值**拼显示。 */
+function openQqDlg(opts) {
+  opts = opts || {};
+  const source = opts.source === 'nudge' ? 'nudge' : 'my';
+  const current = (meState && (meState.emailMask || meState.email || '')) || '';
+  const dlg = makeDialog('qqMask', '');
+  const box = dlg.box;
+  const failEl = () => $('qqErr');
 
-  const save = async (email) => {
-    const btn = $('myEmailGo');
-    const errEl = $('myEmailErr');
-    const fail = (m) => { errEl.textContent = m; errEl.classList.remove('hidden'); };
+  const applyResult = (d, qq, bound) => {
+    const maskTxt = bound ? ((d && d.emailMask) || maskQq(qq)) : '';
+    if (meState) {
+      meState.emailMask = maskTxt;
+      meState.email = maskTxt;
+      meState.needQq = bound ? false : true;
+    }
+    dlg.close();
+    toast(bound ? (current ? 'QQ 邮箱已更新' : 'QQ 邮箱已绑定')
+      : 'QQ 邮箱已解绑，忘记密码请联系管理员');
+    if (source === 'my' || view === 'my') { try { loadMy(); } catch (_) {} }
+  };
+
+  const submit = async (qq) => {
+    const btn = $('qqGo');
+    const errEl = failEl();
+    const fail = (m) => { if (errEl) { errEl.textContent = m; errEl.classList.remove('hidden'); } };
     errEl.classList.add('hidden');
-    btn.disabled = true; btn.textContent = '保存中…';
+    if (!isValidQq(qq)) return fail('QQ 号应为 5~12 位数字，且不能以 0 开头');
+    btn.disabled = true; btn.textContent = '绑定中…';
+    const input = $('qqIn');
+    if (input) input.disabled = true;
     try {
-      const r = await fetch('/api/public/my/email', {
-        method: 'POST',
-        headers: Object.assign({ 'Content-Type': 'application/json' }, myTokenHeaders()),
-        body: JSON.stringify({ email: email }),
-      });
-      if (r.status === 401) { close(); sessionExpired(); return; }
-      const d = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
-      // 成功：用用户输入值更新 meState，再重拉「我的」页让列表行显示新邮箱
-      if (meState) meState.email = email;
-      close();
-      toast(email ? '邮箱已绑定' : '邮箱已解绑');
-      loadMy();
+      const d = await postJson('/api/public/my/email', { qq: qq }, { auth: true });
+      applyResult(d, qq, true);
     } catch (e) {
-      btn.disabled = false; btn.textContent = '保存';
-      fail(e.message || '保存失败，稍后再试');
+      if (e.code === 'UNAUTHORIZED') { dlg.close(); sessionExpired(); return; }
+      btn.disabled = false; btn.textContent = current ? '保存' : (source === 'nudge' ? '立即绑定' : '绑定');
+      if (input) input.disabled = false;
+      if (e.code === 'NEED_PROFILE') { dlg.close(); renderProfileGuide(meState || {}); return; }
+      fail(apiErrText(e) || '保存失败，稍后再试');
     }
   };
 
-  $('myEmailGo').onclick = () => {
-    const email = ($('myEmailIn').value || '').trim();
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-      const errEl = $('myEmailErr');
-      errEl.textContent = '邮箱格式不正确';
-      errEl.classList.remove('hidden');
-      return;
-    }
-    save(email);
+  const renderUnbindConfirm = () => {
+    box.innerHTML =
+      '<button class="dialog-close" id="qqX2" aria-label="关闭"><span class="material-symbols-outlined">close</span></button>' +
+      '<h3>解绑 QQ 邮箱</h3>' +
+      '<div class="warn-box">解绑后，忘记密码将无法自助重置，只能联系管理员帅帅在后台重置。<br>确定要解绑吗？</div>' +
+      '<div class="btn-row"><button class="go gray" id="qqUnbindCancel">取消</button>' +
+      '<button class="go" id="qqUnbindOk" style="background:#F43F5E">仍要解绑</button></div>';
+    $('qqX2').onclick = dlg.close;
+    $('qqUnbindCancel').onclick = renderMain;
+    $('qqUnbindOk').onclick = async () => {
+      const btn = $('qqUnbindOk');
+      btn.disabled = true; btn.textContent = '解绑中…';
+      try {
+        const d = await postJson('/api/public/my/email', { qq: '' }, { auth: true });
+        applyResult(d, '', false);
+      } catch (e) {
+        if (e.code === 'UNAUTHORIZED') { dlg.close(); sessionExpired(); return; }
+        btn.disabled = false; btn.textContent = '仍要解绑';
+        const errEl = document.createElement('div');
+        errEl.className = 'form-err';
+        errEl.textContent = apiErrText(e) || '解绑失败，稍后再试';
+        btn.parentNode.parentNode.appendChild(errEl);
+      }
+    };
   };
-  const clearEl = $('myEmailClear');
-  if (clearEl) {
-    clearEl.onclick = () => save('');
-  }
+
+  const renderMain = () => {
+    box.innerHTML =
+      '<button class="dialog-close" id="qqX" aria-label="关闭"><span class="material-symbols-outlined">close</span></button>' +
+      '<h3>' + (current ? '修改 QQ 邮箱' : '绑定 QQ 邮箱') + '</h3>' +
+      '<p class="tip">' + (source === 'nudge'
+        ? '绑定后忘记密码可以自助重置，临时密码会发到你的 QQ 邮箱。<br>没有 QQ 邮箱？请联系管理员帅帅。'
+        : '忘记密码时，临时密码会发到这个 QQ 邮箱。<br>没有 QQ 邮箱？请联系管理员帅帅。') + '</p>' +
+      (current ? '<div class="field-label">当前绑定</div>' +
+        '<input class="dlg-readonly" value="' + esc(current) + '" readonly autocomplete="off">' : '') +
+      '<div class="field-label">QQ 号</div>' +
+      '<div class="qq-wrap"><input id="qqIn" inputmode="numeric" maxlength="12" placeholder="QQ 号" autocomplete="off">' +
+        '<span class="qq-suffix">@qq.com</span></div>' +
+      '<div class="qq-preview" id="qqPreview">将绑定：你的 QQ 邮箱</div>' +
+      '<div class="form-err hidden" id="qqErr"></div>' +
+      '<div class="btn-row">' +
+        (source === 'nudge' ? '<button class="go gray" id="qqLater">以后再说</button>'
+          : '<button class="go gray" id="qqCancel">取消</button>') +
+        '<button class="go" id="qqGo">' + (current ? '保存' : (source === 'nudge' ? '立即绑定' : '绑定')) + '</button>' +
+      '</div>' +
+      (current ? '<div style="text-align:right;margin-top:12px">' +
+        '<button class="link-danger" id="qqUnbind">解绑 QQ 邮箱</button></div>' : '');
+    $('qqX').onclick = dlg.close;
+    if ($('qqLater')) $('qqLater').onclick = dlg.close;   // 写冷却：markQqNudged 在弹出时已记一次
+    if ($('qqCancel')) $('qqCancel').onclick = dlg.close;
+    const input = $('qqIn');
+    const syncPreview = () => {
+      const q = String(input.value || '').replace(/\D/g, '').replace(/^0+/, '').slice(0, 12);
+      input.value = q;
+      $('qqPreview').textContent = isValidQq(q) ? '将绑定：' + q + '@qq.com' :
+        (q ? 'QQ 号应为 5~12 位数字，且不能以 0 开头' : '将绑定：你的 QQ 邮箱');
+    };
+    input.addEventListener('input', () => { failEl().classList.add('hidden'); syncPreview(); });
+    input.onkeydown = (e) => { if (e.key === 'Enter') $('qqGo').click(); };
+    setTimeout(() => { try { input.focus(); } catch (_) {} }, 60);
+    $('qqGo').onclick = () => submit(String(input.value || '').trim());
+    if ($('qqUnbind')) $('qqUnbind').onclick = renderUnbindConfirm;
+  };
+
+  renderMain();
 }
 
 /* 追分设置入口行的右侧摘要（2026-10-12：没开追分开关 = 关；开了看目标数）。
@@ -7505,6 +8064,14 @@ function dismissAnnounce() {
   if (await siteIsOpen()) { bootRest(); return; }
   const me = await ensureLogin();
   applyLoginState(me);   // 登录后立刻按账号团别设置 TEAM
+  /* 2026-10-18 契约 v2 §4.3/§4.6：刷新页面恢复登录态时也要接住两个状态 ——
+     needProfile → 复用 #gate 渲染不可关闭的补全卡（阻断逻辑自愈）；
+     mustChangePass → 延迟弹「请修改密码」提示层（临时密码登录过、还没改密）。
+     已经走过登录流程的（登录当下就渲染/弹过）不重复弹，避免用户点掉「稍后」又被弹一次。 */
+  if (me && me.needProfile && !$('obPhone')) { try { renderProfileGuide(me); } catch (_) {} }
+  else if (me && me.mustChangePass && !mustPwdPrompted) {
+    setTimeout(() => { try { if (!mustPwdPrompted) openMustChangeDlg(); } catch (_) {} }, 600);
+  }
   /* 登录彩带（2026-10-13）：celebrate.enabled && celebrate.confetti 才放。
      只放彩带、不挂横幅（展示内容走 items）；
      celebrateFiredThisLoad 记着本次页面的庆祝事件已开跑，site 数据回来后

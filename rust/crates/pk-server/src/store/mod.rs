@@ -645,10 +645,13 @@ mod tests {
         );
     }
 
-    /// 密码规则：4~20 位字母、数字或点（2026-10-17 起允许点）。
-    /// 下限沿革：2026-10-10 放宽为 4 → 10-12 审计 M4 提到 6 → **10-13 产品拍板回到 4**
-    /// （运营开号习惯是手机号后四位，6 位下限会把后台开号全拒掉）。
-    /// 符号/空格/太短仍拒绝；登录路径（my_account_check_login）不比长度，
+    /// 密码规则（2026-10-18 用户拍板）：**4~64 个字符，允许中英文 / 特殊字符 /
+    /// 任何符号（含空格），不 trim**；只拒 ASCII 控制字符与全空白。
+    ///
+    /// 口径沿革：2026-10-10 放宽为 4 → 10-12 审计 M4 提到 6 → **10-13 产品拍板回到 4**
+    /// （运营开号习惯是手机号后四位，6 位下限会把后台开号全拒掉）→ 10-17 允许点 →
+    /// **10-18 放开整个字符集并把上限提到 64**（用户原话「密码支持中英文、特殊字符、
+    /// 任何符号」）。下限仍是 4；登录路径（my_account_check_login）不比长度，
     /// 存量短密码账号登录不受影响。
     #[test]
     fn my_account_password_rule() {
@@ -658,20 +661,43 @@ mod tests {
             validate_my_account("玖豆", "Aa181206..").is_ok(),
             "带点 → 放行（2026-10-17 口径）"
         );
-        assert!(
-            validate_my_account("啸帆", "133-1234-5678").is_err(),
-            "带横线 → 拒绝"
-        );
-        assert!(
-            validate_my_account("啸帆", "ab_123").is_err(),
-            "带下划线 → 拒绝"
-        );
+        // 2026-10-18 新口径：旧断言「符号 / 空格 / 下划线被拒」全部反转为放行
+        for p in [
+            "133-1234-5678", // 横线
+            "ab_123",        // 下划线
+            "12 34",         // 空格
+            "abcd!",         // 标点
+            "ab@c#",         // 邮箱常用符号
+            "密码abcd",      // 中文
+            "  a1b  ",       // 首尾空格（不 trim，属于密码本身）
+        ] {
+            assert!(
+                validate_my_account("啸帆", p).is_ok(),
+                "{p} 含任意字符 → 应放行（2026-10-18 口径）"
+            );
+        }
+        // 长度边界保留：下限 4、上限 64（按字符数算）
         assert!(
             validate_my_account("啸帆", "123").is_err(),
             "少于 4 位 → 拒绝"
         );
-        assert!(validate_my_account("", "13312345678").is_err());
+        assert!(
+            validate_my_account("啸帆", &"a".repeat(64)).is_ok(),
+            "64 个字符是上限边界值"
+        );
+        assert!(
+            validate_my_account("啸帆", &"a".repeat(65)).is_err(),
+            "65 个字符 → 拒绝"
+        );
         assert!(validate_my_account("啸帆", "").is_err());
+        assert!(validate_my_account("啸帆", "     ").is_err(), "全空白 → 拒绝");
+        assert!(
+            validate_my_account("啸帆", "ab\ncd").is_err(),
+            "含 ASCII 控制字符 → 拒绝"
+        );
+        // 姓名规则不变
+        assert!(validate_my_account("", "13312345678").is_err());
+        assert!(validate_my_account(&"啸".repeat(21), "13312345678").is_err());
     }
 }
 
