@@ -282,6 +282,15 @@ button { font:inherit; cursor:pointer; }
   -webkit-backdrop-filter:blur(12px); backdrop-filter:blur(12px); }
 .ip-capsule b { font-size:12px; font-weight:700; letter-spacing:.25em; color:#F3E8FF; }
 .ip-capsule i { font-style:normal; font-size:10px; color:#fcd34d; animation:ipTwinkle 2s ease-in-out infinite; }
+/* 冠军页胶囊（Stitch _2 稿）：金紫流光，鎏金描边 + 金色内高光 */
+.ip-theme-gold .ip-capsule {
+  background:linear-gradient(90deg, rgba(69,26,13,.9) 0%, rgba(88,28,135,.9) 50%, rgba(69,26,13,.9) 100%);
+  border-color:rgba(252,211,77,.6);
+  box-shadow:0 0 16px rgba(251,191,36,.5), inset 0 1px 2px rgba(255,255,255,.4); }
+.ip-theme-gold .ip-capsule b { color:#FEF3C7; }
+/* 全屏顶部聚光源按页切主题：gold 页鎏金（Stitch _2），purple/ice 页保持紫（_3/_1 稿） */
+.ip-live-gold .ip-glow-top {
+  background:radial-gradient(ellipse at top, rgba(254,240,138,.5) 0%, rgba(245,158,11,.28) 45%, transparent 75%); }
 /* 中段可滚区（内容超出内部滚，卡片尺寸不动；设计稿自上而下排布） */
 .ip-main { flex:1 1 auto; min-height:0; width:100%; overflow-x:hidden; overflow-y:auto;
   display:flex; flex-direction:column; align-items:center;
@@ -334,42 +343,53 @@ button { font:inherit; cursor:pointer; }
   animation:ipSpinReverse 18s linear infinite; }
 .ip-orbit2 i { position:absolute; bottom:12px; right:32px; width:8px; height:8px; border-radius:50%;
   background:#E9D5FF; box-shadow:0 0 8px #E9D5FF; }
-/* ---- 冠军专属（Stitch 冠军稿）：鎏金日冕双环 + 太阳芒羽 + 金色能量核 ---- */
-/* 日冕外环：逆时针 22s 精密金色能量环（上缘亮金 / 下缘深金，内发光） */
-.ip-theme-gold .ip-corona { position:absolute; width:212px; height:212px; border-radius:50%;
-  pointer-events:none; border:2px solid transparent;
-  border-top-color:rgba(254,243,138,.85); border-bottom-color:rgba(217,119,6,.6);
-  box-shadow:0 0 22px rgba(251,191,36,.5), inset 0 0 22px rgba(253,224,71,.35);
-  animation:ipSpinReverse 22s linear infinite; }
-/* 日冕四芒星与能量星珠（随环旋转） */
+/* ---- 冠军专属（Stitch _2 冠军稿）：鎏金日冕双环（3D 透视椭圆）+ 太阳芒羽 + 金色能量核 ---- */
+/* 日冕外环：w-52 h-52（208px）1.5px 虚线亮金，rotateX(64deg) rotateY(16deg) 透视椭圆，逆时针 16s */
+.ip-theme-gold .ip-corona { position:absolute; width:208px; height:208px; border-radius:50%;
+  pointer-events:none; border:1.5px dashed rgba(253,224,71,.85);
+  box-shadow:0 0 24px rgba(245,158,11,.7), inset 0 0 18px rgba(254,240,138,.4);
+  transform:rotateX(64deg) rotateY(16deg);
+  animation:ipGoldSpinRev 16s linear infinite; }
+@keyframes ipGoldSpinRev {
+  from { transform:rotateX(64deg) rotateY(16deg) rotate(0deg); }
+  to   { transform:rotateX(64deg) rotateY(16deg) rotate(-360deg); } }
+/* 日冕四芒星与能量星珠（随环旋转）：星珠 top-1.5 right-10，✦ bottom-2 left-9 */
 .ip-theme-gold .ip-corona i { position:absolute; font-style:normal; color:#fde047;
   text-shadow:0 0 8px #fde047; animation:ipTwinkle 2s ease-in-out infinite; }
-.ip-theme-gold .ip-corona .dot { position:absolute; top:2px; right:36px; width:9px; height:9px;
-  border-radius:50%; background:#fde047; box-shadow:0 0 10px #fbbf24; }
-/* 鎏金星轨：顺时针 16s 粒子环（左缘琥珀 / 右缘亮金虚线） */
-.ip-theme-gold .ip-orbit { width:178px; height:178px;
-  border-top-color:rgba(253,224,71,.75); border-bottom-color:rgba(245,158,11,.55);
-  box-shadow:0 0 18px rgba(251,191,36,.5), inset 0 0 18px rgba(253,224,71,.3);
-  animation:ipSpinSlow 16s linear infinite; }
-.ip-theme-gold .ip-orbit i { background:#fbbf24; box-shadow:0 0 10px #fbbf24; }
-.ip-theme-gold .ip-orbit2 { border-left-color:rgba(251,191,36,.7); border-right-color:rgba(254,240,138,.6);
-  box-shadow:0 0 20px rgba(245,158,11,.45);
-  animation:ipSpinReverse 24s linear infinite; }
-.ip-theme-gold .ip-orbit2 i { background:#fef08a; box-shadow:0 0 8px #fef08a; }
-/* 太阳芒羽：徽章背后放射状金色佛光，周期旋转 + 缩放呼吸 */
-.ip-sunburst { position:absolute; width:260px; height:260px; border-radius:50%; pointer-events:none;
+.ip-theme-gold .ip-corona .dot { position:absolute; top:6px; right:40px; width:10px; height:10px;
+  border-radius:50%; background:#fde047; box-shadow:0 0 10px #fde047; }
+/* 鎏金星轨内环：1.8px 上亮金/下深金，rotateX(60deg) rotateY(-20deg) 透视椭圆，顺时针 22s */
+.ip-theme-gold .ip-orbit { width:176px; height:176px;
+  border:1.8px solid transparent;
+  border-top-color:rgba(254,240,138,.95); border-bottom-color:rgba(245,158,11,.8);
+  box-shadow:0 0 20px rgba(251,191,36,.6);
+  transform:rotateX(60deg) rotateY(-20deg);
+  animation:ipGoldSpin 22s linear infinite; }
+@keyframes ipGoldSpin {
+  from { transform:rotateX(60deg) rotateY(-20deg) rotate(0deg); }
+  to   { transform:rotateX(60deg) rotateY(-20deg) rotate(360deg); } }
+.ip-theme-gold .ip-orbit i { background:#fde047; box-shadow:0 0 10px #fde047; }
+/* 内环第二颗紫晶微光星珠（bottom-3 right-8） */
+.ip-theme-gold .ip-orbit i + i { background:#E9D5FF; box-shadow:0 0 8px #E9D5FF; }
+.ip-theme-gold .ip-orbit2 { display:none; }   /* _2 稿只有双环体系，旧第三环退役 */
+/* 太阳芒羽：徽章背后放射状金色佛光，周期旋转 + 缩放呼吸（_2 稿 golden-sunburst） */
+.ip-sunburst { position:absolute; width:224px; height:224px; border-radius:50%; pointer-events:none;
   opacity:.85; z-index:0;
   background:repeating-conic-gradient(from 0deg at 50% 50%,
-    rgba(253,224,71,.28) 0deg 4deg, transparent 4deg 12deg);
-  -webkit-mask-image:radial-gradient(circle, #000 0%, #000 30%, transparent 68%);
-  mask-image:radial-gradient(circle, #000 0%, #000 30%, transparent 68%);
-  animation:ipSunspin 40s linear infinite, ipPulseGlow 4s ease-in-out infinite; }
+    rgba(253,224,71,.35) 0deg 8deg, transparent 8deg 20deg,
+    rgba(245,158,11,.3) 20deg 28deg, transparent 28deg 40deg);
+  -webkit-mask-image:radial-gradient(circle, #000 20%, rgba(0,0,0,.6) 55%, transparent 72%);
+  mask-image:radial-gradient(circle, #000 20%, rgba(0,0,0,.6) 55%, transparent 72%);
+  animation:ipSunspin 36s linear infinite, ipSunPulse 3.5s ease-in-out infinite; }
 @keyframes ipSunspin { to { transform:rotate(360deg); } }
-/* 金色能量核：徽章正后方耀斑光团，让徽章宛如悬浮在耀日中心 */
-.ip-glowcore { position:absolute; width:150px; height:150px; border-radius:50%; pointer-events:none;
+@keyframes ipSunPulse {
+  0%,100% { transform:scale(.95); opacity:.75; }
+  50%     { transform:scale(1.08); opacity:1; } }
+/* 金色能量核：徽章正后方耀斑光团（_2 稿 w-44 h-44 四段金→紫渐变） */
+.ip-glowcore { position:absolute; width:176px; height:176px; border-radius:50%; pointer-events:none;
   z-index:1;
-  background:radial-gradient(circle, rgba(254,240,138,.55) 0%, rgba(251,191,36,.32) 40%, transparent 70%);
-  animation:ipPulseGlow 3s ease-in-out infinite; }
+  background:radial-gradient(circle, rgba(253,224,71,.7) 0%, rgba(245,158,11,.45) 35%, rgba(147,51,234,.2) 60%, transparent 75%);
+  animation:ipPulseGlow 2.2s ease-in-out infinite; }
 /* ---- 季军专属（Stitch 季军稿）：冰蓝倾斜透视椭圆星轨 + 双能量星体 ---- */
 /* 透视星轨：rotateX(68deg) + rotate(-15deg) 的立体椭圆，发光描边，绕椭圆公转 */
 .ip-ice-orbit { position:absolute; width:200px; height:200px; border-radius:50%; pointer-events:none;
@@ -411,6 +431,18 @@ button { font:inherit; cursor:pointer; }
 .ip-sub { margin:0; display:flex; align-items:center; justify-content:center; gap:6px;
   font-size:12px; line-height:16px; font-weight:600; letter-spacing:.1em; color:rgba(233,213,255,.9); }
 .ip-sub i { font-style:normal; color:#fbbf24; animation:ipPulseGlow 2.5s ease-in-out infinite; }
+/* 冠军页标题渐变（Stitch _2 稿 title-supreme-gold）：全金阶 + 金色投影 */
+.ip-theme-gold .ip-titles h1 {
+  background:linear-gradient(180deg,#FFFFFF 0%,#FEF08A 25%,#FDE047 50%,#F59E0B 80%,#B45309 100%);
+  -webkit-background-clip:text; background-clip:text;
+  -webkit-text-fill-color:transparent; color:transparent;
+  filter:drop-shadow(0 2px 10px rgba(245,158,11,.75)) drop-shadow(0 4px 22px rgba(0,0,0,.95)); }
+/* 季军页标题渐变（Stitch _1 稿 text-title-3d）：白→冰蓝→金，冰蓝+金双色投影 */
+.ip-theme-ice .ip-titles h1 {
+  background:linear-gradient(180deg,#FFFFFF 0%,#BAE6FD 35%,#FDE047 75%,#D97706 100%);
+  -webkit-background-clip:text; background-clip:text;
+  -webkit-text-fill-color:transparent; color:transparent;
+  filter:drop-shadow(0 2px 8px rgba(14,116,144,.8)) drop-shadow(0 4px 18px rgba(250,204,21,.45)); }
 /* 选手荣耀卡：定高 134（设计稿实测 p-4），内部上排 + 奖励行。
    2026-10-16 用户口径：上排 space-between 的中段空洞过大 → space-evenly 把
    头像↔成绩的中缝收到与两侧边缘一致，名字短也显得排满合适。 */
@@ -423,6 +455,39 @@ button { font:inherit; cursor:pointer; }
   -webkit-backdrop-filter:blur(8px); backdrop-filter:blur(8px); }
 .ip-player::before { content:''; position:absolute; top:0; right:0; width:80px; height:80px;
   background:linear-gradient(225deg, rgba(192,132,252,.2) 0%, transparent 70%); pointer-events:none; }
+/* 三甲选手卡主题覆盖（Stitch 三稿）：
+   gold（_2）= 金紫底 amber-950/40→purple-950/70→indigo-950/70 + 金描边金辉 + 金色右上折射光 96px；
+   purple（_3）= purple-950/70→purple-900/50→indigo-950/70 + 紫辉 + 紫色折射光 80px（与通用一致）；
+   ice（_1）= #2b1154/90→#190736/95 纵向渐变 + #522588 描边 + 白内高光。 */
+.ip-theme-gold .ip-player {
+  background:linear-gradient(90deg, rgba(69,26,3,.4) 0%, rgba(59,7,100,.7) 50%, rgba(30,27,75,.7) 100%);
+  border-color:rgba(251,191,36,.4);
+  box-shadow:0 0 26px rgba(245,158,11,.32), inset 0 0 16px rgba(254,240,138,.16); }
+.ip-theme-gold .ip-player::before {
+  width:96px; height:96px;
+  background:linear-gradient(225deg, rgba(251,191,36,.25) 0%, transparent 70%); }
+.ip-theme-purple .ip-player {
+  background:linear-gradient(90deg, rgba(59,7,100,.7) 0%, rgba(88,28,135,.5) 50%, rgba(30,27,75,.7) 100%);
+  border-color:rgba(192,132,252,.4);
+  box-shadow:0 0 24px rgba(168,85,247,.28), inset 0 0 16px rgba(216,180,254,.15); }
+.ip-theme-ice .ip-player {
+  background:linear-gradient(180deg, rgba(43,17,84,.9) 0%, rgba(25,7,54,.95) 100%);
+  border-color:#522588;
+  box-shadow:inset 0 1px 1px rgba(255,255,255,.15); }
+.ip-theme-ice .ip-player::before {
+  background:linear-gradient(225deg, rgba(125,211,252,.2) 0%, transparent 70%); }
+/* 头像环主题色（Stitch 三稿）：gold 金流光 / purple 紫银流光 / ice 冰蓝流光 */
+.ip-theme-gold .ip-ava-ring {
+  background:linear-gradient(45deg, #fde047 0%, #fbbf24 50%, #d97706 100%);
+  box-shadow:0 0 14px rgba(245,158,11,.6); }
+.ip-theme-gold .ip-ava-core { border-color:#542d13; background:#1e0e38; }
+.ip-theme-purple .ip-ava-ring {
+  background:linear-gradient(45deg, #fbbf24 0%, #d8b4fe 50%, #818cf8 100%);
+  box-shadow:0 0 12px rgba(168,85,247,.5); }
+.ip-theme-ice .ip-ava-ring {
+  background:linear-gradient(45deg, #22d3ee 0%, #7dd3fc 50%, #1d4ed8 100%);
+  box-shadow:0 0 14px rgba(56,189,248,.7); }
+.ip-theme-ice .ip-ava-core { border-color:rgba(56,189,248,.4); background:#16082e; }
 .ip-p-row { flex:1 1 auto; min-height:0; display:flex; align-items:center; justify-content:space-evenly; gap:8px; }
 .ip-p-left { display:flex; align-items:center; gap:12px; min-width:0; }
 .ip-ava { position:relative; flex:none; }
@@ -4741,7 +4806,7 @@ function chaseValueBlock(items, used, max) {
       '<input id="tkVal" inputmode="decimal" placeholder="本月音浪目标（万）" disabled>' +
       '<button class="go" id="tkValAdd" disabled>最多 ' + max + ' 个</button>';
   } else {
-    h += '<input id="tkVal" inputmode="decimal" placeholder="本月音浪目标（万），例：50">' +
+    h += '<input id="tkVal" inputmode="decimal" placeholder="目标分数（万）">' +
       '<button class="go" id="tkValAdd">添加目标分数</button>';
   }
   return h;
@@ -6434,9 +6499,11 @@ const IP_BADGE_SRC = {
     · icon：条目没配图标时的缺省徽章（emoji_events=冠军杯 / military_tech=奖牌 / star=星徽）
     （2026-10-16 用户口径：头像角标字「金/银/铜」去除，char 字段删除） */
 var IP_SEATS = [
-  { theme: 'gold', name: '冠军', btn: '冠军荣耀', sub: '问鼎巅峰 · 一战封神', icon: 'emoji_events' },
+  /* sub 文案 2026-10-17 对齐 Stitch 三稿：冠军「荣耀加冕 · 全公会通报」（_2 稿）、
+     亚军「锐不可当 · 傲视群雄」（_3 稿原词）、季军「傲然登榜 · 跻身三甲」（_1 稿） */
+  { theme: 'gold', name: '冠军', btn: '冠军荣耀', sub: '荣耀加冕 · 全公会通报', icon: 'emoji_events' },
   { theme: 'purple', name: '亚军', btn: '亚军荣耀', sub: '锐不可当 · 傲视群雄', icon: 'military_tech' },
-  { theme: 'ice', name: '季军', btn: '季军荣耀', sub: '锋芒毕露 · 再攀高峰', icon: 'star' },
+  { theme: 'ice', name: '季军', btn: '季军荣耀', sub: '傲然登榜 · 跻身三甲', icon: 'star' },
 ];
 var IP_SEAT_REST = { theme: 'purple', name: '荣耀席位', btn: '下一席位', sub: '荣耀在册 · 与有荣焉', icon: 'auto_awesome' };
 function ipSeat(i) { return IP_SEATS[i] || IP_SEAT_REST; }
@@ -6620,6 +6687,11 @@ function maybeAnnounceItemsPopup() {
     const it = pages[i];
     const seat = ipSeat(i);
     idx = i;
+    /* 全屏氛围层按页切主题（2026-10-17 Stitch 1:1）：顶部聚光源 gold 页是「鎏金」、
+       purple/ice 页是「紫」（_2 稿 vs _3/_1 稿）。主题类挂 box 上（rays/glow-top/
+       glow-bottom 三个全屏层是 box 直接子节点），翻页时三选一切换。 */
+    box.classList.remove('ip-live-gold', 'ip-live-purple', 'ip-live-ice');
+    box.classList.add('ip-live-' + (seat.theme || 'purple'));
     main.innerHTML = '';   // 只清这一层；粒子/装饰层翻页不重建
     const page = document.createElement('div');
     page.className = 'ip-page';
