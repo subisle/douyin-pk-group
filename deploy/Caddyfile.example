@@ -2,11 +2,25 @@
 #
 # 服务本身只监听 127.0.0.1:8787，公网流量全部由 Caddy 收口：
 #   - /            对外展示页（任何人可访问，无需口令；/1 /0 /report /lineage /my*
-#                  /wechat* /group* /st/* 都是同一份展示页的深链/兼容路径）
+#                  /wechat* /group* /st/* 都是同一展示页的深链/兼容路径）
 #   - /admin*      管理员后台（应用层校验登录口令；静态壳可匿名取，数据全靠 /api 鉴权）
 #   - /api/*       接口（鉴权与缓存策略由应用自己下发，见下）
 #
 # 用法：把下面内容并到 64 上现有的 Caddyfile，重载即可。
+#
+# 2026-10-17 线上实测补充（64 上已生效，与本文件对齐）：
+#   1. pk 站挂在 Cloudflare 橙云后（Proxied），源站 443 用 iptables 收成 CF-only
+#      白名单（脚本 /usr/local/sbin/cf-whitelist-443.sh，幂等可重跑；CF 段变化时重跑）。
+#      防的是「改 hosts 直连源站」绕过 CF 的抗丢包/缓存/DDoS 防护。
+#      ⚠️ 副作用：TLS-ALPN-01 验证进不来，所以 Caddy 全局选项固定用 HTTP-01（走 80，
+#      未封）。若曾用 dns-01/自签则不受影响。80 端口对公网保留全开（ACME + IP 兜底）。
+#   2. 加了 :80 全局兜底块：http://<源站IP>/ 直连时 301 跳正式域名（原来是 308 跳
+#      https://IP，无证书死路）。ACME 挑战路径 Caddy 会在内部短路，不受影响。
+
+:80 {
+	# IP 直连兜底（2026-10-17）：把「直接输 IP」的用户引回正式域名
+	redir https://pk.example.com{uri} permanent
+}
 
 pk.example.com {
 	encode zstd gzip
@@ -44,7 +58,16 @@ pk.example.com {
 	# }
 
 	# Docker 部署：容器只发 127.0.0.1，用 host 网络反代
-	reverse_proxy 127.0.0.1:8787
+	# ---------------------------------------------------------------
+	# 客户端真实 IP（2026-10-17）：链路是 CF → Caddy → docker-proxy → 容器，
+	# 容器里 ConnectInfo 只会看到 Docker 网关（如 172.26.0.1），XFF 链尾是 CF
+	# 边缘节点 IP —— 两者都不是真实访客。Cloudflare 会把真实客户端 IP 放在
+	# CF-Connecting-IP 头里（橙云代理时由 CF 覆写，客户端伪造不了），这里显式
+	# 转成 X-Real-IP 交给后端；没有该头时 header_up 会删掉 X-Real-IP，后端回落
+	# 到 XFF 链尾（直连源站场景仍然正确）。应用侧信任边界见 ipinfo::request_ip。
+	reverse_proxy 127.0.0.1:8787 {
+		header_up X-Real-IP {http.request.header.CF-Connecting-IP}
+	}
 
 	log {
 		output file /var/log/caddy/pk-group.log

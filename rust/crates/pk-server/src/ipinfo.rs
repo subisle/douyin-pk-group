@@ -276,15 +276,29 @@ pub fn source_names(set: SourceSet) -> Vec<&'static str> {
 
 /* ------------------------------- 请求 IP ------------------------------- */
 
-/// 生产流量经 Caddy（→ 127.0.0.1）到本机。
+/// 请求 IP：展示端门禁 / 访客日志 / 地区判定的唯一口径。
 ///
-/// 2026-10-13 安全修复（与 auth.rs login_source_key / admin.rs client_ip_for_limit
-/// 同口径）：XFF **第一跳是客户端可任意伪造的值**（`curl -H "X-Forwarded-For: 1.2.3.4"`
-/// 即可换地区绕过门禁）；XFF 链尾才是反代追加的、客户端无法篡改的一跳。
-/// 所以只信任来自回环连接的 X-Forwarded-For，且**取链尾**；其余情况一律用直连地址。
-/// （旧实现还认 cf-connecting-ip / x-real-ip 的第一跳，同样可被伪造，已移除。）
+/// 生产链路是 Cloudflare → Caddy → docker-proxy → 容器。2026-10-17 修复
+/// 「后端登录 IP 不对」：容器里 ConnectInfo 看到的直连方是 Docker 网关
+/// （如 172.26.0.1），**永远不是 127.0.0.1** —— 旧逻辑只在回环直连时才信任
+/// 转发头，结果所有访客都被记成了内网网关 IP（access_logs 全是 172.26.0.1 /
+/// 省份「内网」）。新口径（与 auth.rs login_source_key / admin.rs
+/// client_ip_for_limit 一致）：
+/// - 直连方是**回环或私网**（Docker 网关在内）才信任转发头；
+/// - `X-Real-IP` 优先（Caddy 显式注入 CF-Connecting-IP，即真实客户端 IP）；
+/// - 否则取 XFF 链尾（最接近服务端的一跳，反代追加、客户端难伪造）；
+/// - 公网直连一律用直连地址，外来伪造头直接忽略。
 pub fn request_ip(addr: SocketAddr, headers: &HeaderMap) -> String {
-    if addr.ip().is_loopback() {
+    if is_internal(&addr.ip()) {
+        if let Some(ip) = headers
+            .get("x-real-ip")
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .and_then(|s| s.parse::<IpAddr>().ok())
+        {
+            return ip.to_string();
+        }
         if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
             // 取链尾（最接近服务端的一跳），并做 IP 合法性校验，非法则回落直连地址
             if let Some(last) = xff.rsplit(',').next() {
@@ -300,7 +314,12 @@ pub fn request_ip(addr: SocketAddr, headers: &HeaderMap) -> String {
     addr.ip().to_string()
 }
 
-fn is_internal(ip: &IpAddr) -> bool {
+/// 直连方是否属于「本机/内网」——回环、私网、链路本地等。
+///
+/// 2026-10-17：`request_ip` / `auth::login_source_key` / `admin::client_ip_for_limit`
+/// 三处共用这一判定作为「是否信任转发头」的边界（容器里 Docker 网关属于私网）。
+/// 注意 `IpAddr` 本身没有 `is_private()`，必须按 V4/V6 分派。
+pub fn is_internal(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
             v4.is_loopback()
@@ -1791,15 +1810,27 @@ mod tests {
     fn request_ip_prefers_forwarded_headers_only_from_internal() {
         use axum::http::HeaderMap;
         let mut h = HeaderMap::new();
-        // 2026-10-13 安全修复：XFF 取链尾（反代追加的一跳，不可伪造），
-        // 客户端塞在第一跳的伪造值 1.2.3.4 必须被忽略。
+        // XFF 取链尾（反代追加的一跳，不可伪造），客户端塞第一跳的伪造值被忽略。
         h.insert("x-forwarded-for", "1.2.3.4, 10.0.0.1".parse().unwrap());
         let local: SocketAddr = "127.0.0.1:5555".parse().unwrap();
         assert_eq!(request_ip(local, &h), "10.0.0.1");
         let public: SocketAddr = "8.8.8.8:5555".parse().unwrap();
         assert_eq!(request_ip(public, &h), "8.8.8.8");
+        // 2026-10-17 修复「登录 IP 不对」：Docker 网关直连（私网）现在也信任
+        // 转发头 —— 修复前这里会错误回落成 172.26.0.1，access_logs 全记网关。
+        let gateway: SocketAddr = "172.26.0.1:5555".parse().unwrap();
+        assert_eq!(request_ip(gateway, &h), "10.0.0.1");
 
-        // cf-connecting-ip 同样可被客户端伪造，已不再信任，回落直连地址
+        // X-Real-IP（Caddy 注入的 CF-Connecting-IP）优先于 XFF
+        let mut hr = HeaderMap::new();
+        hr.insert("x-real-ip", "223.5.5.5".parse().unwrap());
+        hr.insert("x-forwarded-for", "1.2.3.4".parse().unwrap());
+        assert_eq!(request_ip(local, &hr), "223.5.5.5");
+        assert_eq!(request_ip(gateway, &hr), "223.5.5.5");
+        // 公网直连时 X-Real-IP 同样不信任（客户端可伪造）
+        assert_eq!(request_ip(public, &hr), "8.8.8.8");
+
+        // cf-connecting-ip 直传头不读（可被客户端伪造），回落直连地址
         let mut h = HeaderMap::new();
         h.insert("cf-connecting-ip", "223.5.5.5".parse().unwrap());
         assert_eq!(request_ip(local, &h), "127.0.0.1");
@@ -1808,6 +1839,11 @@ mod tests {
         let mut h = HeaderMap::new();
         h.insert("x-forwarded-for", "not-an-ip".parse().unwrap());
         assert_eq!(request_ip(local, &h), "127.0.0.1");
+        // X-Real-IP 非法值 → 回落 XFF 链尾
+        let mut hbad = HeaderMap::new();
+        hbad.insert("x-real-ip", "junk".parse().unwrap());
+        hbad.insert("x-forwarded-for", "203.0.113.9".parse().unwrap());
+        assert_eq!(request_ip(local, &hbad), "203.0.113.9");
     }
 
     #[test]

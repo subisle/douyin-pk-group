@@ -60,10 +60,11 @@ impl ApiError {
         Self(anyhow::anyhow!(msg.into()), Some(status), true, None)
     }
 
-    /// 显式状态码 + 自定义响应体（2026-10-14 审计 P1）：/api/public/my/login 被
-    /// LoginLimiter 锁定时返回 429 且要带 `lockedFor` 字段（与 /api/auth/login
-    /// 的响应结构对齐，前端才能做「请 X 秒后再试」倒计时）。文案/字段由调用方
-    /// 保证是面向用户的安全内容，原样下发，不做任何关键词推断。
+    /// 显式状态码 + 自定义响应体（2026-10-14 审计 P1）：给需要下发结构化 JSON
+    /// 错误体的错误用。原本是 /api/public/my/login 被 LoginLimiter 锁定时返回
+    /// 429 + `lockedFor` 倒计时字段（2026-10-17 用户口径「去除登录限速」后该
+    /// 调用点已删）；构造器保留 —— 文案/字段由调用方保证是面向用户的安全内容，
+    /// 原样下发，不做任何关键词推断。
     pub fn with_json(status: StatusCode, body: serde_json::Value) -> Self {
         Self(anyhow::anyhow!(""), Some(status), true, Some(body))
     }

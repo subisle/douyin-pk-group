@@ -98,128 +98,40 @@ pub struct Auth {
     /// 一次性 ticket → 过期时刻（SSE / 日报图等只能把凭证放进 URL 的场景）
     tickets: Mutex<HashMap<String, Instant>>,
     ttl: Duration,
-    /// P1-4：登录失败限流（同来源连续失败 N 次锁 M 分钟）。
-    /// 2026-10-14 审计（P1）：展示端 /api/public/my/login 经 login_locked /
-    /// login_record_* 委托方法复用这一个限流器（此前只有 /api/auth/login 在用，
-    /// 公开端可绕开锁定爆破管理员口令），字段保持私有。
-    limiter: LoginLimiter,
+    /* 2026-10-17 用户口径「去除登录限速」：LoginLimiter（连续失败 5 次锁 10 分钟）
+    已连同 /api/auth/login 上的挂载一起移除；展示端（verify / my_login）的限速
+    同日更早也已摘除。防爆破层次现在只剩：argon2id 校验本身（故意慢哈希）+
+    fail-closed 口令长度门。若后续要恢复限流，参考 git 历史里的 LoginLimiter。 */
 }
 
-/// P1-4：登录失败限流 —— 同一来源连续失败 N 次锁定 M 分钟，成功登录清零。
-/// 参考 public_teams.rs 的 VerifyLimiter（每窗口固定次数），这里是「连续失败
-/// 计数 + 到期解锁」，对在线撞库更直接；内存 HashMap，key 会随锁过期淘汰。
-pub struct LoginLimiter {
-    hits: Mutex<HashMap<String, Entry>>,
-    max_failures: u32,
-    lockout: Duration,
-}
-
-struct Entry {
-    /// 连续失败次数
-    failures: u32,
-    /// 锁定截止时刻（仅在 failures 达到阈值时设置）
-    locked_until: Option<Instant>,
-    /// 最近一次活动，用于淘汰不活跃的 key
-    last: Instant,
-}
-
-impl Default for LoginLimiter {
-    fn default() -> Self {
-        Self::new(5, Duration::from_secs(10 * 60))
-    }
-}
-
-impl LoginLimiter {
-    pub fn new(max_failures: u32, lockout: Duration) -> Self {
-        Self {
-            hits: Mutex::new(HashMap::new()),
-            max_failures,
-            lockout,
-        }
-    }
-
-    /// 来源是否被锁。锁定到期时顺手解锁并清零。
-    pub fn locked(&self, key: &str) -> bool {
-        let mut hits = self.hits.lock().expect("login 限流锁 poisoned");
-        let now = Instant::now();
-        if let Some(e) = hits.get_mut(key) {
-            if let Some(until) = e.locked_until {
-                if now < until {
-                    return true;
-                }
-                // 锁定期满：解锁并清零
-                e.locked_until = None;
-                e.failures = 0;
-            }
-            e.last = now;
-        }
-        false
-    }
-
-    /// 记一次失败；达到阈值则进入锁定并返回 true（用于打日志）。
-    pub fn record_failure(&self, key: &str) -> bool {
-        let mut hits = self.hits.lock().expect("login 限流锁 poisoned");
-        let now = Instant::now();
-        // 顺手淘汰：只留活跃 key（锁定中的也算活跃），防 map 无限膨胀
-        hits.retain(|_, e| {
-            now.duration_since(e.last) < Duration::from_secs(3600)
-                || e.locked_until.is_some_and(|u| now < u)
-        });
-        let e = hits.entry(key.to_string()).or_insert(Entry {
-            failures: 0,
-            locked_until: None,
-            last: now,
-        });
-        e.last = now;
-        e.failures = e.failures.saturating_add(1);
-        if e.failures >= self.max_failures {
-            e.locked_until = Some(now + self.lockout);
-            true
-        } else {
-            false
-        }
-    }
-
-    /// 成功登录：清零该来源的失败计数。
-    pub fn record_success(&self, key: &str) {
-        let mut hits = self.hits.lock().expect("login 限流锁 poisoned");
-        if let Some(e) = hits.get_mut(key) {
-            e.failures = 0;
-            e.locked_until = None;
-            e.last = Instant::now();
-        }
-    }
-
-    /// 剩余锁定秒数（用于响应体提示）；未锁返回 0。
-    pub fn locked_seconds(&self, key: &str) -> u64 {
-        let mut hits = self.hits.lock().expect("login 限流锁 poisoned");
-        let now = Instant::now();
-        if let Some(e) = hits.get_mut(key) {
-            if let Some(until) = e.locked_until {
-                if now < until {
-                    return (until - now).as_secs() + 1;
-                }
-                e.locked_until = None;
-                e.failures = 0;
-            }
-        }
-        0
-    }
-}
-
-/// 登录来源：优先 X-Forwarded-For（仅当直连方是 127.0.0.1，即经本机反代），
-/// 否则用直连 IP。避免经 Caddy 后全站共用一个来源，同时不信任外来的 XFF。
+/// 登录来源：日志用（2026-10-17 限速移除后仅打日志，不再做限流 key）。
 ///
-/// 2026-10-12 安全审计 H1 修复：改取 **最后一跳**。XFF 规范里每个代理把「来源」
-/// 追加到链尾——自建 Caddy 是追加者，真实客户端在链上；取第一跳等于取攻击者
-/// 随手伪造的值（`curl -H "X-Forwarded-For: 1.2.3.4"` 每次换桶，限流完全失效，
-/// 审计实测复现）。直连反代场景下最后一跳 = 反代追加的直连 IP，客户端无法伪造。
+/// 2026-10-17 修正「后端登录 IP 不对」：生产链路是 Cloudflare → Caddy →
+/// docker-proxy → 容器，容器里 ConnectInfo 看到的是 Docker 网关（如 172.26.0.1），
+/// 永远不是 127.0.0.1——旧逻辑只在回环直连时才信 XFF，结果所有来源都记成了网关。
+/// 新口径与 ipinfo::request_ip / admin.rs client_ip_for_limit 一致：
+/// - 直连方是**回环或私网**（Docker 网关在内）才信任转发头；
+/// - `X-Real-IP` 优先（Caddy 显式注入的 CF-Connecting-IP，即真实客户端 IP）；
+/// - 否则取 XFF 链尾（最接近服务端的一跳，反代追加、客户端难伪造）；
+/// - 公网直连一律用 ConnectInfo（外来伪造头直接忽略）。
 fn login_source_key(
     remote: Option<std::net::SocketAddr>,
     headers: &axum::http::HeaderMap,
 ) -> String {
     let direct = remote.map(|a| a.ip().to_string()).unwrap_or_default();
-    if direct == "127.0.0.1" || direct == "::1" {
+    let trusted = remote
+        .map(|a| crate::ipinfo::is_internal(&a.ip()))
+        .unwrap_or(true);
+    if trusted {
+        if let Some(ip) = headers
+            .get("x-real-ip")
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .and_then(|s| s.parse::<std::net::IpAddr>().ok())
+        {
+            return ip.to_string();
+        }
         if let Some(xff) = headers
             .get("x-forwarded-for")
             .and_then(|v| v.to_str().ok())
@@ -300,7 +212,6 @@ impl Auth {
             tokens: Mutex::new(HashMap::new()),
             tickets: Mutex::new(HashMap::new()),
             ttl: Duration::from_secs(ttl),
-            limiter: LoginLimiter::default(),
         }
     }
 
@@ -325,33 +236,11 @@ impl Auth {
         self.check_password(input)
     }
 
-    /* ───── 登录失败限流（2026-10-14 审计 P1 修复）─────
-    /api/public/my/login 的管理员快捷口令分支原先只过每 IP 每分钟 5 次的滑动窗口
-    （public_write_allow），**没有**接这里连续失败锁 10 分钟的 LoginLimiter ——
-    而那个 limiter 只挂在 /api/auth/login 上。结果是公网可以对这个公开端点上的
-    管理员口令匀速慢速爆破（5 次/分/IP，换 IP 就重置），argon2 校验还白送攻击者算力。
-    暴露三个委托方法给展示端登录用，key 仍由调用方按来源 IP 生成，跟 /api/auth/login
-    共用同一个 limiter 实例与同一套阈值（5 次失败锁 10 分钟）。 */
-
-    /// 该来源是否已被锁定（锁定期间拒绝，不跑 argon2）
-    pub fn login_locked(&self, key: &str) -> bool {
-        self.limiter.locked(key)
-    }
-
-    /// 剩余锁定秒数（响应体提示用）
-    pub fn login_locked_seconds(&self, key: &str) -> u64 {
-        self.limiter.locked_seconds(key)
-    }
-
-    /// 记一次失败；返回是否刚好达到阈值触发锁定
-    pub fn login_record_failure(&self, key: &str) -> bool {
-        self.limiter.record_failure(key)
-    }
-
-    /// 登录成功：清零该来源失败计数
-    pub fn login_record_success(&self, key: &str) {
-        self.limiter.record_success(key)
-    }
+    /* ───── 登录失败限流已整条移除（2026-10-17 用户口径「去除登录限速」）─────
+    LoginLimiter（连续失败 5 次锁 10 分钟）原先先后挂在展示端登录（verify /
+    my_login，2026-10-14 审计 P1 接入）与后台 /api/auth/login（P1-4）上，
+    今日全部摘除。防爆破层次现在只剩：argon2id 故意慢哈希 + fail-closed
+    口令长度门。要恢复限流请翻 git 历史找回 LoginLimiter。 */
 
     pub fn issue(&self) -> String {
         let token = random_token();
@@ -555,7 +444,9 @@ pub async fn require_admin(
 
 /// `POST /api/auth/login`：口令换 token（口令错返回 401）
 ///
-/// P1-4：登录失败限流 —— 同一来源连续 5 次失败锁 10 分钟，成功登录清零。
+/// 2026-10-17 用户口径「去除登录限速」：原先这里挂 LoginLimiter（连续失败 5 次
+/// 锁 10 分钟），本 handler 已整条移除 —— 口令错就 401，不计数、不锁定。
+/// 地区门禁与登录日志不在本层（管理端无地区门禁）。source 仅用于日志。
 pub async fn login(
     State(st): State<std::sync::Arc<crate::state::AppState>>,
     axum::extract::ConnectInfo(remote): axum::extract::ConnectInfo<std::net::SocketAddr>,
@@ -563,7 +454,7 @@ pub async fn login(
     Json(body): Json<serde_json::Value>,
 ) -> Response {
     let auth = &st.auth;
-    // fail-closed：没配口令时登录接口同样关闭（不验口令、不计限流）
+    // fail-closed：没配口令时登录接口同样关闭
     if !auth.enabled() {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -572,35 +463,17 @@ pub async fn login(
             .into_response();
     }
     let source = login_source_key(Some(remote), &headers);
-    let limiter = &auth.limiter;
-
-    // 已被锁定：直接拒绝，不验口令（验证本身要跑 argon2，白送给攻击者算力）
-    if limiter.locked(&source) {
-        let wait = limiter.locked_seconds(&source);
-        tracing::warn!(source = %source, wait_s = wait, "登录失败次数过多，来源被临时锁定");
-        return (
-            StatusCode::TOO_MANY_REQUESTS,
-            Json(json!({
-                "error": format!("失败次数过多，请 {wait} 秒后再试"),
-                "lockedFor": wait,
-            })),
-        )
-            .into_response();
-    }
 
     let password = body.get("password").and_then(|v| v.as_str()).unwrap_or("");
     if !auth.check_password(password) {
-        let now_locked = limiter.record_failure(&source);
-        if now_locked {
-            tracing::warn!(source = %source, "连续登录失败达到阈值，锁定 10 分钟");
-        }
+        // 2026-10-17 用户口径「去除登录限速」：失败不计数、不锁定，仅记日志
+        tracing::warn!(source = %source, "后台登录口令不正确");
         return (
             StatusCode::UNAUTHORIZED,
             Json(json!({ "error": "口令不正确" })),
         )
             .into_response();
     }
-    limiter.record_success(&source);
     let token = auth.issue();
     Json(json!({ "token": token, "enabled": auth.enabled() })).into_response()
 }
@@ -674,7 +547,6 @@ mod tests {
             tokens: Mutex::new(HashMap::new()),
             tickets: Mutex::new(HashMap::new()),
             ttl: Duration::from_secs(3600),
-            limiter: LoginLimiter::default(),
         }
     }
 
@@ -782,7 +654,6 @@ mod tests {
             tokens: Mutex::new(HashMap::new()),
             tickets: Mutex::new(HashMap::new()),
             ttl: Duration::from_secs(0),
-            limiter: LoginLimiter::default(),
         };
         let t = a.issue();
         assert!(!a.verify(&t), "ttl=0 的 token 应当立刻失效");
@@ -946,82 +817,49 @@ mod tests {
             assert!(is_open(p), "{p} 应该免鉴权");
         }
     }
+    /* LoginLimiter 的两条单元测试（连续失败锁定 / 到期自动解锁）已随限速
+    一起移除（2026-10-17「去除登录限速」口径）；要恢复请翻 git 历史。 */
 
-    /// P1-4：登录失败限流 —— 连续失败 N 次锁 M 分钟；成功清零；不同来源互不影响。
+    /// 2026-10-17 修正「后端登录 IP 不对」：来源提取的信任边界从「仅回环直连」
+    /// 扩为「回环或私网直连」（生产容器里 ConnectInfo 是 Docker 网关 172.26.0.1），
+    /// 且 `X-Real-IP`（Caddy 注入的 CF-Connecting-IP）优先于 XFF 链尾。
+    /// 公网直连仍然一律用 ConnectInfo，外来伪造头直接忽略。
     #[test]
-    fn login_limiter_locks_after_consecutive_failures() {
-        let lim = LoginLimiter::new(3, Duration::from_secs(60));
-        let a = "10.0.0.1";
-        let b = "10.0.0.2";
-
-        assert!(!lim.locked(a));
-        assert!(!lim.record_failure(a));
-        assert!(!lim.record_failure(a));
-        assert!(!lim.locked(a), "没到阈值不应锁");
-        assert!(lim.record_failure(a), "第 3 次连续失败应触发锁定");
-        assert!(lim.locked(a), "达到阈值后来源被锁");
-        assert!(lim.locked_seconds(a) > 0 && lim.locked_seconds(a) <= 60);
-        // 别的来源不受牵连
-        assert!(!lim.locked(b));
-        // 成功登录清零
-        lim.record_success(a);
-        assert!(!lim.locked(a), "成功登录后应解锁");
-        assert_eq!(lim.locked_seconds(a), 0);
-        // 清零后重新计数，不会立刻再锁
-        assert!(!lim.record_failure(a));
-        assert!(!lim.locked(a));
-    }
-
-    /// P1-4：锁定到期自动解锁（把锁定时刻拨到过去）。
-    #[test]
-    fn login_limiter_unlocks_after_lockout_expires() {
-        let lim = LoginLimiter::new(1, Duration::from_secs(60));
-        let a = "10.0.0.9";
-        assert!(lim.record_failure(a));
-        assert!(lim.locked(a));
-        // 手动把锁定时刻拨到过去，模拟时间流逝
-        {
-            let mut hits = lim.hits.lock().unwrap();
-            let e = hits.get_mut(a).unwrap();
-            e.locked_until = Some(Instant::now() - Duration::from_secs(1));
-        }
-        assert!(!lim.locked(a), "锁定期满应自动解锁并清零");
-        // 解锁后重新计数：max=1 时下一次失败会再次触发锁定（这正是预期语义）
-        assert!(lim.record_failure(a));
-        assert!(lim.locked(a));
-    }
-
-    /// P1-4：XFF 只在直连方是回环地址（经本机反代）时才被信任。
-    /// 2026-10-12 安全审计 H1：改取**最后一跳**——第一跳是客户端可伪造的值，
-    /// 每次换头即换限流桶（实测 8 连发全过）；链尾才是反代追加的真实来源。
-    #[test]
-    fn login_source_trusts_xff_only_from_loopback() {
+    fn login_source_trusts_headers_from_private_direct() {
         let mut h = axum::http::HeaderMap::new();
         h.insert("x-forwarded-for", "203.0.113.7, 10.0.0.1".parse().unwrap());
         let loopback: std::net::SocketAddr = "127.0.0.1:5000".parse().unwrap();
-        let external: std::net::SocketAddr = "192.168.1.5:5000".parse().unwrap();
+        let external: std::net::SocketAddr = "203.0.113.99:5000".parse().unwrap();
+        // 64 生产：docker-proxy 直连方 = Docker 网关（172.26.0.1，属私网）
+        let gateway: std::net::SocketAddr = "172.26.0.1:5000".parse().unwrap();
 
-        // 最后一跳 = 10.0.0.1（反代追加的直连来源，客户端无法篡改链尾之后的部分）
+        // XFF 链尾（回环直连）
         assert_eq!(login_source_key(Some(loopback), &h), "10.0.0.1");
-        // 单跳 XFF（无中间代理）：链尾即自身
-        let mut h1 = axum::http::HeaderMap::new();
-        h1.insert("x-forwarded-for", "203.0.113.9".parse().unwrap());
-        assert_eq!(login_source_key(Some(loopback), &h1), "203.0.113.9");
-        // 伪造者把假值放第一跳也无效——仍然取链尾
-        let mut hf = axum::http::HeaderMap::new();
-        hf.insert(
-            "x-forwarded-for",
-            "1.2.3.4, 5.6.7.8, 203.0.113.10".parse().unwrap(),
-        );
-        assert_eq!(login_source_key(Some(loopback), &hf), "203.0.113.10");
-        // 直连方不是回环 → 不信任 XFF，用直连 IP
-        assert_eq!(login_source_key(Some(external), &h), "192.168.1.5");
+        // XFF 链尾（私网网关直连 —— 修复前这里会错误回落成 172.26.0.1）
+        assert_eq!(login_source_key(Some(gateway), &h), "10.0.0.1");
+        // X-Real-IP 优先于 XFF（Caddy 注入的 CF 真实客户端 IP）
+        let mut hr = axum::http::HeaderMap::new();
+        hr.insert("x-real-ip", "203.0.113.77".parse().unwrap());
+        hr.insert("x-forwarded-for", "1.2.3.4".parse().unwrap());
+        assert_eq!(login_source_key(Some(loopback), &hr), "203.0.113.77");
+        assert_eq!(login_source_key(Some(gateway), &hr), "203.0.113.77");
+        // X-Real-IP 非法值 → 回落 XFF
+        let mut hbad = axum::http::HeaderMap::new();
+        hbad.insert("x-real-ip", "not-an-ip".parse().unwrap());
+        hbad.insert("x-forwarded-for", "203.0.113.9".parse().unwrap());
+        assert_eq!(login_source_key(Some(loopback), &hbad), "203.0.113.9");
+        // 公网直连 → 不信任任何转发头，用直连 IP（旧测试用 192.168.1.5 属私网，
+        // 现在会信任头，改用真公网地址验证这条边界）
+        let mut hforge = axum::http::HeaderMap::new();
+        hforge.insert("x-real-ip", "1.2.3.4".parse().unwrap());
+        assert_eq!(login_source_key(Some(external), &hforge), "203.0.113.99");
         // 没有 XFF → 用直连 IP
         assert_eq!(
             login_source_key(Some(loopback), &axum::http::HeaderMap::new()),
             "127.0.0.1"
         );
-        // 没有直连地址（测试环境）→ 空 key，照样可用
-        assert_eq!(login_source_key(None, &h), "");
+        // 没有直连地址（测试环境）→ 视为可信，走头；无头时空 key
+        assert_eq!(login_source_key(None, &h), "10.0.0.1");
+        assert_eq!(login_source_key(None, &axum::http::HeaderMap::new()), "");
     }
 }

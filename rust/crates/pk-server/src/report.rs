@@ -952,8 +952,15 @@ fn render_svg_labeled_inner(
                         y + 14.0
                     ));
                 }
+                /* 2026-10-17 修复「有的行不显示音浪」：数字是白色 #FFFFFF，原本设计
+                是压在蓝色进度条上；但条宽按音浪比例缩放，全团第一名动辄是末位的
+                几十倍，绝大多数人的条只有几像素宽——数字中心 x=433.8 落在浅色轨道
+                #EAF3FF 上，白字压浅底，resvg 是忠实渲染的，肉眼就是看不见。
+                现在给数字加 paint-order="stroke" 的 #007AFF 描边：在蓝条上与原版
+                几乎一样（蓝底白字），在浅轨道上变成白字蓝边，任何条宽都可读。
+                resvg 0.45 支持 paint-order（/tmp/resvg-font-test paint_order2 验证）。 */
                 s.push_str(&format!(
-                    "<text x=\"433.8\" y=\"{text_y:.0}\" font-size=\"13\" fill=\"#FFFFFF\" font-weight=\"700\" text-anchor=\"middle\" dominant-baseline=\"central\" font-family=\"{MONO}\">{}</text>",
+                    "<text x=\"433.8\" y=\"{text_y:.0}\" font-size=\"13\" fill=\"#FFFFFF\" paint-order=\"stroke\" stroke=\"#007AFF\" stroke-width=\"3\" stroke-linejoin=\"round\" font-weight=\"700\" text-anchor=\"middle\" dominant-baseline=\"central\" font-family=\"{MONO}\">{}</text>",
                     esc(&fmt_wan(r.wave))
                 ));
             }
@@ -1534,6 +1541,61 @@ mod tests {
             assert!(!svg_none.contains(label), "关掉的列不该渲染表头：{label}");
         }
         assert!(!svg_none.contains(">浩龙</text>"), "姓名列关掉后不应再出现姓名");
+    }
+
+    /// 2026-10-17 修复「微信 bot 推送的每日榜单有的不显示音浪」：
+    /// 音浪数字是白色，靠压在蓝色进度条上才有对比度；但条宽按音浪比例缩放，
+    /// 第一名是末位几十倍时大多数条只有几像素宽，白字落在浅色轨道 #EAF3FF 上
+    /// —— resvg 忠实渲染了，但肉眼不可见。修复 = 给数字加 paint-order="stroke"
+    /// 的 #007AFF 描边（白字蓝边，任何条宽都可读；在蓝条上观感与原版几乎一致）。
+    /// 本测试钉住：数字必须带描边，且描边色与进度条同色。
+    #[test]
+    fn wave_value_text_has_stroke_for_light_track_visibility() {
+        let rep = DailyReport {
+            date: "2026-10-16".into(),
+            team: "male".into(),
+            rows: vec![
+                ReportRow {
+                    name: "第一名".into(),
+                    wave: 800_000,
+                    minutes: 0,
+                    is_live: true,
+                    absent_days: 0,
+                    total_wave: 800_000,
+                },
+                ReportRow {
+                    name: "末位".into(),
+                    wave: 250,
+                    minutes: 0,
+                    is_live: true,
+                    absent_days: 0,
+                    total_wave: 250,
+                },
+            ],
+            master_groups: vec![],
+            no_master: vec![],
+            daily_star: None,
+        };
+        let svg = render_svg_labeled_inner(
+            &rep,
+            "",
+            2,
+            "",
+            false,
+            &DailyReportFields::default(),
+            0,
+        );
+        // 白色数字必须带 paint-order="stroke" + 蓝描边（浅轨道上可见）
+        let expect = "fill=\"#FFFFFF\" paint-order=\"stroke\" stroke=\"#007AFF\"";
+        assert!(
+            svg.matches(expect).count() >= 2,
+            "音浪数字缺蓝描边（浅色轨道上白字不可见）：{svg}"
+        );
+        // 防退化：不许再出现「裸白字」变体
+        assert!(
+            !svg.contains("fill=\"#FFFFFF\" font-weight=\"700\" text-anchor=\"middle\""),
+            "音浪数字不应再是无描边的裸白字"
+        );
     }
 
     /// 机器人「日报」文本的时长口径（2026-10-16 用户口径「机器人推送的也改」）：

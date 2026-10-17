@@ -40,30 +40,11 @@ pub async fn verify(
         );
         return Err(ApiError::forbidden("当前地区暂不支持访问"));
     }
-    let limiter_ok = public_write_allow(&client_ip_for_limit(addr, &headers));
-    if !limiter_ok {
-        return Err(ApiError::with_status(
-            axum::http::StatusCode::TOO_MANY_REQUESTS,
-            "尝试太频繁，请稍后再试",
-        ));
-    }
-    /* 2026-10-17 审计 4-P1-1：verify 接入 LoginLimiter（与 /my/login、/api/auth/login
-    同一套「连续失败 5 次锁 10 分钟」，key 加 myverify: 前缀分桶）。
-    原先这里只有上面的 5 次/分 IP 滑窗 —— 换 IP 即重置，攻击者可对纯数字密码
-    （初始密码 = 手机号后四位的产品口径仍在）慢速匀速撞库。锁定期间不跑
-    argon2、不查库，直接 429。 */
-    let verify_key = format!("myverify:{}", client_ip_for_limit(addr, &headers));
-    if st.auth.login_locked(&verify_key) {
-        let wait = st.auth.login_locked_seconds(&verify_key);
-        tracing::warn!(ip = %client_ip, wait_s = wait, "展示端 verify 失败次数过多，来源被临时锁定");
-        return Err(ApiError::with_json(
-            axum::http::StatusCode::TOO_MANY_REQUESTS,
-            json!({
-                "error": format!("失败次数过多，请 {wait} 秒后再试"),
-                "lockedFor": wait,
-            }),
-        ));
-    }
+    /* 2026-10-17 用户口径「去除登录限速」：原先这里有两道闸 ——
+    ① public_write_allow 每 IP 每分钟 5 次滑窗（VERIFY_LIMITER）；
+    ② LoginLimiter 连续失败 5 次锁 10 分钟（key = myverify:<IP>）。
+    两道已全部移除：登录（含失败）不限速、不锁定，输错直接走账号校验返回
+    「密码错误 / 账号还没开通」。地区门禁与 access_logs 登录日志保留不动。 */
     // 账号 = 手机号或姓名：新前端传 account，老前端传 name，两者都行
     let acct = body
         .get("account")
@@ -94,16 +75,10 @@ pub async fn verify(
         Ok(name) => name,
         Err(why) => {
             crate::ipinfo::log_login(&st, &client_ip, &geo, &team, &acct, false).await;
-            // 连续失败计数（2026-10-17 审计 4-P1-1）：第 5 次失败锁 10 分钟
-            let now_locked = st.auth.login_record_failure(&verify_key);
-            if now_locked {
-                tracing::warn!(ip = %client_ip, "展示端 verify 连续失败达到阈值，锁定 10 分钟");
-            }
+            // 2026-10-17 用户口径「去除登录限速」：失败不计数、不锁定
             return Ok(Json(json!({ "ok": false, "error": why.message() })));
         }
     };
-    // 验证通过 → 清零该来源失败计数（与 /my/login 同口径：成功即解锁）
-    st.auth.login_record_success(&verify_key);
     crate::ipinfo::log_login(&st, &client_ip, &geo, &team, &account_name, true).await;
 
     /* 1.5 手机号自助注册还没绑主播的账号：先放进来（personId=0），登录后「我的」页
@@ -219,30 +194,12 @@ pub async fn my_login(
         );
         return Err(ApiError::forbidden("当前地区暂不支持访问"));
     }
-    let limiter_ok = public_write_allow(&client_ip_for_limit(addr, &headers));
-    if !limiter_ok {
-        return Err(ApiError::with_status(
-            axum::http::StatusCode::TOO_MANY_REQUESTS,
-            "尝试太频繁，请稍后再试",
-        ));
-    }
-    /* 2026-10-14 审计 P1：登录接入 LoginLimiter（连续失败锁 10 分钟）。
-    原先这里只过上面的 5 次/分滑动窗口，攻击者换 IP 即可对公开端点慢速爆破
-    管理员口令（下面的快捷口令分支会跑 argon2，白送算力）。现在与 /api/auth/login
-    共用同一套「连续失败 5 次锁 10 分钟」，key 用同一来源口径并加 mylogin: 前缀分桶。 */
-    let login_key = format!("mylogin:{}", client_ip_for_limit(addr, &headers));
-    if st.auth.login_locked(&login_key) {
-        let wait = st.auth.login_locked_seconds(&login_key);
-        tracing::warn!(ip = %client_ip, wait_s = wait, "展示端登录失败次数过多，来源被临时锁定");
-        // 与 /api/auth/login 同一响应结构（error + lockedFor），前端可做倒计时提示
-        return Err(ApiError::with_json(
-            axum::http::StatusCode::TOO_MANY_REQUESTS,
-            json!({
-                "error": format!("失败次数过多，请 {wait} 秒后再试"),
-                "lockedFor": wait,
-            }),
-        ));
-    }
+    /* 2026-10-17 用户口径「去除登录限速」：原先这里有两道闸 ——
+    ① public_write_allow 每 IP 每分钟 5 次滑窗（VERIFY_LIMITER）；
+    ② LoginLimiter 连续失败 5 次锁 10 分钟（key = mylogin:<IP>，2026-10-14 审计 P1
+      接入，2026-10-17 审计 4-P1-1 又给 verify 加了同款）。
+    两道已全部移除：登录（含失败与管理员快捷口令爆破尝试）不限速、不锁定。
+    地区门禁与 access_logs 登录日志保留不动 —— 失败尝试仍全部进访客日志。 */
     let acct = body
         .get("account")
         .and_then(|v| v.as_str())
@@ -274,7 +231,6 @@ pub async fn my_login(
     （/api/admin/visits 支持关键字搜索）且随备份 dump 外流。这里记固定占位符。 */
     let admin_shortcut = acct == pass && st.auth.verify_admin_password(&acct);
     if admin_shortcut {
-        st.auth.login_record_success(&login_key);
         crate::ipinfo::log_login_path(
             &st,
             &client_ip,
@@ -296,21 +252,9 @@ pub async fn my_login(
             "token": token, "admin": true, "bound": true
         })));
     }
-    /* 2026-10-14 修正（失败只记一次 + 门控）：本块是这条登录路径**唯一**的失败计数点，
-    下面的账号校验分支不再重复计数 —— 原先两处各记一次，auth.rs 的「连续失败 5 次
-    锁 10 分钟」实际第 3 次失败就触发，注释与行为不符。
-    计数还受 `st.auth.enabled()`（= ADMIN_PASSWORD 已配置）门控：没配口令时
-    verify_admin_password 恒 false，快捷分支不可能被爆破；不门控的话，正常用户
-    输错密码也会被按「来源」级计数（阈值按 IP 不按账号），NAT 后 5 个人就能把整栋楼
-    锁 10 分钟。
-    真正打快捷分支的爆破（acct==pass 且口令错）一定满足「已配置」，一次不漏全部计数 ——
-    防爆破语义不变；账号密码正确时，下面会 login_record_success 清零。 */
-    if st.auth.enabled() {
-        let now_locked = st.auth.login_record_failure(&login_key);
-        if now_locked {
-            tracing::warn!(ip = %client_ip, "展示端登录连续失败达到阈值，锁定 10 分钟");
-        }
-    }
+    /* 2026-10-17 用户口径「去除登录限速」：原先这里对「已配置口令 + 非快捷登录」
+    记一次连续失败（5 次锁 10 分钟），现已整条移除 —— 不再计数、不再锁定，
+    每次失败尝试照常进 access_logs（上面账号校验分支里的 log_login_path）。 */
 
     /* 1. 账号校验（与 verify 同一套 my_accounts）
     2026-10-14：失败原因（密码错 / 账号没开通）下发前端照实显示。 */
@@ -331,8 +275,7 @@ pub async fn my_login(
             return Ok(Json(json!({ "ok": false, "error": why.message() })));
         }
     };
-    // 账号密码正确 → 清零失败计数（与 /api/auth/login 同口径：成功即解锁）
-    st.auth.login_record_success(&login_key);
+    // 账号密码正确（2026-10-17 用户口径：登录限速已去除，无失败计数可清）
     /* 1.5 账号没绑主播：两个团都放行，token 挂 MY_ANY_KEY（登录后强制绑定） */
     /* 可看团别（迁移 024）：一次性取出来给下面三个分支共用。
     Inherit 时完全沿用旧逻辑（token_team 原样返回 base），分权只在显式配了的
@@ -431,7 +374,10 @@ pub async fn my_login(
     }
 }
 
-/// 登录验证限流：每 IP 每分钟 5 次（登录门撞库防护）
+/// 展示端写接口限流：每 IP 每分钟 5 次（当前唯一调用方 = 个人页改密写口）。
+///
+/// 2026-10-17 用户口径「去除登录限速」：登录链路（verify / my_login）原先挂的
+/// 这道闸已摘除 —— 本函数现在只给已登录改密挡脚本刷，不再用于登录限速。
 pub(super) fn public_write_allow(ip: &str) -> bool {
     VERIFY_LIMITER
         .get_or_init(|| VerifyLimiter::new(5))
@@ -451,10 +397,12 @@ pub(super) fn public_password_reset_allow(ip: &str) -> bool {
 
 /* -------- 「忘记密码重置」按手机号限流（2026-10-17 审计 4-P2-A） --------
  *
- * 端点免登录、只认手机号，第三轮把「明文回显」拿掉后仍有一条可用性攻击面：
- * 任何人只要知道主播手机号，就能把账号密码重置成**无人知晓的随机串**并吊销其全部
- * token（my_password_reset 的既有行为），主播本人无法自助恢复、只能等管理员再重置一次。
- * 反复触发即可把「忘记密码」变成定向锁号武器，且 12 次/分/IP 的限流换 IP 就绕过。
+ * 端点免登录、只认手机号，第四轮把「明文回显」拿掉后仍有一条可用性攻击面：
+ * 任何人只要知道主播手机号，就能把账号密码重置掉并吊销其全部 token
+ * （my_password_reset 的既有行为），主播本人正在用的登录态直接被踢。
+ * （2026-10-17 起重置 = 手机号后四位，主播可自行推算新密码登录恢复，
+ * 但「反复触发把人踢下线」的骚扰面仍在，这层闸继续保留。）
+ * 反复触发即可把「忘记密码」变成定向骚扰武器，且 12 次/分/IP 的限流换 IP 就绕过。
  *
  * 这里在内存里按手机号再做一层闸（与 IP 限流并存）：
  * - 同一手机号 10 分钟内只**真正重置一次**；
@@ -542,8 +490,9 @@ pub async fn my_password_set(
     headers: HeaderMap,
     axum::Json(body): axum::Json<Value>,
 ) -> ApiResult {
-    /* 复用登录门那一档写接口限流（public_write_allow：每 IP 每分钟 5 次）：
-    改密要跑 argon2，且是免 token 时最值得挡的写口之一。 */
+    /* 改密写接口限流（每 IP 每分钟 5 次）：改密要跑 argon2，挡脚本刷写口。
+    2026-10-17 用户口径「去除登录限速」只去了登录链路（verify / my_login）的
+    两道闸；这里是**已登录**的改密写口，不属于登录限速，保留。 */
     if !public_write_allow(&client_ip_for_limit(addr, &headers)) {
         return Err(ApiError::with_status(
             axum::http::StatusCode::TOO_MANY_REQUESTS,
@@ -596,17 +545,20 @@ pub async fn my_password_set(
 /// 就能把该账号的密码重置成「手机号后四位」，并且接口把新密码明文回显。
 /// 手机号在公会内部半公开、且重置结果可自行推算，等于忘记密码流程完全没有身份绑定。
 ///
-/// 现在三件事一起改：
+/// 现在四件事一起改：
 /// 1. 只保留 `public_password_reset_allow` 限流（每 IP 每分钟 12 次）挡脚本刷。
 ///    （2026-10-14「彻底移除注册功能」后注册开关已不存在，原先这里那道
 ///    「注册开关」运维总闸随之删掉 —— 忘记密码是未登录场景的唯一入口，
 ///    不能跟着注册一起消失。）
-/// 2. 新密码改用 CSPRNG 随机串（不再是手机号后四位），攻击者无法自行推算。
-///    （展示端 st_page.html 早已按「后端下发随机临时密码」写文案与回填，本次是对齐后端。）
+/// 2. 新密码 = **手机号后四位**（2026-10-17 用户口径，与开号初始密码统一）。
+///    （2026-10-14~10-16 期间曾是 CSPRNG 随机串；改回后四位后运营无需中介转达，
+///    主播凭手机号自行推算即可登录 —— 这是与「初始密码 = 后四位」同级的产品口径。）
 /// 3. 日志不再打账号名 —— 未绑定 / 自助注册账号的 name 就是手机号本身，
 ///    `mask_phone` 的脱敏被 `accounts = ?names` 绕过，只打数量。
+/// 4. 新密码以哈希落库、不在响应里明文回显（2026-10-17 审计 4-P1-1）：
+///    后四位本就可由手机号推算，明文回显只是给「不知道手机号」的人省一步推导，
+///    照旧不下发；前端文案引导「用手机号后四位登录」。
 ///
-/// 新密码以哈希落库、不再下发明文（2026-10-17 审计 4-P1-1），
 /// 且按手机号再做一层限流（2026-10-17 审计 4-P2-A，见 `PASSWORD_RESET_GUARD`）：
 /// 10 分钟内重复请求 / 1 小时超 3 次只回同形成功包，不改密、不吊销 token。
 pub async fn my_password_reset(
@@ -665,17 +617,14 @@ pub async fn my_password_reset(
     tracing::info!(
         phone = %mask_phone(phone),
         accounts = names.len(),
-        "展示端账号密码已重置为随机临时密码（旧 token 已吊销）"
+        "展示端账号密码已重置为手机号后四位（旧 token 已吊销）"
     );
-    /* 2026-10-17 审计 4-P1-1：不再把临时密码**明文回显**进响应。
-    原先「免登录 + 只凭手机号 + 12 次/分/IP（换 IP 绕过）」的端点把新密码原文交给
-    调用者 = 知道主播手机号的任何人都能直接接管其展示端账号（攻击链：重置拿密码
-    → 登录得 24h token → 取对接码改绑微信推送）。改成管理员中介口径：
-    服务端不回密码，临时密码只落 argon2id 哈希；主播重置后找管理员取临时密码
-    （管理员用后台「我的页面账号」改密下发，或直接告知新临时密码）。
-    兼容：老前端会把 d.password 回填密码框 —— 空值时前端走「请联系管理员」分支
-    （st_page.html 已同步改）。响应仍返回 ok + names 数量，不泄露账号名单。 */
-    let _ = password; // 新密码只以哈希落库，不再出服务端（见上）
+    /* 2026-10-17 审计 4-P1-1：不在响应里明文回显密码 —— 即便新口径 = 手机号后四位
+    （可推算），也不给「不知道手机号」的人省那一步推导；同时与旧前端兼容：
+    老 st_page.html 会把 d.password 回填密码框 —— 空值时前端走提示分支。
+    新口径下提示直接告诉主播「用手机号后四位登录」，无需管理员中介。
+    响应仍返回 ok + names 数量，不泄露账号名单。 */
+    let _ = password; // 新密码只以哈希落库，不出服务端（见上）
     Ok(Json(json!({ "ok": true, "names": names.len() })))
 }
 

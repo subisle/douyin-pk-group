@@ -2365,7 +2365,7 @@ function showGate() {
          只弹数字键盘、字母打不出来（自助设置了字母密码就登不进来）。去掉该属性用默认键盘。 */
       /* 2026-10-17 第四轮审计 D 域 P3-4：登录密码框用 type="password"（原来裸 text，肩窥/投屏直接露密码）。 */
       '<input id="gatePass" type="password" placeholder="密码" autocomplete="off">' +
-      '<button class="gate-forgot" id="gateForgot">忘记密码？重置生成临时密码</button>' +
+      '<button class="gate-forgot" id="gateForgot">忘记密码？重置密码</button>' +
       '<div class="form-err hidden" id="gateErr"></div>' +
       '<button class="btn-main" id="gateGo">登 录</button>' +
       '<div class="gate-foot">遇到问题？请联系管理员帅帅</div></div>' +
@@ -2459,18 +2459,18 @@ async function forgotPassword() {
     });
     const d = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
-    /* 2026-10-17 审计 4-P1-1：后端不再明文回传临时密码（免登录重置 + 明文回显 =
-       知道手机号的任何人可接管账号）。改管理员中介口径：主播点「忘记密码」→
-       密码已重置 → 联系管理员领临时密码 → 登录后到「我的」页改自己的密码。 */
+    /* 2026-10-17 用户口径：重置密码 = 手机号后四位（与开号初始密码统一）。
+       后端不明文回传密码（4-P1-1 审计口径保持）：主播自己能推算 —— 就是手机号后四位，
+       无需管理员中介转达。登录后到「我的」页可再改成自己的密码。 */
     errEl.classList.remove('hidden');
-    errEl.textContent = '密码已重置。请联系管理员领取临时密码，' +
-      '登录后到「我的」页 → 「重置密码」改成自己的密码';
-    toast('密码已重置，请联系管理员领取临时密码');
+    errEl.textContent = '密码已重置为手机号后四位，请用「' + acct.slice(-4) +
+      '」登录，再到「我的」页 → 「重置密码」改成自己的密码';
+    toast('密码已重置为手机号后四位');
   } catch (e) {
     errEl.textContent = e.message || '重置失败，稍后再试';
     errEl.classList.remove('hidden');
   } finally {
-    btn.disabled = false; btn.textContent = '忘记密码？重置生成临时密码';
+    btn.disabled = false; btn.textContent = '忘记密码？重置密码';
   }
 }
 

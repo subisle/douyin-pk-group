@@ -200,7 +200,10 @@ pub async fn admin_my_account_set_view_team(
 
 /* ------------------------------- 防遍历限流 ------------------------------- */
 
-/// 验证接口限流：每 IP 每分钟 5 次（姓名/密码撞库防护）
+/// 展示端写接口限流器（每 IP 每分钟 5 次；当前唯一用途 = 个人页改密写口挡脚本刷）
+///
+/// 2026-10-17 用户口径「去除登录限速」：登录链路（verify / my_login）已不再
+/// 使用这档限流 —— 名字保留（改档历史见 git），但调用方只剩改密写口。
 pub(super) static VERIFY_LIMITER: std::sync::OnceLock<VerifyLimiter> = std::sync::OnceLock::new();
 /// 写接口限流：每 IP 每分钟 12 次（原先只给注册类接口，2026-10-14 注册功能移除后
 /// 由「忘记密码重置」`/api/public/my/password/reset` 复用；与登录撞库不是一回事，
@@ -244,16 +247,26 @@ impl VerifyLimiter {
     }
 }
 
-/// P1-3：限流用的「客户端真实 IP」。
-/// 生产经反代（Caddy → 127.0.0.1:8787），直连看到的 ConnectInfo 全是 127.0.0.1，
-/// 全站会共用一个限流桶；但 X-Forwarded-For 可以被任何人伪造 —— 所以只信任
-/// **来自 127.0.0.1 的连接**带来的 XFF（取最后一跳，即反代追加的直连来源），
-/// 非本机连接一律用 ConnectInfo（伪造的 XFF 直接忽略）。
+/// 展示端写接口限流用的「客户端真实 IP」（当前唯一调用方 = 个人页改密写口；
+/// 登录链路 2026-10-17「去除登录限速」后已不再走这里）。
 ///
-/// 2026-10-12 安全审计 H1 修复：第一跳是客户端可任意伪造的值（换一次头换一个
-/// 限流桶，实测 8 连发全过）；XFF 链尾才是反代追加的、客户端无法篡改的真实来源。
+/// 2026-10-17 修正（与 auth.rs login_source_key / ipinfo::request_ip 同口径）：
+/// 生产容器里 ConnectInfo 是 Docker 网关（172.26.0.1，属私网），旧逻辑只信任
+/// 回环直连的 XFF，导致限流桶全站共用一个网关 IP。新口径：
+/// - 直连方是**回环或私网**才信任转发头；`X-Real-IP`（Caddy 注入的
+///   CF-Connecting-IP）优先，其次 XFF 链尾（反代追加、客户端难伪造）；
+/// - 公网直连一律用 ConnectInfo，伪造的转发头直接忽略。
 pub(super) fn client_ip_for_limit(addr: std::net::SocketAddr, headers: &HeaderMap) -> String {
-    if addr.ip().is_loopback() {
+    if crate::ipinfo::is_internal(&addr.ip()) {
+        if let Some(ip) = headers
+            .get("x-real-ip")
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .and_then(|s| s.parse::<std::net::IpAddr>().ok())
+        {
+            return ip.to_string();
+        }
         if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
             if let Some(last) = xff.rsplit(',').next() {
                 let ip = last.trim();
