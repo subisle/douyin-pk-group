@@ -633,22 +633,35 @@ pub async fn my_push_wechat_poll(
     发不出去也不影响对接本身（真正的兜底是 wxpush 的「首次入站激活回执」，同样带名字）。
     出网闸门在 `user_send_text` 里：测试阶段（PUSH_OUT_ENABLED 未开）只记 WARN、不真发，
     返回值仍是 Ok —— 所以 welcome 只是「试过了」，不代表对方一定收到。 */
+    /* 欢迎语（2026-10-18 修正）：**只在有 context_token 时发** —— 重扫同一个微信时
+    wx_sessions 里已有上次私聊的上下文，用它发才是真正的「主动消息」；首次扫码没有
+    token，不尝试（iLink/openclaw 口径：缺 token 不算可发）。 */
+    let welcome_session = if acct.conversation_id.is_empty() {
+        None
+    } else {
+        crate::store::wx_session_get(&st, &acct.conversation_id).await
+    };
+    let welcome = welcome_target(
+        &acct.conversation_id,
+        welcome_session,
+        &acct.ilink_user_id,
+    );
     let mut welcomed = false;
-    if !acct.ilink_user_id.is_empty() {
+    if let Some((to_user, context_token)) = welcome {
         let text = crate::bot::wx_dock_welcome(&name);
         match crate::bot::weixin::user_send_text(
             &st,
             &acct.base_url,
             &acct.bot_token,
-            &acct.ilink_user_id,
-            "",
+            &to_user,
+            &context_token,
             &text,
         )
         .await
         {
             Ok(()) => {
                 welcomed = true;
-                tracing::info!(account = %name, "对接完成欢迎语已发送（含姓名）");
+                tracing::info!(account = %name, "对接完成欢迎语已发送（复用已有会话上下文）");
             }
             Err(e) if crate::push::is_blocked(&e) => {
                 // 2026-10-17 审计 6-P2-1：闸门拦截不算发送失败 —— 只是不发，
@@ -661,15 +674,56 @@ pub async fn my_push_wechat_poll(
                 "对接完成欢迎语发送失败：等对方给机器人发第一条消息时再回执（wxpush 激活回执）"
             ),
         }
+    } else {
+        tracing::info!(
+            account = %name,
+            "首次扫码/无会话上下文：不尝试主动欢迎语（iLink 要求 context_token），等用户给机器人发第一条消息激活"
+        );
     }
     let response = json!({
         "status": "confirmed",
         "tokenSaved": true,
-        "needActivate": true,
+        /* 首次扫码没有 context_token，必须由用户先发一条消息才能主动推送；
+           同一个微信重扫若已带上下文发成功，就不需要再「等激活」。 */
+        "needActivate": !welcomed,
         "welcome": welcomed,
     });
     pending_wx_remove(&qrcode);
     Ok(Json(response))
+}
+
+/// 扫码确认时的欢迎语投递上下文（纯函数，便于单测）。
+///
+/// iLink 的主动消息必须带 `context_token` —— 官方 openclaw 客户端
+/// (`packages/openclaw-weixin/src/channel.ts`) 在缺 token 时**直接拒绝发送**
+/// （`contextToken is required`），不是「允许缺省尝试」。所以：
+/// - **同一个微信重扫 / 解绑后重扫**：`wx_sessions` 里已有上次入站留下的会话上下文
+///   → 用它发欢迎语（这才是「重新对接」能主动收到消息的关键）；
+/// - **首次扫码**（还没有任何入站消息）：没有 token，返回 None，不尝试发送 ——
+///   等用户给机器人发第一条消息，走 wxpush 的「首次入站激活回执」；
+/// - 换微信号重扫：旧会话已作废（conv 清空），同样返回 None。
+///
+/// 2026-10-18 用户报障「对接成功后还是没有主动发信息；取消绑定重新扫码也算第一次」：
+/// 原实现无论重扫还是首扫都传空 `context_token` 去发欢迎语，上游接受（返回 message_id）
+/// 但不会真正投递，日志却记「已发送」——用户永远收不到。
+fn welcome_target(
+    conv: &str,
+    session: Option<(String, String)>,
+    fallback_user: &str,
+) -> Option<(String, String)> {
+    if conv.trim().is_empty() {
+        return None;
+    }
+    let (to_user, context_token) = session?;
+    if context_token.trim().is_empty() {
+        return None;
+    }
+    let to_user = if to_user.trim().is_empty() {
+        fallback_user.trim().to_string()
+    } else {
+        to_user
+    };
+    (!to_user.is_empty()).then_some((to_user, context_token))
 }
 
 /// POST /api/public/teams/{team}/my/push/code {token}：生成/刷新 **4 位数字**对接码
@@ -1274,5 +1328,51 @@ mod wx_save_failure_tests {
             wx_save_failure(e).into_response().status(),
             StatusCode::INTERNAL_SERVER_ERROR
         );
+    }
+}
+
+/* --------------- 扫码欢迎语投递上下文（2026-10-18：重扫要复用 context_token） --------------- */
+
+#[cfg(test)]
+mod welcome_target_tests {
+    use super::welcome_target;
+
+    /// 首次扫码：没有任何入站会话 → 没有 context_token，不能主动发（返回 None）。
+    #[test]
+    fn first_scan_without_session_returns_none() {
+        assert_eq!(welcome_target("", None, "user1"), None);
+        assert_eq!(welcome_target("wxacct:bot:user1", None, "user1"), None);
+    }
+
+    /// 有会话但 token 为空（历史脏数据 / 会话失效）→ 也不能发。
+    #[test]
+    fn empty_context_token_returns_none() {
+        assert_eq!(
+            welcome_target("wxacct:bot:user1", Some(("user1".into(), String::new())), "user1"),
+            None
+        );
+    }
+
+    /// 同一个微信重扫 / 解绑后重扫：复用 wx_sessions 里的 to_user + context_token。
+    /// 这是「重新对接后能主动收到欢迎语」的关键（原实现传空 token，上游接受但不投递）。
+    #[test]
+    fn rebind_reuses_stored_context() {
+        let got = welcome_target(
+            "wxacct:bot:user1",
+            Some(("user1".into(), "CTX-123".into())),
+            "fallback",
+        );
+        assert_eq!(got, Some(("user1".into(), "CTX-123".into())));
+    }
+
+    /// 会话里 to_user 为空时回落扫码人的 ilink_user_id（历史行兼容）。
+    #[test]
+    fn falls_back_to_scanned_user_when_session_to_user_empty() {
+        let got = welcome_target(
+            "wxacct:bot:user1",
+            Some((String::new(), "CTX-123".into())),
+            "scanned-user",
+        );
+        assert_eq!(got, Some(("scanned-user".into(), "CTX-123".into())));
     }
 }

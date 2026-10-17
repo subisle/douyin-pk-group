@@ -5147,10 +5147,15 @@ function wechatBindHtml(p) {
 function pushUnboundHtml(p) {
   let h = '';
   if (wxDockConfirmed) {
-    /* 本次会话刚轮询到 confirmed：只钉一句成功（toast 会被重渲染冲掉）。
-       正常情况 refreshPush 之后就是状态 B；万一还停在状态 A（后端 bound 还没翻转），
-       5 秒自动回流会把页面带过去，这里不再重复「等确认」文案自相矛盾。 */
-    h += '<div class="sub" style="margin-top:8px;line-height:1.75">✅ 对接成功</div>';
+    /* 本次会话刚轮询到 confirmed（toast 会被重渲染冲掉，这里钉住）。
+       · 首次扫码：没有 context_token，iLink 无法主动发消息 —— 必须提示「给机器人发一条消息」
+         激活（2026-10-18 用户报障：以前只显示「对接成功」，用户以为该主动收到消息，实际不会）；
+       · 重扫/解绑后重扫：后端复用已有会话上下文把欢迎语发出来了，正常显示成功即可。 */
+    h += '<div class="sub" style="margin-top:8px;line-height:1.75">' +
+      (wxDockNeedActivate
+        ? '✅ 已扫码对接<br>最后一步：在微信里给机器人随便发一条消息，会收到欢迎语并激活推送。'
+        : '✅ 对接成功') +
+      '</div>';
   } else {
     h += '<div class="sub" style="margin-top:8px;line-height:1.75">' +
       (p.scanBound
@@ -5229,6 +5234,7 @@ let pushCodeTick = null;     // 对接码倒计时句柄
 let wxDockQr = '';           // 当前二维码标识（轮询必须带上）
 let wxDockDeadline = 0;      // 有效期截止（毫秒时间戳）
 let wxDockConfirmed = false; // 本次会话刚对接成功：重渲染后仍显示一句「对接成功」
+let wxDockNeedActivate = false; // 首次扫码没有 context_token：要提示「给机器人发一条消息」
 
 function clearWxDock() {
   clearTimeout(wxDockTimer); clearInterval(wxDockTick);
@@ -5269,6 +5275,7 @@ async function startWxDock() {
   clearWxDock();
   wxDockQr = '';
   wxDockConfirmed = false;
+  wxDockNeedActivate = false;
   const img = $('pushWxQr');
   if (img) { img.removeAttribute('src'); img.alt = '微信对接二维码'; }
   const wrap = $('pushWxQrWrap');
@@ -5385,7 +5392,8 @@ function onWxDockConfirmed(d) {
   clearWxDock();
   clearPushCodeTimer();
   wxDockConfirmed = true;
-  wxStatusSet('ok', '✅ 对接成功');
+  wxDockNeedActivate = !!(d && d.needActivate);
+  wxStatusSet('ok', wxDockNeedActivate ? '✅ 已扫码，待激活' : '✅ 对接成功');
   const wrap = $('pushWxQrWrap');
   if (wrap) wrap.classList.remove('qr-live');
   const exp = $('pushWxExpire');
@@ -5395,7 +5403,9 @@ function onWxDockConfirmed(d) {
   $('pushCodeBox')?.classList.add('hidden');
   $('pushCodeRetry')?.classList.add('hidden');
   wxDockGoReenable();
-  toast(d && d.welcome === false ? '对接成功（欢迎语稍后到）' : '对接成功');
+  toast(wxDockNeedActivate
+    ? '已扫码对接：给机器人发一条消息即激活'
+    : '对接成功');
   refreshPush();
 }
 
@@ -5728,6 +5738,7 @@ function bindPushBoundHandlers(p) {
         toast('已取消绑定');
         /* 「本次会话刚对接成功」的标记一并清掉：回状态 A 时不能再显示「✅ 对接成功」 */
         wxDockConfirmed = false;
+        wxDockNeedActivate = false;
         await refreshPush();
       } catch (e) {
         unbind.disabled = false;
