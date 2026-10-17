@@ -1,0 +1,19 @@
+# CNB 云端构建 pk-server 镜像（2026-10-17 双页日报版）
+# 产物：docker.cnb.cool/course-deploy/artifacts/pk-server:latest（amd64）
+# 64 服务器拉取：docker pull docker.cnb.cool/course-deploy/artifacts/pk-server:latest
+main:
+  push:
+    - services:
+        - docker
+      docker:
+        image: docker:27
+      env:
+        IMAGE: ${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}/pk-server
+      runner:
+        tags: cnb:arch:amd64
+      stages:
+        - name: build and push
+          script: |
+            docker build -t ${IMAGE}:latest -t ${IMAGE}:${CNB_COMMIT_SHORT} .
+            docker push ${IMAGE}:latest
+            docker push ${IMAGE}:${CNB_COMMIT_SHORT}
