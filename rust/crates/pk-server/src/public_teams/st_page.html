@@ -207,10 +207,13 @@ button { font:inherit; cursor:pointer; }
   -webkit-overflow-scrolling:touch; scrollbar-width:none;
   mask-image:linear-gradient(to right,#000 94%,transparent 100%); position:relative; }
 .subnav::-webkit-scrollbar { display:none; }
+/* 2026-10-18 玻璃化：旧分段条按钮改白玻胶囊（白 .6 底 + 白 .8 描边，参照看板页日期按钮） */
 .subnav button { flex:none; height:30px; padding:0 13px; border-radius:var(--r-full);
-  background:#F2F4F7; border:1px solid transparent; color:var(--on-surface-variant);
-  font-size:12.5px; }
-.subnav button.on { background:var(--primary); border-color:var(--primary); color:#fff; font-weight:600; }
+  background:rgba(255,255,255,.6); border:1px solid rgba(255,255,255,.8); color:#64748B;
+  font-size:12.5px; box-shadow:0 2px 6px rgba(0,0,0,.04); }
+/* 2026-10-18 玻璃化：选中从 primary 蓝改琥珀白底 pill（#B45309 字 + rgba(252,211,77,.4) 描边） */
+.subnav button.on { background:#fff; border-color:rgba(252,211,77,.4); color:#B45309; font-weight:600;
+  box-shadow:0 2px 10px rgba(217,119,6,.14); }
 
 /* 📣 公告大卡（2026-10-14 → 2026-10-17 停用）：原顶部竖排公告大卡样式整组保留不删
    （弹窗与别的块仍引用其中部分类名），但顶部已不再渲染 —— 公告内容收进头部单行
@@ -1040,7 +1043,8 @@ body.busy #view { opacity:.62; }
 }
 @media (hover:hover) {
   .tabbar button:hover { color:var(--primary); }
-  #subnav button:hover { background:#E5E7EB; color:var(--on-surface); }
+  /* 2026-10-18 玻璃化：subnav 白玻胶囊 hover 改浅玻璃提亮，不再灰底 */
+  #subnav button:hover { background:rgba(255,255,255,.85); color:#0F172A; }
   .dates button:hover, .stepper button:hover, .icon-btn:hover { background:#F4F6FA; }
   .lb-row:hover { background:#F8FAFD; }
   .seg button:not(.on):hover { color:var(--on-surface); }
@@ -1268,6 +1272,62 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .st-row-lbl { display:block; font-size:10px; line-height:15px; color:#94A3B8;
   font-variant-numeric:tabular-nums; }
 
+/* ===== 智能安全区避让轨道弹幕（Stitch 玻璃稿 FullScreenDanmakuOverlay 1:1）=====
+   纯文字胶囊横飘层：fixed 全屏容器（430px 居中、z-30、pointer-events 穿透不挡
+   列表滑动）。三条轨道 top 232/456/618 是设计稿 390 视口下避开「领奖台头像 /
+   腰部 / 列表卡间隙」的安全位，按任务口径用固定值（本地布局已 1:1 对齐）。
+   只叠文字胶囊，不碰前三名头像 / 领奖台 / 奖杯 DOM。 */
+#danmakuLayer { position:fixed; inset:0; max-width:430px; margin:0 auto;
+  overflow:hidden; z-index:30; pointer-events:none; }
+.dm-track { position:absolute; left:0; width:100%; white-space:nowrap; }
+.dm-track-a { top:232px; }
+.dm-track-b { top:456px; }
+.dm-track-c { top:618px; }
+/* 弹幕平滑无限左移流动关键帧（三档速度） */
+@keyframes danmakuRunSlow   { 0% { transform:translateX(105vw); } 100% { transform:translateX(-130%); } }
+@keyframes danmakuRunMedium { 0% { transform:translateX(108vw); } 100% { transform:translateX(-135%); } }
+@keyframes danmakuRunFast   { 0% { transform:translateX(110vw); } 100% { transform:translateX(-140%); } }
+/* 胶囊底盘：24px 高超薄通透磨砂玻璃（inline-flex + gap 6px + 左右 padding 10px） */
+.danmaku-slim { display:inline-flex; align-items:center; gap:6px; padding:0 10px;
+  height:24px; box-sizing:border-box; vertical-align:top;
+  -webkit-backdrop-filter:blur(12px); backdrop-filter:blur(12px);
+  box-shadow:0 4px 12px rgba(15,23,42,.06), 0 1px 2px rgba(0,0,0,.02);
+  border-radius:9999px; line-height:1; }
+/* 冠军浅金琉璃微弹幕（Medium 15s / delay .5s） */
+.danmaku-slim-gold { background:linear-gradient(90deg, rgba(255,255,255,.88) 0%, rgba(254,243,199,.78) 100%);
+  border:.5px solid rgba(245,158,11,.35); animation:danmakuRunMedium 15s linear infinite; animation-delay:.5s; }
+/* 亚军轻柔淡紫微弹幕（Slow 18s / delay 8s） */
+.danmaku-slim-purple { background:linear-gradient(90deg, rgba(255,255,255,.88) 0%, rgba(243,232,255,.75) 100%);
+  border:.5px solid rgba(192,132,252,.35); animation:danmakuRunSlow 18s linear infinite; animation-delay:8s; }
+/* 季军清透冰蓝微弹幕（Fast 14s / delay 4.5s） */
+.danmaku-slim-cyan { background:linear-gradient(90deg, rgba(255,255,255,.88) 0%, rgba(224,242,254,.78) 100%);
+  border:.5px solid rgba(56,189,248,.35); animation:danmakuRunFast 14s linear infinite; animation-delay:4.5s; }
+/* 轨 C 公告胶囊：金胶囊但 delay 2s（任务口径 7；声明在三档之后才盖得过 gold 的 .5s） */
+.danmaku-slim-ann { animation-delay:2s; }
+/* 轨道内第二个胶囊起 80px 错开（设计稿 ml-20） */
+.danmaku-slim.dm-ml { margin-left:80px; }
+/* 胶囊内文字：emoji 11 / 名字 10.5 黑体黑 / 中点 9 / 称号 10 粗 / 数字 10.5 黑 mono */
+.dm-ic  { font-size:11px; line-height:1; }
+.dm-nm  { font-size:10.5px; font-weight:900; letter-spacing:-.01em; }
+.dm-dot { font-size:9px; font-weight:700; line-height:1; }
+.dm-tt  { font-size:10px; font-weight:700; }
+.dm-num { font-size:10.5px; font-weight:900; letter-spacing:-.01em;
+  font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,'Liberation Mono','Courier New',monospace; }
+/* 三档色系：名字/数字 = 深色（800），称号 = 中色（700），中点 = 亮色（400/500） */
+.danmaku-slim-gold   .dm-nm, .danmaku-slim-gold   .dm-num { color:#92400E; }
+.danmaku-slim-gold   .dm-tt { color:#B45309; }
+.danmaku-slim-gold   .dm-dot { color:#F59E0B; }
+.danmaku-slim-purple .dm-nm, .danmaku-slim-purple .dm-num { color:#6B21A8; }
+.danmaku-slim-purple .dm-tt { color:#7E22CE; }
+.danmaku-slim-purple .dm-dot { color:#C084FC; }
+.danmaku-slim-cyan   .dm-nm, .danmaku-slim-cyan   .dm-num { color:#075985; }
+.danmaku-slim-cyan   .dm-tt { color:#0369A1; }
+.danmaku-slim-cyan   .dm-dot { color:#38BDF8; }
+/* 无障碍：用户开了「减弱动态」→ 三档动画全关，胶囊静止停在轨道左侧 */
+@media (prefers-reduced-motion: reduce) {
+  .danmaku-slim-gold, .danmaku-slim-purple, .danmaku-slim-cyan { animation:none; }
+}
+
 /* ===== 工具栏（日榜/月榜 segmented + 日期胶囊）=====
     2026-10-18：这里原本是「Stitch Apple Style Mobile Showcase」那一版的覆盖层，
     会盖掉上方 2026-10-18 玻璃稿的值（CSS 后出现者胜：本块在文件更下方）。
@@ -1279,29 +1339,38 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .st-seg button:disabled { cursor:not-allowed; }
 
 /* ===== 分组页（Pk Tournament）Stitch 版 ===== */
+/* 2026-10-18 玻璃化：赛事分段条对齐看板页 .st-seg 分段容器（白 .52 底 + blur(28px) saturate(180%)） */
 .st-group-tabs { display:flex; align-items:center; gap:.25rem; padding:.25rem;
-  background:var(--surface-container); border-radius:.75rem; overflow-x:auto;
+  background:rgba(255,255,255,.52); border:1px solid rgba(255,255,255,.85);
+  box-shadow:0 6px 24px rgba(15,23,42,.05), 0 1px 3px rgba(0,0,0,.02),
+    inset 0 1px 2px rgba(255,255,255,.95), inset 0 -1px 2px rgba(148,163,184,.12);
+  -webkit-backdrop-filter:blur(28px) saturate(180%); backdrop-filter:blur(28px) saturate(180%);
+  border-radius:9999px; overflow-x:auto;
   scrollbar-width:none; -webkit-overflow-scrolling:touch; }
 .st-group-tabs::-webkit-scrollbar { display:none; }
-.st-group-tabs button { flex:none; padding:.375rem 1rem; border-radius:.5rem; border:none;
-  background:transparent; color:var(--on-surface-variant); font-size:14px; font-weight:500; }
-.st-group-tabs button.on { background:var(--surface-container-lowest); color:var(--primary);
-  font-weight:600; box-shadow:0 1px 3px rgba(0,0,0,.08); }
-.st-group-tabs button:disabled { color:var(--outline); }
+.st-group-tabs button { flex:none; padding:.375rem 1rem; border-radius:9999px; border:none;
+  background:transparent; color:#64748B; font-size:14px; font-weight:500; }
+/* 2026-10-18 玻璃化：选中改白玻 pill（白 .95 底 + #0F172A 700），容器内 pill 视觉一致 */
+.st-group-tabs button.on { background:rgba(255,255,255,.95); color:#0F172A;
+  font-weight:700; box-shadow:0 4px 14px rgba(0,0,0,.06), 0 1px 2px rgba(0,0,0,.04),
+    inset 0 1px 2px #fff; }
+.st-group-tabs button:disabled { color:#94A3B8; }
 .st-group-chips { display:flex; gap:.5rem; overflow-x:auto; padding-bottom:1rem;
   scrollbar-width:none; -webkit-overflow-scrolling:touch;
   mask-image:linear-gradient(to right,#000 92%,transparent 100%); }
 .st-group-chips::-webkit-scrollbar { display:none; }
+/* 2026-10-18 玻璃化：组别胶囊改白玻胶囊（白 .6 底 + 白 .8 描边，参照看板页日期按钮） */
 .st-group-chip { flex:none; display:flex; align-items:center; gap:.5rem; padding:.5rem 1rem;
-  border-radius:9999px; background:var(--surface-container-lowest); color:var(--on-surface);
-  box-shadow:0 1px 3px rgba(0,0,0,.06); font-size:12px; font-weight:600; cursor:pointer;
-  border:none; }
-.st-group-chip.on { background:var(--primary); color:var(--on-primary);
-  box-shadow:0 2px 6px rgba(0,88,188,.24); }
-.st-group-chip .n { width:.25rem; height:.25rem; border-radius:9999px; background:var(--outline-variant); }
-.st-group-chip.on .n { background:rgba(255,255,255,.6); }
-.st-group-chip .c { color:var(--on-surface-variant); font-weight:400; }
-.st-group-chip.on .c { color:rgba(255,255,255,.95); }
+  border-radius:9999px; background:rgba(255,255,255,.6); border:1px solid rgba(255,255,255,.8);
+  color:#0F172A; box-shadow:0 2px 6px rgba(0,0,0,.04); font-size:12px; font-weight:600;
+  cursor:pointer; }
+/* 2026-10-18 玻璃化：选中改琥珀强调（白底 + #B45309 字 + 琥珀描边/投影，参照「今天」按钮琥珀化） */
+.st-group-chip.on { background:#fff; border-color:rgba(252,211,77,.4); color:#B45309;
+  box-shadow:0 2px 10px rgba(217,119,6,.14); }
+.st-group-chip .n { width:.25rem; height:.25rem; border-radius:9999px; background:rgba(148,163,184,.5); }
+.st-group-chip.on .n { background:#D97706; }
+.st-group-chip .c { color:#64748B; font-weight:400; }
+.st-group-chip.on .c { color:rgba(180,83,9,.8); }
 .st-group-cards { display:flex; overflow-x:auto; gap:1rem; padding-bottom:1rem;
   scroll-snap-type:x mandatory; scrollbar-width:none; -webkit-overflow-scrolling:touch; }
 .st-group-cards::-webkit-scrollbar { display:none; }
@@ -1311,10 +1380,13 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .st-gcard-head .l { display:flex; align-items:center; gap:.5rem; }
 .st-gcard-head .bar { width:.375rem; height:1rem; border-radius:9999px; background:var(--primary); }
 .st-gcard-head .bar.alt { background:var(--secondary); }
-.st-gcard-head h2 { margin:0; font-size:18px; font-weight:600; color:var(--on-surface); letter-spacing:-.01em; }
-.st-gcard-head .cnt { font-size:12px; color:var(--on-surface-variant); font-weight:500; }
-.st-gcard-body { background:var(--surface-container-lowest); border-radius:.75rem;
-  box-shadow:0 1px 3px rgba(0,0,0,.06); overflow:hidden; display:flex; flex-direction:column; }
+.st-gcard-head h2 { margin:0; font-size:18px; font-weight:600; color:#0F172A; letter-spacing:-.01em; }
+.st-gcard-head .cnt { font-size:12px; color:#64748B; font-weight:500; }
+/* 2026-10-18 玻璃化：分组主体卡换玻璃卡 token（白 .72 底 + blur(20px) + 16px 圆角 + 同款投影） */
+.st-gcard-body { background:rgba(255,255,255,.72); border:1px solid rgba(255,255,255,.85);
+  border-radius:16px; box-shadow:0 8px 32px rgba(148,163,184,.12), 0 1px 2px rgba(0,0,0,.03);
+  -webkit-backdrop-filter:blur(20px); backdrop-filter:blur(20px);
+  overflow:hidden; display:flex; flex-direction:column; }
 .st-gmem { display:flex; align-items:center; gap:1rem; padding:.75rem 1rem;
   border-bottom:1px solid var(--surface-container); transition:background .15s; }
 .st-gmem:last-child { border-bottom:none; }
@@ -1332,22 +1404,26 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 
 /* ===== 族谱页（Clan Lineage）Stitch 版 ===== */
 .st-ln-tools { display:flex; align-items:center; gap:.5rem; padding:.5rem 0 1rem; }
+/* 2026-10-18 玻璃化：族谱搜索框改白玻胶囊（白 .72 底 + 白 .85 描边 + 12px 圆角，参照看板页 .search） */
 .st-ln-search { flex:1; display:flex; align-items:center; gap:.5rem; height:2.5rem;
-  background:var(--surface-container-lowest); border-radius:.75rem; padding:0 1rem;
-  box-shadow:0 1px 3px rgba(0,0,0,.06); }
+  background:rgba(255,255,255,.72); border:1px solid rgba(255,255,255,.85);
+  border-radius:12px; padding:0 1rem; box-shadow:0 2px 6px rgba(0,0,0,.04); }
 .st-ln-search input { flex:1; border:none; outline:none; background:transparent;
-  font-size:13px; color:var(--on-surface); min-width:0; }
-.st-ln-search input::placeholder { color:var(--outline); }
+  font-size:13px; color:#0F172A; min-width:0; }
+.st-ln-search input::placeholder { color:#94A3B8; }
 /* 搜索框内「清除」按钮（设计稿 cancel 图标）：有输入时才出现，避免常驻占位 */
 .st-ln-clear { border:none; background:transparent; padding:0; display:grid; place-items:center;
   color:var(--on-surface-variant); flex:none; }
 .st-ln-clear .material-symbols-outlined { font-size:18px; }
-.st-ln-btn { width:2.5rem; height:2.5rem; border-radius:.75rem; background:var(--surface-container-lowest);
-  border:none; box-shadow:0 1px 3px rgba(0,0,0,.06); display:grid; place-items:center;
-  color:var(--on-surface-variant); font-size:16px; flex:none; }
+/* 2026-10-18 玻璃化：工具栏图标钮改白玻图标钮 token（白 .7 底 + 白 .9 描边） */
+.st-ln-btn { width:2.5rem; height:2.5rem; border-radius:.75rem; background:rgba(255,255,255,.7);
+  border:1px solid rgba(255,255,255,.9); box-shadow:0 2px 6px rgba(0,0,0,.04);
+  display:grid; place-items:center; color:#475569; font-size:16px; flex:none; }
 .st-ln-btn:active { transform:scale(.95); }
-.st-ln-stat { background:var(--surface-container-lowest); border-radius:.75rem; padding:1rem;
-  box-shadow:0 1px 3px rgba(0,0,0,.06); margin-bottom:1rem; }
+/* 2026-10-18 玻璃化：统计卡换玻璃卡 token（白 .72 底 + blur(20px) + 16px 圆角 + 同款投影） */
+.st-ln-stat { background:rgba(255,255,255,.72); border:1px solid rgba(255,255,255,.85);
+  border-radius:16px; box-shadow:0 8px 32px rgba(148,163,184,.12), 0 1px 2px rgba(0,0,0,.03);
+  -webkit-backdrop-filter:blur(20px); backdrop-filter:blur(20px); padding:1rem; margin-bottom:1rem; }
 /* 指标卡固定 3 格（设计稿 Apple Clean Grid）：单根=直属徒弟/师傅音浪/师徒总音浪，
    多根=公会在册/代际分支/累计音浪 */
 .st-ln-stat-g { display:grid; grid-template-columns:repeat(3,1fr); gap:.25rem; text-align:center; }
@@ -1356,8 +1432,11 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .st-ln-stat-g .v { font-size:11px; color:var(--on-surface-variant); margin-top:.125rem; }
 .st-branch { display:flex; flex-direction:column; gap:1.5rem; padding:0 0 1rem; }
 /* 支系卡（设计稿 node-card）：内容比单行高，头像与折叠钮都顶对齐 */
-.st-branch-card { background:var(--surface-container-lowest); border-radius:.75rem; padding:1rem;
-  box-shadow:0 1px 3px rgba(0,0,0,.06); display:flex; align-items:flex-start; justify-content:space-between; }
+/* 2026-10-18 玻璃化：支系卡换玻璃卡 token（白 .72 底 + blur(20px) + 16px 圆角 + 同款投影） */
+.st-branch-card { background:rgba(255,255,255,.72); border:1px solid rgba(255,255,255,.85);
+  border-radius:16px; box-shadow:0 8px 32px rgba(148,163,184,.12), 0 1px 2px rgba(0,0,0,.03);
+  -webkit-backdrop-filter:blur(20px); backdrop-filter:blur(20px); padding:1rem;
+  display:flex; align-items:flex-start; justify-content:space-between; }
 .st-branch-card .l { display:flex; align-items:flex-start; gap:1rem; min-width:0; flex:1; }
 /* 根支系头像/代际胶囊用 primary-fixed 浅蓝底（设计稿一致），不再用 secondary 紫 */
 .st-branch-av { width:3rem; height:3rem; border-radius:.75rem; background:var(--primary-fixed);
@@ -1413,8 +1492,12 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .st-ln-tip .d { font-size:11px; color:var(--on-surface-variant); margin-top:.125rem; line-height:1.6; }
 
 /* ===== 我的页（My Profile）Stitch 版 ===== */
-.st-my-head { background:var(--surface-container-lowest); border-radius:.75rem; padding:1rem;
-  box-shadow:0 1px 3px rgba(0,0,0,.06); display:flex; align-items:center; gap:1rem; }
+/* 2026-10-18 玻璃化：实底白卡 → 白 .72 玻璃卡（白 .85 描边 + 看板同款投影 + blur 20px） */
+.st-my-head { background:rgba(255,255,255,.72); border:1px solid rgba(255,255,255,.85);
+  border-radius:16px; padding:1rem;
+  box-shadow:0 8px 32px rgba(148,163,184,.12), 0 1px 2px rgba(0,0,0,.03);
+  -webkit-backdrop-filter:blur(20px); backdrop-filter:blur(20px);
+  display:flex; align-items:center; gap:1rem; }
 /* 头像用设计稿浅底单字徽标（primary-fixed 底 + primary 字），不再按姓名哈希上彩色 */
 .st-my-av { width:4rem; height:4rem; border-radius:9999px; display:grid; place-items:center;
   font-size:22px; font-weight:600; background:var(--primary-fixed); color:var(--primary);
@@ -1424,7 +1507,8 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
   place-items:center; border:2px solid var(--surface-container-lowest); }
 .st-my-av .badge .material-symbols-outlined { font-size:14px; font-weight:700; }
 .st-my-head .nm { font-size:18px; font-weight:600; color:var(--on-surface); }
-.st-my-head .tag { padding:0 .375rem; border-radius:9999px; background:var(--surface-container);
+/* 2026-10-18 玻璃化：chip 底 var(--surface-container) → 白 .52 玻 */
+.st-my-head .tag { padding:0 .375rem; border-radius:9999px; background:rgba(255,255,255,.52);
   color:var(--on-surface-variant); font-size:11px; line-height:1.5; margin-left:.375rem; }
 .st-my-head .sub { font-size:13px; color:var(--on-surface-variant); margin-top:.125rem; }
 .st-my-head .sync { display:flex; align-items:center; gap:.375rem; margin-top:.375rem;
@@ -1432,8 +1516,11 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .st-my-head .sync .dot { width:.375rem; height:.375rem; border-radius:9999px; background:var(--primary);
   animation:stPulse 1.6s ease-in-out infinite; }
 @keyframes stPulse { 0%,100% { opacity:1; } 50% { opacity:.35; } }
-.st-my-big { background:var(--surface-container-lowest); border-radius:.75rem; padding:1rem;
-  box-shadow:0 1px 3px rgba(0,0,0,.06); margin-top:.75rem; }
+/* 2026-10-18 玻璃化：实底白卡 → 白 .72 玻璃卡（白 .85 描边 + 看板同款投影 + blur 20px） */
+.st-my-big { background:rgba(255,255,255,.72); border:1px solid rgba(255,255,255,.85);
+  border-radius:16px; padding:1rem;
+  box-shadow:0 8px 32px rgba(148,163,184,.12), 0 1px 2px rgba(0,0,0,.03);
+  -webkit-backdrop-filter:blur(20px); backdrop-filter:blur(20px); margin-top:.75rem; }
 .st-my-big .lbl { display:flex; align-items:center; justify-content:space-between;
   font-size:12px; color:var(--on-surface-variant); text-transform:uppercase; letter-spacing:.05em; }
 .st-my-big .chip { display:inline-flex; align-items:center; gap:.125rem; padding:0 .5rem;
@@ -1447,7 +1534,9 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .st-my-big .row .rmb { font-size:18px; font-weight:600; color:var(--tertiary); }
 /* 「预估折合收益」行尾：日期/未开播信息（从头像卡副标题挪过来的，不丢信息） */
 .st-my-big .row .tail { margin-left:auto; font-size:11px; color:var(--outline); }
-.st-my-rank { margin-top:.75rem; background:var(--surface-container-low); border-radius:.5rem;
+/* 2026-10-18 玻璃化：内嵌排名条 surface-container-low → 白 .52 玻 + 白 .85 描边 */
+.st-my-rank { margin-top:.75rem; background:rgba(255,255,255,.52);
+  border:1px solid rgba(255,255,255,.85); border-radius:.5rem;
   padding:.5rem; }
 .st-my-rank .l1 { display:flex; align-items:center; justify-content:space-between;
   font-size:12px; font-weight:500; }
@@ -1461,7 +1550,8 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
    2026-10-14 用户反馈行内太挤：gap 收到 .25rem，右侧「比X」小字 11→10.5px，
    cv 右对齐不动（.st-cmp-pct 涨跌百分比保留） */
 .st-my-big .st-cmp-row { display:flex; align-items:baseline; gap:.25rem;
-  padding:.4375rem 0; border-bottom:1px solid var(--hairline);
+  /* 2026-10-18 玻璃化：分隔线 → 玻璃卡同款淡 slate 线（对齐看板 .st-list-head） */
+  padding:.4375rem 0; border-bottom:1px solid rgba(226,232,240,.6);
   font-variant-numeric:tabular-nums; }
 .st-my-big .st-cmp-row:last-of-type { border-bottom:none; }
 .st-my-big .st-cmp-row .material-symbols-outlined { font-size:16px; color:var(--primary);
@@ -1473,8 +1563,10 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .st-my-big .st-cmp-row .st-cmp-pct { font-size:12px; font-weight:700; color:var(--tertiary); }
 .st-my-big .st-cmp-row .cp { font-size:10.5px; color:var(--outline); flex:none; }
 /* 分成收益行：图标 + 标签 + 分成 tag 左，金额右（设计稿 monetization_on 行） */
+/* 2026-10-18 玻璃化：分成收益行 surface-container-low → 白 .52 玻 + 白 .85 描边 */
 .st-my-big .st-cmp-rmb { display:flex; align-items:center; justify-content:space-between;
-  margin-top:.625rem; background:var(--surface-container-low); border-radius:.5rem;
+  margin-top:.625rem; background:rgba(255,255,255,.52);
+  border:1px solid rgba(255,255,255,.85); border-radius:.5rem;
   padding:.5rem .625rem; }
 .st-my-big .st-cmp-rmb .l { display:flex; align-items:center; gap:.25rem;
   font-size:12.5px; color:var(--on-surface-variant); }
@@ -1483,13 +1575,18 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
   background:rgba(0,88,188,.08); color:var(--primary); font-size:11px; font-weight:700; }
 .st-my-big .st-cmp-rmb .v { font-size:17px; font-weight:700; color:var(--tertiary);
   font-variant-numeric:tabular-nums; }
-.st-my-card { background:var(--surface-container-lowest); border-radius:.75rem; padding:1rem;
-  box-shadow:0 1px 3px rgba(0,0,0,.06); margin-top:.75rem; display:flex; align-items:center;
+/* 2026-10-18 玻璃化：实底白卡 → 白 .72 玻璃卡（白 .85 描边 + 看板同款投影 + blur 20px） */
+.st-my-card { background:rgba(255,255,255,.72); border:1px solid rgba(255,255,255,.85);
+  border-radius:16px; padding:1rem;
+  box-shadow:0 8px 32px rgba(148,163,184,.12), 0 1px 2px rgba(0,0,0,.03);
+  -webkit-backdrop-filter:blur(20px); backdrop-filter:blur(20px); margin-top:.75rem;
+  display:flex; align-items:center;
   justify-content:space-between; }
 .st-my-card .l { display:flex; align-items:center; gap:1rem; min-width:0; }
 .st-my-ico { width:2.5rem; height:2.5rem; border-radius:9999px; background:var(--secondary-fixed);
   color:var(--secondary); display:grid; place-items:center; flex:none; }
-.st-my-ico.sq { border-radius:.5rem; background:var(--surface-container); color:var(--on-surface-variant); }
+.st-my-ico.sq { border-radius:.5rem; /* 2026-10-18 玻璃化：surface-container 实底 → 白 .52 玻 */
+  background:rgba(255,255,255,.52); color:var(--on-surface-variant); }
 .st-my-ico .material-symbols-outlined { font-size:22px; }
 .st-my-card .t { font-size:18px; font-weight:600; color:var(--on-surface); }
 .st-my-card .chip2 { padding:0 .375rem; border-radius:.25rem; background:rgba(76,74,202,.12);
@@ -1503,8 +1600,12 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 
 /* ===== 我的抖音号卡（2026-10-12）：每个号一行，日/月/年/累计四格 =====
    title 行复用 .st-my-list .sec 口径，右侧「共 N 个」用同色 11px 非大写 */
-.st-my-acct { background:var(--surface-container-lowest); border-radius:.75rem;
-  box-shadow:0 1px 3px rgba(0,0,0,.06); overflow:hidden; margin-top:.75rem; }
+/* 2026-10-18 玻璃化：实底白卡 → 白 .72 玻璃卡（白 .85 描边 + 看板同款投影 + blur 20px） */
+.st-my-acct { background:rgba(255,255,255,.72); border:1px solid rgba(255,255,255,.85);
+  border-radius:16px;
+  box-shadow:0 8px 32px rgba(148,163,184,.12), 0 1px 2px rgba(0,0,0,.03);
+  -webkit-backdrop-filter:blur(20px); backdrop-filter:blur(20px);
+  overflow:hidden; margin-top:.75rem; }
 .st-my-acct > .sec { padding:.5rem 1rem; font-size:11px; color:var(--outline);
   display:flex; align-items:center; justify-content:space-between; }
 .st-my-acct > .sec .n { text-transform:none; letter-spacing:0; }
@@ -1526,13 +1627,17 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
    2026-10-15 任务五：行可点（点击复制抖音号），.copiable 挂 cursor + hover/active 反馈。 */
 .st-my-acct .row { display:flex; flex-wrap:wrap; align-items:center;
   justify-content:space-between; gap:.25rem .75rem;
-  padding:.875rem 1rem; border-top:1px solid var(--surface-container); }
+  /* 2026-10-18 玻璃化：行分隔线 → 玻璃卡同款淡 slate 线（对齐看板 .st-row） */
+  padding:.875rem 1rem; border-top:1px solid #F1F5F9; }
 .st-my-acct .row.copiable { cursor:pointer; -webkit-tap-highlight-color:transparent; }
-.st-my-acct .row.copiable:hover { background:var(--surface-container-low); }
-.st-my-acct .row.copiable:active { background:var(--surface-container); }
+/* 2026-10-18 玻璃化：行 hover surface-container-low → 白 .6（对齐看板 .st-row:hover） */
+.st-my-acct .row.copiable:hover { background:rgba(255,255,255,.6); }
+/* 2026-10-18 玻璃化：行 active surface-container → 白 .8 */
+.st-my-acct .row.copiable:active { background:rgba(255,255,255,.8); }
 .st-my-acct .row .l { display:flex; align-items:center; gap:1rem; flex:1 1 8rem; min-width:0; }
 .st-my-acct .row .ico { width:2rem; height:2rem; border-radius:.5rem;
-  background:var(--surface-container); color:var(--on-surface-variant);
+  /* 2026-10-18 玻璃化：surface-container 实底 → 白 .52 玻 */
+  background:rgba(255,255,255,.52); color:var(--on-surface-variant);
   display:grid; place-items:center; flex:none; }
 .st-my-acct .row .ico .material-symbols-outlined { font-size:20px; }
 .st-my-acct .row .t { font-size:15px; font-weight:500; color:var(--on-surface);
@@ -1545,7 +1650,8 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
    灰底灰点灰字 = 未开播；浅主色底 + 主色点（保留脉冲）+ 主色字 = 已开播 */
 .st-my-acct .row .st { display:inline-flex; align-items:center; gap:.3rem; font-size:10.5px;
   font-weight:600; line-height:1.5; padding:.1rem .5rem; border-radius:9999px;
-  background:var(--surface-container); color:var(--on-surface-variant); flex:none;
+  /* 2026-10-18 玻璃化：surface-container 实底 → 白 .52 玻 */
+  background:rgba(255,255,255,.52); color:var(--on-surface-variant); flex:none;
   white-space:nowrap; }
 .st-my-acct .row .st i { width:.375rem; height:.375rem; border-radius:9999px;
   background:var(--outline-variant); flex:none; }
@@ -1569,15 +1675,23 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .st-my-acct .fail { padding:.75rem 1rem; font-size:11px; color:var(--outline); text-align:center; }
 .st-my-acct .none { padding:1rem; font-size:12px; color:var(--on-surface-variant);
   text-align:center; line-height:1.7; }
-.st-my-list { background:var(--surface-container-lowest); border-radius:.75rem;
-  box-shadow:0 1px 3px rgba(0,0,0,.06); overflow:hidden; margin-top:.75rem; }
+/* 2026-10-18 玻璃化：实底白卡列表容器 → 白 .72 玻璃卡（白 .85 描边 + 看板同款投影 + blur 20px） */
+.st-my-list { background:rgba(255,255,255,.72); border:1px solid rgba(255,255,255,.85);
+  border-radius:16px;
+  box-shadow:0 8px 32px rgba(148,163,184,.12), 0 1px 2px rgba(0,0,0,.03);
+  -webkit-backdrop-filter:blur(20px); backdrop-filter:blur(20px);
+  overflow:hidden; margin-top:.75rem; }
 .st-my-list .sec { padding:.5rem 1rem; font-size:11px; color:var(--outline);
   text-transform:uppercase; letter-spacing:.05em; }
 .st-my-item { display:flex; align-items:center; justify-content:space-between; padding:.875rem 1rem;
-  border-top:1px solid var(--surface-container); transition:background .15s; }
-.st-my-item:hover { background:var(--surface-container-low); }
+  /* 2026-10-18 玻璃化：行分隔线 → 玻璃卡同款淡 slate 线（对齐看板 .st-row） */
+  border-top:1px solid #F1F5F9; transition:background .15s; }
+/* 2026-10-18 玻璃化：行 hover surface-container-low → 白 .6（对齐看板 .st-row:hover） */
+.st-my-item:hover { background:rgba(255,255,255,.6); }
 .st-my-item .l { display:flex; align-items:center; gap:1rem; min-width:0; }
-.st-my-item .ico { width:2rem; height:2rem; border-radius:.5rem; background:var(--surface-container);
+.st-my-item .ico { width:2rem; height:2rem; border-radius:.5rem;
+  /* 2026-10-18 玻璃化：surface-container 实底 → 白 .52 玻 */
+  background:rgba(255,255,255,.52);
   display:grid; place-items:center; color:var(--on-surface-variant); flex:none; }
 .st-my-item .ico .material-symbols-outlined { font-size:20px; }
 .st-my-item .t { font-size:15px; font-weight:500; color:var(--on-surface); }
@@ -1633,13 +1747,17 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .tabs2 button.on { background:var(--primary); border-color:var(--primary); color:#fff; }
 /* 搜索框 + 下拉候选列表：相对定位容器，下拉绝对定位白底阴影 */
 .sr { position:relative; margin-top:10px; }
-.sr input { width:100%; height:40px; border:1px solid var(--hairline);
-  border-radius:var(--r-md); padding:0 12px; font-size:14px; background:#fff;
+/* 2026-10-18 玻璃化：搜索输入框白实底 → 白玻输入（白 .72 底 + 白 .85 描边，参照看板 .search） */
+.sr input { width:100%; height:40px; border:1px solid rgba(255,255,255,.85);
+  border-radius:var(--r-md); padding:0 12px; font-size:14px; background:rgba(255,255,255,.72);
   color:var(--on-surface); }
 .sr input:focus { outline:none; border-color:var(--primary); }
+/* 2026-10-18 玻璃化：候选下拉白实底 → 白玻卡（白 .85 描边 + blur 20px，投影保留浮层可读性） */
 .sr-list { position:absolute; left:0; right:0; top:calc(100% + 4px); z-index:20;
-  background:#fff; border:1px solid var(--hairline); border-radius:var(--r-md);
-  box-shadow:0 8px 24px rgba(0,0,0,.12); max-height:60vh; overflow:auto; }
+  background:rgba(255,255,255,.92); border:1px solid rgba(255,255,255,.85); border-radius:var(--r-md);
+  box-shadow:0 8px 32px rgba(148,163,184,.12), 0 1px 2px rgba(0,0,0,.03);
+  -webkit-backdrop-filter:blur(20px); backdrop-filter:blur(20px);
+  max-height:60vh; overflow:auto; }
 .sr-list > div { padding:9px 12px; font-size:13px; color:var(--on-surface);
   border-bottom:1px solid var(--hairline); cursor:pointer; }
 .sr-list > div:last-child { border-bottom:none; }
@@ -1688,15 +1806,20 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .delta.d-flat { color:var(--outline); font-weight:400; }
 
 /* 联系运营卡（设计稿：圆形「帅」字头像 + 文案 + 立即私信 pill） */
-.st-my-ops { margin-top:.75rem; background:var(--surface-container-lowest);
-  border:1px solid var(--hairline); border-radius:.75rem; padding:1rem;
-  box-shadow:0 1px 3px rgba(0,0,0,.06); display:flex; align-items:center; gap:1rem; }
+/* 2026-10-18 玻璃化：实底白卡 → 白 .72 玻璃卡（描边白 .85 换玻璃口径 + blur 20px） */
+.st-my-ops { margin-top:.75rem; background:rgba(255,255,255,.72);
+  border:1px solid rgba(255,255,255,.85); border-radius:16px; padding:1rem;
+  box-shadow:0 8px 32px rgba(148,163,184,.12), 0 1px 2px rgba(0,0,0,.03);
+  -webkit-backdrop-filter:blur(20px); backdrop-filter:blur(20px);
+  display:flex; align-items:center; gap:1rem; }
 .st-my-ops-av { width:2.5rem; height:2.5rem; border-radius:9999px; background:var(--primary-fixed);
   color:var(--primary); display:grid; place-items:center; font-size:18px; font-weight:700; flex:none; }
 .st-my-ops .t { font-size:14px; font-weight:600; color:var(--on-surface); }
 .st-my-ops .d { font-size:11px; color:var(--outline); margin-top:.125rem; }
 .st-my-ops-btn { display:inline-flex; align-items:center; gap:.25rem; padding:.375rem .75rem;
-  border:none; border-radius:9999px; background:var(--surface-container-low); color:var(--primary);
+  border:none; border-radius:9999px;
+  /* 2026-10-18 玻璃化：surface-container-low 实底 → 白 .52 玻 */
+  background:rgba(255,255,255,.52); color:var(--primary);
   font-size:12px; font-weight:500; flex:none; }
 .st-my-ops-btn .material-symbols-outlined { font-size:16px; }
 .st-my-ops-btn:active { transform:scale(.96); }
@@ -1787,10 +1910,14 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
   font-size:12px; margin-bottom:10px; text-align:center; }
 
 /* ===== 我的页兼容层（Stitch 外壳 + 原表单/弹层） ===== */
-.my-logout { margin-top:12px; width:100%; height:44px; border:1px solid var(--hairline);
-  border-radius:var(--r-md); background:#fff; color:var(--on-surface); font-weight:600; }
-.my-trend { background:var(--surface-container-lowest); border-radius:.75rem; padding:1rem;
-  box-shadow:0 1px 3px rgba(0,0,0,.06); margin-top:.75rem; }
+/* 2026-10-18 玻璃化：退出按钮白实底 → 白玻输入口径（白 .72 底 + 白 .85 描边） */
+.my-logout { margin-top:12px; width:100%; height:44px; border:1px solid rgba(255,255,255,.85);
+  border-radius:var(--r-md); background:rgba(255,255,255,.72); color:var(--on-surface); font-weight:600; }
+/* 2026-10-18 玻璃化：趋势图容器实底白卡 → 白 .72 玻璃卡（白 .85 描边 + 看板同款投影 + blur 20px） */
+.my-trend { background:rgba(255,255,255,.72); border:1px solid rgba(255,255,255,.85);
+  border-radius:16px; padding:1rem;
+  box-shadow:0 8px 32px rgba(148,163,184,.12), 0 1px 2px rgba(0,0,0,.03);
+  -webkit-backdrop-filter:blur(20px); backdrop-filter:blur(20px); margin-top:.75rem; }
 .my-trend .bars { display:flex; align-items:flex-end; gap:3px; height:90px; margin-top:8px; }
 .my-trend .b { flex:1; background:var(--primary); border-radius:3px; opacity:.9; }
 .my-trend .b.off { background:var(--surface-container-highest); }
@@ -1799,9 +1926,10 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .my-push { margin-top:.75rem; }
 .my-push .row { font-size:13px; margin-top:8px; display:flex; align-items:center; gap:8px; }
 .my-push .sub { font-size:11px; color:var(--on-surface-variant); }
-.my-push input { width:100%; height:40px; border:1px solid var(--hairline);
-  border-radius:var(--r-md); padding:0 12px; font-size:14px; margin-top:8px;
-  background:#fff; color:var(--on-surface); }
+/* 2026-10-18 玻璃化：微信卡输入框白实底 → 白玻输入（白 .72 底 + 白 .85 描边，参照看板 .search） */
+.my-push input { width:100%; height:40px; border:1px solid rgba(255,255,255,.85);
+  border-radius:12px; padding:0 12px; font-size:14px; margin-top:8px;
+  background:rgba(255,255,255,.72); color:var(--on-surface); }
 .my-push input:focus { outline:none; border-color:var(--primary); }
   object-fit:cover; background:var(--surface-container-low); flex:none; }
   background:#fff; color:var(--on-surface-variant); font-size:12.5px; }
@@ -1819,9 +1947,12 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 #gate { position:fixed; inset:0; z-index:90; background:#F2F4F7;
   display:flex; align-items:center; justify-content:center; padding:20px; overflow:auto; }
 #gate.hidden { display:none; }
+/* 2026-10-18 玻璃化：登录卡白实底 → 白 .72 玻璃卡（白 .85 描边 + 看板同款投影 + blur 20px，
+   28px 圆角保持不变；body 的 .bg-light-apple 渐变能透出来） */
 .gate-box { max-width:390px; width:100%; margin:auto; text-align:center;
-  background:#FFFFFF; border-radius:28px; border:1px solid rgba(11,28,48,.04);
-  box-shadow:0 12px 36px -4px rgba(11,28,48,.08), 0 4px 12px -2px rgba(11,28,48,.04);
+  background:rgba(255,255,255,.72); border-radius:28px; border:1px solid rgba(255,255,255,.85);
+  box-shadow:0 8px 32px rgba(148,163,184,.12), 0 1px 2px rgba(0,0,0,.03);
+  -webkit-backdrop-filter:blur(20px); backdrop-filter:blur(20px);
   padding:28px; padding-top:36px;
   animation:stFadeIn .18s ease-out;
   font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Helvetica Neue",sans-serif; }
@@ -1833,18 +1964,27 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .gate-box .big-av .material-symbols-outlined { font-size:30px; }
 .gate-box h3 { margin:0 0 18px; font-size:23px; font-weight:700; letter-spacing:-.02em; color:#0B1C30; }
 .gate-box .tip { margin:0 0 16px; color:#64748B; font-size:13px; line-height:1.7; }
-.gate-tabs { display:flex; margin:0 0 18px; background:#FFFFFF;
-  border:1px solid #E2E8F0; border-radius:9999px; padding:4px; }
+/* 2026-10-18 玻璃化：tab 容器白实底 → 白玻分段容器 token（白 .52 底 + 白 .85 描边
+   + blur(28px) saturate(180%) + 看板 .seg 同款内外投影） */
+.gate-tabs { display:flex; margin:0 0 18px; background:rgba(255,255,255,.52);
+  border:1px solid rgba(255,255,255,.85); border-radius:9999px; padding:4px;
+  box-shadow:0 6px 24px rgba(15,23,42,.05), 0 1px 3px rgba(0,0,0,.02),
+    inset 0 1px 2px rgba(255,255,255,.95), inset 0 -1px 2px rgba(148,163,184,.12);
+  -webkit-backdrop-filter:blur(28px) saturate(180%); backdrop-filter:blur(28px) saturate(180%); }
 .gate-tabs button { flex:1; height:40px; border:none; border-radius:9999px;
   background:transparent; color:#64748B; font-size:15px; transition:all .15s; }
-.gate-tabs button.on { background:#0066FF; color:#fff;
-  font-weight:600; box-shadow:0 4px 14px 0 rgba(0,102,255,.28); }
-.gate-box input { width:100%; height:50px; border:1px solid #E2E8F0;
+/* 2026-10-18 玻璃化：选中 tab #0066FF 蓝实底 → 琥珀 #B45309（白字 + 同色系投影） */
+.gate-tabs button.on { background:#B45309; color:#fff;
+  font-weight:600; box-shadow:0 4px 14px 0 rgba(180,83,9,.28); }
+/* 2026-10-18 玻璃化：登录输入框白实底 + 灰描边 → 白玻输入（白 .72 底 + 白 .85 描边 + 12px 圆角，
+   参照看板 .search 口径） */
+.gate-box input { width:100%; height:50px; border:1px solid rgba(255,255,255,.85);
   border-radius:12px; padding:0 16px; font-size:15px; margin-bottom:12px;
-  background:#FFFFFF; color:#0B1C30; transition:border-color .18s ease, box-shadow .18s ease; }
+  background:rgba(255,255,255,.72); color:#0B1C30; transition:border-color .18s ease, box-shadow .18s ease; }
 .gate-box input::placeholder { color:#94A3B8; }
-.gate-box input:focus { outline:none; border-color:#0066FF;
-  box-shadow:0 0 0 4px rgba(0,102,255,.10); background:#FFFFFF; }
+/* 2026-10-18 玻璃化：focus 描边/光圈 #0066FF 蓝 → 琥珀 #D97706 系（强调色统一） */
+.gate-box input:focus { outline:none; border-color:#D97706;
+  box-shadow:0 0 0 4px rgba(217,119,6,.10); background:rgba(255,255,255,.72); }
 .gate-box input.gate-err { border-color:#FB7185;
   box-shadow:0 0 0 4px rgba(244,63,94,.15); }
 .gate-box .form-err { color:#F43F5E; font-size:13px; margin:-4px 0 10px; text-align:left;
@@ -1997,18 +2137,24 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .cal-d.on:active { background:var(--primary); opacity:.85; }
 
 /* ===== 绑定主播（Apple Style） ===== */
-.my-bind { background:var(--surface-container-lowest); border-radius:.75rem;
-  padding:16px 16px 14px; text-align:left; box-shadow:0 1px 3px rgba(0,0,0,.06); }
+/* 2026-10-18 玻璃化：绑定主播卡实底白卡 → 白 .72 玻璃卡（白 .85 描边 + 看板同款投影 + blur 20px） */
+.my-bind { background:rgba(255,255,255,.72); border:1px solid rgba(255,255,255,.85);
+  border-radius:16px;
+  padding:16px 16px 14px; text-align:left;
+  box-shadow:0 8px 32px rgba(148,163,184,.12), 0 1px 2px rgba(0,0,0,.03);
+  -webkit-backdrop-filter:blur(20px); backdrop-filter:blur(20px); }
 .my-bind .sub { font-size:12px; color:var(--on-surface-variant); line-height:1.7; }
 .my-bind .warn { font-size:12px; color:#b45309; background:#fff7e6; border-radius:.5rem;
   padding:8px 10px; margin-top:10px; line-height:1.6; }
-.my-bind input { width:100%; height:42px; border:1px solid var(--hairline); border-radius:.75rem;
-  padding:0 12px; font-size:14px; margin-top:10px; background:var(--surface-container-low);
+/* 2026-10-18 玻璃化：绑定卡输入框 surface-container-low → 白玻输入（白 .72 底 + 白 .85 描边 + 12px 圆角） */
+.my-bind input { width:100%; height:42px; border:1px solid rgba(255,255,255,.85); border-radius:12px;
+  padding:0 12px; font-size:14px; margin-top:10px; background:rgba(255,255,255,.72);
   color:var(--on-surface); }
 .my-bind input:focus { outline:none; border-color:var(--primary);
   box-shadow:0 0 0 3px rgba(0,88,188,.12); }
 .my-bind .hit { display:flex; align-items:center; justify-content:space-between; gap:8px;
-  padding:10px 2px; border-bottom:1px solid var(--surface-container); font-size:14px; }
+  /* 2026-10-18 玻璃化：行分隔线 → 玻璃卡同款淡 slate 线（对齐看板 .st-row） */
+  padding:10px 2px; border-bottom:1px solid #F1F5F9; font-size:14px; }
 .my-bind .hit:last-child { border-bottom:none; }
 .my-bind .hit .tag { font-size:11px; color:var(--on-surface-variant); margin-left:6px; }
 .my-bind .hit button { flex:none; height:30px; padding:0 14px; border:none; border-radius:9999px;
@@ -2016,10 +2162,14 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .my-bind .none { color:var(--on-surface-variant); font-size:12px; padding:10px 2px; }
 
 /* ===== 我的页兼容层（Stitch 外壳 + 原表单/弹层） ===== */
-.my-logout { margin-top:12px; width:100%; height:44px; border:1px solid var(--hairline);
-  border-radius:var(--r-md); background:#fff; color:var(--on-surface); font-weight:600; }
-.my-trend { background:var(--surface-container-lowest); border-radius:.75rem; padding:1rem;
-  box-shadow:0 1px 3px rgba(0,0,0,.06); margin-top:.75rem; }
+/* 2026-10-18 玻璃化：退出按钮白实底 → 白玻输入口径（白 .72 底 + 白 .85 描边） */
+.my-logout { margin-top:12px; width:100%; height:44px; border:1px solid rgba(255,255,255,.85);
+  border-radius:var(--r-md); background:rgba(255,255,255,.72); color:var(--on-surface); font-weight:600; }
+/* 2026-10-18 玻璃化：趋势图容器实底白卡 → 白 .72 玻璃卡（白 .85 描边 + 看板同款投影 + blur 20px） */
+.my-trend { background:rgba(255,255,255,.72); border:1px solid rgba(255,255,255,.85);
+  border-radius:16px; padding:1rem;
+  box-shadow:0 8px 32px rgba(148,163,184,.12), 0 1px 2px rgba(0,0,0,.03);
+  -webkit-backdrop-filter:blur(20px); backdrop-filter:blur(20px); margin-top:.75rem; }
 .my-trend .bars { display:flex; align-items:flex-end; gap:3px; height:90px; margin-top:8px; }
 .my-trend .b { flex:1; background:var(--primary); border-radius:3px; opacity:.9; }
 .my-trend .b.off { background:var(--surface-container-highest); }
@@ -2028,9 +2178,10 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .my-push { margin-top:.75rem; }
 .my-push .row { font-size:13px; margin-top:8px; display:flex; align-items:center; gap:8px; }
 .my-push .sub { font-size:11px; color:var(--on-surface-variant); }
-.my-push input { width:100%; height:40px; border:1px solid var(--hairline);
-  border-radius:var(--r-md); padding:0 12px; font-size:14px; margin-top:8px;
-  background:#fff; color:var(--on-surface); }
+/* 2026-10-18 玻璃化：微信卡输入框白实底 → 白玻输入（白 .72 底 + 白 .85 描边，参照看板 .search） */
+.my-push input { width:100%; height:40px; border:1px solid rgba(255,255,255,.85);
+  border-radius:12px; padding:0 12px; font-size:14px; margin-top:8px;
+  background:rgba(255,255,255,.72); color:var(--on-surface); }
 .my-push input:focus { outline:none; border-color:var(--primary); }
   object-fit:cover; background:var(--surface-container-low); flex:none; }
   background:#fff; color:var(--on-surface-variant); font-size:12.5px; }
@@ -2432,6 +2583,10 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
   <div class="err hidden" id="err"></div>
   <div id="view"></div>
   <div class="note" id="foot">数据每晚 24:00 后更新前一天 · 仅供内部参考 · 请勿外传</div>
+  <!-- 智能安全区避让轨道弹幕层（Stitch FullScreenDanmakuOverlay 1:1）：fixed 430px 居中、
+       z-30、pointer-events 穿透。DOM 由 renderDanmaku() 拼装；只在看板（data）视图显示，
+       switchView 切走时收口隐藏（类 hidden 来自全局 .hidden）。 -->
+  <div id="danmakuLayer" class="hidden" aria-hidden="true"></div>
 </main>
 
 <!-- 2026-10-18 第二轮 1:1：定位层上提 —— fixed 外层 + relative nav 双层（对齐设计稿） -->
@@ -3628,6 +3783,57 @@ function renderList() {
      .section 的通用样式差；其余视图照旧用 .section。 */
   $('view').innerHTML = '<div class="section st-data">' + body + '</div>';
   bindRows();
+  /* 🎈 智能安全区避让轨道弹幕：榜单渲染完顺手挂弹幕层（renderDanmaku 自己带
+     空数据兜底 —— listAll 空 / 榜单未公布时整层 hidden）。 */
+  renderDanmaku();
+}
+
+/* ==================== 智能安全区避让轨道弹幕（Stitch 玻璃稿 1:1） ====================
+   三条横向轨道上的纯文字胶囊（24px 磨砂玻璃底），不碰前三名头像/领奖台/奖杯 DOM：
+     · 轨 A（top 232，金）  ：榜首    👑 {名} · {每{日|月|年}榜首} {X万音浪}
+     · 轨 B（top 456，紫/青）：榜二 ⚡、榜三 🌟（同上称号口径）
+     · 轨 C（top 618，金）  ：公告条目 🏆 {公告标题} · {人名}（最多 2 条，enabled 才取）
+   数据：榜单 = listAll（rank 1-3）；公告 = siteAnnouncements.items（enabled 条目的
+   title+name）。名字一律过 esc()。轨道 top 232/456/618 是设计稿 390 视口安全位
+   （避开领奖台头像/腰部/列表卡间隙），按任务口径固定值不随布局算。 */
+function renderDanmaku() {
+  const layer = $('danmakuLayer');
+  if (!layer) return;
+  /* 榜单未公布 / 没数据 → 整层隐藏（含公告轨：没有榜单的看板本身就是空态页） */
+  if (!Array.isArray(listAll) || !listAll.length) { layer.classList.add('hidden'); layer.innerHTML = ''; return; }
+  const pick = (r) => listAll.find(x => x.hasData !== false && x.rank === r);
+  const top1 = pick(1), top2 = pick(2), top3 = pick(3);
+  /* 称号随 period 联动：日榜「每日榜首」、月榜「每月榜首」、年榜「年度榜首」 */
+  const unit = period === 'monthly' ? '每月' : period === 'yearly' ? '年度' : '每日';
+  /* 数字格式与榜单一致（wan：万位分段）；wave 为 null（后台隐藏数值）不出数字段 */
+  const num = (w) => w == null ? '' : wan(w);
+  /* 单个名次胶囊：emoji + 名字 + 中点 + 称号 + 音浪数字 */
+  const cap = (cls, ic, it, tt, ml) => !it ? '' :
+    '<span class="danmaku-slim ' + cls + (ml ? ' dm-ml' : '') + '">' +
+      '<span class="dm-ic">' + ic + '</span>' +
+      '<span class="dm-nm">' + esc(it.name) + '</span>' +
+      '<span class="dm-dot">·</span>' +
+      '<span class="dm-tt">' + tt + '</span>' +
+      (it.wave == null ? '' : '<span class="dm-num">' + num(it.wave) + '</span>') +
+    '</span>';
+  /* 轨 B 榜二紫、榜三青（第二个胶囊起 ml 80px 错开）；轨 C 公告金（delay 2s 见 CSS） */
+  const annItems = (Array.isArray(siteAnnouncements.items) ? siteAnnouncements.items : [])
+    .filter(it => it && it.enabled).slice(0, 2);
+  const ann = annItems.map((it, i) =>
+    '<span class="danmaku-slim danmaku-slim-gold danmaku-slim-ann' + (i ? ' dm-ml' : '') + '">' +
+      '<span class="dm-ic">🏆</span>' +
+      '<span class="dm-nm">' + esc(it.title) + '</span>' +
+      '<span class="dm-dot">·</span>' +
+      '<span class="dm-tt">' + esc(it.name) + '</span>' +
+    '</span>').join('');
+  layer.innerHTML =
+    '<div class="dm-track dm-track-a">' + cap('danmaku-slim-gold', '👑', top1, unit + '榜首', false) + '</div>' +
+    '<div class="dm-track dm-track-b">' +
+      cap('danmaku-slim-purple', '⚡', top2, unit + '榜二', false) +
+      cap('danmaku-slim-cyan', '🌟', top3, unit + '榜三', true) +
+    '</div>' +
+    '<div class="dm-track dm-track-c">' + ann + '</div>';
+  layer.classList.remove('hidden');
 }
 
 function copyText(t) {
@@ -6895,6 +7101,9 @@ function switchView(v, opts) {
      并入 #mhAnn 一并删除。 */
   if (v === 'data') mhAnnRestore();
   else mhAnnCollapse();
+  /* 🎈 弹幕层只在看板显示：切走统一收口隐藏（挂载点在 renderList → renderDanmaku，
+     切回 data 重新渲染榜单时会自动恢复）。 */
+  if (v !== 'data') { const dl = $('danmakuLayer'); if (dl) dl.classList.add('hidden'); }
   show('subnav', v === 'group');
   show('foot', v !== 'lineage');
   syncHeaderOffset();
