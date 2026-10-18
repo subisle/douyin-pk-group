@@ -94,7 +94,7 @@ const PROBES = [
   { sec: '头部', name: 'mh-ann (公告胶囊)', design: '.mt-2\\.5', local: ['.mh-ann', '#mhAnn'], props: ['border-radius', 'padding', 'background-image', 'background-color', 'box-shadow', 'height'] },
   { sec: '头部', name: 'mh-ann 标题', design: '.bg-clip-text', local: ['.mh-ann .mha-tx', '.mh-ann'], props: ['font-size', 'background-image', 'font-weight', 'letter-spacing', 'color'] },
   { sec: '头部', name: 'mh-ann 角标', design: '.text-amber-700.font-mono', local: ['.mh-ann .mha-idx'], props: ['font-size', 'color', 'padding', 'border-radius', 'background-color', 'border'] },
-  { sec: '头部', name: 'ping 圆点', design: 'header .animate-ping', local: ['.mh-dot', '.masthead .dot'], props: ['width', 'height', 'background-color', 'box-shadow'] },
+  // ping 圆点：2026-10-18 新设计稿头部已删除该元素，探针一并移除
 
   // ── 工具栏 ──
   { sec: '工具栏', name: 'period bar (st-seg)', design: '#period-segmented-bar', local: ['#seg', '.st-seg'], props: ['background-color', 'padding', 'border-radius', 'border', 'box-shadow', 'backdrop-filter', 'height'] },
@@ -128,19 +128,28 @@ const PROBES = [
   { sec: '榜单', name: 'st-row-wv', design: '.glass-card .text-right .font-black', local: ['.st-row-wv'], props: ['font-size', 'font-family', 'font-weight'] },
   { sec: '榜单', name: 'st-row-lbl', design: '.glass-card .text-\\[10px\\]', local: ['.st-row-lbl'], props: ['font-size', 'color'] },
 
-  // ── 底栏 nav ──
-  { sec: '底栏', name: 'navRow 容器', design: '#liquid-tab-bar', local: ['#navRow', '.tabbar', 'nav.tabbar'], props: ['border-radius', 'padding', 'background-color', 'border', 'box-shadow', 'backdrop-filter', 'height'] },
-  { sec: '底栏', name: 'nav 外层定位', design: '#liquid-tab-bar', local: ['#navRow', 'nav.tabbar'], props: ['position', 'bottom', 'left', 'width', 'max-width', 'z-index'] },
-  { sec: '底栏', name: 'nav button', design: '.nav-tab-item', local: ['#navRow > button', '.tabbar > button'], props: ['flex', 'height', 'font-size', 'color', 'background', 'padding-top', 'padding-bottom'] },
-  { sec: '底栏', name: 'nav button.on', design: '.nav-tab-item .tab-label', local: ['#navRow button.on .tab-label', '.tabbar button.on .tab-label'], props: ['font-size', 'font-weight', 'color'] },
-  { sec: '底栏', name: 'nav 未选中文字', design: '.nav-tab-item[data-index="1"] .tab-label', local: ['#navRow button:not(.on) .tab-label', '.tabbar button:not(.on) .tab-label'], props: ['font-size', 'font-weight', 'color'] },
-  { sec: '底栏', name: 'nav 图标 svg', design: '.nav-tab-item svg', local: ['.tabbar button .ic svg', '#navRow button svg'], props: ['width', 'height'] },
-  { sec: '底栏', name: 'nav active pill', design: '#active-indicator', local: ['#navPill'], props: ['border-radius', 'background-image', 'box-shadow', 'border', 'backdrop-filter', 'width'] },
+  // ── 底栏 nav（2026-10-18 第三轮：新设计稿白色胶囊 dock 体系） ──
+  { sec: '底栏', name: 'navRow 容器', design: '#capsule-bottom-dock', local: ['#navRow'], props: ['border-radius', 'padding', 'background-color', 'border', 'box-shadow', 'backdrop-filter', 'height'] },
+  { sec: '底栏', name: 'nav 外层定位', design: '#capsule-bottom-dock', local: ['#navRow'], props: ['position', 'bottom', 'left', 'width', 'max-width', 'z-index'] },
+  // 按钮层：只比布局与继承字号/内边距（颜色由当前选中态决定，选中/未选中分别在下面两个探针里比）
+  { sec: '底栏', name: 'nav button', design: '.dock-tab-btn', local: ['#navRow > button'], props: ['flex', 'height', 'font-size', 'background', 'padding-top', 'padding-bottom'] },
+  { sec: '底栏', name: 'nav button.on', design: '.dock-tab-btn .tab-label.font-bold', local: ['#navRow button.on .tab-label'], props: ['font-size', 'font-weight', 'color', 'letter-spacing'] },
+  { sec: '底栏', name: 'nav 未选中文字', design: '.dock-tab-btn .tab-label.font-medium', local: ['#navRow button:not(.on) .tab-label'], props: ['font-size', 'font-weight', 'color'] },
+  { sec: '底栏', name: 'nav 图标 svg', design: '.dock-tab-btn svg', local: ['#navRow button:not(.on) .ic svg'], props: ['width', 'height'] },
+  { sec: '底栏', name: 'nav active pill', design: '#ambient-highlight-pill', local: ['#navPill'], props: ['border-radius', 'background-image', 'box-shadow', 'border', 'backdrop-filter', 'width'] },
 ];
 
 // 内容驱动差异白名单：这些字段的不一致来自两边数据不同（mock 3 行 vs 真实 99 人），
 // 不是样式问题。单列为 expected，不计入「不一致」。
 const CONTENT_DRIVEN = new Set([
+  // 底部导航：设计稿 mock 把「我的」做成选中态、本地默认选中「看板」——
+  // 标签 x 坐标天然不同，只比样式（字号/字重/颜色/字距），不比位置。
+  'nav button.on.rect.x', 'nav button.on.rect.y',
+  'pod-1 总计.rect.w',
+  'nav 未选中文字.rect.x', 'nav 未选中文字.rect.y',
+  'nav 图标 svg.rect.x', 'nav 图标 svg.rect.y', 'nav 图标 svg.rect.w', 'nav 图标 svg.rect.h',
+  // 主标题文案不同（设计稿「个人数据中心」6 字 vs 本地「主播数据榜」5 字）
+  'mh-title .t (h1).rect.w',
   'body.rect.h', 'body.rect.y',
   'main.wrap.rect.h', 'main.wrap.rect.y',
   'st-list.rect.h', 'st-list-body (卡片).rect.h',

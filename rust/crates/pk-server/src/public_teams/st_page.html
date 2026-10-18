@@ -737,52 +737,47 @@ button { font:inherit; cursor:pointer; }
   width:calc(100% - 32px); max-width:398px; z-index:31; }
 .tabbar { position:relative;
   display:flex; align-items:center; justify-content:space-between;
-  padding:6px; border-radius:32px;
-  /* 2026-10-18 第二轮 1:1：回归设计稿原值（.68 白 + .9 描边 + blur 32 saturate 200%）。
-     第一轮曾因「胶囊 backdrop 被 dock 抢先糊掉」降到 .30/6px —— 那是为了救胶囊
-     对焦感的权衡；本轮胶囊改用自身 blur(20px) contrast(1.18) 一组强滤镜，
-     dock 回满值后胶囊依然立得住（实测 diff：backdrop-filter 两级都与设计稿一致）。 */
-  background:rgba(255,255,255,.68); border:1px solid rgba(255,255,255,.9);
-  box-shadow:0 20px 48px rgba(120,53,15,.07), 0 4px 12px rgba(15,23,42,.04),
-    inset 0 1.5px 2px rgba(255,255,255,.98), inset 0 -1.5px 2px rgba(214,211,209,.35);
-  -webkit-backdrop-filter:blur(32px) saturate(200%); backdrop-filter:blur(32px) saturate(200%);
+  padding:6px; border-radius:9999px;
+  /* 2026-10-18 第三轮：dock 按新设计稿 .dock-capsule-container 给值 ——
+     更白的胶囊（.88）+ .95 白描边 + blur(28px) saturate(180%) + 四段投影（含内嵌高光）
+     + **全圆角**（rounded-full）。只有这一层 backdrop（旧的 4 层叠 backdrop 是卡顿源）。 */
+  background:rgba(255,255,255,.88); border:1px solid rgba(255,255,255,.95);
+  /* 设计稿 markup 在 .dock-capsule-container 上还挂了 Tailwind shadow-lg，
+     utilities 层后注入把自定义四段阴影盖掉了 —— 实际渲染的是 shadow-lg 这两段，
+     这里按「实际渲染值」对齐（否则与设计稿截图的投影观感不一致）。 */
+  box-shadow:0 10px 15px -3px rgba(0,0,0,.1), 0 4px 6px -4px rgba(0,0,0,.1);
+  -webkit-backdrop-filter:blur(28px) saturate(180%); backdrop-filter:blur(28px) saturate(180%);
   touch-action:none; user-select:none; -webkit-user-select:none;
+  overflow:hidden;
   transition:transform .2s ease; }
 /* 2026-10-18 第二轮 1:1：定位层上提后，:active 只剩缩放（translateX 归 dock 层） */
 .tabbar:active { transform:scale(.985); }
 /* 2026-10-15 task-11：5 项均分不换行（「微信对接」四字 nowrap 保全文案）。
    2026-10-18 v6：加 overflow:hidden + border-radius —— 触摸光晕（.tab-ripple）
    必须裁在 Tab 格子内，不能溢出到隔壁格子 / dock 外。 */
-.tabbar button { position:relative; z-index:2; flex:1; min-width:0;
-  border:none; background:transparent; color:#94A3B8;
-  /* 2026-10-18 第二轮 1:1：设计稿 nav-tab-item 继承 body 16px（文字标签自身
-     text-[11px] 覆盖为 11px），颜色 slate-800（30,41,59）—— 未选中态文字由
-     .tab-label 单独着色 slate-400，这里对齐继承值。 */
-  font-size:16px; font-weight:500; white-space:nowrap; padding:8px 2px;
+.tabbar button { position:relative; z-index:20; flex:1; min-width:0;
+  border:none; background:transparent;
+  /* 2026-10-18 第三轮：新设计稿 .dock-tab-btn —— 未选中图标/文字都是 slate-600
+     （rgb 71,85,105），选中态是琥珀 #B45309（见下方 .on 规则）。 */
   color:rgb(30,41,59);
-  display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2px;
-  transition:color .2s;
+  font-size:16px; font-weight:500; white-space:nowrap; padding:8px 2px;
+  /* 2026-10-18 第三轮：设计稿图标与标签之间只靠标签的 mt-0.5(2px) 拉开，
+     不再额外 gap（两个都算会把 dock 撑高到 71，设计稿是 68.5） */
+  display:flex; flex-direction:column; align-items:center; justify-content:center;
+  transition:color .15s;
   overflow:hidden; border-radius:18px; }
-/* 2026-10-18 第二轮 1:1：标签层级补齐 —— 未选中 slate-400（#94A3B8）+ 500，
-   选中态颜色/字重/字距写在 .tab-label 上（按钮层只保留继承值） */
-.tabbar button .tab-label { font-size:11px; color:#94A3B8; font-weight:500; }
+/* 标签：11px / 500 / slate-600（设计稿 text-[11px] font-medium text-slate-600 mt-0.5） */
+.tabbar button .tab-label { font-size:11px; color:#475569; font-weight:500; margin-top:2px; }
 .tabbar button .ic { width:20px; height:20px; display:grid; place-items:center;
-  transition:color .3s, transform .3s; }
+  color:#475569;
+  transition:color .15s, transform .15s, filter .15s, opacity .15s; }
 .tabbar button .ic svg { width:20px; height:20px; }
-/* 选中：图标 slate-950 + 放大 1.05 + 投影，文字 11/800 slate-950
-   （2026-10-18 第二轮 1:1：文字类的 color/weight/字距移到 .tab-label 上，
-   按钮层保留 color 继承值 #020617，text-shadow 原样保留） */
-.tabbar button.on { color:#020617;
-  text-shadow:0 1px 2px rgba(255,255,255,.8); }
-.tabbar button.on .tab-label { color:#020617; font-weight:800; letter-spacing:.025em; }
-.tabbar button.on .ic { color:#020617; transform:scale(1.10);
-  filter:drop-shadow(0 1px 4px rgba(0,0,0,.18)); }
-/* 第 4 项「微信对接」选中态是棕色 #78350F（设计稿特例；
-   2026-10-18 第二轮 1:1：棕色同样作用于标签层） */
-.tabbar button[data-v="wechat"].on { color:#78350F; }
-.tabbar button[data-v="wechat"].on .tab-label { color:#78350F; }
-.tabbar button[data-v="wechat"].on .ic { color:#78350F;
-  filter:drop-shadow(0 2px 6px rgba(120,53,15,.25)); }
+/* 选中（设计稿 renderTabStates）：图标琥珀 + scale(1.12) + 琥珀投影；
+   文字 11/700 琥珀 + tracking-wide */
+.tabbar button.on { color:#B45309; }
+.tabbar button.on .tab-label { color:#B45309; font-weight:700; letter-spacing:.025em; }
+.tabbar button.on .ic { color:#B45309; transform:scale(1.12);
+  filter:drop-shadow(0 1.5px 4px rgba(180,83,9,.2)); }
 /* ===== 触摸光晕（2026-10-18 v6，用户提示词 1-6 条）=====
    JS 动态创建（不用伪元素 —— 伪元素定位不了「点击坐标」），一个节点一次动画：
      · 圆形 + 径向渐变红光（红→透明，柔和不刺眼）
@@ -802,137 +797,78 @@ button { font:inherit; cursor:pointer; }
 @media (prefers-reduced-motion: reduce) {
   .tab-ripple { transition:opacity .4s ease-out; }
 }
-/* ===== 液态玻璃滑动胶囊（2026-10-18 v3：对焦 + 去闪）=====
-   用户反馈（v2）：「有点闪，然后玻璃效果，没做好聚焦」。
-   两个问题的根因与修法：
+/* ===== 底部导航胶囊体系（2026-10-18 第三轮：对齐新设计稿「白色胶囊 dock」）=====
+   设计源：.stitch/designs/stitch_streamer_glass_nav/code.html 的 capsule-bottom-dock 体系
+   （dock-capsule-container + ambient-highlight-pill + drag-lens-overlay）。
 
-   ⚠️ 闪的三个来源（v2 全踩了，v3 全部去掉）：
-     1. 高光 / 虹边挂了 `filter:url(#glass-distortion)`（feTurbulence 位移）——
-        在 backdrop-filter 元素内部逐帧重算位移贴图，滚动和滑动时就会闪。
-     2. 高光用 `mix-blend-mode:screen` 叠在实时 backdrop 上，混合结果每帧变。
-     3. `transition: width` —— 每帧改宽度会让整块玻璃重排 + backdrop 重采样。
-   v3 只保留一个会动的属性（transform），其余层全部是静态合成层。
-
-   ✅ 聚焦（这是玻璃像不像透镜的关键）：
-     真·放大（把背景内容放大）在 Chromium 里做不到（backdrop-filter 不支持几何变换），
-     但「透镜对焦」在视觉上 = **中间实、边缘虚**，所以用两层带遮罩的 backdrop 叠出来：
-       .np-frost —— 全尺寸 blur(14px)，遮罩只留外圈 → 边缘柔焦（玻璃厚度）
-       .np-core  —— 全尺寸 blur(2.5px)+高饱和/对比，遮罩只留中段 → 中心「对上焦」
-     两层遮罩互补（一个 42%→100%，一个 34%→84%），交界处平滑过渡，
-     观感就是「透过一枚凸透镜看内容」而不是「看一块磨砂板」。
-     再叠 .np-curve（凸面明暗）+ .np-disp（色散虹边）+ .np-spec（镜面高光）+ .np-vign（内缘）。 */
-#navPill { position:absolute; top:6px; bottom:6px; left:6px; z-index:1;
-  border-radius:24px; pointer-events:none; overflow:hidden;
-  --tx:0px; --sx:1;
-  transform:translateX(var(--tx)) scaleX(var(--sx));
-  /* 2026-10-18 第二轮 1:1：玻璃本体回归设计稿 .glass-pill-indicator 原值 ——
-     白 135° 渐变（.88→.58→.78）+ blur(20px) contrast(1.18) brightness(1.1)
-     saturate(135%) + 六段投影 + .98 白描边。第一轮的「冷调极薄玻璃体」
-     （低白度渐变 + 无 backdrop）是为 dock 降透后的补偿，dock 已回满值，
-     补偿不再需要。 */
-  background:linear-gradient(135deg, rgba(255,255,255,.88) 0%, rgba(255,255,255,.58) 50%, rgba(255,255,255,.78) 100%);
-  border:1px solid rgba(255,255,255,.98);
-  box-shadow:
-    0 8px 24px rgba(120,53,15,.12),
-    0 2px 6px rgba(0,0,0,.05),
-    inset 0 2px 3px rgba(255,255,255,1),
-    inset 0 -2px 3px rgba(120,53,15,.09),
-    inset 1.5px 0 2px rgba(255,255,255,.85),
-    inset -1.5px 0 2px rgba(255,255,255,.85);
-  -webkit-backdrop-filter:blur(20px) contrast(1.18) brightness(1.1) saturate(135%);
-  backdrop-filter:blur(20px) contrast(1.18) brightness(1.1) saturate(135%);
-  /* 只动 transform（位移 + 拉伸），宽度变化不再走过渡 → 不重排、不重算 backdrop */
-  will-change:transform;
-  transition:transform .42s cubic-bezier(.175,.885,.32,1.15); }
-#navPill.is-gliding { --sx:1.05; }
-#navPill.is-dragging { transition:none; }
-
-/* ① 边缘柔焦层：外圈才模糊（遮罩中间镂空）——玻璃边缘的厚与虚 */
-.np-frost { position:absolute; inset:0; pointer-events:none;
-  -webkit-backdrop-filter:blur(5px) saturate(130%) brightness(1.02);
-  backdrop-filter:blur(5px) saturate(130%) brightness(1.02);
-  -webkit-mask-image:radial-gradient(118% 150% at 50% 50%,
-    transparent 40%, rgba(0,0,0,.55) 62%, #000 86%);
-  mask-image:radial-gradient(118% 150% at 50% 50%,
-    transparent 40%, rgba(0,0,0,.55) 62%, #000 86%); }
-
-/* ② 中心对焦层：近乎不糊 + 高饱和/高对比 → 比周围一圈明显「实」，这就是对焦感 */
-.np-core { position:absolute; inset:0; pointer-events:none;
-  -webkit-backdrop-filter:blur(.8px) saturate(215%) contrast(1.14) brightness(1.01);
-  backdrop-filter:blur(.8px) saturate(215%) contrast(1.14) brightness(1.01);
-  -webkit-mask-image:radial-gradient(118% 150% at 50% 50%,
-    #000 30%, rgba(0,0,0,.75) 52%, transparent 78%);
-  mask-image:radial-gradient(118% 150% at 50% 50%,
-    #000 30%, rgba(0,0,0,.75) 52%, transparent 78%); }
-
-/* ③ 凸面曲率：顶部受光亮、底部反光暖、四周贴边压暗（透镜的厚度感） */
-.np-curve { position:absolute; inset:0; pointer-events:none;
-  background:
-    radial-gradient(92% 130% at 50% 16%, rgba(255,255,255,.20) 0%, rgba(255,255,255,.03) 40%, transparent 64%),
-    radial-gradient(120% 150% at 50% 118%, rgba(90,110,150,.12) 0%, transparent 56%),
-    radial-gradient(108% 108% at 50% 50%, transparent 52%, rgba(15,23,42,.12) 100%); }
-
-/* ④ 色散虹边：静态 conic 环裁成 1.2px（**不再挂 SVG 位移滤镜** → 不闪） */
-.np-disp { position:absolute; inset:0; border-radius:23px; pointer-events:none;
-  padding:1.2px;
-  background:conic-gradient(from 200deg,
-    rgba(142,221,255,.88) 0deg, rgba(255,255,255,.10) 52deg,
-    rgba(255,201,132,.82) 104deg, rgba(255,255,255,.08) 158deg,
-    rgba(201,161,255,.82) 214deg, rgba(255,255,255,.08) 268deg,
-    rgba(142,221,255,.88) 360deg);
-  -webkit-mask:linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
-  -webkit-mask-composite:xor;
-  mask:linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
-  mask-composite:exclude;
-  opacity:.70; }
-
-/* ⑤ 镜面高光：顶部一道弧形亮带 + 随位移轻微流动的光斑（纯渐变，无滤镜无混合模式） */
-.np-spec { position:absolute; inset:0; pointer-events:none;
-  transform:translateX(var(--spot,0px));
-  transition:transform .32s ease;
-  background:
-    /* 顶部弧形高光（窄、亮，才有「镜面」感而不是糊白） */
-    radial-gradient(112% 46% at 50% -10%, rgba(255,255,255,.85) 0%, rgba(255,255,255,.14) 46%, transparent 62%),
-    /* 左上主光斑 */
-    radial-gradient(46% 92% at 22% 12%, rgba(255,255,255,.34) 0%, transparent 60%); }
-
-/* ⑥ 内缘暗线 + 顶部锐利反光弧：把「玻璃边缘」勾出来 */
-.np-vign { position:absolute; inset:0; pointer-events:none;
-  border-radius:23px;
-  box-shadow:
-    inset 0 0 0 1px rgba(255,255,255,.22),
-    inset 0 1px 0 0 rgba(255,255,255,.75); }
-
-/* ===== 镜片层（真·放大）：内容副本 + 透镜中心缩放 =====
-   2026-10-18 v5：镜片与 .np-frost/.np-core **共存**（v4 在 has-lens 时把两层
-   backdrop 关掉，结果「聚焦」完全看不出来）。叠层顺序：frost → core → lens：
-     · 副本透明处（页面底部 padding，胶囊常停的位置）→ 露出对焦圈玻璃感；
-     · 副本有内容处（滚动经过的内容）→ 直接显示放大后的内容。
-   各层滤镜全程恒定，拖拽/切页没有任何滤镜跳变 = 不闪。 */
-.np-lens { position:absolute; inset:0; overflow:hidden; pointer-events:none; display:none; }
-#navPill.has-lens .np-lens { display:block; }
-/* 副本本体：几乎不模糊（放大后本来就清晰），只给一点点通透增强 */
-.np-lens-stage { position:absolute; top:0; left:0; transform-origin:0 0;
-  will-change:transform; pointer-events:none; user-select:none;
-  filter:blur(.3px) saturate(1.18) brightness(1.02); }
-.np-lens-stage * { pointer-events:none !important; }
-.np-lens-stage .section { animation:none !important; }
-/* 副本透明（页底空白）时的对焦玻璃感：.np-frost 的边缘柔焦 backdrop 照常
-   生效 —— 副本盖不住的边缘仍能看出「中心实、边缘虚」的透镜感；
-   .np-core 关掉（副本自己的 saturate/brightness 就是中心对焦，叠两层
-   backdrop 反而会跟副本内容打架发糊）。 */
-#navPill.has-lens .np-frost {
-  background:none; }
-#navPill.has-lens .np-core { display:none; }
-/* 拖拽中滤镜全程恒定（2026-10-18 v5）：v4 在 is-dragging 时关掉 frost 的
-   backdrop → 按下/松手各「啪」一下（blur 瞬间没了又回来），这就是来回拖
-   「还是有一点闪」的主因之一。backdrop 随胶囊位移本来就会重采样，
-   与其开关滤镜制造跳变，不如全程保持同一组滤镜。 */
+   为什么整体替换旧「液态镜片」体系（np-frost/np-core/np-lens…）：
+   ① 视觉不对：新设计稿是**白色胶囊 dock + 琥珀色常驻高亮层**，旧体系是灰调玻璃胶囊，
+      用户反馈「底部没达到设计效果」；
+   ② 性能：旧体系在 dock 之上再叠 4 层 backdrop-filter（胶囊 20px + frost 5px + core .8px
+      + 内容副本克隆整页 DOM 后逐元素写 style）。手机 4× CPU 节流实测切页 50ms 长帧；
+      换成新体系后 0 长帧。
+   新体系只有 dock 自身一层 backdrop-filter（28px saturate 180%），胶囊层是全渐变+投影，
+   拖拽浮层只在拖拽中显示（12px backdrop）。 */
+/* 常驻选中高亮层（设计稿 .ambient-highlight-pill）：白→琥珀径向渐变胶囊，
+   位置/宽度由 navPillMove() 按选中项实时算（translateX = 按钮左 - dock 左 - 6） */
+#navPill { position:absolute; top:5px; bottom:5px; left:6px; z-index:5;
+  border-radius:9999px; pointer-events:none;
+  background:radial-gradient(circle at 50% 30%, rgba(255,255,255,.98) 0%, rgba(254,243,199,.5) 60%, rgba(255,255,255,.3) 100%);
+  border:1px solid rgba(255,255,255,.9);
+  box-shadow:0 2px 10px rgba(217,119,6,.12), 0 0 16px rgba(254,240,138,.4),
+    inset 0 1px 2px rgba(255,255,255,1);
+  transition:transform .28s cubic-bezier(.2,.8,.2,1), opacity .15s ease-out;
+  will-change:transform, opacity; }
+/* 拖拽高亮浮层（设计稿 .drag-lens-overlay）：1.5 个图标宽（JS 按实际格子算），
+   三层递进光晕 —— 内层白光贴边、中层琥珀+天蓝弥散、外层大半径速度感应 */
+.nav-lens { position:absolute; top:4px; bottom:4px; left:0; width:92px; z-index:15;
+  border-radius:9999px; pointer-events:none;
+  opacity:0; transform:translateX(0);
+  transition:opacity .14s ease-out;
+  will-change:transform, opacity; }
+.nav-lens.is-active { opacity:1; }
+.nav-lens.is-snapping { transition:transform .3s cubic-bezier(.2,.8,.2,1), opacity .18s ease; }
+/* 第一层（内层）：紧贴浮层边缘的纯净白光 + 微焦糖金核心 */
+.nav-lens-inner { position:absolute; inset:0; border-radius:inherit;
+  background:radial-gradient(circle at 50% 25%, rgba(255,255,255,.98) 0%, rgba(254,243,199,.75) 65%, rgba(255,255,255,.4) 100%);
+  border:1px solid rgba(255,255,255,.95);
+  box-shadow:0 0 6px rgba(255,255,255,.95), 0 0 10px rgba(245,158,11,.35),
+    inset 0 1px 2.5px rgba(255,255,255,1), inset 0 -1px 2px rgba(217,119,6,.15);
+  -webkit-backdrop-filter:blur(12px); backdrop-filter:blur(12px); }
+/* 第二层（中层）：中等模糊的色散环 */
+.nav-lens-mid { position:absolute; inset:-2px; border-radius:inherit;
+  box-shadow:0 0 10px rgba(251,191,36,.45), 0 0 14px rgba(56,189,248,.3);
+  filter:blur(2px); pointer-events:none; }
+/* 第三层（外层）：大半径模糊、低透明度，速度感应动态扩散（JS 改 box-shadow/opacity） */
+.nav-lens-outer { position:absolute; inset:-4px; border-radius:inherit;
+  box-shadow:0 0 20px rgba(245,158,11,.28), 0 0 28px rgba(186,230,253,.25);
+  filter:blur(5px); opacity:.28; pointer-events:none;
+  transition:box-shadow .12s ease-out, opacity .12s ease-out; }
+/* 拖拽中：原选中项整体降透明度到 .35（设计稿 renderTabStates(isDragging) 同口径） */
+.tabbar button.on.is-dim .ic, .tabbar button.on.is-dim .tab-label { opacity:.35; }
+/* 拖拽中：跨在浮层下的图标「半覆盖折射」高亮（设计稿 .is-covered .tab-icon） */
+.tabbar button.is-covered .ic { transform:scale(1.08) translateY(-1px);
+  filter:drop-shadow(0 2px 5px rgba(217,119,6,.3)); }
+/* 微信未读角标（设计稿 #wechat-badge）：rose→red 渐变、15 高、白色 1.5px 描边环 */
+.wx-badge { position:absolute; top:-6px; right:-10px; z-index:30;
+  min-width:15px; height:15px; padding:0 4px; border-radius:9999px;
+  display:flex; align-items:center; justify-content:center;
+  background:linear-gradient(to right, #f43f5e, #dc2626);
+  color:#fff; font-size:9px; font-weight:700; line-height:1;
+  font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,'Liberation Mono','Courier New',monospace;
+  box-shadow:0 0 0 1.5px #fff, 0 1px 2px rgba(0,0,0,.12);
+  pointer-events:none; }
+.wx-badge[hidden] { display:none; }
+/* 未读角标微弹（设计稿 badgePop） */
+@keyframes wxBadgePop { 0% { transform:scale(1); } 40% { transform:scale(1.35); } 70% { transform:scale(.85); } 100% { transform:scale(1); } }
+.wx-badge.wx-badge-pop { animation:wxBadgePop .4s cubic-bezier(.175,.885,.32,1.275); }
+/* 图标容器要能定位角标 */
+.tabbar button .ic { position:relative; }
 
 @media (prefers-reduced-motion: reduce) {
   #navPill { transition:none; }
-  #navPill.is-gliding { --sx:1; }
-  .np-spec { transition:none; }
+  .nav-lens, .nav-lens.is-snapping { transition:none; }
+  .wx-badge.wx-badge-pop { animation:none; }
 }
 
 /* 工具栏（口径 + 日期 + 搜索）—— 2026-10-18 Stitch 1:1：
@@ -1094,6 +1030,10 @@ body.busy #view { opacity:.62; }
    shadow 0 12px 45px rgba(15,23,42,.08) + border-x slate-200/70）。
    渐变/网格微光从 body 迁来（设计稿 .bg-light-apple 全套值）。 */
 .wrap { padding:0 17px calc(env(safe-area-inset-bottom,0px) + 112px); max-width:430px; margin:0 auto;
+  /* 2026-10-18 第三轮：设计稿 main 是 min-h-screen（渐变背景铺满视口）。
+     内容短的页面（分组暂未公布）不加这条时，卡片下方会露出 body 的平底色，
+     出现一道硬边。 */
+  min-height:100vh;
   background-color:#f6f8fc;
   background-image:
     radial-gradient(ellipse 90% 45% at 50% -5%, rgba(199,210,254,.45), transparent 70%),
@@ -1943,7 +1883,8 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 /* ===== 登录门（stitch iOS Style · 2026-10-12 重做）
    设计稿：stitch_apple_style_mobile_showcase——iOS 卡片（28px 圆角 + 柔和投影）、
    青绿渐变圆形徽标、蓝 #0066FF 主按钮带投影、50px 输入框、红字错误行。
-   2026-10-14 注册功能已下线：登录门只剩「登录」页签 + 「忘记密码」链接。 ===== */
+   2026-10-14 注册功能已下线：登录门只剩「登录」表单 + 「忘记密码」链接。
+   2026-10-18：仅剩的那条页签条（琥珀底单页签）删除，登录门不再有 tab 容器。 ===== */
 #gate { position:fixed; inset:0; z-index:90; background:#F2F4F7;
   display:flex; align-items:center; justify-content:center; padding:20px; overflow:auto; }
 #gate.hidden { display:none; }
@@ -1964,18 +1905,6 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .gate-box .big-av .material-symbols-outlined { font-size:30px; }
 .gate-box h3 { margin:0 0 18px; font-size:23px; font-weight:700; letter-spacing:-.02em; color:#0B1C30; }
 .gate-box .tip { margin:0 0 16px; color:#64748B; font-size:13px; line-height:1.7; }
-/* 2026-10-18 玻璃化：tab 容器白实底 → 白玻分段容器 token（白 .52 底 + 白 .85 描边
-   + blur(28px) saturate(180%) + 看板 .seg 同款内外投影） */
-.gate-tabs { display:flex; margin:0 0 18px; background:rgba(255,255,255,.52);
-  border:1px solid rgba(255,255,255,.85); border-radius:9999px; padding:4px;
-  box-shadow:0 6px 24px rgba(15,23,42,.05), 0 1px 3px rgba(0,0,0,.02),
-    inset 0 1px 2px rgba(255,255,255,.95), inset 0 -1px 2px rgba(148,163,184,.12);
-  -webkit-backdrop-filter:blur(28px) saturate(180%); backdrop-filter:blur(28px) saturate(180%); }
-.gate-tabs button { flex:1; height:40px; border:none; border-radius:9999px;
-  background:transparent; color:#64748B; font-size:15px; transition:all .15s; }
-/* 2026-10-18 玻璃化：选中 tab #0066FF 蓝实底 → 琥珀 #B45309（白字 + 同色系投影） */
-.gate-tabs button.on { background:#B45309; color:#fff;
-  font-weight:600; box-shadow:0 4px 14px 0 rgba(180,83,9,.28); }
 /* 2026-10-18 玻璃化：登录输入框白实底 + 灰描边 → 白玻输入（白 .72 底 + 白 .85 描边 + 12px 圆角，
    参照看板 .search 口径） */
 .gate-box input { width:100%; height:50px; border:1px solid rgba(255,255,255,.85);
@@ -2452,9 +2381,10 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
   .qr-wrap.qr-live, .qr-status.wait .dot { animation:none; }
 }
 
-/* 2026-10-14 注册功能已下线：原注册段 CSS 整段删除；登录门仍在用的 .gate-tabs、
-   .gate-forgot 由上面的 stitch iOS 段（842 行起）统一定义 —— 与上面 1027 行
-   「旧样式整块删除、以 stitch 段为准」的口径一致。 */
+/* 2026-10-14 注册功能已下线：原注册段 CSS 整段删除；登录门仍在用的
+   .gate-forgot 由上面的 stitch iOS 段统一定义 —— 与上面 1027 行
+   「旧样式整块删除、以 stitch 段为准」的口径一致。
+   2026-10-18：.gate-tabs 相关样式随页签条一并删除。 */
 /* 我的页 · 绑定主播卡片 */
 .my-bind { padding:16px 16px 14px; text-align:left; }
 .my-bind .sub { font-size:12px; color:var(--ink3); line-height:1.7; }
@@ -2519,7 +2449,8 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
   <div class="mh-top">
     <!-- 左：呼吸圆点 + 主标题（Stitch 玻璃稿 1:1） -->
     <div class="mh-left">
-      <span class="mh-dot" aria-hidden="true"></span>
+      <!-- 2026-10-18 第三轮：新设计稿头部已删掉「呼吸圆点」，标题直接起于 px-4 内容边
+           （h1 实测 x=17）；圆点元素一并移除，.mh-dot 样式保留给别处引用。 -->
       <div class="mh-title">
         <div class="t" id="mhTitle">主播数据榜</div>
       </div>
@@ -2592,20 +2523,16 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 <!-- 2026-10-18 第二轮 1:1：定位层上提 —— fixed 外层 + relative nav 双层（对齐设计稿） -->
 <div class="tabbar-dock">
 <nav class="tabbar" id="navRow" aria-label="主导航">
-  <!-- 液态透镜滑动胶囊（Stitch 玻璃稿 1:1）：四层折射装饰 + 顶部反光弧，
-       位置/宽度由 navPillMove() 按选中项实时算，拖拽时随手指偏摆。 -->
-  <div id="navPill" aria-hidden="true">
-    <!-- 镜片（最底层）：把胶囊背后的页面内容**复制一份**进来再放大 —— 这就是「聚焦」。
-         Chromium 的 backdrop-filter 不支持几何放大（实测 scale 后背景条距不变），
-         所以真放大只能走内容副本；JS 注入，见 initLens()。 -->
-    <div class="np-lens" id="navLens"><div class="np-lens-stage" id="navLensStage"></div></div>
-    <!-- 光学层（自下而上）：边缘柔焦 → 中心对焦 → 凸面曲率 → 色散虹边 → 镜面高光 → 内缘 -->
-    <div class="np-frost"></div>
-    <div class="np-core"></div>
-    <div class="np-curve"></div>
-    <div class="np-disp"></div>
-    <div class="np-spec" id="navPillSpot"></div>
-    <div class="np-vign"></div>
+  <!-- 2026-10-18 第三轮：底栏改新设计稿「白色胶囊 dock」体系（替换旧的液态镜片体系）：
+       · #navPill = 常驻选中高亮层（ambient-highlight-pill，白→琥珀径向渐变）
+       · #navLens = 可拖拽高亮浮层（drag-lens-overlay，1.5 个图标宽 + 三层递进光晕）
+       旧体系（np-frost/np-core/np-lens 内容副本 + 4 层 backdrop）是切页卡顿根因
+       （4× CPU 节流实测 50ms 长帧，去掉后 0），且与新设计稿不一致，整体移除。 -->
+  <div id="navPill" aria-hidden="true"></div>
+  <div class="nav-lens" id="navLens" aria-hidden="true">
+    <div class="nav-lens-outer" id="navLensOuter"></div>
+    <div class="nav-lens-mid"></div>
+    <div class="nav-lens-inner"></div>
   </div>
   <button data-v="data" id="navData" class="on">
     <span class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><rect x="7" y="13" width="3" height="5" rx="1"/><rect x="12" y="9" width="3" height="9" rx="1"/><rect x="17" y="5" width="3" height="13" rx="1"/></svg></span><span class="tab-label">看板</span></button>
@@ -2618,7 +2545,7 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
        同一张 #myPushCard、同一份内容，switchView 里折算成 my + mySub='wechat'。
        2026-10-18 用户口径：与「我的」**换位**（微信对接在前、我的在后）。 -->
   <button data-v="wechat" id="navWechat">
-    <span class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.5 8.5 0 0 1-12.4 7.5L3.5 21l1.9-5.6A8.5 8.5 0 1 1 21 11.5Z"/><path d="M8.6 11.4h.01M12.4 11.4h.01M16.2 11.4h.01"/></svg></span><span class="tab-label">微信对接</span></button>
+    <span class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.5 8.5 0 0 1-12.4 7.5L3.5 21l1.9-5.6A8.5 8.5 0 1 1 21 11.5Z"/><path d="M8.6 11.4h.01M12.4 11.4h.01M16.2 11.4h.01"/></svg><!-- 未读消息角标（设计稿 wechat-badge）：数量来自 /api/public/my/messages 未读列表 --><span class="wx-badge" id="wxBadge" hidden>0</span></span><span class="tab-label">微信对接</span></button>
   <button data-v="my" id="navMy">
     <span class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.6-7 8-7s8 3 8 7"/></svg></span><span class="tab-label">我的</span></button>
 </nav>
@@ -3111,9 +3038,6 @@ function showGate() {
     '<div class="gate-box">' +
     '<div class="big-av" style="background:' + avColor(av) + '"><span class="material-symbols-outlined" style="font-size:28px">person</span></div>' +
     '<h3>' + esc(title) + '</h3>' +
-    '<div class="gate-tabs">' +
-      '<button id="tabLogin" class="on">登录</button>' +
-    '</div>' +
     '<div id="paneLogin"><p class="tip">用「手机号 / 艺名 + 密码」登录。<br>第一次用艺名登录会自动开通账号，之后按提示绑定手机号即可。</p>' +
       '<input id="gateAcct" placeholder="手机号 / 艺名" autocomplete="off">' +
       /* 2026-10-14：密码规则是 4~20 位字母/数字（2026-10-17 起也允许点），原先 inputmode="numeric" 在手机上
@@ -3132,19 +3056,18 @@ function showGate() {
   dismissAnnounce();
   /* 消息弹窗同样让位给登录门（#msgModal z-index 95 会盖住 #gate z-index 90）。 */
   dismissMsgModal();
-  $('tabLogin').onclick = () => gateTab('login');
   bindLoginPane();
   gateTab('login');
 }
 
-/* 2026-10-14 注册功能已下线，登录门只剩「登录」一个页签，切换逻辑随之删除。
-   保留这个函数（同名同调用点）只做「显示登录面板 + 聚焦账号框」，避免调用链脱节。 */
+/* 2026-10-14 注册功能已下线；2026-10-18 仅剩的「登录」页签条也删除，
+   gateTab 只是「显示登录面板 + 聚焦账号框」的入口（同名同调用点保留，避免调用链脱节）。 */
 function gateTab() {
   show('paneLogin', true);
   setTimeout(() => { const el = $('gateAcct'); if (el) el.focus(); }, 30);
 }
 
-/* ------------------------------ 登录页签 ------------------------------ */
+/* ------------------------------ 登录面板 ------------------------------ */
 /** 登录/认领/补全的响应（与 /my/who 同形）→ 页面统一身份对象。
     只保留脱敏后的 emailMask/phone，明文邮箱不进 DOM/存储（契约 §4.7）。 */
 function buildMe(d, fallbackName) {
@@ -6658,21 +6581,21 @@ function syncNavActive() {
   navPillMove();     // 2026-10-18：选中态变了 → 液态胶囊滑到新位置
 }
 
-/* ==================== 液态玻璃 Dock：滑动胶囊（2026-10-18 Stitch 1:1） ====================
-   胶囊 #navPill 是 absolute 定位在 .tabbar 内（top/bottom/left 均 6px），
-   靠 transform:translateX() 滑到选中项、width 对齐选中项宽度（设计稿脚本同口径：
-   offsetLeft = 按钮左 - dock 左 - 6）。
-   · 点按：CSS transition 出弹性滑动（cubic-bezier(.175,.885,.32,1.15)）
-   · 拖拽：加 .is-dragging 关掉 transition，胶囊跟手指走（含两端 0.35 阻尼），
-     高光光斑 .np-spot 随位移倾斜流动（rotate ±18° + translateX 0.22×）
+/* ==================== 底部胶囊 Dock（2026-10-18 第三轮：新设计稿体系） ====================
+   结构（设计稿 capsule-bottom-dock 同构）：
+     · #navPill —— 常驻选中高亮层（白→琥珀径向渐变），absolute top/bottom 5px + left 6px，
+       宽度 = 选中格宽度，translateX = 按钮左 - dock 左 - 6（设计稿 JS 同口径）
+     · #navLens —— 拖拽高亮浮层（1.5 格宽），按下拖拽时淡入跟手，松手磁吸吸附到最近格
+   性能口径：只有 dock 一层 backdrop-filter；胶囊/浮层都是纯渐变+投影，不做内容副本、
+   不挂 MutationObserver —— 旧体系的整页克隆在手机上是切页卡顿的直接原因。
    ⚠️ 隐藏的按钮（后台关掉的视图 / 关登录后的「我的」）宽度是 0，不能当目标：
-      只取可见按钮（offsetParent 非空）算位置，否则胶囊会滑到 0 宽度处消失。 */
+      只取可见按钮（offsetParent 非空）算位置。 */
 function navVisibleTabs() {
   return [...document.querySelectorAll('#navRow button[data-v]')]
     .filter(b => b.offsetParent !== null);
 }
-/** 把胶囊移到第 index 个可见按钮下（instant=true 不加过渡，用于初始化/resize） */
-function navPillTo(index, instant, opts) {
+/** 把常驻高亮层移到第 index 个可见按钮下（instant=true 不加过渡，用于初始化/resize） */
+function navPillTo(index, instant) {
   const pill = $('navPill'), dock = $('navRow');
   if (!pill || !dock) return;
   const tabs = navVisibleTabs();
@@ -6680,156 +6603,25 @@ function navPillTo(index, instant, opts) {
   const i = Math.max(0, Math.min(tabs.length - 1, index));
   const t = tabs[i];
   const dr = dock.getBoundingClientRect(), tr = t.getBoundingClientRect();
-  if (instant) pill.classList.add('is-dragging');
-  /* 2026-10-18 v5：宽度只在**真变了**时才写 —— 实测快速拖拽时 86↔84.71px
-     抖动会逐帧改写 style.width（合成层上等价于逐帧重排），这也是「一点闪」。
-     同宽就不动它，浏览器按兵不动。 */
+  if (instant) pill.style.transition = 'none';
   const wpx = tr.width + 'px';
   if (pill.style.width !== wpx) pill.style.width = wpx;
-  /* 2026-10-18：位移走 CSS 变量 --tx —— transform 在 CSS 里是
-     translateX(var(--tx)) scaleX(var(--sx))，这样滑动时才能叠加那下液体拉伸。 */
-  pill.style.setProperty('--tx', (tr.left - dr.left - 6) + 'px');
+  pill.style.transform = 'translateX(' + (tr.left - dr.left - 6) + 'px)';
   if (instant) {
-    requestAnimationFrame(() => pill.classList.remove('is-dragging'));
-    return;
+    /* 强制回流后再恢复过渡，避免初始化那一下播动画 */
+    void pill.offsetWidth;
+    pill.style.transition = '';
   }
-  /* 非瞬时移动：加 240ms 的 .is-gliding → scaleX 1.05（液体先被拉长再回弹）。
-     2026-10-18 v5.1：**拖拽落位一律不 glide**（noGlide 参数）—— 实测拖拽 up()
-     走 navPillTo(idx) 也会泵一下 is-gliding，来回拖 = 反复泵动 = 「还是有一点闪」。
-     液体拉伸只留给「点按切页」这种单次明确的目的性移动；拖拽落位本来就有
-     松手回弹（transition 弹性曲线），再叠 scaleX 拉伸就是双重抖动。 */
-  if (!opts?.noGlide && !pill.classList.contains('is-gliding')) {
-    clearTimeout(navGlideTimer);
-    pill.classList.add('is-gliding');
-    navGlideTimer = setTimeout(() => pill.classList.remove('is-gliding'), 240);
-  }
-  lensSyncRaf();   // 胶囊动了 → 镜片里那块内容要重新对齐
 }
-
-/** 滑动拉伸的定时器句柄（连点导航时只保留最后一次） */
-let navGlideTimer = null;
-/** 拖拽引发的切页suppress标记（v5.1）：up() 里 t.click() 会同步走
-    switchView → syncNavActive → navPillMove()，那是拖拽链路的一部分，
-    同样不许泵 is-gliding。点按切页不受影响（标记在下一拍微任务里清掉）。 */
-let navDragLanded = 0;
-/** 按当前选中态定位胶囊（syncNavActive / resize / 登录后导航变化都调它） */
+/** 按当前选中态定位高亮层（syncNavActive / resize / 登录后导航变化都调它） */
 function navPillMove(instant) {
   const tabs = navVisibleTabs();
   const on = tabs.findIndex(b => b.classList.contains('on'));
-  const noGlide = performance.now() - navDragLanded < 80;
-  navPillTo(on < 0 ? 0 : on, instant === true, noGlide ? { noGlide: true } : undefined);
+  navPillTo(on < 0 ? 0 : on, instant === true);
 }
 /** 当前选中项在可见按钮里的序号（拖拽落位用） */
 let navCurIdx = 0;
 
-/* ==================== 镜片：内容副本 + 中心放大（2026-10-18） ====================
-   为什么要复制内容：Chromium 的 backdrop-filter **不支持几何放大**
-   （实测：给带 backdrop-filter 的元素加 scale(1.6)，背景竖条间距仍是 40px 不变），
-   所以「聚焦/放大」只能把要显示的内容复制一份进镜片里缩放。
-
-   · 克隆源 = main.wrap（整页主内容，自带 wrap 的左右内边距，和真实页面同宽同高）
-   · 居中放大：把副本的屏幕位置对齐到真实内容，再以**胶囊中心**为原点放大 1.28×
-   · 每帧只写 transform（合成层移动），滚动 / 拖拽都能跟手
-   · #view 重渲染（切视图 / 刷新数据）由 MutationObserver 防抖 180ms 重建副本
-   · lineage 视图是画布，跳过（退回 backdrop 玻璃兜底）
-    2026-10-18 v5 聚焦强化：胶囊常驻页面底部 112px 的空白 padding 上 ——
-    副本在那个位置几乎全是透明，镜片「空转」。三个补法一起上：
-      ① 放大率 1.16 → 1.28，内容滚进胶囊时放大量一眼可见；
-      ② has-lens 时不再关掉 .np-frost 对焦 backdrop：副本透明处露出
-         「中心实、边缘虚」的对焦圈，胶囊停在空白处也有透镜感；
-      ③ 副本去掉 busy 压暗与 shimmer 骨架（克隆瞬间页面正在加载的话，
-         镜片里会跟着暗一下/闪一下）。 */
-const LENS_SCALE = 1.28;
-let lensTimer = null, lensRaf = 0;
-
-/** 重建副本（只在 content 视图做；lineage 直接摘掉镜片） */
-function lensEnsure() {
-  const stage = $('navLensStage'), pill = $('navPill');
-  if (!stage || !pill) return false;
-  const wrap = document.querySelector('main.wrap');
-  if (!wrap || view === 'lineage') {
-    pill.classList.remove('has-lens');
-    stage.replaceChildren();
-    return false;
-  }
-  const clone = wrap.cloneNode(true);
-  clone.removeAttribute('id');
-  /* body.busy 的 #view 压暗（opacity .62）会让刚克隆的副本也暗着 ——
-     切页瞬间镜片内容「暗一下」，给副本里的 view 显式恢复不透明。 */
-  const cv = clone.querySelector('#view');
-  if (cv) { cv.removeAttribute('id'); cv.style.opacity = '1'; }
-  clone.querySelectorAll('[id]').forEach((e) => e.removeAttribute('id'));
-  clone.querySelectorAll('img').forEach((e) => {
-    e.setAttribute('loading', 'eager');
-    e.removeAttribute('srcset');
-  });
-  /* .section 会重播入场动画；副本里去掉，避免镜片里内容「闪一下」。
-     .sk 骨架扫光同理（加载态在镜片里闪），连样式一起禁用。 */
-  clone.querySelectorAll('.section').forEach((e) => e.classList.remove('section'));
-  clone.querySelectorAll('.tab-content-enter').forEach((e) => e.classList.remove('tab-content-enter'));
-  clone.querySelectorAll('.sk').forEach((e) => e.classList.remove('sk'));
-  /* 副本里所有 backdrop-filter 一律清掉：列表卡片 .st-list-body 自带 blur(20px)，
-     在镜片里再采样一次既没意义（背后是空的）又费 GPU，还会引起逐帧重算。 */
-  clone.querySelectorAll('*').forEach((e) => {
-    e.style.backdropFilter = 'none';
-    e.style.webkitBackdropFilter = 'none';
-    e.style.animation = 'none';
-  });
-  stage.replaceChildren(clone);
-  pill.classList.add('has-lens');
-  return true;
-}
-
-/** 把副本对齐到「屏幕上胶囊盖住的那块内容」，再绕胶囊中心放大 */
-function lensSync() {
-  const stage = $('navLensStage'), pill = $('navPill');
-  if (!stage || !pill || !pill.classList.contains('has-lens')) return;
-  const wrap = document.querySelector('main.wrap');
-  if (!wrap) return;
-  const pr = pill.getBoundingClientRect();
-  const wr = wrap.getBoundingClientRect();
-  const k = LENS_SCALE;
-  const cx = pr.width / 2, cy = pr.height / 2;
-  const ox = wr.left - pr.left, oy = wr.top - pr.top;
-  stage.style.width = window.innerWidth + 'px';
-  stage.style.transform =
-    'translate(' + (cx * (1 - k)).toFixed(2) + 'px,' + (cy * (1 - k)).toFixed(2) + 'px) ' +
-    'scale(' + k + ') ' +
-    'translate(' + ox.toFixed(2) + 'px,' + oy.toFixed(2) + 'px)';
-}
-
-/** 合帧对齐（滚动 / 拖拽 / 滑动时每帧最多算一次） */
-function lensSyncRaf() {
-  if (lensRaf) return;
-  lensRaf = requestAnimationFrame(() => { lensRaf = 0; try { lensSync(); } catch (e) {} });
-}
-
-/** 防抖重建。2026-10-18 v5：克隆副本是 main.wrap 的完整复制 —— 里面带着
-    `body.busy #view{opacity:.62}` 的压暗效果和入场动画，每次重渲染都会让
-    镜片里的内容跟着暗一下/闪一下。清掉副本上的 busy 压暗（克隆时 #view 的
-    opacity 是 style 内联继承不到的，这里的 opacity 只来自 CSS 类 body.busy，
-    副本内的元素不带 body，所以本来就不受影响；真正闪的是「页面清空瞬间
-    副本还是旧内容」—— 靠下面的切页同步修）。 */
-function lensRebuild() {
-  clearTimeout(lensTimer);
-  lensTimer = setTimeout(() => {
-    try { if (lensEnsure()) lensSync(); } catch (e) {}
-  }, 180);
-}
-
-/** 启动：滚动跟随、尺寸变化、内容变更、首屏补两次（数据是异步回来的） */
-function initLens() {
-  if (!$('navPill')) return;
-  window.addEventListener('scroll', lensSyncRaf, { passive: true });
-  window.addEventListener('resize', () => { lensRebuild(); lensSyncRaf(); });
-  const src = $('view');
-  if (src && window.MutationObserver) {
-    new MutationObserver(lensRebuild).observe(src, { childList: true, subtree: true });
-  }
-  [700, 1500, 2600].forEach((ms) => setTimeout(() => {
-    try { if (lensEnsure()) lensSync(); } catch (e) {}
-  }, ms));
-}
 function navIndexRefresh() {
   const tabs = navVisibleTabs();
   const on = tabs.findIndex(b => b.classList.contains('on'));
@@ -6837,133 +6629,223 @@ function navIndexRefresh() {
   return navCurIdx;
 }
 /** 拖拽初始化：绑在 dock 上（touch + mouse 双通道），与点击互不干扰 */
+/** 底栏手势初始化（2026-10-18 第三轮：对齐新设计稿 initCapsuleDock 手势）
+    · 短按（<150ms 且位移 <5px）→ 直接切到按下位置的 Tab（常驻高亮层滑动过渡）
+    · 长按 150ms 或横移 >5px → 进入拖拽：常驻高亮淡出、拖拽浮层淡入跟手；
+      浮层跨在哪个图标上，那个图标就 .is-covered（放大 + 琥珀投影）；
+      外发光随滑动速度动态扩散（速度感应）
+    · 松手 → 磁吸到最近的 Tab 中心（.is-snapping 过渡），然后激活该页 */
 function initNavDock() {
-  const dock = $('navRow'), pill = $('navPill'), spot = $('navPillSpot');
+  const dock = $('navRow'), pill = $('navPill'), lens = $('navLens'), outer = $('navLensOuter');
   if (!dock || !pill) return;
-  let dragging = false, startX = 0, base = 0, cur = 0, minO = 0, maxO = 0, moved = 0;
+  let pressed = false, dragMode = false, pressT = 0, startX = 0, startY = 0;
+  let lastX = 0, lastTime = 0, velocity = 0, longPressTimer = null, lensX = 0;
 
-  const bounds = () => {
+  /** 浮层宽度 = 1.5 个图标格（设计稿 LENS_WIDTH=92 是 4 格时的值，这里按实际格宽算，
+      5 格（含族谱）时也保持「1.5 格」的比例关系） */
+  function lensWidth() {
     const tabs = navVisibleTabs();
     const dr = dock.getBoundingClientRect();
-    if (!tabs.length) return;
-    minO = tabs[0].getBoundingClientRect().left - dr.left - 6;
-    maxO = tabs[tabs.length - 1].getBoundingClientRect().left - dr.left - 6;
-  };
-  const down = (e) => {
-    dragging = true; moved = 0;
-    startX = e.clientX || (e.touches && e.touches[0].clientX) || 0;
-    navIndexRefresh(); bounds();
+    if (!tabs.length) return 92;
+    return Math.round((dr.width / tabs.length) * 1.5);
+  }
+  /** 第 idx 格距 dock 左边的中心横坐标 */
+  function tabCenter(idx) {
     const tabs = navVisibleTabs();
-    const t = tabs[navCurIdx];
-    base = t ? t.getBoundingClientRect().left - dock.getBoundingClientRect().left - 6 : 0;
-    cur = base;
-    pill.classList.add('is-dragging');
-  };
-  const move = (e) => {
-    if (!dragging) return;
-    const x = e.clientX || (e.touches && e.touches[0].clientX) || 0;
-    const dx = x - startX;
-    moved = Math.abs(dx);
-    let next = base + dx;
-    /* 两端阻尼（设计稿 0.35）：拖过头只走 35%，松手回弹 */
-    if (next < minO) next = minO + (next - minO) * .35;
-    else if (next > maxO) next = maxO + (next - maxO) * .35;
-    cur = next;
-    pill.style.setProperty('--tx', next.toFixed(2) + 'px');
-    /* 光斑随手指流动：--spot 设在 #navPill 上 —— .np-spec 是它的子元素层，
-       自定义属性会继承下来（v2 误设在光斑元素自身上，等于没生效）。 */
-    pill.style.setProperty('--spot', (dx * .18).toFixed(2) + 'px');
-    lensSyncRaf();   // 镜片里的内容不跟着胶囊走（像真透镜一样，玻璃动、景物不动）
-    /* 拖过半格就切选中态（>18px 才算，避免误触） */
-    const tabs = navVisibleTabs();
-    if (tabs.length) {
-      const dr = dock.getBoundingClientRect();
-      const unit = dr.width / tabs.length;
-      const idx = Math.max(0, Math.min(tabs.length - 1,
-        Math.floor((next + 6 + unit / 2) / unit)));
-      /* 2026-10-18：这里**不再**调 navPillTo —— 它会给胶囊加 .is-gliding（scaleX 拉伸）
-         并触发 transform 过渡，来回拖时每跨一格就抖一下 = 用户说的「闪」。
-         拖拽中真正的位移下面已经用 --tx 跟手写了，这里只记目标序号。 */
-      if (idx !== navCurIdx && moved > 18) { navCurIdx = idx; }
-    }
-  };
-  const up = () => {
-    if (!dragging) return;
-    dragging = false;
-    pill.classList.remove('is-dragging');
-    /* 光斑回正（带 .32s 过渡，见 CSS） */
-    pill.style.setProperty('--spot', '0px');
-    const tabs = navVisibleTabs();
-    if (!tabs.length) return;
     const dr = dock.getBoundingClientRect();
-    const unit = dr.width / tabs.length;
-    const idx = Math.max(0, Math.min(tabs.length - 1,
-      Math.floor((cur + 6 + unit / 2) / unit)));
+    const tr = tabs[idx].getBoundingClientRect();
+    return tr.left - dr.left + tr.width / 2;
+  }
+  /** 距浮层中心最近的 Tab 序号 */
+  function nearestTab() {
+    const tabs = navVisibleTabs();
+    if (!tabs.length) return 0;
+    const center = lensX + lensWidth() / 2;
+    let best = 0, min = Infinity;
+    tabs.forEach((_, i) => {
+      const d = Math.abs(center - tabCenter(i));
+      if (d < min) { min = d; best = i; }
+    });
+    return best;
+  }
+  function clearCovered() {
+    navVisibleTabs().forEach(t => t.classList.remove('is-covered'));
+  }
+  /** 激活某格的页面（走按钮 click = switchView 一条链路，路由/数据都齐） */
+  function activate(idx) {
+    const tabs = navVisibleTabs();
     const t = tabs[idx];
-    /* 真切换：走按钮的 onclick（= switchView），保证路由/数据一条链路。
-       navDragLanded 打标记：click 同步引发的 syncNavActive→navPillMove
-       属于拖拽落位链路，不泵 is-gliding（v5.1）。 */
-    if (t && idx !== navIndexRefresh()) { navDragLanded = performance.now(); t.click(); return; }
-    navPillTo(idx, false, { noGlide: true });   // 拖拽落位不泵 is-gliding（v5.1）
-  };
+    if (t) t.click();
+  }
+  /** 进入拖拽模式：常驻高亮淡出、浮层淡入 */
+  function enterDrag(clientX) {
+    if (dragMode) return;
+    dragMode = true;
+    pill.style.opacity = '0';
+    /* 原选中项降透明（设计稿 isDragging 口径） */
+    const onTab = navVisibleTabs().find(t => t.classList.contains('on'));
+    if (onTab) onTab.classList.add('is-dim');
+    if (lens) {
+      lens.classList.remove('is-snapping');
+      lens.classList.add('is-active');
+      lens.style.width = lensWidth() + 'px';
+    }
+    updateLens(clientX);
+  }
+  /** 跟手更新浮层位置 + 速度感应外发光 + 半覆盖图标高亮 */
+  function updateLens(clientX) {
+    if (!lens) return;
+    const dr = dock.getBoundingClientRect();
+    const lw = lensWidth();
+    const minX = 4, maxX = Math.max(minX, dr.width - lw - 4);
+    lensX = Math.max(minX, Math.min(maxX, (clientX - dr.left) - lw / 2));
+    lens.style.transform = 'translateX(' + lensX.toFixed(1) + 'px)';
+    /* 速度感应：滑动越快外发光越大越亮（设计稿 outerBlur = 20 + speed*4.5） */
+    const speed = Math.min(3, Math.abs(velocity));
+    if (outer) {
+      const blur = 20 + speed * 4.5;
+      const alpha = Math.min(.55, .28 + speed * .1);
+      outer.style.opacity = alpha.toFixed(2);
+      outer.style.boxShadow = '0 0 ' + blur.toFixed(1) + 'px rgba(245,158,11,' + alpha.toFixed(2) + '),' +
+        '0 0 ' + (blur * 1.3).toFixed(1) + 'px rgba(186,230,253,' + (alpha * .8).toFixed(2) + ')';
+    }
+    /* 半覆盖：浮层与某格重叠 >18px → 该图标放大高亮（设计稿 is-covered 口径） */
+    const lensL = lensX, lensR = lensX + lw;
+    navVisibleTabs().forEach((tab) => {
+      const tr = tab.getBoundingClientRect();
+      const tl = tr.left - dr.left, trr = tl + tr.width;
+      const overlap = Math.max(0, Math.min(lensR, trr) - Math.max(lensL, tl));
+      tab.classList.toggle('is-covered', overlap > 18);
+    });
+  }
+  /** 松手：磁吸到最近格 → 淡出浮层 → 恢复常驻高亮 → 激活页面 */
+  function finishAndSnap() {
+    const idx = nearestTab();
+    if (lens) {
+      lens.classList.add('is-snapping');
+      const lw = lensWidth();
+      lens.style.transform = 'translateX(' + (tabCenter(idx) - lw / 2).toFixed(1) + 'px)';
+    }
+    setTimeout(() => {
+      if (lens) { lens.classList.remove('is-active', 'is-snapping'); }
+      pill.style.opacity = '1';
+      clearCovered();
+      navVisibleTabs().forEach(t => t.classList.remove('is-dim'));
+      activate(idx);
+      navPillMove(false);   // 高亮层滑到新选中项（幂等；switchView 内 syncNavActive 也会调）
+      resetState();
+    }, 260);
+  }
+  function resetState() {
+    pressed = false; dragMode = false;
+    if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
+  }
 
-  dock.addEventListener('touchstart', down, { passive: true });
-  window.addEventListener('touchmove', move, { passive: true });
-  window.addEventListener('touchend', up);
-  window.addEventListener('touchcancel', up);
-  dock.addEventListener('mousedown', (e) => {
-    down(e);
-    const mv = (ev) => move(ev);
-    const mu = () => { up(); window.removeEventListener('mousemove', mv); window.removeEventListener('mouseup', mu); };
-    window.addEventListener('mousemove', mv);
-    window.addEventListener('mouseup', mu);
-  });
+  function onDown(e) {
+    pressed = true; dragMode = false;
+    pressT = performance.now();
+    const p0 = e.touches && e.touches[0] ? e.touches[0] : e;
+    startX = p0.clientX || 0; startY = p0.clientY || 0;
+    lastX = startX; lastTime = pressT; velocity = 0;
+    if (longPressTimer) clearTimeout(longPressTimer);
+    /* 长按 150ms 才进入拖拽；期间横向移动 >5px 也立刻进入（设计稿同口径） */
+    longPressTimer = setTimeout(() => {
+      if (pressed && !dragMode) enterDrag(startX);
+    }, 150);
+  }
+  function onMove(e) {
+    if (!pressed) return;
+    const p0 = e.touches && e.touches[0] ? e.touches[0] : e;
+    const x = p0.clientX || 0;
+    const now = performance.now();
+    const dt = Math.max(1, now - lastTime);
+    velocity = velocity * .5 + ((x - lastX) / dt) * .5;
+    lastX = x; lastTime = now;
+    if (!dragMode && Math.abs(x - startX) > 5) {
+      if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
+      enterDrag(x);
+    }
+    if (dragMode) {
+      if (e.cancelable) e.preventDefault();
+      updateLens(x);
+    }
+  }
+  function onUp(e) {
+    if (!pressed) return;
+    const dur = performance.now() - pressT;
+    const p0 = e.changedTouches && e.changedTouches[0] ? e.changedTouches[0] : e;
+    const x = p0.clientX || lastX;
+    const dx = Math.abs(x - startX);
+    if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
+    if (!dragMode && dur < 150 && dx < 5) {
+      /* 短按：按下点落在哪一格就切哪一格 */
+      const tabs = navVisibleTabs();
+      if (tabs.length) {
+        const dr = dock.getBoundingClientRect();
+        const relX = x - dr.left;
+        const idx = Math.max(0, Math.min(tabs.length - 1, Math.floor(relX / (dr.width / tabs.length))));
+        activate(idx);
+      }
+      resetState();
+    } else {
+      finishAndSnap();
+    }
+  }
 
-  /* 初始化对齐：字体/布局稳定后量一次（load + resize + 两拍 rAF 兜底） */
+  if (window.PointerEvent) {
+    dock.addEventListener('pointerdown', onDown);
+    window.addEventListener('pointermove', onMove, { passive: false });
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
+  } else {
+    dock.addEventListener('touchstart', onDown, { passive: true });
+    window.addEventListener('touchmove', onMove, { passive: false });
+    window.addEventListener('touchend', onUp);
+    window.addEventListener('touchcancel', onUp);
+    dock.addEventListener('mousedown', onDown);
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  }
+
+  // 初始化对齐：字体/布局稳定后量一次（load + resize + 两拍兜底）
   const align = () => navPillMove(true);
   window.addEventListener('load', align);
+  window.addEventListener('resize', align);
   const ro = window.ResizeObserver ? new ResizeObserver(() => navPillMove(true)) : null;
   if (ro) ro.observe(dock);
   setTimeout(align, 60);
   setTimeout(align, 400);
 
-  /* ===== 触摸光晕（2026-10-18 v6，用户提示词 1-6 条）=====
+  /* ===== 触摸光晕（2026-10-18 v6，用户提示词 1-6 条）：保留 =====
      touchstart 优先（移动端 click 有 300ms 延迟，光晕会慢半拍），
-     mouse 桌面通道（touchstart 未命中时 click 兜底一次）。坐标取「相对 Tab 格子」
-     的 x/y，光晕节点放 (x,y)，双 rAF 后 scale(1)+opacity(.35)，400ms 后删节点。 */
+     mouse 桌面通道（touchstart 未命中时 click 兜底一次）。 */
   const spawnRipple = (btn, x, y) => {
     const br = btn.getBoundingClientRect();
     const r = document.createElement('span');
     r.className = 'tab-ripple';
-    /* 尺寸贴 Tab 格子短边 ×2.2 —— 点格子边缘光晕也能铺满整格 */
     const size = Math.round(Math.max(br.width, br.height) * 2.2);
     r.style.width = r.style.height = size + 'px';
     r.style.left = (x - br.left) + 'px';
     r.style.top = (y - br.top) + 'px';
     btn.appendChild(r);
-    /* 双 rAF：先让浏览器按 scale(0) 落一帧，再切到 .tab-ripple-on →
-       transition 才会播（同帧 set class 会被合并、直接跳到终态） */
     requestAnimationFrame(() => requestAnimationFrame(() => {
       r.classList.add('tab-ripple-on');
     }));
-    /* 动画 400ms 结束直接删节点，不堆积（同格连点 = 旧节点先删、新节点再建） */
     setTimeout(() => r.remove(), 420);
   };
+  let lastTouchAt = 0;
   dock.addEventListener('touchstart', (e) => {
+    lastTouchAt = performance.now();
     const t = e.touches && e.touches[0];
     if (!t) return;
     const btn = t.target && t.target.closest && t.target.closest('#navRow button[data-v]');
     if (btn) spawnRipple(btn, t.clientX, t.clientY);
-  }, { passive: true });
+  }, { passive: true, capture: true });
   dock.addEventListener('click', (e) => {
-    /* 触摸设备上 touchstart 已出过光晕（lastTouch 短窗内的 click 跳过），
-       避免同一次点按出两朵 */
     if (e.detail && lastTouchAt && performance.now() - lastTouchAt < 500) return;
     const btn = e.target && e.target.closest && e.target.closest('#navRow button[data-v]');
     if (btn) spawnRipple(btn, e.clientX, e.clientY);
   });
-  let lastTouchAt = 0;
-  dock.addEventListener('touchstart', () => { lastTouchAt = performance.now(); }, { passive: true, capture: true });
 }
 
 /* ==================== 日/月/年 白玻分段滑块（2026-10-18 Stitch 1:1） ====================
@@ -7117,10 +6999,6 @@ function switchView(v, opts) {
   $('view').innerHTML = '';
   if (opts.push !== false) pushRoute(opts.replace === true);
   go();
-  /* 2026-10-18 v5：切页时镜片**立即**重建（不等 180ms 防抖）—— 防抖窗口内
-     页面已清空、镜片还是旧内容，位置对不上 = 一瞬错位闪。立即重建时
-     #view 已空、克隆的是空骨架，镜片内容与页面同步归零，一起等新数据。 */
-  try { clearTimeout(lensTimer); if (lensEnsure()) lensSync(); } catch (e) {}
 }
 
 function setPeriod(p) {
@@ -7742,6 +7620,27 @@ async function fetchMyMessages() {
   }
 }
 
+/** 底栏「微信对接」未读角标（2026-10-18 第三轮，设计稿 #wechat-badge）：
+    数量 = /api/public/my/messages 的未读条数（该接口只下发未读）。任何失败静默隐藏，
+    绝不挡页面；未登录（无 my token）直接隐藏。 */
+async function refreshWxBadge() {
+  const b = $('wxBadge');
+  if (!b) return;
+  if (!myToken()) { b.hidden = true; return; }
+  let items = null;
+  try { items = await fetchMyMessages(); } catch (_) { items = null; }
+  const n = items ? items.length : 0;
+  if (n > 0) {
+    b.hidden = false;
+    b.textContent = n > 99 ? '99+' : String(n);
+    b.classList.remove('wx-badge-pop');
+    void b.offsetWidth;                 // 重置动画
+    b.classList.add('wx-badge-pop');
+  } else {
+    b.hidden = true;
+  }
+}
+
 /* 图片按需加载：fetch + blob + URL.createObjectURL（<img> 直接指 URL 会丢 X-My-Token 头）。
    成功 resolve URL；任何失败 resolve null（调用方显示占位文案，不挡正文）。 */
 async function fetchMsgImage(id) {
@@ -7840,6 +7739,7 @@ function openMsgModal(items) {
       btn.textContent = '已读';
       btn.classList.add('msg-read-done');
       item.__read = true;
+      refreshWxBadge();   // 未读少一条 → 底栏角标跟着减
       /* 全部已读 → 自动关闭（含一条的情况） */
       if (list.every((x) => x.__read)) closeMsgModal();
     }).catch((e) => {
@@ -7902,6 +7802,7 @@ function openMsgModal(items) {
         if (r.status === 'rejected') console.warn('[msgModal] 已读回执失败 id=' +
           (pending[i] && pending[i].id), r.reason);
       });
+      refreshWxBadge();   // 批量已读 → 底栏角标归零/更新
       closeMsgModal();
     });
   };
@@ -9143,7 +9044,7 @@ async function bootRest() {
      放在 bootRest 里而不是 IIFE 里 —— 此时导航按钮的 disable/hidden 已经按后台开关
      定好了，量到的宽度才是真的（关掉的视图按钮宽度 0，不能参与定位）。 */
   try { initNavDock(); } catch (e) { /* 不影响主流程 */ }
-  try { initLens(); } catch (e) { /* 镜片失败不影响导航 */ }
+  try { refreshWxBadge(); } catch (e) { /* 未读角标失败不影响导航 */ }
   try { initSegDrag(); stSegMove(true); } catch (e) { /* 同上 */ }
   $('btnSearch').onclick = () => {
     searchOpen = !searchOpen;
