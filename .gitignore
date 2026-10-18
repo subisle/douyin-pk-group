@@ -94,3 +94,6 @@ backup.env
 
 # 安全审计记录（含口令/手机号/内网拓扑引用，本地保留不入库；2026-10-17 第四轮补）
 audit-conflicts/
+
+# 设计对照工具的产物体（脚本本身入库，diff 结果不入库）
+scripts/design-diff/last-diff.json
