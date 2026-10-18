@@ -74,78 +74,133 @@
   --glass:rgba(252,248,251,.80);
 }
 * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
-body { margin:0; background:var(--canvas-bg); color:var(--on-surface);
-  font:14px/1.5 -apple-system,BlinkMacSystemFont,'SF Pro Text','PingFang SC','Hiragino Sans GB',sans-serif; }
+/* 页面背景（2026-10-18 Stitch「主播数据榜-真实凸透镜折射玻璃导航栏」1:1）：
+   浅色多重微光弥散网格（Light Mesh Gradients）—— 底色 #f6f8fc + 四团径向柔光 +
+   24px 极淡网格线（设计稿 main.bg-light-apple 原值照搬）。
+   原 --canvas-bg 变量保留在 :root 里给别处引用，body 不再用它。 */
+/* 2026-10-18 看板 1:1 对齐 Stitch 设计稿（glass_nav）：
+   body = 设备外框（bg-[#edf1f7] 居中），main.wrap = 手机屏本体（bg-light-apple 渐变 + 430 上限
+   + 左右边线 + 0 12px 45px 投影）。原先渐变挂在 body 上、wrap 透明 —— 设计稿正好相反。 */
+body { margin:0; background-color:#edf1f7;
+  /* 2026-10-18 第二轮 1:1：body 文字色对齐设计稿 slate-800（30,41,59） */
+  color:#1E293B;
+  font:16px/1.5 -apple-system,BlinkMacSystemFont,'SF Pro Text','PingFang SC','Hiragino Sans GB','Microsoft YaHei',sans-serif; }
 button { font:inherit; cursor:pointer; }
 /* hidden 属性必须赢过任何 display 规则（新版 UI 大量 flex/grid 布局会覆盖它） */
 [hidden] { display:none !important; }
 .hidden { display:none !important; }
 
 /* ===== Masthead（Cupertino 毛玻璃浅色头部） ===== */
-.masthead { background:var(--glass); color:var(--on-surface);
-  -webkit-backdrop-filter:blur(20px) saturate(180%); backdrop-filter:blur(20px) saturate(180%);
-  padding:calc(env(safe-area-inset-top,0px) + 10px) 16px 0;
-  position:sticky; top:0; z-index:30; overflow:hidden;
-  border-bottom:1px solid var(--hairline);
-  box-shadow:0 1px 3px rgba(0,0,0,.04); }
-.masthead::before { content:''; position:absolute; inset:0; pointer-events:none;
-  background:radial-gradient(circle at 50% -20%, rgba(0,122,255,.08), transparent 70%); }
+.masthead { background:none; color:var(--on-surface);
+  -webkit-backdrop-filter:none; backdrop-filter:none;
+  /* 2026-10-18 第二轮 1:1：masthead 移入 main.wrap —— 水平 padding 17→16（px-4）
+     + margin:0 -17px 抵消 wrap 的 17px padding（全宽 388、内容起点 x=17，
+     与设计稿 1px 边线 + px-4 一致） */
+  padding:calc(env(safe-area-inset-top,0px) + 12px) 16px 8px;
+  margin:0 -17px;
+  position:static; overflow:visible;
+  border-bottom:0px solid #E5E7EB; box-shadow:none; z-index:10; }
+.masthead::before { display:none; }
 /* 头部（2026-10-16 用户口径）：标题整块居中 —— 三栏网格（左 1fr / 中 auto / 右 1fr），
    中栏宽度 = 标题本身，所以标题天然落在**整行正中**；换团胶囊固定右栏、右对齐。
    副标题从 .mh-title 里拆出来单占一行（.mh-sub）整行居中 —— 若跟着标题挤在中栏，
    长副标题（DATA 2026.10.12 · 2/101 有数据）会被右侧胶囊压成省略号。 */
-.mh-top { display:grid; grid-template-columns:1fr auto 1fr; align-items:center; gap:10px;
+.mh-top { display:flex; align-items:center; justify-content:space-between; gap:10px;
   position:relative; }
+/* 左栏：呼吸圆点 + 主标题（设计稿 w-2 h-2 amber-500 ping + text-xl font-extrabold） */
+.mh-left { display:flex; align-items:center; gap:8px; min-width:0; }
+.mh-dot { flex:none; width:8px; height:8px; border-radius:9999px; background:#F59E0B;
+  box-shadow:0 0 8px rgba(245,158,11,.6); animation:mhPing 1.2s cubic-bezier(0,0,.2,1) infinite; }
+@keyframes mhPing { 75%,100% { transform:scale(2); opacity:0; } }
 .mh-badge { width:36px; height:36px; border-radius:11px; background:var(--masthead-surface);
   border:1px solid var(--hairline-dark); display:grid; place-items:center; font-weight:800;
   font-size:15px; color:var(--primary); flex:none; }
 /* 徽标兼「换团」按钮：点一下回团别选择卡 */
 .mh-badge.mh-switch { cursor:pointer; font-size:13px; }
 .mh-badge.mh-switch:active { transform:scale(.94); }
-.mh-title { grid-column:2; min-width:0; text-align:center; }
-.mh-title .t { font-weight:800; font-size:17px; letter-spacing:-.01em; color:var(--on-surface); }
-/* 副标题行：整行居中（长文本走省略号，不挡右侧胶囊） */
-.mh-sub { margin-top:2px; font-size:11px; color:var(--ink3); font-family:Menlo,monospace;
-  text-align:center; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-/* 📣 头部公告行（2026-10-17 用户口径）：原来公告内容占三块竖排大卡（#annItems 两条
-   紫金横幅 + #home-ann 蓝色通知条，合计近半屏、滚走前一直占位），现在全部收进
-   masthead 内的**单行胶囊**：随头部吸顶、只占一行 22px。多条公告 4 秒轮换单行
-   淡入淡出（JS 侧 renderAnnounceItems / renderHomeAnnouncement）。
-   单行省略：nowrap + ellipsis，行内居中；max-width 95% 与头部同宽感。 */
-.mh-ann { display:flex; align-items:center; justify-content:center; gap:4px;
-  height:22px; margin:4px auto 6px; max-width:95%; padding:2px 10px;
-  border-radius:9999px; font-size:11px; line-height:1.2; text-align:center;
-  overflow:hidden; white-space:nowrap; text-overflow:ellipsis;
-  background:#F5F3FF; border:1px solid #C4B5FD; color:#4C1D95; }
-/* 品牌条（tone=brand）：沿 .ann-item.ai-brand 的紫金渐变，整体调淡一档适配头部小字 */
-.mh-ann.ai-brand { background:linear-gradient(120deg,#6D28D9 0%,#8B5CF6 45%,#B45309 100%);
-  border-color:rgba(245,158,11,.55); color:#FFFBEB;
-  box-shadow:0 2px 10px rgba(109,40,217,.25); }
-/* 蓝色通知条（renderHomeAnnouncement 并入的 placements.home）：沿原 .ann-bar 浅蓝 */
-.mh-ann.ai-home { background:linear-gradient(135deg,#EAF3FF,#E0EDFF);
-  border-color:var(--primary-fixed-dim); color:var(--on-surface); }
+.mh-title { min-width:0; text-align:left; }
+.mh-title .t { font-weight:800; font-size:20px; line-height:28px; letter-spacing:-.5px;
+  color:#0F172A; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+/* 副标题行（设计稿 text-[11px] font-medium text-slate-500 mt-1.5 tracking-wide）：
+    左对齐跟主标题同栏（设计稿数据行就在标题下方左侧） */
+.mh-sub { margin-top:6px; font-size:11px; line-height:16.5px; font-weight:500; color:#64748B;
+  font-family:inherit; letter-spacing:.025em; text-align:start;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.mh-sub .mono { font-family:Menlo,monospace; font-weight:700; color:#0284C7; }
+.mh-sub .sep { color:#CBD5E1; margin:0 4px; }
+/* 📣 头部公告行（2026-10-18 Stitch 1:1 精确结构）：设计稿是**双层 DOM** ——
+    外层 1px 渐变描边胶囊（p-[1px] + from-purple-300/60 via-amber-300/80 to-blue-300/60
+    + shadow 0 2px 12px purple-500/12），内层白玻胆（bg-white/80 + blur(12px) +
+    border white/80 + py-1.5 px-3 + rounded-full）：
+      · 左：图标 + 金色渐变标题（bg-clip-text，amber-700→amber-600→yellow-600）
+      · 右：琥珀色「1/3」等宽角标（amber-50 底 + amber-300/40 描边）
+    2026-10-18 第二轮：从「单元素双背景」改为真实双层（.mha-in 内胆），
+    computed style 与设计稿逐字段一致（padding 1px / background-image 单渐变）。 */
+.mh-ann { border-radius:9999px; padding:1px; margin:10px 0 0; height:38px;
+  box-sizing:border-box; overflow:hidden;
+  background:linear-gradient(to right, rgba(216,180,254,.6), rgba(252,211,77,.8), rgba(147,197,253,.6));
+  box-shadow:0 2px 12px rgba(168,85,247,.12);
+  font-size:12px; color:#1E293B; }
+/* 内胆：白玻一行（设计稿 bg-white/80 backdrop-blur-md py-1.5 px-3 border-white/80） */
+.mh-ann .mha-in { height:36px; box-sizing:border-box;
+  display:flex; align-items:center; justify-content:space-between; gap:8px;
+  padding:6px 12px; border-radius:9999px;
+  background:rgba(255,255,255,.8); border:1px solid rgba(255,255,255,.8);
+  -webkit-backdrop-filter:blur(12px); backdrop-filter:blur(12px); }
+/* 左段：图标 + 文案（文案超长走省略号，不撑破胶囊） */
+.mh-ann .mha-l { display:flex; align-items:center; gap:6px; flex:1 1 auto; min-width:0; }
 .mh-ann .material-symbols-outlined { font-size:14px; line-height:1; flex:none;
-  color:inherit; opacity:.85; }
-/* 单行内多条轮换的淡入淡出（同一行内换内容，不换行不撑高） */
+  color:#1E293B; opacity:.85; }
+/* 金渐变标题（设计稿 from-amber-700 via-amber-600 to-yellow-600 bg-clip-text） */
 .mh-ann .mha-tx { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  font-size:12px; font-weight:800; letter-spacing:.3px; line-height:16px;
+  background:linear-gradient(to right, #B45309, #D97706, #CA8A04);
+  -webkit-background-clip:text; background-clip:text;
+  -webkit-text-fill-color:transparent; color:transparent;
   transition:opacity .45s ease; }
 .mh-ann .mha-tx.mha-fade { opacity:0; }
-/* 轮换角标「1/3」：只有多条时渲染，字号压到 9.5px */
-.mh-ann .mha-idx { flex:none; font-size:9.5px; opacity:.65; font-family:Menlo,monospace; }
-/* 换团条（2026-10-15）：头部右侧三胶囊，只给「全团」账号。
-    2026-10-16：改成网格右栏 + 右对齐（原来是 flex:1 的标题挤着它）；同时收紧一档 ——
-    原自然宽 140px 比右栏（390 屏上 127px）还宽，按钮会被压成两行。 */
-.team-switch { grid-column:3; justify-self:end; display:flex; gap:3px; padding:2px; border-radius:11px;
-  background:var(--masthead-surface); border:1px solid var(--hairline-dark); }
-.team-switch button { border:none; background:none; cursor:pointer; padding:4px 6px;
-  border-radius:8px; font-size:11.5px; font-weight:700; color:var(--ink3);
-  font-family:inherit; line-height:1; white-space:nowrap; transition:all .15s; }
+/* 轮换角标「1/3」（设计稿 amber-50 底 + amber-300/40 描边 + amber-700 等宽字） */
+.mh-ann .mha-idx { flex:none; font-size:11px; font-weight:700; font-family:Menlo,monospace;
+  letter-spacing:.1em; color:#B45309; background:#FFFBEB; padding:2px 8px;
+  border-radius:9999px; border:1px solid rgba(252,211,77,.4); }
+/* 品牌条（tone=brand）：内胆换紫，外层渐变描边不变（设计稿只有这一种胶囊，
+    紫胆是运营配置 tone=brand 的展示变体，保留） */
+.mh-ann.ai-brand .mha-in {
+  background:rgba(88,28,135,.88); color:#FFFBEB; }
+.mh-ann.ai-brand .mha-tx, .mh-ann.ai-brand .material-symbols-outlined {
+  background:none; -webkit-text-fill-color:#FFFBEB; color:#FFFBEB; }
+.mh-ann.ai-brand .mha-idx { color:#FDE68A; background:rgba(88,28,135,.9);
+  border-color:rgba(252,211,77,.45); }
+/* 蓝色通知条（renderHomeAnnouncement 并入的 placements.home）：内胆换浅蓝 */
+.mh-ann.ai-home .mha-in { background:rgba(224,237,255,.85); }
+.mh-ann.ai-home .mha-tx, .mh-ann.ai-home .material-symbols-outlined {
+  background:none; -webkit-text-fill-color:var(--on-surface); color:var(--on-surface); }
+/* 换团条（2026-10-18 Stitch 1:1）：iOS 分段控制器（Segmented Control）——
+    外壳 slate-200/70 + p-0.5 + 全圆角 + 白 .6 描边 + inset 阴影 + blur(12px)；
+    选中项 = 白底胶囊（px-3 py-1）+ 白 .9 描边 + 0 2px 8px rgba(0,0,0,.08)。
+    实测（390 视口）：外壳 144×32、选中按钮 50×26、字号 12/700。 */
+.team-switch { display:inline-flex; align-items:center; flex:none;
+  padding:2px; border-radius:9999px;
+  background:rgba(226,232,240,.7); border:1px solid rgba(255,255,255,.6);
+  /* 2026-10-18 1:1：设计稿外壳带 inset 0 2px 4px rgba(0,0,0,.05)（内陷感） */
+  box-shadow:inset 0 2px 4px rgba(0,0,0,.05);
+  -webkit-backdrop-filter:blur(12px); backdrop-filter:blur(12px);
+  font-size:12px; font-weight:600; }
+.team-switch button { border:none; background:none; cursor:pointer;
+  padding:4px 10px; border-radius:9999px; font-size:12px; font-weight:500;
+  color:#475569; font-family:inherit; line-height:16px; white-space:nowrap;
+  transition:all .15s; }
 .team-switch button:active { transform:scale(.94); }
-.team-switch button.on { background:var(--primary); color:#fff; }
+/* 选中项（设计稿 bg-white px-3 py-1 + border border-white/90 + shadow）：
+   加边框的同时把左右内边距补到 12 —— 设计稿三颗按钮实测 50/44/44、外壳 144 宽。 */
+.team-switch button.on { background:#fff; color:#0F172A; font-weight:700;
+  padding:4px 12px; border:1px solid rgba(255,255,255,.9);
+  box-shadow:0 2px 8px rgba(0,0,0,.08); }
 .team-switch.hidden { display:none; }
-/* 极窄屏（≤370px，如 360 安卓机）：胶囊再收一档，保持「标题居中 + 胶囊右对齐」不打架 */
+/* 极窄屏（≤370px）：胶囊再收一档，别把标题挤成省略号 */
 @media (max-width:370px) {
-  .team-switch button { padding:3px 5px; font-size:11px; }
+  .team-switch { font-size:11px; }
+  .team-switch button { padding:4px 8px; font-size:11px; }
 }
 /* 分组子导航（按赛事类型拆页，浅色胶囊，仅在分组页显示） */
 .subnav { display:flex; gap:6px; margin-top:10px; overflow-x:auto; padding-bottom:10px;
@@ -667,58 +722,288 @@ button { font:inherit; cursor:pointer; }
   .ip-box { width:calc(100vw - 16px); box-shadow:0 12px 40px rgba(10,3,25,.92), 0 0 30px rgba(245,158,11,.32); }
 }
 
-/* 底部标签栏（看板 / 分组 / 族谱 / 我的 / 微信对接）：毛玻璃 + 安全区 */
-.tabbar { position:fixed; left:0; right:0; bottom:0; z-index:31;
-  display:flex; background:var(--glass);
-  -webkit-backdrop-filter:blur(20px) saturate(180%); backdrop-filter:blur(20px) saturate(180%);
-  border-top:1px solid var(--hairline);
-  padding-bottom:env(safe-area-inset-bottom,0px); }
-/* 2026-10-15 task-11：第 5 项「微信对接」加入后要 5 等分且不换行 ——
-   flex:1 + min-width:0 保证横向均分，white-space:nowrap 保证「微信对接」四字不折行。 */
-.tabbar button { flex:1; min-width:0; height:52px; border:none; background:transparent; color:var(--ink3);
-  font-size:11px; white-space:nowrap; padding:0 2px;
-  display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2px; }
-.tabbar button .ic { width:24px; height:24px; display:grid; place-items:center; }
-.tabbar button.on { color:var(--primary); font-weight:700; }
-/* 窄屏（≤375px，iPhone SE/mini 一档）5 项时再收一点字号，优先保住「微信对接」全文案 */
-@media (max-width:375px) {
-  .tabbar button { font-size:10px; letter-spacing:-.02em; }
-  .tabbar button .ic { width:22px; height:22px; }
+/* ===== 底部导航（2026-10-18 Stitch 玻璃稿 1:1）：苹果高阶悬浮液态玻璃 Dock =====
+    设计源：.stitch/designs/stitch_streamer_glass_nav/code.html
+    实测（390 视口）：外层 fixed bottom-4 居中、宽 calc(100% - 32px)（上限 398px）、
+    z-40；nav 本体圆角 32、p-1.5（6px）、高 68.5、白 .68 底 + 白 .9 描边 +
+    blur(32px) saturate(200%) + 四段投影（含两段 inset 高光）。
+    态：滑动胶囊 #navPill（86×54.5 圆角 24 + 四层折射装饰）跟随选中项；
+    选中项图标/文字 slate-950（第4项「微信对接」是棕色 #78350F），未选中 slate-400。 */
+/* 2026-10-18 第二轮 1:1：定位层上提（设计稿 fixed 外层 + relative nav 双层） */
+.tabbar-dock { position:fixed; bottom:16px; left:50%; transform:translateX(-50%);
+  width:calc(100% - 32px); max-width:398px; z-index:31; }
+.tabbar { position:relative;
+  display:flex; align-items:center; justify-content:space-between;
+  padding:6px; border-radius:32px;
+  /* 2026-10-18 第二轮 1:1：回归设计稿原值（.68 白 + .9 描边 + blur 32 saturate 200%）。
+     第一轮曾因「胶囊 backdrop 被 dock 抢先糊掉」降到 .30/6px —— 那是为了救胶囊
+     对焦感的权衡；本轮胶囊改用自身 blur(20px) contrast(1.18) 一组强滤镜，
+     dock 回满值后胶囊依然立得住（实测 diff：backdrop-filter 两级都与设计稿一致）。 */
+  background:rgba(255,255,255,.68); border:1px solid rgba(255,255,255,.9);
+  box-shadow:0 20px 48px rgba(120,53,15,.07), 0 4px 12px rgba(15,23,42,.04),
+    inset 0 1.5px 2px rgba(255,255,255,.98), inset 0 -1.5px 2px rgba(214,211,209,.35);
+  -webkit-backdrop-filter:blur(32px) saturate(200%); backdrop-filter:blur(32px) saturate(200%);
+  touch-action:none; user-select:none; -webkit-user-select:none;
+  transition:transform .2s ease; }
+/* 2026-10-18 第二轮 1:1：定位层上提后，:active 只剩缩放（translateX 归 dock 层） */
+.tabbar:active { transform:scale(.985); }
+/* 2026-10-15 task-11：5 项均分不换行（「微信对接」四字 nowrap 保全文案）。
+   2026-10-18 v6：加 overflow:hidden + border-radius —— 触摸光晕（.tab-ripple）
+   必须裁在 Tab 格子内，不能溢出到隔壁格子 / dock 外。 */
+.tabbar button { position:relative; z-index:2; flex:1; min-width:0;
+  border:none; background:transparent; color:#94A3B8;
+  /* 2026-10-18 第二轮 1:1：设计稿 nav-tab-item 继承 body 16px（文字标签自身
+     text-[11px] 覆盖为 11px），颜色 slate-800（30,41,59）—— 未选中态文字由
+     .tab-label 单独着色 slate-400，这里对齐继承值。 */
+  font-size:16px; font-weight:500; white-space:nowrap; padding:8px 2px;
+  color:rgb(30,41,59);
+  display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2px;
+  transition:color .2s;
+  overflow:hidden; border-radius:18px; }
+/* 2026-10-18 第二轮 1:1：标签层级补齐 —— 未选中 slate-400（#94A3B8）+ 500，
+   选中态颜色/字重/字距写在 .tab-label 上（按钮层只保留继承值） */
+.tabbar button .tab-label { font-size:11px; color:#94A3B8; font-weight:500; }
+.tabbar button .ic { width:20px; height:20px; display:grid; place-items:center;
+  transition:color .3s, transform .3s; }
+.tabbar button .ic svg { width:20px; height:20px; }
+/* 选中：图标 slate-950 + 放大 1.05 + 投影，文字 11/800 slate-950
+   （2026-10-18 第二轮 1:1：文字类的 color/weight/字距移到 .tab-label 上，
+   按钮层保留 color 继承值 #020617，text-shadow 原样保留） */
+.tabbar button.on { color:#020617;
+  text-shadow:0 1px 2px rgba(255,255,255,.8); }
+.tabbar button.on .tab-label { color:#020617; font-weight:800; letter-spacing:.025em; }
+.tabbar button.on .ic { color:#020617; transform:scale(1.10);
+  filter:drop-shadow(0 1px 4px rgba(0,0,0,.18)); }
+/* 第 4 项「微信对接」选中态是棕色 #78350F（设计稿特例；
+   2026-10-18 第二轮 1:1：棕色同样作用于标签层） */
+.tabbar button[data-v="wechat"].on { color:#78350F; }
+.tabbar button[data-v="wechat"].on .tab-label { color:#78350F; }
+.tabbar button[data-v="wechat"].on .ic { color:#78350F;
+  filter:drop-shadow(0 2px 6px rgba(120,53,15,.25)); }
+/* ===== 触摸光晕（2026-10-18 v6，用户提示词 1-6 条）=====
+   JS 动态创建（不用伪元素 —— 伪元素定位不了「点击坐标」），一个节点一次动画：
+     · 圆形 + 径向渐变红光（红→透明，柔和不刺眼）
+     · pointer-events:none —— 不拦截点击
+     · 初始 scale(0) opacity(0)，双 rAF 后 → scale(1) opacity(.35)
+     · transition all .4s ease-out（扩散 + 淡出同步）
+     · 400ms 后 setTimeout 删节点，不堆积
+   光晕尺寸取 Tab 格子短边的 2.2 倍 —— 点格子边缘也能铺满整格。 */
+.tab-ripple { position:absolute; width:96px; height:96px; border-radius:50%;
+  pointer-events:none; z-index:0;
+  background:radial-gradient(circle,
+    rgba(239,68,68,.55) 0%, rgba(239,68,68,.28) 40%, rgba(239,68,68,0) 70%);
+  transform:translate(-50%,-50%) scale(0); opacity:0;
+  transition:transform .4s ease-out, opacity .4s ease-out; }
+.tab-ripple.tab-ripple-on { transform:translate(-50%,-50%) scale(1); opacity:.35; }
+/* prefers-reduced-motion：光晕退化为一次性淡入淡出（不扩散），仍能看出反馈 */
+@media (prefers-reduced-motion: reduce) {
+  .tab-ripple { transition:opacity .4s ease-out; }
 }
-.tabbar button:active { opacity:.55; }
+/* ===== 液态玻璃滑动胶囊（2026-10-18 v3：对焦 + 去闪）=====
+   用户反馈（v2）：「有点闪，然后玻璃效果，没做好聚焦」。
+   两个问题的根因与修法：
 
-/* 工具栏（口径 + 日期 + 搜索 + 字段） */
-.toolbar { position:sticky; top:var(--mh-h, 56px); z-index:8; background:rgba(255,255,255,.72);
-  -webkit-backdrop-filter:blur(20px) saturate(180%); backdrop-filter:blur(20px) saturate(180%); border-bottom:1px solid var(--hairline);
-  padding:8px 12px; }
-.tools { max-width:560px; margin:0 auto; }
-.seg { display:flex; background:#F2F4F7; border-radius:var(--r-full); padding:3px; }
-.seg button { flex:1; height:32px; border:none; border-radius:var(--r-full); background:transparent;
-  color:var(--on-surface-variant); font-size:13px; }
-.seg button.on { background:#fff; color:var(--on-surface); font-weight:700;
-  box-shadow:0 1px 2px rgb(16 24 40 / 12%); }
-.seg button:disabled { color:#c2c8d2; cursor:not-allowed; }
-.line2 { display:flex; align-items:center; gap:8px; margin-top:8px; }
-.dates { display:flex; gap:8px; overflow-x:auto; flex:1; padding-bottom:2px;
+   ⚠️ 闪的三个来源（v2 全踩了，v3 全部去掉）：
+     1. 高光 / 虹边挂了 `filter:url(#glass-distortion)`（feTurbulence 位移）——
+        在 backdrop-filter 元素内部逐帧重算位移贴图，滚动和滑动时就会闪。
+     2. 高光用 `mix-blend-mode:screen` 叠在实时 backdrop 上，混合结果每帧变。
+     3. `transition: width` —— 每帧改宽度会让整块玻璃重排 + backdrop 重采样。
+   v3 只保留一个会动的属性（transform），其余层全部是静态合成层。
+
+   ✅ 聚焦（这是玻璃像不像透镜的关键）：
+     真·放大（把背景内容放大）在 Chromium 里做不到（backdrop-filter 不支持几何变换），
+     但「透镜对焦」在视觉上 = **中间实、边缘虚**，所以用两层带遮罩的 backdrop 叠出来：
+       .np-frost —— 全尺寸 blur(14px)，遮罩只留外圈 → 边缘柔焦（玻璃厚度）
+       .np-core  —— 全尺寸 blur(2.5px)+高饱和/对比，遮罩只留中段 → 中心「对上焦」
+     两层遮罩互补（一个 42%→100%，一个 34%→84%），交界处平滑过渡，
+     观感就是「透过一枚凸透镜看内容」而不是「看一块磨砂板」。
+     再叠 .np-curve（凸面明暗）+ .np-disp（色散虹边）+ .np-spec（镜面高光）+ .np-vign（内缘）。 */
+#navPill { position:absolute; top:6px; bottom:6px; left:6px; z-index:1;
+  border-radius:24px; pointer-events:none; overflow:hidden;
+  --tx:0px; --sx:1;
+  transform:translateX(var(--tx)) scaleX(var(--sx));
+  /* 2026-10-18 第二轮 1:1：玻璃本体回归设计稿 .glass-pill-indicator 原值 ——
+     白 135° 渐变（.88→.58→.78）+ blur(20px) contrast(1.18) brightness(1.1)
+     saturate(135%) + 六段投影 + .98 白描边。第一轮的「冷调极薄玻璃体」
+     （低白度渐变 + 无 backdrop）是为 dock 降透后的补偿，dock 已回满值，
+     补偿不再需要。 */
+  background:linear-gradient(135deg, rgba(255,255,255,.88) 0%, rgba(255,255,255,.58) 50%, rgba(255,255,255,.78) 100%);
+  border:1px solid rgba(255,255,255,.98);
+  box-shadow:
+    0 8px 24px rgba(120,53,15,.12),
+    0 2px 6px rgba(0,0,0,.05),
+    inset 0 2px 3px rgba(255,255,255,1),
+    inset 0 -2px 3px rgba(120,53,15,.09),
+    inset 1.5px 0 2px rgba(255,255,255,.85),
+    inset -1.5px 0 2px rgba(255,255,255,.85);
+  -webkit-backdrop-filter:blur(20px) contrast(1.18) brightness(1.1) saturate(135%);
+  backdrop-filter:blur(20px) contrast(1.18) brightness(1.1) saturate(135%);
+  /* 只动 transform（位移 + 拉伸），宽度变化不再走过渡 → 不重排、不重算 backdrop */
+  will-change:transform;
+  transition:transform .42s cubic-bezier(.175,.885,.32,1.15); }
+#navPill.is-gliding { --sx:1.05; }
+#navPill.is-dragging { transition:none; }
+
+/* ① 边缘柔焦层：外圈才模糊（遮罩中间镂空）——玻璃边缘的厚与虚 */
+.np-frost { position:absolute; inset:0; pointer-events:none;
+  -webkit-backdrop-filter:blur(5px) saturate(130%) brightness(1.02);
+  backdrop-filter:blur(5px) saturate(130%) brightness(1.02);
+  -webkit-mask-image:radial-gradient(118% 150% at 50% 50%,
+    transparent 40%, rgba(0,0,0,.55) 62%, #000 86%);
+  mask-image:radial-gradient(118% 150% at 50% 50%,
+    transparent 40%, rgba(0,0,0,.55) 62%, #000 86%); }
+
+/* ② 中心对焦层：近乎不糊 + 高饱和/高对比 → 比周围一圈明显「实」，这就是对焦感 */
+.np-core { position:absolute; inset:0; pointer-events:none;
+  -webkit-backdrop-filter:blur(.8px) saturate(215%) contrast(1.14) brightness(1.01);
+  backdrop-filter:blur(.8px) saturate(215%) contrast(1.14) brightness(1.01);
+  -webkit-mask-image:radial-gradient(118% 150% at 50% 50%,
+    #000 30%, rgba(0,0,0,.75) 52%, transparent 78%);
+  mask-image:radial-gradient(118% 150% at 50% 50%,
+    #000 30%, rgba(0,0,0,.75) 52%, transparent 78%); }
+
+/* ③ 凸面曲率：顶部受光亮、底部反光暖、四周贴边压暗（透镜的厚度感） */
+.np-curve { position:absolute; inset:0; pointer-events:none;
+  background:
+    radial-gradient(92% 130% at 50% 16%, rgba(255,255,255,.20) 0%, rgba(255,255,255,.03) 40%, transparent 64%),
+    radial-gradient(120% 150% at 50% 118%, rgba(90,110,150,.12) 0%, transparent 56%),
+    radial-gradient(108% 108% at 50% 50%, transparent 52%, rgba(15,23,42,.12) 100%); }
+
+/* ④ 色散虹边：静态 conic 环裁成 1.2px（**不再挂 SVG 位移滤镜** → 不闪） */
+.np-disp { position:absolute; inset:0; border-radius:23px; pointer-events:none;
+  padding:1.2px;
+  background:conic-gradient(from 200deg,
+    rgba(142,221,255,.88) 0deg, rgba(255,255,255,.10) 52deg,
+    rgba(255,201,132,.82) 104deg, rgba(255,255,255,.08) 158deg,
+    rgba(201,161,255,.82) 214deg, rgba(255,255,255,.08) 268deg,
+    rgba(142,221,255,.88) 360deg);
+  -webkit-mask:linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite:xor;
+  mask:linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  mask-composite:exclude;
+  opacity:.70; }
+
+/* ⑤ 镜面高光：顶部一道弧形亮带 + 随位移轻微流动的光斑（纯渐变，无滤镜无混合模式） */
+.np-spec { position:absolute; inset:0; pointer-events:none;
+  transform:translateX(var(--spot,0px));
+  transition:transform .32s ease;
+  background:
+    /* 顶部弧形高光（窄、亮，才有「镜面」感而不是糊白） */
+    radial-gradient(112% 46% at 50% -10%, rgba(255,255,255,.85) 0%, rgba(255,255,255,.14) 46%, transparent 62%),
+    /* 左上主光斑 */
+    radial-gradient(46% 92% at 22% 12%, rgba(255,255,255,.34) 0%, transparent 60%); }
+
+/* ⑥ 内缘暗线 + 顶部锐利反光弧：把「玻璃边缘」勾出来 */
+.np-vign { position:absolute; inset:0; pointer-events:none;
+  border-radius:23px;
+  box-shadow:
+    inset 0 0 0 1px rgba(255,255,255,.22),
+    inset 0 1px 0 0 rgba(255,255,255,.75); }
+
+/* ===== 镜片层（真·放大）：内容副本 + 透镜中心缩放 =====
+   2026-10-18 v5：镜片与 .np-frost/.np-core **共存**（v4 在 has-lens 时把两层
+   backdrop 关掉，结果「聚焦」完全看不出来）。叠层顺序：frost → core → lens：
+     · 副本透明处（页面底部 padding，胶囊常停的位置）→ 露出对焦圈玻璃感；
+     · 副本有内容处（滚动经过的内容）→ 直接显示放大后的内容。
+   各层滤镜全程恒定，拖拽/切页没有任何滤镜跳变 = 不闪。 */
+.np-lens { position:absolute; inset:0; overflow:hidden; pointer-events:none; display:none; }
+#navPill.has-lens .np-lens { display:block; }
+/* 副本本体：几乎不模糊（放大后本来就清晰），只给一点点通透增强 */
+.np-lens-stage { position:absolute; top:0; left:0; transform-origin:0 0;
+  will-change:transform; pointer-events:none; user-select:none;
+  filter:blur(.3px) saturate(1.18) brightness(1.02); }
+.np-lens-stage * { pointer-events:none !important; }
+.np-lens-stage .section { animation:none !important; }
+/* 副本透明（页底空白）时的对焦玻璃感：.np-frost 的边缘柔焦 backdrop 照常
+   生效 —— 副本盖不住的边缘仍能看出「中心实、边缘虚」的透镜感；
+   .np-core 关掉（副本自己的 saturate/brightness 就是中心对焦，叠两层
+   backdrop 反而会跟副本内容打架发糊）。 */
+#navPill.has-lens .np-frost {
+  background:none; }
+#navPill.has-lens .np-core { display:none; }
+/* 拖拽中滤镜全程恒定（2026-10-18 v5）：v4 在 is-dragging 时关掉 frost 的
+   backdrop → 按下/松手各「啪」一下（blur 瞬间没了又回来），这就是来回拖
+   「还是有一点闪」的主因之一。backdrop 随胶囊位移本来就会重采样，
+   与其开关滤镜制造跳变，不如全程保持同一组滤镜。 */
+
+@media (prefers-reduced-motion: reduce) {
+  #navPill { transition:none; }
+  #navPill.is-gliding { --sx:1; }
+  .np-spec { transition:none; }
+}
+
+/* 工具栏（口径 + 日期 + 搜索）—— 2026-10-18 Stitch 1:1：
+    不再是「毛玻璃吸顶通条」，而是普通文档流里的一块（设计稿 toolbar 无背景无边框），
+    左右各 16px 内边距、上限 560px 居中。内含两块：
+      ① 日/月/年 白玻分段容器（.st-seg，42 高 + 白 .85 描边 + blur(28px) saturate(1.8)）
+      ② 日期胶囊条 + 日历/搜索图标钮（30/32 高） */
+/* 2026-10-18 第二轮 1:1：toolbar 移入 main.wrap —— padding 17→16 + margin:0 -17px
+   （抵消 wrap padding，全宽 388、内容起点 x=17，与设计稿 1px 边线 + px-4 一致） */
+.toolbar { position:static; z-index:8; background:none; border-bottom:none;
+  -webkit-backdrop-filter:none; backdrop-filter:none; padding:6px 16px 0; margin:0 -17px; }
+/* 2026-10-18 第二轮 1:1：tools 容器对齐设计稿 main 内 16px 边距（wrap 17px 减 1px 边线） */
+.tools { max-width:430px; margin:0 auto; }
+/* 分段容器（设计稿 period-segmented-container）：p-1 + 全圆角 + blur(28px) saturate(180%) */
+.seg.st-seg { position:relative; display:flex; align-items:center; justify-content:space-between;
+  padding:4px; border-radius:9999px; gap:0;
+  background:rgba(255,255,255,.52); border:1px solid rgba(255,255,255,.85);
+  box-shadow:0 6px 24px rgba(15,23,42,.05), 0 1px 3px rgba(0,0,0,.02),
+    inset 0 1px 2px rgba(255,255,255,.95), inset 0 -1px 2px rgba(148,163,184,.12);
+  -webkit-backdrop-filter:blur(28px) saturate(180%); backdrop-filter:blur(28px) saturate(180%); }
+.seg.st-seg button { position:relative; z-index:1; flex:1; height:32px; border:none;
+  border-radius:9999px; background:transparent; padding:6px 0; box-sizing:border-box;
+  color:#64748B; font-size:14px; font-weight:500; font-family:inherit;
+  transition:color .2s, font-weight .2s; }
+.seg.st-seg button.on { background:transparent; color:#0F172A; font-weight:700; }
+.seg.st-seg button:disabled { color:#94A3B8; cursor:not-allowed; }
+/* 白玻滑块（JS 定位，宽度/位移由 stSegMove 计算） */
+.st-seg-pill { position:absolute; top:4px; bottom:4px; left:4px; border-radius:9999px;
+  pointer-events:none; z-index:0;
+  background:rgba(255,255,255,.95); border:1px solid rgba(255,255,255,.95);
+  box-shadow:0 4px 14px rgba(0,0,0,.06), 0 1px 2px rgba(0,0,0,.04),
+    inset 0 1px 2px #fff;
+  transition:transform .4s cubic-bezier(.175,.885,.32,1.15), width .25s ease; }
+.st-seg-pill.is-dragging { transition:none; transform-origin:center; }
+/* 滑块内微晶反光弧顶 + 竖向渐变（设计稿两个绝对定位装饰层） */
+.st-seg-pill::before { content:''; position:absolute; left:12px; right:12px; top:2px;
+  height:1.5px; background:#fff; border-radius:9999px; filter:blur(.2px); }
+.st-seg-pill::after { content:''; position:absolute; inset:0; border-radius:9999px;
+  background:linear-gradient(180deg, rgba(255,255,255,.40) 0%, transparent 50%, rgba(241,245,249,.30) 100%); }
+.line2 { display:flex; align-items:center; gap:8px; margin-top:12px; }
+.dates { display:flex; gap:8px; overflow-x:auto; flex:1; padding:2px 0; min-width:0;
   -webkit-overflow-scrolling:touch; scrollbar-width:none;
   mask-image:linear-gradient(to right,#000 88%,transparent 100%); }
 .dates::-webkit-scrollbar { display:none; }
-.dates button { flex:none; height:32px; padding:0 14px; border-radius:var(--r-full);
-  background:#fff; border:1px solid var(--hairline); color:var(--on-surface-variant);
-  font-size:12.5px; font-family:Menlo,monospace; }
-.dates button.on { background:var(--primary); border-color:var(--primary); color:#fff; font-weight:600; }
-.dates button.nodata { color:#C2C8D2; }
+/* 日期胶囊（设计稿：选中=白底 + emerald 字 + emerald-200 描边；其余=白 .6 渐淡） */
+.dates button { flex:none; padding:6px 12px; border-radius:9999px;
+  background:rgba(255,255,255,.6); border:1px solid rgba(255,255,255,.8);
+  color:#475569; font-size:12px; font-weight:600; font-family:inherit;
+  line-height:16px; }
+.dates button.on { background:#fff; border-color:rgba(167,243,208,.9); color:#047857;
+  font-weight:700; box-shadow:0 2px 10px rgba(5,150,105,.14); }
+.dates button.on::before { content:''; display:inline-block; width:6px; height:6px;
+  border-radius:9999px; background:#10B981; margin-right:6px; vertical-align:middle;
+  animation:stPulse 1.6s ease-in-out infinite; }
+/* 更旧的日期再淡一档（设计稿 period-sub-2/3） */
+.dates button.sub { background:rgba(255,255,255,.4); border-color:rgba(255,255,255,.6);
+  color:#94A3B8; }
+.dates button.nodata { color:#CBD5E1; }
 .dates .mgap { flex:none; align-self:center; font-size:10px; color:var(--ink3);
   font-weight:700; padding-left:2px; }
 .stepper { display:flex; align-items:center; gap:4px; flex:1; min-width:0; }
-.stepper button { width:34px; height:32px; border-radius:var(--r-sm); background:#fff;
-  border:1px solid var(--hairline); color:var(--on-surface-variant); line-height:1; }
+.stepper button { width:32px; height:30px; border-radius:9999px;
+  background:rgba(255,255,255,.7); border:1px solid rgba(255,255,255,.9);
+  color:#475569; line-height:1; }
 .stepper .now { flex:1; text-align:center; font-family:Menlo,monospace; font-size:14px; font-weight:600; }
-.icon-btn { width:34px; height:32px; border-radius:var(--r-sm); background:#fff;
-  border:1px solid var(--hairline); display:grid; place-items:center; color:var(--on-surface-variant); flex:none; }
-.icon-btn.on { border-color:var(--primary); color:var(--primary); background:var(--highlight-bg); }
-.search { display:flex; align-items:center; gap:6px; margin-top:8px; background:#fff;
-  border:1px solid var(--hairline); border-radius:var(--r-sm); padding:0 10px; height:34px; }
+/* 日历 / 搜索图标钮（设计稿 w-8 h-8 全圆角 + 白 .7 底 + 白 .9 描边） */
+.icon-btn { width:32px; height:32px; border-radius:9999px; flex:none;
+  background:rgba(255,255,255,.7); border:1px solid rgba(255,255,255,.9);
+  display:grid; place-items:center; color:#475569;
+  box-shadow:0 2px 6px rgba(0,0,0,.04); }
+.icon-btn.on { border-color:var(--primary); color:var(--primary); background:#fff; }
+.search { display:flex; align-items:center; gap:6px; margin-top:8px;
+  background:rgba(255,255,255,.72); border:1px solid rgba(255,255,255,.85);
+  border-radius:12px; padding:0 10px; height:34px; }
 .search input { flex:1; border:none; outline:none; font:inherit; background:transparent; color:var(--on-surface); }
 .search input::placeholder { color:var(--ink3); }
 
@@ -739,8 +1024,20 @@ button { touch-action:manipulation; user-select:none; -webkit-user-select:none; 
   animation:spin .7s linear infinite; }
 body.busy #mhSpin { display:inline-block; }
 @keyframes spin { to { transform:rotate(360deg); } }
+/* 页面横向滑动容器（2026-10-18 v6，提示词第 7 条 PageView 思路）：
+   #viewSlide 包住 #view，切 Tab 时 JS 按「旧页序号 → 新页序号」的方向给
+   #view 一个 translateX 入场动画（向左切 = 新页从右侧滑入，向右切 = 从左侧），
+   模拟 APP PageView 翻页。动画只动 transform + opacity（合成层，不重排）。 */
 #view { transition:opacity .12s; }
 body.busy #view { opacity:.62; }
+.view-slide-in { animation:viewSlide .32s cubic-bezier(.25,.8,.35,1); }
+@keyframes viewSlide {
+  from { opacity:.35; transform:translateX(var(--slide-from, 40px)); }
+  to   { opacity:1;   transform:translateX(0); } }
+/* reduced-motion：翻页动画位移归零，退化为纯淡入 */
+@media (prefers-reduced-motion: reduce) {
+  .view-slide-in { --slide-from:0px; animation-duration:.18s; }
+}
 @media (hover:hover) {
   .tabbar button:hover { color:var(--primary); }
   #subnav button:hover { background:#E5E7EB; color:var(--on-surface); }
@@ -784,7 +1081,27 @@ body.busy #view { opacity:.62; }
 .cal-d.on:active { background:#1D4ED8; }
 
 /* ===== 内容 ===== */
-.wrap { padding:14px 14px calc(env(safe-area-inset-bottom,0px) + 78px); max-width:560px; margin:0 auto; }
+/* 内容区（2026-10-18）：底栏改成悬浮 dock（离底 16px、高 68.5），底部留白要够；
+    左右 16px 与头部/工具栏对齐，上限 560px 居中。 */
+/* 左右 17px（不是 16）：设计稿 main 有 border-x 1px，内部区块实测从 x=17 起、宽 356，
+    本页没有那层设备边框，用 17px 内边距把这段 1px 补回来 —— 这样在 390 视口下
+    头部/工具栏/榜单的左右边界与设计稿像素级一致。 */
+/* 2026-10-18 看板 1:1：wrap = 设计稿 main（max-w-[430px] bg-light-apple pb-28
+   shadow 0 12px 45px rgba(15,23,42,.08) + border-x slate-200/70）。
+   渐变/网格微光从 body 迁来（设计稿 .bg-light-apple 全套值）。 */
+.wrap { padding:0 17px calc(env(safe-area-inset-bottom,0px) + 112px); max-width:430px; margin:0 auto;
+  background-color:#f6f8fc;
+  background-image:
+    radial-gradient(ellipse 90% 45% at 50% -5%, rgba(199,210,254,.45), transparent 70%),
+    radial-gradient(circle 320px at 90% 12%, rgba(254,240,138,.35), transparent 70%),
+    radial-gradient(circle 280px at 10% 32%, rgba(186,230,253,.35), transparent 65%),
+    radial-gradient(circle 350px at 50% 75%, rgba(237,233,254,.40), transparent 70%),
+    linear-gradient(rgba(148,163,184,.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(148,163,184,.03) 1px, transparent 1px);
+  background-size:100% 100%,100% 100%,100% 100%,100% 100%,24px 24px,24px 24px;
+  background-repeat:no-repeat,no-repeat,no-repeat,no-repeat,repeat,repeat;
+  box-shadow:0 12px 45px rgba(15,23,42,.08);
+  border-left:1px solid rgba(229,231,235,.7); border-right:1px solid rgba(229,231,235,.7); }
 .section { animation:fade .18s ease-out; }
 @keyframes fade { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:none; } }
 .card { background:var(--card-bg); border:1px solid var(--hairline); border-radius:var(--r-lg); }
@@ -793,109 +1110,173 @@ body.busy #view { opacity:.62; }
 h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
   letter-spacing:.04em; display:flex; align-items:center; justify-content:space-between; }
 
-/* ===== 排行榜（Stitch Apple Style Mobile Showcase 精确还原） ===== */
-.st-podium { display:grid; grid-template-columns:1fr 1.25fr 1fr; align-items:end; gap:.25rem;
-  padding:1rem 1rem 1.5rem; }
+/* ===== 排行榜（2026-10-18 Stitch 玻璃稿 1:1 改版）=====
+    设计源：.stitch/designs/stitch_streamer_glass_nav/code.html（390 视口实测值）：
+      · 领奖台：grid-cols-3 gap-1.5 items-end、pt-2 pb-3、容器左右 12px；
+        第1名头像环 80（p-3 + 白→amber-300→amber-500 渐变 + ring-4 白 .95），
+        第2/3名 64（p-2.5 + 冷银 / 琥珀渐变 + ring-2 白 .9）；第1名整组上移 8px。
+      · 姓名：第1名 16/800 #0F172A；第2/3名 14/700 #1E293B。
+      · 数值：第1名 20/900 金渐变（bg-clip-text）；第2/3名 16/900 #0F172A。
+      · 单位小字 11/700：第1名 amber-600，第2/3名 sky-600。
+      · 「总 X」10px：第1名 amber-700/80，第2/3名 slate-500。
+    ⚠️ 前三名的奖杯图标（金/银/铜 .st-trophy）按用户口径**保持原样不动**。 */
+/* margin-top 16 = 设计稿领奖台 section 的 mt-4（它是一块独立 section，不跟工具栏连着） */
+/* 2026-10-18 第二轮 1:1：全宽对齐 —— 负 margin -17 抵消 wrap padding（x=1 w=388），
+    padding 12（px-3）让内容 x=13 w=364，与设计稿逐像素一致。 */
+/* 2026-10-18 第二轮 1:1：.st-podium = 纯 grid（无负 margin）；px-3 的 section 内边距
+    由本规则 padding 给（12px），rect 对齐设计稿 grid：x=13 w=364。 */
+.st-podium { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); align-items:end;
+  gap:6px; margin:16px 12px 0; padding:8px 0 12px; }
 .st-pod { display:flex; flex-direction:column; align-items:center; min-width:0; text-align:center; }
-.st-pod-2 { padding-bottom:.5rem; }
-.st-pod-1 { padding-bottom:1.25rem; }
-.st-pod-3 { padding-bottom:.25rem; }
-.st-pod-ring { position:relative; margin-bottom:1rem; }
-.st-pod-1 .st-pod-ring { margin-bottom:1.25rem; }
+/* 第1名整组上移（设计稿 -translate-y-2）；第2/3名**不上移**——设计稿 podium 是
+    items-end 对齐、只有第一名抬起来。 */
+.st-pod-1 { transform:translateY(-8px); }
+/* 第2/3名：设计稿 pod-2 头像环实测 y=264.5。本地比设计稿多一行「时长」小标签，
+   靠 margin-top 负 6px 把多出来的那行抵消掉，保证头像环落在设计稿的 y 上。 */
+.st-pod-2, .st-pod-3 { margin-top:0; }
+/* 2026-10-18 第二轮 1:1：设计稿头像环包裹层 mb-2（8px）。原 16px 是第一轮按
+    整高凑的近似值 —— 实测设计稿 pod-1 列内链：环底(232.5+80) + mb 8 + 名字 mt 6
+    = 名字顶 326.5，与探针实测一字不差。 */
+.st-pod-ring { position:relative; margin-bottom:8px; }
+.st-pod-1 .st-pod-ring { margin-bottom:8px; }
+/* 头像环：外层是渐变「铸边」，内层是圆形头像（设计稿 p-[3px]/p-[2.5px] + ring 白） */
 .st-pod-av { border-radius:9999px; display:grid; place-items:center; font-weight:600;
-  box-shadow:0 4px 10px rgba(0,0,0,.10); }
-.st-pod-1 .st-pod-av { width:80px; height:80px; background:#fffbeb; color:#78350f;
-  font-size:22px; font-weight:700; letter-spacing:-.015em; box-shadow:0 8px 20px rgba(0,0,0,.14); }
- .st-pod-2 .st-pod-av, .st-pod-3 .st-pod-av { width:64px; height:64px; font-size:18px; }
-.st-pod-av.st-pod-in-1 { width:70px; height:70px; background:#fffbeb; color:#78350f; }
-.st-pod-av.st-pod-in-2 { width:56px; height:56px; background:#f1f5f9; color:#334155; }
-.st-pod-av.st-pod-in-3 { width:56px; height:56px; background:#f5f5f4; color:#44403c; }
-/* 真头像（T3）：后端给了 avatar 的容器带 .has-img，<img> 铺满圆形容器裁切；
-   底色与首字只属于没头像的人，所以有图时把容器底色去掉（领奖台的金银铜底、列表行的
-   柔和底都靠这一步让位），尺寸一概不变，版式与旧版完全一致。 */
+  box-sizing:border-box; }
+/* 2026-10-18 第二轮 1:1：渐变去显式 stops（0/50/100 是 Tailwind 默认位，
+    computed 值与设计稿逐字一致；颜色顺序对齐 from-white via-amber-200 to-amber-500） */
+.st-pod-1 .st-pod-av { width:80px; height:80px; padding:3px;
+  background:linear-gradient(180deg,#FFFFFF,#FCD34D,#F59E0B);
+  box-shadow:0 0 0 4px rgba(255,255,255,.95);
+  font-size:22px; font-weight:700; letter-spacing:-.015em; color:#78350F; }
+.st-pod-2 .st-pod-av { width:64px; height:64px; padding:2.5px; font-size:18px;
+  background:linear-gradient(180deg,#FFFFFF,#E2E8F0,#94A3B8);
+  box-shadow:0 0 0 2px rgba(255,255,255,.9), 0 6px 18px rgba(148,163,184,.35);
+  color:#334155; }
+.st-pod-3 .st-pod-av { width:64px; height:64px; padding:2.5px; font-size:18px;
+  background:linear-gradient(180deg,#FFFFFF,#FCD34D,#FB923C);
+  box-shadow:0 0 0 2px rgba(255,255,255,.9), 0 6px 18px rgba(217,119,6,.25);
+  color:#7C2D12; }
+/* 真头像（T3）：有图时容器底色让位（渐变铸边仍在，等于一圈渐变描边），尺寸不变 */
 .st-pod-av img, .st-row-av img { width:100%; height:100%; object-fit:cover; border-radius:9999px; display:block; }
-.st-pod-av.has-img, .st-row-av.has-img { background:none; }
-/* 领奖台奖杯（金/银/铜，替代原 crown 图标）：源文件 public_teams/assets/trophy-1.svg（金，第1名）/ trophy-2.svg（银，第2名）/ trophy-3.svg（铜，第3名），
-   iconfont 导出、viewBox 0 0 1024 1024，**已去掉原图浅色圆底**（透明背景）。
-   为保持本页自包含（零外网/零新路由），三份 SVG 已按名次内嵌为 base64 data URI。
-   换图步骤：替换 assets/trophy-N.svg 后重跑
-     base64 -i rust/crates/pk-server/src/public_teams/assets/trophy-N.svg | tr -d '\n'
-   把新串贴回 TROPHY_SRC 对应名次即可（保持单行、末尾无换行）。 */
-/* 位置（2026-10-16 用户口径「头部不显示了，数字换成…」）：奖杯挂在头像**正下方**——
-   原来挂在头像顶上正好压住主播的脸；而且奖杯自带名次数字，原先那个数字药丸是重复的，
-   所以整体替代掉（DOM 里已无 .st-pod-rank）。 */
+/* ⚠️ 2026-10-18：领奖台的渐变铸边**不能**被 has-img 清掉 —— 头像铺在内圈、
+   铸边就是那圈金/银/铜渐变描边（设计稿正是这个效果）。
+   列表行 .st-row-av 的底色是「无头像时才有的柔和底」，有图时照旧让位。 */
+.st-row-av.has-img { background:none; }
+/* 领奖台奖杯（金/银/铜）—— 2026-10-18 用户口径「前三名的图标不变」：位置与尺寸
+    全部保持原样，只保留注释说明。源文件 assets/trophy-{1,2,3}.svg 内嵌 data URI。 */
 .st-trophy { position:absolute; bottom:-.625rem; left:50%; transform:translateX(-50%);
   width:1.75rem; height:1.75rem; display:block; pointer-events:none; user-select:none;
   filter:drop-shadow(0 1px 3px rgba(0,0,0,.18)); }
 .st-pod-1 .st-trophy { bottom:-.75rem; width:2rem; height:2rem; }
-.st-pod-nm { margin:.25rem 0 0; font-size:18px; font-weight:600; letter-spacing:-.01em; color:var(--on-surface);
+/* 名字：设计稿 mt-1.5（6px）；第1名 16/800 #0F172A，第2/3名 14/700 #1E293B */
+.st-pod-nm { margin:6px 0 0; font-size:14px; line-height:20px; font-weight:700;
+  letter-spacing:-.01em; color:#1E293B;
   overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:100%; }
-.st-pod-2 .st-pod-nm, .st-pod-3 .st-pod-nm { font-size:14px; }
-.st-pod-off { margin-top:.125rem; display:inline-block; padding:0 .5rem; border-radius:.25rem;
+.st-pod-1 .st-pod-nm { margin-top:6px; font-size:16px; line-height:24px; font-weight:800;
+  color:#0F172A; }
+.st-pod-off { margin-top:2px; display:inline-block; padding:0 .5rem; border-radius:.25rem;
   background:var(--surface-container); color:var(--on-surface-variant);
   font-size:10px; line-height:1.5; font-weight:400; }
 .st-pod-1 .st-pod-off { padding:.125rem .5rem; border-radius:9999px; font-size:11px;
   background:rgba(185,28,28,.06); color:var(--error); border:1px solid rgba(185,28,28,.16); }
 .st-pod-1 .st-pod-off.warn { background:rgba(185,28,28,.08); }
-.st-pod-wv { margin:.25rem 0 0; font-size:15px; font-weight:700; color:var(--on-surface);
-  letter-spacing:-.02em; font-variant-numeric:tabular-nums; }
-.st-pod-1 .st-pod-wv { font-size:18px; color:var(--primary); }
-.st-pod-lbl { display:block; font-size:11px; color:var(--primary); font-weight:500; letter-spacing:.02em; }
-.st-pod-total { margin:.125rem 0 0; font-size:11px; color:var(--on-surface-variant);
+/* 音浪数值（设计稿 leading-tight + tracking-tight + 金渐变仅第1名） */
+.st-pod-wv { margin:2px 0 0; font-size:16px; line-height:18px; font-weight:900;
+  letter-spacing:-.02em; color:#0F172A; font-variant-numeric:tabular-nums; }
+.st-pod-1 .st-pod-wv { font-size:20px; line-height:23px;
+  background:linear-gradient(to right,#D97706,#CA8A04,#B45309);
+  -webkit-background-clip:text; background-clip:text;
+  -webkit-text-fill-color:transparent; color:transparent; }
+/* 单位小字（设计稿 text-[11px] block font-bold font-mono tracking-wide，行高 16.5）：
+    2026-10-18 第二轮 1:1：去 width:100%（设计稿是 inline span，宽=文字宽，
+    居中由父级 items-center 完成）+ line-height 16.5px 对齐实测。
+    第二轮补：等宽字体栈 + tracking-wide（.025em）—— 3 个 CJK 在等宽栈里更宽，
+    实测 83.5px 与设计稿逐字一致。 */
+/* 2026-10-18 第二轮 1:1：数值 + 单位小字包一层（设计稿 div.mt-0.5，mt-2）。
+    普通块级 div：宽度 = 最宽子元素（数值），块级 label 撑满它 —— 设计稿标签实测
+    宽 83.5 正是数值「5万6788」的宽度。stretch（不用 center）才能让 block 子元素填满。 */
+.st-pod-num { margin-top:2px; display:flex; flex-direction:column; align-items:stretch;
+  max-width:100%; text-align:center; }
+.st-pod-num .st-pod-wv { margin-top:0; }
+.st-pod-num .st-pod-lbl { margin-top:2px; }
+/* 单位小字（设计稿 text-[11px] block font-bold font-mono tracking-wide，行高 16.5）：
+    display:block 撑满 .st-pod-num（= 数值宽度），与设计稿「标签宽 83.5 = 数值宽」一致。 */
+.st-pod-lbl { display:block; font-size:11px; line-height:16.5px;
+  font-weight:700; letter-spacing:.025em; color:#0284C7;
+  font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,'Liberation Mono','Courier New',monospace; }
+.st-pod-1 .st-pod-lbl { color:#D97706; }
+.st-pod-total { margin:2px 0 0; font-size:10px; line-height:15px; color:#64748B;
   font-variant-numeric:tabular-nums; }
-.st-pod-1 .st-pod-total { font-weight:500; }
+.st-pod-1 .st-pod-total { font-weight:600; color:rgba(180,83,9,.8); }
 
-/* 排行榜列表（4 名起） */
-.st-list { display:flex; flex-direction:column; gap:.25rem; padding:0 1rem 1.5rem; }
-.st-list-head { display:flex; align-items:center; justify-content:space-between; padding:0 .25rem .25rem; }
-.st-list-head span { font-size:11px; letter-spacing:.05em; text-transform:uppercase;
-  color:var(--on-surface-variant); }
+/* 排行榜列表（4 名起）—— 设计稿：section px-4，卡 = 白玻（blur 20px + 白 .85 描边）
+    + 圆角 16 + 0 8px 32px rgba(148,163,184,.12)；行高 68（px-3.5 py-3）、
+    divide-y divide-slate-100；名次 16 等宽、头像 44（ring-2 白）、姓名 15/700、
+    数值 16 等宽、单位 10 #94A3B8。 */
+/* margin-top 4 = 设计稿榜单 section 的 mt-1 */
+/* 2026-10-18 第二轮 1:1：设计稿 section 是 display:block（mt-1 px-4 flex-1），
+    头部行与卡片靠正常流上下排。原 flex 列改 block，computed 一致。
+    全宽：负 margin -17 抵消 wrap padding（section x=1 w=388），padding 16（px-4）
+    让表头/卡片 x=17 w=356，与设计稿逐像素一致。 */
+/* 2026-10-18 第二轮 1:1：全宽 + px-4 由父级 .st-data 统一给（设计稿 section 口径） */
+.st-list { display:block; margin-top:4px; padding:0 0 24px; }
+/* 看板区块容器（renderList 专用）：负 margin 抵消 wrap 的 17px padding 变全宽（w=388），
+    内部再按设计稿各自 section 的内边距缩 —— 领奖台 px-3（12px，内容 x=13 w=364）、
+    榜单 px-4（16px，内容 x=17 w=356），与设计稿逐像素一致。 */
+.st-data { margin:0 -17px; padding:0; }
+.st-data .st-list { padding:0 16px; }
+.st-list-head { display:flex; align-items:center; justify-content:space-between;
+  padding:8px 12px; font-size:12px; line-height:16px; font-weight:600; color:#64748B;
+  border-bottom:1px solid rgba(226,232,240,.6); }
+.st-list-head span { font-size:12px; font-weight:600; color:#64748B; }
 .st-list-head span:last-child { text-align:right; }
-.st-list-body { background:var(--surface-container-lowest); border-radius:.75rem;
-  box-shadow:0 1px 3px rgba(0,0,0,.06); overflow:hidden; display:flex; flex-direction:column; }
-.st-row { display:flex; align-items:center; justify-content:space-between; padding:.75rem 1rem;
-  border-bottom:1px solid var(--surface-container); transition:background .15s; }
+.st-list-body { background:rgba(255,255,255,.72); border-radius:16px;
+  /* 2026-10-18 第二轮 1:1：设计稿 .glass-card 的 mt-1（卡片顶 = 表头底 + 4） */
+  margin-top:4px;
+  border:1px solid rgba(255,255,255,.85);
+  box-shadow:0 8px 32px rgba(148,163,184,.12), 0 1px 2px rgba(0,0,0,.03);
+  -webkit-backdrop-filter:blur(20px); backdrop-filter:blur(20px);
+  overflow:hidden; display:flex; flex-direction:column; }
+.st-row { display:flex; align-items:center; justify-content:space-between;
+  height:68px; box-sizing:border-box; padding:12px 14px;
+  border-bottom:1px solid #F1F5F9; transition:background .15s; }
 .st-row:last-child { border-bottom:none; }
-.st-row:hover { background:var(--surface-container-low); }
+.st-row:hover { background:rgba(255,255,255,.6); }
 .st-row.off { opacity:.62; }
-.st-row-l { display:flex; align-items:center; gap:.75rem; min-width:0; }
-.st-row-rk { width:1.25rem; text-align:center; font-size:14px; font-weight:600;
-  color:var(--on-surface-variant); font-variant-numeric:tabular-nums; flex:none; }
-.st-row-av { width:2.5rem; height:2.5rem; border-radius:9999px; display:grid; place-items:center;
-  font-size:14px; font-weight:600; flex:none; box-shadow:0 1px 3px rgba(0,0,0,.06);
-  border:1px solid rgba(0,0,0,.04); }
+.st-row-l { display:flex; align-items:center; gap:12px; min-width:0; }
+.st-row-rk { width:16px; text-align:center; font-size:16px; font-weight:700;
+  color:#334155; font-variant-numeric:tabular-nums; flex:none;
+  /* 2026-10-18 第二轮 1:1：等宽字体补全字体栈（与设计稿 computed 一致） */
+  font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,'Liberation Mono','Courier New',monospace; }
+.st-row-av { width:44px; height:44px; border-radius:9999px; display:grid; place-items:center;
+  font-size:14px; font-weight:600; flex:none; box-sizing:border-box;
+  box-shadow:0 0 0 2px #fff, 0 1px 2px rgba(0,0,0,.05); background:#fff; }
 .st-row-mid { min-width:0; }
 .st-row-nmwrap { display:flex; align-items:center; gap:.375rem; min-width:0; }
-.st-row-nm { font-size:15px; font-weight:600; color:var(--on-surface);
+.st-row-nm { font-size:15px; font-weight:700; color:#1E293B;
   overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .st-row-off { padding:0 .375rem; border-radius:.25rem; background:var(--surface-container);
   color:var(--on-surface-variant); font-size:10px; line-height:1.5; font-weight:400; flex:none; }
 .st-row-off.warn { background:rgba(185,28,28,.06); color:var(--error); }
-.st-row-sub { margin:.125rem 0 0; font-size:11px; color:var(--primary); font-variant-numeric:tabular-nums; }
+.st-row-sub { margin:.125rem 0 0; font-size:11px; color:#0284C7; font-variant-numeric:tabular-nums; }
 .st-row.off .st-row-sub { color:var(--outline); }
 .st-row-r { text-align:right; flex:none; }
-.st-row-wv { display:block; font-size:15px; font-weight:700; color:var(--on-surface);
-  font-variant-numeric:tabular-nums; letter-spacing:-.02em; }
-.st-row-lbl { display:block; font-size:11px; color:var(--on-surface-variant);
+.st-row-wv { display:block; font-size:16px; line-height:24px; font-weight:900; color:#0F172A;
+  font-variant-numeric:tabular-nums; letter-spacing:-.02em;
+  /* 2026-10-18 第二轮 1:1：等宽字体补全字体栈（与设计稿 computed 一致） */
+  font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,'Liberation Mono','Courier New',monospace; }
+.st-row-lbl { display:block; font-size:10px; line-height:15px; color:#94A3B8;
   font-variant-numeric:tabular-nums; }
 
-/* ===== 工具栏（日榜/月榜 segmented + 日期胶囊）Stitch 版 ===== */
-.st-seg { display:flex; background:var(--surface-container-high); border-radius:9999px;
-  padding:.25rem; gap:.25rem; }
-.st-seg button { flex:1; height:1.875rem; border-radius:9999px; border:none; background:transparent;
-  color:var(--on-surface-variant); font-size:14px; font-weight:500; }
-.st-seg button.on { background:var(--surface-container-lowest); color:var(--on-surface);
-  box-shadow:0 1px 3px rgba(0,0,0,.08); }
-.st-seg button:disabled { color:var(--outline); cursor:not-allowed; }
-.dates button { background:var(--surface-container); border-color:transparent; color:var(--on-surface-variant); }
-.dates button.on { background:var(--surface-container-lowest); color:var(--on-surface);
-  box-shadow:0 1px 3px rgba(0,0,0,.08); border-color:transparent; position:relative; }
-.dates button.on::before { content:''; width:.375rem; height:.375rem; border-radius:9999px;
-  background:var(--primary); display:inline-block; margin-right:.25rem; vertical-align:middle; }
-.icon-btn { background:var(--surface-container-low); border-color:transparent; border-radius:9999px; }
-.icon-btn.on { background:var(--surface-container-lowest); color:var(--primary); border-color:transparent; }
-.search { background:var(--surface-container-lowest); border-radius:.75rem; }
-.search input { background:transparent; }
+/* ===== 工具栏（日榜/月榜 segmented + 日期胶囊）=====
+    2026-10-18：这里原本是「Stitch Apple Style Mobile Showcase」那一版的覆盖层，
+    会盖掉上方 2026-10-18 玻璃稿的值（CSS 后出现者胜：本块在文件更下方）。
+    新版口径统一在上方「工具栏」块里定义，本块只保留**其它页面区块仍在用**的
+    兜底（.st-seg 作为独立类名被分组/族谱等处的旧标记引用），不再覆盖口径。
+    ⚠️ 若将来要改工具栏外观，改上方那块，不要在这里加。 */
+.st-seg { border-radius:9999px; }
+.st-seg button { border-radius:9999px; border:none; background:transparent; }
+.st-seg button:disabled { cursor:not-allowed; }
 
 /* ===== 分组页（Pk Tournament）Stitch 版 ===== */
 .st-group-tabs { display:flex; align-items:center; gap:.25rem; padding:.25rem;
@@ -1973,20 +2354,34 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 <!-- 账号还没绑主播（历史遗留）：全站提醒。绑定由管理员在后台处理，前端没有自助入口（2026-10-14） -->
 <div class="bindbar" id="bindBar" hidden>你还没有绑定主播，请联系管理员帅帅处理</div>
 
+<!-- 📣 公告条容器（2026-10-14）：原页面顶部唯一入口，2026-10-17 起停用 ——
+     公告内容改由 renderAnnounceItems / renderHomeAnnouncement 写进 masthead 内的
+     单行胶囊 #mhAnn（见头部）。本元素与 .ann-items/.ann-item 系列旧 CSS 保留不删
+     （弹窗、别的页面块还引用部分类名），只是不再往这里渲染任何子节点。
+     2026-10-18 第二轮 1:1：masthead 移入 main 后，本废弃元素保留原位不动。 -->
+<div class="ann-items" id="annItems"></div>
+
+<main class="wrap">
+<!-- 2026-10-18 第二轮 1:1：masthead / toolbar 移入 main.wrap（结构对齐设计稿 ——
+     页头与工具栏享受同一张网格光晕渐变背景 + 1px 左右边线）。原位置在 main 外。 -->
 <header class="masthead">
   <div class="mh-top">
-    <div class="mh-title">
-      <div class="t" id="mhTitle">主播数据榜</div>
+    <!-- 左：呼吸圆点 + 主标题（Stitch 玻璃稿 1:1） -->
+    <div class="mh-left">
+      <span class="mh-dot" aria-hidden="true"></span>
+      <div class="mh-title">
+        <div class="t" id="mhTitle">主播数据榜</div>
+      </div>
     </div>
     <!-- 换团条（2026-10-15 权限分布）：只有「全团」账号（switchable=true）才显示。
-         三个胶囊 = 全团 / 男团 / 女团；钉死某团的账号（如饭团=女团）整条不渲染。 -->
+         2026-10-18 改 iOS 分段控制器样式；钉死某团的账号整条不渲染。 -->
     <div class="team-switch hidden" id="teamSwitch">
       <button data-t="all" class="on">全团</button>
       <button data-t="male">男团</button>
       <button data-t="female">女团</button>
     </div>
   </div>
-  <!-- 副标题（2026-10-16）：单占一行、整行居中，不跟标题抢中间那栏 -->
+  <!-- 副标题（2026-10-18）：跟主标题同栏左对齐，不再整行居中 -->
   <div class="mh-sub"><span id="mhSub">LOADING</span><span id="mhSpin" aria-hidden="true"></span></div>
   <!-- 📣 头部公告行（2026-10-17 用户口径）：公告内容收进头部单行胶囊，随 masthead 吸顶。
        renderAnnounceItems(items) 与 renderHomeAnnouncement(home) 都往这里写；多条 = 4 秒
@@ -2002,15 +2397,12 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
   </div>
 </header>
 
-<!-- 📣 公告条容器（2026-10-14）：原页面顶部唯一入口，2026-10-17 起停用 ——
-     公告内容改由 renderAnnounceItems / renderHomeAnnouncement 写进 masthead 内的
-     单行胶囊 #mhAnn（见头部）。本元素与 .ann-items/.ann-item 系列旧 CSS 保留不删
-     （弹窗、别的页面块还引用部分类名），只是不再往这里渲染任何子节点。 -->
-<div class="ann-items" id="annItems"></div>
-
+<!-- 2026-10-18 第二轮 1:1：toolbar 移入 main.wrap，紧跟 header（结构对齐设计稿） -->
 <div class="toolbar hidden" id="toolbar">
   <div class="tools">
+    <!-- 日/月/年 白玻分段：滑块 #segPill 由 stSegMove() 定位（含拖拽跟随） -->
     <div class="seg st-seg" id="seg">
+      <div class="st-seg-pill" id="segPill" aria-hidden="true"></div>
       <button data-p="daily" class="on">日榜</button>
       <button data-p="monthly">月榜</button>
       <button data-p="yearly">年榜</button>
@@ -2037,37 +2429,46 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
   </div>
 </div>
 
-<main class="wrap">
   <div class="err hidden" id="err"></div>
   <div id="view"></div>
   <div class="note" id="foot">数据每晚 24:00 后更新前一天 · 仅供内部参考 · 请勿外传</div>
 </main>
 
+<!-- 2026-10-18 第二轮 1:1：定位层上提 —— fixed 外层 + relative nav 双层（对齐设计稿） -->
+<div class="tabbar-dock">
 <nav class="tabbar" id="navRow" aria-label="主导航">
+  <!-- 液态透镜滑动胶囊（Stitch 玻璃稿 1:1）：四层折射装饰 + 顶部反光弧，
+       位置/宽度由 navPillMove() 按选中项实时算，拖拽时随手指偏摆。 -->
+  <div id="navPill" aria-hidden="true">
+    <!-- 镜片（最底层）：把胶囊背后的页面内容**复制一份**进来再放大 —— 这就是「聚焦」。
+         Chromium 的 backdrop-filter 不支持几何放大（实测 scale 后背景条距不变），
+         所以真放大只能走内容副本；JS 注入，见 initLens()。 -->
+    <div class="np-lens" id="navLens"><div class="np-lens-stage" id="navLensStage"></div></div>
+    <!-- 光学层（自下而上）：边缘柔焦 → 中心对焦 → 凸面曲率 → 色散虹边 → 镜面高光 → 内缘 -->
+    <div class="np-frost"></div>
+    <div class="np-core"></div>
+    <div class="np-curve"></div>
+    <div class="np-disp"></div>
+    <div class="np-spec" id="navPillSpot"></div>
+    <div class="np-vign"></div>
+  </div>
   <button data-v="data" id="navData" class="on">
-    <span class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><rect x="7" y="13" width="3" height="5" rx="1"/><rect x="12" y="9" width="3" height="9" rx="1"/><rect x="17" y="5" width="3" height="13" rx="1"/></svg></span>
-    看板
-  </button>
+    <span class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><rect x="7" y="13" width="3" height="5" rx="1"/><rect x="12" y="9" width="3" height="9" rx="1"/><rect x="17" y="5" width="3" height="13" rx="1"/></svg></span><span class="tab-label">看板</span></button>
   <button data-v="group" id="navGroup">
-    <span class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.5"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6"/><path d="M16 4.5a3.5 3.5 0 0 1 0 7"/><path d="M17 14c2.8.4 4.5 2.4 4.5 5.5"/></svg></span>
-    分组
-  </button>
+    <span class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.5"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6"/><path d="M16 4.5a3.5 3.5 0 0 1 0 7"/><path d="M17 14c2.8.4 4.5 2.4 4.5 5.5"/></svg></span><span class="tab-label">分组</span></button>
   <button data-v="lineage" id="navLineage">
-    <span class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><path d="M6 9v6a3 3 0 0 0 3 3h6"/><path d="M6 12h6a3 3 0 0 0 3-3"/></svg></span>
-    族谱
-  </button>
-  <button data-v="my" id="navMy">
-    <span class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.6-7 8-7s8 3 8 7"/></svg></span>
-    我的
-  </button>
+    <span class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><path d="M6 9v6a3 3 0 0 0 3 3h6"/><path d="M6 12h6a3 3 0 0 0 3-3"/></svg></span><span class="tab-label">族谱</span></button>
   <!-- 2026-10-15 task-11：用户点名要的一级入口「微信对接」。
        它不是一个新视图：点进来等价于「我的 → 消息设置」子页（/my/wechat），
-       同一张 #myPushCard、同一份内容，switchView 里折算成 my + mySub='wechat'。 -->
+       同一张 #myPushCard、同一份内容，switchView 里折算成 my + mySub='wechat'。
+       2026-10-18 用户口径：与「我的」**换位**（微信对接在前、我的在后）。 -->
   <button data-v="wechat" id="navWechat">
-    <span class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.5 8.5 0 0 1-12.4 7.5L3.5 21l1.9-5.6A8.5 8.5 0 1 1 21 11.5Z"/><path d="M8.6 11.4h.01M12.4 11.4h.01M16.2 11.4h.01"/></svg></span>
-    微信对接
-  </button>
+    <span class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.5 8.5 0 0 1-12.4 7.5L3.5 21l1.9-5.6A8.5 8.5 0 1 1 21 11.5Z"/><path d="M8.6 11.4h.01M12.4 11.4h.01M16.2 11.4h.01"/></svg></span><span class="tab-label">微信对接</span></button>
+  <button data-v="my" id="navMy">
+    <span class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.6-7 8-7s8 3 8 7"/></svg></span><span class="tab-label">我的</span></button>
 </nav>
+</div>
+
 
 <div id="toast">
   <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6 9 17l-5-5"/></svg>
@@ -2558,7 +2959,7 @@ function showGate() {
     '<div class="gate-tabs">' +
       '<button id="tabLogin" class="on">登录</button>' +
     '</div>' +
-    '<div id="paneLogin"><p class="tip">用「手机号 / 艺名 + 密码」登录。<br>没绑手机号的账号，登录后会引导你绑定手机号和 QQ 邮箱。</p>' +
+    '<div id="paneLogin"><p class="tip">用「手机号 / 艺名 + 密码」登录。<br>第一次用艺名登录会自动开通账号，之后按提示绑定手机号即可。</p>' +
       '<input id="gateAcct" placeholder="手机号 / 艺名" autocomplete="off">' +
       /* 2026-10-14：密码规则是 4~20 位字母/数字（2026-10-17 起也允许点），原先 inputmode="numeric" 在手机上
          只弹数字键盘、字母打不出来（自助设置了字母密码就登不进来）。去掉该属性用默认键盘。 */
@@ -2630,7 +3031,6 @@ function bindLoginPane() {
     /* 契约 v2 §4.1：密码**不 trim** —— 首尾空格是密码的一部分（后端同样不 trim） */
     const pw = $('gatePass').value || '';
     const errEl = $('gateErr');
-    showClaimEntry('');   // 换账号重试时先收掉上一次的「首次登录？认领账号」入口
     if (!acct || !pw) {
       errEl.textContent = '请输入账号和密码';
       errEl.classList.remove('hidden');
@@ -2646,14 +3046,38 @@ function bindLoginPane() {
       const d = await postJson('/api/public/my/login', { account: acct, pass: pw });
       applyLoginSuccess(d, acct);
     } catch (e) {
+      /* 2026-10-18 用户口径：**未认领的艺名直接点登录就开通** ——
+         NO_ACCOUNT + canClaim 时不弹「认领账号」入口/弹窗，把刚输入的密码
+         直接当开通密码调 /my/claim（后端 canClaim 已校验「台账唯一同名在职 +
+         未被占用」），成功即进强制补全。
+         已认领的艺名走不到这里（后端按 BAD_PASSWORD 报「密码错误」），互不干扰。 */
+      if (e.code === 'NO_ACCOUNT' && e.data && e.data.canClaim) {
+        const name = e.data.claimName || acct;
+        /* 开通密码规则本地先验（4~64 位），不合规则提示重输，不打到限流口上 */
+        if (!isValidPass(pw)) {
+          btn.disabled = false; btn.textContent = '登 录';
+          acctEl.disabled = false; passEl.disabled = false;
+          errEl.textContent = '首次用这个艺名登录将自动开通账号；' + PASS_RULE;
+          errEl.classList.remove('hidden');
+          return;
+        }
+        btn.textContent = '开通中…';
+        try {
+          const d = await postJson('/api/public/my/claim', { name: name, pass: pw });
+          applyLoginSuccess(d, name);   // needProfile:true → 强制补全卡
+        } catch (e2) {
+          /* 并发被人先认领 / 限流：如实报错，已认领的直接用密码再登一次即可 */
+          btn.disabled = false; btn.textContent = '登 录';
+          acctEl.disabled = false; passEl.disabled = false;
+          errEl.textContent = apiErrText(e2) || '开通失败，稍后再试';
+          errEl.classList.remove('hidden');
+        }
+        return;
+      }
       btn.disabled = false; btn.textContent = '登 录';
       acctEl.disabled = false; passEl.disabled = false;
       errEl.textContent = apiErrText(e) || '登录失败，稍后再试';
       errEl.classList.remove('hidden');
-      /* 认领入口（契约 §4.2）：只有「账号不存在 + 艺名唯一 + 可认领」时后端才给 canClaim */
-      if (e.code === 'NO_ACCOUNT' && e.data && e.data.canClaim) {
-        showClaimEntry(e.data.claimName || acct);
-      }
     }
   };
   $('gateGo').onclick = go;
@@ -2663,66 +3087,17 @@ function bindLoginPane() {
 }
 
 /* ==================== 凭艺名认领开号（契约 v2 §4.2 / §3.2） ====================
-   2026-10-18 用户拍板：凭艺名**直接认领开号**、艺名唯一、同一 QQ 不能绑多个账号。
-   入口只在登录返回 {code:'NO_ACCOUNT', canClaim:true, claimName} 时出现（后端已校验
-   「台账唯一同名在职主播 + 该主播还没被占用」），前端不做二次判定。 */
-function showClaimEntry(name) {
-  const box = document.querySelector('#gate .gate-box');
-  if (!box) return;
-  const old = $('gateClaim');
-  if (old) old.remove();
-  const nm = String(name || '').trim();
-  if (!nm) return;
-  const btn = document.createElement('button');
-  btn.type = 'button';
-  btn.id = 'gateClaim';
-  btn.className = 'gate-claim';
-  btn.textContent = '首次登录？认领账号“' + nm + '”';
-  btn.onclick = () => { try { openClaimDlg(nm); } catch (_) {} };
-  box.appendChild(btn);
-}
+   2026-10-18 用户口径（当日二改）：**未认领的艺名直接点「登录」就开通** ——
+   bindLoginPane 收到 NO_ACCOUNT+canClaim 时，把输入框里的密码直接当开通密码
+   调 /my/claim（后端 canClaim 已校验「台账唯一同名在职 + 未被占用」），
+   成功即进强制补全。不再出「认领账号」按钮与弹窗（showClaimEntry/openClaimDlg
+   随入口一起下线，.gate-claim 样式保留无引用）。
+   已认领的艺名照旧走 BAD_PASSWORD「密码错误」，与开通路径互不干扰。 */
 
 function openClaimDlg(name) {
-  const dlg = makeDialog('claimMask',
-    '<button class="dialog-close" id="claimX" aria-label="关闭"><span class="material-symbols-outlined">close</span></button>' +
-    '<h3>认领账号</h3>' +
-    '<p class="tip">第一次用这个艺名登录？设置一个登录密码就能认领这个账号，手机号可以登录后补全。</p>' +
-    '<div class="field-label">艺名</div>' +
-    '<input id="claimName" class="dlg-readonly" value="' + esc(name) + '" readonly autocomplete="off">' +
-    '<div class="field-label">设置密码</div>' +
-    '<input id="claimPass" type="password" placeholder="' + PASS_RULE + '" autocomplete="new-password">' +
-    '<input id="claimPass2" type="password" placeholder="确认密码" autocomplete="new-password">' +
-    '<div class="form-err hidden" id="claimErr"></div>' +
-    '<div class="btn-row"><button class="go gray" id="claimCancel">取消</button>' +
-    '<button class="go" id="claimGo">认领并登录</button></div>');
-  $('claimX').onclick = dlg.close;
-  $('claimCancel').onclick = dlg.close;
-  ['claimPass', 'claimPass2'].forEach((id) => {
-    $(id).onkeydown = (e) => { if (e.key === 'Enter') $('claimGo').click(); };
-  });
-  setTimeout(() => { const el = $('claimPass'); if (el) el.focus(); }, 60);
-  $('claimGo').onclick = async () => {
-    const pass = $('claimPass').value || '';
-    const pass2 = $('claimPass2').value || '';
-    const errEl = $('claimErr');
-    const fail = (m) => { errEl.textContent = m; errEl.classList.remove('hidden'); };
-    errEl.classList.add('hidden');
-    if (!isValidPass(pass)) return fail(PASS_RULE);
-    if (pass !== pass2) return fail('两次输入的密码不一致');
-    const btn = $('claimGo');
-    btn.disabled = true; btn.textContent = '认领中…';
-    const p1 = $('claimPass'), p2 = $('claimPass2');
-    p1.disabled = true; p2.disabled = true;
-    try {
-      const d = await postJson('/api/public/my/claim', { name: name, pass: pass });
-      dlg.close();
-      applyLoginSuccess(d, name);   // 成功与登录同形（needProfile:true + 新 token）
-    } catch (e) {
-      btn.disabled = false; btn.textContent = '认领并登录';
-      p1.disabled = false; p2.disabled = false;
-      fail(apiErrText(e) || '认领失败，稍后再试');
-    }
-  };
+  /* 2026-10-18 二改后无调用方（开通直接在 bindLoginPane 里调 /my/claim）。
+     保留空壳防旧引用报错；下个清理窗口再整体删除。 */
+  void name;
 }
 
 /* ==================== 忘记密码（契约 v2 §4.5 / §3.5） ====================
@@ -3158,8 +3533,12 @@ function podHtml(items) {
       '<h3 class="st-pod-nm">' + esc(it.name) + '</h3>' +
       (absent != null ? '<span class="st-pod-off' + (absent > 0 ? ' warn' : '') + '">未播 ' + absent + '天</span>' : '') +
       (min ? '<span class="st-pod-off">时长 ' + min + '</span>' : '') +
-      '<p class="st-pod-wv">' + wave + '</p>' +
-      '<span class="st-pod-lbl">' + label + '</span>' +
+      /* 2026-10-18 第二轮 1:1：数值与单位小字包进 .st-pod-num（设计稿 div.mt-0.5），
+         块级 label 撑到与数值同宽 —— 设计稿标签实测宽 83.5 正是数值「5万6788」的宽度。 */
+      '<div class="st-pod-num">' +
+        '<p class="st-pod-wv">' + wave + '</p>' +
+        '<span class="st-pod-lbl">' + label + '</span>' +
+      '</div>' +
       (total ? '<p class="st-pod-total">总 ' + total + '</p>' : '') +
     '</div>';
   }).join('') + '</div>';
@@ -3245,7 +3624,9 @@ function renderList() {
     ? '<div class="empty">' + (key ? '没有匹配「' + esc(key) + '」的主播<br>换个名字试试'
         : '<span class="big">📺</span>这个' + (period === 'daily' ? '日期' : '周期') + '没有可显示的主播<br>换个日期试试') + '</div>'
     : (pod + listHtml);
-  $('view').innerHTML = '<div class="section">' + body + '</div>';
+  /* 2026-10-18 第二轮 1:1：看板区块容器用 .st-data（px-4 全宽口径），不再吃
+     .section 的通用样式差；其余视图照旧用 .section。 */
+  $('view').innerHTML = '<div class="section st-data">' + body + '</div>';
   bindRows();
 }
 
@@ -3332,6 +3713,8 @@ async function loadData() {
 }
 
 function renderDates() {
+  /* 2026-10-18：日期条重渲染后布局可能变化，底栏/分段滑块顺带对齐一次 */
+  try { navPillMove(); stSegMove(); } catch (e) {}
   const dates = (site && site.dates) || [];
   let prevM = '';
   $('dates').innerHTML = dates.map(d => {
@@ -6066,6 +6449,395 @@ window.addEventListener('resize', syncHeaderOffset);
 function syncNavActive() {
   const key = (view === 'my' && mySub === 'wechat') ? 'wechat' : view;
   document.querySelectorAll('[data-v]').forEach(b => b.classList.toggle('on', b.dataset.v === key));
+  navPillMove();     // 2026-10-18：选中态变了 → 液态胶囊滑到新位置
+}
+
+/* ==================== 液态玻璃 Dock：滑动胶囊（2026-10-18 Stitch 1:1） ====================
+   胶囊 #navPill 是 absolute 定位在 .tabbar 内（top/bottom/left 均 6px），
+   靠 transform:translateX() 滑到选中项、width 对齐选中项宽度（设计稿脚本同口径：
+   offsetLeft = 按钮左 - dock 左 - 6）。
+   · 点按：CSS transition 出弹性滑动（cubic-bezier(.175,.885,.32,1.15)）
+   · 拖拽：加 .is-dragging 关掉 transition，胶囊跟手指走（含两端 0.35 阻尼），
+     高光光斑 .np-spot 随位移倾斜流动（rotate ±18° + translateX 0.22×）
+   ⚠️ 隐藏的按钮（后台关掉的视图 / 关登录后的「我的」）宽度是 0，不能当目标：
+      只取可见按钮（offsetParent 非空）算位置，否则胶囊会滑到 0 宽度处消失。 */
+function navVisibleTabs() {
+  return [...document.querySelectorAll('#navRow button[data-v]')]
+    .filter(b => b.offsetParent !== null);
+}
+/** 把胶囊移到第 index 个可见按钮下（instant=true 不加过渡，用于初始化/resize） */
+function navPillTo(index, instant, opts) {
+  const pill = $('navPill'), dock = $('navRow');
+  if (!pill || !dock) return;
+  const tabs = navVisibleTabs();
+  if (!tabs.length) { pill.style.width = '0px'; return; }
+  const i = Math.max(0, Math.min(tabs.length - 1, index));
+  const t = tabs[i];
+  const dr = dock.getBoundingClientRect(), tr = t.getBoundingClientRect();
+  if (instant) pill.classList.add('is-dragging');
+  /* 2026-10-18 v5：宽度只在**真变了**时才写 —— 实测快速拖拽时 86↔84.71px
+     抖动会逐帧改写 style.width（合成层上等价于逐帧重排），这也是「一点闪」。
+     同宽就不动它，浏览器按兵不动。 */
+  const wpx = tr.width + 'px';
+  if (pill.style.width !== wpx) pill.style.width = wpx;
+  /* 2026-10-18：位移走 CSS 变量 --tx —— transform 在 CSS 里是
+     translateX(var(--tx)) scaleX(var(--sx))，这样滑动时才能叠加那下液体拉伸。 */
+  pill.style.setProperty('--tx', (tr.left - dr.left - 6) + 'px');
+  if (instant) {
+    requestAnimationFrame(() => pill.classList.remove('is-dragging'));
+    return;
+  }
+  /* 非瞬时移动：加 240ms 的 .is-gliding → scaleX 1.05（液体先被拉长再回弹）。
+     2026-10-18 v5.1：**拖拽落位一律不 glide**（noGlide 参数）—— 实测拖拽 up()
+     走 navPillTo(idx) 也会泵一下 is-gliding，来回拖 = 反复泵动 = 「还是有一点闪」。
+     液体拉伸只留给「点按切页」这种单次明确的目的性移动；拖拽落位本来就有
+     松手回弹（transition 弹性曲线），再叠 scaleX 拉伸就是双重抖动。 */
+  if (!opts?.noGlide && !pill.classList.contains('is-gliding')) {
+    clearTimeout(navGlideTimer);
+    pill.classList.add('is-gliding');
+    navGlideTimer = setTimeout(() => pill.classList.remove('is-gliding'), 240);
+  }
+  lensSyncRaf();   // 胶囊动了 → 镜片里那块内容要重新对齐
+}
+
+/** 滑动拉伸的定时器句柄（连点导航时只保留最后一次） */
+let navGlideTimer = null;
+/** 拖拽引发的切页suppress标记（v5.1）：up() 里 t.click() 会同步走
+    switchView → syncNavActive → navPillMove()，那是拖拽链路的一部分，
+    同样不许泵 is-gliding。点按切页不受影响（标记在下一拍微任务里清掉）。 */
+let navDragLanded = 0;
+/** 按当前选中态定位胶囊（syncNavActive / resize / 登录后导航变化都调它） */
+function navPillMove(instant) {
+  const tabs = navVisibleTabs();
+  const on = tabs.findIndex(b => b.classList.contains('on'));
+  const noGlide = performance.now() - navDragLanded < 80;
+  navPillTo(on < 0 ? 0 : on, instant === true, noGlide ? { noGlide: true } : undefined);
+}
+/** 当前选中项在可见按钮里的序号（拖拽落位用） */
+let navCurIdx = 0;
+
+/* ==================== 镜片：内容副本 + 中心放大（2026-10-18） ====================
+   为什么要复制内容：Chromium 的 backdrop-filter **不支持几何放大**
+   （实测：给带 backdrop-filter 的元素加 scale(1.6)，背景竖条间距仍是 40px 不变），
+   所以「聚焦/放大」只能把要显示的内容复制一份进镜片里缩放。
+
+   · 克隆源 = main.wrap（整页主内容，自带 wrap 的左右内边距，和真实页面同宽同高）
+   · 居中放大：把副本的屏幕位置对齐到真实内容，再以**胶囊中心**为原点放大 1.28×
+   · 每帧只写 transform（合成层移动），滚动 / 拖拽都能跟手
+   · #view 重渲染（切视图 / 刷新数据）由 MutationObserver 防抖 180ms 重建副本
+   · lineage 视图是画布，跳过（退回 backdrop 玻璃兜底）
+    2026-10-18 v5 聚焦强化：胶囊常驻页面底部 112px 的空白 padding 上 ——
+    副本在那个位置几乎全是透明，镜片「空转」。三个补法一起上：
+      ① 放大率 1.16 → 1.28，内容滚进胶囊时放大量一眼可见；
+      ② has-lens 时不再关掉 .np-frost 对焦 backdrop：副本透明处露出
+         「中心实、边缘虚」的对焦圈，胶囊停在空白处也有透镜感；
+      ③ 副本去掉 busy 压暗与 shimmer 骨架（克隆瞬间页面正在加载的话，
+         镜片里会跟着暗一下/闪一下）。 */
+const LENS_SCALE = 1.28;
+let lensTimer = null, lensRaf = 0;
+
+/** 重建副本（只在 content 视图做；lineage 直接摘掉镜片） */
+function lensEnsure() {
+  const stage = $('navLensStage'), pill = $('navPill');
+  if (!stage || !pill) return false;
+  const wrap = document.querySelector('main.wrap');
+  if (!wrap || view === 'lineage') {
+    pill.classList.remove('has-lens');
+    stage.replaceChildren();
+    return false;
+  }
+  const clone = wrap.cloneNode(true);
+  clone.removeAttribute('id');
+  /* body.busy 的 #view 压暗（opacity .62）会让刚克隆的副本也暗着 ——
+     切页瞬间镜片内容「暗一下」，给副本里的 view 显式恢复不透明。 */
+  const cv = clone.querySelector('#view');
+  if (cv) { cv.removeAttribute('id'); cv.style.opacity = '1'; }
+  clone.querySelectorAll('[id]').forEach((e) => e.removeAttribute('id'));
+  clone.querySelectorAll('img').forEach((e) => {
+    e.setAttribute('loading', 'eager');
+    e.removeAttribute('srcset');
+  });
+  /* .section 会重播入场动画；副本里去掉，避免镜片里内容「闪一下」。
+     .sk 骨架扫光同理（加载态在镜片里闪），连样式一起禁用。 */
+  clone.querySelectorAll('.section').forEach((e) => e.classList.remove('section'));
+  clone.querySelectorAll('.tab-content-enter').forEach((e) => e.classList.remove('tab-content-enter'));
+  clone.querySelectorAll('.sk').forEach((e) => e.classList.remove('sk'));
+  /* 副本里所有 backdrop-filter 一律清掉：列表卡片 .st-list-body 自带 blur(20px)，
+     在镜片里再采样一次既没意义（背后是空的）又费 GPU，还会引起逐帧重算。 */
+  clone.querySelectorAll('*').forEach((e) => {
+    e.style.backdropFilter = 'none';
+    e.style.webkitBackdropFilter = 'none';
+    e.style.animation = 'none';
+  });
+  stage.replaceChildren(clone);
+  pill.classList.add('has-lens');
+  return true;
+}
+
+/** 把副本对齐到「屏幕上胶囊盖住的那块内容」，再绕胶囊中心放大 */
+function lensSync() {
+  const stage = $('navLensStage'), pill = $('navPill');
+  if (!stage || !pill || !pill.classList.contains('has-lens')) return;
+  const wrap = document.querySelector('main.wrap');
+  if (!wrap) return;
+  const pr = pill.getBoundingClientRect();
+  const wr = wrap.getBoundingClientRect();
+  const k = LENS_SCALE;
+  const cx = pr.width / 2, cy = pr.height / 2;
+  const ox = wr.left - pr.left, oy = wr.top - pr.top;
+  stage.style.width = window.innerWidth + 'px';
+  stage.style.transform =
+    'translate(' + (cx * (1 - k)).toFixed(2) + 'px,' + (cy * (1 - k)).toFixed(2) + 'px) ' +
+    'scale(' + k + ') ' +
+    'translate(' + ox.toFixed(2) + 'px,' + oy.toFixed(2) + 'px)';
+}
+
+/** 合帧对齐（滚动 / 拖拽 / 滑动时每帧最多算一次） */
+function lensSyncRaf() {
+  if (lensRaf) return;
+  lensRaf = requestAnimationFrame(() => { lensRaf = 0; try { lensSync(); } catch (e) {} });
+}
+
+/** 防抖重建。2026-10-18 v5：克隆副本是 main.wrap 的完整复制 —— 里面带着
+    `body.busy #view{opacity:.62}` 的压暗效果和入场动画，每次重渲染都会让
+    镜片里的内容跟着暗一下/闪一下。清掉副本上的 busy 压暗（克隆时 #view 的
+    opacity 是 style 内联继承不到的，这里的 opacity 只来自 CSS 类 body.busy，
+    副本内的元素不带 body，所以本来就不受影响；真正闪的是「页面清空瞬间
+    副本还是旧内容」—— 靠下面的切页同步修）。 */
+function lensRebuild() {
+  clearTimeout(lensTimer);
+  lensTimer = setTimeout(() => {
+    try { if (lensEnsure()) lensSync(); } catch (e) {}
+  }, 180);
+}
+
+/** 启动：滚动跟随、尺寸变化、内容变更、首屏补两次（数据是异步回来的） */
+function initLens() {
+  if (!$('navPill')) return;
+  window.addEventListener('scroll', lensSyncRaf, { passive: true });
+  window.addEventListener('resize', () => { lensRebuild(); lensSyncRaf(); });
+  const src = $('view');
+  if (src && window.MutationObserver) {
+    new MutationObserver(lensRebuild).observe(src, { childList: true, subtree: true });
+  }
+  [700, 1500, 2600].forEach((ms) => setTimeout(() => {
+    try { if (lensEnsure()) lensSync(); } catch (e) {}
+  }, ms));
+}
+function navIndexRefresh() {
+  const tabs = navVisibleTabs();
+  const on = tabs.findIndex(b => b.classList.contains('on'));
+  navCurIdx = on < 0 ? 0 : on;
+  return navCurIdx;
+}
+/** 拖拽初始化：绑在 dock 上（touch + mouse 双通道），与点击互不干扰 */
+function initNavDock() {
+  const dock = $('navRow'), pill = $('navPill'), spot = $('navPillSpot');
+  if (!dock || !pill) return;
+  let dragging = false, startX = 0, base = 0, cur = 0, minO = 0, maxO = 0, moved = 0;
+
+  const bounds = () => {
+    const tabs = navVisibleTabs();
+    const dr = dock.getBoundingClientRect();
+    if (!tabs.length) return;
+    minO = tabs[0].getBoundingClientRect().left - dr.left - 6;
+    maxO = tabs[tabs.length - 1].getBoundingClientRect().left - dr.left - 6;
+  };
+  const down = (e) => {
+    dragging = true; moved = 0;
+    startX = e.clientX || (e.touches && e.touches[0].clientX) || 0;
+    navIndexRefresh(); bounds();
+    const tabs = navVisibleTabs();
+    const t = tabs[navCurIdx];
+    base = t ? t.getBoundingClientRect().left - dock.getBoundingClientRect().left - 6 : 0;
+    cur = base;
+    pill.classList.add('is-dragging');
+  };
+  const move = (e) => {
+    if (!dragging) return;
+    const x = e.clientX || (e.touches && e.touches[0].clientX) || 0;
+    const dx = x - startX;
+    moved = Math.abs(dx);
+    let next = base + dx;
+    /* 两端阻尼（设计稿 0.35）：拖过头只走 35%，松手回弹 */
+    if (next < minO) next = minO + (next - minO) * .35;
+    else if (next > maxO) next = maxO + (next - maxO) * .35;
+    cur = next;
+    pill.style.setProperty('--tx', next.toFixed(2) + 'px');
+    /* 光斑随手指流动：--spot 设在 #navPill 上 —— .np-spec 是它的子元素层，
+       自定义属性会继承下来（v2 误设在光斑元素自身上，等于没生效）。 */
+    pill.style.setProperty('--spot', (dx * .18).toFixed(2) + 'px');
+    lensSyncRaf();   // 镜片里的内容不跟着胶囊走（像真透镜一样，玻璃动、景物不动）
+    /* 拖过半格就切选中态（>18px 才算，避免误触） */
+    const tabs = navVisibleTabs();
+    if (tabs.length) {
+      const dr = dock.getBoundingClientRect();
+      const unit = dr.width / tabs.length;
+      const idx = Math.max(0, Math.min(tabs.length - 1,
+        Math.floor((next + 6 + unit / 2) / unit)));
+      /* 2026-10-18：这里**不再**调 navPillTo —— 它会给胶囊加 .is-gliding（scaleX 拉伸）
+         并触发 transform 过渡，来回拖时每跨一格就抖一下 = 用户说的「闪」。
+         拖拽中真正的位移下面已经用 --tx 跟手写了，这里只记目标序号。 */
+      if (idx !== navCurIdx && moved > 18) { navCurIdx = idx; }
+    }
+  };
+  const up = () => {
+    if (!dragging) return;
+    dragging = false;
+    pill.classList.remove('is-dragging');
+    /* 光斑回正（带 .32s 过渡，见 CSS） */
+    pill.style.setProperty('--spot', '0px');
+    const tabs = navVisibleTabs();
+    if (!tabs.length) return;
+    const dr = dock.getBoundingClientRect();
+    const unit = dr.width / tabs.length;
+    const idx = Math.max(0, Math.min(tabs.length - 1,
+      Math.floor((cur + 6 + unit / 2) / unit)));
+    const t = tabs[idx];
+    /* 真切换：走按钮的 onclick（= switchView），保证路由/数据一条链路。
+       navDragLanded 打标记：click 同步引发的 syncNavActive→navPillMove
+       属于拖拽落位链路，不泵 is-gliding（v5.1）。 */
+    if (t && idx !== navIndexRefresh()) { navDragLanded = performance.now(); t.click(); return; }
+    navPillTo(idx, false, { noGlide: true });   // 拖拽落位不泵 is-gliding（v5.1）
+  };
+
+  dock.addEventListener('touchstart', down, { passive: true });
+  window.addEventListener('touchmove', move, { passive: true });
+  window.addEventListener('touchend', up);
+  window.addEventListener('touchcancel', up);
+  dock.addEventListener('mousedown', (e) => {
+    down(e);
+    const mv = (ev) => move(ev);
+    const mu = () => { up(); window.removeEventListener('mousemove', mv); window.removeEventListener('mouseup', mu); };
+    window.addEventListener('mousemove', mv);
+    window.addEventListener('mouseup', mu);
+  });
+
+  /* 初始化对齐：字体/布局稳定后量一次（load + resize + 两拍 rAF 兜底） */
+  const align = () => navPillMove(true);
+  window.addEventListener('load', align);
+  const ro = window.ResizeObserver ? new ResizeObserver(() => navPillMove(true)) : null;
+  if (ro) ro.observe(dock);
+  setTimeout(align, 60);
+  setTimeout(align, 400);
+
+  /* ===== 触摸光晕（2026-10-18 v6，用户提示词 1-6 条）=====
+     touchstart 优先（移动端 click 有 300ms 延迟，光晕会慢半拍），
+     mouse 桌面通道（touchstart 未命中时 click 兜底一次）。坐标取「相对 Tab 格子」
+     的 x/y，光晕节点放 (x,y)，双 rAF 后 scale(1)+opacity(.35)，400ms 后删节点。 */
+  const spawnRipple = (btn, x, y) => {
+    const br = btn.getBoundingClientRect();
+    const r = document.createElement('span');
+    r.className = 'tab-ripple';
+    /* 尺寸贴 Tab 格子短边 ×2.2 —— 点格子边缘光晕也能铺满整格 */
+    const size = Math.round(Math.max(br.width, br.height) * 2.2);
+    r.style.width = r.style.height = size + 'px';
+    r.style.left = (x - br.left) + 'px';
+    r.style.top = (y - br.top) + 'px';
+    btn.appendChild(r);
+    /* 双 rAF：先让浏览器按 scale(0) 落一帧，再切到 .tab-ripple-on →
+       transition 才会播（同帧 set class 会被合并、直接跳到终态） */
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      r.classList.add('tab-ripple-on');
+    }));
+    /* 动画 400ms 结束直接删节点，不堆积（同格连点 = 旧节点先删、新节点再建） */
+    setTimeout(() => r.remove(), 420);
+  };
+  dock.addEventListener('touchstart', (e) => {
+    const t = e.touches && e.touches[0];
+    if (!t) return;
+    const btn = t.target && t.target.closest && t.target.closest('#navRow button[data-v]');
+    if (btn) spawnRipple(btn, t.clientX, t.clientY);
+  }, { passive: true });
+  dock.addEventListener('click', (e) => {
+    /* 触摸设备上 touchstart 已出过光晕（lastTouch 短窗内的 click 跳过），
+       避免同一次点按出两朵 */
+    if (e.detail && lastTouchAt && performance.now() - lastTouchAt < 500) return;
+    const btn = e.target && e.target.closest && e.target.closest('#navRow button[data-v]');
+    if (btn) spawnRipple(btn, e.clientX, e.clientY);
+  });
+  let lastTouchAt = 0;
+  dock.addEventListener('touchstart', () => { lastTouchAt = performance.now(); }, { passive: true, capture: true });
+}
+
+/* ==================== 日/月/年 白玻分段滑块（2026-10-18 Stitch 1:1） ====================
+   与 dock 胶囊同口径：滑块 #segPill 在 .st-seg 内 absolute（top/bottom/left 4px），
+   transform 移到选中项；点击由 setPeriod 触发，额外支持拖拽（两端 0.32 阻尼）。 */
+function stSegButtons() {
+  return [...document.querySelectorAll('#seg button[data-p]')]
+    .filter(b => b.offsetParent !== null && !b.disabled);
+}
+function stSegMove(instant) {
+  const pill = $('segPill'), box = $('seg');
+  if (!pill || !box) return;
+  const btns = stSegButtons();
+  if (!btns.length) { pill.style.width = '0px'; return; }
+  const on = btns.find(b => b.classList.contains('on')) || btns[0];
+  const br = box.getBoundingClientRect(), or_ = on.getBoundingClientRect();
+  if (instant) pill.classList.add('is-dragging');
+  pill.style.width = or_.width + 'px';
+  pill.style.transform = 'translateX(' + (or_.left - br.left - 4) + 'px)';
+  if (instant) requestAnimationFrame(() => pill.classList.remove('is-dragging'));
+}
+function initSegDrag() {
+  const box = $('seg'), pill = $('segPill');
+  if (!box || !pill) return;
+  let dragging = false, startX = 0, base = 0, cur = 0, minO = 0, maxO = 0, moved = 0;
+  const down = (e) => {
+    dragging = true; moved = 0;
+    startX = e.clientX || (e.touches && e.touches[0].clientX) || 0;
+    const btns = stSegButtons();
+    if (!btns.length) { dragging = false; return; }
+    const br = box.getBoundingClientRect();
+    const on = btns.find(b => b.classList.contains('on')) || btns[0];
+    base = on.getBoundingClientRect().left - br.left - 4;
+    cur = base;
+    minO = btns[0].getBoundingClientRect().left - br.left - 4;
+    maxO = btns[btns.length - 1].getBoundingClientRect().left - br.left - 4;
+    pill.classList.add('is-dragging');
+  };
+  const move = (e) => {
+    if (!dragging) return;
+    const x = e.clientX || (e.touches && e.touches[0].clientX) || 0;
+    const dx = x - startX;
+    moved = Math.abs(dx);
+    let next = base + dx;
+    if (next < minO) next = minO + (next - minO) * .32;
+    else if (next > maxO) next = maxO + (next - maxO) * .32;
+    cur = next;
+    pill.style.transform = 'translateX(' + next + 'px)';
+    const btns = stSegButtons();
+    if (!btns.length) return;
+    const br = box.getBoundingClientRect();
+    const unit = br.width / btns.length;
+    const idx = Math.max(0, Math.min(btns.length - 1,
+      Math.floor((next + 4 + unit / 2) / unit)));
+    if (!btns[idx].classList.contains('on') && moved > 16) setPeriod(btns[idx].dataset.p);
+  };
+  const up = () => {
+    if (!dragging) return;
+    dragging = false;
+    pill.classList.remove('is-dragging');
+    const btns = stSegButtons();
+    if (!btns.length) return;
+    const br = box.getBoundingClientRect();
+    const unit = br.width / btns.length;
+    const idx = Math.max(0, Math.min(btns.length - 1,
+      Math.floor((cur + 4 + unit / 2) / unit)));
+    if (!btns[idx].classList.contains('on')) setPeriod(btns[idx].dataset.p);
+    else stSegMove();
+  };
+  box.addEventListener('touchstart', down, { passive: true });
+  window.addEventListener('touchmove', move, { passive: true });
+  window.addEventListener('touchend', up);
+  window.addEventListener('touchcancel', up);
+  box.addEventListener('mousedown', (e) => {
+    down(e);
+    const mv = (ev) => move(ev);
+    const mu = () => { up(); window.removeEventListener('mousemove', mv); window.removeEventListener('mouseup', mu); };
+    window.addEventListener('mousemove', mv);
+    window.addEventListener('mouseup', mu);
+  });
 }
 
 function switchView(v, opts) {
@@ -6088,10 +6860,34 @@ function switchView(v, opts) {
   }
   if (v === 'lineage' && (s.lineageEnabled === false || TEAM === 'female')) v = 'data';
   if (v === 'my' && s.loginRequired === false) v = 'data';
+  /* ===== 页面横滑方向（2026-10-18 v6，提示词第 7 条）=====
+     序号差定方向：新 Tab 在右边（newIdx > oldIdx）= 向右翻页，新页从右滑入
+     （--slide-from:40px）；在左边则从左（-40px）。同页（序号相同）不播动画。
+     注意不能用 view/mySub 推 sameView：点「我的」时 onclick 先把 mySub 清成
+     null，旧页 key 在这里已经算不出来 —— 直接用「切页前后 .on 落在哪个序号」
+     对比，click 前旧序号取自 DOM（syncNavActive 还没跑），天然准确。 */
+  const tabsBefore = navVisibleTabs();
+  const oldIdx = tabsBefore.findIndex(b => b.classList.contains('on'));
   view = v;
   syncNavActive();
+  const tabsAfter = navVisibleTabs();
+  const newIdx = tabsAfter.findIndex(b => b.classList.contains('on'));
+  if (oldIdx >= 0 && newIdx >= 0 && oldIdx !== newIdx) {
+    const viewEl = $('view');
+    viewEl.classList.remove('view-slide-in');
+    viewEl.style.setProperty('--slide-from', (newIdx > oldIdx ? 40 : -40) + 'px');
+    /* 强制 reflow：同帧 remove→add class 不重播动画，要先量一次 offsetWidth */
+    void viewEl.offsetWidth;
+    viewEl.classList.add('view-slide-in');
+    setTimeout(() => viewEl.classList.remove('view-slide-in'), 340);
+  }
   document.querySelectorAll('#subnav button').forEach(b => b.classList.toggle('on', b.dataset.g === curGroup));
   show('toolbar', v === 'data');
+  /* 2026-10-18：#toolbar 刚从 hidden 变可见，此刻才量得准宽度 ——
+     隐藏期间 stSegMove 算出来的宽度是 0，不补一次滑块就永远是 2px。 */
+  if (v === 'data') requestAnimationFrame(() => { try { stSegMove(true); } catch (e) {} });
+  /* 底栏胶囊同理：隐藏的导航按钮（后台关掉的视图）不参与定位，这里再对齐一次 */
+  requestAnimationFrame(() => { try { navPillMove(true); } catch (e) {} });
   /* 📣 头部公告行 #mhAnn 显隐（2026-10-17，任务口径 e 选「switchView 控制显隐」）：
      mhAnn 在 masthead 里是全局的，公告挂数据看板 —— 非数据视图统一收口：停轮换 +
      清行 + hidden；数据视图按 mhAnnQueue 原样恢复（不等网络，bootRest 静默刷新 /
@@ -6112,11 +6908,16 @@ function switchView(v, opts) {
   $('view').innerHTML = '';
   if (opts.push !== false) pushRoute(opts.replace === true);
   go();
+  /* 2026-10-18 v5：切页时镜片**立即**重建（不等 180ms 防抖）—— 防抖窗口内
+     页面已清空、镜片还是旧内容，位置对不上 = 一瞬错位闪。立即重建时
+     #view 已空、克隆的是空骨架，镜片内容与页面同步归零，一起等新数据。 */
+  try { clearTimeout(lensTimer); if (lensEnsure()) lensSync(); } catch (e) {}
 }
 
 function setPeriod(p) {
   period = p;
   document.querySelectorAll('#seg button').forEach(b => b.classList.toggle('on', b.dataset.p === p));
+  stSegMove();          // 2026-10-18：白玻滑块滑到新口径
   show('dates', p === 'daily');
   show('stepper', p !== 'daily');
   show('btnCal', p === 'daily');   // 日历只属于「每日」口径
@@ -7111,21 +7912,31 @@ function mhAnnShowItem(box, q, idx, total) {
     if (seq !== mhAnnSeq) return;   // 令牌过期：这一帧作废，不写 DOM
     box.className = 'mh-ann' + (q.brand ? ' ai-brand' : '') + homeCls;
     box.textContent = '';
+    /* 2026-10-18 第二轮 1:1：外层（渐变描边 1px）+ 内层白玻胆 .mha-in 真双层结构，
+       与设计稿 DOM 逐字段对应（外 padding:1px 渐变 / 内 bg-white/80 + border）。 */
+    const inn = document.createElement('span');
+    inn.className = 'mha-in';
+    box.appendChild(inn);
+    /* 左段（图标 + 文案）整体包进 .mha-l 撑满剩余宽度，
+       序号角标才能被 justify-content:space-between 顶到最右（设计稿两端对齐）。 */
+    const l = document.createElement('span');
+    l.className = 'mha-l';
+    inn.appendChild(l);
     if (q.icon) {   // icon 空串 = 这条不渲染图标（2026-10-17 口径，无默认兜底）
       const ico = document.createElement('span');
       ico.className = 'material-symbols-outlined';
       ico.textContent = q.icon;
-      box.appendChild(ico);
+      l.appendChild(ico);
     }
     const t = document.createElement('span');
     t.className = 'mha-tx';
     t.textContent = q.text;
-    box.appendChild(t);
+    l.appendChild(t);
     if (total > 1) {   // 多条轮换：行尾小字序号角标「1/3」
       const ix = document.createElement('span');
       ix.className = 'mha-idx';
       ix.textContent = idx + '/' + total;
-      box.appendChild(ix);
+      inn.appendChild(ix);
     }
     t.classList.remove('mha-fade');
   };
@@ -8119,6 +8930,12 @@ async function bootRest() {
     switchView(r.view, { push: false });
   });
   document.querySelectorAll('#seg button').forEach(b => b.onclick = () => setPeriod(b.dataset.p));
+  /* 2026-10-18 Stitch 玻璃稿：初始化两个滑动胶囊（底栏液态玻璃 dock + 日/月/年白玻分段）。
+     放在 bootRest 里而不是 IIFE 里 —— 此时导航按钮的 disable/hidden 已经按后台开关
+     定好了，量到的宽度才是真的（关掉的视图按钮宽度 0，不能参与定位）。 */
+  try { initNavDock(); } catch (e) { /* 不影响主流程 */ }
+  try { initLens(); } catch (e) { /* 镜片失败不影响导航 */ }
+  try { initSegDrag(); stSegMove(true); } catch (e) { /* 同上 */ }
   $('btnSearch').onclick = () => {
     searchOpen = !searchOpen;
     show('searchBox', searchOpen);
@@ -8201,6 +9018,9 @@ async function bootRest() {
   if (!segs.daily && segs.monthly) period = 'monthly';
   else if (!segs.daily && segs.yearly) period = 'yearly';
   document.querySelectorAll('#seg button').forEach(b => b.classList.toggle('on', b.dataset.p === period));
+  /* 2026-10-18：口径按钮的 disabled/on 上面才定完，滑块必须在这之后再量一次
+     （bootRest 前段那次调用时 #toolbar 可能还是 hidden，量出来宽度会是 0） */
+  try { stSegMove(true); } catch (e) {}
 
   /* 每日报告页被关掉时首页落到分组（分组也关则落到族谱）；深链指到被关的页也一样改道 */
   const firstOn = (v, fb) => {
