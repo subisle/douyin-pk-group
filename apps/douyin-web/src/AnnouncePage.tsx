@@ -49,6 +49,13 @@ const EMPTY_PLACEMENTS: PlacementsMap = {
 }
 const EMPTY_CELEBRATE: CelebrateCfg = { enabled: false, confetti: false, title: '', name: '', wave: '0' }
 
+/** 看板弹幕（2026-10-19 后端新增）：展示页榜单上的飘字胶囊。
+    后端字段为 { enabled, top: number, dailyChampion, contestChampion }，top 是 390 宽视口下
+    弹幕轨道的 top 像素（后端 clamp 0..830；默认 712 ≈ 底部导航上方）。
+    与 celebrate.wave 同口径：state 里存字符串方便 number 输入框编辑，保存时转回数字。 */
+type DanmakuCfg = { enabled: boolean; top: string; dailyChampion: boolean; contestChampion: boolean }
+const EMPTY_DANMAKU: DanmakuCfg = { enabled: false, top: '712', dailyChampion: true, contestChampion: true }
+
 /** 展示页公告条（2026-10-14）：可配多条，数组顺序 = 展示端从上到下。
     对应后端 Announcement.items[idx]；tone：brand = 紫金渐变（原庆祝条样式）、
     plain = 白底描边（原冠军条样式）。wave 同 celebrate 存字符串方便 number 输入框，
@@ -121,7 +128,7 @@ function fmtClock(d: Date) {
   return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
 }
 
-/** 公告配置页：📢 公告位 / 📣 展示页公告条 / 🎉 庆祝配置 三个编辑区块
+/** 公告配置页：📢 公告位 / 📣 展示页公告条 / 🎉 庆祝配置 / 🎈 看板弹幕 四个编辑区块
     共用一份状态，底部 ann-savebar 一次整包保存（引导配置只回传、不再编辑）。 */
 export default function AnnouncePage() {
   const [data, setData] = useState<{ enabled: boolean; version: number } | null>(null)
@@ -138,6 +145,10 @@ export default function AnnouncePage() {
   const [placements, setPlacements] = useState<PlacementsMap>(EMPTY_PLACEMENTS)
   // 庆祝配置 v2：受控输入；wave 在 state 里是字符串（number 输入框好编辑），保存时转数字
   const [celebrate, setCelebrate] = useState<CelebrateCfg>(EMPTY_CELEBRATE)
+  // 看板弹幕（2026-10-19 后端新增）：受控输入；top 在 state 里是字符串（同 celebrate.wave）
+  const [danmaku, setDanmaku] = useState<DanmakuCfg>(EMPTY_DANMAKU)
+  /** GET 里有没有 danmaku 这个 key：老后端不下发时保存不发 danmaku（同 items 的 itemsLoaded 口径） */
+  const [danmakuLoaded, setDanmakuLoaded] = useState(false)
   // 展示页公告条（2026-10-14）：多条列表，顺序即展示顺序
   const [items, setItems] = useState<AnnounceItemCfg[]>([])
   /** GET 里有没有 items 这个 key：老后端不下发时保存不发 items，避免整包替换把已有配置清空 */
@@ -217,6 +228,8 @@ export default function AnnouncePage() {
       version: number
       placements?: Partial<Record<PlacementKey, Partial<PlacementCfg>>>
       celebrate?: Partial<CelebrateCfg>
+      /** 看板弹幕（2026-10-19 后端新增）；老后端不下发该 key（undefined） */
+      danmaku?: { enabled?: boolean; top?: number; dailyChampion?: boolean; contestChampion?: boolean }
       /** 展示页公告条（2026-10-14）：全量下发（含 enabled=false），编辑初值就是它 */
       items?: {
         enabled?: boolean
@@ -262,6 +275,21 @@ export default function AnnouncePage() {
           name: c.name ?? '',
           wave: String(c.wave ?? 0),
         })
+        // 看板弹幕初始化（2026-10-19 后端新增）：老后端不下发 danmaku key → 保持 EMPTY
+        // 且不标 loaded（保存时不发该字段，同 items 的 itemsLoaded 口径）。两个冠军开关
+        // 只认显式 false（字段缺失按默认开处理），top 缺失兜底 712。
+        if (d.danmaku) {
+          setDanmaku({
+            enabled: !!d.danmaku.enabled,
+            top: String(d.danmaku.top ?? 712),
+            dailyChampion: d.danmaku.dailyChampion !== false,
+            contestChampion: d.danmaku.contestChampion !== false,
+          })
+          setDanmakuLoaded(true)
+        } else {
+          setDanmaku(EMPTY_DANMAKU)
+          setDanmakuLoaded(false)
+        }
         // 公告条初始化：数组整体替换（顺序即展示顺序）；老后端没有 items key 时保持空列表，
         // 且不标 loaded —— 保存时不发 items，防止把库里的多条整包清空。
         // popup 兜底 !!：老后端不下发该字段 = undefined → false（不弹窗）
@@ -348,11 +376,13 @@ export default function AnnouncePage() {
     enabled?: boolean
     placements?: PlacementsMap
     celebrate?: CelebrateCfg
+    danmaku?: DanmakuCfg
     items?: AnnounceItemCfg[]
   }) {
     const en = overrides?.enabled ?? enabled
     const pl = overrides?.placements ?? placements
     const ce = overrides?.celebrate ?? celebrate
+    const dm = overrides?.danmaku ?? danmaku
     const its = overrides?.items ?? items
     setBusy(true)
     setSaveErr('') // 每次保存先清掉上一次的失败提示，避免旧错误一直挂着
@@ -366,6 +396,20 @@ export default function AnnouncePage() {
         placements: pl,
         // 庆祝配置 v2：wave 转回数字（非数字 / 负数兜底 0 = 不显示）
         celebrate: { ...ce, wave: Math.max(0, Math.round(Number(ce.wave) || 0)) },
+      }
+      if (danmakuLoaded) {
+        // 看板弹幕（2026-10-19 后端新增，部分更新语义）：只在 GET 下发过 danmaku 才带上，
+        // 老后端（不下发该 key）保存时不发，保持「不下发就不回传」的一致性（同 items 口径）。
+        // top 转数字：空 / 非数字兜底 712（默认位置）；后端还会 clamp 0..830，
+        // 保存侧只把「改坏成负数」的输入抬回 0，不挡合法值（含 0 本身）。
+        // 注意关着也回传 state 里的 top —— 部分更新下带了字段就写库，
+        // 发硬编码 712 会把「关着但自定义过位置」的值悄悄覆盖掉。
+        body.danmaku = {
+          enabled: dm.enabled,
+          top: Math.max(0, Math.round(Number(dm.top) || 712)),
+          dailyChampion: !!dm.dailyChampion,
+          contestChampion: !!dm.contestChampion,
+        }
       }
       if (itemsLoaded) {
         // 展示页公告条：数组顺序 = 展示端从上到下；wave 转数字，tone 只收 brand / plain。
@@ -830,6 +874,84 @@ export default function AnnouncePage() {
         </div>
       </section>
 
+      {/* ============ 区块 5 · 看板弹幕（2026-10-19 后端新增） ============ */}
+      <section className="card ann-sec">
+        <h2 className="ann-sec-head">🎈 看板弹幕</h2>
+        <p className="ann-sec-sub">
+          展示页榜单上的飘字胶囊；位置填 390 宽视口下的轨道 top 像素（默认 712 = 底部导航上方）。
+        </p>
+        <div
+          style={{
+            border: '1px solid var(--line)',
+            borderRadius: 10,
+            padding: 10,
+            display: 'grid',
+            gap: 8,
+          }}
+        >
+          {/* 总开关：展示端渲染弹幕轨道（关 = 完全不渲染，其余字段保留但不生效） */}
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 12.5 }}>
+            <input
+              type="checkbox"
+              className="switch"
+              checked={danmaku.enabled}
+              onChange={(e) => {
+                // 开关即时保存：新值作为 overrides 传入，避免旧 state 覆盖
+                const next = { ...danmaku, enabled: e.target.checked }
+                setDanmaku(next)
+                save({ danmaku: next })
+              }}
+            />
+            开启看板弹幕
+          </label>
+          <div className="ann-grid ann-grid-fields">
+            {/* 显示每日冠军：榜单每日之星的飘字胶囊开关（切换即保存，同上） */}
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 12.5 }}>
+              <input
+                type="checkbox"
+                className="switch"
+                checked={danmaku.dailyChampion}
+                onChange={(e) => {
+                  const next = { ...danmaku, dailyChampion: e.target.checked }
+                  setDanmaku(next)
+                  save({ danmaku: next })
+                }}
+              />
+              显示每日冠军
+            </label>
+            {/* 显示争霸赛冠军：争霸赛冠军的飘字胶囊开关（切换即保存，同上） */}
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 12.5 }}>
+              <input
+                type="checkbox"
+                className="switch"
+                checked={danmaku.contestChampion}
+                onChange={(e) => {
+                  const next = { ...danmaku, contestChampion: e.target.checked }
+                  setDanmaku(next)
+                  save({ danmaku: next })
+                }}
+              />
+              显示争霸赛冠军
+            </label>
+            {/* 轨道位置：number 输入，state 存字符串（同 celebrate.wave），失焦转数字保存；
+                后端 clamp 0..830，这里只做提示，保存侧兜底见 save() */}
+            <label style={{ fontSize: 12.5, color: 'var(--ink3)' }}>
+              弹幕位置 top(px)（0-830，默认 712）
+              <input
+                type="number"
+                min={0}
+                max={830}
+                value={danmaku.top}
+                placeholder="712"
+                onChange={(e) => setDanmaku((prev) => ({ ...prev, top: e.target.value }))}
+                onBlur={() => save()}
+                style={input34}
+              />
+            </label>
+          </div>
+        </div>
+      </section>
+
       {/* 保存区：三个编辑区块共用一次整包保存（公告位 + 公告条 + 庆祝；引导只回传不编辑） */}
       <div className="ann-savebar">
         {/* 手动保存按钮：save 现在带 overrides 参数，onClick 必须包一层箭头函数，
@@ -837,7 +959,7 @@ export default function AnnouncePage() {
             保存中：disabled + 文案变「保存中…」（DESIGN §6：disabled 必须能看出是哪种状态）。
             busy 时按钮不可点 = 不会重入，连续保存只能一次一次来，时间戳也就一次一次更新。 */}
         <button className="primary" disabled={busy} aria-busy={busy} onClick={() => save()}>
-          {busy ? '保存中…' : '保存全部（公告位 / 公告条 / 庆祝）'}
+          {busy ? '保存中…' : '保存全部（公告位 / 公告条 / 庆祝 / 弹幕）'}
         </button>
         {/* 保存成功：按钮旁持续显示「已保存 · HH:MM:SS」（本地时间，24 小时制）。
             状态变化用图标 + 文本，不只靠颜色（DESIGN §4.6）；role=status 让读屏也能收到。
@@ -862,7 +984,7 @@ export default function AnnouncePage() {
         )}
         {data && <span className="hint">当前版本 {data.version}</span>}
         <span style={{ fontSize: 11.5, color: 'var(--ink3)' }}>
-          文本框失焦或开关切换后自动保存（公告位 + 公告条 + 庆祝整体一起保存，版本前进，
+          文本框失焦或开关切换后自动保存（公告位 + 公告条 + 庆祝 + 弹幕整体一起保存，版本前进，
           展示端会重新弹出引导；原有引导配置会原样保留一并回传）。
         </span>
         {/* 保存失败：红字原因 + 「重试」按钮（DESIGN §4.5：失败给重试入口与原因，不给「出错了」）。

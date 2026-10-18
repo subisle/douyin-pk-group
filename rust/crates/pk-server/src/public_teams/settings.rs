@@ -291,6 +291,9 @@ pub struct Announcement {
     ///（彩带 / 登录庆祝逻辑仍用它）。
     #[serde(default)]
     pub items: Vec<AnnounceItem>,
+    /// 看板弹幕配置（2026-10-19）：位置与内容开关（serde default → 旧配置无此字段也安全）
+    #[serde(default)]
+    pub danmaku: DanmakuConfig,
 }
 
 /// 一条展示页公告条（2026-10-14，cfg_key='announcement' 的 `items` 元素）。
@@ -392,6 +395,69 @@ pub struct CelebrateConfig {
     /// 音浪数（0 = 不显示数值）
     #[serde(default)]
     pub wave: i64,
+}
+
+/// 看板弹幕（2026-10-19）：展示页榜单上的横向飘字胶囊。
+/// 只允许两种内容：每日冠军（榜单 rank1）与争霸赛冠军（公告条目）；
+/// 位置由 top 指定（390 视口下的轨道 top px，默认 712 = 底部导航上方的安全带）。
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct DanmakuConfig {
+    /// 总开关（false = 展示端完全不渲染弹幕层）
+    #[serde(default)]
+    pub enabled: bool,
+    /// 轨道 top（px）。红框位（dock 上方）默认 712；展示端按 style.top 直出
+    #[serde(default = "danmaku_top_default")]
+    pub top: i64,
+    /// 显示「每日冠军」（榜单第一名，👑 金胶囊）
+    #[serde(default)]
+    pub daily_champion: bool,
+    /// 显示「争霸赛冠军」（公告条目第一条，🏆 金胶囊）
+    #[serde(default)]
+    pub contest_champion: bool,
+}
+
+pub(super) fn danmaku_top_default() -> i64 {
+    712
+}
+
+impl DanmakuConfig {
+    /// top 白名单：0..=830 之外 clamp 回边界（防任意整数；830 = 390 视口 dock 上方极限）
+    pub fn normalized_top(&self) -> i64 {
+        self.top.clamp(0, 830)
+    }
+}
+
+impl Default for DanmakuConfig {
+    /// enabled 默认 false（升级后不自动开，运营在后台显式打开）；
+    /// daily/contest 默认 true（总开关一开就有内容，不必再逐项勾选）。
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            top: danmaku_top_default(),
+            daily_champion: true,
+            contest_champion: true,
+        }
+    }
+}
+
+/// 看板弹幕（2026-10-19）的部分更新内核：`danmaku` 对象 → 逐字段合并进当前配置
+/// （没传的字段保持原样）；top 越界 clamp 回 0..=830 白名单（与 normalized_top
+/// 同一区间）。抽成纯函数与 parse_items 同理由：update_announcement 要 AppState，
+/// 合并语义（clamp / 部分更新）单测直接调它，不起 server。
+pub(super) fn merge_danmaku(cur: &mut DanmakuConfig, d: &serde_json::Map<String, Value>) {
+    if let Some(v) = d.get("enabled").and_then(|v| v.as_bool()) {
+        cur.enabled = v;
+    }
+    if let Some(v) = d.get("top").and_then(|v| v.as_i64()) {
+        cur.top = v.clamp(0, 830);
+    }
+    if let Some(v) = d.get("dailyChampion").and_then(|v| v.as_bool()) {
+        cur.daily_champion = v;
+    }
+    if let Some(v) = d.get("contestChampion").and_then(|v| v.as_bool()) {
+        cur.contest_champion = v;
+    }
 }
 
 /// 引导弹窗的一步：标题 + 正文 + 图标（Material Symbols 名）。
@@ -743,6 +809,14 @@ impl Announcement {
             // 展示页公告条（2026-10-14）：管理端**全量**下发（含 enabled=false，供后台编辑）；
             // 公开前端的裁剪形态走 public_items_json()
             "items": self.all_items_json(),
+            // 看板弹幕（2026-10-19）：top 走 normalized_top 白名单（0..=830）再直出，
+            // 管理端全量与公开裁剪形态（site.rs 的 announcement_json 也走本函数）同一键
+            "danmaku": {
+                "enabled": self.danmaku.enabled,
+                "top": self.danmaku.normalized_top(),
+                "dailyChampion": self.danmaku.daily_champion,
+                "contestChampion": self.danmaku.contest_champion,
+            },
         })
     }
 
@@ -849,8 +923,9 @@ pub async fn get_announcement(State(st): State<ArcState>) -> ApiResult {
 /// {enabled?, steps?: [{title, content, icon?, target?}],
 ///  placements?: {login|home|my: {enabled?, text?, icon?}},   // 2026-10-13 公告位
 ///  celebrate?: {enabled?, confetti?, title?, name?, wave?},  // 2026-10-13 庆祝
-///  items?: [{enabled?, icon?, title?, name?, wave?, text?, tone?, popup?}]}
-///  // 2026-10-14 公告条；popup 为 2026-10-15 弹窗标记（bool，缺省 false，纯横幅不变）
+///  items?: [{enabled?, icon?, title?, name?, wave?, text?, tone?, popup?}]   // 2026-10-14 公告条
+///  danmaku?: {enabled?, top?, dailyChampion?, contestChampion?}}             // 2026-10-19 看板弹幕
+///  // popup 为 2026-10-15 弹窗标记（bool，缺省 false，纯横幅不变）
 /// 部分更新语义：没传的字段/公告位保持原样（与 enabled/steps 同一套口径）；
 /// 传了 items 就**整包替换**（顺序即展示顺序）。
 pub async fn update_announcement(State(st): State<ArcState>, Json(body): Json<Value>) -> ApiResult {
@@ -907,6 +982,15 @@ pub async fn update_announcement(State(st): State<ArcState>, Json(body): Json<Va
     一次无关的保存就把合成条目写进库里。 */
     if let Some(arr) = body.get("items").and_then(|v| v.as_array()) {
         a.items = parse_items(arr);
+    }
+
+    /* ---------------- 看板弹幕（2026-10-19）：部分更新，逐字段合并 ----------------
+    没传 danmaku 整块保持原样；传了就逐字段合并（enabled/top/dailyChampion/
+    contestChampion，缺哪个字段保哪个字段），与 celebrate 的部分更新语义一致。
+    top 越界在 merge_danmaku 里 clamp 回 0..=830（防任意整数进配置）。
+    合并语义抽在纯函数 merge_danmaku，单测直接调它（见 announcement_items_tests）。 */
+    if let Some(d) = body.get("danmaku").and_then(|v| v.as_object()) {
+        merge_danmaku(&mut a.danmaku, d);
     }
 
     // 每次保存都让版本前进，前端据此重新弹出（内容没变也弹，保证运营可主动重发）
@@ -1587,5 +1671,127 @@ mod announcement_items_tests {
                 .expect("旧数据必须能反序列化");
         assert_eq!(legacy.items[0].seat, -1);
         assert!(legacy.items[0].period.is_empty());
+    }
+
+    /* ---------------- 看板弹幕 danmaku 单测（2026-10-19） ---------------- */
+
+    /// ① 默认值：enabled=false（升级后不自动开，运营在后台显式打开）/
+    /// top=712（dock 上方安全带）/ 两个内容开关 true（开关一开就有内容）。
+    #[test]
+    fn danmaku_defaults() {
+        let d = DanmakuConfig::default();
+        assert!(!d.enabled, "默认关闭：升级不得自动开弹幕");
+        assert_eq!(d.top, 712);
+        assert!(d.daily_champion);
+        assert!(d.contest_champion);
+    }
+
+    /// ② top 白名单：normalized_top 与保存端 merge_danmaku 同一 0..=830 clamp。
+    /// 保存路径等价于 POST danmaku {enabled:true, top:900} → GET 回 top==830。
+    #[test]
+    fn danmaku_top_is_clamped_on_both_sides() {
+        // 下发端：normalized_top clamp
+        let mut d = DanmakuConfig::default();
+        d.top = 900;
+        assert_eq!(d.normalized_top(), 830);
+        d.top = -5;
+        assert_eq!(d.normalized_top(), 0);
+        d.top = 712;
+        assert_eq!(d.normalized_top(), 712, "白名单内原样");
+
+        // 保存端：merge_danmaku（update_announcement 的合并内核）同口径
+        let mut cur = DanmakuConfig::default();
+        merge_danmaku(
+            &mut cur,
+            &serde_json::from_str(r#"{"enabled": true, "top": 900}"#).unwrap(),
+        );
+        assert!(cur.enabled);
+        assert_eq!(cur.top, 830, "保存端 top 越界 clamp 回 830");
+
+        // 负数也 clamp；白名单内原样收
+        let mut cur = DanmakuConfig::default();
+        merge_danmaku(&mut cur, &serde_json::from_str(r#"{"top": -1}"#).unwrap());
+        assert_eq!(cur.top, 0);
+        merge_danmaku(&mut cur, &serde_json::from_str(r#"{"top": 390}"#).unwrap());
+        assert_eq!(cur.top, 390);
+    }
+
+    /// ③ 部分更新语义：没传的字段保持原样；非 i64 的 top（浮点/字符串）不碰原值；
+    /// 完全不传 danmaku（旧前端保存）整块原样。
+    #[test]
+    fn danmaku_partial_update_keeps_untouched_fields() {
+        let base = DanmakuConfig {
+            enabled: true,
+            top: 400,
+            daily_champion: false,
+            contest_champion: true,
+        };
+
+        // 只传 contestChampion：其余三字段不动
+        let mut cur = base.clone();
+        merge_danmaku(
+            &mut cur,
+            &serde_json::from_str(r#"{"contestChampion": false}"#).unwrap(),
+        );
+        assert_eq!(
+            (cur.enabled, cur.top, cur.daily_champion, cur.contest_champion),
+            (true, 400, false, false),
+            "没传的字段必须保持原样"
+        );
+
+        // 非法 top 类型（浮点 / 字符串）= 没传，原值保留
+        let mut cur = base.clone();
+        merge_danmaku(
+            &mut cur,
+            &serde_json::from_str(r#"{"top": 390.5}"#).unwrap(),
+        );
+        assert_eq!(cur.top, 400);
+        merge_danmaku(&mut cur, &serde_json::from_str(r#"{"top": "900"}"#).unwrap());
+        assert_eq!(cur.top, 400);
+
+        // update_announcement 不传 danmaku 键 → 整块原样（合并内核根本不被调用，
+        // 这里钉的是「空对象合并 = 无操作」这一语义）
+        let mut cur = base.clone();
+        merge_danmaku(&mut cur, &serde_json::Map::new());
+        assert_eq!(cur, base);
+    }
+
+    /// ④ 旧配置兼容：{"items":[]} 反序列化不报错，danmaku 整块回落默认值；
+    /// serde（save/load 同一形态）roundtrip 无损。
+    #[test]
+    fn old_announcement_json_without_danmaku_defaults_and_roundtrips() {
+        let ann: Announcement = serde_json::from_str(r#"{"items":[]}"#)
+            .expect("旧配置（无 danmaku 字段）必须能反序列化");
+        assert_eq!(ann.danmaku, DanmakuConfig::default());
+        assert!(!ann.danmaku.enabled);
+        assert_eq!(ann.danmaku.top, 712);
+        assert!(ann.danmaku.daily_champion && ann.danmaku.contest_champion);
+
+        // save/load 走 serde derive（snake_case）→ roundtrip 无损
+        let a = Announcement {
+            danmaku: DanmakuConfig {
+                enabled: true,
+                top: 300,
+                daily_champion: true,
+                contest_champion: false,
+            },
+            ..Default::default()
+        };
+        let back: Announcement = serde_json::from_str(&serde_json::to_string(&a).unwrap())
+            .expect("danmaku 存取 roundtrip 必须无损");
+        assert_eq!(back.danmaku, a.danmaku);
+    }
+
+    /// ⑤ 下发形态：to_json（管理端全量）与公开端共用的这个键输出 camelCase
+    /// （enabled/top/dailyChampion/contestChampion），top 走 normalized_top。
+    #[test]
+    fn danmaku_downlink_json_shape() {
+        let mut a = Announcement::default();
+        a.danmaku.top = 9999; // 越界脏数据：下发时 clamp
+        let d = &a.to_json()["danmaku"];
+        assert_eq!(d["enabled"], false);
+        assert_eq!(d["top"], 830, "下发端 top 也要过白名单");
+        assert_eq!(d["dailyChampion"], true);
+        assert_eq!(d["contestChampion"], true);
     }
 }

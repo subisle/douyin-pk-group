@@ -142,6 +142,14 @@ pub async fn public_announcements(State(st): State<ArcState>) -> ApiResult {
         "celebrate": ann.celebrate_public_json(),
         // 展示页公告条（2026-10-14）：与 site.items 同口径，登录门弹出时页面就能兜底渲染
         "items": ann.public_items_json(),
+        // 看板弹幕（2026-10-19）：与 to_json 的 danmaku 同一 camelCase 键
+        // （enabled/top/dailyChampion/contestChampion，top 已按 0..=830 白名单归一）
+        "danmaku": {
+            "enabled": ann.danmaku.enabled,
+            "top": ann.danmaku.normalized_top(),
+            "dailyChampion": ann.danmaku.daily_champion,
+            "contestChampion": ann.danmaku.contest_champion,
+        },
     })))
 }
 
