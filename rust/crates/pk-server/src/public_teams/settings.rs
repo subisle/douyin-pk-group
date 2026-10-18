@@ -397,16 +397,17 @@ pub struct CelebrateConfig {
     pub wave: i64,
 }
 
-/// 看板弹幕（2026-10-19）：展示页榜单上的横向飘字胶囊。
-/// 只允许两种内容：每日冠军（榜单 rank1）与争霸赛冠军（公告条目）；
-/// 位置由 top 指定（390 视口下的轨道 top px，默认 712 = 底部导航上方的安全带）。
+/// 看板弹幕（2026-10-19）：展示页「前三名分数」与「名次/主播」之间的横向飘字胶囊。
+/// 只允许两种内容：每日冠军（榜单 rank1）与争霸赛冠军（公告条目）。
+/// 2026-10-19 第三轮口径：弹幕位置改为**结构性锚定**（嵌在领奖台与榜单表头之间），
+/// `top` 从「屏幕绝对位置」改为**微调偏移量**（-80..=80 px，正=下移，0=自然位）。
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct DanmakuConfig {
-    /// 总开关（false = 展示端完全不渲染弹幕层）
+    /// 总开关（false = 展示端完全不渲染弹幕条）
     #[serde(default)]
     pub enabled: bool,
-    /// 轨道 top（px）。红框位（dock 上方）默认 712；展示端按 style.top 直出
+    /// 位置微调（px，-80..=80）。0 = 前三名与「名次/主播」之间的自然位
     #[serde(default = "danmaku_top_default")]
     pub top: i64,
     /// 显示「每日冠军」（榜单第一名，👑 金胶囊）
@@ -418,15 +419,19 @@ pub struct DanmakuConfig {
 }
 
 pub(super) fn danmaku_top_default() -> i64 {
-    712
+    0
 }
 
 impl DanmakuConfig {
-    /// top 白名单：0..=830 之外 clamp 回边界（防任意整数；830 = 390 视口 dock 上方极限）
+    /// top 白名单：-80..=80 之外 clamp 回边界（防任意整数；超出会盖住分数或表头）
     pub fn normalized_top(&self) -> i64 {
-        self.top.clamp(0, 830)
+        self.top.clamp(DANMAKU_TOP_MIN, DANMAKU_TOP_MAX)
     }
 }
+
+/// 弹幕位置微调边界（px）：负=上移贴分数，正=下移贴表头；再大就压内容了
+pub(super) const DANMAKU_TOP_MIN: i64 = -80;
+pub(super) const DANMAKU_TOP_MAX: i64 = 80;
 
 impl Default for DanmakuConfig {
     /// enabled 默认 false（升级后不自动开，运营在后台显式打开）；
@@ -442,15 +447,15 @@ impl Default for DanmakuConfig {
 }
 
 /// 看板弹幕（2026-10-19）的部分更新内核：`danmaku` 对象 → 逐字段合并进当前配置
-/// （没传的字段保持原样）；top 越界 clamp 回 0..=830 白名单（与 normalized_top
-/// 同一区间）。抽成纯函数与 parse_items 同理由：update_announcement 要 AppState，
-/// 合并语义（clamp / 部分更新）单测直接调它，不起 server。
+/// （没传的字段保持原样）；top 越界 clamp 回 -80..=80（与 normalized_top 同一区间，
+/// 语义是「相对弹幕自然位的微调偏移」）。抽成纯函数与 parse_items 同理由：
+/// update_announcement 要 AppState，合并语义（clamp / 部分更新）单测直接调它，不起 server。
 pub(super) fn merge_danmaku(cur: &mut DanmakuConfig, d: &serde_json::Map<String, Value>) {
     if let Some(v) = d.get("enabled").and_then(|v| v.as_bool()) {
         cur.enabled = v;
     }
     if let Some(v) = d.get("top").and_then(|v| v.as_i64()) {
-        cur.top = v.clamp(0, 830);
+        cur.top = v.clamp(DANMAKU_TOP_MIN, DANMAKU_TOP_MAX);
     }
     if let Some(v) = d.get("dailyChampion").and_then(|v| v.as_bool()) {
         cur.daily_champion = v;
@@ -809,7 +814,7 @@ impl Announcement {
             // 展示页公告条（2026-10-14）：管理端**全量**下发（含 enabled=false，供后台编辑）；
             // 公开前端的裁剪形态走 public_items_json()
             "items": self.all_items_json(),
-            // 看板弹幕（2026-10-19）：top 走 normalized_top 白名单（0..=830）再直出，
+            // 看板弹幕（2026-10-19）：top 走 normalized_top（-80..=80 微调偏移）再直出，
             // 管理端全量与公开裁剪形态（site.rs 的 announcement_json 也走本函数）同一键
             "danmaku": {
                 "enabled": self.danmaku.enabled,
@@ -987,7 +992,7 @@ pub async fn update_announcement(State(st): State<ArcState>, Json(body): Json<Va
     /* ---------------- 看板弹幕（2026-10-19）：部分更新，逐字段合并 ----------------
     没传 danmaku 整块保持原样；传了就逐字段合并（enabled/top/dailyChampion/
     contestChampion，缺哪个字段保哪个字段），与 celebrate 的部分更新语义一致。
-    top 越界在 merge_danmaku 里 clamp 回 0..=830（防任意整数进配置）。
+    top 越界在 merge_danmaku 里 clamp 回 -80..=80（防任意整数进配置）。
     合并语义抽在纯函数 merge_danmaku，单测直接调它（见 announcement_items_tests）。 */
     if let Some(d) = body.get("danmaku").and_then(|v| v.as_object()) {
         merge_danmaku(&mut a.danmaku, d);
@@ -1676,28 +1681,31 @@ mod announcement_items_tests {
     /* ---------------- 看板弹幕 danmaku 单测（2026-10-19） ---------------- */
 
     /// ① 默认值：enabled=false（升级后不自动开，运营在后台显式打开）/
-    /// top=712（dock 上方安全带）/ 两个内容开关 true（开关一开就有内容）。
+    /// top=0（自然位：前三名分数与「名次/主播」之间）/ 两个内容开关 true。
     #[test]
     fn danmaku_defaults() {
         let d = DanmakuConfig::default();
         assert!(!d.enabled, "默认关闭：升级不得自动开弹幕");
-        assert_eq!(d.top, 712);
+        assert_eq!(d.top, 0, "默认偏移 0 = 自然位");
         assert!(d.daily_champion);
         assert!(d.contest_champion);
     }
 
-    /// ② top 白名单：normalized_top 与保存端 merge_danmaku 同一 0..=830 clamp。
-    /// 保存路径等价于 POST danmaku {enabled:true, top:900} → GET 回 top==830。
+    /// ② top 白名单：normalized_top 与保存端 merge_danmaku 同一 -80..=80 clamp
+    /// （2026-10-19 第三轮：top 语义 = 相对「前三名与名次栏之间」自然位的微调偏移）。
+    /// 保存路径等价于 POST danmaku {enabled:true, top:900} → GET 回 top==80。
     #[test]
     fn danmaku_top_is_clamped_on_both_sides() {
         // 下发端：normalized_top clamp
         let mut d = DanmakuConfig::default();
         d.top = 900;
-        assert_eq!(d.normalized_top(), 830);
+        assert_eq!(d.normalized_top(), 80);
+        d.top = -900;
+        assert_eq!(d.normalized_top(), -80);
         d.top = -5;
-        assert_eq!(d.normalized_top(), 0);
-        d.top = 712;
-        assert_eq!(d.normalized_top(), 712, "白名单内原样");
+        assert_eq!(d.normalized_top(), -5);
+        d.top = 24;
+        assert_eq!(d.normalized_top(), 24, "白名单内原样");
 
         // 保存端：merge_danmaku（update_announcement 的合并内核）同口径
         let mut cur = DanmakuConfig::default();
@@ -1706,14 +1714,14 @@ mod announcement_items_tests {
             &serde_json::from_str(r#"{"enabled": true, "top": 900}"#).unwrap(),
         );
         assert!(cur.enabled);
-        assert_eq!(cur.top, 830, "保存端 top 越界 clamp 回 830");
+        assert_eq!(cur.top, 80, "保存端 top 越界 clamp 回 80");
 
-        // 负数也 clamp；白名单内原样收
+        // 区间内原样收、越界 clamp
         let mut cur = DanmakuConfig::default();
         merge_danmaku(&mut cur, &serde_json::from_str(r#"{"top": -1}"#).unwrap());
-        assert_eq!(cur.top, 0);
+        assert_eq!(cur.top, -1);
         merge_danmaku(&mut cur, &serde_json::from_str(r#"{"top": 390}"#).unwrap());
-        assert_eq!(cur.top, 390);
+        assert_eq!(cur.top, 80);
     }
 
     /// ③ 部分更新语义：没传的字段保持原样；非 i64 的 top（浮点/字符串）不碰原值；
@@ -1722,7 +1730,7 @@ mod announcement_items_tests {
     fn danmaku_partial_update_keeps_untouched_fields() {
         let base = DanmakuConfig {
             enabled: true,
-            top: 400,
+            top: 30,
             daily_champion: false,
             contest_champion: true,
         };
@@ -1735,7 +1743,7 @@ mod announcement_items_tests {
         );
         assert_eq!(
             (cur.enabled, cur.top, cur.daily_champion, cur.contest_champion),
-            (true, 400, false, false),
+            (true, 30, false, false),
             "没传的字段必须保持原样"
         );
 
@@ -1743,11 +1751,11 @@ mod announcement_items_tests {
         let mut cur = base.clone();
         merge_danmaku(
             &mut cur,
-            &serde_json::from_str(r#"{"top": 390.5}"#).unwrap(),
+            &serde_json::from_str(r#"{"top": 39.5}"#).unwrap(),
         );
-        assert_eq!(cur.top, 400);
-        merge_danmaku(&mut cur, &serde_json::from_str(r#"{"top": "900"}"#).unwrap());
-        assert_eq!(cur.top, 400);
+        assert_eq!(cur.top, 30);
+        merge_danmaku(&mut cur, &serde_json::from_str(r#"{"top": "90"}"#).unwrap());
+        assert_eq!(cur.top, 30);
 
         // update_announcement 不传 danmaku 键 → 整块原样（合并内核根本不被调用，
         // 这里钉的是「空对象合并 = 无操作」这一语义）
@@ -1764,14 +1772,14 @@ mod announcement_items_tests {
             .expect("旧配置（无 danmaku 字段）必须能反序列化");
         assert_eq!(ann.danmaku, DanmakuConfig::default());
         assert!(!ann.danmaku.enabled);
-        assert_eq!(ann.danmaku.top, 712);
+        assert_eq!(ann.danmaku.top, 0);
         assert!(ann.danmaku.daily_champion && ann.danmaku.contest_champion);
 
         // save/load 走 serde derive（snake_case）→ roundtrip 无损
         let a = Announcement {
             danmaku: DanmakuConfig {
                 enabled: true,
-                top: 300,
+                top: -40,
                 daily_champion: true,
                 contest_champion: false,
             },
@@ -1790,7 +1798,7 @@ mod announcement_items_tests {
         a.danmaku.top = 9999; // 越界脏数据：下发时 clamp
         let d = &a.to_json()["danmaku"];
         assert_eq!(d["enabled"], false);
-        assert_eq!(d["top"], 830, "下发端 top 也要过白名单");
+        assert_eq!(d["top"], 80, "下发端 top 也要过白名单");
         assert_eq!(d["dailyChampion"], true);
         assert_eq!(d["contestChampion"], true);
     }

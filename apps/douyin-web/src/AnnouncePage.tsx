@@ -51,10 +51,10 @@ const EMPTY_CELEBRATE: CelebrateCfg = { enabled: false, confetti: false, title: 
 
 /** 看板弹幕（2026-10-19 后端新增）：展示页榜单上的飘字胶囊。
     后端字段为 { enabled, top: number, dailyChampion, contestChampion }，top 是 390 宽视口下
-    弹幕轨道的 top 像素（后端 clamp 0..830；默认 712 ≈ 底部导航上方）。
+    弹幕位置微调偏移（-80..80；默认 0 = 前三名分数与「名次/主播」之间）。
     与 celebrate.wave 同口径：state 里存字符串方便 number 输入框编辑，保存时转回数字。 */
 type DanmakuCfg = { enabled: boolean; top: string; dailyChampion: boolean; contestChampion: boolean }
-const EMPTY_DANMAKU: DanmakuCfg = { enabled: false, top: '712', dailyChampion: true, contestChampion: true }
+const EMPTY_DANMAKU: DanmakuCfg = { enabled: false, top: '0', dailyChampion: true, contestChampion: true }
 
 /** 展示页公告条（2026-10-14）：可配多条，数组顺序 = 展示端从上到下。
     对应后端 Announcement.items[idx]；tone：brand = 紫金渐变（原庆祝条样式）、
@@ -277,11 +277,11 @@ export default function AnnouncePage() {
         })
         // 看板弹幕初始化（2026-10-19 后端新增）：老后端不下发 danmaku key → 保持 EMPTY
         // 且不标 loaded（保存时不发该字段，同 items 的 itemsLoaded 口径）。两个冠军开关
-        // 只认显式 false（字段缺失按默认开处理），top 缺失兜底 712。
+        // 只认显式 false（字段缺失按默认开处理），top 缺失兜底 0（自然位）。
         if (d.danmaku) {
           setDanmaku({
             enabled: !!d.danmaku.enabled,
-            top: String(d.danmaku.top ?? 712),
+            top: String(d.danmaku.top ?? 0),
             dailyChampion: d.danmaku.dailyChampion !== false,
             contestChampion: d.danmaku.contestChampion !== false,
           })
@@ -400,13 +400,13 @@ export default function AnnouncePage() {
       if (danmakuLoaded) {
         // 看板弹幕（2026-10-19 后端新增，部分更新语义）：只在 GET 下发过 danmaku 才带上，
         // 老后端（不下发该 key）保存时不发，保持「不下发就不回传」的一致性（同 items 口径）。
-        // top 转数字：空 / 非数字兜底 712（默认位置）；后端还会 clamp 0..830，
+        // top 转数字：空 / 非数字兜底 0（自然位）；后端还会 clamp -80..=80，
         // 保存侧只把「改坏成负数」的输入抬回 0，不挡合法值（含 0 本身）。
         // 注意关着也回传 state 里的 top —— 部分更新下带了字段就写库，
-        // 发硬编码 712 会把「关着但自定义过位置」的值悄悄覆盖掉。
+        // 发硬编码 0 会把「关着但自定义过位置」的值悄悄覆盖掉。
         body.danmaku = {
           enabled: dm.enabled,
-          top: Math.max(0, Math.round(Number(dm.top) || 712)),
+          top: Math.max(-80, Math.min(80, Math.round(Number(dm.top) || 0))),
           dailyChampion: !!dm.dailyChampion,
           contestChampion: !!dm.contestChampion,
         }
@@ -878,7 +878,7 @@ export default function AnnouncePage() {
       <section className="card ann-sec">
         <h2 className="ann-sec-head">🎈 看板弹幕</h2>
         <p className="ann-sec-sub">
-          展示页榜单上的飘字胶囊；位置填 390 宽视口下的轨道 top 像素（默认 712 = 底部导航上方）。
+          展示页「前三名分数」与「名次/主播」之间的飘字胶囊；位置可上下微调（默认 0 = 自然位）。
         </p>
         <div
           style={{
@@ -933,16 +933,16 @@ export default function AnnouncePage() {
               />
               显示争霸赛冠军
             </label>
-            {/* 轨道位置：number 输入，state 存字符串（同 celebrate.wave），失焦转数字保存；
-                后端 clamp 0..830，这里只做提示，保存侧兜底见 save() */}
+            {/* 位置微调：number 输入，state 存字符串（同 celebrate.wave），失焦转数字保存；
+                后端 clamp -80..=80，这里只做提示，保存侧兜底见 save() */}
             <label style={{ fontSize: 12.5, color: 'var(--ink3)' }}>
-              弹幕位置 top(px)（0-830，默认 712）
+              位置微调 offset(px)（-80 ~ 80，负=上移，正=下移，默认 0）
               <input
                 type="number"
-                min={0}
-                max={830}
+                min={-80}
+                max={80}
                 value={danmaku.top}
-                placeholder="712"
+                placeholder="0"
                 onChange={(e) => setDanmaku((prev) => ({ ...prev, top: e.target.value }))}
                 onBlur={() => save()}
                 style={input34}

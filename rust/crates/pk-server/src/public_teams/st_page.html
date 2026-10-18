@@ -765,10 +765,17 @@ button { font:inherit; cursor:pointer; }
      不再额外 gap（两个都算会把 dock 撑高到 71，设计稿是 68.5） */
   display:flex; flex-direction:column; align-items:center; justify-content:center;
   transition:color .15s;
+  /* 2026-10-19：设计稿 nav 上是 `touch-none`，按钮也要显式 touch-action:none。
+     <button> 的 UA 默认是 `touch-action: manipulation`（不继承 dock 的 none），
+     浏览器于是把底栏上的横向拖动判成「滚动手势」→ 拖两下就抛 pointercancel，
+     长按拖拽被中断、松手永远走不到磁吸/切页。这里补上与设计稿一致的 touch-none。 */
+  touch-action:none;
   overflow:hidden; border-radius:18px; }
 /* 标签：11px / 500 / slate-600（设计稿 text-[11px] font-medium text-slate-600 mt-0.5） */
-.tabbar button .tab-label { font-size:11px; color:#475569; font-weight:500; margin-top:2px; }
+.tabbar button .tab-label { font-size:11px; color:#475569; font-weight:500; margin-top:2px;
+  touch-action:none; }
 .tabbar button .ic { width:20px; height:20px; display:grid; place-items:center;
+  touch-action:none;
   color:#475569;
   transition:color .15s, transform .15s, filter .15s, opacity .15s; }
 .tabbar button .ic svg { width:20px; height:20px; }
@@ -1212,19 +1219,20 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .st-row-lbl { display:block; font-size:10px; line-height:15px; color:#94A3B8;
   font-variant-numeric:tabular-nums; }
 
-/* ===== 智能安全区避让轨道弹幕（Stitch 玻璃稿 FullScreenDanmakuOverlay 1:1）=====
-    纯文字胶囊横飘层：fixed 全屏容器（430px 居中、z-30、pointer-events 穿透不挡
-    列表滑动）。2026-10-19 口径改版：**单轨道、两条金胶囊** ——
-      · 轨道 top 来自后端配置 danmaku.top（0..830，默认 712 = 底部导航上方红框位），
-        JS 直接内联 style，CSS 不再固定 a/b/c 三个安全位（旧类已删）。
-      · 胶囊一：👑 每日冠军（榜单 rank1，「每日榜首 X万音浪」，开关 danmaku.dailyChampion）
-      · 胶囊二：🏆 争霸赛冠军（公告条目第一条，「title · name」，开关 danmaku.contestChampion，
-        复用 .danmaku-slim-ann 的 delay 2s 与金胶囊错开）
-    旧榜二紫 / 榜三青胶囊随三条轨一并下线（.danmaku-slim-purple/cyan 已删）。
-    总开关 danmaku.enabled=false 时 JS 整层 hidden，CSS 无需感知。 */
-#danmakuLayer { position:fixed; inset:0; max-width:430px; margin:0 auto;
-  overflow:hidden; z-index:30; pointer-events:none; }
-.dm-track { position:absolute; left:0; width:100%; white-space:nowrap; }
+/* ===== 看板弹幕（2026-10-19 第三轮：嵌在「前三名分数」与「名次/主播」之间）=====
+    用户口径：弹幕只放前三名分数下面、名次/主播表头上边 —— 不再做 fixed 全屏轨道。
+    实现：.dm-strip 作为**文档流**元素插在领奖台与榜单之间（高 24px 与胶囊同高，
+    overflow:hidden 裁住横飘；pointer-events:none 不挡滑动），胶囊在其中横向流动。
+    位置微调：后端 danmaku.top 是**偏移量**（-80..80px，正=下移，默认 0=自然位），
+    JS 写成 .dm-strip 的 margin-top（CSS 不写死 top，避免和旧 fixed 语义混淆）。
+    内容只有两条金胶囊：
+      · 👑 每日冠军（榜单 rank1，「每日榜首 X万音浪」，开关 danmaku.dailyChampion）
+      · 🏆 争霸赛冠军（公告第一条 enabled，「title · name」，开关 danmaku.contestChampion，
+        复用 .danmaku-slim-ann 的 delay 2s 错开）
+    总开关 danmaku.enabled=false → renderList 不输出 .dm-strip（零高度占用）。 */
+.dm-strip { position:relative; height:24px; margin:2px 0 0; overflow:hidden;
+  pointer-events:none; }
+.dm-track { position:absolute; left:0; top:0; width:100%; white-space:nowrap; }
 /* 弹幕平滑无限左移流动关键帧（Medium 档） */
 @keyframes danmakuRunMedium { 0% { transform:translateX(108vw); } 100% { transform:translateX(-135%); } }
 /* 胶囊底盘：24px 高超薄通透磨砂玻璃（inline-flex + gap 6px + 左右 padding 10px） */
@@ -2502,10 +2510,6 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
   <div class="err hidden" id="err"></div>
   <div id="view"></div>
   <div class="note" id="foot">数据每晚 24:00 后更新前一天 · 仅供内部参考 · 请勿外传</div>
-  <!-- 智能安全区避让轨道弹幕层（Stitch FullScreenDanmakuOverlay 1:1）：fixed 430px 居中、
-       z-30、pointer-events 穿透。DOM 由 renderDanmaku() 拼装；只在看板（data）视图显示，
-       switchView 切走时收口隐藏（类 hidden 来自全局 .hidden）。 -->
-  <div id="danmakuLayer" class="hidden" aria-hidden="true"></div>
 </main>
 
 <!-- 2026-10-18 第二轮 1:1：定位层上提 —— fixed 外层 + relative nav 双层（对齐设计稿） -->
@@ -3689,67 +3693,58 @@ function renderList() {
     '<div class="st-list-body">' +
       (rows.length ? rows.map(lbRowHtml).join('') : '<div class="empty" style="padding:18px">其余人今天还没有数据</div>') +
     '</div></div>';
+  /* 2026-10-19 第三轮：弹幕条 .dm-strip 作为文档流元素插在「前三名分数」与
+     「名次/主播」表头之间（用户口径：只放这两者之间）。开关关闭时为空串 = 零占用。 */
   const body = rows.length === 0 && !pod
     ? '<div class="empty">' + (key ? '没有匹配「' + esc(key) + '」的主播<br>换个名字试试'
         : '<span class="big">📺</span>这个' + (period === 'daily' ? '日期' : '周期') + '没有可显示的主播<br>换个日期试试') + '</div>'
-    : (pod + listHtml);
+    : (pod + dmStripHtml() + listHtml);
   /* 2026-10-18 第二轮 1:1：看板区块容器用 .st-data（px-4 全宽口径），不再吃
      .section 的通用样式差；其余视图照旧用 .section。 */
   $('view').innerHTML = '<div class="section st-data">' + body + '</div>';
   bindRows();
-  /* 🎈 智能安全区避让轨道弹幕：榜单渲染完顺手挂弹幕层（renderDanmaku 自己带
-     总开关兜底 danmaku.enabled !== true 整层 hidden；登录门 / 三甲通报弹窗 /
-     引导弹窗开着时挂载闸保持 hidden，由各自关闭点补挂）。 */
-  renderDanmaku();
 }
 
-/* ==================== 智能安全区避让轨道弹幕（Stitch 玻璃稿 1:1） ====================
-    2026-10-19 口径改版：**单轨道、两条金胶囊**（榜二/榜三轨已下线）：
-      · 胶囊一 👑 每日冠军：listAll 里 rank===1 且 hasData!==false 的行
-        「👑 {名} · {每{日|月|年}榜首} {X万音浪}」（wave==null 不出数字段；
-        称号随 period 联动照旧）。开关 danmaku.dailyChampion。
-      · 胶囊二 🏆 争霸赛冠军：siteAnnouncements.items 第一条 enabled
-        「🏆 {title} · {name}」（不再最多 2 条）。开关 danmaku.contestChampion。
-        同为金胶囊（danmaku-slim-gold），叠 danmaku-slim-ann 的 delay 2s 错开；
-        第二个胶囊起 dm-ml（80px）错开照旧。
-    位置：单轨 .dm-track，top 来自配置 danmaku.top（clamp 0..830，非法回落 712 =
-    底部导航上方红框位），JS 直接内联 style（CSS 里不再有固定 top 的 a/b/c 轨）。
-    开关：danmaku.enabled !== true（含字段缺失 = 老后端）→ 整层 hidden + 清空。
-    挂载闸：登录门 / 三甲通报弹窗 / 引导弹窗 任一开着 → 保持 hidden 不渲染，
-    由各自关闭点（close 的通报弹窗 / applyLoginSuccess / bootRest 末尾）补挂，
-    杜绝「打开页面弹幕先满屏跑」。幂等：每次调用全量重画 innerHTML。
-    数据：榜单 = listAll（rank1）；公告 = siteAnnouncements.items（enabled 条目）。
-    名字/称号一律过 esc()。 */
-function renderDanmaku() {
-  const layer = $('danmakuLayer');
-  if (!layer) return;
-  /* 总开关：配置缺失（老后端）/ enabled!==true → 不渲染，整层收口 */
+/* ==================== 看板弹幕（2026-10-19 第三轮：嵌在榜三与表头之间） ====================
+    用户口径：「弹幕只放在前三名分数下面即可。名次/主播上边」——不再是 fixed 全屏轨道，
+    改为**文档流里的窄条 .dm-strip**（高 24px，与胶囊同高），由 renderList 插在
+    领奖台与榜单之间；胶囊在条内横向流动，条外 overflow:hidden 裁住。
+       · 胶囊一 👑 每日冠军：listAll 里 rank===1 且 hasData!==false
+         「👑 {名} · {每{日|月|年}榜首} {X万音浪}」（wave==null 不出数字段）
+       · 胶囊二 🏆 争霸赛冠军：siteAnnouncements.items 第一条 enabled
+         「🏆 {title} · {name}」（复用 .danmaku-slim-ann 的 delay 2s 错开）
+    位置微调：后端 danmaku.top 是**偏移量**（-80..80，正=下移，默认 0 = 自然位），
+    写成 .dm-strip 的 margin-top；非数字回落 0。
+    总开关：danmaku.enabled !== true（含老后端缺字段）→ renderList 不输出弹幕条。
+    挂载闸：登录门 / 三甲通报弹窗 / 引导弹窗 任一开着 → 条内保持空（占位不闪），
+    各自关闭时 renderDanmaku() 补挂（幂等）。 */
+function dmCfg() {
   const cfg = (siteAnnouncements && typeof siteAnnouncements === 'object') ? siteAnnouncements : {};
-  const dmk = (cfg.danmaku && typeof cfg.danmaku === 'object') ? cfg.danmaku : {};
-  if (dmk.enabled !== true) { layer.classList.add('hidden'); layer.innerHTML = ''; return; }
-  /* 挂载闸：登录门（#gate 非 hidden）/ 三甲通报弹窗（#itemPopup 存在且非 hidden）/
-     引导弹窗（announceCtx 非空，与 maybeAnnounceItemsPopup 同口径）任一开着 →
-     保持 hidden 并 return，弹窗各自关闭时再补挂（见三处挂载点）。 */
+  const d = (cfg.danmaku && typeof cfg.danmaku === 'object') ? cfg.danmaku : {};
+  return { cfg: cfg, d: d };
+}
+/** 位置偏移：-80..80px（正=下移）；非数字/缺失 → 0 */
+function dmOffset(d) {
+  let t = Number(d.top);
+  if (!isFinite(t)) t = 0;
+  return Math.max(-80, Math.min(80, Math.round(t)));
+}
+/** 挂载闸：登录门 / 三甲通报弹窗 / 引导弹窗 任一开着 → true（弹幕先不出现） */
+function dmGateOpen() {
   const gate = $('gate');
   const popup = $('itemPopup');
-  if ((gate && !gate.classList.contains('hidden')) ||
-      (popup && !popup.classList.contains('hidden')) ||
-      announceCtx) {
-    layer.classList.add('hidden');
-    return;
-  }
-  /* 轨道 top：数字 clamp 到 0..830；非法（非数字）回落 712（底部导航上方红框位） */
-  let top = Number(dmk.top);
-  if (!isFinite(top)) top = 712;
-  top = Math.max(0, Math.min(830, Math.round(top)));
+  return !!((gate && !gate.classList.contains('hidden')) ||
+            (popup && !popup.classList.contains('hidden')) ||
+            announceCtx);
+}
+/** 两条金胶囊的 HTML（数据缺/开关关时对应胶囊为空串） */
+function dmPillsHtml(cfg, d) {
   /* 每日冠军（榜单 rank1，hasData!==false；开关 dailyChampion） */
-  const top1 = dmk.dailyChampion && Array.isArray(listAll)
+  const top1 = d.dailyChampion !== false && Array.isArray(listAll)
     ? listAll.find(x => x && x.hasData !== false && x.rank === 1) : null;
   /* 称号随 period 联动：日榜「每日榜首」、月榜「每月榜首」、年榜「年度榜首」 */
   const unit = period === 'monthly' ? '每月' : period === 'yearly' ? '年度' : '每日';
-  /* 数字格式与榜单一致（wan：万位分段）；wave 为 null（后台隐藏数值）不出数字段 */
   const num = (w) => w == null ? '' : wan(w);
-  /* 每日冠军金胶囊：👑 名 · 称号 音浪（wave==null 时无数字段） */
   const champ = top1
     ? '<span class="danmaku-slim danmaku-slim-gold">' +
         '<span class="dm-ic">👑</span>' +
@@ -3759,9 +3754,8 @@ function renderDanmaku() {
         (top1.wave == null ? '' : '<span class="dm-num">' + num(top1.wave) + '</span>') +
       '</span>'
     : '';
-  /* 争霸赛冠军金胶囊：🏆 title · name（公告 items 第一条 enabled；开关 contestChampion；
-     同金底叠 danmaku-slim-ann 的 delay 2s，前面有榜首胶囊时再补 dm-ml 80px 错开） */
-  const annIt = (dmk.contestChampion && Array.isArray(cfg.items) ? cfg.items : [])
+  /* 争霸赛冠军金胶囊：🏆 title · name（公告 items 第一条 enabled；开关 contestChampion） */
+  const annIt = (d.contestChampion !== false && Array.isArray(cfg.items) ? cfg.items : [])
     .find(it => it && it.enabled);
   const ann = annIt
     ? '<span class="danmaku-slim danmaku-slim-gold danmaku-slim-ann' + (champ ? ' dm-ml' : '') + '">' +
@@ -3771,12 +3765,26 @@ function renderDanmaku() {
         '<span class="dm-tt">' + esc(annIt.name) + '</span>' +
       '</span>'
     : '';
-  /* 两条都空（开关全关 / 数据缺）→ 整层 hidden，不出空轨道 */
-  const pills = champ + ann;
-  if (!pills) { layer.classList.add('hidden'); layer.innerHTML = ''; return; }
-  /* 幂等挂载：单轨全量重画 innerHTML，top 内联（重复调用不残留旧轨道） */
-  layer.innerHTML = '<div class="dm-track" style="top:' + top + 'px">' + pills + '</div>';
-  layer.classList.remove('hidden');
+  return champ + ann;
+}
+/** renderList 用：输出弹幕条（开关关 = 空串，零占用）；挂载闸开着 = 空轨道占位 */
+function dmStripHtml() {
+  const { cfg, d } = dmCfg();
+  if (d.enabled !== true) return '';
+  const pills = dmGateOpen() ? '' : dmPillsHtml(cfg, d);
+  return '<div class="dm-strip" style="margin-top:' + dmOffset(d) + 'px">' +
+    '<div class="dm-track">' + pills + '</div></div>';
+}
+/** 幂等补挂：更新已存在弹幕条里的胶囊（三个关闭点：登录成功 / 通报弹窗关 / bootRest 尾） */
+function renderDanmaku() {
+  const strip = document.querySelector('.dm-strip');
+  if (!strip) return;                      // 非看板 / 弹幕关闭：无事可做
+  const { cfg, d } = dmCfg();
+  if (d.enabled !== true) { strip.remove(); return; }
+  strip.style.marginTop = dmOffset(d) + 'px';
+  const track = strip.querySelector('.dm-track');
+  if (!track) return;
+  track.innerHTML = dmGateOpen() ? '' : dmPillsHtml(cfg, d);
 }
 
 function copyText(t) {
@@ -7022,7 +7030,7 @@ function switchView(v, opts) {
   else mhAnnCollapse();
   /* 🎈 弹幕层只在看板显示：切走统一收口隐藏（挂载点在 renderList → renderDanmaku，
      切回 data 重新渲染榜单时会自动恢复）。 */
-  if (v !== 'data') { const dl = $('danmakuLayer'); if (dl) dl.classList.add('hidden'); }
+  /* 弹幕条随 renderList 一起输出/移除，切视图无需额外收口（2026-10-19 第三轮） */
   show('subnav', v === 'group');
   show('foot', v !== 'lineage');
   syncHeaderOffset();
@@ -9040,7 +9048,7 @@ function dismissAnnounce() {
       ? siteAnnouncements.danmaku : {};
     return {
       enabled: d.enabled === true,
-      top: d.top,
+      top: d.top == null ? 0 : d.top,   // 2026-10-19 第三轮：top 语义=微调偏移（-80..80，默认 0）
       dailyChampion: d.dailyChampion !== false,
       contestChampion: d.contestChampion !== false,
     };
