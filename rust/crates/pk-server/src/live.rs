@@ -1164,52 +1164,51 @@ mod tests {
         }
     }
 
-/* ---------------------- 推送的三层开关（纯逻辑） ---------------------- */
+    /* ---------------------- 推送的三层开关（纯逻辑） ---------------------- */
 
-/// 推送开关的层次判定：任一层关掉就不推。
-/// 这里测的是纯函数口径（与 live::push_round_scores 的判断一致），
-/// 不碰数据库与网络。
-fn push_allowed(global: bool, event: bool, person: bool) -> bool {
-    global && event && person
-}
-
-#[test]
-fn push_requires_all_three_layers() {
-    assert!(push_allowed(true, true, true));
-    assert!(!push_allowed(false, true, true), "总闸关 → 不发");
-    assert!(!push_allowed(true, false, true), "赛事关 → 不发");
-    assert!(!push_allowed(true, true, false), "主播没开 → 不发");
-}
-
-#[test]
-fn push_interval_bounds_are_enforced() {
-    // 与 live_api::update_push 的校验同一口径：10~3600 秒
-    for bad in [0, 1, 9, 3601, 100_000] {
-        assert!(!(10..=3600).contains(&bad), "{bad} 应被拒");
+    /// 推送开关的层次判定：任一层关掉就不推。
+    /// 这里测的是纯函数口径（与 live::push_round_scores 的判断一致），
+    /// 不碰数据库与网络。
+    fn push_allowed(global: bool, event: bool, person: bool) -> bool {
+        global && event && person
     }
-    for ok in [10, 60, 300, 3600] {
-        assert!((10..=3600).contains(&ok), "{ok} 应被接受");
+
+    #[test]
+    fn push_requires_all_three_layers() {
+        assert!(push_allowed(true, true, true));
+        assert!(!push_allowed(false, true, true), "总闸关 → 不发");
+        assert!(!push_allowed(true, false, true), "赛事关 → 不发");
+        assert!(!push_allowed(true, true, false), "主播没开 → 不发");
     }
-}
 
-#[test]
-fn cutoff_score_is_lowest_at_rank() {
-    // 晋级线 = 第 qualify 名的分数（并列时取该名次的分数）
-    let seats = vec![
-        serde_json::json!({"rank": 1, "score": 900}),
-        serde_json::json!({"rank": 2, "score": 800}),
-        serde_json::json!({"rank": 2, "score": 800}),
-        serde_json::json!({"rank": 4, "score": 600}),
-    ];
-    let qualify = 2;
-    let cutoff = seats
-        .iter()
-        .filter(|s| s.get("rank").and_then(|v| v.as_i64()).unwrap_or(0) as i32 == qualify)
-        .filter_map(|s| s.get("score").and_then(|v| v.as_i64()))
-        .min();
-    assert_eq!(cutoff, Some(800), "晋级线是并列第 2 名的分数");
-}
+    #[test]
+    fn push_interval_bounds_are_enforced() {
+        // 与 live_api::update_push 的校验同一口径：10~3600 秒
+        for bad in [0, 1, 9, 3601, 100_000] {
+            assert!(!(10..=3600).contains(&bad), "{bad} 应被拒");
+        }
+        for ok in [10, 60, 300, 3600] {
+            assert!((10..=3600).contains(&ok), "{ok} 应被接受");
+        }
+    }
 
+    #[test]
+    fn cutoff_score_is_lowest_at_rank() {
+        // 晋级线 = 第 qualify 名的分数（并列时取该名次的分数）
+        let seats = vec![
+            serde_json::json!({"rank": 1, "score": 900}),
+            serde_json::json!({"rank": 2, "score": 800}),
+            serde_json::json!({"rank": 2, "score": 800}),
+            serde_json::json!({"rank": 4, "score": 600}),
+        ];
+        let qualify = 2;
+        let cutoff = seats
+            .iter()
+            .filter(|s| s.get("rank").and_then(|v| v.as_i64()).unwrap_or(0) as i32 == qualify)
+            .filter_map(|s| s.get("score").and_then(|v| v.as_i64()))
+            .min();
+        assert_eq!(cutoff, Some(800), "晋级线是并列第 2 名的分数");
+    }
 
     #[test]
     fn rules_default_is_valid() {
