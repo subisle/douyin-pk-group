@@ -725,13 +725,15 @@ button { font:inherit; cursor:pointer; }
   .ip-box { width:calc(100vw - 16px); box-shadow:0 12px 40px rgba(10,3,25,.92), 0 0 30px rgba(245,158,11,.32); }
 }
 
-/* ===== 底部导航（2026-10-18 Stitch 玻璃稿 1:1）：苹果高阶悬浮液态玻璃 Dock =====
-    设计源：.stitch/designs/stitch_streamer_glass_nav/code.html
-    实测（390 视口）：外层 fixed bottom-4 居中、宽 calc(100% - 32px)（上限 398px）、
-    z-40；nav 本体圆角 32、p-1.5（6px）、高 68.5、白 .68 底 + 白 .9 描边 +
-    blur(32px) saturate(200%) + 四段投影（含两段 inset 高光）。
-    态：滑动胶囊 #navPill（86×54.5 圆角 24 + 四层折射装饰）跟随选中项；
-    选中项图标/文字 slate-950（第4项「微信对接」是棕色 #78350F），未选中 slate-400。 */
+/* ===== 底部导航（2026-10-19 最新设计稿）：悬浮白色胶囊 Dock + 液态水滴 =====
+    设计源：Stitch 9879920671738170074 / 2f32c73c9eb745c99ad617e812c6189f
+    「主播数据榜-水滴仅边缘色散质感导航栏」（本地落盘
+    .stitch/designs/stitch_droplet_nav/code.html）。
+    实测（390 视口）：外层 fixed bottom-4 居中、宽 calc(100% - 32px)（上限 398px）、z-40；
+    nav 本体全圆角、p-1.5（6px）、高 68.5、白 .88 底 + 白 .95 描边 +
+    blur(28px) saturate(180%) + shadow-lg 两段投影。
+    选中态：一格宽「液态水滴」#navDrop 停在选中格（纯透明白玻璃 + 最外沿 1.5px
+    conic 色散环），选中图标/文字琥珀 #B45309；未选中 slate-600。 */
 /* 2026-10-18 第二轮 1:1：定位层上提（设计稿 fixed 外层 + relative nav 双层） */
 .tabbar-dock { position:fixed; bottom:16px; left:50%; transform:translateX(-50%);
   width:calc(100% - 32px); max-width:398px; z-index:31; }
@@ -748,10 +750,10 @@ button { font:inherit; cursor:pointer; }
   box-shadow:0 10px 15px -3px rgba(0,0,0,.1), 0 4px 6px -4px rgba(0,0,0,.1);
   -webkit-backdrop-filter:blur(28px) saturate(180%); backdrop-filter:blur(28px) saturate(180%);
   touch-action:none; user-select:none; -webkit-user-select:none;
-  overflow:hidden;
-  transition:transform .2s ease; }
-/* 2026-10-18 第二轮 1:1：定位层上提后，:active 只剩缩放（translateX 归 dock 层） */
-.tabbar:active { transform:scale(.985); }
+  /* 2026-10-19 第四轮：删掉 .tabbar:active 的整条缩放 —— 旧版按下时 dock 会
+     scale(.985)，拖拽过程中 getBoundingClientRect 一直变，水滴跟手会漂；最新
+    设计稿的按压缩放由水滴自身形变承担，dock 保持不动。 */
+  overflow:hidden; }
 /* 2026-10-15 task-11：5 项均分不换行（「微信对接」四字 nowrap 保全文案）。
    2026-10-18 v6：加 overflow:hidden + border-radius —— 触摸光晕（.tab-ripple）
    必须裁在 Tab 格子内，不能溢出到隔壁格子 / dock 外。 */
@@ -779,12 +781,8 @@ button { font:inherit; cursor:pointer; }
   color:#475569;
   transition:color .15s, transform .15s, filter .15s, opacity .15s; }
 .tabbar button .ic svg { width:20px; height:20px; }
-/* 选中（设计稿 renderTabStates）：图标琥珀 + scale(1.12) + 琥珀投影；
-   文字 11/700 琥珀 + tracking-wide */
-.tabbar button.on { color:#B45309; }
-.tabbar button.on .tab-label { color:#B45309; font-weight:700; letter-spacing:.025em; }
-.tabbar button.on .ic { color:#B45309; transform:scale(1.12);
-  filter:drop-shadow(0 1.5px 4px rgba(180,83,9,.2)); }
+/* 选中态 / 水滴 focused·edge 两态的图标文字样式，统一在下方「液态水滴」体系里定义
+   （2026-10-19 第四轮：scale 从旧版的 1.12 改回设计稿的 1.08 + translateY(-.5px)）。 */
 /* ===== 触摸光晕（2026-10-18 v6，用户提示词 1-6 条）=====
    JS 动态创建（不用伪元素 —— 伪元素定位不了「点击坐标」），一个节点一次动画：
      · 圆形 + 径向渐变红光（红→透明，柔和不刺眼）
@@ -804,58 +802,116 @@ button { font:inherit; cursor:pointer; }
 @media (prefers-reduced-motion: reduce) {
   .tab-ripple { transition:opacity .4s ease-out; }
 }
-/* ===== 底部导航胶囊体系（2026-10-18 第三轮：对齐新设计稿「白色胶囊 dock」）=====
-   设计源：.stitch/designs/stitch_streamer_glass_nav/code.html 的 capsule-bottom-dock 体系
-   （dock-capsule-container + ambient-highlight-pill + drag-lens-overlay）。
+/* ===== 底部导航「液态水滴 + 边缘色散」体系（2026-10-19 第四轮）=====
+   设计源：Stitch 项目 9879920671738170074 / 屏幕 2f32c73c9eb745c99ad617e812c6189f
+   （标题「主播数据榜-水滴仅边缘色散质感导航栏」；本地落盘
+   .stitch/designs/stitch_droplet_nav/code.html）。
 
-   为什么整体替换旧「液态镜片」体系（np-frost/np-core/np-lens…）：
-   ① 视觉不对：新设计稿是**白色胶囊 dock + 琥珀色常驻高亮层**，旧体系是灰调玻璃胶囊，
-      用户反馈「底部没达到设计效果」；
-   ② 性能：旧体系在 dock 之上再叠 4 层 backdrop-filter（胶囊 20px + frost 5px + core .8px
-      + 内容副本克隆整页 DOM 后逐元素写 style）。手机 4× CPU 节流实测切页 50ms 长帧；
-      换成新体系后 0 长帧。
-   新体系只有 dock 自身一层 backdrop-filter（28px saturate 180%），胶囊层是全渐变+投影，
-   拖拽浮层只在拖拽中显示（12px backdrop）。 */
-/* 常驻选中高亮层（设计稿 .ambient-highlight-pill）：白→琥珀径向渐变胶囊，
-   位置/宽度由 navPillMove() 按选中项实时算（translateX = 按钮左 - dock 左 - 6） */
-#navPill { position:absolute; top:5px; bottom:5px; left:6px; z-index:5;
-  border-radius:9999px; pointer-events:none;
-  background:radial-gradient(circle at 50% 30%, rgba(255,255,255,.98) 0%, rgba(254,243,199,.5) 60%, rgba(255,255,255,.3) 100%);
-  border:1px solid rgba(255,255,255,.9);
-  box-shadow:0 2px 10px rgba(217,119,6,.12), 0 0 16px rgba(254,240,138,.4),
-    inset 0 1px 2px rgba(255,255,255,1);
-  transition:transform .28s cubic-bezier(.2,.8,.2,1), opacity .15s ease-out;
-  will-change:transform, opacity; }
-/* 拖拽高亮浮层（设计稿 .drag-lens-overlay）：1.5 个图标宽（JS 按实际格子算），
-   三层递进光晕 —— 内层白光贴边、中层琥珀+天蓝弥散、外层大半径速度感应 */
-.nav-lens { position:absolute; top:4px; bottom:4px; left:0; width:92px; z-index:15;
-  border-radius:9999px; pointer-events:none;
-  opacity:0; transform:translateX(0);
-  transition:opacity .14s ease-out;
-  will-change:transform, opacity; }
-.nav-lens.is-active { opacity:1; }
-.nav-lens.is-snapping { transition:transform .3s cubic-bezier(.2,.8,.2,1), opacity .18s ease; }
-/* 第一层（内层）：紧贴浮层边缘的纯净白光 + 微焦糖金核心 */
-.nav-lens-inner { position:absolute; inset:0; border-radius:inherit;
-  background:radial-gradient(circle at 50% 25%, rgba(255,255,255,.98) 0%, rgba(254,243,199,.75) 65%, rgba(255,255,255,.4) 100%);
-  border:1px solid rgba(255,255,255,.95);
-  box-shadow:0 0 6px rgba(255,255,255,.95), 0 0 10px rgba(245,158,11,.35),
-    inset 0 1px 2.5px rgba(255,255,255,1), inset 0 -1px 2px rgba(217,119,6,.15);
-  -webkit-backdrop-filter:blur(12px); backdrop-filter:blur(12px); }
-/* 第二层（中层）：中等模糊的色散环 */
-.nav-lens-mid { position:absolute; inset:-2px; border-radius:inherit;
-  box-shadow:0 0 10px rgba(251,191,36,.45), 0 0 14px rgba(56,189,248,.3);
-  filter:blur(2px); pointer-events:none; }
-/* 第三层（外层）：大半径模糊、低透明度，速度感应动态扩散（JS 改 box-shadow/opacity） */
-.nav-lens-outer { position:absolute; inset:-4px; border-radius:inherit;
-  box-shadow:0 0 20px rgba(245,158,11,.28), 0 0 28px rgba(186,230,253,.25);
-  filter:blur(5px); opacity:.28; pointer-events:none;
-  transition:box-shadow .12s ease-out, opacity .12s ease-out; }
-/* 拖拽中：原选中项整体降透明度到 .35（设计稿 renderTabStates(isDragging) 同口径） */
-.tabbar button.on.is-dim .ic, .tabbar button.on.is-dim .tab-label { opacity:.35; }
-/* 拖拽中：跨在浮层下的图标「半覆盖折射」高亮（设计稿 .is-covered .tab-icon） */
-.tabbar button.is-covered .ic { transform:scale(1.08) translateY(-1px);
-  filter:drop-shadow(0 2px 5px rgba(217,119,6,.3)); }
+   为什么整体替换上一版「琥珀胶囊 + 拖拽大光晕」体系：
+   ① 视觉不对：上一版拖拽时是 1.5 格宽的琥珀大光晕，内部有径向渐变和外发光，还把
+      原选中项压到 opacity .35；最新设计稿要求「清澈通透水滴，色散只出现在最外沿
+      1.5px 轮廓线上，水滴内部零彩光」——用户反馈「拖动的时候和设计图不一致」。
+   ② 结构：设计稿是三层 —— 底层 dock 胶囊（含左右内壁碰撞色散）+ 中层一格宽水滴
+      （#navDrop，跟手/磁吸）+ 顶层图标（水滴内的 focused 琥珀、边缘掠过的 edge）。
+   性能口径：只有 dock 自身一层 backdrop-filter + 水滴 body 一层小面积 backdrop
+   （16px、一格宽），旧体系的 1.5 格大光晕、多层渐变叠加全部移除。 */
+
+/* 内壁碰撞色散霓虹层（设计稿 .dock-wall-dispersion-left/right）：
+   只有拖到左右两端 18px 内才淡入，平时 opacity:0 不参与渲染。 */
+.nav-wall { position:absolute; top:0; bottom:0; width:48px; pointer-events:none;
+  opacity:0; z-index:5;
+  transition:opacity .18s ease-out, transform .18s ease-out; }
+.nav-wall-l { left:0;
+  background:radial-gradient(ellipse at 0% 50%,
+    rgba(255,59,48,.55) 0%, rgba(255,149,0,.48) 22%, rgba(52,199,89,.4) 45%,
+    rgba(0,199,190,.35) 65%, rgba(88,86,214,.3) 82%, transparent 100%);
+  filter:blur(4px); }
+.nav-wall-r { right:0;
+  background:radial-gradient(ellipse at 100% 50%,
+    rgba(255,59,48,.55) 0%, rgba(255,149,0,.48) 22%, rgba(52,199,89,.4) 45%,
+    rgba(0,199,190,.35) 65%, rgba(88,86,214,.3) 82%, transparent 100%);
+  filter:blur(4px); }
+
+/* 水滴滑动宿主（设计稿 .liquid-water-droplet-core）：
+   宽度由 JS 量成一格宽（初始 0，避免首帧在错误位置闪一下）；left:6 / top/bottom:5
+   与设计稿一致。拖拽时去掉 transition 跟手；松手 .is-snapping 走果冻弹性吸附；
+   静止 .is-idle 时水体做 4.5s 表面张力呼吸形变。 */
+#navDrop { position:absolute; top:5px; bottom:5px; left:6px; width:0; z-index:10;
+  pointer-events:none; will-change:transform, width, border-radius;
+  transform-origin:center center;
+  transition:transform .42s cubic-bezier(.19,1,.22,1), border-radius .35s ease-out; }
+#navDrop.is-idle .nav-drop-body { animation:navDropletBreathing 4.5s ease-in-out infinite; }
+#navDrop.is-dragging { transition:none !important; }
+#navDrop.is-snapping {
+  transition:transform .48s cubic-bezier(.175,.885,.32,1.28),
+    border-radius .4s cubic-bezier(.175,.885,.32,1.25); }
+@keyframes navDropletBreathing {
+  0%, 100% { border-radius:52% 48% 50% 50% / 48% 52% 48% 52%; transform:scale(1) translateY(0); }
+  35% { border-radius:48% 52% 47% 53% / 52% 47% 53% 48%; transform:scale(1.02,.98) translateY(-.5px); }
+  70% { border-radius:53% 47% 52% 48% / 49% 53% 47% 51%; transform:scale(.985,1.015) translateY(.5px); }
+}
+/* 内部光斑折射浮动（设计稿 dropletCausticGlint） */
+@keyframes navDropletGlint {
+  0%, 100% { opacity:.85; transform:scale(1) translateX(0); }
+  50% { opacity:1; transform:scale(1.08) translateX(1px); }
+}
+
+/* 水滴主体（设计稿 .droplet-body）：100% 纯粹通透的白色半透水体 + 高透毛玻璃，
+   **内部零彩光、零琥珀渐变、零外发光**（上一版视觉不对的核心就是这些内部光效）。 */
+.nav-drop-body { position:absolute; inset:0; border-radius:9999px;
+  background:rgba(255,255,255,.72);
+  -webkit-backdrop-filter:blur(16px) saturate(140%); backdrop-filter:blur(16px) saturate(140%);
+  border:1.5px solid rgba(255,255,255,.95);
+  box-shadow:0 4px 16px rgba(15,23,42,.06), 0 1px 3px rgba(15,23,42,.04),
+    inset 0 1.5px 2px rgba(255,255,255,.95), inset 0 -1.5px 2px rgba(226,232,240,.5);
+  overflow:hidden;
+  will-change:transform, border-radius, box-shadow;
+  transition:box-shadow .15s ease-out; }
+
+/* 最外层边缘轮廓色散环（设计稿 .droplet-chromatic-ring）：
+   conic 彩虹只画在 1.5px 边框上 —— mask 把内部挖空（content-box xor），
+   保证色散/薄膜干涉只存在于最外沿 rim，绝不向水体内部浸染。 */
+.nav-drop-ring { position:absolute; inset:-1.5px; border-radius:9999px;
+  pointer-events:none; opacity:.35; padding:1.5px;
+  background:conic-gradient(from 180deg at 50% 50%,
+    rgba(255,59,48,.85) 0deg, rgba(255,149,0,.8) 55deg, rgba(255,214,10,.8) 110deg,
+    rgba(52,199,89,.8) 170deg, rgba(0,199,190,.85) 230deg, rgba(0,122,255,.85) 280deg,
+    rgba(175,82,222,.85) 330deg, rgba(255,59,48,.85) 360deg);
+  -webkit-mask:linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite:xor;
+  mask:linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  mask-composite:exclude;
+  box-shadow:0 0 6px rgba(0,199,190,.35), 0 0 2px rgba(255,59,48,.4);
+  filter:blur(.6px);
+  transition:opacity .18s ease-out, box-shadow .18s ease-out;
+  will-change:opacity, box-shadow; }
+
+/* 水膜表面张力顶部极细高光切面（设计稿 .droplet-glint-top） */
+.nav-drop-glint { position:absolute; top:1.5px; left:14%; right:14%; height:4.5px;
+  border-radius:9999px; pointer-events:none; filter:blur(.2px);
+  background:linear-gradient(180deg, rgba(255,255,255,.95) 0%,
+    rgba(255,255,255,.15) 80%, transparent 100%);
+  animation:navDropletGlint 3.6s ease-in-out infinite; }
+/* 水底焦散反折射细弧（设计稿 .droplet-caustic-bottom，保持纯净白色） */
+.nav-drop-caustic { position:absolute; bottom:1.5px; left:20%; right:20%; height:3px;
+  border-radius:9999px; pointer-events:none; filter:blur(.4px);
+  background:radial-gradient(ellipse at 50% 100%, rgba(255,255,255,.75) 0%, transparent 80%); }
+
+/* 顶层图标状态（设计稿 .dock-tab-btn 两态）：
+   · focused（水滴内部）：琥珀 #B45309 + scale(1.08) translateY(-.5px) + 琥珀投影；
+   · edge（水滴边缘掠过）：slate-700 #334155 + scale(1.02)；
+   · 其余回默认 slate-600。
+   拖拽中 dock 挂 .is-droplet-dragging —— 此时旧的 .on 常亮必须失效，否则被水滴
+   甩开的老选中项还是琥珀，和设计稿「焦点跟随水滴」不一致。 */
+.tabbar:not(.is-droplet-dragging) button.on .tab-label { color:#B45309; font-weight:700; letter-spacing:.025em; }
+.tabbar:not(.is-droplet-dragging) button.on .ic { color:#B45309; transform:scale(1.08) translateY(-.5px);
+  filter:drop-shadow(0 1.5px 4px rgba(180,83,9,.2)); }
+.tabbar button.is-droplet-focused .tab-label { color:#B45309; font-weight:700; letter-spacing:.025em; }
+.tabbar button.is-droplet-focused .ic { color:#B45309; transform:scale(1.08) translateY(-.5px);
+  filter:drop-shadow(0 1.5px 4px rgba(180,83,9,.2)); }
+.tabbar button.is-droplet-edge .ic { color:#334155; transform:scale(1.02); filter:none; }
+.tabbar button.is-droplet-edge .tab-label { color:#475569; font-weight:500; letter-spacing:0; }
+
 /* 微信未读角标（设计稿 #wechat-badge）：rose→red 渐变、15 高、白色 1.5px 描边环 */
 .wx-badge { position:absolute; top:-6px; right:-10px; z-index:30;
   min-width:15px; height:15px; padding:0 4px; border-radius:9999px;
@@ -873,11 +929,11 @@ button { font:inherit; cursor:pointer; }
 .tabbar button .ic { position:relative; }
 
 @media (prefers-reduced-motion: reduce) {
-  #navPill { transition:none; }
-  .nav-lens, .nav-lens.is-snapping { transition:none; }
+  #navDrop, #navDrop.is-snapping { transition:none; }
+  #navDrop.is-idle .nav-drop-body { animation:none; }
+  .nav-drop-glint { animation:none; }
   .wx-badge.wx-badge-pop { animation:none; }
 }
-
 /* 工具栏（口径 + 日期 + 搜索）—— 2026-10-18 Stitch 1:1：
     不再是「毛玻璃吸顶通条」，而是普通文档流里的一块（设计稿 toolbar 无背景无边框），
     左右各 16px 内边距、上限 560px 居中。内含两块：
@@ -2521,16 +2577,21 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 <!-- 2026-10-18 第二轮 1:1：定位层上提 —— fixed 外层 + relative nav 双层（对齐设计稿） -->
 <div class="tabbar-dock">
 <nav class="tabbar" id="navRow" aria-label="主导航">
-  <!-- 2026-10-18 第三轮：底栏改新设计稿「白色胶囊 dock」体系（替换旧的液态镜片体系）：
-       · #navPill = 常驻选中高亮层（ambient-highlight-pill，白→琥珀径向渐变）
-       · #navLens = 可拖拽高亮浮层（drag-lens-overlay，1.5 个图标宽 + 三层递进光晕）
-       旧体系（np-frost/np-core/np-lens 内容副本 + 4 层 backdrop）是切页卡顿根因
-       （4× CPU 节流实测 50ms 长帧，去掉后 0），且与新设计稿不一致，整体移除。 -->
-  <div id="navPill" aria-hidden="true"></div>
-  <div class="nav-lens" id="navLens" aria-hidden="true">
-    <div class="nav-lens-outer" id="navLensOuter"></div>
-    <div class="nav-lens-mid"></div>
-    <div class="nav-lens-inner"></div>
+  <!-- 2026-10-19 第四轮：底栏换最新设计稿「液态水滴 + 边缘色散」体系
+       （旧 #navPill 琥珀胶囊 + #navLens 1.5 格大光晕移除）：
+       · #navWallL/#navWallR —— 左右内壁碰撞色散霓虹（拖到两端才淡入）
+       · #navDrop —— 一格宽水滴宿主（静止停在选中格；拖拽跟手；松手磁吸）
+       · #navDropRing —— 1.5px 空心 conic 彩虹轮廓（mask 挖空内部：色散只允许在边缘）
+       · #navDropBody —— 纯透明白玻璃水体（内部零彩光；顶部水膜高光 + 底部焦散弧）
+       交互口径不变：长按拖拽 → 松手才切路由；普通短按不切页。 -->
+  <div class="nav-wall nav-wall-l" id="navWallL" aria-hidden="true"></div>
+  <div class="nav-wall nav-wall-r" id="navWallR" aria-hidden="true"></div>
+  <div id="navDrop" class="is-idle" aria-hidden="true">
+    <div class="nav-drop-ring" id="navDropRing"></div>
+    <div class="nav-drop-body" id="navDropBody">
+      <div class="nav-drop-glint"></div>
+      <div class="nav-drop-caustic"></div>
+    </div>
   </div>
   <button data-v="data" id="navData" class="on">
     <span class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><rect x="7" y="13" width="3" height="5" rx="1"/><rect x="12" y="9" width="3" height="9" rx="1"/><rect x="17" y="5" width="3" height="13" rx="1"/></svg></span><span class="tab-label">看板</span></button>
@@ -3877,7 +3938,7 @@ async function loadData() {
 
 function renderDates() {
   /* 2026-10-18：日期条重渲染后布局可能变化，底栏/分段滑块顺带对齐一次 */
-  try { navPillMove(); stSegMove(); } catch (e) {}
+  try { navDropMove(); stSegMove(); } catch (e) {}
   const dates = (site && site.dates) || [];
   let prevM = '';
   $('dates').innerHTML = dates.map(d => {
@@ -6612,59 +6673,135 @@ window.addEventListener('resize', syncHeaderOffset);
 function syncNavActive() {
   const key = (view === 'my' && mySub === 'wechat') ? 'wechat' : view;
   document.querySelectorAll('[data-v]').forEach(b => b.classList.toggle('on', b.dataset.v === key));
-  navPillMove();     // 2026-10-18：选中态变了 → 液态胶囊滑到新位置
+  navDropMove();     // 2026-10-19：选中态变了 → 液态水滴滑到新位置
 }
 
-/* ==================== 底部胶囊 Dock（2026-10-18 第三轮：新设计稿体系） ====================
-   结构（设计稿 capsule-bottom-dock 同构）：
-     · #navPill —— 常驻选中高亮层（白→琥珀径向渐变），absolute top/bottom 5px + left 6px，
-       宽度 = 选中格宽度，translateX = 按钮左 - dock 左 - 6（设计稿 JS 同口径）
-     · #navLens —— 拖拽高亮浮层（1.5 格宽），按下拖拽时淡入跟手，松手磁吸吸附到最近格
-   性能口径：只有 dock 一层 backdrop-filter；胶囊/浮层都是纯渐变+投影，不做内容副本、
-   不挂 MutationObserver —— 旧体系的整页克隆在手机上是切页卡顿的直接原因。
-   ⚠️ 隐藏的按钮（后台关掉的视图 / 关登录后的「我的」）宽度是 0，不能当目标：
-      只取可见按钮（offsetParent 非空）算位置。 */
+/* ==================== 底部「液态水滴 + 边缘色散」Dock（2026-10-19 第四轮） ====================
+   设计源：Stitch 项目 9879920671738170074 / 屏幕 2f32c73c9eb745c99ad617e812c6189f
+   （「主播数据榜-水滴仅边缘色散质感导航栏」，本地落盘
+   .stitch/designs/stitch_droplet_nav/code.html 的 #liquid-water-droplet 体系）。
+
+   结构（与设计稿同构）：
+     · #navWallL/#navWallR —— 左右内壁碰撞色散霓虹层（拖到两端 <18px 才淡入）
+     · #navDrop           —— 一格宽水滴宿主（top/bottom:5px、left:6px；transform 跟手）
+     · #navDropRing       —— 1.5px 空心 conic 彩虹环（mask-composite 挖空内部：
+                             色散/薄膜干涉只允许出现在最外沿轮廓线上）
+     · #navDropBody       —— 白 .72 + blur(16px) saturate(140%) 通透水体，内部零彩光
+   手势（2026-10-19 用户口径，保持不变）：仅「长按 150ms 或横移 >5px → 拖拽 → 松手」
+   切路由，普通短按不切；松手磁吸最近格（340ms 弹性回弹）后合成 click 走 activate()。
+   拖拽时水滴按速度拉伸/压扁/skew、贴壁挤压变色；跨格时图标 focused（琥珀）/edge
+   （slate-700）两态，不再把原选中项压暗（旧 .is-dim/.is-covered 已删除）。
+   ⚠️ 隐藏按钮宽度 0，只取可见按钮（navVisibleTabs）参与定位。
+   ⚠️ 旧体系（#navPill 琥珀胶囊 + #navLens 1.5 格大光晕 + .is-dim/.is-covered）
+      就是「拖动时和设计图不一致」的直接原因：内部琥珀渐变、大面积外发光、原选中项
+      被压到 35% 透明 —— 设计稿要求的是「清澈水滴 + 仅边缘色散 + 焦点图标琥珀」。 */
+
+/** 当前可见的底栏格子（后台关掉的视图按钮 offsetParent 为空，宽度 0 不参与定位） */
 function navVisibleTabs() {
   return [...document.querySelectorAll('#navRow button[data-v]')]
     .filter(b => b.offsetParent !== null);
 }
-/** 把常驻高亮层移到第 index 个可见按钮下（instant=true 不加过渡，用于初始化/resize） */
-function navPillTo(index, instant) {
-  const pill = $('navPill'), dock = $('navRow');
-  if (!pill || !dock) return;
+
+/** 水滴基础宽度 = 一格宽；字体/视口/可见项数量变化后都要重新量 */
+let navDropW = 86;
+/** 水滴当前 translateX（相对 dock 左边界；CSS left:6 + translateX = 实际左沿） */
+let navDropX = 0;
+/** 是否正在拖拽：拖拽期间 resize/syncNavActive 不能把水滴拉回选中格（见 navDropMove） */
+let navDropDragging = false;
+function navDropGeometry() {
+  const drop = $('navDrop');
   const tabs = navVisibleTabs();
-  if (!tabs.length) { pill.style.width = '0px'; return; }
-  const i = Math.max(0, Math.min(tabs.length - 1, index));
-  const t = tabs[i];
-  const dr = dock.getBoundingClientRect(), tr = t.getBoundingClientRect();
-  if (instant) pill.style.transition = 'none';
-  const wpx = tr.width + 'px';
-  if (pill.style.width !== wpx) pill.style.width = wpx;
-  pill.style.transform = 'translateX(' + (tr.left - dr.left - 6) + 'px)';
-  if (instant) {
-    /* 强制回流后再恢复过渡，避免初始化那一下播动画 */
-    void pill.offsetWidth;
-    pill.style.transition = '';
+  if (!drop) return false;
+  if (!tabs.length) { drop.style.width = '0px'; return false; }
+  navDropW = Math.round(tabs[0].getBoundingClientRect().width);
+  drop.style.width = navDropW + 'px';
+  return true;
+}
+
+/** 第 idx 个可见格 → 水滴 translateX（设计稿同口径：按钮左 - dock 左 - 6） */
+function navDropXOf(idx) {
+  const dock = $('navRow'), tabs = navVisibleTabs();
+  if (!dock || !tabs.length) return 0;
+  const i = Math.max(0, Math.min(tabs.length - 1, idx));
+  const dr = dock.getBoundingClientRect(), tr = tabs[i].getBoundingClientRect();
+  return tr.left - dr.left - 6;
+}
+
+/** 水滴当前中心（dock 坐标）：left:6px + translateX + 半格宽 */
+function navDropCenter() {
+  return 6 + navDropX + navDropW / 2;
+}
+
+/** 内壁色散层复位（平时完全透明） */
+function navDropHideWalls() {
+  const l = $('navWallL'), r = $('navWallR');
+  if (l) { l.style.opacity = '0'; l.style.transform = 'scale(1)'; }
+  if (r) { r.style.opacity = '0'; r.style.transform = 'scale(1)'; }
+}
+
+/** 水滴形态复位：圆角/缩放/色散环/内壁霓虹（place 与 snap 结束共用） */
+function navDropResetMorph() {
+  const body = $('navDropBody'), ring = $('navDropRing');
+  if (body) { body.style.borderRadius = '9999px'; body.style.transform = 'scale(1, 1)'; }
+  if (ring) {
+    ring.style.borderRadius = '9999px';
+    ring.style.transform = 'scale(1, 1)';
+    ring.style.opacity = '.35';
+    ring.style.boxShadow = '0 0 6px rgba(0,199,190,.35), 0 0 2px rgba(255,59,48,.4)';
   }
+  navDropHideWalls();
 }
-/** 按当前选中态定位高亮层（syncNavActive / resize / 登录后导航变化都调它） */
-function navPillMove(instant) {
+
+/** 顶层图标态（设计稿 applyDropletMorphAndDispersion 末段同口径）：
+    水滴中心距格中心 ≤ 0.45 半格 → focused（琥珀加粗放大）
+    ≤ 1.05 半格 → edge（slate-700 微放大），其余回默认 slate-600。
+    拖拽中 dock 会挂 .is-droplet-dragging，CSS 里让 .on 不再常量高亮
+    （否则被水滴甩开的老选中项还是琥珀，正是旧实现视觉不对的另一半原因）。 */
+function navDropPaintTabs() {
+  const dock = $('navRow');
+  if (!dock) return;
+  const dr = dock.getBoundingClientRect();
+  const center = navDropCenter();
+  const half = navDropW / 2;
+  navVisibleTabs().forEach((tab) => {
+    const tr = tab.getBoundingClientRect();
+    const tc = (tr.left - dr.left) + tr.width / 2;
+    const dist = Math.abs(center - tc);
+    tab.classList.remove('is-droplet-focused', 'is-droplet-edge');
+    if (dist <= half * .45) tab.classList.add('is-droplet-focused');
+    else if (dist <= half * 1.05) tab.classList.add('is-droplet-edge');
+  });
+}
+
+/** 水滴位置/形态动画的定时器（place 的 idle 复位 + 松手后的 snap 收尾） */
+const navDropTimers = { idle: 0, snap: 0 };
+
+/** 把水滴放到第 index 个可见格（animate=true 走弹性吸附过渡，false 立即落位） */
+function navDropPlace(index, animate) {
+  const drop = $('navDrop');
+  if (!drop || !navDropGeometry()) return;
   const tabs = navVisibleTabs();
-  const on = tabs.findIndex(b => b.classList.contains('on'));
-  navPillTo(on < 0 ? 0 : on, instant === true);
+  const i = Math.max(0, Math.min(tabs.length - 1, index));
+  navDropX = navDropXOf(i);
+  drop.classList.remove('is-dragging');
+  drop.classList.toggle('is-snapping', animate === true);
+  navDropResetMorph();
+  drop.style.transform = 'translateX(' + navDropX + 'px)';
+  navDropPaintTabs();
+  clearTimeout(navDropTimers.idle);
+  navDropTimers.idle = setTimeout(() => {
+    drop.classList.remove('is-snapping');
+    drop.classList.add('is-idle');
+  }, animate === true ? 480 : 60);
 }
-/** 2026-10-19 用户口径：底栏**只有**「长按 + 拖拽 + 松手」才切换路由；
-    普通短按（tap）不切页。
-    实现要点：底栏按钮在 bootRest 里被挂了原生 onclick → switchView，
-    一次普通 tap 会同时走「手势逻辑（已改成不切）+ 原生 click（会切）」，
-    所以必须有闸门：只有拖拽落位时合成的 click（activate 内）才放行。
-    标记位由 activate() 置 true、click 同步执行完立刻置回 false。 */
-let navDragCommitted = false;
-/** 判断一次 click 是不是「底栏拖拽落位」放行的（供 bootRest 的 onclick 闸门用） */
-function navDragAllowsSwitch(btn) {
-  if (!navDragCommitted) return false;
-  /* 只认底栏内的按钮；页面里其它 [data-v] 入口（子导航/深链）不受本闸门影响 */
-  return !!(btn && btn.closest && btn.closest('#navRow'));
+
+/** 按当前选中态（.on）定位水滴 —— syncNavActive / resize / 渲染后都会调它。
+    拖拽中必须跳过：resize（含截图工具/横竖屏变化）或页面重渲染若把水滴拉回
+    老选中格，松手时的「最近格」就会算错，直接导致拖到 B 却切回 A。 */
+function navDropMove(instant) {
+  if (navDropDragging) return;
+  navCurIdx = navIndexRefresh();
+  navDropPlace(navCurIdx, instant !== true);
 }
 
 /** 当前选中项在可见按钮里的序号（拖拽落位用） */
@@ -6676,125 +6813,147 @@ function navIndexRefresh() {
   navCurIdx = on < 0 ? 0 : on;
   return navCurIdx;
 }
-/** 拖拽初始化：绑在 dock 上（touch + mouse 双通道），与点击互不干扰 */
-/** 底栏手势初始化（2026-10-18 第三轮：对齐新设计稿 initCapsuleDock 手势）
-    2026-10-19 交互口径变更（用户点名）：**只有「长按 + 拖拽 + 松手」才切换路由**，
-    普通短按/单击不再切页（设计稿原本还有一条「短点击立刻切页」的分支，已按本口径删除）。
-    · 短按（<150ms 且位移 <5px）→ **不切页**：常驻高亮层留在原处，只清拖拽态残影
-    · 长按 150ms 或横移 >5px → 进入拖拽：常驻高亮淡出、拖拽浮层淡入跟手；
-      浮层跨在哪个图标上，那个图标就 .is-covered（放大 + 琥珀投影）；
-      外发光随滑动速度动态扩散（速度感应）
-    · 松手 → 磁吸到最近的 Tab 中心（.is-snapping 过渡），然后激活该页（唯一切路由入口） */
-function initNavDock() {
-  const dock = $('navRow'), pill = $('navPill'), lens = $('navLens'), outer = $('navLensOuter');
-  if (!dock || !pill) return;
-  let pressed = false, dragMode = false, pressT = 0, startX = 0, startY = 0;
-  let lastX = 0, lastTime = 0, velocity = 0, longPressTimer = null, lensX = 0;
 
-  /** 浮层宽度 = 1.5 个图标格（设计稿 LENS_WIDTH=92 是 4 格时的值，这里按实际格宽算，
-      5 格（含族谱）时也保持「1.5 格」的比例关系） */
-  function lensWidth() {
-    const tabs = navVisibleTabs();
+/** 底栏按钮点击闸门（2026-10-19 用户口径）：
+    底栏**只有**「长按 + 拖拽 + 松手」才切换路由；普通短按（tap）不切页。
+    实现在 bootRest 里给底栏按钮挂了原生 onclick → switchView，一次普通 tap 会同时走
+    「手势逻辑（不切）+ 原生 click（会切）」，所以必须闸住：只有拖拽落位合成的 click
+    （activate 内）才放行。标记位由 activate() 置 true、click 同步执行完立刻置回。 */
+let navDragCommitted = false;
+
+/** 判断一次 click 是不是「底栏拖拽落位」放行的（供 bootRest 的 onclick 闸门用） */
+function navDragAllowsSwitch(btn) {
+  if (!navDragCommitted) return false;
+  /* 只认底栏内的按钮；页面里其它 [data-v] 入口（子导航/深链）不受本闸门影响 */
+  return !!(btn && btn.closest && btn.closest('#navRow'));
+}
+
+/** 底栏手势初始化（对齐设计稿 initLiquidWaterDropletDock 的物理参数）
+    · 短按（<150ms 且位移 <5px）→ **不切页**：水滴留在原处（视觉上明确「没切换」）
+    · 长按 150ms 或横移 >5px → 进入拖拽：水滴跟手、速度感应形变、贴壁色散；
+      跨格时图标 focused/edge 两态
+    · 松手 → 磁吸最近格（340ms 果冻回弹）→ 合成 click 激活该页（唯一切路由入口） */
+function initNavDock() {
+  const dock = $('navRow'), drop = $('navDrop'), body = $('navDropBody'), ring = $('navDropRing');
+  if (!dock || !drop) return;
+  let pressed = false, dragMode = false, pressT = 0, startX = 0, startY = 0;
+  let lastX = 0, lastTime = 0, velocity = 0, longPressTimer = null;
+
+  const vibrate = (ms) => { try { if ('vibrate' in navigator) navigator.vibrate(ms); } catch (e) {} };
+
+  /** 拖拽跟手 + 速度感应形变 + 内壁碰撞色散（设计稿物理参数逐值搬过来） */
+  function applyMorph(targetX, dockWidth) {
+    const v = Math.max(-2.5, Math.min(2.5, velocity));
+    const absV = Math.abs(v);
+    const dir = v >= 0 ? 1 : -1;
+    /* 速度越快：横向拉伸越多、纵向压扁越多；方向决定 skew 与流体圆角朝向 */
+    const stretchX = 1 + Math.min(.42, absV * .22);
+    const squashY = Math.max(.82, 1 - absV * .12);
+    const minX = 4, maxX = Math.max(minX, dockWidth - navDropW - 4);
+    const distL = targetX - minX, distR = maxX - targetX;
+    let leftW = 0, rightW = 0, wallSquashX = 1;
+    if (distL < 18) { leftW = Math.max(0, (18 - distL) / 18); wallSquashX = 1 - leftW * .22; }
+    else if (distR < 18) { rightW = Math.max(0, (18 - distR) / 18); wallSquashX = 1 - rightW * .22; }
+    /* 内壁霓虹：撞到左/右墙才亮，越近越亮 */
+    const wl = $('navWallL'), wr = $('navWallR');
+    if (wl) { wl.style.opacity = (leftW * .95).toFixed(2); wl.style.transform = 'scale(' + (1 + leftW * .25).toFixed(3) + ')'; }
+    if (wr) { wr.style.opacity = (rightW * .95).toFixed(2); wr.style.transform = 'scale(' + (1 + rightW * .25).toFixed(3) + ')'; }
+    /* 流体圆角/形变：贴壁优先，其次按速度方向拉伸 */
+    let br = '9999px';
+    if (leftW > .15) br = '28% 72% 70% 30% / 40% 60% 60% 40%';
+    else if (rightW > .15) br = '72% 28% 30% 70% / 60% 40% 40% 60%';
+    else if (absV > .08) br = dir > 0 ? '35% 65% 62% 38% / 44% 56% 56% 44%' : '65% 35% 38% 62% / 56% 44% 44% 56%';
+    const tf = 'scale(' + (stretchX * wallSquashX).toFixed(3) + ', ' + squashY.toFixed(3) + ')' +
+      ' skewX(' + (dir * Math.min(8, absV * 4)).toFixed(1) + 'deg)';
+    if (body) { body.style.borderRadius = br; body.style.transform = tf; }
+    /* 色散只在边缘激发：速度/贴壁越大，外沿细辉光越亮、扩散越大；内部始终不染色 */
+    if (ring) {
+      ring.style.borderRadius = br;
+      ring.style.transform = tf;
+      const alpha = Math.min(1, .35 + absV * .4 + (leftW + rightW) * .5);
+      ring.style.opacity = alpha.toFixed(2);
+      const spread = (2 + (leftW + rightW) * 5 + absV * 3).toFixed(1);
+      ring.style.boxShadow = '0 0 ' + spread + 'px rgba(0,199,190,.45), 0 0 2px rgba(255,59,48,.6)';
+    }
+    navDropPaintTabs();
+  }
+
+  /** 拖拽位置：按手指 x 居中，夹在 dock 内（设计稿 minX=4 / maxX=宽-格宽-4） */
+  function updateDrop(clientX) {
     const dr = dock.getBoundingClientRect();
-    if (!tabs.length) return 92;
-    return Math.round((dr.width / tabs.length) * 1.5);
+    const minX = 4, maxX = Math.max(minX, dr.width - navDropW - 4);
+    navDropX = Math.max(minX, Math.min(maxX, (clientX - dr.left) - navDropW / 2));
+    drop.style.transform = 'translateX(' + navDropX.toFixed(1) + 'px)';
+    applyMorph(navDropX, dr.width);
   }
-  /** 第 idx 格距 dock 左边的中心横坐标 */
-  function tabCenter(idx) {
-    const tabs = navVisibleTabs();
-    const dr = dock.getBoundingClientRect();
-    const tr = tabs[idx].getBoundingClientRect();
-    return tr.left - dr.left + tr.width / 2;
+
+  /** 进入拖拽：水滴立刻切到跟手态（常驻 .is-idle 呼吸动画暂停） */
+  function enterDrag(clientX) {
+    if (dragMode) return;
+    dragMode = true;
+    clearTimeout(navDropTimers.idle);
+    navDropDragging = true;
+    drop.classList.remove('is-idle', 'is-snapping');
+    drop.classList.add('is-dragging');
+    dock.classList.add('is-droplet-dragging');
+    vibrate(12);
+    updateDrop(clientX);
   }
-  /** 距浮层中心最近的 Tab 序号 */
-  function nearestTab() {
-    const tabs = navVisibleTabs();
-    if (!tabs.length) return 0;
-    const center = lensX + lensWidth() / 2;
-    let best = 0, min = Infinity;
-    tabs.forEach((_, i) => {
-      const d = Math.abs(center - tabCenter(i));
-      if (d < min) { min = d; best = i; }
-    });
-    return best;
-  }
-  function clearCovered() {
-    navVisibleTabs().forEach(t => t.classList.remove('is-covered'));
-  }
+
   /** 激活某格的页面（走按钮 click = switchView 一条链路，路由/数据都齐）。
       2026-10-19：底栏只认「长按拖拽 → 松手」这一条切路由链路（短按不切），
-      所以这里在合成 click 前先置 navDragCommitted 闸门标记，让 bootRest 里挂在
-      底栏按钮上的原生 onclick 放行这一次；其余（普通 tap 触发的原生 click）
-      一律被闸门拦下，不切页。 */
+      所以合成 click 前先置 navDragCommitted 闸门标记，让 bootRest 里挂在底栏按钮上的
+      原生 onclick 放行这一次；其余普通 tap 触发的原生 click 一律被闸门拦下。 */
   function activate(idx) {
-    const tabs = navVisibleTabs();
-    const t = tabs[idx];
+    const t = navVisibleTabs()[idx];
     if (!t) return;
     navDragCommitted = true;
     try { t.click(); } finally { navDragCommitted = false; }
   }
-  /** 进入拖拽模式：常驻高亮淡出、浮层淡入 */
-  function enterDrag(clientX) {
-    if (dragMode) return;
-    dragMode = true;
-    pill.style.opacity = '0';
-    /* 原选中项降透明（设计稿 isDragging 口径） */
-    const onTab = navVisibleTabs().find(t => t.classList.contains('on'));
-    if (onTab) onTab.classList.add('is-dim');
-    if (lens) {
-      lens.classList.remove('is-snapping');
-      lens.classList.add('is-active');
-      lens.style.width = lensWidth() + 'px';
-    }
-    updateLens(clientX);
-  }
-  /** 跟手更新浮层位置 + 速度感应外发光 + 半覆盖图标高亮 */
-  function updateLens(clientX) {
-    if (!lens) return;
+
+  /** 松手磁吸：找最近格 → 340ms 果冻回弹 → 合成 click 切页 → 复位常驻水滴 */
+  function finishSnap() {
     const dr = dock.getBoundingClientRect();
-    const lw = lensWidth();
-    const minX = 4, maxX = Math.max(minX, dr.width - lw - 4);
-    lensX = Math.max(minX, Math.min(maxX, (clientX - dr.left) - lw / 2));
-    lens.style.transform = 'translateX(' + lensX.toFixed(1) + 'px)';
-    /* 速度感应：滑动越快外发光越大越亮（设计稿 outerBlur = 20 + speed*4.5） */
-    const speed = Math.min(3, Math.abs(velocity));
-    if (outer) {
-      const blur = 20 + speed * 4.5;
-      const alpha = Math.min(.55, .28 + speed * .1);
-      outer.style.opacity = alpha.toFixed(2);
-      outer.style.boxShadow = '0 0 ' + blur.toFixed(1) + 'px rgba(245,158,11,' + alpha.toFixed(2) + '),' +
-        '0 0 ' + (blur * 1.3).toFixed(1) + 'px rgba(186,230,253,' + (alpha * .8).toFixed(2) + ')';
-    }
-    /* 半覆盖：浮层与某格重叠 >18px → 该图标放大高亮（设计稿 is-covered 口径） */
-    const lensL = lensX, lensR = lensX + lw;
-    navVisibleTabs().forEach((tab) => {
+    const center = navDropX + 6 + navDropW / 2;
+    let best = 0, min = Infinity;
+    navVisibleTabs().forEach((tab, i) => {
       const tr = tab.getBoundingClientRect();
-      const tl = tr.left - dr.left, trr = tl + tr.width;
-      const overlap = Math.max(0, Math.min(lensR, trr) - Math.max(lensL, tl));
-      tab.classList.toggle('is-covered', overlap > 18);
+      const tc = (tr.left - dr.left) + tr.width / 2;
+      const d = Math.abs(center - tc);
+      if (d < min) { min = d; best = i; }
     });
-  }
-  /** 松手：磁吸到最近格 → 淡出浮层 → 恢复常驻高亮 → 激活页面 */
-  function finishAndSnap() {
-    const idx = nearestTab();
-    if (lens) {
-      lens.classList.add('is-snapping');
-      const lw = lensWidth();
-      lens.style.transform = 'translateX(' + (tabCenter(idx) - lw / 2).toFixed(1) + 'px)';
+    const snapX = navDropXOf(best);
+    navDropX = snapX;
+    drop.classList.remove('is-dragging');
+    drop.classList.add('is-snapping');
+    drop.style.transform = 'translateX(' + snapX + 'px)';
+    /* 吸附瞬间：水球横向收、纵向弹（设计稿 58/58/54/54 果冻形变） */
+    const jelly = '58% 58% 54% 54% / 52% 52% 48% 48%';
+    if (body) { body.style.borderRadius = jelly; body.style.transform = 'scale(.92, 1.08)'; }
+    if (ring) {
+      ring.style.borderRadius = jelly;
+      ring.style.transform = 'scale(.92, 1.08)';
+      ring.style.opacity = '.5';
     }
-    setTimeout(() => {
-      if (lens) { lens.classList.remove('is-active', 'is-snapping'); }
-      pill.style.opacity = '1';
-      clearCovered();
-      navVisibleTabs().forEach(t => t.classList.remove('is-dim'));
-      activate(idx);
-      navPillMove(false);   // 高亮层滑到新选中项（幂等；switchView 内 syncNavActive 也会调）
+    navDropHideWalls();
+    vibrate(15);
+    clearTimeout(navDropTimers.snap);
+    navDropTimers.snap = setTimeout(() => {
+      navDropResetMorph();
+      drop.classList.remove('is-snapping');
+      drop.classList.add('is-idle');
+      navDropDragging = false;   // 先清拖拽标志：activate → syncNavActive → navDropMove 要能落位
+      activate(best);            // 唯一的路由切换入口（合成 click，过 navDragCommitted 闸门）
+      navDropMove(true);         // 与 switchView 内 syncNavActive 幂等；立即落位避免二次动画
+      dock.classList.remove('is-droplet-dragging');
       resetState();
-    }, 260);
+    }, 340);
   }
+
   function resetState() {
-    pressed = false; dragMode = false;
+    pressed = false; dragMode = false; navDropDragging = false;
     if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
+    dock.classList.remove('is-droplet-dragging');
   }
 
   function onDown(e) {
@@ -6809,13 +6968,14 @@ function initNavDock() {
       if (pressed && !dragMode) enterDrag(startX);
     }, 150);
   }
+
   function onMove(e) {
     if (!pressed) return;
     const p0 = e.touches && e.touches[0] ? e.touches[0] : e;
     const x = p0.clientX || 0;
     const now = performance.now();
     const dt = Math.max(1, now - lastTime);
-    velocity = velocity * .5 + ((x - lastX) / dt) * .5;
+    velocity = velocity * .4 + ((x - lastX) / dt) * .6;
     lastX = x; lastTime = now;
     if (!dragMode && Math.abs(x - startX) > 5) {
       if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
@@ -6823,24 +6983,25 @@ function initNavDock() {
     }
     if (dragMode) {
       if (e.cancelable) e.preventDefault();
-      updateLens(x);
+      updateDrop(x);
     }
   }
+
   function onUp(e) {
     if (!pressed) return;
     if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
     if (!dragMode) {
       /* 短按（含「按住了但没到 150ms / 没挪够 5px」）—— 按 2026-10-19 用户口径**不切页**：
-         常驻高亮层 #navPill 留在原处，清掉可能残留的拖拽态（.is-dim / .is-covered），
-         视觉上明确「这次点击没有切换路由」。切路由只认走完长按拖拽的那条链路。 */
-      clearCovered();
-      navVisibleTabs().forEach(t => t.classList.remove('is-dim'));
-      pill.style.opacity = '1';
+         水滴原地不动，清掉可能残留的拖拽态，视觉上明确「这次点击没有切换路由」。
+         切路由只认走完长按拖拽的那条链路。 */
+      navDropResetMorph();
+      drop.classList.remove('is-dragging');
+      drop.classList.add('is-idle');
       resetState();
       return;
     }
-    /* 拖拽中松手：磁吸到最近格 → 淡出浮层 → 恢复常驻高亮 → 激活目标页（唯一切路由入口） */
-    finishAndSnap();
+    /* 拖拽中松手：磁吸到最近格 → 回弹 → 激活目标页（唯一切路由入口） */
+    finishSnap();
   }
 
   if (window.PointerEvent) {
@@ -6858,11 +7019,11 @@ function initNavDock() {
     window.addEventListener('mouseup', onUp);
   }
 
-  // 初始化对齐：字体/布局稳定后量一次（load + resize + 两拍兜底）
-  const align = () => navPillMove(true);
+  // 初始化对齐：字体/布局稳定后量一次（load + resize + 两拍兜底 + ResizeObserver）
+  const align = () => navDropMove(true);
   window.addEventListener('load', align);
   window.addEventListener('resize', align);
-  const ro = window.ResizeObserver ? new ResizeObserver(() => navPillMove(true)) : null;
+  const ro = window.ResizeObserver ? new ResizeObserver(() => navDropMove(true)) : null;
   if (ro) ro.observe(dock);
   setTimeout(align, 60);
   setTimeout(align, 400);
@@ -7026,7 +7187,7 @@ function switchView(v, opts) {
      隐藏期间 stSegMove 算出来的宽度是 0，不补一次滑块就永远是 2px。 */
   if (v === 'data') requestAnimationFrame(() => { try { stSegMove(true); } catch (e) {} });
   /* 底栏胶囊同理：隐藏的导航按钮（后台关掉的视图）不参与定位，这里再对齐一次 */
-  requestAnimationFrame(() => { try { navPillMove(true); } catch (e) {} });
+  requestAnimationFrame(() => { try { navDropMove(true); } catch (e) {} });
   /* 📣 头部公告行 #mhAnn 显隐（2026-10-17，任务口径 e 选「switchView 控制显隐」）：
      mhAnn 在 masthead 里是全局的，公告挂数据看板 —— 非数据视图统一收口：停轮换 +
      清行 + hidden；数据视图按 mhAnnQueue 原样恢复（不等网络，bootRest 静默刷新 /
@@ -9112,7 +9273,7 @@ async function bootRest() {
     switchView(r.view, { push: false });
   });
   document.querySelectorAll('#seg button').forEach(b => b.onclick = () => setPeriod(b.dataset.p));
-  /* 2026-10-18 Stitch 玻璃稿：初始化两个滑动胶囊（底栏液态玻璃 dock + 日/月/年白玻分段）。
+  /* 2026-10-19 最新设计稿：初始化底栏液态水滴 dock（+ 日/月/年白玻分段滑块）。
      放在 bootRest 里而不是 IIFE 里 —— 此时导航按钮的 disable/hidden 已经按后台开关
      定好了，量到的宽度才是真的（关掉的视图按钮宽度 0，不能参与定位）。 */
   try { initNavDock(); } catch (e) { /* 不影响主流程 */ }

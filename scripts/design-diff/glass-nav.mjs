@@ -128,7 +128,10 @@ const PROBES = [
   { sec: '榜单', name: 'st-row-wv', design: '.glass-card .text-right .font-black', local: ['.st-row-wv'], props: ['font-size', 'font-family', 'font-weight'] },
   { sec: '榜单', name: 'st-row-lbl', design: '.glass-card .text-\\[10px\\]', local: ['.st-row-lbl'], props: ['font-size', 'color'] },
 
-  // ── 底栏 nav（2026-10-18 第三轮：新设计稿白色胶囊 dock 体系） ──
+  // ── 底栏 nav（2026-10-18 第三轮：白色胶囊 dock 体系） ──
+  // ⚠️ 2026-10-19 第四轮起底栏换成「液态水滴 + 边缘色散」（Stitch 9879920671738170074 /
+  //    2f32c73c…），#navPill/#navLens 已删除；下面的底栏探针只对旧设计稿有效，
+  //    新底栏对照请用 scripts/design-diff/droplet-nav.mjs（80 字段 + 拖拽自检）。
   { sec: '底栏', name: 'navRow 容器', design: '#capsule-bottom-dock', local: ['#navRow'], props: ['border-radius', 'padding', 'background-color', 'border', 'box-shadow', 'backdrop-filter', 'height'] },
   { sec: '底栏', name: 'nav 外层定位', design: '#capsule-bottom-dock', local: ['#navRow'], props: ['position', 'bottom', 'left', 'width', 'max-width', 'z-index'] },
   // 按钮层：只比布局与继承字号/内边距（颜色由当前选中态决定，选中/未选中分别在下面两个探针里比）
