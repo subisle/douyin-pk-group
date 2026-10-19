@@ -1294,12 +1294,12 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
     内容只有两条金胶囊：
       · 👑 每日冠军（榜单 rank1，「每日榜首 X万音浪」，开关 danmaku.dailyChampion）
       · 🏆 争霸赛冠军（公告第一条 enabled，「title · name」，开关 danmaku.contestChampion，
-        复用 .danmaku-slim-ann 的 delay 2s 错开）
+        复用 .danmaku-slim-ann 的延迟错开）
     总开关 danmaku.enabled=false → renderList 不输出 .dm-strip（零高度占用）。 */
 .dm-strip { position:relative; height:24px; margin:2px 0 0; overflow:hidden;
   pointer-events:none; }
 .dm-track { position:absolute; left:0; top:0; width:100%; white-space:nowrap; }
-/* 弹幕平滑无限左移流动关键帧（Medium 档） */
+/* 弹幕平滑无限左移流动关键帧（2026-10-20 提速档：更快进入视野） */
 @keyframes danmakuRunMedium { 0% { transform:translateX(108vw); } 100% { transform:translateX(-135%); } }
 /* 胶囊底盘：24px 高超薄通透磨砂玻璃（inline-flex + gap 6px + 左右 padding 10px） */
 .danmaku-slim { display:inline-flex; align-items:center; gap:6px; padding:0 10px;
@@ -1314,10 +1314,10 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
    = 屏幕右侧外），到期后从右边平稳滚进来，全程看不见「先静止再跳」。 */
 .danmaku-slim-gold { background:linear-gradient(90deg, rgba(255,255,255,.88) 0%, rgba(254,243,199,.78) 100%);
   border:.5px solid rgba(245,158,11,.35);
-  animation:danmakuRunMedium 15s linear infinite; animation-delay:.5s;
+  animation:danmakuRunMedium 10s linear infinite; animation-delay:.15s;
   animation-fill-mode:backwards; }
 /* 争霸赛冠军胶囊：同金底但 delay 2s（与榜首的 .5s 错开，不用 ml 也盖得住） */
-.danmaku-slim-ann { animation-delay:2s; }
+.danmaku-slim-ann { animation-delay:.75s; }
 /* 同轨第二个胶囊起 80px 错开（设计稿 ml-20） */
 .danmaku-slim.dm-ml { margin-left:80px; }
 /* 胶囊内文字：emoji 11 / 名字 10.5 黑体黑 / 中点 9 / 称号 10 粗 / 数字 10.5 黑 mono */
@@ -3852,7 +3852,7 @@ function renderList() {
        · 胶囊一 👑 每日冠军：listAll 里 rank===1 且 hasData!==false
          「👑 {名} · {每{日|月|年}榜首} {X万音浪}」（wave==null 不出数字段）
        · 胶囊二 🏆 争霸赛冠军：siteAnnouncements.items 第一条 enabled
-         「🏆 {title} · {name}」（复用 .danmaku-slim-ann 的 delay 2s 错开）
+         「🏆 {title} · {name}」（复用 .danmaku-slim-ann 的延迟错开）
     位置微调：后端 danmaku.top 是**偏移量**（-80..80，正=下移，默认 0 = 自然位），
     写成 .dm-strip 的 margin-top；非数字回落 0。
     总开关：danmaku.enabled !== true（含老后端缺字段）→ renderList 不输出弹幕条。
