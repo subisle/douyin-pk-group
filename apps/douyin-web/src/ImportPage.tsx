@@ -6,6 +6,8 @@ type Row = {
   name: string
   wave?: number | null
   cumulativeWave?: number | null
+  /** 时长（分钟）：按日文件带「开播有效时长」列时才有（当日时长）；按月导入是整月时长。
+   *  按日导入现在会写进 daily_metric.minutes（2026-10-19 口径）。 */
   minutes?: number | null
   isLive?: boolean | null
   douyinNo?: string | null
@@ -25,12 +27,12 @@ type CommitReport = {
   /** 已建档但当天一行数值都没有：跳过（不算失败，缺数据报告会跟踪） */
   skipped?: string[]
   missing: string[]
-  /** 按月导入：本次写入的整月时长（分钟）合计 */
+  /** 本次写入的时长（分钟）合计：按月 = 整月时长；按日 = 当日时长合计 */
   minutesTotal?: number
   /** 按月导入：本次写入的整月音浪合计 */
   waveTotal?: number
   period?: string
-  /** 按日导入时文件里的「时长」列被忽略的行数（时长只按月导入） */
+  /** 兼容字段：后端按日口径统一后恒为 0（按日导入已支持写时长） */
   droppedMinutes?: number
 }
 
@@ -266,6 +268,8 @@ export default function ImportPage() {
   /** 文件里实际带了多少行时长 / 音浪（默认勾选与提示都看它；勾选框还能再改） */
   const monthMinutesRows = monthRows.filter((r) => r.minutes != null).length
   const monthWaveRows = monthRows.filter((r) => r.wave != null).length
+  /** 按日预览：文件里有人带「开播有效时长」（minutes）才渲染「当日时长」列，老文件版式不变 */
+  const dailyMinutesRows = rows.filter((r) => r.minutes != null).length
   /** 预览表格列：文件里有、或被勾选的指标列才渲染（只导时长就不显示音浪列） */
   const showMinutes = monthMinutesRows > 0 || monthMetrics.minutes
   const showWave = monthWaveRows > 0 || monthMetrics.wave
@@ -708,15 +712,17 @@ export default function ImportPage() {
                 （月榜 / 个人月卡以它为准）
               </div>
             )}
-            {!!report.droppedMinutes && (
+            {/* 按日导入现在也写时长（daily_metric.minutes）：文件带「开播有效时长」列时给个合计，
+                文件没有时长列时后端保留库里旧值，minutesTotal 为 0，这里不显示。 */}
+            {!report.period && (report.minutesTotal ?? 0) > 0 && (
               <div>
-                ⏱️ 文件里有 {report.droppedMinutes} 行的「时长」列已忽略：<b>按日导入不写时长，时长只按月导</b>
-                —— 要导时长请切到「按月导入（时长 / 音浪）」。
+                ⏱️ 本次写入时长合计 <b>{hourText(report.minutesTotal ?? 0)}</b>
+                （按日写入 daily_metric，日榜 / 日报 / 展示端当日时长立刻生效）
               </div>
             )}
             {!!report.unchanged && (
               <div>
-                ♻️ 另有 {report.unchanged} 行{report.period ? '整月值（时长 / 音浪）' : '音浪值'}与库里完全相同，未覆盖（改过的值才会覆盖）
+                ♻️ 另有 {report.unchanged} 行{report.period ? '整月值（时长 / 音浪）' : '音浪 / 时长值'}与库里完全相同，未覆盖（改过的值才会覆盖）
               </div>
             )}
             {/* 导入结果里的「另有 N 行已暂存」一行已移除（2026-10-14 用户口径：
@@ -1086,6 +1092,8 @@ export default function ImportPage() {
                       <th>#</th>
                       <th>名字</th>
                       <th>当日音浪</th>
+                      {/* 文件里有人带「开播有效时长」才显示这一列；没有时长列的旧文件版式不变 */}
+                      {dailyMinutesRows > 0 && <th>当日时长(x时x分)</th>}
                       <th>累计音浪</th>
                       <th>抖音号</th>
                       <th>开播</th>
@@ -1097,6 +1105,9 @@ export default function ImportPage() {
                         <td className="hint">{i + 1}</td>
                         <td>{r.name}</td>
                         <td className="num">{r.wave ?? '—'}</td>
+                        {dailyMinutesRows > 0 && (
+                          <td className="num">{r.minutes == null ? '—' : hourText(r.minutes)}</td>
+                        )}
                         <td className="num">{r.cumulativeWave ?? '—'}</td>
                         <td>{r.douyinNo ?? r.anchorId ?? '—'}</td>
                         <td>{r.isLive == null ? '—' : r.isLive ? '开播' : '未开播'}</td>

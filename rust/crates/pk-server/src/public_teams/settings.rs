@@ -8,15 +8,28 @@ use super::*;
 /// 每个公开接口都要读它，进程内缓存 30s，save 时立即刷新缓存）
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PublicSettings {
+    #[serde(default = "default_true")]
     pub male_enabled: bool,
+    #[serde(default = "default_true")]
     pub female_enabled: bool,
+    #[serde(default = "default_true")]
     pub daily: bool,
+    #[serde(default = "default_true")]
     pub monthly: bool,
+    #[serde(default = "default_true")]
     pub yearly: bool,
+    #[serde(default = "default_true")]
     pub duration: bool,
+    #[serde(default = "default_true")]
     pub trend: bool,
-    /// 每日报告的音浪数值（2026-10-09）：关掉后榜单不下发任何数字，名次/名次变动照常
+    /// 每日报告的音浪数值（2026-10-09）：关掉后所有公开口径（日/月/年/个人）的
+    /// wave / totalWave 一律置空，名次/名次变动照常。
+    #[serde(default = "default_true")]
     pub wave: bool,
+    /// 未播天数显隐（2026-10-19）：日/月/年榜的 absentDays 同受此开关控制。
+    /// 老配置没有该键时按 true（保持历史行为）。
+    #[serde(default = "default_true")]
+    pub absent_days: bool,
     /// 每日报告页显隐（2026-10-10）：关掉后接口不下发榜单、导航整体消失
     #[serde(default = "default_true")]
     pub data_enabled: bool,
@@ -30,6 +43,17 @@ pub struct PublicSettings {
     /// 关掉的类型子导航消失，该类型子页按「暂未公布」处理。
     #[serde(default)]
     pub group_types: std::collections::HashMap<String, bool>,
+    /// 预估收益口径（2026-10-19）：展示端「我的」页与「我的抖音号」把音浪折成人民币时用的
+    /// **主播分成比例**（百分数，35 = 35%）。抖音的分成不是固定值（个人主播约 30%，公会
+    /// 主播按公会等级 30%~55%，2026 年起又改成任务制弹性分成），所以这里可配，
+    /// 不再在前端硬编码 35%。
+    #[serde(default = "default_share_pct")]
+    pub share_pct: i64,
+    /// 预估收益口径（2026-10-19）：提现/平台手续费比例（百分数，0 = 不扣）。抖音侧实际扣费
+    /// 不固定（提现单笔手续费、平台技术服务费、个税都可能是不同口径），这里只给一个可配的
+    /// 估算比例，前端按「分成后 ×（1 - 手续费）」估到手。
+    #[serde(default)]
+    pub fee_pct: i64,
     /// 是否开启登录门（2026-10-10）：关 = 全面开放，打开就能看（但没有「我的」页）；
     /// 开 = 全站要登录（现状）
     #[serde(default = "default_true")]
@@ -38,6 +62,21 @@ pub struct PublicSettings {
 
 pub(super) fn default_true() -> bool {
     true
+}
+
+/// 分成比例缺省 35%（历史硬编码值；老配置没有该键时保持原行为）。
+pub(super) fn default_share_pct() -> i64 {
+    35
+}
+
+/// 分成 / 手续费比例的合法区间（百分数，含端点）。越界一律按缺省值回落，
+/// 绝不让一个负数或 300% 的脏配置把「预估到手」算成负数。
+pub(super) fn clamp_pct(v: i64, fallback: i64) -> i64 {
+    if (0..=100).contains(&v) {
+        v
+    } else {
+        fallback
+    }
 }
 
 /// 分组页/子页显隐的过滤口径（public::plans 用）：页关 → 全部不发；
@@ -86,6 +125,95 @@ mod settings_tests {
         s.group_types.insert("月终争霸赛".into(), true);
         assert!(plan_visible_by_settings(&s, "初级争霸赛小组赛"));
     }
+
+    /// 老配置没有 absent_days 键时按 true 迁移，不能因为新增字段把整份设置解析失败。
+    #[test]
+    pub(super) fn old_settings_default_absent_days_on() {
+        let mut v = serde_json::to_value(PublicSettings::default()).unwrap();
+        let obj = v.as_object_mut().unwrap();
+        obj.remove("absent_days");
+        obj.remove("duration");
+        obj.remove("wave");
+        let parsed: PublicSettings = serde_json::from_value(v).unwrap();
+        assert!(
+            parsed.absent_days && parsed.duration && parsed.wave,
+            "老配置缺字段只按字段级默认 true，不能把整份设置回落成别的值"
+        );
+    }
+
+    /// 管理端/展示端共用的 JSON 必须把三个字段开关都下发；关掉时必须明确为 false。
+    #[test]
+    pub(super) fn public_settings_json_has_metric_field_switches() {
+        let mut s = PublicSettings::default();
+        s.duration = false;
+        s.wave = false;
+        s.absent_days = false;
+        let v = s.to_json();
+        assert_eq!(v["duration"], false);
+        assert_eq!(v["wave"], false);
+        assert_eq!(v["absentDays"], false);
+    }
+
+    /// `wave=false` 的兜底清洗：每日之星/冠军横幅/公告条里的 wave 都要置空，
+    /// 但不误伤非 wave 字段。
+    #[test]
+    pub(super) fn hide_wave_numbers_is_recursive_and_narrow() {
+        let mut v = serde_json::json!({
+            "star": {"name": "A", "wave": 123},
+            "items": [{"title": "冠军", "wave": 456, "text": "keep"}],
+            "waveEnabled": false
+        });
+        hide_wave_numbers(&mut v);
+        assert!(v["star"]["wave"].is_null());
+        assert!(v["items"][0]["wave"].is_null());
+        assert_eq!(v["items"][0]["text"], "keep");
+        assert_eq!(v["waveEnabled"], false);
+    }
+
+    /// 预估收益口径（2026-10-19）：老配置没有 sharePct/feePct 时按 35% / 0% 迁移，
+    /// 保持「前端硬编码 35%」时代的旧行为，不因为新增字段把整份设置解析失败。
+    #[test]
+    pub(super) fn old_settings_default_share_and_fee() {
+        let mut v = serde_json::to_value(PublicSettings::default()).unwrap();
+        let obj = v.as_object_mut().unwrap();
+        obj.remove("share_pct");
+        obj.remove("fee_pct");
+        let parsed: PublicSettings = serde_json::from_value(v).unwrap();
+        assert_eq!(parsed.share_pct, 35, "缺省仍是历史硬编码的 35%");
+        assert_eq!(parsed.fee_pct, 0);
+        assert_eq!(clamp_pct(parsed.share_pct, default_share_pct()), 35);
+    }
+
+    /// 脏配置（负数 / 超 100%）一律夹回缺省：不能让「预估到手」算成负数或放大数倍。
+    #[test]
+    pub(super) fn earnings_pct_clamps_dirty_values() {
+        assert_eq!(clamp_pct(-5, 35), 35);
+        assert_eq!(clamp_pct(300, 35), 35);
+        assert_eq!(clamp_pct(101, 35), 35);
+        assert_eq!(clamp_pct(0, 35), 0, "0% 是合法值（分成全归平台）");
+        assert_eq!(clamp_pct(100, 35), 100);
+        // 下发 JSON 里也必须是夹过的值，前端拿到的永远是合法百分数
+        let mut s = PublicSettings::default();
+        s.share_pct = 999;
+        s.fee_pct = -3;
+        let v = s.to_json();
+        assert_eq!(v["sharePct"], 35);
+        assert_eq!(v["feePct"], 0);
+    }
+
+    #[test]
+    pub(super) fn period_enabled_follows_each_tab_switch() {
+        let mut s = PublicSettings::default();
+        assert!(s.period_enabled("daily"));
+        assert!(s.period_enabled("monthly"));
+        assert!(s.period_enabled("yearly"));
+        s.daily = false;
+        assert!(!s.period_enabled("daily"));
+        s.monthly = false;
+        assert!(!s.period_enabled("monthly"));
+        s.yearly = false;
+        assert!(!s.period_enabled("yearly"));
+    }
 }
 
 impl Default for PublicSettings {
@@ -99,10 +227,13 @@ impl Default for PublicSettings {
             duration: true,
             trend: true,
             wave: true,
+            absent_days: true,
             data_enabled: true,
             group_enabled: true,
             lineage_enabled: true,
             group_types: Default::default(),
+            share_pct: default_share_pct(),
+            fee_pct: 0,
             login_required: true,
         }
     }
@@ -115,6 +246,30 @@ pub(super) static PS_CACHE: std::sync::OnceLock<
 pub(super) fn ps_cache() -> &'static std::sync::Mutex<Option<(PublicSettings, std::time::Instant)>>
 {
     PS_CACHE.get_or_init(std::sync::Mutex::default)
+}
+
+/// 把任意公开 DTO 里的 `wave` 数值递归置空。用于站点头部的每日之星、冠军横幅、
+/// 公告条/庆祝等「非榜单」数据：`PublicSettings.wave=false` 时它们同样不能成为
+/// 绕过榜单闸门的数值出口。只动键名恰好为 `wave` 的值，不动 `wave: false` 这类
+/// 开关本身（调用方只把数据对象传进来）。
+pub(super) fn hide_wave_numbers(v: &mut Value) {
+    match v {
+        Value::Object(map) => {
+            for (k, child) in map.iter_mut() {
+                if k == "wave" {
+                    *child = Value::Null;
+                } else {
+                    hide_wave_numbers(child);
+                }
+            }
+        }
+        Value::Array(rows) => {
+            for child in rows {
+                hide_wave_numbers(child);
+            }
+        }
+        _ => {}
+    }
 }
 
 impl PublicSettings {
@@ -146,6 +301,15 @@ impl PublicSettings {
         }
     }
 
+    /// 某个公开周期页签是否开放；非法/空 period 按 daily 处理（与 lineage_window 同口径）。
+    pub(super) fn period_enabled(&self, period: &str) -> bool {
+        match period {
+            "monthly" => self.monthly,
+            "yearly" => self.yearly,
+            _ => self.daily,
+        }
+    }
+
     pub(super) fn team_enabled(&self, team: &str) -> bool {
         match team {
             // 2026-10-11 起首页是不分男女的展示端：all 一次读全量数据。
@@ -171,10 +335,13 @@ impl PublicSettings {
             "duration": self.duration,
             "trend": self.trend,
             "wave": self.wave,
+            "absentDays": self.absent_days,
             "dataEnabled": self.data_enabled,
             "groupEnabled": self.group_enabled,
             "lineageEnabled": self.lineage_enabled,
             "groupTypes": self.group_types,
+            "sharePct": clamp_pct(self.share_pct, default_share_pct()),
+            "feePct": clamp_pct(self.fee_pct, 0),
             "loginRequired": self.login_required,
         })
     }
@@ -224,6 +391,15 @@ pub async fn update_settings(State(st): State<ArcState>, Json(body): Json<Value>
     s.duration = flag("duration", s.duration);
     s.trend = flag("trend", s.trend);
     s.wave = flag("wave", s.wave);
+    // 兼容两种请求写法：新管理端用 absentDays，旧脚本/手工请求可能用 snake_case。
+    s.absent_days = flag("absentDays", flag("absent_days", s.absent_days));
+    // 预估收益口径（2026-10-19）：传了才改，且强制夹到 0..=100（脏值回落缺省，
+    // 不让负数 / 300% 这类脏配置把「预估到手」算成负数）。
+    let pct = |key: &str, cur: i64, fallback: i64| -> i64 {
+        clamp_pct(body.get(key).and_then(|v| v.as_i64()).unwrap_or(cur), fallback)
+    };
+    s.share_pct = pct("sharePct", s.share_pct, default_share_pct());
+    s.fee_pct = pct("feePct", s.fee_pct, 0);
     s.data_enabled = flag("dataEnabled", s.data_enabled);
     s.group_enabled = flag("groupEnabled", s.group_enabled);
     s.lineage_enabled = flag("lineageEnabled", s.lineage_enabled);
@@ -259,6 +435,8 @@ pub async fn update_settings(State(st): State<ArcState>, Json(body): Json<Value>
         }
     }
     s.save(&st).await;
+    /* 图片字段 / 每日之星等设置变化后，旧榜单图缓存必须作废。 */
+    crate::push::clear_daily_image_cache();
     crate::events::emit(crate::events::SCOPE_SETTINGS, "公开站点设置已更新");
     Ok(Json(json!({ "ok": true, "settings": s.to_json() })))
 }
@@ -1742,17 +1920,19 @@ mod announcement_items_tests {
             &serde_json::from_str(r#"{"contestChampion": false}"#).unwrap(),
         );
         assert_eq!(
-            (cur.enabled, cur.top, cur.daily_champion, cur.contest_champion),
+            (
+                cur.enabled,
+                cur.top,
+                cur.daily_champion,
+                cur.contest_champion
+            ),
             (true, 30, false, false),
             "没传的字段必须保持原样"
         );
 
         // 非法 top 类型（浮点 / 字符串）= 没传，原值保留
         let mut cur = base.clone();
-        merge_danmaku(
-            &mut cur,
-            &serde_json::from_str(r#"{"top": 39.5}"#).unwrap(),
-        );
+        merge_danmaku(&mut cur, &serde_json::from_str(r#"{"top": 39.5}"#).unwrap());
         assert_eq!(cur.top, 30);
         merge_danmaku(&mut cur, &serde_json::from_str(r#"{"top": "90"}"#).unwrap());
         assert_eq!(cur.top, 30);

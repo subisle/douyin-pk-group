@@ -16,7 +16,7 @@ use calamine::{open_workbook_auto_from_rs, Reader};
 use chrono::NaiveDate;
 use pk_core::roster::{parse_roster, ParseOptions};
 use pk_core::types::ParsedRow;
-use pk_core::{default_aliases, normalize_name};
+use pk_core::{default_aliases, extract_stage_name, normalize_name};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::{PgPool, Row};
@@ -77,7 +77,8 @@ pub fn maybe_spreadsheet_text(filename: &str, bytes: &[u8]) -> anyhow::Result<Op
 /// - `person.generation`（INT4）→ 详情页代数恒空
 /// - `person.hide_in_daily_report`（int2）→ 榜单隐藏标记恒 false
 /// - `import_batch.imported_rows/ok_rows/failed_rows`（INT4）→ 批次列表行数恒 0
-/// - `import_pending.minutes`（INT4）→ 暂存区时长恒空
+/// - `import_pending.minutes`（INT4）→ 暂存区时长读出来恒空（**旧解码 bug**，已由本 helper 修好；
+///   2026-10-19 起按日导入也会写时长，暂存区不再「恒空」）
 /// - `STREAMERS_SQL` 的 `wechat_bound` / `wechat_push`（**boolean**）→ 台账两列恒 false
 ///
 /// 所以这里按「宽 → 窄 → 布尔 → 数字文本」回退，一次收口；新读点直接用本 helper，
@@ -613,11 +614,13 @@ pub async fn create_streamer(
         }
     }
 
-    // 建档后把暂存区里这个抖音号 / 采集 ID 的行补账进 daily_metric（「建档后才显示」）
-    let absorbed = absorb_pending_best_effort(&st, person_id, "create_streamer").await;
+    // 建档后把暂存区里这个抖音号 / 采集 ID 的行补账进 daily_metric（「建档后才显示」）；
+    // 月度暂存（042）同样在这一刻补进 monthly_wave / monthly_duration
+    let (absorbed, absorbed_month) =
+        absorb_all_best_effort(&st, person_id, "create_streamer").await;
 
     Ok(Json(
-        json!({ "ok": true, "personId": person_id, "absorbed": absorbed }),
+        json!({ "ok": true, "personId": person_id, "absorbed": absorbed, "absorbedMonth": absorbed_month }),
     ))
 }
 
@@ -913,10 +916,10 @@ pub async fn update_streamer(
                 .map_err(|e| map_account_err(e, &no))?;
             }
         }
-        // 改了抖音号 → 暂存区里这个号的行现在能对上号了，补账
-        let absorbed = absorb_pending_best_effort(&st, id, "update_streamer").await;
+        // 改了抖音号 → 暂存区里这个号的行现在能对上号了，补账（按日 + 月度）
+        let (absorbed, absorbed_month) = absorb_all_best_effort(&st, id, "update_streamer").await;
         return Ok(Json(
-            json!({ "ok": true, "personId": id, "absorbed": absorbed }),
+            json!({ "ok": true, "personId": id, "absorbed": absorbed, "absorbedMonth": absorbed_month }),
         ));
     }
 
@@ -956,6 +959,12 @@ pub struct ImportRow {
     /// 当日累计总音浪（快照口径；给了它就按差分算 wave）
     #[serde(rename = "cumulativeWave")]
     pub cumulative_wave: Option<f64>,
+    /// 当日时长（分钟，来自「开播有效时长 / 时长」列）。
+    ///
+    /// 按日导入从 2026-10-19 起也写 daily_metric.minutes（旧口径「每日不能导入时长」已作废）：
+    /// - `Some(v)` → 写 v（0 也是运营的显式数据）；
+    /// - `None`（老文件没有时长列）→ 落库时**保留库里当天已有值**，新行才写 0，
+    ///   见 `write_daily_row`。
     pub minutes: Option<f64>,
     #[serde(rename = "isLive")]
     pub is_live: Option<bool>,
@@ -1160,15 +1169,20 @@ struct MatchCtx {
     by_douyin: HashMap<String, u64>,
     /// 采集 ID（anchor_id）→ person：运营文件里只给「主播id」时也认得出
     by_anchor: HashMap<String, u64>,
+    /// 艺名候选集（`extract_stage_name` 的字典）= 台账里所有在职艺名。
+    /// 单独存一份是为了避免每行都重新 `map` 一遍艺人列表。
+    stage_names: Vec<String>,
 }
 
 impl MatchCtx {
     #[cfg(test)]
     fn from_streamers(streamers: Vec<LocalStreamer>) -> Self {
+        let stage_names = streamers.iter().map(|s| s.name.clone()).collect();
         Self {
             streamers,
             by_douyin: HashMap::new(),
             by_anchor: HashMap::new(),
+            stage_names,
         }
     }
 }
@@ -1198,10 +1212,12 @@ async fn load_match_ctx(st: &AppState) -> anyhow::Result<MatchCtx> {
             }
         }
     }
+    let stage_names = streamers.iter().map(|s| s.name.clone()).collect();
     Ok(MatchCtx {
         streamers,
         by_douyin,
         by_anchor,
+        stage_names,
     })
 }
 
@@ -1236,7 +1252,20 @@ fn resolve_row(
                 .and_then(|aid| ctx.by_anchor.get(aid).or_else(|| ctx.by_douyin.get(aid)))
         });
     let douyin_hit = ident_hit.and_then(|pid| streamers.iter().find(|s| s.id == *pid));
+    /* 新增兜底（2026-10-18 用户口径）：号码认不出时，从抖音昵称里抽艺名认人。
+    为什么需要：有的人换过号 / 开过小号，库里 account 只有旧号；还有人的抖音号是
+    `haoyi6725` `xn_0213_` 这类字母串，从来没录进过台账。这些行按号码匹配全部掉进
+    暂存区，数据就丢了。实测 445 行里靠艺名多认出 34 行。
+    为什么放在号码之后：`matched_by_douyin` 仍只表示「按号码命中」，号码命中永远优先，
+    艺名兜底不会抢走已经绑定的人（实测号码命中与艺名命中零冲突）。 */
+    let stage_hit = douyin_hit.is_none().then(|| {
+        let nick = row.name.trim();
+        let stage = extract_stage_name(nick, &ctx.stage_names);
+        stage.and_then(|n| streamers.iter().find(|s| s.name == n))
+    });
+    let stage_hit = stage_hit.flatten();
     let hit = douyin_hit
+        .or(stage_hit)
         .or_else(|| streamers.iter().find(|s| normalize_name(&s.name) == key))
         .or_else(|| streamers.iter().find(|s| s.name == name));
     let team_conflict = match (hit, expect_team) {
@@ -1481,6 +1510,12 @@ fn nice_400(e: anyhow::Error) -> ApiError {
     }
 }
 
+/// 请求体 → 按日导入行（text 与 rows 二选一，rows 优先）。
+///
+/// 返回值第二项是**文件里带时长的行数**（`minutes.is_some()` 的行数）。
+/// 2026-10-19 用户口径变更：按日导入也写 daily_metric.minutes ——
+/// 旧的 `strip_minutes`（把 minutes 抹掉）已删除；预览用它告诉运营
+/// 「文件里有多少行带时长、时长合计多少」。
 async fn body_rows(
     text: &Option<String>,
     rows: &Option<Vec<ImportRow>>,
@@ -1505,22 +1540,9 @@ async fn body_rows(
             })?;
         out = parse_any_text(text);
     }
-    let dropped = strip_minutes(&mut out);
-    Ok((out, dropped))
-}
-
-/// 按日导入不再写时长（用户口径 2026-10-10：「每日不能导入时长，只有月时长」）。
-/// 时长只有一个月度来源（monthly_duration，走 /import/month/*）；按日导入这里把行里的
-/// minutes 抹掉并计数，让预览/提交都能明确告诉运营「文件里的时长列已忽略」。
-fn strip_minutes(rows: &mut [ImportRow]) -> usize {
-    let mut n = 0;
-    for r in rows.iter_mut() {
-        if r.minutes.is_some() {
-            r.minutes = None;
-            n += 1;
-        }
-    }
-    n
+    // 时长行数按「解析后仍带 minutes」计：rows 与 text 两条入口一视同仁
+    let duration_rows = out.iter().filter(|r| r.minutes.is_some()).count();
+    Ok((out, duration_rows))
 }
 
 /// 月度指标导入的行：text → 时长 / 音浪两类列都认（parse_month_metrics_text）；
@@ -1608,7 +1630,7 @@ pub async fn import_preview(State(st): State<ArcState>, Json(body): Json<ImportB
     if !team.is_empty() {
         valid_team(team)?;
     }
-    let (raw_rows, dropped_minutes) = body_rows(&body.text, &body.rows).await.map_err(nice_400)?;
+    let (raw_rows, duration_rows) = body_rows(&body.text, &body.rows).await.map_err(nice_400)?;
     ensure(!raw_rows.is_empty(), "没有解析到任何数据行")?;
     let ctx = load_match_ctx(&st).await?;
     let aliases = merged_aliases(&st).await;
@@ -1624,15 +1646,24 @@ pub async fn import_preview(State(st): State<ArcState>, Json(body): Json<ImportB
         })
         .collect();
     let matched = resolved.iter().filter(|r| r.matched).count();
+    // 文件里的当日时长合计（分钟）：rows 原样带 minutes，前端按日预览显示「本次会写入多少时长」
+    let minutes_total: i64 = raw_rows
+        .iter()
+        .filter_map(|r| r.minutes)
+        .map(|m| m as i64)
+        .sum();
     Ok(Json(json!({
         "total": resolved.len(),
         "matched": matched,
         "unmatched": resolved.len() - matched,
         "bizDate": body.biz_date,
         "team": team,
-        // 按日导入不写时长（用户口径 2026-10-10）：文件里有「时长 / 开播有效时长」列时，
-        // 这里报出被忽略的行数，前端直接提示「要导时长请切到按月」。
-        "droppedMinutes": dropped_minutes,
+        // 2026-10-19 用户口径变更：按日导入也写时长（daily_metric.minutes）。
+        // droppedMinutes 是旧口径（2026-10-10「按日不写时长」）的兼容字段，恒 0；
+        // durationRows / minutesTotal 才是有意义的新字段。
+        "droppedMinutes": 0,
+        "durationRows": duration_rows,
+        "minutesTotal": minutes_total,
         "rows": resolved,
     })))
 }
@@ -1647,7 +1678,7 @@ pub async fn import_commit(State(st): State<ArcState>, Json(body): Json<ImportBo
     // 不分男女团是默认：team 不传 / 传 auto 都按主播档案逐行归属
     let team = body.team.as_deref().unwrap_or("auto");
     let mode = body.mode.as_deref().unwrap_or("merge");
-    let (rows, dropped_minutes) = body_rows(&body.text, &body.rows).await.map_err(nice_400)?;
+    let (rows, _duration_rows) = body_rows(&body.text, &body.rows).await.map_err(nice_400)?;
     // commit_import 的「异常文件 / reject 模式」两类拒绝是代码拼好的运营提示
     //（安全、可操作），经 nice_400 白名单保住 400；其余错误照旧 500 通用文案。
     let report = commit_import(
@@ -1671,7 +1702,9 @@ pub async fn import_commit(State(st): State<ArcState>, Json(body): Json<ImportBo
         "pending": report.pending,
         "skipped": report.skipped,
         "missing": report.missing,
-        "droppedMinutes": dropped_minutes.max(report.dropped_minutes as usize),
+        // 兼容字段：旧口径（2026-10-10「按日不写时长」）已作废，恒 0；按日时长看 minutesTotal
+        "droppedMinutes": 0,
+        "minutesTotal": report.minutes_total,
     })))
 }
 
@@ -1690,10 +1723,12 @@ pub struct CommitReport {
     pub skipped: Vec<String>,
     /// 团内当天还没有数据的主播（完整度报告，docs：统一日期所有抖音号都要导入）
     pub missing: Vec<String>,
-    /// 按日导入里被忽略的时长行数（用户口径 2026-10-10：每日不能导入时长，只有月时长）。
-    /// HTTP 端在 body_rows 里就抹掉了 minutes（预览/提交都看得到），机器人直连这里时由本字段兜住。
+    /// **兼容字段，恒 0**：2026-10-10「按日不能导入时长」的旧口径已作废
+    /// （2026-10-19 起按日导入也写 daily_metric.minutes），保留字段只为旧前端不报错。
     pub dropped_minutes: u32,
-    /// 本次写入的时长合计（分钟）：按月导入（且勾了时长）才有值，按日导入恒为 0
+    /// 本次写入的时长合计（分钟）：
+    /// - 按日导入 = 本次 ok 行的当日时长合计（merge 后，一人多号已求和）；
+    /// - 按月导入 = 勾了时长时的整月合计。
     pub minutes_total: i64,
     /// 本次写入的音浪合计：按月导入（且勾了音浪）才有值，按日导入恒为 0
     pub wave_total: i64,
@@ -1813,13 +1848,12 @@ pub async fn commit_import(
     st: &Arc<AppState>,
     team: &str,
     biz_date: &str,
-    mut rows: Vec<ImportRow>,
+    rows: Vec<ImportRow>,
     mode: &str,
     filename: &str,
 ) -> anyhow::Result<CommitReport> {
-    // 时长不随按日导入（用户口径 2026-10-10）：机器人 / 粘贴文本 / 任何直连调用都在这里兜一道，
-    // 只有 /import/month/* 的月度时长导入会写 monthly_duration。
-    let dropped_minutes = strip_minutes(&mut rows) as u32;
+    // 按日导入也写时长（2026-10-19 用户口径变更）：旧的 strip_minutes 已删除，
+    // 机器人 / 粘贴文本 / 任何直连调用都一样把行里的 minutes 落进 daily_metric.minutes。
     anyhow::ensure!(
         st.sources.iter().any(|s| s.id == "LOCAL"),
         "管理端需要 LOCAL 数据源（douyin_writer 对应的本地 PostgreSQL）"
@@ -1891,6 +1925,15 @@ pub async fn commit_import(
             }
         }
     }
+
+    /* 本次时长合计（分钟）：按日导入从 2026-10-19 起写 daily_metric.minutes，
+    这里报的是**本次 ok 行**的当日时长合计（merge 后，一人多号已求和）。
+    没带时长列的行（minutes = None）不计入 —— 它们落库时保留库里旧值（见 write_daily_row）。 */
+    let minutes_total: i64 = ok_rows
+        .iter()
+        .filter_map(|r| r.raw.minutes)
+        .map(|m| m as i64)
+        .sum();
 
     let mut tx = pool.begin().await?;
 
@@ -1969,7 +2012,11 @@ pub async fn commit_import(
              VALUES (?,?,?::date,?,?,?,?,?)
              ON CONFLICT (douyin_no, biz_date) DO UPDATE SET
                  name = EXCLUDED.name, wave = EXCLUDED.wave,
-                 cumulative_wave = EXCLUDED.cumulative_wave, minutes = EXCLUDED.minutes,
+                 cumulative_wave = EXCLUDED.cumulative_wave,
+                 /* 时长（2026-10-19）：按日文件带时长时暂存行也有真实 minutes。
+                 重导「老格式（没有时长列）」文件时 EXCLUDED.minutes 是 NULL，
+                 无条件覆盖会把已暂存的时长冲没（绑号后补账就丢了），所以保留旧值。 */
+                 minutes = COALESCE(EXCLUDED.minutes, import_pending.minutes),
                  is_live = EXCLUDED.is_live, source_batch_id = EXCLUDED.source_batch_id",
         ))
         .bind(truncate_chars(&r.raw.name, PENDING_NAME_MAX_CHARS))
@@ -2106,9 +2153,10 @@ pub async fn commit_import(
         // 跳过行：命中主播但当天一行数值都没有（不算失败，交给缺数据报告）
         skipped,
         missing,
-        dropped_minutes,
-        // 按日导入不写时长（时长只按月导入）
-        minutes_total: 0,
+        // 兼容字段：按日导入现在也写时长（2026-10-19 口径），恒 0
+        dropped_minutes: 0,
+        // 本次 ok 行的当日时长合计（分钟）
+        minutes_total,
         // 按日导入的当日音浪走 daily_metric，不算「月度音浪导入」
         wave_total: 0,
     })
@@ -2342,6 +2390,11 @@ async fn write_daily_row(
         .await?
         .unwrap_or_default();
 
+    /* 库里当天已有的行（可能来自这个主播另一个号的导入 / 上一次按日导入 / 暂存补账）。
+    **只查一次**：Unchanged 判定、minutes-only 分支、以及下面「文件没有时长列时保留旧值」
+    都复用这一个 existing，避免同一行在一笔写入里查两遍。 */
+    let existing = existing_day_row(tx, person_id, biz_date).await?;
+
     let (wave, cumulative, prev_date, span, reliable): (i64, i64, Option<String>, i16, i16) =
         match (r.raw.wave, r.raw.cumulative_wave) {
             // 两个都给了：以「当日音浪」为准（运营文件里这一列就是当天值），累计只当快照。
@@ -2377,14 +2430,21 @@ async fn write_daily_row(
             (None, None) => (0, 0, None, 1, 1),
         };
 
-    let minutes = r.raw.minutes.unwrap_or(0.0) as i64;
+    /* 时长（2026-10-19 用户口径：按日导入也写 daily_metric.minutes）：
+    - 行里有 minutes（Some(v)）→ 写 v；0 也是运营的显式数据，照写；
+    - 行里没有（None，典型是老文件没有「时长 / 开播有效时长」列）→ **保留库里当天已有值**，
+      新行才写 0。旧实现 `unwrap_or(0.0)` 会在没有时长列的文件重导时把已有 minutes 静默清零。 */
+    let minutes = match r.raw.minutes {
+        Some(v) => v as i64,
+        None => existing.map(|(_, _, m, _)| m).unwrap_or(0),
+    };
     let is_live = r.raw.is_live.map(|b| b as i16).unwrap_or(0);
 
     // 时长-only 行（时长 CSV）：只更新 minutes/is_live，不把已导入的音浪覆盖成 0
     if r.raw.wave.is_none() && r.raw.cumulative_wave.is_none() {
         // 连分钟和开播都没给（暂存补账时可能出现的「只有名字」行）：库里已有当日行就什么都不动
         let presence_only = r.raw.minutes.is_none() && r.raw.is_live.is_none();
-        if let Some((_, _, m, live)) = existing_day_row(tx, person_id, biz_date).await? {
+        if let Some((_, _, m, live)) = existing {
             if presence_only || (m == minutes && live == is_live) {
                 return Ok(WriteOutcome::Unchanged);
             }
@@ -2409,7 +2469,7 @@ async fn write_daily_row(
     }
 
     // 库里已有该人该日、且算出来的值与库里完全一致 → 不动它（幂等：同一天重复发同一个文件不产生任何写入）
-    if let Some((w, c, m, live)) = existing_day_row(tx, person_id, biz_date).await? {
+    if let Some((w, c, m, live)) = existing {
         if w == wave && c == cumulative && m == minutes && live == is_live {
             return Ok(WriteOutcome::Unchanged);
         }
@@ -2594,6 +2654,172 @@ async fn absorb_pending_best_effort(st: &AppState, person_id: u64, ctx: &str) ->
             0
         }
     }
+}
+
+/* --------------------- 暂存区 · 月度：未匹配整月行（042） --------------------- */
+/*
+   2026-10-18 用户口径：「之前有数据但是没有绑定，后续如果绑定，数据要同步过来」。
+
+   按日导入早有这条链路（import_pending → absorb_pending），但月度导入原先**直接丢弃**
+   未匹配行：月报先导、事后才建档 / 绑号，那个月的整月时长 / 音浪就再也回不来。
+   现在未匹配但有抖音号 / 采集 ID 的行落 import_pending_month（按 period 暂存，
+   不摊到某一天），建档或绑号后由下面的 absorb_pending_month 补进
+   monthly_wave / monthly_duration —— 与按日补账同一个触发时机、同一套「不阻塞」语义。
+*/
+
+/// 月度未匹配行 → 月度暂存区（重导同月同号按最新值覆盖，不翻倍）。
+///
+/// 注意 **不重置** absorbed_person_id / absorbed_at：已补账的行再重导只更新数值，
+/// 不会被下一次 absorb 再次叠加（补账幂等的第二道防线；第一道是查询里的
+/// absorbed_at IS NULL）。
+const PENDING_MONTH_UPSERT_SQL: &str = "INSERT INTO import_pending_month
+         (name, douyin_no, period, wave, minutes, source_batch_id)
+     VALUES (?,?,?,?,?,?)
+     ON CONFLICT (douyin_no, period) DO UPDATE SET
+         name = EXCLUDED.name, wave = EXCLUDED.wave, minutes = EXCLUDED.minutes,
+         source_batch_id = EXCLUDED.source_batch_id";
+
+/// 月度暂存补账 · 音浪：**叠加**而非覆盖。
+/// 一个主播可能挂多个号、每个号各有一条暂存行（与月度导入「一人多号求和」、
+/// 按日补账「一人多号求和」口径一致）；库里已有该月导入值时也不能把它冲掉。
+const PENDING_MONTH_ABSORB_WAVE_SQL: &str = "INSERT INTO monthly_wave
+         (person_id, period, wave, source_batch_id)
+     VALUES (?,?,?,?)
+     ON CONFLICT (person_id, period) DO UPDATE SET
+         wave = monthly_wave.wave + EXCLUDED.wave,
+         source_batch_id = COALESCE(EXCLUDED.source_batch_id, monthly_wave.source_batch_id)";
+
+/// 月度暂存补账 · 时长：同音浪，按月叠加
+const PENDING_MONTH_ABSORB_MINUTES_SQL: &str = "INSERT INTO monthly_duration
+         (person_id, period, minutes, source_batch_id)
+     VALUES (?,?,?,?)
+     ON CONFLICT (person_id, period) DO UPDATE SET
+         minutes = monthly_duration.minutes + EXCLUDED.minutes,
+         source_batch_id = COALESCE(EXCLUDED.source_batch_id, monthly_duration.source_batch_id)";
+
+/// 未匹配行已暂存时给运营看的结论（出现在导入结果的失败列表里，替代原来的「未匹配」）
+const MONTH_PENDING_STAGED_REASON: &str =
+    "未匹配到主播：已暂存，绑定/建档后会自动补账（本次不计入月度数据）";
+/// 连暂存都写不进去（典型：库还没跑 042 迁移）时的兜底文案
+const MONTH_PENDING_FAILED_REASON: &str =
+    "未匹配到主播，暂存失败（库可能还没跑 042 迁移）：先建档或绑定抖音号，再重导该月文件";
+
+/// 一条月度暂存行（补账用）
+struct PendingMonthRow {
+    id: u64,
+    period: String,
+    wave: Option<i64>,
+    minutes: Option<i64>,
+    batch_id: Option<i64>,
+}
+
+/// 把月度暂存区里「已经能对上号」的整月行补账进 monthly_wave / monthly_duration
+/// （建档 / 绑号 / 改号后调用，与按日 absorb_pending 同一触发点、同一语义）。
+///
+/// 命中条件：暂存行的号码出现在该主播的 account.douyin_no 或 account.anchor_id 里
+/// （见 [`dialect::PENDING_MONTH_FOR_PERSON_SQL`]）。
+/// 已有该月值时**叠加**（一人多号求和），不覆盖该主播其它号已经导入的量。
+///
+/// 幂等两道防线：查询只认 `absorbed_at IS NULL`；写值前先 `UPDATE ... WHERE id = ?
+/// AND absorbed_at IS NULL` 抢占，认领、写值、标记 absorbed 在同一个事务里 ——
+/// 重复调用（或并发调用）补 0 行，绝不会把音浪 / 时长叠加两次。
+/// 返回补账行数；写库不可用时返回 0（不阻塞建档本身）。
+pub async fn absorb_pending_month(st: &AppState, person_id: u64) -> anyhow::Result<u32> {
+    let Some(pool) = st.writer.as_ref() else {
+        return Ok(0);
+    };
+    let rows = sqlx::query(&crate::pq::rewrite(dialect::PENDING_MONTH_FOR_PERSON_SQL))
+        .bind(person_id as i64)
+        .bind(person_id as i64)
+        .map(|r: sqlx::postgres::PgRow| PendingMonthRow {
+            id: read_u64(&r, "id").unwrap_or(0),
+            period: read_str(&r, "period"),
+            wave: read_opt_i64(&r, "wave"),
+            minutes: read_opt_i64(&r, "minutes"),
+            batch_id: read_opt_i64(&r, "source_batch_id"),
+        })
+        .fetch_all(pool)
+        .await?;
+    if rows.is_empty() {
+        return Ok(0);
+    }
+
+    let mut tx = pool.begin().await?;
+    let mut absorbed: u32 = 0;
+    for p in &rows {
+        // 坏行（id / period 不可用）：留着人工处理，别写进 monthly_* 也别标记认领
+        if p.id == 0 || valid_period(&p.period).is_err() {
+            continue;
+        }
+        // 先抢占：并发 / 重复 absorb 只有一方能把这一行认领走，写值因此只会发生一次。
+        let claimed = sqlx::query(&crate::pq::rewrite(
+            "UPDATE import_pending_month SET absorbed_person_id = ?, absorbed_at = now()
+             WHERE id = ? AND absorbed_at IS NULL",
+        ))
+        .bind(person_id as i64)
+        .bind(p.id as i64)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if claimed == 0 {
+            continue; // 已被别的调用补过 → 跳过（幂等）
+        }
+        if let Some(w) = p.wave {
+            sqlx::query(&crate::pq::rewrite(PENDING_MONTH_ABSORB_WAVE_SQL))
+                .bind(person_id as i64)
+                .bind(&p.period)
+                .bind(w)
+                .bind(p.batch_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        if let Some(m) = p.minutes {
+            sqlx::query(&crate::pq::rewrite(PENDING_MONTH_ABSORB_MINUTES_SQL))
+                .bind(person_id as i64)
+                .bind(&p.period)
+                .bind(m as i32)
+                .bind(p.batch_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        absorbed += 1;
+    }
+    tx.commit().await?;
+
+    if absorbed > 0 {
+        st.clear_cache();
+        crate::events::emit(
+            crate::events::SCOPE_IMPORT,
+            format!(
+                "月度暂存补账：{} 行并入「{}」",
+                absorbed,
+                person_name_of_id(st, person_id).await
+            ),
+        );
+    }
+    Ok(absorbed)
+}
+
+/// 月度暂存补账的「不阻塞」包装：失败只记日志，不影响建档 / 绑号结果
+async fn absorb_pending_month_best_effort(st: &AppState, person_id: u64, ctx: &str) -> u32 {
+    match absorb_pending_month(st, person_id).await {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::warn!(person_id, ctx, error = %e, "月度暂存补账失败（不影响建档/绑号）");
+            0
+        }
+    }
+}
+
+/// 建档 / 绑号后的一次性补账总入口：按日暂存 + 月度暂存各补一次。
+///
+/// 两条链路互不影响（各自 best-effort）：按日链路挂库里的 import_pending，
+/// 月度链路挂 import_pending_month（042）；月度表没迁移时只 warn，不影响按日补账。
+/// 返回 (按日补账行数, 月度补账行数)。
+async fn absorb_all_best_effort(st: &AppState, person_id: u64, ctx: &str) -> (u32, u32) {
+    let daily = absorb_pending_best_effort(st, person_id, ctx).await;
+    let monthly = absorb_pending_month_best_effort(st, person_id, ctx).await;
+    (daily, monthly)
 }
 
 #[derive(Deserialize)]
@@ -2861,8 +3087,10 @@ pub async fn import_day_delete(
 
 /* ------------------------ 月度指标导入（按平台月报） ------------------------ */
 /*
-   用户口径（2026-10-10）：「每日不能导入时长，只有月时长」。
-   时长只有「按月报整月导入」一个来源 —— 按日导入不再写 daily_metric.minutes（见 strip_minutes），
+   口径沿革：2026-10-10 用户口径「每日不能导入时长，只有月时长」，按日链路用 strip_minutes
+   把 minutes 抹掉；**2026-10-19 用户口径变更**：抖音后台按日导出文件开始带「开播有效时长」列，
+   按日导入也写 daily_metric.minutes（strip_minutes 已删除），详见 `write_daily_row`。
+   月度整月值仍然是月榜 / 个人月卡的首选来源：
    月度文件一人一行（「9月份时长.csv」里的「开播有效时长」= 整月累计，如 75小时29分钟41秒），
    落 monthly_duration(person_id, period, minutes)；月榜 / 个人月卡优先用这个整月值，
    某月没有整月记录（历史月份）才回落到 daily_metric 求和。
@@ -2987,6 +3215,18 @@ fn month_note(failures: &[Value], skipped: &[String]) -> Option<String> {
         ));
     }
     (!parts.is_empty()).then(|| truncate_chars(&parts.join("；"), NOTE_MAX_CHARS))
+}
+
+/// 月度未匹配行落暂存区时要写的值：只取**本次勾选**的指标（与匹配行写库口径一致）。
+///
+/// 例：只勾了「时长」导一个带音浪列的概览文件 —— 暂存的音浪必须留空，
+/// 否则事后绑号补账会把一个本次根本没导入的指标写进 monthly_wave。
+/// 取值用 `as i64 / as i32` 截断，与匹配行 `w as i64` 完全一致。
+fn month_stage_values(raw: &ImportRow, metrics: MonthMetrics) -> (Option<i64>, Option<i32>) {
+    (
+        raw.wave.filter(|_| metrics.wave).map(|v| v as i64),
+        raw.minutes.filter(|_| metrics.minutes).map(|v| v as i32),
+    )
 }
 
 /// POST /api/admin/import/month/preview：月度时长预览（解析 + 匹配 + 对账），不落库
@@ -3196,15 +3436,22 @@ pub async fn commit_month_metrics(
 
     let mut failures: Vec<Value> = Vec::new();
     let mut ok_rows: Vec<&ResolvedRow> = Vec::new();
+    let mut pending_rows: Vec<&ResolvedRow> = Vec::new();
     let mut skipped: Vec<String> = Vec::new();
     for r in &merged {
         if !r.matched {
-            // 月度值不进暂存区：import_pending 是按「某一天」补账的，整月值摊到一天会失真。
-            // 有抖音号 / ID 也要先建档，建完再重导这个月的文件。
-            failures.push(json!({
-                "name": truncate_chars(&r.raw.name, 64),
-                "reason": "未匹配到主播（按月导入不进暂存区）：先在主播台账建档或绑定抖音号，再重导该月文件"
-            }));
+            /* 2026-10-18「先有数据后绑定」：月度未匹配行不再直接丢弃 ——
+            有抖音号 / 采集 ID 的先落 import_pending_month（按 period 暂存，不摊到某一天），
+            台账建档或绑定该号后由 absorb_pending_month 自动补进
+            monthly_wave / monthly_duration。连号码都没有的行无从补账，仍按失败报出来。
+            暂存行依旧**不计入 ok_rows**（本次不写 monthly_*）。 */
+            match row_ident(&r.raw) {
+                Some(_) => pending_rows.push(r),
+                None => failures.push(json!({
+                    "name": truncate_chars(&r.raw.name, 64),
+                    "reason": "未匹配到主播，也没有抖音号/ID 可以暂存；请先在主播台账建档或绑定"
+                })),
+            }
             continue;
         }
         if let Some(reason) = &r.team_conflict {
@@ -3350,6 +3597,45 @@ pub async fn commit_month_metrics(
         }
     }
 
+    /* 月度未匹配但有号的行 → import_pending_month（2026-10-18「先有数据后绑定」）。
+    与按日导入的暂存同口径：同一「号码 + 月份」重导按最新值覆盖（幂等，不翻倍），
+    不写 monthly_*、不进月榜 / 个人月卡；建档或绑号后 absorb_pending_month 自动补账。
+    暂存失败（典型：库没跑 042）不能拖垮整批导入 —— 记日志，该行退化成原来的失败提示。 */
+    let mut staged_count: u32 = 0;
+    for r in &pending_rows {
+        let Some(no) = row_ident(&r.raw) else {
+            continue;
+        };
+        let (stage_wave, stage_minutes) = month_stage_values(&r.raw, metrics);
+        let res = sqlx::query(&crate::pq::rewrite(PENDING_MONTH_UPSERT_SQL))
+            .bind(truncate_chars(&r.raw.name, PENDING_NAME_MAX_CHARS))
+            .bind(&no)
+            .bind(period)
+            // 只暂存「勾了的指标」：与匹配行写库口径一致（只导时长时，文件里的音浪
+            // 不该被偷偷暂存下来，否则补账会写进一个本次根本没导入的指标）
+            .bind(stage_wave)
+            .bind(stage_minutes)
+            .bind(batch_id as i64)
+            .execute(&mut *tx)
+            .await;
+        match res {
+            Ok(_) => {
+                staged_count += 1;
+                failures.push(json!({
+                    "name": truncate_chars(&r.raw.name, 64),
+                    "reason": MONTH_PENDING_STAGED_REASON
+                }));
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, name = %r.raw.name, "月度暂存写入失败（该行不进暂存区）");
+                failures.push(json!({
+                    "name": truncate_chars(&r.raw.name, 64),
+                    "reason": MONTH_PENDING_FAILED_REASON
+                }));
+            }
+        }
+    }
+
     let note = month_note(&failures, &skipped);
     sqlx::query(&crate::pq::rewrite(
         "UPDATE import_batch SET ok_rows = ?, failed_rows = ?, note = ? WHERE id = ?",
@@ -3381,12 +3667,17 @@ pub async fn commit_month_metrics(
     crate::events::emit(
         crate::events::SCOPE_IMPORT,
         format!(
-            "{} 按月导入（{}）{ok_count} 人（{}）{}",
+            "{} 按月导入（{}）{ok_count} 人（{}）{}{}",
             period,
             metrics.label(),
             totals.join("，"),
             if unchanged > 0 {
                 format!("，另有 {unchanged} 人值没变未覆盖")
+            } else {
+                String::new()
+            },
+            if staged_count > 0 {
+                format!("，另有 {staged_count} 人未建档已暂存（绑定/建档后自动补账）")
             } else {
                 String::new()
             }
@@ -3399,7 +3690,8 @@ pub async fn commit_month_metrics(
         ok_rows: ok_count,
         unchanged,
         failures,
-        // 月度值不进暂存区（见上面的失败原因）
+        // 月度暂存行同时列在 failures 里（reason = 「已暂存…」），
+        // 这个字段留给「暂存区」视图复用，本次不再重复列人名。
         pending: Vec::new(),
         skipped,
         missing: Vec::new(),
@@ -3858,15 +4150,15 @@ pub async fn bind_account(
             .bind(acc_id)
             .execute(pool)
             .await?;
-            let absorbed = absorb_pending_best_effort(&st, id, "bind_account").await;
+            let (absorbed, absorbed_month) = absorb_all_best_effort(&st, id, "bind_account").await;
             return Ok(Json(
-                json!({ "ok": true, "douyinNo": no, "promoted": true, "absorbed": absorbed }),
+                json!({ "ok": true, "douyinNo": no, "promoted": true, "absorbed": absorbed, "absorbedMonth": absorbed_month }),
             ));
         }
-        // 号本来就在这个人名下：暂存区里如果有这个号的未认领行，一样要补账
-        let absorbed = absorb_pending_best_effort(&st, id, "bind_account").await;
+        // 号本来就在这个人名下：暂存区里如果有这个号的未认领行，一样要补账（按日 + 月度）
+        let (absorbed, absorbed_month) = absorb_all_best_effort(&st, id, "bind_account").await;
         return Ok(Json(
-            json!({ "ok": true, "douyinNo": no, "dedup": true, "absorbed": absorbed }),
+            json!({ "ok": true, "douyinNo": no, "dedup": true, "absorbed": absorbed, "absorbedMonth": absorbed_month }),
         ));
     }
 
@@ -3917,10 +4209,11 @@ pub async fn bind_account(
         crate::events::SCOPE_ROSTER,
         format!("{} 绑定抖音号 {no}", person_name_of_id(&st, id).await),
     );
-    // 绑号后：暂存区里这个号（或采集 ID）的导入行补账进 daily_metric
-    let absorbed = absorb_pending_best_effort(&st, id, "bind_account").await;
+    // 绑号后：暂存区里这个号（或采集 ID）的导入行补账进 daily_metric；
+    // 月度暂存（042）同样在这一刻补进 monthly_wave / monthly_duration
+    let (absorbed, absorbed_month) = absorb_all_best_effort(&st, id, "bind_account").await;
     Ok(Json(
-        json!({ "ok": true, "douyinNo": no, "anchorId": anchor_id, "absorbed": absorbed }),
+        json!({ "ok": true, "douyinNo": no, "anchorId": anchor_id, "absorbed": absorbed, "absorbedMonth": absorbed_month }),
     ))
 }
 
@@ -5155,8 +5448,10 @@ pub async fn import_upload(
 }
 
 /// 附件是不是「只有时长的月度文件」：有时长列、但**没有任何音浪数值**。
-/// 用户口径 2026-10-10：每日不能导入时长，只有月时长 —— 所以「有时长、没音浪」
-/// 只可能是平台月报文件，机器人可以直接按月导。
+/// 沿革：2026-10-10 口径「每日不能导入时长，只有月时长」时，「有时长、没音浪」
+/// 只可能是平台月报文件，机器人直接按月导。—— 2026-10-19 起按日导入也能写时长，
+/// 但「只有时长列」仍按月度文件识别（整月累计 vs 当日值无法只靠表头区分），
+/// 自动分流行为保持不变，运营在弹窗里可以改。
 ///
 /// 2026-10-16 起「有时长也有音浪」的文件（概览列表）不再自动判成月度文件：
 /// 它同样是按日导出的长相，默认仍按日；运营要在管理端弹窗里手动切「按月导入」
@@ -5193,7 +5488,7 @@ fn month_suggest(filename: &str, month_rows: &[ImportRow], rows: &[ImportRow]) -
         "year": year,
         "month": month,
         "fromFilename": from_name.is_some(),
-        "reason": "文件里只有「时长」列、没有音浪列 → 按月度时长导入（时长只按月导入；带音浪的月度文件请在弹窗里切「按月导入」）",
+        "reason": "文件里只有「时长」列、没有音浪列 → 按月度时长导入（带音浪的月度文件请在弹窗里切「按月导入」）",
     })
 }
 
@@ -5541,6 +5836,129 @@ mod tests {
         assert!(parse_month_metrics_text("主播昵称,粉丝数\n浩龙,100\n").is_empty());
     }
 
+    /* ---------------- 月度暂存补账（042，2026-10-18「先有数据后绑定」） ---------------- */
+
+    /// 月度暂存的写入 SQL 必须按 (douyin_no, period) 幂等覆盖，且**不能**把
+    /// absorbed_* 标记重置 —— 已补账的行若在重导时被「复活」，下一次 absorb 会把
+    /// 同一个整月值再叠加一遍（音浪 / 时长静默翻倍）。
+    #[test]
+    fn month_pending_upsert_is_idempotent_and_keeps_claim() {
+        assert!(PENDING_MONTH_UPSERT_SQL.contains("INSERT INTO import_pending_month"));
+        assert!(
+            PENDING_MONTH_UPSERT_SQL.contains("ON CONFLICT (douyin_no, period)"),
+            "重导同月同号要覆盖而不是插第二条：{PENDING_MONTH_UPSERT_SQL}"
+        );
+        for col in ["name", "wave", "minutes", "source_batch_id"] {
+            assert!(
+                PENDING_MONTH_UPSERT_SQL.contains(col),
+                "重导要覆盖 {col}：{PENDING_MONTH_UPSERT_SQL}"
+            );
+        }
+        assert!(
+            !PENDING_MONTH_UPSERT_SQL.contains("absorbed_at")
+                && !PENDING_MONTH_UPSERT_SQL.contains("absorbed_person_id"),
+            "重导绝不能让已补账的行重新变成未认领：{PENDING_MONTH_UPSERT_SQL}"
+        );
+        // 月度暂存表不是按日表：混用会让整月值摊到某一天
+        assert!(!PENDING_MONTH_UPSERT_SQL.contains("biz_date"));
+    }
+
+    /// 补账 SQL 必须**叠加**（一人多号求和、库里已有导入值也不能被冲掉），
+    /// 且各自落到对应的月度表 —— 写错表 = 时长进音浪 / 音浪进时长。
+    #[test]
+    fn month_pending_absorb_sqls_add_into_their_month_tables() {
+        assert!(PENDING_MONTH_ABSORB_WAVE_SQL.contains("INSERT INTO monthly_wave"));
+        assert!(PENDING_MONTH_ABSORB_WAVE_SQL.contains("ON CONFLICT (person_id, period)"));
+        assert!(
+            PENDING_MONTH_ABSORB_WAVE_SQL.contains("monthly_wave.wave + EXCLUDED.wave"),
+            "必须叠加而不是覆盖：{PENDING_MONTH_ABSORB_WAVE_SQL}"
+        );
+        assert!(!PENDING_MONTH_ABSORB_WAVE_SQL.contains("monthly_duration"));
+
+        assert!(PENDING_MONTH_ABSORB_MINUTES_SQL.contains("INSERT INTO monthly_duration"));
+        assert!(PENDING_MONTH_ABSORB_MINUTES_SQL.contains("ON CONFLICT (person_id, period)"));
+        assert!(
+            PENDING_MONTH_ABSORB_MINUTES_SQL
+                .contains("monthly_duration.minutes + EXCLUDED.minutes"),
+            "必须叠加而不是覆盖：{PENDING_MONTH_ABSORB_MINUTES_SQL}"
+        );
+        assert!(!PENDING_MONTH_ABSORB_MINUTES_SQL.contains("monthly_wave"));
+        // 两条 SQL 的绑定顺序是 (person_id, period, 值, batch)：占位符个数必须对齐
+        assert_eq!(
+            crate::pq::rewrite(PENDING_MONTH_ABSORB_WAVE_SQL)
+                .matches('$')
+                .count(),
+            4
+        );
+        assert_eq!(
+            crate::pq::rewrite(PENDING_MONTH_ABSORB_MINUTES_SQL)
+                .matches('$')
+                .count(),
+            4
+        );
+    }
+
+    /// 未匹配行的结论文案：运营看到的是「已暂存、之后会自动补账」，
+    /// 不再是原来那句「按月导入不进暂存区，请重导该月文件」。
+    #[test]
+    fn month_pending_reason_tells_operator_it_self_heals() {
+        assert!(MONTH_PENDING_STAGED_REASON.contains("已暂存"));
+        assert!(MONTH_PENDING_STAGED_REASON.contains("自动补账"));
+        assert!(
+            !MONTH_PENDING_STAGED_REASON.contains("重导"),
+            "已经暂存的行不用再重导文件：{MONTH_PENDING_STAGED_REASON}"
+        );
+        // 暂存失败时要点名 042，运营能直接说清「库没跑迁移」
+        assert!(MONTH_PENDING_FAILED_REASON.contains("042"));
+    }
+
+    /// 没勾的指标不该进暂存区（只导时长时文件里的音浪列不该被暂存），
+    /// 走的是 commit 里的 metrics.minutes / metrics.wave 判定；这里钉死暂存绑定的取值口径：
+    /// 暂存值必须与「匹配后写库」的取值完全一致（同一行 `as i64` 截断），
+    /// 否则补账后与重导同一文件会得到两个不同的整月值。
+    #[test]
+    fn month_pending_stage_bind_matches_write_semantics() {
+        let raw = ImportRow {
+            name: "浩龙".into(),
+            douyin_no: Some("cyl765".into()),
+            anchor_id: None,
+            wave: Some(5508.7),
+            cumulative_wave: None,
+            minutes: Some(108.9),
+            is_live: None,
+            err: None,
+        };
+        // 匹配行写库用 `w as i64`（截断）；暂存必须完全一致，否则补账值与重导值会不同
+        assert_eq!(
+            month_stage_values(&raw, MonthMetrics::BOTH),
+            (Some(5508), Some(108))
+        );
+        // 只勾时长：文件里的音浪不许被暂存（否则补账时写进一个没导入的指标）
+        assert_eq!(
+            month_stage_values(&raw, MonthMetrics::MINUTES_ONLY),
+            (None, Some(108))
+        );
+        // 只勾音浪：时长留空
+        assert_eq!(
+            month_stage_values(
+                &raw,
+                MonthMetrics {
+                    minutes: false,
+                    wave: true
+                }
+            ),
+            (Some(5508), None)
+        );
+        // 有抖音号就可以暂存；没有号码的行无从补账，必须继续报失败
+        assert_eq!(row_ident(&raw).as_deref(), Some("cyl765"));
+        let no_ident = ImportRow {
+            douyin_no: None,
+            anchor_id: None,
+            ..raw.clone()
+        };
+        assert!(row_ident(&no_ident).is_none());
+    }
+
     /// 月度指标勾选（wire 值 → 勾选状态）：空数组必须报错，不能静默当成都导。
     #[test]
     fn month_metrics_selection_parses_wire_values() {
@@ -5644,34 +6062,76 @@ mod tests {
         }
     }
 
+    /* ---------------- 按日导入时长（2026-10-19 用户口径变更） ---------------- */
+
+    /// 抖音后台 2026-10-17 按日导出（创想之星）的真实表头 + 一行数据。
+    /// 表头里四列最容易读错：`分成比-直播音浪收益`(35) / `总音浪`(3825) /
+    /// `开播有效时长`(3小时46分钟36秒) / `feed看播时长`(26小时7分钟4秒)。
+    /// 按日导入从 2026-10-19 起写 daily_metric.minutes：音浪必须取「总音浪」、
+    /// 时长必须取「开播有效时长」，绝不能把分成比 / feed 看播时长当指标。
+    const DAILY_DURATION_CSV: &str = "主播ID,主播昵称,抖音号,抖音号（原）,火山号,火山号（原）,粉丝数,上次开播时间,签约类型,运营经纪人,招募经纪人,首播时间,入会时间,西瓜号,备注,分成比-直播音浪收益,总音浪,会员订阅音浪,开播有效时长,feed看播时长,feed_acu,主播标签,星守护音浪,星守护付费人数,星守护入账音浪\n\
+        36749492093076,玖安🎹,52000348871,,52000348871,,1200,2026-10-16 20:00:00,金牌主播,创想之星,创想之星,2024-01-01,2024-02-01,,,35,3825,0,3小时46分钟36秒,26小时7分钟4秒,7,,0,0,0\n";
+
     #[test]
-    fn strip_minutes_drops_daily_duration() {
-        // 用户口径 2026-10-10：每日不能导入时长 —— 按日导入的行一律抹掉 minutes
-        let mut rows = vec![
-            ImportRow {
-                name: "浩龙".into(),
-                wave: Some(1000.0),
-                minutes: Some(120.0),
-                ..Default::default()
-            },
-            ImportRow {
-                name: "玖玉".into(),
-                wave: Some(2000.0),
-                ..Default::default()
-            },
-            ImportRow {
-                name: "只有时长".into(),
-                minutes: Some(60.0),
-                ..Default::default()
-            },
-        ];
-        assert_eq!(strip_minutes(&mut rows), 2);
-        assert!(rows.iter().all(|r| r.minutes.is_none()));
-        // 只剩「只有时长」的行会被抹成没有任何数值 → 分类为跳过（不写库，也不算失败）
+    fn daily_export_parses_total_wave_and_effective_duration() {
+        let rows = parse_any_text(DAILY_DURATION_CSV);
+        assert_eq!(rows.len(), 1, "真实表头要能解析出一行：{rows:?}");
+        let r = &rows[0];
+        assert_eq!(r.name, "玖安🎹");
+        assert_eq!(r.wave, Some(3825.0), "音浪取「总音浪」，不能取分成比 35");
         assert_eq!(
-            classify_row(&resolved(rows[2].clone(), Some(7), None)),
-            RowClass::Skipped
+            r.minutes,
+            Some(226.0),
+            "时长取「开播有效时长」3小时46分钟36秒 → 226 分钟"
         );
+    }
+
+    /// body_rows 不再 strip minutes：行里的时长原样保留，第二项报「带时长的行数」。
+    #[tokio::test]
+    async fn body_rows_keeps_daily_duration() {
+        let (rows, duration_rows) = body_rows(&Some(DAILY_DURATION_CSV.to_string()), &None)
+            .await
+            .expect("解析成功");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(duration_rows, 1, "带时长的行数要报出来（预览用）");
+        assert_eq!(
+            rows[0].minutes,
+            Some(226.0),
+            "body_rows 不能把 minutes 抹掉"
+        );
+        assert_eq!(rows[0].wave, Some(3825.0));
+
+        // 结构化 rows 入口同样保留 minutes；没时长的行不计入 durationRows
+        let (rows, duration_rows) = body_rows(
+            &None,
+            &Some(vec![
+                ImportRow {
+                    name: "浩龙".into(),
+                    wave: Some(1000.0),
+                    minutes: Some(120.0),
+                    ..Default::default()
+                },
+                ImportRow {
+                    name: "玖玉".into(),
+                    wave: Some(2000.0),
+                    ..Default::default()
+                },
+            ]),
+        )
+        .await
+        .expect("结构化行");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(duration_rows, 1);
+        assert_eq!(rows[0].minutes, Some(120.0));
+        assert!(rows[1].minutes.is_none());
+    }
+
+    /// 只有「时长」的行是有效数据（RowClass::Ok）：旧口径下会被 strip 成空行 → Skipped。
+    #[test]
+    fn minutes_only_row_classifies_ok() {
+        let mut raw = raw_row("只有时长", None, None);
+        raw.minutes = Some(60.0);
+        assert_eq!(classify_row(&resolved(raw, Some(7), None)), RowClass::Ok);
     }
 
     #[test]
@@ -5742,6 +6202,7 @@ mod tests {
                 name: "狼澈".into(),
                 gender: "male".into(),
             }],
+            stage_names: vec!["狼澈".into()],
             by_douyin: HashMap::new(),
             by_anchor: HashMap::from([("2262157006222251".to_string(), 7u64)]),
         };
@@ -5758,6 +6219,7 @@ mod tests {
                 name: "浩龙".into(),
                 gender: "male".into(),
             }],
+            stage_names: vec!["浩龙".into()],
             by_douyin: HashMap::from([("cyl765".to_string(), 9u64)]),
             by_anchor: HashMap::new(),
         };
@@ -6019,6 +6481,7 @@ mod tests {
                 name: "狼佑".into(),
                 gender: "male".into(),
             }],
+            stage_names: vec!["狼佑".into()],
             by_douyin: HashMap::from([
                 ("39863161947".to_string(), 86u64),
                 ("dy_jiuyu01".to_string(), 86u64),
@@ -6068,6 +6531,111 @@ mod tests {
         );
         assert!(r3.matched && !r3.matched_by_douyin);
         assert_eq!(r3.person_id, Some(86));
+    }
+
+    /// 艺名兜底（2026-10-18 用户口径）：库里没有这个抖音号时，从昵称里抽艺名认人。
+    /// 台账故意只放 3 个人、且不登记他们的抖音号，模拟「换号 / 小号 / 字母号」三种场景。
+    fn stage_ctx() -> MatchCtx {
+        MatchCtx {
+            streamers: vec![
+                LocalStreamer {
+                    id: 132,
+                    name: "狼霆".into(),
+                    gender: "male".into(),
+                },
+                LocalStreamer {
+                    id: 25,
+                    name: "浩艺".into(),
+                    gender: "male".into(),
+                },
+                LocalStreamer {
+                    id: 172,
+                    name: "玖玉".into(),
+                    gender: "male".into(),
+                },
+            ],
+            by_douyin: HashMap::new(),
+            by_anchor: HashMap::new(),
+            stage_names: vec!["狼霆".into(), "浩艺".into(), "玖玉".into()],
+        }
+    }
+
+    #[test]
+    fn resolve_row_falls_back_to_stage_name_when_no_unknown() {
+        let ctx = stage_ctx();
+        // 换了新号，库里没有 → 靠艺名认出
+        let r = resolve_row(
+            &raw_row("狼霆🎹", Some("56874096680"), Some(1.0)),
+            &ctx,
+            &HashMap::new(),
+            None,
+        );
+        assert_eq!(r.person_id, Some(132), "换号后靠艺名也要认得出");
+        assert!(r.matched);
+        // 字母抖音号（haoyi6725）从来没录进台账 → 同样靠艺名
+        let r2 = resolve_row(
+            &raw_row("浩艺🎙️", Some("haoyi6725"), Some(1.0)),
+            &ctx,
+            &HashMap::new(),
+            None,
+        );
+        assert_eq!(r2.person_id, Some(25));
+        // 括号里的师傅名不算本人：玖玉🎹🎤(尊师狼轩) 是玖玉
+        let r3 = resolve_row(
+            &raw_row("玖玉🎹🎤(尊师狼轩)", Some("37181712726"), Some(1.0)),
+            &ctx,
+            &HashMap::new(),
+            None,
+        );
+        assert_eq!(r3.person_id, Some(172));
+        // 认不出的一律不猜，留在暂存区
+        let r4 = resolve_row(
+            &raw_row("账号已注销", Some("账号已注销"), Some(1.0)),
+            &ctx,
+            &HashMap::new(),
+            None,
+        );
+        assert!(!r4.matched);
+        assert_eq!(r4.person_id, None);
+    }
+
+    /// 号码命中永远压过艺名兜底：昵称写着别人的艺名，但号是 A 的 → 归 A。
+    /// （实测 445 行里号码与艺名零冲突，这条是防止以后艺名规则放宽时认错人）
+    #[test]
+    fn douyin_no_beats_stage_name() {
+        let ctx = MatchCtx {
+            streamers: vec![LocalStreamer {
+                id: 172,
+                name: "玖玉".into(),
+                gender: "male".into(),
+            }],
+            by_douyin: HashMap::from([("37181712726".to_string(), 172u64)]),
+            by_anchor: HashMap::new(),
+            stage_names: vec!["玖玉".into()],
+        };
+        let r = resolve_row(
+            &raw_row("狼霆🎹", Some("37181712726"), Some(1.0)),
+            &ctx,
+            &HashMap::new(),
+            None,
+        );
+        assert_eq!(r.person_id, Some(172));
+        assert!(r.matched_by_douyin, "按号命中，不算按艺名");
+    }
+
+    /// 艺名兜底不改变「按名字命中」的语义：matchedByDouyin 仍为 false。
+    /// 前端按这个字段判断「是不是认错人了」，不能因为换了兜底路径就谎报。
+    #[test]
+    fn stage_name_hit_is_not_reported_as_douyin_hit() {
+        let ctx = stage_ctx();
+        let r = resolve_row(
+            &raw_row("狼霆🎹", Some("56874096680"), Some(1.0)),
+            &ctx,
+            &HashMap::new(),
+            None,
+        );
+        assert!(r.matched);
+        assert!(!r.matched_by_douyin, "艺名命中不是号码命中");
     }
 
     #[test]

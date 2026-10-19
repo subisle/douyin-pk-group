@@ -1,8 +1,8 @@
 /**
  * 底栏（#navRow）手势口径自检：
- *   1. **普通短按（tap）不切换路由**（2026-10-19 用户口径）；
- *   2. 长按 → 拖拽 → 松手，才切到落位那一格对应的路由；
- *   3. 拖回原格松手：不报错、路由不变。
+ *   1. 普通短按（tap）切换路由，且不出现旧版整格大红；
+ *   2. 按住横向拖动 → 松手，切到落位那一格对应的路由（不要求先长按）；
+ *   3. 拖回原格松手：回到原视图，不报错。
  *
  * 用法：
  *   node scripts/check/uicheck-nav-drag.mjs [BASE] [管理员口令]
@@ -206,33 +206,32 @@ try {
   const otherIdx = curOn === 0 ? 1 : 0;
   const from = nav[curOn], to = nav[otherIdx];
 
-  /* ---------- 1. 普通短按：不切路由 ---------- */
+  /* ---------- 1. 普通短按：点击切路由，且没有旧版整格大红 ---------- */
   const r0 = await route(), v0 = await activeV();
   await touch(ws, 'touchStart', to.cx, to.cy);
   await sleep(60);                       // <150ms，且不移动
   await touch(ws, 'touchEnd', to.cx, to.cy);
   await sleep(900);
   const r1 = await route(), v1 = await activeV();
-  r1 === r0 && v1 === v0
-    ? ok(`短按「${to.v}」不切路由（路由 ${r1} / 选中 ${v1} 均未变）`)
-    : bad(`短按竟然切了路由：${r0}(${v0}) → ${r1}(${v1})`);
+  r1 !== r0 && v1 === to.v
+    ? ok(`短按「${to.v}」切换到路由 ${r1}`)
+    : bad(`短按「${to.v}」没有切页：${r0}(${v0}) → ${r1}(${v1})`);
+  const noBigRed = await evaluate(ws, `document.querySelectorAll('.tab-ripple').length === 0`);
+  noBigRed ? ok('短按没有旧版整格大红 ripple') : bad('短按仍出现旧版整格大红 ripple');
   console.log('  ->  ' + (await shot(ws, '01-after-tap.png')));
-  /* 短按后液态水滴必须留在原选中格（视觉上明确「没切换」） */
-  const dropStill = await evaluate(ws, `(() => {
-    const tabs = [...document.querySelectorAll('#navRow button[data-v]')].filter(b => b.offsetParent !== null);
-    const on = tabs.findIndex(b => b.classList.contains('on'));
-    const drop = document.getElementById('navDrop');
-    if (!drop) return false;
-    const dr = document.getElementById('navRow').getBoundingClientRect();
-    const m = new DOMMatrixReadOnly(getComputedStyle(drop).transform);
-    const tr = tabs[Math.max(0, on)].getBoundingClientRect();
-    return Math.abs(m.m41 - (tr.left - dr.left - 6)) < 3;
-  })()`);
-  dropStill ? ok('短按后液态水滴仍停在原选中格') : bad('短按后水滴位置漂了');
-
-  /* ---------- 2. 长按 + 拖拽 + 松手：切到目标格 ---------- */
+  /* 点回原格，后续拖拽用例从原格出发 */
   await touch(ws, 'touchStart', from.cx, from.cy);
-  await sleep(260);                       // >150ms → 进入拖拽模式
+  await sleep(60);
+  await touch(ws, 'touchEnd', from.cx, from.cy);
+  await sleep(900);
+  const r1b = await route(), v1b = await activeV();
+  v1b === v0
+    ? ok(`短按「${from.v}」切回原视图（路由 ${r1b}）`)
+    : bad(`短按切回失败：${r1}(${v1}) → ${r1b}(${v1b})`);
+
+  /* ---------- 2. 按住横向拖动 + 松手：切到目标格 ---------- */
+  await touch(ws, 'touchStart', from.cx, from.cy);
+  await sleep(30);                        // 不等待长按，验证即按即拖
   /* 分几步移动，模拟真实拖动（也触发速度感应） */
   const steps = 8;
   for (let s = 1; s <= steps; s++) {
@@ -285,8 +284,8 @@ try {
   await sleep(1400);                      // 等磁吸(340ms) + 切页
   const r2 = await route(), v2 = await activeV();
   v2 === to.v
-    ? ok(`长按拖拽松手后切到目标格「${to.v}」（路由 ${r2}）`)
-    : bad(`长按拖拽松手后没有切到「${to.v}」：选中仍是 ${v2}，路由 ${r2}`);
+    ? ok(`按住拖动松手后切到目标格「${to.v}」（路由 ${r2}）`)
+    : bad(`按住拖动松手后没有切到「${to.v}」：选中仍是 ${v2}，路由 ${r2}`);
   console.log('  ->  ' + (await shot(ws, '02-after-drag.png')));
 
   /* ---------- 3. 拖回原格松手：回到原路由 ---------- */

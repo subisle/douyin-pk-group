@@ -202,18 +202,15 @@ button { font:inherit; cursor:pointer; }
   .team-switch { font-size:11px; }
   .team-switch button { padding:4px 8px; font-size:11px; }
 }
-/* 分组子导航（按赛事类型拆页，浅色胶囊，仅在分组页显示） */
-.subnav { display:flex; gap:6px; margin-top:10px; overflow-x:auto; padding-bottom:10px;
-  -webkit-overflow-scrolling:touch; scrollbar-width:none;
-  mask-image:linear-gradient(to right,#000 94%,transparent 100%); position:relative; }
-.subnav::-webkit-scrollbar { display:none; }
-/* 2026-10-18 玻璃化：旧分段条按钮改白玻胶囊（白 .6 底 + 白 .8 描边，参照看板页日期按钮） */
-.subnav button { flex:none; height:30px; padding:0 13px; border-radius:var(--r-full);
-  background:rgba(255,255,255,.6); border:1px solid rgba(255,255,255,.8); color:#64748B;
-  font-size:12.5px; box-shadow:0 2px 6px rgba(0,0,0,.04); }
-/* 2026-10-18 玻璃化：选中从 primary 蓝改琥珀白底 pill（#B45309 字 + rgba(252,211,77,.4) 描边） */
-.subnav button.on { background:#fff; border-color:rgba(252,211,77,.4); color:#B45309; font-weight:600;
-  box-shadow:0 2px 10px rgba(217,119,6,.14); }
+/* 分组赛事切换（2026-10-19 用户口径）：只保留这一套，苹果白玻分段控件。
+   与底部水滴导航明确区分：这里是等宽分段 + 白色玻璃滑块，支持长按后拖动。 */
+.battle-seg { margin-top:10px; }
+#subnav { touch-action:pan-y; user-select:none; -webkit-user-select:none; }
+#subnav.is-dragging { cursor:grabbing; }
+/* 与日/月/年完全同一套 .seg.st-seg / .st-seg-pill；仅因五组中文标签更长收一档字号。 */
+#subnav button { padding:6px 0; font-size:13px; white-space:nowrap; }
+#subnav.is-longpress .st-seg-pill { filter:brightness(1.025); }
+@media (max-width:370px) { #subnav button { font-size:12px; } }
 
 /* 📣 公告大卡（2026-10-14 → 2026-10-17 停用）：原顶部竖排公告大卡样式整组保留不删
    （弹窗与别的块仍引用其中部分类名），但顶部已不再渲染 —— 公告内容收进头部单行
@@ -736,7 +733,7 @@ button { font:inherit; cursor:pointer; }
     conic 色散环），选中图标/文字琥珀 #B45309；未选中 slate-600。 */
 /* 2026-10-18 第二轮 1:1：定位层上提（设计稿 fixed 外层 + relative nav 双层） */
 .tabbar-dock { position:fixed; bottom:16px; left:50%; transform:translateX(-50%);
-  width:calc(100% - 32px); max-width:398px; z-index:31; }
+  width:calc(100% - 32px); max-width:398px; z-index:40; }
 .tabbar { position:relative;
   display:flex; align-items:center; justify-content:space-between;
   padding:6px; border-radius:9999px;
@@ -755,7 +752,7 @@ button { font:inherit; cursor:pointer; }
     设计稿的按压缩放由水滴自身形变承担，dock 保持不动。 */
   overflow:hidden; }
 /* 2026-10-15 task-11：5 项均分不换行（「微信对接」四字 nowrap 保全文案）。
-   2026-10-18 v6：加 overflow:hidden + border-radius —— 触摸光晕（.tab-ripple）
+   加 overflow:hidden + border-radius —— tap 小反馈（.tab-tap-feedback）
    必须裁在 Tab 格子内，不能溢出到隔壁格子 / dock 外。 */
 .tabbar button { position:relative; z-index:20; flex:1; min-width:0;
   border:none; background:transparent;
@@ -780,27 +777,29 @@ button { font:inherit; cursor:pointer; }
   touch-action:none;
   color:#475569;
   transition:color .15s, transform .15s, filter .15s, opacity .15s; }
-.tabbar button .ic svg { width:20px; height:20px; }
+.tabbar button .ic svg { width:20px; height:20px; position:relative; z-index:1; }
 /* 选中态 / 水滴 focused·edge 两态的图标文字样式，统一在下方「液态水滴」体系里定义
    （2026-10-19 第四轮：scale 从旧版的 1.12 改回设计稿的 1.08 + translateY(-.5px)）。 */
-/* ===== 触摸光晕（2026-10-18 v6，用户提示词 1-6 条）=====
-   JS 动态创建（不用伪元素 —— 伪元素定位不了「点击坐标」），一个节点一次动画：
-     · 圆形 + 径向渐变红光（红→透明，柔和不刺眼）
-     · pointer-events:none —— 不拦截点击
-     · 初始 scale(0) opacity(0)，双 rAF 后 → scale(1) opacity(.35)
-     · transition all .4s ease-out（扩散 + 淡出同步）
-     · 400ms 后 setTimeout 删节点，不堆积
-   光晕尺寸取 Tab 格子短边的 2.2 倍 —— 点格子边缘也能铺满整格。 */
-.tab-ripple { position:absolute; width:96px; height:96px; border-radius:50%;
-  pointer-events:none; z-index:0;
-  background:radial-gradient(circle,
-    rgba(239,68,68,.55) 0%, rgba(239,68,68,.28) 40%, rgba(239,68,68,0) 70%);
-  transform:translate(-50%,-50%) scale(0); opacity:0;
-  transition:transform .4s ease-out, opacity .4s ease-out; }
-.tab-ripple.tab-ripple-on { transform:translate(-50%,-50%) scale(1); opacity:.35; }
-/* prefers-reduced-motion：光晕退化为一次性淡入淡出（不扩散），仍能看出反馈 */
+/* ===== 点击反馈（2026-10-19 第五轮）=====
+   用户补充口径：普通 tap 不应出现之前的整格「大红」径向光晕；只需一个克制、
+   贴近图标的小反馈，并且不得让 tap 看起来像已经切页。反馈在松手确认是 tap 后才生成，
+   所以长按/拖拽不会残留红圈，也不会因合成 click 重复生成。 */
+.tab-tap-feedback { position:absolute; left:50%; top:50%; width:30px; height:30px;
+  border-radius:50%; pointer-events:none; z-index:0;
+  background:radial-gradient(circle, rgba(180,83,9,.16) 0%, rgba(180,83,9,.06) 55%,
+    rgba(180,83,9,0) 72%);
+  transform:translate(-50%,-50%) scale(.62); opacity:0;
+  transition:transform .18s ease-out, opacity .18s ease-out; }
+.tab-tap-feedback.on { transform:translate(-50%,-50%) scale(1); opacity:1; }
+/* tap 只给水滴一次无色的张力回弹，不改变静态 rim 的色散强度。 */
+#navDrop.is-tap-ack .nav-drop-body { animation:navDropTapAck .2s ease-out; }
+@keyframes navDropTapAck {
+  0%,100% { transform:scale(1,1); }
+  45% { transform:scale(.97,1.03); }
+}
 @media (prefers-reduced-motion: reduce) {
-  .tab-ripple { transition:opacity .4s ease-out; }
+  .tab-tap-feedback { transition:opacity .12s ease-out; transform:translate(-50%,-50%) scale(1); }
+  #navDrop.is-tap-ack .nav-drop-body { animation:none; }
 }
 /* ===== 底部导航「液态水滴 + 边缘色散」体系（2026-10-19 第四轮）=====
    设计源：Stitch 项目 9879920671738170074 / 屏幕 2f32c73c9eb745c99ad617e812c6189f
@@ -1043,7 +1042,7 @@ body.busy #view { opacity:.62; }
 @media (hover:hover) {
   .tabbar button:hover { color:var(--primary); }
   /* 2026-10-18 玻璃化：subnav 白玻胶囊 hover 改浅玻璃提亮，不再灰底 */
-  #subnav button:hover { background:rgba(255,255,255,.85); color:#0F172A; }
+  #subnav button:hover { background:transparent; color:#0F172A; }
   .dates button:hover, .stepper button:hover, .icon-btn:hover { background:#F4F6FA; }
   .lb-row:hover { background:#F8FAFD; }
   .seg button:not(.on):hover { color:var(--on-surface); }
@@ -1190,10 +1189,12 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 /* 音浪数值（设计稿 leading-tight + tracking-tight + 金渐变仅第1名） */
 .st-pod-wv { margin:2px 0 0; font-size:16px; line-height:18px; font-weight:900;
   letter-spacing:-.02em; color:#0F172A; font-variant-numeric:tabular-nums; }
-.st-pod-1 .st-pod-wv { font-size:20px; line-height:23px;
-  background:linear-gradient(to right,#D97706,#CA8A04,#B45309);
+.st-pod-1 .st-pod-wv, .st-pod-2 .st-pod-wv, .st-pod-3 .st-pod-wv {
+  background-image:linear-gradient(to right,#D97706,#CA8A04,#B45309);
   -webkit-background-clip:text; background-clip:text;
   -webkit-text-fill-color:transparent; color:transparent; }
+/* 2026-10-19 用户口径：前三名音浪统一金色，第 1 名保留更大的字号。 */
+.st-pod-1 .st-pod-wv { font-size:20px; line-height:23px; }
 /* 单位小字（设计稿 text-[11px] block font-bold font-mono tracking-wide，行高 16.5）：
     2026-10-18 第二轮 1:1：去 width:100%（设计稿是 inline span，宽=文字宽，
     居中由父级 items-center 完成）+ line-height 16.5px 对齐实测。
@@ -1212,9 +1213,7 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
   font-weight:700; letter-spacing:.025em; color:#0284C7;
   font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,'Liberation Mono','Courier New',monospace; }
 .st-pod-1 .st-pod-lbl { color:#D97706; }
-.st-pod-total { margin:2px 0 0; font-size:10px; line-height:15px; color:#64748B;
-  font-variant-numeric:tabular-nums; }
-.st-pod-1 .st-pod-total { font-weight:600; color:rgba(180,83,9,.8); }
+/* 领奖台「总音浪」已按 2026-10-19 用户口径下线。 */
 
 /* 排行榜列表（4 名起）—— 设计稿：section px-4，卡 = 白玻（blur 20px + 白 .85 描边）
     + 圆角 16 + 0 8px 32px rgba(148,163,184,.12)；行高 68（px-3.5 py-3）、
@@ -1265,8 +1264,19 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .st-row-off { padding:0 .375rem; border-radius:.25rem; background:var(--surface-container);
   color:var(--on-surface-variant); font-size:10px; line-height:1.5; font-weight:400; flex:none; }
 .st-row-off.warn { background:rgba(185,28,28,.06); color:var(--error); }
-.st-row-sub { margin:.125rem 0 0; font-size:11px; color:#0284C7; font-variant-numeric:tabular-nums; }
-.st-row.off .st-row-sub { color:var(--outline); }
+.st-row-sub { margin:.125rem 0 0; padding:0; font-size:11px; color:#64748B;
+  font-variant-numeric:tabular-nums; line-height:1.5; }
+/* 2026-10-19 用户口径：月 / 年榜的「未播 x天」从名字右侧挪到名字下面一行（借用 .st-row-sub 行） */
+.st-row-sub .st-row-off { margin:0; }
+/* 2026-10-19 用户口径：榜单行「时长」格（日 / 月 / 年共用）——夹在名字与音浪之间
+   （日榜用户圈出的空白位置）；2026-10-19 用户口径：日 / 月 / 年三种榜单都放在
+   名字与音浪之间的空白区域并左对齐，不再贴着右侧音浪；无秒，仅 minutes
+   缺失/null 时隐藏。
+   flex:1 吃掉中间空档，避免名字短的人把这格推到左边。 */
+.st-row-min { flex:1 1 auto; min-width:0; text-align:left; padding:0 10px 0 18px;
+  font-size:12px; line-height:16px; font-weight:600; color:#0284C7;
+  font-variant-numeric:tabular-nums; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.st-row.off .st-row-min { color:var(--outline); }
 .st-row-r { text-align:right; flex:none; }
 .st-row-wv { display:block; font-size:16px; line-height:24px; font-weight:900; color:#0F172A;
   font-variant-numeric:tabular-nums; letter-spacing:-.02em;
@@ -1337,22 +1347,6 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .st-seg button:disabled { cursor:not-allowed; }
 
 /* ===== 分组页（Pk Tournament）Stitch 版 ===== */
-/* 2026-10-18 玻璃化：赛事分段条对齐看板页 .st-seg 分段容器（白 .52 底 + blur(28px) saturate(180%)） */
-.st-group-tabs { display:flex; align-items:center; gap:.25rem; padding:.25rem;
-  background:rgba(255,255,255,.52); border:1px solid rgba(255,255,255,.85);
-  box-shadow:0 6px 24px rgba(15,23,42,.05), 0 1px 3px rgba(0,0,0,.02),
-    inset 0 1px 2px rgba(255,255,255,.95), inset 0 -1px 2px rgba(148,163,184,.12);
-  -webkit-backdrop-filter:blur(28px) saturate(180%); backdrop-filter:blur(28px) saturate(180%);
-  border-radius:9999px; overflow-x:auto;
-  scrollbar-width:none; -webkit-overflow-scrolling:touch; }
-.st-group-tabs::-webkit-scrollbar { display:none; }
-.st-group-tabs button { flex:none; padding:.375rem 1rem; border-radius:9999px; border:none;
-  background:transparent; color:#64748B; font-size:14px; font-weight:500; }
-/* 2026-10-18 玻璃化：选中改白玻 pill（白 .95 底 + #0F172A 700），容器内 pill 视觉一致 */
-.st-group-tabs button.on { background:rgba(255,255,255,.95); color:#0F172A;
-  font-weight:700; box-shadow:0 4px 14px rgba(0,0,0,.06), 0 1px 2px rgba(0,0,0,.04),
-    inset 0 1px 2px #fff; }
-.st-group-tabs button:disabled { color:#94A3B8; }
 .st-group-chips { display:flex; gap:.5rem; overflow-x:auto; padding-bottom:1rem;
   scrollbar-width:none; -webkit-overflow-scrolling:touch;
   mask-image:linear-gradient(to right,#000 92%,transparent 100%); }
@@ -1499,7 +1493,13 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 /* 头像用设计稿浅底单字徽标（primary-fixed 底 + primary 字），不再按姓名哈希上彩色 */
 .st-my-av { width:4rem; height:4rem; border-radius:9999px; display:grid; place-items:center;
   font-size:22px; font-weight:600; background:var(--primary-fixed); color:var(--primary);
-  flex:none; position:relative; }
+  flex:none; position:relative; overflow:hidden; }
+/* 2026-10-19 用户口径：我的页头像优先用抖音头像，同源头像与榜单一致。 */
+.st-my-av.has-img { background:#fff; box-shadow:0 0 0 2px #fff, 0 1px 3px rgba(0,0,0,.06); }
+.st-my-av img { width:100%; height:100%; object-fit:cover; display:block; }
+.st-my-acct .row .ico.has-img { background:#fff; border-radius:9999px;
+  box-shadow:0 0 0 2px #fff, 0 1px 2px rgba(0,0,0,.06); overflow:hidden; }
+.st-my-acct .row .ico img { width:100%; height:100%; object-fit:cover; display:block; }
 .st-my-av .badge { position:absolute; right:-2px; bottom:-2px; width:1.25rem; height:1.25rem;
   border-radius:9999px; background:var(--primary); color:var(--on-primary); display:grid;
   place-items:center; border:2px solid var(--surface-container-lowest); }
@@ -1573,6 +1573,7 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
   background:rgba(0,88,188,.08); color:var(--primary); font-size:11px; font-weight:700; }
 .st-my-big .st-cmp-rmb .v { font-size:17px; font-weight:700; color:var(--tertiary);
   font-variant-numeric:tabular-nums; }
+.st-my-big .st-cmp-rmb .r { margin-left:auto; font-size:10.5px; color:#64748B; }
 /* 2026-10-18 玻璃化：实底白卡 → 白 .72 玻璃卡（白 .85 描边 + 看板同款投影 + blur 20px） */
 .st-my-card { background:rgba(255,255,255,.72); border:1px solid rgba(255,255,255,.85);
   border-radius:16px; padding:1rem;
@@ -1633,6 +1634,9 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 /* 2026-10-18 玻璃化：行 active surface-container → 白 .8 */
 .st-my-acct .row.copiable:active { background:rgba(255,255,255,.8); }
 .st-my-acct .row .l { display:flex; align-items:center; gap:1rem; flex:1 1 8rem; min-width:0; }
+.st-my-acct .row .ico.has-img { background:#fff; border-radius:9999px;
+  box-shadow:0 0 0 2px #fff, 0 1px 2px rgba(0,0,0,.06); overflow:hidden; }
+.st-my-acct .row .ico img { width:100%; height:100%; object-fit:cover; display:block; }
 .st-my-acct .row .ico { width:2rem; height:2rem; border-radius:.5rem;
   /* 2026-10-18 玻璃化：surface-container 实底 → 白 .52 玻 */
   background:rgba(255,255,255,.52); color:var(--on-surface-variant);
@@ -1670,6 +1674,14 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .st-my-acct .row .wg .c b { font-size:13px; font-weight:600; color:var(--on-surface);
   font-variant-numeric:tabular-nums; white-space:nowrap;
   text-align:right; min-width:3.5em; }
+.st-my-acct .fee-note { padding:6px 1rem; font-size:11px; line-height:1.5; color:#64748B;
+  border-top:1px solid rgba(226,232,240,.6); }
+/* 号级「本月预估到手」（2026-10-19）：占整行右对齐的小字，与四格音浪同一色系，
+   不抢主标题宽度（四格已经在 flex 行右端，这一行自然折到下方）。 */
+.st-my-acct .row .est { flex:1 1 100%; text-align:right; font-size:11px;
+  color:var(--on-surface-variant); margin-top:.25rem; }
+.st-my-acct .row .est b { font-size:12.5px; font-weight:700; color:var(--tertiary);
+  font-variant-numeric:tabular-nums; }
 .st-my-acct .fail { padding:.75rem 1rem; font-size:11px; color:var(--outline); text-align:center; }
 .st-my-acct .none { padding:1rem; font-size:12px; color:var(--on-surface-variant);
   text-align:center; line-height:1.7; }
@@ -2186,92 +2198,76 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 #wm { position:fixed; inset:0; z-index:70; pointer-events:none; background-repeat:repeat; }
 #wm[hidden] { display:none; }
 
-/* ===== 引导弹窗（2026-10-12 大厂级）：分步引导 + 品牌头 + 步骤条 + 键盘/手势 =====
-   对齐 Apple / 微信「新功能介绍」的做法：
-   · 居中卡片，毛玻璃遮罩 + 卡片回弹入场（不是硬弹）
-   · 品牌头（图标 + 「新功能」chip）替代裸标题，每步一个图标
-   · 进度条可点（Pill 步骤条），第 N 步可点回跳
-   · Esc / 点遮罩 = 跳过，← → 键盘翻页，触屏左右滑动翻页
-   · 底部「跳过引导」+ 主按钮「下一步 / 知道啦」，上一步有但不抢焦点
-   · 滚动锁定（body overflow hidden），长文案卡内滚动，不会把按钮顶出屏幕
-   · prefers-reduced-motion 时关掉动画 */
-#announce { position:fixed; inset:0; z-index:100; background:rgba(11,15,23,.55);
+/* ===== 新手引导（2026-10-19 Apple 白玻版） =====
+   仅保留必要信息：图标、标题、直白说明、步骤点、主按钮。
+   使用系统字体、白色半透明玻璃、Apple 蓝主按钮，不再使用彩色品牌头。 */
+#announce { position:fixed; inset:0; z-index:100; background:rgba(0,0,0,.32);
   display:flex; align-items:center; justify-content:center; padding:20px;
-  -webkit-backdrop-filter:blur(18px) saturate(150%); backdrop-filter:blur(18px) saturate(150%); }
+  -webkit-backdrop-filter:blur(16px) saturate(130%); backdrop-filter:blur(16px) saturate(130%); }
 #announce.hidden { display:none; }
 @keyframes annOverlayIn { from { opacity:0; } to { opacity:1; } }
 @keyframes annCardIn {
-  from { opacity:0; transform:translateY(24px) scale(.96); }
-  60%  { opacity:1; transform:translateY(0) scale(1.005); }
-  to   { opacity:1; transform:none; }
+  from { opacity:0; transform:translateY(16px) scale(.975); }
+  to { opacity:1; transform:none; }
 }
-@keyframes annStepIn { from { opacity:0; transform:translateX(14px); } to { opacity:1; transform:none; } }
-@keyframes annIconPulse { 0%,100% { transform:scale(1); } 50% { transform:scale(1.08); } }
-#announce.ann-overlay-in { animation:annOverlayIn .22s ease both; }
-.announce-box { max-width:352px; width:100%; max-height:calc(100dvh - 40px);
-  background:#fff; border-radius:22px; padding:0 0 18px; text-align:center;
-  box-shadow:0 24px 70px rgb(0 0 0 / 28%); overflow:hidden;
-  display:flex; flex-direction:column; animation:annCardIn .34s cubic-bezier(.22,1,.36,1) both; }
-/* 品牌头：渐变头图，让「这是一个正式功能说明」而不是系统告警 */
-.announce-box .a-head { position:relative; padding:22px 20px 16px;
-  background:var(--primary);
-  background:linear-gradient(160deg, var(--primary) 0%, #6d5bd0 100%);
-  color:var(--on-primary); }
-@supports (background: linear-gradient(in srgb, red, blue)) {
-  .announce-box .a-head { background:linear-gradient(160deg, var(--primary) 0%, color-mix(in srgb, var(--primary) 72%, #7c3aed) 100%); }
-}
-.announce-box .a-ico { width:52px; height:52px; border-radius:16px; margin:0 auto 12px;
-  background:rgb(255 255 255 / 18%); color:#fff; display:grid; place-items:center;
-  font-size:26px; animation:annIconPulse 2.4s ease-in-out infinite; }
-.announce-box .a-chip { display:inline-block; padding:3px 10px; border-radius:9999px;
-  background:rgb(255 255 255 / 20%); color:#fff; font-size:11px; font-weight:700;
-  letter-spacing:.04em; margin-bottom:8px; }
-.announce-box h3 { margin:0; font-size:18px; font-weight:800; line-height:1.4; }
-.announce-box .a-body { margin:0; padding:16px 20px 18px; font-size:14px;
-  color:var(--on-surface-variant); line-height:1.8; text-align:left;
-  white-space:pre-wrap; word-break:break-word; overflow-y:auto; flex:1 1 auto;
-  -webkit-overflow-scrolling:touch; }
-/* 富文本模式（bodyHtml 产出 <p>/<ul>）关掉 pre-wrap，改由块级元素自己管间距；
-   纯文本模式（上面那条）保留 pre-wrap，README 式的手动换行才好看。 */
+@keyframes annStepIn { from { opacity:0; transform:translateY(5px); } to { opacity:1; transform:none; } }
+#announce.ann-overlay-in { animation:annOverlayIn .2s ease both; }
+.announce-box { max-width:350px; width:100%; max-height:calc(100dvh - 40px);
+  background:rgba(255,255,255,.84); border:1px solid rgba(255,255,255,.92);
+  border-radius:28px; padding:0 0 16px; text-align:center;
+  box-shadow:0 24px 80px rgba(0,0,0,.24), 0 2px 8px rgba(0,0,0,.06),
+    inset 0 1px 1px rgba(255,255,255,.95);
+  -webkit-backdrop-filter:blur(32px) saturate(180%); backdrop-filter:blur(32px) saturate(180%);
+  overflow:hidden; display:flex; flex-direction:column;
+  animation:annCardIn .28s cubic-bezier(.22,1,.36,1) both;
+  color:#1d1d1f; font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','PingFang SC',
+    'Helvetica Neue',Arial,sans-serif; }
+.announce-box .a-head { position:relative; padding:22px 22px 12px; background:transparent; color:#1d1d1f; }
+.announce-box .a-ico { width:50px; height:50px; border-radius:15px; margin:0 auto 10px;
+  background:linear-gradient(180deg,#fff,#f2f2f7); color:#007aff; display:grid; place-items:center;
+  font-size:25px; border:1px solid rgba(255,255,255,.95);
+  box-shadow:0 6px 18px rgba(15,23,42,.09), inset 0 1px 1px #fff; animation:none; }
+.announce-box .a-chip { display:inline-block; padding:3px 9px; border-radius:9999px;
+  background:rgba(118,118,128,.10); color:#6e6e73; font-size:11px; font-weight:600;
+  letter-spacing:.02em; margin-bottom:8px; }
+.announce-box h3 { margin:0; font-size:20px; font-weight:700; line-height:1.3; letter-spacing:-.02em; }
+.announce-box .a-body { margin:0; padding:4px 24px 18px; font-size:15px;
+  color:#3a3a3c; line-height:1.55; text-align:center; white-space:pre-wrap;
+  word-break:break-word; overflow-y:auto; flex:1 1 auto; -webkit-overflow-scrolling:touch; }
 .announce-box .a-body.rich { white-space:normal; }
-.announce-box .a-body.rich p { margin:0 0 8px; }
+.announce-box .a-body.rich p { margin:0 0 7px; }
 .announce-box .a-body.rich p:last-child { margin-bottom:0; }
-.announce-box .a-body.rich ul { margin:4px 0 8px; padding-left:4px; list-style:none; }
-.announce-box .a-body.rich ul:last-child { margin-bottom:0; }
+.announce-box .a-body.rich ul { margin:4px 0 7px; padding:0; list-style:none; text-align:left; }
 .announce-box .a-body.rich li { position:relative; padding-left:14px; margin:3px 0; }
 .announce-box .a-body.rich li::before { content:''; position:absolute; left:2px; top:.62em;
-  width:4px; height:4px; border-radius:9999px; background:var(--primary); }
-.announce-box .a-body.rich b { color:var(--on-surface); font-weight:700; }
-/* Pill 步骤条：当前步拉长成胶囊，整条可点（大厂引导的标配进度反馈） */
+  width:4px; height:4px; border-radius:9999px; background:#007aff; }
+.announce-box .a-body.rich b { color:#1d1d1f; font-weight:650; }
 .announce-box .a-dots { display:flex; justify-content:center; align-items:center;
-  gap:6px; padding:0 20px 14px; }
+  gap:6px; padding:0 22px 15px; }
 .announce-box .a-dots button { width:6px; height:6px; padding:0; border:none; cursor:pointer;
-  border-radius:9999px; background:#D8DEE7; transition:width .25s cubic-bezier(.22,1,.36,1), background .25s; }
-.announce-box .a-dots button.on { width:18px; border-radius:3px; background:var(--primary); }
-.announce-box .a-dots button.done { background:#BFC9E4; }
-@supports (color: color-mix(in srgb, red 50%, blue)) {
-  .announce-box .a-dots button.done { background:color-mix(in srgb, var(--primary) 45%, #fff); }
-}
-.announce-box .a-actions { display:flex; gap:8px; padding:0 20px; }
-.announce-box .a-prev, .announce-box .a-ok { flex:1; height:46px; border:none;
-  border-radius:var(--r-md); font-size:15px; font-weight:700; cursor:pointer;
-  transition:transform .12s ease, opacity .12s ease; }
-.announce-box .a-prev { background:#F1F5F9; color:var(--on-surface-variant); flex:0 0 92px; }
-.announce-box .a-ok { background:var(--primary); color:var(--on-primary); }
-.announce-box .a-prev:active, .announce-box .a-ok:active { transform:scale(.97); }
+  border-radius:9999px; background:rgba(118,118,128,.24);
+  transition:width .24s cubic-bezier(.22,1,.36,1), background .2s; }
+.announce-box .a-dots button.on { width:18px; border-radius:3px; background:#007aff; }
+.announce-box .a-dots button.done { background:rgba(0,122,255,.32); }
+.announce-box .a-actions { display:flex; gap:8px; padding:0 18px; }
+.announce-box .a-prev, .announce-box .a-ok { flex:1; height:48px; border:none;
+  border-radius:14px; font-size:16px; font-weight:600; cursor:pointer;
+  font-family:inherit; transition:transform .12s ease, opacity .12s ease; }
+.announce-box .a-prev { background:rgba(118,118,128,.12); color:#3a3a3c; flex:0 0 94px; }
+.announce-box .a-ok { background:#007aff; color:#fff; box-shadow:0 5px 14px rgba(0,122,255,.22); }
+.announce-box .a-prev:active, .announce-box .a-ok:active { transform:scale(.975); }
 .announce-box .a-prev:disabled { opacity:.4; cursor:default; }
-.announce-box .a-skip { margin:12px 20px 0; background:none; border:none; cursor:pointer;
-  color:var(--ink3); font-size:12px; padding:4px 0; }
-.announce-box .a-step-in { animation:annStepIn .26s cubic-bezier(.22,1,.36,1) both; }
-/* 底部上滑提示（最后一步）：告诉用户可以滑动手势翻页 */
-.announce-box .a-swipe-hint { margin:10px 20px 0; font-size:11px; color:var(--ink3); }
+.announce-box .a-skip { margin:10px 18px 0; background:none; border:none; cursor:pointer;
+  color:#8e8e93; font-size:13px; padding:4px 0; font-family:inherit; }
+.announce-box .a-step-in { animation:annStepIn .22s ease both; }
+.announce-box .a-swipe-hint { display:none; }
 @media (prefers-reduced-motion: reduce) {
-  #announce.ann-overlay-in, .announce-box, .announce-box .a-step-in,
-  .announce-box .a-ico { animation:none; }
+  #announce.ann-overlay-in, .announce-box, .announce-box .a-step-in { animation:none; }
 }
 @media (max-width:360px) {
-  .announce-box { max-width:100%; }
-  .announce-box .a-prev { flex:0 0 80px; }
+  #announce { padding:14px; }
+  .announce-box { max-width:100%; border-radius:24px; }
+  .announce-box .a-prev { flex:0 0 82px; }
 }
 
 /* ===== spotlight 引导（2026-10-13）：指向具体元素的挖孔高亮 + 卡片贴位 =====
@@ -2295,12 +2291,12 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
   50%     { box-shadow:0 0 0 5px #fff, 0 0 0 8px var(--primary), 0 0 0 9999px rgba(11,15,23,.62); }
 }
 /* 贴位卡片：overflow 放开让小三角露出（a-head 渐变自带圆角自己裁） */
-.announce-box .a-head { border-radius:22px 22px 0 0; }
+.announce-box .a-head { border-radius:28px 28px 0 0; }
 .announce-box.at-bottom, .announce-box.at-top,
 .announce-box.at-left, .announce-box.at-right { overflow:visible; }
 .announce-box.at-bottom::before, .announce-box.at-top::before,
 .announce-box.at-left::before, .announce-box.at-right::before {
-  content:''; position:absolute; width:14px; height:14px; background:#fff;
+  content:''; position:absolute; width:14px; height:14px; background:rgba(248,248,250,.96);
   transform:rotate(45deg); z-index:-1; }
 .announce-box.at-bottom::before { top:-7px; left:var(--ax, 50%); margin-left:-7px;
   border-left:1px solid rgba(15,23,42,.06); border-top:1px solid rgba(15,23,42,.06); }
@@ -2430,11 +2426,34 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
   background:#EEF2FF; color:var(--primary);
   font-size:11px; font-weight:700; display:grid; place-items:center; margin-top:1px; }
 .qr-steps .qr-txt { font-size:12.5px; color:var(--on-surface-variant); line-height:1.6; }
-.wx-code-card { max-width:260px; margin:12px auto 0; padding:12px 14px;
+.qrcode { box-sizing:border-box; position:relative; z-index:1; }
+.qr-placeholder { position:absolute; inset:0; z-index:0; display:grid; place-items:center;
+  width:208px; height:208px; border-radius:12px; background:#fff; color:var(--ink3);
+  font-size:13px; line-height:1.5; text-align:center; }
+.qr-wrap.qr-live .qr-placeholder { display:none; }
+.qr-wrap:not(.qr-live) .qrcode { visibility:hidden; }
+.wx-bind-copy { position:relative; z-index:71; margin-top:8px; }
+.wx-bind-lead { font-size:15px; font-weight:600; color:var(--on-surface); line-height:1.5; }
+.wx-bind-copy p { margin:6px 0 0; font-size:13px; line-height:1.75;
+  color:var(--on-surface-variant); text-wrap:pretty; }
+.wx-bind-copy .nowrap { white-space:nowrap; }
+.wx-bind-note { position:relative; z-index:71; margin-top:9px; padding:8px 10px; border-radius:10px; background:#EAF3FF;
+  color:#175CD3; font-size:12.5px; line-height:1.6; }
+.wx-bind-qr { position:relative; z-index:71; margin-top:14px; }
+.wx-shot-hint { display:table; max-width:100%; margin:0 auto 10px; padding:4px 10px; border-radius:9999px;
+  text-align:center; box-sizing:border-box;
+  background:#EAF3FF; color:#175CD3; font-size:11.5px; font-weight:600; line-height:1.5; }
+.wx-code-fallback { max-width:260px; margin:12px auto 0; text-align:left; }
+.wx-code-fallback summary { cursor:pointer; list-style:none; text-align:center;
+  font-size:12px; color:var(--on-surface-variant); line-height:1.6; }
+.wx-code-fallback summary::-webkit-details-marker { display:none; }
+.wx-code-fallback summary::after { content:'›'; display:inline-block; margin-left:4px; transform:rotate(90deg); }
+.wx-code-fallback[open] summary::after { transform:rotate(-90deg); }
+.wx-code-card { max-width:260px; margin:10px auto 0; padding:12px 14px;
   background:var(--surface-container-low); border:1px solid var(--hairline); border-radius:14px; }
 .wx-code-main { display:flex; align-items:center; justify-content:center; gap:10px; margin-top:6px; }
 .wx-code-main b { min-width:88px; font-size:26px; letter-spacing:6px; color:var(--on-surface); }
-.wx-code-main button { height:32px; padding:0 12px; border-radius:9999px; font-size:12px; }
+.wx-code-main button { flex:none; width:auto; height:32px; padding:0 12px; border-radius:9999px; font-size:12px; }
 @media (prefers-reduced-motion: reduce) {
   .qr-wrap.qr-live, .qr-status.wait .dot { animation:none; }
 }
@@ -2528,7 +2547,8 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
        轮换单行淡入淡出；非数据视图 / 空公告 → hidden 不占位。原竖排的 #annItems 大卡与
        #home-ann 蓝条已取消渲染（元素与旧 CSS 保留不删，别处不再使用）。 -->
   <div class="mh-ann" id="mhAnn" hidden></div>
-  <div class="subnav hidden" id="subnav">
+  <div class="seg st-seg battle-seg hidden" id="subnav">
+    <div class="st-seg-pill" id="groupSegPill" aria-hidden="true"></div>
     <button data-g="junior">初级小组赛</button>
     <button data-g="mid">中级小组赛</button>
     <button data-g="final">月终争霸赛</button>
@@ -2577,13 +2597,9 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 <!-- 2026-10-18 第二轮 1:1：定位层上提 —— fixed 外层 + relative nav 双层（对齐设计稿） -->
 <div class="tabbar-dock">
 <nav class="tabbar" id="navRow" aria-label="主导航">
-  <!-- 2026-10-19 第四轮：底栏换最新设计稿「液态水滴 + 边缘色散」体系
-       （旧 #navPill 琥珀胶囊 + #navLens 1.5 格大光晕移除）：
-       · #navWallL/#navWallR —— 左右内壁碰撞色散霓虹（拖到两端才淡入）
-       · #navDrop —— 一格宽水滴宿主（静止停在选中格；拖拽跟手；松手磁吸）
-       · #navDropRing —— 1.5px 空心 conic 彩虹轮廓（mask 挖空内部：色散只允许在边缘）
-       · #navDropBody —— 纯透明白玻璃水体（内部零彩光；顶部水膜高光 + 底部焦散弧）
-       交互口径不变：长按拖拽 → 松手才切路由；普通短按不切页。 -->
+  <!-- Stitch 1:1：9879920671738170074 / 2f32c73c9eb745c99ad617e812c6189f
+       「主播数据榜-水滴仅边缘色散质感导航栏」
+       固定四格顺序：看板 / 分组 / 我的 / 微信对接；族谱仅在后台开启时作为额外项出现。 -->
   <div class="nav-wall nav-wall-l" id="navWallL" aria-hidden="true"></div>
   <div class="nav-wall nav-wall-r" id="navWallR" aria-hidden="true"></div>
   <div id="navDrop" class="is-idle" aria-hidden="true">
@@ -2594,19 +2610,15 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
     </div>
   </div>
   <button data-v="data" id="navData" class="on">
-    <span class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><rect x="7" y="13" width="3" height="5" rx="1"/><rect x="12" y="9" width="3" height="9" rx="1"/><rect x="17" y="5" width="3" height="13" rx="1"/></svg></span><span class="tab-label">看板</span></button>
+    <span class="ic"><svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path d="M2 11a1 1 0 011-1h2a1 1 0 011 1v5a1 1 0 01-1 1H3a1 1 0 01-1-1v-5zM8 7a1 1 0 011-1h2a1 1 0 011 1v9a1 1 0 01-1 1H9a1 1 0 01-1-1V7zM14 4a1 1 0 011-1h2a1 1 0 011 1v12a1 1 0 01-1 1h-2a1 1 0 01-1-1V4z"/></svg></span><span class="tab-label">看板</span></button>
   <button data-v="group" id="navGroup">
-    <span class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.5"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6"/><path d="M16 4.5a3.5 3.5 0 0 1 0 7"/><path d="M17 14c2.8.4 4.5 2.4 4.5 5.5"/></svg></span><span class="tab-label">分组</span></button>
+    <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span class="tab-label">分组</span></button>
   <button data-v="lineage" id="navLineage">
     <span class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><path d="M6 9v6a3 3 0 0 0 3 3h6"/><path d="M6 12h6a3 3 0 0 0 3-3"/></svg></span><span class="tab-label">族谱</span></button>
-  <!-- 2026-10-15 task-11：用户点名要的一级入口「微信对接」。
-       它不是一个新视图：点进来等价于「我的 → 消息设置」子页（/my/wechat），
-       同一张 #myPushCard、同一份内容，switchView 里折算成 my + mySub='wechat'。
-       2026-10-18 用户口径：与「我的」**换位**（微信对接在前、我的在后）。 -->
-  <button data-v="wechat" id="navWechat">
-    <span class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.5 8.5 0 0 1-12.4 7.5L3.5 21l1.9-5.6A8.5 8.5 0 1 1 21 11.5Z"/><path d="M8.6 11.4h.01M12.4 11.4h.01M16.2 11.4h.01"/></svg><!-- 未读消息角标（设计稿 wechat-badge）：数量来自 /api/public/my/messages 未读列表 --><span class="wx-badge" id="wxBadge" hidden>0</span></span><span class="tab-label">微信对接</span></button>
   <button data-v="my" id="navMy">
-    <span class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.6-7 8-7s8 3 8 7"/></svg></span><span class="tab-label">我的</span></button>
+    <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span class="tab-label">我的</span></button>
+  <button data-v="wechat" id="navWechat">
+    <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="wx-badge" id="wxBadge" hidden>0</span></span><span class="tab-label">微信对接</span></button>
 </nav>
 </div>
 
@@ -2672,6 +2684,7 @@ let q = '';
 let consecutiveFail = 0;
 let timer = null;
 let loadSeq = 0;         // 请求序号：RTT≈260ms，快速连点时只认最后一次的结果
+let viewAbort = null;    // 当前视图请求的 AbortController：切页/换日期时取消旧请求
 
 /* 请求在途的即时反馈：标题旁小菊花 + 内容轻微压暗。
    在 go() 里开、请求落地后关；静默刷新不经过这里，不打扰正常浏览。 */
@@ -2694,7 +2707,7 @@ function parseRoute() {
   /* 「我的」子页（2026-10-15 契约 C）：wechat = 「消息设置」；push 为兼容别名，
      旧链接 /my/push 仍打开同一页（不 404、不落回列表）。 */
   const mym = rest.match(/^my\/(push|chase|privacy|about|wechat)$/);
-  if (mym) return { view: 'my', mySub: mym[1] };
+  if (mym) return { view: 'my', mySub: mym[1] === 'push' ? 'wechat' : mym[1] };
   const gm = rest.match(/^group\/([a-z-]+)$/);
   if (gm && GROUP_PAGES.some(p => p.key === gm[1])) return { view: 'group', group: gm[1] };
   return { view: 'data' };
@@ -2743,6 +2756,37 @@ const yuan = (n) => {
   const v = Math.round(Number(n) * 100) / 100;
   return '¥' + v.toFixed(2).replace(/\.00$/, '').replace(/(\.\d)0$/, '$1');
 };
+/* ===== 预估收益口径（2026-10-19）=====
+   抖音音浪兑人民币是 10:1（1 元 = 10 音浪，全站沿用），但**主播能拿多少不是固定 35%**：
+     · 个人主播（无公会）约 30%，公会主播按公会等级 30%~55%（S 级最高 40%~55%）；
+     · 2026 年起新政策改成「双周任务弹性制」（基线 + 流水 + 活跃任务叠加），
+       固定分成被取消，实际比例随任务完成度浮动；
+     · 提现侧另有成本：提现门槛 ¥1000 起、单笔手续费，平台技术服务费/个税另计。
+   所以 35% 与手续费都不写在前端：由后台 `public_settings`（sharePct / feePct）下发，
+   /my 与 /my/accounts 各带一份 earnings，前端按它算、按它展示口径说明。
+   公式：到手 ≈ 音浪 ÷ 10 × 分成% ×（1 - 手续费%）。配置缺失/脏值回落 35% / 0%。 */
+let earningsCfg = { sharePct: 35, feePct: 0 };
+/** 单条 earnings 配置落库（接口没带 / 带了脏值都按缺省兜底，绝不让页面算出负数）。 */
+function applyEarnings(src) {
+  const num = (v, dflt) => {
+    const n = Number(v);
+    return Number.isFinite(n) && n >= 0 && n <= 100 ? n : dflt;
+  };
+  const e = src && typeof src === 'object' ? src : {};
+  earningsCfg = { sharePct: num(e.sharePct, 35), feePct: num(e.feePct, 0) };
+}
+/** 音浪 → 预估到手人民币（元）。wave 无效返回 null，由调用方决定显示「—」。 */
+function estYuan(wave) {
+  const w = Number(wave);
+  if (!Number.isFinite(w) || w <= 0) return null;
+  return w / 10 * (earningsCfg.sharePct / 100) * (1 - earningsCfg.feePct / 100);
+}
+/** 分成口径说明（卡内小字）：只按当前配置生成，不再写死 35%。 */
+function earningsNote() {
+  return '预估到手 = 音浪 ÷ 10 × ' + earningsCfg.sharePct + '% 分成' +
+    (earningsCfg.feePct > 0 ? ' ×（1 − ' + earningsCfg.feePct + '% 手续费）' : '') +
+    '；抖音实际以公会等级与任务完成度结算，提现扣费另计。';
+}
 /** 同期差值 chip（1.0.1）：涨红跌绿是固定口径；prev 为 null（上期没数据）不显示 */
 const waveDelta = (wave, prev) => {
   if (wave == null || prev == null) return '';
@@ -2914,13 +2958,13 @@ function makeDialog(id, boxHtml) {
   return { mask: mask, close: close, box: mask.firstElementChild, locked: (on) => { mask.dataset.locked = on ? '1' : ''; } };
 }
 
-async function api(p) {
+async function api(p, opts) {
   /* 登录门（2026-10-10）：带登录态请求头；401 → 弹登录门。
      2026-10-13 修「登录成功又回登录门」：token 一律走 X-My-Token 头——后端
      （admin.rs::header_my_token）只认这个头，?token= / ?access_token= 一律按未登录
      401 处理。旧写法下登录成功后第一个数据请求就 401 → sessionExpired 清 token →
      又弹登录门。顺带 token 不再进 URL（访问日志/浏览器历史/Referer 不再记登录态）。 */
-  const r = await fetch(p, { headers: myTokenHeaders() });
+  const r = await fetch(p, { headers: myTokenHeaders(), signal: opts && opts.signal });
   if (r.status === 401) { sessionExpired(); throw new Error('请先登录'); }
   let d = {};
   try { d = await r.json(); } catch (_) {}
@@ -3058,9 +3102,7 @@ function closeGate(me) {
   /* 引导在登录门弹出时被 dismissAnnounce 收掉了，登录成功要补弹一次。
      用 rAF 等一帧：登录门的 hidden 和引导的 remove('hidden') 要在同一帧后
      再改 class，否则浏览器可能把两层遮罩的过渡叠在一起闪一下。
-     localStorage 已记住版本的（老用户 / 已读过）这里自然不再弹。
-     2026-10-17：maybeAnnounce 内 GUIDE_ENABLED=false 总闸兜住，正常登录不再弹；
-     调用保留不动（恢复引导时无需回改此处）。 */
+     同一用户 7 天内已经看过引导的，这里会按时间戳自然跳过。 */
   requestAnimationFrame(() => {
     try { maybeAnnounce(); } catch (_) {}
     /* 2026-10-18：登录后的后续编排（契约 §4.2 优先级：needProfile > mustChangePass > needQq）。
@@ -3595,6 +3637,25 @@ function applyWatermark(name) {
   wm.hidden = false;
 }
 function removeWatermark() { const wm = $('wm'); if (wm) { wm.hidden = true; wm.style.backgroundImage = ''; } }
+/* 二维码页临时收起全屏水印：水印层 z-index 高于普通内容，若压在二维码上会影响
+   相册识别。只在「消息设置 → 微信对接」子页隐藏，离开后按原状态恢复。 */
+function setQrWatermarkHidden(hide) {
+  const wm = $('wm');
+  if (!wm) return;
+  if (hide) {
+    if (wm.dataset.qrHidden !== '1') {
+      wm.dataset.qrWasHidden = wm.hidden ? '1' : '0';
+      wm.dataset.qrHidden = '1';
+    }
+    wm.hidden = true;
+    return;
+  }
+  if (wm.dataset.qrHidden === '1') {
+    if (wm.dataset.qrWasHidden !== '1') wm.hidden = false;
+    delete wm.dataset.qrHidden;
+    delete wm.dataset.qrWasHidden;
+  }
+}
 
 /* ==================== 榜单 ==================== */
 /* 版式严格对齐排行榜参考设计：TOP3 领奖台 + 名次/头像/名字/数值 的简洁列表。
@@ -3661,10 +3722,11 @@ function podHtml(items) {
         '</div>'
       : '<div class="st-pod-av ' + IN_TONE(it.rank) + '" data-n="' + esc(it.name) + '">' + ch + '</div>';
     const wave = it.wave == null ? '—' : wan(it.wave);
-    const total = it.periodic ? '' : (it.totalWave == null ? '' : wan(it.totalWave));
-    const label = it.periodic ? (period === 'monthly' ? '当月音浪' : '年度音浪') : '日音浪';
-    const min = it.minutes == null || it.minutes === 0 ? '' : minFmt(it.minutes);
-    const absent = it.periodic ? (it.absentDays == null ? 0 : it.absentDays) : null;
+    /* 2026-10-19 用户口径：领奖台不再显示「总音浪」，日 / 月 / 年都只保留本期音浪。 */
+    const label = it.periodic ? '' : '日音浪';
+    /* 字段关闭时后端可能不下发 → null/undefined 一律隐藏；0 是后端真实值，照常显示。 */
+    const min = it.minutes == null ? '' : minFmt(it.minutes);
+    const absent = it.periodic && it.absentDays != null ? it.absentDays : null;
     return '<div class="st-pod st-pod-' + it.rank + '" data-n="' + esc(it.name) + '" data-w="' + (it.wave == null ? '' : it.wave) + '">' +
       '<div class="st-pod-ring">' +
         trophyHtml(it.rank) +
@@ -3677,28 +3739,28 @@ function podHtml(items) {
          块级 label 撑到与数值同宽 —— 设计稿标签实测宽 83.5 正是数值「5万6788」的宽度。 */
       '<div class="st-pod-num">' +
         '<p class="st-pod-wv">' + wave + '</p>' +
-        '<span class="st-pod-lbl">' + label + '</span>' +
+        (label ? '<span class="st-pod-lbl">' + label + '</span>' : '') +
       '</div>' +
-      (total ? '<p class="st-pod-total">总 ' + total + '</p>' : '') +
     '</div>';
   }).join('') + '</div>';
 }
 
 /** 榜单行（Stitch 版）：
-    日榜：按当日音浪排名，右列显示当日音浪，不显示未播天数。
-    月榜：按当月音浪排名，右列显示当月音浪。
-    年榜：按年度音浪排名，右列显示年度音浪。
-    时长字段：导入有数据就显示在名字下方，没有则完全隐藏。 */
+    日榜：按当日音浪排名，右列显示当日音浪（下方小字「当日音浪」）。
+    月榜：按当月音浪排名，右列只显示数字（2026-10-19 去掉「当月音浪」小字）。
+    年榜：按年度音浪排名，右列只显示数字（同上）。
+    时长：minutes 缺失/null 时整格隐藏；0 是真实值，显示为「时长 0分」。
+    未播天数（仅月 / 年榜）：absentDays 缺失/null 时整行隐藏；0 是真实值，显示「未播 0天」。
+    2026-10-19 起未播天数在名字下面一行，不再挂在名字右侧。 */
 function lbRowHtml(it) {
   const hideWave = it.wave == null;
   const off = it.hasData === false || (!hideWave && it.wave < 2);
   const wave = hideWave ? '—' : wan(it.wave);
-  const rightLbl = it.periodic
-    ? (period === 'monthly' ? '当月音浪' : '年度音浪')
-    : '当日音浪';
-  const min = (it.minutes == null || it.minutes === 0) ? '' : minFmt(it.minutes);
-  const absent = it.periodic ? (it.absentDays == null ? 0 : it.absentDays) : null;
-  const sub = min ? '时长 ' + min : '';
+  /* 2026-10-19 用户口径：月 / 年榜右列「显示数字即可」，去掉「当月音浪 / 年度音浪」四个字；
+     日榜保留「当日音浪」小字（用户没让删，且日榜右列只有数字会失去口径提示）。 */
+  const rightLbl = it.periodic ? '' : '当日音浪';
+  const min = it.minutes == null ? '' : minFmt(it.minutes);
+  const absent = it.periodic && it.absentDays != null ? it.absentDays : null;
   return '<div class="st-row' + (off ? ' off' : '') + '" data-n="' + esc(it.name) +
     '" data-w="' + (off || hideWave ? '' : it.wave) + '">' +
     '<div class="st-row-l">' +
@@ -3712,14 +3774,15 @@ function lbRowHtml(it) {
         : '<div class="st-row-av" data-n="' + esc(it.name) + '" style="' + avSoft(it.name) + '">' +
             esc(String(it.name || '?').charAt(0)) + '</div>') +
       '<div class="st-row-mid">' +
-        '<div class="st-row-nmwrap"><span class="st-row-nm">' + esc(it.name) + '</span>' +
-          (absent != null ? '<span class="st-row-off' + (absent > 0 ? ' warn' : '') + '">未播 ' + absent + '天</span>' : '') +
-        '</div>' +
-        (sub ? '<p class="st-row-sub">' + sub + '</p>' : '') +
+        '<div class="st-row-nmwrap"><span class="st-row-nm">' + esc(it.name) + '</span></div>' +
+        (absent != null
+          ? '<p class="st-row-sub"><span class="st-row-off' + (absent > 0 ? ' warn' : '') + '">未播 ' + absent + '天</span></p>'
+          : '') +
       '</div>' +
     '</div>' +
+    (min ? '<span class="st-row-min">时长 ' + min + '</span>' : '') +
     '<div class="st-row-r"><span class="st-row-wv">' + (off ? '—' : wave) + '</span>' +
-      '<span class="st-row-lbl">' + rightLbl + '</span></div>' +
+      (rightLbl ? '<span class="st-row-lbl">' + rightLbl + '</span>' : '') + '</div>' +
   '</div>';
 }
 
@@ -3871,26 +3934,40 @@ function bindRows() {
     el.ontouchstart = () => { lp = setTimeout(() => copy(el), 520); };
     el.ontouchend = el.ontouchmove = () => clearTimeout(lp);
   });
-  /* 头像兜底（T3）：接口给的 avatar 也可能 404 / 图挂了，绝不能留破图。
-     在渲染后同一拍挂 onerror：摘掉 has-img（领奖台的 CSS 底色自己回来），列表行再补回
-     avSoft 柔和底色，最后用 data-n 里的名字回落成姓名首字（textContent 顺带把 <img> 拿掉，
-     破图图标也不会留下）。领奖台不设内联底色，保持旧版外观。 */
+  bindAvatarFallback();
+}
+
+/* 头像兜底（T3）：接口给的 avatar 也可能 404 / 图挂了，绝不能留破图。
+   在渲染后同一拍挂 onerror：摘掉 has-img（领奖台的 CSS 底色自己回来），按容器类型回落 ——
+     · .st-row-av（榜单名次行）→ avSoft 柔和底色 + 姓名首字；
+     · .ico（我的抖音号行图标）→ 补回 material 图标（**不再**走首字，图标位不是头像位）；
+     · 其余（.st-pod-av 领奖台 / .st-my-av 我的页大头像）→ 姓名首字。
+   2026-10-19：从 bindRows 里抽出来 —— 「我的」页（个人页大头像 + 抖音号列表）也用真头像，
+   同样要有裂图兜底；原先 ico 分支设完 innerHTML 后又被 textContent='' 清掉，这里一并修正。 */
+function bindAvatarFallback() {
   document.querySelectorAll('#view img[data-av]').forEach(img => {
     img.onerror = () => {
       const box = img.parentElement;
       if (!box) return;
       box.classList.remove('has-img');
       const nm = box.dataset.n || '';
-      if (box.classList.contains('st-row-av')) box.style.cssText = avSoft(nm);
-      box.textContent = String(nm || '?').charAt(0);
+      if (box.classList.contains('st-row-av')) {
+        box.style.cssText = avSoft(nm);
+        box.textContent = String(nm || '?').charAt(0);
+      } else if (box.classList.contains('ico')) {
+        box.classList.add('material-icon');
+        box.innerHTML = '<span class="material-symbols-outlined">smart_display</span>';
+      } else {
+        box.textContent = String(nm || '?').charAt(0);
+      }
     };
   });
 }
 
 /* ==================== 加载：数据页 ==================== */
-async function loadData() {
+async function loadData(signal) {
   if (period === 'daily') {
-    const d = await api('/api/public/teams/' + TEAM + '/daily' + (curDate ? '?date=' + curDate : ''));
+    const d = await api('/api/public/teams/' + TEAM + '/daily' + (curDate ? '?date=' + curDate : ''), { signal });
     curDate = d.date;
     listAll = d.items || [];
     $('mhSub').textContent = 'DATA ' + (curDate || '').replaceAll('-', '.') +
@@ -3898,7 +3975,7 @@ async function loadData() {
     renderDates();
   } else {
     const url = '/api/public/teams/' + TEAM + '/' + period + (curPeriod ? '?period=' + curPeriod : '');
-    const d = await api(url);
+    const d = await api(url, { signal });
     /* 显隐兜底（2026-10-11）：后端 published:false / periodEnabled:false 时不下发 period，
        以前直接 curPeriod = d.period 再 .slice 会抛错，页面只剩「暂时取不到数据」。 */
     if (!d || d.published === false) {
@@ -4075,11 +4152,11 @@ const LN_THEMES = [
 /* 族谱音浪口径（2026-10-12）：daily / monthly / yearly，切换时带 period 重新拉 */
 let lineagePeriod = 'daily';
 
-async function loadLineage(period) {
+async function loadLineage(period, signal) {
   if (period) lineagePeriod = period;
   let d;
   try {
-    d = await api('/api/public/teams/' + TEAM + '/lineage?period=' + lineagePeriod);
+    d = await api('/api/public/teams/' + TEAM + '/lineage?period=' + lineagePeriod, { signal });
   } catch (e) {
     /* 非师门成员：后端 403 + code=lineage_forbidden（2026-10-12 审计口径，产品口径是
        「族谱给有师门归属的人看」）。这是本人的正常态，不是地区门禁 —— 页面骨架/导航
@@ -4670,7 +4747,7 @@ async function loadPlans() {
   } catch (_) { plans = []; }
 }
 
-async function loadGroup() {
+async function loadGroup(signal) {
   const page = GROUP_PAGES.find(p => p.key === curGroup) || GROUP_PAGES[0];
   curGroup = page.key;
   $('mhSub').textContent = page.label;
@@ -4678,27 +4755,24 @@ async function loadGroup() {
   const list = plans.filter(p => (p.eventType || '') === page.type);
   if (!list.length) {
     $('view').innerHTML = '<div class="section tab-content-enter">' +
-      '<div class="st-group-tabs">' +
-        [...document.querySelectorAll('#subnav button:not([disabled])')].map(b =>
-          '<button data-g="' + b.dataset.g + '"' + (b.dataset.g === curGroup ? ' class="on"' : '') +
-          '>' + esc(b.textContent) + '</button>').join('') +
-      '</div>' +
       '<div class="st-group-chips"><button class="st-group-chip" disabled>' +
         '<span class="n"></span><span>暂无场次</span><span class="c">0人</span></button></div>' +
       '<div class="empty"><span class="big">📺</span>' + esc(page.label) +
       '暂未公布<br>上架后这里会自动出现</div></div>';
-    bindStGroupTabs();
+    bindGroupChips();
     return;
   }
   if (!list.some(p => p.id === planByType[curGroup])) planByType[curGroup] = list[0].id;
   const pid = planByType[curGroup];
   $('view').innerHTML = '<div class="section">' + shimmerList() + '</div>';
   try {
-    const d = await api('/api/public/plans/' + pid);
+    const d = await api('/api/public/plans/' + pid, { signal });
     $('mhSub').textContent = page.label;
     $('view').innerHTML = groupHtml(d, page, list);
-    bindStGroupTabs();
+    bindGroupChips();
+    groupSegMove(true);
   } catch (e) {
+    if (e && e.name === 'AbortError') return;
     $('view').innerHTML = '<div class="empty"><span class="big">📺</span>取不到分组数据<br>' + esc(e.message) + '</div>';
   }
 }
@@ -4717,14 +4791,8 @@ function groupHtml(d, page, list) {
     sched.start ? sched.start + ' 后 / 间隔 ' + (sched.intervalMin || 15) + ' 分' : '',
   ].filter(Boolean).join(' · ');
 
-  /* 顶部：赛事维度 segmented（复用 #subnav 的真实按钮文案/状态） */
-  const tabs = [...document.querySelectorAll('#subnav button:not([disabled])')].map(b =>
-    '<button data-g="' + b.dataset.g + '"' + (b.dataset.g === curGroup ? ' class="on"' : '') +
-    '>' + esc(b.textContent) + '</button>').join('');
-
   let html = '<div class="section tab-content-enter">';
   if (d.stale) html += '<div class="stale">分组用的是快照数据，可能不是最新</div>';
-  html += '<div class="st-group-tabs">' + tabs + '</div>';
 
   /* 场次信息卡 + 组别胶囊 */
   html +=
@@ -4784,16 +4852,8 @@ function groupHtml(d, page, list) {
   return html + '</div>';
 }
 
-/** Stitch 分组交互：赛事 tab 切换 / 组别胶囊滚动到卡片 */
-function bindStGroupTabs() {
-  document.querySelectorAll('.st-group-tabs button[data-g]').forEach(b => {
-    b.onclick = () => {
-      if (!b.disabled) {
-        curGroup = b.dataset.g;
-        switchView('group');
-      }
-    };
-  });
+/** 分组页交互：组别胶囊滚动到卡片（赛事切换统一由顶部 #subnav 负责）。 */
+function bindGroupChips() {
   document.querySelectorAll('.st-group-chip[data-scroll]').forEach(c => {
     c.onclick = () => {
       const card = document.getElementById(c.dataset.scroll);
@@ -4804,6 +4864,146 @@ function bindStGroupTabs() {
       }
     };
   });
+}
+
+/* ===== 分组赛事切换：独立苹果白玻分段控件（不共用底部水滴） =====
+   普通点击切页；长按 180ms 后横向拖动时，白色玻璃滑块跟手跨格，松手切页。 */
+let groupSegClickSuppressUntil = 0;
+let groupSegPreviewKey = '';
+
+function groupSegButtons() {
+  return [...document.querySelectorAll('#subnav button[data-g]')]
+    .filter(b => b.offsetParent !== null && !b.disabled);
+}
+
+function groupSegMove(instant) {
+  const box = $('subnav'), pill = $('groupSegPill');
+  if (!box || !pill) return;
+  const btns = groupSegButtons();
+  if (!btns.length) { pill.style.width = '0px'; return; }
+  const active = btns.find(b => b.classList.contains('on')) || btns[0];
+  const br = box.getBoundingClientRect(), ar = active.getBoundingClientRect();
+  if (!br.width || !ar.width) { pill.style.width = '0px'; return; }
+  if (instant) pill.classList.add('is-dragging');
+  pill.style.width = ar.width + 'px';
+  pill.style.transform = 'translateX(' + (ar.left - br.left - 4).toFixed(1) + 'px)';
+  if (instant) requestAnimationFrame(() => pill.classList.remove('is-dragging'));
+}
+
+function groupSegChoose(key) {
+  if (!key) return;
+  const btn = document.querySelector('#subnav button[data-g="' + key + '"]');
+  if (!btn || btn.disabled) return;
+  if (curGroup === key && view === 'group') { groupSegMove(); return; }
+  curGroup = key;
+  switchView('group');
+}
+
+function groupSegPreviewAt(clientX, btns) {
+  let best = btns[0], dist = Infinity;
+  btns.forEach((b) => {
+    const r = b.getBoundingClientRect();
+    const d = Math.abs((r.left + r.width / 2) - clientX);
+    if (d < dist) { dist = d; best = b; }
+  });
+  if (!best || best.dataset.g === groupSegPreviewKey) return best ? best.dataset.g : '';
+  groupSegPreviewKey = best.dataset.g;
+  btns.forEach(b => b.classList.toggle('on', b === best));
+  groupSegMove(true);
+  return groupSegPreviewKey;
+}
+
+function initGroupSegDrag() {
+  const box = $('subnav'), pill = $('groupSegPill');
+  if (!box || !pill) return;
+  let pressed = false, longReady = false, dragging = false, rejected = false;
+  let pointerId = null, startX = 0, startY = 0, longTimer = null, previewKey = '';
+
+  const clearTimer = () => { if (longTimer) { clearTimeout(longTimer); longTimer = null; } };
+  const restoreActive = () => {
+    document.querySelectorAll('#subnav button[data-g]').forEach(b => b.classList.toggle('on', b.dataset.g === curGroup));
+    groupSegPreviewKey = '';
+    groupSegMove(true);
+  };
+  const reset = (restore) => {
+    clearTimer();
+    pressed = false; longReady = false; dragging = false; rejected = false;
+    pointerId = null; previewKey = '';
+    box.classList.remove('is-longpress', 'is-dragging');
+    pill.classList.remove('is-dragging');
+    if (restore) restoreActive();
+  };
+
+  function onDown(e) {
+    if (e.button != null && e.button !== 0) return;
+    const btn = e.target && e.target.closest ? e.target.closest('#subnav button[data-g]') : null;
+    if (!btn || btn.disabled) return;
+    pressed = true; longReady = false; dragging = false; rejected = false;
+    pointerId = e.pointerId != null ? e.pointerId : null;
+    startX = e.clientX || 0; startY = e.clientY || 0;
+    previewKey = btn.dataset.g;
+    clearTimer();
+    longTimer = setTimeout(() => {
+      longTimer = null;
+      if (!pressed || rejected) return;
+      longReady = true;
+      groupSegPreviewKey = previewKey;
+      box.classList.add('is-longpress');
+      pill.classList.add('is-dragging');
+      if (pointerId != null) { try { box.setPointerCapture(pointerId); } catch (_) {} }
+      try { if ('vibrate' in navigator) navigator.vibrate(8); } catch (_) {}
+    }, 180);
+  }
+
+  function onMove(e) {
+    if (!pressed) return;
+    if (pointerId != null && e.pointerId != null && e.pointerId !== pointerId) return;
+    const dx = (e.clientX || 0) - startX;
+    const dy = (e.clientY || 0) - startY;
+    if (!longReady && !dragging) {
+      if (Math.hypot(dx, dy) > 8) {
+        rejected = true;
+        groupSegClickSuppressUntil = performance.now() + 500;
+        box.classList.remove('is-longpress');
+        pill.classList.remove('is-dragging');
+        clearTimer();
+      }
+      return;
+    }
+    if (longReady && !dragging && Math.abs(dx) > 3) {
+      dragging = true;
+      box.classList.add('is-dragging');
+    }
+    if (dragging) {
+      if (e.cancelable) e.preventDefault();
+      const key = groupSegPreviewAt(e.clientX || startX, groupSegButtons());
+      if (key) previewKey = key;
+    }
+  }
+
+  function onUp(e) {
+    if (!pressed) return;
+    if (pointerId != null && e && e.pointerId != null && e.pointerId !== pointerId) return;
+    const commit = longReady && dragging ? previewKey : '';
+    if (rejected || longReady) groupSegClickSuppressUntil = performance.now() + 500;
+    reset(false);
+    if (commit && commit !== curGroup) groupSegChoose(commit);
+    else restoreActive();
+  }
+
+  function onCancel(e) {
+    if (pointerId != null && e && e.pointerId != null && e.pointerId !== pointerId) return;
+    groupSegClickSuppressUntil = performance.now() + 500;
+    reset(true);
+  }
+
+  box.addEventListener('pointerdown', onDown);
+  window.addEventListener('pointermove', onMove, { passive: false });
+  window.addEventListener('pointerup', onUp);
+  window.addEventListener('pointercancel', onCancel);
+  box.addEventListener('lostpointercapture', (e) => { if (pressed) onCancel(e); });
+  window.addEventListener('resize', () => groupSegMove(true));
+  setTimeout(() => groupSegMove(true), 50);
 }
 
 /* ==================== 我的（手机号+密码登录） ==================== */
@@ -4873,7 +5073,7 @@ function myLogout() {
   chasePicked.clear();   // 换账号/退出后旧的多选暂存不能跟着新账号走
 }
 
-async function loadMy() {
+async function loadMy(signal) {
   const t = myToken();
   if (!t) { sessionExpired(); return; }
   $('mhSub').textContent = 'MY';
@@ -4885,7 +5085,7 @@ async function loadMy() {
        （binds.rs「管理员账号缺少对应的主播档案」）。与其给一堆点不动的控件，
        不如直接说清楚去找管理员。
        token 由 api() 统一走 X-My-Token 头（2026-10-13），URL 不再带登录态。 */
-    const who = await api('/api/public/teams/' + TEAM + '/my/who');
+    const who = await api('/api/public/teams/' + TEAM + '/my/who', { signal });
     if (who && who.needBind) { applyLoginState(who); renderBindCard(who); return; }
     /* 2026-10-18 契约 v2 §4.7：正常账号也要把 who 的身份标志回填进 meState
        （emailMask/needQq/mustChangePass/phone）—— 否则刚登录进「我的」页，
@@ -4897,23 +5097,23 @@ async function loadMy() {
         if (who[k] !== undefined) meState[k] = who[k];
       });
     }
-    const d = await api('/api/public/teams/' + TEAM + '/my');
+    /* 主数据 + 三块附属数据并行拉：以前四个 await 串行，CPU 4x 下「我的/微信」
+       切换光网络等待就多出约 300ms。附属接口失败仍各自兜底，不挡主数据。 */
+    const optional = (p, fallback) => api(p, { signal }).catch((e) => {
+      if (e && e.name === 'AbortError') throw e;  // 切页取消要向上传递，不能伪装成空数据
+      return fallback;
+    });
+    const [d, series, push, accounts] = await Promise.all([
+      api('/api/public/teams/' + TEAM + '/my', { signal }),
+      optional('/api/public/teams/' + TEAM + '/my/series?days=14', null),
+      optional('/api/public/teams/' + TEAM + '/my/push', null),
+      optional('/api/public/teams/' + TEAM + '/my/accounts', { __err: true }),
+    ]);
     myPersonId = Number(d.personId || 0) || null;
-    let series = null;
-    try {
-      series = await api('/api/public/teams/' + TEAM + '/my/series?days=14');
-    } catch (_) { /* 趋势图失败不挡主数据 */ }
-    let push = null;
-    try {
-      push = await api('/api/public/teams/' + TEAM + '/my/push');
-    } catch (_) { /* 推送状态失败不挡主数据 */ }
-    /* 我的抖音号（2026-10-12）：后端并行实现中。失败/超时一律不挡主数据，
-       这里用 {__err:true} 占位，卡片位置只出一行灰字（口径见 myAccountsCard） */
-    let accounts = null;
-    try {
-      accounts = await api('/api/public/teams/' + TEAM + '/my/accounts');
-    } catch (_) { accounts = { __err: true }; }
     renderMy(d, series, push, accounts);
+    /* 「我的」页真头像兜底（2026-10-19）：个人页大头像 + 抖音号列表行都可能有图，
+       裂图要回落首字/图标，不能留破图（与榜单 bindRows 同一套）。 */
+    bindAvatarFallback();
     /* 📣 「我的」页公告条（2026-10-13）：renderMy 渲染完成后，placements.my 开着才追加。
        插在 view 内容最顶上（资料卡之前），图标默认 person。
        深链 /my/<sub> 直接落到子页时不挂（公告属于「我的」列表首页）。 */
@@ -4923,6 +5123,7 @@ async function loadMy() {
        绝不挡主数据；本次页面生命周期只自动弹一次（probeMyMessages 内部锁）。 */
     probeMyMessages().catch(() => {});
   } catch (e) {
+    if (e && e.name === 'AbortError') return;
     /* token 过期/没验证过 → 回登录门；其它错误照常显示错误态 */
     const m = String(e.message || '');
     if (m.indexOf('过期') >= 0 || m.indexOf('缺少') >= 0 || m.indexOf('请先登录') >= 0) {
@@ -5048,8 +5249,16 @@ function myAccountsCard(accounts) {
     /* 2026-10-15 任务五：整行可点复制抖音号。复制的是 douyinNo 本体（no 前缀是
        「ID 」兜底展示形态，带出去没意义）；no 为空不挂 .copiable、不绑事件。 */
     const copyable = no && a.douyinNo;
+    /* 行图标（2026-10-19 用户口径「我的抖音号列表也添加头像」）：有同源头像就出真头像，
+       没有仍回落抖音号图标；data-n 交给 bindRows 的 onerror 兜底（图裂了回图标）。
+       注意 .ico 不是 .st-row-av，兜底分支走「补回 material 图标」那一支。 */
+    const avName = String(a.anchorName || a.douyinNo || '?');
     return '<div class="row' + (copyable ? ' copiable" data-copy="' + esc(no) : '') + '">' +
-      '<div class="l"><div class="ico"><span class="material-symbols-outlined">smart_display</span></div>' +
+      '<div class="l"><div class="ico' + (a.avatar ? ' has-img' : '') + '" data-n="' + esc(avName) + '">' +
+        (a.avatar
+          ? '<img data-av src="' + esc(a.avatar) + '" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer">'
+          : '<span class="material-symbols-outlined">smart_display</span>') +
+      '</div>' +
       '<div style="min-width:0">' +
         '<div style="display:flex;align-items:center;min-width:0"><span class="t">' + esc(title) + '</span>' +
         (a.primary ? '<span class="chip">主号</span>' : '') +
@@ -5060,10 +5269,18 @@ function myAccountsCard(accounts) {
       '<div class="wg">' +
         cell('日', a.daily) + cell('月', a.monthly) +
         cell('年', a.yearly) + cell('累计', a.total) +
-      '</div></div>';
+      '</div>' +
+      /* 本月预估到手（2026-10-19）：与「我的」页大数字卡同一口径（音浪 ÷ 10 × 分成 ×（1−手续费）），
+         号级月音浪按本行的 monthly.wave 算；无数据/关音浪数值时不显示这一行。 */
+      (a.monthly && a.monthly.wave != null && a.monthly.wave > 0
+        ? '<div class="est">本月预估到手 <b>' + esc(yuan(estYuan(a.monthly.wave))) + '</b></div>'
+        : '') +
+      '</div>';
   }).join('');
   return '<div class="st-my-acct">' +
     '<div class="sec"><span>我的抖音号</span><span class="n">共 ' + Number(sum.count) + ' 个</span></div>' +
+    /* 口径说明（2026-10-19）：分成 / 手续费改由后台配置下发，不再写死 35%。 */
+    '<div class="fee-note">' + esc(earningsNote()) + '</div>' +
     '<div class="sum"><span>合计</span><span class="g">' +
       cell('日', sum.daily) + cell('月', sum.monthly) +
       cell('年', sum.yearly) + cell('累计', sum.total) +
@@ -5072,6 +5289,9 @@ function myAccountsCard(accounts) {
 
 function renderMy(d, series, push, accounts) {
   accounts = accounts || null;
+  /* 收益口径（2026-10-19）：/my 与 /my/accounts 都带 earnings，两处同源；
+     取 /my 的为主，它没带（老后端 / 接口失败）时退回抖音号卡那份。 */
+  applyEarnings((d && d.earnings) || (accounts && accounts.earnings));
   if (d.name) {
     localStorage.setItem(MY_NAME_KEY(), d.name);
     /* 水印口径（2026-10-11）：手机号优先（打码），无手机号回退艺名。
@@ -5111,8 +5331,10 @@ function renderMy(d, series, push, accounts) {
   /* 副标题（2026-10-12）：「团名 · 师承【师傅】」。masterName 是 /my 接口字段（没有师傅 = null，
      整段只显示团名）；原「日期 · 未开播」挪到大数字卡「预估折合收益」行尾，信息不丢 */
   const head = '<div class="st-my-head">' +
-    '<div class="st-my-av">' +
-      esc(String(d.name || '?').charAt(0)) +
+    '<div class="st-my-av' + (d.avatar ? ' has-img' : '') + '">' +
+      (d.avatar
+        ? '<img data-av src="' + esc(d.avatar) + '" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer">'
+        : esc(String(d.name || '?').charAt(0))) +
       '<span class="badge"><span class="material-symbols-outlined">verified</span></span>' +
     '</div>' +
     '<div style="flex:1;min-width:0">' +
@@ -5126,7 +5348,7 @@ function renderMy(d, series, push, accounts) {
   const t = d.total || {};
   const y = d.yearly || {};
   const dd = d.daily || {};
-  const monthlyYuan = m.yuan == null ? (m.wave == null ? '—' : yuan(m.wave / 10)) : yuan(m.yuan);
+  const monthlyYuan = m.yuan == null ? yuan(estYuan(m.wave)) : yuan(m.yuan);
   /* Stitch 版音浪对比卡（2026-10-13）：今日/本月/本年 三段同期对照。
      daily.prevWave=上一业务日、monthly.prevWave=上月同期、yearly.prevWave=去年同期，
      数据 /my 全有（minutes.rs 同期对照字段）。涨红跌绿沿用 waveDelta。 */
@@ -5147,9 +5369,12 @@ function renderMy(d, series, push, accounts) {
     cmpRow('today', '今日音浪', dd, '比上日') +
     cmpRow('calendar_month', '本月音浪', m, '比上月同期') +
     cmpRow('functions', '本年累计', y, '比去年同期') +
+    /* 分成比例与手续费都来自后台配置（2026-10-19），前端不再硬编码 35%。 */
     '<div class="st-cmp-rmb"><div class="l"><span class="material-symbols-outlined">monetization_on</span>' +
-      '<span>本月预估折合收益</span><span class="pct-tag">35%分成</span></div>' +
-      '<div class="v">' + monthlyYuan + '</div></div>' +
+      '<span>本月预估到手</span><span class="pct-tag">' + earningsCfg.sharePct + '%分成' +
+      (earningsCfg.feePct > 0 ? ' · 扣' + earningsCfg.feePct + '%费' : '') + '</span></div>' +
+      '<div class="v">' + monthlyYuan + '</div>' +
+      '<div class="r"><span class="tail">' + esc(earningsNote()) + '</span></div></div>' +
   '</div>';
 
 
@@ -5391,6 +5616,14 @@ function renderMySub() {
           '遇到问题请在「我的」页联系运营帅帅。</div>') +
       '</div>';
   }
+  /* 进入 / 回到微信对接子页：已有有效二维码就恢复轮询，没有就自动取一张。 */
+  if (sub !== 'wechat') {
+    clearWxDock();
+    clearPushCodeTimer();
+    wxDockAutoAttempted = false;
+  }
+  setQrWatermarkHidden(sub === 'wechat');
+  if (sub === 'wechat') autoStartWxDock(pushState);
   /* 滚回顶部（进子页的第一屏） */
   window.scrollTo({ top: 0 });
 }
@@ -5399,6 +5632,11 @@ function renderMySub() {
 function showMyHome() {
   const v = $('view');
   if (!v) return;
+  setQrWatermarkHidden(false);
+  /* 离开微信对接子页：停掉 2 秒轮询 / 倒计时，二维码 URL 保留，回来时若未过期直接恢复。 */
+  clearWxDock();
+  clearPushCodeTimer();
+  wxDockAutoAttempted = false;
   const bar = $('mySubBar');
   if (bar) bar.hidden = true;
   const info = $('myInfoCard');
@@ -5640,8 +5878,8 @@ function pushStatusText(p) {
 /* 2026-10-10：数据入库约 30 分钟后由微信机器人私聊推送，两类内容各自开关（都关着就不推）：
    · 追分提醒 —— 追主播 / 定音浪目标 / 追名次（一律比本月累计），追上/还差多少都推给你
    · 每日报告 —— 当天音浪排行榜
-   对接（2026-10-17 极简口径）：页面点「扫码对接」→ POST /my/push/wechat/start →
-   就地出二维码 + 4 位对接码（同一响应）+ 2 秒轮询，扫码并在手机上点确认
+   对接（2026-10-19 口径）：进入微信对接子页自动 POST /my/push/wechat/start →
+   出二维码 + 4 位对接码（同一响应）+ 2 秒轮询，用户截屏后用微信扫码并在手机上点确认
    （confirmed）即对接完成（服务端自动落凭证，bound 随之 true，机器人随即私聊欢迎语）。 */
 let pushState = null;
 let pushSrTimer = null;      // scanBound 旧态的自动回流轮询（needActivate 时 5s 后刷一次）
@@ -5745,12 +5983,9 @@ function wechatBindHtml(p) {
   return h;
 }
 
-/* 状态 A 未对接（2026-10-17 用户口径：极简，两行文案 + 一个按钮）：
-   点「扫码对接」→ POST /my/push/wechat/start → 就地出二维码（imgContent 直接塞 <img>）
-   + 4 位对接码（start 响应的 code 字段；admin 观看账号后端不下发 code，码块保持隐藏）
-   + 2 秒轮询 poll，confirmed 即对接完成（onWxDockConfirmed → refreshPush 进状态 B）。
-   scanBound 旧态（扫了码还没等微信确认）也归入状态 A：只说「等微信确认」，
-   不再要求用户给机器人发消息激活；状态回流靠 bindPushBox 保留的 5 秒自动刷新。 */
+/* 状态 A 未对接：进入页面就自动取二维码（不再要求先点按钮），用户截屏后到
+   微信「扫一扫 → 相册」选择即可。取码响应仍带 4 位对接码，但只放进可折叠兜底，
+   不抢扫码主路径；confirmed 后 onWxDockConfirmed → refreshPush 进状态 B。 */
 function pushUnboundHtml(p) {
   let h = '';
   if (wxDockConfirmed) {
@@ -5764,68 +5999,69 @@ function pushUnboundHtml(p) {
         : '✅ 对接成功') +
       '</div>';
   } else {
-    h += '<div class="sub" style="margin-top:8px;line-height:1.75">' +
-      (p.scanBound
-        ? '等微信确认，扫码后手机上点确认即可。'
-        : '扫码对接微信后，给机器人随便发一条消息，会收到欢迎语，提醒和日报也发到你的微信。') +
+    h += '<div class="wx-bind-copy">' +
+      '<div class="wx-bind-lead">截屏后用微信扫码绑定机器人</div>' +
+      '<p>每日自动发给你数据；收徒弟后，还有<span class="nowrap">徒弟数据</span>、' +
+      '<span class="nowrap">个人数据</span>等。</p>' +
+      '<p>欢迎绑定体验，后续会持续更新更多功能。</p>' +
       '</div>';
+    if (p && p.scanBound) {
+      h += '<div class="wx-bind-note">' +
+        (p.needActivate
+          ? '微信已扫码对接，最后一步：给机器人发一条消息激活推送。'
+          : '微信已扫码，请在手机上点确认；确认后会自动跳转成功状态。') +
+        '</div>';
+    }
   }
-  h += '<button class="go gray" id="pushQrShow" style="margin-top:10px">扫码对接</button>' +
-    '<div id="pushQrArea" class="hidden" style="margin-top:10px">' +
+  if (!wxDockConfirmed) {
+  h += '<div class="wx-bind-qr" id="pushQrArea" aria-busy="true">' +
+    '<div class="wx-shot-hint">截屏保存，微信「扫一扫」→ 从相册选择</div>' +
     /* 二维码卡（.qr-* 一套样式是原「扫码绑定」卡留下的：208px 白底 + 四角取景框 +
-       状态行 + 倒计时），二维码与状态行由 startWxDock/pollWxDock 现填。 */
+       状态行 + 倒计时），页面打开即自动获取；用户截屏后去微信相册扫码。 */
     '<div class="qr-frame"><i></i><div class="qr-wrap" id="pushWxQrWrap">' +
-    '<img class="qrcode" id="pushWxQr" alt="微信对接二维码"></div><i></i></div>' +
-    '<div class="qr-status wait" id="pushWxStatus"><span class="dot"></span>' +
-    '<span id="pushWxStatusTx">二维码获取中…</span></div>' +
-    '<div class="qr-expire" id="pushWxExpire"></div>' +
-    '<button class="go gray hidden" id="pushWxRefresh" style="margin-top:8px">刷新二维码</button>' +
+    '<div class="qr-placeholder" id="pushWxQrPlaceholder">二维码生成中…</div>' +
+    '<img class="qrcode" id="pushWxQr" width="208" height="208" ' +
+    'alt="微信机器人绑定二维码，截屏后可从微信相册扫码"></div><i></i></div>' +
+    '<div class="qr-status wait" id="pushWxStatus" role="status" aria-live="polite">' +
+    '<span class="dot"></span><span id="pushWxStatusTx">二维码获取中…</span></div>' +
+    '<div class="qr-expire" id="pushWxExpire">打开微信「扫一扫」，从相册选择即可绑定</div>' +
+    '<button class="go gray hidden" id="pushWxRefresh" style="margin-top:8px">重新获取二维码</button>' +
     /* 上游要求验证码时才出现（status = need_verifycode），官方流程的一部分，保留 */
     '<div class="hidden" id="pushWxVerifyWrap" style="margin-top:8px;text-align:left">' +
     '<div class="hint">微信让你输验证码：把微信里显示的数字填到这里。</div>' +
     '<input id="pushWxVerify" inputmode="numeric" autocomplete="one-time-code" ' +
-    'placeholder="微信里显示的验证码" style="width:100%;height:42px;border:1px solid var(--hairline);' +
+    'aria-label="微信验证码" placeholder="微信里显示的验证码" ' +
+    'style="width:100%;height:42px;border:1px solid var(--hairline);' +
     'border-radius:12px;padding:0 12px;font-size:14px;margin-top:6px;background:#fff;color:var(--on-surface)">' +
     '<button class="go gray" id="pushWxVerifyGo" style="margin-top:6px">提交验证码</button></div>' +
-    /* 4 位对接码：start 响应带 4 位 code 时由 fillPushCode 解开 hidden；
-       admin 观看账号没有 code，这块永远不出现（正好满足「没有 code 就不显示码块」）。 */
-    '<div class="hint wx-code-card hidden" id="pushCodeBox">' +
-    '<div class="sub">4 位对接码（可选 · 30 分钟内有效）</div>' +
+    /* 4 位对接码：start 响应带码时展开一个可折叠兜底；默认只走扫码，不抢主流程注意力。 */
+    '<details class="wx-code-fallback hidden" id="pushCodeFallback">' +
+    '<summary>扫码遇到问题？使用 4 位对接码</summary>' +
+    '<div class="hint wx-code-card" id="pushCodeBox">' +
+    '<div class="sub">在微信里把这 4 位数字发给机器人，也能完成对接</div>' +
     '<div class="wx-code-main"><b id="pushCodeValue">—</b>' +
     '<button class="go gray" id="pushCodeCopy" disabled>复制对接码</button></div>' +
-    '<div class="qr-expire" id="pushCodeExpire">不用对接码也行：扫码后给机器人发一条消息即可对接</div>' +
+    '<div class="qr-expire" id="pushCodeExpire">30 分钟内有效</div>' +
     '<div id="pushCodeError" class="hidden" style="margin-top:6px;color:#b42318;font-weight:600"></div>' +
-    '</div>' +
-    '<button class="go gray hidden" id="pushCodeRetry" style="margin-top:6px">重新获取对接码</button>' +
+    '</div></details>' +
     '</div>';
+  }
   return h;
 }
 
-/* 「扫码对接」按钮（2026-10-17 用户口径）：点一下**直接**调 start 出二维码 + 对接码，
-   不再展开/收起两段式；「刷新二维码」兜底重取（上游抖动 / 二维码过期时用）。
-   双击防抖看按钮自身 disabled（对接期间禁用），不用 wxDockQr 判断 ——
-   那个值在流程结束/过期时不一定清掉，拿它当闸会把重试也挡住。 */
+/* 二维码区常驻：页面打开自动取码，用户直接截屏。
+   「重新获取二维码」只在取码失败 / 过期时露出；验证码与对接码都是异常兜底。 */
 function bindPushQrShow() {
-  const btn = $('pushQrShow'), area = $('pushQrArea');
-  if (!btn || !area) return;
-  btn.onclick = () => {
-    if (btn.disabled) return;
-    btn.disabled = true;
-    btn.textContent = '对接中…';
-    area.classList.remove('hidden');   // 二维码卡默认藏，点按钮才亮出来
-    startWxDock();
-  };
   const refresh = $('pushWxRefresh');
   if (refresh) refresh.onclick = () => startWxDock();
   const verifyGo = $('pushWxVerifyGo');
   if (verifyGo) verifyGo.onclick = () => wxDockPollNow();
   const copy = $('pushCodeCopy');
   if (copy) copy.onclick = copyPushCode;
-  bindPushCodeRetry();
 }
 
-/* ===== 微信对接二维码（2026-10-17 用户口径）=====
-   点「扫码对接」→ POST /my/push/wechat/start（后端转 openclaw-weixin 官方
+/* ===== 微信对接二维码（2026-10-19 用户口径）=====
+   进入子页自动 POST /my/push/wechat/start（后端转 openclaw-weixin 官方
    get_bot_qrcode）→ imgContent 是 data:image/svg+xml 的二维码图，直接塞 <img>；
    同一响应里的 code / codeExpires 由 fillPushCode 填 4 位对接码块。
    拿到就 2 秒一轮 POST /my/push/wechat/poll 看状态：wait/scaned/need_verifycode/
@@ -5839,11 +6075,17 @@ let wxDockTimer = null;      // 状态轮询句柄
 let wxDockTick = null;       // 有效期倒计时句柄
 let pushCodeTick = null;     // 对接码倒计时句柄
 let wxDockQr = '';           // 当前二维码标识（轮询必须带上）
+let wxDockImgContent = '';   // 当前二维码 data URL；离开子页再回来可就地恢复
 let wxDockDeadline = 0;      // 有效期截止（毫秒时间戳）
+let wxDockStarting = false;  // 防止自动取码与手动重试并发打两次 start
+let wxDockEpoch = 0;         // 二维码请求代际：重渲染/重取码后旧响应必须作废
+let wxDockPollingEpoch = 0;  // 当前在飞的 poll 属于哪一代（0 = 无）
+let wxDockAutoAttempted = false; // 本次进入子页是否已自动取过一次码
 let wxDockConfirmed = false; // 本次会话刚对接成功：重渲染后仍显示一句「对接成功」
 let wxDockNeedActivate = false; // 首次扫码没有 context_token：要提示「给机器人发一条消息」
 
 function clearWxDock() {
+  wxDockEpoch++;
   clearTimeout(wxDockTimer); clearInterval(wxDockTick);
   wxDockTimer = null; wxDockTick = null;
 }
@@ -5866,7 +6108,7 @@ function startWxCountdown() {
   clearInterval(wxDockTick);
   const render = () => {
     const exp = $('pushWxExpire');
-    if (!exp) { clearInterval(wxDockTick); return; }   // 节点没了（收起/重渲染）
+    if (mySub !== 'wechat' || !exp) { clearInterval(wxDockTick); return; }   // 离开子页/节点没了
     const left = Math.max(0, wxDockDeadline - Date.now());
     if (!left) { clearInterval(wxDockTick); onWxQrExpired(); return; }
     const sec = Math.ceil(left / 1000);
@@ -5877,55 +6119,128 @@ function startWxCountdown() {
   wxDockTick = setInterval(render, 1000);
 }
 
-/* 取二维码：失败（上游抖动 / 401 之外的 400）也要给「刷新」按钮，不能把这块卡死 */
+function setWxQrPlaceholder(text) {
+  const ph = $('pushWxQrPlaceholder');
+  if (ph) ph.textContent = text;
+}
+
+function wxDockShowRetry() {
+  $('pushWxRefresh')?.classList.remove('hidden');
+}
+
+/* 取二维码：失败（上游抖动 / 401 之外的 400）也要给「重新获取」按钮，不能把这块卡死。
+   并发保护：自动取码和用户点重试可能同一帧触发，只允许一个 start 在飞。 */
 async function startWxDock() {
+  if (wxDockStarting) return;
+  wxDockStarting = true;
   clearWxDock();
+  const epoch = wxDockEpoch;
+  clearPushCodeTimer();
   wxDockQr = '';
+  wxDockImgContent = '';
+  wxDockDeadline = 0;
   wxDockConfirmed = false;
   wxDockNeedActivate = false;
   const img = $('pushWxQr');
-  if (img) { img.removeAttribute('src'); img.alt = '微信对接二维码'; }
+  if (img) img.removeAttribute('src');
   const wrap = $('pushWxQrWrap');
   if (wrap) wrap.classList.remove('qr-live');
+  const area = $('pushQrArea');
+  if (area) area.setAttribute('aria-busy', 'true');
+  setWxQrPlaceholder('二维码生成中…');
   $('pushWxRefresh')?.classList.add('hidden');
   $('pushWxVerifyWrap')?.classList.add('hidden');
+  $('pushCodeFallback')?.classList.add('hidden');
   if ($('pushWxVerify')) $('pushWxVerify').value = '';
   const exp = $('pushWxExpire');
-  if (exp) { exp.textContent = ''; exp.classList.remove('soon'); }
+  if (exp) { exp.textContent = '正在生成二维码，请稍候…'; exp.classList.remove('soon'); }
   wxStatusSet('wait', '二维码获取中…');
   try {
     const d = await postPush('/wechat/start', {});
-    if (!$('pushWxStatus')) return;          // 展开期间被收起 / 重渲染：结果丢掉
+    /* 代际/DOM 变了就丢弃旧响应：否则重渲染后旧响应会把新页面写坏。 */
+    if (epoch !== wxDockEpoch || !$('pushWxStatus') || mySub !== 'wechat') return;
     wxDockQr = d.qrcode || '';
     if (!wxDockQr) throw new Error('微信接口没有返回二维码');
     const imgContent = typeof d.imgContent === 'string' ? d.imgContent.trim() : '';
     if (!imgContent) throw new Error('微信接口没有返回二维码图形');
+    wxDockImgContent = imgContent;
     if (img) img.src = imgContent;
     if (wrap) wrap.classList.add('qr-live');
-    wxDockDeadline = Date.now() + WX_QR_TTL_MS;
-    /* 响应里带 4 位 code 就直接填码块（admin 观看账号 code 为空 → 码块保持隐藏） */
+    const expiresIn = Number(d.expiresIn);
+    wxDockDeadline = Date.now() +
+      (Number.isFinite(expiresIn) && expiresIn > 0 ? expiresIn * 1000 : WX_QR_TTL_MS);
+    /* 响应里带 4 位 code 时只露出折叠兜底（admin 观看账号 code 为空 → 整块隐藏） */
     fillPushCode(d);
     wxStatusSet('wait', '等待扫码…');
+    const exp2 = $('pushWxExpire');
+    if (exp2) { exp2.textContent = ''; exp2.classList.remove('soon'); }
+    if (area) area.setAttribute('aria-busy', 'false');
     startWxCountdown();
     pollWxDock();
   } catch (e) {
+    if (epoch !== wxDockEpoch || mySub !== 'wechat') return;
+    if (e.status === 401) return; // postPush 已拉起登录门
+    wxDockQr = '';
+    wxDockImgContent = '';
+    setWxQrPlaceholder('二维码没取到');
     wxStatusSet('bad', '二维码没取到：' + (e.message || '未知错误'));
-    $('pushWxRefresh')?.classList.remove('hidden');
-    wxDockGoReenable();   // start 失败也允许直接再点「扫码对接」重试
+    if (area) area.setAttribute('aria-busy', 'false');
+    wxDockShowRetry();
+  } finally {
+    wxDockStarting = false;
+    /* 渲染换代导致本次请求作废：等旧请求退出后，在新 DOM 上自动补一次。 */
+    if (epoch !== wxDockEpoch && mySub === 'wechat' && !wxDockQr) {
+      wxDockAutoAttempted = false;
+      queueMicrotask(() => autoStartWxDock(pushState));
+    }
   }
+}
+
+/* 离开子页会停轮询；再回来且二维码仍有效时直接恢复，不重新打 start。 */
+function resumeWxDock() {
+  if (!wxDockQr || !wxDockImgContent || wxDockDeadline <= Date.now()) return false;
+  const img = $('pushWxQr');
+  const wrap = $('pushWxQrWrap');
+  if (!img || !wrap) return false;
+  img.src = wxDockImgContent;
+  wrap.classList.add('qr-live');
+  const area = $('pushQrArea');
+  if (area) area.setAttribute('aria-busy', 'false');
+  wxStatusSet('wait', '等待扫码…');
+  startWxCountdown();
+  pollWxDock();
+  return true;
+}
+
+function autoStartWxDock(p) {
+  if (!p || p.bound || !p.channelConfigured || wxDockConfirmed) return;
+  if (mySub !== 'wechat') return;
+  const card = $('myPushCard');
+  if (card && card.hidden) return;
+  if (wxDockStarting) return;
+  if (resumeWxDock()) return;
+  /* scanBound = 已经扫过码、只差手机确认。此时不能再自动取一张新码，
+     否则可能把用户刚扫的那张顶掉；只显示确认提示并给一个手动重取入口。 */
+  if (p.scanBound && !wxDockQr) {
+    setWxQrPlaceholder(p.needActivate ? '已扫码，等待给机器人发消息激活' : '已扫码，请在手机上确认');
+    wxStatusSet('scaned', p.needActivate
+      ? '已扫码，等待给机器人发消息激活…'
+      : '已扫码，请在手机上确认…');
+    wxDockShowRetry();
+    return;
+  }
+  if (wxDockAutoAttempted) return;
+  wxDockAutoAttempted = true;
+  startWxDock();
 }
 
 /* 安排下一轮状态轮询（2 秒一轮）。节点没了就自然停（收起 / 重渲染都会清计时器）。 */
 function pollWxDock() {
+  if (mySub !== 'wechat' || !wxDockQr) return;
   clearTimeout(wxDockTimer);
   wxDockTimer = setTimeout(wxDockPollOnce, 2000);
 }
 
-/* 二维码流程作废（过期 / 验证码拉黑）后恢复「扫码对接」主按钮可点（2026-10-17） */
-function wxDockGoReenable() {
-  const goBtn = $('pushQrShow');
-  if (goBtn) { goBtn.disabled = false; goBtn.textContent = '扫码对接'; }
-}
 
 /* 立刻轮询一次（点「提交验证码」走这里：等 2 秒才发像是卡住了，用户会连点）。
    排队的下一轮先取消，跑完由 wxDockPollOnce 末尾照常续上，任何时刻至多一个待触发计时器。 */
@@ -5937,14 +6252,27 @@ function wxDockPollNow() {
 /* 轮询一次状态，末尾自己续下一轮。有验证码输入时按 verify_code 一起带上
    （need_verifycode 的解法：后端透传给官方 get_qrcode_status）。 */
 async function wxDockPollOnce() {
-  if (!wxDockQr || !$('pushWxStatus')) return;  // 收起 / 重渲染：不再续轮询
+  const epoch = wxDockEpoch;
+  if (mySub !== 'wechat' || !wxDockQr || !$('pushWxStatus')) return;  // 离开子页/收起：不再续轮询
+  if (wxDockPollingEpoch === epoch) return;
+  wxDockPollingEpoch = epoch;
+  const qr = wxDockQr;
   const verify = $('pushWxVerify') ? $('pushWxVerify').value.trim() : '';
   let d;
   try {
     d = await postPush('/wechat/poll', verify
-      ? { qrcode: wxDockQr, verifyCode: verify }
-      : { qrcode: wxDockQr });
+      ? { qrcode: qr, verifyCode: verify }
+      : { qrcode: qr });
+    if (epoch !== wxDockEpoch || qr !== wxDockQr || mySub !== 'wechat' || !$('pushWxStatus')) return;
   } catch (e) {
+    if (epoch !== wxDockEpoch || qr !== wxDockQr || mySub !== 'wechat') return;
+    if (e.status === 401) return; // postPush 已拉起登录门
+    if (e.status === 403) {
+      clearWxDock();
+      wxStatusSet('bad', e.message || '微信状态查询被拒绝');
+      wxDockShowRetry();
+      return;
+    }
     /* 400 = 后端判定二维码会话已过期（pending 会话 5 分钟 TTL）→ 给刷新 */
     if (e.status !== 400) {
       wxStatusSet('bad', '状态查询暂时失败，继续等待…');
@@ -5952,10 +6280,16 @@ async function wxDockPollOnce() {
       return;
     }
     clearWxDock();
+    wxDockQr = '';
+    wxDockImgContent = '';
+    const img = $('pushWxQr');
+    if (img) img.removeAttribute('src');
+    setWxQrPlaceholder('二维码已失效');
     wxStatusSet('bad', '二维码已失效，点下面刷新');
-    $('pushWxRefresh')?.classList.remove('hidden');
-    wxDockGoReenable();
+    wxDockShowRetry();
     return;
+  } finally {
+    if (wxDockPollingEpoch === epoch) wxDockPollingEpoch = 0;
   }
   const st = d.status || 'wait';
   if (st === 'confirmed') { onWxDockConfirmed(d); return; }
@@ -5966,9 +6300,13 @@ async function wxDockPollOnce() {
     wxStatusSet('wait', '微信要求输入验证码');
   } else if (st === 'verify_code_blocked') {
     clearWxDock();
+    wxDockQr = '';
+    wxDockImgContent = '';
+    const img = $('pushWxQr');
+    if (img) img.removeAttribute('src');
+    setWxQrPlaceholder('二维码已作废');
     wxStatusSet('bad', '验证码连续不对，二维码作废了');
-    $('pushWxRefresh')?.classList.remove('hidden');
-    wxDockGoReenable();
+    wxDockShowRetry();
     return;
   } else if (st === 'scaned_but_redirect') {
     wxStatusSet('scaned', '已扫码，正在切换服务器继续等待…');
@@ -5982,13 +6320,19 @@ async function wxDockPollOnce() {
 
 function onWxQrExpired() {
   clearWxDock();
+  wxDockQr = '';
+  wxDockImgContent = '';
+  const img = $('pushWxQr');
+  if (img) img.removeAttribute('src');
+  const area = $('pushQrArea');
+  if (area) area.setAttribute('aria-busy', 'false');
+  setWxQrPlaceholder('二维码已失效');
   wxStatusSet('bad', '二维码已失效');
   const exp = $('pushWxExpire');
-  if (exp) { exp.textContent = '二维码 5 分钟有效，点下面刷新'; exp.classList.remove('soon'); }
+  if (exp) { exp.textContent = '二维码 5 分钟有效，点下面重新获取'; exp.classList.remove('soon'); }
   const wrap = $('pushWxQrWrap');
   if (wrap) wrap.classList.remove('qr-live');
-  $('pushWxRefresh')?.classList.remove('hidden');
-  wxDockGoReenable();
+  wxDockShowRetry();
 }
 
 /* 对接成功（2026-10-17 口径：confirmed 即完成，后端保存凭证 = bound 随之变 true）：
@@ -6000,6 +6344,13 @@ function onWxDockConfirmed(d) {
   clearPushCodeTimer();
   wxDockConfirmed = true;
   wxDockNeedActivate = !!(d && d.needActivate);
+  wxDockQr = '';
+  wxDockImgContent = '';
+  wxDockDeadline = 0;
+  const qrImg = $('pushWxQr');
+  if (qrImg) qrImg.removeAttribute('src');
+  const qrArea = $('pushQrArea');
+  if (qrArea) qrArea.setAttribute('aria-busy', 'false');
   wxStatusSet('ok', wxDockNeedActivate ? '✅ 已扫码，待激活' : '✅ 对接成功');
   const wrap = $('pushWxQrWrap');
   if (wrap) wrap.classList.remove('qr-live');
@@ -6007,9 +6358,8 @@ function onWxDockConfirmed(d) {
   if (exp) { exp.textContent = ''; exp.classList.remove('soon'); }
   $('pushWxVerifyWrap')?.classList.add('hidden');
   $('pushWxRefresh')?.classList.add('hidden');
-  $('pushCodeBox')?.classList.add('hidden');
-  $('pushCodeRetry')?.classList.add('hidden');
-  wxDockGoReenable();
+  $('pushCodeFallback')?.classList.add('hidden');
+  $('pushCodeFallback')?.removeAttribute('open');
   toast(wxDockNeedActivate
     ? '已扫码对接：给机器人发一条消息即激活'
     : '对接成功');
@@ -6035,10 +6385,9 @@ function startPushCodeCountdown(deadline) {
     const left = Math.max(0, deadline - Date.now());
     if (!left) {
       clearPushCodeTimer();
-      exp.textContent = '对接码已失效，点下面重新获取';
+      exp.textContent = '对接码已失效，请重新获取二维码';
       exp.classList.add('soon');
       $('pushCodeCopy').disabled = true;
-      $('pushCodeRetry')?.classList.remove('hidden');
       return;
     }
     const sec = Math.ceil(left / 1000);
@@ -6073,27 +6422,21 @@ async function copyPushCode() {
 }
 
 function fillPushCode(d) {
-  const box = $('pushCodeBox');
+  const box = $('pushCodeFallback');
   if (!box) return;
   clearPushCodeTimer();
   const code = String(d.code || '').trim();
-  /* admin 观看账号 / 后端没给码：码块保持 hidden，整个对接只走扫码一条路 */
+  /* admin 观看账号 / 后端没给码：整块兜底保持 hidden，只走扫码 */
   if (!/^\d{4}$/.test(code)) return;
   box.classList.remove('hidden');
+  box.removeAttribute('open');
   $('pushCodeValue').textContent = code;
   $('pushCodeCopy').disabled = false;
   $('pushCodeExpire').textContent = '30 分钟内有效';
   $('pushCodeExpire').classList.remove('soon');
   $('pushCodeError').textContent = '';
   $('pushCodeError').classList.add('hidden');
-  $('pushCodeRetry')?.classList.add('hidden');
   startPushCodeCountdown(pushCodeDeadline(d.codeExpires));
-}
-
-/* 失败重取按钮：start 重跑一遍（重新取二维码 + 对接码） */
-function bindPushCodeRetry() {
-  const retry = $('pushCodeRetry');
-  if (retry) retry.onclick = () => startWxDock();
 }
 
 /* ② 推送开关（2026-10-17 口径：只属于状态 B —— p.bound 时才渲染本段；
@@ -6108,7 +6451,7 @@ function pushFlagsHtml(p) {
     (p.notifyTarget ? ' checked' : '') + (p.admin ? ' disabled' : '') +
     '> 追分提醒（追上 / 还差多少）</label>';
   h += '<label class="sw"><input type="checkbox" id="swDaily"' +
-    (p.dailyReport ? ' checked' : '') + '> 每日报告（当天音浪排行榜）</label>';
+    (p.dailyReport ? ' checked' : '') + '> 每日报告（月榜 / 个人数据）</label>';
   /* 师门日报第三开关（docs/23 §4.3）：仅名下有直系徒弟的人显示（hasDisciples）。
      兼容期后端还没下发 hasDisciples 时按 false 处理 = 不显示，开关自然回退两开盖。 */
   if (p.hasDisciples) {
@@ -6346,6 +6689,7 @@ function bindPushBoundHandlers(p) {
         /* 「本次会话刚对接成功」的标记一并清掉：回状态 A 时不能再显示「✅ 对接成功」 */
         wxDockConfirmed = false;
         wxDockNeedActivate = false;
+        wxDockAutoAttempted = false;
         await refreshPush();
       } catch (e) {
         unbind.disabled = false;
@@ -6623,6 +6967,12 @@ async function postPush(path, extra) {
     body: JSON.stringify(Object.assign({ token: myToken() }, extra)),
   });
   const d = await r.json().catch(() => ({}));
+  if (r.status === 401) {
+    sessionExpired();
+    const e = new Error('请先登录');
+    e.status = 401;
+    throw e;
+  }
   if (!r.ok) {
     const e = new Error(d.error || ('HTTP ' + r.status));
     e.status = r.status;
@@ -6632,16 +6982,16 @@ async function postPush(path, extra) {
 }
 
 function bindPushBox(p) {
-  /* 2026-10-17 用户口径：状态 A 点「扫码对接」才现取二维码 + 对接码（不再随卡自动拉
-     —— renderPushBox 每次轮询回来都会走这里，自动拉会把「不点不调」变成事实上的
-     每次都打一次上游接口）。事件绑定统一在下方那一处 bindPushQrShow()（离渲染近、注释同源）。 */
+  /* 2026-10-19 用户口径：进入子页自动取二维码 + 对接码；事件绑定统一在下方
+     bindPushQrShow()（离渲染近、注释同源）。autoStartWxDock 自身有 starting /
+     有效二维码 / scanBound 三重保护，重复渲染不会重复打 start。 */
   // scanBound 旧态（扫了码还没等微信确认）：留在状态 A 显示「等微信确认」，
   // 但保留 5 秒自动刷新让状态回流（后端确认后 bound=true，这里一刷就进状态 B）。
-  if (p && p.needActivate) {
+  if (p && (p.needActivate || p.scanBound)) {
     clearTimeout(pushSrTimer);
     pushSrTimer = setTimeout(() => refreshPush(), 5000);
   }
-  /* 段①「扫码对接」按钮的取码/轮询绑定（bindPushQrShow 内部含对接码填充与重取） */
+  /* 二维码区的刷新 / 验证码 / 对接码事件绑定 */
   bindPushQrShow();
   if (p && p.bound) bindPushBoundHandlers(p);
   /* 「追分设置」独立卡（2026-10-13）：内容渲染 + 事件都跟着推送状态走，
@@ -6651,6 +7001,9 @@ function bindPushBox(p) {
      bindChaseHandlers —— 那会在没换 innerHTML 的情况下把事件挂第二遍（enterSubmit 的
      addEventListener 会让 Enter 双提交）。 */
   renderChaseBox(p);
+  /* 数据渲染完成后再判断 #myPushCard 是否可见：初始 renderMy 时子页还没切出来，
+     用 microtask 等 renderMySub 设置完 hidden 再自动取码；重试路径也能复用。 */
+  queueMicrotask(() => autoStartWxDock(p));
 }
 
 
@@ -6687,9 +7040,9 @@ function syncNavActive() {
      · #navDropRing       —— 1.5px 空心 conic 彩虹环（mask-composite 挖空内部：
                              色散/薄膜干涉只允许出现在最外沿轮廓线上）
      · #navDropBody       —— 白 .72 + blur(16px) saturate(140%) 通透水体，内部零彩光
-   手势（2026-10-19 用户口径，保持不变）：仅「长按 150ms 或横移 >5px → 拖拽 → 松手」
-   切路由，普通短按不切；松手磁吸最近格（340ms 弹性回弹）后合成 click 走 activate()。
-   拖拽时水滴按速度拉伸/压扁/skew、贴壁挤压变色；跨格时图标 focused（琥珀）/edge
+   交互：普通点击立即切路由；按住横移即可拖拽，松手磁吸最近格（340ms 弹性回弹）
+   并立即切路由。水滴按速度拉伸/压扁/skew；外沿增强色散只在长按拖拽的
+   水滴碰撞带遇到其它 tab 图标包围盒时增强。跨格时图标 focused（琥珀）/edge
    （slate-700）两态，不再把原选中项压暗（旧 .is-dim/.is-covered 已删除）。
    ⚠️ 隐藏按钮宽度 0，只取可见按钮（navVisibleTabs）参与定位。
    ⚠️ 旧体系（#navPill 琥珀胶囊 + #navLens 1.5 格大光晕 + .is-dim/.is-covered）
@@ -6732,7 +7085,84 @@ function navDropCenter() {
   return 6 + navDropX + navDropW / 2;
 }
 
-/** 内壁色散层复位（平时完全透明） */
+/** 只设置最外沿 rim 的强度；k=0 完全隐藏，k>0 只由图标真实碰撞产生。 */
+function navDropSetRim(k) {
+  const ring = $('navDropRing'), dock = $('navRow');
+  k = Math.max(0, Math.min(1, Number(k) || 0));
+  /* Stitch 1:1：静止时最外沿已有 1.5px 薄膜干涉 rim（.35）；图标碰撞只增强
+     同一圈外沿的亮度/外发光，绝不向水体内部染色。 */
+  if (ring) {
+    ring.style.opacity = (.35 + k * .55).toFixed(2);
+    ring.style.boxShadow = k > .02
+      ? '0 0 ' + (6 + k * 4).toFixed(1) + 'px rgba(0,199,190,.42), 0 0 2px rgba(255,59,48,.62)'
+      : '0 0 6px rgba(0,199,190,.35), 0 0 2px rgba(255,59,48,.4)';
+  }
+  if (dock) dock.dataset.navCollision = k > .02 ? '1' : '0';
+}
+
+/** 拖拽几何缓存：一次手势只量一次，pointermove 不再反复 getBoundingClientRect。 */
+function navDropDragGeometry() {
+  const dock = $('navRow'), drop = $('navDrop');
+  if (!dock || !drop) return null;
+  const dr = dock.getBoundingClientRect();
+  const tabs = navVisibleTabs();
+  const originIndex = navIndexRefresh();
+  return {
+    dockLeft: dr.left,
+    dockWidth: dr.width,
+    dockHeight: dr.height,
+    dropHeight: drop.getBoundingClientRect().height || Math.max(1, dr.height - 10),
+    originIndex: originIndex,
+    tabCenters: tabs.map((tab) => {
+      const r = tab.getBoundingClientRect();
+      return (r.left - dr.left) + r.width / 2;
+    }),
+    icons: tabs.map((tab, index) => {
+      const el = tab.querySelector('.ic') || tab;
+      const r = el.getBoundingClientRect();
+      return {
+        index: index,
+        left: r.left - dr.left,
+        right: r.right - dr.left,
+        top: r.top - dr.top,
+        bottom: r.bottom - dr.top,
+      };
+    }),
+  };
+}
+
+/** 水滴外沿 band 与其它 tab 图标的真实包围盒是否相交。
+    只在长按后的水平拖拽里调用；速度、贴内壁、未碰撞的邻近都不参与。
+    椭圆归一化后：rMin/rMax 是图标矩形离水滴中心最近/最远的 normalized radius。
+    图标矩形穿过 [内侧安全区, 外沿] 这条窄带才算碰撞。 */
+function navDropIconCollision(geom, targetX, scaleX, scaleY) {
+  if (!geom || !geom.icons || !geom.icons.length) return 0;
+  const halfW = Math.max(1, navDropW * scaleX / 2);
+  const halfH = Math.max(1, geom.dropHeight * scaleY / 2);
+  const cx = 6 + targetX + navDropW / 2;
+  const cy = 5 + geom.dropHeight / 2;
+  const bandPx = Math.max(8, Math.min(14, Math.min(halfW, halfH) * .24));
+  const inner = Math.max(.66, 1 - bandPx / Math.min(halfW, halfH));
+  let hit = 0;
+  for (let i = 0; i < geom.icons.length; i++) {
+    const r = geom.icons[i];
+    if (i === geom.originIndex) continue;      // 起点那一格是水滴原本所在格，不算「其他图标」
+    const dxNear = cx < r.left ? r.left - cx : (cx > r.right ? cx - r.right : 0);
+    const dyNear = cy < r.top ? r.top - cy : (cy > r.bottom ? cy - r.bottom : 0);
+    const rMin = Math.hypot(dxNear / halfW, dyNear / halfH);
+    if (rMin > 1.06) continue;
+    const dxFar = Math.max(Math.abs(r.left - cx), Math.abs(r.right - cx));
+    const dyFar = Math.max(Math.abs(r.top - cy), Math.abs(r.bottom - cy));
+    const rMax = Math.hypot(dxFar / halfW, dyFar / halfH);
+    if (rMax < inner) continue;
+    const outerContact = Math.max(0, Math.min(1, (1.06 - rMin) / .16));
+    const innerContact = Math.max(0, Math.min(1, (rMax - inner) / Math.max(.01, 1 - inner)));
+    hit = Math.max(hit, Math.min(outerContact, innerContact));
+  }
+  return hit;
+}
+
+/** 内壁色散层复位（平时完全透明；2026-10-19 第五轮起不再由贴壁触发） */
 function navDropHideWalls() {
   const l = $('navWallL'), r = $('navWallR');
   if (l) { l.style.opacity = '0'; l.style.transform = 'scale(1)'; }
@@ -6746,9 +7176,8 @@ function navDropResetMorph() {
   if (ring) {
     ring.style.borderRadius = '9999px';
     ring.style.transform = 'scale(1, 1)';
-    ring.style.opacity = '.35';
-    ring.style.boxShadow = '0 0 6px rgba(0,199,190,.35), 0 0 2px rgba(255,59,48,.4)';
   }
+  navDropSetRim(0);
   navDropHideWalls();
 }
 
@@ -6757,16 +7186,22 @@ function navDropResetMorph() {
     ≤ 1.05 半格 → edge（slate-700 微放大），其余回默认 slate-600。
     拖拽中 dock 会挂 .is-droplet-dragging，CSS 里让 .on 不再常量高亮
     （否则被水滴甩开的老选中项还是琥珀，正是旧实现视觉不对的另一半原因）。 */
-function navDropPaintTabs() {
+function navDropPaintTabs(geom) {
   const dock = $('navRow');
   if (!dock) return;
-  const dr = dock.getBoundingClientRect();
   const center = navDropCenter();
   const half = navDropW / 2;
-  navVisibleTabs().forEach((tab) => {
-    const tr = tab.getBoundingClientRect();
-    const tc = (tr.left - dr.left) + tr.width / 2;
-    const dist = Math.abs(center - tc);
+  let centers;
+  if (geom && geom.tabCenters) centers = geom.tabCenters;
+  else {
+    const dr = dock.getBoundingClientRect();
+    centers = navVisibleTabs().map((tab) => {
+      const tr = tab.getBoundingClientRect();
+      return (tr.left - dr.left) + tr.width / 2;
+    });
+  }
+  navVisibleTabs().forEach((tab, i) => {
+    const dist = Math.abs(center - (centers[i] || 0));
     tab.classList.remove('is-droplet-focused', 'is-droplet-edge');
     if (dist <= half * .45) tab.classList.add('is-droplet-focused');
     else if (dist <= half * 1.05) tab.classList.add('is-droplet-edge');
@@ -6814,111 +7249,181 @@ function navIndexRefresh() {
   return navCurIdx;
 }
 
-/** 底栏按钮点击闸门（2026-10-19 用户口径）：
-    底栏**只有**「长按 + 拖拽 + 松手」才切换路由；普通短按（tap）不切页。
-    实现在 bootRest 里给底栏按钮挂了原生 onclick → switchView，一次普通 tap 会同时走
-    「手势逻辑（不切）+ 原生 click（会切）」，所以必须闸住：只有拖拽落位合成的 click
-    （activate 内）才放行。标记位由 activate() 置 true、click 同步执行完立刻置回。 */
-let navDragCommitted = false;
+/** pointer 手势结束后短暂吞掉浏览器补发的原生 click。
+    短按由 onUp 直接切页；长按拖拽由 finishSnap 直接切页；被判定为滑扫的手势
+    也必须吞掉 click。键盘/脚本直接触发的 click 不经过这里，仍可正常切页。 */
+let navClickSuppressUntil = 0;
 
-/** 判断一次 click 是不是「底栏拖拽落位」放行的（供 bootRest 的 onclick 闸门用） */
-function navDragAllowsSwitch(btn) {
-  if (!navDragCommitted) return false;
-  /* 只认底栏内的按钮；页面里其它 [data-v] 入口（子导航/深链）不受本闸门影响 */
-  return !!(btn && btn.closest && btn.closest('#navRow'));
+/** 底栏按钮的唯一激活函数：点击、键盘与长按拖拽共用同一网关。 */
+function activateNavButton(btn) {
+  if (!btn || !btn.dataset || btn.disabled) return;
+  /* 「我的」是列表首页入口：先清掉上次停留的子页（与旧 bootRest 行为一致）。 */
+  if (btn.dataset.v === 'my') mySub = null;
+  switchView(btn.dataset.v);
 }
 
 /** 底栏手势初始化（对齐设计稿 initLiquidWaterDropletDock 的物理参数）
-    · 短按（<150ms 且位移 <5px）→ **不切页**：水滴留在原处（视觉上明确「没切换」）
-    · 长按 150ms 或横移 >5px → 进入拖拽：水滴跟手、速度感应形变、贴壁色散；
-      跨格时图标 focused/edge 两态
-    · 松手 → 磁吸最近格（340ms 果冻回弹）→ 合成 click 激活该页（唯一切路由入口） */
+    · 短按点击 → 立即切页，只给克制 tap 反馈（不再出现整格大红）
+    · 按住后只要产生横向位移就进入拖拽，不要求先等 150ms；速度只控形变
+    · 长按 150ms 后继续拖动时，色散才由水滴边缘带碰到其它图标包围盒增强
+    · 松手 → 立即切路由/发请求；340ms 只保留水滴磁吸回弹视觉 */
 function initNavDock() {
   const dock = $('navRow'), drop = $('navDrop'), body = $('navDropBody'), ring = $('navDropRing');
   if (!dock || !drop) return;
-  let pressed = false, dragMode = false, pressT = 0, startX = 0, startY = 0;
-  let lastX = 0, lastTime = 0, velocity = 0, longPressTimer = null;
+  let pressed = false, longReady = false, dragMode = false, gestureRejected = false;
+  let pressT = 0, startX = 0, startY = 0, lastX = 0, lastTime = 0, velocity = 0;
+  let longPressTimer = null, velocityTimer = null, moveRaf = 0, pendingX = 0;
+  let pressBtn = null, dragGeom = null, activePointerId = null;
 
   const vibrate = (ms) => { try { if ('vibrate' in navigator) navigator.vibrate(ms); } catch (e) {} };
+  const reducedMotion = () => !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
 
-  /** 拖拽跟手 + 速度感应形变 + 内壁碰撞色散（设计稿物理参数逐值搬过来） */
-  function applyMorph(targetX, dockWidth) {
+  /** 仅 tap 成功后出现的小反馈：图标附近一个 30px 暖色淡环 + 水滴无色回弹。
+      长按/拖拽不生成；合成 click 也不生成，因此不会出现旧版整格大红或重复动画。 */
+  function showTapFeedback(btn) {
+    if (!btn) return;
+    const icon = btn.querySelector('.ic') || btn;
+    icon.querySelectorAll('.tab-tap-feedback').forEach((n) => n.remove());
+    const r = document.createElement('span');
+    r.className = 'tab-tap-feedback';
+    icon.appendChild(r);
+    requestAnimationFrame(() => requestAnimationFrame(() => r.classList.add('on')));
+    setTimeout(() => r.remove(), 240);
+    if (reducedMotion()) return;
+    if (body && body.animate) {
+      try {
+        body.animate([
+          { transform: 'scale(1, 1)' },
+          { transform: 'scale(.97, 1.03)' },
+          { transform: 'scale(1, 1)' },
+        ], { duration: 200, easing: 'ease-out' });
+        return;
+      } catch (e) { /* 老浏览器走下面的 CSS class 兜底 */ }
+    }
+    drop.classList.remove('is-tap-ack');
+    requestAnimationFrame(() => {
+      drop.classList.add('is-tap-ack');
+      setTimeout(() => drop.classList.remove('is-tap-ack'), 220);
+    });
+  }
+
+  function clearPressTimers() {
+    if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
+    if (velocityTimer) { clearTimeout(velocityTimer); velocityTimer = null; }
+    if (moveRaf) { cancelAnimationFrame(moveRaf); moveRaf = 0; }
+    pendingX = 0;
+  }
+
+  function resetPress() {
+    pressed = false; longReady = false; dragMode = false; gestureRejected = false;
+    pressBtn = null; dragGeom = null; navDropDragging = false;
+    clearPressTimers();
+    dock.classList.remove('is-droplet-dragging');
+  }
+
+  /** 340ms 只是水滴磁吸视觉；路由在 pointerup 时已经立刻提交，不在这里等待。 */
+  function settleSnap() {
+    if (navDropTimers.snap) { clearTimeout(navDropTimers.snap); navDropTimers.snap = 0; }
+    navDropResetMorph();
+    drop.classList.remove('is-dragging', 'is-snapping');
+    drop.classList.add('is-idle');
+    resetPress();
+    navDropMove(true);
+  }
+
+  function cancelGesture() {
+    navDropResetMorph();
+    drop.classList.remove('is-dragging', 'is-snapping');
+    drop.classList.add('is-idle');
+    resetPress();
+    navDropMove(true);
+  }
+
+  /** 拖拽跟手 + 速度形变。色散环强度只由 navDropIconCollision() 的图标碰撞决定；
+      速度只控制拉伸/压扁，贴左右内壁不再触发任何霓虹。 */
+  function applyMorph(targetX, dockWidth, geom) {
     const v = Math.max(-2.5, Math.min(2.5, velocity));
     const absV = Math.abs(v);
     const dir = v >= 0 ? 1 : -1;
-    /* 速度越快：横向拉伸越多、纵向压扁越多；方向决定 skew 与流体圆角朝向 */
     const stretchX = 1 + Math.min(.42, absV * .22);
     const squashY = Math.max(.82, 1 - absV * .12);
-    const minX = 4, maxX = Math.max(minX, dockWidth - navDropW - 4);
-    const distL = targetX - minX, distR = maxX - targetX;
-    let leftW = 0, rightW = 0, wallSquashX = 1;
-    if (distL < 18) { leftW = Math.max(0, (18 - distL) / 18); wallSquashX = 1 - leftW * .22; }
-    else if (distR < 18) { rightW = Math.max(0, (18 - distR) / 18); wallSquashX = 1 - rightW * .22; }
-    /* 内壁霓虹：撞到左/右墙才亮，越近越亮 */
-    const wl = $('navWallL'), wr = $('navWallR');
-    if (wl) { wl.style.opacity = (leftW * .95).toFixed(2); wl.style.transform = 'scale(' + (1 + leftW * .25).toFixed(3) + ')'; }
-    if (wr) { wr.style.opacity = (rightW * .95).toFixed(2); wr.style.transform = 'scale(' + (1 + rightW * .25).toFixed(3) + ')'; }
-    /* 流体圆角/形变：贴壁优先，其次按速度方向拉伸 */
     let br = '9999px';
-    if (leftW > .15) br = '28% 72% 70% 30% / 40% 60% 60% 40%';
-    else if (rightW > .15) br = '72% 28% 30% 70% / 60% 40% 40% 60%';
-    else if (absV > .08) br = dir > 0 ? '35% 65% 62% 38% / 44% 56% 56% 44%' : '65% 35% 38% 62% / 56% 44% 44% 56%';
-    const tf = 'scale(' + (stretchX * wallSquashX).toFixed(3) + ', ' + squashY.toFixed(3) + ')' +
+    if (absV > .08) {
+      br = dir > 0
+        ? '35% 65% 62% 38% / 44% 56% 56% 44%'
+        : '65% 35% 38% 62% / 56% 44% 44% 56%';
+    }
+    const tf = 'scale(' + stretchX.toFixed(3) + ', ' + squashY.toFixed(3) + ')' +
       ' skewX(' + (dir * Math.min(8, absV * 4)).toFixed(1) + 'deg)';
     if (body) { body.style.borderRadius = br; body.style.transform = tf; }
-    /* 色散只在边缘激发：速度/贴壁越大，外沿细辉光越亮、扩散越大；内部始终不染色 */
     if (ring) {
       ring.style.borderRadius = br;
       ring.style.transform = tf;
-      const alpha = Math.min(1, .35 + absV * .4 + (leftW + rightW) * .5);
-      ring.style.opacity = alpha.toFixed(2);
-      const spread = (2 + (leftW + rightW) * 5 + absV * 3).toFixed(1);
-      ring.style.boxShadow = '0 0 ' + spread + 'px rgba(0,199,190,.45), 0 0 2px rgba(255,59,48,.6)';
     }
-    navDropPaintTabs();
+    navDropSetRim(navDropIconCollision(geom, targetX, stretchX, squashY));
+    navDropPaintTabs(geom);
   }
 
-  /** 拖拽位置：按手指 x 居中，夹在 dock 内（设计稿 minX=4 / maxX=宽-格宽-4） */
+  /** pointermove 合并到一帧，避免长按拖拽时每个原始事件都同步写样式。 */
   function updateDrop(clientX) {
-    const dr = dock.getBoundingClientRect();
-    const minX = 4, maxX = Math.max(minX, dr.width - navDropW - 4);
-    navDropX = Math.max(minX, Math.min(maxX, (clientX - dr.left) - navDropW / 2));
+    if (!dragGeom) return;
+    const minX = 4, maxX = Math.max(minX, dragGeom.dockWidth - navDropW - 4);
+    navDropX = Math.max(minX, Math.min(maxX, (clientX - dragGeom.dockLeft) - navDropW / 2));
     drop.style.transform = 'translateX(' + navDropX.toFixed(1) + 'px)';
-    applyMorph(navDropX, dr.width);
+    applyMorph(navDropX, dragGeom.dockWidth, dragGeom);
   }
 
-  /** 进入拖拽：水滴立刻切到跟手态（常驻 .is-idle 呼吸动画暂停） */
+  function scheduleDrop(clientX) {
+    pendingX = clientX;
+    if (moveRaf) return;
+    moveRaf = requestAnimationFrame(() => {
+      moveRaf = 0;
+      updateDrop(pendingX);
+    });
+  }
+
+  function decayVelocity() {
+    if (velocityTimer) clearTimeout(velocityTimer);
+    velocityTimer = setTimeout(() => {
+      velocityTimer = null;
+      if (!dragMode || !dragGeom) return;
+      velocity *= .45;
+      if (Math.abs(velocity) < .015) velocity = 0;
+      applyMorph(navDropX, dragGeom.dockWidth, dragGeom);
+      if (velocity !== 0) decayVelocity();
+    }, 70);
+  }
+
+  /** 进入跟手态必须同时满足：已长按 + 确实发生了横向移动。 */
   function enterDrag(clientX) {
     if (dragMode) return;
     dragMode = true;
     clearTimeout(navDropTimers.idle);
     navDropDragging = true;
+    dragGeom = navDropDragGeometry();
     drop.classList.remove('is-idle', 'is-snapping');
     drop.classList.add('is-dragging');
     dock.classList.add('is-droplet-dragging');
+    navDropHideWalls();
+    navDropSetRim(0);
     vibrate(12);
     updateDrop(clientX);
   }
 
-  /** 激活某格的页面（走按钮 click = switchView 一条链路，路由/数据都齐）。
-      2026-10-19：底栏只认「长按拖拽 → 松手」这一条切路由链路（短按不切），
-      所以合成 click 前先置 navDragCommitted 闸门标记，让 bootRest 里挂在底栏按钮上的
-      原生 onclick 放行这一次；其余普通 tap 触发的原生 click 一律被闸门拦下。 */
+  /** 激活某格：直接走 activateNavButton → switchView，不再合成 click。 */
   function activate(idx) {
-    const t = navVisibleTabs()[idx];
-    if (!t) return;
-    navDragCommitted = true;
-    try { t.click(); } finally { navDragCommitted = false; }
+    activateNavButton(navVisibleTabs()[idx]);
   }
 
-  /** 松手磁吸：找最近格 → 340ms 果冻回弹 → 合成 click 切页 → 复位常驻水滴 */
+  /** 松手：先立即激活目标页，再让 340ms 磁吸动画自己收尾。
+      之前是先等完 340ms 才 activate，实测每次切换都固定慢 344-366ms。 */
   function finishSnap() {
-    const dr = dock.getBoundingClientRect();
+    clearPressTimers();   // 取消松手瞬间尚未落地的 rAF/速度计时，避免覆盖磁吸形态
+    if (!dragGeom) dragGeom = navDropDragGeometry();
+    if (!dragGeom) { cancelGesture(); return; }
     const center = navDropX + 6 + navDropW / 2;
     let best = 0, min = Infinity;
-    navVisibleTabs().forEach((tab, i) => {
-      const tr = tab.getBoundingClientRect();
-      const tc = (tr.left - dr.left) + tr.width / 2;
+    dragGeom.tabCenters.forEach((tc, i) => {
       const d = Math.abs(center - tc);
       if (d < min) { min = d; best = i; }
     });
@@ -6927,93 +7432,128 @@ function initNavDock() {
     drop.classList.remove('is-dragging');
     drop.classList.add('is-snapping');
     drop.style.transform = 'translateX(' + snapX + 'px)';
-    /* 吸附瞬间：水球横向收、纵向弹（设计稿 58/58/54/54 果冻形变） */
     const jelly = '58% 58% 54% 54% / 52% 52% 48% 48%';
     if (body) { body.style.borderRadius = jelly; body.style.transform = 'scale(.92, 1.08)'; }
     if (ring) {
       ring.style.borderRadius = jelly;
       ring.style.transform = 'scale(.92, 1.08)';
-      ring.style.opacity = '.5';
     }
+    navDropSetRim(0);
     navDropHideWalls();
     vibrate(15);
-    clearTimeout(navDropTimers.snap);
-    navDropTimers.snap = setTimeout(() => {
-      navDropResetMorph();
-      drop.classList.remove('is-snapping');
-      drop.classList.add('is-idle');
-      navDropDragging = false;   // 先清拖拽标志：activate → syncNavActive → navDropMove 要能落位
-      activate(best);            // 唯一的路由切换入口（合成 click，过 navDragCommitted 闸门）
-      navDropMove(true);         // 与 switchView 内 syncNavActive 幂等；立即落位避免二次动画
-      dock.classList.remove('is-droplet-dragging');
-      resetState();
-    }, 340);
-  }
 
-  function resetState() {
-    pressed = false; dragMode = false; navDropDragging = false;
-    if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
-    dock.classList.remove('is-droplet-dragging');
+    const current = navVisibleTabs().findIndex(b => b.classList.contains('on'));
+    if (best !== current) activate(best);     // 立即切路由/发请求；不等 340ms 视觉动画
+    if (navDropTimers.snap) clearTimeout(navDropTimers.snap);
+    navDropTimers.snap = setTimeout(settleSnap, 340);
   }
 
   function onDown(e) {
-    pressed = true; dragMode = false;
+    if (e.button != null && e.button !== 0) return;
+    if (activePointerId != null) return;
+    if (window.PointerEvent && e.pointerId != null) {
+      activePointerId = e.pointerId;
+      try { dock.setPointerCapture(e.pointerId); } catch (_) {}
+    }
+    if (navDropTimers.snap) settleSnap();
+    pressed = true; longReady = false; dragMode = false; gestureRejected = false;
     pressT = performance.now();
     const p0 = e.touches && e.touches[0] ? e.touches[0] : e;
     startX = p0.clientX || 0; startY = p0.clientY || 0;
     lastX = startX; lastTime = pressT; velocity = 0;
-    if (longPressTimer) clearTimeout(longPressTimer);
-    /* 长按 150ms 才进入拖拽；期间横向移动 >5px 也立刻进入（设计稿同口径） */
+    const target = p0.target || e.target;
+    pressBtn = target && target.closest ? target.closest('#navRow button[data-v]') : null;
+    clearPressTimers();
+    /* 只启动长按计时；不位移不进入拖拽，因此普通长按不会变形成贴壁霓虹。 */
     longPressTimer = setTimeout(() => {
-      if (pressed && !dragMode) enterDrag(startX);
+      longPressTimer = null;
+      if (!pressed || dragMode || gestureRejected) return;
+      longReady = true;
     }, 150);
   }
 
   function onMove(e) {
     if (!pressed) return;
+    if (activePointerId != null && e.pointerId != null && e.pointerId !== activePointerId) return;
     const p0 = e.touches && e.touches[0] ? e.touches[0] : e;
     const x = p0.clientX || 0;
+    const y = p0.clientY || 0;
+    const dx = x - startX, dy = y - startY;
     const now = performance.now();
+
     const dt = Math.max(1, now - lastTime);
     velocity = velocity * .4 + ((x - lastX) / dt) * .6;
     lastX = x; lastTime = now;
-    if (!dragMode && Math.abs(x - startX) > 5) {
-      if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
-      enterDrag(x);
+    /* 支持按住即拖：横向位移超过 3px 立即进入拖拽，不要求先长按 150ms。
+       纵向明显移动才视为页面滚动并取消；长按只控制碰撞色散何时增强。 */
+    if (!dragMode && Math.abs(dx) > 3 && Math.abs(dx) > Math.abs(dy)) enterDrag(x);
+    if (!dragMode) {
+      if (Math.hypot(dx, dy) > 8) {
+        gestureRejected = true;
+        clearPressTimers();
+        navDropResetMorph();
+        drop.classList.remove('is-dragging', 'is-snapping', 'is-tap-ack');
+        drop.classList.add('is-idle');
+      }
+      return;
     }
     if (dragMode) {
       if (e.cancelable) e.preventDefault();
-      updateDrop(x);
+      scheduleDrop(x);
+      decayVelocity();
     }
   }
 
   function onUp(e) {
     if (!pressed) return;
+    if (activePointerId != null && e && e.pointerId != null && e.pointerId !== activePointerId) return;
+    activePointerId = null;
+    navClickSuppressUntil = performance.now() + 500;
+    const held = performance.now() - pressT;
     if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
-    if (!dragMode) {
-      /* 短按（含「按住了但没到 150ms / 没挪够 5px」）—— 按 2026-10-19 用户口径**不切页**：
-         水滴原地不动，清掉可能残留的拖拽态，视觉上明确「这次点击没有切换路由」。
-         切路由只认走完长按拖拽的那条链路。 */
-      navDropResetMorph();
-      drop.classList.remove('is-dragging');
-      drop.classList.add('is-idle');
-      resetState();
+    if (gestureRejected) {
+      cancelGesture();
       return;
     }
-    /* 拖拽中松手：磁吸到最近格 → 回弹 → 激活目标页（唯一切路由入口） */
+    if (!dragMode) {
+      const tapped = pressBtn;
+      /* 普通短按：立即切页并给克制反馈；长按不放仍安静结束，不误触路由。 */
+      if (tapped && held < 420) {
+        showTapFeedback(tapped);
+        activateNavButton(tapped);
+      }
+      navDropResetMorph();
+      drop.classList.remove('is-dragging', 'is-snapping');
+      drop.classList.add('is-idle');
+      resetPress();
+      return;
+    }
     finishSnap();
+  }
+
+  function onCancel(e) {
+    if (activePointerId != null && e && e.pointerId != null && e.pointerId !== activePointerId) return;
+    activePointerId = null;
+    if (!pressed) return;
+    cancelGesture();
   }
 
   if (window.PointerEvent) {
     dock.addEventListener('pointerdown', onDown);
     window.addEventListener('pointermove', onMove, { passive: false });
     window.addEventListener('pointerup', onUp);
-    window.addEventListener('pointercancel', onUp);
+    window.addEventListener('pointercancel', onCancel);
+    dock.addEventListener('lostpointercapture', () => {
+      /* pointerup 提交后浏览器会正常释放 capture，此时 is-snapping 正在播放，
+         不能把它误当成 pointercancel 截断磁吸动画。真正的异常失焦仍走 cancel。 */
+      if (drop.classList.contains('is-snapping')) return;
+      onCancel();
+    });
   } else {
     dock.addEventListener('touchstart', onDown, { passive: true });
     window.addEventListener('touchmove', onMove, { passive: false });
     window.addEventListener('touchend', onUp);
-    window.addEventListener('touchcancel', onUp);
+    window.addEventListener('touchcancel', onCancel);
     dock.addEventListener('mousedown', onDown);
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
@@ -7027,37 +7567,6 @@ function initNavDock() {
   if (ro) ro.observe(dock);
   setTimeout(align, 60);
   setTimeout(align, 400);
-
-  /* ===== 触摸光晕（2026-10-18 v6，用户提示词 1-6 条）：保留 =====
-     touchstart 优先（移动端 click 有 300ms 延迟，光晕会慢半拍），
-     mouse 桌面通道（touchstart 未命中时 click 兜底一次）。 */
-  const spawnRipple = (btn, x, y) => {
-    const br = btn.getBoundingClientRect();
-    const r = document.createElement('span');
-    r.className = 'tab-ripple';
-    const size = Math.round(Math.max(br.width, br.height) * 2.2);
-    r.style.width = r.style.height = size + 'px';
-    r.style.left = (x - br.left) + 'px';
-    r.style.top = (y - br.top) + 'px';
-    btn.appendChild(r);
-    requestAnimationFrame(() => requestAnimationFrame(() => {
-      r.classList.add('tab-ripple-on');
-    }));
-    setTimeout(() => r.remove(), 420);
-  };
-  let lastTouchAt = 0;
-  dock.addEventListener('touchstart', (e) => {
-    lastTouchAt = performance.now();
-    const t = e.touches && e.touches[0];
-    if (!t) return;
-    const btn = t.target && t.target.closest && t.target.closest('#navRow button[data-v]');
-    if (btn) spawnRipple(btn, t.clientX, t.clientY);
-  }, { passive: true, capture: true });
-  dock.addEventListener('click', (e) => {
-    if (e.detail && lastTouchAt && performance.now() - lastTouchAt < 500) return;
-    const btn = e.target && e.target.closest && e.target.closest('#navRow button[data-v]');
-    if (btn) spawnRipple(btn, e.clientX, e.clientY);
-  });
 }
 
 /* ==================== 日/月/年 白玻分段滑块（2026-10-18 Stitch 1:1） ====================
@@ -7140,6 +7649,47 @@ function initSegDrag() {
   });
 }
 
+let viewEnterAnim = null;
+let pendingViewEnter = null;
+
+/** 新 DOM 已经写入后才播放短淡入；避免在空容器/旧视图上先播动画。 */
+function flushViewEnter() {
+  const p = pendingViewEnter;
+  pendingViewEnter = null;
+  if (p) playViewEnter(p.oldIdx, p.newIdx);
+}
+
+/** 切页入场只走 compositor：WAAPI 直接开新动画，不再 remove→offsetWidth→add 强制同步布局。 */
+function playViewEnter(oldIdx, newIdx) {
+  const viewEl = $('view');
+  if (!viewEl || oldIdx < 0 || newIdx < 0 || oldIdx === newIdx) return;
+  if (viewEnterAnim) { try { viewEnterAnim.cancel(); } catch (e) {} viewEnterAnim = null; }
+  const reduced = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  const dx = reduced ? 0 : (newIdx > oldIdx ? 40 : -40);
+  if (viewEl.animate) {
+    try {
+      /* 页面内有大量 backdrop-filter；只做短 opacity，不做 transform/slide，
+         避免整页合成层在切页时大面积重采样。 */
+      viewEnterAnim = viewEl.animate([
+        { opacity: .45 },
+        { opacity: 1 },
+      ], {
+        duration: reduced ? 90 : 150,
+        easing: 'ease-out',
+        fill: 'none',
+      });
+      viewEnterAnim.onfinish = () => { viewEnterAnim = null; };
+      return;
+    } catch (e) { /* 老浏览器走 class 兜底 */ }
+  }
+  viewEl.classList.remove('view-slide-in');
+  viewEl.style.setProperty('--slide-from', dx + 'px');
+  requestAnimationFrame(() => {
+    viewEl.classList.add('view-slide-in');
+    setTimeout(() => viewEl.classList.remove('view-slide-in'), reduced ? 200 : 340);
+  });
+}
+
 function switchView(v, opts) {
   opts = opts || {};
   /* 2026-10-15 task-11：底栏「微信对接」一级入口不新增视图 —— 折算成
@@ -7170,17 +7720,17 @@ function switchView(v, opts) {
   const oldIdx = tabsBefore.findIndex(b => b.classList.contains('on'));
   view = v;
   syncNavActive();
+  const onWechat = v === 'my' && mySub === 'wechat';
+  setQrWatermarkHidden(onWechat);
+  if (!onWechat) {
+    clearWxDock();
+    clearPushCodeTimer();
+    wxDockAutoAttempted = false;
+  }
   const tabsAfter = navVisibleTabs();
   const newIdx = tabsAfter.findIndex(b => b.classList.contains('on'));
-  if (oldIdx >= 0 && newIdx >= 0 && oldIdx !== newIdx) {
-    const viewEl = $('view');
-    viewEl.classList.remove('view-slide-in');
-    viewEl.style.setProperty('--slide-from', (newIdx > oldIdx ? 40 : -40) + 'px');
-    /* 强制 reflow：同帧 remove→add class 不重播动画，要先量一次 offsetWidth */
-    void viewEl.offsetWidth;
-    viewEl.classList.add('view-slide-in');
-    setTimeout(() => viewEl.classList.remove('view-slide-in'), 340);
-  }
+  pendingViewEnter = (oldIdx >= 0 && newIdx >= 0 && oldIdx !== newIdx)
+    ? { oldIdx: oldIdx, newIdx: newIdx } : null;
   document.querySelectorAll('#subnav button').forEach(b => b.classList.toggle('on', b.dataset.g === curGroup));
   show('toolbar', v === 'data');
   /* 2026-10-18：#toolbar 刚从 hidden 变可见，此刻才量得准宽度 ——
@@ -7199,6 +7749,7 @@ function switchView(v, opts) {
      切回 data 重新渲染榜单时会自动恢复）。 */
   /* 弹幕条随 renderList 一起输出/移除，切视图无需额外收口（2026-10-19 第三轮） */
   show('subnav', v === 'group');
+  if (v === 'group') requestAnimationFrame(() => { try { groupSegMove(true); } catch (e) {} });
   show('foot', v !== 'lineage');
   syncHeaderOffset();
   /* 离开「我的」页就停页内计时器（激活轮询 / 目标人搜索防抖）：
@@ -7208,7 +7759,8 @@ function switchView(v, opts) {
     clearTimeout(pushChaseSrTimer);
     chasePicked.clear();     // 离开「我的」页：多选暂存作废（下次进来重新选）
   }
-  $('view').innerHTML = '';
+  /* 不清空 #view：旧内容先保留并由 .busy 轻微压暗，等目标视图一次替换。
+     先 innerHTML='' 会触发一次大布局 + 空白闪动，是底栏切换体感卡顿的一部分。 */
   if (opts.push !== false) pushRoute(opts.replace === true);
   go();
 }
@@ -7235,20 +7787,26 @@ async function go() {
   /* 立刻给反馈：小菊花 + 内容压暗（数据没到不清空，到了再换）。
      乐观骨架只在内容为空时上，避免已看内容被闪没。 */
   const seq = ++loadSeq;
+  if (viewAbort) { try { viewAbort.abort(); } catch (_) {} }
+  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  viewAbort = controller;
+  const signal = controller ? controller.signal : undefined;
   busyOn();
   const optimistic = () => {
     if (view === 'data' && !listAll.length) $('view').innerHTML = '<div class="section">' + shimmerList() + '</div>';
   };
   optimistic();
   try {
-  if (view === 'data') await loadData();
-  else if (view === 'lineage') await loadLineage();
-  else if (view === 'my') await loadMy();
-  else await loadGroup();
+    if (view === 'data') await loadData(signal);
+    else if (view === 'lineage') await loadLineage(null, signal);
+    else if (view === 'my') await loadMy(signal);
+    else await loadGroup(signal);
     if (seq !== loadSeq) return;          // 期间用户又点了别的：过期响应作废
+    flushViewEnter();                      // 目标 DOM 已落地，再播短淡入
     consecutiveFail = 0;
     show('stale', false);
   } catch (e) {
+    if (e && e.name === 'AbortError') return;  // 切页主动取消：不得再写旧视图
     if (seq !== loadSeq) return;          // 过期失败的报错也不许盖住新内容
     consecutiveFail++;
     if (consecutiveFail >= 2) show('stale', true);
@@ -7257,8 +7815,12 @@ async function go() {
     if (mh) mh.textContent = 'NETWORK';
     if (box) box.innerHTML = '<div class="empty"><span class="big">📶</span>暂时取不到数据<br>' +
       esc(e.message) + '</div>';
+    flushViewEnter();
   } finally {
-    if (seq === loadSeq) busyOff();
+    if (seq === loadSeq) {
+      busyOff();
+      if (viewAbort === controller) viewAbort = null;
+    }
   }
 }
 
@@ -7304,6 +7866,7 @@ function syncNav() {
   show('navMy', s.loginRequired !== false);   // 关登录 = 全面开放，没有「我的」页
   /* 「微信对接」是「我的」子页的一级入口：跟「我的」同生共死（关登录时一起消失） */
   show('navWechat', s.loginRequired !== false);
+  try { groupSegMove(true); } catch (e) {}
 }
 
 /* ==================== 启动（统一展示端） ====================
@@ -7359,6 +7922,41 @@ var ANNOUNCE_ICONS = ['auto_awesome', 'military_tech', 'qr_code_scanner',
   'groups', 'emoji_events', 'local_fire_department', 'trending_up', 'calendar_month',
   'chat_bubble', 'lock', 'person', 'smart_toy', 'workspace_premium'];
 
+/* 新手引导固定内容（2026-10-19 用户口径）：后端只控制 enabled，不再维护步骤文本。
+   顺序：日月年 → 分组 → 微信对接/扫码推送 → 个人页 → 追分目标。 */
+var DEFAULT_GUIDE_STEPS = [
+  {
+    title: '日榜、月榜、年榜',
+    icon: 'insights',
+    target: '#seg',
+    content: '顶部切换，查看每天、每月、每年的音浪和时长。'
+  },
+  {
+    title: '查看赛事分组',
+    icon: 'groups',
+    target: '#subnav',
+    content: '点“分组”，查看各场比赛名单。'
+  },
+  {
+    title: '微信扫码对接',
+    icon: 'qr_code_scanner',
+    target: '#navWechat',
+    content: '截屏后用微信识别二维码。绑定后不用每天登录，微信会自动收到数据推送。'
+  },
+  {
+    title: '查看个人数据',
+    icon: 'person',
+    target: '#navMy',
+    content: '进入“我的”，查看自己的日、月、年音浪，直播时长和个人排名。'
+  },
+  {
+    title: '设置追分目标',
+    icon: 'trending_up',
+    target: '#myChaseCard',
+    content: '在“我的 → 追分设置”定目标，进度每天推送到微信。'
+  }
+];
+
 var announceCtx = null;   // 当前引导实例的开闭句柄（供外部强制收起）
 
 /* 深链直达：?announce=N（或 #announce=N）从第 N 步打开。
@@ -7380,15 +7978,30 @@ function announceDeepStep(stepCount) {
    映射里没有的 selector 不切页。 */
 function announceTargetView(sel) {
   if (!sel) return null;
-  if (/^#my/.test(sel)) return 'my';
-  if (/^#navRow/.test(sel)) {
+  if (/^#nav(?:Data|Group|Lineage|My|Wechat)$/.test(sel)) {
     var b = null;
     try { b = document.querySelector(sel); } catch (_) {}
     var v = b && b.dataset ? b.dataset.v : null;
-    return (v === 'group' || v === 'lineage' || v === 'my' || v === 'wechat') ? v : null;
+    return (v === 'data' || v === 'group' || v === 'lineage' || v === 'my' || v === 'wechat') ? v : null;
   }
-  if (/^\.seg\b|^\.st-row/.test(sel)) return 'data';
+  if (/^#my/.test(sel)) return 'my';
+  if (/^#subnav\b/.test(sel)) return 'group';
+  if (/^#navRow/.test(sel)) {
+    var rowBtn = null;
+    try { rowBtn = document.querySelector(sel); } catch (_) {}
+    var rv = rowBtn && rowBtn.dataset ? rowBtn.dataset.v : null;
+    return (rv === 'group' || rv === 'lineage' || rv === 'my' || rv === 'wechat') ? rv : null;
+  }
+  if (/^\.seg\b|^#seg\b|^\.st-row/.test(sel)) return 'data';
   return null;
+}
+
+/** 引导目标在「我的」下需要哪个子页：undefined = 不改变当前子页。 */
+function announceTargetMySub(sel) {
+  if (!sel) return undefined;
+  if (/^#navWechat$/.test(sel)) return 'wechat';
+  if (/^#navMy$/.test(sel) || /^#my/.test(sel)) return null;
+  return undefined;
 }
 
 /* target 指向的页面被后台关掉（如 groupEnabled=false 时 #navGroup 整体 hidden）：
@@ -7495,28 +8108,30 @@ function applyAnnounceSpot(box, card, sel) {
   return spotMode;
 }
 
+function announceSeenKey() {
+  var me = meState || {};
+  var pid = Number(me.personId || 0);
+  var who = pid > 0 ? ('person:' + pid) : (me.name ? ('name:' + me.name) : 'anonymous');
+  return 'pk_guide_seen_at:' + encodeURIComponent(who);
+}
+
 function maybeAnnounce() {
   var a = site && site.announcement;
-  if (!a || !a.enabled || !(a.steps && a.steps.length)) return;
+  /* 后端只负责开关；步骤固定在前端，避免运营后台再维护一套内容。 */
+  if (!a || !a.enabled) return;
   var box = $('announce');
   if (!box) return;
-  var steps = a.steps;
+  var steps = DEFAULT_GUIDE_STEPS;
   var closing = false;
   var deep = announceDeepStep(steps.length);
   var deepLinked = deep >= 0;
-  /* 2026-10-17 用户口径「新手引导默认关闭」：前端总闸 GUIDE_ENABLED=false，
-     正常进入不再弹引导（库里存量 announcement 配置 enabled=true 也被这道闸兜住）。
-     return 插在深链计算之后、已读锁之前 —— 深链 ?announce=N 预览不受总闸影响仍能看。
-     要恢复引导：把 GUIDE_ENABLED 改回 true 即可，后端 announcement 配置不用动。 */
-  var GUIDE_ENABLED = false;
-  if (!GUIDE_ENABLED && !deepLinked) return;
-  /* 深链优先于已读判断：已读用户也要能通过别人发的链接预览某一步，
-     所以这一行必须在版本守卫之前算出来，不能等 return 之后再解析。 */
   var idx = deepLinked ? deep : 0;
   if (!deepLinked) {
-    var key = 'pk_announce_v';
     try {
-      if (localStorage.getItem(key) === String(a.version)) return;
+      var seenAt = Number(localStorage.getItem(announceSeenKey()) || 0);
+      if (seenAt > 0 && Date.now() - seenAt < 7 * 24 * 60 * 60 * 1000) return;
+      /* 展示即记时：同一用户 7 天内刷新/重新登录都不再重复提示。 */
+      localStorage.setItem(announceSeenKey(), String(Date.now()));
     } catch (_) {}
   }
 
@@ -7533,10 +8148,7 @@ function maybeAnnounce() {
     clearTimeout(pushSrTimer);
     clearSwitching();
     removeListeners();
-    /* 深链预览不落已读：看一眼链接不该把正式引导吃掉 */
-    if (!deepLinked) {
-      try { localStorage.setItem(key, String(a.version)); } catch (_) {}
-    }
+    /* 正常引导在打开时已按用户写入 7 天时间戳；深链预览不写。 */
     announceCtx = null;
     clearAnnounceSpot();
     unlockScroll();
@@ -7601,8 +8213,11 @@ function maybeAnnounce() {
     if (n === idx) return;
     idx = n;
     var sel = (steps[idx] && steps[idx].target) || '';
+    var targetSub = announceTargetMySub(sel);
+    var subChanged = targetSub !== undefined && mySub !== targetSub;
+    if (targetSub !== undefined) mySub = targetSub;
     var need = announceTargetView(sel);
-    if (need && need !== view) {
+    if (need && (need !== view || subChanged)) {
       clearAnnounceSpot();
       box.classList.add('hidden');
       box.innerHTML = '';
@@ -7644,8 +8259,11 @@ function maybeAnnounce() {
        深链绕过 jump，所以这里补一刀）。只处理一次：切页后 firstOpen 已翻 false。 */
     if (isFirst && deepLinked) {
       var s0 = steps[idx] || {};
+      var sub0 = announceTargetMySub(s0.target);
+      var sub0Changed = sub0 !== undefined && mySub !== sub0;
+      if (sub0 !== undefined) mySub = sub0;
       var v0 = announceTargetView(s0.target);
-      if (v0 && v0 !== view) {
+      if (v0 && (v0 !== view || sub0Changed)) {
         try { switchView(v0); } catch (_) {}
       }
     }
@@ -7689,7 +8307,7 @@ function maybeAnnounce() {
     box.innerHTML = '<div class="announce-box" role="dialog" aria-modal="true" ' +
       'aria-labelledby="announceTitle" aria-describedby="announceBody">' +
       '<div class="a-head">' +
-        '<span class="a-chip">新功能</span>' +
+        '<span class="a-chip">新手引导</span>' +
         '<div class="a-ico"><span class="material-symbols-outlined">' + esc(ic) + '</span></div>' +
         '<h3 id="announceTitle">' + esc(s.title || ('第 ' + (idx + 1) + ' 步')) + '</h3>' +
       '</div>' +
@@ -7701,7 +8319,6 @@ function maybeAnnounce() {
         '<button class="a-ok" id="announceNext">' + (last ? '知道啦' : '下一步') + '</button>' +
       '</div>' +
       '<button class="a-skip" id="announceSkip">' + (last ? '关闭' : '跳过引导') + '</button>' +
-      (steps.length > 1 ? '<div class="a-swipe-hint">左右滑动 / 按 ← → 键也可以翻页</div>' : '') +
       '</div>';
     box.classList.remove('hidden');
     box.classList.add('ann-overlay-in');
@@ -9008,7 +9625,7 @@ function fireConfetti(durationMs) {
   cv.id = 'confettiCanvas';
   /* 全屏覆盖、绝不挡操作；z-index 9999 压过登录门(90)/toast 等一切 UI */
   cv.setAttribute('style', 'position:fixed;inset:0;width:100%;height:100%;' +
-    'pointer-events:none;z-index:9999;');
+    'pointer-events:none;z-index:88;');
   cv.width = doc.clientWidth;
   cv.height = doc.clientHeight;
   document.body.appendChild(cv);
@@ -9242,21 +9859,18 @@ function dismissAnnounce() {
 async function bootRest() {
 
   /* 主导航 + 分组子导航 + 前进/后退
-     2026-10-19 用户口径：底栏（#navRow）**只有**「长按拖拽 → 松手」才切路由，
-     普通 tap 不切页。底栏按钮的原生 onclick 在这里统一挂，所以必须加闸 ——
-     否则一次普通 tap 会绕过手势逻辑（手势已改成不切）直接 switchView。
-     闸门放行条件：navDragCommitted（由 initNavDock 的 activate() 在合成 click 前置位）。
-     底栏以外的 [data-v]（分组子导航等）不受影响。 */
+     底栏同时支持「普通点击」与「长按拖拽松手」切路由。pointerup 后浏览器补发的
+     原生 click 在 500ms 内吞掉，避免与 onUp/finishSnap 的直接激活重复；
+     键盘或脚本直接触发的 click 不受影响。底栏以外的 [data-v] 照常点击。 */
   document.querySelectorAll('[data-v]').forEach(b => b.onclick = () => {
-    if (b.closest && b.closest('#navRow') && !navDragAllowsSwitch(b)) return;
-    /* 2026-10-15 task-11：底栏「我的」是列表首页入口 —— 先清掉上次停留的子页
-       （否则从「微信对接」点「我的」会又落回消息设置，「我的」看着像没反应）；
-       「微信对接」则反着来，由 switchView 把 mySub 置成 'wechat'。 */
-    if (b.dataset.v === 'my') mySub = null;
-    switchView(b.dataset.v);
+    if (b.closest && b.closest('#navRow') && performance.now() < navClickSuppressUntil) return;
+    activateNavButton(b);
   });
   document.querySelectorAll('#subnav button').forEach(b =>
-    b.onclick = () => { if (!b.disabled) { curGroup = b.dataset.g; switchView('group'); } });
+    b.onclick = () => {
+      if (b.disabled || performance.now() < groupSegClickSuppressUntil) return;
+      groupSegChoose(b.dataset.g);
+    });
   window.addEventListener('popstate', () => {
     const r = parseRoute();
     if (r.view === 'group' && r.group) curGroup = r.group;
@@ -9279,6 +9893,7 @@ async function bootRest() {
   try { initNavDock(); } catch (e) { /* 不影响主流程 */ }
   try { refreshWxBadge(); } catch (e) { /* 未读角标失败不影响导航 */ }
   try { initSegDrag(); stSegMove(true); } catch (e) { /* 同上 */ }
+  try { initGroupSegDrag(); groupSegMove(true); } catch (e) { /* 分组分段拖动失败不影响主流程 */ }
   $('btnSearch').onclick = () => {
     searchOpen = !searchOpen;
     show('searchBox', searchOpen);

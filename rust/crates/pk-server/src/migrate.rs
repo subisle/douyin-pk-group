@@ -220,6 +220,21 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "041_person_name_uniq",
         include_str!("migrations/041_person_name_uniq.sql"),
     ),
+    // 042：月度导入未匹配行暂存（2026-10-18「先有数据后绑定，数据要同步过来」）。
+    // 月度值不能再摊进按日的 import_pending，单开同构表按 period 暂存，
+    // 建档 / 绑号后由 absorb_pending_month 补进 monthly_wave / monthly_duration。
+    (
+        "042_import_pending_month",
+        include_str!("migrations/042_import_pending_month.sql"),
+    ),
+    // 043：plans.created_at 列型对齐（2026-10-18 实机修复）。001_core 定义是
+    // VARCHAR(40)，但早期/恢复出来的库里这列可能是 TIMESTAMPTZ —— 代码按 String
+    // 解码、写 RFC3339 文本，列型不对就「方案列表恒空 + 保存方案 500」。
+    // 幂等（列已是 varchar 则跳过），可安全重放。
+    (
+        "043_plans_created_at_text",
+        include_str!("migrations/043_plans_created_at_text.sql"),
+    ),
 ];
 
 /// 迁移建连（migrator 账号；同样关语句缓存）
@@ -429,7 +444,10 @@ mod tests {
                         || upper.starts_with("INSERT")
                         || upper.starts_with("UPDATE")
                         || upper.starts_with("DROP TRIGGER")
-                        || upper.starts_with("SELECT"),
+                        || upper.starts_with("SELECT")
+                        // 043 起允许 DO $$ ... $$ 匿名块（幂等条件迁移的唯一手段，
+                        // split_statements 已保证块体作为一条完整语句）。
+                        || upper.starts_with("DO"),
                     "{version} 里出现意外语句: {s}"
                 );
             }

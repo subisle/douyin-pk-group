@@ -114,6 +114,161 @@ pub fn normalize_name(input: &str) -> String {
         .collect()
 }
 
+/// 艺名抽取：从抖音昵称里认出台账艺名（2026-10-18 用户口径）。
+///
+/// ## 为什么需要
+///
+/// 运营 CSV 的「主播昵称」是抖音上的展示名，跟台账艺名不是一回事：
+///
+/// | 昵称 | 艺名 |
+/// |---|---|
+/// | `狼霆🎹` | 狼霆 |
+/// | `浩艺🎙️` | 浩艺（抖音号是 `haoyi6725`，库里根本没有这个号） |
+/// | `十一宝《才艺🎹薇姐》小号` | 薇姐 |
+/// | `三宝🎹才艺（每天晚上八点开播）` | 三宝 |
+/// | `玖玉🎹🎤(尊师狼轩)` | 玖玉（括号里的师傅名不算） |
+/// | `用户5567837253729` / `账号已注销` | 认不出 → None |
+///
+/// 同时有的人换了号 / 开了小号，库里 `account` 只有旧号，新号的行按号码匹配会掉进
+/// 暂存区。艺名兜底让这些行也能归到正确的人身上（用户口径：从左往右第一个整词命中算数）。
+///
+/// ## 「不能搞错」的四条硬闸门
+///
+/// 1. **候选只能来自台账**（`roster` 参数）。昵称里出现但台账没有的（`八宝` / `婷宝` /
+///    `狼月` / `狼烁`）一律不认 —— 不做「像艺名就认」的启发式。
+/// 2. **整词命中，禁止子串**。`狼凯🎹（南方楠）` 里不会拆出「狼凯」（台账没有），
+///    `狼明浩雨` 里不会拆出「明浩」。
+/// 3. **括号内容整体丢弃**。`玖玉🎹🎤(尊师狼轩)` 里的「狼轩」是师傅，不是本人；
+///    `浩坤🎹🎤《鹏先生》` 里的「鹏先生」同理 —— 这类行按「从左往右」取到的是括号前的
+///    「浩坤」，正是本人。
+/// 4. **不做模糊匹配**（无编辑距离 / 无拼音）。`晓明` 与 `晓鸣`、`狼宸`(已离团) 与
+///    `狼辰`(在职) 只差一个字，模糊必错。代价是 `狼月` / `狼烁` 这类真·外团号认不出，
+///    但它们本来就该留在暂存区由运营处理。
+///
+/// ## 返回值
+///
+/// `Some(艺名)` = 命中；`None` = 认不出，**调用方必须当作「未匹配」处理，不得猜**。
+pub fn extract_stage_name(nickname: &str, roster: &[String]) -> Option<String> {
+    let washed = wash_nickname(nickname);
+    let tight: String = washed.chars().filter(|c| !c.is_whitespace()).collect();
+    // 先按「带空格的原始洗后串」找（空格天然分隔「十一宝 小号」这类），
+    // 再退到去空格的紧凑串（`啸  𝄞  燃` 洗完是 `啸   燃`，去空格才连成 `啸燃`）。
+    for text in [washed.as_str(), tight.as_str()] {
+        // strict：命中两侧都不能紧贴汉字；relax：只要求左侧不紧贴。
+        // relax 是兜底（`薇姐唢呐下午5点30分直播` → 薇姐），必须放在 strict 之后，
+        // 否则 `浩坤🎹🎤《鹏先生》` 这类行会被右侧规则提前放行，跑到错误的分支。
+        if let Some(hit) = scan_stage_name(text, roster, false) {
+            return Some(hit);
+        }
+        if let Some(hit) = scan_stage_name(text, roster, true) {
+            return Some(hit);
+        }
+    }
+    None
+}
+
+/// 装饰字符：emoji / 乐器符号 / 变体选择符 / 零宽连接符。
+/// 洗掉它们是为了让「玖雪 🎹」「啸  𝄞  燃 🎹 🎤」里的艺名能连成整词。
+fn is_decor(c: char) -> bool {
+    matches!(c,
+        '\u{1F000}'..='\u{1FAFF}'   // emoji 主区
+        | '\u{2600}'..='\u{27BF}'   // 杂项符号 + 装饰符号（🎹 等）
+        | '\u{2B00}'..='\u{2BFF}'
+        | '\u{2190}'..='\u{21FF}'   // 箭头
+        | '\u{2300}'..='\u{23FF}'   // 杂项技术符号
+        | '\u{1D100}'..='\u{1D1FF}' // 音乐符号（𝄞）
+        | '\u{FE0F}'                // 变体选择符-16
+        | '\u{200D}'                // 零宽连接符
+        | '\u{FEFF}'
+    )
+}
+
+fn is_cjk(c: char) -> bool {
+    matches!(c, '\u{4E00}'..='\u{9FFF}' | '\u{3400}'..='\u{4DBF}')
+}
+
+fn is_bracket_open(c: char) -> bool {
+    matches!(c, '（' | '(' | '【' | '[' | '《' | '〈' | '「')
+}
+
+fn is_bracket_close(c: char) -> bool {
+    matches!(c, '）' | ')' | '】' | ']' | '》' | '〉' | '」')
+}
+
+/// 洗昵称：括号（含内容）→ 空格，装饰字符 → 空格，其余原样保留。
+///
+/// 括号**连内容一起丢弃**而不是只删括号本身：`（尊师狼轩）` 里剩一个「狼轩」
+/// 会被当成艺名命中，把这一行认成别人。生产里 `玖玉🎹🎤(尊师狼轩)`、`狼凯🎹（南方楠）`、
+/// `浩坤🎹🎤《鹏先生》` 都是这个坑。
+fn wash_nickname(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    let mut depth = 0usize;
+    for c in s.chars() {
+        if is_bracket_open(c) {
+            depth += 1;
+            out.push(' ');
+        } else if is_bracket_close(c) {
+            depth = depth.saturating_sub(1);
+            out.push(' ');
+        } else if depth > 0 {
+            // 括号内：整段丢弃
+        } else if is_decor(c) || c.is_whitespace() {
+            out.push(' ');
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// 在洗过的串里找艺名：返回**最靠左**的命中（用户口径「从左往右」）；
+/// 位置相同时取最长的（`南方楠` 优先于 `方楠` 这类子集，虽然台账里不重叠也要求稳）。
+///
+/// `relax` = 右边界放宽（只要求左边界不紧贴汉字）。仅用于 strict 找不到时的兜底，
+/// 例如 `薇姐唢呐下午5点30分直播` —— 「薇姐」右侧紧贴汉字，但它是唯一候选。
+fn scan_stage_name(text: &str, roster: &[String], relax: bool) -> Option<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut best: Option<(usize, usize, &str)> = None;
+    for name in roster {
+        let key: Vec<char> = name.chars().collect();
+        if key.len() < 2 {
+            continue; // 单字艺名不做匹配，误伤太大（「八宝」会被认成「宝」）
+        }
+        if let Some(at) = find_word_at(&chars, &key) {
+            if !boundary_ok(&chars, at, key.len(), relax) {
+                continue;
+            }
+            let cand = (at, key.len(), name.as_str());
+            if best.is_none_or(|b| cand.0 < b.0 || (cand.0 == b.0 && cand.1 > b.1)) {
+                best = Some(cand);
+            }
+        }
+    }
+    best.map(|(_, _, n)| n.to_string())
+}
+
+/// 在 chars 里找 key 第一次出现的下标（按 char 位置，不用字节偏移 —— 全中文更省事）
+fn find_word_at(chars: &[char], key: &[char]) -> Option<usize> {
+    if key.is_empty() || key.len() > chars.len() {
+        return None;
+    }
+    (0..=chars.len() - key.len()).find(|&i| &chars[i..i + key.len()] == key)
+}
+
+/// 边界检查：命中两侧不能紧贴汉字 —— 否则 `晓明` 会被 `小晓明` 命中、
+/// `狼明浩雨` 里会拆出「明浩」这类根本不存在的艺名。
+fn boundary_ok(chars: &[char], at: usize, len: usize, relax: bool) -> bool {
+    let left_ok = at == 0 || !is_cjk(chars[at - 1]);
+    if !left_ok {
+        return false;
+    }
+    if relax {
+        return true;
+    }
+    let right = at + len;
+    right >= chars.len() || !is_cjk(chars[right])
+}
+
 pub fn apply_alias(name: &str, aliases: Option<&AliasMap>) -> (String, Option<String>) {
     let Some(aliases) = aliases else {
         return (name.to_string(), None);
@@ -502,5 +657,130 @@ mod tests {
     fn normalizes_names() {
         assert_eq!(normalize_name("（阿楠）"), "(阿楠)");
         assert_eq!(normalize_name("  啸  安 "), "啸安");
+    }
+
+    /// 艺名抽取的台账候选：取自生产 person 表的真实艺名（节选，含 2 字与 3 字）。
+    fn roster() -> Vec<String> {
+        [
+            "狼征",
+            "狼明",
+            "狼腾",
+            "浩艺",
+            "浩坤",
+            "浩辰",
+            "浩泽",
+            "浩森",
+            "玖玉",
+            "玖玥",
+            "玖安",
+            "玖久",
+            "啸燃",
+            "啸泽",
+            "啸安",
+            "晓雅",
+            "晓妍",
+            "晓静",
+            "晓楠",
+            "晓倩",
+            "晓暖",
+            "晓涵",
+            "三宝",
+            "狼佑",
+            "狼霆",
+            "狼途",
+            "狼澈",
+            "狼小宝",
+            "鹏先生",
+            "南方楠",
+            "薇姐",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+    }
+
+    /// 生产昵称 → 期望艺名（None = 认不出，必须留在暂存区）。
+    /// 全部来自 2026-10-17 / 2026-09 的运营 CSV 真实行。
+    fn stage(s: &str) -> Option<String> {
+        extract_stage_name(s, &roster())
+    }
+
+    #[test]
+    fn stage_name_plain_and_decorated() {
+        assert_eq!(stage("狼霆🎹").as_deref(), Some("狼霆"));
+        assert_eq!(stage("浩艺🎙️").as_deref(), Some("浩艺"));
+        assert_eq!(stage("玖玥🎹").as_deref(), Some("玖玥"));
+        assert_eq!(stage("晓静").as_deref(), Some("晓静"));
+        // 洗掉空格 / 音乐符号后连成整词
+        assert_eq!(stage("啸  𝄞  燃 🎹 🎤").as_deref(), Some("啸燃"));
+        assert_eq!(stage("玖雪 🎹").as_deref(), None, "玖雪 不在台账里，不能认");
+    }
+
+    #[test]
+    fn stage_name_bracket_content_is_never_the_person() {
+        // 用户口径：玖玉🎹🎤(尊师狼轩) 是玖玉，不是狼轩 —— 括号内容必须整段丢弃
+        assert_eq!(stage("玖玉🎹🎤(尊师狼轩)").as_deref(), Some("玖玉"));
+        assert_eq!(
+            stage("狼凯🎹（南方楠）").as_deref(),
+            None,
+            "南方楠 在括号里，不算"
+        );
+        // 从左往右：括号前的浩坤是本人，括号里的鹏先生不是
+        assert_eq!(stage("浩坤🎹🎤《鹏先生》").as_deref(), Some("浩坤"));
+        assert_eq!(
+            stage("三宝🎹才艺（每天晚上八点开播）").as_deref(),
+            Some("三宝")
+        );
+        assert_eq!(stage("晓楠🎹").as_deref(), Some("晓楠"));
+    }
+
+    #[test]
+    fn stage_name_leftmost_wins_and_loose_side_falls_back() {
+        // 宽松兜底：艺名在串首，右侧紧贴汉字也认（洗完是「薇姐唢呐下午5点30分直播」）
+        assert_eq!(
+            stage("薇姐唢呐🔥下午5点30分直播🔥").as_deref(),
+            Some("薇姐")
+        );
+        assert_eq!(stage("晓涵才艺【尊师🎹微姐】").as_deref(), Some("晓涵"));
+        assert_eq!(stage("晓暖【键盘🎹薇姐】").as_deref(), Some("晓暖"));
+        /* 括号里带艺名、括号外没有 → 不认（保守闸门③）。
+        生产里 `十一宝《才艺🎹薇姐》小号` / `十七宝《小号》才艺🎹薇姐` /
+        `晓玖才艺薇姐` 都长这样，看着像薇姐的小号，但也可能只是薇姐的徒弟号。
+        「宁可留在暂存区等运营点一下」优先于自动认人 —— 要认就往 aliases 里加一条
+        `十一宝 → 薇姐`，那是人工确认过的事实，不是猜的。 */
+        assert_eq!(stage("十一宝《才艺🎹薇姐》小号"), None);
+        assert_eq!(stage("晓玖才艺薇姐"), None);
+    }
+
+    #[test]
+    fn stage_name_rejects_substring_and_unknown() {
+        // 左边界紧贴汉字 → 拒绝：`小晓明` 不能认成「晓明」（何况台账里也没有晓明）
+        assert_eq!(stage("小晓明"), None);
+        /* 昵称里连续出现两个艺名时按「从左往右」取左边（用户口径 2026-10-18）。
+        生产 CSV 里没有这种昵称（艺名后面跟的多是「才艺 / 唢呐 / 🎹」），
+        真出现了也以左边为准，与 `玖玉🎹🎤(尊师狼轩)` 取「玖玉」是同一条规则。 */
+        assert_eq!(stage("狼明浩雨").as_deref(), Some("狼明"));
+        // 台账外的名字（外团 / 观众 / 注销号）一个都不认
+        for nick in [
+            "账号已注销",
+            "用户5567837253729",
+            "八宝",
+            "狼月🎹🎙️",
+            "狼烁🎹🎤",
+            "玖汐🎹🎤",
+            "洋洋洋",
+            "店小二🍗",
+            "茫然",
+            "已换号",
+            "：",
+            "ST-001",
+        ] {
+            assert_eq!(stage(nick), None, "{nick} 不该被认成任何艺名");
+        }
+    }
+
+    #[test]
+    fn stage_name_empty_roster_never_matches() {
+        assert_eq!(extract_stage_name("狼霆🎹", &[]), None);
     }
 }

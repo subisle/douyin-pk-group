@@ -417,10 +417,9 @@ mod my_accounts_tests {
         assert_eq!(items[0]["days"], 9);
     }
 
-    /// 关「音浪数值」时必须连 daily 一起 null：daily 就是音浪，
-    /// 只关 wave 却留 daily 等于没关
+    /// 关「音浪数值」是全局字段闸门：日 / 月 / 年 / 累计全部不能漏 wave。
     #[test]
-    pub(super) fn gate_wave_off_also_hides_daily() {
+    pub(super) fn gate_wave_off_hides_every_period() {
         let s = PublicSettings {
             wave: false,
             ..Default::default()
@@ -430,13 +429,39 @@ mod my_accounts_tests {
             "yearly": {"wave": 5000}, "total": {"wave": 9000}
         })];
         let sum = my_accounts_gate(&mut items, &s);
-        assert!(items[0]["daily"].is_null());
+        assert!(items[0]["daily"]["wave"].is_null());
+        assert!(items[0]["monthly"]["wave"].is_null());
+        assert!(items[0]["yearly"]["wave"].is_null());
         assert!(items[0]["total"].is_null());
-        assert!(sum["daily"].is_null());
+        assert!(sum["daily"]["wave"].is_null());
+        assert!(sum["monthly"]["wave"].is_null());
+        assert!(sum["yearly"]["wave"].is_null());
         assert!(sum["total"].is_null());
-        // 月 / 年开关没关，照常下发
-        assert_eq!(items[0]["monthly"]["wave"], 1000);
-        assert_eq!(items[0]["yearly"]["wave"], 5000);
+    }
+
+    /// 时长与未播天数是独立字段闸门；关掉不应连带关闭整个月/年块。
+    #[test]
+    pub(super) fn gate_duration_and_absent_days_are_independent() {
+        let s = PublicSettings {
+            duration: false,
+            absent_days: false,
+            ..Default::default()
+        };
+        let mut items = vec![json!({
+            "daily": {"wave": 100, "minutes": 10, "absentDays": 2},
+            "monthly": {"wave": 1000, "minutes": 200, "absentDays": 3},
+            "yearly": {"wave": 5000, "minutes": 900, "absentDays": 9},
+            "total": {"wave": 9000}
+        })];
+        let sum = my_accounts_gate(&mut items, &s);
+        for key in ["daily", "monthly", "yearly"] {
+            assert!(items[0][key]["wave"].as_i64().unwrap_or_default() > 0);
+            assert!(items[0][key]["minutes"].is_null());
+            assert!(items[0][key]["absentDays"].is_null());
+            // 账号级 summary 只有音浪契约，不能凭空补 0 时长/未播。
+            assert!(sum[key].get("minutes").is_none());
+            assert!(sum[key].get("absentDays").is_none());
+        }
     }
 
     /// 空结果（这个主播还没绑号 / 管理员观看账号）不炸：count=0，合计 0

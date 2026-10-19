@@ -274,6 +274,10 @@ pub async fn supervisor_loop(st: Arc<AppState>) {
             }
             _ = tick.tick() => {}
         }
+        if !crate::push::push_out_enabled() {
+            tracing::debug!("PUSH_OUT_ENABLED 未开：wxpush supervisor 不补拉长轮询");
+            continue;
+        }
         let accounts = crate::store::wx_push_accounts_all(&st).await;
         let running: HashSet<String> = {
             let mut map = tasks().lock().expect("wxpush tasks 锁 poisoned");

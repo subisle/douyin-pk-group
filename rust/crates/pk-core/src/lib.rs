@@ -19,8 +19,8 @@ pub use group::{
     resolve_master_conflicts, sequential_group, snake_group,
 };
 pub use roster::{
-    apply_alias, default_aliases, default_exclude, normalize_name, parse_roster, AliasMap,
-    ParseOptions, DEFAULT_ROSTER,
+    apply_alias, default_aliases, default_exclude, extract_stage_name, normalize_name,
+    parse_roster, AliasMap, ParseOptions, DEFAULT_ROSTER,
 };
 pub use types::{BalanceStat, GroupOptions, GroupStat, ParsedRow, Player, Strategy, WaveMetric};
 

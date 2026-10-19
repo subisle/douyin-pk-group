@@ -166,6 +166,9 @@ export interface SavedPlan {
   brand?: string;
   schedule?: { start: string; intervalMin: number; breaks?: BreakRule[] };
   display?: DisplayConfig;
+  /** 分组时用的数据日期（`YYYY-MM-DD` 降序，第一个是「最近有效业务日」）。
+   *  2026-10-18 起随方案落库：载入老方案时用来还原导出长图头部日期；缺省 = 老方案没存。 */
+  dates?: string[];
 }
 
 export interface PlanBrief {
@@ -173,9 +176,12 @@ export interface PlanBrief {
   title: string;
   metric: string;
   days: number;
-  /** 2026-10-17 修复（审计 5-P1）：后端 `/api/plans` 下发的是 **createdAt**（camelCase，
-   *  见 routes.rs 的 json! 宏），这里原先写成 created_at → 方案列表时间列恒显示 undefined。 */
-  createdAt: string;
+  /** 后端两处字段名不一致（2026-10-18 实读）：
+   *  - 列表 `GET /api/plans`：`store::list_plans` 直接把 `PlanRow` 序列化出去 → **created_at**
+   *  - 详情 `GET /api/plans/{id}`：`json!` 宏手写 → **createdAt**
+   *  两个都认，方案列表的时间列才不会恒显示 undefined。 */
+  createdAt?: string;
+  created_at?: string;
   published: boolean;
   /** 赛事类型（初级/中级争霸赛小组赛、月终争霸赛、两级争霸赛晋级赛），空串 = 未分类的老方案 */
   eventType?: string;

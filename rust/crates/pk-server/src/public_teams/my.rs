@@ -56,12 +56,16 @@ pub(super) async fn auth_extra(st: &ArcState, name: &str) -> AuthExtra {
 /// 调用方按需追加 `switchable` / `admin` 等既有字段。
 async fn login_ok(st: &ArcState, person_id: u64, name: &str, team: &str, token: &str) -> Value {
     let x = auth_extra(st, name).await;
+    let hash = crate::public_teams::avatars::avatar_hash(st, person_id)
+        .await
+        .unwrap_or_default();
     json!({
         "ok": true,
         "token": token,
         "personId": person_id,
         "name": name,
         "team": team,
+        "avatar": super::site::avatar_url(person_id, &hash),
         "bound": true,
         "needBind": false,
         "needProfile": x.need_profile,
@@ -438,8 +442,9 @@ pub async fn my_login(
 
     /* 0. 管理员快捷口令（账号、密码填同一个管理员口令即可登录展示页）：
     限流之后、my_accounts 账号校验之前判断——这样管理员不用在 my_accounts 里
-    专门留一行账号。口令读自运行时配置（ADMIN_PASSWORD），改 .env 重启即生效；
-    未配置口令时 verify_admin_password 恒 false（fail-closed）。
+    专门留一行账号。口令读自运行时配置（ADMIN_PASSWORD 优先，未配置用默认口令
+    auth::DEFAULT_ADMIN_PASSWORD），改 .env 重启即生效；
+    正常 from_env 恒有口令，None（仅测试构造）时 verify_admin_password 恒 false。
     2026-10-12 安全审计 M1：account 字段绝不能落口令本体——access_logs 运营可查
     （/api/admin/visits 支持关键字搜索）且随备份 dump 外流。这里记固定占位符。 */
     let admin_shortcut = acct == pass && st.auth.verify_admin_password(&acct);

@@ -275,13 +275,23 @@ pub async fn my(
     /* 个人各口径音浪（P1-7：与榜单口径一致，只聚合可信行 wave_reliable=1；
     total 的口径选择见 repos::get_waves 注释 —— 含基线日，但基线日行本身
     wave_reliable=0 不可信，被行级过滤后不影响数值，只保留在日期轴上）。 */
-    let zero = || json!({ "wave": 0, "minutes": 0 });
+    let zero = || json!({ "wave": 0, "minutes": 0, "absentDays": 0 });
+    let daily_wave_expr = if s.wave {
+        "(SUM(wave))::BIGINT AS wave"
+    } else {
+        "NULL::BIGINT AS wave"
+    };
+    let daily_minutes_expr = if s.duration {
+        "(SUM(minutes))::BIGINT AS minutes"
+    } else {
+        "NULL::BIGINT AS minutes"
+    };
     let mut daily = if s.daily && !today.is_empty() {
         Some(
             one(
                 &st,
                 format!(
-                    "SELECT (SUM(wave))::BIGINT AS wave, (SUM(minutes))::BIGINT AS minutes \
+                    "SELECT {daily_wave_expr}, {daily_minutes_expr} \
              FROM daily_metric WHERE person_id = {person_id} AND wave_reliable = 1 \
              AND TO_CHAR(biz_date, 'YYYY-MM-DD') = '{today}'"
                 ),
@@ -295,14 +305,53 @@ pub async fn my(
     };
     let mut monthly = if s.monthly { Some(zero()) } else { None };
     let mut yearly = if s.yearly { Some(zero()) } else { None };
-    let mut total = one(
-        &st,
+    /* 累计卡与「当月 / 当年未播天数」共用同一遍全历史扫描：SUM(CASE...) 不额外查库。
+    未播开关关闭时表达式直接给 NULL，避免无谓计算；对外再统一置 null。 */
+    let not_live = crate::dialect::NOT_LIVE_WAVE_THRESHOLD;
+    // 当前月未播只服务日卡/月卡；当年未播只服务年卡。对应周期关闭时不计算。
+    let absent_month_expr = if s.absent_days && (s.daily || s.monthly) {
         format!(
-            "SELECT (SUM(wave))::BIGINT AS wave, (SUM(minutes))::BIGINT AS minutes \
-         FROM daily_metric WHERE person_id = {person_id} AND wave_reliable = 1"
+            "COALESCE(SUM(CASE WHEN TO_CHAR(biz_date, 'YYYY-MM') = '{month}' AND wave < {not_live} THEN 1 ELSE 0 END), 0)::BIGINT AS absent_month"
+        )
+    } else {
+        "NULL::BIGINT AS absent_month".to_string()
+    };
+    let absent_year_expr = if s.absent_days && s.yearly {
+        format!(
+            "COALESCE(SUM(CASE WHEN TO_CHAR(biz_date, 'YYYY') = '{year}' AND wave < {not_live} THEN 1 ELSE 0 END), 0)::BIGINT AS absent_year"
+        )
+    } else {
+        "NULL::BIGINT AS absent_year".to_string()
+    };
+    let total_wave_expr = if s.wave {
+        "(SUM(wave))::BIGINT AS wave"
+    } else {
+        "NULL::BIGINT AS wave"
+    };
+    let total_minutes_expr = if s.duration {
+        "(SUM(minutes))::BIGINT AS minutes"
+    } else {
+        "NULL::BIGINT AS minutes"
+    };
+    let total_rows = pgrs::query(
+        &st.pools,
+        &sid(&st),
+        &format!(
+            "SELECT {total_wave_expr}, {total_minutes_expr}, \
+             {absent_month_expr}, {absent_year_expr} \
+             FROM daily_metric WHERE person_id = {person_id} AND wave_reliable = 1"
         ),
     )
     .await?;
+    let mut total = json!({ "wave": 0, "minutes": 0 });
+    let mut absent_month = 0i64;
+    let mut absent_year = 0i64;
+    if let Some(r) = total_rows.first() {
+        total["wave"] = json!(row_i64(r, "wave"));
+        total["minutes"] = json!(row_i64(r, "minutes"));
+        absent_month = row_i64(r, "absent_month");
+        absent_year = row_i64(r, "absent_year");
+    }
 
     /* 月 / 年口径（2026-10-10 月度时长导入，2026-10-16 月度音浪导入）：
     「某月有导入的整月值就用它，没有才用日明细求和」—— 音浪（monthly_wave）与时长
@@ -311,14 +360,27 @@ pub async fn my(
     不再单独跑一条日明细 SQL（那条查出来的 wave / minutes 都会被覆盖，白跑一次）。
     **累计（total）口径不变**：整月值只是月内日明细的替代，累计再加一遍会把同一个月算两次。 */
     if let Some(v) = monthly.as_mut() {
-        v["wave"] = json!(my_wave(&st, person_id, &MinutesScope::Month(&month)).await?);
-        v["minutes"] = json!(my_minutes(&st, person_id, &MinutesScope::Month(&month)).await?);
+        if s.wave {
+            v["wave"] = json!(my_wave(&st, person_id, &MinutesScope::Month(&month)).await?);
+        }
+        if s.duration {
+            v["minutes"] = json!(my_minutes(&st, person_id, &MinutesScope::Month(&month)).await?);
+        }
+        v["absentDays"] = json!(absent_month);
     }
     if let Some(v) = yearly.as_mut() {
-        v["wave"] = json!(my_wave(&st, person_id, &MinutesScope::Year(&year)).await?);
-        v["minutes"] = json!(my_minutes(&st, person_id, &MinutesScope::Year(&year)).await?);
+        if s.wave {
+            v["wave"] = json!(my_wave(&st, person_id, &MinutesScope::Year(&year)).await?);
+        }
+        if s.duration {
+            v["minutes"] = json!(my_minutes(&st, person_id, &MinutesScope::Year(&year)).await?);
+        }
+        v["absentDays"] = json!(absent_year);
     }
-    total["minutes"] = json!(my_minutes(&st, person_id, &MinutesScope::Total).await?);
+    if let Some(v) = daily.as_mut() {
+        // 日榜沿用历史口径：未播天数 = 当前业务月内有数据且音浪 < 2 的天数。
+        v["absentDays"] = json!(absent_month);
+    }
 
     /* 同期对照（1.0.1）：本人三个上期音浪，一条 SQL。上期没数据 → NULL → 前端不显示差值。
     2026-10-16：pm（上月同期）走「整月导入值优先」口径；库没跑 026（monthly_wave 缺）时
@@ -432,6 +494,9 @@ pub async fn my(
         if !s.duration {
             v["minutes"] = Value::Null;
         }
+        if !s.absent_days {
+            v["absentDays"] = Value::Null;
+        }
     }
     if !s.wave {
         total["wave"] = Value::Null;
@@ -453,14 +518,29 @@ pub async fn my(
 
     // 「徒弟 + 师傅」门下累计音浪（2026-10-11）：师傅自己 + 所有徒弟的累计音浪。
     let (disciple_count, disciple_wave, total_wave) =
-        lineage_wave_summary(&st, &my_team, person_id)
+        lineage_wave_summary(&st, &my_team, person_id, s.wave)
             .await
             .unwrap_or((0, 0, 0));
+
+    /* 「我的」页头像（2026-10-19 用户口径「个人页面头像添加头像」）：/my 原先根本不下发
+    avatar，前端 st_page.html 读 `d.avatar` 永远是 undefined，个人页大头像只有姓名首字块。
+    取法与 /my/accounts 同一套（person_avatar 里 image 非空的行才给地址），取不到时
+    avatar_hash 回空串 → 前端退回首字，绝不因为头像把个人页打挂。
+    person_id=0（管理员观看账号）没有主播档案也没有头像，直接跳过一次查询。 */
+    let avatar_hash = if person_id == 0 {
+        None
+    } else {
+        super::avatars::avatar_hash(&st, person_id).await
+    };
 
     Ok(Json(json!({
         "published": true,
         "personId": person_id,
         "name": name,
+        "avatar": avatar_hash
+            .as_deref()
+            .map(|h| super::site::avatar_url(person_id, h))
+            .unwrap_or_default(),
         "date": today,
         "daily": daily,
         "monthly": monthly,
@@ -482,7 +562,27 @@ pub async fn my(
         },
         // 管理员观看账号（personId=0）：前端据此隐藏「绑定抖音号」表单
         "admin": person_id == 0,
+        /* 预估收益口径（2026-10-19）：展示端把音浪折成人民币用的分成比例与手续费比例
+        （百分数）。以前前端把 35% 硬编码在 st_page.html 里，抖音改规则就得改代码；
+        现在由后台配置下发，前后端同一份口径。夹取与缺省见 settings::clamp_pct。 */
+        "earnings": {
+            "sharePct": super::settings::clamp_pct(s.share_pct, super::settings::default_share_pct()),
+            "feePct": super::settings::clamp_pct(s.fee_pct, 0),
+        },
     })))
+}
+
+/// `/my/series` 的统一出参：空数据与正常数据都必须走同一套字段闸门，
+/// 否则「库里没数据」分支会绕过 wave/duration 开关把数组形状泄露出去。
+fn my_series_json(dates: Vec<String>, waves: &[i64], minutes: &[i64], s: &PublicSettings) -> Value {
+    json!({
+        "published": true,
+        "dates": if s.daily { json!(dates) } else { json!([]) },
+        "waves": if s.daily && s.wave { json!(waves) } else { Value::Null },
+        "minutes": if s.daily && s.duration { json!(minutes) } else { Value::Null },
+        "dailyEnabled": s.daily,
+        "durationEnabled": s.duration,
+    })
 }
 
 /// GET /api/public/teams/{team}/my/series?days=（token 走 X-My-Token 头）
@@ -503,14 +603,17 @@ pub async fn my_series(
         return Err(ApiError::bad_request("该账号不属于本团"));
     }
     let days = q.days.unwrap_or(14).clamp(1, 30);
+    if !s.daily {
+        return Ok(Json(my_series_json(Vec::new(), &[], &[], &s)));
+    }
     let dates = crate::repos::get_available_dates(&st, None, false).await?;
     let mut take: Vec<String> = dates.into_iter().take(days as usize).collect();
     take.reverse(); // 折线图要正序：老 → 新
-    let empty_dates: Vec<String> = Vec::new();
     if take.is_empty() {
-        return Ok(Json(
-            json!({ "published": true, "dates": empty_dates, "waves": [], "minutes": [] }),
-        ));
+        return Ok(Json(my_series_json(Vec::new(), &[], &[], &s)));
+    }
+    if !s.wave && !s.duration {
+        return Ok(Json(my_series_json(take, &[], &[], &s)));
     }
 
     /* 2026-10-14 审计 P1（按 Lead 口径：消除 SQL 拼接，改日期窗口过滤 + 绑定参数）。
@@ -526,17 +629,29 @@ pub async fn my_series(
     // 窗口边界独立成 String（不借 take）：闭包按值 move 它们，之后 take 照常 move 进响应
     let window_end = take.last().expect("take 非空已在上方提前返回").clone();
     let window_start = take[window_start_idx].clone();
-    let sql = "SELECT TO_CHAR(biz_date, 'YYYY-MM-DD') AS d, \
-         (SUM(wave))::BIGINT AS wave, (SUM(minutes))::BIGINT AS minutes \
+    let wave_expr = if s.wave {
+        "(SUM(wave))::BIGINT"
+    } else {
+        "NULL::BIGINT"
+    };
+    let minutes_expr = if s.duration {
+        "(SUM(minutes))::BIGINT"
+    } else {
+        "NULL::BIGINT"
+    };
+    let sql = format!(
+        "SELECT TO_CHAR(biz_date, 'YYYY-MM-DD') AS d, \
+         {wave_expr} AS wave, {minutes_expr} AS minutes \
          FROM daily_metric WHERE person_id = ? AND wave_reliable = 1 \
          AND biz_date >= ?::date AND biz_date <= ?::date \
-         GROUP BY d ORDER BY d ASC";
+         GROUP BY d ORDER BY d ASC"
+    );
     let rows = {
         // 闭包要求 'static：直接把 String **move** 进闭包（E0597 —— 借用活不过语句）。
         // 先把要 move 的值在闭包外准备好，闭包体里再解引用，避免与 take 的 move 冲突。
         let ws = window_start.clone();
         let we = window_end.clone();
-        pgrs::query_with_binds(&st.pools, &sid(&st), sql, move |q| {
+        pgrs::query_with_binds(&st.pools, &sid(&st), &sql, move |q| {
             q.bind(person_id as i64).bind(ws).bind(we)
         })
         .await?
@@ -556,14 +671,7 @@ pub async fn my_series(
         .iter()
         .map(|d| min_map.get(d).copied().unwrap_or(0))
         .collect();
-    Ok(Json(json!({
-        "published": true,
-        "dates": take,
-        // 后台关掉「音浪数值」：序列不下发数字，前端不画图
-        "waves": if s.wave { json!(waves) } else { Value::Null },
-        "minutes": if s.duration { json!(minutes) } else { Value::Null },
-        "durationEnabled": s.duration,
-    })))
+    Ok(Json(my_series_json(take, &waves, &minutes, &s)))
 }
 
 /* --------------------- 我的抖音号（分账号音浪 2026-10-12） --------------------- */
@@ -621,6 +729,7 @@ pub fn my_accounts_sql(person_id: u64, p: &AccountPeriods) -> String {
     这样两个卡的月 / 年数字对齐，合计 = 整月值(或主号日明细) + 副号。 */
     format!(
         "SELECT a.id AS aid, a.anchor_id, a.douyin_no, a.anchor_name, a.is_primary, \
+         a.person_id, COALESCE(MAX(pa.hash), '') AS avatar_hash, \
            (COALESCE(SUM(CASE WHEN t.d = '{day}' THEN t.w END), 0))::BIGINT AS wd, \
            (COALESCE(SUM(CASE WHEN t.d LIKE '{month}-%' THEN t.w END), 0))::BIGINT AS wm, \
            (COALESCE(SUM(CASE WHEN t.d LIKE '{year}-%' THEN t.w END), 0))::BIGINT AS wy, \
@@ -632,7 +741,9 @@ pub fn my_accounts_sql(person_id: u64, p: &AccountPeriods) -> String {
                       WHERE mw.person_id = {person_id} AND mw.period = '{month}'), 0)::BIGINT AS mw_m, \
            COALESCE((SELECT SUM(mw.wave) FROM monthly_wave mw \
                       WHERE mw.person_id = {person_id} AND mw.period LIKE '{year}-%'), 0)::BIGINT AS mw_y \
-         FROM account a LEFT JOIN ( \
+         FROM account a \
+           LEFT JOIN person_avatar pa ON pa.person_id = a.person_id AND pa.image IS NOT NULL \
+           LEFT JOIN ( \
            SELECT d.anchor_id AS anchor_id, TO_CHAR(d.biz_date, 'YYYY-MM-DD') AS d, \
                   d.wave AS w \
            FROM daily_metric d JOIN account pa \
@@ -649,7 +760,7 @@ pub fn my_accounts_sql(person_id: u64, p: &AccountPeriods) -> String {
            WHERE sa.person_id = {person_id} \
          ) t ON t.anchor_id = a.anchor_id \
          WHERE a.person_id = {person_id} \
-         GROUP BY a.id, a.anchor_id, a.douyin_no, a.anchor_name, a.is_primary \
+         GROUP BY a.id, a.anchor_id, a.douyin_no, a.anchor_name, a.is_primary, a.person_id \
          ORDER BY a.is_primary DESC, a.id",
         day = p.day,
         month = p.month,
@@ -688,6 +799,14 @@ pub(super) fn my_account_row(r: &sqlx::postgres::PgRow) -> Value {
     let douyin_no = r.try_get::<String, _>("douyin_no").unwrap_or_default();
     let anchor_name = r.try_get::<String, _>("anchor_name").unwrap_or_default();
     let primary = r.try_get::<i16, _>("is_primary").unwrap_or(0) == 1;
+    let avatar = super::site::avatar_url(
+        r.try_get::<i64, _>("person_id").unwrap_or(0).max(0) as u64,
+        r.try_get::<Option<String>, _>("avatar_hash")
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+            .trim(),
+    );
     // 副号没有时长，也不判未播：这里只有音浪口径
     let last_date = r
         .try_get::<Option<String>, _>("last_d")
@@ -702,6 +821,7 @@ pub(super) fn my_account_row(r: &sqlx::postgres::PgRow) -> Value {
         "douyinNo": douyin_no,
         "anchorName": anchor_name,
         "primary": primary,
+        "avatar": avatar,
         "daily": { "wave": row_i64(r, "wd") },
         "monthly": { "wave": wm },
         "yearly": { "wave": wy },
@@ -715,57 +835,75 @@ pub(super) fn my_account_row(r: &sqlx::postgres::PgRow) -> Value {
 }
 
 /// 后台显隐开关过滤（纯函数，便于单测）：
-/// - 关「每日音浪」或关「音浪数值」→ daily 置 null（两者任一关都不给数字，否则可反推）；
-/// - 关「月报」→ monthly null；关「年报」→ yearly null；关「音浪数值」→ total null；
+/// - 日/月/年页签各自开关：关掉的周期整块置 null；
+/// - `wave` / `duration` / `absentDays` 是全局字段开关：周期仍开时只把对应字段置 null；
 /// - 开播标记 / 最后日期 / 天数不是音浪数值，照常下发（与 /my 里名次照常下发同理）。
 ///
 /// 顺带回一份全号加总（与 /my 的合计口径一致：主号 daily_metric + 副号 wave_snapshot，
-/// 因此 summary 与 /my 的 total 可以对得上，前端卡顶直接显示它）。
+/// 因此 summary 与 /my 的 total 可以对得上，前端卡顶直接显示它）。汇总同样逐个字段
+/// 过闸门：关闭的 wave 绝不能从月/年 summary 里漏出来。
 pub fn my_accounts_gate(items: &mut [Value], s: &PublicSettings) -> Value {
-    let mut sum_d: i64 = 0;
-    let mut sum_m: i64 = 0;
-    let mut sum_y: i64 = 0;
-    let mut sum_t: i64 = 0;
+    let pick = |o: &serde_json::Map<String, Value>, k: &str, metric: &str| -> i64 {
+        o.get(k)
+            .and_then(|v| v.get(metric))
+            .and_then(Value::as_i64)
+            .unwrap_or(0)
+    };
     for it in items.iter_mut() {
         let Some(o) = it.as_object_mut() else {
             continue;
         };
-        let pick = |o: &serde_json::Map<String, Value>, k: &str| -> i64 {
-            o.get(k)
-                .and_then(|v| v.get("wave"))
-                .and_then(Value::as_i64)
-                .unwrap_or(0)
+        let gate_period = |o: &mut serde_json::Map<String, Value>, key: &str, enabled: bool| {
+            if !enabled {
+                o.insert(key.into(), Value::Null);
+                return;
+            }
+            let Some(block) = o.get_mut(key).and_then(Value::as_object_mut) else {
+                return;
+            };
+            if !s.wave {
+                block.insert("wave".into(), Value::Null);
+            }
+            if !s.duration {
+                block.insert("minutes".into(), Value::Null);
+            }
+            if !s.absent_days {
+                block.insert("absentDays".into(), Value::Null);
+            }
         };
-        sum_d += pick(o, "daily");
-        sum_m += pick(o, "monthly");
-        sum_y += pick(o, "yearly");
-        sum_t += pick(o, "total");
-        if !(s.daily && s.wave) {
-            o.insert("daily".into(), Value::Null);
-        }
-        if !s.monthly {
-            o.insert("monthly".into(), Value::Null);
-        }
-        if !s.yearly {
-            o.insert("yearly".into(), Value::Null);
-        }
+        gate_period(o, "daily", s.daily);
+        gate_period(o, "monthly", s.monthly);
+        gate_period(o, "yearly", s.yearly);
         if !s.wave {
             o.insert("total".into(), Value::Null);
         }
     }
-    let one = |on: bool, v: i64| -> Value {
-        if on {
-            json!({ "wave": v })
-        } else {
-            Value::Null
+    // 按「过滤后」的字段求和：关闭周期/关闭字段都已在上一轮置 null。
+    // /my/accounts 的产品契约是「每个号 × 日/月/年/累计音浪」；账号级没有可靠的
+    // 时长/未播汇总，不能在 summary 里补 0 冒充真实值。这里只汇总 wave。
+    let mut sum = [0i64; 3]; // daily / monthly / yearly
+    let mut sum_t = 0i64;
+    for it in items.iter() {
+        let Some(o) = it.as_object() else {
+            continue;
+        };
+        for (i, key) in ["daily", "monthly", "yearly"].into_iter().enumerate() {
+            sum[i] += pick(o, key, "wave");
         }
+        sum_t += pick(o, "total", "wave");
+    }
+    let period = |on: bool, wave: i64| -> Value {
+        if !on {
+            return Value::Null;
+        }
+        json!({ "wave": if s.wave { json!(wave) } else { Value::Null } })
     };
     json!({
         "count": items.len(),
-        "daily": one(s.daily && s.wave, sum_d),
-        "monthly": one(s.monthly, sum_m),
-        "yearly": one(s.yearly, sum_y),
-        "total": one(s.wave, sum_t),
+        "daily": period(s.daily, sum[0]),
+        "monthly": period(s.monthly, sum[1]),
+        "yearly": period(s.yearly, sum[2]),
+        "total": if s.wave { json!({ "wave": sum_t }) } else { Value::Null },
     })
 }
 
@@ -796,6 +934,10 @@ pub async fn my_accounts(
             "date": "",
             "accounts": empty,
             "summary": summary,
+            "earnings": {
+                "sharePct": super::settings::clamp_pct(s.share_pct, super::settings::default_share_pct()),
+                "feePct": super::settings::clamp_pct(s.fee_pct, 0),
+            },
         })));
     }
 
@@ -817,6 +959,11 @@ pub async fn my_accounts(
         "date": today,
         "accounts": accounts,
         "summary": summary,
+        // 预估收益口径（2026-10-19）：与 /my 同一份后台配置（分成比例 + 手续费）。
+        "earnings": {
+            "sharePct": super::settings::clamp_pct(s.share_pct, super::settings::default_share_pct()),
+            "feePct": super::settings::clamp_pct(s.fee_pct, 0),
+        },
     })))
 }
 
@@ -1054,5 +1201,35 @@ mod tests {
             daily.contains("TO_CHAR(biz_date, 'YYYY-MM') = '2999-08' THEN wave"),
             "pm 回落成日明细口径：{daily}"
         );
+    }
+
+    /// /my/series 的字段闸门：空数组分支也不能绕过 wave/duration 开关。
+    #[test]
+    fn series_payload_hides_disabled_metrics_even_when_empty() {
+        let s = PublicSettings::default();
+        let on = my_series_json(vec!["2999-01-01".into()], &[123], &[45], &s);
+        assert_eq!(on["waves"][0], 123);
+        assert_eq!(on["minutes"][0], 45);
+        assert_eq!(on["durationEnabled"], true);
+
+        let s = PublicSettings {
+            wave: false,
+            duration: false,
+            ..Default::default()
+        };
+        let empty = my_series_json(Vec::new(), &[], &[], &s);
+        assert!(empty["waves"].is_null());
+        assert!(empty["minutes"].is_null());
+        assert_eq!(empty["durationEnabled"], false);
+        assert_eq!(empty["dailyEnabled"], true);
+        assert_eq!(empty["published"], true);
+
+        let s = PublicSettings {
+            daily: false,
+            ..Default::default()
+        };
+        let closed = my_series_json(vec!["2999-01-01".into()], &[123], &[45], &s);
+        assert_eq!(closed["dates"].as_array().unwrap().len(), 0);
+        assert_eq!(closed["dailyEnabled"], false);
     }
 }

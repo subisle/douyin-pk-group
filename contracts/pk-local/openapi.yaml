@@ -163,7 +163,7 @@ paths:
   /api/admin/import/preview:
     post:
       operationId: previewImport
-      description: "状态：已实现（B 阶段）。解析粘贴文本/结构化行并匹配主播，不落库。"
+      description: "状态：已实现（B 阶段）。解析粘贴文本/结构化行并匹配主播，不落库。2026-10-19 起按日也支持时长：响应新增 durationRows（文件里带时长的行数）/ minutesTotal（时长合计，分钟）；droppedMinutes 保留但恒 0（兼容旧口径）。"
       requestBody:
         required: true
         content:
@@ -176,7 +176,7 @@ paths:
   /api/admin/import/commit:
     post:
       operationId: commitImport
-      description: "状态：已实现（B 阶段）。事务写 daily_metric（merge 幂等覆盖 / reject 拒绝重复）+ import_batch 审计。"
+      description: "状态：已实现（B 阶段）。事务写 daily_metric（merge 幂等覆盖 / reject 拒绝重复）+ import_batch 审计。2026-10-19 起文件里有「开播有效时长 / 时长」列时**按日也写 daily_metric.minutes**（同日同人重导值不同才覆盖），行里没有时长（老文件）时保留库里已有当日值不清零；响应 minutesTotal = 本次写入时长合计，droppedMinutes 恒 0（兼容）。"
       requestBody:
         required: true
         content:

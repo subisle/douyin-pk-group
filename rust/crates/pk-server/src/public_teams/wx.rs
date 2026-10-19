@@ -315,14 +315,23 @@ pub(super) fn pending_wx_put(
 }
 
 /// 同一账号还有未过期的二维码会话时，直接复用它，避免反复向上游要新码。
-pub(super) fn pending_wx_cached(name: &str) -> Option<(String, String, String)> {
+pub(super) fn pending_wx_cached(name: &str) -> Option<(String, String, String, u64)> {
     let mut m = pending_wx_logins()
         .lock()
         .expect("pending wx login 锁 poisoned");
-    m.retain(|_, login| login.created.elapsed() < Duration::from_secs(5 * 60));
+    let ttl = Duration::from_secs(5 * 60);
+    m.retain(|_, login| login.created.elapsed() < ttl);
     m.iter()
         .find(|(_, login)| login.name == name)
-        .map(|(qrcode, login)| (qrcode.clone(), login.img_content.clone(), login.url.clone()))
+        .map(|(qrcode, login)| {
+            let remaining = ttl.saturating_sub(login.created.elapsed()).as_secs().max(1);
+            (
+                qrcode.clone(),
+                login.img_content.clone(),
+                login.url.clone(),
+                remaining,
+            )
+        })
 }
 
 /// 读一次未过期的扫码会话（保留在 map 里，轮询可重复调用）；
@@ -388,7 +397,7 @@ pub async fn my_push_wechat_start(
     let team_scope = crate::store::person_team_of_name(&st, &name)
         .await
         .unwrap_or_default();
-    let (qrcode, img_content, url) = if let Some(cached) = pending_wx_cached(&name) {
+    let (qrcode, img_content, url, expires_in) = if let Some(cached) = pending_wx_cached(&name) {
         cached
     } else {
         let out = crate::bot::weixin::user_login_qrcode().await?;
@@ -417,7 +426,7 @@ pub async fn my_push_wechat_start(
             .unwrap_or_default()
             .to_string();
         pending_wx_put(&qrcode, &name, person_id, &team_scope, &img_content, &url);
-        (qrcode, img_content, url)
+        (qrcode, img_content, url, 5 * 60u64)
     };
     let (code, code_expires) = if person_id == 0 {
         (String::new(), String::new())
@@ -436,6 +445,7 @@ pub async fn my_push_wechat_start(
         "url": url,
         "code": code,
         "codeExpires": code_expires,
+        "expiresIn": expires_in,
     })))
 }
 
@@ -641,11 +651,7 @@ pub async fn my_push_wechat_poll(
     } else {
         crate::store::wx_session_get(&st, &acct.conversation_id).await
     };
-    let welcome = welcome_target(
-        &acct.conversation_id,
-        welcome_session,
-        &acct.ilink_user_id,
-    );
+    let welcome = welcome_target(&acct.conversation_id, welcome_session, &acct.ilink_user_id);
     let mut welcomed = false;
     if let Some((to_user, context_token)) = welcome {
         let text = crate::bot::wx_dock_welcome(&name);
@@ -1307,8 +1313,7 @@ mod wx_save_failure_tests {
     #[test]
     fn bind_conflict_maps_to_400() {
         let e: anyhow::Error = crate::store::WxBindConflict(
-            "该微信已经绑定在另一个账号上；一个微信只能绑一个主播，请先解绑旧的再扫"
-                .into(),
+            "该微信已经绑定在另一个账号上；一个微信只能绑一个主播，请先解绑旧的再扫".into(),
         )
         .into();
         assert_eq!(
@@ -1348,7 +1353,11 @@ mod welcome_target_tests {
     #[test]
     fn empty_context_token_returns_none() {
         assert_eq!(
-            welcome_target("wxacct:bot:user1", Some(("user1".into(), String::new())), "user1"),
+            welcome_target(
+                "wxacct:bot:user1",
+                Some(("user1".into(), String::new())),
+                "user1"
+            ),
             None
         );
     }

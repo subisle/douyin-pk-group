@@ -24,7 +24,7 @@ pub async fn site(
     let ann = Announcement::load_effective(&st).await;
     // 🚩 冠军展示位（2026-10-13）：管理员可配（star_title/star_override，与推送图共用配置）。
     // 手动指定「称号|人名|音浪」优先；没配就自动取最近一个业务日的当日音浪第一。
-    let star = {
+    let mut star = if s.daily && s.data_enabled {
         let ov = crate::store::config_get(&st, "star_override").await;
         let auto = star_auto(&st, &query_team, "").await;
         match ov.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
@@ -41,10 +41,12 @@ pub async fn site(
             },
             None => auto_json(&auto),
         }
+    } else {
+        Value::Null
     };
     /* 🏆 争霸赛冠军横幅（2026-10-13）：管理员整条文案可编（config champ_banner，
     格式「称号|人名|音浪」，空 = 不显示横幅）。与 🚩每日之星独立。 */
-    let champ = match crate::store::config_get(&st, "champ_banner")
+    let mut champ = match crate::store::config_get(&st, "champ_banner")
         .await
         .as_deref()
         .map(str::trim)
@@ -64,13 +66,23 @@ pub async fn site(
     /* 引导弹窗：开启时随站点一起来（管理端全量形态）。但公开响应里不能出现
     enabled=false 的公告条 —— 把嵌套的 items 换成公开裁剪口径，公开响应任何位置
     都只含上线条目。 */
-    let announcement_json = if ann.enabled {
+    let mut announcement_json = if ann.enabled {
         let mut v = ann.to_json();
         v["items"] = ann.public_items_json();
         v
     } else {
         Value::Null
     };
+    let mut items = ann.public_items_json();
+    let mut celebrate = serde_json::to_value(&ann.celebrate).unwrap_or(Value::Null);
+    if !s.wave {
+        // 数值总闸门：除榜单/个人卡外，站点头部与公告/庆祝里的 wave 也不能绕过。
+        hide_wave_numbers(&mut star);
+        hide_wave_numbers(&mut champ);
+        hide_wave_numbers(&mut announcement_json);
+        hide_wave_numbers(&mut celebrate);
+        hide_wave_numbers(&mut items);
+    }
     Ok(Json(json!({
         "published": true,
         "team": query_team,
@@ -83,10 +95,10 @@ pub async fn site(
         // 前端各页各取所需（登录页在登录前拿不到 site，另有 /api/public/announcements）
         "placements": ann.placements,
         // 庆祝配置（2026-10-13）：登录后展示页/我的页的彩带庆祝 + 冠军横幅用
-        "celebrate": ann.celebrate,
+        "celebrate": celebrate,
         // 展示页公告条（2026-10-14）新增键：数组顺序 = 从上到下；只含 enabled=true，
         // 是展示端公告/冠军横幅的**唯一来源**（champ/celebrate 保留兼容，页面不再单独渲染）
-        "items": ann.public_items_json(),
+        "items": items,
         "settings": {
             "daily": s.daily,
             "monthly": s.monthly,
@@ -94,6 +106,7 @@ pub async fn site(
             "duration": s.duration,
             "trend": s.trend,
             "wave": s.wave,
+            "absentDays": s.absent_days,
             // 页面级显隐（2026-10-10）：每日报告 / 分组 / 族谱 / 分组子页 / 登录开关
             "dataEnabled": s.data_enabled,
             "groupEnabled": s.group_enabled,
@@ -124,7 +137,15 @@ pub struct ListQuery {
 /// 2026-10-14：新增 `items`（展示页公告条，site 未回来前的兜底数据源），
 /// 与 site 同口径（load_effective + public_items_json）。
 pub async fn public_announcements(State(st): State<ArcState>) -> ApiResult {
+    let s = PublicSettings::load(&st).await;
     let ann = Announcement::load_effective(&st).await;
+    let mut celebrate = ann.celebrate_public_json();
+    let mut items = ann.public_items_json();
+    if !s.wave {
+        // 登录门阶段同样受数值总闸门约束（这个端点不经过 site 的清洗）。
+        hide_wave_numbers(&mut celebrate);
+        hide_wave_numbers(&mut items);
+    }
     // 登录页图标归一化先算好再进 json!（宏的值位置放不了语句块），与 placement_json 同口径
     let login_icon = ann.placements.login.icon.trim();
     let login_icon = if STEP_ICON_WHITELIST.contains(&login_icon) {
@@ -139,9 +160,9 @@ pub async fn public_announcements(State(st): State<ArcState>) -> ApiResult {
             "icon": login_icon,
         },
         // 庆祝配置裁剪形态（celebrate_public_json），登录后彩带庆祝用
-        "celebrate": ann.celebrate_public_json(),
+        "celebrate": celebrate,
         // 展示页公告条（2026-10-14）：与 site.items 同口径，登录门弹出时页面就能兜底渲染
-        "items": ann.public_items_json(),
+        "items": items,
         // 看板弹幕（2026-10-19）：与 to_json 的 danmaku 同一 camelCase 键
         // （enabled/top/dailyChampion/contestChampion，top 已按 0..=830 白名单归一）
         "danmaku": {
@@ -192,7 +213,7 @@ async fn avatar_map(st: &ArcState, source: &str) -> HashMap<u64, String> {
 /// hash 非空 → `/api/public/avatars/<pid>?v=<hash>`（换图破缓存）；
 /// hash 为空（历史行 / 同步异常）→ 退化成不带 query 的地址，仍然出图。
 /// 注意：这里**不判**图片是否存在 —— 端点自己会对 `image IS NULL` 的人 404。
-pub(super) fn avatar_url(person_id: u64, hash: &str) -> String {
+pub(crate) fn avatar_url(person_id: u64, hash: &str) -> String {
     let hash = hash.trim();
     if hash.is_empty() {
         format!("/api/public/avatars/{person_id}")
@@ -241,10 +262,16 @@ pub async fn daily(
     未开播，前端标记为「未开播」。只在 daily_metric 里捞人的话，某天只录了 1 个人时
     榜单就真只剩 1 行，跟库里的在册人数对不上。
     hide_in_daily_report = 1 的主播（管理端逐人设置）完全不进榜、不占名次。 */
+    // 时长关掉时不把 minutes 列带进 SQL；音浪即使不展示也必须算，因为名次、
+    // 并列名次与 liveCount/isLive 都依赖它。
+    let minutes_select = if s.duration {
+        ", (COALESCE(SUM(d.minutes), 0))::BIGINT AS minutes"
+    } else {
+        ""
+    };
     let sql = format!(
         "SELECT p.id AS person_id, p.name, \
-         (COALESCE(SUM(d.wave), 0))::BIGINT AS wave, \
-         (COALESCE(SUM(d.minutes), 0))::BIGINT AS minutes, \
+         (COALESCE(SUM(d.wave), 0))::BIGINT AS wave{minutes_select}, \
          CASE WHEN COALESCE(SUM(d.wave), 0) >= 2 THEN 1 ELSE 0 END AS live, \
          COUNT(d.id) AS nrow \
          FROM person p \
@@ -265,18 +292,23 @@ pub async fn daily(
     // totalWave = 历史累计总音浪（2026-10-11 用户口径，展示页列「累计总音浪」）。
     // P1-7：只聚合可信行（wave_reliable=1），与 WAVES_A / 月年榜口径一致。
     let month = &date[..7];
-    // 与日报共用 dialect::month_absent_sql（唯一口径：有数据行且音浪 < 2 才算未播）
-    let absent_sql = crate::dialect::month_absent_sql(month);
-    let total_sql = "SELECT person_id, (SUM(wave))::BIGINT AS total \
-         FROM daily_metric WHERE wave_reliable = 1 GROUP BY person_id"
-        .to_string();
+    // 未播天数关闭时连聚合查询都不发；与日报共用 dialect::month_absent_sql
+    // （唯一口径：有数据行且音浪 < 2 才算未播）。
     let mut absent_map: HashMap<u64, i64> = Default::default();
-    for r in pgrs::query(&st.pools, &source, &absent_sql).await? {
-        absent_map.insert(row_pid(&r, "person_id"), row_i64(&r, "n"));
+    if s.absent_days {
+        let absent_sql = crate::dialect::month_absent_sql(month);
+        for r in pgrs::query(&st.pools, &source, &absent_sql).await? {
+            absent_map.insert(row_pid(&r, "person_id"), row_i64(&r, "n"));
+        }
     }
+    // totalWave 属于音浪数值，关闭时不再跑全历史聚合。
     let mut total_map: HashMap<u64, i64> = Default::default();
-    for r in pgrs::query(&st.pools, &source, &total_sql).await? {
-        total_map.insert(row_pid(&r, "person_id"), row_i64(&r, "total"));
+    if s.wave {
+        let total_sql = "SELECT person_id, (SUM(wave))::BIGINT AS total \
+             FROM daily_metric WHERE wave_reliable = 1 GROUP BY person_id";
+        for r in pgrs::query(&st.pools, &source, total_sql).await? {
+            total_map.insert(row_pid(&r, "person_id"), row_i64(&r, "total"));
+        }
     }
     let mut prev_rank: HashMap<u64, usize> = Default::default();
     if let Some(pd) = &prev_date {
@@ -303,6 +335,9 @@ pub async fn daily(
     let mut last_wave: Option<i64> = None;
     let mut last_rank = 0usize;
     let mut ranked = 0usize;
+    // 先按原始开播行计数：后面 wave 置 null 后不能再用 items.wave 反算，
+    // 否则关掉音浪数值会把 liveCount 错误变成 0。
+    let mut live_count = 0usize;
     let mut items: Vec<Value> = Vec::with_capacity(rows.len());
     for r in rows.iter() {
         let pid = row_pid(r, "person_id");
@@ -322,6 +357,10 @@ pub async fn daily(
         if has_data {
             last_wave = Some(cur);
         }
+        let live = row_live(r);
+        if live {
+            live_count += 1;
+        }
         let delta = match prev_rank.get(&pid).copied() {
             // 前一天压根没他（没数据）或今天没数据：都不算升降
             Some(pr) if has_data => Some(if pr > rank {
@@ -339,10 +378,8 @@ pub async fn daily(
             // 需要 id 的只有 push 搜索/绑定接口，那些接口单独下发）
             "name": r.try_get::<String, _>("name").unwrap_or_default(),
             "wave": cur,
-            "isLive": row_live(r),
+            "isLive": live,
             "hasData": has_data,
-            "absentDays": absent_map.get(&pid).copied().unwrap_or(0),
-            "totalWave": total_map.get(&pid).copied().unwrap_or(0),
             "rank": rank,
         });
         /* 抖音头像（2026-10-16）：主播列表渲染真头像用，本地留存 + 同源地址；没有就是 null，
@@ -355,11 +392,16 @@ pub async fn daily(
         if s.duration {
             item["minutes"] = json!(row_i64(r, "minutes"));
         }
+        if s.absent_days {
+            item["absentDays"] = json!(absent_map.get(&pid).copied().unwrap_or(0));
+        }
         if s.trend {
             item["delta"] = delta.unwrap_or(Value::Null);
         }
-        if !s.wave {
-            // 音浪数值显隐（后台开关）：关掉后不下发任何数字
+        if s.wave {
+            item["totalWave"] = json!(total_map.get(&pid).copied().unwrap_or(0));
+        } else {
+            // 音浪数值显隐（后台开关）：关掉后不下发任何数字。
             item["wave"] = Value::Null;
             item["totalWave"] = Value::Null;
         }
@@ -371,12 +413,7 @@ pub async fn daily(
         "teamSize": rows.len(),
         // P2-13：liveCount 语义对齐为「开播人数」（当日音浪 ≥ 未播阈值），
         // 原来统计的是「有数据人数」，字段名与口径不符
-        "liveCount": items
-            .iter()
-            .filter(|i| {
-                i["wave"].as_i64().map(is_live_wave).unwrap_or(false)
-            })
-            .count(),
+        "liveCount": live_count,
         "items": items,
     })))
 }
@@ -472,23 +509,27 @@ pub async fn lineage(
         Err(e) => return ApiError::from(e).into_response(),
     };
 
-    // 个人音浪（2026-10-12 改按 period/date 窗口过滤；与榜单口径一致 wave_reliable=1。
-    // 2026-10-16：月 / 年优先用导入的整月音浪，库没跑 026 迁移时按日明细口径回落）
+    /* 个人音浪（2026-10-12 改按 period/date 窗口过滤；与榜单口径一致 wave_reliable=1。
+    2026-10-16：月 / 年优先用导入的整月音浪，库没跑 026 迁移时按日明细口径回落。
+    周期页签关闭（daily/monthly/yearly）或 wave 关闭时不查音浪，只下发树结构。 */
+    let wave_visible = s.wave && s.period_enabled(&period);
     let mut wave_map: HashMap<u64, i64> = Default::default();
-    match dialect::query_month_wave_fallback(
-        &st.pools,
-        &sid(&st),
-        &lineage_wave_window_sql(&period, &base_date, true),
-        &lineage_wave_window_sql(&period, &base_date, false),
-    )
-    .await
-    {
-        Ok(rs) => {
-            for r in &rs {
-                wave_map.insert(row_pid(r, "person_id"), row_i64(r, "total"));
+    if wave_visible {
+        match dialect::query_month_wave_fallback(
+            &st.pools,
+            &sid(&st),
+            &lineage_wave_window_sql(&period, &base_date, true),
+            &lineage_wave_window_sql(&period, &base_date, false),
+        )
+        .await
+        {
+            Ok(rs) => {
+                for r in &rs {
+                    wave_map.insert(row_pid(r, "person_id"), row_i64(r, "total"));
+                }
             }
+            Err(e) => return ApiError::from(e).into_response(),
         }
-        Err(e) => return ApiError::from(e).into_response(),
     }
 
     let mut nodes: Vec<Value> = Vec::with_capacity(rows.len());
@@ -529,8 +570,8 @@ pub async fn lineage(
             "generation": row_opt_i64(r, "generation"),
             "disciples": row_i64(r, "disciples"),
             // 音浪数值显隐（后台开关）：关掉后不下发任何数字
-            "wave": if s.wave { json!(wave) } else { Value::Null },
-            "totalWave": if s.wave { json!(total_wave) } else { Value::Null },
+            "wave": if wave_visible { json!(wave) } else { Value::Null },
+            "totalWave": if wave_visible { json!(total_wave) } else { Value::Null },
         }));
     }
     for (node, (id, master)) in nodes.iter_mut().zip(lineage_remap_ids(&raw_ids)) {
@@ -769,6 +810,7 @@ pub async fn lineage_wave_summary(
     st: &AppState,
     team: &str,
     person_id: u64,
+    include_wave: bool,
 ) -> anyhow::Result<(i64, i64, i64)> {
     if person_id == 0 {
         return Ok((0, 0, 0));
@@ -797,6 +839,14 @@ pub async fn lineage_wave_summary(
             children.entry(master).or_default().push(id);
         }
     }
+    let disciple_count = children
+        .get(&person_id)
+        .map(|v| v.len() as i64)
+        .unwrap_or(0);
+    if !include_wave {
+        // 直属徒弟数不是音浪数值，照常返回；wave=false 时不扫每日音浪表。
+        return Ok((disciple_count, 0, 0));
+    }
     // 每人累计总音浪（与榜单 totalWave 同口径）
     let wave_sql = "SELECT person_id, (SUM(wave))::BIGINT AS total \
          FROM daily_metric WHERE wave_reliable = 1 GROUP BY person_id"
@@ -810,10 +860,6 @@ pub async fn lineage_wave_summary(
     let mut on_stack: std::collections::HashSet<u64> = Default::default();
     let total_wave = subtree_wave_sum(person_id, &children, &wave_map, &mut memo, &mut on_stack);
     let self_wave = wave_map.get(&person_id).copied().unwrap_or(0);
-    let disciple_count = children
-        .get(&person_id)
-        .map(|v| v.len() as i64)
-        .unwrap_or(0);
     Ok((disciple_count, total_wave - self_wave, total_wave))
 }
 
@@ -864,6 +910,9 @@ pub(super) async fn period_public(
     if !s.team_enabled(gate) {
         return Ok(Json(json!({ "published": false })));
     }
+    if !s.data_enabled {
+        return Ok(Json(json!({ "published": true, "periodEnabled": false })));
+    }
     let enabled = if is_month { s.monthly } else { s.yearly };
     if !enabled {
         return Ok(Json(json!({ "published": true, "periodEnabled": false })));
@@ -894,14 +943,25 @@ pub(super) async fn period_public(
     // （monthly_duration，平台月报）、「音浪」优先用整月音浪（monthly_wave），没有整月记录的
     // 月份才用日明细求和 —— 见 dialect::period_rollup_sql。缺哪张整月表就只回落哪一项
     // （dialect::query_period 里两个开关互相独立）。
+    // 只 SELECT 当前启用的字段：时长关闭时不下发 minutes/liveDays；未播关闭时
+    // 不下发 absentDays。音浪仍参与 ORDER BY/名次，展示时再由 s.wave 置空。
+    let minutes_select = if s.duration {
+        ", (SUM({minutes}))::BIGINT AS minutes, (SUM(t.live))::BIGINT AS live_days"
+    } else {
+        ""
+    };
+    let absent_select = if s.absent_days {
+        ", (SUM(t.off))::BIGINT AS off_days"
+    } else {
+        ""
+    };
+    let select = format!(
+        "p.id AS person_id, p.name, (SUM({{wave}}))::BIGINT AS wave{minutes_select}{absent_select}"
+    );
     let rows = dialect::query_period(
         &st.pools,
         &sid(st),
-        "p.id AS person_id, p.name, \
-         (SUM({wave}))::BIGINT AS wave, \
-         (SUM({minutes}))::BIGINT AS minutes, \
-         (SUM(t.live))::BIGINT AS live_days, \
-         (SUM(t.off))::BIGINT AS off_days",
+        &select,
         &format!("{period}%"),
         team,
         " AND p.status <> 'left' AND p.hide_in_daily_report = 0",
@@ -941,7 +1001,9 @@ pub(super) async fn period_public(
             item["minutes"] = json!(row_i64(r, "minutes"));
             item["liveDays"] = json!(row_i64(r, "live_days"));
         }
-        item["absentDays"] = json!(row_i64(r, "off_days"));
+        if s.absent_days {
+            item["absentDays"] = json!(row_i64(r, "off_days"));
+        }
         if !s.wave {
             item["wave"] = Value::Null;
         }
@@ -1038,6 +1100,9 @@ pub async fn star_of_day(
     if !s.team_enabled(&team) {
         return Ok(Json(json!({ "published": false })));
     }
+    if !s.data_enabled || !s.daily {
+        return Ok(Json(json!({ "published": true, "dailyEnabled": false })));
+    }
     let date = q.get("date").cloned().unwrap_or_default();
     let date = if date.is_empty() {
         String::new()
@@ -1051,11 +1116,17 @@ pub async fn star_of_day(
     };
     let (name, wave) = star_auto(&st, &team, &date).await;
     if name.is_empty() {
-        return Ok(Json(json!({ "title": "每日之星", "name": "", "wave": 0 })));
+        return Ok(Json(json!({
+            "title": "每日之星",
+            "name": "",
+            "wave": if s.wave { json!(0) } else { Value::Null },
+        })));
     }
-    Ok(Json(
-        json!({ "title": "每日之星", "name": name, "wave": wave }),
-    ))
+    Ok(Json(json!({
+        "title": "每日之星",
+        "name": name,
+        "wave": if s.wave { json!(wave) } else { Value::Null },
+    })))
 }
 
 fn auto_json(a: &(String, i64)) -> serde_json::Value {

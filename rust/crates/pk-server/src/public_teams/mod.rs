@@ -6,7 +6,7 @@
 //!
 //! 拆分（2026-10-12）：按业务域分文件，对外路径 `public_teams::*` 不变。
 
-use crate::dialect::{self, is_live_wave};
+use crate::dialect;
 use crate::pgrs;
 use crate::routes::ApiError;
 use crate::state::AppState;

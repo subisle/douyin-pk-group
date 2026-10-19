@@ -105,23 +105,10 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()))
         .init();
 
-    /* P1-5：无 ADMIN_PASSWORD 时拒绝启动。
-    之前的行为是「整个 /api 不鉴权只打日志」，一旦按仓库资产部署（HOST=0.0.0.0
-    + compose 直接发布端口），管理 API 就裸奔在公网。现在默认拒绝启动；
-    本地开发确实不想配口令时，显式设 ALLOW_NO_ADMIN_PASSWORD=1 放行。 */
-    if !auth::Auth::password_configured()
-        && std::env::var("ALLOW_NO_ADMIN_PASSWORD").as_deref() != Ok("1")
-    {
-        eprintln!(
-            "拒绝启动：未设置 ADMIN_PASSWORD（管理 API 将完全无鉴权）。\n\
-             - 正常部署：在 .env / 环境里配置 ADMIN_PASSWORD\n\
-             - 本地开发确实不需要口令：显式设 ALLOW_NO_ADMIN_PASSWORD=1"
-        );
-        anyhow::bail!("未设置 ADMIN_PASSWORD（设置 ALLOW_NO_ADMIN_PASSWORD=1 可显式放行）");
-    }
-    if !auth::Auth::password_configured() {
-        tracing::warn!("ALLOW_NO_ADMIN_PASSWORD=1：本次启动 /api 不鉴权（仅限本地开发）");
-    }
+    /* 2026-10-19 用户口径「后端的口令默认为 shuai4444」：未配置 ADMIN_PASSWORD 时
+    用 auth::DEFAULT_ADMIN_PASSWORD 兜底，服务不再拒绝启动，管理接口也不再 503。
+    旧 P1-5 启动守卫（无口令拒绝启动 / ALLOW_NO_ADMIN_PASSWORD=1 放行）随之作废 ——
+    正在用默认口令时由 Auth::from_env() 打 WARN 提醒生产环境覆盖。 */
 
     /* 显式迁移子命令：`pk-server migrate`（docs/00 §4 决策：DDL 不随启动自动跑） */
     if std::env::args().any(|a| a == "migrate") {
@@ -395,8 +382,14 @@ async fn main() -> anyhow::Result<()> {
         .map_err(|_| anyhow::anyhow!("bots 重复初始化"))?;
 
     /* 用户自助扫码的微信推送通道（2026-10-11，多账号）：恢复每个已扫码账号的长轮询，
-    并起一条 supervisor 每 30 秒扫表补拉（任务 panic / 异常退出会被重新拉起）。 */
-    crate::wxpush::bootstrap(&st).await;
+    并起一条 supervisor 每 30 秒扫表补拉（任务 panic / 异常退出会被重新拉起）。
+    2026-10-19：bootstrap 也受总闸约束 —— 测试关闸时不长轮询 getupdates；
+    开闸时行为不变。 */
+    if bot_autostart {
+        crate::wxpush::bootstrap(&st).await;
+    } else {
+        tracing::info!("PUSH_OUT_ENABLED 未开：wxpush 不恢复长轮询");
+    }
     let wxpush_supervisor = tokio::spawn(crate::wxpush::supervisor_loop(st.clone()));
 
     /* 延迟推送调度器（2026-10-10）：每 60 秒扫一次 push_jobs，把到点的任务推出去。

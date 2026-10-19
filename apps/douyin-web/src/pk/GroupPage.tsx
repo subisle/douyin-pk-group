@@ -13,7 +13,13 @@ import {
   type BoardConfig,
   type EventType,
 } from './api';
-import { buildExportNode, disposeExportNode, downloadBlob, nodeToPngBlob } from './exportImage';
+import {
+  buildExportNode,
+  buildGapExportNode,
+  disposeExportNode,
+  downloadBlob,
+  nodeToPngBlob,
+} from './exportImage';
 import {
   BREAK_AFTER_GROUP,
   REVIVAL_EVENTS,
@@ -346,7 +352,13 @@ export default function GroupPage() {
   const inspectSeqRef = useRef(0);
   const inspectInflightRef = useRef<Promise<InspectResponse | null> | null>(null);
 
-  async function inspectNow(next: Bucket[]) {
+  /** `constraints` 可选：载入方案时要按**方案自带的赛程**体检，不能拿页面当前控件
+   *  （刚载入时 buckets 还是空的，`scheduleInput()` 会算成「没有复活赛/加长休息」，
+   *  组头开赛时间就会比方案里少一段，导出长图跟着错）。 */
+  async function inspectNow(
+    next: Bucket[],
+    constraints?: ReturnType<typeof scheduleInputFor>,
+  ) {
     if (!next.length) {
       inspectSeqRef.current += 1;
       inspectInflightRef.current = null;
@@ -357,7 +369,7 @@ export default function GroupPage() {
     }
     const seqAtRequest = ++inspectSeqRef.current;
     const req = pk
-      .inspect({ groups: next.map((b) => b.players), constraints: scheduleInput() })
+      .inspect({ groups: next.map((b) => b.players), constraints: constraints ?? scheduleInput() })
       .then((r): InspectResponse => r)
       .catch((e) => {
         // 只有最新的那次才允许往页面上报错；被更新的拖拽盖掉的旧响应静默丢弃
@@ -757,6 +769,9 @@ export default function GroupPage() {
           buckets: buckets.map((b) => ({ name: b.name, players: b.players })),
           schedule: { start: startTime, intervalMin, breaks },
           display,
+          /* 数据日期也存进方案（2026-10-18）：载入方案后 `dates` 是空的，
+           * 导出长图头部只能退回 `isoLocal()`，历史方案会被印成「导出当天」的日期。 */
+          dates,
         },
       });
       setPlanId(r.id);
@@ -799,14 +814,29 @@ export default function GroupPage() {
       if (p.schedule?.start) setStartTime(p.schedule.start);
       if (p.schedule?.intervalMin) setIntervalMin(p.schedule.intervalMin);
       if (p.display) setDisplay({ ...DEFAULT_DISPLAY, ...p.display });
+      /* 恢复数据日期（老方案没存过就保持空，导出退回今天） */
+      if (p.dates?.length) setDates(p.dates);
       setPlayers((p.buckets || []).flatMap((b: { players: Player[] }) => b.players || []));
       setMsg(`已载入方案 #${id}`);
+      /* 体检必须用**方案自带的赛程**：此刻 buckets 仍是旧值，`scheduleInput()`
+       * 会按 0 组算成「没有复活赛」，组头开赛时间会少一段（13:20 显示成 13:15）。 */
+      const loaded = p.buckets || [];
       void inspectNow(
-        (p.buckets || []).map((b: { name: string; players: Player[] }, i: number) => ({
+        loaded.map((b: { name: string; players: Player[] }, i: number) => ({
           id: `tmp${i}`,
           name: b.name,
           players: b.players || [],
         })),
+        {
+          schedule: {
+            start: p.schedule?.start || startTime,
+            intervalMin: p.schedule?.intervalMin ?? intervalMin,
+            breaks: (p.schedule?.breaks || []) as BreakRule[],
+          },
+          strengthOrder: p.strengthOrder
+            ? { enabled: p.strengthOrder.enabled !== false, mode: p.strengthOrder.mode }
+            : { enabled: false },
+        },
       );
     } catch (e) {
       setError((e as Error).message);
@@ -881,6 +911,54 @@ export default function GroupPage() {
     }
   }
 
+  /* ---------------- 导出总排名分差图 ---------------- */
+  /** 与长图分开的一张图：所有参赛者按总排名排下来，标出与上一位差多少分、
+   *  各组的人在总榜占了哪一段。分差图必须看到音浪，所以「展示音浪数值」关着时拦下。 */
+  async function exportGapImage() {
+    if (!buckets.length) {
+      setError('看板是空的');
+      return;
+    }
+    if (!display.wave) {
+      setError('「展示音浪数值」已关闭，分差图需要音浪数据：勾上再导出');
+      return;
+    }
+    setBusy('gap');
+    try {
+      // 与长图同一口径：等最新一次 inspect 落地，避免拖完立刻导出拿到旧数据
+      if (inspectInflightRef.current) {
+        await inspectInflightRef.current;
+      }
+      const total = buckets.reduce((s, b) => s + b.players.length, 0);
+      const node = buildGapExportNode({
+        title: title.trim() || 'PK 分组',
+        brandLine: `PK GROUP · 总排名分差 · ${dates[0] || isoLocal()}`,
+        metaLine: `${eventType} · 口径 ${waveLabel} · 共 ${buckets.length} 组 ${total} 人`,
+        players: buckets.flatMap((b, gi) =>
+          b.players.map((p) => ({
+            name: p.name,
+            groupName: b.name,
+            groupIndex: gi,
+            wave: p.wave || 0,
+          })),
+        ),
+        metricLabel: waveLabel,
+        footer: `${title.trim() || 'PK 分组'} · ${eventType} | ${isoLocal()}`,
+      });
+      try {
+        const blob = await nodeToPngBlob(node, { scale: 2 });
+        downloadBlob(blob, `${title.trim() || 'pk'}-总排名分差-${dates[0] || 'plan'}.png`);
+        setMsg('分差图已导出');
+      } finally {
+        disposeExportNode(node);
+      }
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy('');
+    }
+  }
+
   /* ---------------- 派生 ---------------- */
   const totalPlayers = useMemo(() => buckets.reduce((s, b) => s + b.players.length, 0), [buckets]);
 
@@ -915,9 +993,10 @@ export default function GroupPage() {
   const slotAt = (i: number) => {
     const [h, m] = startTime.split(':').map((x) => Number(x) || 0);
     let t = h * 60 + m;
+    /* 与后端 pk-core::gap_after 同口径：命中加长休息的那一段，间隔**被 restMin 替换**
+     * 而不是叠加（第 4 组后复活赛 20 分钟 → 第 5 组是 13:20，不是 13:35）。 */
     for (let k = 0; k < i; k += 1) {
-      t += intervalMin;
-      if (restOn && k + 1 === restAfterGroup) t += restMin;
+      t += restOn && k + 1 === restAfterGroup ? restMin : intervalMin;
     }
     const hh = Math.floor(t / 60) % 24;
     return `${String(hh).padStart(2, '0')}:${String(t % 60).padStart(2, '0')}`;
@@ -1530,6 +1609,14 @@ export default function GroupPage() {
           <button disabled={busy === 'export'} onClick={exportImage}>
             {busy === 'export' ? '导出中…' : '导出长图'}
           </button>
+          {/* 总排名分差图：单独一张 PNG，只回答「谁排第几、相邻差多少分」 */}
+          <button
+            disabled={busy === 'gap'}
+            onClick={exportGapImage}
+            title="总排名 + 相邻名次分差：看全体人员的总榜位次、每组占了哪一段、互相差多少分"
+          >
+            {busy === 'gap' ? '导出中…' : '导出分差图'}
+          </button>
           {/* PK 展板（2026-10-16 用户口径）：全屏独立页，不在侧边栏 —— 跳转新标签打开。
               展板要投屏/占满整屏，新标签里没有后台导航（地址栏除外）。 */}
           <button onClick={() => openFullscreen('pk-board')} title="在新标签打开展板（全屏无导航，可投屏）">
@@ -1612,7 +1699,9 @@ export default function GroupPage() {
                   </td>
                   <td>{p.eventType || '—'}</td>
                   <td>{metricLabel(p.metric, p.days)}</td>
-                  <td className="hint">{String(p.createdAt).slice(0, 16).replace('T', ' ')}</td>
+                  <td className="hint">
+                    {String(p.createdAt ?? p.created_at ?? '').slice(0, 16).replace('T', ' ')}
+                  </td>
                   <td>{p.published ? <span className="ok">已上架</span> : '未上架'}</td>
                   <td>
                     <button disabled={busy === 'load'} onClick={() => loadPlan(p.id)}>

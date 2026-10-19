@@ -310,20 +310,29 @@ export default function StreamerPage() {
     }
   }
 
+  /** 补账提示（2026-10-18）：建档/绑号会同时补「按日」与「月度」两个暂存区。
+      月度是 042 新链路（先导月报、事后才建档/绑号的整月数据），有补到就一并说出来，
+      否则运营会以为那个月的月榜数据没回来。 */
+  function absorbedText(daily?: number, month?: number) {
+    const bits: string[] = []
+    if (daily) bits.push(`按日 ${daily} 行`)
+    if (month) bits.push(`月度 ${month} 行`)
+    if (!bits.length) return ''
+    return `（暂存区已补账入库：${bits.join(' + ')}，现在开始出现在榜单里）`
+  }
+
   async function create() {
     setError('')
     setMsg('')
     try {
-      const d = await api<{ personId: number; absorbed?: number }>('/api/admin/streamers', {
-        method: 'POST',
-        body: JSON.stringify({ name, team: newTeam, douyinNo: douyinNo || undefined }),
-      })
-      setMsg(
-        `已建档：${name}` +
-          (d.absorbed
-            ? `（已把暂存区里该抖音号的 ${d.absorbed} 行数据补账入库，现在开始出现在榜单里）`
-            : ''),
+      const d = await api<{ personId: number; absorbed?: number; absorbedMonth?: number }>(
+        '/api/admin/streamers',
+        {
+          method: 'POST',
+          body: JSON.stringify({ name, team: newTeam, douyinNo: douyinNo || undefined }),
+        },
       )
+      setMsg(`已建档：${name}` + absorbedText(d.absorbed, d.absorbedMonth))
       setName('')
       setDouyinNo('')
       load()
@@ -500,7 +509,7 @@ export default function StreamerPage() {
     if (!detail) return
     setError('')
     try {
-      const bound = await api<{ absorbed?: number }>(
+      const bound = await api<{ absorbed?: number; absorbedMonth?: number }>(
         `/api/admin/streamers/${detail.personId}/accounts`,
         {
           method: 'POST',
@@ -515,8 +524,7 @@ export default function StreamerPage() {
       const d = await api(`/api/admin/streamers/${detail.personId}/detail`)
       setDetail(d)
       setMsg(
-        `已给「${detail.name}」绑定抖音号` +
-          (bound.absorbed ? `（暂存区 ${bound.absorbed} 行数据已补账入库）` : ''),
+        `已给「${detail.name}」绑定抖音号` + absorbedText(bound.absorbed, bound.absorbedMonth),
       )
       setTimeout(() => setMsg(''), 2000)
       load()

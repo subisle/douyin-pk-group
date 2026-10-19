@@ -648,6 +648,23 @@ pub const PENDING_FOR_PERSON_SQL: &str = "SELECT id, name, douyin_no,
                             WHERE a.person_id = ? AND a.anchor_id <> ''))
      ORDER BY biz_date, id";
 
+/// 月度暂存区里「某个主播名下、还没认领」的整月行（042，建档 / 绑号后补账用）。
+///
+/// 命中口径与按日 [`PENDING_FOR_PERSON_SQL`] 逐条对齐：暂存行的号码出现在该主播
+/// account 的 douyin_no 或 anchor_id 里即算命中；只认 `absorbed_at IS NULL`（幂等）。
+/// 区别只在业务日期：月度暂存按 `period char(7)`（YYYY-MM）而不是某一天，
+/// 所以按 period 排序，补账时按月叠加。
+pub const PENDING_MONTH_FOR_PERSON_SQL: &str =
+    "SELECT id, name, btrim(period) AS period, wave, minutes,
+       source_batch_id
+     FROM import_pending_month
+     WHERE absorbed_at IS NULL
+       AND (douyin_no IN (SELECT a.douyin_no FROM account a
+                            WHERE a.person_id = ? AND a.douyin_no <> '')
+         OR douyin_no IN (SELECT a.anchor_id FROM account a
+                            WHERE a.person_id = ? AND a.anchor_id <> ''))
+     ORDER BY period, id";
+
 /// 在册主播总数（未删除且未离开）
 pub const ACTIVE_PERSON_COUNT_SQL: &str =
     "SELECT COUNT(*) AS n FROM person WHERE deleted_at IS NULL AND status <> 'left'";
@@ -692,6 +709,34 @@ mod tests {
         assert!(STREAMERS_SQL.contains("gender"));
         assert!(PREV_CUMULATIVE_SQL.contains("cumulative_wave"));
         assert!(BATCH_LIST_SQL.contains("ok_rows"), "002 迁移后的审计字段");
+    }
+
+    /// 042：月度暂存补账的命中口径必须和按日 `PENDING_FOR_PERSON_SQL` 一致 ——
+    /// 该主播名下任一抖音号 / 采集 ID 命中即算，且只认未认领行（幂等的前提）。
+    /// 钉死关键子句是防「顺手改成按 name 命中」或「漏掉 absorbed_at IS NULL 导致重复补账」。
+    #[test]
+    fn pending_month_sql_matches_person_scoped_by_account() {
+        for must in [
+            "FROM import_pending_month",
+            "absorbed_at IS NULL",
+            "a.douyin_no <> ''",
+            "a.anchor_id <> ''",
+            "ORDER BY period, id",
+        ] {
+            assert!(
+                PENDING_MONTH_FOR_PERSON_SQL.contains(must),
+                "月度暂存补账缺「{must}」：{PENDING_MONTH_FOR_PERSON_SQL}"
+            );
+        }
+        // 两个绑定：douyin_no 一个、anchor_id 一个（与 bind 调用严格对齐，多一个就 panic）
+        assert_eq!(placeholder_count(PENDING_MONTH_FOR_PERSON_SQL), 2);
+        assert!(
+            !PENDING_MONTH_FOR_PERSON_SQL.contains("biz_date"),
+            "月度暂存按 period 认，不是某一天：{PENDING_MONTH_FOR_PERSON_SQL}"
+        );
+        // 两张暂存表不能写串（按日 / 按月各一条补账链路）
+        assert!(!PENDING_FOR_PERSON_SQL.contains("import_pending_month"));
+        assert!(!PENDING_LIST_SQL.contains("import_pending_month"));
     }
 
     /// 同抖音号重复检测的口径：**同一个抖音号挂在 ≥2 个不同主播名下**才算重复。

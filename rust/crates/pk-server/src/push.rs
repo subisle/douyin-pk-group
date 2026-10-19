@@ -66,7 +66,11 @@ fn render_daily_two_pages(
     if n == 0 {
         return Vec::new();
     }
-    let per_page = n.div_ceil(DAILY_PAGE_COUNT);
+    let per_page = if n <= 2 {
+        n
+    } else {
+        n.div_ceil(DAILY_PAGE_COUNT)
+    };
     let pages: Vec<Vec<crate::report::ReportRow>> =
         rep.rows.chunks(per_page).map(|c| c.to_vec()).collect();
     crate::report::render_month_svg_pages_exact(rep, pages, personal_mark, fields)
@@ -456,20 +460,14 @@ fn out_blocked(kind: &str, to: &str, preview: &str) -> bool {
 /// 师门日报图片分页：每页行数（师门名单通常个位数，几乎总是单页）。
 const PAGE_ROWS: usize = 40;
 
-fn lineage_report_pngs(
+async fn lineage_report_pngs(
     rep: &crate::lineage_report::LineageReport,
     fields: &crate::report::LineageReportFields,
 ) -> Vec<Vec<u8>> {
-    crate::lineage_report::render_svg_pages_with_fields(rep, PAGE_ROWS, "", fields)
-        .iter()
-        .filter_map(|svg| match svg_to_png(svg) {
-            Ok(png) => Some(png),
-            Err(e) => {
-                tracing::warn!(error = %e, "师门日报 SVG 转 PNG 失败");
-                None
-            }
-        })
-        .collect()
+    let svgs = crate::lineage_report::render_svg_pages_with_fields(rep, PAGE_ROWS, "", fields);
+    render_svgs_to_pngs_async(svgs, 2.0, "师门日报")
+        .await
+        .unwrap_or_default()
 }
 
 /// 出网闸门拦截（2026-10-17，审计 1-P0-2）：**不代表发送成功**。
@@ -489,9 +487,43 @@ impl std::fmt::Display for Blocked {
 
 impl std::error::Error for Blocked {}
 
+/// 多页图片发送到一半失败：`sent` 页已经真实送达，不能再整组重发或退回文字。
+#[derive(Debug)]
+struct PartialImageSend {
+    sent: usize,
+    total: usize,
+    source: anyhow::Error,
+}
+
+impl std::fmt::Display for PartialImageSend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "图片仅发送 {}/{} 页，第 {} 页失败：{}",
+            self.sent,
+            self.total,
+            self.sent + 1,
+            self.source
+        )
+    }
+}
+
+impl std::error::Error for PartialImageSend {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
 /// 这个错误是不是「被闸门拦下」（而不是真的发送失败）。
 pub(crate) fn is_blocked(e: &anyhow::Error) -> bool {
     e.downcast_ref::<Blocked>().is_some()
+}
+
+/// 已送达页数；None = 一页都没送达（可按整组失败处理）。
+fn partial_image_sent(e: &anyhow::Error) -> Option<usize> {
+    e.downcast_ref::<PartialImageSend>()
+        .map(|p| p.sent)
+        .filter(|n| *n > 0)
 }
 
 /* --------------------- 推送去重租约（2026-10-17 第四轮审计 B 域修复） ---------------------
@@ -853,7 +885,7 @@ async fn send_binding_images(
     b: &crate::store::PushBinding,
     caption: &str,
     pngs: &[Vec<u8>],
-) -> anyhow::Result<()> {
+) -> anyhow::Result<usize> {
     anyhow::ensure!(!pngs.is_empty(), "没有可发送的图片");
     /* 测试阶段出网闸门：图片通道同样收口（与文本同一开关，见 send_binding 上方说明）。
     同样返回 `Blocked` 而不是 Ok —— 拦截不等于发成功，去重标记不能被空跑消耗。 */
@@ -871,6 +903,8 @@ async fn send_binding_images(
         .ok_or_else(|| anyhow::anyhow!("图片推送需要扫码账号（请在「我的」页重新扫码）"))?;
     anyhow::ensure!(!a.bot_token.is_empty(), "扫码账号凭证为空，请重新扫码");
     let (to_user, context_token) = push_ctx(st, b, &a).await?;
+    let total = pngs.len();
+    let mut sent = 0usize;
     for (i, png) in pngs.iter().enumerate() {
         // 说明文字只挂在第一张前；第二张起带页码提示
         let cap = if i == 0 {
@@ -878,7 +912,7 @@ async fn send_binding_images(
         } else {
             format!("📄 榜单第 {} 页（接上条）", i + 1)
         };
-        crate::store::wxmedia::user_send_image(
+        match crate::store::wxmedia::user_send_image(
             st,
             &a.base_url,
             &a.bot_token,
@@ -887,9 +921,20 @@ async fn send_binding_images(
             &cap,
             png,
         )
-        .await?;
+        .await
+        {
+            Ok(()) => sent += 1,
+            Err(e) if sent == 0 => return Err(e),
+            Err(e) => {
+                return Err(anyhow::Error::new(PartialImageSend {
+                    sent,
+                    total,
+                    source: e,
+                }))
+            }
+        }
     }
-    Ok(())
+    Ok(sent)
 }
 
 /// 两条路径共用的会话上下文解析：conv 取账号/绑定里非空者，
@@ -940,6 +985,17 @@ pub(crate) fn svg_to_png(svg: &str) -> anyhow::Result<Vec<u8>> {
     svg_to_png_at(svg, 2.0)
 }
 
+/// 进程级系统字体库：首次渲染时扫描一次，以后复用。
+fn system_font_db() -> std::sync::Arc<resvg::usvg::fontdb::Database> {
+    static DB: std::sync::OnceLock<std::sync::Arc<resvg::usvg::fontdb::Database>> =
+        std::sync::OnceLock::new();
+    std::sync::Arc::clone(DB.get_or_init(|| {
+        let mut db = resvg::usvg::fontdb::Database::new();
+        db.load_system_fonts();
+        std::sync::Arc::new(db)
+    }))
+}
+
 /// 指定缩放比转 PNG（`scale = 1.0` 时输出等于 SVG 的 width×height）。
 ///
 /// 为什么需要这个：榜单图 SVG 宽 1440、高 4520（逻辑像素），原先统一按 2.0 渲染
@@ -952,9 +1008,12 @@ pub(crate) fn svg_to_png_at(svg: &str, scale: f32) -> anyhow::Result<Vec<u8>> {
     任何 font-family（含 PingFang SC / Hiragino Sans GB / emoji）都解析不到，
     所有 <text> 被静默丢弃，PNG 只剩色块。必须显式 load_system_fonts()
     （/System/Fonts、/Library/Fonts、~/Library/Fonts 全量入 db），
-    之后现有 FONT 栈与 emoji 全部正常渲染（/tmp/resvg-font-test 复现矩阵验证）。 */
+    之后现有 FONT 栈与 emoji 全部正常渲染（/tmp/resvg-font-test 复现矩阵验证）。
+
+    2026-10-19 性能：字体库只扫一次，之后每个 SVG 共享 Arc<fontdb::Database>。
+    旧实现每页都 load_system_fonts()，推送给几十人 × 两页会重复扫几十次字体目录。 */
     let mut opt = resvg::usvg::Options::default();
-    opt.fontdb_mut().load_system_fonts();
+    opt.fontdb = system_font_db();
     let tree = resvg::usvg::Tree::from_str(svg, &opt)?;
     let size = tree.size();
     let (w, h) = (
@@ -1207,18 +1266,13 @@ async fn run_inner(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result
                     let pngs: Vec<Vec<u8>> = match cached_pngs {
                         Some(p) => p,
                         None => {
-                            let p: Vec<Vec<u8>> = svgs
-                                .iter()
-                                .filter_map(|svg| match svg_to_png_at(svg, DAILY_PNG_SCALE) {
-                                    Ok(png) => Some(png),
-                                    Err(e) => {
-                                        tracing::warn!(account = %b.name, error = %e, "SVG 转 PNG 失败");
-                                        None
-                                    }
-                                })
-                                .collect();
-                            // 回填缓存：机器人命令「1」随后命中，不用再渲一遍
-                            store_daily_pngs(team, date, &b.name, &p);
+                            let p = render_svgs_to_pngs_async(svgs, DAILY_PNG_SCALE, "每日报告")
+                                .await
+                                .unwrap_or_default();
+                            // 只有整组页面都转成功才回填缓存；半套图绝不落盘。
+                            if !p.is_empty() {
+                                store_daily_pngs(team, date, &b.name, &p);
+                            }
                             p
                         }
                     };
@@ -1242,16 +1296,20 @@ async fn run_inner(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result
                     } else {
                         tracing::info!(account = %b.name, pages = pngs.len(), bytes = pngs.iter().map(|p| p.len()).sum::<usize>(), "推送·每日报告(图片)");
                         match send_binding_images(st, b, "", &pngs).await {
-                            Ok(()) => {
+                            Ok(_) => {
                                 sent_any = true;
                                 finalize_report_claim(st, &b.name).await;
                                 tracing::info!(account = %b.name, pages = pngs.len(), "每日报告(图片)已推送");
                             }
                             Err(e) => {
-                                /* 图片被闸门拦下时**不要退回文本**重试：文本走同一闸门，
-                                重试只是又一次空跑（还会多一条「已拦截」日志）。
-                                这里还原占位标记即可，继续处理后面的订阅者。 */
-                                if is_blocked(&e) {
+                                /* 已经送达至少一页时，禁止退回文字或下一轮整组重发：
+                                否则用户会收到「第 1 页 + 文字」或重复第 1 页。
+                                保留已发页的去重标记，只记录缺失页。 */
+                                if let Some(sent) = partial_image_sent(&e) {
+                                    sent_any = true;
+                                    finalize_report_claim(st, &b.name).await;
+                                    tracing::warn!(account = %b.name, sent, pages = pngs.len(), error = %e, "每日报告图片部分发送，停止重试以避免重复");
+                                } else if is_blocked(&e) {
                                     restore_report_claim(st, &b.name).await;
                                     tracing::warn!(account = %b.name, "每日报告(图片)：闸门拦截，未发（去重标记不推进）");
                                 } else {
@@ -1401,7 +1459,7 @@ async fn run_inner(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result
         只有追分 → 文本；只有师门 → 图片；都没有 → 不发。 */
         match (target_text, lineage_rep.as_ref()) {
             (Some(t), Some(l)) => {
-                let pngs = lineage_report_pngs(l, &report_fields.lineage);
+                let pngs = lineage_report_pngs(l, &report_fields.lineage).await;
                 if pngs.is_empty() {
                     restore_lineage_claim(st, &b.name).await;
                     tracing::warn!(account = %b.name, "师门日报全部页面转 PNG 失败，本轮仅处理追分");
@@ -1429,7 +1487,7 @@ async fn run_inner(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result
                         "推送·追分+师门(图片)"
                     );
                     match send_binding_images(st, b, &t, &pngs).await {
-                        Ok(()) => {
+                        Ok(_) => {
                             sent_any = true;
                             /* 发送成功后才落库：目标状态推进；师门租约 release 时保留本轮标记。 */
                             for (id, hit, gap) in pending_states.iter() {
@@ -1439,13 +1497,23 @@ async fn run_inner(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result
                             tracing::info!(account = %b.name, pages = pngs.len(), "追分+师门(图片)已推送");
                         }
                         Err(e) => {
-                            // 合并发送失败：师门占位还原，目标状态不推进，整条留到下轮再推。
-                            restore_lineage_claim(st, &b.name).await;
-                            if is_blocked(&e) {
-                                tracing::warn!(account = %b.name, "追分+师门(图片)：闸门拦截，未发（去重标记不推进，开闸后会补推）");
+                            if let Some(sent) = partial_image_sent(&e) {
+                                // 首张图已带追分说明送达：目标状态推进；师门标记也保留，禁止整组重发。
+                                sent_any = true;
+                                for (id, hit, gap) in pending_states.iter() {
+                                    crate::store::target_set_state(st, *id, *hit, *gap, date).await;
+                                }
+                                finalize_lineage_claim(st, &b.name).await;
+                                tracing::warn!(account = %b.name, sent, pages = pngs.len(), error = %e, "追分+师门图片部分发送，停止重试以避免重复");
                             } else {
-                                tracing::warn!(account = %b.name, error = %e, "追分+师门(图片)推送失败");
-                                crate::store::push_touch(st, &b.name, &e.to_string()).await;
+                                // 一页都没送达：师门占位还原，目标状态不推进，整条留到下轮再推。
+                                restore_lineage_claim(st, &b.name).await;
+                                if is_blocked(&e) {
+                                    tracing::warn!(account = %b.name, "追分+师门(图片)：闸门拦截，未发（去重标记不推进，开闸后会补推）");
+                                } else {
+                                    tracing::warn!(account = %b.name, error = %e, "追分+师门(图片)推送失败");
+                                    crate::store::push_touch(st, &b.name, &e.to_string()).await;
+                                }
                             }
                         }
                     }
@@ -1472,27 +1540,33 @@ async fn run_inner(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result
                 }
             }
             (None, Some(l)) => {
-                let pngs = lineage_report_pngs(l, &report_fields.lineage);
+                let pngs = lineage_report_pngs(l, &report_fields.lineage).await;
                 if pngs.is_empty() {
                     restore_lineage_claim(st, &b.name).await;
                     tracing::warn!(account = %b.name, "师门日报全部页面转 PNG 失败，本轮跳过");
                 } else {
                     tracing::info!(account = %b.name, pages = pngs.len(), "推送·师门日报(图片)");
                     match send_binding_images(st, b, "", &pngs).await {
-                        Ok(()) => {
+                        Ok(_) => {
                             sent_any = true;
                             // 发送成功：师门标记保持本轮业务日（占位时已写），只释放租约。
                             finalize_lineage_claim(st, &b.name).await;
                             tracing::info!(account = %b.name, pages = pngs.len(), "师门日报(图片)已推送");
                         }
                         Err(e) => {
-                            /* 被闸门拦下 ≠ 发送成功：还原占位标记，消息留到开闸后再推。 */
-                            restore_lineage_claim(st, &b.name).await;
-                            if is_blocked(&e) {
-                                tracing::warn!(account = %b.name, "师门日报(图片)：闸门拦截，未发（去重标记不推进）");
+                            if let Some(sent) = partial_image_sent(&e) {
+                                sent_any = true;
+                                finalize_lineage_claim(st, &b.name).await;
+                                tracing::warn!(account = %b.name, sent, pages = pngs.len(), error = %e, "师门日报图片部分发送，停止重试以避免重复");
                             } else {
-                                tracing::warn!(account = %b.name, error = %e, "师门日报(图片)推送失败");
-                                crate::store::push_touch(st, &b.name, &e.to_string()).await;
+                                /* 一页都没送达：还原占位标记，消息留到开闸后再推。 */
+                                restore_lineage_claim(st, &b.name).await;
+                                if is_blocked(&e) {
+                                    tracing::warn!(account = %b.name, "师门日报(图片)：闸门拦截，未发（去重标记不推进）");
+                                } else {
+                                    tracing::warn!(account = %b.name, error = %e, "师门日报(图片)推送失败");
+                                    crate::store::push_touch(st, &b.name, &e.to_string()).await;
+                                }
                             }
                         }
                     }
@@ -1826,8 +1900,9 @@ pub(crate) async fn direct_disciples(st: &AppState, master_id: u64) -> Vec<(u64,
 
 /// 缓存文件 magic（`PKRP` = PK Report PNG）+ 打包版本；改格式/改渲染尺寸就改版本号，旧文件自然失效。
 const IMG_CACHE_MAGIC: &[u8; 4] = b"PKRP";
-/// v2（2026-10-18）：榜单图改为按 [`DAILY_PNG_SCALE`] 渲染（1080 宽），旧尺寸图作废。
-const IMG_CACHE_VER: u8 = 2;
+/// v4（2026-10-19）：月榜末列改为「距上一名」、分页页脚/条形图改用全量口径；
+/// 旧版式缓存自然失效。v3 是本人行高亮 + 音浪值移到条右侧。
+const IMG_CACHE_VER: u8 = 4;
 /// 榜单图渲染缩放比：SVG 逻辑宽 1440 → 1080 px。
 ///
 /// 取舍（2026-10-18 用户口径「每天 100 个占太多了」）：微信显示宽度上限就是 1080，
@@ -1839,6 +1914,8 @@ const IMG_CACHE_MAX_MB_DEFAULT: u64 = 256;
 const IMG_CACHE_TTL_SECS: u64 = 12 * 3600;
 /// 单页 PNG 上限（防御：异常文件直接丢弃）
 const IMG_MAX_PAGE_BYTES: usize = 32 * 1024 * 1024;
+/// 缓存代次：导入 / 影响图片的配置变化时递增；旧预渲染任务看到代次变化就不再落盘。
+static IMG_CACHE_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn report_cache_dir() -> std::path::PathBuf {
     let db = crate::config::sqlite_path();
@@ -1920,7 +1997,11 @@ pub(crate) fn store_daily_pngs(team: &str, date: &str, person: &str, pngs: &[Vec
     }
     let buf = encode_pngs(pngs);
     let path = dir.join(img_cache_key(team, date, person));
-    let tmp = path.with_extension("tmp");
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = path.with_extension(format!("tmp-{}-{stamp}", std::process::id()));
     if std::fs::write(&tmp, &buf).is_ok() {
         if let Err(e) = std::fs::rename(&tmp, &path) {
             tracing::warn!(error = %e, "榜单图缓存写入失败（不影响发送）");
@@ -1931,6 +2012,7 @@ pub(crate) fn store_daily_pngs(team: &str, date: &str, person: &str, pngs: &[Vec
 
 /// 导入完成 → 清空榜单图缓存（榜单变了，旧图必须全部作废）。
 pub fn clear_daily_image_cache() {
+    IMG_CACHE_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let dir = report_cache_dir();
     let Ok(rd) = std::fs::read_dir(&dir) else {
         return;
@@ -1939,7 +2021,7 @@ pub fn clear_daily_image_cache() {
     for e in rd.flatten() {
         let p = e.path();
         let ext = p.extension().and_then(|x| x.to_str()).unwrap_or("");
-        if (ext == "bin" || ext == "tmp") && std::fs::remove_file(&p).is_ok() {
+        if (ext == "bin" || ext.starts_with("tmp")) && std::fs::remove_file(&p).is_ok() {
             n += 1;
         }
     }
@@ -2018,7 +2100,7 @@ fn sweep_image_cache() {
     for e in rd.flatten() {
         let path = e.path();
         let ext = path.extension().and_then(|x| x.to_str()).unwrap_or("");
-        if ext != "bin" && ext != "tmp" {
+        if ext != "bin" && !ext.starts_with("tmp") {
             continue;
         }
         let Ok(meta) = e.metadata() else { continue };
@@ -2072,6 +2154,7 @@ fn sweep_image_cache() {
 /// 命令「1」和自动推送命中缓存就秒回，没有缓存时照旧现场渲染（回填缓存）。
 pub async fn prewarm_daily_report_images(st: &std::sync::Arc<AppState>, date: &str) {
     sweep_image_cache();
+    let generation = IMG_CACHE_GEN.load(std::sync::atomic::Ordering::SeqCst);
     let started = std::time::Instant::now();
 
     /* ① **现取名单**（2026-10-18 用户口径「每天渲染前去看一下获取名单」）：
@@ -2101,13 +2184,29 @@ pub async fn prewarm_daily_report_images(st: &std::sync::Arc<AppState>, date: &s
     if total == 0 {
         tracing::info!(
             date,
-            skipped_unpaired, already_cached,
+            skipped_unpaired,
+            already_cached,
             "榜单图预渲染：没有需要渲染的人（未对接的不渲）"
         );
         return;
     }
 
-    /* ③ **人多分批**：每批 render_batch_size 人，批间休息 render_batch_interval_secs 秒，
+    /* ③ 每个团队只构建一次基础月榜：同一团队几十个人的每日之星、字段配置、
+    月榜聚合完全相同，只有水印不同。这样预渲染不会 N 个人重复跑 N 次 build_month。 */
+    let mut prepared: HashMap<
+        String,
+        Option<(crate::report::DailyReport, crate::report::DailyReportFields)>,
+    > = HashMap::new();
+    for team in ["male", "female"] {
+        if targets.iter().any(|(t, _)| t == team) {
+            prepared.insert(
+                team.to_string(),
+                prepare_daily_png_source(st, team, date).await,
+            );
+        }
+    }
+
+    /* ④ **人多分批**：每批 render_batch_size 人，批间休息 render_batch_interval_secs 秒，
     确保渲染不会长时间吃满 CPU（用户口径「多了就分批次确保不能太占用」）。 */
     let batch = render_batch_size();
     let interval = render_batch_interval_secs();
@@ -2129,16 +2228,23 @@ pub async fn prewarm_daily_report_images(st: &std::sync::Arc<AppState>, date: &s
             tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
         }
         for (team, name) in chunk {
-            /* ④ 渲染前**再复核一次**：这一批可能排了几分钟，期间对方可能刚解绑 /
+            /* ⑤ 渲染前**再复核一次**：这一批可能排了几分钟，期间对方可能刚解绑 /
             重扫换号 / 凭证失效 —— 断了的就别渲了。 */
             if !name_can_receive_images(st, name).await {
                 skipped_unpaired += 1;
                 tracing::info!(account = %name, "预渲染跳过：渲染前发现已断开");
                 continue;
             }
-            let pngs = render_daily_report_pngs(st, team, date, name).await;
-            if pngs.is_empty() {
+            let Some((rep, fields)) = prepared.get(team.as_str()).and_then(Option::as_ref) else {
+                tracing::warn!(team = %team, date, "榜单图预渲染：基础报表不可用，跳过");
                 continue;
+            };
+            let Some(pngs) = render_daily_pngs_from_rep(rep, name, fields).await else {
+                continue;
+            };
+            if IMG_CACHE_GEN.load(std::sync::atomic::Ordering::SeqCst) != generation {
+                tracing::warn!(account = %name, "预渲染代次已变化，丢弃本轮旧图");
+                return;
             }
             store_daily_pngs(team, date, name, &pngs);
             rendered += 1;
@@ -2179,7 +2285,13 @@ pub(crate) async fn daily_report_pngs(
     person_name: &str,
 ) -> Vec<Vec<u8>> {
     if let Some(p) = cached_daily_pngs(team, date, person_name) {
-        tracing::debug!(team, date, person = person_name, pages = p.len(), "榜单图命中缓存");
+        tracing::debug!(
+            team,
+            date,
+            person = person_name,
+            pages = p.len(),
+            "榜单图命中缓存"
+        );
         return p;
     }
     let pngs = render_daily_report_pngs(st, team, date, person_name).await;
@@ -2187,22 +2299,20 @@ pub(crate) async fn daily_report_pngs(
     pngs
 }
 
-/// 真正干活的渲染（无缓存）。`daily_report_pngs` 与预渲染共用。
-pub(crate) async fn render_daily_report_pngs(
+/// 构建一份可被多个收件人复用的榜单图基础数据（月榜 / 每日之星 / 字段配置）。
+/// 预渲染同一团队时只调一次，避免给 50 个人重复跑 50 次 build_month。
+async fn prepare_daily_png_source(
     st: &std::sync::Arc<AppState>,
     team: &str,
     date: &str,
-    person_name: &str,
-) -> Vec<Vec<u8>> {
+) -> Option<(crate::report::DailyReport, crate::report::DailyReportFields)> {
     let rank_items = daily_rank(st, team, date).await;
     if rank_items.is_empty() {
-        return Vec::new();
+        return None;
     }
     /* 🚩 每日之星：口径与自动推送完全一致（config star_title / star_override / star_icon） */
     let ov = crate::store::config_get(st, "star_override").await;
-    let auto = rank_items
-        .first()
-        .map(|(_, name, w)| (name.clone(), *w));
+    let auto = rank_items.first().map(|(_, name, w)| (name.clone(), *w));
     let (title, def) = parse_star_override(ov.as_deref(), auto);
     let icon = crate::store::config_get(st, "star_icon")
         .await
@@ -2216,8 +2326,8 @@ pub(crate) async fn render_daily_report_pngs(
     let rep = match crate::report::build_month(st, date, team, star).await {
         Ok(rep) => rep,
         Err(e) => {
-            tracing::warn!(error = %e, team = %team, date = %date, "机器人榜单图：月榜构建失败，退回文字");
-            return Vec::new();
+            tracing::warn!(error = %e, team = %team, date = %date, "榜单图：月榜构建失败");
+            return None;
         }
     };
     let fields = crate::store::config_get(st, "push_report_fields")
@@ -2225,16 +2335,65 @@ pub(crate) async fn render_daily_report_pngs(
         .map(|v| crate::report::PushReportFields::from_json(&v))
         .unwrap_or_default()
         .daily;
-    render_daily_two_pages(&rep, person_name, &fields)
-        .iter()
-        .filter_map(|svg| match svg_to_png_at(svg, DAILY_PNG_SCALE) {
-            Ok(png) => Some(png),
-            Err(e) => {
-                tracing::warn!(error = %e, "机器人榜单图：SVG 转 PNG 失败，跳过该页");
-                None
+    Some((rep, fields))
+}
+
+/// 整组 SVG 转 PNG：任何一页失败都返回 None，禁止把半套图发送或写进缓存。
+/// CPU 密集的 resvg 放到 blocking 线程池，避免卡住 Tokio worker。
+async fn render_svgs_to_pngs_async(
+    svgs: Vec<String>,
+    scale: f32,
+    context: &'static str,
+) -> Option<Vec<Vec<u8>>> {
+    if svgs.is_empty() {
+        return None;
+    }
+    match tokio::task::spawn_blocking(move || {
+        let mut out = Vec::with_capacity(svgs.len());
+        for (i, svg) in svgs.iter().enumerate() {
+            match svg_to_png_at(svg, scale) {
+                Ok(png) => out.push(png),
+                Err(e) => {
+                    tracing::warn!(page = i + 1, error = %e, "{context}：SVG 转 PNG 失败，整组作废");
+                    return None;
+                }
             }
-        })
-        .collect()
+        }
+        Some(out)
+    })
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error = %e, "{context}：PNG 渲染任务失败，整组作废");
+            None
+        }
+    }
+}
+
+/// 同一份基础报表按收件人水印渲染；页数、每日之星、字段显隐与自动推送同源。
+async fn render_daily_pngs_from_rep(
+    rep: &crate::report::DailyReport,
+    person_name: &str,
+    fields: &crate::report::DailyReportFields,
+) -> Option<Vec<Vec<u8>>> {
+    let svgs = render_daily_two_pages(rep, person_name, fields);
+    render_svgs_to_pngs_async(svgs, DAILY_PNG_SCALE, "榜单图").await
+}
+
+/// 真正干活的渲染（无缓存）。`daily_report_pngs` 与预渲染共用。
+pub(crate) async fn render_daily_report_pngs(
+    st: &std::sync::Arc<AppState>,
+    team: &str,
+    date: &str,
+    person_name: &str,
+) -> Vec<Vec<u8>> {
+    let Some((rep, fields)) = prepare_daily_png_source(st, team, date).await else {
+        return Vec::new();
+    };
+    render_daily_pngs_from_rep(&rep, person_name, &fields)
+        .await
+        .unwrap_or_default()
 }
 
 /* --------------------- 2026-10-12：我的抖音号分号明细 --------------------- */
@@ -2714,10 +2873,13 @@ mod tests {
         );
         assert!(!pages[1].contains(">01</text>"), "第 2 页不能重置名次");
 
-        // 1 人：单页，不带页码
+        // 1 / 2 人：单页，不带页码
         let single = render_daily_two_pages(&rep(mk_rows(1)), "浩雨", &fields);
         assert_eq!(single.len(), 1);
         assert!(!single[0].contains("第 1 /"));
+        let two = render_daily_two_pages(&rep(mk_rows(2)), "浩雨", &fields);
+        assert_eq!(two.len(), 1, "2 人不应强拆成两页");
+        assert!(!two[0].contains("第 1 /"));
 
         // 0 人：空 Vec（调用方退文本推送）
         assert!(render_daily_two_pages(&rep(vec![]), "浩雨", &fields).is_empty());
@@ -2788,10 +2950,7 @@ mod tests {
         assert_eq!(def, Some(("狼哲".to_string(), 0)));
     }
 
-    /// 追人：差距 = 对方 - 我，文案要带上双方数值
-    #[test]
     /* ---- 2026-10-18：预渲染分批配置 ---- */
-
     #[test]
     fn render_batch_config_is_within_bounds() {
         // 不假设环境变量取值，只守住「不会把 CPU 打满」的上下界：
@@ -2845,10 +3004,26 @@ mod tests {
     #[test]
     fn img_cache_key_is_stable_and_person_scoped() {
         let a = img_cache_key("male", "2026-10-16", "浩雨");
-        assert_eq!(a, img_cache_key("male", "2026-10-16", "浩雨"), "同输入应稳定");
-        assert_ne!(a, img_cache_key("male", "2026-10-16", "浩宁"), "不同人不同键");
-        assert_ne!(a, img_cache_key("female", "2026-10-16", "浩雨"), "不同团不同键");
-        assert_ne!(a, img_cache_key("male", "2026-10-15", "浩雨"), "不同日期不同键");
+        assert_eq!(
+            a,
+            img_cache_key("male", "2026-10-16", "浩雨"),
+            "同输入应稳定"
+        );
+        assert_ne!(
+            a,
+            img_cache_key("male", "2026-10-16", "浩宁"),
+            "不同人不同键"
+        );
+        assert_ne!(
+            a,
+            img_cache_key("female", "2026-10-16", "浩雨"),
+            "不同团不同键"
+        );
+        assert_ne!(
+            a,
+            img_cache_key("male", "2026-10-15", "浩雨"),
+            "不同日期不同键"
+        );
         assert!(a.ends_with(".bin"), "扩展名固定：{a}");
     }
 
@@ -3707,6 +3882,17 @@ mod tests {
     /// 闸门拦截必须是**可区分的信号**（2026-10-17 修复，审计 1-P0-2）：
     /// 拦截时 send_binding 返回 Err(Blocked)，调用方据此**不推进**去重标记；
     /// 若仍像以前那样返回 Ok，关闸期间的消息会被永久吞掉（标记已消耗、开闸也不补推）。
+    #[test]
+    fn partial_image_send_is_recognized() {
+        let e = anyhow::Error::new(PartialImageSend {
+            sent: 1,
+            total: 2,
+            source: anyhow::anyhow!("page 2 failed"),
+        });
+        assert_eq!(partial_image_sent(&e), Some(1));
+        assert!(!is_blocked(&e));
+    }
+
     #[test]
     fn blocked_is_distinguishable_from_success() {
         let e = anyhow::Error::from(Blocked);

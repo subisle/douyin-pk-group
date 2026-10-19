@@ -128,18 +128,10 @@ function fmtClock(d: Date) {
   return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
 }
 
-/** 公告配置页：📢 公告位 / 📣 展示页公告条 / 🎉 庆祝配置 / 🎈 看板弹幕 四个编辑区块
-    共用一份状态，底部 ann-savebar 一次整包保存（引导配置只回传、不再编辑）。 */
+/** 公告配置页：新手引导只保留开关；其余公告位 / 公告条 / 庆祝 / 弹幕共用保存。 */
 export default function AnnouncePage() {
   const [data, setData] = useState<{ enabled: boolean; version: number } | null>(null)
-  /* 引导步骤（2026-10-14 审计修复）：state 原先只声明 title/content/icon，但后端
-     to_json 会下发 `target`（spotlight 指向的目标元素选择器），save 又是整包 POST ——
-     于是运营在后台保存一次，每条步骤的 target 就被写成 ''，展示端所有 spotlight 引导
-     退化成居中卡片（卡片文案却还写着「点分组页签」，直接误导用户）。补上该字段：
-     加载时保留、保存时原样回传。 */
-  const [steps, setSteps] = useState<
-    { title: string; content: string; icon: string; target: string }[]
-  >([])
+  /* 新手引导内容固定在展示端；后台只维护 enabled 总开关。 */
   const [enabled, setEnabled] = useState(false)
   // 公告位 v2（登录页 / 看板 / 个人页）：受控输入，GET 后逐字段兜底填充
   const [placements, setPlacements] = useState<PlacementsMap>(EMPTY_PLACEMENTS)
@@ -224,7 +216,6 @@ export default function AnnouncePage() {
     // v2：后端 to_json 全量下发 placements / celebrate；泛型只声明用到的字段
     api<{
       enabled: boolean
-      steps: { title: string; content: string; icon: string; target?: string }[]
       version: number
       placements?: Partial<Record<PlacementKey, Partial<PlacementCfg>>>
       celebrate?: Partial<CelebrateCfg>
@@ -253,11 +244,6 @@ export default function AnnouncePage() {
     }>('/api/admin/announcement')
       .then((d) => {
         setData(d)
-        setSteps(
-          d.steps?.length
-            ? d.steps.map((s) => ({ ...s, target: s.target ?? '' }))
-            : [{ title: '', content: '', icon: '', target: '' }],
-        )
         setEnabled(!!d.enabled)
         // 公告位 v2 初始化：旧数据（serde default，字段可能整体缺失 / 某项缺失）逐字段兜底
         const p = d.placements ?? {}
@@ -369,7 +355,7 @@ export default function AnnouncePage() {
     void save({ items: next })
   }
 
-  /** 保存整个 Announcement JSON（引导 + 公告位 v2 + 庆祝 v2 + 公告条一起 POST）。
+  /** 保存公告配置（新手引导只提交 enabled；公告位 / 庆祝 / 公告条一起 POST）。
       overrides：开关类控件在同一 tick 里 setState 还没生效，把新值直接带进来
       避免用旧 state 覆盖刚点完的开关；文本类控件失焦时不传、走最新 state。 */
   async function save(overrides?: {
@@ -391,7 +377,6 @@ export default function AnnouncePage() {
       // 老后端 / 未加载时省略该字段，避免把库里的多条清空
       const body: Record<string, unknown> = {
         enabled: en,
-        steps,
         // 公告位 v2：三个位置原样上传，后端逐项做 enabled / 文案长度 / 图标白名单校验
         placements: pl,
         // 庆祝配置 v2：wave 转回数字（非数字 / 负数兜底 0 = 不显示）
@@ -433,8 +418,7 @@ export default function AnnouncePage() {
       }
       const d = await api<{ announcement: { version: number } }>('/api/admin/announcement', {
         method: 'POST',
-        // v2：保存 = 整个 Announcement JSON 一起下发（引导 + 公告位 + 庆祝 + 公告条），
-        // 后端 update_announcement 按字段合并后 version 自增（展示端重新弹出引导）。
+        // 保存 = 引导开关 + 公告位 + 庆祝 + 公告条；引导步骤由展示端固定，不再回传。
         body: JSON.stringify(body),
       })
       setData((prev) => (prev ? { ...prev, enabled: en, version: d.announcement.version } : prev))
@@ -458,9 +442,7 @@ export default function AnnouncePage() {
 
   return (
     <div className="page ann-page">
-      {/* 2026-10-14：引导弹窗编辑区块已按运营要求下线。steps / enabled 的 state 与
-          load / save 保留——save 是整包 POST /api/admin/announcement，把后端已有的
-          引导配置原样回传，别把库里的 steps 清掉。 */}
+      {/* 新手引导不在此页编辑内容，仅保留总开关。 */}
       {/* 配置加载失败提示（含重试）：data 为空 = 整包 GET 还没成功过 */}
       {!data && err && (
         <div className="alert warn">
@@ -469,6 +451,33 @@ export default function AnnouncePage() {
             重试
           </button>
         </div>
+      )}
+
+      {/* 新手引导：内容与步骤固定在展示端，后台只保留总开关。 */}
+      {data && (
+        <section className="card ann-sec">
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16 }}>
+            <div>
+              <h2 style={{ margin: 0 }}>新手引导</h2>
+              <p className="hint" style={{ margin: '6px 0 0' }}>
+                开启后按用户记录展示时间；同一用户 7 天内只提示一次。
+              </p>
+            </div>
+            <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, whiteSpace: 'nowrap' }}>
+              <input
+                className="switch"
+                type="checkbox"
+                checked={enabled}
+                onChange={(e) => {
+                  const next = e.target.checked
+                  setEnabled(next)
+                  void save({ enabled: next })
+                }}
+              />
+              <span>{enabled ? '已开启' : '已关闭'}</span>
+            </label>
+          </div>
+        </section>
       )}
 
       {/* ============ 区块 2 · 公告位（2026-10-13） ============ */}
@@ -984,8 +993,8 @@ export default function AnnouncePage() {
         )}
         {data && <span className="hint">当前版本 {data.version}</span>}
         <span style={{ fontSize: 11.5, color: 'var(--ink3)' }}>
-          文本框失焦或开关切换后自动保存（公告位 + 公告条 + 庆祝 + 弹幕整体一起保存，版本前进，
-          展示端会重新弹出引导；原有引导配置会原样保留一并回传）。
+          文本框失焦或开关切换后自动保存（公告位 + 公告条 + 庆祝 + 弹幕整体一起保存）。
+          新手引导只由上方总开关控制，同一用户 7 天内不会重复提示。
         </span>
         {/* 保存失败：红字原因 + 「重试」按钮（DESIGN §4.5：失败给重试入口与原因，不给「出错了」）。
             已在页面上的内容一个字段都不清 —— 失败后 state 保持原样，重试就是重发同一份。

@@ -60,6 +60,6 @@
 |---|---|
 | 服务 | `cd rust && cargo run -p pk-server`（读 `rust/.env`，端口 8787） |
 | 数据库 | PG `127.0.0.1:3318` / `douyin_dev`（读 `pk_reader`，写 `pk_writer`，属主 `zmy`） |
-| 管理员口令 | `rust/.env` 的 `ADMIN_PASSWORD`（fail-closed，未配则管理接口全关） |
+| 管理员口令 | `rust/.env` 的 `ADMIN_PASSWORD` 优先；未配置时默认 `shuai4444`（auth::DEFAULT_ADMIN_PASSWORD，2026-10-19 用户口径），改后重启生效 |
 | 展示端账号 | 浩雨=any（总管理员，原「帅帅」，开发期绑 person 20 浩雨）/ 饭团=female（女团）/ 鹏先生=any（绑 person 1027） |
 | 迁移 | `pk-server migrate`（本机表属主是 `zmy`，用 `DB_MIGRATOR_USER=zmy` 跑） |

@@ -35,6 +35,20 @@ use super::*;
 // 显式引入比满文件写 `axum::http::StatusCode::` 更省行
 use axum::http::StatusCode;
 
+/// 轻量取 hash：给 /my 组装同源头像 URL 用（查询失败/无图回落空串）。
+pub(crate) async fn avatar_hash(st: &ArcState, person_id: u64) -> Option<String> {
+    if person_id == 0 {
+        return None;
+    }
+    let sql = "SELECT hash FROM person_avatar WHERE person_id = ? AND image IS NOT NULL LIMIT 1";
+    pgrs::query_with_binds(&st.pools, &sid(st), sql, |q| q.bind(person_id as i64))
+        .await
+        .ok()?
+        .first()?
+        .try_get::<String, _>("hash")
+        .ok()
+}
+
 /// GET /api/public/avatars/{person_id}
 ///
 /// 成功：`200` + `Content-Type: <mime 或 image/jpeg>` +

@@ -13,9 +13,11 @@
 //! 口令哈希用 argon2id（PHC 字符串常驻内存），校验走 `PasswordVerifier`
 //! 的常数时间比较，避免逐字节提前返回泄露前缀。
 //!
-//! fail-closed（2026-10-11 审计整改）：未配置 ADMIN_PASSWORD 时**没有兜底
-//! 口令**，管理接口全部 503；main.rs 启动守卫默认直接拒绝启动（本地开发
-//! 需显式 ALLOW_NO_ADMIN_PASSWORD=1，但此时管理接口依然全关）。
+//! 口令（2026-10-19 用户口径）：**默认 `shuai4444`**，未配置 / 空 `ADMIN_PASSWORD`
+//! 时自动生效 —— 管理端永远有一个可用口令，不再出现「没配口令整片 503」。
+//! `ADMIN_PASSWORD` 环境变量优先（本地 / 生产都可覆盖）；口令 <16 位或正在用默认值
+//! 时启动日志给 WARN，提醒尽快轮换。旧口径（2026-10-11 审计 fail-closed：未配口令
+//! 拒绝启动 / 503）按用户要求作废，`ALLOW_NO_ADMIN_PASSWORD` 一并下线。
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -54,7 +56,15 @@ pub(crate) fn verify_password(input: &str, phc: &str) -> bool {
 
 /// 管理员口令最小长度（2026-10-17 审计 4-P0-A）：共享口令是整个管理面的唯一凭证，
 /// 短口令在「按来源 IP 限流」下仍可能被分布式撞库；本机历史上还出现过口令复用。
+/// 2026-10-19 起不再 fail-closed，只用于启动日志 WARN（默认口令本身就短于该阈值）。
 const ADMIN_PASSWORD_MIN_LEN: usize = 16;
+
+/// 默认管理员口令（2026-10-19 用户口径「后端的口令默认为 shuai4444」）。
+///
+/// 未配置 / 空 `ADMIN_PASSWORD` 时用它；配了环境变量则环境变量优先。
+/// 与旧版内置兜底口令的区别：这里**明确**是产品默认值（用户定的），
+/// 不是偷偷兜底 —— 启动日志会 WARN 提醒生产环境覆盖。
+pub const DEFAULT_ADMIN_PASSWORD: &str = "shuai4444";
 
 /// 管理员口令强度闸门（trim 后）：**只做长度下限**。
 ///
@@ -92,7 +102,8 @@ fn random_token() -> String {
 }
 
 pub struct Auth {
-    /// 管理员口令的 argon2id 哈希（None = 未配置 ADMIN_PASSWORD，fail-closed）
+    /// 管理员口令的 argon2id 哈希。`from_env()` 恒为 `Some`（未配置时用默认口令）；
+    /// `None` 只出现在测试构造里，表示「完全没有口令」的防御路径。
     password_hash: Option<String>,
     tokens: Mutex<HashMap<String, Instant>>,
     /// 一次性 ticket → 过期时刻（SSE / 日报图等只能把凭证放进 URL 的场景）
@@ -101,7 +112,8 @@ pub struct Auth {
     /* 2026-10-17 用户口径「去除登录限速」：LoginLimiter（连续失败 5 次锁 10 分钟）
     已连同 /api/auth/login 上的挂载一起移除；展示端（verify / my_login）的限速
     同日更早也已摘除。防爆破层次现在只剩：argon2id 校验本身（故意慢哈希）+
-    fail-closed 口令长度门。若后续要恢复限流，参考 git 历史里的 LoginLimiter。 */
+    默认/短口令的启动 WARN（2026-10-19 起口令长度不再 fail-closed）。
+    若后续要恢复限流，参考 git 历史里的 LoginLimiter。 */
 }
 
 /// 登录来源：日志用（2026-10-17 限速移除后仅打日志，不再做限流 key）。
@@ -158,51 +170,41 @@ impl Default for Auth {
 }
 
 impl Auth {
-    /// 是否配置了 ADMIN_PASSWORD（trim 后非空）。main.rs 启动守卫用它：
-    /// 没配置默认拒绝启动（本地开发可显式 ALLOW_NO_ADMIN_PASSWORD=1 放行启动，
-    /// 但管理接口仍然 fail-closed 全关，见 require_admin）。
-    pub fn password_configured() -> bool {
-        std::env::var("ADMIN_PASSWORD")
-            .ok()
-            .is_some_and(|p| !p.trim().is_empty())
-    }
-
     pub fn from_env() -> Self {
-        /* 审计 2026-10-11（fail-closed）：口令只认环境变量 ADMIN_PASSWORD，
-        删掉内置兜底口令（硬编码在公开仓库里等于明文公开）。未配置时
-        password_hash=None，管理接口全部 503，绝不再放行任何请求。 */
-        let password_hash = match std::env::var("ADMIN_PASSWORD")
+        /* 2026-10-19 用户口径「后端的口令默认为 shuai4444」：
+        - `ADMIN_PASSWORD` 配了（trim 后非空）→ 环境变量优先，口令照常启用；
+        - 没配 / 空串 / 纯空白 → 用 [`DEFAULT_ADMIN_PASSWORD`]。
+        旧口径（2026-10-11 审计 fail-closed：未配 → 503、短于 16 位 → 503）已作废：
+        现在任何时候都有可用口令，不会再把整个管理端锁死。运维可见性靠两条 WARN：
+        正在用默认口令、环境变量口令短于 16 位（密码明文绝不进日志）。 */
+        let env_password = std::env::var("ADMIN_PASSWORD")
             .ok()
             .map(|p| p.trim().to_string())
-            .filter(|p| !p.is_empty())
-        {
+            .filter(|p| !p.is_empty());
+        let password = match env_password {
             Some(p) => {
-                /* 2026-10-17 审计 4-P0-A：口令过短不得当作「已配置」放行（历史泄露值都
-                短于 16 位，一律被长度下限挡住）。不满足时与「未配置」同语义
-                （password_hash=None），require_admin 会 503 —— 启动日志给出可执行提示，
-                但绝不降级成无鉴权。 */
-                if admin_password_is_acceptable(&p) {
+                if !admin_password_is_acceptable(&p) {
+                    tracing::warn!(
+                        len = p.chars().count(),
+                        min_len = ADMIN_PASSWORD_MIN_LEN,
+                        "ADMIN_PASSWORD 短于 16 位：按用户口径照常启用，但建议尽快轮换为强口令"
+                    );
+                } else {
                     tracing::info!(
                         "管理员口令已从 ADMIN_PASSWORD 加载（argon2id 哈希驻留内存，不存明文）"
                     );
-                    Some(hash_password(&p))
-                } else {
-                    tracing::error!(
-                        len = p.chars().count(),
-                        min_len = ADMIN_PASSWORD_MIN_LEN,
-                        "ADMIN_PASSWORD 过短（<16 位）：管理接口已 fail-closed 全关（503），\
-                         请立即轮换为 ≥16 位强随机口令后重启"
-                    );
-                    None
                 }
+                p
             }
             None => {
-                tracing::error!(
-                    "ADMIN_PASSWORD 未配置，管理接口全部关闭（fail-closed）——请在 .env / 环境里配置后重启"
+                tracing::warn!(
+                    "未配置 ADMIN_PASSWORD：已启用默认管理口令（见 auth::DEFAULT_ADMIN_PASSWORD \
+                     与 AGENTS.md）；生产环境请在 .env 覆盖成强口令后重启"
                 );
-                None
+                DEFAULT_ADMIN_PASSWORD.to_string()
             }
         };
+        let password_hash = Some(hash_password(&password));
         let ttl = std::env::var("ADMIN_TOKEN_TTL")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -222,7 +224,7 @@ impl Auth {
 
     pub fn check_password(&self, input: &str) -> bool {
         match &self.password_hash {
-            // fail-closed：没配口令 → 任何输入都不通过
+            // 防御式：正常 from_env() 恒有口令（未配置时默认口令兜底），None 仅测试构造
             None => false,
             Some(phc) => verify_password(input, phc),
         }
@@ -230,8 +232,8 @@ impl Auth {
 
     /// 展示端登录门（/api/public/my/login）专用：账号、密码两个字段填同一个
     /// 管理员口令时，允许以「管理员观看账号」身份进展示页。口令读自运行时
-    /// 配置（ADMIN_PASSWORD 启动时哈希驻留内存），改 .env 后重启即生效。
-    /// 未配置口令 → 一律 false（fail-closed）。
+    /// 配置（ADMIN_PASSWORD 优先，未配置用默认口令），改 .env 后重启即生效。
+    /// 正常 from_env() 恒有口令；`None`（仅测试构造）→ 一律 false。
     pub(crate) fn verify_admin_password(&self, input: &str) -> bool {
         self.check_password(input)
     }
@@ -239,8 +241,8 @@ impl Auth {
     /* ───── 登录失败限流已整条移除（2026-10-17 用户口径「去除登录限速」）─────
     LoginLimiter（连续失败 5 次锁 10 分钟）原先先后挂在展示端登录（verify /
     my_login，2026-10-14 审计 P1 接入）与后台 /api/auth/login（P1-4）上，
-    今日全部摘除。防爆破层次现在只剩：argon2id 故意慢哈希 + fail-closed
-    口令长度门。要恢复限流请翻 git 历史找回 LoginLimiter。 */
+    今日全部摘除。防爆破层次现在只剩：argon2id 故意慢哈希 + 默认/短口令 WARN。
+    要恢复限流请翻 git 历史找回 LoginLimiter。 */
 
     pub fn issue(&self) -> String {
         let token = random_token();
@@ -252,7 +254,7 @@ impl Auth {
     }
 
     pub fn verify(&self, token: &str) -> bool {
-        // fail-closed：没配口令时任何 token 都不认
+        // 防御式：没有口令（仅测试构造）时任何 token 都不认；正常 from_env 恒有口令
         if !self.enabled() {
             return false;
         }
@@ -406,8 +408,8 @@ pub async fn require_admin(
         return next.run(req).await;
     }
 
-    // fail-closed（2026-10-11 审计整改）：未配置 ADMIN_PASSWORD 时管理接口
-    // 一律 503 —— 宁可全关，也不能像旧逻辑那样「没配口令就放行一切」。
+    // 防御式：正常 from_env 恒有口令（未配置时默认口令兜底），这里只在
+    // 「无口令实例」（仅测试构造）时兜 503 —— 绝不出现「无口令却放行一切」。
     if !auth.enabled() {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -454,7 +456,7 @@ pub async fn login(
     Json(body): Json<serde_json::Value>,
 ) -> Response {
     let auth = &st.auth;
-    // fail-closed：没配口令时登录接口同样关闭
+    // 防御式：正常 from_env 恒有口令，这里只在「无口令实例」（仅测试构造）时兜 503
     if !auth.enabled() {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -527,8 +529,8 @@ pub async fn session(
 ) -> Response {
     let auth = &st.auth;
     let enabled = auth.enabled();
-    // fail-closed：未配置口令时 enabled=false 且 ok=false（旧逻辑 !enabled → ok=true
-    // 会让前端以为「这台机器不要口令」，与 require_admin 的全关语义自相矛盾）
+    // 防御式：正常 from_env 恒 enabled=true（默认口令兜底）；恒发 ticket 不受影响。
+    // 保留「enabled=false 且 ok=false」的语义，避免前端把无口令实例误认成免登录。
     let ok = enabled && Auth::token_of(&headers).is_some_and(|t| auth.verify(&t));
     Json(json!({ "enabled": enabled, "ok": ok })).into_response()
 }
@@ -566,8 +568,8 @@ mod tests {
         assert!(!verify_password("x", "$argon2id$garbage"));
     }
 
-    /// fail-closed：未配置口令（None）时口令校验与 token 校验一律拒绝，
-    /// 任何输入都不放行（2026-10-11 审计整改，删掉内置兜底口令后的核心语义）。
+    /// 无口令实例（仅测试构造；from_env 已不会产生 None）：
+    /// 口令校验与 token 校验一律拒绝，任何输入都不放行。
     #[test]
     fn disabled_auth_rejects_everything() {
         let a = auth_with(None);
@@ -580,40 +582,54 @@ mod tests {
         assert!(!a.redeem_ticket("no-such-ticket"));
     }
 
-    /// 2026-10-17 审计 4-P0-A：口令过短（含历史泄露值，它们都 <16 位）不得启用管理鉴权
-    /// （fail-closed）；长度足够的强口令正常启用；未配置保持原 fail-closed 行为。
-    /// 注意：本测试**不使用任何真实口令明文**，样例一律为明显的假值。
+    /// 2026-10-19 用户口径「后端的口令默认为 shuai4444」：
+    /// 未配置 / 空串 / 纯空白 → 启用内置默认口令；环境变量配了 → 环境变量优先
+    /// （短口令只 WARN，不再 fail-closed）。注意：本测试**不使用任何真实口令明文**
+    /// （DEFAULT_ADMIN_PASSWORD 是用户点名写入代码的公开默认值，断言时用常量引用），
+    /// 强口令样例一律为明显的假值。
     #[test]
-    fn admin_password_gate_fails_closed_when_too_short() {
+    fn admin_password_defaults_to_builtin_when_unset() {
         let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let old = std::env::var("ADMIN_PASSWORD").ok();
 
-        // 过短 / 15 位差 1 / 纯空白：一律不启用管理鉴权
-        for weak in [
-            "short",
-            "weak-pass-123",    // 明显假样例：13 位，过短
-            "abc123456789012",  // 15 位，差 1 位
-            "abc123456789012 ", // 16 位但 trim 后 15 位（首尾空白不算强度）
-            "   ",
-        ] {
-            std::env::set_var("ADMIN_PASSWORD", weak);
-            let auth = Auth::from_env();
-            assert!(!auth.enabled(), "过短口令 {weak:?} 不应启用管理鉴权");
-            assert!(!auth.check_password(weak), "fail-closed 时任何输入都不通过");
-            assert!(!auth.verify("anything"));
-        }
-
-        // 未配置：保持原行为（管理接口全关）
+        // 未配置：默认口令兜底，管理鉴权启用
         std::env::remove_var("ADMIN_PASSWORD");
-        assert!(!Auth::from_env().enabled());
+        let auth = Auth::from_env();
+        assert!(auth.enabled(), "未配置口令应启用默认口令，管理鉴权不关闭");
+        assert!(
+            auth.check_password(DEFAULT_ADMIN_PASSWORD),
+            "未配置时应当用 DEFAULT_ADMIN_PASSWORD 校验"
+        );
+        assert!(!auth.check_password("wrong-password"));
 
-        // ≥16 位强口令：正常启用，且能通过校验
-        let strong = "S3cure-Admin-Phrase-2026-10-17";
+        // 纯空白：等同未配置，仍走默认口令
+        std::env::set_var("ADMIN_PASSWORD", "   ");
+        let auth = Auth::from_env();
+        assert!(auth.enabled(), "纯空白环境变量等同未配置，仍应启用");
+        assert!(
+            auth.check_password(DEFAULT_ADMIN_PASSWORD),
+            "纯空白时应当走默认口令"
+        );
+        assert!(!auth.check_password("   "), "空白本身不该当口令用");
+
+        // 显式短口令：环境变量优先，照常启用（不再 fail-closed，只 WARN）
+        let short = "short-pw";
+        std::env::set_var("ADMIN_PASSWORD", short);
+        let auth = Auth::from_env();
+        assert!(auth.enabled(), "显式配置的短口令也应启用管理鉴权");
+        assert!(auth.check_password(short), "环境变量口令优先于默认口令");
+        assert!(
+            !auth.check_password(DEFAULT_ADMIN_PASSWORD),
+            "配了环境变量后默认口令不应继续生效"
+        );
+
+        // ≥16 位强口令：环境变量优先，正常校验
+        let strong = "S3cure-Admin-Phrase-2026-10-19";
         std::env::set_var("ADMIN_PASSWORD", strong);
         let auth = Auth::from_env();
-        assert!(auth.enabled(), "16 位以上口令应启用管理鉴权");
+        assert!(auth.enabled(), "强口令应启用管理鉴权");
         assert!(auth.check_password(strong));
-        assert!(!auth.check_password("wrong-password"));
+        assert!(!auth.check_password(DEFAULT_ADMIN_PASSWORD));
 
         // 还原环境，避免影响其它用例
         match old {

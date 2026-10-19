@@ -142,7 +142,13 @@ fn fmt_wan(v: i64) -> String {
 /// 居中起点计算，几个像素的误差肉眼不可见，也不会影响其它列的固定 x 坐标。
 fn approx_text_width(s: &str, size: f64) -> f64 {
     s.chars()
-        .map(|c| if (c as u32) < 0x2E80 { size * 0.55 } else { size })
+        .map(|c| {
+            if (c as u32) < 0x2E80 {
+                size * 0.55
+            } else {
+                size
+            }
+        })
         .sum()
 }
 
@@ -479,13 +485,14 @@ pub fn render_svg_pages_with_fields(
                 daily_star: rep.daily_star.clone(),
                 rows,
             };
-            render_svg_labeled_inner(
+            render_svg_labeled_inner_with_all(
                 &page_rep,
                 &page_label,
                 total,
                 personal_mark,
                 false,
                 fields,
+                &rep.rows,
                 pi * per_page,
             )
         })
@@ -522,12 +529,7 @@ pub fn render_month_svg_pages(
     per_page: usize,
     personal_mark: &str,
 ) -> Vec<String> {
-    render_month_svg_pages_with_fields(
-        rep,
-        per_page,
-        personal_mark,
-        &DailyReportFields::default(),
-    )
+    render_month_svg_pages_with_fields(rep, per_page, personal_mark, &DailyReportFields::default())
 }
 
 /// 月榜「定页数」分页渲染（2026-10-17 用户口径「每日报告分成两页即可」）：
@@ -573,13 +575,14 @@ pub fn render_month_svg_pages_exact(
                 daily_star: rep.daily_star.clone(),
                 rows,
             };
-            let svg = render_svg_labeled_inner(
+            let svg = render_svg_labeled_inner_with_all(
                 &page_rep,
                 &page_label,
                 total,
                 personal_mark,
                 true,
                 fields,
+                &rep.rows,
                 offset,
             );
             offset += page_rep.rows.len();
@@ -656,20 +659,21 @@ pub fn render_month_svg_pages_with_fields(
                 rows,
             };
             // 修复2：第 pi 页的名次从「前面页行数之和」起编（pi*per_page），跨页连续
-            render_svg_labeled_inner(
+            render_svg_labeled_inner_with_all(
                 &page_rep,
                 &page_label,
                 total,
                 personal_mark,
                 true,
                 fields,
+                &rep.rows,
                 pi * per_page,
             )
         })
         .collect()
 }
 
-#[allow(clippy::too_many_lines)]
+/// 单页渲染的便捷入口：全量行 = 本页行（测试 / 非分页路径使用）。
 fn render_svg_labeled_inner(
     rep: &DailyReport,
     page_label: &str,
@@ -677,6 +681,29 @@ fn render_svg_labeled_inner(
     personal_mark: &str,
     is_month: bool,
     fields: &DailyReportFields,
+    row_offset: usize,
+) -> String {
+    render_svg_labeled_inner_with_all(
+        rep,
+        page_label,
+        total,
+        personal_mark,
+        is_month,
+        fields,
+        &rep.rows,
+        row_offset,
+    )
+}
+
+#[allow(clippy::too_many_lines)]
+fn render_svg_labeled_inner_with_all(
+    rep: &DailyReport,
+    page_label: &str,
+    total: usize,
+    personal_mark: &str,
+    is_month: bool,
+    fields: &DailyReportFields,
+    all_rows: &[ReportRow],
     // 修复2：本页第一行的名次偏移 = 前面页行数之和（0 = 单页/首页）。
     // 原先函数内用 `total - n` 推导，只对「两页且当前是末页」成立。
     row_offset: usize,
@@ -688,7 +715,8 @@ fn render_svg_labeled_inner(
     let list_h = n as f64 * 48.0;
     let footer_y = header_h + list_h + 20.0;
     let total_h = footer_y + 50.0;
-    let max_wave = rep.rows.iter().map(|r| r.wave).max().unwrap_or(1).max(1);
+    // 分页时也必须用全量榜单的最大值，否则第二页低音浪会被放大成和第一页第一名一样长。
+    let max_wave = all_rows.iter().map(|r| r.wave).max().unwrap_or(1).max(1);
     let th_y = header_h - 40.0; // 表头背景 y
     let ty_y = header_h - 22.0; // 表头文字 y
     let team_label = if rep.team == "male" {
@@ -754,7 +782,7 @@ fn render_svg_labeled_inner(
             //  b) 同坐标再叠一层纯黑 opacity 0.004 → 在蓝条/深色区域形成可检测暗差。
             // 两层都是实心文字字形，像素层面稳定存在，程序按模板位置做相关即可提取。
             watermark_layer.push_str(&format!(
-                "<text x=\"{wx:.0}\" y=\"{wy:.0}\" font-family=\"{FONT}\" font-size=\"22\" font-weight=\"900\" fill=\"#FFFFFF\" fill-opacity=\"0.35\" text-anchor=\"middle\" transform=\"rotate(-18 {wx:.0} {wy:.0})\">{mark}</text>"
+                "<text x=\"{wx:.0}\" y=\"{wy:.0}\" font-family=\"{FONT}\" font-size=\"22\" font-weight=\"900\" fill=\"#FFFFFF\" fill-opacity=\"0.20\" text-anchor=\"middle\" transform=\"rotate(-18 {wx:.0} {wy:.0})\">{mark}</text>"
             ));
             watermark_layer.push_str(&format!(
                 "<text x=\"{wx:.0}\" y=\"{wy:.0}\" font-family=\"{FONT}\" font-size=\"22\" font-weight=\"900\" fill=\"#000000\" fill-opacity=\"0.012\" text-anchor=\"middle\" transform=\"rotate(-18 {wx:.0} {wy:.0})\">{mark}</text>"
@@ -762,9 +790,14 @@ fn render_svg_labeled_inner(
         }
     }
 
-    // 标题
+    // 标题：月榜图明确写「月榜」，避免和当日日报混读。
+    let report_title = if is_month {
+        "主播月榜日报"
+    } else {
+        "主播数据日报"
+    };
     s.push_str(&format!(
-        "<text x=\"360\" y=\"21\" font-size=\"25\" fill=\"#101828\" font-weight=\"700\" text-anchor=\"middle\" dominant-baseline=\"central\" font-family=\"{FONT}\">主播数据日报 · {team_label}{page_label}</text>"
+        "<text x=\"360\" y=\"21\" font-size=\"25\" fill=\"#101828\" font-weight=\"700\" text-anchor=\"middle\" dominant-baseline=\"central\" font-family=\"{FONT}\">{report_title} · {team_label}{page_label}</text>"
     ));
     let date_cn = format_cn_date(&rep.date);
 
@@ -847,13 +880,10 @@ fn render_svg_labeled_inner(
     } else {
         "当日音浪"
     };
-    /* 最后一列的表头（2026-10-17 修复，审计 2-P2-7）：
-    月榜这一列填的其实是**本月累计**（`total_wave: wave` 同值复用），
-    但表头沿用日榜的「累计总音浪」—— 主播看到月榜「累计总音浪 50 万」
-    会理解成历史累计，实际是本月，两榜同表头不同义。
-    月榜改标「本月累计（总）」，明确它就是左边那列的同一个数。 */
+    /* 最后一列：日榜是历史累计；月榜不再重复左边同一个「本月累计」，
+    改为「距上一名」，用全量榜单跨页计算差距。 */
     let total_col_label = if is_month {
-        "本月累计（总）"
+        "距上一名"
     } else {
         "累计总音浪"
     };
@@ -871,7 +901,7 @@ fn render_svg_labeled_inner(
             || (label == "当月未播天数" && fields.absent_days)
             || (label == "本月累计音浪" && fields.wave)
             || (label == "当日音浪" && fields.wave)
-            || (label == "本月累计（总）" && fields.total_wave)
+            || (label == "距上一名" && fields.total_wave)
             || (label == "累计总音浪" && fields.total_wave)
     })
     .collect();
@@ -883,20 +913,35 @@ fn render_svg_labeled_inner(
 
     // 数据行（名次按全团连续编号：修复2 —— row_offset 参数由分页方传入（前面页行数之和），
     // >2 页时编号依然连续；原先函数内 `total - n` 只在「两页且当前是末页」时碰巧正确）
-    let bar_full = 242.5f64;
+    let bar_track_w = 150.0f64;
+    let wave_value_x = 548.0f64;
     for (i, r) in rep.rows.iter().enumerate() {
         let y = header_h + i as f64 * 48.0;
         let text_y = y + 25.0;
         let rank = row_offset + i + 1;
         let off_air = !r.is_live;
-        let row_bg = if off_air { "#FFF7F7" } else { "#FFFFFF" };
-        let row_stroke = if off_air { "#FEE4E2" } else { "#EAECF0" };
+        let is_me = !personal_mark.trim().is_empty() && r.name == personal_mark.trim();
+        let row_bg = if off_air {
+            "#FFF7F7"
+        } else if is_me {
+            "#F0F7FF"
+        } else {
+            "#FFFFFF"
+        };
+        let row_stroke = if off_air {
+            "#FEE4E2"
+        } else if is_me {
+            "#B2DDFF"
+        } else {
+            "#EAECF0"
+        };
         s.push_str(&format!(
             "<rect y=\"{y:.0}\" width=\"720\" height=\"48\" fill=\"{row_bg}\" stroke=\"{row_stroke}\" stroke-width=\"1\"/>"
         ));
-        if off_air {
+        if off_air || is_me {
+            let accent = if off_air { "#F04438" } else { "#007AFF" };
             s.push_str(&format!(
-                "<rect y=\"{:.0}\" width=\"4\" height=\"32\" fill=\"#F04438\" rx=\"2\"/>",
+                "<rect y=\"{:.0}\" width=\"4\" height=\"32\" fill=\"{accent}\" rx=\"2\"/>",
                 y + 8.0
             ));
         }
@@ -920,11 +965,22 @@ fn render_svg_labeled_inner(
                 rank
             ));
         }
-        let name_fg = if off_air { "#B42318" } else { "#101828" };
+        let name_fg = if off_air {
+            "#B42318"
+        } else if is_me {
+            "#005FCC"
+        } else {
+            "#101828"
+        };
         if fields.name {
+            let name_text = if is_me {
+                format!("{}（我）", r.name)
+            } else {
+                r.name.clone()
+            };
             s.push_str(&format!(
                 "<text x=\"72.6\" y=\"{text_y:.0}\" font-size=\"14\" fill=\"{name_fg}\" font-weight=\"700\" text-anchor=\"start\" dominant-baseline=\"central\" font-family=\"{FONT}\">{}</text>",
-                esc(&r.name)
+                esc(&name_text)
             ));
         }
         let absent_fg = if off_air { "#B42318" } else { "#027A48" };
@@ -937,13 +993,13 @@ fn render_svg_labeled_inner(
         if fields.wave {
             if off_air {
                 s.push_str(&format!(
-                    "<rect x=\"312.6\" y=\"{:.0}\" width=\"{bar_full}\" height=\"22\" fill=\"#FEE4E2\" rx=\"11\"/><text x=\"433.8\" y=\"{text_y:.0}\" font-size=\"13\" fill=\"#D92D20\" font-weight=\"700\" text-anchor=\"middle\" dominant-baseline=\"central\" font-family=\"{FONT}\">未开播</text>",
+                    "<rect x=\"312.6\" y=\"{:.0}\" width=\"{bar_track_w}\" height=\"22\" fill=\"#FEE4E2\" rx=\"11\"/><text x=\"433.8\" y=\"{text_y:.0}\" font-size=\"13\" fill=\"#D92D20\" font-weight=\"700\" text-anchor=\"middle\" dominant-baseline=\"central\" font-family=\"{FONT}\">未开播</text>",
                     y + 14.0
                 ));
             } else {
-                let w = bar_full * r.wave as f64 / max_wave as f64;
+                let w = bar_track_w * r.wave as f64 / max_wave as f64;
                 s.push_str(&format!(
-                    "<rect x=\"312.6\" y=\"{:.0}\" width=\"{bar_full}\" height=\"22\" fill=\"#EAF3FF\" rx=\"11\"/>",
+                    "<rect x=\"312.6\" y=\"{:.0}\" width=\"{bar_track_w}\" height=\"22\" fill=\"#EAF3FF\" rx=\"11\"/>",
                     y + 14.0
                 ));
                 if w > 1.0 {
@@ -952,15 +1008,10 @@ fn render_svg_labeled_inner(
                         y + 14.0
                     ));
                 }
-                /* 2026-10-17 修复「有的行不显示音浪」：数字是白色 #FFFFFF，原本设计
-                是压在蓝色进度条上；但条宽按音浪比例缩放，全团第一名动辄是末位的
-                几十倍，绝大多数人的条只有几像素宽——数字中心 x=433.8 落在浅色轨道
-                #EAF3FF 上，白字压浅底，resvg 是忠实渲染的，肉眼就是看不见。
-                现在给数字加 paint-order="stroke" 的 #007AFF 描边：在蓝条上与原版
-                几乎一样（蓝底白字），在浅轨道上变成白字蓝边，任何条宽都可读。
-                resvg 0.45 支持 paint-order（/tmp/resvg-font-test paint_order2 验证）。 */
+                /* 2026-10-19：数值移到进度条右侧、用深色字，不再白字压在条内。
+                这样无论条宽是 1px 还是满格，数字都稳定可读，也不会被水印顶穿。 */
                 s.push_str(&format!(
-                    "<text x=\"433.8\" y=\"{text_y:.0}\" font-size=\"13\" fill=\"#FFFFFF\" paint-order=\"stroke\" stroke=\"#007AFF\" stroke-width=\"3\" stroke-linejoin=\"round\" font-weight=\"700\" text-anchor=\"middle\" dominant-baseline=\"central\" font-family=\"{MONO}\">{}</text>",
+                    "<text x=\"{wave_value_x}\" y=\"{text_y:.0}\" font-size=\"13\" fill=\"#344054\" font-weight=\"700\" text-anchor=\"end\" dominant-baseline=\"central\" font-family=\"{MONO}\">{}</text>",
                     esc(&fmt_wan(r.wave))
                 ));
             }
@@ -970,15 +1021,40 @@ fn render_svg_labeled_inner(
             ));
         }
         if fields.total_wave {
+            let right_text = if is_month {
+                let idx = row_offset + i;
+                let gap = if idx == 0 {
+                    all_rows
+                        .get(1)
+                        .map(|next| (r.wave - next.wave).max(0))
+                        .unwrap_or(0)
+                } else {
+                    all_rows
+                        .get(idx - 1)
+                        .map(|prev| (prev.wave - r.wave).max(0))
+                        .unwrap_or(0)
+                };
+                if all_rows.len() <= 1 {
+                    "—".to_string()
+                } else if gap == 0 {
+                    "持平".to_string()
+                } else if idx == 0 {
+                    format!("领先 {}", fmt_wan(gap))
+                } else {
+                    format!("差 {}", fmt_wan(gap))
+                }
+            } else {
+                fmt_wan(r.total_wave)
+            };
             s.push_str(&format!(
-                "<text x=\"708\" y=\"{text_y:.0}\" font-size=\"14\" fill=\"#475467\" text-anchor=\"end\" dominant-baseline=\"central\" font-family=\"{MONO}\">{}</text>",
-                esc(&fmt_wan(r.total_wave))
+                "<text x=\"708\" y=\"{text_y:.0}\" font-size=\"13\" fill=\"#475467\" text-anchor=\"end\" dominant-baseline=\"central\" font-family=\"{MONO}\">{}</text>",
+                esc(&right_text)
             ));
         }
     }
 
-    // footer：数据说明 + 未播统计（全团口径）
-    let off_count = total - rep.rows.iter().filter(|r| r.is_live).count();
+    // footer：数据说明 + 未播统计（全量口径，分页时不能只数本页）
+    let off_count = all_rows.iter().filter(|r| !r.is_live).count();
     s.push_str(&format!(
         "<text x=\"8\" y=\"{footer_y:.0}\" font-size=\"12\" fill=\"#667085\" font-weight=\"600\" text-anchor=\"start\" dominant-baseline=\"central\" font-family=\"{FONT}\">数据日期 {} · {} {total} 人</text>",
         date_cn,
@@ -1003,7 +1079,14 @@ fn render_svg_labeled_inner(
 pub fn render_svg(rep: &DailyReport) -> String {
     // 单页渲染：名次从 1 开始，row_offset = 0（修复2 新增参数）；
     // 网页版固定全字段显示（推送图的字段显隐只作用于微信推送）。
-    render_svg_labeled(rep, "", rep.rows.len(), "", &DailyReportFields::default(), 0)
+    render_svg_labeled(
+        rep,
+        "",
+        rep.rows.len(),
+        "",
+        &DailyReportFields::default(),
+        0,
+    )
 }
 
 fn format_cn_date(iso: &str) -> String {
@@ -1017,7 +1100,8 @@ fn format_cn_date(iso: &str) -> String {
 ///
 /// 时长口径（2026-10-16 用户口径「机器人推送的也改」）：与展示端同一条 `x时x分` 规则
 /// （[`crate::push::fmt_minutes`]，不带秒、不用「分钟」长词）。**时长为 0 时不显示**——
-/// 按日导入不写时长（每日只有月口径），0 = 没数据，拼出来只会是噪音「X / 0分」；
+/// 0 表示没有时长数据（老文件没有「时长 / 开播有效时长」列，或当天没开播），
+/// 拼出来只会是噪音「X / 0分」；
 /// 这与展示端领奖台 / 榜单行对 `minutes === 0` 的隐藏语义一致。
 pub fn render_text(rep: &DailyReport) -> String {
     let team_label = if rep.team == "male" {
@@ -1330,8 +1414,8 @@ mod tests {
         }
     }
 
-    /// 每人专属隐形水印（2026-10-12）：同一榜单、不同收件人 → 水印文字必须是
-    /// 各自艺名（隐形双层：白 0.35 + 黑 0.012），且互相不同。
+    /// 每人专属水印（2026-10-12）：同一榜单、不同收件人 → 水印文字必须是
+    /// 各自艺名（双层：白 0.20 + 黑 0.012），且互相不同。
     #[test]
     fn per_recipient_hidden_watermark() {
         let mk_rows = || {
@@ -1344,7 +1428,7 @@ mod tests {
                 total_wave: 547_308,
             }]
         };
-        let build = |mark: &str| DailyReport {
+        let build = || DailyReport {
             date: "2026-10-11".into(),
             team: "male".into(),
             rows: mk_rows(),
@@ -1353,7 +1437,7 @@ mod tests {
             daily_star: None,
         };
         let a = render_svg_labeled_inner(
-            &build("浩月"),
+            &build(),
             "",
             1,
             "浩月",
@@ -1362,7 +1446,7 @@ mod tests {
             0,
         );
         let b = render_svg_labeled_inner(
-            &build("狼征"),
+            &build(),
             "",
             1,
             "狼征",
@@ -1370,8 +1454,8 @@ mod tests {
             &DailyReportFields::default(),
             0,
         );
-        // 隐形双层都在：白 0.35 + 黑 0.012
-        assert!(a.contains("fill-opacity=\"0.35\"") && a.contains("fill-opacity=\"0.012\""));
+        // 双层水印都在：白 0.20 + 黑 0.012（2026-10-19 降低白色强度，避免糊住数值）
+        assert!(a.contains("fill-opacity=\"0.20\"") && a.contains("fill-opacity=\"0.012\""));
         // 文字是各自艺名，且互不相同
         assert!(a.contains(&format!(">{}</text>", "浩月")));
         assert!(b.contains(&format!(">{}</text>", "狼征")));
@@ -1383,15 +1467,8 @@ mod tests {
         assert!(b.contains(">狼征</text>"));
         assert!(!b.contains(">浩月</text>"), "狼征的图里不能出现浩月水印");
         // 管理后台版（无 personal_mark）保持通用水印，不带个人名
-        let admin = render_svg_labeled_inner(
-            &build(""),
-            "",
-            1,
-            "",
-            true,
-            &DailyReportFields::default(),
-            0,
-        );
+        let admin =
+            render_svg_labeled_inner(&build(), "", 1, "", true, &DailyReportFields::default(), 0);
         assert!(admin.contains(WATERMARK));
         assert!(!admin.contains(">浩月</text>"));
     }
@@ -1418,10 +1495,10 @@ mod tests {
                 icon: String::new(),
             }),
         };
-        let svg = render_svg_labeled_inner(&rep, "", 1, "浩月", true, &DailyReportFields::default(), 0);
+        let svg =
+            render_svg_labeled_inner(&rep, "", 1, "浩月", true, &DailyReportFields::default(), 0);
         // 表头锚点与列值锚点一一对应：主播姓名 start @72.6，末列 end @708。
-        // 2026-10-17（审计 2-P2-7）：月榜末列表头改「本月累计（总）」——
-        // 月榜这一列其实是本月累计，沿用日榜的「累计总音浪」会让主播理解成历史累计。
+        // 2026-10-19：月榜末列改为「距上一名」，不再重复左边同一个本月累计。
         let h_name = text_element_of(&svg, "主播姓名");
         assert!(
             h_name.contains("x=\"72.6\""),
@@ -1435,10 +1512,10 @@ mod tests {
             !svg.contains(">累计总音浪</text>"),
             "月榜不该再用日榜的「累计总音浪」表头（语义是本月累计）"
         );
-        let h_total = text_element_of(&svg, "本月累计（总）");
+        let h_total = text_element_of(&svg, "距上一名");
         assert!(
             h_total.contains("x=\"708\""),
-            "总音浪表头 x 应与列值同为 708: {h_total}"
+            "距上一名表头 x 应与列值同为 708: {h_total}"
         );
         assert!(
             h_total.contains("text-anchor=\"end\""),
@@ -1485,7 +1562,9 @@ mod tests {
         // href 经 esc() 转义 & < >
         assert!(svg.contains("<image "), "data:image 图标应渲染为 <image>");
         assert!(
-            svg.contains("width=\"16\" height=\"16\" href=\"data:image/png;base64,iVBOR&amp;x&lt;y\""),
+            svg.contains(
+                "width=\"16\" height=\"16\" href=\"data:image/png;base64,iVBOR&amp;x&lt;y\""
+            ),
             "头部胶囊图标应为 16×16 且 href 做转义"
         );
         assert!(
@@ -1537,20 +1616,20 @@ mod tests {
             status: false,
         };
         let svg_none = render_svg_labeled_inner(&rep, "", 1, "", false, &hidden, 0);
-        for label in ["排名", "主播姓名", "当月未播天数", "当日音浪", "累计总音浪"] {
+        for label in ["排名", "主播姓名", "当月未播天数", "当日音浪", "累计总音浪"]
+        {
             assert!(!svg_none.contains(label), "关掉的列不该渲染表头：{label}");
         }
-        assert!(!svg_none.contains(">浩龙</text>"), "姓名列关掉后不应再出现姓名");
+        assert!(
+            !svg_none.contains(">浩龙</text>"),
+            "姓名列关掉后不应再出现姓名"
+        );
     }
 
-    /// 2026-10-17 修复「微信 bot 推送的每日榜单有的不显示音浪」：
-    /// 音浪数字是白色，靠压在蓝色进度条上才有对比度；但条宽按音浪比例缩放，
-    /// 第一名是末位几十倍时大多数条只有几像素宽，白字落在浅色轨道 #EAF3FF 上
-    /// —— resvg 忠实渲染了，但肉眼不可见。修复 = 给数字加 paint-order="stroke"
-    /// 的 #007AFF 描边（白字蓝边，任何条宽都可读；在蓝条上观感与原版几乎一致）。
-    /// 本测试钉住：数字必须带描边，且描边色与进度条同色。
+    /// 2026-10-19：音浪值放到进度条右侧的深色文字列，不依赖条宽，
+    /// 也不会再被白色水印糊住；不再使用白字 + 描边。
     #[test]
-    fn wave_value_text_has_stroke_for_light_track_visibility() {
+    fn wave_value_text_is_dark_and_right_of_track() {
         let rep = DailyReport {
             date: "2026-10-16".into(),
             team: "male".into(),
@@ -1576,31 +1655,161 @@ mod tests {
             no_master: vec![],
             daily_star: None,
         };
-        let svg = render_svg_labeled_inner(
-            &rep,
-            "",
-            2,
-            "",
-            false,
-            &DailyReportFields::default(),
-            0,
-        );
-        // 白色数字必须带 paint-order="stroke" + 蓝描边（浅轨道上可见）
-        let expect = "fill=\"#FFFFFF\" paint-order=\"stroke\" stroke=\"#007AFF\"";
+        let svg =
+            render_svg_labeled_inner(&rep, "", 2, "", false, &DailyReportFields::default(), 0);
         assert!(
-            svg.matches(expect).count() >= 2,
-            "音浪数字缺蓝描边（浅色轨道上白字不可见）：{svg}"
+            svg.matches("fill=\"#344054\" font-weight=\"700\"").count() >= 2,
+            "音浪值应使用深色文字: {svg}"
         );
-        // 防退化：不许再出现「裸白字」变体
         assert!(
-            !svg.contains("fill=\"#FFFFFF\" font-weight=\"700\" text-anchor=\"middle\""),
-            "音浪数字不应再是无描边的裸白字"
+            svg.contains("x=\"548\"") && svg.contains("text-anchor=\"end\""),
+            "音浪值应固定落在进度条右侧: {svg}"
         );
+        assert!(
+            !svg.contains("paint-order=\"stroke\""),
+            "不应再依赖白字描边"
+        );
+    }
+
+    #[test]
+    fn monthly_report_gap_column_and_marks_viewer() {
+        let rep = DailyReport {
+            date: "2026-10-10".into(),
+            team: "male".into(),
+            rows: vec![
+                ReportRow {
+                    name: "浩龙".into(),
+                    wave: 90_000,
+                    minutes: 0,
+                    is_live: true,
+                    absent_days: 1,
+                    total_wave: 90_000,
+                },
+                ReportRow {
+                    name: "浩月".into(),
+                    wave: 10_000,
+                    minutes: 0,
+                    is_live: true,
+                    absent_days: 0,
+                    total_wave: 10_000,
+                },
+            ],
+            master_groups: vec![],
+            no_master: vec![],
+            daily_star: None,
+        };
+        let svg =
+            render_svg_labeled_inner(&rep, "", 2, "浩月", true, &DailyReportFields::default(), 0);
+        assert!(
+            svg.contains("领先 8.0 万"),
+            "第一名应显示领先第二名的差值: {svg}"
+        );
+        assert!(
+            svg.contains("差 8.0 万"),
+            "第二名应显示距上一名的差值: {svg}"
+        );
+        assert!(
+            svg.contains("浩月（我）"),
+            "收件人本人行应标记「我」: {svg}"
+        );
+        assert!(
+            svg.contains("fill=\"#F0F7FF\""),
+            "收件人本人行应有浅蓝高亮: {svg}"
+        );
+    }
+
+    #[test]
+    fn pagination_bars_use_global_max_wave() {
+        let rep = DailyReport {
+            date: "2026-10-10".into(),
+            team: "male".into(),
+            rows: vec![
+                ReportRow {
+                    name: "第一名".into(),
+                    wave: 100_000,
+                    minutes: 0,
+                    is_live: true,
+                    absent_days: 0,
+                    total_wave: 100_000,
+                },
+                ReportRow {
+                    name: "第二名".into(),
+                    wave: 10_000,
+                    minutes: 0,
+                    is_live: true,
+                    absent_days: 0,
+                    total_wave: 10_000,
+                },
+                ReportRow {
+                    name: "第三名".into(),
+                    wave: 1_000,
+                    minutes: 0,
+                    is_live: true,
+                    absent_days: 0,
+                    total_wave: 1_000,
+                },
+            ],
+            master_groups: vec![],
+            no_master: vec![],
+            daily_star: None,
+        };
+        let pages = render_month_svg_pages(&rep, 2, "");
+        assert_eq!(pages.len(), 2);
+        assert!(
+            pages[1].contains("width=\"1.5\""),
+            "第二页条形图必须按全量最大音浪缩放，而不是页内最大值"
+        );
+    }
+
+    #[test]
+    fn pagination_footer_uses_full_off_air_count() {
+        let rep = DailyReport {
+            date: "2026-10-10".into(),
+            team: "male".into(),
+            rows: vec![
+                ReportRow {
+                    name: "开播".into(),
+                    wave: 90_000,
+                    minutes: 0,
+                    is_live: true,
+                    absent_days: 0,
+                    total_wave: 90_000,
+                },
+                ReportRow {
+                    name: "未播".into(),
+                    wave: 0,
+                    minutes: 0,
+                    is_live: false,
+                    absent_days: 2,
+                    total_wave: 0,
+                },
+                ReportRow {
+                    name: "未播2".into(),
+                    wave: 0,
+                    minutes: 0,
+                    is_live: false,
+                    absent_days: 2,
+                    total_wave: 0,
+                },
+            ],
+            master_groups: vec![],
+            no_master: vec![],
+            daily_star: None,
+        };
+        let pages = render_month_svg_pages(&rep, 1, "");
+        assert_eq!(pages.len(), 3);
+        for (i, page) in pages.iter().enumerate() {
+            assert!(
+                page.contains("未开播 2 人"),
+                "第 {} 页 footer 应使用全量未播人数: {page}",
+                i + 1
+            );
+        }
     }
 
     /// 机器人「日报」文本的时长口径（2026-10-16 用户口径「机器人推送的也改」）：
     /// 与展示端同一条 `x时x分` 规则、不带「分钟」长词；**时长 0 不显示**
-    /// （按日导入不写时长，0 = 没数据，拼出来是「X / 0分」这种噪音）。
+    /// （0 = 没有时长数据：老文件没有时长列或当天没开播，拼出来是「X / 0分」这种噪音）。
     #[test]
     fn bot_daily_report_text_formats_duration_like_display() {
         let mk = |name: &str, wave: i64, minutes: i64| ReportRow {
