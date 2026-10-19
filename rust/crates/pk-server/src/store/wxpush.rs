@@ -69,7 +69,7 @@ pub async fn push_state(st: &AppState, name: &str) -> serde_json::Value {
     let Some(r) = row else {
         return serde_json::json!({
             "bound": false, "code": "", "codeExpires": "",
-            "notifyTarget": false, "dailyReport": false,
+            "notifyTarget": false, "dailyReport": true,
             "lineageReport": false, "hasDisciples": false,
         });
     };
@@ -685,15 +685,21 @@ pub async fn push_set_flags(
     notify_target: bool,
     daily_report: bool,
 ) -> bool {
-    matches!(w(st), Ok(pool) if sqlx::query(&crate::pq::rewrite("UPDATE push_bindings SET notify_target = ?, daily_report = ?, updated_at = ? WHERE name = ?"))
-                .bind(if notify_target { 1i16 } else { 0i16 })
+    /* 2026-10-19：改 UPSERT —— 「我的」页扫码后（scanBound）就能先设开关，
+    此时 push_bindings 行可能还没建（首次绑定）。原先纯 UPDATE 会静默丢设置，
+    用户以为开了、实际没存。INSERT 只带 name + 两个开关，其余列走表默认值。 */
+    matches!(w(st), Ok(pool) if sqlx::query(&crate::pq::rewrite(
+            "INSERT INTO push_bindings (name, notify_target, daily_report, updated_at) \
+             VALUES (?, ?, ?, ?) \
+             ON CONFLICT (name) DO UPDATE SET notify_target = EXCLUDED.notify_target, \
+               daily_report = EXCLUDED.daily_report, updated_at = EXCLUDED.updated_at"))
+        .bind(name.trim())
+        .bind(if notify_target { 1i16 } else { 0i16 })
         .bind(if daily_report { 1i16 } else { 0i16 })
         .bind(now_str())
-        .bind(name.trim())
         .execute(pool)
         .await
-        .map(|r| r.affected() > 0)
-        .unwrap_or(false))
+        .is_ok())
 }
 
 /// 只改「每日报告」开关（机器人里的「暂停 / 开启接收每日推送」）。
@@ -703,29 +709,18 @@ pub async fn push_set_daily_report(st: &AppState, name: &str, on: bool) -> bool 
         return false;
     };
     let name = name.trim();
-    let changed = sqlx::query(&crate::pq::rewrite(
-        "UPDATE push_bindings SET daily_report = ?, updated_at = ? WHERE name = ?",
+    // 2026-10-19：UPSERT（首次绑定时行可能还没建，纯 UPDATE 会静默丢设置）
+    sqlx::query(&crate::pq::rewrite(
+        "INSERT INTO push_bindings (name, daily_report, updated_at) VALUES (?, ?, ?) \
+         ON CONFLICT (name) DO UPDATE SET daily_report = EXCLUDED.daily_report, \
+           updated_at = EXCLUDED.updated_at",
     ))
+    .bind(name)
     .bind(if on { 1i16 } else { 0i16 })
     .bind(now_str())
-    .bind(name)
     .execute(pool)
     .await
-    .map(|r| r.affected() > 0)
-    .unwrap_or(false);
-    if changed {
-        return true;
-    }
-    // 值没变时 SQL 执行的 affected rows = 0（同一秒内重复发同一条命令），
-    // 不是失败：确认这行还在就按幂等成功回执。
-    sqlx::query_scalar::<_, i64>(&crate::pq::rewrite(
-        "SELECT COUNT(*) FROM push_bindings WHERE name = ?",
-    ))
-    .bind(name)
-    .fetch_one(pool)
-    .await
-    .map(|n| n > 0)
-    .unwrap_or(false)
+    .is_ok()
 }
 
 /// 只改「师门日报」开关（docs/23 §4.3；「我的」页第三开关，仅名下有徒弟的人可见）。
@@ -735,27 +730,18 @@ pub async fn push_set_lineage_report(st: &AppState, name: &str, on: bool) -> boo
         return false;
     };
     let name = name.trim();
-    let changed = sqlx::query(&crate::pq::rewrite(
-        "UPDATE push_bindings SET lineage_report = ?, updated_at = ? WHERE name = ?",
+    // 2026-10-19：UPSERT，语义同 push_set_daily_report
+    sqlx::query(&crate::pq::rewrite(
+        "INSERT INTO push_bindings (name, lineage_report, updated_at) VALUES (?, ?, ?) \
+         ON CONFLICT (name) DO UPDATE SET lineage_report = EXCLUDED.lineage_report, \
+           updated_at = EXCLUDED.updated_at",
     ))
+    .bind(name)
     .bind(if on { 1i16 } else { 0i16 })
     .bind(now_str())
-    .bind(name)
     .execute(pool)
     .await
-    .map(|r| r.affected() > 0)
-    .unwrap_or(false);
-    if changed {
-        return true;
-    }
-    sqlx::query_scalar::<_, i64>(&crate::pq::rewrite(
-        "SELECT COUNT(*) FROM push_bindings WHERE name = ?",
-    ))
-    .bind(name)
-    .fetch_one(pool)
-    .await
-    .map(|n| n > 0)
-    .unwrap_or(false)
+    .is_ok()
 }
 
 /// 师门日报推送成功后写同业务日去重标记（对齐 last_report_date 机制）
@@ -787,6 +773,22 @@ pub async fn push_binding_by_conversation(
          FROM push_bindings WHERE conversation_id = ? LIMIT 1",
     ))
     .bind(conversation_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()?;
+    Some(binding_from_row(&row))
+}
+
+/// 按姓名查绑定（预渲染个人报告用；只读，不做任何状态变更）。
+pub async fn push_binding_by_name(st: &AppState, name: &str) -> Option<PushBinding> {
+    let pool = w(st).ok()?;
+    let row = sqlx::query(&crate::pq::rewrite(
+        "SELECT name, team, person_id, conversation_id, notify_target, daily_report,
+                lineage_report, last_lineage_date
+         FROM push_bindings WHERE name = ? LIMIT 1",
+    ))
+    .bind(name.trim())
     .fetch_optional(pool)
     .await
     .ok()

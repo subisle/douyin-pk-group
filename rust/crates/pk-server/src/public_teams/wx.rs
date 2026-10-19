@@ -637,13 +637,11 @@ pub async fn my_push_wechat_poll(
     crate::wxpush::ensure_account(&st, &name).await;
     tracing::info!(account = %name, bot = %acct.ilink_bot_id, "用户扫码登录微信推送账号成功，等待首次消息激活");
 
-    /* 对接完成欢迎语（2026-10-16 深夜用户口径：**对接完成发送欢迎语加名字**）。
-    这一刻刚拿到该账号的 bot_token，iLink 的私聊是「会话上下文」形态 —— 用户还没给
-    机器人发过消息，所以没有 context_token；官方协议允许缺省尝试（`send_raw` 同口径），
-    发不出去也不影响对接本身（真正的兜底是 wxpush 的「首次入站激活回执」，同样带名字）。
-    出网闸门在 `user_send_text` 里：测试阶段（PUSH_OUT_ENABLED 未开）只记 WARN、不真发，
-    返回值仍是 Ok —— 所以 welcome 只是「试过了」，不代表对方一定收到。 */
-    /* 欢迎语（2026-10-18 修正）：**只在有 context_token 时发** —— 重扫同一个微信时
+    /* 对接成功消息 + 功能介绍（2026-10-19 用户口径：先发成功，再发介绍）。
+    首次扫码还没有 context_token，协议上无法可靠主动发送；真正的首条回执由
+    wxpush 在用户第一次给机器人发消息时发送。重扫同一个微信时
+    wx_sessions 里已有上次私聊上下文，可以立即主动连发两条。 */
+    /* 对接消息：**只在有 context_token 时发** —— 重扫同一个微信时
     wx_sessions 里已有上次私聊的上下文，用它发才是真正的「主动消息」；首次扫码没有
     token，不尝试（iLink/openclaw 口径：缺 token 不算可发）。 */
     let welcome_session = if acct.conversation_id.is_empty() {
@@ -654,36 +652,40 @@ pub async fn my_push_wechat_poll(
     let welcome = welcome_target(&acct.conversation_id, welcome_session, &acct.ilink_user_id);
     let mut welcomed = false;
     if let Some((to_user, context_token)) = welcome {
-        let text = crate::bot::wx_dock_welcome(&name);
-        match crate::bot::weixin::user_send_text(
+        match crate::bot::send_wx_dock_messages(
             &st,
             &acct.base_url,
             &acct.bot_token,
             &to_user,
             &context_token,
-            &text,
+            &name,
         )
         .await
         {
             Ok(()) => {
                 welcomed = true;
-                tracing::info!(account = %name, "对接完成欢迎语已发送（复用已有会话上下文）");
+                tracing::info!(
+                    account = %name,
+                    "对接成功提示和功能介绍已发送（复用已有会话上下文）"
+                );
             }
             Err(e) if crate::push::is_blocked(&e) => {
-                // 2026-10-17 审计 6-P2-1：闸门拦截不算发送失败 —— 只是不发，
-                // 不落「等对方发第一条消息再回执」的误导日志。
-                tracing::info!(account = %name, "对接完成欢迎语被出网闸门拦截（未发）");
+                // 闸门拦截不是成功；页面仍需提示用户给机器人发第一条消息。
+                tracing::info!(
+                    account = %name,
+                    "对接成功提示 / 功能介绍被出网闸门拦截（未发）"
+                );
             }
             Err(e) => tracing::warn!(
                 account = %name,
                 error = %e,
-                "对接完成欢迎语发送失败：等对方给机器人发第一条消息时再回执（wxpush 激活回执）"
+                "对接成功提示 / 功能介绍发送失败：等对方给机器人发第一条消息时再回执"
             ),
         }
     } else {
         tracing::info!(
             account = %name,
-            "首次扫码/无会话上下文：不尝试主动欢迎语（iLink 要求 context_token），等用户给机器人发第一条消息激活"
+            "首次扫码/无会话上下文：不尝试主动发送（iLink 要求 context_token），等用户给机器人发第一条消息后连发成功提示和介绍"
         );
     }
     let response = json!({
@@ -698,7 +700,7 @@ pub async fn my_push_wechat_poll(
     Ok(Json(response))
 }
 
-/// 扫码确认时的欢迎语投递上下文（纯函数，便于单测）。
+/// 扫码确认时的对接消息投递上下文（纯函数，便于单测）。
 ///
 /// iLink 的主动消息必须带 `context_token` —— 官方 openclaw 客户端
 /// (`packages/openclaw-weixin/src/channel.ts`) 在缺 token 时**直接拒绝发送**

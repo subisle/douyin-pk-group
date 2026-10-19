@@ -567,7 +567,7 @@ pub async fn my(
         现在由后台配置下发，前后端同一份口径。夹取与缺省见 settings::clamp_pct。 */
         "earnings": {
             "sharePct": super::settings::clamp_pct(s.share_pct, super::settings::default_share_pct()),
-            "feePct": super::settings::clamp_pct(s.fee_pct, 0),
+            "feePct": super::settings::clamp_fee_pct(s.fee_pct, 0.0),
         },
     })))
 }
@@ -936,7 +936,7 @@ pub async fn my_accounts(
             "summary": summary,
             "earnings": {
                 "sharePct": super::settings::clamp_pct(s.share_pct, super::settings::default_share_pct()),
-                "feePct": super::settings::clamp_pct(s.fee_pct, 0),
+                "feePct": super::settings::clamp_fee_pct(s.fee_pct, 0.0),
             },
         })));
     }
@@ -962,7 +962,7 @@ pub async fn my_accounts(
         // 预估收益口径（2026-10-19）：与 /my 同一份后台配置（分成比例 + 手续费）。
         "earnings": {
             "sharePct": super::settings::clamp_pct(s.share_pct, super::settings::default_share_pct()),
-            "feePct": super::settings::clamp_pct(s.fee_pct, 0),
+            "feePct": super::settings::clamp_fee_pct(s.fee_pct, 0.0),
         },
     })))
 }

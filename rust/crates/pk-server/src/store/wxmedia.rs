@@ -54,6 +54,35 @@ struct Uploaded {
     file_size_cipher: usize,
 }
 
+/// 批量发图发到一半失败：`sent` 页的图片已经真实送达。
+///
+/// 调用方必须据此停止整组重试/文字兜底，否则会重复发送已成功的页。
+#[derive(Debug)]
+pub struct PartialImageBatch {
+    pub sent: usize,
+    pub total: usize,
+    source: anyhow::Error,
+}
+
+impl std::fmt::Display for PartialImageBatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "图片仅发送 {}/{} 页，第 {} 页失败：{}",
+            self.sent,
+            self.total,
+            self.sent + 1,
+            self.source
+        )
+    }
+}
+
+impl std::error::Error for PartialImageBatch {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
 /// 上传一张图片（PNG 字节）到微信 CDN
 async fn upload_image(
     base_url: &str,
@@ -237,6 +266,148 @@ pub async fn user_send_image(
         }),
     )
     .await
+}
+
+/// 批量发图：所有页先并行上传，全部成功后再按传入顺序逐页发送。
+///
+/// 这样既把最慢的 `getuploadurl + CDN PUT` 从串行改成并行，又保持微信会话里的
+/// 页序不变。任何上传失败时还没有发出消息，调用方可安全整组重试；发送阶段中途
+/// 失败则返回 [`PartialImageBatch`]，避免调用方重复发送已送达页。
+pub async fn user_send_images(
+    st: &crate::state::AppState,
+    base_url: &str,
+    token: &str,
+    to_user_id: &str,
+    context_token: &str,
+    captions: &[String],
+    pngs: &[&[u8]],
+) -> anyhow::Result<usize> {
+    anyhow::ensure!(!pngs.is_empty(), "没有可发送的图片");
+    anyhow::ensure!(
+        captions.len() == pngs.len(),
+        "图片说明数量（{}）必须与图片页数（{}）一致",
+        captions.len(),
+        pngs.len()
+    );
+
+    let started = std::time::Instant::now();
+    if !crate::push::push_out_allowed_for_account(st, to_user_id).await {
+        let total_bytes = pngs.iter().map(|p| p.len()).sum::<usize>();
+        let preview = captions
+            .iter()
+            .find(|c| !c.trim().is_empty())
+            .map(|c| c.chars().take(120).collect())
+            .unwrap_or_else(|| format!("（{} 页图片，共 {} 字节）", pngs.len(), total_bytes));
+        tracing::warn!(
+            to_user_id,
+            pages = pngs.len(),
+            bytes = total_bytes,
+            preview = %preview,
+            "【测试阶段】已拦截微信批量图片发送（未上传、未发送）"
+        );
+        return Err(crate::push::Blocked.into());
+    }
+
+    let upload_started = std::time::Instant::now();
+    let results = futures_util::future::join_all(
+        pngs.iter()
+            .map(|png| upload_image(base_url, token, to_user_id, *png)),
+    )
+    .await;
+    let mut uploaded = Vec::with_capacity(results.len());
+    for (i, result) in results.into_iter().enumerate() {
+        match result {
+            Ok(up) => uploaded.push(up),
+            Err(e) => {
+                tracing::warn!(
+                    page = i + 1,
+                    pages = pngs.len(),
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    error = %e,
+                    "微信批量图片上传失败（尚未发送任何消息）"
+                );
+                return Err(e).with_context(|| format!("第 {} 页图片上传失败", i + 1));
+            }
+        }
+    }
+    tracing::info!(
+        pages = pngs.len(),
+        bytes = pngs.iter().map(|p| p.len()).sum::<usize>(),
+        upload_ms = upload_started.elapsed().as_millis() as u64,
+        "微信批量图片并行上传完成"
+    );
+
+    let total = pngs.len();
+    let mut sent = 0usize;
+    for (i, up) in uploaded.into_iter().enumerate() {
+        let caption = captions.get(i).map(String::as_str).unwrap_or_default();
+        if !caption.is_empty() {
+            if let Err(e) = send_item(
+                base_url,
+                token,
+                to_user_id,
+                context_token,
+                serde_json::json!({ "type": 1, "text_item": { "text": caption } }),
+            )
+            .await
+            {
+                return batch_send_error(sent, total, e, i);
+            }
+        }
+        if let Err(e) = send_item(
+            base_url,
+            token,
+            to_user_id,
+            context_token,
+            serde_json::json!({
+                "type": 2,
+                "image_item": {
+                    "media": {
+                        "encrypt_query_param": up.download_param,
+                        "aes_key": b64(up.aeskey_hex.as_bytes()),
+                        "encrypt_type": 1
+                    },
+                    "mid_size": up.file_size_cipher
+                }
+            }),
+        )
+        .await
+        {
+            return batch_send_error(sent, total, e, i);
+        }
+        sent += 1;
+    }
+
+    tracing::info!(
+        pages = total,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "微信批量图片发送完成"
+    );
+    Ok(sent)
+}
+
+fn batch_send_error(
+    sent: usize,
+    total: usize,
+    source: anyhow::Error,
+    page_index: usize,
+) -> anyhow::Result<usize> {
+    tracing::warn!(
+        page = page_index + 1,
+        sent,
+        total,
+        error = %source,
+        "微信批量图片发送失败"
+    );
+    if sent == 0 {
+        Err(source)
+    } else {
+        Err(anyhow::Error::new(PartialImageBatch {
+            sent,
+            total,
+            source,
+        }))
+    }
 }
 
 /* ------------------------------ 小工具 ------------------------------ */

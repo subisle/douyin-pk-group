@@ -346,12 +346,10 @@ async fn poll_loop(st: Arc<AppState>, name: String) {
     }
 }
 
-/// 单账号轮询的**最小间隔**（用户口径 2026-10-16：正常限制一下一分钟，防服务器占用过高）。
-/// 空轮询本来就睡 longpolling_timeout_ms（一圈 ≈ 35s 挂住 + 30s 睡 ≈ 1 次/分钟），
-/// 这条下限管的是两头热循环：有消息时循环不睡会连打（实测单次请求仅 ~0.2s），
-/// 失败重试 2s 也偏密。任何一轮结束后没到 60s 就在下一轮顶补睡。
-/// 100 账号 × 1 次/分钟 ≈ 1.7 请求/秒，服务器毫无压力；首条消息走长轮询即时到达，不受影响。
-const POLL_MIN_INTERVAL: Duration = Duration::from_secs(60);
+/// 单账号轮询的**最小间隔**（2026-10-20 用户口径：实时优先，从 60s 降到 5s）。
+/// 空轮询本来就挂住 longpolling_timeout_ms；这条下限只防有消息/失败后的热循环连打。
+/// 100 账号按 5s 下限仍只约 20 请求/秒峰值、空轮询远低于此，服务器压力可接受。
+const POLL_MIN_INTERVAL: Duration = Duration::from_secs(5);
 
 /// 距上一轮开始过了 `elapsed`，下一轮之前还该等多久（纯函数，可单测）
 fn poll_floor_wait(elapsed: Duration) -> Duration {
@@ -561,22 +559,29 @@ async fn handle_msg(st: &Arc<AppState>, acct: &WxPushAccount, m: &Value) {
     if !already_bound {
         crate::store::push_bind_account(st, &acct.name, &acct.team, &conversation, &from_user)
             .await;
-        /* 2026-10-18：欢迎语统一到 `bot::wx_dock_welcome`（随机鼓励文案 + 功能简介 + 1/2/3/4 菜单）。
-        扫码路径、4 位对接码路径、首次入站激活路径三处共用同一份文案，改文案只改一处。 */
-        let welcome = crate::bot::wx_dock_welcome(&acct.name);
-        if let Err(e) = user_send_text(
+        /* 2026-10-19 用户口径：首次入站激活也先发「对接成功」，再发功能介绍。
+        与重扫主动发送共用同一组文案和发送窄口；任一条失败都只记日志，
+        不阻断用户首条命令的执行。 */
+        if let Err(e) = crate::bot::send_wx_dock_messages(
             st,
             &acct.base_url,
             &acct.bot_token,
             &from_user,
             &context_token,
-            &welcome,
+            &acct.name,
         )
         .await
         {
-            tracing::warn!(account = %acct.name, error = %e, "扫码激活回执发送失败");
+            tracing::warn!(
+                account = %acct.name,
+                error = %e,
+                "扫码激活的对接成功提示 / 功能介绍发送失败"
+            );
         } else {
-            tracing::info!(account = %acct.name, "扫码推送已激活（首次入站留下会话上下文）");
+            tracing::info!(
+                account = %acct.name,
+                "扫码推送已激活，已发送对接成功提示和功能介绍"
+            );
         }
         /* 2026-10-18：首条消息如果本身就是命令（主播扫完直接回「1」），欢迎语发完继续
         往下走命令路由 —— 否则用户看到欢迎语里写着「回 1 看榜单」却回 1 没反应，
@@ -608,25 +613,38 @@ async fn handle_msg(st: &Arc<AppState>, acct: &WxPushAccount, m: &Value) {
     /* 2026-10-18 用户口径「文字的榜单去掉」：命令 1 现在带榜单图（`Outbound.images`）。
     有图先发图，**发图成功就不再发文字**；图全部失败才退回文字，保证命令至少有一个回复。 */
     if !out.images.is_empty() {
-        let mut sent = 0usize;
-        for png in &out.images {
-            match crate::store::wxmedia::user_send_image(
-                st,
-                &acct.base_url,
-                &acct.bot_token,
-                &from_user,
-                &context_token,
-                "",
-                png,
-            )
-            .await
-            {
-                Ok(()) => sent += 1,
-                Err(e) => {
-                    tracing::warn!(account = %acct.name, error = %e, "扫码账号图片回复发送失败")
+        /* 两页榜单一次性交给批量发送窄口：批量层可并行准备/上传，并按传入顺序发消息。
+        这里始终给出与图片等长的空 caption，保持“榜单只有图、不带说明文字”的口径。 */
+        let captions = vec![String::new(); out.images.len()];
+        let pngs: Vec<&[u8]> = out.images.iter().map(Vec::as_slice).collect();
+        let sent = match crate::store::wxmedia::user_send_images(
+            st,
+            &acct.base_url,
+            &acct.bot_token,
+            &from_user,
+            &context_token,
+            &captions,
+            &pngs,
+        )
+        .await
+        {
+            Ok(sent) => sent,
+            Err(e) => {
+                if let Some(partial) = e.downcast_ref::<crate::store::wxmedia::PartialImageBatch>()
+                {
+                    tracing::warn!(
+                        account = %acct.name,
+                        sent = partial.sent,
+                        pages = partial.total,
+                        error = %e,
+                        "扫码账号榜单图部分发送，停止重试以避免重复"
+                    );
+                    return;
                 }
+                tracing::warn!(account = %acct.name, error = %e, "扫码账号图片回复批量发送失败");
+                0
             }
-        }
+        };
         if sent > 0 {
             return;
         }
@@ -646,6 +664,27 @@ async fn handle_msg(st: &Arc<AppState>, acct: &WxPushAccount, m: &Value) {
     .await
     {
         tracing::warn!(account = %acct.name, error = %e, "扫码账号命令回复发送失败");
+        return;
+    }
+    /* 4 位对接码路径把「成功回执 → 功能介绍」放在 Outbound 的 followup_texts；
+    普通命令不走这里。第二条失败不影响第一条已送达，只记日志便于排障。 */
+    for text in &out.followup_texts {
+        if text.trim().is_empty() {
+            continue;
+        }
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        if let Err(e) = user_send_text(
+            st,
+            &acct.base_url,
+            &acct.bot_token,
+            &from_user,
+            &context_token,
+            text,
+        )
+        .await
+        {
+            tracing::warn!(account = %acct.name, error = %e, "扫码账号后续文本发送失败");
+        }
     }
 }
 
@@ -788,19 +827,18 @@ mod tests {
     }
 
     #[test]
-    fn poll_floor_caps_one_round_per_minute() {
-        // 用户口径（2026-10-16）：单账号一分钟最多一轮。
-        assert_eq!(POLL_MIN_INTERVAL, Duration::from_secs(60));
-        // 刚跑完一轮 → 补睡满 60s；过了 35s（长轮询挂住）→ 再睡 25s；超时 → 不睡
+    fn poll_floor_caps_hot_loop_but_keeps_realtime() {
+        // 2026-10-20 用户口径改为实时优先：只防热循环连打（5s），不再一分钟一轮。
+        assert_eq!(POLL_MIN_INTERVAL, Duration::from_secs(5));
         assert_eq!(
             poll_floor_wait(Duration::from_secs(0)),
-            Duration::from_secs(60)
+            Duration::from_secs(5)
         );
         assert_eq!(
-            poll_floor_wait(Duration::from_secs(35)),
-            Duration::from_secs(25)
+            poll_floor_wait(Duration::from_secs(3)),
+            Duration::from_secs(2)
         );
-        assert_eq!(poll_floor_wait(Duration::from_secs(60)), Duration::ZERO);
+        assert_eq!(poll_floor_wait(Duration::from_secs(5)), Duration::ZERO);
         assert_eq!(
             poll_floor_wait(Duration::from_secs(3600)),
             Duration::ZERO,

@@ -50,6 +50,11 @@ pub struct Attachment {
 pub struct Outbound {
     pub conversation_id: String,
     pub text: String,
+    /// 主消息发完后继续发送的文本（按顺序）。
+    ///
+    /// 微信扫码账号对接成功时拆成两条：第一条确认已提交/对接成功，第二条发功能
+    /// 介绍。微信端连续气泡比一大段文字更容易读，也不会让成功回执被长文案淹没。
+    pub followup_texts: Vec<String>,
     /// 随文字一起下发的图片（PNG 字节，按顺序发送）。空 = 纯文本。
     ///
     /// 2026-10-18 用户口径：机器人命令「1」（每日榜单）改成发**榜单图**（与自动推送
@@ -63,8 +68,15 @@ impl Outbound {
         Self {
             conversation_id: conversation_id.to_string(),
             text: text.into(),
+            followup_texts: Vec::new(),
             images: Vec::new(),
         }
+    }
+
+    /// 主消息后继续发一条文本（微信扫码对接的「成功回执 → 功能介绍」）。
+    pub fn with_followup_text(mut self, text: impl Into<String>) -> Self {
+        self.followup_texts.push(text.into());
+        self
     }
 
     /// 挂上待发图片（文字仍保留：渠道发不了图时用它兜底）。
@@ -603,7 +615,8 @@ pub async fn weixin_add_qr_set(
 /// 安全口径：对接码 = 「我的」页 push_rotate_code 生成的 **4 位数字、30 分钟一次性、库里全局唯一**
 /// 的码（见迁移 028）。错误文案统一，不区分「码不对」「码过期」，避免枚举。
 /// **裸 4 位数字没对上码时静默**：否则正常聊天里随便一个 4 位数都会收到一句「绑定失败」。
-/// 对接成功的回复 = [`wx_dock_welcome`]（**带账号姓名**）：P1-1 审计原口径是「回复不带姓名，
+/// 对接成功的回复 = [`wx_dock_success`] + [`wx_dock_intro`]（**带账号姓名**）：
+/// P1-1 审计原口径是「回复不带姓名，
 /// 防会话被截图外传」，2026-10-16 深夜用户口径改为**欢迎语带名字** —— 主播自己一眼确认
 /// 绑对了号，比防外传更值。要退回匿名口径只改这一个函数即可（扫码路径的入站回执同理）。
 async fn try_bind_weixin(st: &Arc<AppState>, inbound: &Inbound) -> Option<Outbound> {
@@ -688,7 +701,7 @@ async fn try_bind_weixin(st: &Arc<AppState>, inbound: &Inbound) -> Option<Outbou
         crate::events::SCOPE_BOT,
         format!("微信推送已绑定（{name}）"),
     );
-    Some(Outbound::to(&conversation, wx_dock_welcome(&name)))
+    Some(Outbound::to(&conversation, wx_dock_success(&name)).with_followup_text(wx_dock_intro()))
 }
 
 /* ------------------ 对接码会话级尝试锁（2026-10-17 第四轮审计 P1-2） ------------------
@@ -845,36 +858,75 @@ pub(crate) fn looks_like_command(text: &str) -> bool {
     commands::parse(text).is_some()
 }
 
-/// 微信对接完成欢迎语（唯一出口：扫码确认 / 4 位对接码 / 首次入站激活三个入口共用）。
+/// 微信对接成功回执（所有对接入口的第一条消息）。
 ///
 /// 2026-10-16 用户口径：「对接完成发送欢迎语加名字」——直接叫名字（账号姓名 =
 /// 展示端登录的那个姓名），比通用文案更像「系统认识你」，主播一眼确认绑对了号。
 /// 曾经 P1-1 审计要求不带姓名（防会话截图外传），本次由用户明确改回带姓名；
 /// 要恢复匿名口径，把 `你好，{name}！` 换成 `你好！` 即可，三个入口同时生效。
 ///
+pub(crate) fn wx_dock_success(name: &str) -> String {
+    let who = name.trim();
+    if who.is_empty() {
+        "你好！\n✅ 微信对接成功，机器人已为你配置好。".to_string()
+    } else {
+        format!("你好，{who}！\n✅ 微信对接成功，机器人已为你配置好。")
+    }
+}
+
+/// 微信功能介绍（所有对接入口的第二条消息）。
+///
 /// 2026-10-18 用户口径：欢迎语 = **随机鼓励文案（1000 条池）+ 功能简介 + 1/2/3/4 菜单**。
 /// 主播多数是**没开播的时候**打开，第一句要先给情绪价值（鼓励/陪伴），再讲功能，
 /// 最后给最省事的入口：回一个数字。
-pub(crate) fn wx_dock_welcome(name: &str) -> String {
-    let who = name.trim();
-    let hello = if who.is_empty() {
-        "你好！".to_string()
-    } else {
-        format!("你好，{who}！")
-    };
+/// 2026-10-19 用户口径：成功确认与功能介绍拆成两条发，本条不再重复「对接成功」。
+pub(crate) fn wx_dock_intro() -> String {
     format!(
-        "{hello}\n{greeting}\n\n\
-         ✅ 微信对接成功\n\n\
-         以后数据更新会自动推给你（每日报告 / 追分提醒），\n\
+        "{greeting}\n\n\
+         以后每天自动推送每日报告，追分提醒也会单独推送，\n\
          开关和追分目标都在展示端「我的」页里设置。\n\n\
          想查什么，直接回数字：\n\
          1 —— 每日榜单（当天 TOP10 + 你排第几）\n\
-         2 —— 个人榜单（你的今日 / 本月 + 追分进度）\n\
+         2 —— 个人报告（今日音浪 / 预估收入 + 本月 + 追分进度）\n\
          3 —— 徒弟榜单（名下徒弟本月排第几）\n\
          4 —— 追分榜单（你在追的人排第几、还差多少）\n\n\
          发「帮助」看全部说明，发「解绑」可断开对接。",
         greeting = random_greeting()
     )
+}
+
+/// 微信对接成功后连续发送「成功回执 → 功能介绍」。
+///
+/// 只走 [`weixin::user_send_text`] 这个已装出网闸门的窄口；任一条被拦截/失败都
+/// 原样返回 `Err`，调用方不能把 `Blocked` 当成已送达。两条之间留很短间隔，
+/// 保证微信端气泡顺序稳定。
+pub(crate) async fn send_wx_dock_messages(
+    st: &AppState,
+    base_url: &str,
+    bot_token: &str,
+    to_user: &str,
+    context_token: &str,
+    name: &str,
+) -> anyhow::Result<()> {
+    weixin::user_send_text(
+        st,
+        base_url,
+        bot_token,
+        to_user,
+        context_token,
+        &wx_dock_success(name),
+    )
+    .await?;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    weixin::user_send_text(
+        st,
+        base_url,
+        bot_token,
+        to_user,
+        context_token,
+        &wx_dock_intro(),
+    )
+    .await
 }
 
 /// 微信提权口令（2026-10-11 审计整改）：不再硬编码在源码里，
@@ -1348,8 +1400,15 @@ async fn route_command(
             None => NO_BINDING_HINT.to_string(),
         },
         // 2026-10-18 新增：3 = 名下徒弟的榜单，4 = 追分榜单
+        /* 2026-10-19 用户口径「徒弟的也去除文字只发图片」：命令 3 与自动推送的
+        师门日报同源（lineage_report::build + 同一套字段配置），渲染成功就只发图，
+        文字留给发不了图的渠道（QQ）兜底 —— 与命令 1 的处理方式一致。 */
         CmdId::DiscipleRank => match current_binding(st, inbound).await {
-            Some(b) => cmd_disciple_rank_user(st, &b).await,
+            Some(b) => {
+                let (t, pngs) = cmd_disciple_rank_user(st, &b).await;
+                images = pngs;
+                t
+            }
             None => NO_BINDING_HINT.to_string(),
         },
         CmdId::TargetRank => match current_binding(st, inbound).await {
@@ -1423,7 +1482,10 @@ async fn cmd_daily_report_user(
     b: &crate::store::PushBinding,
 ) -> (String, Vec<Vec<u8>>) {
     let Some(date) = latest_biz_date(st).await else {
-        return ("还没有可用的业务数据，等运营导入后再来看。".into(), Vec::new());
+        return (
+            "还没有可用的业务数据，等运营导入后再来看。".into(),
+            Vec::new(),
+        );
     };
     let Some(team) = binding_team(st, b).await else {
         return (
@@ -1451,8 +1513,8 @@ async fn cmd_daily_report_user(
     (text, pngs)
 }
 
-/// 普通用户「个人报告」：今日名次/音浪 + 本月累计/名次 + 追分目标进度
-async fn cmd_my_report_user(st: &Arc<AppState>, b: &crate::store::PushBinding) -> String {
+/// 普通用户「个人报告」：今日名次/音浪/预估收入 + 本月累计/名次 + 追分目标进度
+pub async fn cmd_my_report_user(st: &Arc<AppState>, b: &crate::store::PushBinding) -> String {
     let Some(date) = latest_biz_date(st).await else {
         return "还没有可用的业务数据，等运营导入后再来看。".into();
     };
@@ -1485,25 +1547,53 @@ async fn cmd_my_report_user(st: &Arc<AppState>, b: &crate::store::PushBinding) -
             (label, detail, gap_text, gap)
         })
         .collect();
-    render_my_report(&b.name, &date, day_pos, month_pos, my_month, &target_lines)
+    /* 今日音浪 + 预估收入（2026-10-19 用户口径「个人的今日音浪还有收入」）：
+    今日音浪取日榜里本人那一行（`day_pos` 的第二项），没上榜 = 今天没开播 → 不显示收入。
+    收入口径与展示端「我的」页同源（后台 share_pct / fee_pct，见 push::est_yuan），
+    不在机器人这边另写一套，避免两处算出不同数字。 */
+    let day_wave = day_pos.map(|(_, w)| w);
+    let est = match day_wave {
+        Some(w) => match crate::push::est_yuan(st, w).await {
+            Some(v) => Some(crate::push::fmt_yuan(v)),
+            None => None,
+        },
+        None => None,
+    };
+    render_my_report(
+        &b.name,
+        &date,
+        day_pos,
+        month_pos,
+        my_month,
+        &target_lines,
+        est.as_deref(),
+    )
 }
 
 /// 「我的报告」排版（纯函数，好测）。
 /// gap：≤ 0 已达成；i64::MAX = 追名次但本月还没进榜（没有可比的差距）
-fn render_my_report(
+pub(crate) fn render_my_report(
     name: &str,
     date: &str,
     day: Option<(usize, i64)>,
     month_pos: Option<usize>,
     my_month: i64,
     targets: &[(String, String, String, i64)],
+    est: Option<&str>, // 今日预估到手（已格式化成 ¥x；None = 今天没播 / 无可估音浪）
 ) -> String {
     let mut out = format!("📈 我的报告（{name}）");
     match day {
-        Some((pos, wave)) => out.push_str(&format!(
-            "\n今日（{date}）：{} · 团内第 {pos} 名",
-            crate::push::fmt_wan(wave)
-        )),
+        Some((pos, wave)) => {
+            out.push_str(&format!(
+                "\n今日（{date}）：{} · 团内第 {pos} 名",
+                crate::push::fmt_wan(wave)
+            ));
+            /* 今日音浪后面紧跟预估收入（用户口径）：数字与金额同一行，不另起一段。
+            没有可估金额（今天没播 / wave=0）就不显示这一截，不留空的「¥」。 */
+            if let Some(e) = est {
+                out.push_str(&format!(" · 预估 {e}"));
+            }
+        }
         None => out.push_str(&format!("\n今日（{date}）：今天还没开播（榜上还没有你）")),
     }
     match month_pos {
@@ -1536,24 +1626,40 @@ fn render_my_report(
 
 /// 普通用户「徒弟榜单」（命令 3）：名下**直系徒弟**的本月团内排名。
 ///
-/// 口径与「个人榜单 / 追分榜单」一致：本月累计音浪 + 团内名次（可信行聚合）。
+/// 口径与「个人报告 / 追分榜单」一致：本月累计音浪 + 团内名次（可信行聚合）。
 /// 只算直系（`person.master_id = 本人`），与「我的」页 `disciple.count` 同源，徒孙不计。
-async fn cmd_disciple_rank_user(st: &Arc<AppState>, b: &crate::store::PushBinding) -> String {
+/// 返回 `(文字兜底, 师门日报图)`：图非空时微信渠道只发图（2026-10-19 用户口径）。
+pub async fn cmd_disciple_rank_user(
+    st: &Arc<AppState>,
+    b: &crate::store::PushBinding,
+) -> (String, Vec<Vec<u8>>) {
     if b.person_id == 0 {
-        return "这个账号没有绑定主播档案，看不到徒弟榜单。".into();
+        return (
+            "这个账号没有绑定主播档案，看不到徒弟榜单。".into(),
+            Vec::new(),
+        );
     }
     let Some(date) = latest_biz_date(st).await else {
-        return "还没有可用的业务数据，等运营导入后再来看。".into();
+        return (
+            "还没有可用的业务数据，等运营导入后再来看。".into(),
+            Vec::new(),
+        );
     };
     let Some(team) = binding_team(st, b).await else {
-        return "还没有查到你的团别归属，稍后再试；一直这样请联系管理员。".into();
+        return (
+            "还没有查到你的团别归属，稍后再试；一直这样请联系管理员。".into(),
+            Vec::new(),
+        );
     };
     let month = date.get(..7).unwrap_or(&date).to_string();
     let disciples = crate::push::direct_disciples(st, b.person_id).await;
     if disciples.is_empty() {
-        return format!(
-            "「{}」名下目前还没有徒弟。\n徒弟在台账里挂到你名下之后，这里就能看到他们的本月排名。",
-            b.name.trim()
+        return (
+            format!(
+                "「{}」名下目前还没有徒弟。\n徒弟在台账里挂到你名下之后，这里就能看到他们的本月排名。",
+                b.name.trim()
+            ),
+            Vec::new(),
         );
     }
     let rank = crate::push::month_rank_list(st, &team, &month).await;
@@ -1580,11 +1686,24 @@ async fn cmd_disciple_rank_user(st: &Arc<AppState>, b: &crate::store::PushBindin
         (None, Some(_)) => std::cmp::Ordering::Greater,
         (None, None) => a.1.cmp(&b.1),
     });
-    render_disciple_rank(b.name.trim(), &month, &rows)
+    let text = render_disciple_rank(b.name.trim(), &month, &rows);
+    /* 师门日报图（与自动推送同一份渲染，带本人水印）：渲染失败（无直系徒弟 /
+    库抖动 / PNG 转换失败）就退回文字，命令不会没响应。 */
+    let pngs = match crate::lineage_report::build(st, &date, b.person_id).await {
+        Ok(rep) if rep.rows.len() > 1 => {
+            crate::push::lineage_report_pngs_for(st, &rep, b.name.trim()).await
+        }
+        _ => Vec::new(),
+    };
+    (text, pngs)
 }
 
 /// 徒弟榜单排版（纯函数，好测）。`rows` 已按名次排好：`(团内名次, 徒弟名, 本月音浪)`。
-fn render_disciple_rank(name: &str, month: &str, rows: &[(Option<usize>, String, i64)]) -> String {
+pub(crate) fn render_disciple_rank(
+    name: &str,
+    month: &str,
+    rows: &[(Option<usize>, String, i64)],
+) -> String {
     /// 一条微信消息里最多列多少人（再多会刷屏，且微信有长度限制）
     const MAX_ROWS: usize = 30;
     let total: i64 = rows.iter().map(|(_, _, w)| *w).sum();
@@ -1611,7 +1730,7 @@ fn render_disciple_rank(name: &str, month: &str, rows: &[(Option<usize>, String,
 
 /// 普通用户「追分榜单」（命令 4）：我在追的人现在团内第几、还差多少。
 ///
-/// 与「个人榜单」底部那几行追分目标同源（`targets_for_push` + `eval_target`），
+/// 与「个人报告」底部那几行追分目标同源（`targets_for_push` + `eval_target`），
 /// 区别是把每个目标单独展开成榜单项，带对方当前名次和音浪。
 async fn cmd_target_rank_user(st: &Arc<AppState>, b: &crate::store::PushBinding) -> String {
     if b.person_id == 0 {
@@ -2436,6 +2555,7 @@ mod tests {
             Some(5),
             300_000,
             &targets,
+            None,
         );
         assert!(t.contains("📈 我的报告（小美）"), "{t}");
         assert!(t.contains("今日（2026-10-09）：5 万 · 团内第 4 名"), "{t}");
@@ -2447,6 +2567,46 @@ mod tests {
             !t.contains("还差 本月还没开播"),
             "哨兵值不该拼出别扭文案：{t}"
         );
+        assert!(!t.contains("预估"), "没传收入就不该出现金额：{t}");
+    }
+
+    /* ---- 2026-10-19：个人报告带「今日音浪 + 预估收入」 ---- */
+
+    #[test]
+    fn my_report_appends_estimated_income_when_given() {
+        let t = render_my_report(
+            "小美",
+            "2026-10-09",
+            Some((4, 50_000)),
+            Some(5),
+            300_000,
+            &[],
+            Some("¥1750"),
+        );
+        assert!(
+            t.contains("今日（2026-10-09）：5 万 · 团内第 4 名 · 预估 ¥1750"),
+            "{t}"
+        );
+        assert!(
+            t.contains("追分目标：还没有设置"),
+            "无目标时的文案不变：{t}"
+        );
+    }
+
+    /// 今天没开播（day=None）→ 不该出现任何金额，也不该留空的「预估 ¥」
+    #[test]
+    fn my_report_hides_income_when_not_live() {
+        let t = render_my_report(
+            "小美",
+            "2026-10-09",
+            None,
+            Some(5),
+            300_000,
+            &[],
+            Some("¥1750"),
+        );
+        assert!(t.contains("今天还没开播"), "{t}");
+        assert!(!t.contains("预估"), "没播就不该显示收入：{t}");
     }
 
     /* ---- 2026-10-18：对接欢迎语 + 数字命令 3/4 ---- */
@@ -2478,13 +2638,15 @@ mod tests {
     }
 
     #[test]
-    fn dock_welcome_has_greeting_intro_and_numeric_menu() {
-        let t = wx_dock_welcome("浩雨");
-        assert!(t.starts_with("你好，浩雨！"), "{t}");
-        assert!(t.contains("✅ 微信对接成功"), "{t}");
+    fn dock_intro_has_greeting_and_numeric_menu() {
+        let t = wx_dock_intro();
+        assert!(
+            !t.contains("微信对接成功"),
+            "成功回执必须单独作为第一条消息，介绍里不能重复：{t}"
+        );
         for line in [
             "1 —— 每日榜单",
-            "2 —— 个人榜单",
+            "2 —— 个人报告",
             "3 —— 徒弟榜单",
             "4 —— 追分榜单",
         ] {
@@ -2492,15 +2654,26 @@ mod tests {
         }
         assert!(t.contains("帮助"), "{t}");
         assert!(t.contains("解绑"), "{t}");
-        // 第二行必须来自文案池（随机鼓励语）
-        let second = t.lines().nth(1).unwrap_or_default().trim();
+        // 第一行必须来自文案池（随机鼓励语）
+        let first = t.lines().next().unwrap_or_default().trim();
         assert!(
-            wx_greetings().contains(&second),
-            "第二行不是文案池里的句子：{second}"
+            wx_greetings().contains(&first),
+            "第一行不是文案池里的句子：{first}"
         );
-        // 空姓名兜底不出现「你好，！」
-        let anon = wx_dock_welcome("  ");
-        assert!(anon.starts_with("你好！"), "{anon}");
+    }
+
+    #[test]
+    fn dock_success_is_short_and_carries_name() {
+        let t = wx_dock_success("浩雨");
+        assert_eq!(t.lines().next().unwrap(), "你好，浩雨！");
+        assert!(t.contains("✅ 微信对接成功"), "{t}");
+        assert!(t.contains("机器人已为你配置好"), "{t}");
+        assert!(!t.contains("每日榜单"), "功能介绍必须放到第二条：{t}");
+
+        for blank in [wx_dock_success(""), wx_dock_success("   ")] {
+            assert_eq!(blank.lines().next().unwrap(), "你好！", "{blank}");
+            assert!(!blank.contains("你好，！"), "{blank}");
+        }
     }
 
     #[test]
@@ -2552,7 +2725,7 @@ mod tests {
 
     #[test]
     fn my_report_without_data_is_friendly() {
-        let none = render_my_report("小美", "2026-10-09", None, None, 0, &[]);
+        let none = render_my_report("小美", "2026-10-09", None, None, 0, &[], None);
         assert!(none.contains("今天还没开播"), "{none}");
         assert!(none.contains("本月还没开播"), "{none}");
 
@@ -2781,7 +2954,10 @@ mod tests {
         );
         let admins = vec!["12345678".to_string()];
         assert!(qq_admin_ok(&admins, "12345678"));
-        assert!(!qq_admin_ok(&admins, "87654321"), "名单外的 QQ 号不是管理员");
+        assert!(
+            !qq_admin_ok(&admins, "87654321"),
+            "名单外的 QQ 号不是管理员"
+        );
     }
 
     /// 会话级失败计数 key 必须带渠道前缀，且能装进迁移 036 加宽后的 160 列。
@@ -2792,18 +2968,14 @@ mod tests {
         assert!(bind_fail_conv_key("weixin", &long).len() <= 160);
     }
 
-    /// 对接完成欢迎语（2026-10-16 深夜用户口径：**欢迎语带名字**）。
-    /// 两个对接入口（机器人回对接码 / 扫码确认后的 poll）共用这一份文案，
-    /// 口径回归到「不带姓名」时只改 wx_dock_welcome，改这里就能一起守住。
+    /// 对接成功回执（2026-10-19：第一条）必须带名字，功能介绍第二条不能重复成功。
     #[test]
-    fn dock_welcome_carries_name() {
-        let t = wx_dock_welcome("浩雨");
-        assert_eq!(t.lines().next().unwrap(), "你好，浩雨！");
-        assert!(t.contains("微信对接成功"), "{t}");
-        assert!(t.contains("解绑"), "要留解绑指引：{t}");
-        // 空名 / 纯空格（历史脏数据）不得出现「你好，！」
-        for blank in [wx_dock_welcome(""), wx_dock_welcome("   ")] {
-            assert_eq!(blank.lines().next().unwrap(), "你好！", "{blank}");
-        }
+    fn dock_messages_split_success_and_intro() {
+        let success = wx_dock_success("浩雨");
+        let intro = wx_dock_intro();
+        assert!(success.contains("浩雨"), "{success}");
+        assert!(success.contains("微信对接成功"), "{success}");
+        assert!(!intro.contains("微信对接成功"), "{intro}");
+        assert!(intro.contains("解绑"), "要留解绑指引：{intro}");
     }
 }

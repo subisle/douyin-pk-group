@@ -15,6 +15,7 @@ const LineagePage = lazy(() => import('./LineagePage'))
 const AnnouncePage = lazy(() => import('./AnnouncePage'))
 const BotPage = lazy(() => import('./BotPage'))
 const SendPage = lazy(() => import('./SendPage'))
+const LiveMonitorPage = lazy(() => import('./live/LiveMonitorPage'))
 const GroupPage = lazy(() => import('./pk/GroupPage'))
 const BoardPage = lazy(() => import('./pk/BoardPage'))
 
@@ -31,6 +32,7 @@ const NAV_ICONS: Record<RouteKey, string> = {
   announce: '📣',
   bots: '🤖',
   send: '📢',
+  live: '📡',
 }
 
 export default function App() {
@@ -176,6 +178,7 @@ export default function App() {
           {route === 'announce' && <AnnouncePage />}
           {route === 'bots' && <BotPage />}
           {route === 'send' && <SendPage />}
+          {route === 'live' && <LiveMonitorPage />}
         </Suspense>
       </main>
       {toast && (

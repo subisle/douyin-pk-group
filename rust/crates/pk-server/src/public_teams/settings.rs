@@ -53,7 +53,7 @@ pub struct PublicSettings {
     /// 不固定（提现单笔手续费、平台技术服务费、个税都可能是不同口径），这里只给一个可配的
     /// 估算比例，前端按「分成后 ×（1 - 手续费）」估到手。
     #[serde(default)]
-    pub fee_pct: i64,
+    pub fee_pct: f64,
     /// 是否开启登录门（2026-10-10）：关 = 全面开放，打开就能看（但没有「我的」页）；
     /// 开 = 全站要登录（现状）
     #[serde(default = "default_true")]
@@ -65,15 +65,24 @@ pub(super) fn default_true() -> bool {
 }
 
 /// 分成比例缺省 35%（历史硬编码值；老配置没有该键时保持原行为）。
-pub(super) fn default_share_pct() -> i64 {
+pub(crate) fn default_share_pct() -> i64 {
     35
 }
 
 /// 分成 / 手续费比例的合法区间（百分数，含端点）。越界一律按缺省值回落，
 /// 绝不让一个负数或 300% 的脏配置把「预估到手」算成负数。
-pub(super) fn clamp_pct(v: i64, fallback: i64) -> i64 {
+pub(crate) fn clamp_pct(v: i64, fallback: i64) -> i64 {
     if (0..=100).contains(&v) {
         v
+    } else {
+        fallback
+    }
+}
+
+/// 税费 / 手续费比例（2026-10-20 支持小数）：夹回 0..=100，缺省回落。
+pub(crate) fn clamp_fee_pct(v: f64, fallback: f64) -> f64 {
+    if v.is_finite() && (0.0..=100.0).contains(&v) {
+        (v * 1000.0).round() / 1000.0
     } else {
         fallback
     }
@@ -180,7 +189,7 @@ mod settings_tests {
         obj.remove("fee_pct");
         let parsed: PublicSettings = serde_json::from_value(v).unwrap();
         assert_eq!(parsed.share_pct, 35, "缺省仍是历史硬编码的 35%");
-        assert_eq!(parsed.fee_pct, 0);
+        assert_eq!(parsed.fee_pct, 0.0);
         assert_eq!(clamp_pct(parsed.share_pct, default_share_pct()), 35);
     }
 
@@ -195,10 +204,10 @@ mod settings_tests {
         // 下发 JSON 里也必须是夹过的值，前端拿到的永远是合法百分数
         let mut s = PublicSettings::default();
         s.share_pct = 999;
-        s.fee_pct = -3;
+        s.fee_pct = -3.0;
         let v = s.to_json();
         assert_eq!(v["sharePct"], 35);
-        assert_eq!(v["feePct"], 0);
+        assert_eq!(v["feePct"], 0.0);
     }
 
     #[test]
@@ -233,7 +242,7 @@ impl Default for PublicSettings {
             lineage_enabled: true,
             group_types: Default::default(),
             share_pct: default_share_pct(),
-            fee_pct: 0,
+            fee_pct: 0.0,
             login_required: true,
         }
     }
@@ -341,7 +350,7 @@ impl PublicSettings {
             "lineageEnabled": self.lineage_enabled,
             "groupTypes": self.group_types,
             "sharePct": clamp_pct(self.share_pct, default_share_pct()),
-            "feePct": clamp_pct(self.fee_pct, 0),
+            "feePct": self.fee_pct.clamp(0.0, 100.0),
             "loginRequired": self.login_required,
         })
     }
@@ -396,10 +405,19 @@ pub async fn update_settings(State(st): State<ArcState>, Json(body): Json<Value>
     // 预估收益口径（2026-10-19）：传了才改，且强制夹到 0..=100（脏值回落缺省，
     // 不让负数 / 300% 这类脏配置把「预估到手」算成负数）。
     let pct = |key: &str, cur: i64, fallback: i64| -> i64 {
-        clamp_pct(body.get(key).and_then(|v| v.as_i64()).unwrap_or(cur), fallback)
+        clamp_pct(
+            body.get(key).and_then(|v| v.as_i64()).unwrap_or(cur),
+            fallback,
+        )
     };
     s.share_pct = pct("sharePct", s.share_pct, default_share_pct());
-    s.fee_pct = pct("feePct", s.fee_pct, 0);
+    // 2026-10-20：税费 / 手续费允许两位小数（实测 0.624%），不能再用整数截断。
+    s.fee_pct = body
+        .get("feePct")
+        .and_then(|v| v.as_f64())
+        .filter(|v| *v >= 0.0 && *v <= 100.0)
+        .map(|v| (v * 1000.0).round() / 1000.0)
+        .unwrap_or(s.fee_pct);
     s.data_enabled = flag("dataEnabled", s.data_enabled);
     s.group_enabled = flag("groupEnabled", s.group_enabled);
     s.lineage_enabled = flag("lineageEnabled", s.lineage_enabled);

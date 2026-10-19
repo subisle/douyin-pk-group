@@ -504,7 +504,8 @@ async fn my_account_set_pool(
          VALUES (?, ?, ?, 0, ?) \
          ON CONFLICT (name) DO UPDATE SET phone = EXCLUDED.phone, pass = EXCLUDED.pass, \
            temp_pass_hash = '', temp_pass_exp = NULL, must_change_pass = 0";
-    const UPSERT_LEGACY: &str = "INSERT INTO my_accounts (name, phone, pass, is_admin, created_at) \
+    const UPSERT_LEGACY: &str =
+        "INSERT INTO my_accounts (name, phone, pass, is_admin, created_at) \
          VALUES (?, ?, ?, 0, ?) \
          ON CONFLICT (name) DO UPDATE SET phone = EXCLUDED.phone, pass = EXCLUDED.pass";
     let mut res = sqlx::query(&crate::pq::rewrite(UPSERT_NEW))
@@ -1072,8 +1073,7 @@ pub async fn my_accounts_batch_open(
                     q = q.bind(&pass_hash);
                 }
                 let mut res = q.bind(pid as i64).bind(&old_name).execute(pool).await;
-                if force_reset
-                    && matches!(&res, Err(e) if e.to_string().contains("Unknown column"))
+                if force_reset && matches!(&res, Err(e) if e.to_string().contains("Unknown column"))
                 {
                     tracing::warn!("039 未跑：批量 force_reset 无法清临时密码三列");
                     res = sqlx::query(&crate::pq::rewrite(
@@ -1417,11 +1417,7 @@ pub enum TempPassResult {
 /// `where_sql` 是**代码里写死的**片段（`m.phone = ?` / `m.name = ?`），不接收外部输入。
 /// 039 未跑时整句失败 → 回落老列查询（临时密码当不存在，登录照常可用），
 /// 与 038 在 `my_account_info` 里的回落策略同口径 —— 不让没迁移的库整体登不进去。
-async fn login_row(
-    pool: &PgPool,
-    where_sql: &str,
-    key: &str,
-) -> Option<sqlx::postgres::PgRow> {
+async fn login_row(pool: &PgPool, where_sql: &str, key: &str) -> Option<sqlx::postgres::PgRow> {
     let sql = format!(
         "SELECT m.name, m.pass, m.person_id, COALESCE(p.gender, '') AS team, \
                 m.temp_pass_hash, m.must_change_pass, \
@@ -1997,7 +1993,9 @@ pub async fn my_account_info(st: &AppState, key: &str) -> Option<MyAccountInfo> 
 
 /// 读账号的绑定邮箱（按登录名）。没登记 / 列不存在（迁移 038 没跑）→ 空串。
 pub async fn my_account_email(st: &AppState, name: &str) -> String {
-    let Ok(pool) = w(st) else { return String::new() };
+    let Ok(pool) = w(st) else {
+        return String::new();
+    };
     let key = name.trim();
     if key.is_empty() {
         return String::new();
@@ -2026,18 +2024,20 @@ pub async fn my_account_set_email(
     if key.is_empty() {
         return Err(biz("登录已过期，请重新登录"));
     }
-    sqlx::query(&crate::pq::rewrite("UPDATE my_accounts SET email = ? WHERE name = ?"))
-        .bind(email)
-        .bind(key)
-        .execute(pool)
-        .await
-        .map_err(|e| {
-            if e.to_string().contains("Unknown column") {
-                biz("邮箱功能未启用：请先跑一次 pk-server migrate（038_my_account_email）")
-            } else {
-                format!("写入邮箱失败：{e}")
-            }
-        })?;
+    sqlx::query(&crate::pq::rewrite(
+        "UPDATE my_accounts SET email = ? WHERE name = ?",
+    ))
+    .bind(email)
+    .bind(key)
+    .execute(pool)
+    .await
+    .map_err(|e| {
+        if e.to_string().contains("Unknown column") {
+            biz("邮箱功能未启用：请先跑一次 pk-server migrate（038_my_account_email）")
+        } else {
+            format!("写入邮箱失败：{e}")
+        }
+    })?;
     Ok(())
 }
 
@@ -2235,7 +2235,10 @@ pub async fn my_account_claim(
     }
     let pass = validate_my_password(pass)?;
     let pool = w(st).map_err(|e| e.to_string())?;
-    let mut tx = pool.begin().await.map_err(|e| format!("认领事务开启失败：{e}"))?;
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("认领事务开启失败：{e}"))?;
 
     // 1) 台账里找同名在职主播（含已离团行，才能给出「已离团」这条明确文案）
     let rows = sqlx::query(&crate::pq::rewrite(
@@ -2812,18 +2815,18 @@ mod tests {
     #[test]
     fn password_rule_accepts_any_unicode() {
         for p in [
-            "9282",              // 手机号后四位（运营开号习惯）
+            "9282", // 手机号后四位（运营开号习惯）
             "abcd",
-            "133-1234-5678",     // 横线（旧口径拒绝，2026-10-18 起放行）
-            "ab_123",            // 下划线
-            "12 34",             // 中间空格
+            "133-1234-5678", // 横线（旧口径拒绝，2026-10-18 起放行）
+            "ab_123",        // 下划线
+            "12 34",         // 中间空格
             "abcd!",
             "ab@c#",
-            "密码abcd",          // 中文
-            "Aa181206..",        // 点
-            "ab\u{1f600}cd",     // emoji（按 1 个字符计）
-            "p@ss w0rd! 中文",   // 混排
-            "  a1b  ",           // 首尾空格也是密码的一部分（不 trim）
+            "密码abcd",        // 中文
+            "Aa181206..",      // 点
+            "ab\u{1f600}cd",   // emoji（按 1 个字符计）
+            "p@ss w0rd! 中文", // 混排
+            "  a1b  ",         // 首尾空格也是密码的一部分（不 trim）
         ] {
             assert!(
                 validate_my_password(p).is_ok(),
@@ -2848,7 +2851,9 @@ mod tests {
     /// 下限 4：1~3 个字符一律拒绝。
     #[test]
     fn password_rule_rejects_too_short() {
-        for p in ["1", "12", "123", "a", "ab", "abc", "a1", "1a2", "密", "密码"] {
+        for p in [
+            "1", "12", "123", "a", "ab", "abc", "a1", "1a2", "密", "密码",
+        ] {
             assert!(
                 validate_my_account("凤夏", p).is_err(),
                 "{p:?}（{} 个字符）少于 4 → 拒绝",
@@ -2886,8 +2891,7 @@ mod tests {
     #[test]
     fn password_rule_rejects_blank() {
         for p in ["", "   ", "\t\n ", "        "] {
-            let err = validate_my_password(p)
-                .expect_err(&format!("{p:?} 是空白密码，必须拒绝"));
+            let err = validate_my_password(p).expect_err(&format!("{p:?} 是空白密码，必须拒绝"));
             assert!(is_biz(&err), "空密码拒绝必须是 BIZ 文案：{err}");
             assert_eq!(biz_msg(&err), MSG_PASS_BLANK, "实际文案：{err}");
         }
@@ -2899,15 +2903,14 @@ mod tests {
     #[test]
     fn password_rule_rejects_ascii_control_chars() {
         for p in [
-            "ab\ncd",       // 换行
-            "ab\tcd",       // 制表符
-            "ab\rcd",       // 回车
-            "ab\u{0}cd",    // NUL
-            "ab\u{7f}cd",   // DEL
-            "abcd\u{1}",    // SOH
+            "ab\ncd",     // 换行
+            "ab\tcd",     // 制表符
+            "ab\rcd",     // 回车
+            "ab\u{0}cd",  // NUL
+            "ab\u{7f}cd", // DEL
+            "abcd\u{1}",  // SOH
         ] {
-            let err = validate_my_password(p)
-                .expect_err(&format!("{p:?} 含控制字符，必须拒绝"));
+            let err = validate_my_password(p).expect_err(&format!("{p:?} 含控制字符，必须拒绝"));
             assert_eq!(biz_msg(&err), MSG_PASS_CTRL, "实际文案：{err}");
         }
         // 非 ASCII 的「控制类」字符不在拒绝范围（用户口径是任意符号），例如零宽连接符
@@ -2951,9 +2954,17 @@ mod tests {
         assert_eq!(normalize_qq("123456").unwrap(), "123456");
         assert_eq!(normalize_qq("  123456  ").unwrap(), "123456");
         assert_eq!(normalize_qq("123 456").unwrap(), "123456", "内部空格也去");
-        assert_eq!(normalize_qq("12345\u{3000}6").unwrap(), "123456", "全角空格也去");
+        assert_eq!(
+            normalize_qq("12345\u{3000}6").unwrap(),
+            "123456",
+            "全角空格也去"
+        );
         assert_eq!(normalize_qq("123456@qq.com").unwrap(), "123456");
-        assert_eq!(normalize_qq("123456@QQ.COM").unwrap(), "123456", "域名大小写不敏感");
+        assert_eq!(
+            normalize_qq("123456@QQ.COM").unwrap(),
+            "123456",
+            "域名大小写不敏感"
+        );
         assert_eq!(normalize_qq(" 123456@qq.com ").unwrap(), "123456");
         // 边界：5 位与 12 位合法
         assert_eq!(normalize_qq("12345").unwrap(), "12345");
@@ -2967,20 +2978,19 @@ mod tests {
         for raw in [
             "",
             "   ",
-            "1234",                 // 4 位（少一位）
-            "1234567890123",        // 13 位（多一位）
-            "012345",               // 首位 0
+            "1234",          // 4 位（少一位）
+            "1234567890123", // 13 位（多一位）
+            "012345",        // 首位 0
             "0",
             "12a456",
-            "12-456",               // 横线不是 QQ 号的一部分
-            "123456@163.com",       // 只收 QQ 域名
+            "12-456",         // 横线不是 QQ 号的一部分
+            "123456@163.com", // 只收 QQ 域名
             "123456@vip.qq.com",
-            "１２３４５６",          // 全角数字
+            "１２３４５６", // 全角数字
             "abcde",
             "@qq.com",
         ] {
-            let err = normalize_qq(raw)
-                .expect_err(&format!("{raw:?} 不是合法 QQ 号，必须拒绝"));
+            let err = normalize_qq(raw).expect_err(&format!("{raw:?} 不是合法 QQ 号，必须拒绝"));
             assert!(is_biz(&err), "必须是 BIZ 文案：{err}");
             assert_eq!(biz_msg(&err), MSG_INVALID_QQ, "实际文案：{err}");
         }
@@ -3142,8 +3152,15 @@ mod tests {
         // 临时密码 = 10 位 CSPRNG 串（不是可推导的手机号后四位），且必须过密码规则
         let p = crate::random::random_password();
         assert_eq!(p.chars().count(), 10, "临时密码应为 10 位随机串");
-        assert_ne!(p, initial_password("13800138000"), "临时密码 ≠ 手机号后四位");
-        assert!(validate_my_password(&p).is_ok(), "临时密码必须过统一密码规则");
+        assert_ne!(
+            p,
+            initial_password("13800138000"),
+            "临时密码 ≠ 手机号后四位"
+        );
+        assert!(
+            validate_my_password(&p).is_ok(),
+            "临时密码必须过统一密码规则"
+        );
         // 非法 QQ 号的拒绝文案与用户填错 QQ 的提示一致
         assert_eq!(biz_msg(&qq_to_email("abc").unwrap_err()), MSG_INVALID_QQ);
     }
@@ -3327,7 +3344,9 @@ mod tests {
     }
 
     async fn it_cleanup(st: &crate::state::AppState) {
-        let Some(pool) = st.writer.as_ref() else { return };
+        let Some(pool) = st.writer.as_ref() else {
+            return;
+        };
         for name in [IT_NAME_MALE, IT_NAME_FEMALE] {
             let _ = sqlx::query(&crate::pq::rewrite(
                 "DELETE FROM my_accounts WHERE name = ?",
@@ -3412,9 +3431,11 @@ mod tests {
                 "已认领 → 不可再认领"
             );
             assert!(
-                is_biz(&my_account_claim(&st, IT_NAME_MALE, "初识密码@2026")
-                    .await
-                    .unwrap_err()),
+                is_biz(
+                    &my_account_claim(&st, IT_NAME_MALE, "初识密码@2026")
+                        .await
+                        .unwrap_err()
+                ),
                 "重复认领必须是业务拒绝（handler 400 原样下发）"
             );
 
@@ -3442,16 +3463,20 @@ mod tests {
             );
 
             // ---- 3) S1 标志 + 拒绝单独绑 QQ ----
-            let f = my_account_auth_flags(&st, IT_NAME_MALE).await.expect("flags");
+            let f = my_account_auth_flags(&st, IT_NAME_MALE)
+                .await
+                .expect("flags");
             assert!(f.need_profile, "没手机号 → needProfile");
             assert!(!f.need_qq, "S1 优先，不催 QQ");
             assert!(!f.qq_bound);
             assert_eq!(f.email_mask, "");
             assert_eq!(f.phone, "", "S1 还没有手机号（handler 打码前是空串）");
             assert_eq!(
-                biz_msg(&my_account_set_qq(&st, IT_NAME_MALE, IT_QQ_MALE)
-                    .await
-                    .unwrap_err()),
+                biz_msg(
+                    &my_account_set_qq(&st, IT_NAME_MALE, IT_QQ_MALE)
+                        .await
+                        .unwrap_err()
+                ),
                 MSG_NEED_PROFILE,
                 "S1 只绑 QQ 必须被拦（handler → 403 NEED_PROFILE）"
             );
@@ -3467,13 +3492,17 @@ mod tests {
             .await
             .expect("首次补全应成功");
             assert_eq!(
-                biz_msg(&my_account_profile_bind(&st, IT_NAME_MALE, "19900000009", "", None)
-                    .await
-                    .unwrap_err()),
+                biz_msg(
+                    &my_account_profile_bind(&st, IT_NAME_MALE, "19900000009", "", None)
+                        .await
+                        .unwrap_err()
+                ),
                 MSG_PROFILE_ALREADY_DONE,
                 "第二次补全 → PROFILE_ALREADY_DONE"
             );
-            let f = my_account_auth_flags(&st, IT_NAME_MALE).await.expect("flags");
+            let f = my_account_auth_flags(&st, IT_NAME_MALE)
+                .await
+                .expect("flags");
             assert!(!f.need_profile && !f.need_qq);
             assert!(f.qq_bound);
             assert_eq!(f.email_mask, "100***@qq.com", "脱敏：本地部分留前 3 位");
@@ -3485,11 +3514,9 @@ mod tests {
                 LoginFail::BadPassword,
                 "补全时给了新密码 → 旧密码失效"
             );
-            assert!(
-                my_account_check_login(&st, IT_NAME_MALE, "新密码!a1")
-                    .await
-                    .is_ok()
-            );
+            assert!(my_account_check_login(&st, IT_NAME_MALE, "新密码!a1")
+                .await
+                .is_ok());
             assert!(
                 my_account_check_login(&st, IT_PHONE_MALE, "新密码!a1")
                     .await
@@ -3504,22 +3531,26 @@ mod tests {
                 .await
                 .expect("第二人认领");
             assert_eq!(
-                biz_msg(&my_account_profile_bind(
-                    &st,
-                    IT_NAME_FEMALE,
-                    IT_PHONE_FEMALE,
-                    IT_QQ_MALE,
-                    None,
-                )
-                .await
-                .unwrap_err()),
+                biz_msg(
+                    &my_account_profile_bind(
+                        &st,
+                        IT_NAME_FEMALE,
+                        IT_PHONE_FEMALE,
+                        IT_QQ_MALE,
+                        None,
+                    )
+                    .await
+                    .unwrap_err()
+                ),
                 MSG_QQ_TAKEN,
                 "同一 QQ 不能绑多个账号（040 唯一索引 + 应用层查重）"
             );
             assert_eq!(
-                biz_msg(&my_account_profile_bind(&st, IT_NAME_FEMALE, IT_PHONE_MALE, "", None)
-                    .await
-                    .unwrap_err()),
+                biz_msg(
+                    &my_account_profile_bind(&st, IT_NAME_FEMALE, IT_PHONE_MALE, "", None)
+                        .await
+                        .unwrap_err()
+                ),
                 MSG_PHONE_TAKEN,
                 "手机号唯一"
             );
@@ -3532,9 +3563,11 @@ mod tests {
                 .expect("flags");
             assert!(f2.need_qq && !f2.qq_bound, "没 QQ 的用户由 needQq 引导");
             assert_eq!(
-                biz_msg(&my_account_set_qq(&st, IT_NAME_FEMALE, IT_QQ_MALE)
-                    .await
-                    .unwrap_err()),
+                biz_msg(
+                    &my_account_set_qq(&st, IT_NAME_FEMALE, IT_QQ_MALE)
+                        .await
+                        .unwrap_err()
+                ),
                 MSG_QQ_TAKEN
             );
             assert_eq!(
@@ -3543,10 +3576,12 @@ mod tests {
                     .expect("绑定自己的 QQ"),
                 "100***@qq.com"
             );
-            assert!(my_account_auth_flags(&st, IT_NAME_FEMALE)
-                .await
-                .unwrap()
-                .qq_bound);
+            assert!(
+                my_account_auth_flags(&st, IT_NAME_FEMALE)
+                    .await
+                    .unwrap()
+                    .qq_bound
+            );
             // 解绑 → 空串 + needQq 回归
             assert_eq!(
                 my_account_set_qq(&st, IT_NAME_FEMALE, "")
@@ -3554,10 +3589,12 @@ mod tests {
                     .expect("解绑 QQ"),
                 ""
             );
-            assert!(my_account_auth_flags(&st, IT_NAME_FEMALE)
-                .await
-                .unwrap()
-                .need_qq);
+            assert!(
+                my_account_auth_flags(&st, IT_NAME_FEMALE)
+                    .await
+                    .unwrap()
+                    .need_qq
+            );
 
             // ---- 6) 忘记密码双因子（不匹配一律同一文案）----
             let (t_name, t_email) = my_account_reset_target(&st, IT_PHONE_MALE, IT_QQ_MALE)
@@ -3606,7 +3643,10 @@ mod tests {
             let again = my_account_check_login(&st, IT_NAME_MALE, "TempPass123")
                 .await
                 .expect("临时密码不消费，15 分钟内可重复用");
-            assert!(again.temp_used, "契约 §2.4：Valid 不清 temp（避免手滑锁死）");
+            assert!(
+                again.temp_used,
+                "契约 §2.4：Valid 不清 temp（避免手滑锁死）"
+            );
             assert_eq!(
                 my_account_temp_pass_try(&st, IT_NAME_MALE, "TempPass123")
                     .await
@@ -3624,10 +3664,12 @@ mod tests {
             my_account_reset_password_self(&st, IT_NAME_MALE, "最终密码 2026")
                 .await
                 .expect("改密");
-            assert!(!my_account_auth_flags(&st, IT_NAME_MALE)
-                .await
-                .unwrap()
-                .must_change_pass);
+            assert!(
+                !my_account_auth_flags(&st, IT_NAME_MALE)
+                    .await
+                    .unwrap()
+                    .must_change_pass
+            );
             assert_eq!(
                 my_account_check_login(&st, IT_NAME_MALE, "TempPass123")
                     .await
@@ -3666,10 +3708,12 @@ mod tests {
                     .unwrap_err(),
                 LoginFail::BadPassword
             );
-            assert!(!my_account_auth_flags(&st, IT_NAME_MALE)
-                .await
-                .unwrap()
-                .must_change_pass);
+            assert!(
+                !my_account_auth_flags(&st, IT_NAME_MALE)
+                    .await
+                    .unwrap()
+                    .must_change_pass
+            );
 
             // ---- 11) 过期：先验签再判过期 → TempExpired，并惰性清 temp ----
             my_account_reset_apply(&st, IT_PHONE_MALE, "TempPass789")
@@ -3704,5 +3748,4 @@ mod tests {
             panic!("真库集成回归失败：{e}");
         }
     }
-
 }

@@ -235,6 +235,11 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "043_plans_created_at_text",
         include_str!("migrations/043_plans_created_at_text.sql"),
     ),
+    // 044：直播 PK 实时监控与赛事运行态（2026-10-20）。plans 只是赛前分组快照，
+    // 实时分数每几秒刷新，不能写进 payload；这里单开赛事/阶段/小组/对局/席位/
+    // 采样/时间线/晋级/监控房间/采集 worker/推送作业各组表。
+    // battle_id / room_id / UID 一律 VARCHAR（19 位超 JS 安全整数）。幂等。
+    ("044_live_pk", include_str!("migrations/044_live_pk.sql")),
 ];
 
 /// 迁移建连（migrator 账号；同样关语句缓存）

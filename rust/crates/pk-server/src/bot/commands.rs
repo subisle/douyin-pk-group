@@ -28,7 +28,7 @@ pub enum CmdId {
     Help,
     /// 每日榜单（对外主命令名 = `1`）
     DailyReport,
-    /// 个人榜单（对外主命令名 = `2`）
+    /// 个人报告（对外主命令名 = `2`）
     MyReport,
     /// 名下徒弟的榜单（对外主命令名 = `3`）
     DiscipleRank,
@@ -78,14 +78,14 @@ pub const COMMANDS: &[CmdSpec] = &[
         name: "2",
         aliases: &["个人榜单", "个人报告", "me", "my"],
         role: Role::User,
-        summary: "个人榜单：你的今日 / 本月数据 + 追分进度",
+        summary: "个人报告：今日音浪 / 预估收入 + 本月数据 + 追分进度",
     },
     CmdSpec {
         id: CmdId::DiscipleRank,
         name: "3",
         aliases: &["徒弟榜单", "徒弟榜", "徒弟"],
         role: Role::User,
-        summary: "徒弟榜单：名下徒弟的本月榜单",
+        summary: "徒弟榜单图：名下徒弟的音浪对比（与师门日报同一张图）",
     },
     CmdSpec {
         id: CmdId::TargetRank,
@@ -220,7 +220,7 @@ fn matches_spec(candidate: &str, spec: &CmdSpec) -> bool {
 
 /// 解析一条命令文本 → (命令 ID, 参数)。
 ///
-/// - 先整句精确匹配无参命令（帮助 / 状态 / 分组 / 总榜 / 1 每日榜单 / 2 个人榜单 /
+/// - 先整句精确匹配无参命令（帮助 / 状态 / 分组 / 总榜 / 1 每日报告 / 2 个人报告 /
 ///   3 徒弟榜单 / 4 追分榜单 / 暂停接收每日推送 / 开启接收每日推送，含中文名与英文别名，
 ///   忽略大小写）
 /// - 否则取第一个 token 匹配 name / aliases（忽略大小写），其余 token 作为参数

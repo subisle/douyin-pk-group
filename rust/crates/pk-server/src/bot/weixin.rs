@@ -991,10 +991,22 @@ impl WxTransport {
             if sent > 0 {
                 return Ok(());
             }
-            tracing::warn!(pages = out.images.len(), "微信全局通道榜单图全部失败，退回文字");
+            tracing::warn!(
+                pages = out.images.len(),
+                "微信全局通道榜单图全部失败，退回文字"
+            );
         }
         self.send_raw(&to_user, &group, &context_token, &out.text)
-            .await
+            .await?;
+        for text in &out.followup_texts {
+            if text.trim().is_empty() {
+                continue;
+            }
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            self.send_raw(&to_user, &group, &context_token, text)
+                .await?;
+        }
+        Ok(())
     }
 
     /// 主动推送（追分提醒 / 每日报告，2026-10-09）：会话上下文从 DB 取，

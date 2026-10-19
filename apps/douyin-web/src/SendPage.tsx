@@ -255,8 +255,11 @@ export default function SendPage() {
     return full.filter((t) => t.team === batch).length
   }, [tab, selPersons, selMasters, includeMaster, batch, full])
 
+  /* 2026-10-19 用户口径「只要图片不要文字」：带图时正文可空（图发成功本来就不发文字，
+     正文只作图失败时的兜底）；纯文字消息仍必须填正文。 */
+  const hasImage = !!upload || imageKind !== 'none'
   const canSend =
-    !!title.trim() && !!content.trim() && channels.length > 0 && estimatedN > 0 && !sending
+    !!title.trim() && (!!content.trim() || hasImage) && channels.length > 0 && estimatedN > 0 && !sending
 
   /** 组装 target（前端只传意图，docs/23 §5.2：展开与校验在服务端） */
   function buildTarget() {
@@ -455,7 +458,9 @@ export default function SendPage() {
               <div className="row" style={{ alignItems: 'stretch' }}>
                 <textarea
                   rows={5}
-                  placeholder="正文（必填，纯文本，收件侧按 textContent 渲染）"
+                  placeholder={hasImage
+                    ? '正文（可选；只发图时留空，正文仅图片发送失败时兜底）'
+                    : '正文（必填，纯文本，收件侧按 textContent 渲染）'}
                   maxLength={1000}
                   value={content}
                   onChange={(e) => setContent(e.target.value.slice(0, 1000))}

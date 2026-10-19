@@ -1,0 +1,125 @@
+/* 直播分数监控（2026-10-20）
+   沿用主样式表的 CSS 变量，不另起一套色板，避免与后台其它页割裂。 */
+
+.lm-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.lm-toolbar select { min-width: 220px; }
+
+/* 状态点：颜色即语义，扫一眼就知道哪一卡住了 */
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  flex: 0 0 auto;
+  background: var(--ink3);
+}
+.dot-live { background: var(--good); box-shadow: 0 0 0 3px var(--good-bg); }
+.dot-warn { background: var(--warn); box-shadow: 0 0 0 3px var(--warn-bg); }
+.dot-ok { background: var(--brand); }
+.dot-idle { background: var(--ink3); }
+
+.lm-tag {
+  font-size: 12px;
+  color: var(--ink2);
+  background: var(--canvas);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 1px 8px;
+  white-space: nowrap;
+}
+.lm-tag.lm-bad { color: var(--bad); background: var(--bad-bg); border-color: transparent; }
+.lm-tag.lm-ok { color: var(--good); background: var(--good-bg); border-color: transparent; }
+
+.lm-rooms { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+.lm-room {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 7px 10px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-ctl);
+}
+
+/* 主体：左实时分、右赛程，窄屏自动堆叠 */
+.lm-board {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) minmax(320px, 1.35fr);
+  gap: 14px;
+  align-items: start;
+}
+@media (max-width: 900px) {
+  .lm-board { grid-template-columns: 1fr; }
+}
+
+.lm-scores, .lm-stages, .lm-actions, .lm-qualifiers {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 12px;
+}
+.lm-scores h3, .lm-stages h3, .lm-actions h3, .lm-qualifiers h3 {
+  margin: 0 0 10px;
+  font-size: 14px;
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}
+.lm-scores h3 select { margin-left: auto; font-size: 12px; }
+
+.lm-table { width: 100%; border-collapse: collapse; }
+.lm-table th {
+  text-align: left; font-size: 12px; color: var(--ink2);
+  font-weight: 600; padding: 4px 6px;
+  border-bottom: 1px solid var(--line);
+}
+.lm-table td { padding: 5px 6px; border-bottom: 1px solid var(--line); font-size: 13px; }
+.lm-table tr.is-qualified td { color: var(--good); }
+.lm-rank { color: var(--ink2); width: 34px; }
+.lm-score { text-align: right; font-variant-numeric: tabular-nums; }
+
+.lm-stage { margin-bottom: 12px; }
+.lm-stage-head {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 13px; font-weight: 600; color: var(--ink);
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 8px;
+}
+
+.lm-group {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-ctl);
+  padding: 7px 9px;
+  margin-bottom: 6px;
+}
+.lm-group.lm-live { border-color: color-mix(in srgb, var(--good) 35%, transparent); }
+.lm-group.lm-warn { border-color: color-mix(in srgb, var(--warn) 35%, transparent); }
+.lm-group-head {
+  display: flex; align-items: center; gap: 7px; flex-wrap: wrap;
+  font-size: 13px;
+}
+.lm-group-head button { margin-left: auto; }
+
+.lm-rounds { margin-top: 7px; display: flex; flex-direction: column; gap: 6px; }
+.lm-round {
+  border: 1px dashed var(--line-strong);
+  border-radius: 6px;
+  padding: 5px 7px;
+  font-size: 12px;
+}
+.lm-round.is-official {
+  border-style: solid;
+  border-color: color-mix(in srgb, var(--good) 40%, transparent);
+  background: var(--good-bg);
+}
+.lm-round-line { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.lm-round-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 5px; }
+
+.lm-warn { color: var(--warn); font-size: 12px; margin: 4px 0 0; }
+
+.lm-actions { margin-top: 14px; }
+.lm-actions button { margin-right: 8px; margin-bottom: 6px; }
+.lm-qualifiers { margin-top: 14px; }

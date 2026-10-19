@@ -1567,7 +1567,11 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
   border:1px solid rgba(255,255,255,.85); border-radius:.5rem;
   padding:.5rem .625rem; }
 .st-my-big .st-cmp-rmb .l { display:flex; align-items:center; gap:.25rem;
-  font-size:12.5px; color:var(--on-surface-variant); }
+  font-size:12.5px; color:var(--on-surface-variant); flex:none; }
+.st-my-big .st-cmp-rmb .l > span:not(.material-symbols-outlined):not(.pct-tag) {
+  white-space:nowrap; }
+.st-my-big .st-cmp-rmb .l .pct-tag { white-space:nowrap; max-width:8.5rem;
+  overflow:hidden; text-overflow:ellipsis; }
 .st-my-big .st-cmp-rmb .l .material-symbols-outlined { font-size:16px; color:var(--tertiary); }
 .st-my-big .st-cmp-rmb .l .pct-tag { padding:.0625rem .375rem; border-radius:.25rem;
   background:rgba(0,88,188,.08); color:var(--primary); font-size:11px; font-weight:700; }
@@ -2764,7 +2768,9 @@ const yuan = (n) => {
      · 提现侧另有成本：提现门槛 ¥1000 起、单笔手续费，平台技术服务费/个税另计。
    所以 35% 与手续费都不写在前端：由后台 `public_settings`（sharePct / feePct）下发，
    /my 与 /my/accounts 各带一份 earnings，前端按它算、按它展示口径说明。
-   公式：到手 ≈ 音浪 ÷ 10 × 分成% ×（1 - 手续费%）。配置缺失/脏值回落 35% / 0%。 */
+   公式：到手 ≈ 音浪 ÷ 10 × 分成% ×（1 - 手续费/税%）。配置缺失/脏值回落 35% / 0%。
+   2026-10-20 实测口径：分成后金额约扣 0.624% 税费，后台 feePct 填 0.624 即可；
+   前端保留两位小数，避免整页配置被整数限制截断。 */
 let earningsCfg = { sharePct: 35, feePct: 0 };
 /** 单条 earnings 配置落库（接口没带 / 带了脏值都按缺省兜底，绝不让页面算出负数）。 */
 function applyEarnings(src) {
@@ -2772,8 +2778,14 @@ function applyEarnings(src) {
     const n = Number(v);
     return Number.isFinite(n) && n >= 0 && n <= 100 ? n : dflt;
   };
+  const round2 = (v, dflt) => Math.round(Number(v) * 100) / 100;
   const e = src && typeof src === 'object' ? src : {};
-  earningsCfg = { sharePct: num(e.sharePct, 35), feePct: num(e.feePct, 0) };
+  earningsCfg = {
+    sharePct: num(e.sharePct, 35),
+    feePct: Number.isFinite(Number(e.feePct)) && Number(e.feePct) >= 0 && Number(e.feePct) <= 100
+      ? round2(e.feePct, 0)
+      : 0,
+  };
 }
 /** 音浪 → 预估到手人民币（元）。wave 无效返回 null，由调用方决定显示「—」。 */
 function estYuan(wave) {
@@ -2783,9 +2795,7 @@ function estYuan(wave) {
 }
 /** 分成口径说明（卡内小字）：只按当前配置生成，不再写死 35%。 */
 function earningsNote() {
-  return '预估到手 = 音浪 ÷ 10 × ' + earningsCfg.sharePct + '% 分成' +
-    (earningsCfg.feePct > 0 ? ' ×（1 − ' + earningsCfg.feePct + '% 手续费）' : '') +
-    '；抖音实际以公会等级与任务完成度结算，提现扣费另计。';
+  return '以实际提现为准。';
 }
 /** 同期差值 chip（1.0.1）：涨红跌绿是固定口径；prev 为 null（上期没数据）不显示 */
 const waveDelta = (wave, prev) => {
@@ -5076,7 +5086,8 @@ function myLogout() {
 async function loadMy(signal) {
   const t = myToken();
   if (!t) { sessionExpired(); return; }
-  $('mhSub').textContent = 'MY';
+  /* 2026-10-19 用户口径「去掉头部的 MY」：「我的」页与子页不再显示这行英文标签。 */
+  $('mhSub').textContent = '';
   try {
     /* 账号还没绑主播（历史遗留 bound=0 / person_id=0，2026-10-14）：
        绑定由管理员在后台做，前端没有自助入口，所以这里**仍然早退**出一张说明卡 ——
@@ -5154,7 +5165,7 @@ function renderBindCard(who) {
 function renderMyLogin() {
   /* 全站有登录门后这里只是兜底（正常到不了）；文案保持与登录门一致 */
   const name = localStorage.getItem(MY_NAME_KEY()) || '';
-  $('mhSub').textContent = 'MY';
+  $('mhSub').textContent = '';
   $('view').innerHTML = '<div class="section my-login">' +
     '<div class="card card-pad">' +
     '<div class="big-av" style="background:' + avColor(LABEL()) + '">' + esc(LABEL().charAt(0)) + '</div>' +
@@ -5371,8 +5382,8 @@ function renderMy(d, series, push, accounts) {
     cmpRow('functions', '本年累计', y, '比去年同期') +
     /* 分成比例与手续费都来自后台配置（2026-10-19），前端不再硬编码 35%。 */
     '<div class="st-cmp-rmb"><div class="l"><span class="material-symbols-outlined">monetization_on</span>' +
-      '<span>本月预估到手</span><span class="pct-tag">' + earningsCfg.sharePct + '%分成' +
-      (earningsCfg.feePct > 0 ? ' · 扣' + earningsCfg.feePct + '%费' : '') + '</span></div>' +
+      '<span>预估到手</span><span class="pct-tag">' + earningsCfg.sharePct + '%分成' +
+      (earningsCfg.feePct > 0 ? ' · 扣' + earningsCfg.feePct + '%税' : '') + '</span></div>' +
       '<div class="v">' + monthlyYuan + '</div>' +
       '<div class="r"><span class="tail">' + esc(earningsNote()) + '</span></div></div>' +
   '</div>';
@@ -5621,6 +5632,7 @@ function renderMySub() {
     clearWxDock();
     clearPushCodeTimer();
     wxDockAutoAttempted = false;
+    wxDockForceQr = false;
   }
   setQrWatermarkHidden(sub === 'wechat');
   if (sub === 'wechat') autoStartWxDock(pushState);
@@ -5637,6 +5649,7 @@ function showMyHome() {
   clearWxDock();
   clearPushCodeTimer();
   wxDockAutoAttempted = false;
+  wxDockForceQr = false;
   const bar = $('mySubBar');
   if (bar) bar.hidden = true;
   const info = $('myInfoCard');
@@ -5880,7 +5893,7 @@ function pushStatusText(p) {
    · 每日报告 —— 当天音浪排行榜
    对接（2026-10-19 口径）：进入微信对接子页自动 POST /my/push/wechat/start →
    出二维码 + 4 位对接码（同一响应）+ 2 秒轮询，用户截屏后用微信扫码并在手机上点确认
-   （confirmed）即对接完成（服务端自动落凭证，bound 随之 true，机器人随即私聊欢迎语）。 */
+   （confirmed）即对接完成；首次扫码后给对方发一条消息，机器人会依次发成功提示和介绍。 */
 let pushState = null;
 let pushSrTimer = null;      // scanBound 旧态的自动回流轮询（needActivate 时 5s 后刷一次）
 let pushChaseSrTimer = null; // 「目标人」搜索防抖（与上面的轮询分开，避免互相 clearTimeout）
@@ -5941,8 +5954,8 @@ function renderPushBox(p) {
    ① 微信对接 —— 两个状态：
       状态 A 未对接（!p.bound，含 scanBound 还没等微信确认的旧态）：
         一句说明 + 一个「扫码对接」按钮 → 二维码 + 4 位对接码 + 2 秒轮询，
-        confirmed 即对接完成（不再要用户给机器人发消息激活）；
-      状态 B 已对接（p.bound）：一行「✓ 已对接（昵称）」+「取消绑定」按钮。
+        confirmed 即对接完成；首次扫码仍要用户先给机器人发一条消息才能生成会话上下文；
+      状态 B 已对接（p.bound）：一行「✓ 已对接（昵称）」+「重新绑定」按钮。
    ② 推送开关 —— 仅状态 B 出现（追分提醒 / 每日报告 / 师门日报）。
    原第三段「追分设置」入口行整体删除：追分入口只留在「我的」列表页那一行。
    后端 channelConfigured=false（管理员还没接机器人）时整页只给一句说明。 */
@@ -5962,8 +5975,8 @@ function pushSecTitle(text) {
 }
 
 /* ① 微信对接（2026-10-17 用户口径：两态极简，原三态/多段提示全部收拢）：
-   · 状态 B 已对接（p.bound）：一行「✓ 已对接（昵称）」+「取消绑定」按钮；
-     解绑只断推送接线、不注销扫码登录，重新对接不用再扫码（confirm 文案里说清）。
+   · 状态 B 已对接（p.bound）：一行「✓ 已对接（昵称）」+「重新绑定」按钮。
+     重新绑定只重置推送接线、不注销扫码登录，不需要重新扫码。
    · 状态 A 未对接（!p.bound，含 scanBound 旧态）：交给 pushUnboundHtml ——
      一句说明 + 「扫码对接」按钮。 */
 function wechatBindHtml(p) {
@@ -5976,7 +5989,7 @@ function wechatBindHtml(p) {
     if (p.lastError) {
       h += '<div class="hint">上次推送没成功：' + esc(p.lastError) + '</div>';
     }
-    h += '<button class="go gray" id="pushUnbind" style="margin-top:10px">取消绑定</button>';
+    h += '<button class="go gray" id="pushUnbind" style="margin-top:10px">重新绑定</button>';
   } else {
     h += pushUnboundHtml(p);
   }
@@ -5988,16 +6001,31 @@ function wechatBindHtml(p) {
    不抢扫码主路径；confirmed 后 onWxDockConfirmed → refreshPush 进状态 B。 */
 function pushUnboundHtml(p) {
   let h = '';
+  /* 2026-10-19 用户口径「已扫码不展示码」：已经扫过码、只差手机确认 /
+     给机器人发消息的中间态，不再铺那张大二维码 —— 只留说明 + 按钮。
+     点击「重新获取二维码」会重建二维码区；startWxDock 先复位旧会话状态，
+     后端 start 也会复用仍有效的 pending 会话，不会立刻另开一张。 */
+  const scannedWaiting = !wxDockConfirmed && !wxDockForceQr && !!(p && p.scanBound);
   if (wxDockConfirmed) {
     /* 本次会话刚轮询到 confirmed（toast 会被重渲染冲掉，这里钉住）。
-       · 首次扫码：没有 context_token，iLink 无法主动发消息 —— 必须提示「给机器人发一条消息」
-         激活（2026-10-18 用户报障：以前只显示「对接成功」，用户以为该主动收到消息，实际不会）；
-       · 重扫/解绑后重扫：后端复用已有会话上下文把欢迎语发出来了，正常显示成功即可。 */
+       · 首次扫码：没有 context_token，iLink 无法主动发消息 —— 必须提示「给机器人发一条消息」，
+         对方发完后机器人会立即连发「对接成功」和功能介绍并激活；
+       · 重扫/解绑后重扫：后端复用已有会话上下文主动连发同样两条消息，正常显示成功即可。 */
     h += '<div class="sub" style="margin-top:8px;line-height:1.75">' +
       (wxDockNeedActivate
-        ? '✅ 已扫码对接<br>最后一步：在微信里给机器人随便发一条消息，会收到欢迎语并激活推送。'
+        ? '✅ 已完成对接<br>最后一步：在微信里给机器人随便发一条消息，机器人会依次发送“对接成功”和功能介绍，同时激活推送。'
         : '✅ 对接成功') +
       '</div>';
+  } else if (scannedWaiting) {
+    /* 扫码后不再展示大二维码：一句明确的确认提示 + 小号重取入口（2026-10-19） */
+    h += '<div class="wx-bind-note" style="margin-top:10px">' +
+      '已扫码，请在微信中确认完成机器人对接。若页面一直没有变化，' +
+      '请重新获取二维码后再扫一次。默认每天自动推送每日报告。</div>';
+    if (p.needActivate) {
+      h += '<div class="hint" style="margin-top:6px;line-height:1.7">' +
+        '首次对接：完成后给机器人发一条消息，即会收到成功提示和功能介绍。</div>';
+    }
+    h += '<button class="go gray" id="pushWxRefresh" style="margin-top:10px">重新获取二维码</button>';
   } else {
     h += '<div class="wx-bind-copy">' +
       '<div class="wx-bind-lead">截屏后用微信扫码绑定机器人</div>' +
@@ -6005,15 +6033,8 @@ function pushUnboundHtml(p) {
       '<span class="nowrap">个人数据</span>等。</p>' +
       '<p>欢迎绑定体验，后续会持续更新更多功能。</p>' +
       '</div>';
-    if (p && p.scanBound) {
-      h += '<div class="wx-bind-note">' +
-        (p.needActivate
-          ? '微信已扫码对接，最后一步：给机器人发一条消息激活推送。'
-          : '微信已扫码，请在手机上点确认；确认后会自动跳转成功状态。') +
-        '</div>';
-    }
   }
-  if (!wxDockConfirmed) {
+  if (!wxDockConfirmed && !scannedWaiting) {
   h += '<div class="wx-bind-qr" id="pushQrArea" aria-busy="true">' +
     '<div class="wx-shot-hint">截屏保存，微信「扫一扫」→ 从相册选择</div>' +
     /* 二维码卡（.qr-* 一套样式是原「扫码绑定」卡留下的：208px 白底 + 四角取景框 +
@@ -6025,7 +6046,7 @@ function pushUnboundHtml(p) {
     '<div class="qr-status wait" id="pushWxStatus" role="status" aria-live="polite">' +
     '<span class="dot"></span><span id="pushWxStatusTx">二维码获取中…</span></div>' +
     '<div class="qr-expire" id="pushWxExpire">打开微信「扫一扫」，从相册选择即可绑定</div>' +
-    '<button class="go gray hidden" id="pushWxRefresh" style="margin-top:8px">重新获取二维码</button>' +
+    '<button class="go gray hidden" id="pushWxRefresh" style="margin-top:8px">获取二维码</button>' +
     /* 上游要求验证码时才出现（status = need_verifycode），官方流程的一部分，保留 */
     '<div class="hidden" id="pushWxVerifyWrap" style="margin-top:8px;text-align:left">' +
     '<div class="hint">微信让你输验证码：把微信里显示的数字填到这里。</div>' +
@@ -6050,10 +6071,22 @@ function pushUnboundHtml(p) {
 }
 
 /* 二维码区常驻：页面打开自动取码，用户直接截屏。
-   「重新获取二维码」只在取码失败 / 过期时露出；验证码与对接码都是异常兜底。 */
+   「重新获取二维码」在扫码后中间态 / 取码失败 / 过期时都可用；验证码与对接码是异常兜底。 */
 function bindPushQrShow() {
   const refresh = $('pushWxRefresh');
-  if (refresh) refresh.onclick = () => startWxDock();
+  if (refresh) {
+    refresh.onclick = () => {
+      /* scanBound 状态只渲染了说明和按钮。用户点重取时必须先按二维码模式
+         重渲染整张卡，否则 startWxDock 没有 #pushQrArea / #pushWxQr 可写，
+         接口即使返回二维码也永远显示不出来。 */
+      if (!wxDockForceQr && pushState && pushState.scanBound && !$('pushQrArea')) {
+        wxDockForceQr = true;
+        renderPushBox(pushState);
+        return;
+      }
+      startWxDock();
+    };
+  }
   const verifyGo = $('pushWxVerifyGo');
   if (verifyGo) verifyGo.onclick = () => wxDockPollNow();
   const copy = $('pushCodeCopy');
@@ -6066,7 +6099,7 @@ function bindPushQrShow() {
    同一响应里的 code / codeExpires 由 fillPushCode 填 4 位对接码块。
    拿到就 2 秒一轮 POST /my/push/wechat/poll 看状态：wait/scaned/need_verifycode/
    expired/verify_code_blocked/scaned_but_redirect/binded_redirect/confirmed。
-   confirmed = 后端已保存凭证 + 试发欢迎语 = 对接完成（不再要用户发消息激活）。
+   confirmed = 后端已保存凭证；重配时复用会话上下文主动连发两条，首次扫码待用户首条消息触发。
    计时器必须显式清（clearWxDock）：renderPushBox 每次重渲染都会换掉 #pushBox 的 DOM，
    残留的 setInterval/setTimeout 只会在已卸载节点上白写文案。 */
 const WX_QR_TTL_MS = 5 * 60 * 1000; // 官方二维码约 5 分钟有效（与页面文案一致）
@@ -6083,6 +6116,7 @@ let wxDockPollingEpoch = 0;  // 当前在飞的 poll 属于哪一代（0 = 无�
 let wxDockAutoAttempted = false; // 本次进入子页是否已自动取过一次码
 let wxDockConfirmed = false; // 本次会话刚对接成功：重渲染后仍显示一句「对接成功」
 let wxDockNeedActivate = false; // 首次扫码没有 context_token：要提示「给机器人发一条消息」
+let wxDockForceQr = false; // scanBound 中间态下，用户已明确选择重新展示并获取二维码
 
 function clearWxDock() {
   wxDockEpoch++;
@@ -6132,6 +6166,9 @@ function wxDockShowRetry() {
    并发保护：自动取码和用户点重试可能同一帧触发，只允许一个 start 在飞。 */
 async function startWxDock() {
   if (wxDockStarting) return;
+  /* 「重新获取二维码」唯一出口：先放弃上一代状态，把过期的 scanBound
+     中间态清成可渲染的取码页；否则按钮会指向已消失的旧 DOM。 */
+  wxDockAutoAttempted = false;
   wxDockStarting = true;
   clearWxDock();
   const epoch = wxDockEpoch;
@@ -6219,13 +6256,9 @@ function autoStartWxDock(p) {
   if (card && card.hidden) return;
   if (wxDockStarting) return;
   if (resumeWxDock()) return;
-  /* scanBound = 已经扫过码、只差手机确认。此时不能再自动取一张新码，
-     否则可能把用户刚扫的那张顶掉；只显示确认提示并给一个手动重取入口。 */
-  if (p.scanBound && !wxDockQr) {
-    setWxQrPlaceholder(p.needActivate ? '已扫码，等待给机器人发消息激活' : '已扫码，请在手机上确认');
-    wxStatusSet('scaned', p.needActivate
-      ? '已扫码，等待给机器人发消息激活…'
-      : '已扫码，请在手机上确认…');
+  /* scanBound = 已经扫过码、只差手机确认。此时自动重开会顶掉刚扫的码；
+     只渲染说明和手动重取入口，用户明确点击后再 startWxDock()。 */
+  if (p.scanBound && !wxDockForceQr && !wxDockQr) {
     wxDockShowRetry();
     return;
   }
@@ -6294,7 +6327,7 @@ async function wxDockPollOnce() {
   const st = d.status || 'wait';
   if (st === 'confirmed') { onWxDockConfirmed(d); return; }
   if (st === 'expired') { onWxQrExpired(); return; }
-  if (st === 'scaned') wxStatusSet('scaned', '已扫码，请在手机上确认…');
+  if (st === 'scaned') wxStatusSet('scaned', '已扫码，请在微信中确认机器人对接…');
   else if (st === 'need_verifycode') {
     $('pushWxVerifyWrap')?.classList.remove('hidden');
     wxStatusSet('wait', '微信要求输入验证码');
@@ -6309,11 +6342,11 @@ async function wxDockPollOnce() {
     wxDockShowRetry();
     return;
   } else if (st === 'scaned_but_redirect') {
-    wxStatusSet('scaned', '已扫码，正在切换服务器继续等待…');
+    wxStatusSet('scaned', '已扫码，正在切换服务器继续对接…');
   } else if (st === 'binded_redirect') {
     /* 官方语义：这个微信之前已经连过本机器人。凭证这次拿不到，只能等上游再给
        confirmed；一直不来的话倒计时到点会引导刷新（换一个二维码再扫）。 */
-    wxStatusSet('scaned', '这个微信之前对接过，正在同步…');
+    wxStatusSet('scaned', '这个微信已对接过机器人，正在同步…');
   } else wxStatusSet('wait', '等待扫码…');
   pollWxDock();
 }
@@ -6335,15 +6368,14 @@ function onWxQrExpired() {
   wxDockShowRetry();
 }
 
-/* 对接成功（2026-10-17 口径：confirmed 即完成，后端保存凭证 = bound 随之变 true）：
-   停轮询、钉一句成功、刷新推送状态直接进状态 B（onWxDockConfirmed 先置
-   wxDockConfirmed=true，refreshPush 重渲染后状态 A 分支显示「✅ 对接成功」，
-   随后 p.bound=true 换成状态 B 的「✓ 已对接（昵称）」）。 */
+/* 对接成功：停轮询、钉一句成功、刷新推送状态。首次扫码仍需对方发一条消息，
+   机器人收到后连发成功提示和功能介绍；同一微信号重配则后端已主动连发两条。 */
 function onWxDockConfirmed(d) {
   clearWxDock();
   clearPushCodeTimer();
   wxDockConfirmed = true;
   wxDockNeedActivate = !!(d && d.needActivate);
+  wxDockForceQr = false;
   wxDockQr = '';
   wxDockImgContent = '';
   wxDockDeadline = 0;
@@ -6351,7 +6383,7 @@ function onWxDockConfirmed(d) {
   if (qrImg) qrImg.removeAttribute('src');
   const qrArea = $('pushQrArea');
   if (qrArea) qrArea.setAttribute('aria-busy', 'false');
-  wxStatusSet('ok', wxDockNeedActivate ? '✅ 已扫码，待激活' : '✅ 对接成功');
+  wxStatusSet('ok', wxDockNeedActivate ? '✅ 已完成，待激活' : '✅ 对接成功');
   const wrap = $('pushWxQrWrap');
   if (wrap) wrap.classList.remove('qr-live');
   const exp = $('pushWxExpire');
@@ -6361,7 +6393,7 @@ function onWxDockConfirmed(d) {
   $('pushCodeFallback')?.classList.add('hidden');
   $('pushCodeFallback')?.removeAttribute('open');
   toast(wxDockNeedActivate
-    ? '已扫码对接：给机器人发一条消息即激活'
+    ? '已完成对接：给机器人发一条消息，即发送成功提示和介绍'
     : '对接成功');
   refreshPush();
 }
@@ -6444,20 +6476,23 @@ function fillPushCode(d) {
    bot 支持的全部个人开关：notifyTarget / dailyReport / lineageReport。
    lineageReport 仅 hasDisciples 为真时显示（没有徒弟就完全不出现），保持既有口径。 */
 function pushFlagsHtml(p) {
-  /* 状态 A（未对接）：开关一个都不出 —— 对接完成刷新后自然出现 */
-  if (!p.bound) return '';
+  /* 2026-10-19 用户口径「绑定后显示开关和通知开关等」：完全没扫过码时不出开关；
+     扫了码（scanBound，哪怕还差手机确认）就先给出来，让主播提前设好要不要收。 */
+  if (!p.bound && !p.scanBound) return '';
   let h = pushSecTitle('推送开关');
   h += '<label class="sw"><input type="checkbox" id="swTarget"' +
     (p.notifyTarget ? ' checked' : '') + (p.admin ? ' disabled' : '') +
     '> 追分提醒（追上 / 还差多少）</label>';
   h += '<label class="sw"><input type="checkbox" id="swDaily"' +
-    (p.dailyReport ? ' checked' : '') + '> 每日报告（月榜 / 个人数据）</label>';
+    (p.dailyReport ? ' checked' : '') + '> 每日报告（默认开启）</label>';
   /* 师门日报第三开关（docs/23 §4.3）：仅名下有直系徒弟的人显示（hasDisciples）。
      兼容期后端还没下发 hasDisciples 时按 false 处理 = 不显示，开关自然回退两开盖。 */
   if (p.hasDisciples) {
     h += '<label class="sw"><input type="checkbox" id="swLineage"' +
       (p.lineageReport ? ' checked' : '') + '> 师门日报（徒弟音浪对比）</label>';
   }
+  h += '<div class="hint" style="margin-top:10px;line-height:1.7">' +
+    '开启后，数据更新后会自动推送到你的微信。</div>';
   /* 管理员观看账号说明：追分开关为什么置灰（追分目标表单在「追分设置」独立卡） */
   if (p.admin) {
     h += '<div class="sub" style="margin-top:10px;line-height:1.7">管理员观看账号没有自己的音浪，' +
@@ -6667,12 +6702,12 @@ function bindPushBoundHandlers(p) {
   if (swD) swD.onchange = saveFlags;
   if (swL) swL.onchange = saveFlags;
 
-  /* 「取消绑定」（2026-10-17 改名，原「解除绑定」）：confirm 后 POST /my/push/unbind
-     → refreshPush 回状态 A。后端只断推送接线、不注销扫码登录，重新对接不用再扫码。 */
+  /* 「重新绑定」（2026-10-20 改名，原「取消绑定」）：confirm 后 POST /my/push/unbind
+     → refreshPush 回状态 A。后端只重置推送接线、不注销扫码登录，重新对接不用再扫码。 */
   const unbind = $('pushUnbind');
   if (unbind) {
     unbind.onclick = async () => {
-      if (!confirm('取消绑定后不再收到推送，确定吗？')) return;
+      if (!confirm('重新绑定会先解除当前推送，确定继续吗？')) return;
       unbind.disabled = true;
       try {
         await fetch('/api/public/teams/' + TEAM + '/my/push/unbind', {
@@ -6685,11 +6720,12 @@ function bindPushBoundHandlers(p) {
           const d = await r.json().catch(() => ({}));
           if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
         });
-        toast('已取消绑定');
+        toast('已解除当前绑定，请重新对接');
         /* 「本次会话刚对接成功」的标记一并清掉：回状态 A 时不能再显示「✅ 对接成功」 */
         wxDockConfirmed = false;
         wxDockNeedActivate = false;
         wxDockAutoAttempted = false;
+        wxDockForceQr = false;
         await refreshPush();
       } catch (e) {
         unbind.disabled = false;
@@ -6987,9 +7023,13 @@ function bindPushBox(p) {
      有效二维码 / scanBound 三重保护，重复渲染不会重复打 start。 */
   // scanBound 旧态（扫了码还没等微信确认）：留在状态 A 显示「等微信确认」，
   // 但保留 5 秒自动刷新让状态回流（后端确认后 bound=true，这里一刷就进状态 B）。
-  if (p && (p.needActivate || p.scanBound)) {
+  if (p && (p.needActivate || p.scanBound) && !wxDockForceQr) {
     clearTimeout(pushSrTimer);
-    pushSrTimer = setTimeout(() => refreshPush(), 5000);
+    pushSrTimer = setTimeout(() => {
+      /* 用户已点「重新获取二维码」时，后续状态由 start/poll 自己推进。
+         此时再整卡刷新会清掉刚建立的轮询并把二维码重新藏回中间态。 */
+      if (!wxDockForceQr) refreshPush();
+    }, 5000);
   }
   /* 二维码区的刷新 / 验证码 / 对接码事件绑定 */
   bindPushQrShow();
@@ -7726,6 +7766,7 @@ function switchView(v, opts) {
     clearWxDock();
     clearPushCodeTimer();
     wxDockAutoAttempted = false;
+    wxDockForceQr = false;
   }
   const tabsAfter = navVisibleTabs();
   const newIdx = tabsAfter.findIndex(b => b.classList.contains('on'));

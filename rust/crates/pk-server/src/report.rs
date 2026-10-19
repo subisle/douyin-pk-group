@@ -913,8 +913,8 @@ fn render_svg_labeled_inner_with_all(
 
     // 数据行（名次按全团连续编号：修复2 —— row_offset 参数由分页方传入（前面页行数之和），
     // >2 页时编号依然连续；原先函数内 `total - n` 只在「两页且当前是末页」时碰巧正确）
-    let bar_track_w = 150.0f64;
-    let wave_value_x = 548.0f64;
+    let bar_track_w = 242.4f64; // 312.6 + 242.4 = 555，中心 433.8，与表头严格对齐
+    let wave_value_x = 433.8f64;
     for (i, r) in rep.rows.iter().enumerate() {
         let y = header_h + i as f64 * 48.0;
         let text_y = y + 25.0;
@@ -997,21 +997,23 @@ fn render_svg_labeled_inner_with_all(
                     y + 14.0
                 ));
             } else {
-                let w = bar_track_w * r.wave as f64 / max_wave as f64;
+                let w = (bar_track_w * r.wave as f64 / max_wave as f64).round();
                 s.push_str(&format!(
                     "<rect x=\"312.6\" y=\"{:.0}\" width=\"{bar_track_w}\" height=\"22\" fill=\"#EAF3FF\" rx=\"11\"/>",
                     y + 14.0
                 ));
                 if w > 1.0 {
                     s.push_str(&format!(
-                        "<rect x=\"312.6\" y=\"{:.0}\" width=\"{w:.1}\" height=\"22\" fill=\"#007AFF\" rx=\"11\"/>",
+                        "<rect x=\"312.6\" y=\"{:.0}\" width=\"{w:.0}\" height=\"22\" fill=\"#007AFF\" rx=\"11\"/>",
                         y + 14.0
                     ));
                 }
-                /* 2026-10-19：数值移到进度条右侧、用深色字，不再白字压在条内。
-                这样无论条宽是 1px 还是满格，数字都稳定可读，也不会被水印顶穿。 */
+                /* 2026-10-20：数字放回粗条中心，与「本月累计音浪」表头同 x。
+                白色半透明胶囊保证浅色底 / 蓝色填充上都清晰，不再把值放到条外。 */
                 s.push_str(&format!(
-                    "<text x=\"{wave_value_x}\" y=\"{text_y:.0}\" font-size=\"13\" fill=\"#344054\" font-weight=\"700\" text-anchor=\"end\" dominant-baseline=\"central\" font-family=\"{MONO}\">{}</text>",
+                    "<rect x=\"{:.1}\" y=\"{:.0}\" width=\"56\" height=\"16\" fill=\"#FFFFFF\" fill-opacity=\"0.86\" rx=\"8\"/><text x=\"{wave_value_x}\" y=\"{text_y:.0}\" font-size=\"13\" fill=\"#344054\" font-weight=\"700\" text-anchor=\"middle\" dominant-baseline=\"central\" font-family=\"{MONO}\">{}</text>",
+                    wave_value_x - 28.0,
+                    text_y - 8.0,
                     esc(&fmt_wan(r.wave))
                 ));
             }
@@ -1626,10 +1628,9 @@ mod tests {
         );
     }
 
-    /// 2026-10-19：音浪值放到进度条右侧的深色文字列，不依赖条宽，
-    /// 也不会再被白色水印糊住；不再使用白字 + 描边。
+    /// 2026-10-20：音浪粗条与「本月累计音浪」表头中心对齐，数值放回条内。
     #[test]
-    fn wave_value_text_is_dark_and_right_of_track() {
+    fn wave_value_text_is_centered_inside_track() {
         let rep = DailyReport {
             date: "2026-10-16".into(),
             team: "male".into(),
@@ -1662,8 +1663,16 @@ mod tests {
             "音浪值应使用深色文字: {svg}"
         );
         assert!(
-            svg.contains("x=\"548\"") && svg.contains("text-anchor=\"end\""),
-            "音浪值应固定落在进度条右侧: {svg}"
+            svg.contains("width=\"242.4\"") && svg.contains("x=\"312.6\""),
+            "音浪粗条应从 312.6 起、宽 242.4，中心与表头 433.8 对齐: {svg}"
+        );
+        assert!(
+            svg.contains("x=\"433.8\"") && svg.contains("text-anchor=\"middle\""),
+            "音浪值应放回粗条中心: {svg}"
+        );
+        assert!(
+            svg.contains("fill-opacity=\"0.86\""),
+            "条内数值应有半透明胶囊保证可读性: {svg}"
         );
         assert!(
             !svg.contains("paint-order=\"stroke\""),
@@ -1756,7 +1765,7 @@ mod tests {
         let pages = render_month_svg_pages(&rep, 2, "");
         assert_eq!(pages.len(), 2);
         assert!(
-            pages[1].contains("width=\"1.5\""),
+            pages[1].contains("width=\"2\""),
             "第二页条形图必须按全量最大音浪缩放，而不是页内最大值"
         );
     }

@@ -879,7 +879,13 @@ function PublicSettingsCard() {
   /** 预估收益口径（2026-10-19）：分成 / 手续费百分数，失焦保存（非法/越界回落缺省值）。 */
   async function savePct(key: 'sharePct' | 'feePct', raw: string, dflt: number) {
     const n = Number(raw)
-    const v = Number.isFinite(n) && n >= 0 && n <= 100 ? Math.round(n) : dflt
+    // 税费 / 手续费支持小数（2026-10-20 实测 0.624%）；仍夹回 0~100。
+    const v =
+      Number.isFinite(n) && n >= 0 && n <= 100
+        ? key === 'feePct'
+          ? Math.round(n * 1000) / 1000
+          : Math.round(n)
+        : dflt
     try {
       const d = await api('/api/admin/public/settings', {
         method: 'POST',
@@ -1043,7 +1049,7 @@ function PublicSettingsCard() {
           <p className="hint" style={{ margin: '0 0 4px' }}>
             音浪兑人民币固定 10:1（1 元 = 10 音浪），<b>主播分成比例与手续费由这里配</b>：
             展示端「本月预估到手」「我的抖音号」的号级估算都按
-            <code>音浪 ÷ 10 × 分成% ×（1 − 手续费%）</code>算，并把这个口径写在卡片上。
+            <code>音浪 ÷ 10 × 分成% ×（1 − 税费/手续费%）</code>算，并把这个口径写在卡片上。
             抖音实际分成不固定（个人主播约 30%，公会主播按等级 30%~55%，2026 年起改为任务制弹性分成），
             提现另有门槛与单笔手续费 —— 这里填的是<b>估算口径</b>，改规则时不用改代码。
           </p>
@@ -1061,16 +1067,16 @@ function PublicSettingsCard() {
               <span className="field-hint">0~100，缺省 35；失焦即保存。</span>
             </label>
             <label className="field">
-              提现 / 平台手续费（%）
+              税费 / 手续费（%）
               <input
                 type="number"
                 min={0}
                 max={100}
-                step={1}
+                step={0.001}
                 defaultValue={settings.feePct ?? 0}
                 onBlur={(e) => savePct('feePct', e.target.value, 0)}
               />
-              <span className="field-hint">0~100，0 = 不扣；只用于估算展示，实际扣费以抖音为准。</span>
+              <span className="field-hint">0~100，支持小数（实测约 0.624）；只用于估算展示，实际扣费以抖音为准。</span>
             </label>
           </div>
         </>

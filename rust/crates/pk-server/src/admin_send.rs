@@ -419,9 +419,6 @@ fn parse_send_body(body: &Value) -> Result<MsgInput, ApiError> {
         .unwrap_or_default()
         .trim()
         .to_string();
-    if content.is_empty() {
-        return Err(ApiError::bad_request("请输入消息内容"));
-    }
     if content.chars().count() > 1000 {
         return Err(ApiError::bad_request("内容太长（最多 1000 字）"));
     }
@@ -433,6 +430,15 @@ fn parse_send_body(body: &Value) -> Result<MsgInput, ApiError> {
         return Err(ApiError::bad_request(format!(
             "不支持的图片类型：{image_kind_requested}"
         )));
+    }
+    /* 2026-10-19 用户口径「只要图片不要文字」：带图时正文**可空** ——
+    图发送成功本来就不会再发文字，正文只作降级兜底（图失败时发它）。
+    纯文字消息（无图）仍然必须填正文，否则就是一条空消息。 */
+    let has_image = image_kind_requested != "none" || body.get("imageBase64").is_some();
+    if content.is_empty() && !has_image {
+        return Err(ApiError::bad_request(
+            "请输入消息内容（只发图片时可以不填）",
+        ));
     }
     // 上传图（task-14）：imageBase64 给了就按上传图走；与服务端渲染图（imageKind）
     // 互斥 —— imageKind 除了默认值 "none" 之外还给了值就 400（前端默认带 none 不算冲突）。
@@ -1890,6 +1896,29 @@ mod tests {
             "title": "t", "content": "c", "channels": ["popup"],
             "target": { "type": "persons", "ids": [1] },
         })
+    }
+
+    /// 2026-10-19「只要图片不要文字」：带图时正文可空（正文只作图失败时的兜底）；
+    /// 纯文字消息仍然必须有正文，不能提交空消息。
+    #[test]
+    fn content_optional_only_when_image_present() {
+        // 上传图 + 空正文 → 允许
+        let mut b = body_with_image(PNG_1X1_B64, None);
+        b["content"] = json!("");
+        assert!(parse(b).is_ok(), "带图时正文应可空");
+
+        // 服务端渲染图（师门日报）+ 空正文 → 允许
+        let mut b = json!({
+            "title": "师门日报", "content": "", "channels": ["wxbot"],
+            "target": { "type": "team", "team": "male" },
+            "imageKind": "lineage",
+        });
+        assert!(parse(b.clone()).is_ok(), "imageKind 带图时正文应可空");
+
+        // 纯文字 + 空正文 → 拒绝（ApiError 没有 Debug，这里只钉「必须报错」；
+        // 文案由 `parse_send_body` 的 bad_request 常量保证，改文案不会悄悄放行空消息）
+        b["imageKind"] = json!("none");
+        assert!(parse(b).is_err(), "纯文字空正文必须拒绝");
     }
 
     /// PNG 正常通过：魔数 + 容器宽高 + kind 落 "custom"；裸 base64 与 dataURL 都收

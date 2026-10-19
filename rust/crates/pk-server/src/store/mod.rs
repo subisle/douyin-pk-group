@@ -31,6 +31,8 @@ pub mod cache;
 /// 导入暂存区（import_pending）按保留期清理：手动触发，不挂自动任务。
 pub mod import_pending;
 mod legacy;
+/// 直播 PK 赛事运行态（live_* 表）：分数采样 / 对局 / 晋级，实时数据不进 plans.payload
+mod live;
 pub mod my_account;
 mod push_jobs;
 mod wx_sessions;
@@ -42,6 +44,7 @@ pub use admin_messages::*;
 
 pub use import_pending::import_pending_prune;
 pub use legacy::*;
+pub use live::*;
 pub use my_account::*;
 pub use push_jobs::*;
 pub use wx_sessions::*;
@@ -690,7 +693,10 @@ mod tests {
             "65 个字符 → 拒绝"
         );
         assert!(validate_my_account("啸帆", "").is_err());
-        assert!(validate_my_account("啸帆", "     ").is_err(), "全空白 → 拒绝");
+        assert!(
+            validate_my_account("啸帆", "     ").is_err(),
+            "全空白 → 拒绝"
+        );
         assert!(
             validate_my_account("啸帆", "ab\ncd").is_err(),
             "含 ASCII 控制字符 → 拒绝"

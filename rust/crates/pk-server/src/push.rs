@@ -32,7 +32,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use sqlx::Row;
 
@@ -107,6 +107,46 @@ pub fn fmt_wan(v: i64) -> String {
         format!("{s} 万")
     } else {
         format!("{v}")
+    }
+}
+
+/* ---------------------- 预估收益（2026-10-19，与展示端同源） ----------------------
+ *
+ * 音浪折人民币的口径**全站只能有一处**：展示端「我的」页、机器人「个人报告」、
+ * 以后的推送文案都读后台 `public_settings` 的 `share_pct` / `fee_pct`
+ * （见 public_teams/settings.rs）。抖音的分成不是固定值（个人主播约 30%，公会主播
+ * 按等级 30%~55%，2026 年起改任务制弹性分成），提现另有门槛与单笔手续费，
+ * 所以比例可配、不写死在代码里。
+ *
+ * 公式：到手 ≈ 音浪 ÷ 10 × 分成% ×（1 − 手续费%）。音浪兑人民币固定 10:1。
+ */
+
+/// 读后台收益口径（分成比例 / 手续费，百分数）。配置缺失 / 脏值时由
+/// `PublicSettings` 的 serde 缺省与 `clamp_pct` 兜底，这里拿到的必是合法百分数。
+pub async fn earnings_pct(st: &std::sync::Arc<AppState>) -> (i64, f64) {
+    let s = crate::public_teams::PublicSettings::load(st).await;
+    (
+        crate::public_teams::clamp_pct(s.share_pct, crate::public_teams::default_share_pct()),
+        crate::public_teams::clamp_fee_pct(s.fee_pct, 0.0),
+    )
+}
+
+/// 音浪 → 预估到手人民币（元）。`wave <= 0` 返回 None（没播 / 没数据就不该显示金额）。
+pub async fn est_yuan(st: &std::sync::Arc<AppState>, wave: i64) -> Option<f64> {
+    if wave <= 0 {
+        return None;
+    }
+    let (share, fee) = earnings_pct(st).await;
+    Some(wave as f64 / 10.0 * (share as f64 / 100.0) * (1.0 - fee / 100.0))
+}
+
+/// 金额排版（与微信里其它数字同一套简洁口径）：整数不带小数，否则两位。
+/// 只在**有收入**时调用（None 由调用方回落「—」）。
+pub fn fmt_yuan(v: f64) -> String {
+    if v >= 100.0 {
+        format!("¥{}", v.round() as i64)
+    } else {
+        format!("¥{:.2}", (v * 100.0).round() / 100.0)
     }
 }
 
@@ -460,11 +500,28 @@ fn out_blocked(kind: &str, to: &str, preview: &str) -> bool {
 /// 师门日报图片分页：每页行数（师门名单通常个位数，几乎总是单页）。
 const PAGE_ROWS: usize = 40;
 
-async fn lineage_report_pngs(
+/// 师门日报图（2026-10-20 起所有图片统一带收件人水印）：自动推送与用户主动查询
+/// 都按收件人姓名加隐形/可见水印，避免自动推送版本可被无责转发。
+pub async fn lineage_report_pngs_for(
+    st: &std::sync::Arc<AppState>,
+    rep: &crate::lineage_report::LineageReport,
+    person_name: &str,
+) -> Vec<Vec<u8>> {
+    let fields = crate::store::config_get(st, "push_report_fields")
+        .await
+        .map(|v| crate::report::PushReportFields::from_json(&v))
+        .unwrap_or_default()
+        .lineage;
+    lineage_report_pngs_marked(rep, &fields, person_name).await
+}
+
+async fn lineage_report_pngs_marked(
     rep: &crate::lineage_report::LineageReport,
     fields: &crate::report::LineageReportFields,
+    personal_mark: &str,
 ) -> Vec<Vec<u8>> {
-    let svgs = crate::lineage_report::render_svg_pages_with_fields(rep, PAGE_ROWS, "", fields);
+    let svgs =
+        crate::lineage_report::render_svg_pages_with_fields(rep, PAGE_ROWS, personal_mark, fields);
     render_svgs_to_pngs_async(svgs, 2.0, "师门日报")
         .await
         .unwrap_or_default()
@@ -524,6 +581,11 @@ fn partial_image_sent(e: &anyhow::Error) -> Option<usize> {
     e.downcast_ref::<PartialImageSend>()
         .map(|p| p.sent)
         .filter(|n| *n > 0)
+        .or_else(|| {
+            e.downcast_ref::<crate::store::wxmedia::PartialImageBatch>()
+                .map(|p| p.sent)
+                .filter(|n| *n > 0)
+        })
 }
 
 /* --------------------- 推送去重租约（2026-10-17 第四轮审计 B 域修复） ---------------------
@@ -878,6 +940,32 @@ async fn send_binding(
     wx_proactive(wx_global, &b.conversation_id, text).await
 }
 
+/* --------------------- 直播分数监控的推送出口（2026-10-20） ---------------------
+ *
+ * 直播 PK 的分数提醒是**新的发送内容**，但不是新的发送通道：这里只是把
+ * `send_binding` 那条唯一窄口开放给 `live` 模块。
+ *
+ * 为什么不直接在 live.rs 里调 `bot::weixin::user_send_text`：那条路径会绕过
+ * `send_binding` 里的三层判断（出网闸门 / 会话是否还通 / 扫码凭证是否在），
+ * 等于给系统开一条绕闸门的旁路 —— 正是 AGENTS.md「新增发送路径也绕不过闸门」
+ * 要防的事。所有对外发送都必须经过这里。
+ */
+
+/// 给一条绑定发一条直播提醒文本。返回值与 [`send_binding`] 一致：
+/// `Err(Blocked)` = 被闸门拦下（**未发送**），调用方据此不推进去重标记。
+pub async fn send_live_text(
+    st: &Arc<AppState>,
+    b: &crate::store::PushBinding,
+    text: &str,
+) -> anyhow::Result<()> {
+    let wx_global = st
+        .bots
+        .get()
+        .and_then(|m| m.wechat.as_ref())
+        .map(std::sync::Arc::clone);
+    send_binding(st, b, wx_global.as_ref(), text).await
+}
+
 /// 发图片（1..N 张）+ 首张前带说明文字。逐张独立 sendmessage（openclaw 口径）。
 /// 走扫码账号通道（getuploadurl → AES-ECB → novac2c CDN → image_item）。
 async fn send_binding_images(
@@ -903,38 +991,29 @@ async fn send_binding_images(
         .ok_or_else(|| anyhow::anyhow!("图片推送需要扫码账号（请在「我的」页重新扫码）"))?;
     anyhow::ensure!(!a.bot_token.is_empty(), "扫码账号凭证为空，请重新扫码");
     let (to_user, context_token) = push_ctx(st, b, &a).await?;
-    let total = pngs.len();
-    let mut sent = 0usize;
-    for (i, png) in pngs.iter().enumerate() {
-        // 说明文字只挂在第一张前；第二张起带页码提示
-        let cap = if i == 0 {
-            caption.to_string()
-        } else {
-            format!("📄 榜单第 {} 页（接上条）", i + 1)
-        };
-        match crate::store::wxmedia::user_send_image(
-            st,
-            &a.base_url,
-            &a.bot_token,
-            &to_user,
-            &context_token,
-            &cap,
-            png,
-        )
-        .await
-        {
-            Ok(()) => sent += 1,
-            Err(e) if sent == 0 => return Err(e),
-            Err(e) => {
-                return Err(anyhow::Error::new(PartialImageSend {
-                    sent,
-                    total,
-                    source: e,
-                }))
+    let captions: Vec<String> = pngs
+        .iter()
+        .enumerate()
+        .map(|(i, _)| {
+            // 说明文字只挂在第一张前；第二张起带页码提示
+            if i == 0 {
+                caption.to_string()
+            } else {
+                format!("📄 榜单第 {} 页（接上条）", i + 1)
             }
-        }
-    }
-    Ok(sent)
+        })
+        .collect();
+    let png_refs: Vec<&[u8]> = pngs.iter().map(Vec::as_slice).collect();
+    crate::store::wxmedia::user_send_images(
+        st,
+        &a.base_url,
+        &a.bot_token,
+        &to_user,
+        &context_token,
+        &captions,
+        &png_refs,
+    )
+    .await
 }
 
 /// 两条路径共用的会话上下文解析：conv 取账号/绑定里非空者，
@@ -1455,14 +1534,26 @@ async fn run_inner(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result
             }
         }
 
-        /* 追分 + 师门同开：追分文字作为首张师门图的说明发送，仍是一条逻辑推送；
-        只有追分 → 文本；只有师门 → 图片；都没有 → 不发。 */
+        /* 追分 + 师门同开（2026-10-19 用户口径「只要图片不要文字」）：
+        两段各自渲染成图（追分图在前、师门图在后），一起发；**不再用文字当 caption**。
+        哪一段渲染失败就只跳过那一段、还原它的去重标记（下轮补推），不拖累另一段。
+        两段全失败才退回追分文字兜底 —— 保证至少有一个回复，与命令 1 同口径。 */
         match (target_text, lineage_rep.as_ref()) {
             (Some(t), Some(l)) => {
-                let pngs = lineage_report_pngs(l, &report_fields.lineage).await;
-                if pngs.is_empty() {
+                let target_pngs = target_push_pngs(&t, b.name.trim()).await;
+                let target_ok = !target_pngs.is_empty();
+                let target_len = target_pngs.len();
+                let lineage_pngs =
+                    lineage_report_pngs_marked(l, &report_fields.lineage, b.name.trim()).await;
+                let lineage_ok = !lineage_pngs.is_empty();
+                if !lineage_ok {
                     restore_lineage_claim(st, &b.name).await;
-                    tracing::warn!(account = %b.name, "师门日报全部页面转 PNG 失败，本轮仅处理追分");
+                    tracing::warn!(account = %b.name, "师门日报全部页面转 PNG 失败，本轮只发追分图");
+                }
+                let mut pngs = target_pngs;
+                pngs.extend(lineage_pngs);
+                if pngs.is_empty() {
+                    tracing::warn!(account = %b.name, "追分+师门图全部渲染失败，退回追分文字");
                     match send_binding(st, b, wx_global.as_ref(), &t).await {
                         Ok(()) => {
                             sent_any = true;
@@ -1482,11 +1573,11 @@ async fn run_inner(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result
                 } else {
                     tracing::info!(
                         account = %b.name,
-                        caption = %t.replace('\n', " | "),
-                        pages = pngs.len(),
-                        "推送·追分+师门(图片)"
+                        target_pages = target_len,
+                        lineage_pages = pngs.len() - target_len,
+                        "推送·追分+师门(图片，无文字)"
                     );
-                    match send_binding_images(st, b, &t, &pngs).await {
+                    match send_binding_images(st, b, "", &pngs).await {
                         Ok(_) => {
                             sent_any = true;
                             /* 发送成功后才落库：目标状态推进；师门租约 release 时保留本轮标记。 */
@@ -1498,13 +1589,30 @@ async fn run_inner(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result
                         }
                         Err(e) => {
                             if let Some(sent) = partial_image_sent(&e) {
-                                // 首张图已带追分说明送达：目标状态推进；师门标记也保留，禁止整组重发。
+                                /* 部分送达（2026-10-19 起按「页」精确认领）：
+                                追分图排在前面（第 1..target_len 页），师门图在其后。
+                                · sent >= target_len → 追分图全发了，目标状态才能推进；
+                                · sent > target_len  → 至少一页师门图发了，师门标记保留；
+                                · 否则师门标记还原，下轮补推。 */
                                 sent_any = true;
-                                for (id, hit, gap) in pending_states.iter() {
-                                    crate::store::target_set_state(st, *id, *hit, *gap, date).await;
+                                let target_sent = target_ok && sent >= target_len;
+                                let lineage_sent = lineage_ok && sent > target_len;
+                                if target_sent {
+                                    for (id, hit, gap) in pending_states.iter() {
+                                        crate::store::target_set_state(st, *id, *hit, *gap, date)
+                                            .await;
+                                    }
                                 }
-                                finalize_lineage_claim(st, &b.name).await;
-                                tracing::warn!(account = %b.name, sent, pages = pngs.len(), error = %e, "追分+师门图片部分发送，停止重试以避免重复");
+                                if lineage_sent {
+                                    finalize_lineage_claim(st, &b.name).await;
+                                } else if lineage_ok {
+                                    restore_lineage_claim(st, &b.name).await;
+                                }
+                                tracing::warn!(
+                                    account = %b.name, sent, target_len, pages = pngs.len(),
+                                    target_sent, lineage_sent, error = %e,
+                                    "追分+师门图片部分发送，按已送达页数认领，停止整组重试"
+                                );
                             } else {
                                 // 一页都没送达：师门占位还原，目标状态不推进，整条留到下轮再推。
                                 restore_lineage_claim(st, &b.name).await;
@@ -1520,27 +1628,57 @@ async fn run_inner(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result
                 }
             }
             (Some(t), None) => {
-                tracing::info!(account = %b.name, text = %t.replace('\n', " | "), "推送·追分提醒");
-                match send_binding(st, b, wx_global.as_ref(), &t).await {
-                    Ok(()) => {
-                        sent_any = true;
-                        for (id, hit, gap) in pending_states.iter() {
-                            crate::store::target_set_state(st, *id, *hit, *gap, date).await;
+                /* 2026-10-19「只要图片不要文字」：追分提醒也发图。
+                图渲染失败才退回文字（保证命令/推送至少有一个回复）。 */
+                let pngs = target_push_pngs(&t, b.name.trim()).await;
+                if pngs.is_empty() {
+                    tracing::warn!(account = %b.name, "追分提醒图渲染失败，退回文字");
+                    match send_binding(st, b, wx_global.as_ref(), &t).await {
+                        Ok(()) => {
+                            sent_any = true;
+                            for (id, hit, gap) in pending_states.iter() {
+                                crate::store::target_set_state(st, *id, *hit, *gap, date).await;
+                            }
                         }
-                        tracing::info!(account = %b.name, "追分提醒已推送");
+                        Err(e) => {
+                            if is_blocked(&e) {
+                                tracing::warn!(account = %b.name, "追分提醒：闸门拦截，未发（目标状态不推进）");
+                            } else {
+                                tracing::warn!(account = %b.name, error = %e, "追分提醒推送失败");
+                                crate::store::push_touch(st, &b.name, &e.to_string()).await;
+                            }
+                        }
                     }
-                    Err(e) => {
-                        if is_blocked(&e) {
-                            tracing::warn!(account = %b.name, "追分提醒：闸门拦截，未发（目标状态不推进，开闸后会补推）");
-                        } else {
-                            tracing::warn!(account = %b.name, error = %e, "追分提醒推送失败");
-                            crate::store::push_touch(st, &b.name, &e.to_string()).await;
+                } else {
+                    tracing::info!(account = %b.name, pages = pngs.len(), "推送·追分提醒(图片，无文字)");
+                    match send_binding_images(st, b, "", &pngs).await {
+                        Ok(_) => {
+                            sent_any = true;
+                            for (id, hit, gap) in pending_states.iter() {
+                                crate::store::target_set_state(st, *id, *hit, *gap, date).await;
+                            }
+                            tracing::info!(account = %b.name, "追分提醒(图片)已推送");
+                        }
+                        Err(e) => {
+                            if let Some(sent) = partial_image_sent(&e) {
+                                sent_any = true;
+                                for (id, hit, gap) in pending_states.iter() {
+                                    crate::store::target_set_state(st, *id, *hit, *gap, date).await;
+                                }
+                                tracing::warn!(account = %b.name, sent, pages = pngs.len(), error = %e, "追分提醒图片部分发送，停止重试以避免重复");
+                            } else if is_blocked(&e) {
+                                tracing::warn!(account = %b.name, "追分提醒(图片)：闸门拦截，未发（目标状态不推进）");
+                            } else {
+                                tracing::warn!(account = %b.name, error = %e, "追分提醒图片推送失败");
+                                crate::store::push_touch(st, &b.name, &e.to_string()).await;
+                            }
                         }
                     }
                 }
             }
             (None, Some(l)) => {
-                let pngs = lineage_report_pngs(l, &report_fields.lineage).await;
+                let pngs =
+                    lineage_report_pngs_marked(l, &report_fields.lineage, b.name.trim()).await;
                 if pngs.is_empty() {
                     restore_lineage_claim(st, &b.name).await;
                     tracing::warn!(account = %b.name, "师门日报全部页面转 PNG 失败，本轮跳过");
@@ -1900,9 +2038,9 @@ pub(crate) async fn direct_disciples(st: &AppState, master_id: u64) -> Vec<(u64,
 
 /// 缓存文件 magic（`PKRP` = PK Report PNG）+ 打包版本；改格式/改渲染尺寸就改版本号，旧文件自然失效。
 const IMG_CACHE_MAGIC: &[u8; 4] = b"PKRP";
-/// v4（2026-10-19）：月榜末列改为「距上一名」、分页页脚/条形图改用全量口径；
-/// 旧版式缓存自然失效。v3 是本人行高亮 + 音浪值移到条右侧。
-const IMG_CACHE_VER: u8 = 4;
+/// v9（2026-10-20）：统一所有图片水印口径（每日榜单 / 追分提醒 / 师门日报）；
+/// v8 是两页榜单收件人水印复核。
+const IMG_CACHE_VER: u8 = 9;
 /// 榜单图渲染缩放比：SVG 逻辑宽 1440 → 1080 px。
 ///
 /// 取舍（2026-10-18 用户口径「每天 100 个占太多了」）：微信显示宽度上限就是 1080，
@@ -1977,40 +2115,50 @@ fn decode_pngs(raw: &[u8]) -> Option<Vec<Vec<u8>>> {
 /// 读缓存（不存在 / 过期 / 格式坏 → None，调用方现场渲染）。
 pub(crate) fn cached_daily_pngs(team: &str, date: &str, person: &str) -> Option<Vec<Vec<u8>>> {
     let path = report_cache_dir().join(img_cache_key(team, date, person));
-    let meta = std::fs::metadata(&path).ok()?;
+    cached_pngs_at(&path)
+}
+
+fn cached_pngs_at(path: &std::path::Path) -> Option<Vec<Vec<u8>>> {
+    let meta = std::fs::metadata(path).ok()?;
     let age = meta.modified().ok()?.elapsed().ok()?.as_secs();
     if age > IMG_CACHE_TTL_SECS {
-        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path);
         return None;
     }
-    decode_pngs(&std::fs::read(&path).ok()?)
+    decode_pngs(&std::fs::read(path).ok()?)
 }
 
 /// 写缓存（原子替换：先写 .tmp 再 rename；失败只 warn，不影响本次发送）。
 pub(crate) fn store_daily_pngs(team: &str, date: &str, person: &str, pngs: &[Vec<u8>]) {
+    store_pngs_at(
+        &report_cache_dir().join(img_cache_key(team, date, person)),
+        pngs,
+    );
+}
+
+fn store_pngs_at(path: &std::path::Path, pngs: &[Vec<u8>]) {
     if pngs.is_empty() || pngs.len() > 8 {
         return;
     }
-    let dir = report_cache_dir();
-    if std::fs::create_dir_all(&dir).is_err() {
+    let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    if std::fs::create_dir_all(dir).is_err() {
         return;
     }
     let buf = encode_pngs(pngs);
-    let path = dir.join(img_cache_key(team, date, person));
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     let tmp = path.with_extension(format!("tmp-{}-{stamp}", std::process::id()));
     if std::fs::write(&tmp, &buf).is_ok() {
-        if let Err(e) = std::fs::rename(&tmp, &path) {
-            tracing::warn!(error = %e, "榜单图缓存写入失败（不影响发送）");
+        if let Err(e) = std::fs::rename(&tmp, path) {
+            tracing::warn!(error = %e, "图片缓存写入失败（不影响发送）");
             let _ = std::fs::remove_file(&tmp);
         }
     }
 }
 
-/// 导入完成 → 清空榜单图缓存（榜单变了，旧图必须全部作废）。
+/// 导入完成 → 清空图片缓存（榜单变了，旧图必须全部作废）。
 pub fn clear_daily_image_cache() {
     IMG_CACHE_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let dir = report_cache_dir();
@@ -2043,13 +2191,15 @@ pub fn render_batch_size() -> usize {
         .unwrap_or(5)
 }
 
-/// 预渲染批间隔（秒，默认 10；0 = 不休息）。上限 600 秒。
+/// 预渲染批间隔（秒，默认 2；0 = 不休息）。上限 600 秒。
 pub fn render_batch_interval_secs() -> u64 {
     std::env::var("RENDER_BATCH_INTERVAL_SECS")
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
         .filter(|v| *v <= 600)
-        .unwrap_or(10)
+        // 2026-10-20：预渲染默认从 10 秒降到 2 秒，导入后 100 人从约 200 秒等待
+        // 降到约 40 秒等待；页面并行渲染本身已更快，批间仍留 CPU 缓冲。
+        .unwrap_or(2)
 }
 
 /* ---------------- 「能不能收到」判定（没对接 / 断开的直接跳过） ----------------
@@ -2155,28 +2305,47 @@ fn sweep_image_cache() {
 pub async fn prewarm_daily_report_images(st: &std::sync::Arc<AppState>, date: &str) {
     sweep_image_cache();
     let generation = IMG_CACHE_GEN.load(std::sync::atomic::Ordering::SeqCst);
-    let started = std::time::Instant::now();
+    let started = Instant::now();
 
     /* ① **现取名单**（2026-10-18 用户口径「每天渲染前去看一下获取名单」）：
-    每次预渲染都重新查 push_bindings，不复用任何旧快照 —— 解绑 / 换号 / 新对接
-    都要在这一刻体现。`push_bindings_for_team` 已过滤掉「没有会话」的人。 */
+    以扫码账号表为事实来源，且当场校验会话上下文。这里不能只看 push_bindings：
+    管理员 / 观看账号可能关闭了自动推送开关，但仍能用机器人命令「1」查榜；
+    也不能依赖 push_bindings.conversation_id，因为那张表可能写入失败而账号表已接通。 */
+    let mut seen = std::collections::HashSet::new();
     let mut targets: Vec<(String, String)> = Vec::new();
     let mut skipped_unpaired = 0usize;
     let mut already_cached = 0usize;
-    for team in ["male", "female"] {
-        for b in crate::store::push_bindings_for_team(st, team).await {
-            /* ② 没对接 / 断开的**不渲**：要同时满足「会话有上下文」+「有扫码账号凭证」。
-            只判 push_bindings 不够 —— 解绑后 conversation 仍可能残留、凭证可能被删。 */
-            if !name_can_receive_images(st, &b.name).await {
-                skipped_unpaired += 1;
-                tracing::debug!(account = %b.name, "预渲染跳过：未对接或连接已断开");
+    for a in crate::store::wx_push_accounts_all(st).await {
+        let name = a.name.trim().to_string();
+        if name.is_empty()
+            || a.paused
+            || a.bot_token.trim().is_empty()
+            || a.conversation_id.trim().is_empty()
+            || crate::store::wx_session_get(st, &a.conversation_id)
+                .await
+                .is_none()
+        {
+            skipped_unpaired += 1;
+            tracing::debug!(account = %name, "预渲染跳过：未扫码、已暂停或连接已断开");
+            continue;
+        }
+        let teams: Vec<String> = match a.team.trim() {
+            "male" | "female" => vec![a.team.trim().to_string()],
+            _ => match crate::store::person_team_of_name(st, &name).await {
+                Some(team) => vec![team],
+                // 管理员 / 观看账号查不到团别：男女两团都预热，命令 1 用哪个团都能命中。
+                None => ["male", "female"].map(String::from).to_vec(),
+            },
+        };
+        for team in teams {
+            if !seen.insert((team.clone(), name.clone())) {
                 continue;
             }
-            if cached_daily_pngs(team, date, &b.name).is_some() {
+            if cached_daily_pngs(&team, date, &name).is_some() {
                 already_cached += 1;
                 continue;
             }
-            targets.push((team.to_string(), b.name));
+            targets.push((team, name.clone()));
         }
     }
 
@@ -2228,12 +2397,12 @@ pub async fn prewarm_daily_report_images(st: &std::sync::Arc<AppState>, date: &s
             tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
         }
         for (team, name) in chunk {
-            /* ⑤ 渲染前**再复核一次**：这一批可能排了几分钟，期间对方可能刚解绑 /
-            重扫换号 / 凭证失效 —— 断了的就别渲了。 */
-            if !name_can_receive_images(st, name).await {
-                skipped_unpaired += 1;
-                tracing::info!(account = %name, "预渲染跳过：渲染前发现已断开");
-                continue;
+            /* ⑤ 只复核轻量代次标记。账号/会话在发现阶段已经校验；真正发送前
+            send_binding_images / 命令 1 仍会各自复核，避免预渲染阶段再做一次
+            push_bindings + account + session 的 N+1 查询。 */
+            if IMG_CACHE_GEN.load(std::sync::atomic::Ordering::SeqCst) != generation {
+                tracing::warn!(account = %name, "预渲染代次已变化，丢弃本轮旧图");
+                return;
             }
             let Some((rep, fields)) = prepared.get(team.as_str()).and_then(Option::as_ref) else {
                 tracing::warn!(team = %team, date, "榜单图预渲染：基础报表不可用，跳过");
@@ -2267,7 +2436,7 @@ pub async fn prewarm_daily_report_images(st: &std::sync::Arc<AppState>, date: &s
         skipped_unpaired,
         already_cached,
         elapsed_ms = started.elapsed().as_millis() as u64,
-        "榜单图预渲染结束"
+        "榜单图预渲染结束（含个人报告）"
     );
 }
 
@@ -2348,27 +2517,40 @@ async fn render_svgs_to_pngs_async(
     if svgs.is_empty() {
         return None;
     }
-    match tokio::task::spawn_blocking(move || {
-        let mut out = Vec::with_capacity(svgs.len());
-        for (i, svg) in svgs.iter().enumerate() {
-            match svg_to_png_at(svg, scale) {
-                Ok(png) => out.push(png),
-                Err(e) => {
-                    tracing::warn!(page = i + 1, error = %e, "{context}：SVG 转 PNG 失败，整组作废");
-                    return None;
-                }
+    let started = Instant::now();
+    // 每页一个 blocking 任务：两页 SVG 可同时转 PNG，仍保留输入顺序；
+    // 任一页失败则整组作废，绝不发送/缓存半套图。
+    let results = futures_util::future::join_all(svgs.into_iter().map(|svg| {
+        let context = context;
+        tokio::task::spawn_blocking(move || {
+            svg_to_png_at(&svg, scale).map_err(|e| {
+                tracing::warn!(error = %e, "{context}：SVG 转 PNG 失败，整组作废");
+                e
+            })
+        })
+    }))
+    .await;
+    let mut out = Vec::with_capacity(results.len());
+    for (i, result) in results.into_iter().enumerate() {
+        match result {
+            Ok(Ok(png)) => out.push(png),
+            Ok(Err(e)) => {
+                tracing::warn!(page = i + 1, error = %e, "{context}：第 {} 页转 PNG 失败", i + 1);
+                return None;
+            }
+            Err(e) => {
+                tracing::warn!(page = i + 1, error = %e, "{context}：PNG 渲染任务失败，整组作废");
+                return None;
             }
         }
-        Some(out)
-    })
-    .await
-    {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!(error = %e, "{context}：PNG 渲染任务失败，整组作废");
-            None
-        }
     }
+    tracing::info!(
+        context,
+        pages = out.len(),
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "SVG 并行转 PNG 完成"
+    );
+    Some(out)
 }
 
 /// 同一份基础报表按收件人水印渲染；页数、每日之星、字段显隐与自动推送同源。
@@ -2758,6 +2940,129 @@ fn target_push_text(date: &str, lines: &[String], my: i64, completion_pct: Optio
     out
 }
 
+/* ---------------------- 追分提醒图（2026-10-19 用户口径） ----------------------
+ *
+ * 「只要图片不要文字」：自动推送的追分提醒不再发文字，改成把**同一份文案**
+ * 逐行画进一张 SVG（再转 PNG）。这样：
+ *   · 文案口径只有一处（`target_push_text`），改文案不会图/文不一致；
+ *   · 微信两条通道都走「有图发图、成功就不发文字」的既有窄口；
+ *   · 追分 + 师门同开时，两张图一起发（追分图在前），不再用文字当 caption。
+ *
+ * 样式与师门日报图同一套：720 宽、PingFang 字体栈、斜排水印、行间 36。
+ */
+const TARGET_FONT: &str = "PingFang SC, Hiragino Sans GB, Heiti SC, STHeiti, Microsoft YaHei, Noto Sans CJK SC, Noto Sans SC, Source Han Sans SC, WenQuanYi Zen Hei, sans-serif";
+const TARGET_WATERMARK: &str = "内部数据 · 请勿外传";
+
+/// 单页报告卡片 → SVG（2026-10-20 版式重做）。
+/// 首行作为标题；其余行左对齐，长行自动换行，不再把内容挤成难看的居中块。
+pub(crate) fn render_target_push_svg(text: &str, personal_mark: &str) -> String {
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    let (title, body) = match lines.split_first() {
+        Some((t, r)) => (*t, r),
+        None => ("追分提醒", &[][..]),
+    };
+    let esc = crate::lineage_report::esc;
+    const MAX_CHARS: usize = 26; // 720 宽、15px 字号下每行约 26 个中文字符
+    let mut rows: Vec<String> = Vec::new();
+    for line in body {
+        let src = *line;
+        let mut cur = String::new();
+        let mut width = 0usize;
+        for ch in src.chars() {
+            let w = if ch.is_ascii() { 1 } else { 2 };
+            if width + w > MAX_CHARS * 2 && !cur.is_empty() {
+                rows.push(cur.clone());
+                cur.clear();
+                width = 0;
+            }
+            cur.push(ch);
+            width += w;
+        }
+        if !cur.is_empty() {
+            rows.push(cur);
+        }
+    }
+    if rows.is_empty() {
+        rows.push("暂无数据".to_string());
+    }
+    let row_h = 44.0f64;
+    let header_h = 96.0f64;
+    let footer_h = 44.0f64;
+    let total_h = header_h + rows.len() as f64 * row_h + footer_h;
+    let mut s = String::with_capacity(10 * 1024);
+    s.push_str(&format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1440\" height=\"{}\" viewBox=\"0 0 720 {total_h:.0}\" role=\"img\">",
+        total_h as i64 * 2
+    ));
+    s.push_str("<rect width=\"720\" height=\"100000\" fill=\"#FFFFFF\"/>");
+    s.push_str(&format!(
+        "<text x=\"40\" y=\"44\" font-size=\"22\" fill=\"#101828\" font-weight=\"700\" text-anchor=\"start\" dominant-baseline=\"central\" font-family=\"{TARGET_FONT}\">{}</text>",
+        esc(title)
+    ));
+    s.push_str(
+        "<line x1=\"40\" y1=\"70\" x2=\"680\" y2=\"70\" stroke=\"#EAECF0\" stroke-width=\"1\"/>",
+    );
+    for (i, line) in rows.iter().enumerate() {
+        let y = header_h + i as f64 * row_h + row_h / 2.0;
+        let (fill, weight) = if line.starts_with('🎉') {
+            ("#0E9F6E", "700")
+        } else if line.starts_with('⚠') {
+            ("#C0392B", "700")
+        } else if line.starts_with("今日") {
+            ("#101828", "700")
+        } else if line.starts_with("本月累计") {
+            ("#344054", "600")
+        } else {
+            ("#475467", "500")
+        };
+        s.push_str(&format!(
+            "<text x=\"40\" y=\"{y:.0}\" font-size=\"16\" fill=\"{fill}\" font-weight=\"{weight}\" text-anchor=\"start\" dominant-baseline=\"central\" font-family=\"{TARGET_FONT}\">{}</text>",
+            esc(line)
+        ));
+    }
+
+    /* 斜排水印：与师门日报图同一套密度，压在最顶层 */
+    let mark_src = if personal_mark.trim().is_empty() {
+        TARGET_WATERMARK.to_string()
+    } else {
+        format!("{TARGET_WATERMARK} {}", personal_mark.trim())
+    };
+    let footer_y = header_h + rows.len() as f64 * row_h + 14.0;
+    s.push_str(&format!(
+        "<line x1=\"40\" y1=\"{footer_y:.0}\" x2=\"680\" y2=\"{footer_y:.0}\" stroke=\"#EAECF0\" stroke-width=\"1\"/>"
+    ));
+    let mark = esc(&mark_src);
+    let step_x = 140.0f64;
+    let step_y = 76.0f64;
+    let wm_rows = (total_h / step_y).ceil() as i64 + 1;
+    for yi in 0..wm_rows {
+        for xi in 0..6u32 {
+            let wx = xi as f64 * step_x - 30.0 + if yi % 2 == 1 { step_x / 2.0 } else { 0.0 };
+            let wy = yi as f64 * step_y + 24.0;
+            s.push_str(&format!(
+                "<text x=\"{wx:.0}\" y=\"{wy:.0}\" font-size=\"16\" font-weight=\"700\" fill=\"#101828\" fill-opacity=\"0.07\" text-anchor=\"middle\" font-family=\"{TARGET_FONT}\" transform=\"rotate(-24 {wx:.0} {wy:.0})\">{mark}</text>"
+            ));
+            // 双层隐形水印：白层压浅底，黑层压深底；与每日榜单同一套检测口径。
+            s.push_str(&format!(
+                "<text x=\"{wx:.0}\" y=\"{wy:.0}\" font-size=\"22\" font-weight=\"900\" fill=\"#FFFFFF\" fill-opacity=\"0.20\" text-anchor=\"middle\" font-family=\"{TARGET_FONT}\" transform=\"rotate(-24 {wx:.0} {wy:.0})\">{mark}</text>"
+            ));
+            s.push_str(&format!(
+                "<text x=\"{wx:.0}\" y=\"{wy:.0}\" font-size=\"22\" font-weight=\"900\" fill=\"#000000\" fill-opacity=\"0.012\" text-anchor=\"middle\" font-family=\"{TARGET_FONT}\" transform=\"rotate(-24 {wx:.0} {wy:.0})\">{mark}</text>"
+            ));
+        }
+    }
+    s.push_str("</svg>");
+    s
+}
+
+/// 追分提醒 → PNG（带收件人水印）。渲染失败返回空 Vec，调用方据此退回文字兜底。
+pub async fn target_push_pngs(text: &str, personal_mark: &str) -> Vec<Vec<u8>> {
+    let svg = render_target_push_svg(text, personal_mark);
+    render_svgs_to_pngs_async(vec![svg], 2.0, "追分提醒")
+        .await
+        .unwrap_or_default()
+}
+
 /// 每日报告文案：TOP10 + 我的名次 + 我的抖音号分号明细（2026-10-12）。
 ///
 /// 明细挂在「我：第 N 名 · X」之后：先给人一个总览名次，再看每个号各挣多少。
@@ -2829,9 +3134,106 @@ mod tests {
         assert_eq!(fmt_minutes(-90), "-30分");
     }
 
+    /// 金额排版（2026-10-19）：整数档不带小数，小额两位。与微信里其它数字同一套简洁口径。
+    #[test]
+    fn fmt_yuan_is_compact() {
+        assert_eq!(fmt_yuan(1750.0), "¥1750");
+        assert_eq!(fmt_yuan(100.0), "¥100");
+        assert_eq!(fmt_yuan(99.994), "¥99.99");
+        assert_eq!(fmt_yuan(0.0), "¥0.00");
+        assert_eq!(fmt_yuan(12.5), "¥12.50");
+    }
+
+    /// 追分提醒图（2026-10-19「只要图片不要文字」）：文案逐行进图，标题/目标行/脚注/水印都在。
+    #[test]
+    fn target_push_svg_embeds_every_line() {
+        let text = "📈 追分（10-18）\n\
+                    🎉 本月目标 50 万 · 已达成（你 52 万）\n\
+                    ⚠️ 浩冬 · 被反超，还差 10 万（你 30 万 / TA 40 万）\n\
+                    · 本月第 3 名 · 你第 5 名，还差 2 名\n\
+                    数值目标完成度 104%\n\
+                    \n\
+                    你本月累计 52 万\n\
+                    改目标：我的 → 追分设置";
+        let svg = render_target_push_svg(text, "浩雨");
+        assert!(svg.starts_with("<svg"), "{svg}");
+        assert!(svg.ends_with("</svg>"), "{svg}");
+        // 标题、三类目标行、脚注都要进图
+        for must in [
+            "📈 追分（10-18）",
+            "🎉 本月目标 50 万",
+            "⚠️ 浩冬",
+            "· 本月第 3 名",
+            "数值目标完成度 104%",
+            "你本月累计 52 万",
+            "改目标：我的 → 追分设置",
+        ] {
+            assert!(svg.contains(must), "图里缺「{must}」");
+        }
+        // 收件人水印进图（防转发）
+        assert!(svg.contains("浩雨"), "水印没带上收件人：{svg}");
+        // 达成/反超用不同颜色，扫一眼能分辨
+        assert!(svg.contains("#0E9F6E"), "达成行应有绿色");
+        assert!(svg.contains("#C0392B"), "反超行应有红色");
+        assert!(
+            svg.contains("fill-opacity=\"0.20\"") && svg.contains("fill-opacity=\"0.012\""),
+            "追分提醒也应有双层隐形水印"
+        );
+    }
+
+    /// 空文案也要能出一张合法 SVG（标题回落），不能 panic / 产半截标签。
+    #[test]
+    fn target_push_svg_handles_empty_text() {
+        let svg = render_target_push_svg("", "");
+        assert!(svg.starts_with("<svg") && svg.ends_with("</svg>"), "{svg}");
+        assert!(svg.contains("追分提醒"), "空文案应回落标题");
+    }
+
+    /// 分成 / 手续费的夹取（与 public_teams::settings 同一条规则）：
+    /// 脏配置不能把「预估到手」算成负数或放大数倍。
+    #[test]
+    fn earnings_pct_clamp_is_shared_with_display() {
+        // 复用展示端那份实现，避免推送侧另写一套导致两处数字不一致
+        assert_eq!(crate::public_teams::clamp_pct(35, 35), 35);
+        assert_eq!(crate::public_teams::clamp_pct(-5, 35), 35);
+        assert_eq!(crate::public_teams::clamp_pct(300, 35), 35);
+        assert_eq!(crate::public_teams::clamp_pct(0, 35), 0);
+        assert_eq!(crate::public_teams::default_share_pct(), 35);
+    }
+
     /// 每日报告两页版（2026-10-17 用户口径「分成两页即可」）：
     /// 85 人团必须正好 2 页、对半分（首页 43 行）、名次跨页连续、页码标注正确；
     /// 少数人时不强拆（≤2 人单页）。
+    #[test]
+    fn daily_report_every_page_has_recipient_watermark() {
+        let mk = |wave: i64| crate::report::ReportRow {
+            name: "测试".into(),
+            wave,
+            minutes: 0,
+            is_live: wave >= 2,
+            absent_days: 0,
+            total_wave: wave,
+        };
+        let rep = crate::report::DailyReport {
+            date: "2026-10-18".into(),
+            team: "male".into(),
+            rows: vec![mk(100), mk(80), mk(60), mk(40), mk(20), mk(0)],
+            master_groups: vec![],
+            no_master: vec![],
+            daily_star: None,
+        };
+        let pages =
+            render_daily_two_pages(&rep, "浩雨", &crate::report::DailyReportFields::default());
+        assert_eq!(pages.len(), 2, "必须两页: {pages:?}");
+        for (i, svg) in pages.iter().enumerate() {
+            assert!(
+                svg.contains(">浩雨</text>"),
+                "第 {} 页必须有收件人隐形水印",
+                i + 1
+            );
+        }
+    }
+
     #[test]
     fn daily_report_two_pages_split() {
         let mk_rows = |n: usize| {

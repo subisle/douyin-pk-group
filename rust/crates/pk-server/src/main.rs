@@ -750,6 +750,69 @@ async fn main() -> anyhow::Result<()> {
         `my_bind_requests` / `anchor_claims` 两张表与迁移保留不删，只停用代码路径
         （历史数据仍可用 SQL 查）。 */
         .route("/api/admin/collect/status", get(admin::collect_status))
+        // ---- 直播 PK 实时监控（2026-10-20）----
+        // 管理端接口挂在 /api/live 下，走全局 require_admin（与其它 /api 同一层）；
+        // 采集器上报走 /api/internal/live 下，单独鉴权（X-Live-Token），
+        // 见下面 internal_live 路由与 live_api::require_collector。
+        .route(
+            "/api/live/events",
+            get(live_api::events).post(live_api::create_event),
+        )
+        .route(
+            "/api/live/events/{id}/rules",
+            axum::routing::put(live_api::update_rules),
+        )
+        .route(
+            "/api/live/events/{id}/monitors",
+            post(live_api::add_monitor),
+        )
+        .route("/api/live/events/{id}/plans", post(live_api::bind_plans))
+        .route("/api/live/events/{id}/overview", get(live_api::overview))
+        .route("/api/live/events/{id}/scores", get(live_api::live_scores))
+        .route(
+            "/api/live/events/{id}/day-groups",
+            post(live_api::build_day_groups),
+        )
+        .route(
+            "/api/live/events/{id}/revival",
+            post(live_api::build_revival),
+        )
+        .route(
+            "/api/live/events/{id}/promotion",
+            post(live_api::build_promotion),
+        )
+        .route(
+            "/api/live/groups/{group_id}/official",
+            post(live_api::choose_official),
+        )
+        .route(
+            "/api/live/groups/{group_id}/finalize",
+            post(live_api::finalize_group),
+        )
+        .route(
+            "/api/live/groups/{group_id}/rounds",
+            get(live_api::group_rounds),
+        )
+        // 冻结晋级结果：单组 / 整阶段（生成复活赛前必须先冻结，淘汰者才进得了复活池）
+        .route(
+            "/api/live/groups/{group_id}/freeze",
+            post(live_api::freeze_group),
+        )
+        .route("/api/live/stages/freeze", post(live_api::freeze_stage))
+        .route(
+            "/api/live/rounds/{round_id}/void",
+            post(live_api::void_round),
+        )
+        // 推送开关（赛事级）+ 主播级开关 + 手动补推
+        .route(
+            "/api/live/events/{id}/push",
+            axum::routing::put(live_api::update_push),
+        )
+        .route("/api/live/push/person", post(live_api::set_person_push))
+        .route(
+            "/api/live/rounds/{round_id}/push",
+            post(live_api::push_round_now),
+        )
         // 访客日志（2026-10-10）：展示端访问 / 登录记录，含外省被拒的
         .route("/api/admin/visits", get(ipinfo::admin_visits))
         // IP 归属地现场查询（2026-10-11，诊断用）：走 IP_QUERY_SOURCES 集，绕过 ip_geo_cache
@@ -837,6 +900,22 @@ async fn main() -> anyhow::Result<()> {
         ))
         .layer(cors);
 
+    /* 采集器上报口（2026-10-20）：**不挂 require_admin**，单独走 X-Live-Token
+    中间件（live_api::require_collector）。采集器是独立常驻进程，不该持有
+    管理员凭证；这里也**不合并进上面的 api**（那层会要求管理员口令）。
+    只有两个端点：观测上报 + 心跳，能写的数据局限于 live_* 表。 */
+    let internal_live = Router::new()
+        .route(
+            "/api/internal/live/events/{event_id}/observations",
+            post(live_api::ingest),
+        )
+        .route(
+            "/api/internal/live/worker/heartbeat",
+            post(live_api::heartbeat),
+        )
+        .layer(axum::middleware::from_fn(live_api::require_collector))
+        .with_state(st.clone());
+
     /* 前端静态资源 + SPA 回退（生产单端口模式）。
     启动时只判断 index.html 在不在，内容由 spa::handler 每次回退时现读，
     这样前端重新构建不用重启服务。 */
@@ -904,6 +983,9 @@ async fn main() -> anyhow::Result<()> {
     ))
     /* 2026-10-17 第四轮审计 D 域 P3-5：缓存策略（见文件头 `cache_control_mw`）。 */
     .layer(axum::middleware::from_fn(cache_control_mw));
+
+    // 采集上报口挂在最外层之后：它有自己的鉴权与状态，不进管理端那棵路由树
+    let app = app.merge(internal_live);
 
     // 登录态持久化（2026-10-12）：把 AppState 注册给 token 函数，
     // my token put/take/revoke 由此落到 Redis——容器重启后 24h 内登录态自动恢复。

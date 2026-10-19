@@ -30,6 +30,8 @@ pub const SCOPE_PLANS: &str = "plans";
 pub const SCOPE_SETTINGS: &str = "settings";
 pub const SCOPE_SOURCE: &str = "source";
 pub const SCOPE_BOT: &str = "bot";
+/// 直播 PK 实时变更（分数 / 对局状态 / 阶段推进，2026-10-20）
+pub const SCOPE_LIVE: &str = "live";
 /// 访客日志新增（2026-10-17：后台「访客日志」页原先订阅的 scope 与页面数据无关，
 /// 页面永远不自动刷新；给它一个专用域，由 `ipinfo::log_access` 写入成功后广播）
 pub const SCOPE_VISITS: &str = "visits";

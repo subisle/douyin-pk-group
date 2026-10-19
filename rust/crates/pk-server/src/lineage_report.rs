@@ -11,8 +11,8 @@ use std::sync::Arc;
 use sqlx::Row;
 
 use crate::pgrs;
-use crate::report::LineageReportFields;
 use crate::push::fmt_wan;
+use crate::report::LineageReportFields;
 use crate::state::AppState;
 
 /* ------------------------------ 数据结构 ------------------------------ */
@@ -76,7 +76,7 @@ const WATERMARK: &str = "内部数据 · 请勿外传";
 /// SVG/XML 文本转义（& < > " ' 五个，& 在前避免双转义）。
 /// 名册姓名、师傅名、水印 personal_mark 都来自用户可控字符串，
 /// 不转义会提前闭合属性/标签，构成 SVG 注入面。
-fn esc(s: &str) -> String {
+pub(crate) fn esc(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
@@ -472,7 +472,7 @@ fn render_page(
         }
     }
 
-    // 底部斜排水印：多层密铺 rotate(-24)，personal_mark 压进文案（过 esc）
+    // 底部水印（2026-10-20 统一口径）：可见斜排 + 双层隐形（白 0.20 / 黑 0.012）。
     let mark_src = if personal_mark.trim().is_empty() {
         WATERMARK.to_string()
     } else {
@@ -489,6 +489,12 @@ fn render_page(
             let wy = yi as f64 * step_y + 24.0;
             watermark.push_str(&format!(
                 "<text x=\"{wx:.0}\" y=\"{wy:.0}\" font-size=\"16\" font-weight=\"700\" fill=\"#101828\" fill-opacity=\"0.07\" text-anchor=\"middle\" font-family=\"{FONT}\" transform=\"rotate(-24 {wx:.0} {wy:.0})\">{mark}</text>"
+            ));
+            watermark.push_str(&format!(
+                "<text x=\"{wx:.0}\" y=\"{wy:.0}\" font-size=\"22\" font-weight=\"900\" fill=\"#FFFFFF\" fill-opacity=\"0.20\" text-anchor=\"middle\" font-family=\"{FONT}\" transform=\"rotate(-24 {wx:.0} {wy:.0})\">{mark}</text>"
+            ));
+            watermark.push_str(&format!(
+                "<text x=\"{wx:.0}\" y=\"{wy:.0}\" font-size=\"22\" font-weight=\"900\" fill=\"#000000\" fill-opacity=\"0.012\" text-anchor=\"middle\" font-family=\"{FONT}\" transform=\"rotate(-24 {wx:.0} {wy:.0})\">{mark}</text>"
             ));
         }
     }
@@ -663,10 +669,14 @@ mod tests {
             status: false,
         };
         let none = render_svg_pages_with_fields(&rep, 0, "浩月", &hidden);
-        for label in ["主播", "今日音浪", "昨日音浪", "较昨日", "本月累计", "状态"] {
+        for label in ["主播", "今日音浪", "昨日音浪", "较昨日", "本月累计", "状态"]
+        {
             assert!(!none[0].contains(label), "关掉的列不该渲染表头：{label}");
         }
-        assert!(!none[0].contains(">阿三</text>"), "主播列关掉后不应再出现姓名");
+        assert!(
+            !none[0].contains(">阿三</text>"),
+            "主播列关掉后不应再出现姓名"
+        );
     }
 
     #[test]
@@ -741,6 +751,25 @@ mod tests {
         assert!(!t.contains("较昨日"));
         assert!(!t.contains('▲'));
         assert!(!t.contains('▼'));
+    }
+
+    #[test]
+    fn svg_has_visible_and_hidden_watermark_on_every_page() {
+        let rep = fixture();
+        let pages = render_svg_pages_with_fields(&rep, 2, "浩雨", &LineageReportFields::default());
+        assert_eq!(pages.len(), 2, "fixture 应分两页");
+        for (i, svg) in pages.iter().enumerate() {
+            assert!(
+                svg.contains("内部数据 · 请勿外传 浩雨"),
+                "第 {} 页缺可见水印",
+                i + 1
+            );
+            assert!(
+                svg.contains("fill-opacity=\"0.20\"") && svg.contains("fill-opacity=\"0.012\""),
+                "第 {} 页缺双层隐形水印",
+                i + 1
+            );
+        }
     }
 
     #[test]

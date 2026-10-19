@@ -164,8 +164,18 @@ pub async fn send_mail(to: &str, subject: &str, body: &str) -> Result<(), String
         expect(&mut s, "", &["220"]).await?;
         expect(&mut s, &format!("EHLO {host}\r\n"), &["250"]).await?;
         expect(&mut s, "AUTH LOGIN\r\n", &["334"]).await?;
-        expect(&mut s, &format!("{}\r\n", B64.encode(user.as_bytes())), &["334"]).await?;
-        expect(&mut s, &format!("{}\r\n", B64.encode(pass.as_bytes())), &["235"]).await?;
+        expect(
+            &mut s,
+            &format!("{}\r\n", B64.encode(user.as_bytes())),
+            &["334"],
+        )
+        .await?;
+        expect(
+            &mut s,
+            &format!("{}\r\n", B64.encode(pass.as_bytes())),
+            &["235"],
+        )
+        .await?;
         expect(&mut s, &format!("MAIL FROM:<{from}>\r\n"), &["250"]).await?;
         expect(&mut s, &format!("RCPT TO:<{to}>\r\n"), &["250", "251"]).await?;
         expect(&mut s, "DATA\r\n", &["354"]).await?;
@@ -266,8 +276,14 @@ mod tests {
         assert!(body.contains("Ab3kP9xQ2m"), "必须带临时密码：{body}");
         assert!(body.contains("15 分钟"), "必须写有效期：{body}");
         assert!(body.contains("立即"), "必须提示登录后立即修改：{body}");
-        assert!(body.contains("不是您本人的操作"), "必须有非本人操作提示：{body}");
-        assert_eq!(TEMP_PASS_SUBJECT, "抖音PK · 密码重置临时密码（15 分钟内有效）");
+        assert!(
+            body.contains("不是您本人的操作"),
+            "必须有非本人操作提示：{body}"
+        );
+        assert_eq!(
+            TEMP_PASS_SUBJECT,
+            "抖音PK · 密码重置临时密码（15 分钟内有效）"
+        );
         // 信体不含任何身份信息（模板只接受临时密码一个插值）
         assert!(!body.contains('@'), "信体不得出现邮箱：{body}");
         assert!(!body.contains("192."), "信体不得出现 IP/手机号片段：{body}");
