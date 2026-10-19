@@ -1241,9 +1241,15 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
   -webkit-backdrop-filter:blur(12px); backdrop-filter:blur(12px);
   box-shadow:0 4px 12px rgba(15,23,42,.06), 0 1px 2px rgba(0,0,0,.02);
   border-radius:9999px; line-height:1; }
-/* 冠军浅金琉璃微弹幕（Medium 15s / delay .5s）——两条胶囊都用金底盘 */
+/* 冠军浅金琉璃微弹幕（Medium 15s / delay .5s）——两条胶囊都用金底盘
+   ⚠️ animation-fill-mode:backwards 必须带：没有它时，delay 期间元素停在**自然位置**
+   （条内右段静止 2 秒，用户看到的就是「一打开就固定在那儿」），delay 结束才跳到
+   屏幕外开始滚 —— 加 fill-mode 后 delay 期间就落在 0% 关键帧（translateX(108vw)
+   = 屏幕右侧外），到期后从右边平稳滚进来，全程看不见「先静止再跳」。 */
 .danmaku-slim-gold { background:linear-gradient(90deg, rgba(255,255,255,.88) 0%, rgba(254,243,199,.78) 100%);
-  border:.5px solid rgba(245,158,11,.35); animation:danmakuRunMedium 15s linear infinite; animation-delay:.5s; }
+  border:.5px solid rgba(245,158,11,.35);
+  animation:danmakuRunMedium 15s linear infinite; animation-delay:.5s;
+  animation-fill-mode:backwards; }
 /* 争霸赛冠军胶囊：同金底但 delay 2s（与榜首的 .5s 错开，不用 ml 也盖得住） */
 .danmaku-slim-ann { animation-delay:2s; }
 /* 同轨第二个胶囊起 80px 错开（设计稿 ml-20） */
