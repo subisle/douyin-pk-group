@@ -2533,6 +2533,12 @@ struct PendingRow {
     batch_id: u64,
 }
 
+const ABSORB_EXISTING_DAY_SQL: &str =
+    "UPDATE daily_metric SET wave = ?, cumulative_wave = ?, minutes = ?, is_live = ?, \
+       anchor_id = COALESCE((SELECT anchor_id FROM account \
+                             WHERE person_id = ? AND is_primary = 1 LIMIT 1), anchor_id) \
+     WHERE person_id = ? AND biz_date = ?::date";
+
 /// 把暂存区里「已经能对上号」的行补账进 daily_metric（建档 / 绑号 / 绑定审核通过后调用）。
 ///
 /// 命中条件：暂存行的号码出现在该主播的 account.douyin_no 或 account.anchor_id 里。
@@ -2582,18 +2588,16 @@ pub async fn absorb_pending(st: &AppState, person_id: u64) -> anyhow::Result<u32
                     let new_cum = c.max(p.cumulative_wave.unwrap_or(0));
                     let new_min = m + p.minutes.unwrap_or(0);
                     let new_live = live | p.is_live.unwrap_or(0);
-                    sqlx::query(&crate::pq::rewrite(
-                        "UPDATE daily_metric SET wave = ?, cumulative_wave = ?, minutes = ?, is_live = ?
-                         WHERE person_id = ? AND biz_date = ?::date",
-                    ))
-                    .bind(new_wave)
-                    .bind(new_cum)
-                    .bind(new_min)
-                    .bind(new_live)
-                    .bind(person_id as i64)
-                    .bind(&p.biz_date)
-                    .execute(&mut *tx)
-                    .await?;
+                    sqlx::query(&crate::pq::rewrite(ABSORB_EXISTING_DAY_SQL))
+                        .bind(new_wave)
+                        .bind(new_cum)
+                        .bind(new_min)
+                        .bind(new_live)
+                        .bind(person_id as i64)
+                        .bind(person_id as i64)
+                        .bind(&p.biz_date)
+                        .execute(&mut *tx)
+                        .await?;
                 }
                 // 当日还没有数据：按正常导入口径写（累计差分 / 基线日语义都在 write_daily_row 里）
                 None => {
@@ -5895,6 +5899,20 @@ mod tests {
                 .matches('$')
                 .count(),
             4
+        );
+    }
+
+    /// 暂存补账遇到当天已有 0 值行时，必须把 anchor_id 切到当前主号；
+    /// 否则总音浪正确，但 /my/accounts 的主号分支会漏掉这些日行。
+    #[test]
+    fn daily_pending_absorb_repairs_anchor_on_existing_day() {
+        assert!(ABSORB_EXISTING_DAY_SQL.contains("anchor_id = COALESCE"));
+        assert!(ABSORB_EXISTING_DAY_SQL.contains("is_primary = 1"));
+        assert_eq!(
+            crate::pq::rewrite(ABSORB_EXISTING_DAY_SQL)
+                .matches('$')
+                .count(),
+            7
         );
     }
 
