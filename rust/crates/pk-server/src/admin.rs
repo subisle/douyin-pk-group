@@ -567,7 +567,7 @@ pub async fn create_streamer(
     let mut tx = pool.begin().await?;
     let res = sqlx::query(&crate::pq::rewrite(
         "INSERT INTO person (name, gender, master_id, generation, group_name, status, joined_at)
-         VALUES (?,?,?,?,?,?,?) RETURNING id",
+         VALUES (?,?,?,?,?,?,?::date) RETURNING id",
     ))
     .bind(&name)
     .bind(&team)
