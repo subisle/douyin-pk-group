@@ -3830,17 +3830,44 @@ function detailHtml(it, rowMode) {
     '<div class="st-detail-foot"><span>长按主播可复制数据</span><b>点击同一主播也可收回</b></div>' +
   '</div>';
 }
+function clearOpenDetail() {
+  document.querySelectorAll('.st-detail').forEach(el => el.remove());
+  document.querySelectorAll('[data-expand-name]').forEach(el => {
+    el.classList.remove('is-open');
+    el.setAttribute('aria-expanded', 'false');
+  });
+}
 function toggleDetail(name, restoreFocus) {
   if (!name) return;
   const ctx = detailCtx();
-  if (expandedName === name && expandedCtx === ctx) {
+  const same = expandedName === name && expandedCtx === ctx;
+  clearOpenDetail();
+  if (same) {
     expandedName = '';
     expandedCtx = '';
-  } else {
-    expandedName = name;
-    expandedCtx = ctx;
+    if (restoreFocus) {
+      const trigger = [...document.querySelectorAll('[data-expand-name]')]
+        .find(el => el.dataset.expandName === name);
+      if (trigger) trigger.focus({ preventScroll: true });
+    }
+    return;
   }
-  renderList();
+  expandedName = name;
+  expandedCtx = ctx;
+  const it = listAll.find(x => x.name === name);
+  const trigger = [...document.querySelectorAll('[data-expand-name]')]
+    .find(el => el.dataset.expandName === name);
+  if (!it || !trigger) return;
+  trigger.classList.add('is-open');
+  trigger.setAttribute('aria-expanded', 'true');
+  const isPod = trigger.classList.contains('st-pod');
+  if (isPod) {
+    const podium = trigger.closest('.st-podium');
+    if (podium) podium.insertAdjacentHTML('afterend', detailHtml(it, false));
+  } else {
+    const group = trigger.closest('.st-row-group') || trigger.parentElement;
+    if (group) group.insertAdjacentHTML('beforeend', detailHtml(it, true));
+  }
   requestAnimationFrame(() => {
     if (restoreFocus) {
       const trigger = [...document.querySelectorAll('[data-expand-name]')]
@@ -3962,6 +3989,66 @@ function avSoft(name) {
 }
 
 let listAll = [];
+/* 数据页整包缓存（2026-10-21）：用户点开主播详情只用当前页已有字段，零网络请求。
+   首屏响应含当前榜单全部主播及详情字段；其它日期 / 月榜 / 年榜在空闲时串行预取，
+   之后切换直接读缓存，避免用户操作时才发请求造成等待。 */
+const PAGE_DATA_TTL_MS = 5 * 60 * 1000;
+const pageDataCache = new Map();
+const prefetchedTeams = new Set();
+function pageDataKey(team, p, scope) {
+  return String(team || '') + '|' + String(p || '') + '|' + String(scope || '');
+}
+function cachedPageData(key) {
+  const hit = pageDataCache.get(key);
+  if (!hit) return null;
+  if (Date.now() - hit.at > PAGE_DATA_TTL_MS) {
+    pageDataCache.delete(key);
+    return null;
+  }
+  return hit.data;
+}
+function cachePageData(key, data) {
+  if (!key || !data || typeof data !== 'object') return;
+  pageDataCache.set(key, { at: Date.now(), data });
+}
+function scheduleDashboardPrefetch() {
+  const dates = (site && Array.isArray(site.dates)) ? site.dates.slice(0, 60) : [];
+  if (!dates.length || prefetchedTeams.has(TEAM)) return;
+  if (navigator.onLine === false || (navigator.connection && navigator.connection.saveData)) return;
+  prefetchedTeams.add(TEAM);
+  const jobs = [];
+  dates.forEach(d => jobs.push({
+    key: pageDataKey(TEAM, 'daily', d),
+    url: '/api/public/teams/' + TEAM + '/daily?date=' + encodeURIComponent(d),
+  }));
+  [...new Set(dates.map(d => d.slice(0, 7)))].forEach(p => jobs.push({
+    key: pageDataKey(TEAM, 'monthly', p),
+    url: '/api/public/teams/' + TEAM + '/monthly?period=' + encodeURIComponent(p),
+  }));
+  [...new Set(dates.map(d => d.slice(0, 4)))].forEach(p => jobs.push({
+    key: pageDataKey(TEAM, 'yearly', p),
+    url: '/api/public/teams/' + TEAM + '/yearly?period=' + encodeURIComponent(p),
+  }));
+  const run = () => {
+    let i = 0;
+    const next = () => {
+      while (i < jobs.length && cachedPageData(jobs[i].key)) i++;
+      if (i >= jobs.length) return;
+      const job = jobs[i++];
+      fetchWithTimeout(job.url, { headers: myTokenHeaders() }, 5000)
+        .then(async (r) => {
+          if (!r.ok) return;
+          const d = await r.json().catch(() => null);
+          cachePageData(job.key, d);
+        })
+        .catch(() => {})
+        .finally(() => setTimeout(next, 220));
+    };
+    next();
+  };
+  if (window.requestIdleCallback) requestIdleCallback(run, { timeout: 2500 });
+  else setTimeout(run, 900);
+}
 /** 参与渲染的行：搜索过滤（未开播的人始终显示，置灰） */
 function visibleRows() {
   const key = q.trim();
@@ -4139,17 +4226,26 @@ function bindAvatarFallback() {
 }
 
 /* ==================== 加载：数据页 ==================== */
-async function loadData(signal) {
+async function loadData(signal, fresh) {
+  const scope = period === 'daily' ? (curDate || '') : (curPeriod || '');
+  let key = pageDataKey(TEAM, period, scope);
+  const url = period === 'daily'
+    ? '/api/public/teams/' + TEAM + '/daily' + (curDate ? '?date=' + encodeURIComponent(curDate) : '')
+    : '/api/public/teams/' + TEAM + '/' + period + (curPeriod ? '?period=' + encodeURIComponent(curPeriod) : '');
+  let d = fresh ? null : cachedPageData(key);
+  if (!d) {
+    d = await api(url, { signal });
+    if (period === 'daily' && d && d.date) key = pageDataKey(TEAM, 'daily', d.date);
+    else if (d && d.period) key = pageDataKey(TEAM, period, d.period);
+    cachePageData(key, d);
+  }
   if (period === 'daily') {
-    const d = await api('/api/public/teams/' + TEAM + '/daily' + (curDate ? '?date=' + curDate : ''), { signal });
     curDate = d.date;
     listAll = d.items || [];
     $('mhSub').textContent = 'DATA ' + (curDate || '').replaceAll('-', '.') +
       ' · ' + (d.liveCount || 0) + '/' + (d.teamSize || listAll.length) + ' 有数据';
     renderDates();
   } else {
-    const url = '/api/public/teams/' + TEAM + '/' + period + (curPeriod ? '?period=' + curPeriod : '');
-    const d = await api(url, { signal });
     /* 显隐兜底（2026-10-11）：后端 published:false / periodEnabled:false 时不下发 period，
        以前直接 curPeriod = d.period 再 .slice 会抛错，页面只剩「暂时取不到数据」。 */
     if (!d || d.published === false) {
@@ -4185,6 +4281,7 @@ async function loadData(signal) {
     syncStepper();
   }
   renderList();
+  if (period === 'daily') scheduleDashboardPrefetch();
 }
 
 function renderDates() {
@@ -8037,7 +8134,7 @@ function scheduleRefresh() {
   timer = setTimeout(() => {
     /* lineage / my 不参与静默刷新：lineage 重建画布会丢缩放位置；
        my 是个人数据页，低频变化，且重建会打断用户正在输入的表单 */
-    Promise.resolve(view === 'data' ? loadData()
+    Promise.resolve(view === 'data' ? loadData(undefined, true)
       : (view === 'lineage' || view === 'my') ? null : loadGroup())
       .then(() => { consecutiveFail = 0; show('stale', false); })
       .catch(() => { consecutiveFail++; if (consecutiveFail >= 2) show('stale', true); })
