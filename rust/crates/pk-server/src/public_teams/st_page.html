@@ -1285,17 +1285,14 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .st-row-lbl { display:block; font-size:10px; line-height:15px; color:#94A3B8;
   font-variant-numeric:tabular-nums; }
 
-/* ===== 看板弹幕（2026-10-19 第三轮：嵌在「前三名分数」与「名次/主播」之间）=====
-    用户口径：弹幕只放前三名分数下面、名次/主播表头上边 —— 不再做 fixed 全屏轨道。
+/* ===== 看板弹幕（2026-10-21：只滚当日榜单冠军）=====
+    用户口径：弹幕只放前三名分数下面、名次/主播表头上边，并且只滚当天榜单第 1 名。
     实现：.dm-strip 作为**文档流**元素插在领奖台与榜单之间（高 24px 与胶囊同高，
     overflow:hidden 裁住横飘；pointer-events:none 不挡滑动），胶囊在其中横向流动。
     位置微调：后端 danmaku.top 是**偏移量**（-80..80px，正=下移，默认 0=自然位），
     JS 写成 .dm-strip 的 margin-top（CSS 不写死 top，避免和旧 fixed 语义混淆）。
-    内容只有两条金胶囊：
-      · 👑 每日冠军（榜单 rank1，「每日榜首 X万音浪」，开关 danmaku.dailyChampion）
-      · 🏆 争霸赛冠军（公告第一条 enabled，「title · name」，开关 danmaku.contestChampion，
-        复用 .danmaku-slim-ann 的延迟错开）
-    总开关 danmaku.enabled=false → renderList 不输出 .dm-strip（零高度占用）。 */
+    内容只保留一条金胶囊：👑 当日冠军（日榜 rank1，「每日榜首 X万音浪」）。
+    月榜 / 年榜、总开关关闭、无冠军、dailyChampion=false → 不输出 .dm-strip（零高度占用）。 */
 .dm-strip { position:relative; height:24px; margin:2px 0 0; overflow:hidden;
   pointer-events:none; }
 .dm-track { position:absolute; left:0; top:0; width:100%; white-space:nowrap; }
@@ -1307,7 +1304,7 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
   -webkit-backdrop-filter:blur(12px); backdrop-filter:blur(12px);
   box-shadow:0 4px 12px rgba(15,23,42,.06), 0 1px 2px rgba(0,0,0,.02);
   border-radius:9999px; line-height:1; }
-/* 冠军浅金琉璃微弹幕（Medium 15s / delay .5s）——两条胶囊都用金底盘
+/* 冠军浅金琉璃微弹幕（10s / delay .15s）
    ⚠️ animation-fill-mode:backwards 必须带：没有它时，delay 期间元素停在**自然位置**
    （条内右段静止 2 秒，用户看到的就是「一打开就固定在那儿」），delay 结束才跳到
    屏幕外开始滚 —— 加 fill-mode 后 delay 期间就落在 0% 关键帧（translateX(108vw)
@@ -1316,10 +1313,6 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
   border:.5px solid rgba(245,158,11,.35);
   animation:danmakuRunMedium 10s linear infinite; animation-delay:.15s;
   animation-fill-mode:backwards; }
-/* 争霸赛冠军胶囊：同金底但 delay 2s（与榜首的 .5s 错开，不用 ml 也盖得住） */
-.danmaku-slim-ann { animation-delay:.75s; }
-/* 同轨第二个胶囊起 80px 错开（设计稿 ml-20） */
-.danmaku-slim.dm-ml { margin-left:80px; }
 /* 胶囊内文字：emoji 11 / 名字 10.5 黑体黑 / 中点 9 / 称号 10 粗 / 数字 10.5 黑 mono */
 .dm-ic  { font-size:11px; line-height:1; }
 .dm-nm  { font-size:10.5px; font-weight:900; letter-spacing:-.01em; }
@@ -3171,6 +3164,20 @@ function showGate() {
   gateTab('login');
 }
 
+/** 登录门已先显示、公告随后才回来时，只补/换登录页公告条，不重建表单、不打断输入。 */
+function refreshGateAnnouncement() {
+  const col = document.querySelector('#gate .gate-col');
+  if (!col || $('obPhone')) return;
+  const html = annBarHtml('gate-ann', siteAnnouncements.login, 'campaign');
+  const old = $('gate-ann');
+  if (old) {
+    if (html) old.outerHTML = html;
+    else old.remove();
+  } else if (html) {
+    col.insertAdjacentHTML('afterbegin', html);
+  }
+}
+
 /* 2026-10-14 注册功能已下线；2026-10-18 仅剩的「登录」页签条也删除，
    gateTab 只是「显示登录面板 + 聚焦账号框」的入口（同名同调用点保留，避免调用链脱节）。 */
 function gateTab() {
@@ -3615,8 +3622,8 @@ async function ensureLogin() {
     const cands = ['all'];
     for (const team of cands) {
       try {
-        const who = await fetch('/api/public/teams/' + team + '/my/who',
-          { headers: myTokenHeaders() }).then((r) => r.json());
+        const who = await fetchWithTimeout('/api/public/teams/' + team + '/my/who',
+          { headers: myTokenHeaders() }, 2500).then((r) => r.json());
         if (who && who.ok) {
           /* team 回账号真正的团别（团别待定 = 空串），不是刚试探的团 */
           who.team = who.anyTeam ? '' :
@@ -3845,23 +3852,21 @@ function renderList() {
   bindRows();
 }
 
-/* ==================== 看板弹幕（2026-10-19 第三轮：嵌在榜三与表头之间） ====================
-    用户口径：「弹幕只放在前三名分数下面即可。名次/主播上边」——不再是 fixed 全屏轨道，
+/* ==================== 看板弹幕（2026-10-21：只滚当日榜单冠军） ====================
+    用户口径：「弹幕只放在前三名分数下面即可。名次/主播上边」，并且只滚动每日榜单冠军 —— 不再是 fixed 全屏轨道，
     改为**文档流里的窄条 .dm-strip**（高 24px，与胶囊同高），由 renderList 插在
     领奖台与榜单之间；胶囊在条内横向流动，条外 overflow:hidden 裁住。
-       · 胶囊一 👑 每日冠军：listAll 里 rank===1 且 hasData!==false
-         「👑 {名} · {每{日|月|年}榜首} {X万音浪}」（wave==null 不出数字段）
-       · 胶囊二 🏆 争霸赛冠军：siteAnnouncements.items 第一条 enabled
-         「🏆 {title} · {name}」（复用 .danmaku-slim-ann 的延迟错开）
+       · 唯一胶囊 👑 当日冠军：日榜 listAll 里 rank===1 且 hasData!==false
+         「👑 {名} · 每日榜首 {X万音浪}」（wave==null 不出数字段）
     位置微调：后端 danmaku.top 是**偏移量**（-80..80，正=下移，默认 0 = 自然位），
     写成 .dm-strip 的 margin-top；非数字回落 0。
-    总开关：danmaku.enabled !== true（含老后端缺字段）→ renderList 不输出弹幕条。
+    显示条件：仅日榜；danmaku.enabled === true 且 danmaku.dailyChampion !== false，
+    且有当日冠军。月榜 / 年榜 / 无冠军 → renderList 不输出弹幕条（零高度占用）。
     挂载闸：登录门 / 三甲通报弹窗 / 引导弹窗 任一开着 → 条内保持空（占位不闪），
     各自关闭时 renderDanmaku() 补挂（幂等）。 */
 function dmCfg() {
   const cfg = (siteAnnouncements && typeof siteAnnouncements === 'object') ? siteAnnouncements : {};
-  const d = (cfg.danmaku && typeof cfg.danmaku === 'object') ? cfg.danmaku : {};
-  return { cfg: cfg, d: d };
+  return (cfg.danmaku && typeof cfg.danmaku === 'object') ? cfg.danmaku : {};
 }
 /** 位置偏移：-80..80px（正=下移）；非数字/缺失 → 0 */
 function dmOffset(d) {
@@ -3877,41 +3882,26 @@ function dmGateOpen() {
             (popup && !popup.classList.contains('hidden')) ||
             announceCtx);
 }
-/** 两条金胶囊的 HTML（数据缺/开关关时对应胶囊为空串） */
-function dmPillsHtml(cfg, d) {
-  /* 每日冠军（榜单 rank1，hasData!==false；开关 dailyChampion） */
-  const top1 = d.dailyChampion !== false && Array.isArray(listAll)
-    ? listAll.find(x => x && x.hasData !== false && x.rank === 1) : null;
-  /* 称号随 period 联动：日榜「每日榜首」、月榜「每月榜首」、年榜「年度榜首」 */
-  const unit = period === 'monthly' ? '每月' : period === 'yearly' ? '年度' : '每日';
+/** 当日冠军金胶囊的 HTML（月/年榜、数据缺、开关关时为空串） */
+function dmPillsHtml(d) {
+  if (period !== 'daily' || d.dailyChampion === false || !Array.isArray(listAll)) return '';
+  const top1 = listAll.find(x => x && x.hasData !== false && x.rank === 1) || null;
+  if (!top1) return '';
   const num = (w) => w == null ? '' : wan(w);
-  const champ = top1
-    ? '<span class="danmaku-slim danmaku-slim-gold">' +
-        '<span class="dm-ic">👑</span>' +
-        '<span class="dm-nm">' + esc(top1.name) + '</span>' +
-        '<span class="dm-dot">·</span>' +
-        '<span class="dm-tt">' + unit + '榜首</span>' +
-        (top1.wave == null ? '' : '<span class="dm-num">' + num(top1.wave) + '</span>') +
-      '</span>'
-    : '';
-  /* 争霸赛冠军金胶囊：🏆 title · name（公告 items 第一条 enabled；开关 contestChampion） */
-  const annIt = (d.contestChampion !== false && Array.isArray(cfg.items) ? cfg.items : [])
-    .find(it => it && it.enabled);
-  const ann = annIt
-    ? '<span class="danmaku-slim danmaku-slim-gold danmaku-slim-ann' + (champ ? ' dm-ml' : '') + '">' +
-        '<span class="dm-ic">🏆</span>' +
-        '<span class="dm-nm">' + esc(annIt.title) + '</span>' +
-        '<span class="dm-dot">·</span>' +
-        '<span class="dm-tt">' + esc(annIt.name) + '</span>' +
-      '</span>'
-    : '';
-  return champ + ann;
+  return '<span class="danmaku-slim danmaku-slim-gold">' +
+      '<span class="dm-ic">👑</span>' +
+      '<span class="dm-nm">' + esc(top1.name) + '</span>' +
+      '<span class="dm-dot">·</span>' +
+      '<span class="dm-tt">每日榜首</span>' +
+      (top1.wave == null ? '' : '<span class="dm-num">' + num(top1.wave) + '</span>') +
+    '</span>';
 }
 /** renderList 用：输出弹幕条（开关关 = 空串，零占用）；挂载闸开着 = 空轨道占位 */
 function dmStripHtml() {
-  const { cfg, d } = dmCfg();
-  if (d.enabled !== true) return '';
-  const pills = dmGateOpen() ? '' : dmPillsHtml(cfg, d);
+  const d = dmCfg();
+  if (d.enabled !== true || period !== 'daily' || d.dailyChampion === false) return '';
+  const pills = dmGateOpen() ? '' : dmPillsHtml(d);
+  if (!pills && !dmGateOpen()) return '';
   return '<div class="dm-strip" style="margin-top:' + dmOffset(d) + 'px">' +
     '<div class="dm-track">' + pills + '</div></div>';
 }
@@ -3919,12 +3909,14 @@ function dmStripHtml() {
 function renderDanmaku() {
   const strip = document.querySelector('.dm-strip');
   if (!strip) return;                      // 非看板 / 弹幕关闭：无事可做
-  const { cfg, d } = dmCfg();
-  if (d.enabled !== true) { strip.remove(); return; }
+  const d = dmCfg();
+  if (d.enabled !== true || period !== 'daily' || d.dailyChampion === false) { strip.remove(); return; }
   strip.style.marginTop = dmOffset(d) + 'px';
   const track = strip.querySelector('.dm-track');
   if (!track) return;
-  track.innerHTML = dmGateOpen() ? '' : dmPillsHtml(cfg, d);
+  const pills = dmGateOpen() ? '' : dmPillsHtml(d);
+  if (!pills && !dmGateOpen()) { strip.remove(); return; }
+  track.innerHTML = pills;
 }
 
 function copyText(t) {
@@ -7918,7 +7910,7 @@ async function siteIsOpen() {
     /* 带上已有登录态：登录门开启时 /all 对有效 token 放行（后端 gate_team 口径）。
        token 走 X-My-Token 头（2026-10-13）；裸 fetch 或 ?access_token= 都会 401，
        导致每次 boot 又弹一次登录门（"登录成功又回登录门 / 要登录两次"的根因之一）。 */
-    const r = await fetch('/api/public/teams/all', { headers: myTokenHeaders() });
+    const r = await fetchWithTimeout('/api/public/teams/all', { headers: myTokenHeaders() }, 2500);
     return r.ok;
   } catch (_) { return false; }
 }
@@ -8197,6 +8189,8 @@ function maybeAnnounce() {
     box.innerHTML = '';
     box.classList.remove('ann-spot');
     box.classList.remove('ann-overlay-in');
+    /* 引导关闭 = 弹幕挂载闸解除：首帧若被引导按住，这里立即补挂当日冠军。 */
+    try { renderDanmaku(); } catch (_) {}
   }
   announceCtx = close;
 
@@ -8757,9 +8751,22 @@ let mhAnnSeq = 0;
    home 条）：switchView 切走时保留，切回数据视图时据此原样恢复（不用等网络）。 */
 let mhAnnQueue = [];
 
+/** 公开启动探测的硬超时：登录界面不能被公告/站点接口拖住。
+    页面内的业务请求仍走 api()；这里只保护首屏那几次“有就用、没有也能继续”的探测。 */
+async function fetchWithTimeout(url, opts, timeoutMs) {
+  if (typeof AbortController !== 'function') return fetch(url, opts);
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), timeoutMs);
+  try {
+    return await fetch(url, Object.assign({}, opts || {}, { signal: ctl.signal }));
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** 拉 announcements 配置：任何失败（404/网络/后端未上线）都回落为空对象，绝不挡启动 */
 async function fetchAnnouncements() {
-  const r = await fetch('/api/public/announcements');
+  const r = await fetchWithTimeout('/api/public/announcements', {}, 2500);
   if (!r.ok) return {};
   const d = await r.json().catch(() => ({}));
   return d && typeof d === 'object' ? d : {};
@@ -9859,8 +9866,21 @@ function dismissAnnounce() {
   if (announceCtx) announceCtx();
 }
 
+/** 站点本身免登录时，把提前显示的登录门静默收起（不清 token、不触发登录流程）。 */
+function hideBootGate() {
+  const g = $('gate');
+  if (!g) return;
+  gateResolve = null;
+  g.classList.add('hidden');
+  g.innerHTML = '';
+}
+
 (async function boot() {
   applyTeam();
+  /* 登录优先（2026-10-21）：没有 token 时先同步渲染登录门，再等公告/站点探测。
+     这样慢网络下用户第一眼看到的是可输入的手机号/密码，而不是空看板 + LOADING。 */
+  const earlyLogin = !myToken() ? ensureLogin() : null;
+  const openTask = siteIsOpen();
   /* 公告/庆祝配置（2026-10-13）：并行探测 GET /api/public/announcements，
      失败/后端未上线时回落为全关（{}），所有消费点都按 falsy 兜底，不挡启动流程。
      items 也在这份里先垫一帧，见 bootRest 顶部。 */
@@ -9878,8 +9898,9 @@ function dismissAnnounce() {
       contestChampion: d.contestChampion !== false,
     };
   })();
-  if (await siteIsOpen()) { bootRest(); return; }
-  const me = await ensureLogin();
+  try { refreshGateAnnouncement(); } catch (_) {}
+  if (await openTask) { hideBootGate(); bootRest(); return; }
+  const me = earlyLogin ? await earlyLogin : await ensureLogin();
   applyLoginState(me);   // 登录后立刻按账号团别设置 TEAM
   /* 2026-10-18 契约 v2 §4.3/§4.6：刷新页面恢复登录态时也要接住两个状态 ——
      needProfile → 复用 #gate 渲染不可关闭的补全卡（阻断逻辑自愈）；

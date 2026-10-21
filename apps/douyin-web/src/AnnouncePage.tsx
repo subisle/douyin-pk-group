@@ -49,8 +49,9 @@ const EMPTY_PLACEMENTS: PlacementsMap = {
 }
 const EMPTY_CELEBRATE: CelebrateCfg = { enabled: false, confetti: false, title: '', name: '', wave: '0' }
 
-/** 看板弹幕（2026-10-19 后端新增）：展示页榜单上的飘字胶囊。
-    后端字段为 { enabled, top: number, dailyChampion, contestChampion }，top 是 390 宽视口下
+/** 看板弹幕（2026-10-19 后端新增，2026-10-21 收敛为只滚日榜冠军）：
+    后端字段仍保留 contestChampion 以兼容旧配置，但展示端已不再输出争霸赛冠军胶囊。
+    字段为 { enabled, top: number, dailyChampion, contestChampion }，top 是 390 宽视口下
     弹幕位置微调偏移（-80..80；默认 0 = 前三名分数与「名次/主播」之间）。
     与 celebrate.wave 同口径：state 里存字符串方便 number 输入框编辑，保存时转回数字。 */
 type DanmakuCfg = { enabled: boolean; top: string; dailyChampion: boolean; contestChampion: boolean }
@@ -887,7 +888,7 @@ export default function AnnouncePage() {
       <section className="card ann-sec">
         <h2 className="ann-sec-head">🎈 看板弹幕</h2>
         <p className="ann-sec-sub">
-          展示页「前三名分数」与「名次/主播」之间的飘字胶囊；位置可上下微调（默认 0 = 自然位）。
+          展示页「前三名分数」与「名次/主播」之间的飘字胶囊，只滚当天榜单冠军；位置可上下微调（默认 0 = 自然位）。
         </p>
         <div
           style={{
@@ -927,20 +928,6 @@ export default function AnnouncePage() {
                 }}
               />
               显示每日冠军
-            </label>
-            {/* 显示争霸赛冠军：争霸赛冠军的飘字胶囊开关（切换即保存，同上） */}
-            <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 12.5 }}>
-              <input
-                type="checkbox"
-                className="switch"
-                checked={danmaku.contestChampion}
-                onChange={(e) => {
-                  const next = { ...danmaku, contestChampion: e.target.checked }
-                  setDanmaku(next)
-                  save({ danmaku: next })
-                }}
-              />
-              显示争霸赛冠军
             </label>
             {/* 位置微调：number 输入，state 存字符串（同 celebrate.wave），失焦转数字保存；
                 后端 clamp -80..=80，这里只做提示，保存侧兜底见 save() */}
