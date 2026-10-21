@@ -1285,6 +1285,66 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .st-row-lbl { display:block; font-size:10px; line-height:15px; color:#94A3B8;
   font-variant-numeric:tabular-nums; }
 
+/* ===== 主播详情手风琴（2026-10-21）=====
+   点击领奖台 / 榜单行 = 展开选中主播的详情，再点同一项或「收起」= 收回。
+   详情是文档流里的白玻卡，不遮挡名单；同时最多展开一人。
+   长按 / 右键仍复制，键盘 Enter / Space 与点击等价。 */
+.st-pod[data-expand-name], .st-row[data-expand-name] { cursor:pointer; }
+.st-pod[data-expand-name] { border-radius:18px; transition:background .16s, box-shadow .16s; }
+.st-pod[data-expand-name]:hover { background:rgba(255,255,255,.42); }
+.st-pod.is-open { background:rgba(255,255,255,.68); box-shadow:0 8px 22px rgba(148,163,184,.13); }
+.st-pod[data-expand-name]:focus-visible, .st-row[data-expand-name]:focus-visible,
+.st-detail-close:focus-visible {
+  outline:2px solid #D97706; outline-offset:-2px; }
+.st-row-group { border-bottom:1px solid #F1F5F9; }
+.st-row-group:last-child { border-bottom:none; }
+.st-row-group .st-row { border-bottom:none; }
+.st-row.is-open { background:rgba(255,255,255,.72); }
+.st-expand-cue { width:16px; height:16px; flex:none; display:inline-grid; place-items:center;
+  color:#94A3B8; }
+.st-expand-cue::before { content:''; width:6px; height:6px; border-right:1.6px solid currentColor;
+  border-bottom:1.6px solid currentColor; transform:rotate(45deg) translateY(-1px);
+  transition:transform .16s cubic-bezier(.23,1,.32,1); }
+.is-open .st-expand-cue { color:#D97706; }
+.is-open .st-expand-cue::before { transform:rotate(225deg) translate(-1px,0); }
+.st-pod-nm { display:flex; align-items:center; justify-content:center; gap:2px; max-width:100%; }
+.st-pod-nmtext { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.st-detail { margin:0 12px 12px; padding:13px 13px 11px; border-radius:16px;
+  background:linear-gradient(145deg, rgba(255,255,255,.92), rgba(239,246,255,.76));
+  border:1px solid rgba(255,255,255,.96);
+  box-shadow:0 10px 26px rgba(148,163,184,.14), 0 1px 2px rgba(0,0,0,.03),
+    inset 0 1px 1px rgba(255,255,255,.95);
+  -webkit-backdrop-filter:blur(18px); backdrop-filter:blur(18px);
+  animation:stDetailIn .18s cubic-bezier(.23,1,.32,1) both; }
+.st-detail-row { margin:0 10px 10px; }
+@keyframes stDetailIn {
+  from { opacity:0; transform:translateY(-6px); }
+  to { opacity:1; transform:translateY(0); }
+}
+.st-detail-head { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+.st-detail-title { font-size:12px; line-height:18px; font-weight:700; color:#334155; }
+.st-detail-badge { padding:3px 8px; border-radius:9999px; font-size:10px; line-height:15px;
+  font-weight:700; color:#475569; background:rgba(100,116,139,.10); flex:none; }
+.st-detail-badge.live { color:#0369A1; background:rgba(14,165,233,.12); }
+.st-detail-badge.warn { color:#B45309; background:rgba(245,158,11,.12); }
+.st-detail-close { border:none; background:transparent; color:#64748B; font:inherit;
+  font-size:11px; padding:2px 0 2px 8px; text-decoration:underline; text-underline-offset:3px; }
+.st-detail-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:7px;
+  margin-top:10px; }
+.st-detail-cell { min-width:0; padding:8px 10px; border-radius:11px;
+  background:rgba(255,255,255,.64); border:1px solid rgba(255,255,255,.9); }
+.st-detail-lb { font-size:10px; line-height:15px; font-weight:600; color:#7B8798; }
+.st-detail-v { margin-top:2px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  font-size:14px; line-height:20px; font-weight:800; color:#0F172A;
+  font-variant-numeric:tabular-nums; }
+.st-detail-foot { display:flex; justify-content:space-between; align-items:center; gap:8px;
+  margin-top:9px; font-size:10px; line-height:15px; color:#94A3B8; }
+.st-detail-foot b { color:#64748B; font-weight:600; }
+@media (prefers-reduced-motion: reduce) {
+  .st-detail { animation:none; }
+  .st-expand-cue::before { transition:none; }
+}
+
 /* ===== 看板弹幕（2026-10-21：只滚当日榜单冠军）=====
     用户口径：弹幕只放前三名分数下面、名次/主播表头上边，并且只滚当天榜单第 1 名。
     实现：.dm-strip 作为**文档流**元素插在领奖台与榜单之间（高 24px 与胶囊同高，
@@ -3718,6 +3778,81 @@ const trophyHtml = (r) =>
       '" width="24" height="24" draggable="false">'
     : '';
 
+/* ---- 主播详情手风琴：点击展开 / 收回；上下文（团别 + 日期/周期）变化自动失效 ---- */
+let expandedName = '';
+let expandedCtx = '';
+function detailCtx() {
+  return [TEAM, period, period === 'daily' ? (curDate || '') : (curPeriod || '')].join('|');
+}
+function detailOpen(it) {
+  return !!it && expandedName === it.name && expandedCtx === detailCtx();
+}
+function expandCue(open) {
+  return '<span class="st-expand-cue" aria-hidden="true"></span>';
+}
+function detailDeltaText(delta) {
+  if (!delta) return '—';
+  if (delta.dir === 'up') return '↑ ' + delta.n + ' 名';
+  if (delta.dir === 'down') return '↓ ' + delta.n + ' 名';
+  return '持平';
+}
+function detailStatus(it) {
+  if (it.periodic) {
+    const n = it.absentDays;
+    return n != null && n > 0 ? { text: '未播 ' + n + ' 天', cls: 'warn' } : { text: '有数据', cls: '' };
+  }
+  if (it.hasData === false) return { text: '暂无数据', cls: '' };
+  return it.isLive ? { text: '直播中', cls: 'live' } : { text: '今日未开播', cls: 'warn' };
+}
+function detailCell(label, value) {
+  return '<div class="st-detail-cell"><div class="st-detail-lb">' + esc(label) +
+    '</div><div class="st-detail-v">' + esc(value) + '</div></div>';
+}
+function detailHtml(it, rowMode) {
+  if (!it || !detailOpen(it)) return '';
+  const st = detailStatus(it);
+  const waveLbl = it.periodic ? (period === 'monthly' ? '当月音浪' : '年度音浪') : '当日音浪';
+  const cells = [
+    detailCell('当前排名', it.rank ? '第 ' + it.rank + ' 名' : '—'),
+    detailCell(waveLbl, it.wave == null ? '—' : wan(it.wave)),
+  ];
+  if (!it.periodic && it.totalWave != null) cells.push(detailCell('累计音浪', wan(it.totalWave)));
+  if (it.minutes != null) cells.push(detailCell('直播时长', minFmt(it.minutes)));
+  if (it.periodic && it.absentDays != null) cells.push(detailCell('未播天数', it.absentDays + ' 天'));
+  if (it.delta) cells.push(detailCell('排名变化', detailDeltaText(it.delta)));
+  return '<div class="st-detail' + (rowMode ? ' st-detail-row' : '') + '" data-detail-name="' + esc(it.name) +
+      '" role="region" aria-label="' + esc(it.name) + '详情">' +
+    '<div class="st-detail-head">' +
+      '<div class="st-detail-title">主播详情 <span class="st-detail-badge ' + st.cls + '">' + esc(st.text) + '</span></div>' +
+      '<button class="st-detail-close" type="button" data-close-detail="' + esc(it.name) + '">收起</button>' +
+    '</div>' +
+    '<div class="st-detail-grid">' + cells.join('') + '</div>' +
+    '<div class="st-detail-foot"><span>长按主播可复制数据</span><b>点击同一主播也可收回</b></div>' +
+  '</div>';
+}
+function toggleDetail(name, restoreFocus) {
+  if (!name) return;
+  const ctx = detailCtx();
+  if (expandedName === name && expandedCtx === ctx) {
+    expandedName = '';
+    expandedCtx = '';
+  } else {
+    expandedName = name;
+    expandedCtx = ctx;
+  }
+  renderList();
+  requestAnimationFrame(() => {
+    if (restoreFocus) {
+      const trigger = [...document.querySelectorAll('[data-expand-name]')]
+        .find(el => el.dataset.expandName === name);
+      if (trigger) trigger.focus({ preventScroll: true });
+    }
+    const detail = [...document.querySelectorAll('.st-detail')]
+      .find(el => el.dataset.detailName === name);
+    if (detail) detail.scrollIntoView({ block: 'nearest' });
+  });
+}
+
 /** 领奖台：按 [第2名, 第1名, 第3名] 排布，第一名居中大号；缺位留空。
     后台关掉「音浪数值」时接口不下发数字（wave=null），显示 —。 */
 function podHtml(items) {
@@ -3729,6 +3864,7 @@ function podHtml(items) {
     r === 1 ? 'st-pod-in-1' : r === 2 ? 'st-pod-in-2' : 'st-pod-in-3';
   return '<div class="st-podium">' + order.map(it => {
     if (!it) return '<div class="st-pod"></div>';
+    const open = detailOpen(it);
     const ch = esc(String(it.name || '?').charAt(0));
     /* 真头像（T3）：avatar 是同源相对路径（拿不到就是 null）。有图就直出 <img>（公开图，
        不用 fetch+objectURL），没图仍走原来的「首字 + 金银铜底色」，外观与旧版一模一样。
@@ -3744,12 +3880,14 @@ function podHtml(items) {
     /* 字段关闭时后端可能不下发 → null/undefined 一律隐藏；0 是后端真实值，照常显示。 */
     const min = it.minutes == null ? '' : minFmt(it.minutes);
     const absent = it.periodic && it.absentDays != null ? it.absentDays : null;
-    return '<div class="st-pod st-pod-' + it.rank + '" data-n="' + esc(it.name) + '" data-w="' + (it.wave == null ? '' : it.wave) + '">' +
+    return '<div class="st-pod st-pod-' + it.rank + (open ? ' is-open' : '') + '" data-n="' + esc(it.name) +
+        '" data-w="' + (it.wave == null ? '' : it.wave) + '" data-expand-name="' + esc(it.name) +
+        '" role="button" tabindex="0" aria-expanded="' + open + '" aria-label="查看' + esc(it.name) + '详情">' +
       '<div class="st-pod-ring">' +
         trophyHtml(it.rank) +
         av +
       '</div>' +
-      '<h3 class="st-pod-nm">' + esc(it.name) + '</h3>' +
+      '<h3 class="st-pod-nm"><span class="st-pod-nmtext">' + esc(it.name) + '</span>' + expandCue(open) + '</h3>' +
       (absent != null ? '<span class="st-pod-off' + (absent > 0 ? ' warn' : '') + '">未播 ' + absent + '天</span>' : '') +
       (min ? '<span class="st-pod-off">时长 ' + min + '</span>' : '') +
       /* 2026-10-18 第二轮 1:1：数值与单位小字包进 .st-pod-num（设计稿 div.mt-0.5），
@@ -3759,7 +3897,7 @@ function podHtml(items) {
         (label ? '<span class="st-pod-lbl">' + label + '</span>' : '') +
       '</div>' +
     '</div>';
-  }).join('') + '</div>';
+  }).join('') + '</div>' + detailHtml(order.find(it => it && detailOpen(it)), false);
 }
 
 /** 榜单行（Stitch 版）：
@@ -3770,6 +3908,7 @@ function podHtml(items) {
     未播天数（仅月 / 年榜）：absentDays 缺失/null 时整行隐藏；0 是真实值，显示「未播 0天」。
     2026-10-19 起未播天数在名字下面一行，不再挂在名字右侧。 */
 function lbRowHtml(it) {
+  const open = detailOpen(it);
   const hideWave = it.wave == null;
   const off = it.hasData === false || (!hideWave && it.wave < 2);
   const wave = hideWave ? '—' : wan(it.wave);
@@ -3778,8 +3917,10 @@ function lbRowHtml(it) {
   const rightLbl = it.periodic ? '' : '当日音浪';
   const min = it.minutes == null ? '' : minFmt(it.minutes);
   const absent = it.periodic && it.absentDays != null ? it.absentDays : null;
-  return '<div class="st-row' + (off ? ' off' : '') + '" data-n="' + esc(it.name) +
-    '" data-w="' + (off || hideWave ? '' : it.wave) + '">' +
+  return '<div class="st-row-group">' +
+    '<div class="st-row' + (off ? ' off' : '') + (open ? ' is-open' : '') + '" data-n="' + esc(it.name) +
+    '" data-w="' + (off || hideWave ? '' : it.wave) + '" data-expand-name="' + esc(it.name) +
+    '" role="button" tabindex="0" aria-expanded="' + open + '" aria-label="查看' + esc(it.name) + '详情">' +
     '<div class="st-row-l">' +
       '<span class="st-row-rk">' + (off ? '—' : (it.rank || '—')) + '</span>' +
       /* 真头像（T3）：有图先给 has-img（不设 avSoft 内联底色，否则会盖住圆形裁切），
@@ -3791,7 +3932,7 @@ function lbRowHtml(it) {
         : '<div class="st-row-av" data-n="' + esc(it.name) + '" style="' + avSoft(it.name) + '">' +
             esc(String(it.name || '?').charAt(0)) + '</div>') +
       '<div class="st-row-mid">' +
-        '<div class="st-row-nmwrap"><span class="st-row-nm">' + esc(it.name) + '</span></div>' +
+        '<div class="st-row-nmwrap"><span class="st-row-nm">' + esc(it.name) + '</span>' + expandCue(open) + '</div>' +
         (absent != null
           ? '<p class="st-row-sub"><span class="st-row-off' + (absent > 0 ? ' warn' : '') + '">未播 ' + absent + '天</span></p>'
           : '') +
@@ -3800,6 +3941,7 @@ function lbRowHtml(it) {
     (min ? '<span class="st-row-min">时长 ' + min + '</span>' : '') +
     '<div class="st-row-r"><span class="st-row-wv">' + (off ? '—' : wave) + '</span>' +
       (rightLbl ? '<span class="st-row-lbl">' + rightLbl + '</span>' : '') + '</div>' +
+    '</div>' + detailHtml(it, true) +
   '</div>';
 }
 
@@ -3924,17 +4066,47 @@ function copyText(t) {
   toast('已复制 ' + t);
 }
 
-/* 点人/长按 = 复制「名字 · 音浪」；音浪隐藏时只复制名字 */
+/* 点人 = 展开 / 收回详情；长按 / 右键 = 复制「名字 · 音浪」（音浪隐藏时只复制名字） */
 function bindRows() {
   const copy = (el) => copyText(el.dataset.w === ''
     ? el.dataset.n
     : el.dataset.n + ' · ' + wan(Number(el.dataset.w || 0)) + ' 音浪');
-  document.querySelectorAll('#view .lb-row, #view .pod').forEach(el => {
-    let lp;
-    el.onclick = () => copy(el);
+  document.querySelectorAll('#view [data-expand-name]').forEach(el => {
+    let lp = null;
+    let suppressClick = false;
+    const clearLp = () => { if (lp) clearTimeout(lp); lp = null; };
+    el.onclick = (e) => {
+      if (suppressClick) {
+        suppressClick = false;
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+      toggleDetail(el.dataset.expandName || el.dataset.n || '', false);
+    };
+    el.onkeydown = (e) => {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      e.preventDefault();
+      toggleDetail(el.dataset.expandName || el.dataset.n || '', true);
+    };
     el.oncontextmenu = (e) => { e.preventDefault(); copy(el); };
-    el.ontouchstart = () => { lp = setTimeout(() => copy(el), 520); };
-    el.ontouchend = el.ontouchmove = () => clearTimeout(lp);
+    el.ontouchstart = () => {
+      suppressClick = false;
+      clearLp();
+      lp = setTimeout(() => { suppressClick = true; copy(el); }, 520);
+    };
+    el.ontouchend = () => {
+      clearLp();
+      if (suppressClick) setTimeout(() => { suppressClick = false; }, 350);
+    };
+    el.ontouchmove = clearLp;
+  });
+  document.querySelectorAll('#view [data-close-detail]').forEach(btn => {
+    btn.onclick = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      toggleDetail(btn.dataset.closeDetail || '', true);
+    };
   });
   bindAvatarFallback();
 }
