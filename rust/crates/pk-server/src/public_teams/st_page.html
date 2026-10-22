@@ -4372,7 +4372,7 @@ function dashboardBlockingOverlay() {
 /** 数字动画和排名定焦都等弹窗（公告 / QQ / 消息 / 资料）关闭后再执行，
     避免动画在遮罩后面播完，用户真正看到时已经结束。 */
 function scheduleDashboardReveal(animateNumbers) {
-  if (animateNumbers) numberAnimationPending = true;
+  if (animateNumbers && canAnimateDashboardNumbers()) numberAnimationPending = true;
   clearTimeout(dashboardRevealTimer);
   const tick = () => {
     if (performance.now() < dashboardRevealNotBefore || dashboardBlockingOverlay()) {
@@ -4388,23 +4388,41 @@ function scheduleDashboardReveal(animateNumbers) {
   dashboardRevealTimer = setTimeout(tick, 30);
 }
 
-/** 首屏 / 切口径后的数字加载动画：从 0 滚动到真实音浪值。
-    静默刷新和导入自动刷新传 fresh=true，不重复播放，避免打断阅读。 */
+/** 数字加载动画只给已登录用户：仅动画当前视口内的数字 + 自己的排名数字。
+    这样既保留加载质感，又避免一次更新上百个 DOM 造成掉帧。 */
+function canAnimateDashboardNumbers() {
+  return !!(myToken() && meState && meState.name && !meState.needBind && meState.bound !== false);
+}
+
 function animateDashboardNumbers() {
+  if (!canAnimateDashboardNumbers() || view !== 'data' || document.hidden) return;
   if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
-  const els = [...document.querySelectorAll('[data-count-wave]')]
-    .filter(el => el.dataset.countWave !== '');
+  const mine = meState && meState.name ? String(meState.name) : '';
+  const all = [...document.querySelectorAll('[data-count-wave]')]
+    .filter(el => el.dataset.countWave !== '' && Number(el.dataset.countWave) > 1);
+  const els = all.filter((el) => {
+    if (mine) {
+      const owner = el.closest('[data-expand-name]');
+      if (owner && owner.dataset.expandName === mine) return true;
+    }
+    const r = el.getBoundingClientRect();
+    return r.bottom >= 0 && r.top <= window.innerHeight + 40;
+  }).slice(0, 18);
   if (!els.length) return;
   const targets = els.map(el => Number(el.dataset.countWave) || 0);
-  const duration = 720;
+  const duration = 560;
   const started = performance.now();
+  els.forEach(el => { el.textContent = '0'; });
   const tick = (now) => {
     const p = Math.min(1, (now - started) / duration);
-    const eased = 1 - Math.pow(1 - p, 3);
-    els.forEach((el, i) => { el.textContent = wan(Math.round(targets[i] * eased)); });
+    const eased = 1 - Math.pow(1 - p, 4);
+    els.forEach((el, i) => {
+      const next = wan(Math.round(targets[i] * eased));
+      if (el.textContent !== next) el.textContent = next;
+    });
     if (p < 1) requestAnimationFrame(tick);
+    else els.forEach((el, i) => { el.textContent = wan(targets[i]); });
   };
-  els.forEach(el => { el.textContent = '0'; });
   requestAnimationFrame(tick);
 }
 
