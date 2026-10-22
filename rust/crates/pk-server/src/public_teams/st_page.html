@@ -4294,7 +4294,7 @@ async function loadData(signal, fresh) {
     $('pNow').textContent = period === 'monthly'
       ? curPeriod.slice(0, 4) + '年' + (+curPeriod.slice(5, 7)) + '月'
       : curPeriod + '年';
-    syncStepper();
+    renderDates();
   }
   renderList();
   if (period === 'daily') scheduleDashboardPrefetch();
@@ -4303,6 +4303,23 @@ async function loadData(signal, fresh) {
 function renderDates() {
   /* 2026-10-18：日期条重渲染后布局可能变化，底栏/分段滑块顺带对齐一次 */
   try { navDropMove(); stSegMove(); } catch (e) {}
+  if (period !== 'daily') {
+    const periods = dataPeriods(period);
+    let prevY = '';
+    $('dates').innerHTML = periods.map(p => {
+      const year = p.slice(0, 4);
+      const gap = period === 'monthly' && year !== prevY
+        ? '<span class="mgap">' + year + '年</span>' : '';
+      prevY = year;
+      const label = period === 'monthly' ? (+p.slice(5, 7)) + '月' : p + '年';
+      return gap + '<button data-period="' + p + '" class="' + (p === curPeriod ? 'on' : '') + '">' +
+        label + '</button>';
+    }).join('');
+    document.querySelectorAll('#dates button').forEach(b => b.onclick = () => pickPeriod(b.dataset.period));
+    const on = document.querySelector('#dates button.on');
+    if (on) on.scrollIntoView({ inline: 'center', block: 'nearest' });
+    return;
+  }
   const dates = (site && site.dates) || [];
   let prevM = '';
   $('dates').innerHTML = dates.map(d => {
@@ -4328,6 +4345,14 @@ function pickDate(d) {
     x.classList.toggle('on', x.dataset.d === d));
   const on = document.querySelector('#dates button.on');
   if (on) on.scrollIntoView({ inline: 'center', block: 'nearest', behavior: 'smooth' });
+  go();
+}
+
+/* 点月份 / 年份：与日榜日期条同一交互，选中后立刻高亮并加载对应整月数据 */
+function pickPeriod(p) {
+  if (!p || p === curPeriod) return;
+  curPeriod = p;
+  renderDates();
   go();
 }
 
@@ -8087,12 +8112,13 @@ function setPeriod(p) {
   period = p;
   document.querySelectorAll('#seg button').forEach(b => b.classList.toggle('on', b.dataset.p === p));
   stSegMove();          // 2026-10-18：白玻滑块滑到新口径
-  show('dates', p === 'daily');
-  show('stepper', p !== 'daily');
+  /* 2026-10-22 用户口径：月 / 年也改成和日榜一样的横向可点周期条，不再用 ‹ › 步进。 */
+  show('dates', true);
+  show('stepper', false);
   show('btnCal', p === 'daily');   // 日历只属于「每日」口径
   if (p === 'daily') calHide();    // 月/年切换时把开着的日历收掉
   curPeriod = snapPeriod(p, nowPeriod(p));   // 只落有数据的周期
-  syncStepper();
+  renderDates();
   go();
 }
 
@@ -10259,7 +10285,7 @@ async function bootRest() {
     } else {
       curPeriod = snapPeriod('yearly', String(+curPeriod + n));
     }
-    syncStepper();
+    renderDates();
     go();
   }
 
@@ -10346,13 +10372,13 @@ async function bootRest() {
   const dates0 = site.dates || [];
   curDate = dates0.includes(refStr()) ? refStr() : site.latestDate;
   curPeriod = snapPeriod(period, nowPeriod(period));   // 只站有数据的周期
-  show('dates', period === 'daily');
-  show('stepper', period !== 'daily');
-  show('btnCal', period === 'daily');   // 日历只管「按日」口径；月/年走 ‹ › 步进
+  show('dates', true);
+  show('stepper', false);
+  show('btnCal', period === 'daily');   // 日历只管「按日」口径；月/年用同一横向周期条
   $('pNow').textContent = period === 'monthly'
     ? curPeriod.slice(0, 4) + '年' + (+curPeriod.slice(5, 7)) + '月'
     : curPeriod + '年';
-  syncStepper();
+  renderDates();
 
   await loadPlans();
   syncNav();
