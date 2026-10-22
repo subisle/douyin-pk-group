@@ -1248,6 +1248,17 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
   border-bottom:1px solid #F1F5F9; transition:background .15s; }
 .st-row:last-child { border-bottom:none; }
 .st-row:hover { background:rgba(255,255,255,.6); }
+/* 登录后定焦自己的排名（2026-10-22）：平滑滚到领奖台/榜单行，并短暂高亮。 */
+.st-rank-focus { position:relative; z-index:3; animation:stRankFocus 2.4s cubic-bezier(.22,.8,.24,1) both; }
+@keyframes stRankFocus {
+  0% { background:rgba(255,255,255,0); box-shadow:0 0 0 0 rgba(245,158,11,0); }
+  18% { background:rgba(255,248,220,.78); box-shadow:0 0 0 3px rgba(245,158,11,.35), 0 14px 34px rgba(245,158,11,.16); }
+  68% { background:rgba(255,248,220,.62); box-shadow:0 0 0 2px rgba(245,158,11,.24), 0 10px 26px rgba(148,163,184,.12); }
+  100% { background:rgba(255,255,255,0); box-shadow:0 0 0 0 rgba(245,158,11,0); }
+}
+@media (prefers-reduced-motion:reduce) {
+  .st-rank-focus { animation:none; box-shadow:0 0 0 2px rgba(245,158,11,.35); }
+}
 .st-row.off { opacity:.62; }
 .st-row-l { display:flex; align-items:center; gap:12px; min-width:0; }
 .st-row-rk { width:16px; text-align:center; font-size:16px; font-weight:700;
@@ -2797,6 +2808,13 @@ const GROUP_PAGES = [
 ];
 
 let site = null;         // 站点配置（含后台级显隐开关）
+/* 本次登录只定焦一次自己的排名；页面内刷新 / 切日期不会反复抢滚动。 */
+let rankFocusPending = false;
+let rankFocusDone = false;
+let rankFocusIdentity = '';
+let numberAnimationPending = false;
+let dashboardRevealTimer = null;
+let dashboardRevealNotBefore = 0;
 let period = 'daily';    // daily | monthly | yearly
 let view = 'data';       // data | group | lineage | my
 let curGroup = GROUP_PAGES[0].key;  // 分组子页当前 key
@@ -3151,9 +3169,20 @@ let meState = null;       // 当前登录身份（who 的结果，带 bound / ne
    /my/push 在服务端 mask_phone() 后下发，前端拿到即已脱敏，不再二次打码
    （对已打码值再 mask 会把 138****1234 打成 13****34，水印失真）。 */
 
+function queueMyRankFocus(me) {
+  if (!me || me.needBind || me.bound === false || !me.name) return;
+  if (rankFocusIdentity === me.name) return;
+  rankFocusIdentity = me.name;
+  rankFocusPending = true;
+  rankFocusDone = false;
+  /* 登录后 QQ/公告弹窗通常在 ~650ms 内出现，先等过这一档，避免定焦在遮罩背后播完。 */
+  dashboardRevealNotBefore = performance.now() + 900;
+}
+
 /** 登录成功后统一收口：水印 + 未绑定提醒条 + 换团条显隐 */
 function applyLoginState(me) {
   meState = me || null;
+  try { queueMyRankFocus(me); } catch (_) {}
   /* 换团条：只有「全团」账号（后端 switchable=true）才显示。
      钉死某团的账号（饭团=女团）压根不给切换入口，不是「显示但点了报错」。
      switchable 由 /my/who 每次都下发，所以刷新页面也能重建（不只登录那一刻）。 */
@@ -4029,7 +4058,7 @@ function podHtml(items) {
       /* 2026-10-18 第二轮 1:1：数值与单位小字包进 .st-pod-num（设计稿 div.mt-0.5），
          块级 label 撑到与数值同宽 —— 设计稿标签实测宽 83.5 正是数值「5万6788」的宽度。 */
       '<div class="st-pod-num">' +
-        '<p class="st-pod-wv">' + wave + '</p>' +
+        '<p class="st-pod-wv" data-count-wave="' + (it.wave == null ? '' : it.wave) + '">' + wave + '</p>' +
         (label ? '<span class="st-pod-lbl">' + label + '</span>' : '') +
       '</div>' +
     '</div>';
@@ -4075,7 +4104,7 @@ function lbRowHtml(it) {
       '</div>' +
     '</div>' +
     (min ? '<span class="st-row-min">时长 ' + min + '</span>' : '') +
-    '<div class="st-row-r"><span class="st-row-wv">' + (off ? '—' : wave) + '</span>' +
+    '<div class="st-row-r"><span class="st-row-wv" data-count-wave="' + (off || hideWave ? '' : it.wave) + '">' + (off ? '—' : wave) + '</span>' +
       (rightLbl ? '<span class="st-row-lbl">' + rightLbl + '</span>' : '') + '</div>' +
     '</div>' + detailHtml(it, true) +
   '</div>';
@@ -4335,6 +4364,68 @@ function renderList() {
   bindRows();
 }
 
+function dashboardBlockingOverlay() {
+  if (announceCtx) return true;
+  return !!document.querySelector('#gate:not(.hidden), #itemPopup:not(.hidden), [id$="Mask"]:not(.hidden)');
+}
+
+/** 数字动画和排名定焦都等弹窗（公告 / QQ / 消息 / 资料）关闭后再执行，
+    避免动画在遮罩后面播完，用户真正看到时已经结束。 */
+function scheduleDashboardReveal(animateNumbers) {
+  if (animateNumbers) numberAnimationPending = true;
+  clearTimeout(dashboardRevealTimer);
+  const tick = () => {
+    if (performance.now() < dashboardRevealNotBefore || dashboardBlockingOverlay()) {
+      dashboardRevealTimer = setTimeout(tick, 220);
+      return;
+    }
+    if (numberAnimationPending) {
+      numberAnimationPending = false;
+      animateDashboardNumbers();
+    }
+    focusMyRankIfNeeded();
+  };
+  dashboardRevealTimer = setTimeout(tick, 30);
+}
+
+/** 首屏 / 切口径后的数字加载动画：从 0 滚动到真实音浪值。
+    静默刷新和导入自动刷新传 fresh=true，不重复播放，避免打断阅读。 */
+function animateDashboardNumbers() {
+  if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  const els = [...document.querySelectorAll('[data-count-wave]')]
+    .filter(el => el.dataset.countWave !== '');
+  if (!els.length) return;
+  const targets = els.map(el => Number(el.dataset.countWave) || 0);
+  const duration = 720;
+  const started = performance.now();
+  const tick = (now) => {
+    const p = Math.min(1, (now - started) / duration);
+    const eased = 1 - Math.pow(1 - p, 3);
+    els.forEach((el, i) => { el.textContent = wan(Math.round(targets[i] * eased)); });
+    if (p < 1) requestAnimationFrame(tick);
+  };
+  els.forEach(el => { el.textContent = '0'; });
+  requestAnimationFrame(tick);
+}
+
+/** 登录后只定焦一次：平滑滚到自己所在的领奖台 / 榜单行并高亮。 */
+function focusMyRankIfNeeded() {
+  if (!rankFocusPending || rankFocusDone || view !== 'data') return;
+  const name = meState && meState.name ? String(meState.name) : '';
+  if (!name) return;
+  rankFocusDone = true;
+  rankFocusPending = false;
+  const el = [...document.querySelectorAll('[data-expand-name]')]
+    .find(x => x.dataset.expandName === name);
+  if (!el) return;
+  requestAnimationFrame(() => {
+    const reduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    el.scrollIntoView({ behavior: reduced ? 'auto' : 'smooth', block: 'center', inline: 'nearest' });
+    el.classList.add('st-rank-focus');
+    setTimeout(() => el.classList.remove('st-rank-focus'), 2500);
+  });
+}
+
 /* ==================== 看板弹幕（2026-10-22：男女团各自的当日最高） ====================
     用户口径：「弹幕只放在前三名分数下面即可。名次/主播上边」，男女团各滚自己的每日最高 —— 不再是 fixed 全屏轨道，
     改为**文档流里的窄条 .dm-strip**（高 24px，与胶囊同高），由 renderList 插在
@@ -4561,6 +4652,7 @@ async function loadData(signal, fresh) {
     renderDates();
   }
   renderList();
+  scheduleDashboardReveal(!fresh);
   if (reqPeriod === 'daily') scheduleDashboardPrefetch();
 }
 
