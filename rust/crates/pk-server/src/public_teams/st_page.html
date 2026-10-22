@@ -1336,6 +1336,10 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .st-detail-v { margin-top:2px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
   font-size:14px; line-height:20px; font-weight:800; color:#0F172A;
   font-variant-numeric:tabular-nums; }
+.st-day-split { display:flex; align-items:baseline; gap:0; }
+.st-day-off { color:#E11D48; }
+.st-day-sep { color:#94A3B8; font-weight:600; }
+.st-day-live { color:#059669; }
 .st-detail-foot { display:flex; justify-content:space-between; align-items:center; gap:8px;
   margin-top:9px; font-size:10px; line-height:15px; color:#94A3B8; }
 .st-detail-foot b { color:#64748B; font-weight:600; }
@@ -3811,6 +3815,14 @@ function detailCell(label, value) {
   return '<div class="st-detail-cell"><div class="st-detail-lb">' + esc(label) +
     '</div><div class="st-detail-v">' + esc(value) + '</div></div>';
 }
+function daySplitCell(absent, live) {
+  const off = Math.max(0, Number(absent) || 0);
+  const on = Math.max(0, Number(live) || 0);
+  return '<div class="st-detail-cell" title="未直播 ' + off + ' 天 / 直播 ' + on + ' 天">' +
+    '<div class="st-detail-lb">未播 / 直播天数</div>' +
+    '<div class="st-detail-v st-day-split"><span class="st-day-off">未' + off +
+      '</span><span class="st-day-sep">/</span><span class="st-day-live">' + on + '</span></div></div>';
+}
 function detailHtml(it, rowMode) {
   if (!it || !detailOpen(it)) return '';
   const st = detailStatus(it);
@@ -3824,8 +3836,11 @@ function detailHtml(it, rowMode) {
   ];
   if (!it.periodic && it.totalWave != null) cells.push(detailCell('累计音浪', wan(it.totalWave)));
   cells.push(detailCell('直播时长', it.minutes == null ? '—' : minFmt(it.minutes)));
-  if (it.periodic && it.absentDays != null) cells.push(detailCell('未播天数', it.absentDays + ' 天'));
   if (it.delta) cells.push(detailCell('排名变化', detailDeltaText(it.delta)));
+  if (it.periodic && it.liveDays != null && it.absentDays != null &&
+      ((Number(it.liveDays) || 0) + (Number(it.absentDays) || 0) > 0)) {
+    cells.push(daySplitCell(it.absentDays, it.liveDays));
+  }
   return '<div class="st-detail' + (rowMode ? ' st-detail-row' : '') + '" data-detail-name="' + esc(it.name) +
       '" role="region" aria-label="' + esc(it.name) + '详情">' +
     '<div class="st-detail-head">' +
