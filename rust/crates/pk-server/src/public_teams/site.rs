@@ -302,7 +302,7 @@ pub async fn daily(
         ""
     };
     let sql = format!(
-        "SELECT p.id AS person_id, p.name, \
+        "SELECT p.id AS person_id, p.name, p.gender AS team, \
          (COALESCE(SUM(d.wave), 0))::BIGINT AS wave{minutes_select}, \
          CASE WHEN COALESCE(SUM(d.wave), 0) >= 2 THEN 1 ELSE 0 END AS live, \
          COUNT(d.id) AS nrow \
@@ -313,7 +313,7 @@ pub async fn daily(
          WHERE p.deleted_at IS NULL \
          AND ('{query_team}' = '' OR p.gender = '{query_team}') \
          AND p.hide_in_daily_report = 0 \
-         GROUP BY p.id, p.name \
+         GROUP BY p.id, p.name, p.gender \
          ORDER BY nrow DESC, wave DESC, p.name ASC"
     );
     let rows = pgrs::query(&st.pools, &source, &sql).await?;
@@ -374,6 +374,30 @@ pub async fn daily(
     let mut last_wave: Option<i64> = None;
     let mut last_rank = 0usize;
     let mut ranked = 0usize;
+    // 各团自己的当日冠军名次（2026-10-22）：全团视角下男女各有一条每日最高弹幕，
+    // 不能拿全局 rank=1 代表两团。SQL 已按当日音浪全局降序，因此分别累计各团人数即可；
+    // 同音浪保持并列名次，与总榜口径一致。
+    let mut team_ranked: HashMap<String, usize> = Default::default();
+    let mut team_last: HashMap<String, (i64, usize)> = Default::default();
+    let mut team_rank_map: HashMap<u64, usize> = Default::default();
+    for r in rows.iter() {
+        if row_i64(r, "nrow") <= 0 {
+            continue;
+        }
+        let pid = row_pid(r, "person_id");
+        let team = r.try_get::<String, _>("team").unwrap_or_default();
+        let wave = row_i64(r, "wave");
+        let seen = team_ranked.entry(team.clone()).or_insert(0);
+        *seen += 1;
+        let rank = match team_last.get(&team).copied() {
+            Some((last_wave, last_rank)) if last_wave == wave => last_rank,
+            _ => {
+                team_last.insert(team, (wave, *seen));
+                *seen
+            }
+        };
+        team_rank_map.insert(pid, rank);
+    }
     // 先按原始开播行计数：后面 wave 置 null 后不能再用 items.wave 反算，
     // 否则关掉音浪数值会把 liveCount 错误变成 0。
     let mut live_count = 0usize;
@@ -416,6 +440,10 @@ pub async fn daily(
             // 展示端团数据视图只按 name/isLive/rank 渲染，不依赖这个内部 id；
             // 需要 id 的只有 push 搜索/绑定接口，那些接口单独下发）
             "name": r.try_get::<String, _>("name").unwrap_or_default(),
+            // 团别 + 团内名次：全团视角下用于给男/女团各取一名「每日最高」弹幕。
+            // 这两个字段不涉及手机号/抖音号，公开 DTO 可安全下发。
+            "team": r.try_get::<String, _>("team").unwrap_or_default(),
+            "teamRank": team_rank_map.get(&pid).copied().unwrap_or(0),
             "wave": cur,
             "isLive": live,
             "hasData": has_data,

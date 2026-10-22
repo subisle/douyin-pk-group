@@ -1348,13 +1348,14 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
   .st-expand-cue::before { transition:none; }
 }
 
-/* ===== 看板弹幕（2026-10-21：只滚当日榜单冠军）=====
-    用户口径：弹幕只放前三名分数下面、名次/主播表头上边，并且只滚当天榜单第 1 名。
+/* ===== 看板弹幕（2026-10-22：男女团各自的当日最高）=====
+    用户口径：弹幕只放前三名分数下面、名次/主播表头上边；男团、女团各自滚自己的
+    当日最高主播。全团视角两条一起滚，单团视角只滚本团一条。
     实现：.dm-strip 作为**文档流**元素插在领奖台与榜单之间（高 24px 与胶囊同高，
     overflow:hidden 裁住横飘；pointer-events:none 不挡滑动），胶囊在其中横向流动。
     位置微调：后端 danmaku.top 是**偏移量**（-80..80px，正=下移，默认 0=自然位），
     JS 写成 .dm-strip 的 margin-top（CSS 不写死 top，避免和旧 fixed 语义混淆）。
-    内容只保留一条金胶囊：👑 当日冠军（日榜 rank1，「每日榜首 X万音浪」）。
+    内容胶囊：男团金牌「男团每日最高」、女团粉牌「女团每日最高」。
     月榜 / 年榜、总开关关闭、无冠军、dailyChampion=false → 不输出 .dm-strip（零高度占用）。 */
 .dm-strip { position:relative; height:24px; margin:2px 0 0; overflow:hidden;
   pointer-events:none; }
@@ -1387,9 +1388,17 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .danmaku-slim-gold .dm-nm, .danmaku-slim-gold .dm-num { color:#92400E; }
 .danmaku-slim-gold .dm-tt { color:#B45309; }
 .danmaku-slim-gold .dm-dot { color:#F59E0B; }
+/* 女团每日最高：与男团金牌区分成玫瑰粉琉璃，全团视角下两条胶囊并排滚动。 */
+.danmaku-slim-pink { background:linear-gradient(90deg, rgba(255,255,255,.90) 0%, rgba(252,231,243,.82) 100%);
+  border:.5px solid rgba(219,39,119,.24);
+  animation:danmakuRunMedium 10s linear infinite; animation-delay:.15s;
+  animation-fill-mode:backwards; }
+.danmaku-slim-pink .dm-nm, .danmaku-slim-pink .dm-num { color:#9D174D; }
+.danmaku-slim-pink .dm-tt { color:#BE185D; }
+.danmaku-slim-pink .dm-dot { color:#F472B6; }
 /* 无障碍：用户开了「减弱动态」→ 动画全关，胶囊静止停在轨道左侧 */
 @media (prefers-reduced-motion: reduce) {
-  .danmaku-slim-gold { animation:none; }
+  .danmaku-slim-gold, .danmaku-slim-pink { animation:none; }
 }
 
 /* ===== 工具栏（日榜/月榜 segmented + 日期胶囊）=====
@@ -4171,12 +4180,12 @@ function renderList() {
   bindRows();
 }
 
-/* ==================== 看板弹幕（2026-10-21：只滚当日榜单冠军） ====================
-    用户口径：「弹幕只放在前三名分数下面即可。名次/主播上边」，并且只滚动每日榜单冠军 —— 不再是 fixed 全屏轨道，
+/* ==================== 看板弹幕（2026-10-22：男女团各自的当日最高） ====================
+    用户口径：「弹幕只放在前三名分数下面即可。名次/主播上边」，男女团各滚自己的每日最高 —— 不再是 fixed 全屏轨道，
     改为**文档流里的窄条 .dm-strip**（高 24px，与胶囊同高），由 renderList 插在
     领奖台与榜单之间；胶囊在条内横向流动，条外 overflow:hidden 裁住。
-       · 唯一胶囊 👑 当日冠军：日榜 listAll 里 rank===1 且 hasData!==false
-         「👑 {名} · 每日榜首 {X万音浪}」（wave==null 不出数字段）
+       · 男团取 teamRank===1，女团取 teamRank===1；全团视角两条胶囊同轨滚动。
+         显示「👑 {名} · 男/女团每日最高 {X万音浪}」（wave==null 不出数字段）
     位置微调：后端 danmaku.top 是**偏移量**（-80..80，正=下移，默认 0 = 自然位），
     写成 .dm-strip 的 margin-top；非数字回落 0。
     显示条件：仅日榜；danmaku.enabled === true 且 danmaku.dailyChampion !== false，
@@ -4201,19 +4210,40 @@ function dmGateOpen() {
             (popup && !popup.classList.contains('hidden')) ||
             announceCtx);
 }
-/** 当日冠军金胶囊的 HTML（月/年榜、数据缺、开关关时为空串） */
+/** 某个团的当日最高主播（2026-10-22）：优先用后端 teamRank=1；
+    旧接口没有 teamRank/team 时退回全局 rank=1。 */
+function dmChampionForTeam(team) {
+  const rows = listAll.filter((x) => x && x.hasData !== false &&
+    (!x.team || !team || x.team === team));
+  return rows.find((x) => Number(x.teamRank) === 1) ||
+    rows.find((x) => Number(x.rank) === 1) || null;
+}
+
+/** 单条每日最高胶囊：男团金、女团粉；全团视角下男女各一条。 */
+function dmPillFor(item, team) {
+  if (!item) return '';
+  const label = team === 'male' ? '男团每日最高'
+    : team === 'female' ? '女团每日最高' : '每日最高';
+  const cls = team === 'female' ? ' danmaku-slim-pink' : '';
+  return '<span class="danmaku-slim danmaku-slim-gold' + cls + '">' +
+      '<span class="dm-ic">👑</span>' +
+      '<span class="dm-nm">' + esc(item.name) + '</span>' +
+      '<span class="dm-dot">·</span>' +
+      '<span class="dm-tt">' + label + '</span>' +
+      (item.wave == null ? '' : '<span class="dm-num">' + wan(item.wave) + '</span>') +
+    '</span>';
+}
+
+/** 当日最高胶囊 HTML（月/年榜、数据缺、开关关时为空串） */
 function dmPillsHtml(d) {
   if (period !== 'daily' || d.dailyChampion === false || !Array.isArray(listAll)) return '';
-  const top1 = listAll.find(x => x && x.hasData !== false && x.rank === 1) || null;
-  if (!top1) return '';
-  const num = (w) => w == null ? '' : wan(w);
-  return '<span class="danmaku-slim danmaku-slim-gold">' +
-      '<span class="dm-ic">👑</span>' +
-      '<span class="dm-nm">' + esc(top1.name) + '</span>' +
-      '<span class="dm-dot">·</span>' +
-      '<span class="dm-tt">每日榜首</span>' +
-      (top1.wave == null ? '' : '<span class="dm-num">' + num(top1.wave) + '</span>') +
-    '</span>';
+  const hasTeamMeta = listAll.some((x) => x && (x.team === 'male' || x.team === 'female'));
+  if (!hasTeamMeta) {
+    const team = TEAM === 'male' || TEAM === 'female' ? TEAM : '';
+    return dmPillFor(dmChampionForTeam(team), team);
+  }
+  const teams = TEAM === 'male' || TEAM === 'female' ? [TEAM] : ['male', 'female'];
+  return teams.map((team) => dmPillFor(dmChampionForTeam(team), team)).join('');
 }
 /** renderList 用：输出弹幕条（开关关 = 空串，零占用）；挂载闸开着 = 空轨道占位 */
 function dmStripHtml() {
