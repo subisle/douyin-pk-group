@@ -3820,7 +3820,7 @@ function detailHtml(it, rowMode) {
     detailCell(waveLbl, it.wave == null ? '—' : wan(it.wave)),
   ];
   if (!it.periodic && it.totalWave != null) cells.push(detailCell('累计音浪', wan(it.totalWave)));
-  if (it.minutes != null) cells.push(detailCell('直播时长', minFmt(it.minutes)));
+  cells.push(detailCell('直播时长', it.minutes == null ? '—' : minFmt(it.minutes)));
   if (it.periodic && it.absentDays != null) cells.push(detailCell('未播天数', it.absentDays + ' 天'));
   if (it.delta) cells.push(detailCell('排名变化', detailDeltaText(it.delta)));
   return '<div class="st-detail' + (rowMode ? ' st-detail-row' : '') + '" data-detail-name="' + esc(it.name) +
