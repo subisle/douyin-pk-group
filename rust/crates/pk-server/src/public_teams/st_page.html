@@ -1711,19 +1711,19 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .st-my-acct > .sec { padding:.5rem 1rem; font-size:11px; color:var(--outline);
   display:flex; align-items:center; justify-content:space-between; gap:.75rem; }
 .st-my-acct > .sec .n { text-transform:none; letter-spacing:0; text-align:right; }
-/* 账号总览：先给出本月 / 累计预计到手，避免用户逐个展开后才看到重点。 */
-.st-my-acct .acct-overview { margin:0 1rem .75rem; padding:.75rem;
-  border-radius:.75rem; background:rgba(255,255,255,.52);
+/* 账号总览压成一条：只保留本月主数字，累计作为右侧次要信息。 */
+.st-my-acct .acct-totalbar { margin:0 1rem .25rem; padding:.65rem .75rem;
+  border-radius:.625rem; background:rgba(255,255,255,.52);
   border:1px solid rgba(255,255,255,.85);
-  display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:.75rem; }
-.st-my-acct .acct-kpi { min-width:0; }
-.st-my-acct .acct-kpi + .acct-kpi { border-left:1px solid rgba(226,232,240,.8); padding-left:.75rem; }
-.st-my-acct .acct-kpi span { display:block; font-size:11px; color:var(--on-surface-variant); }
-.st-my-acct .acct-kpi b { display:block; margin-top:.125rem; font-size:17px; line-height:1.25;
-  color:var(--tertiary); font-variant-numeric:tabular-nums; white-space:nowrap;
-  overflow:hidden; text-overflow:ellipsis; }
-.st-my-acct .acct-kpi small { display:block; margin-top:.125rem; font-size:10.5px;
-  color:var(--outline); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  display:flex; align-items:flex-end; justify-content:space-between; gap:.75rem; }
+.st-my-acct .acct-totalbar .main { min-width:0; }
+.st-my-acct .acct-totalbar .main span { display:block; font-size:10.5px; color:var(--on-surface-variant); }
+.st-my-acct .acct-totalbar .main b { display:block; margin-top:.0625rem; font-size:18px;
+  color:var(--tertiary); font-variant-numeric:tabular-nums; white-space:nowrap; }
+.st-my-acct .acct-totalbar .sub { flex:none; padding-left:.75rem; text-align:right;
+  border-left:1px solid rgba(226,232,240,.8); font-size:10.5px; color:var(--outline); }
+.st-my-acct .acct-totalbar .sub b { display:block; margin-top:.0625rem; font-size:12.5px;
+  color:var(--on-surface); font-variant-numeric:tabular-nums; }
 /* 单个抖音号：summary 只放识别信息和本月预估，展开后再给完整数据。 */
 .st-my-acct .acct-item { border-top:1px solid #F1F5F9; }
 .st-my-acct .acct-summary { list-style:none; display:flex; align-items:center; gap:.75rem;
@@ -1763,7 +1763,7 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .st-my-acct .acct-detail::before { content:''; display:block; height:1px;
   background:rgba(226,232,240,.7); margin-bottom:.75rem; }
 .st-my-acct .acct-numberline { display:flex; align-items:center; gap:.5rem;
-  min-width:0; margin-bottom:.75rem; }
+  min-width:0; margin-bottom:.625rem; }
 .st-my-acct .acct-numberline > span { flex:none; font-size:10.5px; color:var(--outline); }
 .st-my-acct .acct-numberline code { min-width:0; overflow:hidden; text-overflow:ellipsis;
   white-space:nowrap; font:500 12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;
@@ -1774,22 +1774,27 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .st-my-acct .acct-copy:active { transform:translateY(1px); }
 .st-my-acct .acct-copy:focus-visible { outline:2px solid var(--primary); outline-offset:2px; }
 .st-my-acct .acct-stats { display:grid; grid-template-columns:repeat(2,minmax(0,1fr));
-  gap:.5rem; }
-.st-my-acct .acct-cell { padding:.625rem .75rem; border-radius:.5rem;
-  background:rgba(255,255,255,.52); border:1px solid rgba(255,255,255,.85);
-  display:flex; align-items:baseline; justify-content:space-between; gap:.5rem; }
+  gap:.375rem; }
+.st-my-acct .acct-cell { padding:.5rem .625rem; border-radius:.5rem;
+  background:rgba(255,255,255,.46); display:flex; align-items:baseline;
+  justify-content:space-between; gap:.5rem; }
 .st-my-acct .acct-cell i { font-style:normal; font-size:10.5px; color:var(--outline); flex:none; }
-.st-my-acct .acct-cell b { font-size:13px; color:var(--on-surface); font-weight:600;
+.st-my-acct .acct-cell b { font-size:12.5px; color:var(--on-surface); font-weight:600;
   font-variant-numeric:tabular-nums; white-space:nowrap; }
-.st-my-acct .acct-earnings { display:grid; grid-template-columns:repeat(2,minmax(0,1fr));
-  gap:.5rem; margin-top:.5rem; }
-.st-my-acct .acct-earn { padding:.625rem .75rem; border-radius:.5rem;
-  background:var(--primary-fixed); box-shadow:inset 0 0 0 1px rgba(0,88,188,.10); }
-.st-my-acct .acct-earn span { display:block; font-size:10.5px; color:var(--on-surface-variant); }
-.st-my-acct .acct-earn b { display:block; margin-top:.125rem; font-size:15px;
-  color:var(--tertiary); font-variant-numeric:tabular-nums; }
-.st-my-acct .acct-earn small { display:block; margin-top:.125rem; font-size:10px; color:var(--outline); }
-.st-my-acct .acct-note { margin-top:.5rem; font-size:10.5px; line-height:1.5; color:#64748B; }
+.st-my-acct .acct-earnline { margin-top:.5rem; padding:.55rem .625rem; border-radius:.5rem;
+  background:var(--primary-fixed); box-shadow:inset 0 0 0 1px rgba(0,88,188,.10);
+  display:flex; align-items:center; justify-content:space-between; gap:.75rem; }
+.st-my-acct .acct-earnline span { font-size:10.5px; color:var(--on-surface-variant); }
+.st-my-acct .acct-earnline b { margin-left:.25rem; font-size:13px; color:var(--tertiary);
+  font-variant-numeric:tabular-nums; }
+.st-my-acct .acct-note { margin-top:.5rem; display:flex; align-items:center;
+  justify-content:space-between; gap:.5rem; font-size:10.5px; line-height:1.5; color:#64748B; }
+.st-my-acct .acct-note .st { display:inline-flex; align-items:center; gap:.3rem;
+  font-size:10.5px; font-weight:600; color:var(--on-surface-variant); }
+.st-my-acct .acct-note .st i { width:.375rem; height:.375rem; border-radius:9999px;
+  background:var(--outline-variant); }
+.st-my-acct .acct-note .st.on { color:var(--primary); }
+.st-my-acct .acct-note .st.on i { background:var(--primary); animation:stPulse 1.6s ease-in-out infinite; }
 .st-my-acct .fee-note { padding:6px 1rem; font-size:11px; line-height:1.5; color:#64748B;
   border-top:1px solid rgba(226,232,240,.6); }
 .st-my-acct .fail { padding:.75rem 1rem; font-size:11px; color:var(--outline); text-align:center; }
@@ -1802,7 +1807,8 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
   .st-my-big .earn-grid { gap:.375rem; }
   .st-my-acct .acct-summary { gap:.5rem; padding:.75rem; }
   .st-my-acct .acct-detail { padding:0 .75rem .875rem; }
-  .st-my-acct .acct-overview { margin-left:.75rem; margin-right:.75rem; }
+  .st-my-acct .acct-totalbar { margin-left:.75rem; margin-right:.75rem; }
+  .st-my-acct .acct-earnline { align-items:flex-start; flex-direction:column; gap:.25rem; }
 }
 @media (prefers-reduced-motion:reduce) {
   .st-my-acct .acct-chevron { transition:none; }
@@ -5828,14 +5834,11 @@ function myAccountsCard(accounts) {
               : '<span class="material-symbols-outlined">smart_display</span>') +
           '</span>' +
           '<span class="acct-id">' +
-            '<span class="acct-titleline"><span class="t">' + esc(title) + '</span>' + pct +
-              '<span class="st' + (a.liveToday ? ' on' : '') + '"><i></i>' +
-                (a.liveToday ? '今日已开播' : '今日未开播') + '</span>' +
-            '</span>' +
+            '<span class="acct-titleline"><span class="t">' + esc(title) + '</span>' + pct + '</span>' +
             '<span class="acct-sub">' + esc(meta || '暂无数据') + '</span>' +
           '</span>' +
         '</span>' +
-        '<span class="acct-glance"><span class="g-l">本月预估</span><b>' +
+        '<span class="acct-glance"><span class="g-l">本月</span><b>' +
           esc(yuanBig(monthEst)) + '</b></span>' +
         '<span class="material-symbols-outlined acct-chevron">expand_more</span>' +
       '</summary>' +
@@ -5846,29 +5849,23 @@ function myAccountsCard(accounts) {
           cell('今日音浪', a.daily) + cell('本月音浪', a.monthly) +
           cell('本年音浪', a.yearly) + cell('累计音浪', a.total) +
         '</div>' +
-        '<div class="acct-earnings">' +
-          '<div class="acct-earn"><span>本月预计到手</span><b>' + esc(yuanBig(monthEst)) + '</b>' +
-            '<small>' + (a.monthly && a.monthly.wave != null ? esc(wan(a.monthly.wave)) + ' 音浪' : '本月暂无数据') + '</small></div>' +
-          '<div class="acct-earn"><span>累计预计到手</span><b>' + esc(yuanBig(totalEst)) + '</b>' +
-            '<small>' + (a.total && a.total.wave != null ? '自有数据 ' + esc(wan(a.total.wave)) + ' 音浪' : '累计暂无数据') + '</small></div>' +
-        '</div>' +
-        '<div class="acct-note">' +
+        '<div class="acct-earnline"><span>本月预计<b>' + esc(yuanBig(monthEst)) + '</b></span>' +
+          '<span>累计预计<b>' + esc(yuanBig(totalEst)) + '</b></span></div>' +
+        '<div class="acct-note"><span class="st' + (a.liveToday ? ' on' : '') + '"><i></i>' +
+          (a.liveToday ? '今日已开播' : '今日未开播') + '</span><span>' +
           (lastDate ? '最后有数据 ' + esc(dateShown) : '暂无数据日期') +
-          (days ? ' · ' + days + ' 天有数据' : '') + '</div>' +
+          (days ? ' · ' + days + ' 天有数据' : '') + '</span></div>' +
       '</div>' +
     '</details>';
   }).join('');
   const monthEst = sum.monthly == null ? null : estOf(sum.monthly);
   const totalEst = sum.total == null ? null : estOf(sum.total);
   return '<div class="st-my-acct">' +
-    '<div class="sec"><span>我的抖音号</span><span class="n">共 ' + Number(sum.count) + ' 个 · 点击展开明细</span></div>' +
-    '<div class="fee-note">' + esc(earningsNote()) + '</div>' +
-    '<div class="acct-overview">' +
-      '<div class="acct-kpi"><span>本月预计到手</span><b>' + esc(yuanBig(monthEst)) + '</b>' +
-        '<small>' + (sum.monthly && sum.monthly.wave != null ? '合计 ' + esc(wan(sum.monthly.wave)) + ' 音浪' : '音浪数据未展示') + '</small></div>' +
-      '<div class="acct-kpi"><span>累计预计到手</span><b>' + esc(yuanBig(totalEst)) + '</b>' +
-        '<small>' + (sum.total && sum.total.wave != null ? esc(wan(sum.total.wave)) + ' 音浪' : '音浪数据未展示') + '</small></div>' +
-    '</div>' + body + '</div>';
+    '<div class="sec"><span>我的抖音号</span><span class="n">共 ' + Number(sum.count) + ' 个</span></div>' +
+    '<div class="acct-totalbar"><div class="main"><span>本月预计到手</span><b>' + esc(yuanBig(monthEst)) + '</b></div>' +
+      '<div class="sub">累计<b>' + esc(yuanBig(totalEst)) + '</b></div></div>' +
+    body +
+    '<div class="fee-note">' + esc(earningsNote()) + '</div></div>';
 }
 
 function renderMy(d, series, push, accounts) {
