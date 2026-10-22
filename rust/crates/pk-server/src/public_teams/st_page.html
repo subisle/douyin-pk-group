@@ -3212,7 +3212,7 @@ async function switchTeam(t) {
   if (TEAM === t) return;
   TEAM = t;
   /* 记忆住，刷新/下次进来还是这个视角（同一账号自己的偏好） */
-  try { localStorage.setItem('myViewTeam', t); } catch (_) {}
+  try { localStorage.setItem('myViewTeam', t); localStorage.setItem('pkLastTeam', t); } catch (_) {}
   if (meState) meState.team = t;
   renderTeamSwitch(meState);
   applyTeam();
@@ -4218,6 +4218,83 @@ async function refreshDataAfterImport() {
   } finally {
     if (seq === importedRefreshSeq) importedRefreshBusy = false;
   }
+}
+
+/* ==================== 登录前加密预取（2026-10-22） ====================
+   登录前并发请求 AES-GCM 加密的 site + daily；密钥只在服务端内存，登录成功后
+   才按账号团别释放。前端用 Web Crypto 解密并在浏览器本地渲染，服务器不返回明文。 */
+function prefetchTeamHint() {
+  try {
+    const last = localStorage.getItem('pkLastTeam');
+    if (last === 'all' || last === 'male' || last === 'female') return last;
+  } catch (_) {}
+  const saved = savedViewTeam();
+  return saved || '';
+}
+
+function randomHex(bytes) {
+  const a = new Uint8Array(bytes);
+  crypto.getRandomValues(a);
+  return Array.from(a, (n) => n.toString(16).padStart(2, '0')).join('');
+}
+
+function b64ToBytes(s) {
+  const bin = atob(String(s || ''));
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+async function startEncryptedPrefetch(team) {
+  if (!window.crypto || !crypto.subtle || !crypto.getRandomValues) return null;
+  if (team !== 'all' && team !== 'male' && team !== 'female') return null;
+  const sid = randomHex(16);
+  const r = await fetchWithTimeout(
+    '/api/public/prefetch?sid=' + encodeURIComponent(sid) + '&team=' + encodeURIComponent(team),
+    {}, 6000,
+  );
+  if (!r.ok) return null;
+  const d = await r.json().catch(() => null);
+  if (!d || d.ok !== true || d.disabled || !d.data || !d.iv) return null;
+  return { ...d, sid, team };
+}
+
+async function decryptEncryptedPrefetch(state, team) {
+  if (!state || !window.crypto || !crypto.subtle) return null;
+  const r = await fetchWithTimeout(
+    '/api/public/prefetch/key?sid=' + encodeURIComponent(state.sid),
+    { headers: myTokenHeaders() }, 2500,
+  );
+  if (!r.ok) return null;
+  const k = await r.json().catch(() => null);
+  if (!k || k.ok !== true || !k.key || k.team !== team || state.team !== team) return null;
+  try {
+    const key = await crypto.subtle.importKey(
+      'raw', b64ToBytes(k.key), { name: 'AES-GCM' }, false, ['decrypt'],
+    );
+    const plain = await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: b64ToBytes(state.iv) }, key, b64ToBytes(state.data),
+    );
+    const d = JSON.parse(new TextDecoder().decode(plain));
+    if (!d || d.team !== team || !d.site || !d.daily) return null;
+    return d;
+  } catch (_) { return null; }
+}
+
+async function consumeEncryptedPrefetch(task, team) {
+  try {
+    /* 用户已经登录但远端的预取还没回来时，最多再等 1.2 秒；超时就正常请求。 */
+    const state = await Promise.race([
+      task,
+      new Promise((resolve) => setTimeout(() => resolve(null), 1200)),
+    ]);
+    const d = await decryptEncryptedPrefetch(state, team);
+    if (!d) return null;
+    const date = d.daily && d.daily.date ? d.daily.date : refStr();
+    cachePageData(pageDataKey(team, 'daily', date), d.daily);
+    try { localStorage.setItem('pkLastTeam', team); } catch (_) {}
+    return d;
+  } catch (_) { return null; }
 }
 
 /** 参与渲染的行：搜索过滤（未开播的人始终显示，置灰） */
@@ -10435,6 +10512,14 @@ function hideBootGate() {
 
 (async function boot() {
   applyTeam();
+  /* 与登录门并行：先拉密文，登录后只取一次性密钥并本地解密。
+     有历史团别时只预取一个；首次访问并行预取 all/male/female，登录后选命中的那份。 */
+  const prefetchHint = prefetchTeamHint();
+  const prefetchTeams = prefetchHint ? [prefetchHint] : ['all', 'male', 'female'];
+  const encryptedPrefetchTasks = {};
+  prefetchTeams.forEach((team) => {
+    encryptedPrefetchTasks[team] = startEncryptedPrefetch(team).catch(() => null);
+  });
   /* 登录优先 + 登录卡公告并行（2026-10-22）：没有 token 时先同步渲染登录门，
      同时只拉公开的登录配置；绝不先请求 /teams/all 或任何榜单数据。
      登录与公告谁先回谁先推进：用户已登录时不再被慢公告请求卡住。 */
@@ -10460,13 +10545,19 @@ function hideBootGate() {
     if (siteAnnouncements.loginRequired === false) {
       gateResolve = null;
       hideBootGate();
-      bootRest({ authed: false });
+      const prefetched = await consumeEncryptedPrefetch(encryptedPrefetchTasks[TEAM], TEAM);
+      bootRest({ authed: false, prefetchedSite: prefetched && prefetched.site });
       return;
     }
     me = await earlyLogin;
   }
 
   applyLoginState(me);   // 登录后立刻按账号团别设置 TEAM
+  try { localStorage.setItem('pkLastTeam', TEAM); } catch (_) {}
+  if (!encryptedPrefetchTasks[TEAM]) {
+    encryptedPrefetchTasks[TEAM] = startEncryptedPrefetch(TEAM).catch(() => null);
+  }
+  const prefetched = await consumeEncryptedPrefetch(encryptedPrefetchTasks[TEAM], TEAM);
   /* 2026-10-18 契约 v2 §4.3/§4.6：刷新页面恢复登录态时也要接住两个状态 ——
      needProfile → 复用 #gate 渲染不可关闭的补全卡（阻断逻辑自愈）；
      mustChangePass → 延迟弹「请修改密码」提示层（临时密码登录过、还没改密）。
@@ -10476,7 +10567,7 @@ function hideBootGate() {
     setTimeout(() => { try { if (!mustPwdPrompted) openMustChangeDlg(); } catch (_) {} }, 600);
   }
   /* 登录前已在 boot() 里完成 /my/who 校验，这里不要二次 who + 二次 site。 */
-  bootRest({ authed: true });
+  bootRest({ authed: true, prefetchedSite: prefetched && prefetched.site });
 })();
 
 async function bootRest(opts) {
@@ -10553,12 +10644,16 @@ async function bootRest(opts) {
      401（要登录）→ 弹登录门重试。 */
   const fetchSite = () => api('/api/public/teams/' + TEAM);
   try {
-    site = await fetchSite().catch(async (e) => {
-      if (String(e.message || '').indexOf('登录') < 0) throw e;
-      const me = await ensureLogin();
-      applyLoginState(me);
-      return fetchSite();
-    });
+    if (opts.prefetchedSite && opts.prefetchedSite.published !== false) {
+      site = opts.prefetchedSite;   // 登录前密文预取已在本地解密
+    } else {
+      site = await fetchSite().catch(async (e) => {
+        if (String(e.message || '').indexOf('登录') < 0) throw e;
+        const me = await ensureLogin();
+        applyLoginState(me);
+        return fetchSite();
+      });
+    }
   } catch (e) {
     if (regionBlockedShown) return;   // 已展示地区门禁整页提示，别覆盖成「连不上服务」
     document.body.innerHTML = '<div class="empty" style="padding-top:120px"><span class="big">📡</span>' +

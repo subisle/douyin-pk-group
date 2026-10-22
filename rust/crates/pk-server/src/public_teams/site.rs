@@ -18,18 +18,23 @@ pub async fn site(
     }
     gate_team(&st, s.login_required, &team, &headers).await?;
     let query_team = data_team(&team, &token_team(&headers)).to_string();
-    let dates = crate::repos::get_available_dates(&st, None, false).await?;
-    let imported_months = crate::repos::get_imported_month_periods(&st, None).await;
+    site_payload(&st, &s, &query_team).await
+}
+
+/// 站点 payload 的纯组装层：已由 handler / 加密预取完成团别与权限校验。
+pub(super) async fn site_payload(st: &AppState, s: &PublicSettings, query_team: &str) -> ApiResult {
+    let dates = crate::repos::get_available_dates(st, None, false).await?;
+    let imported_months = crate::repos::get_imported_month_periods(st, None).await;
     let monthly_periods = public_periods(&dates, &imported_months, false);
     let yearly_periods = public_periods(&dates, &imported_months, true);
     // 公告弹窗：开启时随站点配置一起下发；关闭时不下发（前端不弹）
     // load_effective（2026-10-14）：items 为空时按 celebrate/champ_banner 内存合成一条
-    let ann = Announcement::load_effective(&st).await;
+    let ann = Announcement::load_effective(st).await;
     // 🚩 冠军展示位（2026-10-13）：管理员可配（star_title/star_override，与推送图共用配置）。
     // 手动指定「称号|人名|音浪」优先；没配就自动取最近一个业务日的当日音浪第一。
     let mut star = if s.daily && s.data_enabled {
-        let ov = crate::store::config_get(&st, "star_override").await;
-        let auto = star_auto(&st, &query_team, "").await;
+        let ov = crate::store::config_get(st, "star_override").await;
+        let auto = star_auto(st, query_team, "").await;
         match ov.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
             Some(v) => match v.splitn(3, '|').collect::<Vec<_>>()[..] {
                 [t, n, w] => serde_json::json!({
@@ -49,7 +54,7 @@ pub async fn site(
     };
     /* 🏆 争霸赛冠军横幅（2026-10-13）：管理员整条文案可编（config champ_banner，
     格式「称号|人名|音浪」，空 = 不显示横幅）。与 🚩每日之星独立。 */
-    let mut champ = match crate::store::config_get(&st, "champ_banner")
+    let mut champ = match crate::store::config_get(st, "champ_banner")
         .await
         .as_deref()
         .map(str::trim)
@@ -71,12 +76,12 @@ pub async fn site(
     都只含上线条目。 */
     let mut announcement_json = if ann.enabled {
         let mut v = ann.to_json();
-        v["items"] = ann.public_items_json_for(&query_team);
+        v["items"] = ann.public_items_json_for(query_team);
         v
     } else {
         Value::Null
     };
-    let mut items = ann.public_items_json_for(&query_team);
+    let mut items = ann.public_items_json_for(query_team);
     let mut celebrate = serde_json::to_value(&ann.celebrate).unwrap_or(Value::Null);
     if !s.wave {
         // 数值总闸门：除榜单/个人卡外，站点头部与公告/庆祝里的 wave 也不能绕过。
@@ -201,7 +206,7 @@ pub async fn public_announcements(State(st): State<ArcState>) -> ApiResult {
 /// hash 为空（历史行 / 同步异常）时退化成不带 `?v=` 的地址：仍然出图，只是失去换图破缓存。
 ///
 /// 装饰性字段：表不存在（迁移没跑）或查询失败只 debug + 空 map，不让榜单整体 500。
-async fn avatar_map(st: &ArcState, source: &str) -> HashMap<u64, String> {
+async fn avatar_map(st: &AppState, source: &str) -> HashMap<u64, String> {
     let sql = "SELECT person_id, hash FROM person_avatar WHERE image IS NOT NULL";
     match pgrs::query(&st.pools, source, sql).await {
         Ok(rows) => rows.iter().fold(HashMap::new(), |mut m, r| {
@@ -250,6 +255,16 @@ pub async fn daily(
     }
     gate_team(&st, s.login_required, &team, &headers).await?;
     let query_team = data_team(&team, &token_team(&headers)).to_string();
+    daily_payload(&st, &s, &query_team, q.date.as_deref()).await
+}
+
+/// 每日榜单 payload 的纯组装层：已由 handler / 加密预取完成团别与权限校验。
+pub(super) async fn daily_payload(
+    st: &AppState,
+    s: &PublicSettings,
+    query_team: &str,
+    requested_date: Option<&str>,
+) -> ApiResult {
     if !s.daily {
         return Ok(Json(json!({ "published": true, "dailyEnabled": false })));
     }
@@ -257,17 +272,17 @@ pub async fn daily(
     if !s.data_enabled {
         return Ok(Json(json!({ "published": true, "dailyEnabled": false })));
     }
-    let dates = crate::repos::get_available_dates(&st, None, false).await?;
-    let date = match q.date.as_deref() {
+    let dates = crate::repos::get_available_dates(st, None, false).await?;
+    let date = match requested_date {
         Some(d) if valid_date_pub(d) && dates.iter().any(|x| x == d) => d.to_string(),
         _ => dates.first().cloned().unwrap_or_default(),
     };
     if date.is_empty() {
         return Err(ApiError::bad_request("暂未公布数据"));
     }
-    let source = sid(&st);
+    let source = sid(st);
     // 头像（主播列表用）：一次查完，两百行以内，跟 total/absent 一样在内存 join
-    let avatars = avatar_map(&st, &source).await;
+    let avatars = avatar_map(st, &source).await;
     // 前一业务日（用于名次变动 ↑↓）
     let idx = dates.iter().position(|d| d == &date);
     let prev_date = idx.and_then(|i| dates.get(i + 1)).cloned();
