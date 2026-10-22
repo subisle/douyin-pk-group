@@ -5806,16 +5806,17 @@ function myAccountsCard(accounts) {
       '<div class="none">还没有绑定抖音号，绑定后这里显示每个号的数据</div></div>';
   }
   const body = list.map((a) => {
-    /* 没登记抖音号时退回采集 ID；主标题优先用抖音名称。 */
-    const no = a.douyinNo
-      ? String(a.douyinNo)
-      : (a.anchorId ? 'ID ' + String(a.anchorId) : '');
-    const title = (a.anchorName ? String(a.anchorName) : '') || no || '未登记抖音号';
+    /* 只展示真实抖音号；没有登记时明确显示「未绑定抖音号」，不暴露采集 ID。 */
+    const no = a.douyinNo ? String(a.douyinNo) : '';
+    const title = (a.anchorName ? String(a.anchorName) : '') || no || '未绑定抖音号';
     const lastDate = a.lastDate ? String(a.lastDate) : '';
     const dateShown = /^\d{4}-\d{2}-\d{2}$/.test(lastDate) ? lastDate.slice(5) : lastDate;
     const days = Number(a.days) > 0 ? Number(a.days) : 0;
-    const meta = (no && a.anchorName ? no : (no ? '' : '未登记抖音号')) +
-      (lastDate ? (no && a.anchorName ? ' · ' : '') + dateShown : '');
+    const metaParts = [];
+    if (no && a.anchorName) metaParts.push(no);
+    else if (!no) metaParts.push('未绑定抖音号');
+    if (lastDate) metaParts.push(dateShown);
+    const meta = metaParts.join(' · ');
     const avName = String(a.anchorName || a.douyinNo || '?');
     const monthEst = estOf(a.monthly);
     const totalEst = estOf(a.total);
@@ -5844,7 +5845,7 @@ function myAccountsCard(accounts) {
       '</summary>' +
       '<div class="acct-detail">' +
         '<div class="acct-numberline"><span>抖音号</span><code>' +
-          esc(no || '未登记') + '</code>' + copy + '</div>' +
+          esc(no || '未绑定') + '</code>' + copy + '</div>' +
         '<div class="acct-stats">' +
           cell('今日音浪', a.daily) + cell('本月音浪', a.monthly) +
           cell('本年音浪', a.yearly) + cell('累计音浪', a.total) +
