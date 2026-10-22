@@ -1553,9 +1553,13 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 /* 2026-10-19 用户口径：我的页头像优先用抖音头像，同源头像与榜单一致。 */
 .st-my-av.has-img { background:#fff; box-shadow:0 0 0 2px #fff, 0 1px 3px rgba(0,0,0,.06); }
 .st-my-av img { width:100%; height:100%; object-fit:cover; display:block; }
-.st-my-acct .row .ico.has-img { background:#fff; border-radius:9999px;
+.st-my-acct .acct-main .ico { width:2rem; height:2rem; border-radius:.5rem;
+  background:rgba(255,255,255,.52); color:var(--on-surface-variant);
+  display:grid; place-items:center; flex:none; }
+.st-my-acct .acct-main .ico .material-symbols-outlined { font-size:20px; }
+.st-my-acct .acct-main .ico.has-img { background:#fff; border-radius:9999px;
   box-shadow:0 0 0 2px #fff, 0 1px 2px rgba(0,0,0,.06); overflow:hidden; }
-.st-my-acct .row .ico img { width:100%; height:100%; object-fit:cover; display:block; }
+.st-my-acct .acct-main .ico img { width:100%; height:100%; object-fit:cover; display:block; }
 .st-my-av .badge { position:absolute; right:-2px; bottom:-2px; width:1.25rem; height:1.25rem;
   border-radius:9999px; background:var(--primary); color:var(--on-primary); display:grid;
   place-items:center; border:2px solid var(--surface-container-lowest); }
@@ -1588,6 +1592,36 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .st-my-big .row .rmb { font-size:18px; font-weight:600; color:var(--tertiary); }
 /* 「预估折合收益」行尾：日期/未开播信息（从头像卡副标题挪过来的，不丢信息） */
 .st-my-big .row .tail { margin-left:auto; font-size:11px; color:var(--outline); }
+/* 2026-10-22 个人页收益概览：累计预计到手为主焦点，本月与环比紧随其后。
+   音浪对比降为第二层信息，避免两套数字争夺视觉重心。 */
+.st-my-big .earn-head { display:flex; align-items:flex-start; justify-content:space-between;
+  gap:.75rem; }
+.st-my-big .earn-kicker { display:flex; align-items:center; gap:.375rem; font-size:11px;
+  color:var(--on-surface-variant); }
+.st-my-big .earn-kicker .material-symbols-outlined { font-size:15px; color:var(--tertiary); }
+.st-my-big .earn-main { margin-top:.25rem; font-size:32px; line-height:1.15; font-weight:700;
+  color:var(--on-surface); letter-spacing:-.025em; font-variant-numeric:tabular-nums; }
+.st-my-big .earn-main .cur { font-size:19px; font-weight:600; margin-right:.125rem; color:var(--tertiary); }
+.st-my-big .earn-caption { margin-top:.25rem; font-size:11px; line-height:1.5; color:var(--outline); }
+.st-my-big .earn-pill { flex:none; display:inline-flex; align-items:center; gap:.25rem;
+  padding:.25rem .5rem; border-radius:9999px; background:rgba(0,88,188,.08);
+  color:var(--primary); font-size:10.5px; font-weight:600; white-space:nowrap; }
+.st-my-big .earn-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:.5rem; margin-top:.75rem; }
+.st-my-big .earn-kpi { padding:.625rem .75rem; border-radius:.5rem;
+  background:rgba(255,255,255,.52); border:1px solid rgba(255,255,255,.85); min-width:0; }
+.st-my-big .earn-kpi > span { display:block; font-size:10.5px; color:var(--on-surface-variant); }
+.st-my-big .earn-kpi > b { display:block; margin-top:.125rem; font-size:17px; font-weight:700;
+  color:var(--tertiary); font-variant-numeric:tabular-nums; white-space:nowrap;
+  overflow:hidden; text-overflow:ellipsis; }
+.st-my-big .earn-kpi > small { display:flex; align-items:center; gap:.25rem; margin-top:.125rem;
+  font-size:10.5px; line-height:1.4; color:var(--outline); min-height:1.25em; }
+.st-my-big .earn-kpi > small .delta { font-size:10.5px; }
+.st-my-big .wave-block { margin-top:.75rem; padding-top:.625rem;
+  border-top:1px solid rgba(226,232,240,.7); }
+.st-my-big .wave-block .wave-title { display:flex; align-items:center; gap:.375rem;
+  font-size:11px; font-weight:600; color:var(--on-surface-variant); }
+.st-my-big .wave-block .wave-title .material-symbols-outlined { font-size:15px; color:var(--primary); }
 /* 2026-10-18 玻璃化：内嵌排名条 surface-container-low → 白 .52 玻 + 白 .85 描边 */
 .st-my-rank { margin-top:.75rem; background:rgba(255,255,255,.52);
   border:1px solid rgba(255,255,255,.85); border-radius:.5rem;
@@ -1657,94 +1691,113 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
   font-size:12px; flex:none; }
 .st-my-card .r .material-symbols-outlined { font-size:18px; }
 
-/* ===== 我的抖音号卡（2026-10-12）：每个号一行，日/月/年/累计四格 =====
-   title 行复用 .st-my-list .sec 口径，右侧「共 N 个」用同色 11px 非大写 */
-/* 2026-10-18 玻璃化：实底白卡 → 白 .72 玻璃卡（白 .85 描边 + 看板同款投影 + blur 20px） */
+/* ===== 我的抖音号卡（2026-10-22 展开 / 收缩版）=====
+   收益先看总数，账号默认收起；点开单个号再看日 / 月 / 年 / 累计与双口径预估。
+   使用原生 details/summary，保留键盘、读屏和触屏的折叠语义。 */
 .st-my-acct { background:rgba(255,255,255,.72); border:1px solid rgba(255,255,255,.85);
   border-radius:16px;
   box-shadow:0 8px 32px rgba(148,163,184,.12), 0 1px 2px rgba(0,0,0,.03);
   -webkit-backdrop-filter:blur(20px); backdrop-filter:blur(20px);
   overflow:hidden; margin-top:.75rem; }
 .st-my-acct > .sec { padding:.5rem 1rem; font-size:11px; color:var(--outline);
-  display:flex; align-items:center; justify-content:space-between; }
-.st-my-acct > .sec .n { text-transform:none; letter-spacing:0; }
-/* 合计条（2026-10-15 任务五）：原 surface-container-low 灰底升级为 primary-fixed
-   淡主色底 + 同色内描边，与上面的普通行区分开，「合计」一眼可辨
-   （仍是 Stitch 低饱和底色，不引入新颜色体系）。 */
-.st-my-acct .sum { margin:0 1rem .5rem; background:var(--primary-fixed);
-  box-shadow:inset 0 0 0 1px rgba(0,88,188,.12); border-radius:.5rem;
-  padding:.5rem .75rem; display:flex; align-items:center; justify-content:space-between; gap:.5rem;
-  font-size:12px; font-weight:500; color:var(--on-surface); }
-.st-my-acct .sum .g { flex:1; min-width:0; display:grid;
-  grid-template-columns:repeat(2,minmax(0,1fr)); gap:.25rem .75rem; }
-.st-my-acct .sum .c { display:flex; align-items:baseline; justify-content:flex-end; gap:.25rem;
-  font-size:11px; font-weight:400; color:var(--on-surface-variant); }
-.st-my-acct .sum .c b { font-size:13px; font-weight:600; color:var(--on-surface);
-  font-variant-numeric:tabular-nums; text-align:right; min-width:3.5em; }
-/* 单个抖音号行：.st-my-item 口径（左图标 + 主/副标题，右数值），无 chevron。
-   窄屏兜底：撑不下时四格整块换行到下一行（左块有 8rem 基宽，不会把主标题挤没）。
-   2026-10-15 任务五：行可点（点击复制抖音号），.copiable 挂 cursor + hover/active 反馈。 */
-.st-my-acct .row { display:flex; flex-wrap:wrap; align-items:center;
-  justify-content:space-between; gap:.25rem .75rem;
-  /* 2026-10-18 玻璃化：行分隔线 → 玻璃卡同款淡 slate 线（对齐看板 .st-row） */
-  padding:.875rem 1rem; border-top:1px solid #F1F5F9; }
-.st-my-acct .row.copiable { cursor:pointer; -webkit-tap-highlight-color:transparent; }
-/* 2026-10-18 玻璃化：行 hover surface-container-low → 白 .6（对齐看板 .st-row:hover） */
-.st-my-acct .row.copiable:hover { background:rgba(255,255,255,.6); }
-/* 2026-10-18 玻璃化：行 active surface-container → 白 .8 */
-.st-my-acct .row.copiable:active { background:rgba(255,255,255,.8); }
-.st-my-acct .row .l { display:flex; align-items:center; gap:1rem; flex:1 1 8rem; min-width:0; }
-.st-my-acct .row .ico.has-img { background:#fff; border-radius:9999px;
-  box-shadow:0 0 0 2px #fff, 0 1px 2px rgba(0,0,0,.06); overflow:hidden; }
-.st-my-acct .row .ico img { width:100%; height:100%; object-fit:cover; display:block; }
-.st-my-acct .row .ico { width:2rem; height:2rem; border-radius:.5rem;
-  /* 2026-10-18 玻璃化：surface-container 实底 → 白 .52 玻 */
-  background:rgba(255,255,255,.52); color:var(--on-surface-variant);
-  display:grid; place-items:center; flex:none; }
-.st-my-acct .row .ico .material-symbols-outlined { font-size:20px; }
-.st-my-acct .row .t { font-size:15px; font-weight:500; color:var(--on-surface);
-  overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; max-width:100%; }
-/* 主号 chip（2026-10-15 任务五微调）：加一圈淡主色描边，与开播 pill 的灰底区分更明显 */
-.st-my-acct .row .chip { padding:0 .375rem; border-radius:9999px; background:rgba(0,88,188,.10);
-  border:1px solid rgba(0,88,188,.18);
+  display:flex; align-items:center; justify-content:space-between; gap:.75rem; }
+.st-my-acct > .sec .n { text-transform:none; letter-spacing:0; text-align:right; }
+/* 账号总览：先给出本月 / 累计预计到手，避免用户逐个展开后才看到重点。 */
+.st-my-acct .acct-overview { margin:0 1rem .75rem; padding:.75rem;
+  border-radius:.75rem; background:rgba(255,255,255,.52);
+  border:1px solid rgba(255,255,255,.85);
+  display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:.75rem; }
+.st-my-acct .acct-kpi { min-width:0; }
+.st-my-acct .acct-kpi + .acct-kpi { border-left:1px solid rgba(226,232,240,.8); padding-left:.75rem; }
+.st-my-acct .acct-kpi span { display:block; font-size:11px; color:var(--on-surface-variant); }
+.st-my-acct .acct-kpi b { display:block; margin-top:.125rem; font-size:17px; line-height:1.25;
+  color:var(--tertiary); font-variant-numeric:tabular-nums; white-space:nowrap;
+  overflow:hidden; text-overflow:ellipsis; }
+.st-my-acct .acct-kpi small { display:block; margin-top:.125rem; font-size:10.5px;
+  color:var(--outline); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+/* 单个抖音号：summary 只放识别信息和本月预估，展开后再给完整数据。 */
+.st-my-acct .acct-item { border-top:1px solid #F1F5F9; }
+.st-my-acct .acct-summary { list-style:none; display:flex; align-items:center; gap:.75rem;
+  padding:.8125rem 1rem; cursor:pointer; -webkit-tap-highlight-color:transparent;
+  outline:none; }
+.st-my-acct .acct-summary::-webkit-details-marker { display:none; }
+.st-my-acct .acct-summary:hover { background:rgba(255,255,255,.6); }
+.st-my-acct .acct-summary:active { background:rgba(255,255,255,.8); }
+.st-my-acct .acct-summary:focus-visible { box-shadow:inset 0 0 0 2px var(--primary); }
+.st-my-acct .acct-main { display:flex; align-items:center; gap:1rem; flex:1 1 auto; min-width:0; }
+.st-my-acct .acct-id { min-width:0; flex:1 1 auto; }
+.st-my-acct .acct-titleline { display:flex; align-items:center; flex-wrap:wrap; gap:.25rem .375rem; min-width:0; }
+.st-my-acct .acct-titleline .t { font-size:15px; font-weight:500; color:var(--on-surface);
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:0 1 auto; min-width:2.5em; }
+.st-my-acct .acct-titleline .chip { padding:0 .375rem; border-radius:9999px;
+  background:rgba(0,88,188,.10); border:1px solid rgba(0,88,188,.18);
   color:var(--primary); font-size:11px; font-weight:600; line-height:1.5; flex:none; }
-/* 开播状态点（2026-10-15 任务五：强化对比的小圆点 pill）：
-   灰底灰点灰字 = 未开播；浅主色底 + 主色点（保留脉冲）+ 主色字 = 已开播 */
-.st-my-acct .row .st { display:inline-flex; align-items:center; gap:.3rem; font-size:10.5px;
-  font-weight:600; line-height:1.5; padding:.1rem .5rem; border-radius:9999px;
-  /* 2026-10-18 玻璃化：surface-container 实底 → 白 .52 玻 */
-  background:rgba(255,255,255,.52); color:var(--on-surface-variant); flex:none;
-  white-space:nowrap; }
-.st-my-acct .row .st i { width:.375rem; height:.375rem; border-radius:9999px;
+.st-my-acct .acct-titleline .st { display:inline-flex; align-items:center; gap:.3rem;
+  font-size:10.5px; font-weight:600; line-height:1.5; padding:.1rem .5rem;
+  border-radius:9999px; background:rgba(255,255,255,.52);
+  color:var(--on-surface-variant); flex:none; white-space:nowrap; }
+.st-my-acct .acct-titleline .st i { width:.375rem; height:.375rem; border-radius:9999px;
   background:var(--outline-variant); flex:none; }
-.st-my-acct .row .st.on { background:rgba(0,88,188,.10); color:var(--primary); }
-.st-my-acct .row .st.on i { background:var(--primary); animation:stPulse 1.6s ease-in-out infinite; }
-.st-my-acct .row .d { font-size:11px; color:var(--outline); margin-top:.125rem; }
-/* 四格音浪：恒 2×2 小网格 —— 与左侧「标题+副标题」两行等高，且不抢占主标题宽度；
-   2026-10-14 防挤：列宽 minmax(max-content,1fr)，数值格至少占满自身内容宽
-   （「4万3892」这类带万字的值永不截断、永不和「日/月/年/累计」标签重叠），
-   基宽 9rem→11rem 并允许 shrink，富余空间才均分；与 .l 的 8rem 基宽相加超容器时
-   才整块换行（320px 屏折到第二行，绝不横向溢出）。
-   2026-10-15 任务五：数值 b 加 text-align:right + min-width:3.5em 统一右对齐宽度，
-   配合 tabular-nums 四行读数逐位对齐。 */
-.st-my-acct .row .wg { display:grid; grid-template-columns:repeat(2,minmax(max-content,1fr));
-  gap:.25rem .75rem; flex:0 1 11rem; margin-left:auto; }
-.st-my-acct .row .wg .c { display:flex; align-items:baseline; justify-content:flex-end; gap:.25rem;
-  font-size:11px; color:var(--on-surface-variant); white-space:nowrap; }
-.st-my-acct .row .wg .c b { font-size:13px; font-weight:600; color:var(--on-surface);
-  font-variant-numeric:tabular-nums; white-space:nowrap;
-  text-align:right; min-width:3.5em; }
+.st-my-acct .acct-titleline .st.on { background:rgba(0,88,188,.10); color:var(--primary); }
+.st-my-acct .acct-titleline .st.on i { background:var(--primary); animation:stPulse 1.6s ease-in-out infinite; }
+.st-my-acct .acct-sub { margin-top:.125rem; font-size:11px; line-height:1.5; color:var(--outline);
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.st-my-acct .acct-glance { display:flex; align-items:center; gap:.375rem; flex:none;
+  text-align:right; }
+.st-my-acct .acct-glance .g-l { display:block; font-size:10px; color:var(--outline); }
+.st-my-acct .acct-glance b { display:block; margin-top:.0625rem; font-size:13px;
+  color:var(--tertiary); font-variant-numeric:tabular-nums; white-space:nowrap; }
+.st-my-acct .acct-chevron { font-size:19px; color:var(--outline);
+  transition:transform .18s cubic-bezier(.2,.8,.2,1); }
+.st-my-acct .acct-item[open] .acct-chevron { transform:rotate(180deg); }
+.st-my-acct .acct-detail { padding:0 1rem 1rem; }
+.st-my-acct .acct-detail::before { content:''; display:block; height:1px;
+  background:rgba(226,232,240,.7); margin-bottom:.75rem; }
+.st-my-acct .acct-numberline { display:flex; align-items:center; gap:.5rem;
+  min-width:0; margin-bottom:.75rem; }
+.st-my-acct .acct-numberline > span { flex:none; font-size:10.5px; color:var(--outline); }
+.st-my-acct .acct-numberline code { min-width:0; overflow:hidden; text-overflow:ellipsis;
+  white-space:nowrap; font:500 12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;
+  color:var(--on-surface); }
+.st-my-acct .acct-copy { margin-left:auto; border:0; background:rgba(0,88,188,.08);
+  color:var(--primary); border-radius:.375rem; padding:.25rem .5rem; font-size:11px;
+  font-weight:600; cursor:pointer; flex:none; }
+.st-my-acct .acct-copy:active { transform:translateY(1px); }
+.st-my-acct .acct-copy:focus-visible { outline:2px solid var(--primary); outline-offset:2px; }
+.st-my-acct .acct-stats { display:grid; grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:.5rem; }
+.st-my-acct .acct-cell { padding:.625rem .75rem; border-radius:.5rem;
+  background:rgba(255,255,255,.52); border:1px solid rgba(255,255,255,.85);
+  display:flex; align-items:baseline; justify-content:space-between; gap:.5rem; }
+.st-my-acct .acct-cell i { font-style:normal; font-size:10.5px; color:var(--outline); flex:none; }
+.st-my-acct .acct-cell b { font-size:13px; color:var(--on-surface); font-weight:600;
+  font-variant-numeric:tabular-nums; white-space:nowrap; }
+.st-my-acct .acct-earnings { display:grid; grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:.5rem; margin-top:.5rem; }
+.st-my-acct .acct-earn { padding:.625rem .75rem; border-radius:.5rem;
+  background:var(--primary-fixed); box-shadow:inset 0 0 0 1px rgba(0,88,188,.10); }
+.st-my-acct .acct-earn span { display:block; font-size:10.5px; color:var(--on-surface-variant); }
+.st-my-acct .acct-earn b { display:block; margin-top:.125rem; font-size:15px;
+  color:var(--tertiary); font-variant-numeric:tabular-nums; }
+.st-my-acct .acct-earn small { display:block; margin-top:.125rem; font-size:10px; color:var(--outline); }
+.st-my-acct .acct-note { margin-top:.5rem; font-size:10.5px; line-height:1.5; color:#64748B; }
 .st-my-acct .fee-note { padding:6px 1rem; font-size:11px; line-height:1.5; color:#64748B;
   border-top:1px solid rgba(226,232,240,.6); }
-/* 号级「本月预估到手」（2026-10-19）：占整行右对齐的小字，与四格音浪同一色系，
-   不抢主标题宽度（四格已经在 flex 行右端，这一行自然折到下方）。 */
-.st-my-acct .row .est { flex:1 1 100%; text-align:right; font-size:11px;
-  color:var(--on-surface-variant); margin-top:.25rem; }
-.st-my-acct .row .est b { font-size:12.5px; font-weight:700; color:var(--tertiary);
-  font-variant-numeric:tabular-nums; }
 .st-my-acct .fail { padding:.75rem 1rem; font-size:11px; color:var(--outline); text-align:center; }
 .st-my-acct .none { padding:1rem; font-size:12px; color:var(--on-surface-variant);
   text-align:center; line-height:1.7; }
+@media (max-width:380px) {
+  .st-my-big .earn-head { flex-wrap:wrap; }
+  .st-my-big .earn-pill { margin-left:auto; }
+  .st-my-big .earn-main { font-size:29px; }
+  .st-my-big .earn-grid { gap:.375rem; }
+  .st-my-acct .acct-summary { gap:.5rem; padding:.75rem; }
+  .st-my-acct .acct-detail { padding:0 .75rem .875rem; }
+  .st-my-acct .acct-overview { margin-left:.75rem; margin-right:.75rem; }
+}
+@media (prefers-reduced-motion:reduce) {
+  .st-my-acct .acct-chevron { transition:none; }
+}
 /* 2026-10-18 玻璃化：实底白卡列表容器 → 白 .72 玻璃卡（白 .85 描边 + 看板同款投影 + blur 20px） */
 .st-my-list { background:rgba(255,255,255,.72); border:1px solid rgba(255,255,255,.85);
   border-radius:16px;
@@ -2815,6 +2868,14 @@ const yuan = (n) => {
   if (n == null || !Number.isFinite(Number(n))) return '—';
   const v = Math.round(Number(n) * 100) / 100;
   return '¥' + v.toFixed(2).replace(/\.00$/, '').replace(/(\.\d)0$/, '$1');
+};
+/** 收益主数字：保留千分位，避免累计金额变长后难扫读；整数不补 .00。 */
+const yuanBig = (n) => {
+  if (n == null || !Number.isFinite(Number(n))) return '—';
+  const v = Math.round(Number(n) * 100) / 100;
+  const txt = v.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+    .replace(/\.00$/, '').replace(/(\.\d)0$/, '$1');
+  return '¥' + txt;
 };
 /* ===== 预估收益口径（2026-10-19）=====
    抖音音浪兑人民币是 10:1（1 元 = 10 音浪，全站沿用），但**主播能拿多少不是固定 35%**：
@@ -5533,16 +5594,15 @@ function renderMyLogin() {
   $('myPass').onkeydown = (e) => { if (e.key === 'Enter') go(); };
 }
 
-/** 我的抖音号卡（2026-10-12）：GET /api/public/teams/{TEAM}/my/accounts
-    每个绑定的抖音号一行，显示日/月/年/累计音浪（与 /my 同一口径）。
-    三条兜底：published:false → 整卡不渲染；summary.count 为 0 → 空态文案；
-    accounts.__err（接口失败/超时，loadMy 里吞掉的）→ 灰字「抖音号数据加载失败」，绝不让页面挂掉。 */
+/** 我的抖音号卡（2026-10-22）：
+    收益总览在卡顶，单个号默认收起；点开后看分号日 / 月 / 年 / 累计与两种到手口径。
+    三条兜底不变：published:false → 整卡不渲染；summary.count=0 → 空态；
+    accounts.__err → 灰字失败态，绝不让整页数据因为分号接口失败而消失。 */
 function myAccountsCard(accounts) {
   if (!accounts || accounts.published === false) return '';
   const wave = (o) => o == null || o.wave == null ? '—' : wan(o.wave);
-  /* 2026-10-15 任务五：数值格右对齐 + tabular-nums（CSS 在 .wg .c b / .sum .c b 上），
-     标签「日/月/年/累计」包一层 <i>（font-style:normal;min-width:2em）防被数值挤压。 */
-  const cell = (label, o) => '<span class="c">' + label + '<b>' + esc(wave(o)) + '</b></span>';
+  const estOf = (o) => o == null || o.wave == null ? null : estYuan(o.wave);
+  const cell = (label, o) => '<span class="acct-cell"><i>' + label + '</i><b>' + esc(wave(o)) + '</b></span>';
   if (accounts.__err) {
     return '<div class="st-my-acct">' +
       '<div class="sec"><span>我的抖音号</span></div>' +
@@ -5556,61 +5616,75 @@ function myAccountsCard(accounts) {
       '<div class="none">还没有绑定抖音号，绑定后这里显示每个号的数据</div></div>';
   }
   const body = list.map((a) => {
-    /* 没登记抖音号时退回采集 ID，并加 `ID ` 前缀标明「这不是抖音号」——
-       与推送文案（push.rs::AccountWave::display_name）同一口径，2026-10-12 */
-    /* 2026-10-13 用户口径：抖音号行主标题显示抖音名称（anchorName），
-       抖音号做次行说明；没有名称才退回抖音号/采集 ID。 */
+    /* 没登记抖音号时退回采集 ID；主标题优先用抖音名称。 */
     const no = a.douyinNo
       ? String(a.douyinNo)
       : (a.anchorId ? 'ID ' + String(a.anchorId) : '');
-    const title = (a.anchorName ? String(a.anchorName) : '') || no;
-    /* 2026-10-15 任务五：日期只动展示 —— 2026-10-15 缩写成 10-15（MM-DD），
-       只认 YYYY-MM-DD 形态的才缩，其它格式原样透传；lastDate 为空仍显示「暂无数据」。
-       数据字段（a.lastDate）原样保留，不参与任何请求。 */
+    const title = (a.anchorName ? String(a.anchorName) : '') || no || '未登记抖音号';
     const lastDate = a.lastDate ? String(a.lastDate) : '';
     const dateShown = /^\d{4}-\d{2}-\d{2}$/.test(lastDate) ? lastDate.slice(5) : lastDate;
-    const sub = (no && a.anchorName ? no + ' · ' : '') +
-      (lastDate ? dateShown : '暂无数据') +
-      (Number(a.days) > 0 ? ' · ' + a.days + ' 天有数据' : '');
-    /* 2026-10-15 任务五：整行可点复制抖音号。复制的是 douyinNo 本体（no 前缀是
-       「ID 」兜底展示形态，带出去没意义）；no 为空不挂 .copiable、不绑事件。 */
-    const copyable = no && a.douyinNo;
-    /* 行图标（2026-10-19 用户口径「我的抖音号列表也添加头像」）：有同源头像就出真头像，
-       没有仍回落抖音号图标；data-n 交给 bindRows 的 onerror 兜底（图裂了回图标）。
-       注意 .ico 不是 .st-row-av，兜底分支走「补回 material 图标」那一支。 */
+    const days = Number(a.days) > 0 ? Number(a.days) : 0;
+    const meta = (no && a.anchorName ? no : (no ? '' : '未登记抖音号')) +
+      (lastDate ? (no && a.anchorName ? ' · ' : '') + dateShown : '');
     const avName = String(a.anchorName || a.douyinNo || '?');
-    return '<div class="row' + (copyable ? ' copiable" data-copy="' + esc(no) : '') + '">' +
-      '<div class="l"><div class="ico' + (a.avatar ? ' has-img' : '') + '" data-n="' + esc(avName) + '">' +
-        (a.avatar
-          ? '<img data-av src="' + esc(a.avatar) + '" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer">'
-          : '<span class="material-symbols-outlined">smart_display</span>') +
+    const monthEst = estOf(a.monthly);
+    const totalEst = estOf(a.total);
+    const pct = a.primary
+      ? '<span class="chip">主号</span>'
+      : '';
+    const copy = a.douyinNo
+      ? '<button class="acct-copy" type="button" data-copy="' + esc(String(a.douyinNo)) + '">复制</button>'
+      : '';
+    return '<details class="acct-item">' +
+      '<summary class="acct-summary" title="展开或收起账号明细">' +
+        '<span class="acct-main">' +
+          '<span class="ico' + (a.avatar ? ' has-img' : '') + '" data-n="' + esc(avName) + '">' +
+            (a.avatar
+              ? '<img data-av src="' + esc(a.avatar) + '" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer">'
+              : '<span class="material-symbols-outlined">smart_display</span>') +
+          '</span>' +
+          '<span class="acct-id">' +
+            '<span class="acct-titleline"><span class="t">' + esc(title) + '</span>' + pct +
+              '<span class="st' + (a.liveToday ? ' on' : '') + '"><i></i>' +
+                (a.liveToday ? '今日已开播' : '今日未开播') + '</span>' +
+            '</span>' +
+            '<span class="acct-sub">' + esc(meta || '暂无数据') + '</span>' +
+          '</span>' +
+        '</span>' +
+        '<span class="acct-glance"><span class="g-l">本月预估</span><b>' +
+          esc(yuanBig(monthEst)) + '</b></span>' +
+        '<span class="material-symbols-outlined acct-chevron">expand_more</span>' +
+      '</summary>' +
+      '<div class="acct-detail">' +
+        '<div class="acct-numberline"><span>抖音号</span><code>' +
+          esc(no || '未登记') + '</code>' + copy + '</div>' +
+        '<div class="acct-stats">' +
+          cell('今日音浪', a.daily) + cell('本月音浪', a.monthly) +
+          cell('本年音浪', a.yearly) + cell('累计音浪', a.total) +
+        '</div>' +
+        '<div class="acct-earnings">' +
+          '<div class="acct-earn"><span>本月预计到手</span><b>' + esc(yuanBig(monthEst)) + '</b>' +
+            '<small>' + (a.monthly && a.monthly.wave != null ? esc(wan(a.monthly.wave)) + ' 音浪' : '本月暂无数据') + '</small></div>' +
+          '<div class="acct-earn"><span>累计预计到手</span><b>' + esc(yuanBig(totalEst)) + '</b>' +
+            '<small>' + (a.total && a.total.wave != null ? '自有数据 ' + esc(wan(a.total.wave)) + ' 音浪' : '累计暂无数据') + '</small></div>' +
+        '</div>' +
+        '<div class="acct-note">' +
+          (lastDate ? '最后有数据 ' + esc(dateShown) : '暂无数据日期') +
+          (days ? ' · ' + days + ' 天有数据' : '') + '</div>' +
       '</div>' +
-      '<div style="min-width:0">' +
-        '<div style="display:flex;align-items:center;min-width:0"><span class="t">' + esc(title) + '</span>' +
-        (a.primary ? '<span class="chip">主号</span>' : '') +
-        '<span class="st' + (a.liveToday ? ' on' : '') + '"><i></i>' +
-        (a.liveToday ? '今日已开播' : '今日未开播') + '</span></div>' +
-        '<div class="d">' + esc(sub) + '</div>' +
-      '</div></div>' +
-      '<div class="wg">' +
-        cell('日', a.daily) + cell('月', a.monthly) +
-        cell('年', a.yearly) + cell('累计', a.total) +
-      '</div>' +
-      /* 本月预估到手（2026-10-19）：与「我的」页大数字卡同一口径（音浪 ÷ 10 × 分成 ×（1−手续费）），
-         号级月音浪按本行的 monthly.wave 算；无数据/关音浪数值时不显示这一行。 */
-      (a.monthly && a.monthly.wave != null && a.monthly.wave > 0
-        ? '<div class="est">本月预估到手 <b>' + esc(yuan(estYuan(a.monthly.wave))) + '</b></div>'
-        : '') +
-      '</div>';
+    '</details>';
   }).join('');
+  const monthEst = sum.monthly == null ? null : estOf(sum.monthly);
+  const totalEst = sum.total == null ? null : estOf(sum.total);
   return '<div class="st-my-acct">' +
-    '<div class="sec"><span>我的抖音号</span><span class="n">共 ' + Number(sum.count) + ' 个</span></div>' +
-    /* 口径说明（2026-10-19）：分成 / 手续费改由后台配置下发，不再写死 35%。 */
+    '<div class="sec"><span>我的抖音号</span><span class="n">共 ' + Number(sum.count) + ' 个 · 点击展开明细</span></div>' +
     '<div class="fee-note">' + esc(earningsNote()) + '</div>' +
-    '<div class="sum"><span>合计</span><span class="g">' +
-      cell('日', sum.daily) + cell('月', sum.monthly) +
-      cell('年', sum.yearly) + cell('累计', sum.total) +
-    '</span></div>' + body + '</div>';
+    '<div class="acct-overview">' +
+      '<div class="acct-kpi"><span>本月预计到手</span><b>' + esc(yuanBig(monthEst)) + '</b>' +
+        '<small>' + (sum.monthly && sum.monthly.wave != null ? '合计 ' + esc(wan(sum.monthly.wave)) + ' 音浪' : '音浪数据未展示') + '</small></div>' +
+      '<div class="acct-kpi"><span>累计预计到手</span><b>' + esc(yuanBig(totalEst)) + '</b>' +
+        '<small>' + (sum.total && sum.total.wave != null ? esc(wan(sum.total.wave)) + ' 音浪' : '音浪数据未展示') + '</small></div>' +
+    '</div>' + body + '</div>';
 }
 
 function renderMy(d, series, push, accounts) {
@@ -5674,10 +5748,29 @@ function renderMy(d, series, push, accounts) {
   const t = d.total || {};
   const y = d.yearly || {};
   const dd = d.daily || {};
-  const monthlyYuan = m.yuan == null ? yuan(estYuan(m.wave)) : yuan(m.yuan);
-  /* Stitch 版音浪对比卡（2026-10-13）：今日/本月/本年 三段同期对照。
-     daily.prevWave=上一业务日、monthly.prevWave=上月同期、yearly.prevWave=去年同期，
-     数据 /my 全有（minutes.rs 同期对照字段）。涨红跌绿沿用 waveDelta。 */
+  const monthEst = Number.isFinite(Number(m.yuan)) ? Number(m.yuan) : estYuan(m.wave);
+  const totalEst = estYuan(t.wave);
+  const totalWave = t.wave == null ? null : Number(t.wave);
+  const dataDate = d.date ? String(d.date) : '';
+  const dataDateShown = /^\d{4}-\d{2}-\d{2}$/.test(dataDate) ? dataDate.slice(5) : dataDate;
+  const feeBits = earningsCfg.sharePct + '% 分成' +
+    (earningsCfg.feePct > 0 ? ' · 扣 ' + earningsCfg.feePct + '% 税' : '');
+  /* 本月和上月同期都换成人民币再比，避免用户自己再算一遍分成 / 税费。 */
+  const monthCmp = (() => {
+    if (monthEst == null || m.prevWave == null || Number(m.prevWave) <= 0) {
+      return '<span>暂无上月同期数据</span>';
+    }
+    const prevEst = estYuan(m.prevWave);
+    if (prevEst == null) return '<span>暂无上月同期数据</span>';
+    const diff = monthEst - prevEst;
+    if (Math.abs(diff) < 0.005) return '<span>与上月同期持平</span>';
+    const up = diff > 0;
+    const pct = Math.round(Math.abs(diff) / prevEst * 1000) / 10;
+    return '<span class="delta ' + (up ? 'd-up' : 'd-down') + '">' +
+      (up ? '↑' : '↓') + esc(yuanBig(Math.abs(diff))) + ' · ' +
+      (up ? '+' : '-') + pct + '%</span><span>较上月同期</span>';
+  })();
+  /* 音浪仍保留三条同期对照，作为收益主卡的第二层数据，不再抢占第一行。 */
   const cmpRow = (icon, label, o, prevLabel) => {
     if (!o || o.wave == null) return '';
     const delta = (o.prevWave == null || o.prevWave === 0) ? ''
@@ -5691,18 +5784,26 @@ function renderMy(d, series, push, accounts) {
       '<span class="cp">' + prevLabel + '</span></div>';
   };
   const big = '<div class="st-my-big">' +
-    '<div class="lbl"><span>音浪对比</span></div>' +
-    cmpRow('today', '今日音浪', dd, '比上日') +
-    cmpRow('calendar_month', '本月音浪', m, '比上月同期') +
-    cmpRow('functions', '本年累计', y, '比去年同期') +
-    /* 分成比例与手续费都来自后台配置（2026-10-19），前端不再硬编码 35%。 */
-    '<div class="st-cmp-rmb"><div class="l"><span class="material-symbols-outlined">monetization_on</span>' +
-      '<span>预估到手</span><span class="pct-tag">' + earningsCfg.sharePct + '%分成' +
-      (earningsCfg.feePct > 0 ? ' · 扣' + earningsCfg.feePct + '%税' : '') + '</span></div>' +
-      '<div class="v">' + monthlyYuan + '</div>' +
-      '<div class="r"><span class="tail">' + esc(earningsNote()) + '</span></div></div>' +
+    '<div class="earn-head"><div>' +
+      '<div class="earn-kicker"><span class="material-symbols-outlined">monetization_on</span>' +
+        '<span>累计预计到手</span></div>' +
+      '<div class="earn-main">' + esc(yuanBig(totalEst)) + '</div>' +
+      '<div class="earn-caption">基于自有数据累计折算 · 实际提现以平台结算为准</div>' +
+    '</div><span class="earn-pill">' + esc(feeBits) + '</span></div>' +
+    '<div class="earn-grid">' +
+      '<div class="earn-kpi"><span>本月预计到手</span><b>' + esc(yuanBig(monthEst)) + '</b>' +
+        '<small>' + monthCmp + '</small></div>' +
+      '<div class="earn-kpi"><span>自有数据累计音浪</span><b>' +
+        (totalWave == null ? '—' : esc(wan(totalWave))) + '</b>' +
+        '<small>' + (dataDateShown ? '截至 ' + esc(dataDateShown) : '暂无数据日期') + '</small></div>' +
+    '</div>' +
+    '<div class="wave-block"><div class="wave-title">' +
+      '<span class="material-symbols-outlined">functions</span><span>音浪对比</span></div>' +
+      cmpRow('today', '今日音浪', dd, '比上日') +
+      cmpRow('calendar_month', '本月音浪', m, '比上月同期') +
+      cmpRow('functions', '本年累计', y, '比去年同期') +
+    '</div>' +
   '</div>';
-
 
   /* 推送状态走 /my/push 的真实字段（后端没有 configured 这个键）：
      bound=已对接可推送；scanBound+needActivate=扫了码还没等微信确认（2026-10-17 起归入未完成态）。 */
@@ -5766,12 +5867,13 @@ function renderMy(d, series, push, accounts) {
     /* 没有站内私信通道（运营在微信里），这里只指路不跳转 */
     toast('请直接在微信里联系帅帅');
   };
-  /* 我的抖音号：整行点击复制抖音号（2026-10-15 任务五）。
-     行 DOM 由 myAccountsCard 生成（.row.copiable[data-copy]，douyinNo 为空的行不挂），
-     复制成功 toast('已复制抖音号')；无 clipboard API 的老浏览器降级 toast 失败提示。 */
-  document.querySelectorAll('.st-my-acct .row.copiable').forEach((rowEl) => {
-    rowEl.onclick = async () => {
-      const no = rowEl.dataset.copy || '';
+  /* 我的抖音号（2026-10-22）：summary 负责展开 / 收起，复制只放在展开后的明确按钮上，
+     避免原来「想展开却复制了抖音号」的误触。 */
+  document.querySelectorAll('.st-my-acct .acct-copy[data-copy]').forEach((btn) => {
+    btn.onclick = async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const no = btn.dataset.copy || '';
       if (!no) return;
       try {
         if (!navigator.clipboard) throw new Error('clipboard unavailable');
