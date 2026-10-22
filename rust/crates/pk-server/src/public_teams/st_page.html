@@ -1325,7 +1325,6 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .st-detail-title { font-size:12px; line-height:18px; font-weight:700; color:#334155; }
 .st-detail-badge { padding:3px 8px; border-radius:9999px; font-size:10px; line-height:15px;
   font-weight:700; color:#475569; background:rgba(100,116,139,.10); flex:none; }
-.st-detail-badge.live { color:#0369A1; background:rgba(14,165,233,.12); }
 .st-detail-badge.warn { color:#B45309; background:rgba(245,158,11,.12); }
 .st-detail-close { border:none; background:transparent; color:#64748B; font:inherit;
   font-size:11px; padding:2px 0 2px 8px; text-decoration:underline; text-underline-offset:3px; }
@@ -3802,7 +3801,8 @@ function detailStatus(it) {
     return n != null && n > 0 ? { text: '未播 ' + n + ' 天', cls: 'warn' } : { text: '有数据', cls: '' };
   }
   if (it.hasData === false) return { text: '暂无数据', cls: '' };
-  return it.isLive ? { text: '直播中', cls: 'live' } : { text: '今日未开播', cls: 'warn' };
+  /* 2026-10-22 用户口径：详情不再展示在线状态；未播提示保留。 */
+  return it.isLive ? { text: '', cls: '' } : { text: '今日未开播', cls: 'warn' };
 }
 function detailCell(label, value) {
   return '<div class="st-detail-cell"><div class="st-detail-lb">' + esc(label) +
@@ -3811,6 +3811,9 @@ function detailCell(label, value) {
 function detailHtml(it, rowMode) {
   if (!it || !detailOpen(it)) return '';
   const st = detailStatus(it);
+  const badge = st.text
+    ? ' <span class="st-detail-badge ' + st.cls + '">' + esc(st.text) + '</span>'
+    : '';
   const waveLbl = it.periodic ? (period === 'monthly' ? '当月音浪' : '年度音浪') : '当日音浪';
   const cells = [
     detailCell('当前排名', it.rank ? '第 ' + it.rank + ' 名' : '—'),
@@ -3823,7 +3826,7 @@ function detailHtml(it, rowMode) {
   return '<div class="st-detail' + (rowMode ? ' st-detail-row' : '') + '" data-detail-name="' + esc(it.name) +
       '" role="region" aria-label="' + esc(it.name) + '详情">' +
     '<div class="st-detail-head">' +
-      '<div class="st-detail-title">主播详情 <span class="st-detail-badge ' + st.cls + '">' + esc(st.text) + '</span></div>' +
+      '<div class="st-detail-title">主播详情' + badge + '</div>' +
       '<button class="st-detail-close" type="button" data-close-detail="' + esc(it.name) + '">收起</button>' +
     '</div>' +
     '<div class="st-detail-grid">' + cells.join('') + '</div>' +
