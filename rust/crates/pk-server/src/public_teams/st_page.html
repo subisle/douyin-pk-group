@@ -3803,10 +3803,8 @@ function detailDeltaText(delta) {
   return '持平';
 }
 function detailStatus(it) {
-  if (it.periodic) {
-    const n = it.absentDays;
-    return n != null && n > 0 ? { text: '未播 ' + n + ' 天', cls: 'warn' } : { text: '有数据', cls: '' };
-  }
+  /* 月 / 年榜单的日数信息统一放进「未播 / 直播天数」格，不再重复一个状态胶囊。 */
+  if (it.periodic) return { text: '', cls: '' };
   if (it.hasData === false) return { text: '暂无数据', cls: '' };
   /* 2026-10-22 用户口径：详情不再展示在线状态；未播提示保留。 */
   return it.isLive ? { text: '', cls: '' } : { text: '今日未开播', cls: 'warn' };
@@ -3837,7 +3835,7 @@ function detailHtml(it, rowMode) {
   if (!it.periodic && it.totalWave != null) cells.push(detailCell('累计音浪', wan(it.totalWave)));
   cells.push(detailCell('直播时长', it.minutes == null ? '—' : minFmt(it.minutes)));
   if (it.delta) cells.push(detailCell('排名变化', detailDeltaText(it.delta)));
-  if (it.periodic && it.liveDays != null && it.absentDays != null &&
+  if (it.liveDays != null && it.absentDays != null &&
       ((Number(it.liveDays) || 0) + (Number(it.absentDays) || 0) > 0)) {
     cells.push(daySplitCell(it.absentDays, it.liveDays));
   }

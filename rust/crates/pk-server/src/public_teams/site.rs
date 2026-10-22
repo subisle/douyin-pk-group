@@ -323,6 +323,13 @@ pub async fn daily(
             absent_map.insert(row_pid(&r, "person_id"), row_i64(&r, "n"));
         }
     }
+    let mut live_map: HashMap<u64, i64> = Default::default();
+    if s.duration {
+        let live_sql = crate::dialect::month_live_sql(month);
+        for r in pgrs::query(&st.pools, &source, &live_sql).await? {
+            live_map.insert(row_pid(&r, "person_id"), row_i64(&r, "n"));
+        }
+    }
     // totalWave 属于音浪数值，关闭时不再跑全历史聚合。
     let mut total_map: HashMap<u64, i64> = Default::default();
     if s.wave {
@@ -413,6 +420,8 @@ pub async fn daily(
         };
         if s.duration {
             item["minutes"] = json!(row_i64(r, "minutes"));
+            // 当月直播天数：详情里的 未X/Y 与排名变化并排显示。
+            item["liveDays"] = json!(live_map.get(&pid).copied().unwrap_or(0));
         }
         if s.absent_days {
             item["absentDays"] = json!(absent_map.get(&pid).copied().unwrap_or(0));

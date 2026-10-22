@@ -51,6 +51,21 @@ pub fn month_absent_sql(month: &str) -> String {
         .replace("{month}", month)
 }
 
+/// 「当月直播天数」：只统计有数据行且音浪 >= 阈值的日期，与未播天数互补。
+pub const MONTH_LIVE_SQL: &str =
+    "SELECT person_id, (SUM(CASE WHEN wave >= {NOT_LIVE_WAVE_THRESHOLD} THEN 1 ELSE 0 END))::BIGINT AS n \
+     FROM daily_metric WHERE wave_reliable = 1 \
+       AND TO_CHAR(biz_date, 'YYYY-MM') = '{month}' GROUP BY person_id";
+
+pub fn month_live_sql(month: &str) -> String {
+    MONTH_LIVE_SQL
+        .replace(
+            "{NOT_LIVE_WAVE_THRESHOLD}",
+            &NOT_LIVE_WAVE_THRESHOLD.to_string(),
+        )
+        .replace("{month}", month)
+}
+
 /// LOCAL：唯一业务库 —— person / account / daily_metric
 const ANCHORS_A: &str = "SELECT id, name, avatar_url, status,
        (SELECT pa.hash FROM person_avatar pa
@@ -999,6 +1014,14 @@ mod tests {
                 "月未播天数不得按日历天补零（缺采 ≠ 未播）：{month_sql}"
             );
         }
+    }
+
+    #[test]
+    fn live_days_are_complementary_to_absent_days() {
+        let sql = month_live_sql("2999-01");
+        assert!(sql.contains("SUM(CASE WHEN wave >= 2"), "{sql}");
+        assert!(sql.contains("wave_reliable = 1"), "{sql}");
+        assert!(sql.contains("2999-01"), "{sql}");
     }
 
     // ---- 月 / 年骨架的整月口径（2026-10-16 月度音浪导入）----
