@@ -1860,9 +1860,18 @@ mod announcement_items_tests {
                 .map(|x| x["title"].as_str().unwrap_or("").to_string())
                 .collect::<Vec<_>>()
         };
-        assert_eq!(names(a.public_items_json_for("")), vec!["通用公告", "中级争霸赛冠军", "女团活动"]);
-        assert_eq!(names(a.public_items_json_for("male")), vec!["通用公告", "中级争霸赛冠军"]);
-        assert_eq!(names(a.public_items_json_for("female")), vec!["通用公告", "女团活动"]);
+        assert_eq!(
+            names(a.public_items_json_for("")),
+            vec!["通用公告", "中级争霸赛冠军", "女团活动"]
+        );
+        assert_eq!(
+            names(a.public_items_json_for("male")),
+            vec!["通用公告", "中级争霸赛冠军"]
+        );
+        assert_eq!(
+            names(a.public_items_json_for("female")),
+            vec!["通用公告", "女团活动"]
+        );
         assert_eq!(a.public_items_json_for("female")[0]["team"], "");
         assert_eq!(a.public_items_json_for("male")[1]["team"], "male");
         let parsed = parse_items(&[json!({
