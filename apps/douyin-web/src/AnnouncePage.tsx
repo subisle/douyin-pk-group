@@ -72,6 +72,8 @@ type AnnounceTone = 'brand' | 'plain'
 type AnnounceAlign = 'left' | 'center' | 'right'
 type AnnounceItemCfg = {
   enabled: boolean
+  /** 适用团别：'' = 通用；male = 仅男团；female = 仅女团。 */
+  team: '' | 'male' | 'female'
   icon: string
   title: string
   name: string
@@ -102,6 +104,7 @@ type SeatRow = { personId: number; name: string; team: string; wave: number; ava
     （popup 默认 false：不弹窗，只走横幅；align 默认 left：保持原版式） */
 const EMPTY_ANNOUNCE_ITEM: AnnounceItemCfg = {
   enabled: false,
+  team: '',
   icon: '',
   title: '',
   name: '',
@@ -225,6 +228,8 @@ export default function AnnouncePage() {
       /** 展示页公告条（2026-10-14）：全量下发（含 enabled=false），编辑初值就是它 */
       items?: {
         enabled?: boolean
+        /** 2026-10-22 后端新增：'' = 通用；male / female = 仅该团 */
+        team?: string
         icon?: string
         title?: string
         name?: string
@@ -290,6 +295,7 @@ export default function AnnouncePage() {
               const period = String(it?.period ?? '')
               return {
                 enabled: !!it?.enabled,
+                team: it?.team === 'male' || it?.team === 'female' ? it.team : '',
                 icon: it?.icon ?? '',
                 title: it?.title ?? '',
                 name: it?.name ?? '',
@@ -404,6 +410,7 @@ export default function AnnouncePage() {
         // seat / period（2026-10-16 新增）：seat 只发 -1/0/1/2，period 只发 YYYY-MM（空串可发）
         body.items = its.map((it) => ({
           enabled: it.enabled,
+          team: it.team === 'male' || it.team === 'female' ? it.team : '',
           icon: it.icon.trim(),
           title: it.title,
           name: it.name,
@@ -615,6 +622,24 @@ export default function AnnouncePage() {
                 </button>
               </div>
               <div className="ann-grid ann-grid-fields">
+                {/* 适用团别（2026-10-22）：争霸赛等单团内容钉到男/女团；
+                    通用公告留空，两个团都会显示。下拉即保存。 */}
+                <label style={{ fontSize: 12.5, color: 'var(--ink3)' }}>
+                  适用团别
+                  <select
+                    value={it.team ?? ''}
+                    onChange={(e) =>
+                      setItemSaved(i, {
+                        team: e.target.value === 'male' ? 'male' : e.target.value === 'female' ? 'female' : '',
+                      })
+                    }
+                    style={input34}
+                  >
+                    <option value="">全部团别</option>
+                    <option value="male">仅男团</option>
+                    <option value="female">仅女团</option>
+                  </select>
+                </label>
                 {/* 样式：brand = 紫金渐变，plain = 白底描边（下拉即保存） */}
                 <label style={{ fontSize: 12.5, color: 'var(--ink3)' }}>
                   样式

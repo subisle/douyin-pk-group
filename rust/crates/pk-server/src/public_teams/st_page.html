@@ -8361,6 +8361,7 @@ function pickTeam() {
 function applyTeam() {
   $('mhTitle').textContent = LABEL() + '数据榜';
   document.title = LABEL() + '每日报告';
+  try { refreshTeamAnnouncements(); } catch (_) {}
   const linBtn = document.getElementById('navLineage');
   // 族谱是男团专属页：女团视角隐藏入口
   if (linBtn) linBtn.style.display = TEAM === 'female' ? 'none' : '';
@@ -9192,7 +9193,9 @@ async function fetchWithTimeout(url, opts, timeoutMs) {
 
 /** 拉 announcements 配置：任何失败（404/网络/后端未上线）都回落为空对象，绝不挡启动 */
 async function fetchAnnouncements() {
-  const r = await fetchWithTimeout('/api/public/announcements', {}, 2500);
+  const team = TEAM === 'male' || TEAM === 'female' ? TEAM : '';
+  const url = '/api/public/announcements' + (team ? '?team=' + encodeURIComponent(team) : '');
+  const r = await fetchWithTimeout(url, {}, 2500);
   if (!r.ok) return {};
   const d = await r.json().catch(() => ({}));
   return d && typeof d === 'object' ? d : {};
@@ -9228,6 +9231,33 @@ function splitRankNames(raw) {
     .slice(0, 3);
 }
 
+/** 公告条按当前团别过滤（2026-10-22）：
+    team 空 = 男女团通用；male/female = 仅该团。空团别视角（全团 / 登录前）
+    不做额外限制，保留全部公告；真正登录后 applyLoginState 会切到本团并重渲染。 */
+function announcementItemsForTeam(items, team) {
+  const t = team === 'male' || team === 'female'
+    ? team
+    : (TEAM === 'male' || TEAM === 'female' ? TEAM : 'all');
+  return (Array.isArray(items) ? items : []).filter((it) => {
+    if (!it) return false;
+    const itTeam = it.team === 'male' || it.team === 'female' ? it.team : '';
+    return !itTeam || t === 'all' || itTeam === t;
+  });
+}
+
+/** 当前缓存里的公告条来源：site.items 为主，登录前探测结果兜底。 */
+function currentAnnouncementItems() {
+  if (site && Array.isArray(site.items)) return site.items;
+  if (typeof siteAnnouncements !== 'undefined' && siteAnnouncements &&
+      Array.isArray(siteAnnouncements.items)) return siteAnnouncements.items;
+  return [];
+}
+
+/** 团别变化后立即刷新已缓存横幅，不等下一次网络请求。 */
+function refreshTeamAnnouncements() {
+  renderAnnounceItems(currentAnnouncementItems());
+}
+
 /** 📣 头部公告行渲染（2026-10-17 用户口径改版）：原来把每条 enabled 渲染成一张竖排
     .ann-item 大卡（#annItems 顶部占近半屏、滚走前一直占位），现在全部压缩进 masthead
     内的单行胶囊 #mhAnn —— 随头部吸顶、只占一行；多条 = 4 秒间隔自动轮换，同一行内
@@ -9259,7 +9289,7 @@ function renderAnnounceItems(items) {
     return;
   }
   /* 收集 enabled 且有内容的条目（跳过全空条），压成单行轮换队列 */
-  const list = (Array.isArray(items) ? items : []).filter((it) => {
+  const list = announcementItemsForTeam(items, TEAM).filter((it) => {
     if (!it || !it.enabled) return false;
     const title = String(it.title == null ? '' : it.title);
     const text = String(it.text == null ? '' : it.text);
@@ -9570,9 +9600,12 @@ function ipScoreParts(wave) {
 function maybeAnnounceItemsPopup() {
   /* 条目来源：siteAnnouncements.items 优先，site.items 兜底（与 bootRest 里横幅
      的两个来源一致；bootRest 在两者都齐了之后才调用本函数）。 */
-  const items = Array.isArray(siteAnnouncements.items) && siteAnnouncements.items.length
-    ? siteAnnouncements.items
-    : (site && Array.isArray(site.items) ? site.items : []);
+  const items = announcementItemsForTeam(
+    Array.isArray(siteAnnouncements.items) && siteAnnouncements.items.length
+      ? siteAnnouncements.items
+      : (site && Array.isArray(site.items) ? site.items : []),
+    TEAM,
+  );
   const pages = items.filter((it) => it && it.enabled && it.popup);
   if (!pages.length) return;
   /* 引导让位：引导弹窗开着（announceCtx 非空）本次不弹，别叠两层遮罩 */

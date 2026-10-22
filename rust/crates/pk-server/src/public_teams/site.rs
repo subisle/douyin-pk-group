@@ -71,12 +71,12 @@ pub async fn site(
     都只含上线条目。 */
     let mut announcement_json = if ann.enabled {
         let mut v = ann.to_json();
-        v["items"] = ann.public_items_json();
+        v["items"] = ann.public_items_json_for(&query_team);
         v
     } else {
         Value::Null
     };
-    let mut items = ann.public_items_json();
+    let mut items = ann.public_items_json_for(&query_team);
     let mut celebrate = serde_json::to_value(&ann.celebrate).unwrap_or(Value::Null);
     if !s.wave {
         // 数值总闸门：除榜单/个人卡外，站点头部与公告/庆祝里的 wave 也不能绕过。
@@ -145,6 +145,12 @@ pub struct ListQuery {
     pub period: Option<String>,
 }
 
+/// 登录页公告探测的团别过滤。空 / all / 非法 = 全团通用视角，返回所有适用条目。
+#[derive(Deserialize, Default)]
+pub struct PublicAnnouncementQuery {
+    pub team: Option<String>,
+}
+
 /// GET /api/public/announcements：登录页用的轻量公告端点（2026-10-13，无需登录）。
 ///
 /// 为什么不直接用 site()：登录门出现时用户还没登录，site() 要过登录门
@@ -158,11 +164,15 @@ pub struct ListQuery {
 /// 公告/庆祝是全站性配置，且团关闭时展示页（含登录门）照样要能取到这两块。
 /// 2026-10-14：新增 `items`（展示页公告条，site 未回来前的兜底数据源），
 /// 与 site 同口径（load_effective + public_items_json）。
-pub async fn public_announcements(State(st): State<ArcState>) -> ApiResult {
+pub async fn public_announcements(
+    State(st): State<ArcState>,
+    Query(q): Query<PublicAnnouncementQuery>,
+) -> ApiResult {
     let s = PublicSettings::load(&st).await;
     let ann = Announcement::load_effective(&st).await;
+    let team = q.team.as_deref().unwrap_or("");
     let mut celebrate = ann.celebrate_public_json();
-    let mut items = ann.public_items_json();
+    let mut items = ann.public_items_json_for(team);
     if !s.wave {
         // 登录门阶段同样受数值总闸门约束（这个端点不经过 site 的清洗）。
         hide_wave_numbers(&mut celebrate);

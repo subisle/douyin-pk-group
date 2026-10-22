@@ -499,6 +499,9 @@ pub struct Announcement {
 pub struct AnnounceItem {
     /// 是否启用；false 的条目保存在配置里（后台可编辑），但公开下发时被过滤掉
     pub enabled: bool,
+    /// 适用团别（2026-10-22）："" = 男女团都显示；"male" = 仅男团；"female" = 仅女团。
+    /// 争霸赛等只属于单团的横幅必须钉到对应团，避免统一看板页串到另一团。
+    pub team: String,
     /// Material Symbols 图标名，写入与下发都过 [`STEP_ICON_WHITELIST`]；白名单外 → ""
     pub icon: String,
     /// 标题（如「初级争霸赛冠军」）
@@ -743,6 +746,21 @@ pub(super) fn normalize_align(raw: &str) -> String {
     }
 }
 
+/// 公告条适用团别归一：只收 `male` / `female`，其余（空、all、脏值）一律空串 = 男女团通用。
+pub(super) fn normalize_item_team(raw: &str) -> String {
+    match raw.trim() {
+        "male" => "male".to_string(),
+        "female" => "female".to_string(),
+        _ => String::new(),
+    }
+}
+
+/// 单条公告是否适用于某团。空团别（全团 / 游客视角）= 不限制；通用条目两边都显示。
+fn item_matches_team(item: &AnnounceItem, team: &str) -> bool {
+    let view = normalize_item_team(team);
+    view.is_empty() || item.team.is_empty() || item.team == view
+}
+
 /// `star_override`（格式「称号|人名|音浪」，1~3 段）里的第 2 段人名；没有则空串。
 /// 迁移合成时 celebrate.name 为空就回落到这里（与 site() 的 star 解析同口径）。
 pub(super) fn star_override_name(raw: &str) -> String {
@@ -801,6 +819,7 @@ pub(super) fn synth_item(
         };
         return Some(AnnounceItem {
             enabled: true,
+            team: String::new(),
             icon: "emoji_events".to_string(),
             title,
             name,
@@ -824,6 +843,7 @@ pub(super) fn synth_item(
     }
     Some(AnnounceItem {
         enabled: true,
+        team: String::new(),
         icon: "military_tech".to_string(),
         title,
         name,
@@ -875,6 +895,8 @@ pub(super) fn parse_items(arr: &[Value]) -> Vec<AnnounceItem> {
             let icon = v.get("icon").and_then(|x| x.as_str()).unwrap_or("").trim();
             Some(AnnounceItem {
                 enabled: v.get("enabled").and_then(|x| x.as_bool()).unwrap_or(false),
+                // 适用团别：只收 male/female；空/非法 = 男女团通用
+                team: normalize_item_team(v.get("team").and_then(|x| x.as_str()).unwrap_or("")),
                 // 白名单外的图标名直接丢掉（存空串），任意字符串不进配置/DOM
                 icon: if STEP_ICON_WHITELIST.contains(&icon) {
                     icon.chars().take(48).collect()
@@ -1035,6 +1057,8 @@ impl Announcement {
         };
         json!({
             "enabled": it.enabled,
+            // 适用团别：male / female / ""（通用）。展示端按当前视角再过滤一次。
+            "team": normalize_item_team(&it.team),
             "icon": icon,
             "title": it.title,
             "name": it.name,
@@ -1056,11 +1080,18 @@ impl Announcement {
 
     /// 公开下发形态：只发 `enabled=true` 的条目（enabled=false 的不下发），
     /// 顺序 = 配置数组顺序 = 展示端从上到下。
+    #[cfg(test)]
     pub(super) fn public_items_json(&self) -> Value {
+        self.public_items_json_for("")
+    }
+
+    /// 按团别裁剪公开条目：`team` 空 = 全团 / 游客视角，通用条目与男女团专属条目都返回；
+    /// male/female 只返回本团专属 + 通用条目。条目本身仍按 enabled 过滤。
+    pub(super) fn public_items_json_for(&self, team: &str) -> Value {
         Value::Array(
             self.items
                 .iter()
-                .filter(|i| i.enabled)
+                .filter(|i| i.enabled && item_matches_team(i, team))
                 .map(Self::item_json)
                 .collect(),
         )
@@ -1423,6 +1454,7 @@ mod announcement_items_tests {
     fn item(title: &str, name: &str, tone: &str, enabled: bool) -> AnnounceItem {
         AnnounceItem {
             enabled,
+            team: String::new(),
             icon: String::new(),
             title: title.into(),
             name: name.into(),
@@ -1805,6 +1837,42 @@ mod announcement_items_tests {
             .public_items_json()[0]["popup"],
             false
         );
+    }
+
+    /// 公告条按团别隔离（2026-10-22）：通用条目男女团都下发；male/female 专属条目
+    /// 只在自己团出现，空团别（全团 / 登录页兜底）不丢任何条目。
+    #[test]
+    fn item_team_filters_public_items_per_team() {
+        let mut common = item("通用公告", "", "plain", true);
+        common.team = String::new();
+        let mut male = item("中级争霸赛冠军", "浩龙", "brand", true);
+        male.team = "male".into();
+        let mut female = item("女团活动", "", "plain", true);
+        female.team = "female".into();
+        let a = Announcement {
+            items: vec![common, male, female],
+            ..Default::default()
+        };
+        let names = |v: Value| {
+            v.as_array()
+                .unwrap()
+                .iter()
+                .map(|x| x["title"].as_str().unwrap_or("").to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(a.public_items_json_for("")), vec!["通用公告", "中级争霸赛冠军", "女团活动"]);
+        assert_eq!(names(a.public_items_json_for("male")), vec!["通用公告", "中级争霸赛冠军"]);
+        assert_eq!(names(a.public_items_json_for("female")), vec!["通用公告", "女团活动"]);
+        assert_eq!(a.public_items_json_for("female")[0]["team"], "");
+        assert_eq!(a.public_items_json_for("male")[1]["team"], "male");
+        let parsed = parse_items(&[json!({
+            "enabled": true, "title": "仅女团", "team": "female"
+        })]);
+        assert_eq!(parsed[0].team, "female");
+        let bad = parse_items(&[json!({
+            "enabled": true, "title": "脏团别", "team": "all"
+        })]);
+        assert_eq!(bad[0].team, "");
     }
 
     /// 三甲席位 seat / period（2026-10-16 用户口径「直接选择主播 x 月成绩」）：
