@@ -16,8 +16,8 @@ pub async fn site(
     if !s.team_enabled(&team) {
         return Ok(Json(json!({ "published": false })));
     }
-    let query_team = data_team(&team, &token_team(&headers)).to_string();
     gate_team(&st, s.login_required, &team, &headers).await?;
+    let query_team = data_team(&team, &token_team(&headers)).to_string();
     let dates = crate::repos::get_available_dates(&st, None, false).await?;
     let imported_months = crate::repos::get_imported_month_periods(&st, None).await;
     let monthly_periods = public_periods(&dates, &imported_months, false);
@@ -106,6 +106,13 @@ pub async fn site(
         // 展示页公告条（2026-10-14）新增键：数组顺序 = 从上到下；只含 enabled=true，
         // 是展示端公告/冠军横幅的**唯一来源**（champ/celebrate 保留兼容，页面不再单独渲染）
         "items": items,
+        // 看板弹幕配置：登录后随 site 一起下发，登录前轻量配置端点不再携带。
+        "danmaku": {
+            "enabled": ann.danmaku.enabled,
+            "top": ann.danmaku.normalized_top(),
+            "dailyChampion": ann.danmaku.daily_champion,
+            "contestChampion": ann.danmaku.contest_champion,
+        },
         "settings": {
             "daily": s.daily,
             "monthly": s.monthly,
@@ -131,9 +138,12 @@ fn public_periods(dates: &[String], imported_months: &[String], yearly: bool) ->
         .filter_map(|d| if yearly { d.get(0..4) } else { d.get(0..7) })
         .map(str::to_string)
         .collect();
-    out.extend(imported_months.iter().filter_map(|p| {
-        if yearly { p.get(0..4) } else { p.get(0..7) }
-    }).map(str::to_string));
+    out.extend(
+        imported_months
+            .iter()
+            .filter_map(|p| if yearly { p.get(0..4) } else { p.get(0..7) })
+            .map(str::to_string),
+    );
     out.sort_unstable_by(|a, b| b.cmp(a));
     out.dedup();
     out
@@ -145,12 +155,6 @@ pub struct ListQuery {
     pub period: Option<String>,
 }
 
-/// 登录页公告探测的团别过滤。空 / all / 非法 = 全团通用视角，返回所有适用条目。
-#[derive(Deserialize, Default)]
-pub struct PublicAnnouncementQuery {
-    pub team: Option<String>,
-}
-
 /// GET /api/public/announcements：登录页用的轻量公告端点（2026-10-13，无需登录）。
 ///
 /// 为什么不直接用 site()：登录门出现时用户还没登录，site() 要过登录门
@@ -160,25 +164,14 @@ pub struct PublicAnnouncementQuery {
 /// - celebrate：登录后彩带庆祝（enabled/confetti/title/name/wave），
 ///   title/name 空时前端回退推送配置 star_title / star_override 的值。
 ///
-/// 不下发 steps / version 等引导弹窗字段。不带团别参数、也不查 team_enabled：
-/// 公告/庆祝是全站性配置，且团关闭时展示页（含登录门）照样要能取到这两块。
-/// 2026-10-14：新增 `items`（展示页公告条，site 未回来前的兜底数据源），
-/// 与 site 同口径（load_effective + public_items_json）。
-pub async fn public_announcements(
-    State(st): State<ArcState>,
-    Query(q): Query<PublicAnnouncementQuery>,
-) -> ApiResult {
+/// 只下发 `loginRequired` 与登录卡公告位。看板公告 items / celebrate / danmaku
+/// 必须登录后从 `/api/public/teams/{team}` 取，避免登录前响应泄露艺名、头像或音浪。
+pub async fn public_announcements(State(st): State<ArcState>) -> ApiResult {
     let s = PublicSettings::load(&st).await;
     let ann = Announcement::load_effective(&st).await;
-    let team = q.team.as_deref().unwrap_or("");
-    let mut celebrate = ann.celebrate_public_json();
-    let mut items = ann.public_items_json_for(team);
-    if !s.wave {
-        // 登录门阶段同样受数值总闸门约束（这个端点不经过 site 的清洗）。
-        hide_wave_numbers(&mut celebrate);
-        hide_wave_numbers(&mut items);
-    }
-    // 登录页图标归一化先算好再进 json!（宏的值位置放不了语句块），与 placement_json 同口径
+    // 登录前只下发「是否要登录 + 登录卡公告文案」两项公开配置。
+    // 榜单公告 items / celebrate / danmaku 一律等登录后从 /teams/{team} 取，
+    // 避免登录前响应里提前带出主播艺名、头像和音浪。
     let login_icon = ann.placements.login.icon.trim();
     let login_icon = if STEP_ICON_WHITELIST.contains(&login_icon) {
         login_icon
@@ -186,22 +179,11 @@ pub async fn public_announcements(
         ""
     };
     Ok(Json(json!({
+        "loginRequired": s.login_required,
         "login": {
             "enabled": ann.placements.login.enabled,
             "text": ann.placements.login.text,
             "icon": login_icon,
-        },
-        // 庆祝配置裁剪形态（celebrate_public_json），登录后彩带庆祝用
-        "celebrate": celebrate,
-        // 展示页公告条（2026-10-14）：与 site.items 同口径，登录门弹出时页面就能兜底渲染
-        "items": items,
-        // 看板弹幕（2026-10-19）：与 to_json 的 danmaku 同一 camelCase 键
-        // （enabled/top/dailyChampion/contestChampion，top 已按 0..=830 白名单归一）
-        "danmaku": {
-            "enabled": ann.danmaku.enabled,
-            "top": ann.danmaku.normalized_top(),
-            "dailyChampion": ann.danmaku.daily_champion,
-            "contestChampion": ann.danmaku.contest_champion,
         },
     })))
 }
@@ -266,8 +248,8 @@ pub async fn daily(
     if !s.team_enabled(&team) {
         return Ok(Json(json!({ "published": false })));
     }
-    let query_team = data_team(&team, &token_team(&headers)).to_string();
     gate_team(&st, s.login_required, &team, &headers).await?;
+    let query_team = data_team(&team, &token_team(&headers)).to_string();
     if !s.daily {
         return Ok(Json(json!({ "published": true, "dailyEnabled": false })));
     }
@@ -946,8 +928,8 @@ pub async fn monthly(
     headers: HeaderMap,
 ) -> ApiResult {
     let s = PublicSettings::load(&st).await;
-    let query_team = data_team(&team, &token_team(&headers)).to_string();
     gate_team(&st, s.login_required, &team, &headers).await?;
+    let query_team = data_team(&team, &token_team(&headers)).to_string();
     // 显隐判定用**路径上的团**（all 恒为开放），数据过滤才用 query_team。
     // 以前把 query_team 传进去判 team_enabled，匿名访客 token 为空 → data_team 返回 ""
     // → team_enabled("") == false，月/年榜对所有人 published:false（前端 .slice 崩）。
@@ -961,8 +943,8 @@ pub async fn yearly(
     headers: HeaderMap,
 ) -> ApiResult {
     let s = PublicSettings::load(&st).await;
-    let query_team = data_team(&team, &token_team(&headers)).to_string();
     gate_team(&st, s.login_required, &team, &headers).await?;
+    let query_team = data_team(&team, &token_team(&headers)).to_string();
     period_public(&st, &team, &query_team, &q, false).await
 }
 
@@ -1159,16 +1141,19 @@ async fn star_auto(st: &AppState, team: &str, date: &str) -> (String, i64) {
 }
 
 /// GET /api/public/teams/{team}/star?date=YYYY-MM-DD：所选日期的每日之星
-/// （前端切换日期时横幅跟随；未登录可看——榜单数据本来就公开）
+/// （前端切换日期时横幅跟随；与榜单共用展示端登录门，并按 token 团别收窄）
 pub async fn star_of_day(
     State(st): State<ArcState>,
     Path(team): Path<String>,
     Query(q): Query<std::collections::HashMap<String, String>>,
+    headers: HeaderMap,
 ) -> ApiResult {
     let s = PublicSettings::load(&st).await;
     if !s.team_enabled(&team) {
         return Ok(Json(json!({ "published": false })));
     }
+    gate_team(&st, s.login_required, &team, &headers).await?;
+    let query_team = data_team(&team, &token_team(&headers)).to_string();
     if !s.data_enabled || !s.daily {
         return Ok(Json(json!({ "published": true, "dailyEnabled": false })));
     }
@@ -1183,7 +1168,7 @@ pub async fn star_of_day(
             String::new()
         }
     };
-    let (name, wave) = star_auto(&st, &team, &date).await;
+    let (name, wave) = star_auto(&st, &query_team, &date).await;
     if name.is_empty() {
         return Ok(Json(json!({
             "title": "每日之星",

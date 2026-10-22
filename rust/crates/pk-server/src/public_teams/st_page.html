@@ -3207,7 +3207,7 @@ function renderTeamSwitch(me) {
 /** 切团：换 TEAM 后整页重拉（榜单 / 日期条 / 族谱都按团别取数）。
     只改前端视角，不动 token —— 后端 gate_team 对「任意团」token 一律放行，
     所以从 all 切到 male 不需要重新登录。 */
-function switchTeam(t) {
+async function switchTeam(t) {
   if (t !== 'all' && t !== 'male' && t !== 'female') return;
   if (TEAM === t) return;
   TEAM = t;
@@ -3217,9 +3217,23 @@ function switchTeam(t) {
   renderTeamSwitch(meState);
   applyTeam();
   syncNav();
-  /* 族谱是男团专属页：正在看族谱时切到女团会被改道，改道由 switchView 负责，
-     这里只保证当前视图的数据按新团别重拉 */
-  go();
+  if (t !== 'female' && !plans.length) loadPlans().catch(() => {});
+  /* 分组/族谱都是男团专属：切到女团时不要继续请求旧页数据。 */
+  if (t === 'female' && (view === 'lineage' || view === 'group')) {
+    switchView('data');
+  } else {
+    go();
+  }
+  /* site.items 是团别裁剪后的公告源；切团后补拉一次，否则女团专属公告不在缓存里。 */
+  try {
+    const next = await api('/api/public/teams/' + t);
+    if (TEAM !== t || !next || next.published === false) return;
+    site = next;
+    syncNav();
+    renderAnnounceItems(Array.isArray(site.items) ? site.items : []);
+    renderHomeAnnouncement(site.placements && site.placements.home);
+    try { renderDanmaku(); } catch (_) {}
+  } catch (_) {}
 }
 
 /** 关登录门 + 落地登录态。
@@ -4197,6 +4211,8 @@ async function refreshDataAfterImport() {
     if (view !== 'data') return;
     renderDates();
     await loadData(null, true);
+    renderAnnounceItems(Array.isArray(site.items) ? site.items : []);
+    renderHomeAnnouncement(site.placements && site.placements.home);
     try { renderDanmaku(); } catch (_) {}
     toast('数据已更新，每日最高已刷新');
   } finally {
@@ -4249,6 +4265,7 @@ function renderList() {
     挂载闸：登录门 / 三甲通报弹窗 / 引导弹窗 任一开着 → 条内保持空（占位不闪），
     各自关闭时 renderDanmaku() 补挂（幂等）。 */
 function dmCfg() {
+  if (site && site.danmaku && typeof site.danmaku === 'object') return site.danmaku;
   const cfg = (siteAnnouncements && typeof siteAnnouncements === 'object') ? siteAnnouncements : {};
   return (cfg.danmaku && typeof cfg.danmaku === 'object') ? cfg.danmaku : {};
 }
@@ -4403,19 +4420,23 @@ function bindAvatarFallback() {
 
 /* ==================== 加载：数据页 ==================== */
 async function loadData(signal, fresh) {
-  const scope = period === 'daily' ? (curDate || '') : (curPeriod || '');
-  let key = pageDataKey(TEAM, period, scope);
-  const url = period === 'daily'
-    ? '/api/public/teams/' + TEAM + '/daily' + (curDate ? '?date=' + encodeURIComponent(curDate) : '')
-    : '/api/public/teams/' + TEAM + '/' + period + (curPeriod ? '?period=' + encodeURIComponent(curPeriod) : '');
+  const team = TEAM;
+  const reqPeriod = period;
+  const scope = reqPeriod === 'daily' ? (curDate || '') : (curPeriod || '');
+  let key = pageDataKey(team, reqPeriod, scope);
+  const url = reqPeriod === 'daily'
+    ? '/api/public/teams/' + team + '/daily' + (curDate ? '?date=' + encodeURIComponent(curDate) : '')
+    : '/api/public/teams/' + team + '/' + reqPeriod + (curPeriod ? '?period=' + encodeURIComponent(curPeriod) : '');
   let d = fresh ? null : cachedPageData(key);
   if (!d) {
     d = await api(url, { signal });
-    if (period === 'daily' && d && d.date) key = pageDataKey(TEAM, 'daily', d.date);
-    else if (d && d.period) key = pageDataKey(TEAM, period, d.period);
+    /* 可切团账号在请求飞行中切团：旧团响应绝不能写入新团缓存/DOM。 */
+    if (TEAM !== team || period !== reqPeriod) return;
+    if (reqPeriod === 'daily' && d && d.date) key = pageDataKey(team, 'daily', d.date);
+    else if (d && d.period) key = pageDataKey(team, reqPeriod, d.period);
     cachePageData(key, d);
   }
-  if (period === 'daily') {
+  if (reqPeriod === 'daily') {
     curDate = d.date;
     listAll = d.items || [];
     $('mhSub').textContent = 'DATA ' + (curDate || '').replaceAll('-', '.') +
@@ -4426,8 +4447,8 @@ async function loadData(signal, fresh) {
        以前直接 curPeriod = d.period 再 .slice 会抛错，页面只剩「暂时取不到数据」。 */
     if (!d || d.published === false) {
       listAll = [];
-      $('mhSub').textContent = period === 'monthly' ? 'MONTH' : 'YEAR';
-      $('pNow').textContent = period === 'monthly'
+      $('mhSub').textContent = reqPeriod === 'monthly' ? 'MONTH' : 'YEAR';
+      $('pNow').textContent = reqPeriod === 'monthly'
         ? nowPeriod('monthly').slice(0, 4) + '年' + (+nowPeriod('monthly').slice(5, 7)) + '月'
         : nowPeriod('yearly') + '年';
       $('view').innerHTML = '<div class="section"><div class="empty"><span class="big">📺</span>' +
@@ -4436,12 +4457,12 @@ async function loadData(signal, fresh) {
     }
     if (d.periodEnabled === false) {
       listAll = [];
-      $('mhSub').textContent = period === 'monthly' ? 'MONTH' : 'YEAR';
+      $('mhSub').textContent = reqPeriod === 'monthly' ? 'MONTH' : 'YEAR';
       $('view').innerHTML = '<div class="section"><div class="empty"><span class="big">📺</span>' +
-        (period === 'monthly' ? '每月' : '每年') + '榜暂未开放<br>换个口径看看</div></div>';
+        (reqPeriod === 'monthly' ? '每月' : '每年') + '榜暂未开放<br>换个口径看看</div></div>';
       return;
     }
-    curPeriod = snapPeriod(period, d.period || curPeriod);
+    curPeriod = snapPeriod(reqPeriod, d.period || curPeriod);
     if (!curPeriod) {
       listAll = [];
       $('view').innerHTML = '<div class="section"><div class="empty"><span class="big">📺</span>' +
@@ -4450,14 +4471,14 @@ async function loadData(signal, fresh) {
     }
     /* periodic：月/年榜行没有 absentDays/totalWave 概念，榜单行不渲染「本月/未播」副行 */
     listAll = (d.items || []).map(x => ({ ...x, hasData: true, periodic: true }));
-    $('mhSub').textContent = (period === 'monthly' ? 'MONTH ' : 'YEAR ') + curPeriod;
-    $('pNow').textContent = period === 'monthly'
+    $('mhSub').textContent = (reqPeriod === 'monthly' ? 'MONTH ' : 'YEAR ') + curPeriod;
+    $('pNow').textContent = reqPeriod === 'monthly'
       ? curPeriod.slice(0, 4) + '年' + (+curPeriod.slice(5, 7)) + '月'
       : curPeriod + '年';
     renderDates();
   }
   renderList();
-  if (period === 'daily') scheduleDashboardPrefetch();
+  if (reqPeriod === 'daily') scheduleDashboardPrefetch();
 }
 
 function renderDates() {
@@ -8405,7 +8426,7 @@ function syncNav() {
   });
   /* 分组子页全关 → 分组主导航也没了 */
   const anySub = [...document.querySelectorAll('#subnav button')].some(b => !b.disabled);
-  show('navGroup', groupOn && anySub);
+  show('navGroup', groupOn && anySub && TEAM !== 'female');
   show('navData', dataOn);
   show('navLineage', linOn);
   show('navMy', s.loginRequired !== false);   // 关登录 = 全面开放，没有「我的」页
@@ -8415,17 +8436,10 @@ function syncNav() {
 }
 
 /* ==================== 启动（统一展示端） ====================
-   2026-10-11 修复：首页不再弹「男团 / 女团」选择卡，也不根据登录账号所属团
-   跳转；统一直接进 /api/public/teams/all 的全量展示。 */
-async function siteIsOpen() {
-  try {
-    /* 带上已有登录态：登录门开启时 /all 对有效 token 放行（后端 gate_team 口径）。
-       token 走 X-My-Token 头（2026-10-13）；裸 fetch 或 ?access_token= 都会 401，
-       导致每次 boot 又弹一次登录门（"登录成功又回登录门 / 要登录两次"的根因之一）。 */
-    const r = await fetchWithTimeout('/api/public/teams/all', { headers: myTokenHeaders() }, 2500);
-    return r.ok;
-  } catch (_) { return false; }
-}
+   2026-10-22 安全 / 速度口径：
+   · 登录前只请求公开的 /api/public/announcements，不再探测 /teams/all；
+   · 登录响应先确定账号团别（male / female / 空=全团），后续所有数据请求再按该团别发出；
+   · 公告与登录门并行准备，登录后优先首屏看板，其余 plans / 预取并行补上。 */
 
 /* 团别选择卡（关闭登录门时）：打开展示页先选「男团 / 女团」 */
 function pickTeam() {
@@ -9279,9 +9293,8 @@ async function fetchWithTimeout(url, opts, timeoutMs) {
 
 /** 拉 announcements 配置：任何失败（404/网络/后端未上线）都回落为空对象，绝不挡启动 */
 async function fetchAnnouncements() {
-  const team = TEAM === 'male' || TEAM === 'female' ? TEAM : '';
-  const url = '/api/public/announcements' + (team ? '?team=' + encodeURIComponent(team) : '');
-  const r = await fetchWithTimeout(url, {}, 2500);
+  /* 登录前只取最小配置（loginRequired + 登录卡公告），不带主播/榜单数据。 */
+  const r = await fetchWithTimeout('/api/public/announcements', {}, 2500);
   if (!r.ok) return {};
   const d = await r.json().catch(() => ({}));
   return d && typeof d === 'object' ? d : {};
@@ -10422,30 +10435,37 @@ function hideBootGate() {
 
 (async function boot() {
   applyTeam();
-  /* 登录优先（2026-10-21）：没有 token 时先同步渲染登录门，再等公告/站点探测。
-     这样慢网络下用户第一眼看到的是可输入的手机号/密码，而不是空看板 + LOADING。 */
-  const earlyLogin = !myToken() ? ensureLogin() : null;
-  const openTask = siteIsOpen();
-  /* 公告/庆祝配置（2026-10-13）：并行探测 GET /api/public/announcements，
-     失败/后端未上线时回落为全关（{}），所有消费点都按 falsy 兜底，不挡启动流程。
-     items 也在这份里先垫一帧，见 bootRest 顶部。 */
-  siteAnnouncements = await fetchAnnouncements().catch(() => ({}));
-  /* 🎈 弹幕配置兜底（2026-10-19）：danmaku 字段缺失（老后端）→ 全关安全值，
-     消费点 renderDanmaku 只认 enabled===true；字段在但个别键缺失时逐键回落
-     （top 712 = 底部导航上方红框位，两个开关默认开）。 */
-  siteAnnouncements.danmaku = (function () {
-    const d = siteAnnouncements.danmaku && typeof siteAnnouncements.danmaku === 'object'
-      ? siteAnnouncements.danmaku : {};
-    return {
-      enabled: d.enabled === true,
-      top: d.top == null ? 0 : d.top,   // 2026-10-19 第三轮：top 语义=微调偏移（-80..80，默认 0）
-      dailyChampion: d.dailyChampion !== false,
-      contestChampion: d.contestChampion !== false,
-    };
-  })();
-  try { refreshGateAnnouncement(); } catch (_) {}
-  if (await openTask) { hideBootGate(); bootRest(); return; }
-  const me = earlyLogin ? await earlyLogin : await ensureLogin();
+  /* 登录优先 + 登录卡公告并行（2026-10-22）：没有 token 时先同步渲染登录门，
+     同时只拉公开的登录配置；绝不先请求 /teams/all 或任何榜单数据。
+     登录与公告谁先回谁先推进：用户已登录时不再被慢公告请求卡住。 */
+  const earlyLogin = ensureLogin();
+  const annTask = fetchAnnouncements().catch(() => ({}));
+  const first = await Promise.race([
+    earlyLogin.then((me) => ({ kind: 'login', me })),
+    annTask.then((d) => ({ kind: 'ann', d: d || {} })),
+  ]);
+
+  let me = null;
+  if (first.kind === 'login') {
+    me = first.me;
+    /* 公告晚到只补登录卡文案；看板公告/彩带等登录后统一从 site 取。 */
+    annTask.then((d) => {
+      siteAnnouncements = d || {};
+      try { refreshGateAnnouncement(); } catch (_) {}
+    });
+  } else {
+    siteAnnouncements = first.d || {};
+    try { refreshGateAnnouncement(); } catch (_) {}
+    /* 后台明确关登录才开放；缺字段/旧后端按需要登录处理，安全优先。 */
+    if (siteAnnouncements.loginRequired === false) {
+      gateResolve = null;
+      hideBootGate();
+      bootRest({ authed: false });
+      return;
+    }
+    me = await earlyLogin;
+  }
+
   applyLoginState(me);   // 登录后立刻按账号团别设置 TEAM
   /* 2026-10-18 契约 v2 §4.3/§4.6：刷新页面恢复登录态时也要接住两个状态 ——
      needProfile → 复用 #gate 渲染不可关闭的补全卡（阻断逻辑自愈）；
@@ -10455,15 +10475,12 @@ function hideBootGate() {
   else if (me && me.mustChangePass && !mustPwdPrompted) {
     setTimeout(() => { try { if (!mustPwdPrompted) openMustChangeDlg(); } catch (_) {} }, 600);
   }
-  /* 登录彩带（2026-10-13）：celebrate.enabled && celebrate.confetti 才放。
-     只放彩带、不挂横幅（展示内容走 items）；
-     celebrateFiredThisLoad 记着本次页面的庆祝事件已开跑，site 数据回来后
-     ensureCelebrateConfetti 不会因为当天锁误吞/重放。 */
-  fireConfettiOnce(siteAnnouncements.celebrate);
-  bootRest();
+  /* 登录前已在 boot() 里完成 /my/who 校验，这里不要二次 who + 二次 site。 */
+  bootRest({ authed: true });
 })();
 
-async function bootRest() {
+async function bootRest(opts) {
+  opts = opts || {};
 
   /* 主导航 + 分组子导航 + 前进/后退
      底栏同时支持「普通点击」与「长按拖拽松手」切路由。pointerup 后浏览器补发的
@@ -10529,6 +10546,9 @@ async function bootRest() {
      renderAnnounceItems(site.items) 整包覆盖；site.items 不是数组（旧后端）时才回落到这份兜底。 */
   renderAnnounceItems(Array.isArray(siteAnnouncements.items) ? siteAnnouncements.items : []);
 
+  /* 站点配置与分组方案并行：plans 不依赖 site，提前发出可省掉一个串行 RTT；
+     看板首屏也不会再等 plans。 */
+  const plansTask = TEAM === 'female' ? Promise.resolve() : loadPlans();
   /* 先拿站点配置：登录开关在 settings 里，关登录时根本不用弹登录门。
      401（要登录）→ 弹登录门重试。 */
   const fetchSite = () => api('/api/public/teams/' + TEAM);
@@ -10566,7 +10586,7 @@ async function bootRest() {
   /* 展示端登录门（2026-10-11）：后台「开启登录」开着 → 先登录再看；
      关掉 → 全面开放，直接展示全量数据（统一入口，不再分男团/女团）。 */
   const loginRequired = (site.settings || {}).loginRequired !== false;
-  if (loginRequired) {
+  if (loginRequired && !opts.authed) {
     await ensureLogin().then(applyLoginState);
     site = await fetchSite();
   }
@@ -10592,7 +10612,7 @@ async function bootRest() {
   /* 每日报告页被关掉时首页落到分组（分组也关则落到族谱）；深链指到被关的页也一样改道 */
   const firstOn = (v, fb) => {
     if (v === 'data' && s.dataEnabled === false) return fb;
-    if (v === 'group' && (s.groupEnabled === false ||
+    if (v === 'group' && (TEAM === 'female' || s.groupEnabled === false ||
         !document.querySelector('#subnav button:not([disabled])'))) return fb;
     if (v === 'lineage' && (s.lineageEnabled === false || TEAM === 'female')) return fb;
     if (v === 'my' && s.loginRequired === false) return fb;
@@ -10616,7 +10636,8 @@ async function bootRest() {
     : curPeriod + '年';
   renderDates();
 
-  await loadPlans();
+  /* 看板首屏不等分组方案：plans 已与 site 并行启动；
+     只有当前目标确实是分组页时才等待 plans。 */
   syncNav();
 
   /* 首页 = 每日报告：/st/m 直开时保留路径不跳转；带子路径（/group/xxx、/lineage）时
@@ -10631,6 +10652,7 @@ async function bootRest() {
     if (sub && sub.disabled) curGroup = GROUP_PAGES.find(p => !document
       .querySelector('#subnav button[data-g="' + p.key + '"]').disabled)?.key || curGroup;
   }
+  if (view === 'group') await plansTask;
   switchView(view, { push: false });
   scheduleRefresh();
   /* 引导放最后：它依赖 site.settings / site.announcement，且必须让位给登录门。

@@ -45,6 +45,17 @@ pub(crate) fn my_team_allows(my_team: &str, path_team: &str) -> bool {
     path_team == "all" || my_team.is_empty() || my_team == path_team
 }
 
+/// 公开接口的统一身份团别（2026-10-22）：需要登录的数据接口先走展示端登录门，
+/// 返回 token 中的真实团别；空串 = 全团/游客，male/female = 固定团。
+pub(crate) async fn public_identity_team(
+    st: &AppState,
+    headers: &HeaderMap,
+) -> Result<String, ApiError> {
+    let s = PublicSettings::load(st).await;
+    admin::gate_team(st, s.login_required, "all", headers).await?;
+    Ok(admin::token_team(headers))
+}
+
 pub mod admin;
 mod avatars;
 mod binds;

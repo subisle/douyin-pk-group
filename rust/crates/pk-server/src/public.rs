@@ -1,4 +1,4 @@
-//! 对外只读展示端点（无需鉴权）。
+//! 对外只读展示端点（展示端登录开启时按公开登录门鉴权）。
 //!
 //! 只暴露「音浪 + 分组」这类公开展示需要的字段：
 //! - 不返回 personId / key / raw 等内部标识
@@ -173,7 +173,19 @@ impl DisplayConfig {
 }
 
 /// `GET /api/public/plans/{id}`：单个方案的公开展示数据
-pub async fn plan(State(st): State<std::sync::Arc<AppState>>, Path(id): Path<i64>) -> Response {
+pub async fn plan(
+    State(st): State<std::sync::Arc<AppState>>,
+    Path(id): Path<i64>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    let team = match crate::public_teams::public_identity_team(&st, &headers).await {
+        Ok(t) => t,
+        Err(e) => return e.into_response(),
+    };
+    // 争霸赛/晋级赛分组当前只属于男团；女团账号不返回方案详情。
+    if team == "female" {
+        return not_found();
+    }
     let Some(row) = store::get_published_plan(&st, id).await else {
         return not_found();
     };
@@ -457,8 +469,18 @@ pub async fn plan(State(st): State<std::sync::Arc<AppState>>, Path(id): Path<i64
 /// `GET /api/public/plans`：已发布方案的轻量列表
 /// 2026-10-10 起受公开站点设置约束：「分组」页关掉 → 全部不下发；
 /// 某赛事类型子页关掉 → 该类型方案按未上架处理。
-pub async fn plans(State(st): State<std::sync::Arc<AppState>>) -> Response {
+pub async fn plans(
+    State(st): State<std::sync::Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    let team = match crate::public_teams::public_identity_team(&st, &headers).await {
+        Ok(t) => t,
+        Err(e) => return e.into_response(),
+    };
     let s = crate::public_teams::PublicSettings::load(&st).await;
+    if team == "female" || s.group_enabled == false {
+        return Json(json!({ "items": [] })).into_response();
+    }
     let items: Vec<_> = store::list_plans(&st)
         .await
         .into_iter()

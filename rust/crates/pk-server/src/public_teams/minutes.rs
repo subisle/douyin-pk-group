@@ -1004,6 +1004,7 @@ pub async fn my_who(
                 艺名下发（契约 §3.7「无艺名回空串」）；phone 服务端打码。 */
                 return Ok(Json(json!({
                     "ok": true, "personId": 0, "name": info.bind_name(), "team": my_team,
+                    "anyTeam": my_team.is_empty(),
                     "phone": auth.phone, "admin": false, "bound": false, "needBind": true,
                     "needProfile": auth.need_profile, "needQq": auth.need_qq,
                     "mustChangePass": auth.must_change_pass,
@@ -1015,6 +1016,7 @@ pub async fn my_who(
             if info.is_admin {
                 return Ok(Json(json!({
                     "ok": true, "personId": 0, "name": token_name, "team": my_team,
+                    "anyTeam": my_team.is_empty(),
                     "phone": auth.phone, "admin": true, "bound": true,
                     "needProfile": false, "needQq": false,
                     "mustChangePass": auth.must_change_pass,
@@ -1025,6 +1027,7 @@ pub async fn my_who(
         }
         return Ok(Json(json!({
             "ok": true, "personId": 0, "name": token_name, "team": my_team,
+            "anyTeam": my_team.is_empty(),
             "phone": auth.phone, "admin": true, "bound": true,
             "needProfile": false, "needQq": false,
             "mustChangePass": auth.must_change_pass,
@@ -1057,6 +1060,7 @@ pub async fn my_who(
     };
     Ok(Json(json!({
         "ok": true, "personId": person_id, "name": name, "team": my_team,
+        "anyTeam": my_team.is_empty(),
         "phone": phone_masked, "bound": true, "switchable": switchable,
         "needProfile": auth.need_profile, "needQq": auth.need_qq,
         "mustChangePass": auth.must_change_pass,
