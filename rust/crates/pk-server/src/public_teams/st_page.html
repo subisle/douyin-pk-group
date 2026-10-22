@@ -3818,7 +3818,7 @@ function daySplitCell(absent, live) {
   const on = Math.max(0, Number(live) || 0);
   return '<div class="st-detail-cell" title="未直播 ' + off + ' 天 / 直播 ' + on + ' 天">' +
     '<div class="st-detail-lb">未播 / 直播天数</div>' +
-    '<div class="st-detail-v st-day-split"><span class="st-day-off">未' + off +
+    '<div class="st-detail-v st-day-split"><span class="st-day-off">' + off +
       '</span><span class="st-day-sep">/</span><span class="st-day-live">' + on + '</span></div></div>';
 }
 function detailHtml(it, rowMode) {
