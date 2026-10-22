@@ -2876,7 +2876,10 @@ const shiftMonth = (p, n) => {
    以前按 ‹ 能一路翻到 2026年3月，点进去只有空态，等于把不存在的月份的音浪摆给人看）。 */
 function dataPeriods(p) {
   const ds = (site && site.dates) || [];
-  return [...new Set(ds.map(d => p === 'monthly' ? d.slice(0, 7) : d.slice(0, 4)))];  // 降序
+  const server = (site && (p === 'monthly' ? site.monthlyPeriods : site.yearlyPeriods)) || [];
+  return [...new Set([...server, ...ds.map(d => p === 'monthly' ? d.slice(0, 7) : d.slice(0, 4))])]
+    .filter(Boolean)
+    .sort((a, b) => b.localeCompare(a));  // 降序
 }
 /** 当前周期不在有数据的列表里 → 吸附到 ≤ 它的最近一个有数据周期（没有就落到最早一个有数据周期） */
 function snapPeriod(p, cur) {
@@ -4024,11 +4027,13 @@ function scheduleDashboardPrefetch() {
     key: pageDataKey(TEAM, 'daily', d),
     url: '/api/public/teams/' + TEAM + '/daily?date=' + encodeURIComponent(d),
   }));
-  [...new Set(dates.map(d => d.slice(0, 7)))].forEach(p => jobs.push({
+  const monthPeriods = new Set([...(site.monthlyPeriods || []), ...dates.map(d => d.slice(0, 7))]);
+  [...monthPeriods].forEach(p => jobs.push({
     key: pageDataKey(TEAM, 'monthly', p),
     url: '/api/public/teams/' + TEAM + '/monthly?period=' + encodeURIComponent(p),
   }));
-  [...new Set(dates.map(d => d.slice(0, 4)))].forEach(p => jobs.push({
+  const yearPeriods = new Set([...(site.yearlyPeriods || []), ...dates.map(d => d.slice(0, 4))]);
+  [...yearPeriods].forEach(p => jobs.push({
     key: pageDataKey(TEAM, 'yearly', p),
     url: '/api/public/teams/' + TEAM + '/yearly?period=' + encodeURIComponent(p),
   }));

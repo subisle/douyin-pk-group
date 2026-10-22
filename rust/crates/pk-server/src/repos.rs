@@ -71,6 +71,31 @@ pub async fn get_available_dates(
     Ok(get_dates_info(st, source, force).await?.dates)
 }
 
+/// 已导入过整月时长或整月音浪的月份（YYYY-MM，倒序）。
+///
+/// 2026-10-22：展示端原先只从 daily_metric 的日数据推导可选月份，导致
+/// 只有整月表数据、没有日数据的 7/8/9 月无法进入月榜选择器。这里把两张
+/// 整月表里的 period 一并取回；任一表缺失只忽略该表，不影响站点启动。
+pub async fn get_imported_month_periods(st: &AppState, source: Option<&str>) -> Vec<String> {
+    let Ok(src) = st.source(source) else { return Vec::new() };
+    let id = src.id.clone();
+    let mut out: Vec<String> = Vec::new();
+    for table in ["monthly_duration", "monthly_wave"] {
+        let sql = format!("SELECT DISTINCT period FROM {table} WHERE period <> ''");
+        match pgrs::query(&st.pools, &id, &sql).await {
+            Ok(rows) => out.extend(
+                rows.iter()
+                    .filter_map(|r| r.try_get::<String, _>(0).ok())
+                    .filter(|p| p.len() == 7 && p.as_bytes().get(4) == Some(&b'-')),
+            ),
+            Err(e) => tracing::debug!(source = %id, table, error = %e, "读取整月数据月份失败，按空处理"),
+        }
+    }
+    out.sort_unstable_by(|a, b| b.cmp(a));
+    out.dedup();
+    out
+}
+
 pub async fn get_baseline_date(
     st: &AppState,
     source: Option<&str>,

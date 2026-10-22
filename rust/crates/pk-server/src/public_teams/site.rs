@@ -19,6 +19,9 @@ pub async fn site(
     let query_team = data_team(&team, &token_team(&headers)).to_string();
     gate_team(&st, s.login_required, &team, &headers).await?;
     let dates = crate::repos::get_available_dates(&st, None, false).await?;
+    let imported_months = crate::repos::get_imported_month_periods(&st, None).await;
+    let monthly_periods = public_periods(&dates, &imported_months, false);
+    let yearly_periods = public_periods(&dates, &imported_months, true);
     // 公告弹窗：开启时随站点配置一起下发；关闭时不下发（前端不弹）
     // load_effective（2026-10-14）：items 为空时按 celebrate/champ_banner 内存合成一条
     let ann = Announcement::load_effective(&st).await;
@@ -88,6 +91,10 @@ pub async fn site(
         "team": query_team,
         "latestDate": dates.first(),
         "dates": dates,
+        // 月 / 年口径的可用周期：日数据 + 整月导入表合并（2026-10-22）。
+        // 只导入整月、没有日明细的 7/8/9 月也必须能进入展示端月份选择器。
+        "monthlyPeriods": monthly_periods,
+        "yearlyPeriods": yearly_periods,
         "star": star,
         "champ": champ,
         "announcement": announcement_json,
@@ -115,6 +122,21 @@ pub async fn site(
             "loginRequired": s.login_required,
         },
     })))
+}
+
+/// 展示端月 / 年选择器的可用周期：日数据派生周期与整月导入周期取并集，倒序去重。
+fn public_periods(dates: &[String], imported_months: &[String], yearly: bool) -> Vec<String> {
+    let mut out: Vec<String> = dates
+        .iter()
+        .filter_map(|d| if yearly { d.get(0..4) } else { d.get(0..7) })
+        .map(str::to_string)
+        .collect();
+    out.extend(imported_months.iter().filter_map(|p| {
+        if yearly { p.get(0..4) } else { p.get(0..7) }
+    }).map(str::to_string));
+    out.sort_unstable_by(|a, b| b.cmp(a));
+    out.dedup();
+    out
 }
 
 #[derive(Deserialize)]
@@ -1213,5 +1235,22 @@ mod tests {
         );
         assert_eq!(avatar_url(1027, ""), "/api/public/avatars/1027");
         assert_eq!(avatar_url(1027, "   "), "/api/public/avatars/1027");
+    }
+
+    /// 2026-10-22：只在 monthly_wave / monthly_duration 里有数据、daily_metric
+    /// 没有对应日期的月份，也必须进入展示端月 / 年周期列表。
+    #[test]
+    fn public_periods_merge_imported_months() {
+        let dates = vec!["2026-10-21".to_string(), "2026-10-20".to_string()];
+        let imported = vec![
+            "2026-09".to_string(),
+            "2026-08".to_string(),
+            "2026-07".to_string(),
+        ];
+        assert_eq!(
+            public_periods(&dates, &imported, false),
+            vec!["2026-10", "2026-09", "2026-08", "2026-07"]
+        );
+        assert_eq!(public_periods(&dates, &imported, true), vec!["2026"]);
     }
 }
