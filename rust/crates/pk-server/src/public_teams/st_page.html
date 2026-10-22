@@ -4148,6 +4148,62 @@ function scheduleDashboardPrefetch() {
   setTimeout(kick, 1500);
   if (window.requestIdleCallback) requestIdleCallback(kick, { timeout: 4000 });
 }
+/* ==================== 数据导入后自动刷新（2026-10-22） ====================
+   公开 SSE 只通知「数据已导入」，不携带后台明细；收到后清掉榜单缓存并重拉当前
+   团别 / 口径。每日最高弹幕由新的 listAll 重新计算，所以数据导入完成后无需刷新页面。 */
+let publicDataEvents = null;
+let importedRefreshTimer = null;
+let importedRefreshBusy = false;
+let importedRefreshSeq = 0;
+
+function initPublicDataEvents() {
+  if (publicDataEvents || typeof window.EventSource === 'undefined') return;
+  publicDataEvents = new EventSource('/api/public/events');
+  publicDataEvents.addEventListener('change', (ev) => {
+    try {
+      const d = JSON.parse(ev.data || '{}');
+      if (d.scope === 'import') scheduleImportedDataRefresh();
+    } catch (_) {}
+  });
+}
+
+function scheduleImportedDataRefresh() {
+  clearTimeout(importedRefreshTimer);
+  /* 一次导入可能连续广播多条（导入 / 补账 / 落批次），合并成一次重拉。 */
+  importedRefreshTimer = setTimeout(() => {
+    refreshDataAfterImport().catch(() => {});
+  }, 800);
+}
+
+async function refreshDataAfterImport() {
+  if (importedRefreshBusy) { scheduleImportedDataRefresh(); return; }
+  importedRefreshBusy = true;
+  const seq = ++importedRefreshSeq;
+  const team = TEAM;
+  const oldLatest = site && site.latestDate ? site.latestDate : '';
+  try {
+    pageDataCache.clear();
+    prefetchedTeams.clear();
+    let nextSite = null;
+    try { nextSite = await api('/api/public/teams/' + team); } catch (_) {}
+    if (seq !== importedRefreshSeq || TEAM !== team) return;
+    if (nextSite && nextSite.published !== false) site = nextSite;
+    if (period === 'daily') {
+      const latest = site && site.latestDate ? site.latestDate : '';
+      /* 用户原本看的就是最新一天：自动跟到刚导入的新业务日；
+         若用户在翻历史日期，则保持当前日期，只清缓存。 */
+      if (latest && (!curDate || curDate === oldLatest)) curDate = latest;
+    }
+    if (view !== 'data') return;
+    renderDates();
+    await loadData(null, true);
+    try { renderDanmaku(); } catch (_) {}
+    toast('数据已更新，每日最高已刷新');
+  } finally {
+    if (seq === importedRefreshSeq) importedRefreshBusy = false;
+  }
+}
+
 /** 参与渲染的行：搜索过滤（未开播的人始终显示，置灰） */
 function visibleRows() {
   const key = q.trim();
@@ -10514,6 +10570,8 @@ async function bootRest() {
     await ensureLogin().then(applyLoginState);
     site = await fetchSite();
   }
+  /* 导入完成后 SSE 自动刷新每日榜单 / 每日最高弹幕（2026-10-22）。 */
+  try { initPublicDataEvents(); } catch (_) {}
   /* 未绑定主播的提醒条只作提示（文案指向联系管理员帅帅），没有可点的自助入口 */
   syncHeaderOffset();
 

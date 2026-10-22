@@ -104,6 +104,46 @@ pub async fn sse(
     )
 }
 
+/// `GET /api/public/events`：展示端用的轻量 SSE。
+///
+/// 只公开「数据已导入」这一件事，不携带后台 detail / 操作者 / 业务数字，
+/// 前端收到后清掉榜单缓存并重拉当前团队数据，从而让每日最高弹幕随导入自动更新。
+pub async fn public_sse(
+    State(_st): State<Arc<AppState>>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let rx = subscribe();
+    let stream = futures_util::stream::unfold(rx, |mut rx| async move {
+        loop {
+            match rx.recv().await {
+                Ok(c) if c.scope == SCOPE_IMPORT => {
+                    let data = serde_json::json!({
+                        "scope": SCOPE_IMPORT,
+                        "at": c.at,
+                    })
+                    .to_string();
+                    return Some((Ok(Event::default().event("change").data(data)), rx));
+                }
+                Ok(_) => continue,
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    let data = serde_json::json!({
+                        "scope": SCOPE_IMPORT,
+                        "at": chrono::Local::now().to_rfc3339(),
+                        "resync": true,
+                    })
+                    .to_string();
+                    return Some((Ok(Event::default().event("change").data(data)), rx));
+                }
+                Err(broadcast::error::RecvError::Closed) => return None,
+            }
+        }
+    });
+    Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(20))
+            .text("keep-alive"),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -410,6 +410,8 @@ async fn main() -> anyhow::Result<()> {
             "/api/public/announcements",
             get(public_teams::public_announcements),
         )
+        // 展示端轻量 SSE：只广播「数据已导入」，用于每日最高弹幕自动刷新。
+        .route("/api/public/events", get(events::public_sse))
         // 阶段 D：团别公开站点（/st/m、/st/f 的数据接口）
         .route("/api/public/teams/{team}", get(public_teams::site))
         .route("/api/public/teams/{team}/daily", get(public_teams::daily))
