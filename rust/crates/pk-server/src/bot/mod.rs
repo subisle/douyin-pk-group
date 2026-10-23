@@ -1438,7 +1438,7 @@ async fn route_command(
                 cmd_query(st, &name).await
             }
         }
-        CmdId::Export => cmd_export(st, args.first().map(String::as_str).unwrap_or("今日")).await,
+        CmdId::Export => cmd_export(st, &args_ref).await,
         CmdId::DailySquadReport => cmd_daily_report(st, &args_ref).await,
         CmdId::MissingData => cmd_missing(st, &args_ref).await,
         CmdId::Import => cmd_import(st, inbound, &args_ref).await,
@@ -1938,8 +1938,188 @@ async fn cmd_query(st: &Arc<AppState>, name: &str) -> String {
     )
 }
 
-/// 导出：CSV 文本回复（文件上传待接入渠道富媒体接口后替换）
-async fn cmd_export(st: &Arc<AppState>, arg: &str) -> String {
+fn valid_export_month(s: &str) -> bool {
+    s.len() == 7 && crate::dialect::valid_period_shape(s)
+}
+
+fn export_month_or_current(raw: Option<&str>) -> Option<String> {
+    match raw.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(s) if valid_export_month(s) => Some(s.to_string()),
+        Some(_) => None,
+        None => Some(chrono::Local::now().format("%Y-%m").to_string()),
+    }
+}
+
+fn csv_cell(s: &str) -> String {
+    if s.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
+fn export_minutes(minutes: i64) -> String {
+    let m = minutes.max(0);
+    if m == 0 {
+        return "0h".into();
+    }
+    let h = m / 60;
+    let rem = m % 60;
+    match (h, rem) {
+        (0, _) => format!("{rem}m"),
+        (_, 0) => format!("{h}h"),
+        _ => format!("{h}h{rem}m"),
+    }
+}
+
+fn row_pid(r: &sqlx::postgres::PgRow) -> i64 {
+    r.try_get::<i64, _>("person_id")
+        .or_else(|_| r.try_get::<i64, _>("id"))
+        .unwrap_or(0)
+}
+
+fn row_i64(r: &sqlx::postgres::PgRow, col: &str) -> i64 {
+    r.try_get::<i64, _>(col)
+        .or_else(|_| r.try_get::<i32, _>(col).map(i64::from))
+        .unwrap_or(0)
+}
+
+fn month_rank_csv(month: &str, rows: Vec<(i64, String, i64, i64, i64)>) -> String {
+    let mut rows = rows;
+    rows.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.1.cmp(&b.1)));
+    let month_num = month[5..7].trim_start_matches('0');
+    let mut out = format!("\u{feff}排名,主播姓名,{month_num}月音浪,时长,未播天数\n");
+    for (i, (_, name, wave, minutes, absent)) in rows.into_iter().enumerate() {
+        out.push_str(&format!(
+            "{},{},{},{},{}\n",
+            i + 1,
+            csv_cell(&name),
+            wave,
+            export_minutes(minutes),
+            absent
+        ));
+    }
+    out
+}
+
+/// 导出按月总排名 CSV：只取对外展示名册（未删除、未离团、未隐藏），
+/// 男女团分开；未开播但有数据行的人也要保留，排名按当月音浪降序。
+async fn export_month_rank_csv(st: &Arc<AppState>, team: &str, month: &str) -> String {
+    let roster_sql = format!(
+        "SELECT id AS person_id, name FROM person \
+         WHERE deleted_at IS NULL AND status <> 'left' AND hide_in_daily_report = 0 \
+           AND gender = '{team}' ORDER BY name"
+    );
+    let Ok(roster) = crate::pgrs::query(&st.pools, "LOCAL", &roster_sql).await else {
+        return "导出失败：数据库暂时不可用。".into();
+    };
+    if roster.is_empty() {
+        return format!("{}没有可导出的对外展示人员。", team_label(team));
+    }
+
+    let wave_sql = crate::report::month_wave_sql(month);
+    let wave_sql_daily = crate::report::month_wave_sql_daily(month);
+    let wave_rows = match crate::dialect::query_month_wave_fallback(
+        &st.pools,
+        "LOCAL",
+        &wave_sql,
+        &wave_sql_daily,
+    )
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => return format!("导出失败：读取月音浪失败（{e}）"),
+    };
+    let mut wave_map: HashMap<i64, i64> = HashMap::new();
+    for r in &wave_rows {
+        wave_map.insert(row_pid(r), row_i64(r, "wave"));
+    }
+
+    let absent_sql = crate::dialect::month_absent_sql(month);
+    let absent_rows = match crate::pgrs::query(&st.pools, "LOCAL", &absent_sql).await {
+        Ok(rows) => rows,
+        Err(e) => return format!("导出失败：读取未播天数失败（{e}）"),
+    };
+    let mut absent_map: HashMap<i64, i64> = HashMap::new();
+    for r in &absent_rows {
+        absent_map.insert(row_pid(r), row_i64(r, "n"));
+    }
+
+    let mut minutes_map: HashMap<i64, i64> = HashMap::new();
+    let month_minutes_sql = format!(
+        "SELECT person_id, (SUM(minutes))::BIGINT AS minutes \
+         FROM monthly_duration WHERE period = '{month}' GROUP BY person_id"
+    );
+    match crate::pgrs::query(&st.pools, "LOCAL", &month_minutes_sql).await {
+        Ok(rows) => {
+            for r in &rows {
+                minutes_map.insert(row_pid(r), row_i64(r, "minutes"));
+            }
+        }
+        Err(e) if crate::dialect::is_missing_month_table(&e) => {}
+        Err(e) => return format!("导出失败：读取月时长失败（{e}）"),
+    }
+    let daily_minutes_sql = format!(
+        "SELECT person_id, (SUM(minutes))::BIGINT AS minutes \
+         FROM daily_metric WHERE wave_reliable = 1 \
+           AND TO_CHAR(biz_date, 'YYYY-MM') = '{month}' GROUP BY person_id"
+    );
+    match crate::pgrs::query(&st.pools, "LOCAL", &daily_minutes_sql).await {
+        Ok(rows) => {
+            for r in &rows {
+                let pid = row_pid(r);
+                minutes_map
+                    .entry(pid)
+                    .or_insert_with(|| row_i64(r, "minutes"));
+            }
+        }
+        Err(e) => return format!("导出失败：读取日时长失败（{e}）"),
+    }
+
+    let rows: Vec<(i64, String, i64, i64, i64)> = roster
+        .iter()
+        .map(|r| {
+            let pid = row_pid(r);
+            (
+                pid,
+                r.try_get::<String, _>("name").unwrap_or_default(),
+                wave_map.get(&pid).copied().unwrap_or(0),
+                minutes_map.get(&pid).copied().unwrap_or(0),
+                absent_map.get(&pid).copied().unwrap_or(0),
+            )
+        })
+        .collect();
+    month_rank_csv(month, rows)
+}
+
+/// 导出：CSV 文本回复（QQ 当前只发文本；微信同口径）。
+///
+/// - `导出 今日 | YYYY-MM-DD | 总榜`：保留原有日报/总榜导出
+/// - `导出 男团 [YYYY-MM]` / `导出 女团 [YYYY-MM]`：按月导出对外展示名册，
+///   不传月份 = 当前月
+/// - 也接受 `导出 YYYY-MM 男团|女团`
+async fn cmd_export(st: &Arc<AppState>, args: &[&str]) -> String {
+    if let Some(team) = args.first().and_then(|s| team_of(s)) {
+        let Some(month) = export_month_or_current(args.get(1).copied()) else {
+            return "月份格式应为 YYYY-MM，例如：导出 男团 2026-09".into();
+        };
+        if args.len() > 2 {
+            return "用法：导出 男团|女团 [YYYY-MM]".into();
+        }
+        return export_month_rank_csv(st, team, &month).await;
+    }
+    if args.len() >= 2 {
+        if let Some(team) = team_of(args[1]) {
+            let Some(month) = export_month_or_current(Some(args[0])) else {
+                return "月份格式应为 YYYY-MM，例如：导出 2026-09 男团".into();
+            };
+            if args.len() > 2 {
+                return "用法：导出 男团|女团 [YYYY-MM]".into();
+            }
+            return export_month_rank_csv(st, team, &month).await;
+        }
+    }
+    let arg = args.first().copied().unwrap_or("今日");
     let (metric, days, label) = match arg {
         "总榜" => ("total", 1, "总音浪"),
         "今日" => ("lastN", 1, "最近一个业务日"),
@@ -2474,6 +2654,35 @@ mod tests {
         assert_eq!(team_of("male"), Some("male"));
         assert_eq!(team_of("女团"), Some("female"));
         assert_eq!(team_of("boy"), None);
+    }
+
+    #[test]
+    fn month_export_args_validate_year_month() {
+        assert!(valid_export_month("2026-09"));
+        assert!(valid_export_month("2026-12"));
+        assert!(!valid_export_month("2026-9"));
+        assert!(!valid_export_month("2026"));
+        assert!(!valid_export_month("2026-13"));
+        assert_eq!(
+            export_month_or_current(Some("2026-09")).as_deref(),
+            Some("2026-09")
+        );
+        assert!(export_month_or_current(Some("2026-9")).is_none());
+    }
+
+    #[test]
+    fn month_export_csv_matches_display_format() {
+        let csv = month_rank_csv(
+            "2026-09",
+            vec![(1, "乙".into(), 100, 75, 2), (2, "甲,乙".into(), 200, 0, 0)],
+        );
+        let lines: Vec<&str> = csv.trim_start_matches('\u{feff}').lines().collect();
+        assert_eq!(lines[0], "排名,主播姓名,9月音浪,时长,未播天数");
+        assert_eq!(lines[1], "1,\"甲,乙\",200,0h,0");
+        assert_eq!(lines[2], "2,乙,100,1h15m,2");
+        assert_eq!(export_minutes(0), "0h");
+        assert_eq!(export_minutes(60), "1h");
+        assert_eq!(export_minutes(61), "1h1m");
     }
 
     #[test]
