@@ -156,7 +156,7 @@ pub const COMMANDS: &[CmdSpec] = &[
         aliases: &["export"],
         role: Role::Admin,
         summary:
-            "CSV 文本回复（用法：导出 男团|女团 [YYYY|YYYY-MM]；不带月份 = 当前月，年份 = 全年）",
+            "CSV 文件回复（用法：导出 男团|女团 [YYYY|YYYY-MM]；不带月份 = 当前月，年份 = 全年）",
     },
     CmdSpec {
         id: CmdId::DailySquadReport,

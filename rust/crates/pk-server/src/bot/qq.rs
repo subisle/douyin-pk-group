@@ -9,6 +9,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use base64::Engine as _;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
@@ -558,36 +559,95 @@ impl QqTransport {
             tracing::warn!("被动回复窗口已过，本条将按主动消息发送（每月额度 4 条）");
         }
         let msg_id = if in_window { msg_id } else { String::new() };
-        let seq = {
-            let mut inner = self.inner.lock().await;
-            inner.msg_seq += 1;
-            inner.msg_seq
-        };
-        let headers = self.auth_headers().await?;
-        let path = if !group.is_empty() {
-            format!("/v2/groups/{group}/messages")
+        let (message_path, upload_path) = if !group.is_empty() {
+            (
+                format!("/v2/groups/{group}/messages"),
+                format!("/v2/groups/{group}/files"),
+            )
         } else if !user.is_empty() {
-            format!("/v2/users/{user}/messages")
+            (
+                format!("/v2/users/{user}/messages"),
+                format!("/v2/users/{user}/files"),
+            )
         } else {
             anyhow::bail!("缺少回复目标 openid");
         };
-        let body = json!({
-            "content": out.text,
-            "msg_type": 0,
-            "msg_seq": seq,
-            "msg_id": msg_id,
-        });
-        let mut req = self.http.post(format!("{}{path}", self.api_base));
-        for (k, v) in headers {
-            req = req.header(k, v);
+
+        if !out.text.is_empty() {
+            let seq = self.next_msg_seq().await;
+            let body = json!({
+                "content": out.text,
+                "msg_type": 0,
+                "msg_seq": seq,
+                "msg_id": msg_id,
+            });
+            self.post_message(&message_path, &body).await?;
         }
-        let resp = req.json(&body).send().await?;
-        let status = resp.status();
-        if !status.is_success() {
-            let text = resp.text().await.unwrap_or_default();
-            anyhow::bail!("QQ 消息发送失败 HTTP {status}: {}", truncate(&text, 200));
+
+        for file in &out.files {
+            let uploaded = self
+                .post_message(
+                    &upload_path,
+                    &json!({
+                        "file_type": 4,
+                        "file_name": file.file_name,
+                        "file_data": base64::engine::general_purpose::STANDARD.encode(&file.data),
+                        "srv_send_msg": false,
+                    }),
+                )
+                .await?;
+            let file_info = uploaded
+                .get("file_info")
+                .and_then(Value::as_str)
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("QQ 文件上传响应缺少 file_info"))?;
+            let seq = self.next_msg_seq().await;
+            self.post_message(
+                &message_path,
+                &json!({
+                    "msg_type": 7,
+                    "media": { "file_info": file_info },
+                    "msg_seq": seq,
+                    "msg_id": msg_id,
+                }),
+            )
+            .await?;
         }
         Ok(())
+    }
+
+    async fn next_msg_seq(&self) -> u32 {
+        let mut inner = self.inner.lock().await;
+        inner.msg_seq += 1;
+        inner.msg_seq
+    }
+
+    async fn invalidate_token(&self) {
+        let mut inner = self.inner.lock().await;
+        inner.access_token.clear();
+        inner.token_expires_at = None;
+    }
+
+    async fn post_message(&self, path: &str, body: &Value) -> anyhow::Result<Value> {
+        for attempt in 0..2 {
+            let headers = self.auth_headers().await?;
+            let mut req = self.http.post(format!("{}{path}", self.api_base));
+            for (k, v) in headers {
+                req = req.header(k, v);
+            }
+            let resp = req.json(body).send().await?;
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            if status.is_success() {
+                return Ok(serde_json::from_str(&text).unwrap_or(Value::Null));
+            }
+            if status == reqwest::StatusCode::UNAUTHORIZED && attempt == 0 {
+                self.invalidate_token().await;
+                continue;
+            }
+            anyhow::bail!("QQ 消息发送失败 HTTP {status}: {}", truncate(&text, 200));
+        }
+        unreachable!("QQ token 重试循环必须返回")
     }
 }
 

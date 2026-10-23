@@ -46,6 +46,13 @@ pub struct Attachment {
     pub file_name: String,
 }
 
+/// 渠道出站文件（QQ 富媒体发送用；微信暂不消费）。
+#[derive(Clone, Debug)]
+pub struct OutboundFile {
+    pub file_name: String,
+    pub data: Vec<u8>,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Outbound {
     pub conversation_id: String,
@@ -61,6 +68,8 @@ pub struct Outbound {
     /// 同一套渲染）。文字版本保留作兜底 —— 能发图的渠道（微信扫码账号 / 微信全局
     /// 机器人）优先发图、不再发文字 TOP10；发不了图的渠道（QQ）继续发文字。
     pub images: Vec<Vec<u8>>,
+    /// 随消息一起发送的文件；QQ 通过 `msg_type=7` 富媒体发送。
+    pub files: Vec<OutboundFile>,
 }
 
 impl Outbound {
@@ -70,6 +79,7 @@ impl Outbound {
             text: text.into(),
             followup_texts: Vec::new(),
             images: Vec::new(),
+            files: Vec::new(),
         }
     }
 
@@ -82,6 +92,11 @@ impl Outbound {
     /// 挂上待发图片（文字仍保留：渠道发不了图时用它兜底）。
     pub fn with_images(mut self, images: Vec<Vec<u8>>) -> Self {
         self.images = images;
+        self
+    }
+
+    pub fn with_files(mut self, files: Vec<OutboundFile>) -> Self {
+        self.files = files;
         self
     }
 }
@@ -1385,6 +1400,7 @@ async fn route_command(
 
     // 命令 1（每日榜单）：图片版优先；文字留着给发不了图的渠道兜底
     let mut images: Vec<Vec<u8>> = Vec::new();
+    let mut files: Vec<OutboundFile> = Vec::new();
     let text = match id {
         CmdId::Help => commands::help_for(role),
         CmdId::DailyReport => match current_binding(st, inbound).await {
@@ -1438,12 +1454,25 @@ async fn route_command(
                 cmd_query(st, &name).await
             }
         }
-        CmdId::Export => cmd_export(st, &args_ref).await,
+        CmdId::Export => match cmd_export(st, &args_ref).await {
+            ExportReply::Text(text) => text,
+            ExportReply::File { file_name, data } => {
+                files.push(OutboundFile { file_name, data });
+                // QQ 只发附件，不额外发长文本；微信无文件能力时给一句兜底提示。
+                if inbound.channel == "qq" {
+                    String::new()
+                } else {
+                    "CSV 文件已生成（QQ 渠道可直接接收文件）".to_string()
+                }
+            }
+        },
         CmdId::DailySquadReport => cmd_daily_report(st, &args_ref).await,
         CmdId::MissingData => cmd_missing(st, &args_ref).await,
         CmdId::Import => cmd_import(st, inbound, &args_ref).await,
     };
-    Outbound::to(&inbound.conversation_id, text).with_images(images)
+    Outbound::to(&inbound.conversation_id, text)
+        .with_images(images)
+        .with_files(files)
 }
 
 /* ------------------------- 普通用户命令（已绑定主播） ------------------------- */
@@ -2015,6 +2044,15 @@ fn period_rank_csv(period: &str, rows: Vec<(i64, String, i64, i64, i64)>) -> Str
     out
 }
 
+enum ExportReply {
+    Text(String),
+    File { file_name: String, data: Vec<u8> },
+}
+
+fn export_file_name(team: &str, period: &str) -> String {
+    format!("总排名-{period}-{}.csv", team_label(team))
+}
+
 /// 导出按月/按年总排名 CSV：只取对外展示名册（未删除、未离团、未隐藏），
 /// 男女团分开；未开播但有数据行的人也要保留，排名按周期音浪降序。
 async fn export_period_rank_csv(st: &Arc<AppState>, team: &str, period: &str) -> String {
@@ -2109,27 +2147,45 @@ async fn export_period_rank_csv(st: &Arc<AppState>, team: &str, period: &str) ->
 /// - `导出 男团 [YYYY|YYYY-MM]` / `导出 女团 [YYYY|YYYY-MM]`：按月/按年导出对外展示名册，
 ///   不传周期 = 当前月
 /// - 也接受 `导出 YYYY-MM 男团|女团` 和紧凑写法 `导出男团2026—10`
-async fn cmd_export(st: &Arc<AppState>, args: &[&str]) -> String {
+async fn cmd_export(st: &Arc<AppState>, args: &[&str]) -> ExportReply {
     if let Some(team) = args.first().and_then(|s| team_of(s)) {
         let period_arg = args.get(1).copied().map(normalize_export_period);
         let Some(period) = export_period_or_current(period_arg.as_deref()) else {
-            return "周期格式应为 YYYY（全年）或 YYYY-MM（月），例如：导出男团2026—10".into();
+            return ExportReply::Text(
+                "周期格式应为 YYYY（全年）或 YYYY-MM（月），例如：导出男团2026—10".into(),
+            );
         };
         if args.len() > 2 {
-            return "用法：导出 男团|女团 [YYYY|YYYY-MM]".into();
+            return ExportReply::Text("用法：导出 男团|女团 [YYYY|YYYY-MM]".into());
         }
-        return export_period_rank_csv(st, team, &period).await;
+        let csv = export_period_rank_csv(st, team, &period).await;
+        if csv.starts_with("导出失败") || csv.contains("没有可导出") {
+            return ExportReply::Text(csv);
+        }
+        return ExportReply::File {
+            file_name: export_file_name(team, &period),
+            data: csv.into_bytes(),
+        };
     }
     if args.len() >= 2 {
         if let Some(team) = team_of(args[1]) {
             let period_arg = normalize_export_period(args[0]);
             let Some(period) = export_period_or_current(Some(&period_arg)) else {
-                return "周期格式应为 YYYY（全年）或 YYYY-MM（月），例如：导出男团2026—10".into();
+                return ExportReply::Text(
+                    "周期格式应为 YYYY（全年）或 YYYY-MM（月），例如：导出男团2026—10".into(),
+                );
             };
             if args.len() > 2 {
-                return "用法：导出 男团|女团 [YYYY|YYYY-MM]".into();
+                return ExportReply::Text("用法：导出 男团|女团 [YYYY|YYYY-MM]".into());
             }
-            return export_period_rank_csv(st, team, &period).await;
+            let csv = export_period_rank_csv(st, team, &period).await;
+            if csv.starts_with("导出失败") || csv.contains("没有可导出") {
+                return ExportReply::Text(csv);
+            }
+            return ExportReply::File {
+                file_name: export_file_name(team, &period),
+                data: csv.into_bytes(),
+            };
         }
     }
     let arg = args.first().copied().unwrap_or("今日");
@@ -2138,12 +2194,12 @@ async fn cmd_export(st: &Arc<AppState>, args: &[&str]) -> String {
         "今日" => ("lastN", 1, "最近一个业务日"),
         d => {
             if valid_date(d) {
-                return cmd_export_date(st, d).await;
+                return ExportReply::Text(cmd_export_date(st, d).await);
             }
-            return "用法：导出 今日 | 导出 YYYY-MM-DD | 导出 总榜".into();
+            return ExportReply::Text("用法：导出 今日 | 导出 YYYY-MM-DD | 导出 总榜".into());
         }
     };
-    csv_of(st, metric, days, label).await
+    ExportReply::Text(csv_of(st, metric, days, label).await)
 }
 
 async fn cmd_export_date(st: &Arc<AppState>, date: &str) -> String {
@@ -2705,6 +2761,11 @@ mod tests {
         assert!(year
             .trim_start_matches('\u{feff}')
             .starts_with("排名,主播姓名,2026年音浪,时长,未播天数\n"));
+        assert_eq!(
+            export_file_name("male", "2026-10"),
+            "总排名-2026-10-男团.csv"
+        );
+        assert_eq!(export_file_name("female", "2026"), "总排名-2026-女团.csv");
     }
 
     #[test]
