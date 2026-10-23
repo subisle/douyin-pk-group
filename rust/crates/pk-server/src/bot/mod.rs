@@ -1938,13 +1938,22 @@ async fn cmd_query(st: &Arc<AppState>, name: &str) -> String {
     )
 }
 
-fn valid_export_month(s: &str) -> bool {
-    s.len() == 7 && crate::dialect::valid_period_shape(s)
+fn valid_export_period(s: &str) -> bool {
+    matches!(s.len(), 4 | 7) && crate::dialect::valid_period_shape(s)
 }
 
-fn export_month_or_current(raw: Option<&str>) -> Option<String> {
+fn normalize_export_period(raw: &str) -> String {
+    raw.chars()
+        .map(|c| match c {
+            '—' | '–' | '－' => '-',
+            _ => c,
+        })
+        .collect()
+}
+
+fn export_period_or_current(raw: Option<&str>) -> Option<String> {
     match raw.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(s) if valid_export_month(s) => Some(s.to_string()),
+        Some(s) if valid_export_period(s) => Some(s.to_string()),
         Some(_) => None,
         None => Some(chrono::Local::now().format("%Y-%m").to_string()),
     }
@@ -1984,11 +1993,15 @@ fn row_i64(r: &sqlx::postgres::PgRow, col: &str) -> i64 {
         .unwrap_or(0)
 }
 
-fn month_rank_csv(month: &str, rows: Vec<(i64, String, i64, i64, i64)>) -> String {
+fn period_rank_csv(period: &str, rows: Vec<(i64, String, i64, i64, i64)>) -> String {
     let mut rows = rows;
     rows.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.1.cmp(&b.1)));
-    let month_num = month[5..7].trim_start_matches('0');
-    let mut out = format!("\u{feff}排名,主播姓名,{month_num}月音浪,时长,未播天数\n");
+    let wave_label = if period.len() == 7 {
+        format!("{}月音浪", period[5..7].trim_start_matches('0'))
+    } else {
+        format!("{period}年音浪")
+    };
+    let mut out = format!("\u{feff}排名,主播姓名,{wave_label},时长,未播天数\n");
     for (i, (_, name, wave, minutes, absent)) in rows.into_iter().enumerate() {
         out.push_str(&format!(
             "{},{},{},{},{}\n",
@@ -2002,9 +2015,9 @@ fn month_rank_csv(month: &str, rows: Vec<(i64, String, i64, i64, i64)>) -> Strin
     out
 }
 
-/// 导出按月总排名 CSV：只取对外展示名册（未删除、未离团、未隐藏），
-/// 男女团分开；未开播但有数据行的人也要保留，排名按当月音浪降序。
-async fn export_month_rank_csv(st: &Arc<AppState>, team: &str, month: &str) -> String {
+/// 导出按月/按年总排名 CSV：只取对外展示名册（未删除、未离团、未隐藏），
+/// 男女团分开；未开播但有数据行的人也要保留，排名按周期音浪降序。
+async fn export_period_rank_csv(st: &Arc<AppState>, team: &str, period: &str) -> String {
     let roster_sql = format!(
         "SELECT id AS person_id, name FROM person \
          WHERE deleted_at IS NULL AND status <> 'left' AND hide_in_daily_report = 0 \
@@ -2017,25 +2030,54 @@ async fn export_month_rank_csv(st: &Arc<AppState>, team: &str, month: &str) -> S
         return format!("{}没有可导出的对外展示人员。", team_label(team));
     }
 
-    let wave_sql = crate::report::month_wave_sql(month);
-    let wave_sql_daily = crate::report::month_wave_sql_daily(month);
-    let wave_rows = match crate::dialect::query_month_wave_fallback(
+    let like = format!("{period}%");
+    let stats_rows = match crate::dialect::query_period(
         &st.pools,
         "LOCAL",
-        &wave_sql,
-        &wave_sql_daily,
+        crate::dialect::ADMIN_PERIOD_SELECT,
+        &like,
+        team,
+        " AND p.hide_in_daily_report = 0 AND p.status <> 'left'",
+        "wave DESC",
     )
     .await
     {
         Ok(rows) => rows,
-        Err(e) => return format!("导出失败：读取月音浪失败（{e}）"),
+        Err(e) => return format!("导出失败：读取周期指标失败（{e}）"),
     };
     let mut wave_map: HashMap<i64, i64> = HashMap::new();
-    for r in &wave_rows {
-        wave_map.insert(row_pid(r), row_i64(r, "wave"));
+    let mut minutes_map: HashMap<i64, i64> = HashMap::new();
+    for r in &stats_rows {
+        let pid = row_pid(r);
+        wave_map.insert(pid, row_i64(r, "wave"));
+        minutes_map.insert(pid, row_i64(r, "minutes"));
     }
 
-    let absent_sql = crate::dialect::month_absent_sql(month);
+    // 只有整月时长、没有日/月音浪的人不会进入 period_rollup 的统计行；
+    // 补一遍 monthly_duration，保证“时长表格”不会漏掉这类人员。
+    let month_duration_sql = format!(
+        "SELECT person_id, (SUM(minutes))::BIGINT AS minutes \
+         FROM monthly_duration WHERE period LIKE '{period}%' GROUP BY person_id"
+    );
+    match crate::pgrs::query(&st.pools, "LOCAL", &month_duration_sql).await {
+        Ok(rows) => {
+            for r in &rows {
+                minutes_map
+                    .entry(row_pid(r))
+                    .or_insert_with(|| row_i64(r, "minutes"));
+            }
+        }
+        Err(e) if crate::dialect::is_missing_month_table(&e) => {}
+        Err(e) => return format!("导出失败：读取整月时长失败（{e}）"),
+    }
+
+    let (date_lo, date_hi) = crate::dialect::like_to_date_range(&like);
+    let absent_sql = format!(
+        "SELECT person_id, (SUM(CASE WHEN wave < 2 THEN 1 ELSE 0 END))::BIGINT AS n \
+         FROM daily_metric WHERE wave_reliable = 1 \
+           AND biz_date >= '{date_lo}'::date AND biz_date < '{date_hi}'::date \
+         GROUP BY person_id"
+    );
     let absent_rows = match crate::pgrs::query(&st.pools, "LOCAL", &absent_sql).await {
         Ok(rows) => rows,
         Err(e) => return format!("导出失败：读取未播天数失败（{e}）"),
@@ -2043,37 +2085,6 @@ async fn export_month_rank_csv(st: &Arc<AppState>, team: &str, month: &str) -> S
     let mut absent_map: HashMap<i64, i64> = HashMap::new();
     for r in &absent_rows {
         absent_map.insert(row_pid(r), row_i64(r, "n"));
-    }
-
-    let mut minutes_map: HashMap<i64, i64> = HashMap::new();
-    let month_minutes_sql = format!(
-        "SELECT person_id, (SUM(minutes))::BIGINT AS minutes \
-         FROM monthly_duration WHERE period = '{month}' GROUP BY person_id"
-    );
-    match crate::pgrs::query(&st.pools, "LOCAL", &month_minutes_sql).await {
-        Ok(rows) => {
-            for r in &rows {
-                minutes_map.insert(row_pid(r), row_i64(r, "minutes"));
-            }
-        }
-        Err(e) if crate::dialect::is_missing_month_table(&e) => {}
-        Err(e) => return format!("导出失败：读取月时长失败（{e}）"),
-    }
-    let daily_minutes_sql = format!(
-        "SELECT person_id, (SUM(minutes))::BIGINT AS minutes \
-         FROM daily_metric WHERE wave_reliable = 1 \
-           AND TO_CHAR(biz_date, 'YYYY-MM') = '{month}' GROUP BY person_id"
-    );
-    match crate::pgrs::query(&st.pools, "LOCAL", &daily_minutes_sql).await {
-        Ok(rows) => {
-            for r in &rows {
-                let pid = row_pid(r);
-                minutes_map
-                    .entry(pid)
-                    .or_insert_with(|| row_i64(r, "minutes"));
-            }
-        }
-        Err(e) => return format!("导出失败：读取日时长失败（{e}）"),
     }
 
     let rows: Vec<(i64, String, i64, i64, i64)> = roster
@@ -2089,34 +2100,36 @@ async fn export_month_rank_csv(st: &Arc<AppState>, team: &str, month: &str) -> S
             )
         })
         .collect();
-    month_rank_csv(month, rows)
+    period_rank_csv(period, rows)
 }
 
 /// 导出：CSV 文本回复（QQ 当前只发文本；微信同口径）。
 ///
 /// - `导出 今日 | YYYY-MM-DD | 总榜`：保留原有日报/总榜导出
-/// - `导出 男团 [YYYY-MM]` / `导出 女团 [YYYY-MM]`：按月导出对外展示名册，
-///   不传月份 = 当前月
-/// - 也接受 `导出 YYYY-MM 男团|女团`
+/// - `导出 男团 [YYYY|YYYY-MM]` / `导出 女团 [YYYY|YYYY-MM]`：按月/按年导出对外展示名册，
+///   不传周期 = 当前月
+/// - 也接受 `导出 YYYY-MM 男团|女团` 和紧凑写法 `导出男团2026—10`
 async fn cmd_export(st: &Arc<AppState>, args: &[&str]) -> String {
     if let Some(team) = args.first().and_then(|s| team_of(s)) {
-        let Some(month) = export_month_or_current(args.get(1).copied()) else {
-            return "月份格式应为 YYYY-MM，例如：导出 男团 2026-09".into();
+        let period_arg = args.get(1).copied().map(normalize_export_period);
+        let Some(period) = export_period_or_current(period_arg.as_deref()) else {
+            return "周期格式应为 YYYY（全年）或 YYYY-MM（月），例如：导出男团2026—10".into();
         };
         if args.len() > 2 {
-            return "用法：导出 男团|女团 [YYYY-MM]".into();
+            return "用法：导出 男团|女团 [YYYY|YYYY-MM]".into();
         }
-        return export_month_rank_csv(st, team, &month).await;
+        return export_period_rank_csv(st, team, &period).await;
     }
     if args.len() >= 2 {
         if let Some(team) = team_of(args[1]) {
-            let Some(month) = export_month_or_current(Some(args[0])) else {
-                return "月份格式应为 YYYY-MM，例如：导出 2026-09 男团".into();
+            let period_arg = normalize_export_period(args[0]);
+            let Some(period) = export_period_or_current(Some(&period_arg)) else {
+                return "周期格式应为 YYYY（全年）或 YYYY-MM（月），例如：导出男团2026—10".into();
             };
             if args.len() > 2 {
-                return "用法：导出 男团|女团 [YYYY-MM]".into();
+                return "用法：导出 男团|女团 [YYYY|YYYY-MM]".into();
             }
-            return export_month_rank_csv(st, team, &month).await;
+            return export_period_rank_csv(st, team, &period).await;
         }
     }
     let arg = args.first().copied().unwrap_or("今日");
@@ -2657,22 +2670,26 @@ mod tests {
     }
 
     #[test]
-    fn month_export_args_validate_year_month() {
-        assert!(valid_export_month("2026-09"));
-        assert!(valid_export_month("2026-12"));
-        assert!(!valid_export_month("2026-9"));
-        assert!(!valid_export_month("2026"));
-        assert!(!valid_export_month("2026-13"));
+    fn export_args_validate_year_and_month() {
+        assert!(valid_export_period("2026-09"));
+        assert!(valid_export_period("2026-12"));
+        assert!(valid_export_period("2026"));
+        assert!(!valid_export_period("2026-9"));
+        assert!(!valid_export_period("2026-13"));
         assert_eq!(
-            export_month_or_current(Some("2026-09")).as_deref(),
+            export_period_or_current(Some("2026-09")).as_deref(),
             Some("2026-09")
         );
-        assert!(export_month_or_current(Some("2026-9")).is_none());
+        assert_eq!(
+            export_period_or_current(Some("2026")).as_deref(),
+            Some("2026")
+        );
+        assert!(export_period_or_current(Some("2026-9")).is_none());
     }
 
     #[test]
-    fn month_export_csv_matches_display_format() {
-        let csv = month_rank_csv(
+    fn period_export_csv_matches_display_format() {
+        let csv = period_rank_csv(
             "2026-09",
             vec![(1, "乙".into(), 100, 75, 2), (2, "甲,乙".into(), 200, 0, 0)],
         );
@@ -2683,6 +2700,11 @@ mod tests {
         assert_eq!(export_minutes(0), "0h");
         assert_eq!(export_minutes(60), "1h");
         assert_eq!(export_minutes(61), "1h1m");
+
+        let year = period_rank_csv("2026", vec![(1, "乙".into(), 100, 0, 0)]);
+        assert!(year
+            .trim_start_matches('\u{feff}')
+            .starts_with("排名,主播姓名,2026年音浪,时长,未播天数\n"));
     }
 
     #[test]

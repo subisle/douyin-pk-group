@@ -155,7 +155,8 @@ pub const COMMANDS: &[CmdSpec] = &[
         name: "导出",
         aliases: &["export"],
         role: Role::Admin,
-        summary: "CSV 文本回复（用法：导出 今日 / 导出 YYYY-MM-DD / 导出 总榜 / 导出 男团|女团 [YYYY-MM]）",
+        summary:
+            "CSV 文本回复（用法：导出 男团|女团 [YYYY|YYYY-MM]；不带月份 = 当前月，年份 = 全年）",
     },
     CmdSpec {
         id: CmdId::DailySquadReport,
@@ -218,6 +219,24 @@ fn matches_spec(candidate: &str, spec: &CmdSpec) -> bool {
             .any(|a| a.eq_ignore_ascii_case(candidate))
 }
 
+/// 兼容运营的自然写法：`导出男团2026—10` / `导出女团2026`。
+/// 中间不强制空格；全角破折号会在执行层统一归一成 `-`。
+fn parse_compact_export(text: &str) -> Option<(CmdId, Vec<String>)> {
+    let rest = text.trim().strip_prefix("导出")?.trim();
+    for team in ["男团", "女团"] {
+        let Some(after) = rest.strip_prefix(team) else {
+            continue;
+        };
+        let period = super::normalize_export_period(after.trim());
+        let mut args = vec![team.to_string()];
+        if !period.is_empty() {
+            args.push(period);
+        }
+        return Some((CmdId::Export, args));
+    }
+    None
+}
+
 /// 解析一条命令文本 → (命令 ID, 参数)。
 ///
 /// - 先整句精确匹配无参命令（帮助 / 状态 / 分组 / 总榜 / 1 每日报告 / 2 个人报告 /
@@ -237,6 +256,9 @@ pub fn parse(text: &str) -> Option<(CmdId, Vec<String>)> {
         if matches_spec(text, spec) {
             return Some((spec.id, Vec::new()));
         }
+    }
+    if let Some(parsed) = parse_compact_export(text) {
+        return Some(parsed);
     }
     let mut toks = text.split_whitespace();
     let head = toks.next()?;
@@ -395,6 +417,22 @@ mod tests {
         assert_eq!(parse("帮助 我"), Some((CmdId::Help, vec!["我".into()])));
         assert_eq!(parse("暂停接收每日推送"), Some((CmdId::PushPause, vec![])));
         assert_eq!(parse("total").map(|p| p.0), None, "总榜没有英文别名");
+    }
+
+    #[test]
+    fn parse_compact_team_export() {
+        assert_eq!(
+            parse("导出男团2026—10"),
+            Some((CmdId::Export, vec!["男团".into(), "2026-10".into()]))
+        );
+        assert_eq!(
+            parse("导出女团2026"),
+            Some((CmdId::Export, vec!["女团".into(), "2026".into()]))
+        );
+        assert_eq!(
+            parse("导出男团"),
+            Some((CmdId::Export, vec!["男团".into()]))
+        );
     }
 
     /// 2026-10-18 用户口径：普通用户四个主命令 = 单个数字 1–4。
