@@ -237,6 +237,9 @@ async fn main() -> anyhow::Result<()> {
         cache: Mutex::new(Default::default()),
         bots: std::sync::OnceLock::new(),
     });
+    /* 小智 MCP 管理员只读接入：配置 XIAOZHI_MCP_ENDPOINT 后自动连接小智云端。
+     * token 只在环境变量里，不进入代码/日志；未配置时完全跳过。 */
+    mcp::spawn_xiaozhi(st.clone());
     /* 榜单图预渲染子命令（2026-10-18 用户口径「预渲染」）：
      `pk-server prewarm-images [YYYY-MM-DD]`（缺省 = 最新业务日）
     把该业务日两个团所有「能收到图的人」的榜单图提前渲好落盘；

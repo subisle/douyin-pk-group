@@ -16,6 +16,7 @@ pub mod live;
 pub mod live_api;
 pub mod mailer;
 pub mod matching;
+pub mod mcp;
 pub mod metrics;
 pub mod migrate;
 pub mod pgrs;
