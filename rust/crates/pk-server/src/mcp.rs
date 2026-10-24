@@ -137,6 +137,16 @@ async fn call_tool(st: &Arc<AppState>, request: &Value) -> anyhow::Result<Value>
         _ => Err(anyhow::anyhow!("未知工具：{name}")),
     }?;
 
+    // 每日播报严格返回可直接朗读的稿子，不把 JSON 包裹文本交给语音模型二次概括。
+    if name == "get_daily_briefing" {
+        if let Some(speech) = value.get("speechText").and_then(Value::as_str) {
+            return Ok(json!({
+                "content": [{ "type": "text", "text": speech }],
+                "isError": false
+            }));
+        }
+    }
+
     let text = serde_json::to_string(&value).unwrap_or_else(|_| "{}".into());
     Ok(json!({
         "content": [{ "type": "text", "text": text }],
@@ -222,7 +232,7 @@ fn tool_defs() -> Vec<Value> {
         }),
         json!({
             "name": "get_daily_briefing",
-            "description": "生成每日播报：最新业务日男团或女团的 TOP5、总音浪、开播和未播人数。",
+            "description": "生成约3分钟中文语音播报稿：每日男团或女团前十名、音浪、时长、未播天数、相邻名次差距和逐名评价。用户说“每日播报/今天播报/前十名播报”时必须调用此工具，并原样朗读返回文本。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -555,34 +565,141 @@ async fn get_daily_briefing(st: &Arc<AppState>, args: &Value) -> anyhow::Result<
     let (as_of, rows) = load_rank_rows(st, team, "daily", &a).await?;
     let top: Vec<Value> = rows
         .iter()
-        .take(5)
+        .take(10)
         .enumerate()
         .map(|(i, r)| row_json(i + 1, r))
         .collect();
     let total_wave: i64 = rows.iter().map(|r| r.wave).sum();
     let live = rows.iter().filter(|r| r.wave >= 2).count();
+    let speech = build_daily_speech(team, &as_of, &rows);
     let summary = format!(
-        "{} {} 每日播报：总音浪 {}，开播 {} 人，未播 {} 人。前三名：{}。",
+        "{} {} 每日播报已生成，约3分钟，包含前十名和逐名评价。",
         team_label(team),
-        as_of,
-        total_wave,
-        live,
-        rows.len().saturating_sub(live),
-        rows.iter()
-            .take(3)
-            .map(|r| r.name.as_str())
-            .collect::<Vec<_>>()
-            .join("、")
+        as_of
     );
     Ok(json!({
         "summary": summary,
+        "speechText": speech,
         "asOf": as_of,
         "team": team,
         "totalWave": total_wave,
         "liveCount": live,
         "offlineCount": rows.len().saturating_sub(live),
-        "top5": top
+        "top10": top
     }))
+}
+
+fn speech_minutes(minutes: i64) -> String {
+    if minutes <= 0 {
+        return "没有登记有效时长".into();
+    }
+    let h = minutes / 60;
+    let m = minutes % 60;
+    match (h, m) {
+        (0, _) => format!("{m}分钟"),
+        (_, 0) => format!("{h}小时"),
+        _ => format!("{h}小时{m}分钟"),
+    }
+}
+
+fn speech_gap(wave: i64, previous: Option<i64>) -> String {
+    match previous {
+        Some(p) if p >= wave => format!("与前一名相差{}音浪", p - wave),
+        Some(p) => format!("领先前一名{}音浪", wave - p),
+        None => String::new(),
+    }
+}
+
+fn build_daily_speech(team: &str, as_of: &str, rows: &[RankRow]) -> String {
+    let visible = rows.len();
+    let total_wave: i64 = rows.iter().map(|r| r.wave).sum();
+    let live = rows.iter().filter(|r| r.wave >= 2).count();
+    let offline = visible.saturating_sub(live);
+    let top10: Vec<&RankRow> = rows.iter().take(10).collect();
+    let top10_wave: i64 = top10.iter().map(|r| r.wave).sum();
+    let top3_wave: i64 = rows.iter().take(3).map(|r| r.wave).sum();
+    let top3_share = if total_wave > 0 {
+        top3_wave * 100 / total_wave
+    } else {
+        0
+    };
+    let average = if visible > 0 {
+        total_wave / visible as i64
+    } else {
+        0
+    };
+    let mut out = String::new();
+
+    out.push_str(&format!(
+        "各位好，下面为您播报{} {}的每日数据，包含整体概况、前十名排名和逐名评价。",
+        team_label(team),
+        as_of
+    ));
+    out.push_str(&format!(
+        "今日{}共有{}位对外展示主播，合计音浪{}，其中有效开播{}人，未播或暂无有效音浪{}人，人均音浪约{}。",
+        team_label(team), visible, total_wave, live, offline, average
+    ));
+    if let Some(first) = rows.first() {
+        out.push_str(&format!(
+            "当前第一名是{}，音浪{}；前三名合计{}，占今日总音浪的{}%；前十名合计{}。",
+            first.name, first.wave, top3_wave, top3_share, top10_wave
+        ));
+    } else {
+        out.push_str("今天暂时没有可播报的榜单数据。");
+        return out;
+    }
+
+    out.push_str("下面进入前十名详细播报。");
+    for (i, row) in rows.iter().take(10).enumerate() {
+        let rank = i + 1;
+        let gap = if i == 0 {
+            rows.get(1)
+                .map(|second| format!("领先第二名{}音浪", row.wave - second.wave))
+                .unwrap_or_else(|| "暂未形成第二名追赶".into())
+        } else {
+            speech_gap(row.wave, rows.get(i - 1).map(|r| r.wave))
+        };
+        let status = if row.wave >= 2 {
+            "已开播"
+        } else {
+            "未形成有效开播"
+        };
+        let duration = speech_minutes(row.minutes);
+        let absent = if row.absent_days > 0 {
+            format!("本月有{}天未播", row.absent_days)
+        } else {
+            "本月暂无未播记录".into()
+        };
+        let evaluation = if row.wave < 2 {
+            "今天没有有效音浪，建议核对是否停播或数据是否入库。"
+        } else if rank <= 3 {
+            "处于第一梯队，整体表现稳定，继续保持直播节奏。"
+        } else {
+            "进入前十，具备继续追赶的基础，建议保持稳定开播和互动转化。"
+        };
+        out.push_str(&format!(
+            "第{}名，{}。今日音浪{}，{}，{}，{}。{}评价：{}",
+            rank, row.name, row.wave, status, duration, absent, gap, evaluation
+        ));
+    }
+
+    if rows.len() > 10 {
+        let tenth = &rows[9];
+        let eleventh = &rows[10];
+        out.push_str(&format!(
+            "第十名门槛是{}，音浪{}；第十一名音浪{}，距离前十还差{}音浪。",
+            tenth.name,
+            tenth.wave,
+            eleventh.name,
+            (tenth.wave - eleventh.wave).max(0)
+        ));
+    }
+    out.push_str(&format!(
+        "以上是{} {}的每日播报。数据以最新业务日为准，未播天数按本月已有数据统计。",
+        team_label(team),
+        as_of
+    ));
+    out
 }
 
 async fn get_data_status(st: &Arc<AppState>) -> anyhow::Result<Value> {
@@ -633,5 +750,25 @@ mod tests {
         assert!(valid_date("2026-10-24"));
         assert!(!valid_date("2026-10-2"));
         assert!(!valid_date("2026-13-01"));
+    }
+
+    #[test]
+    fn daily_speech_has_top_ten_and_three_minute_script() {
+        let rows: Vec<RankRow> = (1..=12)
+            .map(|i| RankRow {
+                name: format!("主播{i}"),
+                wave: 100_000 - i * 6_000,
+                minutes: 1_200 - i * 40,
+                absent_days: i % 4,
+            })
+            .collect();
+        let speech = build_daily_speech("male", "2026-10-24", &rows);
+        assert!(speech.contains("第十名"));
+        assert!(speech.contains("评价："));
+        assert!(
+            speech.chars().count() >= 800,
+            "播报稿过短：{}",
+            speech.chars().count()
+        );
     }
 }
