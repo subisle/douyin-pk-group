@@ -88,7 +88,7 @@ XIAOZHI_MCP_ENDPOINT=wss://api.xiaozhi.me/mcp/?token=<endpoint-token>
 | `get_team_summary` | 查询总音浪、开播人数、未播人数 | 管理员 |
 | `search_anchor` | 按艺名/部分艺名找人 | 管理员 |
 | `get_anchor_rank` | 查某位主播的团别、名次、音浪、时长、未播天数 | 管理员 |
-| `get_daily_briefing` | 每日播报：TOP5、总音浪、开播/未播人数 | 管理员 |
+| `get_daily_briefing` | 约3分钟语音稿：前十名、逐名评价、总音浪、开播/未播人数 | 管理员 |
 | `get_data_status` | 查最新业务日、可用日期数量、展示人数 | 管理员 |
 
 后续按需要增加：
@@ -145,8 +145,8 @@ XIAOZHI_MCP_ENDPOINT=wss://api.xiaozhi.me/mcp/?token=<endpoint-token>
 }
 ```
 
-`team` 缺省为男团，`date` 缺省为最新业务日。返回一段可直接朗读的每日播报，
-以及 TOP5、总音浪、开播人数和未播人数。它只读公开名册，不涉及任何用户身份。
+`team` 缺省为男团，`date` 缺省为最新业务日。返回约 3 分钟的可直接朗读播报稿，
+包含前十名、逐名音浪/时长/未播天数/相邻差距和评价，同时保留结构化前十名数据。
 
 ### 6.3 语音友好的返回约定
 
