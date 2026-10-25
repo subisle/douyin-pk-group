@@ -44,12 +44,14 @@ fn http() -> &'static reqwest::Client {
     })
 }
 
-/// 上传结果：发 image_item 所需的全部字段
+/// 上传结果：发 image_item / file_item 所需的字段
 struct Uploaded {
     /// CDN 返回的下载参数（x-encrypted-param）
     download_param: String,
     /// AES key（hex，原始生成值）
     aeskey_hex: String,
+    /// 明文大小
+    file_size_raw: usize,
     /// 密文大小（PKCS#7 后）
     file_size_cipher: usize,
 }
@@ -83,21 +85,27 @@ impl std::error::Error for PartialImageBatch {
     }
 }
 
-/// 上传一张图片（PNG 字节）到微信 CDN
-async fn upload_image(
+/// 上传媒体到微信 CDN。`media_type` 对齐官方枚举：1 图片 / 2 视频 / 3 文件 / 4 语音。
+async fn upload_media(
     base_url: &str,
     token: &str,
     to_user_id: &str,
-    png: &[u8],
+    media_type: i64,
+    data: &[u8],
 ) -> anyhow::Result<Uploaded> {
+    anyhow::ensure!(!data.is_empty(), "上传内容为空");
+    anyhow::ensure!(
+        (1..=4).contains(&media_type),
+        "非法微信媒体类型：{media_type}"
+    );
     let aeskey: [u8; 16] = rand_bytes();
     let filekey = hex(&rand_bytes());
-    let rawsize = png.len();
+    let rawsize = data.len();
     let filesize = padded_size(rawsize);
     let md5hex = {
         use md5::Digest;
         let mut h = md5::Md5::new();
-        h.update(png);
+        h.update(data);
         hex(&h.finalize())
     };
 
@@ -110,7 +118,7 @@ async fn upload_image(
         Some(token),
         Some(serde_json::json!({
             "filekey": filekey,
-            "media_type": 1,              // 1 图片
+            "media_type": media_type,
             "to_user_id": to_user_id,
             "rawsize": rawsize,
             "rawfilemd5": md5hex,
@@ -141,7 +149,7 @@ async fn upload_image(
     );
 
     // ② AES 加密后 POST CDN
-    let ciphertext = aes_ecb_encrypt(png, &aeskey);
+    let ciphertext = aes_ecb_encrypt(data, &aeskey);
     let cdn_url = if !upload_full_url.is_empty() {
         upload_full_url
     } else {
@@ -173,6 +181,7 @@ async fn upload_image(
     Ok(Uploaded {
         download_param,
         aeskey_hex: hex(&aeskey),
+        file_size_raw: rawsize,
         file_size_cipher: filesize,
     })
 }
@@ -237,7 +246,7 @@ pub async fn user_send_image(
         admin_send.rs 手动下发据此落 failed、不推进去重标记。 */
         return Err(crate::push::Blocked.into());
     }
-    let up = upload_image(base_url, token, to_user_id, png).await?;
+    let up = upload_media(base_url, token, to_user_id, 1, png).await?;
     if !caption.is_empty() {
         send_item(
             base_url,
@@ -266,6 +275,73 @@ pub async fn user_send_image(
         }),
     )
     .await
+}
+
+/// 发文件 + 前置说明文字。TTS MP3、CSV 等都走这里。
+///
+/// 协议对齐官方 `sendWeixinMediaFile`：`getuploadurl(media_type=3)` → CDN 加密上传
+/// → `file_item`（media + file_name + 明文 len）。与图片一样受 `PUSH_OUT_ENABLED` 闸门保护。
+pub async fn user_send_file(
+    st: &crate::state::AppState,
+    base_url: &str,
+    token: &str,
+    to_user_id: &str,
+    context_token: &str,
+    caption: &str,
+    file_name: &str,
+    data: &[u8],
+) -> anyhow::Result<()> {
+    anyhow::ensure!(!data.is_empty(), "没有可发送的文件内容");
+    anyhow::ensure!(!file_name.trim().is_empty(), "文件名不能为空");
+    if !crate::push::push_out_allowed_for_account(st, to_user_id).await {
+        let preview = if caption.is_empty() {
+            format!("（无说明文字，{file_name}，{} 字节）", data.len())
+        } else {
+            caption.chars().take(120).collect()
+        };
+        tracing::warn!(
+            to_user_id,
+            file_name,
+            bytes = data.len(),
+            preview = %preview,
+            "【测试阶段】已拦截微信文件发送（未上传、未发送）"
+        );
+        return Err(crate::push::Blocked.into());
+    }
+    let up = upload_media(base_url, token, to_user_id, 3, data).await?;
+    if !caption.is_empty() {
+        send_item(
+            base_url,
+            token,
+            to_user_id,
+            context_token,
+            serde_json::json!({ "type": 1, "text_item": { "text": caption } }),
+        )
+        .await?;
+    }
+    send_item(
+        base_url,
+        token,
+        to_user_id,
+        context_token,
+        file_item_value(&up, file_name),
+    )
+    .await
+}
+
+fn file_item_value(up: &Uploaded, file_name: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": 4,
+        "file_item": {
+            "media": {
+                "encrypt_query_param": up.download_param,
+                "aes_key": b64(up.aeskey_hex.as_bytes()),
+                "encrypt_type": 1
+            },
+            "file_name": file_name,
+            "len": up.file_size_raw.to_string()
+        }
+    })
 }
 
 /// 批量发图：所有页先并行上传，全部成功后再按传入顺序逐页发送。
@@ -311,7 +387,7 @@ pub async fn user_send_images(
     let upload_started = std::time::Instant::now();
     let results = futures_util::future::join_all(
         pngs.iter()
-            .map(|png| upload_image(base_url, token, to_user_id, *png)),
+            .map(|png| upload_media(base_url, token, to_user_id, 1, *png)),
     )
     .await;
     let mut uploaded = Vec::with_capacity(results.len());
@@ -462,6 +538,25 @@ mod tests {
         assert_eq!(cipher, aes_ecb_encrypt(plain, &key));
         // 空数据 → 一整块填充
         assert_eq!(aes_ecb_encrypt(b"", &key).len(), 16);
+    }
+
+    #[test]
+    fn file_item_matches_ilink_shape() {
+        let up = Uploaded {
+            download_param: "ENC/ABC".into(),
+            aeskey_hex: "00112233445566778899aabbccddeeff".into(),
+            file_size_raw: 12_345,
+            file_size_cipher: 12_352,
+        };
+        let item = file_item_value(&up, "个人每日播报.mp3");
+        assert_eq!(item["type"], 4);
+        assert_eq!(item["file_item"]["file_name"], "个人每日播报.mp3");
+        assert_eq!(item["file_item"]["len"], "12345");
+        assert_eq!(item["file_item"]["media"]["encrypt_query_param"], "ENC/ABC");
+        assert_eq!(
+            item["file_item"]["media"]["aes_key"],
+            b64(b"00112233445566778899aabbccddeeff")
+        );
     }
 
     #[test]

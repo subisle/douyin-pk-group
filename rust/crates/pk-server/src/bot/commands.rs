@@ -42,6 +42,7 @@ pub enum CmdId {
     Rank,
     Query,
     Export,
+    VoiceDailyReport,
     DailySquadReport,
     MissingData,
     Import,
@@ -164,6 +165,13 @@ pub const COMMANDS: &[CmdSpec] = &[
         role: Role::Admin,
         summary:
             "CSV 文件回复（用法：导出 男团|女团 [YYYY|YYYY-MM]；不带月份 = 当前月，年份 = 全年）",
+    },
+    CmdSpec {
+        id: CmdId::VoiceDailyReport,
+        name: "语音日报",
+        aliases: &["团队语音播报", "语音播报", "mp3日报"],
+        role: Role::Admin,
+        summary: "MP3 语音日报（用法：语音日报 [男团|女团] [日期]）",
     },
     CmdSpec {
         id: CmdId::DailySquadReport,
@@ -342,6 +350,7 @@ mod tests {
         CmdId::Rank,
         CmdId::Query,
         CmdId::Export,
+        CmdId::VoiceDailyReport,
         CmdId::DailySquadReport,
         CmdId::MissingData,
         CmdId::Import,
@@ -440,6 +449,14 @@ mod tests {
             parse("导出男团"),
             Some((CmdId::Export, vec!["男团".into()]))
         );
+        assert_eq!(
+            parse("语音日报 女团 2026-10-24"),
+            Some((
+                CmdId::VoiceDailyReport,
+                vec!["女团".into(), "2026-10-24".into()]
+            ))
+        );
+        assert_eq!(parse("mp3日报"), Some((CmdId::VoiceDailyReport, vec![])));
     }
 
     /// 2026-10-18 用户口径：普通用户四个主命令 = 单个数字 1–4。

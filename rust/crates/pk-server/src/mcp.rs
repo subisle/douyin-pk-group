@@ -746,7 +746,10 @@ async fn get_anchor_rank(st: &Arc<AppState>, args: &Value) -> anyhow::Result<Val
     }))
 }
 
-async fn get_personal_daily_briefing(st: &Arc<AppState>, args: &Value) -> anyhow::Result<Value> {
+pub(crate) async fn get_personal_daily_briefing(
+    st: &Arc<AppState>,
+    args: &Value,
+) -> anyhow::Result<Value> {
     let name = args
         .get("name")
         .and_then(Value::as_str)
@@ -819,7 +822,7 @@ async fn get_personal_daily_briefing(st: &Arc<AppState>, args: &Value) -> anyhow
     }))
 }
 
-async fn get_daily_briefing(st: &Arc<AppState>, args: &Value) -> anyhow::Result<Value> {
+pub(crate) async fn get_daily_briefing(st: &Arc<AppState>, args: &Value) -> anyhow::Result<Value> {
     let team = team_arg(args)?;
     let mut a = args.clone();
     a["period"] = json!("daily");

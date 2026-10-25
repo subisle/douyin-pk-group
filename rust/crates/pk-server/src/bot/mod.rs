@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use axum::extract::State;
 use futures_util::TryStreamExt as _;
-use serde_json::Value;
+use serde_json::{json, Value};
 use sqlx::Row as _;
 
 use crate::admin;
@@ -46,7 +46,7 @@ pub struct Attachment {
     pub file_name: String,
 }
 
-/// 渠道出站文件（QQ 富媒体发送用；微信暂不消费）。
+/// 渠道出站文件：QQ 走富媒体，微信走 iLink file_item。
 #[derive(Clone, Debug)]
 pub struct OutboundFile {
     pub file_name: String,
@@ -68,7 +68,7 @@ pub struct Outbound {
     /// 同一套渲染）。文字版本保留作兜底 —— 能发图的渠道（微信扫码账号 / 微信全局
     /// 机器人）优先发图、不再发文字 TOP10；发不了图的渠道（QQ）继续发文字。
     pub images: Vec<Vec<u8>>,
-    /// 随消息一起发送的文件；QQ 通过 `msg_type=7` 富媒体发送。
+    /// 随消息一起发送的文件；QQ 用 `msg_type=7`，微信用 iLink `file_item`。
     pub files: Vec<OutboundFile>,
 }
 
@@ -1412,7 +1412,46 @@ async fn route_command(
             None => NO_BINDING_HINT.to_string(),
         },
         CmdId::MyReport => match current_binding(st, inbound).await {
-            Some(b) => cmd_my_report_user(st, &b).await,
+            Some(b) => {
+                let text = cmd_my_report_user(st, &b).await;
+                if inbound.channel == "weixin"
+                    && crate::tts::enabled()
+                    && crate::push::push_out_enabled()
+                {
+                    if let Some(date) = latest_biz_date(st).await {
+                        match crate::mcp::get_personal_daily_briefing(
+                            st,
+                            &json!({ "name": b.name, "date": date }),
+                        )
+                        .await
+                        {
+                            Ok(value) => {
+                                if let Some(speech) =
+                                    value.get("speechText").and_then(Value::as_str)
+                                {
+                                    match crate::tts::synthesize_mp3(speech).await {
+                                        Ok(data) => files.push(OutboundFile {
+                                            file_name: tts_file_name(
+                                                "个人每日播报",
+                                                &b.name,
+                                                &date,
+                                            ),
+                                            data,
+                                        }),
+                                        Err(e) => {
+                                            tracing::warn!(account = %b.name, error = %e, "个人每日播报 TTS 失败，保留文字")
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(account = %b.name, error = %e, "个人每日播报文案生成失败，保留文字")
+                            }
+                        }
+                    }
+                }
+                text
+            }
             None => NO_BINDING_HINT.to_string(),
         },
         // 2026-10-18 新增：3 = 名下徒弟的榜单，4 = 追分榜单
@@ -1458,14 +1497,19 @@ async fn route_command(
             ExportReply::Text(text) => text,
             ExportReply::File { file_name, data } => {
                 files.push(OutboundFile { file_name, data });
-                // QQ 只发附件，不额外发长文本；微信无文件能力时给一句兜底提示。
+                // 文件发送成功时渠道会跳过这段文字；这里只作为上传失败后的兜底。
                 if inbound.channel == "qq" {
                     String::new()
                 } else {
-                    "CSV 文件已生成（QQ 渠道可直接接收文件）".to_string()
+                    "CSV 文件发送失败，请稍后重试。".to_string()
                 }
             }
         },
+        CmdId::VoiceDailyReport => {
+            let (t, voice_files) = cmd_voice_daily_report(st, &args_ref).await;
+            files = voice_files;
+            t
+        }
         CmdId::DailySquadReport => cmd_daily_report(st, &args_ref).await,
         CmdId::MissingData => cmd_missing(st, &args_ref).await,
         CmdId::Import => cmd_import(st, inbound, &args_ref).await,
@@ -2301,6 +2345,68 @@ async fn cmd_import(st: &Arc<AppState>, inbound: &Inbound, args: &[&str]) -> Str
     format_report("机器人导入", &biz_date, team, report)
 }
 
+fn tts_file_name(kind: &str, name: &str, date: &str) -> String {
+    let clean_name: String = name
+        .trim()
+        .chars()
+        .filter(|c| {
+            !c.is_control() && !matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
+        })
+        .take(30)
+        .collect();
+    let who = if clean_name.is_empty() {
+        "主播".to_string()
+    } else {
+        clean_name
+    };
+    format!("{kind}-{who}-{date}.mp3")
+}
+
+/// 语音日报 [男团|女团] [日期]：团队每日播报的 MP3 文件。
+///
+/// TTS 成功时把完整播报稿留在 `Outbound.text`，但微信/QQ 文件通道发送成功后会跳过
+/// 这段文字；只有文件上传失败时才退回文字，确保命令不会只得到一句“生成成功”。
+async fn cmd_voice_daily_report(st: &Arc<AppState>, args: &[&str]) -> (String, Vec<OutboundFile>) {
+    let team = args.first().and_then(|a| team_of(a)).unwrap_or("male");
+    let date = match args.get(1) {
+        Some(d) if valid_date(d) => d.to_string(),
+        _ => crate::repos::get_available_dates(st, Some("LOCAL"), false)
+            .await
+            .ok()
+            .and_then(|d| d.first().cloned())
+            .unwrap_or_else(default_biz_date),
+    };
+    let value =
+        match crate::mcp::get_daily_briefing(st, &json!({ "team": team, "date": date })).await {
+            Ok(v) => v,
+            Err(e) => return (format!("语音日报生成失败：{e}"), Vec::new()),
+        };
+    let Some(speech) = value.get("speechText").and_then(Value::as_str) else {
+        return ("语音日报生成失败：播报稿为空".to_string(), Vec::new());
+    };
+    if !crate::push::push_out_enabled() {
+        return (speech.to_string(), Vec::new());
+    }
+    if !crate::tts::enabled() {
+        return (
+            format!(
+                "语音日报未配置 TTS：请设置 TTS_API_URL，或在 macOS 上使用 TTS_PROVIDER=macos。\n\n{speech}"
+            ),
+            Vec::new(),
+        );
+    }
+    match crate::tts::synthesize_mp3(speech).await {
+        Ok(data) => (
+            speech.to_string(),
+            vec![OutboundFile {
+                file_name: tts_file_name("语音日报", &team_label(team), &date),
+                data,
+            }],
+        ),
+        Err(e) => (format!("语音合成失败：{e}\n\n{speech}"), Vec::new()),
+    }
+}
+
 /// 日报 [男团|女团] [日期]：文本版日报（当日榜 + 未播名单）
 async fn cmd_daily_report(st: &Arc<AppState>, args: &[&str]) -> String {
     let team = args.first().and_then(|a| team_of(a)).unwrap_or("male");
@@ -2927,6 +3033,14 @@ mod tests {
             let g = random_greeting();
             assert!(pool.contains(&g), "随机文案不在池子里：{g}");
         }
+    }
+
+    #[test]
+    fn tts_file_name_is_safe_and_readable() {
+        let n = tts_file_name("个人每日播报", "狼/影", "2026-10-25");
+        assert_eq!(n, "个人每日播报-狼影-2026-10-25.mp3");
+        let blank = tts_file_name("语音日报", "   ", "2026-10-25");
+        assert_eq!(blank, "语音日报-主播-2026-10-25.mp3");
     }
 
     #[test]

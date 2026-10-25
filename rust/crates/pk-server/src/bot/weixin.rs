@@ -996,6 +996,42 @@ impl WxTransport {
                 "微信全局通道榜单图全部失败，退回文字"
             );
         }
+        if !out.files.is_empty() {
+            let base = self.base_url.lock().await.clone();
+            let token = self.token.lock().await.clone();
+            let mut sent = 0usize;
+            for file in &out.files {
+                match crate::store::wxmedia::user_send_file(
+                    &self.st,
+                    &base,
+                    &token,
+                    &to_user,
+                    &context_token,
+                    "",
+                    &file.file_name,
+                    &file.data,
+                )
+                .await
+                {
+                    Ok(()) => sent += 1,
+                    Err(e) => {
+                        tracing::warn!(
+                            file_name = %file.file_name,
+                            error = %e,
+                            "微信全局通道文件回复发送失败"
+                        );
+                        break;
+                    }
+                }
+            }
+            if sent > 0 {
+                return Ok(());
+            }
+            tracing::warn!(
+                files = out.files.len(),
+                "微信全局通道文件全部发送失败，退回文字"
+            );
+        }
         self.send_raw(&to_user, &group, &context_token, &out.text)
             .await?;
         for text in &out.followup_texts {

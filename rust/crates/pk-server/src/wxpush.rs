@@ -650,6 +650,38 @@ async fn handle_msg(st: &Arc<AppState>, acct: &WxPushAccount, m: &Value) {
         }
         tracing::warn!(account = %acct.name, pages = out.images.len(), "榜单图全部发送失败，退回文字");
     }
+    if !out.files.is_empty() {
+        let mut sent = 0usize;
+        for file in &out.files {
+            match crate::store::wxmedia::user_send_file(
+                st,
+                &acct.base_url,
+                &acct.bot_token,
+                &from_user,
+                &context_token,
+                "",
+                &file.file_name,
+                &file.data,
+            )
+            .await
+            {
+                Ok(()) => sent += 1,
+                Err(e) => {
+                    tracing::warn!(
+                        account = %acct.name,
+                        file_name = %file.file_name,
+                        error = %e,
+                        "扫码账号文件回复发送失败"
+                    );
+                    break;
+                }
+            }
+        }
+        if sent > 0 {
+            return;
+        }
+        tracing::warn!(account = %acct.name, files = out.files.len(), "文件全部发送失败，退回文字");
+    }
     if out.text.trim().is_empty() {
         return;
     }

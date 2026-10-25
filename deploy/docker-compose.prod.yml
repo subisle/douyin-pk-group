@@ -108,6 +108,17 @@ services:
       # PUSH_OUT_ALLOW 留空 = 不额外限制收件人；想灰度就填姓名白名单（逗号分隔）。
       PUSH_OUT_ENABLED: ${PUSH_OUT_ENABLED:-1}
       PUSH_OUT_ALLOW: ${PUSH_OUT_ALLOW:-}
+      # TTS → MP3（微信个人每日播报 / 语音日报）。生产 Linux 需要配置
+      # OpenAI 兼容 audio/speech 接口；缺失时命令保留文字，不影响其它功能。
+      TTS_PROVIDER: ${TTS_PROVIDER:-auto}
+      TTS_API_URL: ${TTS_API_URL:-}
+      TTS_API_KEY: ${TTS_API_KEY:-}
+      TTS_MODEL: ${TTS_MODEL:-gpt-4o-mini-tts}
+      TTS_VOICE: ${TTS_VOICE:-alloy}
+      TTS_FORMAT: ${TTS_FORMAT:-mp3}
+      TTS_SPEED: ${TTS_SPEED:-1.0}
+      TTS_TIMEOUT_SECS: ${TTS_TIMEOUT_SECS:-90}
+      TTS_MAX_CHARS: ${TTS_MAX_CHARS:-4000}
       # 头像同步总闸（2026-10-17 用户点单冻结：与本地口径一致，生产默认冻结）。
       # 要恢复同步需同时删掉 compose 这行与 .env.prod 里的同名变量。
       AVATAR_SYNC_DISABLED: "1"

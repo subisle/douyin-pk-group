@@ -32,5 +32,6 @@ pub mod routes;
 pub mod spa;
 pub mod state;
 pub mod store;
+pub mod tts;
 pub mod writer;
 pub mod wxpush;
