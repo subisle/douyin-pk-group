@@ -127,7 +127,7 @@ async fn handle_message(st: &Arc<AppState>, text: &str) -> Option<Value> {
             "capabilities": { "tools": {} },
             "serverInfo": {
                 "name": "douyin-pk-mcp",
-                "version": "1.2.0"
+                "version": "1.3.0"
             }
         })),
         "ping" => Ok(json!({})),
@@ -207,7 +207,7 @@ fn tool_defs() -> Vec<Value> {
                 "properties": {
                     "team": { "type": "string", "enum": ["male", "female"], "description": "male=男团，female=女团" },
                     "period": { "type": "string", "enum": ["daily", "monthly", "yearly"], "description": "daily=日榜，monthly=月榜，yearly=年榜" },
-                    "date": { "type": "string", "description": "日榜日期，格式 YYYY-MM-DD；缺省为最新业务日" },
+                    "date": { "type": "string", "description": "日榜日期：YYYY-MM-DD、today/今天、yesterday/昨天或 latest；缺省为最新业务日。今天尚无数据时自动落到最新业务日" },
                     "month": { "type": "string", "description": "月榜月份，格式 YYYY-MM；缺省为最新业务日所在月" },
                     "year": { "type": "string", "description": "年榜年份，格式 YYYY；缺省为最新业务日所在年" },
                     "limit": { "type": "integer", "minimum": 1, "maximum": 50, "description": "返回行数，默认 10" }
@@ -224,7 +224,7 @@ fn tool_defs() -> Vec<Value> {
                 "properties": {
                     "team": { "type": "string", "enum": ["male", "female"] },
                     "period": { "type": "string", "enum": ["daily", "monthly", "yearly"] },
-                    "date": { "type": "string" },
+                    "date": { "type": "string", "description": "YYYY-MM-DD、today/今天、yesterday/昨天或 latest；今天无数据时落到最新业务日" },
                     "month": { "type": "string" },
                     "year": { "type": "string" }
                 },
@@ -253,7 +253,7 @@ fn tool_defs() -> Vec<Value> {
                 "properties": {
                     "name": { "type": "string", "description": "主播艺名" },
                     "period": { "type": "string", "enum": ["daily", "monthly", "yearly"] },
-                    "date": { "type": "string" },
+                    "date": { "type": "string", "description": "YYYY-MM-DD、today/今天、yesterday/昨天或 latest；今天无数据时落到最新业务日" },
                     "month": { "type": "string" },
                     "year": { "type": "string" }
                 },
@@ -263,12 +263,12 @@ fn tool_defs() -> Vec<Value> {
         }),
         json!({
             "name": "get_personal_daily_briefing",
-            "description": "生成某位主播的个人每日播报：今日音浪、团内名次、时长、上下名次差距、本月累计与月榜名次、未播天数、预估到手和一句状态总结。用户说“个人每日播报/播报某主播/查某主播今天怎么样”时优先调用。结果必须直接朗读，不寒暄、不说明有没有数据、不说我查一下。",
+            "description": "生成某位主播在指定业务日的个人播报：音浪、团内名次、时长、上下名次差距、本月累计与月榜名次、未播天数、预估到手和一句状态总结。用户说“个人每日播报/播报某主播/查某主播今天怎么样”时优先调用。日期可传 YYYY-MM-DD、today/今天、yesterday/昨天或 latest；今天尚无数据时服务端会落到最新业务日，播报必须使用返回的真实日期，禁止把昨日数据说成今天。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "name": { "type": "string", "description": "主播艺名" },
-                    "date": { "type": "string", "description": "YYYY-MM-DD，缺省为最新业务日" }
+                    "date": { "type": "string", "description": "YYYY-MM-DD、today/今天、yesterday/昨天或 latest；缺省为最新业务日。今天尚无数据时自动落到最新业务日" }
                 },
                 "required": ["name"],
                 "additionalProperties": false
@@ -276,19 +276,19 @@ fn tool_defs() -> Vec<Value> {
         }),
         json!({
             "name": "get_daily_briefing",
-            "description": "生成约3分钟中文语音播报稿：先给一句整体总结，再直接播报每日男团或女团前十名、音浪、时长、未播天数、相邻名次差距和逐名评价。用户说“每日播报/今天播报/前十名播报”时必须调用此工具，并原样朗读返回文本。不要寒暄，不要回答有没有数据，不要说“我查一下/以下是/有数据”。",
+            "description": "生成约3分钟中文语音播报稿：先给一句整体总结，再直接播报指定业务日男团或女团前十名、音浪、时长、未播天数、相邻名次差距和逐名评价。用户说“每日播报/今天播报/前十名播报”时必须调用此工具，并原样朗读返回文本。日期可传 YYYY-MM-DD、today/今天、yesterday/昨天或 latest；今天尚无数据时服务端会落到最新业务日。必须按返回的真实日期播报，禁止把昨日数据说成今天。不要寒暄，不要回答有没有数据，不要说“我查一下/以下是/有数据”。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "team": { "type": "string", "enum": ["male", "female"], "description": "缺省为男团" },
-                    "date": { "type": "string", "description": "YYYY-MM-DD，缺省为最新业务日" }
+                    "date": { "type": "string", "description": "YYYY-MM-DD、today/今天、yesterday/昨天或 latest；缺省为最新业务日。今天尚无数据时自动落到最新业务日" }
                 },
                 "additionalProperties": false
             }
         }),
         json!({
             "name": "get_data_status",
-            "description": "查询最新业务日、可用日期数量以及男团/女团对外展示人数。",
+            "description": "查询今天日期、最新业务日、数据滞后天数（freshness）、可用日期数量以及男团/女团对外展示人数。用户问“今天数据”时先用本工具确认实际最新业务日，再查榜；不得自行假设当天已有数据。",
             "inputSchema": {
                 "type": "object",
                 "properties": {},
@@ -353,12 +353,12 @@ async fn load_rank_rows(
     args: &Value,
 ) -> anyhow::Result<(String, Vec<RankRow>)> {
     if period == "daily" {
-        let date = args
-            .get("date")
-            .and_then(Value::as_str)
-            .filter(|d| valid_date(d))
-            .map(str::to_string)
-            .unwrap_or(latest_date(st).await?);
+        let latest = latest_date(st).await?;
+        let date = resolve_daily_date(
+            args.get("date").and_then(Value::as_str),
+            chrono::Local::now().date_naive(),
+            &latest,
+        );
         let rep = report::build(st, &date, team).await?;
         let rows = rep
             .rows
@@ -477,6 +477,67 @@ fn speech_month(month: &str) -> String {
         Ok(d) => format!("{}年{}月", d.year(), d.month()),
         Err(_) => month.to_string(),
     }
+}
+
+fn speech_date_with_relation(date: &str, today: chrono::NaiveDate) -> String {
+    let label = speech_date(date);
+    let Ok(d) = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d") else {
+        return label;
+    };
+    match (today - d).num_days() {
+        0 => format!("{label}（今天）"),
+        1 => format!("{label}（昨日数据）"),
+        _ => label,
+    }
+}
+
+/// 把 MCP 的日期参数收敛成真实业务日。
+///
+/// 数据本身就是「次日导入前一天」：今天来问时，今天通常还没有数据。
+/// 这里接受日期、today/今日、yesterday/昨日、latest/最新；今天或未来日期
+/// 超过库里的最新业务日时，明确落到最新业务日，绝不把昨天数据标成今天。
+fn resolve_daily_date(raw: Option<&str>, today: chrono::NaiveDate, latest: &str) -> String {
+    let raw = raw.unwrap_or("").trim();
+    if raw.is_empty()
+        || matches!(
+            raw.to_ascii_lowercase().as_str(),
+            "latest" | "最新" | "最新数据" | "最新业务日"
+        )
+    {
+        return latest.to_string();
+    }
+    let lower = raw.to_ascii_lowercase();
+    let candidate = match lower.as_str() {
+        "today" | "今日" | "今天" => today,
+        "yesterday" | "昨日" | "昨天" => today - chrono::Duration::days(1),
+        _ if valid_date(raw) => {
+            chrono::NaiveDate::parse_from_str(raw, "%Y-%m-%d").expect("valid_date 已校验过格式")
+        }
+        _ => return latest.to_string(),
+    };
+    let candidate_s = candidate.format("%Y-%m-%d").to_string();
+    let latest_parsed = chrono::NaiveDate::parse_from_str(latest, "%Y-%m-%d").ok();
+    // 显式历史日期照查；今天/未来，或今天不存在的自然语言日期，一律回到
+    // 当前最新业务日，避免模型自己传入今天的日历日期后返回一份空榜。
+    if candidate > today {
+        return latest.to_string();
+    }
+    if candidate_s.as_str() > latest {
+        let relative = matches!(
+            lower.as_str(),
+            "today" | "今日" | "今天" | "yesterday" | "昨日" | "昨天"
+        );
+        if relative || candidate == today || latest_parsed.is_none() {
+            return latest.to_string();
+        }
+    }
+    candidate_s
+}
+
+fn data_lag_days(latest: &str, today: chrono::NaiveDate) -> i64 {
+    chrono::NaiveDate::parse_from_str(latest, "%Y-%m-%d")
+        .map(|d| (today - d).num_days().max(0))
+        .unwrap_or(0)
 }
 
 fn pct(part: i64, total: i64) -> i64 {
@@ -788,12 +849,12 @@ pub(crate) async fn get_personal_daily_briefing(
         anyhow::bail!("name 不能为空");
     }
     let team = anchor_team(st, name).await?;
-    let date = args
-        .get("date")
-        .and_then(Value::as_str)
-        .filter(|d| valid_date(d))
-        .map(str::to_string)
-        .unwrap_or(latest_date(st).await?);
+    let latest = latest_date(st).await?;
+    let date = resolve_daily_date(
+        args.get("date").and_then(Value::as_str),
+        chrono::Local::now().date_naive(),
+        &latest,
+    );
     let daily_args = json!({ "date": date });
     let (_, daily_rows) = load_rank_rows(st, &team, "daily", &daily_args).await?;
     let month = date.get(..7).unwrap_or(&date).to_string();
@@ -924,7 +985,7 @@ fn daily_overview(rows: &[RankRow]) -> String {
     let top3_wave: i64 = rows.iter().take(3).map(|r| r.wave).sum();
     let top10_wave: i64 = rows.iter().take(10).map(|r| r.wave).sum();
     let mut out = format!(
-        "今天有效开播{}人，全团总音浪{}，人均音浪约{}。",
+        "当日有效开播{}人，全团总音浪{}，人均音浪约{}。",
         live,
         wave_text(total_wave),
         wave_text(average)
@@ -971,7 +1032,7 @@ fn daily_row_evaluation(rows: &[RankRow], idx: usize) -> String {
     let row = &rows[idx];
     let rank = idx + 1;
     if row.wave < 2 {
-        return "今天还没有形成有效音浪，需要先确认开播状态和数据是否入库。".into();
+        return "当日还没有形成有效音浪，需要先确认开播状态和数据是否入库。".into();
     }
     if rank == 1 {
         if rows.len() == 1 {
@@ -1025,7 +1086,7 @@ fn daily_row_evaluation(rows: &[RankRow], idx: usize) -> String {
 }
 
 fn build_daily_speech(team: &str, as_of: &str, rows: &[RankRow]) -> String {
-    let date = speech_date(as_of);
+    let date = speech_date_with_relation(as_of, chrono::Local::now().date_naive());
     if rows.is_empty() {
         return format!("{date}，{}暂时没有可播报的数据。", team_label(team));
     }
@@ -1040,7 +1101,7 @@ fn build_daily_speech(team: &str, as_of: &str, rows: &[RankRow]) -> String {
             "未形成有效开播"
         };
         out.push_str(&format!(
-            "第{}名，{}。今日音浪{}，占全团{}%，{}，直播时长{}，{}。{}。评价：{}",
+            "第{}名，{}。当日音浪{}，占全团{}%，{}，直播时长{}，{}。{}。评价：{}",
             i + 1,
             row.name,
             wave_text(row.wave),
@@ -1074,20 +1135,20 @@ fn personal_evaluation(rows: &[RankRow], idx: usize) -> String {
     let row = &rows[idx];
     let rank = idx + 1;
     if row.wave < 2 {
-        return "今天还没有形成有效音浪，先确认是否开播以及数据是否入库。".into();
+        return "当日还没有形成有效音浪，先确认是否开播以及数据是否入库。".into();
     }
     if rank == 1 {
-        return "今天处在领跑位置，守榜状态不错。".into();
+        return "当日处在领跑位置，守榜状态不错。".into();
     }
     if rank <= 3 {
         let gap = (rows[0].wave - row.wave).max(0);
-        return format!("今天稳在第一梯队，距离榜首还差{}音浪。", wave_text(gap));
+        return format!("当日稳在第一梯队，距离榜首还差{}音浪。", wave_text(gap));
     }
     if rank <= 10 {
         if let Some(third) = rows.get(2) {
             let gap = (third.wave - row.wave).max(0);
             return format!(
-                "今天进入前十，距离前三还差{}音浪，继续稳定开播就有追赶空间。",
+                "当日进入前十，距离前三还差{}音浪，继续稳定开播就有追赶空间。",
                 wave_text(gap)
             );
         }
@@ -1113,9 +1174,9 @@ fn build_personal_daily_speech(
 ) -> String {
     let Some((day_idx, day)) = daily_rows.iter().enumerate().find(|(_, r)| r.name == name) else {
         return format!(
-            "{}，{}个人每日播报。今天暂时没有可播报的数据。",
+            "{}，{}个人每日播报。该业务日暂时没有可播报的数据。",
             name,
-            speech_date(as_of)
+            speech_date_with_relation(as_of, chrono::Local::now().date_naive())
         );
     };
     let day_rank = day_idx + 1;
@@ -1130,11 +1191,15 @@ fn build_personal_daily_speech(
     let duration = if day.minutes > 0 {
         format!("直播时长{}", speech_minutes(day.minutes))
     } else {
-        "今天没有登记有效时长".to_string()
+        "当日没有登记有效时长".to_string()
     };
-    let mut out = format!("{}，{}个人每日播报。", name, speech_date(as_of));
+    let mut out = format!(
+        "{}，{}个人每日播报。",
+        name,
+        speech_date_with_relation(as_of, chrono::Local::now().date_naive())
+    );
     out.push_str(&format!(
-        "今天音浪{}，在{}排名第{}，{}。",
+        "当日音浪{}，在{}排名第{}，{}。",
         wave_text(day.wave),
         team_label(team),
         day_rank,
@@ -1157,7 +1222,7 @@ fn build_personal_daily_speech(
     } else if let Some(previous) = daily_rows.get(day_idx - 1) {
         out.push_str(&format!("{}。", speech_gap(day.wave, Some(previous.wave))));
     }
-    out.push_str(&format!("今天音浪占全团{}%。", pct(day.wave, total_wave)));
+    out.push_str(&format!("当日音浪占全团{}%。", pct(day.wave, total_wave)));
     match month_hit {
         Some((month_idx, month_row)) => out.push_str(&format!(
             "{}累计音浪{}，月榜第{}名。",
@@ -1171,7 +1236,7 @@ fn build_personal_daily_speech(
         )),
     }
     if let Some(est) = estimated_income {
-        out.push_str(&format!("按当前分成估算，今天预计到手约{est}元。"));
+        out.push_str(&format!("按当前分成估算，当日预计到手约{est}元。"));
     }
     out.push_str(&format!(
         "状态总结：{}",
@@ -1183,6 +1248,22 @@ fn build_personal_daily_speech(
 async fn get_data_status(st: &Arc<AppState>) -> anyhow::Result<Value> {
     let dates = repos::get_available_dates(st, None, false).await?;
     let latest = dates.first().cloned().unwrap_or_default();
+    let today = chrono::Local::now().date_naive();
+    let calendar_today = today.format("%Y-%m-%d").to_string();
+    let lag_days = if latest.is_empty() {
+        0
+    } else {
+        data_lag_days(&latest, today)
+    };
+    let freshness = if latest.is_empty() {
+        "暂无业务数据".to_string()
+    } else {
+        match lag_days {
+            0 => "今日数据".to_string(),
+            1 => "昨日数据".to_string(),
+            n => format!("{n}天前数据"),
+        }
+    };
     let mut counts = serde_json::Map::new();
     let mut male_count = 0;
     let mut female_count = 0;
@@ -1202,10 +1283,10 @@ async fn get_data_status(st: &Arc<AppState>) -> anyhow::Result<Value> {
         }
     }
     let summary = if latest.is_empty() {
-        "暂无可用的业务数据。".to_string()
+        format!("今天日期{calendar_today}；暂无可用的业务数据。")
     } else {
         format!(
-            "最新业务日{latest}，共有{}个业务日；男团对外展示{}人，女团对外展示{}人。",
+            "今天日期{calendar_today}；最新业务日是{latest}，属于{freshness}，距今{lag_days}天；共有{}个业务日，男团对外展示{}人，女团对外展示{}人。",
             dates.len(),
             male_count,
             female_count
@@ -1214,7 +1295,10 @@ async fn get_data_status(st: &Arc<AppState>) -> anyhow::Result<Value> {
     Ok(json!({
         "speechText": summary.clone(),
         "summary": summary,
+        "calendarToday": calendar_today,
         "latestDate": latest,
+        "dataLagDays": lag_days,
+        "freshness": freshness,
         "availableDates": dates.len(),
         "visiblePersons": counts
     }))
@@ -1272,6 +1356,39 @@ mod tests {
     }
 
     #[test]
+    fn relative_dates_land_on_latest_real_business_day() {
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 10, 25).unwrap();
+        let latest = "2026-10-24";
+        assert_eq!(resolve_daily_date(None, today, latest), latest);
+        assert_eq!(resolve_daily_date(Some("today"), today, latest), latest);
+        assert_eq!(resolve_daily_date(Some("今天"), today, latest), latest);
+        assert_eq!(
+            resolve_daily_date(Some("2026-10-25"), today, latest),
+            latest
+        );
+        assert_eq!(resolve_daily_date(Some("yesterday"), today, latest), latest);
+        assert_eq!(
+            resolve_daily_date(Some("2026-10-20"), today, latest),
+            "2026-10-20"
+        );
+        assert_eq!(
+            resolve_daily_date(Some("2026-10-26"), today, latest),
+            latest
+        );
+    }
+
+    #[test]
+    fn speech_labels_yesterday_instead_of_calling_it_today() {
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 10, 25).unwrap();
+        assert_eq!(
+            speech_date_with_relation("2026-10-24", today),
+            "2026年10月24日（昨日数据）"
+        );
+        assert_eq!(data_lag_days("2026-10-24", today), 1);
+        assert_eq!(data_lag_days("2026-10-25", today), 0);
+    }
+
+    #[test]
     fn daily_speech_has_top_ten_and_three_minute_script() {
         let rows: Vec<RankRow> = (1..=12)
             .map(|i| RankRow {
@@ -1282,8 +1399,10 @@ mod tests {
             })
             .collect();
         let speech = build_daily_speech("male", "2026-10-24", &rows);
+        let expected_date =
+            speech_date_with_relation("2026-10-24", chrono::Local::now().date_naive());
         assert!(
-            speech.starts_with("2026年10月24日，男团每日播报。"),
+            speech.starts_with(&format!("{expected_date}，男团每日播报。")),
             "{speech}"
         );
         assert!(speech.contains("前三名贡献全团"), "{speech}");
@@ -1291,6 +1410,7 @@ mod tests {
         assert!(speech.contains("评价："));
         assert!(speech.contains("音浪9万4千"));
         assert!(!speech.contains("94000"));
+        assert!(!speech.contains("今天有效开播"), "{speech}");
         for filler in ["各位好", "以下是", "有没有数据", "我查一下", "有数据"] {
             assert!(!speech.contains(filler), "播报不应出现开场套话：{filler}");
         }
@@ -1328,16 +1448,19 @@ mod tests {
             &monthly_rows,
             Some("1750"),
         );
+        let expected_date =
+            speech_date_with_relation("2026-10-24", chrono::Local::now().date_naive());
         assert!(
-            speech.starts_with("主播3，2026年10月24日个人每日播报。"),
+            speech.starts_with(&format!("主播3，{expected_date}个人每日播报。")),
             "{speech}"
         );
-        assert!(speech.contains("今天音浪8万2千"), "{speech}");
+        assert!(speech.contains("当日音浪8万2千"), "{speech}");
         assert!(speech.contains("排名第3"), "{speech}");
         assert!(speech.contains("月榜第3"), "{speech}");
         assert!(speech.contains("预计到手约1750元"), "{speech}");
         assert!(speech.contains("状态总结："), "{speech}");
         assert!(!speech.contains("82000"), "{speech}");
+        assert!(!speech.contains("今天音浪"), "{speech}");
         for filler in ["有没有数据", "我查一下", "有数据", "以下是"] {
             assert!(!speech.contains(filler), "个人播报不应有开场套话：{filler}");
         }

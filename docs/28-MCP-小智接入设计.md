@@ -116,7 +116,7 @@ XIAOZHI_MCP_ENDPOINT=wss://api.xiaozhi.me/mcp/?token=<endpoint-token>
 
 说明：
 
-- `period=daily` 使用 `date`，缺省为最新业务日；
+- `period=daily` 使用 `date`，缺省为最新业务日；`date` 也接受 `today/今天`、`yesterday/昨天`、`latest/最新`；
 - `period=monthly` 使用 `month`，缺省为最新业务日所在月；
 - `period=yearly` 使用 `year`，缺省为最新业务日所在年；
 - `limit` 默认 10，最大 50。
@@ -146,7 +146,8 @@ XIAOZHI_MCP_ENDPOINT=wss://api.xiaozhi.me/mcp/?token=<endpoint-token>
 `team` 缺省为男团，`date` 缺省为最新业务日。返回约 3 分钟的可直接朗读播报稿：
 开头先给榜首优势、前三/前十集中度等整体总结，随后直接播前十名，不寒暄、不说明
 “有没有数据”，不说“我查一下 / 以下是”。总音浪、人均音浪、逐名音浪、相邻差距和
-第十名门槛全部使用中文口语单位（如 `5万2千`）。
+第十名门槛全部使用中文口语单位（如 `5万2千`）。播报始终使用真实业务日期；若最新
+业务日就是昨天，会明确说“昨日数据”，不会把昨天叫成今天。
 
 ### 6.3 `get_personal_daily_briefing`
 
@@ -159,11 +160,20 @@ XIAOZHI_MCP_ENDPOINT=wss://api.xiaozhi.me/mcp/?token=<endpoint-token>
 }
 ```
 
-按艺名生成个人每日播报，包含今日音浪、团内名次、时长、上下名次差距、本月累计音浪、
-月榜名次、未播天数、预估到手和一句状态总结。播报同样从姓名和日期直接开始，不先回答
-“有没有数据”。
+按艺名生成个人每日播报，包含指定业务日音浪、团内名次、时长、上下名次差距、本月
+累计音浪、月榜名次、未播天数、预估到手和一句状态总结。播报同样从姓名和日期直接开始，
+不先回答“有没有数据”；日期若为昨天，会明确标注“昨日数据”。
 
-### 6.4 语音友好的返回约定
+### 6.4 业务日期与“今天”口径
+
+- 数据按“次日导入前一天”的业务口径运行，因此今天查询时通常最新业务日是昨天；
+- MCP 接受 `YYYY-MM-DD`、`today/今天`、`yesterday/昨天`、`latest/最新`；
+- 如果模型传入今天日期、但今天还没有业务数据，服务端自动落到当前最新业务日；
+- `asOf` 永远是真实业务日期，播报以 `asOf` 为准，禁止把昨天数据说成今天；
+- `get_data_status` 返回 `calendarToday`、`latestDate`、`dataLagDays`、`freshness`，
+  供小智先确认日期再查询。
+
+### 6.5 语音友好的返回约定
 
 所有工具返回：
 
@@ -177,7 +187,7 @@ XIAOZHI_MCP_ENDPOINT=wss://api.xiaozhi.me/mcp/?token=<endpoint-token>
 
 ## 7. 安全与稳定性
 
-- 只接受 WSS；endpoint token 不打印、不写入仓库；
+- 只接受 WSS；endpoint token 不打印、不写入仓库；连接每 20 秒发送 WebSocket 心跳，断开后 1 秒起自动重连；
 - 单连接限流，单次工具最多返回 50 行；
 - 单次查询超时 3 秒，超时返回可读错误，不阻塞小智会话；
 - 工具调用日志只记录工具名、参数摘要、耗时和结果状态；不记录 endpoint token、密码、手机号、完整抖音号；
