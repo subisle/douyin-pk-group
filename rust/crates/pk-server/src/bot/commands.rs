@@ -76,9 +76,16 @@ pub const COMMANDS: &[CmdSpec] = &[
     CmdSpec {
         id: CmdId::MyReport,
         name: "2",
-        aliases: &["个人榜单", "个人报告", "me", "my"],
+        aliases: &[
+            "个人榜单",
+            "个人报告",
+            "个人每日播报",
+            "个人播报",
+            "me",
+            "my",
+        ],
         role: Role::User,
-        summary: "个人报告：今日音浪 / 预估收入 + 本月数据 + 追分进度",
+        summary: "个人每日播报：今日音浪 / 预估收入 + 本月数据 + 追分进度",
     },
     CmdSpec {
         id: CmdId::DiscipleRank,
@@ -446,6 +453,8 @@ mod tests {
         // 老中文命令名继续能用（保留为别名，不破坏老用户习惯）
         assert_eq!(parse("每日报告"), Some((CmdId::DailyReport, vec![])));
         assert_eq!(parse("个人报告"), Some((CmdId::MyReport, vec![])));
+        assert_eq!(parse("个人每日播报"), Some((CmdId::MyReport, vec![])));
+        assert_eq!(parse("个人播报"), Some((CmdId::MyReport, vec![])));
         assert_eq!(parse("每日榜单"), Some((CmdId::DailyReport, vec![])));
         assert_eq!(parse("徒弟榜单"), Some((CmdId::DiscipleRank, vec![])));
         assert_eq!(parse("追分榜单"), Some((CmdId::TargetRank, vec![])));

@@ -67,7 +67,8 @@ wss://api.xiaozhi.me/mcp/?token=<endpoint-token>
 小智传入的普通用户名、手机号或个人 token。
 
 - 所有工具都允许查询男团、女团对外展示数据；
-- 不提供个人数据、我的抖音号、密码、手机号、推送开关等用户能力；
+- 允许按艺名生成个人每日播报，但只使用已对外展示的音浪、时长、名次、未播天数等统计；
+- 不提供账号登录、我的抖音号、密码、手机号、推送开关等用户能力；
 - 不提供导入、删除、改绑、发布等写操作；
 - 不返回手机号、抖音号、内部 `personId`；
 - 如 endpoint token 泄露，直接在小智后台重新生成并替换环境变量。
@@ -88,7 +89,8 @@ XIAOZHI_MCP_ENDPOINT=wss://api.xiaozhi.me/mcp/?token=<endpoint-token>
 | `get_team_summary` | 查询总音浪、开播人数、未播人数 | 管理员 |
 | `search_anchor` | 按艺名/部分艺名找人 | 管理员 |
 | `get_anchor_rank` | 查某位主播的团别、名次、音浪、时长、未播天数 | 管理员 |
-| `get_daily_briefing` | 约3分钟语音稿：前十名、逐名评价、总音浪、开播/未播人数 | 管理员 |
+| `get_personal_daily_briefing` | 个人每日播报：今日表现、上下名次差距、本月累计/月榜、预估到手和状态总结 | 管理员 |
+| `get_daily_briefing` | 约3分钟语音稿：先总结，再播前十名、逐名评价和卡位差距 | 管理员 |
 | `get_data_status` | 查最新业务日、可用日期数量、展示人数 | 管理员 |
 
 后续按需要增加：
@@ -141,11 +143,27 @@ XIAOZHI_MCP_ENDPOINT=wss://api.xiaozhi.me/mcp/?token=<endpoint-token>
 }
 ```
 
-`team` 缺省为男团，`date` 缺省为最新业务日。返回约 3 分钟的可直接朗读播报稿，
-包含前十名、逐名音浪/时长/未播天数/相邻差距和评价。总音浪、人均音浪、逐名音浪、
-相邻差距和第十名门槛全部使用中文口语单位（如 `5万2千`）。
+`team` 缺省为男团，`date` 缺省为最新业务日。返回约 3 分钟的可直接朗读播报稿：
+开头先给榜首优势、前三/前十集中度等整体总结，随后直接播前十名，不寒暄、不说明
+“有没有数据”，不说“我查一下 / 以下是”。总音浪、人均音浪、逐名音浪、相邻差距和
+第十名门槛全部使用中文口语单位（如 `5万2千`）。
 
-### 6.3 语音友好的返回约定
+### 6.3 `get_personal_daily_briefing`
+
+参数：
+
+```json
+{
+  "name": "浩龙",
+  "date": "2026-10-23"
+}
+```
+
+按艺名生成个人每日播报，包含今日音浪、团内名次、时长、上下名次差距、本月累计音浪、
+月榜名次、未播天数、预估到手和一句状态总结。播报同样从姓名和日期直接开始，不先回答
+“有没有数据”。
+
+### 6.4 语音友好的返回约定
 
 所有工具返回：
 
@@ -172,7 +190,7 @@ XIAOZHI_MCP_ENDPOINT=wss://api.xiaozhi.me/mcp/?token=<endpoint-token>
 
 - MCP 协议层：initialize / tools/list / tools/call / ping；
 - 小智出站 WSS 连接 + endpoint token；
-- `get_team_ranking`、`get_team_summary`、`search_anchor`、`get_anchor_rank`、`get_daily_briefing`、`get_data_status`；
+- `get_team_ranking`、`get_team_summary`、`search_anchor`、`get_anchor_rank`、`get_personal_daily_briefing`、`get_daily_briefing`、`get_data_status`；
 - 本地 MCP 客户端冒烟测试。
 
 ### P1：小智语音体验
