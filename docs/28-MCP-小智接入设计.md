@@ -119,20 +119,16 @@ XIAOZHI_MCP_ENDPOINT=wss://api.xiaozhi.me/mcp/?token=<endpoint-token>
 - `period=yearly` 使用 `year`，缺省为最新业务日所在年；
 - `limit` 默认 10，最大 50。
 
-返回精简结构：
+返回给小智的 `content.text` 是可直接朗读的中文文本，例如：
 
-```json
-{
-  "summary": "2026-10-23 男团日榜，浩龙第 1，共 89 人。",
-  "asOf": "2026-10-23",
-  "team": "male",
-  "period": "daily",
-  "rows": [
-    {"rank": 1, "name": "浩龙", "wave": 2245607, "minutes": 4529, "live": true, "absentDays": 0}
-  ],
-  "meta": {"total": 89, "truncated": true}
-}
+```text
+男团2026-10-23日榜共89人，第一名浩龙，音浪224万5千。
+第1名浩龙，音浪224万5千，时长75小时29分钟，未播0天，已开播。
 ```
+
+音浪统一使用“万/千”的口语单位，例如 `52542` 输出为 `5万2千`。
+结构化字段只在服务端内部组装，不再以 JSON 文本交给语音模型，避免模型再次读出
+`waveValue` 等无单位原始整数。
 
 ### 6.2 `get_daily_briefing`
 
@@ -146,18 +142,20 @@ XIAOZHI_MCP_ENDPOINT=wss://api.xiaozhi.me/mcp/?token=<endpoint-token>
 ```
 
 `team` 缺省为男团，`date` 缺省为最新业务日。返回约 3 分钟的可直接朗读播报稿，
-包含前十名、逐名音浪/时长/未播天数/相邻差距和评价，同时保留结构化前十名数据。
+包含前十名、逐名音浪/时长/未播天数/相邻差距和评价。总音浪、人均音浪、逐名音浪、
+相邻差距和第十名门槛全部使用中文口语单位（如 `5万2千`）。
 
 ### 6.3 语音友好的返回约定
 
 所有工具返回：
 
-- `summary`：一到两句可直接朗读的中文摘要；
-- `data`：结构化数据，供小智进一步解释；
-- `actions`：可选，例如“要不要查看前 10 名”；
-- 错误统一为 `code` + `message`，例如 `AUTH_REQUIRED`、`TEAM_FORBIDDEN`、`NO_DATA`、`RATE_LIMITED`。
+- `content.text`：只放可直接朗读的中文文本，不暴露原始 JSON 数字；
+- `summary` / `speechText`：服务端内部摘要，`speechText` 优先；
+- 音浪、总音浪、差距等数值统一转成“万/千”口语单位；
+- 错误统一为可朗读的中文说明。
 
-MCP 的 `content` 放 JSON 文本，同时如客户端支持 `structuredContent` 则放同一份结构化结果。
+不向小智返回 `structuredContent` 和 `waveValue` 等原始整数，防止语音模型忽略单位、
+把 `52542` 直接读成一长串数字。
 
 ## 7. 安全与稳定性
 

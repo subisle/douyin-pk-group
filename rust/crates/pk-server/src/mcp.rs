@@ -97,7 +97,7 @@ async fn handle_message(st: &Arc<AppState>, text: &str) -> Option<Value> {
             "capabilities": { "tools": {} },
             "serverInfo": {
                 "name": "douyin-pk-mcp",
-                "version": "1.0.0"
+                "version": "1.1.0"
             }
         })),
         "ping" => Ok(json!({})),
@@ -137,21 +137,21 @@ async fn call_tool(st: &Arc<AppState>, request: &Value) -> anyhow::Result<Value>
         _ => Err(anyhow::anyhow!("未知工具：{name}")),
     }?;
 
-    // 每日播报严格返回可直接朗读的稿子，不把 JSON 包裹文本交给语音模型二次概括。
-    if name == "get_daily_briefing" {
-        if let Some(speech) = value.get("speechText").and_then(Value::as_str) {
-            return Ok(json!({
-                "content": [{ "type": "text", "text": speech }],
-                "isError": false
-            }));
-        }
-    }
-
-    let text = serde_json::to_string(&value).unwrap_or_else(|_| "{}".into());
+    // 只把小智可直接朗读的中文交给模型，不把结构化 JSON 塞进上下文。
+    // 否则模型可能再次概括并读出 waveValue 等无单位原始整数。
+    let text = spoken_text(&value);
     Ok(json!({
         "content": [{ "type": "text", "text": text }],
         "isError": false
     }))
+}
+
+fn spoken_text(value: &Value) -> &str {
+    value
+        .get("speechText")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("summary").and_then(Value::as_str))
+        .unwrap_or("操作已完成，但没有可朗读的内容。")
 }
 
 fn rpc_ok(id: Value, result: Value) -> Value {
@@ -170,7 +170,7 @@ fn tool_defs() -> Vec<Value> {
     vec![
         json!({
             "name": "get_team_ranking",
-            "description": "查询男团或女团的日榜、月榜、年榜。返回排名、艺名、音浪、时长、未播天数和开播状态。",
+            "description": "查询男团或女团的日榜、月榜、年榜。返回排名、艺名、音浪、时长、未播天数和开播状态。音浪使用中文口语单位，例如5万2千；回答时请保留单位，不要改说原始整数。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -187,7 +187,7 @@ fn tool_defs() -> Vec<Value> {
         }),
         json!({
             "name": "get_team_summary",
-            "description": "查询男团或女团某个周期的汇总数据：总音浪、开播人数、未播人数和榜单前三。",
+            "description": "查询男团或女团某个周期的汇总数据：总音浪、开播人数、未播人数和榜单前三。音浪使用中文口语单位，例如5万2千；回答时请保留单位。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -216,7 +216,7 @@ fn tool_defs() -> Vec<Value> {
         }),
         json!({
             "name": "get_anchor_rank",
-            "description": "查询某位对外展示主播在指定周期的团内排名、音浪、时长和未播天数。",
+            "description": "查询某位对外展示主播在指定周期的团内排名、音浪、时长和未播天数。音浪使用中文口语单位，例如5万2千；回答时请保留单位。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -232,7 +232,7 @@ fn tool_defs() -> Vec<Value> {
         }),
         json!({
             "name": "get_daily_briefing",
-            "description": "生成约3分钟中文语音播报稿：每日男团或女团前十名、音浪、时长、未播天数、相邻名次差距和逐名评价。用户说“每日播报/今天播报/前十名播报”时必须调用此工具，并原样朗读返回文本。",
+            "description": "生成约3分钟中文语音播报稿：每日男团或女团前十名、音浪、时长、未播天数、相邻名次差距和逐名评价。音浪使用中文口语单位，例如5万2千。用户说“每日播报/今天播报/前十名播报”时必须调用此工具，并原样朗读返回文本。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -412,11 +412,39 @@ fn team_label(team: &str) -> &'static str {
     }
 }
 
+fn period_label(period: &str) -> &'static str {
+    match period {
+        "monthly" => "月榜",
+        "yearly" => "年榜",
+        _ => "日榜",
+    }
+}
+
+/// 语音可读的音浪数字：52542 -> 5万2千。
+/// 一万以上按万/千取整展示；低于一万保留千位，避免 TTS 读一长串数字。
+fn wave_text(wave: i64) -> String {
+    let n = wave.max(0);
+    if n >= 10_000 {
+        let wan = n / 10_000;
+        let qian = (n % 10_000) / 1_000;
+        return if qian > 0 {
+            format!("{wan}万{qian}千")
+        } else {
+            format!("{wan}万")
+        };
+    }
+    if n >= 1_000 {
+        return format!("{}千", n / 1_000);
+    }
+    n.to_string()
+}
+
 fn row_json(rank: usize, r: &RankRow) -> Value {
     json!({
         "rank": rank,
         "name": r.name,
-        "wave": r.wave,
+        "wave": wave_text(r.wave),
+        "waveValue": r.wave,
         "minutes": r.minutes,
         "absentDays": r.absent_days,
         "live": r.wave >= 2
@@ -428,25 +456,71 @@ async fn get_team_ranking(st: &Arc<AppState>, args: &Value) -> anyhow::Result<Va
     let period = period_arg(args)?;
     let (as_of, rows) = load_rank_rows(st, team, period, args).await?;
     let limit = clamp_limit(args);
-    let shown: Vec<Value> = rows
+    let visible_rows = rows.iter().take(limit).collect::<Vec<_>>();
+    let shown: Vec<Value> = visible_rows
         .iter()
-        .take(limit)
         .enumerate()
         .map(|(i, r)| row_json(i + 1, r))
         .collect();
     let summary = if let Some(first) = rows.first() {
         format!(
-            "{} {} 共 {} 人，{}第 1，音浪 {}。",
+            "{} {} {}共{}人，第一名{}，音浪{}。",
             team_label(team),
             as_of,
+            period_label(period),
             rows.len(),
             first.name,
-            first.wave
+            wave_text(first.wave)
         )
     } else {
-        format!("{} {} 没有对外展示数据。", team_label(team), as_of)
+        format!(
+            "{} {} {}没有对外展示数据。",
+            team_label(team),
+            as_of,
+            period_label(period)
+        )
     };
+    let mut speech_text = if visible_rows.is_empty() {
+        summary.clone()
+    } else {
+        format!(
+            "{} {} {}共{}人。",
+            team_label(team),
+            as_of,
+            period_label(period),
+            rows.len()
+        )
+    };
+    if !visible_rows.is_empty() {
+        speech_text.push(' ');
+        for (i, row) in visible_rows.iter().enumerate() {
+            if i > 0 {
+                speech_text.push(' ');
+            }
+            speech_text.push_str(&format!(
+                "第{}名{}，音浪{}，时长{}，未播{}天，{}。",
+                i + 1,
+                row.name,
+                wave_text(row.wave),
+                speech_minutes(row.minutes),
+                row.absent_days,
+                if row.wave >= 2 {
+                    "已开播"
+                } else {
+                    "未形成有效开播"
+                }
+            ));
+        }
+        if rows.len() > visible_rows.len() {
+            speech_text.push_str(&format!(
+                "以上为前{}名，完整榜单共{}人。",
+                visible_rows.len(),
+                rows.len()
+            ));
+        }
+    }
     Ok(json!({
+        "speechText": speech_text,
         "summary": summary,
         "asOf": as_of,
         "team": team,
@@ -462,20 +536,50 @@ async fn get_team_summary(st: &Arc<AppState>, args: &Value) -> anyhow::Result<Va
     let (as_of, rows) = load_rank_rows(st, team, period, args).await?;
     let total_wave: i64 = rows.iter().map(|r| r.wave).sum();
     let live = rows.iter().filter(|r| r.wave >= 2).count();
-    let top3: Vec<Value> = rows
+    let top3_rows = rows.iter().take(3).collect::<Vec<_>>();
+    let top3: Vec<Value> = top3_rows
         .iter()
-        .take(3)
         .enumerate()
         .map(|(i, r)| row_json(i + 1, r))
         .collect();
+    let offline = rows.len().saturating_sub(live);
+    let summary = format!(
+        "{} {} {}共{}人，总音浪{}，开播{}人，未播或暂无有效音浪{}人。",
+        team_label(team),
+        as_of,
+        period_label(period),
+        rows.len(),
+        wave_text(total_wave),
+        live,
+        offline
+    );
+    let mut speech_text = summary.clone();
+    if !top3_rows.is_empty() {
+        speech_text.push(' ');
+        for (i, row) in top3_rows.iter().enumerate() {
+            if i > 0 {
+                speech_text.push(' ');
+            }
+            speech_text.push_str(&format!(
+                "第{}名{}，音浪{}，时长{}，未播{}天。",
+                i + 1,
+                row.name,
+                wave_text(row.wave),
+                speech_minutes(row.minutes),
+                row.absent_days
+            ));
+        }
+    }
     Ok(json!({
-        "summary": format!("{} {} 共 {} 人，总音浪 {}，开播 {} 人，未播 {} 人。", team_label(team), as_of, rows.len(), total_wave, live, rows.len().saturating_sub(live)),
+        "speechText": speech_text,
+        "summary": summary,
         "asOf": as_of,
         "team": team,
         "period": period,
-        "totalWave": total_wave,
+        "totalWave": wave_text(total_wave),
+        "totalWaveValue": total_wave,
         "liveCount": live,
-        "offlineCount": rows.len().saturating_sub(live),
+        "offlineCount": offline,
         "top3": top3
     }))
 }
@@ -502,17 +606,42 @@ async fn search_anchor(st: &Arc<AppState>, args: &Value) -> anyhow::Result<Value
     );
     let pattern = format!("%{query}%");
     let rows = crate::pgrs::query_with_binds(&st.pools, "LOCAL", &sql, |q| q.bind(pattern)).await?;
-    let items: Vec<Value> = rows
+    let found: Vec<(String, String)> = rows
         .iter()
         .map(|r| {
+            (
+                r.try_get::<String, _>("name").unwrap_or_default(),
+                r.try_get::<String, _>("gender").unwrap_or_default(),
+            )
+        })
+        .collect();
+    let items: Vec<Value> = found
+        .iter()
+        .map(|(name, team)| {
             json!({
-                "name": r.try_get::<String, _>("name").unwrap_or_default(),
-                "team": r.try_get::<String, _>("gender").unwrap_or_default()
+                "name": name,
+                "team": team
             })
         })
         .collect();
+    let summary = if found.is_empty() {
+        format!("没有找到名称包含“{query}”的对外展示主播。")
+    } else {
+        format!("搜索到 {} 位对外展示主播。", found.len())
+    };
+    let speech_text = if found.is_empty() {
+        summary.clone()
+    } else {
+        let names = found
+            .iter()
+            .map(|(name, team)| format!("{name}，{}", team_label(team)))
+            .collect::<Vec<_>>()
+            .join("；");
+        format!("{} 分别是：{}。", summary, names)
+    };
     Ok(json!({
-        "summary": format!("搜索到 {} 位对外展示主播。", items.len()),
+        "speechText": speech_text,
+        "summary": summary,
         "items": items
     }))
 }
@@ -545,14 +674,32 @@ async fn get_anchor_rank(st: &Arc<AppState>, args: &Value) -> anyhow::Result<Val
     let Some((idx, row)) = all.iter().enumerate().find(|(_, r)| r.name == name) else {
         anyhow::bail!("主播「{name}」在 {} 榜单中没有数据", as_of);
     };
+    let summary = format!(
+        "{}在{} {} {}排名第{}，音浪{}，时长{}，未播{}天，{}。",
+        name,
+        team_label(&team),
+        as_of,
+        period_label(period),
+        idx + 1,
+        wave_text(row.wave),
+        speech_minutes(row.minutes),
+        row.absent_days,
+        if row.wave >= 2 {
+            "已开播"
+        } else {
+            "未形成有效开播"
+        }
+    );
     Ok(json!({
-        "summary": format!("{}在{} {} 排名第 {}，音浪 {}，时长 {} 分钟，未播 {} 天。", name, team_label(&team), as_of, idx + 1, row.wave, row.minutes, row.absent_days),
+        "speechText": summary.clone(),
+        "summary": summary,
         "asOf": as_of,
         "team": team,
         "period": period,
         "rank": idx + 1,
         "name": name,
-        "wave": row.wave,
+        "wave": wave_text(row.wave),
+        "waveValue": row.wave,
         "minutes": row.minutes,
         "absentDays": row.absent_days
     }))
@@ -582,7 +729,8 @@ async fn get_daily_briefing(st: &Arc<AppState>, args: &Value) -> anyhow::Result<
         "speechText": speech,
         "asOf": as_of,
         "team": team,
-        "totalWave": total_wave,
+        "totalWave": wave_text(total_wave),
+        "totalWaveValue": total_wave,
         "liveCount": live,
         "offlineCount": rows.len().saturating_sub(live),
         "top10": top
@@ -604,8 +752,9 @@ fn speech_minutes(minutes: i64) -> String {
 
 fn speech_gap(wave: i64, previous: Option<i64>) -> String {
     match previous {
-        Some(p) if p >= wave => format!("与前一名相差{}音浪", p - wave),
-        Some(p) => format!("领先前一名{}音浪", wave - p),
+        Some(p) if p > wave => format!("与前一名相差{}音浪", wave_text(p - wave)),
+        Some(p) if p < wave => format!("领先前一名{}音浪", wave_text(wave - p)),
+        Some(_) => "与前一名音浪持平".into(),
         None => String::new(),
     }
 }
@@ -637,12 +786,16 @@ fn build_daily_speech(team: &str, as_of: &str, rows: &[RankRow]) -> String {
     ));
     out.push_str(&format!(
         "今日{}共有{}位对外展示主播，合计音浪{}，其中有效开播{}人，未播或暂无有效音浪{}人，人均音浪约{}。",
-        team_label(team), visible, total_wave, live, offline, average
+        team_label(team), visible, wave_text(total_wave), live, offline, wave_text(average)
     ));
     if let Some(first) = rows.first() {
         out.push_str(&format!(
             "当前第一名是{}，音浪{}；前三名合计{}，占今日总音浪的{}%；前十名合计{}。",
-            first.name, first.wave, top3_wave, top3_share, top10_wave
+            first.name,
+            wave_text(first.wave),
+            wave_text(top3_wave),
+            top3_share,
+            wave_text(top10_wave)
         ));
     } else {
         out.push_str("今天暂时没有可播报的榜单数据。");
@@ -654,7 +807,13 @@ fn build_daily_speech(team: &str, as_of: &str, rows: &[RankRow]) -> String {
         let rank = i + 1;
         let gap = if i == 0 {
             rows.get(1)
-                .map(|second| format!("领先第二名{}音浪", row.wave - second.wave))
+                .map(|second| {
+                    if row.wave > second.wave {
+                        format!("领先第二名{}音浪", wave_text(row.wave - second.wave))
+                    } else {
+                        "与第二名音浪持平".into()
+                    }
+                })
                 .unwrap_or_else(|| "暂未形成第二名追赶".into())
         } else {
             speech_gap(row.wave, rows.get(i - 1).map(|r| r.wave))
@@ -679,7 +838,14 @@ fn build_daily_speech(team: &str, as_of: &str, rows: &[RankRow]) -> String {
         };
         out.push_str(&format!(
             "第{}名，{}。今日音浪{}，{}，{}，{}。{}评价：{}",
-            rank, row.name, row.wave, status, duration, absent, gap, evaluation
+            rank,
+            row.name,
+            wave_text(row.wave),
+            status,
+            duration,
+            absent,
+            gap,
+            evaluation
         ));
     }
 
@@ -689,9 +855,9 @@ fn build_daily_speech(team: &str, as_of: &str, rows: &[RankRow]) -> String {
         out.push_str(&format!(
             "第十名门槛是{}，音浪{}；第十一名音浪{}，距离前十还差{}音浪。",
             tenth.name,
-            tenth.wave,
+            wave_text(tenth.wave),
             eleventh.name,
-            (tenth.wave - eleventh.wave).max(0)
+            wave_text((tenth.wave - eleventh.wave).max(0))
         ));
     }
     out.push_str(&format!(
@@ -706,6 +872,8 @@ async fn get_data_status(st: &Arc<AppState>) -> anyhow::Result<Value> {
     let dates = repos::get_available_dates(st, None, false).await?;
     let latest = dates.first().cloned().unwrap_or_default();
     let mut counts = serde_json::Map::new();
+    let mut male_count = 0;
+    let mut female_count = 0;
     for team in ["male", "female"] {
         let rows = crate::pgrs::query_with_binds(
             &st.pools,
@@ -713,13 +881,27 @@ async fn get_data_status(st: &Arc<AppState>) -> anyhow::Result<Value> {
             "SELECT COUNT(*) AS n FROM person WHERE deleted_at IS NULL AND status <> 'left' AND hide_in_daily_report = 0 AND gender = ?",
             |q| q.bind(team),
         ).await?;
-        counts.insert(
-            team.to_string(),
-            json!(rows.first().map(|r| row_i64(r, "n")).unwrap_or(0)),
-        );
+        let count = rows.first().map(|r| row_i64(r, "n")).unwrap_or(0);
+        counts.insert(team.to_string(), json!(count));
+        match team {
+            "male" => male_count = count,
+            "female" => female_count = count,
+            _ => {}
+        }
     }
+    let summary = if latest.is_empty() {
+        "暂无可用的业务数据。".to_string()
+    } else {
+        format!(
+            "最新业务日{latest}，共有{}个业务日；男团对外展示{}人，女团对外展示{}人。",
+            dates.len(),
+            male_count,
+            female_count
+        )
+    };
     Ok(json!({
-        "summary": if latest.is_empty() { "暂无可用的业务数据。".to_string() } else { format!("最新业务日 {latest}，共有 {} 个业务日。", dates.len()) },
+        "speechText": summary.clone(),
+        "summary": summary,
         "latestDate": latest,
         "availableDates": dates.len(),
         "visiblePersons": counts
@@ -753,6 +935,24 @@ mod tests {
     }
 
     #[test]
+    fn wave_text_uses_chinese_units() {
+        assert_eq!(wave_text(52_542), "5万2千");
+        assert_eq!(wave_text(12_000), "1万2千");
+        assert_eq!(wave_text(10_000), "1万");
+        assert_eq!(wave_text(9_999), "9千");
+        assert_eq!(wave_text(999), "999");
+    }
+
+    #[test]
+    fn spoken_text_never_exposes_raw_wave_value() {
+        let value = json!({
+            "speechText": "音浪5万2千",
+            "waveValue": 52_542
+        });
+        assert_eq!(spoken_text(&value), "音浪5万2千");
+    }
+
+    #[test]
     fn daily_speech_has_top_ten_and_three_minute_script() {
         let rows: Vec<RankRow> = (1..=12)
             .map(|i| RankRow {
@@ -765,6 +965,8 @@ mod tests {
         let speech = build_daily_speech("male", "2026-10-24", &rows);
         assert!(speech.contains("第十名"));
         assert!(speech.contains("评价："));
+        assert!(speech.contains("音浪9万4千"));
+        assert!(!speech.contains("94000"));
         assert!(
             speech.chars().count() >= 800,
             "播报稿过短：{}",
