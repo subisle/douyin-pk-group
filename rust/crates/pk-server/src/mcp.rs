@@ -23,6 +23,7 @@ use crate::state::AppState;
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
 const MAX_ROWS: usize = 50;
+const HEARTBEAT_SECS: u64 = 20;
 
 /// 启动小智 MCP 出站连接。未配置 endpoint 时安静跳过（本地开发不需要小智）。
 pub fn spawn_xiaozhi(st: Arc<AppState>) {
@@ -37,10 +38,12 @@ pub fn spawn_xiaozhi(st: Arc<AppState>) {
     tokio::spawn(async move {
         let mut backoff = Duration::from_secs(1);
         loop {
-            match run_connection(&st, &endpoint).await {
-                Ok(()) => backoff = Duration::from_secs(1),
+            // 成功建连后由 run_connection 把 backoff 重置为 1 秒；只有连不上时
+            // 才指数退避，避免「云端周期性回收连接」把恢复时间越拖越长。
+            match run_connection(&st, &endpoint, &mut backoff).await {
                 // 不打印 e：底层 WebSocket 错误可能包含带 token 的 endpoint。
                 Err(_) => tracing::warn!("小智 MCP 连接失败或断开，稍后重连"),
+                Ok(()) => {}
             }
             tokio::time::sleep(backoff).await;
             backoff = (backoff * 2).min(Duration::from_secs(60));
@@ -48,25 +51,51 @@ pub fn spawn_xiaozhi(st: Arc<AppState>) {
     });
 }
 
-async fn run_connection(st: &Arc<AppState>, endpoint: &str) -> anyhow::Result<()> {
+async fn run_connection(
+    st: &Arc<AppState>,
+    endpoint: &str,
+    backoff: &mut Duration,
+) -> anyhow::Result<()> {
     tracing::info!("小智 MCP 正在连接");
     let (ws, _) = connect_async(endpoint).await?;
     tracing::info!("小智 MCP 已连接");
+    *backoff = Duration::from_secs(1);
     let (mut write, mut read) = ws.split();
+    let mut heartbeat = tokio::time::interval(Duration::from_secs(HEARTBEAT_SECS));
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // interval 的第一次 tick 是立即触发，先吃掉，避免刚连上就多发一个 ping。
+    heartbeat.tick().await;
 
-    while let Some(frame) = read.next().await {
-        let frame = frame?;
-        let text = match frame {
-            Message::Text(text) => text.to_string(),
-            Message::Binary(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-            Message::Ping(payload) => {
-                write.send(Message::Pong(payload)).await?;
-                continue;
+    loop {
+        tokio::select! {
+            _ = heartbeat.tick() => {
+                // WebSocket 控制帧会穿过大多数代理，比只依赖小智的 JSON-RPC ping
+                // 更能避免 Cloudflare / 网关按空闲时间回收长连接。
+                write.send(Message::Ping(Vec::new().into())).await?;
             }
-            Message::Pong(_) | Message::Close(_) | Message::Frame(_) => continue,
-        };
-        if let Some(response) = handle_message(st, &text).await {
-            write.send(Message::Text(response.to_string())).await?;
+            next = read.next() => {
+                let Some(frame) = next else {
+                    tracing::warn!("小智 MCP 连接 EOF，准备重连");
+                    break;
+                };
+                let frame = frame?;
+                let text = match frame {
+                    Message::Text(text) => text.to_string(),
+                    Message::Binary(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+                    Message::Ping(payload) => {
+                        write.send(Message::Pong(payload)).await?;
+                        continue;
+                    }
+                    Message::Pong(_) | Message::Frame(_) => continue,
+                    Message::Close(_) => {
+                        tracing::warn!("小智 MCP 收到关闭帧，准备重连");
+                        break;
+                    }
+                };
+                if let Some(response) = handle_message(st, &text).await {
+                    write.send(Message::Text(response.to_string())).await?;
+                }
+            }
         }
     }
     Ok(())
