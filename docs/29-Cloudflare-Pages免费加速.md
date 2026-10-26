@@ -6,26 +6,28 @@
 ## 1. 结构
 
 ```text
-用户
-  ├─ app.subisle.com
-  │    ├─ HTML / JS / CSS / 字体 → Cloudflare Pages（免费、边缘缓存）
-  │    └─ /api/* → Pages Function 同域代理
-  │                     ↓
-  │                pk.subisle.com/api/*
-  │                     ↓
-  │              Cloudflare 公共 GET 边缘缓存（30 秒）
-  │                     ↓
-  │                  64 源站
-  │
-  └─ pk.subisle.com
-       ├─ /             → 302 到 app.subisle.com/
-       └─ /api/*        → 保持原 API，不跳转
+公开展示页（原来的根路径不变）
+  pk.subisle.com/
+    ├─ HTML / CSS / JS → Cloudflare 边缘缓存 30 秒
+    ├─ 公告 / 计划 / 头像 → Cloudflare 边缘缓存 30 秒
+    └─ 登录后的榜单与个人数据 → 不缓存，仍按 token 校验
+
+管理端（静态 SPA 拆到 Pages）
+  pk.subisle.com/admin* → 302 → app.subisle.com/admin*
+  app.subisle.com
+    ├─ HTML / JS / CSS / 字体 → Cloudflare Pages
+    └─ /api/* → Pages Function 同域代理
+                     ↓
+                pk.subisle.com/api/*
+                     ↓
+                     64 源站
 ```
 
-- 前端不需要改 API 地址或处理 CORS；
-- `Authorization`、`X-My-Token` 等请求头由 Pages Function 原样转发；
-- `GET /api/public/events` SSE 不走缓存；
-- `/api/public/teams/*/my/*`、登录、管理端、写操作全部不缓存。
+- 公开展示页是 Rust 内嵌的 674KB HTML，不能直接拿 React 管理端 Pages 文件替换；
+  因此主域保留原页面，只做 HTML 边缘缓存。
+- React 管理端 `apps/douyin-web` 拆到 `app.subisle.com`，`/admin*` 自动跳转过去。
+- Pages Function 原样转发 `Authorization`、`X-My-Token` 等请求头，不需要改前端或 CORS。
+- 登录、个人、管理端、写操作、SSE 全部不缓存。
 
 ## 2. 代码
 
@@ -41,13 +43,15 @@
 
 - Pages 项目：`pk-web`
 - 自定义域名：`app.subisle.com`
-- 主域：`pk.subisle.com/` 302 → `https://app.subisle.com/`
-- API 缓存：仅以下公开 GET 路径（示例）
+- 管理员入口：`pk.subisle.com/admin*` 302 → `https://app.subisle.com/admin*`
+- 公开展示页缓存：`/`、`/report`、`/lineage`、`/my*`、`/wechat*`、`/group*`、`/st/*`
+- 真正公开的 API 缓存：
   - `/api/public/announcements`
   - `/api/public/plans`
-  - `/api/public/teams/male|female[/daily|monthly|yearly|lineage|star]`
   - `/api/public/avatars/*`
+- 登录榜单、`/api/public/teams/*`、个人接口、验证码、管理端和所有 POST 请求均不缓存。
 - 边缘 TTL：30 秒；数据导入后最多 30 秒自动刷新，不需要手工清缓存。
+- IP 访问门禁若以后重新开启，必须同步复核 HTML 缓存规则，避免缓存绕过地域限制。
 
 ## 4. 部署
 
@@ -68,9 +72,9 @@ CLOUDFLARE_API_TOKEN=... CLOUDFLARE_ACCOUNT_ID=... \
 
 ## 5. 回滚
 
-1. 删除 `pk.subisle.com/` 的 302 Page Rule；
+1. 删除 `pk.subisle.com/admin*` 的 302 Page Rule；
 2. 删除 Pages 自定义域名 `app.subisle.com`；
-3. `pk.subisle.com` 原 A 记录和 64 源站不受影响，API 始终可用。
+3. `pk.subisle.com` 原 A 记录、公开展示页和 64 源站不受影响，API 始终可用。
 
 ## 6. 效果边界
 

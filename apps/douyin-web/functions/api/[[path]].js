@@ -29,6 +29,8 @@ export async function onRequest(context) {
     const upstream = await fetch(target.toString(), init)
     const responseHeaders = new Headers(upstream.headers)
     responseHeaders.set('X-PK-Proxy', 'cloudflare-pages')
+    const edgeCache = upstream.headers.get('cf-cache-status')
+    if (edgeCache) responseHeaders.set('X-PK-Edge-Cache', edgeCache)
     return new Response(upstream.body, {
       status: upstream.status,
       statusText: upstream.statusText,
