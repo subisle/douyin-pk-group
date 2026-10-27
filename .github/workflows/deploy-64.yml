@@ -1,0 +1,54 @@
+name: 部署 64
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-64-pk-server
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: 上传镜像并重建 pk-server
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: 下载最新 amd64 镜像包
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/pk-deploy
+          gh release download amd64-bundle -D /tmp/pk-deploy \
+            --pattern 'pk-server-amd64.tar.gz' --clobber
+          sha256sum /tmp/pk-deploy/pk-server-amd64.tar.gz
+
+      - name: 安装 sshpass
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq sshpass
+
+      - name: 上传并重建 pk-server
+        env:
+          SSHPASS: ${{ secrets.PK64_SSH_PASSWORD }}
+        run: |
+          set -euo pipefail
+          sshpass -e scp -o StrictHostKeyChecking=accept-new \
+            /tmp/pk-deploy/pk-server-amd64.tar.gz root@64.188.8.149:/tmp/pk-server-amd64-latest.tar.gz
+          sshpass -e ssh -o StrictHostKeyChecking=accept-new root@64.188.8.149 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          docker load -i /tmp/pk-server-amd64-latest.tar.gz
+          image_id=$(docker image inspect pk-server:amd64 --format '{{.Id}}')
+          cd /opt/pk-db
+          pg_before=$(docker inspect pk-postgres --format '{{.Id}}')
+          docker compose up -d --no-deps --force-recreate pk-server
+          sleep 10
+          pg_after=$(docker inspect pk-postgres --format '{{.Id}}')
+          test "$pg_before" = "$pg_after"
+          echo "IMAGE=$image_id"
+          docker inspect pk-server --format 'STATUS={{.State.Health.Status}} IMAGE={{.Image}} RESTARTS={{.RestartCount}}'
+          docker logs --since 2m pk-server 2>&1 | grep -E '小智 MCP (正在连接|已连接)|pk-server 启动' | tail -20 || true
+          REMOTE
