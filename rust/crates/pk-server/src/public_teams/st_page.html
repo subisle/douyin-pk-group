@@ -1249,12 +1249,11 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .st-row:last-child { border-bottom:none; }
 .st-row:hover { background:rgba(255,255,255,.6); }
 /* 登录后定焦自己的排名（2026-10-22）：平滑滚到领奖台/榜单行，并短暂高亮。 */
-.st-rank-focus { position:relative; z-index:3; animation:stRankFocus 2.4s cubic-bezier(.22,.8,.24,1) both; }
+.st-rank-focus { position:relative; z-index:3; animation:stRankFocus 1.25s ease-out both; }
 @keyframes stRankFocus {
-  0% { background:rgba(255,255,255,0); box-shadow:0 0 0 0 rgba(245,158,11,0); }
-  18% { background:rgba(255,248,220,.78); box-shadow:0 0 0 3px rgba(245,158,11,.35), 0 14px 34px rgba(245,158,11,.16); }
-  68% { background:rgba(255,248,220,.62); box-shadow:0 0 0 2px rgba(245,158,11,.24), 0 10px 26px rgba(148,163,184,.12); }
-  100% { background:rgba(255,255,255,0); box-shadow:0 0 0 0 rgba(245,158,11,0); }
+  0% { background:rgba(255,248,220,0); box-shadow:0 0 0 0 rgba(245,158,11,0); }
+  20% { background:rgba(255,248,220,.68); box-shadow:0 0 0 2px rgba(245,158,11,.28); }
+  100% { background:rgba(255,248,220,0); box-shadow:0 0 0 0 rgba(245,158,11,0); }
 }
 @media (prefers-reduced-motion:reduce) {
   .st-rank-focus { animation:none; box-shadow:0 0 0 2px rgba(245,158,11,.35); }
@@ -4426,22 +4425,47 @@ function animateDashboardNumbers() {
   requestAnimationFrame(tick);
 }
 
-/** 登录后只定焦一次：平滑滚到自己所在的领奖台 / 榜单行并高亮。 */
+/** 登录后只定焦一次：滚到自己所在的领奖台 / 榜单行并短暂高亮。
+ *
+ * 2026-10-27 修复：原先无条件 scrollIntoView({behavior:'smooth'})。榜单超过
+ * 60 行时，一次 smooth 要滚几千像素，还要和数字 rAF 同时跑；移动端会明显掉帧，
+ * 甚至像页面卡住。现在：
+ * - 无有效音浪的置灰行不定焦，避免把用户硬拽到榜尾的 0 数据区；
+ * - 目标已在安全视口内就不滚；
+ * - 不在视口内就一次性瞬间定位，不再使用 smooth；
+ * - 等两帧布局稳定后再动，避免列表重排把滚动目标带偏。 */
 function focusMyRankIfNeeded() {
   if (!rankFocusPending || rankFocusDone || view !== 'data') return;
   const name = meState && meState.name ? String(meState.name) : '';
   if (!name) return;
-  rankFocusDone = true;
-  rankFocusPending = false;
   const el = [...document.querySelectorAll('[data-expand-name]')]
     .find(x => x.dataset.expandName === name);
-  if (!el) return;
-  requestAnimationFrame(() => {
-    const reduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    el.scrollIntoView({ behavior: reduced ? 'auto' : 'smooth', block: 'center', inline: 'nearest' });
+  if (!el || !el.isConnected) return;
+  // data-w 为空 = 未开播 / 无有效音浪 / 数值被后台隐藏。都不适合自动定焦；
+  // 保留 pending，让下一次真正有数据的渲染还能再试一次。
+  if (!(Number(el.dataset.w || 0) >= 2)) return;
+  rankFocusDone = true;
+  rankFocusPending = false;
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    if (!el.isConnected) return;
+    const rect = el.getBoundingClientRect();
+    const safeTop = 76;
+    const safeBottom = Math.max(safeTop + 120, window.innerHeight - 96);
+    if (rect.top >= safeTop && rect.bottom <= safeBottom) {
+      el.classList.add('st-rank-focus');
+      setTimeout(() => { if (el.isConnected) el.classList.remove('st-rank-focus'); }, 1400);
+      return;
+    }
+    const maxY = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+    const targetY = Math.max(0, Math.min(maxY,
+      window.scrollY + rect.top - Math.max(0, (window.innerHeight - rect.height) / 2)));
+    // 用户口径（2026-10-27）：只需要移动到本人一次，之后必须能自由滑动。
+    // 一律使用 auto 瞬间定位，彻底避免 native smooth 在长榜单上持续占用滚动，
+    // 也避免用户中途滑动时和仍在进行的平滑滚动互相抢夺。
+    window.scrollTo({ top: targetY, left: 0, behavior: 'auto' });
     el.classList.add('st-rank-focus');
-    setTimeout(() => el.classList.remove('st-rank-focus'), 2500);
-  });
+    setTimeout(() => { if (el.isConnected) el.classList.remove('st-rank-focus'); }, 1400);
+  }));
 }
 
 /* ==================== 看板弹幕（2026-10-22：男女团各自的当日最高） ====================
