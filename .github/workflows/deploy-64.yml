@@ -2,6 +2,10 @@ name: 部署 64
 
 on:
   workflow_dispatch:
+  push:
+    branches: [pg-migration]
+    paths:
+      - ".github/workflows/deploy-64.yml"
 
 permissions:
   contents: read
