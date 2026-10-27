@@ -23,6 +23,7 @@ jobs:
       - name: 下载最新 amd64 镜像包
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           mkdir -p /tmp/pk-deploy
