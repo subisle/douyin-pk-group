@@ -39,15 +39,50 @@ jobs:
       - name: 上传并重建 pk-server
         env:
           SSHPASS: ${{ secrets.PK64_SSH_PASSWORD }}
+          PK_ADMIN_PASSWORD: ${{ secrets.PK_ADMIN_PASSWORD }}
         run: |
           set -euo pipefail
+          admin_b64=$(printf '%s' "$PK_ADMIN_PASSWORD" | base64 -w0)
           sshpass -e scp -o StrictHostKeyChecking=accept-new \
             /tmp/pk-deploy/pk-server-amd64.tar.gz root@64.188.8.149:/tmp/pk-server-amd64-latest.tar.gz
-          sshpass -e ssh -o StrictHostKeyChecking=accept-new root@64.188.8.149 'bash -s' <<'REMOTE'
+          sshpass -e ssh -o StrictHostKeyChecking=accept-new root@64.188.8.149 \
+            "ADMIN_PASSWORD_B64='$admin_b64' bash -s" <<'REMOTE'
           set -euo pipefail
           docker load -i /tmp/pk-server-amd64-latest.tar.gz
           image_id=$(docker image inspect pk-server:amd64 --format '{{.Id}}')
           cd /opt/pk-db
+          export ADMIN_PASSWORD=$(printf '%s' "$ADMIN_PASSWORD_B64" | base64 -d)
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          root = Path('/opt/pk-db')
+          env_path = root / '.env'
+          compose_path = root / 'docker-compose.yml'
+          password = os.environ['ADMIN_PASSWORD']
+
+          env_text = env_path.read_text() if env_path.exists() else ''
+          admin_line = 'ADMIN_PASSWORD=' + json.dumps(password)
+          if re.search(r'(?m)^ADMIN_PASSWORD=', env_text):
+              env_text = re.sub(r'(?m)^ADMIN_PASSWORD=.*$', admin_line, env_text, count=1)
+          else:
+              env_text = env_text.rstrip('\n') + '\n' + admin_line + '\n'
+          env_path.write_text(env_text)
+
+          compose_text = compose_path.read_text()
+          compose_text, count = re.subn(
+              r'(?m)^(\s*)ADMIN_PASSWORD:.*$',
+              r'\1ADMIN_PASSWORD: "${ADMIN_PASSWORD}"',
+              compose_text,
+              count=1,
+          )
+          if count != 1:
+              raise SystemExit('ADMIN_PASSWORD line missing from compose')
+          compose_path.write_text(compose_text)
+          PY
+          docker compose config --quiet
           pg_before=$(docker inspect pk-postgres --format '{{.Id}}')
           docker compose up -d --no-deps --force-recreate pk-server
           sleep 10
