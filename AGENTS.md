@@ -63,3 +63,22 @@
 | 管理员口令 | `rust/.env` 的 `ADMIN_PASSWORD` 优先；未配置时默认 `shuai4444`（auth::DEFAULT_ADMIN_PASSWORD，2026-10-19 用户口径），改后重启生效 |
 | 展示端账号 | 浩雨=any（总管理员，原「帅帅」，开发期绑 person 20 浩雨）/ 饭团=female（女团）/ 鹏先生=any（绑 person 1027） |
 | 迁移 | `pk-server migrate`（本机表属主是 `zmy`，用 `DB_MIGRATOR_USER=zmy` 跑） |
+
+## 5. wxbot 师门生图口径（2026-10-30 用户口径）
+
+- 师门图必须复用 wxbot 推送的同一套生成链路：
+  `lineage_report::build` + `push::lineage_report_pngs_for`（含推送图字段显隐与师傅水印）。
+- “有徒弟的，都要一份”：给每位有符合日报口径直系徒弟的师傅各生成一份 PNG。
+- 师门图包含**本月累计时长**（`monthDuration` 字段，整月时长优先、缺月回落日明细）。
+- 月/年榜与 CSV 导出必须按人合并多抖音号：主号取 `daily_metric`，副号取
+  `wave_snapshot` / `duration_snapshot`，再汇总；不得只查主号。
+- 支持整月报表：`scripts/render-lineage-images.sh --month 2026-10`，输出“师门月报”
+  （本月音浪 + 本月时长）；不带 `--month` 时仍按业务日生成师门日报。
+- 默认**不生成** `薇姐`、`鹏先生` 两份；可通过
+  `LINEAGE_IMAGE_EXCLUDED_MASTERS="薇姐,鹏先生"` 覆盖。
+- 固定师门关系补充（2026-10-31）：`玖瑶`、`玖俏`、`狼耀` → `浩哲`；
+  `玖甜`、`玖晨` → `浩龙`；`浩雨`、`浩龙` → `鹏先生`；`浩佑` → `鹏先生`；
+  `啸辉` → `狼佑`。
+- 一键重跑：`scripts/render-lineage-images.sh`
+  默认取本地最新业务日，输出到 `design-previews/wxbot-lineage-YYYY-MM/`；
+  月报输出到 `design-previews/wxbot-lineage-month-YYYY-MM/`。

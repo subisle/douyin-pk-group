@@ -456,6 +456,11 @@ async fn main() -> anyhow::Result<()> {
             "/api/public/teams/{team}/my/accounts",
             get(public_teams::my_accounts),
         )
+        // 我的页面导出师门图（仅本人，复用 wxbot 师门日报同一条渲染链路）
+        .route(
+            "/api/public/teams/{team}/my/lineage-image.png",
+            get(public_teams::my_lineage_image),
+        )
         // 登录门轻量身份（展示端，本人 token）
         .route("/api/public/teams/{team}/my/who", get(public_teams::my_who))
         // 我的页面 · 微信推送（绑定机器人 + 追分目标 + 每日报告开关，2026-10-09）

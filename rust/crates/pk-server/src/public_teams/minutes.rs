@@ -674,6 +674,119 @@ pub async fn my_series(
     Ok(Json(my_series_json(take, &waves, &minutes, &s)))
 }
 
+/// GET /api/public/teams/{team}/my/lineage-image.png?period=daily|monthly&date=YYYY-MM-DD&page=0
+///
+/// 「我的」页导出师门图。**必须复用 wxbot 推送的同一套链路**
+/// （lineage_report::build / build_month + push::lineage_report_pngs_for），
+/// 这样页面导出的版式、字段显隐、本人水印与自动推送完全一致。
+/// 只允许当前登录人导出自己的师门，不接受 personId 参数。
+#[derive(Debug, Deserialize, Default)]
+pub struct MyLineageImageQuery {
+    pub period: Option<String>,
+    pub date: Option<String>,
+    pub page: Option<usize>,
+}
+
+pub async fn my_lineage_image(
+    State(st): State<ArcState>,
+    Path(team): Path<String>,
+    Query(q): Query<MyLineageImageQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let unavailable = |msg: &str, status: axum::http::StatusCode| {
+        ApiError::with_status(status, msg).into_response()
+    };
+    let s = PublicSettings::load(&st).await;
+    if !s.team_enabled(&team) {
+        return unavailable("师门报表暂未开放", axum::http::StatusCode::NOT_FOUND);
+    }
+    let (person_id, my_team, _) = match my_token_required_with_restore(&st, &headers).await {
+        Ok(v) => v,
+        Err(e) => return e.into_response(),
+    };
+    if person_id == 0 || !my_team_allows(&my_team, &team) {
+        return unavailable("没有可导出的师门报表", axum::http::StatusCode::NOT_FOUND);
+    }
+
+    // 默认使用库里最新业务日；前端会显式带 my.date，历史数据与页面保持一致。
+    let latest = crate::repos::get_available_dates(&st, None, false)
+        .await
+        .ok()
+        .and_then(|v| v.into_iter().next())
+        .unwrap_or_default();
+    let requested = q.date.as_deref().unwrap_or_default().trim();
+    let base_date = if valid_date_pub(requested) {
+        requested.to_string()
+    } else {
+        latest
+    };
+    if !valid_date_pub(&base_date) {
+        return unavailable("暂无可导出的业务日期", axum::http::StatusCode::NOT_FOUND);
+    }
+
+    let period = if q.period.as_deref() == Some("monthly") {
+        "monthly"
+    } else {
+        "daily"
+    };
+    let rep = if period == "monthly" {
+        let month = &base_date[..7];
+        match crate::lineage_report::build_month(&st, month, person_id).await {
+            Ok(rep) => rep,
+            Err(e) => {
+                tracing::warn!(error = %e, person_id, "导出师门月报失败");
+                return unavailable("师门月报生成失败", axum::http::StatusCode::NOT_FOUND);
+            }
+        }
+    } else {
+        match crate::lineage_report::build(&st, &base_date, person_id).await {
+            Ok(rep) => rep,
+            Err(e) => {
+                tracing::warn!(error = %e, person_id, "导出师门日报失败");
+                return unavailable("师门日报生成失败", axum::http::StatusCode::NOT_FOUND);
+            }
+        }
+    };
+    if rep.disciple_count() == 0 {
+        return unavailable(
+            "暂无直系徒弟，师门报表不可用",
+            axum::http::StatusCode::NOT_FOUND,
+        );
+    }
+
+    let pages = crate::push::lineage_report_pngs_for(&st, &rep, &rep.master_name).await;
+    if pages.is_empty() {
+        return unavailable("师门报表图片生成失败", axum::http::StatusCode::NOT_FOUND);
+    }
+    let page_no = q.page.unwrap_or(0);
+    let Some(png) = pages.get(page_no) else {
+        return unavailable("师门报表页码不存在", axum::http::StatusCode::NOT_FOUND);
+    };
+    let safe_date = rep.date.replace('-', "");
+    let filename = format!("lineage-{period}-{safe_date}-{}.png", page_no + 1);
+    match axum::http::Response::builder()
+        .status(axum::http::StatusCode::OK)
+        .header(axum::http::header::CONTENT_TYPE, "image/png")
+        .header(axum::http::header::CACHE_CONTROL, "no-store")
+        .header(
+            axum::http::header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{filename}\""),
+        )
+        .header("x-lineage-pages", pages.len().to_string())
+        .body(axum::body::Body::from(png.clone()))
+    {
+        Ok(resp) => resp,
+        Err(e) => {
+            tracing::error!(error = %e, "构造师门报表响应失败");
+            ApiError::with_status(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "服务器开小差了，请稍后重试",
+            )
+            .into_response()
+        }
+    }
+}
+
 /* --------------------- 我的抖音号（分账号音浪 2026-10-12） --------------------- */
 
 /// 分账号音浪的四个窗口（2026-10-12 建）：今天的业务日 / 本月 / 今年。
