@@ -65,6 +65,7 @@ mod pages;
 mod prefetch;
 mod settings;
 mod site;
+mod workbuddy;
 mod wx;
 
 pub use admin::*;
@@ -76,6 +77,7 @@ pub use pages::*;
 pub use prefetch::*;
 pub use settings::*;
 pub use site::*;
+pub use workbuddy::*;
 pub use wx::*;
 
 #[cfg(test)]

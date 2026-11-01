@@ -73,13 +73,19 @@ apps/server          pk-server (Rust) 的 pnpm 包装：`pnpm dev:api` 直接跑
 - 登录：手机号（或姓名）+ 密码。**账号只有一条创建路径：管理员在后台开号** ——
   「机器人 → 我的页面账号」单条（`POST /api/admin/my-accounts`），或「主播台账 → 批量开号」
   （`POST /api/admin/my-accounts/batch`）。**手机号自助注册已于 2026-10-14 彻底移除**
-  （不是隐藏开关）：登录门「注册」页签 / OAuth 授权步骤 / 姓名核对全部删除，后端 6 条
-  `/api/public/my/register*` 路由、WorkBuddy 网关模块 `wbgateway.rs`（整文件）及其启动接线一并删除，
-  `PublicSettings` 不再下发 `myRegister` 字段，管理后台「公开站点设置 → 开放手机号注册」开关已删，
+  （不是隐藏开关）：登录门「注册」页签 / 注册式 OAuth 授权步骤 / 姓名核对全部删除，后端 6 条
+  `/api/public/my/register*` 路由一并删除；`wbgateway.rs` 于 2026-11-01 以「我的」页
+  WorkBuddy 账号绑定用途重新接入（不创建展示端账号）。`PublicSettings` 不再下发 `myRegister` 字段，
+  管理后台「公开站点设置 → 开放手机号注册」开关已删，
   注册链路的展示端自检脚本（`scripts/check/` 下，415 行）已删。**没有任何客户端能自助开号**
 - 后台开号即绑定：账号名 = 台账主播姓名、`bound=1`、团别按台账走，不用再绑一次；
   手机号另存 `phone` 列，所以手机号和姓名都能登录。
   **绑定后用户自己不能解绑/换绑，只有管理员能在后台「我的页面账号 → 改绑」**
+- **WorkBuddy 账号绑定（2026-11-01）**：用户登录展示端后进入「我的 → WorkBuddy 账号绑定」，
+  选择国内版/国际版并点「获取授权链接」，在 WorkBuddy 页面完成登录授权后，前端轮询到
+  `status=ok` 即表示账号已自动加入 64 的反代账号池。面板密码只存在 pk-server 服务端环境变量
+  `WORKBUDDY_PANEL_PASSWORD`；接口要求 `X-My-Token`，未配置面板口令时返回
+  `WORKBUDDY_NOT_CONFIGURED`（503）。
 - 忘记密码（登录门，**未登录**场景）：`POST /api/public/my/password/reset {phone}` → `{ok, password}`，
   重置为**随机临时密码**（CSPRNG，不再是手机号后四位）并在本次响应里下发一次，旧登录态同时吊销；
   只受每 IP 每分钟 12 次限流（注册开关已删，此端点不再受它约束）。

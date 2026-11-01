@@ -237,6 +237,13 @@ async fn main() -> anyhow::Result<()> {
         cache: Mutex::new(Default::default()),
         bots: std::sync::OnceLock::new(),
     });
+    /* WorkBuddy 账号绑定：面板密码只在服务端；配置后「我的」页才会出现可用入口。 */
+    match wbgateway::init() {
+        Some(wb) => tracing::info!(panel = wb.base(), "WorkBuddy 账号绑定已启用"),
+        None => tracing::info!(
+            "WorkBuddy 账号绑定未配置（WORKBUDDY_PANEL_PASSWORD 为空）：绑定入口会提示联系管理员"
+        ),
+    }
     /* 小智 MCP 管理员只读接入：配置 XIAOZHI_MCP_ENDPOINT 后自动连接小智云端。
      * token 只在环境变量里，不进入代码/日志；未配置时完全跳过。 */
     mcp::spawn_xiaozhi(st.clone());
@@ -514,6 +521,20 @@ async fn main() -> anyhow::Result<()> {
         // 展示端登录 / 密码（2026-10-14 口径：注册功能已彻底移除，保留忘记密码重置，
         // 新增已登录后的自助改密）。这几个接口不带团别。
         .route("/api/public/my/login", post(public_teams::my_login))
+        /* WorkBuddy 反代账号绑定（已登录用户）：服务端拿面板口令换取授权链接，
+         * 浏览器只接触 authUrl/state，完成 OAuth 后账号自动进入反代池。 */
+        .route(
+            "/api/public/my/workbuddy/oauth/start",
+            post(public_teams::my_workbuddy_oauth_start),
+        )
+        .route(
+            "/api/public/my/workbuddy/oauth/poll",
+            post(public_teams::my_workbuddy_oauth_poll),
+        )
+        .route(
+            "/api/public/my/workbuddy/oauth/cancel",
+            post(public_teams::my_workbuddy_oauth_cancel),
+        )
         /* 凭艺名认领开号（2026-10-18 用户拍板 / 契约 §3.2）：没有账号的在职主播
         用艺名 + 自设密码认领，认领即建号，之后进首次补全引导。 */
         .route("/api/public/my/claim", post(public_teams::my_claim))
