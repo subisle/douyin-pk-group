@@ -81,7 +81,7 @@ services:
       # WorkBuddy 账号绑定：面板密码只在服务端；host.docker.internal 指向宿主机 8788。
       WORKBUDDY_PANEL_URL: ${WORKBUDDY_PANEL_URL:-http://host.docker.internal:8788}
       WORKBUDDY_PANEL_PASSWORD: ${WORKBUDDY_PANEL_PASSWORD:-}
-      WORKBUDDY_PUBLIC_API_BASE: ${WORKBUDDY_PUBLIC_API_BASE:-http://64.188.8.149:8788/v1}
+      WORKBUDDY_PUBLIC_API_BASE: ${WORKBUDDY_PUBLIC_API_BASE:-https://wb64.subisle.cc/v1}
       # IP 闸门（展示端访客拦截）。生产留空 = 拦截开启（本意如此）。
       # IP_GATE_DISABLED 只供临时排障（设 1 关拦截），排障完必须关回。
       IP_GATE_DISABLED: ${IP_GATE_DISABLED:-}

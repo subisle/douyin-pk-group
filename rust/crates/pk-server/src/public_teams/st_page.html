@@ -2849,9 +2849,8 @@ let curGroup = GROUP_PAGES[0].key;  // 分组子页当前 key
 /* 「我的」子页（2026-10-13）：bind/push/chase/privacy/about。/my 是列表首页，
    点列表行进子页（下一页式，带返回），路由 /my/<sub> 可直达可分享。 */
 let mySub = null;
-/* WorkBuddy 绑定会话（只保存网关返回的随机 state；页面离开子页即停止轮询） */
-let wbBindState = '';
-let wbBindTimer = null;
+/* WorkBuddy 自动跳转只执行一次，避免 renderMySub 重入时重复申请授权 */
+let wbAutoStarted = false;
 let curDate = null;      // 每日口径当前日期
 let curPeriod = null;    // 月/年口径当前周期
 let plans = [];          // 已上架分组方案（各类型独立互斥，每类型最多一场）
@@ -6234,26 +6233,17 @@ async function exportMyLineage(period, btn) {
   }
 }
 
-/* WorkBuddy 反代账号绑定卡：用户在展示端内完成 OAuth，账号由服务端自动加入 64 反代池。 */
+/* WorkBuddy 反代账号绑定：进入子页即自动申请 OAuth 链接并当前页跳转。 */
 function myWorkbuddyCard() {
   return '<div class="st-my-list" id="myWorkbuddyCard" hidden>' +
     '<div class="sec">WorkBuddy 账号绑定</div>' +
     '<div style="padding:0 1rem 1rem">' +
       '<p class="sub" style="line-height:1.8;margin:0 0 12px">' +
-        '选择 WorkBuddy 版本后获取授权链接，在打开的页面登录并确认授权。' +
-        '完成后这里会自动检测，账号直接加入 64 反代账号池。</p>' +
-      '<div class="field-label">WorkBuddy 版本</div>' +
-      '<select id="wbRealm" style="width:100%;margin:0 0 12px">' +
-        '<option value="cn">国内版</option><option value="intl">国际版</option></select>' +
-      '<button class="st-my-ops-btn" id="wbStart" style="width:100%;justify-content:center">获取授权链接</button>' +
-      '<div id="wbState" style="margin:12px 0 0;line-height:1.7;font-size:13px"></div>' +
+        '正在自动打开 WorkBuddy 登录授权页。登录并确认后，账号会加入 64 反代账号池。</p>' +
+      '<div id="wbState" style="line-height:1.7;font-size:13px;color:#475569">准备跳转…</div>' +
       '<div id="wbLinkBox" style="margin-top:10px;word-break:break-all;font-size:12px"></div>' +
-      '<div id="wbApiBox" class="sub" style="margin-top:12px;line-height:1.8;display:none"></div>' +
+      '<button class="st-my-ops-btn" id="wbStart" style="width:100%;justify-content:center;display:none;margin-top:12px">重新跳转</button>' +
     '</div></div>';
-}
-
-function stopWbBindPoll() {
-  if (wbBindTimer) { clearInterval(wbBindTimer); wbBindTimer = null; }
 }
 
 function setWbBindStatus(text, kind) {
@@ -6263,88 +6253,33 @@ function setWbBindStatus(text, kind) {
   el.style.color = kind === 'ok' ? '#0B7A57' : kind === 'bad' ? '#B42318' : '#475569';
 }
 
-function startWbBindPoll() {
-  stopWbBindPoll();
-  let tries = 0;
-  wbBindTimer = setInterval(async () => {
-    tries += 1;
-    if (tries > 120) {       // 5 分钟没有结果就停止
-      stopWbBindPoll();
-      setWbBindStatus('授权检测超时，请重新获取链接。', 'bad');
-      return;
-    }
-    if (!wbBindState) return;
-    try {
-      const d = await postJson('/api/public/my/workbuddy/oauth/poll',
-        { state: wbBindState }, { auth: true });
-      if (d.status === 'ok') {
-        stopWbBindPoll();
-        wbBindState = '';
-        setWbBindStatus('✓ 绑定成功，账号已加入反代池' +
-          (d.nickname ? '（' + d.nickname + '）' : ''), 'ok');
-        const apiBox = $('wbApiBox');
-        if (apiBox) {
-          apiBox.style.display = 'block';
-          apiBox.innerHTML = '反代地址：<b>' + esc(d.apiBase || '') + '</b><br>' +
-            'API Key 请向管理员获取。';
-        }
-      } else if (d.status === 'error' || d.status === 'expired' || d.status === 'unknown') {
-        stopWbBindPoll();
-        wbBindState = '';
-        setWbBindStatus('授权失败或已过期：' +
-          (d.message || '请重新获取授权链接'), 'bad');
-      }
-    } catch (e) {
-      if (e && e.status === 401) {
-        stopWbBindPoll();
-        sessionExpired();
-      }
-      /* 网络抖动继续轮询；后端 5xx 连续失败会由 5 分钟上限兜底 */
-    }
-  }, 2500);
-}
-
 async function startWbBind() {
-  const btn = $('wbStart');
-  if (!btn) return;
-  const realmEl = $('wbRealm');
-  const realm = realmEl ? realmEl.value : 'cn';
-  const popup = window.open('about:blank', '_blank');
-  if (popup) popup.opener = null;
-  btn.disabled = true;
-  btn.textContent = '获取中…';
-  setWbBindStatus('正在向 WorkBuddy 申请授权链接…', 'wait');
+  if (wbAutoStarted) return;
+  wbAutoStarted = true;
+  const retry = $('wbStart');
+  if (retry) retry.style.display = 'none';
   const linkBox = $('wbLinkBox');
   if (linkBox) linkBox.innerHTML = '';
-  const apiBox = $('wbApiBox');
-  if (apiBox) apiBox.style.display = 'none';
+  setWbBindStatus('正在获取 WorkBuddy 授权链接…', 'wait');
   try {
-    if (wbBindState) {
-      postJson('/api/public/my/workbuddy/oauth/cancel', { state: wbBindState }, { auth: true })
-        .catch(() => {});
-    }
-    stopWbBindPoll();
-    wbBindState = '';
     const d = await postJson('/api/public/my/workbuddy/oauth/start',
-      { realm: realm }, { auth: true });
-    wbBindState = d.state || '';
+      { realm: 'cn' }, { auth: true });
     const link = String(d.authUrl || '');
     if (!/^https?:\/\//i.test(link)) throw new Error('WorkBuddy 返回的授权链接格式不正确');
     if (linkBox) {
-      linkBox.innerHTML = '如果没有自动打开，请点击：<a href="' + esc(link) +
-        '" target="_blank" rel="noopener">打开 WorkBuddy 登录页</a>';
+      linkBox.innerHTML = '如果没有自动跳转，请点击：<a href="' + esc(link) +
+        '">打开 WorkBuddy 登录页</a>';
     }
-    if (popup) {
-      try { popup.location.replace(link); } catch (_) {}
-    }
-    setWbBindStatus('等待你在 WorkBuddy 页面完成登录和授权…', 'wait');
-    startWbBindPoll();
+    setWbBindStatus('正在跳转 WorkBuddy 登录授权页…', 'wait');
+    window.location.assign(link);
   } catch (e) {
-    if (popup) { try { popup.close(); } catch (_) {} }
-    setWbBindStatus(e.message || '获取授权链接失败，请稍后再试', 'bad');
-  } finally {
-    btn.disabled = false;
-    btn.textContent = '重新获取授权链接';
+    wbAutoStarted = false;
+    setWbBindStatus(e.message || '获取授权链接失败，请稍后重试', 'bad');
+    if (retry) {
+      retry.style.display = '';
+      retry.disabled = false;
+      retry.textContent = '重新跳转';
+    }
   }
 }
 
@@ -6489,7 +6424,7 @@ function renderMy(d, series, push, accounts) {
       '<span class="material-symbols-outlined">chevron_right</span></div></div>' +
       '<div class="st-my-item" id="myWorkbuddyRow" style="cursor:pointer"><div class="l"><div class="ico"><span class="material-symbols-outlined">hub</span></div>' +
       '<div style="min-width:0"><div class="t">WorkBuddy 账号绑定</div>' +
-      '<div class="d">授权后自动加入 64 反代账号池</div></div></div>' +
+      '<div class="d">点击后自动跳转 WorkBuddy 登录授权</div></div></div>' +
       '<div class="r"><span class="pri">去绑定</span>' +
       '<span class="material-symbols-outlined">chevron_right</span></div></div>' +
       '<div class="st-my-item" id="myEmailRow" style="cursor:pointer">' +
@@ -6650,7 +6585,7 @@ function renderMySub() {
   syncNavActive();
   if (!mySub) { showMyHome(); return; }
   const sub = mySub;
-  if (sub !== 'workbuddy') stopWbBindPoll();
+  if (sub !== 'workbuddy') wbAutoStarted = false;
   /* 修复6②：信息型子页要显示 myInfoCard，卡片型子页要隐藏它——
      否则从 privacy/about 切到 bind/push 时旧的信息卡会叠在目标卡上。
      在这里统一处理（原实现只在 showMyHome 里隐藏，方向反了就漏）。 */
@@ -6728,6 +6663,7 @@ function renderMySub() {
   }
   setQrWatermarkHidden(sub === 'wechat');
   if (sub === 'wechat') autoStartWxDock(pushState);
+  if (sub === 'workbuddy') startWbBind();
   /* 滚回顶部（进子页的第一屏） */
   window.scrollTo({ top: 0 });
 }
