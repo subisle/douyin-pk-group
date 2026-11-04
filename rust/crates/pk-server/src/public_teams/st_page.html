@@ -2849,8 +2849,8 @@ let curGroup = GROUP_PAGES[0].key;  // 分组子页当前 key
 /* 「我的」子页（2026-10-13）：bind/push/chase/privacy/about。/my 是列表首页，
    点列表行进子页（下一页式，带返回），路由 /my/<sub> 可直达可分享。 */
 let mySub = null;
-/* WorkBuddy 自动跳转只执行一次，避免 renderMySub 重入时重复申请授权 */
-let wbAutoStarted = false;
+/* WorkBuddy 绑定请求去重，防止重复点击产生多条 OAuth state */
+let wbBinding = false;
 let curDate = null;      // 每日口径当前日期
 let curPeriod = null;    // 月/年口径当前周期
 let plans = [];          // 已上架分组方案（各类型独立互斥，每类型最多一场）
@@ -2882,7 +2882,7 @@ function parseRoute() {
   if (rest === 'wechat') return { view: 'my', mySub: 'wechat' };
   /* 「我的」子页（2026-10-15 契约 C）：wechat = 「消息设置」；push 为兼容别名，
      旧链接 /my/push 仍打开同一页（不 404、不落回列表）。 */
-  const mym = rest.match(/^my\/(push|chase|privacy|about|wechat|workbuddy)$/);
+  const mym = rest.match(/^my\/(push|chase|privacy|about|wechat)$/);
   if (mym) return { view: 'my', mySub: mym[1] === 'push' ? 'wechat' : mym[1] };
   const gm = rest.match(/^group\/([a-z-]+)$/);
   if (gm && GROUP_PAGES.some(p => p.key === gm[1])) return { view: 'group', group: gm[1] };
@@ -6243,53 +6243,24 @@ async function exportMyLineage(period, btn) {
   }
 }
 
-/* WorkBuddy 反代账号绑定：进入子页即自动申请 OAuth 链接并当前页跳转。 */
-function myWorkbuddyCard() {
-  return '<div class="st-my-list" id="myWorkbuddyCard" hidden>' +
-    '<div class="sec">WorkBuddy 账号绑定</div>' +
-    '<div style="padding:0 1rem 1rem">' +
-      '<p class="sub" style="line-height:1.8;margin:0 0 12px">' +
-        '正在自动打开 WorkBuddy 登录授权页。登录并确认后，账号会加入 64 反代账号池。</p>' +
-      '<div id="wbState" style="line-height:1.7;font-size:13px;color:#475569">准备跳转…</div>' +
-      '<div id="wbLinkBox" style="margin-top:10px;word-break:break-all;font-size:12px"></div>' +
-      '<button class="st-my-ops-btn" id="wbStart" style="width:100%;justify-content:center;display:none;margin-top:12px">重新跳转</button>' +
-    '</div></div>';
-}
-
-function setWbBindStatus(text, kind) {
-  const el = $('wbState');
-  if (!el) return;
-  el.textContent = text || '';
-  el.style.color = kind === 'ok' ? '#0B7A57' : kind === 'bad' ? '#B42318' : '#475569';
-}
-
+/* WorkBuddy / CodeBuddy 绑定：点击行即自动申请 OAuth 链接并当前页跳转。 */
 async function startWbBind() {
-  if (wbAutoStarted) return;
-  wbAutoStarted = true;
-  const retry = $('wbStart');
-  if (retry) retry.style.display = 'none';
-  const linkBox = $('wbLinkBox');
-  if (linkBox) linkBox.innerHTML = '';
-  setWbBindStatus('正在获取 WorkBuddy 授权链接…', 'wait');
+  if (wbBinding) return;
+  wbBinding = true;
+  const row = $('myWorkbuddyRow');
+  if (row) { row.style.pointerEvents = 'none'; row.style.opacity = '.65'; }
   try {
+    toast('正在获取授权链接…');
     const d = await postJson('/api/public/my/workbuddy/oauth/start',
       { realm: 'cn' }, { auth: true });
     const link = String(d.authUrl || '');
     if (!/^https?:\/\//i.test(link)) throw new Error('WorkBuddy 返回的授权链接格式不正确');
-    if (linkBox) {
-      linkBox.innerHTML = '如果没有自动跳转，请点击：<a href="' + esc(link) +
-        '">打开 WorkBuddy 登录页</a>';
-    }
-    setWbBindStatus('正在跳转 WorkBuddy 登录授权页…', 'wait');
     window.location.assign(link);
   } catch (e) {
-    wbAutoStarted = false;
-    setWbBindStatus(e.message || '获取授权链接失败，请稍后重试', 'bad');
-    if (retry) {
-      retry.style.display = '';
-      retry.disabled = false;
-      retry.textContent = '重新跳转';
-    }
+    wbBinding = false;
+    if (row) { row.style.pointerEvents = ''; row.style.opacity = ''; }
+    if (e && e.status === 401) sessionExpired();
+    else toast(e.message || '获取授权链接失败，请稍后重试');
   }
 }
 
@@ -6468,7 +6439,6 @@ function renderMy(d, series, push, accounts) {
     /* 「追分设置」独立卡（2026-10-13 用户口径）：与推送卡分开，
        追分目标表单只出现在这张卡里，推送卡只管绑定与开关 */
     chaseCard(push) +
-    myWorkbuddyCard() +
     '<button class="my-logout" id="myOut">退出登录</button>' +
   '</div>';
   $('myOut').onclick = () => {
@@ -6533,8 +6503,7 @@ function renderMy(d, series, push, accounts) {
   $('myAbout').onclick = () => { mySub = 'about'; pushRoute(); renderMySub(); };
   $('myPushRow').onclick = () => { mySub = 'wechat'; pushRoute(); renderMySub(); };
   $('myChaseRow').onclick = () => { mySub = 'chase'; pushRoute(); renderMySub(); };
-  $('myWorkbuddyRow').onclick = () => { mySub = 'workbuddy'; pushRoute(); renderMySub(); };
-  $('wbStart').onclick = startWbBind;
+  $('myWorkbuddyRow').onclick = startWbBind;
   renderPushBox(push);
   /* 「追分设置」独立卡（2026-10-13）：**这里绝不能再补一次 renderChaseBox**（2026-10-15 task-7）。
      renderPushBox → bindPushBox 末尾已经 renderChaseBox + bindChaseHandlers；在这里再渲染一次
@@ -6576,7 +6545,6 @@ const MY_SUB_CARDS = {
   wechat:  { title: '消息设置',         card: 'myPushCard' },
   push:    { title: '消息设置',         card: 'myPushCard' },
   chase:   { title: '追分设置',         card: 'myChaseCard' },
-  workbuddy: { title: 'WorkBuddy 账号绑定', card: 'myWorkbuddyCard' },
 };
 const MY_SUB_INFO = {
   privacy: { title: '隐私与对外展示字段', icon: 'visibility' },
@@ -6595,7 +6563,6 @@ function renderMySub() {
   syncNavActive();
   if (!mySub) { showMyHome(); return; }
   const sub = mySub;
-  if (sub !== 'workbuddy') wbAutoStarted = false;
   /* 修复6②：信息型子页要显示 myInfoCard，卡片型子页要隐藏它——
      否则从 privacy/about 切到 bind/push 时旧的信息卡会叠在目标卡上。
      在这里统一处理（原实现只在 showMyHome 里隐藏，方向反了就漏）。 */
@@ -6673,7 +6640,6 @@ function renderMySub() {
   }
   setQrWatermarkHidden(sub === 'wechat');
   if (sub === 'wechat') autoStartWxDock(pushState);
-  if (sub === 'workbuddy') startWbBind();
   /* 滚回顶部（进子页的第一屏） */
   window.scrollTo({ top: 0 });
 }
