@@ -87,6 +87,9 @@ apps/server          pk-server (Rust) 的 pnpm 包装：`pnpm dev:api` 直接跑
   接口要求 `X-My-Token`，未配置面板口令时返回 `WORKBUDDY_NOT_CONFIGURED`（503）。
   公开面板 / API 域名统一为 `https://wb64.subisle.cc/`，反代 API 为
   `https://wb64.subisle.cc/v1`。
+  64 的 `wb-proxy` 需设置 `WB_CN_CHAT_UPSTREAM=https://www.codebuddy.cn`，
+  这样国内版 OAuth 链接才会是 `https://www.codebuddy.cn/login/?platform=CLI&state=<UUID>`；
+  不设置时上游默认返回 `copilot.tencent.com` 登录页。
 - 忘记密码（登录门，**未登录**场景）：`POST /api/public/my/password/reset {phone}` → `{ok, password}`，
   重置为**随机临时密码**（CSPRNG，不再是手机号后四位）并在本次响应里下发一次，旧登录态同时吊销；
   只受每 IP 每分钟 12 次限流（注册开关已删，此端点不再受它约束）。
