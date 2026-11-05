@@ -23,8 +23,8 @@ use axum::Router;
 /// - `/api/*` 一律 no-store；**唯一例外**是公开头像 `/api/public/avatars/*`：
 ///   它自带 `public, max-age=31536000, immutable`（内容 hash 换 URL 破缓存），
 ///   是纯公开数据、无登录态，覆盖成 no-store 会让展示页每次头像都回源查库。
-/// - 展示页 HTML（`/`、`/1`、`/0`、`/report`、`/lineage`、`/my*`、`/wechat*`、
-///   `/group*`、`/st/*`）同样 no-store：页面按登录态/配置实时渲染，缓存只有害处。
+/// - 展示页 HTML（`/`、`/1`、`/0`、`/report`、`/lineage`、`/resources`、`/my*`、
+///   `/wechat*`、`/group*`、`/st/*`）同样 no-store：页面按登录态/配置实时渲染，缓存只有害处。
 /// - 其它路径（`/assets/*`、`/fonts/*`、`/admin` SPA 壳与 dist 静态资源）**不碰**，
 ///   缓存策略继续由 `spa.rs::cache_control` 与反代决定。
 async fn cache_control_mw(
@@ -52,7 +52,15 @@ fn cache_no_store(path: &str) -> bool {
     }
     matches!(
         path,
-        "/" | "/1" | "/0" | "/report" | "/lineage" | "/my" | "/wechat" | "/group"
+        "/" | "/1"
+            | "/0"
+            | "/report"
+            | "/lineage"
+            | "/resources"
+            | "/resource"
+            | "/my"
+            | "/wechat"
+            | "/group"
     ) || path.starts_with("/my/")
         || path.starts_with("/wechat/")
         || path.starts_with("/group/")
@@ -567,6 +575,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/", get(public_teams::st_root))
         .route("/report", get(public_teams::st_root))
         .route("/lineage", get(public_teams::st_root))
+        .route("/resources", get(public_teams::st_root))
+        .route("/resource", get(public_teams::st_root))
         .route("/my", get(public_teams::st_root))
         /* 「我的」子页（2026-10-15）：前端 parseRoute 白名单只认
         my/(bind|push|chase|privacy|about|wechat)（st_page.html 的 mym 正则），

@@ -55,6 +55,9 @@ ICONS = [
     # 2026-10-18 账号绑定 QQ 邮箱：「我的」页 QQ 邮箱行用 mail
     # （漏了会渲染成字面文本 mail，见 03-展示端交互设计.md 附录 B）
     "mail",
+    # 2026-11-05 资源分享页
+    "folder", "folder_special", "view_agenda", "grid_view", "content_copy",
+    "open_in_new", "passkey", "play_circle", "api", "monitoring", "code", "key",
 ]
 
 _DIGITS = ("zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine")

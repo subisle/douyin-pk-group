@@ -352,6 +352,8 @@ const OPEN_PREFIXES: &[&str] = &[
     // 注意 /my 是展示页「我的」前缀；管理端没有以这些开头的路径，不冲突。
     "/report/",
     "/lineage/",
+    "/resources",
+    "/resource",
     "/my/",
     "/group/",
     /* 「微信对接」独立短路径（2026-10-17 修复，审计 5-P0）：
@@ -829,6 +831,8 @@ mod tests {
             "/group",
             "/report",
             "/lineage",
+            "/resources",
+            "/resource",
         ] {
             assert!(is_open(p), "{p} 应该免鉴权");
         }
