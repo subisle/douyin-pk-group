@@ -2935,33 +2935,21 @@ let mySub = null;
 /* WorkBuddy 绑定请求去重，防止重复点击产生多条 OAuth state */
 let wbBinding = false;
 
-/* 资源分享：目前为前端内置目录，后续可无缝改成后台下发。 */
-const RESOURCE_CATEGORIES = [
-  { key: 'all', label: '全部' },
-  { key: 'account', label: '账号与反代' },
-  { key: 'data', label: '数据工具' },
-  { key: 'dev', label: '开发资源' },
-  { key: 'official', label: '官方平台' },
+/* 视频资源目录：卡片点击只跳网盘，不承载通用工具入口。
+   新视频按下面字段追加即可：
+   { id, title, category, desc, netdiskUrl, provider, duration, tags: [] } */
+const VIDEO_CATEGORIES = [
+  { key: 'all', label: '全部视频' },
+  { key: 'basic', label: '入门教学' },
+  { key: 'live', label: '直播运营' },
+  { key: 'edit', label: '剪辑课程' },
+  { key: 'growth', label: '账号增长' },
 ];
-const RESOURCES = [
-  { id: 'wb-panel', title: 'WorkBuddy / CodeBuddy 面板', category: 'account', icon: 'key',
-    desc: '查看账号池、用量与反代状态，账号绑定统一从这里进入。',
-    url: 'https://wb64.subisle.cc/', tags: ['WorkBuddy', '账号绑定'], featured: true },
-  { id: 'wb-api', title: 'WorkBuddy 反代 API', category: 'account', icon: 'api',
-    desc: 'OpenAI 兼容接口地址，API Key 向管理员获取后填入客户端。',
-    url: 'https://wb64.subisle.cc/v1', tags: ['API', '反代'], featured: true },
-  { id: 'pk-dashboard', title: '主播数据看板', category: 'data', icon: 'monitoring',
-    desc: '每日音浪、分组、族谱与个人数据查询入口。',
-    url: 'https://pk.subisle.com/', tags: ['看板', '数据'], featured: true },
-  { id: 'wb-hub', title: 'WorkBuddy2API Hub', category: 'dev', icon: 'code',
-    desc: 'WorkBuddy 多账号反代网关开源项目与部署说明。',
-    url: 'https://github.com/ardeyouxipianyi/workbuddy2api-hub', tags: ['GitHub', '开源'], featured: true },
-  { id: 'codebuddy-login', title: 'CodeBuddy 登录入口', category: 'official', icon: 'passkey',
-    desc: '国内版账号登录与授权页面，通常由绑定流程自动跳转。',
-    url: 'https://www.codebuddy.cn/login/', tags: ['CodeBuddy', '登录'] },
-  { id: 'douyin-creator', title: '抖音创作服务平台', category: 'official', icon: 'play_circle',
-    desc: '抖音官方创作者后台，用于作品、数据和账号相关操作。',
-    url: 'https://creator.douyin.com/', tags: ['抖音', '官方'] },
+const VIDEO_RESOURCES = [
+  // 示例结构（拿到真实视频后追加；未配置时页面显示“暂无视频资源”）：
+  // { id: 'video-001', title: '视频标题', category: 'basic', desc: '视频简介',
+  //   netdiskUrl: 'https://pan.quark.cn/s/xxxx', provider: '夸克网盘',
+  //   duration: '12:30', tags: ['基础', '新手'] },
 ];
 let resourceCategory = 'all';
 let resourceQuery = '';
@@ -6009,24 +5997,27 @@ function initGroupSegDrag() {
 
 /* ==================== 资源分享（2026-11-05） ==================== */
 function resourceCategoryLabel(key) {
-  return (RESOURCE_CATEGORIES.find(c => c.key === key) || {}).label || key;
+  return (VIDEO_CATEGORIES.find(c => c.key === key) || {}).label || key;
 }
 
 function resourceCardHtml(item, layout) {
   const tags = (item.tags || []).slice(0, 3).map(t => '<span class="resource-tag">' + esc(t) + '</span>').join('');
+  const provider = item.provider ? '<span class="resource-tag">' + esc(item.provider) + '</span>' : '';
+  const duration = item.duration ? '<span class="resource-tag">' + esc(item.duration) + '</span>' : '';
   return '<article class="resource-card" data-resource-id="' + esc(item.id) + '">' +
-    '<div class="resource-ico"><span class="material-symbols-outlined">' + esc(item.icon || 'folder') + '</span></div>' +
+    '<div class="resource-ico"><span class="material-symbols-outlined">smart_display</span></div>' +
     '<div class="resource-main">' +
       '<h3 title="' + esc(item.title) + '">' + esc(item.title) + '</h3>' +
       '<div class="desc">' + esc(item.desc) + '</div>' +
       '<div class="resource-row-meta">' +
-        '<span class="resource-tag category">' + esc(resourceCategoryLabel(item.category)) + '</span>' + tags +
+        '<span class="resource-tag category">' + esc(resourceCategoryLabel(item.category)) + '</span>' +
+        provider + duration + tags +
       '</div>' +
     '</div>' +
     '<div class="resource-actions">' +
-      '<a class="resource-open" href="' + esc(item.url) + '" target="_blank" rel="noopener">' +
-        '<span class="material-symbols-outlined">open_in_new</span>打开</a>' +
-      '<button class="resource-copy" type="button" data-copy-url="' + esc(item.url) + '" title="复制链接">' +
+      '<a class="resource-open" href="' + esc(item.netdiskUrl) + '" target="_blank" rel="noopener">' +
+        '<span class="material-symbols-outlined">open_in_new</span>网盘观看</a>' +
+      '<button class="resource-copy" type="button" data-copy-url="' + esc(item.netdiskUrl) + '" title="复制网盘链接">' +
         '<span class="material-symbols-outlined">content_copy</span></button>' +
     '</div>' +
   '</article>';
@@ -6034,7 +6025,7 @@ function resourceCardHtml(item, layout) {
 
 function resourceFilteredItems() {
   const key = resourceQuery.trim().toLowerCase();
-  return RESOURCES.filter(item => {
+  return VIDEO_RESOURCES.filter(item => {
     if (resourceCategory !== 'all' && item.category !== resourceCategory) return false;
     if (!key) return true;
     return [item.title, item.desc, resourceCategoryLabel(item.category), ...(item.tags || [])]
@@ -6047,11 +6038,14 @@ function renderResourceResults() {
   if (!box) return;
   const items = resourceFilteredItems();
   box.className = resourceLayout === 'grid' ? 'resource-grid' : 'resource-list';
+  const noData = VIDEO_RESOURCES.length === 0;
   box.innerHTML = items.length
     ? items.map(item => resourceCardHtml(item, resourceLayout)).join('')
-    : '<div class="resource-empty"><span class="big">⌕</span>没有找到匹配资源<br><span style="font-size:11px">换个关键词或分类试试</span></div>';
+    : noData
+      ? '<div class="resource-empty"><span class="big">🎬</span>暂无视频资源<br><span style="font-size:11px">管理员添加视频后会显示在这里</span></div>'
+      : '<div class="resource-empty"><span class="big">⌕</span>没有找到匹配视频<br><span style="font-size:11px">换个关键词或视频分类试试</span></div>';
   const count = $('resourceCount');
-  if (count) count.innerHTML = '共 <b>' + items.length + '</b> 项资源';
+  if (count) count.innerHTML = '共 <b>' + items.length + '</b> 个视频';
   document.querySelectorAll('[data-resource-cat]').forEach(b => {
     b.classList.toggle('on', b.dataset.resourceCat === resourceCategory);
   });
@@ -6064,7 +6058,7 @@ function renderResourceResults() {
 
 function renderResources() {
   const withCount = (key) => {
-    const n = key === 'all' ? RESOURCES.length : RESOURCES.filter(x => x.category === key).length;
+    const n = key === 'all' ? VIDEO_RESOURCES.length : VIDEO_RESOURCES.filter(x => x.category === key).length;
     return '<button class="resource-cat ' + (resourceCategory === key ? 'on' : '') +
       '" type="button" data-resource-cat="' + esc(key) + '">' + esc(resourceCategoryLabel(key)) +
       '<span class="n">' + n + '</span></button>';
@@ -6072,24 +6066,24 @@ function renderResources() {
   $('view').innerHTML = '<div class="section tab-content-enter resource-page">' +
     '<div class="resource-hero">' +
       '<div class="kicker"><span class="material-symbols-outlined">folder_special</span>RESOURCE HUB</div>' +
-      '<h2>资源分享</h2>' +
-      '<p>常用入口、账号服务、数据工具和开发资源，一处查找，直接打开。</p>' +
+      '<h2>视频资源</h2>' +
+      '<p>精选视频教学与运营课程，按分类或关键词查找，点击直接跳转网盘观看。</p>' +
     '</div>' +
     '<div class="resource-tools">' +
       '<div class="resource-search">' +
         '<span class="material-symbols-outlined">search</span>' +
-        '<input id="resourceSearch" type="search" autocomplete="off" placeholder="搜索资源名称、说明或标签" value="' + esc(resourceQuery) + '">' +
+        '<input id="resourceSearch" type="search" autocomplete="off" placeholder="搜索视频名称、说明、分类或标签" value="' + esc(resourceQuery) + '">' +
         '<button class="clear" id="resourceClear" type="button" aria-label="清空搜索"' + (resourceQuery ? '' : ' hidden') + '><span class="material-symbols-outlined">close</span></button>' +
       '</div>' +
       '<div class="resource-filter-row">' +
-        '<div class="resource-cats">' + RESOURCE_CATEGORIES.map(c => withCount(c.key)).join('') + '</div>' +
+        '<div class="resource-cats">' + VIDEO_CATEGORIES.map(c => withCount(c.key)).join('') + '</div>' +
         '<div class="resource-layout" aria-label="布局切换">' +
           '<button type="button" data-resource-layout="list" title="列表布局"><span class="material-symbols-outlined">view_agenda</span></button>' +
           '<button type="button" data-resource-layout="grid" title="卡片布局"><span class="material-symbols-outlined">grid_view</span></button>' +
         '</div>' +
       '</div>' +
     '</div>' +
-    '<div class="resource-meta"><span id="resourceCount"></span><span>点击资源直接打开</span></div>' +
+    '<div class="resource-meta"><span id="resourceCount"></span><span>点击视频跳转网盘</span></div>' +
     '<div id="resourceResults" class="resource-list"></div>' +
   '</div>';
 
