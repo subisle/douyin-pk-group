@@ -52,6 +52,8 @@ pub struct LineageReport {
     pub total_yesterday: Option<i64>,
     /// 未播徒弟姓名（不含师傅），按 rows 顺序
     pub absent_names: Vec<String>,
+    /// 日报的当日时长目标（分钟）；0 = 不显示时长不足提示。
+    pub min_today_minutes: i64,
 }
 
 impl LineageReport {
@@ -65,34 +67,9 @@ impl LineageReport {
         self.rows.iter().filter(|r| !r.is_master).count()
     }
 
-    /// 日报按当日时长达标线筛选徒弟：师傅行保留，只留下 `today_minutes >= min_minutes` 的徒弟。
-    /// 筛选后重算合计与未播名单，返回最终徒弟数。
-    pub fn retain_daily_disciples_by_minutes(&mut self, min_minutes: i64) -> usize {
-        if min_minutes <= 0 {
-            return self.disciple_count();
-        }
-        let master = self.rows.iter().find(|r| r.is_master).cloned();
-        let mut rows = Vec::with_capacity(self.rows.len());
-        if let Some(m) = master {
-            rows.push(m);
-        }
-        rows.extend(
-            self.rows
-                .iter()
-                .filter(|r| !r.is_master && r.today_minutes >= min_minutes)
-                .cloned(),
-        );
-        self.rows = rows;
-        self.total_today = self.rows.iter().map(|r| r.today).sum();
-        let ys: Vec<i64> = self.rows.iter().filter_map(|r| r.yesterday).collect();
-        self.total_yesterday = (!ys.is_empty()).then(|| ys.iter().sum());
-        self.absent_names = self
-            .rows
-            .iter()
-            .filter(|r| !r.is_master && !r.live)
-            .map(|r| r.name.clone())
-            .collect();
-        self.disciple_count()
+    /// 设置日报的当日时长目标。所有徒弟仍保留，渲染时对未达标者标红。
+    pub fn set_daily_minutes_target(&mut self, min_minutes: i64) {
+        self.min_today_minutes = min_minutes.max(0);
     }
 
     /// 本月累计音浪（含师傅行）。
@@ -381,6 +358,7 @@ pub async fn build(
         total_today,
         total_yesterday,
         absent_names,
+        min_today_minutes: 0,
     })
 }
 
@@ -445,6 +423,7 @@ pub async fn build_month(
         total_today,
         total_yesterday: None,
         absent_names,
+        min_today_minutes: 0,
     })
 }
 
@@ -537,6 +516,18 @@ fn render_page(
             crate::push::fmt_minutes(rep.month_minutes_total())
         ));
     }
+    if rep.min_today_minutes > 0 {
+        let qualified = rep
+            .rows
+            .iter()
+            .filter(|r| !r.is_master && r.today_minutes >= rep.min_today_minutes)
+            .count();
+        sub.push_str(&format!(
+            " · {}小时达标 {}人",
+            rep.min_today_minutes / 60,
+            qualified
+        ));
+    }
     if fields.wave_diff {
         match rep.total_diff() {
             Some(d) if d > 0 => sub.push_str(&format!(
@@ -565,17 +556,19 @@ fn render_page(
     ));
     let columns: Vec<(f64, &str, &str)> = [
         (28.0f64, "主播", "start"),
-        (205.0, "今日音浪", "middle"),
-        (300.0, "昨日音浪", "middle"),
-        (390.0, "较昨日", "middle"),
-        (485.0, "本月累计", "middle"),
-        (590.0, "本月时长", "middle"),
+        (145.0, "今日音浪", "middle"),
+        (235.0, "今日时长", "middle"),
+        (325.0, "昨日音浪", "middle"),
+        (415.0, "较昨日", "middle"),
+        (505.0, "本月累计", "middle"),
+        (600.0, "本月时长", "middle"),
         (696.0, "状态", "end"),
     ]
     .into_iter()
     .filter(|&(_, label, _)| {
         (label == "主播" && fields.anchor)
             || (label == "今日音浪" && fields.today_wave)
+            || (label == "今日时长" && fields.today_duration)
             || (label == "昨日音浪" && fields.yesterday_wave)
             || (label == "较昨日" && fields.wave_diff)
             || (label == "本月累计" && fields.month_total)
@@ -593,9 +586,11 @@ fn render_page(
     for (i, r) in rows.iter().enumerate() {
         let y = header_h + i as f64 * 48.0;
         let text_y = y + 24.0;
+        let below_duration =
+            !r.is_master && rep.min_today_minutes > 0 && r.today_minutes < rep.min_today_minutes;
         let row_bg = if r.is_master {
             MASTER_BG
-        } else if !r.live {
+        } else if !r.live || below_duration {
             ABSENT_BG
         } else {
             "#FFFFFF"
@@ -613,33 +608,42 @@ fn render_page(
         }
         if fields.today_wave {
             s.push_str(&text_cell(
-                205.0,
+                145.0,
                 text_y,
                 "middle",
                 &fmt_wan(r.today),
                 COLOR_TEXT,
             ));
         }
+        if fields.today_duration {
+            s.push_str(&text_cell(
+                235.0,
+                text_y,
+                "middle",
+                &crate::push::fmt_minutes(r.today_minutes),
+                if below_duration { COLOR_UP } else { "#168482" },
+            ));
+        }
         if fields.yesterday_wave {
             match r.yesterday {
                 Some(yv) => s.push_str(&text_cell(
-                    300.0,
+                    325.0,
                     text_y,
                     "middle",
                     &fmt_wan(yv),
                     COLOR_TEXT,
                 )),
-                None => s.push_str(&text_cell(300.0, text_y, "middle", "—", COLOR_MUTED)),
+                None => s.push_str(&text_cell(325.0, text_y, "middle", "—", COLOR_MUTED)),
             }
         }
         if fields.wave_diff {
             match r.yesterday {
-                None => s.push_str(&text_cell(390.0, text_y, "middle", "—", COLOR_MUTED)),
+                None => s.push_str(&text_cell(415.0, text_y, "middle", "—", COLOR_MUTED)),
                 Some(yv) => {
                     let d = r.today - yv;
                     if d > 0 {
                         s.push_str(&text_cell(
-                            390.0,
+                            415.0,
                             text_y,
                             "middle",
                             &format!("▲{}", fmt_wan(d)),
@@ -647,21 +651,21 @@ fn render_page(
                         ));
                     } else if d < 0 {
                         s.push_str(&text_cell(
-                            390.0,
+                            415.0,
                             text_y,
                             "middle",
                             &format!("▼{}", fmt_wan(-d)),
                             COLOR_DOWN,
                         ));
                     } else {
-                        s.push_str(&text_cell(390.0, text_y, "middle", "—", COLOR_MUTED));
+                        s.push_str(&text_cell(415.0, text_y, "middle", "—", COLOR_MUTED));
                     }
                 }
             }
         }
         if fields.month_total {
             s.push_str(&text_cell(
-                485.0,
+                505.0,
                 text_y,
                 "middle",
                 &fmt_wan(r.month_total),
@@ -678,7 +682,9 @@ fn render_page(
             ));
         }
         if fields.status {
-            if r.live {
+            if below_duration {
+                s.push_str(&text_cell(696.0, text_y, "end", "时长不足", COLOR_UP));
+            } else if r.live {
                 s.push_str(&text_cell(696.0, text_y, "end", "开播", COLOR_TEXT));
             } else {
                 s.push_str(&text_cell(696.0, text_y, "end", "未播", COLOR_UP));
@@ -948,22 +954,23 @@ mod tests {
             total_today: 178_000,
             total_yesterday: Some(154_500),
             absent_names: vec!["小王".to_string()],
+            min_today_minutes: 0,
         }
     }
 
     #[test]
-    fn daily_minutes_filter_keeps_master_and_only_qualified_disciples() {
+    fn daily_minutes_target_keeps_all_disciples_for_rendering() {
         let mut rep = fixture();
         rep.rows[0].today_minutes = 300;
         rep.rows[1].today_minutes = 240;
         rep.rows[2].today_minutes = 239;
         rep.rows[3].today_minutes = 0;
-        assert_eq!(rep.retain_daily_disciples_by_minutes(240), 1);
+        rep.set_daily_minutes_target(240);
+        assert_eq!(rep.rows.len(), 4);
         let names: Vec<&str> = rep.rows.iter().map(|r| r.name.as_str()).collect();
-        assert_eq!(names, vec!["冷师傅", "阿三"]);
-        assert_eq!(rep.total_today, 170_000);
-        assert_eq!(rep.total_yesterday, Some(145_000));
-        assert!(rep.absent_names.is_empty());
+        assert_eq!(names, vec!["冷师傅", "阿三", "小<李&仔", "小王"]);
+        assert_eq!(rep.disciple_count(), 3);
+        assert_eq!(rep.min_today_minutes, 240);
     }
 
     #[test]
@@ -976,6 +983,7 @@ mod tests {
             total_today: today,
             total_yesterday: yday,
             absent_names: Vec::new(),
+            min_today_minutes: 0,
         };
         assert_eq!(mk(100, None).total_diff(), None);
         assert_eq!(mk(150, Some(100)).total_diff(), Some(50));
@@ -1022,6 +1030,7 @@ mod tests {
         let hidden = LineageReportFields {
             anchor: false,
             today_wave: false,
+            today_duration: false,
             yesterday_wave: false,
             wave_diff: false,
             month_total: false,
@@ -1032,6 +1041,7 @@ mod tests {
         for label in [
             "主播",
             "今日音浪",
+            "今日时长",
             "昨日音浪",
             "较昨日",
             "本月累计",
@@ -1063,6 +1073,7 @@ mod tests {
             total_today: 1_710_589,
             total_yesterday: None,
             absent_names: vec!["玖瑶".to_string()],
+            min_today_minutes: 0,
         };
         let svg =
             &render_svg_pages_with_fields(&rep, 0, "浩龙", &LineageReportFields::default())[0];

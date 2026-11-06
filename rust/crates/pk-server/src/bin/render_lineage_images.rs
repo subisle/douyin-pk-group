@@ -187,14 +187,7 @@ async fn main() -> anyhow::Result<()> {
             }
         };
         if report_kind == "师门日报" && min_today_minutes > 0 {
-            let kept = report.retain_daily_disciples_by_minutes(min_today_minutes);
-            if kept == 0 {
-                println!(
-                    "跳过\t{master_name}\t无当日时长≥{}分钟的直系徒弟",
-                    min_today_minutes
-                );
-                continue;
-            }
+            report.set_daily_minutes_target(min_today_minutes);
         }
         if report.disciple_count() == 0 {
             println!("跳过\t{master_name}\t无可进入报表的直系徒弟");

@@ -48,9 +48,13 @@ impl Default for DailyReportFields {
 pub struct LineageReportFields {
     pub anchor: bool,
     pub today_wave: bool,
+    /// 当日累计时长：4 小时达标图使用。
+    pub today_duration: bool,
     pub yesterday_wave: bool,
     pub wave_diff: bool,
     pub month_total: bool,
+    /// 本月累计时长（分钟）。默认显示；用于 wxbot 师门图与月度师门图。
+    pub month_duration: bool,
     pub status: bool,
 }
 
@@ -59,9 +63,11 @@ impl Default for LineageReportFields {
         Self {
             anchor: true,
             today_wave: true,
+            today_duration: true,
             yesterday_wave: true,
             wave_diff: true,
             month_total: true,
+            month_duration: true,
             status: true,
         }
     }
@@ -1198,6 +1204,15 @@ fn valid_date_str(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lineage_month_duration_defaults_on_for_old_config() {
+        let fields = PushReportFields::from_json(r#"{"lineage":{"anchor":true}}"#);
+        assert!(
+            fields.lineage.month_duration,
+            "旧配置没有 monthDuration 时必须默认显示本月时长"
+        );
+    }
 
     /// 2026-10-14 审计回归：chrono 的 `parse_from_str("%Y-%m-%d")` 对**非补零**输入
     /// 也返回 Ok（"1-1-1"、"26-1-1" 都能过）。只靠解析做校验会让短串流到 `date[..7]`
