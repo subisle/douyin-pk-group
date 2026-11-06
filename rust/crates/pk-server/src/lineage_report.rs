@@ -1074,7 +1074,9 @@ fn render_range_page(
         ));
     }
     if fields.status && has_standard {
-        sub.push_str(&format!(" · 合格 {qualified} 人 · 严重不足 {severe} 人"));
+        sub.push_str(&format!(
+            " · 徒弟合格 {qualified} 人 · 徒弟严重不足 {severe} 人"
+        ));
     }
     s.push_str(&format!(
         "<text x=\"360\" y=\"66\" font-size=\"14\" fill=\"#475467\" text-anchor=\"middle\" dominant-baseline=\"central\" font-family=\"{FONT}\">{sub}</text>"
@@ -1121,16 +1123,15 @@ fn render_range_page(
     for (i, r) in rows.iter().enumerate() {
         let y = header_h + i as f64 * 48.0;
         let text_y = y + 24.0;
-        let severe = !r.is_master && has_standard && r.month_minutes < rep.daily_severe_minutes;
-        let unmet = !r.is_master
-            && has_standard
-            && !severe
+        let row_severe = has_standard && r.month_minutes < rep.daily_severe_minutes;
+        let row_unmet = has_standard
+            && !row_severe
             && r.month_minutes < rep.daily_qualified_minutes;
         let row_bg = if r.is_master {
             MASTER_BG
-        } else if severe || (!has_standard && !r.live) {
+        } else if !r.live || row_severe {
             ABSENT_BG
-        } else if unmet {
+        } else if row_unmet {
             "#FFF7ED"
         } else {
             "#FFFFFF"
@@ -1160,9 +1161,9 @@ fn render_range_page(
                 text_y,
                 "middle",
                 &crate::push::fmt_minutes(r.month_minutes),
-                if severe {
+                if row_severe || !r.live {
                     COLOR_UP
-                } else if unmet {
+                } else if row_unmet {
                     "#C2410C"
                 } else {
                     "#168482"
@@ -1170,24 +1171,18 @@ fn render_range_page(
             ));
         }
         if fields.status {
-            if r.is_master {
-                if r.live {
-                    s.push_str(&text_cell(696.0, text_y, "end", "开播", COLOR_TEXT));
-                } else {
-                    s.push_str(&text_cell(696.0, text_y, "end", "未播", COLOR_UP));
-                }
+            if !r.live {
+                s.push_str(&text_cell(696.0, text_y, "end", "未播", COLOR_UP));
             } else if has_standard {
-                if severe {
+                if row_severe {
                     s.push_str(&text_cell(696.0, text_y, "end", "严重不足", COLOR_UP));
-                } else if unmet {
+                } else if row_unmet {
                     s.push_str(&text_cell(696.0, text_y, "end", "未达标", "#C2410C"));
                 } else {
                     s.push_str(&text_cell(696.0, text_y, "end", "合格", "#168482"));
                 }
-            } else if r.live {
-                s.push_str(&text_cell(696.0, text_y, "end", "开播", COLOR_TEXT));
             } else {
-                s.push_str(&text_cell(696.0, text_y, "end", "未播", COLOR_UP));
+                s.push_str(&text_cell(696.0, text_y, "end", "开播", COLOR_TEXT));
             }
         }
     }
@@ -1489,7 +1484,7 @@ mod tests {
         rows[1].month_minutes = 1_800; // 30h
         rows[2].month_minutes = 1_400; // 23h20m
         rows[3].month_minutes = 1_000; // 16h40m
-        let rep = LineageReport {
+        let mut rep = LineageReport {
             master_name: "浩龙".to_string(),
             date: "2026-11-01~2026-11-05".to_string(),
             period: LineagePeriod::Range,
@@ -1508,11 +1503,18 @@ mod tests {
             &render_svg_pages_with_fields(&rep, 0, "浩龙", &LineageReportFields::default())[0];
         assert!(svg.contains("11月1日-5日总览"));
         assert!(svg.contains("本区间 5 天：30小时合格 · 20小时以下严重不足"));
-        assert!(svg.contains("合格 1 人"));
-        assert!(svg.contains("严重不足 1 人"));
+        assert!(svg.contains("徒弟合格 1 人"));
+        assert!(svg.contains("徒弟严重不足 1 人"));
         assert!(svg.contains(">合格</text>"));
         assert!(svg.contains(">未达标</text>"));
         assert!(svg.contains(">严重不足</text>"));
+
+        // 师傅没有开播时显示“未播”，但仍不计入徒弟人数统计。
+        rep.rows[0].live = false;
+        let svg =
+            &render_svg_pages_with_fields(&rep, 0, "浩龙", &LineageReportFields::default())[0];
+        assert!(svg.contains(">未播</text>"));
+        assert!(svg.contains("徒弟合格 1 人"));
     }
 
     #[test]
