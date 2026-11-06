@@ -13,7 +13,8 @@
 //!
 //! Usage:
 //!   cargo run -p pk-server --bin render-lineage-images -- \
-//!     [--date 2026-10-21 | --month 2026-10] [--out DIR]
+//!     [--date 2026-10-21 | --month 2026-10 | --from 2026-11-01 [--to 2026-11-05]] \
+//!     [--out DIR]
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -72,9 +73,9 @@ async fn main() -> anyhow::Result<()> {
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "-h" || a == "--help") {
-        println!("用法: render-lineage-images [--date YYYY-MM-DD | --month YYYY-MM] [--out DIR] [--qualified-today-minutes N] [--severe-today-minutes N]");
-        println!("默认: 本地最新业务日；--month 生成整月音浪 + 时长月报");
-        println!("--qualified-today-minutes 360 --severe-today-minutes 240: 按天标注 6 小时合格 / 4 小时以下严重不足");
+        println!("用法: render-lineage-images [--date YYYY-MM-DD | --month YYYY-MM | --from YYYY-MM-DD [--to YYYY-MM-DD]] [--out DIR] [--qualified-today-minutes N] [--severe-today-minutes N]");
+        println!("默认: 本地最新业务日；--month 生成整月音浪 + 时长月报；--from 生成日期区间累计总览（--to 默认取最新业务日）");
+        println!("--qualified-today-minutes 360 --severe-today-minutes 240: 每天 6 小时合格 / 4 小时以下严重不足；区间总览按天数相乘");
         println!("环境变量: LINEAGE_IMAGE_EXCLUDED_MASTERS=薇姐,鹏先生");
         return Ok(());
     }
@@ -108,6 +109,8 @@ async fn main() -> anyhow::Result<()> {
 
     let month_arg = arg_value(&args, "--month");
     let date_arg = arg_value(&args, "--date");
+    let from_arg = arg_value(&args, "--from");
+    let to_arg = arg_value(&args, "--to");
     let qualified_today_minutes = arg_value(&args, "--qualified-today-minutes")
         .map(|v| v.parse::<i64>())
         .transpose()
@@ -121,12 +124,34 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or(0)
         .max(0);
     anyhow::ensure!(
-        !(month_arg.is_some() && date_arg.is_some()),
-        "--month 与 --date 只能二选一"
+        [month_arg.is_some(), date_arg.is_some(), from_arg.is_some()]
+            .into_iter()
+            .filter(|v| *v)
+            .count()
+            <= 1,
+        "--month、--date、--from 只能三选一"
+    );
+    anyhow::ensure!(
+        from_arg.is_some() || to_arg.is_none(),
+        "--to 必须和 --from 一起使用"
     );
     let report_kind;
     let business_label;
-    if let Some(month) = month_arg {
+    let mut range_bounds: Option<(String, String)> = None;
+    if let Some(start) = from_arg {
+        let end = match to_arg {
+            Some(v) => v,
+            None => latest_data_date(&st).await?,
+        };
+        let start_day = chrono::NaiveDate::parse_from_str(&start, "%Y-%m-%d")
+            .map_err(|_| anyhow::anyhow!("--from 日期格式必须是 YYYY-MM-DD：{start}"))?;
+        let end_day = chrono::NaiveDate::parse_from_str(&end, "%Y-%m-%d")
+            .map_err(|_| anyhow::anyhow!("--to 日期格式必须是 YYYY-MM-DD：{end}"))?;
+        anyhow::ensure!(start_day <= end_day, "--from 不能晚于 --to");
+        business_label = format!("{start}至{end}");
+        report_kind = "师门总览";
+        range_bounds = Some((start, end));
+    } else if let Some(month) = month_arg {
         anyhow::ensure!(
             month.len() == 7
                 && chrono::NaiveDate::parse_from_str(&format!("{month}-01"), "%Y-%m-%d").is_ok(),
@@ -143,10 +168,10 @@ async fn main() -> anyhow::Result<()> {
         business_label = date;
         report_kind = "师门日报";
     }
-    let period_slug = if report_kind == "师门月报" {
-        format!("month-{}", business_label)
-    } else {
-        business_label[..7].to_string()
+    let period_slug = match report_kind {
+        "师门月报" => format!("month-{}", business_label),
+        "师门总览" => format!("overview-{}", business_label.replace('至', "_")),
+        _ => business_label[..7].to_string(),
     };
     let out_dir = arg_value(&args, "--out")
         .map(PathBuf::from)
@@ -180,10 +205,28 @@ async fn main() -> anyhow::Result<()> {
             continue;
         }
 
-        let built = if report_kind == "师门月报" {
-            lineage_report::build_month(&st, &business_label, master_id).await
-        } else {
-            lineage_report::build(&st, &business_label, master_id).await
+        let built = match (report_kind, range_bounds.as_ref()) {
+            ("师门总览", Some((start, end))) => {
+                lineage_report::build_range(
+                    &st,
+                    start,
+                    end,
+                    master_id,
+                    if qualified_today_minutes > 0 {
+                        qualified_today_minutes
+                    } else {
+                        360
+                    },
+                    if severe_today_minutes > 0 {
+                        severe_today_minutes
+                    } else {
+                        240
+                    },
+                )
+                .await
+            }
+            ("师门月报", _) => lineage_report::build_month(&st, &business_label, master_id).await,
+            _ => lineage_report::build(&st, &business_label, master_id).await,
         };
         let mut report = match built {
             Ok(rep) => rep,

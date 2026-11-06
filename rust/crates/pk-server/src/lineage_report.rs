@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use chrono::Datelike;
 use sqlx::Row;
 
 use crate::pgrs;
@@ -22,6 +23,7 @@ use crate::state::AppState;
 pub enum LineagePeriod {
     Daily,
     Monthly,
+    Range,
 }
 
 #[derive(Debug, Clone)]
@@ -52,10 +54,14 @@ pub struct LineageReport {
     pub total_yesterday: Option<i64>,
     /// 未播徒弟姓名（不含师傅），按 rows 顺序
     pub absent_names: Vec<String>,
-    /// 日报按天计算的标准：达到该分钟数 = 合格。
+    /// 日报为单日标准；区间总览为「单日标准 × 天数」后的累计合格线。
     pub daily_qualified_minutes: i64,
-    /// 日报按天计算的红线：低于该分钟数 = 严重不足。
+    /// 日报为单日红线；区间总览为「单日红线 × 天数」后的累计严重不足线。
     pub daily_severe_minutes: i64,
+    /// 区间总览的起止日期与自然日数；其他报表为 None / 0。
+    pub range_start: Option<String>,
+    pub range_end: Option<String>,
+    pub range_days: usize,
 }
 
 impl LineageReport {
@@ -149,6 +155,37 @@ fn cn_month(ym: &str) -> String {
     match chrono::NaiveDate::parse_from_str(&format!("{ym}-01"), "%Y-%m-%d") {
         Ok(d) => d.format("%Y年%-m月").to_string(),
         Err(_) => ym.to_string(),
+    }
+}
+
+/// `2026-11-01` + `2026-11-05` → `11月1日-5日`；跨月时保留两端月份。
+fn cn_range(start: &str, end: &str) -> String {
+    let Ok(s) = chrono::NaiveDate::parse_from_str(start, "%Y-%m-%d") else {
+        return format!("{start}-{end}");
+    };
+    let Ok(e) = chrono::NaiveDate::parse_from_str(end, "%Y-%m-%d") else {
+        return format!("{start}-{end}");
+    };
+    if s.year() == e.year() && s.month() == e.month() {
+        format!("{}月{}日-{}日", s.format("%-m"), s.format("%-d"), e.format("%-d"))
+    } else if s.year() == e.year() {
+        format!(
+            "{}月{}日-{}月{}日",
+            s.format("%-m"),
+            s.format("%-d"),
+            e.format("%-m"),
+            e.format("%-d")
+        )
+    } else {
+        format!(
+            "{}年{}月{}日-{}年{}月{}日",
+            s.format("%Y"),
+            s.format("%-m"),
+            s.format("%-d"),
+            e.format("%Y"),
+            e.format("%-m"),
+            e.format("%-d")
+        )
     }
 }
 
@@ -363,6 +400,9 @@ pub async fn build(
         absent_names,
         daily_qualified_minutes: 0,
         daily_severe_minutes: 0,
+        range_start: None,
+        range_end: None,
+        range_days: 0,
     })
 }
 
@@ -429,6 +469,123 @@ pub async fn build_month(
         absent_names,
         daily_qualified_minutes: 0,
         daily_severe_minutes: 0,
+        range_start: None,
+        range_end: None,
+        range_days: 0,
+    })
+}
+
+/// 拉取一段日期的师门总览：累计音浪/时长 + 按天数放大的达标线。
+///
+/// 例：11 月 1–5 日共 5 天，按每天 6 小时合格、每天 4 小时最低线，
+/// 区间合格线 = 30 小时，严重不足线 = 20 小时。
+pub async fn build_range(
+    st: &Arc<AppState>,
+    start: &str,
+    end: &str,
+    master_person_id: u64,
+    per_day_qualified_minutes: i64,
+    per_day_severe_minutes: i64,
+) -> anyhow::Result<LineageReport> {
+    if !valid_date_str(start) || !valid_date_str(end) {
+        anyhow::bail!("日期不合法");
+    }
+    let start_day = chrono::NaiveDate::parse_from_str(start, "%Y-%m-%d")
+        .map_err(|_| anyhow::anyhow!("日期不合法"))?;
+    let end_day = chrono::NaiveDate::parse_from_str(end, "%Y-%m-%d")
+        .map_err(|_| anyhow::anyhow!("日期不合法"))?;
+    anyhow::ensure!(start_day <= end_day, "开始日期不能晚于结束日期");
+    let range_days = (end_day - start_day).num_days() + 1;
+
+    let (master_name, roster) = load_master_and_roster(st, master_person_id).await?;
+    // 区间累计必须按日明细求和，不能用整月导入值，否则会把区间外数据也算进来。
+    // 主号 daily_metric + 副号 wave_snapshot / duration_snapshot，按人合并。
+    let range_sql = format!(
+        "SELECT u.pid AS person_id, \
+           (SUM(u.w))::BIGINT AS wave, (SUM(u.m))::BIGINT AS minutes \
+         FROM ( \
+           SELECT d.person_id AS pid, d.wave AS w, d.minutes AS m \
+             FROM daily_metric d \
+            WHERE d.wave_reliable = 1 \
+              AND d.biz_date >= '{start}'::date AND d.biz_date <= '{end}'::date \
+           UNION ALL \
+           SELECT a.person_id AS pid, ws.wave_value AS w, 0 AS m \
+             FROM wave_snapshot ws \
+             JOIN account a ON a.anchor_id = ws.anchor_id AND a.is_primary = 0 \
+            WHERE ws.biz_date >= '{start}'::date AND ws.biz_date <= '{end}'::date \
+           UNION ALL \
+           SELECT a.person_id AS pid, 0 AS w, ds.minutes AS m \
+             FROM duration_snapshot ds \
+             JOIN account a ON a.anchor_id = ds.anchor_id AND a.is_primary = 0 \
+            WHERE ds.biz_date >= '{start}'::date AND ds.biz_date <= '{end}'::date \
+         ) u GROUP BY u.pid"
+    );
+    let mut metrics: HashMap<u64, (i64, i64)> = HashMap::new();
+    for r in pgrs::query(&st.pools, "LOCAL", &range_sql).await? {
+        metrics.insert(id_of(&r, "person_id"), (signed(&r, "wave"), signed(&r, "minutes")));
+    }
+
+    let qualified_minutes = per_day_qualified_minutes
+        .max(0)
+        .saturating_mul(range_days);
+    let severe_minutes = per_day_severe_minutes
+        .max(0)
+        .saturating_mul(range_days);
+
+    let (master_wave, master_minutes) = metrics.get(&master_person_id).copied().unwrap_or((0, 0));
+    let mut rows = vec![LineageRow {
+        name: master_name.clone(),
+        today: master_wave,
+        today_minutes: master_minutes,
+        yesterday: None,
+        month_total: master_wave,
+        month_minutes: master_minutes,
+        live: master_wave >= 2,
+        is_master: true,
+    }];
+    let mut disciples: Vec<LineageRow> = roster
+        .into_iter()
+        .map(|(pid, name)| {
+            let (wave, minutes) = metrics.get(&pid).copied().unwrap_or((0, 0));
+            LineageRow {
+                name,
+                today: wave,
+                today_minutes: minutes,
+                yesterday: None,
+                month_total: wave,
+                month_minutes: minutes,
+                live: wave >= 2,
+                is_master: false,
+            }
+        })
+        .collect();
+    disciples.sort_by(|a, b| {
+        b.month_total
+            .cmp(&a.month_total)
+            .then(b.month_minutes.cmp(&a.month_minutes))
+            .then(a.name.cmp(&b.name))
+    });
+    rows.extend(disciples);
+
+    let absent_names = rows
+        .iter()
+        .filter(|r| !r.is_master && !r.live)
+        .map(|r| r.name.clone())
+        .collect();
+    let total_today = rows.iter().map(|r| r.month_total).sum();
+    Ok(LineageReport {
+        master_name,
+        date: format!("{start}~{end}"),
+        period: LineagePeriod::Range,
+        rows,
+        total_today,
+        total_yesterday: None,
+        absent_names,
+        daily_qualified_minutes: qualified_minutes,
+        daily_severe_minutes: severe_minutes,
+        range_start: Some(start.to_string()),
+        range_end: Some(end.to_string()),
+        range_days: range_days.max(0) as usize,
     })
 }
 
@@ -474,6 +631,9 @@ pub fn render_svg_pages_with_fields(
                 LineagePeriod::Daily => render_page(rep, chunk, &label, personal_mark, fields),
                 LineagePeriod::Monthly => {
                     render_month_page(rep, chunk, &label, personal_mark, fields)
+                }
+                LineagePeriod::Range => {
+                    render_range_page(rep, chunk, &label, personal_mark, fields)
                 }
             }
         })
@@ -526,12 +686,12 @@ fn render_page(
         let qualified = rep
             .rows
             .iter()
-            .filter(|r| r.today_minutes >= rep.daily_qualified_minutes)
+            .filter(|r| !r.is_master && r.today_minutes >= rep.daily_qualified_minutes)
             .count();
         let severe = rep
             .rows
             .iter()
-            .filter(|r| r.today_minutes < rep.daily_severe_minutes)
+            .filter(|r| !r.is_master && r.today_minutes < rep.daily_severe_minutes)
             .count();
         sub.push_str(&format!(" · 合格 {qualified} 人 · 严重不足 {severe} 人"));
     }
@@ -710,7 +870,7 @@ fn render_page(
             ));
         }
         if fields.status {
-            if has_duration_standard {
+            if has_duration_standard && !r.is_master {
                 if severe {
                     s.push_str(&text_cell(696.0, text_y, "end", "严重不足", COLOR_UP));
                 } else if unmet {
@@ -841,6 +1001,190 @@ fn render_month_page(
         }
         if fields.status {
             if r.live {
+                s.push_str(&text_cell(696.0, text_y, "end", "开播", COLOR_TEXT));
+            } else {
+                s.push_str(&text_cell(696.0, text_y, "end", "未播", COLOR_UP));
+            }
+        }
+    }
+
+    s.push_str(&watermark_layer(total_h, personal_mark));
+    s.push_str("</svg>");
+    s
+}
+
+/// 区间总览：一位师傅一张图，累计音浪/时长 + 按天数放大的 6h / 4h 标准。
+#[allow(clippy::too_many_lines)]
+fn render_range_page(
+    rep: &LineageReport,
+    rows: &[LineageRow],
+    page_label: &str,
+    personal_mark: &str,
+    fields: &LineageReportFields,
+) -> String {
+    let has_standard = rep.daily_qualified_minutes > 0 || rep.daily_severe_minutes > 0;
+    let header_h = if has_standard { 132.0f64 } else { 112.0f64 };
+    let list_h = rows.len() as f64 * 48.0;
+    let footer_y = header_h + list_h + 26.0;
+    let total_h = footer_y + 22.0;
+    let range_label = match (&rep.range_start, &rep.range_end) {
+        (Some(start), Some(end)) => cn_range(start, end),
+        _ => rep.date.clone(),
+    };
+
+    let mut s = String::with_capacity(32 * 1024);
+    s.push_str(&format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1440\" height=\"{}\" viewBox=\"0 0 720 {total_h:.0}\" role=\"img\">",
+        total_h as i64 * 2
+    ));
+    s.push_str(&format!(
+        "<rect width=\"720\" height=\"{total_h:.0}\" fill=\"#FFFFFF\"/>"
+    ));
+    s.push_str(&format!(
+        "<text x=\"360\" y=\"32\" font-size=\"25\" fill=\"{COLOR_TEXT}\" font-weight=\"700\" text-anchor=\"middle\" dominant-baseline=\"central\" font-family=\"{FONT}\">{} 师门 · {}总览{}</text>",
+        esc(&rep.master_name),
+        esc(&range_label),
+        esc(page_label),
+    ));
+
+    let qualified = rep
+        .rows
+        .iter()
+        .filter(|r| {
+            !r.is_master
+                && has_standard
+                && r.month_minutes >= rep.daily_qualified_minutes
+        })
+        .count();
+    let severe = rep
+        .rows
+        .iter()
+        .filter(|r| {
+            !r.is_master && has_standard && r.month_minutes < rep.daily_severe_minutes
+        })
+        .count();
+    let mut sub = format!("门下 {} 人", rep.disciple_count());
+    if fields.month_total {
+        sub.push_str(&format!(" · 累计音浪 {}", fmt_wan(rep.month_wave_total())));
+    }
+    if fields.month_duration {
+        sub.push_str(&format!(
+            " · 累计时长 {}",
+            crate::push::fmt_minutes(rep.month_minutes_total())
+        ));
+    }
+    if fields.status && has_standard {
+        sub.push_str(&format!(" · 合格 {qualified} 人 · 严重不足 {severe} 人"));
+    }
+    s.push_str(&format!(
+        "<text x=\"360\" y=\"66\" font-size=\"14\" fill=\"#475467\" text-anchor=\"middle\" dominant-baseline=\"central\" font-family=\"{FONT}\">{sub}</text>"
+    ));
+
+    if has_standard {
+        // 每日标准乘以自然日数，得到整段日期的累计合格线与严重不足线。
+        let days = rep.range_days.max(1);
+        let qualified_hours = rep.daily_qualified_minutes as f64 / 60.0;
+        let severe_hours = rep.daily_severe_minutes as f64 / 60.0;
+        let note = format!(
+            "时长标准（每天）：6小时合格 · 4小时以下严重不足；本区间 {days} 天：{qualified_hours:.0}小时合格 · {severe_hours:.0}小时以下严重不足"
+        );
+        s.push_str(&format!(
+            "<text x=\"360\" y=\"96\" font-size=\"12\" fill=\"#667085\" text-anchor=\"middle\" dominant-baseline=\"central\" font-family=\"{FONT}\">{note}</text>"
+        ));
+    }
+
+    let th_y = header_h - 30.0;
+    let ty_y = header_h - 14.0;
+    s.push_str(&format!(
+        "<rect y=\"{th_y:.0}\" width=\"720\" height=\"32\" fill=\"#F2F4F7\"/>"
+    ));
+    let columns: Vec<(f64, &str, &str)> = [
+        (28.0f64, "主播", "start"),
+        (350.0, "累计音浪", "middle"),
+        (530.0, "累计时长", "middle"),
+        (696.0, "状态", "end"),
+    ]
+    .into_iter()
+    .filter(|&(_, label, _)| {
+        (label == "主播" && fields.anchor)
+            || (label == "累计音浪" && fields.month_total)
+            || (label == "累计时长" && fields.month_duration)
+            || (label == "状态" && fields.status)
+    })
+    .collect();
+    for (x, label, anchor) in columns {
+        s.push_str(&format!(
+            "<text x=\"{x}\" y=\"{ty_y:.0}\" font-size=\"12\" fill=\"#667085\" font-weight=\"700\" text-anchor=\"{anchor}\" dominant-baseline=\"central\" font-family=\"{FONT}\">{label}</text>"
+        ));
+    }
+
+    for (i, r) in rows.iter().enumerate() {
+        let y = header_h + i as f64 * 48.0;
+        let text_y = y + 24.0;
+        let severe = !r.is_master && has_standard && r.month_minutes < rep.daily_severe_minutes;
+        let unmet = !r.is_master
+            && has_standard
+            && !severe
+            && r.month_minutes < rep.daily_qualified_minutes;
+        let row_bg = if r.is_master {
+            MASTER_BG
+        } else if severe || (!has_standard && !r.live) {
+            ABSENT_BG
+        } else if unmet {
+            "#FFF7ED"
+        } else {
+            "#FFFFFF"
+        };
+        s.push_str(&format!(
+            "<rect y=\"{y:.0}\" width=\"720\" height=\"48\" fill=\"{row_bg}\" stroke=\"#EAECF0\" stroke-width=\"1\"/>"
+        ));
+        if fields.anchor {
+            s.push_str(&format!(
+                "<text x=\"28\" y=\"{text_y:.0}\" font-size=\"14\" fill=\"{COLOR_TEXT}\" font-weight=\"700\" text-anchor=\"start\" dominant-baseline=\"central\" font-family=\"{FONT}\">{}{}</text>",
+                esc(&r.name),
+                if r.is_master { "（师）" } else { "" },
+            ));
+        }
+        if fields.month_total {
+            s.push_str(&text_cell(
+                350.0,
+                text_y,
+                "middle",
+                &fmt_wan(r.month_total),
+                COLOR_TEXT,
+            ));
+        }
+        if fields.month_duration {
+            s.push_str(&text_cell(
+                530.0,
+                text_y,
+                "middle",
+                &crate::push::fmt_minutes(r.month_minutes),
+                if severe {
+                    COLOR_UP
+                } else if unmet {
+                    "#C2410C"
+                } else {
+                    "#168482"
+                },
+            ));
+        }
+        if fields.status {
+            if r.is_master {
+                if r.live {
+                    s.push_str(&text_cell(696.0, text_y, "end", "开播", COLOR_TEXT));
+                } else {
+                    s.push_str(&text_cell(696.0, text_y, "end", "未播", COLOR_UP));
+                }
+            } else if has_standard {
+                if severe {
+                    s.push_str(&text_cell(696.0, text_y, "end", "严重不足", COLOR_UP));
+                } else if unmet {
+                    s.push_str(&text_cell(696.0, text_y, "end", "未达标", "#C2410C"));
+                } else {
+                    s.push_str(&text_cell(696.0, text_y, "end", "合格", "#168482"));
+                }
+            } else if r.live {
                 s.push_str(&text_cell(696.0, text_y, "end", "开播", COLOR_TEXT));
             } else {
                 s.push_str(&text_cell(696.0, text_y, "end", "未播", COLOR_UP));
@@ -990,6 +1334,9 @@ mod tests {
             absent_names: vec!["小王".to_string()],
             daily_qualified_minutes: 0,
             daily_severe_minutes: 0,
+            range_start: None,
+            range_end: None,
+            range_days: 0,
         }
     }
 
@@ -1021,6 +1368,9 @@ mod tests {
             absent_names: Vec::new(),
             daily_qualified_minutes: 0,
             daily_severe_minutes: 0,
+            range_start: None,
+            range_end: None,
+            range_days: 0,
         };
         assert_eq!(mk(100, None).total_diff(), None);
         assert_eq!(mk(150, Some(100)).total_diff(), Some(50));
@@ -1112,6 +1462,9 @@ mod tests {
             absent_names: vec!["玖瑶".to_string()],
             daily_qualified_minutes: 0,
             daily_severe_minutes: 0,
+            range_start: None,
+            range_end: None,
+            range_days: 0,
         };
         let svg =
             &render_svg_pages_with_fields(&rep, 0, "浩龙", &LineageReportFields::default())[0];
@@ -1122,6 +1475,44 @@ mod tests {
         assert!(svg.contains("9分"));
         assert!(svg.contains("玖瑶"));
         assert!(svg.contains("未播"));
+    }
+
+    #[test]
+    fn range_report_scales_daily_standard_by_days() {
+        let mut rows = vec![
+            row("浩龙", 0, None, 1_710_000, true, true),
+            row("合格徒弟", 0, None, 600_000, true, false),
+            row("未达标徒弟", 0, None, 500_000, true, false),
+            row("严重不足徒弟", 0, None, 400_000, true, false),
+        ];
+        rows[0].month_minutes = 3_000;
+        rows[1].month_minutes = 1_800; // 30h
+        rows[2].month_minutes = 1_400; // 23h20m
+        rows[3].month_minutes = 1_000; // 16h40m
+        let rep = LineageReport {
+            master_name: "浩龙".to_string(),
+            date: "2026-11-01~2026-11-05".to_string(),
+            period: LineagePeriod::Range,
+            rows,
+            total_today: 3_210_000,
+            total_yesterday: None,
+            absent_names: Vec::new(),
+            // 每天 6h/4h × 5 天 = 30h/20h。
+            daily_qualified_minutes: 1_800,
+            daily_severe_minutes: 1_200,
+            range_start: Some("2026-11-01".to_string()),
+            range_end: Some("2026-11-05".to_string()),
+            range_days: 5,
+        };
+        let svg =
+            &render_svg_pages_with_fields(&rep, 0, "浩龙", &LineageReportFields::default())[0];
+        assert!(svg.contains("11月1日-5日总览"));
+        assert!(svg.contains("本区间 5 天：30小时合格 · 20小时以下严重不足"));
+        assert!(svg.contains("合格 1 人"));
+        assert!(svg.contains("严重不足 1 人"));
+        assert!(svg.contains(">合格</text>"));
+        assert!(svg.contains(">未达标</text>"));
+        assert!(svg.contains(">严重不足</text>"));
     }
 
     #[test]

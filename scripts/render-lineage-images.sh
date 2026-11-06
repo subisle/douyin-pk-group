@@ -5,6 +5,9 @@
 # 日报按天标注 6 小时合格、4 小时以下严重不足：
 #   scripts/render-lineage-images.sh --date 2026-11-05 \
 #     --qualified-today-minutes 360 --severe-today-minutes 240
+# 多日总览（每天标准 × 天数，一位师傅一张图）：
+#   scripts/render-lineage-images.sh --from 2026-11-01 --to 2026-11-05 \
+#     --qualified-today-minutes 360 --severe-today-minutes 240
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT/rust"
