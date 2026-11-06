@@ -18,14 +18,24 @@ use crate::state::AppState;
 /* ------------------------------ 数据结构 ------------------------------ */
 
 /// 单行：师傅行固定第一（is_master=true），其后徒弟按今日音浪降序、姓名升序。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineagePeriod {
+    Daily,
+    Monthly,
+}
+
 #[derive(Debug, Clone)]
 pub struct LineageRow {
     pub name: String,
     pub today: i64,
+    /// 当日累计有效时长（分钟）；用于「一天不低于 4 小时」筛选，不直接渲染。
+    pub today_minutes: i64,
     /// 昨日音浪；昨日 map 里没有该人 = None（渲染为 `—`）
     pub yesterday: Option<i64>,
     pub month_total: i64,
-    /// 开播 = dialect::is_live_wave(today)（wave<2 = 未播）
+    /// 本月累计时长（分钟）；月度报表的主字段之一。
+    pub month_minutes: i64,
+    /// 日榜 = 当日开播；月榜 = 本月音浪 >= 2。
     pub live: bool,
     pub is_master: bool,
 }
@@ -33,7 +43,9 @@ pub struct LineageRow {
 #[derive(Debug, Clone)]
 pub struct LineageReport {
     pub master_name: String,
+    /// 日报为 YYYY-MM-DD；月报为 YYYY-MM。
     pub date: String,
+    pub period: LineagePeriod,
     pub rows: Vec<LineageRow>,
     pub total_today: i64,
     /// 昨日有值的行求和；昨日全无数据 = None
@@ -51,6 +63,46 @@ impl LineageReport {
     /// 徒弟数（不含师傅行）
     pub fn disciple_count(&self) -> usize {
         self.rows.iter().filter(|r| !r.is_master).count()
+    }
+
+    /// 日报按当日时长达标线筛选徒弟：师傅行保留，只留下 `today_minutes >= min_minutes` 的徒弟。
+    /// 筛选后重算合计与未播名单，返回最终徒弟数。
+    pub fn retain_daily_disciples_by_minutes(&mut self, min_minutes: i64) -> usize {
+        if min_minutes <= 0 {
+            return self.disciple_count();
+        }
+        let master = self.rows.iter().find(|r| r.is_master).cloned();
+        let mut rows = Vec::with_capacity(self.rows.len());
+        if let Some(m) = master {
+            rows.push(m);
+        }
+        rows.extend(
+            self.rows
+                .iter()
+                .filter(|r| !r.is_master && r.today_minutes >= min_minutes)
+                .cloned(),
+        );
+        self.rows = rows;
+        self.total_today = self.rows.iter().map(|r| r.today).sum();
+        let ys: Vec<i64> = self.rows.iter().filter_map(|r| r.yesterday).collect();
+        self.total_yesterday = (!ys.is_empty()).then(|| ys.iter().sum());
+        self.absent_names = self
+            .rows
+            .iter()
+            .filter(|r| !r.is_master && !r.live)
+            .map(|r| r.name.clone())
+            .collect();
+        self.disciple_count()
+    }
+
+    /// 本月累计音浪（含师傅行）。
+    pub fn month_wave_total(&self) -> i64 {
+        self.rows.iter().map(|r| r.month_total).sum()
+    }
+
+    /// 本月累计时长（分钟，含师傅行）。
+    pub fn month_minutes_total(&self) -> i64 {
+        self.rows.iter().map(|r| r.month_minutes).sum()
     }
 }
 
@@ -112,6 +164,24 @@ fn cn_md(iso: &str) -> String {
     }
 }
 
+/// `2026-10` → `2026年10月`
+fn cn_month(ym: &str) -> String {
+    match chrono::NaiveDate::parse_from_str(&format!("{ym}-01"), "%Y-%m-%d") {
+        Ok(d) => d.format("%Y年%-m月").to_string(),
+        Err(_) => ym.to_string(),
+    }
+}
+
+fn valid_month_str(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() == 7
+        && b[4] == b'-'
+        && b.iter()
+            .enumerate()
+            .all(|(i, c)| i == 4 || c.is_ascii_digit())
+        && chrono::NaiveDate::parse_from_str(&format!("{s}-01"), "%Y-%m-%d").is_ok()
+}
+
 /// person_id 列 BIGINT → u64（负值钳到 0）
 fn id_of(r: &sqlx::postgres::PgRow, col: &str) -> u64 {
     r.try_get::<i64, _>(col)
@@ -126,28 +196,14 @@ fn signed(r: &sqlx::postgres::PgRow, col: &str) -> i64 {
 
 /* ------------------------------- build ------------------------------- */
 
-/// 拉取师门日报数据。date 过白名单，master_id 内联进 SQL（u64 无注入面）。
-pub async fn build(
+/// 读取师傅 + 符合日报口径的直系徒弟。
+async fn load_master_and_roster(
     st: &Arc<AppState>,
-    date: &str,
     master_person_id: u64,
-) -> anyhow::Result<LineageReport> {
-    if !valid_date_str(date) {
-        anyhow::bail!("日期不合法");
-    }
+) -> anyhow::Result<(String, Vec<(u64, String)>)> {
     if master_person_id == 0 {
         anyhow::bail!("师傅不存在");
     }
-    let day = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
-        .map_err(|_| anyhow::anyhow!("日期不合法"))?;
-    let yesterday = day
-        .pred_opt()
-        .ok_or_else(|| anyhow::anyhow!("日期不合法"))?
-        .format("%Y-%m-%d")
-        .to_string();
-    let month = date.get(..7).unwrap_or(date);
-
-    // a) 师傅本人（查不到 = 师傅不存在）
     let master_sql =
         format!("SELECT id, name FROM person WHERE id = {master_person_id} AND deleted_at IS NULL");
     let master_rows = pgrs::query(&st.pools, "LOCAL", &master_sql).await?;
@@ -160,28 +216,87 @@ pub async fn build(
         .flatten()
         .unwrap_or_default();
 
-    // b) 名册：直系徒弟（隐藏/离职不进日报，与全团日报同一口径）
     let roster_sql = format!(
         "SELECT id, name FROM person WHERE master_id = {master_person_id} \
          AND deleted_at IS NULL AND hide_in_daily_report = 0 AND status <> 'left'"
     );
+    let roster = pgrs::query(&st.pools, "LOCAL", &roster_sql)
+        .await?
+        .into_iter()
+        .map(|r| {
+            let pid = id_of(&r, "id");
+            let name = r
+                .try_get::<Option<String>, _>("name")
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            (pid, name)
+        })
+        .collect();
+    Ok((master_name, roster))
+}
 
-    // 今日 / 昨日 / 本月音浪：同一口径 wave_reliable = 1（与榜单/全团日报一致）
+/// 本月指标：整月导入值优先，缺表/缺整月值回落日明细。
+/// 返回值是 person_id → (音浪, 时长分钟)。
+async fn load_month_metrics(
+    st: &Arc<AppState>,
+    month: &str,
+) -> anyhow::Result<HashMap<u64, (i64, i64)>> {
+    let select = "p.id AS person_id, \
+         (SUM({wave}))::BIGINT AS wave, \
+         (SUM({minutes}))::BIGINT AS minutes";
+    let rows = crate::dialect::query_period(
+        &st.pools,
+        "LOCAL",
+        select,
+        &format!("{month}%"),
+        "",
+        "",
+        "person_id",
+    )
+    .await?;
+    let mut map = HashMap::new();
+    for r in rows {
+        map.insert(
+            id_of(&r, "person_id"),
+            (signed(&r, "wave"), signed(&r, "minutes")),
+        );
+    }
+    Ok(map)
+}
+
+/// 拉取师门日报数据。date 过白名单，master_id 内联进 SQL（u64 无注入面）。
+pub async fn build(
+    st: &Arc<AppState>,
+    date: &str,
+    master_person_id: u64,
+) -> anyhow::Result<LineageReport> {
+    if !valid_date_str(date) {
+        anyhow::bail!("日期不合法");
+    }
+    let day = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+        .map_err(|_| anyhow::anyhow!("日期不合法"))?;
+    let yesterday = day
+        .pred_opt()
+        .ok_or_else(|| anyhow::anyhow!("日期不合法"))?
+        .format("%Y-%m-%d")
+        .to_string();
+    let month = date.get(..7).unwrap_or(date).to_string();
+    let (master_name, roster) = load_master_and_roster(st, master_person_id).await?;
+
+    // 今日 / 昨日音浪：主号 daily_metric + 副号 wave_snapshot，按人合并。
     let wave_day_sql = |d: &str| {
         format!(
-            "SELECT person_id, (SUM(wave))::BIGINT AS wave FROM daily_metric \
-             WHERE wave_reliable = 1 AND TO_CHAR(biz_date, 'YYYY-MM-DD') = '{d}' GROUP BY person_id"
+            "SELECT u.pid AS person_id, (SUM(u.w))::BIGINT AS wave FROM ( \
+               SELECT d.person_id AS pid, d.wave AS w FROM daily_metric d \
+                WHERE d.wave_reliable = 1 AND TO_CHAR(d.biz_date, 'YYYY-MM-DD') = '{d}' \
+               UNION ALL \
+               SELECT a.person_id AS pid, ws.wave_value AS w \
+                 FROM wave_snapshot ws JOIN account a ON a.anchor_id = ws.anchor_id AND a.is_primary = 0 \
+                WHERE TO_CHAR(ws.biz_date, 'YYYY-MM-DD') = '{d}' \
+             ) u GROUP BY u.pid"
         )
     };
-    /* 本月累计（2026-10-17 修复，审计 P0-1）：原先这里是裸 `SUM(daily_metric.wave)`，
-    而月榜图 / 个人月卡 / 推送 caption 早已改成「整月音浪 monthly_wave 优先、缺月回落
-    日明细」。导了整月音浪后，师傅收到的师门日报图里「本月累计」会比别处少一截
-    （只采到已导入日明细的天数）——同一天两个数字，师傅会拿图来对。
-    现在复用 [`crate::report::month_wave_sql`]（同一份 COALESCE 口径），
-    缺表场景交给 [`crate::dialect::query_month_wave_fallback`] 自动降级。 */
-    let month_sql = crate::report::month_wave_sql(&month);
-    let month_sql_daily = crate::report::month_wave_sql_daily(&month);
-
     let mut today_map: HashMap<u64, i64> = HashMap::new();
     for r in pgrs::query(&st.pools, "LOCAL", &wave_day_sql(date)).await? {
         today_map.insert(id_of(&r, "person_id"), signed(&r, "wave"));
@@ -190,42 +305,54 @@ pub async fn build(
     for r in pgrs::query(&st.pools, "LOCAL", &wave_day_sql(&yesterday)).await? {
         yday_map.insert(id_of(&r, "person_id"), signed(&r, "wave"));
     }
-    let mut month_map: HashMap<u64, i64> = HashMap::new();
-    // 缺表（库没跑 026 迁移）时自动回落到纯日明细版，师门日报不被打挂
-    for r in
-        crate::dialect::query_month_wave_fallback(&st.pools, "LOCAL", &month_sql, &month_sql_daily)
-            .await?
-    {
-        month_map.insert(id_of(&r, "person_id"), signed(&r, "wave"));
+    // 今日时长：主号 daily_metric + 副号 duration_snapshot，用于 4 小时达标筛选。
+    let minute_day_sql = format!(
+        "SELECT u.pid AS person_id, (SUM(u.m))::BIGINT AS minutes FROM ( \
+           SELECT d.person_id AS pid, d.minutes AS m FROM daily_metric d \
+            WHERE TO_CHAR(d.biz_date, 'YYYY-MM-DD') = '{date}' \
+           UNION ALL \
+           SELECT a.person_id AS pid, ds.minutes AS m \
+             FROM duration_snapshot ds JOIN account a ON a.anchor_id = ds.anchor_id AND a.is_primary = 0 \
+            WHERE TO_CHAR(ds.biz_date, 'YYYY-MM-DD') = '{date}' \
+         ) u GROUP BY u.pid"
+    );
+    let mut today_minutes_map: HashMap<u64, i64> = HashMap::new();
+    for r in pgrs::query(&st.pools, "LOCAL", &minute_day_sql).await? {
+        today_minutes_map.insert(id_of(&r, "person_id"), signed(&r, "minutes"));
     }
+    let month_metrics = load_month_metrics(st, &month).await?;
 
     let mut rows: Vec<LineageRow> = Vec::new();
-    // 师傅行固定第一
     let master_today = today_map.get(&master_person_id).copied().unwrap_or(0);
+    let (master_month_wave, master_month_minutes) = month_metrics
+        .get(&master_person_id)
+        .copied()
+        .unwrap_or((0, 0));
     rows.push(LineageRow {
         name: master_name.clone(),
         today: master_today,
+        today_minutes: today_minutes_map
+            .get(&master_person_id)
+            .copied()
+            .unwrap_or(0),
         yesterday: yday_map.get(&master_person_id).copied(),
-        month_total: month_map.get(&master_person_id).copied().unwrap_or(0),
+        month_total: master_month_wave,
+        month_minutes: master_month_minutes,
         live: crate::dialect::is_live_wave(master_today),
         is_master: true,
     });
 
-    // 徒弟：今日降序、同分姓名升序
     let mut disciples: Vec<LineageRow> = Vec::new();
-    for r in pgrs::query(&st.pools, "LOCAL", &roster_sql).await? {
-        let pid = id_of(&r, "id");
-        let name = r
-            .try_get::<Option<String>, _>("name")
-            .ok()
-            .flatten()
-            .unwrap_or_default();
+    for (pid, name) in roster {
         let today = today_map.get(&pid).copied().unwrap_or(0);
+        let (month_wave, month_minutes) = month_metrics.get(&pid).copied().unwrap_or((0, 0));
         disciples.push(LineageRow {
             name,
             today,
+            today_minutes: today_minutes_map.get(&pid).copied().unwrap_or(0),
             yesterday: yday_map.get(&pid).copied(),
-            month_total: month_map.get(&pid).copied().unwrap_or(0),
+            month_total: month_wave,
+            month_minutes,
             live: crate::dialect::is_live_wave(today),
             is_master: false,
         });
@@ -249,9 +376,74 @@ pub async fn build(
     Ok(LineageReport {
         master_name,
         date: date.to_string(),
+        period: LineagePeriod::Daily,
         rows,
         total_today,
         total_yesterday,
+        absent_names,
+    })
+}
+
+/// 拉取整月师门报表：每行展示本月累计音浪与本月累计时长。
+pub async fn build_month(
+    st: &Arc<AppState>,
+    month: &str,
+    master_person_id: u64,
+) -> anyhow::Result<LineageReport> {
+    if !valid_month_str(month) {
+        anyhow::bail!("月份不合法，应为 YYYY-MM");
+    }
+    let (master_name, roster) = load_master_and_roster(st, master_person_id).await?;
+    let metrics = load_month_metrics(st, month).await?;
+
+    let (master_wave, master_minutes) = metrics.get(&master_person_id).copied().unwrap_or((0, 0));
+    let mut rows = vec![LineageRow {
+        name: master_name.clone(),
+        today: 0,
+        today_minutes: 0,
+        yesterday: None,
+        month_total: master_wave,
+        month_minutes: master_minutes,
+        live: master_wave >= 2,
+        is_master: true,
+    }];
+    let mut disciples: Vec<LineageRow> = roster
+        .into_iter()
+        .map(|(pid, name)| {
+            let (wave, minutes) = metrics.get(&pid).copied().unwrap_or((0, 0));
+            LineageRow {
+                name,
+                today: 0,
+                today_minutes: 0,
+                yesterday: None,
+                month_total: wave,
+                month_minutes: minutes,
+                live: wave >= 2,
+                is_master: false,
+            }
+        })
+        .collect();
+    disciples.sort_by(|a, b| {
+        b.month_total
+            .cmp(&a.month_total)
+            .then(b.month_minutes.cmp(&a.month_minutes))
+            .then(a.name.cmp(&b.name))
+    });
+    rows.extend(disciples);
+
+    let absent_names = rows
+        .iter()
+        .filter(|r| !r.is_master && !r.live)
+        .map(|r| r.name.clone())
+        .collect();
+    let total_today = rows.iter().map(|r| r.month_total).sum();
+    Ok(LineageReport {
+        master_name,
+        date: month.to_string(),
+        period: LineagePeriod::Monthly,
+        rows,
+        total_today,
+        total_yesterday: None,
         absent_names,
     })
 }
@@ -294,7 +486,12 @@ pub fn render_svg_pages_with_fields(
             } else {
                 String::new()
             };
-            render_page(rep, chunk, &label, personal_mark, fields)
+            match rep.period {
+                LineagePeriod::Daily => render_page(rep, chunk, &label, personal_mark, fields),
+                LineagePeriod::Monthly => {
+                    render_month_page(rep, chunk, &label, personal_mark, fields)
+                }
+            }
         })
         .collect()
 }
@@ -334,6 +531,12 @@ fn render_page(
     if fields.today_wave {
         sub.push_str(&format!(" · 今日合计 {}", fmt_wan(rep.total_today)));
     }
+    if fields.month_duration {
+        sub.push_str(&format!(
+            " · 本月时长 {}",
+            crate::push::fmt_minutes(rep.month_minutes_total())
+        ));
+    }
     if fields.wave_diff {
         match rep.total_diff() {
             Some(d) if d > 0 => sub.push_str(&format!(
@@ -362,11 +565,12 @@ fn render_page(
     ));
     let columns: Vec<(f64, &str, &str)> = [
         (28.0f64, "主播", "start"),
-        (240.0, "今日音浪", "middle"),
-        (345.0, "昨日音浪", "middle"),
-        (445.0, "较昨日", "middle"),
-        (565.0, "本月累计", "middle"),
-        (692.0, "状态", "end"),
+        (205.0, "今日音浪", "middle"),
+        (300.0, "昨日音浪", "middle"),
+        (390.0, "较昨日", "middle"),
+        (485.0, "本月累计", "middle"),
+        (590.0, "本月时长", "middle"),
+        (696.0, "状态", "end"),
     ]
     .into_iter()
     .filter(|&(_, label, _)| {
@@ -375,6 +579,7 @@ fn render_page(
             || (label == "昨日音浪" && fields.yesterday_wave)
             || (label == "较昨日" && fields.wave_diff)
             || (label == "本月累计" && fields.month_total)
+            || (label == "本月时长" && fields.month_duration)
             || (label == "状态" && fields.status)
     })
     .collect();
@@ -408,7 +613,7 @@ fn render_page(
         }
         if fields.today_wave {
             s.push_str(&text_cell(
-                240.0,
+                205.0,
                 text_y,
                 "middle",
                 &fmt_wan(r.today),
@@ -418,23 +623,23 @@ fn render_page(
         if fields.yesterday_wave {
             match r.yesterday {
                 Some(yv) => s.push_str(&text_cell(
-                    345.0,
+                    300.0,
                     text_y,
                     "middle",
                     &fmt_wan(yv),
                     COLOR_TEXT,
                 )),
-                None => s.push_str(&text_cell(345.0, text_y, "middle", "—", COLOR_MUTED)),
+                None => s.push_str(&text_cell(300.0, text_y, "middle", "—", COLOR_MUTED)),
             }
         }
         if fields.wave_diff {
             match r.yesterday {
-                None => s.push_str(&text_cell(445.0, text_y, "middle", "—", COLOR_MUTED)),
+                None => s.push_str(&text_cell(390.0, text_y, "middle", "—", COLOR_MUTED)),
                 Some(yv) => {
                     let d = r.today - yv;
                     if d > 0 {
                         s.push_str(&text_cell(
-                            445.0,
+                            390.0,
                             text_y,
                             "middle",
                             &format!("▲{}", fmt_wan(d)),
@@ -442,37 +647,174 @@ fn render_page(
                         ));
                     } else if d < 0 {
                         s.push_str(&text_cell(
-                            445.0,
+                            390.0,
                             text_y,
                             "middle",
                             &format!("▼{}", fmt_wan(-d)),
                             COLOR_DOWN,
                         ));
                     } else {
-                        s.push_str(&text_cell(445.0, text_y, "middle", "—", COLOR_MUTED));
+                        s.push_str(&text_cell(390.0, text_y, "middle", "—", COLOR_MUTED));
                     }
                 }
             }
         }
         if fields.month_total {
             s.push_str(&text_cell(
-                565.0,
+                485.0,
                 text_y,
                 "middle",
                 &fmt_wan(r.month_total),
                 "#475467",
             ));
         }
+        if fields.month_duration {
+            s.push_str(&text_cell(
+                590.0,
+                text_y,
+                "middle",
+                &crate::push::fmt_minutes(r.month_minutes),
+                "#168482",
+            ));
+        }
         if fields.status {
             if r.live {
-                s.push_str(&text_cell(692.0, text_y, "end", "开播", COLOR_TEXT));
+                s.push_str(&text_cell(696.0, text_y, "end", "开播", COLOR_TEXT));
             } else {
-                s.push_str(&text_cell(692.0, text_y, "end", "未播", COLOR_UP));
+                s.push_str(&text_cell(696.0, text_y, "end", "未播", COLOR_UP));
             }
         }
     }
 
-    // 底部水印（2026-10-20 统一口径）：可见斜排 + 双层隐形（白 0.20 / 黑 0.012）。
+    // 水印压在最顶层
+    s.push_str(&watermark_layer(total_h, personal_mark));
+    s.push_str("</svg>");
+    s
+}
+
+/// 月报：与日报同一视觉体系，但只展示本月累计音浪、本月累计时长与状态。
+#[allow(clippy::too_many_lines)]
+fn render_month_page(
+    rep: &LineageReport,
+    rows: &[LineageRow],
+    page_label: &str,
+    personal_mark: &str,
+    fields: &LineageReportFields,
+) -> String {
+    let header_h = 112.0f64;
+    let list_h = rows.len() as f64 * 48.0;
+    let footer_y = header_h + list_h + 26.0;
+    let total_h = footer_y + 22.0;
+
+    let mut s = String::with_capacity(32 * 1024);
+    s.push_str(&format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1440\" height=\"{}\" viewBox=\"0 0 720 {total_h:.0}\" role=\"img\">",
+        total_h as i64 * 2
+    ));
+    s.push_str(&format!(
+        "<rect width=\"720\" height=\"{total_h:.0}\" fill=\"#FFFFFF\"/>"
+    ));
+
+    s.push_str(&format!(
+        "<text x=\"360\" y=\"32\" font-size=\"25\" fill=\"{COLOR_TEXT}\" font-weight=\"700\" text-anchor=\"middle\" dominant-baseline=\"central\" font-family=\"{FONT}\">{} 师门 · {}月度战绩{}</text>",
+        esc(&rep.master_name),
+        esc(&cn_month(&rep.date)),
+        esc(page_label),
+    ));
+
+    let mut sub = format!("门下 {} 人", rep.disciple_count());
+    if fields.month_total {
+        sub.push_str(&format!(" · 本月音浪 {}", fmt_wan(rep.month_wave_total())));
+    }
+    if fields.month_duration {
+        sub.push_str(&format!(
+            " · 本月时长 {}",
+            crate::push::fmt_minutes(rep.month_minutes_total())
+        ));
+    }
+    s.push_str(&format!(
+        "<text x=\"360\" y=\"66\" font-size=\"14\" fill=\"#475467\" text-anchor=\"middle\" dominant-baseline=\"central\" font-family=\"{FONT}\">{sub}</text>"
+    ));
+
+    let th_y = header_h - 30.0;
+    let ty_y = header_h - 14.0;
+    s.push_str(&format!(
+        "<rect y=\"{th_y:.0}\" width=\"720\" height=\"32\" fill=\"#F2F4F7\"/>"
+    ));
+    let columns: Vec<(f64, &str, &str)> = [
+        (28.0f64, "主播", "start"),
+        (350.0, "本月音浪", "middle"),
+        (530.0, "本月时长", "middle"),
+        (696.0, "状态", "end"),
+    ]
+    .into_iter()
+    .filter(|&(_, label, _)| {
+        (label == "主播" && fields.anchor)
+            || (label == "本月音浪" && fields.month_total)
+            || (label == "本月时长" && fields.month_duration)
+            || (label == "状态" && fields.status)
+    })
+    .collect();
+    for (x, label, anchor) in columns {
+        s.push_str(&format!(
+            "<text x=\"{x}\" y=\"{ty_y:.0}\" font-size=\"12\" fill=\"#667085\" font-weight=\"700\" text-anchor=\"{anchor}\" dominant-baseline=\"central\" font-family=\"{FONT}\">{label}</text>"
+        ));
+    }
+
+    for (i, r) in rows.iter().enumerate() {
+        let y = header_h + i as f64 * 48.0;
+        let text_y = y + 24.0;
+        let row_bg = if r.is_master {
+            MASTER_BG
+        } else if !r.live {
+            ABSENT_BG
+        } else {
+            "#FFFFFF"
+        };
+        s.push_str(&format!(
+            "<rect y=\"{y:.0}\" width=\"720\" height=\"48\" fill=\"{row_bg}\" stroke=\"#EAECF0\" stroke-width=\"1\"/>"
+        ));
+        if fields.anchor {
+            s.push_str(&format!(
+                "<text x=\"28\" y=\"{text_y:.0}\" font-size=\"14\" fill=\"{COLOR_TEXT}\" font-weight=\"700\" text-anchor=\"start\" dominant-baseline=\"central\" font-family=\"{FONT}\">{}{}</text>",
+                esc(&r.name),
+                if r.is_master { "（师）" } else { "" },
+            ));
+        }
+        if fields.month_total {
+            s.push_str(&text_cell(
+                350.0,
+                text_y,
+                "middle",
+                &fmt_wan(r.month_total),
+                COLOR_TEXT,
+            ));
+        }
+        if fields.month_duration {
+            s.push_str(&text_cell(
+                530.0,
+                text_y,
+                "middle",
+                &crate::push::fmt_minutes(r.month_minutes),
+                "#168482",
+            ));
+        }
+        if fields.status {
+            if r.live {
+                s.push_str(&text_cell(696.0, text_y, "end", "开播", COLOR_TEXT));
+            } else {
+                s.push_str(&text_cell(696.0, text_y, "end", "未播", COLOR_UP));
+            }
+        }
+    }
+
+    s.push_str(&watermark_layer(total_h, personal_mark));
+    s.push_str("</svg>");
+    s
+}
+
+/// 可见斜排 + 双层隐形水印。
+fn watermark_layer(total_h: f64, personal_mark: &str) -> String {
     let mark_src = if personal_mark.trim().is_empty() {
         WATERMARK.to_string()
     } else {
@@ -498,10 +840,7 @@ fn render_page(
             ));
         }
     }
-    // 水印压在最顶层
-    s.push_str(&watermark);
-    s.push_str("</svg>");
-    s
+    watermark
 }
 
 /// 表格单元格 text 元素（font-size 13）
@@ -585,8 +924,10 @@ mod tests {
         LineageRow {
             name: name.to_string(),
             today,
+            today_minutes: 0,
             yesterday,
             month_total,
+            month_minutes: month_total / 4,
             live,
             is_master,
         }
@@ -597,6 +938,7 @@ mod tests {
         LineageReport {
             master_name: "冷师傅".to_string(),
             date: "2026-10-14".to_string(),
+            period: LineagePeriod::Daily,
             rows: vec![
                 row("冷师傅", 50_000, Some(45_000), 900_000, true, true), // ▲
                 row("阿三", 120_000, Some(100_000), 1_200_000, true, false), // ▲
@@ -610,10 +952,26 @@ mod tests {
     }
 
     #[test]
+    fn daily_minutes_filter_keeps_master_and_only_qualified_disciples() {
+        let mut rep = fixture();
+        rep.rows[0].today_minutes = 300;
+        rep.rows[1].today_minutes = 240;
+        rep.rows[2].today_minutes = 239;
+        rep.rows[3].today_minutes = 0;
+        assert_eq!(rep.retain_daily_disciples_by_minutes(240), 1);
+        let names: Vec<&str> = rep.rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, vec!["冷师傅", "阿三"]);
+        assert_eq!(rep.total_today, 170_000);
+        assert_eq!(rep.total_yesterday, Some(145_000));
+        assert!(rep.absent_names.is_empty());
+    }
+
+    #[test]
     fn total_diff_cases() {
         let mk = |today: i64, yday: Option<i64>| LineageReport {
             master_name: "m".to_string(),
             date: "2026-10-14".to_string(),
+            period: LineagePeriod::Daily,
             rows: Vec::new(),
             total_today: today,
             total_yesterday: yday,
@@ -660,23 +1018,61 @@ mod tests {
         let rep = fixture();
         let all = render_svg_pages_with_fields(&rep, 0, "浩月", &LineageReportFields::default());
         assert!(all[0].contains("今日音浪"));
+        assert!(all[0].contains("本月时长"));
         let hidden = LineageReportFields {
             anchor: false,
             today_wave: false,
             yesterday_wave: false,
             wave_diff: false,
             month_total: false,
+            month_duration: false,
             status: false,
         };
         let none = render_svg_pages_with_fields(&rep, 0, "浩月", &hidden);
-        for label in ["主播", "今日音浪", "昨日音浪", "较昨日", "本月累计", "状态"]
-        {
+        for label in [
+            "主播",
+            "今日音浪",
+            "昨日音浪",
+            "较昨日",
+            "本月累计",
+            "本月时长",
+            "状态",
+        ] {
             assert!(!none[0].contains(label), "关掉的列不该渲染表头：{label}");
         }
         assert!(
             !none[0].contains(">阿三</text>"),
             "主播列关掉后不应再出现姓名"
         );
+    }
+
+    #[test]
+    fn month_report_renders_wave_and_duration() {
+        let mut rows = vec![
+            row("浩龙", 0, None, 1_710_000, true, true),
+            row("玖甜", 0, None, 589, true, false),
+            row("玖瑶", 0, None, 0, false, false),
+        ];
+        rows[0].month_minutes = 2_250;
+        rows[1].month_minutes = 9;
+        let rep = LineageReport {
+            master_name: "浩龙".to_string(),
+            date: "2026-10".to_string(),
+            period: LineagePeriod::Monthly,
+            rows,
+            total_today: 1_710_589,
+            total_yesterday: None,
+            absent_names: vec!["玖瑶".to_string()],
+        };
+        let svg =
+            &render_svg_pages_with_fields(&rep, 0, "浩龙", &LineageReportFields::default())[0];
+        assert!(svg.contains("2026年10月月度战绩"));
+        assert!(svg.contains("本月音浪"));
+        assert!(svg.contains("本月时长"));
+        assert!(svg.contains("171 万"));
+        assert!(svg.contains("9分"));
+        assert!(svg.contains("玖瑶"));
+        assert!(svg.contains("未播"));
     }
 
     #[test]
