@@ -1877,11 +1877,16 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .st-my-acct .acct-stats { display:grid; grid-template-columns:repeat(2,minmax(0,1fr));
   gap:.375rem; }
 .st-my-acct .acct-cell { padding:.5rem .625rem; border-radius:.5rem;
-  background:rgba(255,255,255,.46); display:flex; align-items:baseline;
+  background:rgba(255,255,255,.46); display:flex; align-items:flex-start;
   justify-content:space-between; gap:.5rem; }
-.st-my-acct .acct-cell i { font-style:normal; font-size:10.5px; color:var(--outline); flex:none; }
-.st-my-acct .acct-cell b { font-size:12.5px; color:var(--on-surface); font-weight:600;
+.st-my-acct .acct-cell i { margin-top:.1rem; font-style:normal; font-size:10.5px; color:var(--outline); flex:none; }
+.st-my-acct .acct-cell .v { min-width:0; text-align:right; }
+.st-my-acct .acct-cell b { display:block; font-size:12.5px; color:var(--on-surface); font-weight:600;
   font-variant-numeric:tabular-nums; white-space:nowrap; }
+.st-my-acct .acct-cell small { display:block; margin-top:.15rem; font-size:9.5px; color:#64748B;
+  font-variant-numeric:tabular-nums; white-space:nowrap; }
+.st-my-acct .acct-totalbar .sub small { display:block; margin-top:.15rem; font-size:9.5px; color:#64748B;
+  font-variant-numeric:tabular-nums; }
 .st-my-acct .acct-earnline { margin-top:.5rem; padding:.55rem .625rem; border-radius:.5rem;
   background:var(--primary-fixed); box-shadow:inset 0 0 0 1px rgba(0,88,188,.10);
   display:flex; align-items:center; justify-content:space-between; gap:.75rem; }
@@ -6327,8 +6332,10 @@ function renderMyLogin() {
 function myAccountsCard(accounts) {
   if (!accounts || accounts.published === false) return '';
   const wave = (o) => o == null || o.wave == null ? '—' : wan(o.wave);
+  const duration = (o) => o == null || o.minutes == null ? '—' : minFmt(o.minutes);
   const estOf = (o) => o == null || o.wave == null ? null : estYuan(o.wave);
-  const cell = (label, o) => '<span class="acct-cell"><i>' + label + '</i><b>' + esc(wave(o)) + '</b></span>';
+  const cell = (label, o) => '<span class="acct-cell"><i>' + label + '</i>' +
+    '<span class="v"><b>' + esc(wave(o)) + '</b><small>时长 ' + esc(duration(o)) + '</small></span></span>';
   if (accounts.__err) {
     return '<div class="st-my-acct">' +
       '<div class="sec"><span>我的抖音号</span></div>' +
@@ -6397,10 +6404,12 @@ function myAccountsCard(accounts) {
   }).join('');
   const monthEst = sum.monthly == null ? null : estOf(sum.monthly);
   const totalEst = sum.total == null ? null : estOf(sum.total);
+  const totalMinutes = sum.total == null || sum.total.minutes == null ? '—' : minFmt(sum.total.minutes);
   return '<div class="st-my-acct">' +
     '<div class="sec"><span>我的抖音号</span><span class="n">共 ' + Number(sum.count) + ' 个</span></div>' +
     '<div class="acct-totalbar"><div class="main"><span>本月预计到手</span><b>' + esc(yuanBig(monthEst)) + '</b></div>' +
-      '<div class="sub">累计<b>' + esc(yuanBig(totalEst)) + '</b></div></div>' +
+      '<div class="sub"><span>累计<b>' + esc(yuanBig(totalEst)) + '</b></span>' +
+        '<small>累计时长 ' + esc(totalMinutes) + '</small></div></div>' +
     body +
     '<div class="fee-note">' + esc(earningsNote()) + '</div></div>';
 }

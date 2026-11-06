@@ -846,6 +846,18 @@ pub fn my_accounts_sql(person_id: u64, p: &AccountPeriods) -> String {
            (COALESCE(SUM(CASE WHEN t.d = '{day}' THEN t.w END), 0))::BIGINT AS wd, \
            (COALESCE(SUM(CASE WHEN t.d LIKE '{month}-%' THEN t.w END), 0))::BIGINT AS wm, \
            (COALESCE(SUM(CASE WHEN t.d LIKE '{year}-%' THEN t.w END), 0))::BIGINT AS wy, \
+           (COALESCE(SUM(CASE WHEN t.d LIKE '{month}-%' AND SUBSTR(t.d, 1, 7) NOT IN \
+               (SELECT mw1.period FROM monthly_wave mw1 WHERE mw1.person_id = {person_id}) THEN t.w END), 0))::BIGINT AS wdd_m, \
+           (COALESCE(SUM(CASE WHEN t.d LIKE '{year}-%' AND SUBSTR(t.d, 1, 7) NOT IN \
+               (SELECT mw1.period FROM monthly_wave mw1 WHERE mw1.person_id = {person_id}) THEN t.w END), 0))::BIGINT AS wdd_y, \
+           (COALESCE(SUM(CASE WHEN t.d = '{day}' THEN t.m END), 0))::BIGINT AS md, \
+           (COALESCE(SUM(CASE WHEN t.d LIKE '{month}-%' THEN t.m END), 0))::BIGINT AS mm, \
+           (COALESCE(SUM(CASE WHEN t.d LIKE '{year}-%' THEN t.m END), 0))::BIGINT AS myy, \
+           (COALESCE(SUM(CASE WHEN t.d LIKE '{month}-%' AND SUBSTR(t.d, 1, 7) NOT IN \
+               (SELECT md1.period FROM monthly_duration md1 WHERE md1.person_id = {person_id}) THEN t.m END), 0))::BIGINT AS mdd_m, \
+           (COALESCE(SUM(CASE WHEN t.d LIKE '{year}-%' AND SUBSTR(t.d, 1, 7) NOT IN \
+               (SELECT md1.period FROM monthly_duration md1 WHERE md1.person_id = {person_id}) THEN t.m END), 0))::BIGINT AS mdd_y, \
+           (COALESCE(SUM(t.m), 0))::BIGINT AS mt, \
            (COALESCE(SUM(t.w), 0))::BIGINT AS wt, \
            MAX(t.d) AS last_d, \
            COUNT(DISTINCT t.d) AS days, \
@@ -853,23 +865,31 @@ pub fn my_accounts_sql(person_id: u64, p: &AccountPeriods) -> String {
            COALESCE((SELECT SUM(mw.wave) FROM monthly_wave mw \
                       WHERE mw.person_id = {person_id} AND mw.period = '{month}'), 0)::BIGINT AS mw_m, \
            COALESCE((SELECT SUM(mw.wave) FROM monthly_wave mw \
-                      WHERE mw.person_id = {person_id} AND mw.period LIKE '{year}-%'), 0)::BIGINT AS mw_y \
+                      WHERE mw.person_id = {person_id} AND mw.period LIKE '{year}-%'), 0)::BIGINT AS mw_y, \
+           COALESCE((SELECT SUM(md0.minutes) FROM monthly_duration md0 \
+                      WHERE md0.person_id = {person_id} AND md0.period = '{month}'), 0)::BIGINT AS mwd_m, \
+           COALESCE((SELECT SUM(md0.minutes) FROM monthly_duration md0 \
+                      WHERE md0.person_id = {person_id} AND md0.period LIKE '{year}-%'), 0)::BIGINT AS mwd_y \
          FROM account a \
            LEFT JOIN person_avatar pa ON pa.person_id = a.person_id AND pa.image IS NOT NULL \
            LEFT JOIN ( \
            SELECT d.anchor_id AS anchor_id, TO_CHAR(d.biz_date, 'YYYY-MM-DD') AS d, \
-                  d.wave AS w \
+                  d.wave AS w, d.minutes AS m \
            FROM daily_metric d JOIN account pa \
              ON pa.person_id = d.person_id AND pa.anchor_id = d.anchor_id \
               AND pa.is_primary = 1 \
            WHERE d.person_id = {person_id} AND d.wave_reliable = 1 \
-             AND TO_CHAR(d.biz_date, 'YYYY-MM') NOT IN \
-                 (SELECT mw0.period FROM monthly_wave mw0 WHERE mw0.person_id = {person_id}) \
            UNION ALL \
            SELECT ws.anchor_id AS anchor_id, TO_CHAR(ws.biz_date, 'YYYY-MM-DD') AS d, \
-                  ws.wave_value AS w \
+                  ws.wave_value AS w, 0 AS m \
            FROM wave_snapshot ws JOIN account sa \
              ON sa.anchor_id = ws.anchor_id AND sa.is_primary = 0 \
+           WHERE sa.person_id = {person_id} \
+           UNION ALL \
+           SELECT ds.anchor_id AS anchor_id, TO_CHAR(ds.biz_date, 'YYYY-MM-DD') AS d, \
+                  0 AS w, ds.minutes AS m \
+           FROM duration_snapshot ds JOIN account sa \
+             ON sa.anchor_id = ds.anchor_id AND sa.is_primary = 0 \
            WHERE sa.person_id = {person_id} \
          ) t ON t.anchor_id = a.anchor_id \
          WHERE a.person_id = {person_id} \
@@ -900,10 +920,31 @@ pub(super) fn account_month_wave(
     }
     let mw_m = r.try_get::<i64, _>("mw_m").unwrap_or(0);
     let mw_y = r.try_get::<i64, _>("mw_y").unwrap_or(0);
-    (
-        if mw_m > 0 { mw_m } else { monthly },
-        if mw_y > 0 { mw_y } else { yearly },
-    )
+    let wdd_m = r.try_get::<i64, _>("wdd_m").unwrap_or(0);
+    let wdd_y = r.try_get::<i64, _>("wdd_y").unwrap_or(0);
+    (if mw_m > 0 { mw_m } else { wdd_m }, mw_y + wdd_y)
+}
+
+/// 主号那一行的月 / 年时长：与音浪同口径，有整月时长就用月报值，没有才回落日明细。
+/// 副号没有人员粒度月报，直接使用 `duration_snapshot` 汇总值。
+pub(super) fn account_month_minutes(
+    r: &sqlx::postgres::PgRow,
+    monthly: i64,
+    yearly: i64,
+) -> (i64, i64) {
+    let is_primary = r
+        .try_get::<i16, _>("is_prim")
+        .or_else(|_| r.try_get::<i16, _>("is_primary"))
+        .unwrap_or(0)
+        == 1;
+    if !is_primary {
+        return (monthly, yearly);
+    }
+    let mwd_m = r.try_get::<i64, _>("mwd_m").unwrap_or(0);
+    let mwd_y = r.try_get::<i64, _>("mwd_y").unwrap_or(0);
+    let mdd_m = r.try_get::<i64, _>("mdd_m").unwrap_or(0);
+    let mdd_y = r.try_get::<i64, _>("mdd_y").unwrap_or(0);
+    (if mwd_m > 0 { mwd_m } else { mdd_m }, mwd_y + mdd_y)
 }
 
 /// 一行查询结果 → 一个抖音号的 DTO（数值部分先全给，开关过滤在 [my_accounts_gate] 里统一做）。
@@ -920,14 +961,14 @@ pub(super) fn my_account_row(r: &sqlx::postgres::PgRow) -> Value {
             .unwrap_or_default()
             .trim(),
     );
-    // 副号没有时长，也不判未播：这里只有音浪口径
     let last_date = r
         .try_get::<Option<String>, _>("last_d")
         .ok()
         .flatten()
         .filter(|s: &String| valid_date_pub(s));
-    // 主号的月 / 年走整月音浪优先（与 /my 月卡对齐，见 account_month_wave）
+    // 主号月 / 年优先整月导入值（音浪、时长各自独立），缺月才回落日明细。
     let (wm, wy) = account_month_wave(r, row_i64(r, "wm"), row_i64(r, "wy"));
+    let (mm, my) = account_month_minutes(r, row_i64(r, "mm"), row_i64(r, "myy"));
     json!({
         "accountId": row_pid(r, "aid"),
         "anchorId": anchor_id,
@@ -935,10 +976,10 @@ pub(super) fn my_account_row(r: &sqlx::postgres::PgRow) -> Value {
         "anchorName": anchor_name,
         "primary": primary,
         "avatar": avatar,
-        "daily": { "wave": row_i64(r, "wd") },
-        "monthly": { "wave": wm },
-        "yearly": { "wave": wy },
-        "total": { "wave": row_i64(r, "wt") },
+        "daily": { "wave": row_i64(r, "wd"), "minutes": row_i64(r, "md") },
+        "monthly": { "wave": wm, "minutes": mm },
+        "yearly": { "wave": wy, "minutes": my },
+        "total": { "wave": row_i64(r, "wt"), "minutes": row_i64(r, "mt") },
         /* 当日是否开播：与全站同口径（dialect::NOT_LIVE_WAVE_THRESHOLD，音浪 >= 2）。
         注意这是「号」级的开播，副号有音浪就算播了。 */
         "liveToday": dialect::is_live_wave(row_i64(r, "wd")),
@@ -987,36 +1028,52 @@ pub fn my_accounts_gate(items: &mut [Value], s: &PublicSettings) -> Value {
         gate_period(o, "daily", s.daily);
         gate_period(o, "monthly", s.monthly);
         gate_period(o, "yearly", s.yearly);
-        if !s.wave {
+        if !s.wave && !s.duration {
             o.insert("total".into(), Value::Null);
+        } else if let Some(total) = o.get_mut("total").and_then(Value::as_object_mut) {
+            if !s.wave {
+                total.insert("wave".into(), Value::Null);
+            }
+            if !s.duration {
+                total.insert("minutes".into(), Value::Null);
+            }
         }
     }
     // 按「过滤后」的字段求和：关闭周期/关闭字段都已在上一轮置 null。
-    // /my/accounts 的产品契约是「每个号 × 日/月/年/累计音浪」；账号级没有可靠的
-    // 时长/未播汇总，不能在 summary 里补 0 冒充真实值。这里只汇总 wave。
-    let mut sum = [0i64; 3]; // daily / monthly / yearly
+    // 每个号现在同时有音浪与时长；summary 也分别汇总两者。
+    let mut sum = [0i64; 3]; // daily / monthly / yearly wave
+    let mut sum_m = [0i64; 3]; // daily / monthly / yearly minutes
     let mut sum_t = 0i64;
+    let mut sum_mt = 0i64;
     for it in items.iter() {
         let Some(o) = it.as_object() else {
             continue;
         };
         for (i, key) in ["daily", "monthly", "yearly"].into_iter().enumerate() {
             sum[i] += pick(o, key, "wave");
+            sum_m[i] += pick(o, key, "minutes");
         }
         sum_t += pick(o, "total", "wave");
+        sum_mt += pick(o, "total", "minutes");
     }
-    let period = |on: bool, wave: i64| -> Value {
+    let period = |on: bool, wave: i64, minutes: i64| -> Value {
         if !on {
             return Value::Null;
         }
-        json!({ "wave": if s.wave { json!(wave) } else { Value::Null } })
+        json!({
+            "wave": if s.wave { json!(wave) } else { Value::Null },
+            "minutes": if s.duration { json!(minutes) } else { Value::Null },
+        })
     };
     json!({
         "count": items.len(),
-        "daily": period(s.daily, sum[0]),
-        "monthly": period(s.monthly, sum[1]),
-        "yearly": period(s.yearly, sum[2]),
-        "total": if s.wave { json!({ "wave": sum_t }) } else { Value::Null },
+        "daily": period(s.daily, sum[0], sum_m[0]),
+        "monthly": period(s.monthly, sum[1], sum_m[1]),
+        "yearly": period(s.yearly, sum[2], sum_m[2]),
+        "total": (s.wave || s.duration).then(|| json!({
+            "wave": if s.wave { json!(sum_t) } else { Value::Null },
+            "minutes": if s.duration { json!(sum_mt) } else { Value::Null },
+        })).unwrap_or(Value::Null),
     })
 }
 
@@ -1186,6 +1243,53 @@ pub async fn my_who(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn my_accounts_sql_includes_wave_and_minutes_per_account() {
+        let sql = my_accounts_sql(132, &AccountPeriods::of("2999-01-02"));
+        for token in [
+            "d.wave AS w, d.minutes AS m",
+            "ws.wave_value AS w, 0 AS m",
+            "0 AS w, ds.minutes AS m",
+            "FROM monthly_duration",
+            "AS wd",
+            "AS wdd_m",
+            "AS wdd_y",
+            "AS md",
+            "AS mdd_m",
+            "AS mdd_y",
+            "AS mt",
+        ] {
+            assert!(
+                sql.contains(token),
+                "缺少账号级音浪/时长字段 {token}: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn my_accounts_gate_keeps_both_metrics_and_respects_switches() {
+        let mut s = PublicSettings::default();
+        let mut items = vec![json!({
+            "daily": {"wave": 10, "minutes": 60},
+            "monthly": {"wave": 100, "minutes": 600},
+            "yearly": {"wave": 1000, "minutes": 6000},
+            "total": {"wave": 5000, "minutes": 30000}
+        })];
+        let summary = my_accounts_gate(&mut items, &s);
+        assert_eq!(summary["daily"]["wave"], 10);
+        assert_eq!(summary["daily"]["minutes"], 60);
+        assert_eq!(summary["monthly"]["minutes"], 600);
+        assert_eq!(summary["yearly"]["minutes"], 6000);
+        assert_eq!(summary["total"]["minutes"], 30000);
+
+        s.wave = false;
+        let summary = my_accounts_gate(&mut items, &s);
+        assert!(summary["daily"]["wave"].is_null());
+        assert_eq!(summary["daily"]["minutes"], 60);
+        assert_eq!(summary["total"]["minutes"], 30000);
+        assert!(summary["total"]["wave"].is_null());
+    }
 
     /// 月卡音浪（2026-10-16 用户口径）：某月有导入的整月音浪就用它，没有才回落日明细求和 ——
     /// 与「时长」同一套 COALESCE 写法，同一段音浪不会既算整月值又算日明细。

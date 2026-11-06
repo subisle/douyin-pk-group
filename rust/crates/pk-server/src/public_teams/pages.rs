@@ -369,12 +369,16 @@ mod my_accounts_tests {
         let s = PublicSettings::default();
         let mut items = vec![
             json!({
-                "accountId": 1, "daily": {"wave": 100}, "monthly": {"wave": 1000},
-                "yearly": {"wave": 5000}, "total": {"wave": 9000}, "liveToday": true
+                "accountId": 1, "daily": {"wave": 100, "minutes": 10},
+                "monthly": {"wave": 1000, "minutes": 100},
+                "yearly": {"wave": 5000, "minutes": 1000},
+                "total": {"wave": 9000, "minutes": 5000}, "liveToday": true
             }),
             json!({
-                "accountId": 2, "daily": {"wave": 1}, "monthly": {"wave": 20},
-                "yearly": {"wave": 300}, "total": {"wave": 400}, "liveToday": false
+                "accountId": 2, "daily": {"wave": 1, "minutes": 20},
+                "monthly": {"wave": 20, "minutes": 200},
+                "yearly": {"wave": 300, "minutes": 2000},
+                "total": {"wave": 400, "minutes": 8000}, "liveToday": false
             }),
         ];
         let sum = my_accounts_gate(&mut items, &s);
@@ -383,6 +387,10 @@ mod my_accounts_tests {
         assert_eq!(sum["monthly"]["wave"], 1020);
         assert_eq!(sum["yearly"]["wave"], 5300);
         assert_eq!(sum["total"]["wave"], 9400);
+        assert_eq!(sum["daily"]["minutes"], 30);
+        assert_eq!(sum["monthly"]["minutes"], 300);
+        assert_eq!(sum["yearly"]["minutes"], 3000);
+        assert_eq!(sum["total"]["minutes"], 13000);
         assert_eq!(items[0]["daily"]["wave"], 100);
         assert_eq!(items[1]["total"]["wave"], 400);
     }
@@ -398,19 +406,21 @@ mod my_accounts_tests {
             ..Default::default()
         };
         let mut items = vec![json!({
-            "daily": {"wave": 100}, "monthly": {"wave": 1000},
-            "yearly": {"wave": 5000}, "total": {"wave": 9000},
+            "daily": {"wave": 100, "minutes": 10}, "monthly": {"wave": 1000, "minutes": 100},
+            "yearly": {"wave": 5000, "minutes": 1000}, "total": {"wave": 9000, "minutes": 5000},
             "liveToday": true, "lastDate": "2026-10-11", "days": 9
         })];
         let sum = my_accounts_gate(&mut items, &s);
         assert!(items[0]["daily"].is_null());
         assert!(items[0]["monthly"].is_null());
         assert!(items[0]["yearly"].is_null());
-        assert!(items[0]["total"].is_null());
+        assert!(items[0]["total"]["wave"].is_null());
+        assert_eq!(items[0]["total"]["minutes"], 5000);
         assert!(sum["daily"].is_null());
         assert!(sum["monthly"].is_null());
         assert!(sum["yearly"].is_null());
-        assert!(sum["total"].is_null());
+        assert!(sum["total"]["wave"].is_null());
+        assert_eq!(sum["total"]["minutes"], 5000);
         // 开播标记 / 最后日期 / 天数不是音浪数值，照常下发
         assert_eq!(items[0]["liveToday"], true);
         assert_eq!(items[0]["lastDate"], "2026-10-11");
@@ -425,18 +435,20 @@ mod my_accounts_tests {
             ..Default::default()
         };
         let mut items = vec![json!({
-            "daily": {"wave": 100}, "monthly": {"wave": 1000},
-            "yearly": {"wave": 5000}, "total": {"wave": 9000}
+            "daily": {"wave": 100, "minutes": 10}, "monthly": {"wave": 1000, "minutes": 100},
+            "yearly": {"wave": 5000, "minutes": 1000}, "total": {"wave": 9000, "minutes": 5000}
         })];
         let sum = my_accounts_gate(&mut items, &s);
         assert!(items[0]["daily"]["wave"].is_null());
         assert!(items[0]["monthly"]["wave"].is_null());
         assert!(items[0]["yearly"]["wave"].is_null());
-        assert!(items[0]["total"].is_null());
+        assert!(items[0]["total"]["wave"].is_null());
+        assert_eq!(items[0]["total"]["minutes"], 5000);
         assert!(sum["daily"]["wave"].is_null());
         assert!(sum["monthly"]["wave"].is_null());
         assert!(sum["yearly"]["wave"].is_null());
-        assert!(sum["total"].is_null());
+        assert!(sum["total"]["wave"].is_null());
+        assert_eq!(sum["total"]["minutes"], 5000);
     }
 
     /// 时长与未播天数是独立字段闸门；关掉不应连带关闭整个月/年块。
@@ -458,8 +470,8 @@ mod my_accounts_tests {
             assert!(items[0][key]["wave"].as_i64().unwrap_or_default() > 0);
             assert!(items[0][key]["minutes"].is_null());
             assert!(items[0][key]["absentDays"].is_null());
-            // 账号级 summary 只有音浪契约，不能凭空补 0 时长/未播。
-            assert!(sum[key].get("minutes").is_none());
+            // 时长关闭时字段存在但为 null；未播天数不进入账号级 summary。
+            assert!(sum[key].get("minutes").is_some_and(Value::is_null));
             assert!(sum[key].get("absentDays").is_none());
         }
     }
@@ -472,7 +484,9 @@ mod my_accounts_tests {
         let sum = my_accounts_gate(&mut items, &s);
         assert_eq!(sum["count"], 0);
         assert_eq!(sum["daily"]["wave"], 0);
+        assert_eq!(sum["daily"]["minutes"], 0);
         assert_eq!(sum["total"]["wave"], 0);
+        assert_eq!(sum["total"]["minutes"], 0);
         assert!(items.is_empty());
     }
 
