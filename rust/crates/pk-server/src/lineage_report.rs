@@ -52,8 +52,10 @@ pub struct LineageReport {
     pub total_yesterday: Option<i64>,
     /// 未播徒弟姓名（不含师傅），按 rows 顺序
     pub absent_names: Vec<String>,
-    /// 日报的当日时长目标（分钟）；0 = 不显示时长不足提示。
-    pub min_today_minutes: i64,
+    /// 日报按天计算的标准：达到该分钟数 = 合格。
+    pub daily_qualified_minutes: i64,
+    /// 日报按天计算的红线：低于该分钟数 = 严重不足。
+    pub daily_severe_minutes: i64,
 }
 
 impl LineageReport {
@@ -67,9 +69,10 @@ impl LineageReport {
         self.rows.iter().filter(|r| !r.is_master).count()
     }
 
-    /// 设置日报的当日时长目标。所有徒弟仍保留，渲染时对未达标者标红。
-    pub fn set_daily_minutes_target(&mut self, min_minutes: i64) {
-        self.min_today_minutes = min_minutes.max(0);
+    /// 设置日报按天计算的三级标准：>= qualified 合格，>= severe 未达标，< severe 严重不足。
+    pub fn set_daily_minutes_standard(&mut self, qualified_minutes: i64, severe_minutes: i64) {
+        self.daily_qualified_minutes = qualified_minutes.max(0);
+        self.daily_severe_minutes = severe_minutes.max(0);
     }
 
     /// 本月累计音浪（含师傅行）。
@@ -358,7 +361,8 @@ pub async fn build(
         total_today,
         total_yesterday,
         absent_names,
-        min_today_minutes: 0,
+        daily_qualified_minutes: 0,
+        daily_severe_minutes: 0,
     })
 }
 
@@ -423,7 +427,8 @@ pub async fn build_month(
         total_today,
         total_yesterday: None,
         absent_names,
-        min_today_minutes: 0,
+        daily_qualified_minutes: 0,
+        daily_severe_minutes: 0,
     })
 }
 
@@ -483,7 +488,8 @@ fn render_page(
     personal_mark: &str,
     fields: &LineageReportFields,
 ) -> String {
-    let header_h = 112.0f64;
+    let has_duration_standard = rep.daily_qualified_minutes > 0 || rep.daily_severe_minutes > 0;
+    let header_h = if has_duration_standard { 132.0 } else { 112.0 };
     let list_h = rows.len() as f64 * 48.0;
     let footer_y = header_h + list_h + 26.0;
     let total_h = footer_y + 22.0;
@@ -516,17 +522,18 @@ fn render_page(
             crate::push::fmt_minutes(rep.month_minutes_total())
         ));
     }
-    if rep.min_today_minutes > 0 {
+    if rep.daily_qualified_minutes > 0 || rep.daily_severe_minutes > 0 {
         let qualified = rep
             .rows
             .iter()
-            .filter(|r| !r.is_master && r.today_minutes >= rep.min_today_minutes)
+            .filter(|r| r.today_minutes >= rep.daily_qualified_minutes)
             .count();
-        sub.push_str(&format!(
-            " · {}小时达标 {}人",
-            rep.min_today_minutes / 60,
-            qualified
-        ));
+        let severe = rep
+            .rows
+            .iter()
+            .filter(|r| r.today_minutes < rep.daily_severe_minutes)
+            .count();
+        sub.push_str(&format!(" · 合格 {qualified} 人 · 严重不足 {severe} 人"));
     }
     if fields.wave_diff {
         match rep.total_diff() {
@@ -547,6 +554,18 @@ fn render_page(
     s.push_str(&format!(
         "<text x=\"360\" y=\"66\" font-size=\"14\" fill=\"#475467\" text-anchor=\"middle\" dominant-baseline=\"central\" font-family=\"{FONT}\">{sub}</text>"
     ));
+
+    if has_duration_standard {
+        let note = format!(
+            "时长标准（按天）：{}小时合格 · {}小时以下严重不足",
+            rep.daily_qualified_minutes as f64 / 60.0,
+            rep.daily_severe_minutes as f64 / 60.0
+        );
+        s.push_str(&format!(
+            "<text x=\"360\" y=\"88\" font-size=\"10.5\" fill=\"#667085\" text-anchor=\"middle\" dominant-baseline=\"central\" font-family=\"{FONT}\">{}</text>",
+            esc(&note)
+        ));
+    }
 
     // 表头（x/锚点与下方数据行同列一致）
     let th_y = header_h - 30.0; // 表头背景 y
@@ -586,12 +605,15 @@ fn render_page(
     for (i, r) in rows.iter().enumerate() {
         let y = header_h + i as f64 * 48.0;
         let text_y = y + 24.0;
-        let below_duration =
-            !r.is_master && rep.min_today_minutes > 0 && r.today_minutes < rep.min_today_minutes;
+        let severe = has_duration_standard && r.today_minutes < rep.daily_severe_minutes;
+        let unmet =
+            has_duration_standard && !severe && r.today_minutes < rep.daily_qualified_minutes;
         let row_bg = if r.is_master {
             MASTER_BG
-        } else if !r.live || below_duration {
+        } else if severe || (!has_duration_standard && !r.live) {
             ABSENT_BG
+        } else if unmet {
+            "#FFF7ED"
         } else {
             "#FFFFFF"
         };
@@ -621,7 +643,13 @@ fn render_page(
                 text_y,
                 "middle",
                 &crate::push::fmt_minutes(r.today_minutes),
-                if below_duration { COLOR_UP } else { "#168482" },
+                if severe {
+                    COLOR_UP
+                } else if unmet {
+                    "#C2410C"
+                } else {
+                    "#168482"
+                },
             ));
         }
         if fields.yesterday_wave {
@@ -674,7 +702,7 @@ fn render_page(
         }
         if fields.month_duration {
             s.push_str(&text_cell(
-                590.0,
+                600.0,
                 text_y,
                 "middle",
                 &crate::push::fmt_minutes(r.month_minutes),
@@ -682,8 +710,14 @@ fn render_page(
             ));
         }
         if fields.status {
-            if below_duration {
-                s.push_str(&text_cell(696.0, text_y, "end", "时长不足", COLOR_UP));
+            if has_duration_standard {
+                if severe {
+                    s.push_str(&text_cell(696.0, text_y, "end", "严重不足", COLOR_UP));
+                } else if unmet {
+                    s.push_str(&text_cell(696.0, text_y, "end", "未达标", "#C2410C"));
+                } else {
+                    s.push_str(&text_cell(696.0, text_y, "end", "合格", "#168482"));
+                }
             } else if r.live {
                 s.push_str(&text_cell(696.0, text_y, "end", "开播", COLOR_TEXT));
             } else {
@@ -954,23 +988,25 @@ mod tests {
             total_today: 178_000,
             total_yesterday: Some(154_500),
             absent_names: vec!["小王".to_string()],
-            min_today_minutes: 0,
+            daily_qualified_minutes: 0,
+            daily_severe_minutes: 0,
         }
     }
 
     #[test]
-    fn daily_minutes_target_keeps_all_disciples_for_rendering() {
+    fn daily_minutes_standard_keeps_all_disciples_for_rendering() {
         let mut rep = fixture();
         rep.rows[0].today_minutes = 300;
         rep.rows[1].today_minutes = 240;
         rep.rows[2].today_minutes = 239;
         rep.rows[3].today_minutes = 0;
-        rep.set_daily_minutes_target(240);
+        rep.set_daily_minutes_standard(360, 240);
         assert_eq!(rep.rows.len(), 4);
         let names: Vec<&str> = rep.rows.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(names, vec!["冷师傅", "阿三", "小<李&仔", "小王"]);
         assert_eq!(rep.disciple_count(), 3);
-        assert_eq!(rep.min_today_minutes, 240);
+        assert_eq!(rep.daily_qualified_minutes, 360);
+        assert_eq!(rep.daily_severe_minutes, 240);
     }
 
     #[test]
@@ -983,7 +1019,8 @@ mod tests {
             total_today: today,
             total_yesterday: yday,
             absent_names: Vec::new(),
-            min_today_minutes: 0,
+            daily_qualified_minutes: 0,
+            daily_severe_minutes: 0,
         };
         assert_eq!(mk(100, None).total_diff(), None);
         assert_eq!(mk(150, Some(100)).total_diff(), Some(50));
@@ -1073,7 +1110,8 @@ mod tests {
             total_today: 1_710_589,
             total_yesterday: None,
             absent_names: vec!["玖瑶".to_string()],
-            min_today_minutes: 0,
+            daily_qualified_minutes: 0,
+            daily_severe_minutes: 0,
         };
         let svg =
             &render_svg_pages_with_fields(&rep, 0, "浩龙", &LineageReportFields::default())[0];

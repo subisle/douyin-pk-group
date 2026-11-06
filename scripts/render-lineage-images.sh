@@ -2,8 +2,9 @@
 # 用 wxbot 推送同一条师门日报渲染链路，给每个有直系徒弟的师傅各生成一份 PNG。
 # 默认排除：薇姐、鹏先生。可覆盖：
 #   LINEAGE_IMAGE_EXCLUDED_MASTERS="薇姐,鹏先生" scripts/render-lineage-images.sh
-# 日报只保留当天时长 >= 4 小时的徒弟：
-#   scripts/render-lineage-images.sh --date 2026-11-05 --min-today-minutes 240
+# 日报按天标注 6 小时合格、4 小时以下严重不足：
+#   scripts/render-lineage-images.sh --date 2026-11-05 \
+#     --qualified-today-minutes 360 --severe-today-minutes 240
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT/rust"

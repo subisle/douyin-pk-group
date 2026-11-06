@@ -72,9 +72,9 @@ async fn main() -> anyhow::Result<()> {
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "-h" || a == "--help") {
-        println!("用法: render-lineage-images [--date YYYY-MM-DD | --month YYYY-MM] [--out DIR] [--min-today-minutes N]");
+        println!("用法: render-lineage-images [--date YYYY-MM-DD | --month YYYY-MM] [--out DIR] [--qualified-today-minutes N] [--severe-today-minutes N]");
         println!("默认: 本地最新业务日；--month 生成整月音浪 + 时长月报");
-        println!("--min-today-minutes 240: 日报只纳入当天时长 >= 4 小时的徒弟（师傅行保留）");
+        println!("--qualified-today-minutes 360 --severe-today-minutes 240: 按天标注 6 小时合格 / 4 小时以下严重不足");
         println!("环境变量: LINEAGE_IMAGE_EXCLUDED_MASTERS=薇姐,鹏先生");
         return Ok(());
     }
@@ -108,10 +108,16 @@ async fn main() -> anyhow::Result<()> {
 
     let month_arg = arg_value(&args, "--month");
     let date_arg = arg_value(&args, "--date");
-    let min_today_minutes = arg_value(&args, "--min-today-minutes")
+    let qualified_today_minutes = arg_value(&args, "--qualified-today-minutes")
         .map(|v| v.parse::<i64>())
         .transpose()
-        .map_err(|_| anyhow::anyhow!("--min-today-minutes 必须是整数分钟"))?
+        .map_err(|_| anyhow::anyhow!("--qualified-today-minutes 必须是整数分钟"))?
+        .unwrap_or(0)
+        .max(0);
+    let severe_today_minutes = arg_value(&args, "--severe-today-minutes")
+        .map(|v| v.parse::<i64>())
+        .transpose()
+        .map_err(|_| anyhow::anyhow!("--severe-today-minutes 必须是整数分钟"))?
         .unwrap_or(0)
         .max(0);
     anyhow::ensure!(
@@ -186,8 +192,9 @@ async fn main() -> anyhow::Result<()> {
                 continue;
             }
         };
-        if report_kind == "师门日报" && min_today_minutes > 0 {
-            report.set_daily_minutes_target(min_today_minutes);
+        if report_kind == "师门日报" && (qualified_today_minutes > 0 || severe_today_minutes > 0)
+        {
+            report.set_daily_minutes_standard(qualified_today_minutes, severe_today_minutes);
         }
         if report.disciple_count() == 0 {
             println!("跳过\t{master_name}\t无可进入报表的直系徒弟");
