@@ -5471,12 +5471,13 @@ function renderLineage(keepView) {
   /* 没收徒的人只看空态：搜索/缩放/画布/导出都不渲染，也不跑树布局。
      myPersonId 为 0/null 或找不到对应节点时兜底照常画全树（不误伤管理员）。 */
   const me = myPersonId == null ? null : lineageNodes.find(n => n.id === myPersonId);
-  if (me && !(Number(me.disciples) > 0)) {
-      /* 口径切换 chips（2026-10-12）：日 / 月 / 年，点了带 period 重拉 */
+  /* 口径切换 chips（2026-10-12）：日 / 月 / 年，点了带 period 重拉。
+     必须在空态分支外声明，正常族谱渲染下方也要用。 */
   const periodChips = '<div class="ln-period" style="display:flex;gap:.5rem;padding:.25rem 1rem .5rem">' +
     [['daily', '日'], ['monthly', '月'], ['yearly', '年']].map(([k, label]) =>
       '<button class="go' + (lineagePeriod === k ? '' : ' gray') + '" data-lp="' + k + '">' + label + '</button>').join('') +
     '</div>';
+  if (me && !(Number(me.disciples) > 0)) {
 $('view').innerHTML =
       '<div class="section tab-content-enter"><div class="card" style="padding:2rem 1.25rem;text-align:center">' +
         '<div class="material-symbols-outlined" style="font-size:44px;color:var(--on-surface-variant)">history_edu</div>' +
