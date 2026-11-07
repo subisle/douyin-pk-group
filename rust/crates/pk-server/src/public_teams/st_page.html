@@ -6056,7 +6056,7 @@ function resourceCategoryLabel(key) {
 
 async function loadVideoResources(signal) {
   if (videoResourcesLoaded) return;
-  const r = await fetch(VIDEO_RESOURCES_URL, { cache: 'no-cache', signal });
+  const r = await fetch(VIDEO_RESOURCES_URL, { cache: 'default', signal });
   if (!r.ok) throw new Error('资源目录加载失败（' + r.status + '）');
   const data = await r.json();
   const rows = Array.isArray(data) ? data : (data && Array.isArray(data.items) ? data.items : []);
