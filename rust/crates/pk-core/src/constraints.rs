@@ -187,6 +187,15 @@ impl Default for ConstraintSet {
                     name: "浩泽".into(),
                     group: PinnedGroup::last(),
                 },
+                // 2026-11-07 用户口径：初级争霸赛把两个大牌一起压在第 3 组（主战场）
+                PinnedRule {
+                    name: "浩龙".into(),
+                    group: PinnedGroup::Index(3),
+                },
+                PinnedRule {
+                    name: "玖玉".into(),
+                    group: PinnedGroup::Index(3),
+                },
             ],
             schedule: ScheduleRule {
                 // 2026-10-09 用户拍板：小组赛中午 12:15 开始（第 1 组）
