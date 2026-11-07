@@ -115,6 +115,40 @@ def clean_title(value: str) -> str:
     return re.sub(r"\s+", " ", value.replace("\ufeff", "")).strip()
 
 
+def parse_price(title: str) -> int | None:
+    """Extract the gift price from names such as `2999钻`, `3.5w`, `699-...`."""
+    explicit = re.search(r"(?<!\d)(\d+(?:\.\d+)?)\s*(钻|[wW])", title)
+    if explicit:
+        value = float(explicit.group(1))
+        unit = explicit.group(2)
+        return round(value * (1 if unit == "钻" else 10_000))
+
+    prefix_wan = re.match(r"^(\d+(?:\.\d+)?)\s*万", title)
+    if prefix_wan:
+        return round(float(prefix_wan.group(1)) * 10_000)
+
+    leading = re.match(r"^(\d+)", title)
+    if not leading:
+        return None
+    value = int(leading.group(1))
+    rest = title[leading.end() :]
+    if value < 10 or 2000 <= value <= 2099:
+        return None
+    if rest.startswith(("阶", "级", "倍", "强", "年")):
+        return None
+    if value in (25, 26) and rest.startswith("-"):
+        return None
+    return value
+
+
+def price_label(value: int | None) -> str:
+    if value is None:
+        return "价格待定"
+    if value >= 10_000:
+        return f"{value / 10_000:g}万钻"
+    return f"{value}钻"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("zip_path", type=Path)
@@ -150,6 +184,7 @@ def main() -> None:
                 raise SystemExit(f"第 {index} 行不是有效 SVG: {svg_name}")
 
             category = classify(title)
+            price = parse_price(title)
             thumb_name = f"{index:04d}.svg"
             (thumbs_dir / thumb_name).write_bytes(svg_bytes)
             items.append(
@@ -162,6 +197,8 @@ def main() -> None:
                     "netdiskUrl": netdisk_url,
                     "provider": "UC网盘",
                     "thumbnail": f"/resources/thumbs/{thumb_name}",
+                    "price": price,
+                    "priceLabel": price_label(price),
                     "tags": ["无黑边", CATEGORY_LABELS[category]],
                 }
             )

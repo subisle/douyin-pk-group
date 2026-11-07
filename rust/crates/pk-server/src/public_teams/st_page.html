@@ -1609,6 +1609,9 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
   color:#94A3B8; display:grid; place-items:center; cursor:pointer; }
 .resource-layout button.on { background:#fff; color:#4F46E5; box-shadow:0 1px 4px rgba(15,23,42,.1); }
 .resource-layout .material-symbols-outlined { font-size:18px; }
+.resource-sort { flex:none; height:35px; max-width:112px; border:1px solid #E2E8F0; border-radius:10px;
+  background:rgba(255,255,255,.82); color:#475569; font:inherit; font-size:11px; font-weight:600;
+  padding:0 7px; outline:none; }
 .resource-meta { display:flex; align-items:center; justify-content:space-between; margin:0 2px;
   color:#94A3B8; font-size:11px; }
 .resource-meta b { color:#475569; font-weight:600; }
@@ -1643,6 +1646,7 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
   font-size:9.5px; font-weight:600; }
 .resource-tag.category { background:#F1F5F9; color:#64748B; }
 .resource-tag.code { background:#0F172A; color:#E2E8F0; font-variant-numeric:tabular-nums; }
+.resource-tag.price { background:#FFF7ED; color:#C2410C; font-variant-numeric:tabular-nums; }
 .resource-actions { display:flex; align-items:center; gap:5px; margin-top:auto; padding-top:10px; }
 .resource-list .resource-actions { width:84px; flex-direction:column; align-items:stretch; padding-top:0; }
 .resource-list .resource-open, .resource-list .resource-copy { width:100%; }
@@ -2978,6 +2982,7 @@ let videoResourcesLoaded = false;
 let resourceCategory = 'all';
 let resourceQuery = '';
 let resourceVisibleCount = RESOURCE_PAGE_SIZE;
+let resourceSort = 'default';
 let resourceLayout = 'list';
 try { resourceLayout = localStorage.getItem('pk_resource_layout') === 'grid' ? 'grid' : 'list'; } catch (_) {}
 let curDate = null;      // 每日口径当前日期
@@ -6039,9 +6044,9 @@ async function loadVideoResources(signal) {
 function resourceCardHtml(item, layout) {
   const url = esc(item.netdiskUrl);
   const title = esc(item.title);
-  const tags = (item.tags || []).slice(0, 2).map(t => '<span class="resource-tag">' + esc(t) + '</span>').join('');
   const provider = item.provider ? '<span class="resource-tag">' + esc(item.provider) + '</span>' : '';
   const code = item.code ? '<span class="resource-tag code">#' + esc(item.code) + '</span>' : '';
+  const price = item.priceLabel ? '<span class="resource-tag price">' + esc(item.priceLabel) + '</span>' : '';
   const duration = item.duration ? '<span class="resource-tag">' + esc(item.duration) + '</span>' : '';
   const thumb = item.thumbnail
     ? '<a class="resource-thumb" href="' + url + '" target="_blank" rel="noopener" title="打开网盘">' +
@@ -6057,7 +6062,7 @@ function resourceCardHtml(item, layout) {
       '<div class="desc">' + esc(item.desc) + '</div>' +
       '<div class="resource-row-meta">' +
         '<span class="resource-tag category">' + esc(resourceCategoryLabel(item.category)) + '</span>' +
-        code + provider + duration + tags +
+        price + code + provider + duration +
       '</div>' +
     '</div>' +
     '<div class="resource-actions">' +
@@ -6071,12 +6076,23 @@ function resourceCardHtml(item, layout) {
 
 function resourceFilteredItems() {
   const key = resourceQuery.trim().toLowerCase();
-  return VIDEO_RESOURCES.filter(item => {
+  const items = VIDEO_RESOURCES.filter(item => {
     if (resourceCategory !== 'all' && item.category !== resourceCategory) return false;
     if (!key) return true;
-    return [item.title, item.desc, item.code, item.provider, resourceCategoryLabel(item.category), ...(item.tags || [])]
-      .join(' ').toLowerCase().includes(key);
+    return String(item.title || '').toLowerCase().includes(key);
   });
+  if (resourceSort === 'price-asc' || resourceSort === 'price-desc') {
+    const direction = resourceSort === 'price-asc' ? 1 : -1;
+    items.sort((a, b) => {
+      const ap = typeof a.price === 'number' && Number.isFinite(a.price) ? a.price : null;
+      const bp = typeof b.price === 'number' && Number.isFinite(b.price) ? b.price : null;
+      if (ap === null && bp === null) return String(a.id).localeCompare(String(b.id));
+      if (ap === null) return 1;
+      if (bp === null) return -1;
+      return (ap - bp) * direction || String(a.id).localeCompare(String(b.id));
+    });
+  }
+  return items;
 }
 
 function renderResourceResults() {
@@ -6121,16 +6137,21 @@ async function renderResources(signal) {
     '<div class="resource-hero">' +
       '<div class="kicker"><span class="material-symbols-outlined">folder_special</span>RESOURCE HUB</div>' +
       '<h2>礼物视频素材</h2>' +
-      '<p>共 ' + VIDEO_RESOURCES.length + ' 个礼物动效素材，支持搜索、分类及列表/卡片浏览，点击缩略图直接跳转 UC 网盘。</p>' +
+      '<p>共 ' + VIDEO_RESOURCES.length + ' 个礼物动效素材，可按礼物名称搜索、按价格排序，点击缩略图直接跳转 UC 网盘。</p>' +
     '</div>' +
     '<div class="resource-tools">' +
       '<div class="resource-search">' +
         '<span class="material-symbols-outlined">search</span>' +
-        '<input id="resourceSearch" type="search" autocomplete="off" placeholder="搜索礼物名称、编号、分类或标签" value="' + esc(resourceQuery) + '">' +
+        '<input id="resourceSearch" type="search" autocomplete="off" placeholder="搜索礼物名称" value="' + esc(resourceQuery) + '">' +
         '<button class="clear" id="resourceClear" type="button" aria-label="清空搜索"' + (resourceQuery ? '' : ' hidden') + '><span class="material-symbols-outlined">close</span></button>' +
       '</div>' +
       '<div class="resource-filter-row">' +
         '<div class="resource-cats">' + VIDEO_CATEGORIES.map(c => withCount(c.key)).join('') + '</div>' +
+        '<select id="resourceSort" class="resource-sort" aria-label="资源排序">' +
+          '<option value="default"' + (resourceSort === 'default' ? ' selected' : '') + '>默认排序</option>' +
+          '<option value="price-asc"' + (resourceSort === 'price-asc' ? ' selected' : '') + '>价格低到高</option>' +
+          '<option value="price-desc"' + (resourceSort === 'price-desc' ? ' selected' : '') + '>价格高到低</option>' +
+        '</select>' +
         '<div class="resource-layout" aria-label="布局切换">' +
           '<button type="button" data-resource-layout="list" title="列表布局"><span class="material-symbols-outlined">view_agenda</span></button>' +
           '<button type="button" data-resource-layout="grid" title="卡片布局"><span class="material-symbols-outlined">grid_view</span></button>' +
@@ -6162,6 +6183,11 @@ async function renderResources(signal) {
       renderResourceResults();
     };
   });
+  $('resourceSort').onchange = (e) => {
+    resourceSort = e.target.value || 'default';
+    resourceVisibleCount = RESOURCE_PAGE_SIZE;
+    renderResourceResults();
+  };
   document.querySelectorAll('[data-resource-layout]').forEach(b => {
     b.onclick = () => {
       resourceLayout = b.dataset.resourceLayout === 'grid' ? 'grid' : 'list';
