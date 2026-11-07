@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>资源分享</title>
+<style>
+:root{color-scheme:light;--bg:#f5f7fb;--ink:#0f172a;--muted:#64748b;--line:#e2e8f0;--brand:#4f46e5;--brand2:#7c3aed;--card:rgba(255,255,255,.82)}
+*{box-sizing:border-box}html,body{margin:0;min-height:100%;background:var(--bg);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}button,input,select{font:inherit}button{cursor:pointer}a{color:inherit}
+body{background:radial-gradient(circle at 100% 0,#e0e7ff 0,transparent 34%),radial-gradient(circle at 0 18%,#f3e8ff 0,transparent 28%),var(--bg)}
+.top{position:sticky;top:0;z-index:20;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px max(16px,calc((100vw - 920px)/2));background:rgba(245,247,251,.86);backdrop-filter:blur(16px);border-bottom:1px solid rgba(226,232,240,.8)}
+.brand{display:flex;align-items:center;gap:9px;font-weight:800;letter-spacing:-.02em}.brand-mark{width:32px;height:32px;border-radius:11px;background:linear-gradient(135deg,var(--brand),var(--brand2));display:grid;place-items:center;color:#fff;box-shadow:0 6px 16px rgba(79,70,229,.25)}.brand-mark svg{width:18px;height:18px}
+.top-actions{display:flex;align-items:center;gap:8px}.top-link,.logout{border:1px solid var(--line);background:rgba(255,255,255,.76);border-radius:10px;padding:7px 10px;text-decoration:none;font-size:12px;font-weight:700;color:#475569}.logout[hidden]{display:none}
+main{width:min(920px,100%);margin:0 auto;padding:18px 16px 48px}.hidden{display:none!important}
+.login{min-height:calc(100vh - 110px);display:grid;place-items:center}.login-card{width:min(380px,100%);padding:26px;border:1px solid rgba(255,255,255,.95);border-radius:22px;background:rgba(255,255,255,.82);box-shadow:0 18px 50px rgba(15,23,42,.09);backdrop-filter:blur(14px)}.login-kicker{font-size:11px;font-weight:800;letter-spacing:.14em;color:var(--brand)}.login h1{margin:9px 0 7px;font-size:27px;letter-spacing:-.04em}.login p{margin:0 0 20px;color:var(--muted);font-size:13px;line-height:1.7}.field{margin-top:11px}.field label{display:block;margin:0 0 6px;color:#475569;font-size:12px;font-weight:700}.field input{width:100%;height:46px;border:1px solid var(--line);border-radius:12px;padding:0 13px;background:#fff;outline:none;transition:.16s}.field input:focus{border-color:#818cf8;box-shadow:0 0 0 3px rgba(99,102,241,.12)}.login-btn{width:100%;height:46px;margin-top:16px;border:0;border-radius:12px;background:#0f172a;color:#fff;font-weight:800}.login-btn:disabled{opacity:.45;cursor:not-allowed}.login-error{min-height:20px;margin-top:10px;color:#dc2626;font-size:12px;line-height:1.5}.login-back{margin-top:12px;text-align:center;font-size:12px}.login-back a{color:#64748b;text-decoration:none}
+.hero{position:relative;overflow:hidden;padding:22px 19px;border-radius:20px;background:linear-gradient(135deg,rgba(79,70,229,.96),rgba(124,58,237,.9));color:#fff;box-shadow:0 14px 32px rgba(79,70,229,.22)}.hero:after{content:"";position:absolute;right:-42px;top:-58px;width:170px;height:170px;border-radius:50%;background:rgba(255,255,255,.14)}.hero-kicker{font-size:10px;font-weight:800;letter-spacing:.16em;opacity:.75}.hero h1{margin:8px 0 6px;font-size:27px;letter-spacing:-.04em}.hero p{position:relative;margin:0;max-width:480px;font-size:12.5px;line-height:1.7;opacity:.82}.hero b{font-weight:800}
+.tools{margin-top:14px;padding:14px;border:1px solid rgba(255,255,255,.95);border-radius:17px;background:rgba(255,255,255,.78);box-shadow:0 7px 22px rgba(15,23,42,.055);backdrop-filter:blur(10px)}.search{position:relative}.search svg{position:absolute;left:12px;top:50%;width:18px;height:18px;transform:translateY(-50%);color:#94a3b8;fill:none;stroke:currentColor;stroke-width:2}.search input{width:100%;height:43px;border:1px solid var(--line);border-radius:12px;padding:0 42px 0 39px;background:rgba(255,255,255,.95);outline:none}.search input:focus{border-color:#818cf8;box-shadow:0 0 0 3px rgba(99,102,241,.12)}.clear{position:absolute;right:7px;top:7px;width:29px;height:29px;border:0;border-radius:9px;background:transparent;color:#94a3b8;font-size:18px;line-height:1}.clear[hidden]{display:none}
+.filters{margin-top:11px}.group-row,.cat-row{display:flex;gap:7px;overflow-x:auto;padding:1px 0 8px;scrollbar-width:none}.group-row{border-bottom:1px solid rgba(226,232,240,.7)}.group-row::-webkit-scrollbar,.cat-row::-webkit-scrollbar{display:none}.chip{flex:none;display:inline-flex;align-items:center;gap:5px;border:1px solid var(--line);border-radius:999px;padding:7px 11px;background:rgba(255,255,255,.76);color:#64748b;font-size:11.5px;font-weight:700;white-space:nowrap}.chip .n{opacity:.62;font-variant-numeric:tabular-nums}.chip.on{border-color:transparent;background:#4f46e5;color:#fff;box-shadow:0 4px 10px rgba(79,70,229,.22)}.group-chip.on{background:#0f172a;box-shadow:0 4px 12px rgba(15,23,42,.18)}
+.controls{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:2px}.sort-wrap{display:flex;align-items:center;gap:6px;color:#94a3b8;font-size:10.5px}.sort{height:34px;max-width:118px;border:1px solid var(--line);border-radius:10px;background:#fff;color:#475569;padding:0 8px;font-size:11px;font-weight:700;outline:none}.layout{display:flex;gap:2px;padding:3px;border-radius:10px;background:#eef2f7}.layout button{width:31px;height:28px;border:0;border-radius:8px;background:transparent;color:#94a3b8}.layout button.on{background:#fff;color:var(--brand);box-shadow:0 1px 4px rgba(15,23,42,.1)}
+.meta{display:flex;justify-content:space-between;gap:10px;margin:14px 2px 9px;color:#94a3b8;font-size:11px}.meta b{color:#475569}.results{display:flex;flex-direction:column;gap:10px}.results.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.card{min-width:0;display:grid;grid-template-columns:94px minmax(0,1fr) 84px;align-items:center;gap:11px;padding:10px;border:1px solid rgba(255,255,255,.95);border-radius:15px;background:var(--card);box-shadow:0 5px 16px rgba(15,23,42,.055);content-visibility:auto;contain-intrinsic-size:auto 92px}.grid .card{display:flex;flex-direction:column;align-items:stretch;padding:0;contain-intrinsic-size:auto 250px}.thumb{width:94px;height:70px;border-radius:11px;overflow:hidden;background:radial-gradient(circle at 50% 35%,#1e293b,#080b12 72%);display:block}.thumb img{width:100%;height:100%;object-fit:contain;display:block}.grid .thumb{width:100%;height:150px;border-radius:0;border-bottom:1px solid rgba(226,232,240,.7)}.main{min-width:0}.grid .main{padding:12px 13px 0}.card h3{margin:0;font-size:14px;line-height:1.35;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.card h3 a{text-decoration:none}.grid .card h3{white-space:normal;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;min-height:2.7em}.desc{margin-top:5px;color:var(--muted);font-size:11.5px;line-height:1.55;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}.tags{display:flex;gap:5px;flex-wrap:wrap;margin-top:7px}.tag{padding:2px 6px;border-radius:6px;background:#eef2ff;color:var(--brand);font-size:9.5px;font-weight:700}.tag.cat{background:#f1f5f9;color:#64748b}.tag.code{background:#0f172a;color:#e2e8f0}.tag.price{background:#fff7ed;color:#c2410c}.actions{display:flex;flex-direction:column;gap:5px}.grid .actions{padding:10px 13px 13px;margin-top:auto}.open,.copy{height:31px;border:0;border-radius:9px;display:flex;align-items:center;justify-content:center;gap:4px;text-decoration:none;font-size:11px;font-weight:800}.open{background:#4f46e5;color:#fff}.copy{background:#eef2ff;color:#4f46e5}.more{width:100%;margin-top:14px;height:42px;border:1px solid var(--line);border-radius:12px;background:#fff;color:#475569;font-weight:800}.empty{padding:54px 16px;text-align:center;color:#94a3b8;font-size:13px}.skeleton{height:92px;border-radius:15px;background:linear-gradient(90deg,#eef2f7 25%,#f8fafc 37%,#eef2f7 63%);background-size:400% 100%;animation:shine 1.2s infinite}.grid .skeleton{height:250px}@keyframes shine{0%{background-position:100% 0}100%{background-position:0 0}}
+#toast{position:fixed;left:50%;bottom:28px;z-index:50;transform:translate(-50%,18px);padding:9px 14px;border-radius:999px;background:#0f172a;color:#fff;font-size:12px;opacity:0;pointer-events:none;transition:.18s}#toast.show{opacity:1;transform:translate(-50%,0)}
+@media(min-width:700px){.results.grid{grid-template-columns:repeat(3,minmax(0,1fr))}.hero h1{font-size:31px}.hero p{font-size:13px}}
+@media(max-width:420px){main{padding:14px 12px 40px}.top{padding:10px 12px}.brand span:last-child{display:none}.hero{border-radius:17px}.card{grid-template-columns:82px minmax(0,1fr) 72px;gap:9px;padding:9px}.thumb{width:82px;height:66px}.actions .open{font-size:0}.actions .open:after{content:"打开";font-size:11px}}
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="brand"><span class="brand-mark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7a2 2 0 012-2h4l2 2h6a2 2 0 012 2v8a2 2 0 01-2 2H6a2 2 0 01-2-2V7z"/><path d="M4 11h16"/></svg></span><span>资源分享</span></div>
+  <div class="top-actions"><a class="top-link" href="/">返回数据榜</a><button class="logout" id="logout" type="button" hidden>退出</button></div>
+</header>
+<main>
+  <section class="login" id="loginView">
+    <div class="login-card">
+      <div class="login-kicker">RESOURCE HUB</div>
+      <h1>登录查看资源</h1>
+      <p>使用展示端账号登录。登录成功后会自动进入视频素材库。</p>
+      <form id="loginForm">
+        <div class="field"><label for="account">手机号 / 艺名</label><input id="account" name="account" autocomplete="username" required></div>
+        <div class="field"><label for="pass">密码</label><input id="pass" name="pass" type="password" autocomplete="current-password" required></div>
+        <button class="login-btn" id="loginBtn" type="submit">登 录</button>
+      </form>
+      <div class="login-error" id="loginError"></div>
+      <div class="login-back"><a href="/">先返回数据榜</a></div>
+    </div>
+  </section>
+
+  <section id="appView" class="hidden">
+    <div class="hero"><div class="hero-kicker">RESOURCE HUB</div><h1>视频素材库</h1><p>当前收录 <b id="heroCount">—</b> 个素材，按素材大类与细分类浏览；支持名称搜索、价格排序，点击缩略图直接跳转网盘。</p></div>
+    <div class="tools">
+      <div class="search"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><input id="query" type="search" autocomplete="off" placeholder="搜索资源名称"><button class="clear" id="clear" type="button" hidden>×</button></div>
+      <div class="filters"><div class="group-row" id="groups"></div><div class="cat-row" id="cats"></div></div>
+      <div class="controls"><label class="sort-wrap">排序<select class="sort" id="sort"><option value="default">默认排序</option><option value="price-asc">价格低到高</option><option value="price-desc">价格高到低</option></select></label><div class="layout"><button type="button" data-layout="list" class="on" title="列表布局">☷</button><button type="button" data-layout="grid" title="卡片布局">▦</button></div></div>
+    </div>
+    <div class="meta"><span id="count">正在加载…</span><span>点击缩略图跳转网盘</span></div>
+    <div class="results" id="results"><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div></div>
+    <button class="more hidden" id="more" type="button">加载更多</button>
+  </section>
+</main>
+<div id="toast"></div>
+<script>
+(() => {
+  const TOKEN_KEY = 'myToken_any';
+  const PAGE_SIZE = 30;
+  const state = { items: [], groups: [], categories: [], group: 'all', category: 'all', query: '', sort: 'default', layout: localStorage.getItem('pk_resource_layout') === 'grid' ? 'grid' : 'list', shown: PAGE_SIZE, loading: false };
+  const $ = id => document.getElementById(id);
+  const esc = value => String(value == null ? '' : value).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+  const token = () => sessionStorage.getItem(TOKEN_KEY) || '';
+  const setToken = value => { if (value) sessionStorage.setItem(TOKEN_KEY, value); };
+  const loginRequired = () => fetch('/api/public/announcements', {cache:'no-store'}).then(r => r.json()).then(d => d.loginRequired !== false).catch(() => true);
+  const categoryLabel = key => (state.categories.find(c => c.key === key) || {}).label || key;
+  const categoriesFor = key => {
+    if (key === 'all') return state.categories;
+    const group = state.groups.find(g => g.key === key);
+    return group && Array.isArray(group.categories) ? group.categories : [];
+  };
+  const priceOf = item => typeof item.price === 'number' && Number.isFinite(item.price) ? item.price : null;
+
+  function toast(text) {
+    const el = $('toast'); el.textContent = text; el.classList.add('show');
+    clearTimeout(toast.t); toast.t = setTimeout(() => el.classList.remove('show'), 1800);
+  }
+
+  function showLogin(message) {
+    $('appView').classList.add('hidden'); $('loginView').classList.remove('hidden'); $('logout').hidden = true;
+    if (message) $('loginError').textContent = message;
+    setTimeout(() => $('account').focus(), 30);
+  }
+
+  async function submitLogin(event) {
+    event.preventDefault();
+    const account = $('account').value.trim();
+    const pass = $('pass').value;
+    if (!account || !pass) { $('loginError').textContent = '请输入账号和密码'; return; }
+    $('loginBtn').disabled = true; $('loginBtn').textContent = '登录中…'; $('loginError').textContent = '';
+    try {
+      const res = await fetch('/api/public/my/login', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({account, pass})});
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.token) throw new Error(data.error || '登录失败');
+      setToken(data.token); $('pass').value = ''; await boot();
+    } catch (error) {
+      $('loginError').textContent = error.message || '登录失败，请稍后重试';
+    } finally {
+      $('loginBtn').disabled = false; $('loginBtn').textContent = '登 录';
+    }
+  }
+
+  function filtered() {
+    const keyword = state.query.trim().toLowerCase();
+    const keys = new Set(categoriesFor(state.group).map(c => c.key));
+    const rows = state.items.filter(item => {
+      if (state.group !== 'all' && item.group !== state.group && !keys.has(item.category)) return false;
+      if (state.category !== 'all' && item.category !== state.category) return false;
+      return !keyword || String(item.title || '').toLowerCase().includes(keyword);
+    });
+    if (state.sort !== 'default') {
+      const direction = state.sort === 'price-asc' ? 1 : -1;
+      rows.sort((a, b) => {
+        const ap = priceOf(a), bp = priceOf(b);
+        if (ap == null && bp == null) return String(a.id).localeCompare(String(b.id));
+        if (ap == null) return 1; if (bp == null) return -1;
+        return (ap - bp) * direction || String(a.id).localeCompare(String(b.id));
+      });
+    }
+    return rows;
+  }
+
+  function card(item) {
+    const url = esc(item.netdiskUrl), title = esc(item.title);
+    const price = item.priceLabel ? `<span class="tag price">${esc(item.priceLabel)}</span>` : '';
+    const code = item.code ? `<span class="tag code">#${esc(item.code)}</span>` : '';
+    const provider = item.provider ? `<span class="tag">${esc(item.provider)}</span>` : '';
+    const thumb = item.thumbnail ? `<a class="thumb" href="${url}" target="_blank" rel="noopener"><img src="${esc(item.thumbnail)}" alt="${title}" loading="lazy" decoding="async"></a>` : `<a class="thumb" href="${url}" target="_blank" rel="noopener"></a>`;
+    return `<article class="card">${thumb}<div class="main"><h3><a href="${url}" target="_blank" rel="noopener">${title}</a></h3><div class="desc">${esc(item.desc)}</div><div class="tags"><span class="tag cat">${esc(categoryLabel(item.category))}</span>${price}${code}${provider}</div></div><div class="actions"><a class="open" href="${url}" target="_blank" rel="noopener">打开网盘</a><button class="copy" type="button" data-copy="${url}" title="复制网盘链接">复制链接</button></div></article>`;
+  }
+
+  function renderChips() {
+    const groupCount = key => key === 'all' ? state.items.length : state.items.filter(i => i.group === key || new Set(categoriesFor(key).map(c => c.key)).has(i.category)).length;
+    $('groups').innerHTML = `<button class="chip group-chip ${state.group === 'all' ? 'on' : ''}" data-group="all">全部素材 <span class="n">${state.items.length}</span></button>` + state.groups.map(g => `<button class="chip group-chip ${state.group === g.key ? 'on' : ''}" data-group="${esc(g.key)}">${esc(g.label)} <span class="n">${groupCount(g.key)}</span></button>`).join('');
+    const filterBase = state.items.filter(i => state.group === 'all' || i.group === state.group || new Set(categoriesFor(state.group).map(c => c.key)).has(i.category));
+    const catCount = key => key === 'all' ? filterBase.length : filterBase.filter(i => i.category === key).length;
+    $('cats').innerHTML = `<button class="chip ${state.category === 'all' ? 'on' : ''}" data-cat="all">全部 <span class="n">${filterBase.length}</span></button>` + categoriesFor(state.group).map(c => `<button class="chip ${state.category === c.key ? 'on' : ''}" data-cat="${esc(c.key)}">${esc(c.label)} <span class="n">${catCount(c.key)}</span></button>`).join('');
+    document.querySelectorAll('[data-layout]').forEach(button => button.classList.toggle('on', button.dataset.layout === state.layout));
+  }
+
+  function render() {
+    renderChips();
+    const rows = filtered(), visible = rows.slice(0, state.shown);
+    $('results').className = 'results ' + (state.layout === 'grid' ? 'grid' : '');
+    $('results').innerHTML = visible.length ? visible.map(card).join('') : '<div class="empty">没有找到匹配资源<br>换个关键词或分类试试</div>';
+    $('count').innerHTML = `显示 <b>${visible.length}</b> / 共 <b>${rows.length}</b> 个素材`;
+    $('heroCount').textContent = state.items.length.toLocaleString('zh-CN');
+    $('more').classList.toggle('hidden', visible.length >= rows.length);
+    if (visible.length < rows.length) $('more').textContent = `加载更多（剩余 ${rows.length - visible.length}）`;
+    $('clear').hidden = !state.query;
+  }
+
+  async function boot() {
+    try {
+      if (await loginRequired() && !token()) { showLogin(); return; }
+      $('loginView').classList.add('hidden'); $('appView').classList.remove('hidden'); $('logout').hidden = false;
+      if (state.items.length) { render(); return; }
+      state.loading = true;
+      const res = await fetch('/resources/videos.json', {cache:'default'});
+      if (!res.ok) throw new Error(`资源目录加载失败（${res.status}）`);
+      const data = await res.json();
+      state.items = (Array.isArray(data) ? data : data.items || []).filter(x => x && x.title && x.netdiskUrl);
+      state.groups = !Array.isArray(data) && Array.isArray(data.groups) ? data.groups : [];
+      state.categories = !Array.isArray(data) && Array.isArray(data.categories) ? data.categories : state.groups.flatMap(g => g.categories || []);
+      state.loading = false; render();
+    } catch (error) {
+      state.loading = false;
+      $('results').innerHTML = `<div class="empty">${esc(error.message || '加载失败')}<br><button class="more" id="retry" type="button">重新加载</button></div>`;
+      const retry = $('retry'); if (retry) retry.onclick = boot;
+    }
+  }
+
+  $('loginForm').addEventListener('submit', submitLogin);
+  $('logout').addEventListener('click', () => { sessionStorage.removeItem(TOKEN_KEY); location.reload(); });
+  $('query').addEventListener('input', event => { state.query = event.target.value || ''; state.shown = PAGE_SIZE; render(); });
+  $('clear').addEventListener('click', () => { state.query = ''; $('query').value = ''; state.shown = PAGE_SIZE; render(); $('query').focus(); });
+  $('sort').addEventListener('change', event => { state.sort = event.target.value; state.shown = PAGE_SIZE; render(); });
+  $('groups').addEventListener('click', event => { const button = event.target.closest('[data-group]'); if (!button) return; state.group = button.dataset.group; state.category = 'all'; state.shown = PAGE_SIZE; render(); });
+  $('cats').addEventListener('click', event => { const button = event.target.closest('[data-cat]'); if (!button) return; state.category = button.dataset.cat; state.shown = PAGE_SIZE; render(); });
+  document.querySelector('.layout').addEventListener('click', event => { const button = event.target.closest('[data-layout]'); if (!button) return; state.layout = button.dataset.layout === 'grid' ? 'grid' : 'list'; localStorage.setItem('pk_resource_layout', state.layout); state.shown = PAGE_SIZE; render(); });
+  $('more').addEventListener('click', () => { state.shown += PAGE_SIZE; render(); });
+  $('results').addEventListener('click', async event => { const button = event.target.closest('[data-copy]'); if (!button) return; try { await navigator.clipboard.writeText(button.dataset.copy || ''); toast('链接已复制'); } catch (_) { toast('复制失败，请长按打开'); } });
+
+  boot();
+})();
+</script>
+</body>
+</html>

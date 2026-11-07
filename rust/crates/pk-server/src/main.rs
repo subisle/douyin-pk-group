@@ -573,8 +573,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/", get(public_teams::st_root))
         .route("/report", get(public_teams::st_root))
         .route("/lineage", get(public_teams::st_root))
-        .route("/resources", get(public_teams::st_root))
-        .route("/resource", get(public_teams::st_root))
+        .route("/resources", get(public_teams::resources_page))
+        .route("/resource", get(public_teams::resources_page))
         .route("/my", get(public_teams::st_root))
         /* 「我的」子页（2026-10-15）：前端 parseRoute 白名单只认
         my/(bind|push|chase|privacy|about|wechat)（st_page.html 的 mym 正则），

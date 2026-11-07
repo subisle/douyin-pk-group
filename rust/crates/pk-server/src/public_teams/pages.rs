@@ -6,6 +6,9 @@ use super::*;
 
 pub(super) const ST_PAGE: &str = include_str!("st_page.html");
 
+/// 独立轻量资源页：避免为了 2176 条素材加载整站约 719KB 的展示页脚本。
+const RESOURCES_PAGE: &str = include_str!("resources_page.html");
+
 /// GET / 根路径：展示页（2026-10-11 起不分男女，统一读 /api/public/teams/all）
 pub async fn st_root() -> Response {
     st_page_for("all")
@@ -33,6 +36,22 @@ pub async fn st_page_sub(
     axum::extract::Path((_team, _rest)): axum::extract::Path<(String, String)>,
 ) -> Response {
     st_page_for("all")
+}
+
+/// GET /resources、/resource：独立资源分享页。
+/// 页面只包含资源浏览所需的最小 CSS/JS；登录与数据仍走原有公开 API。
+pub async fn resources_page() -> Response {
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (
+                axum::http::header::CACHE_CONTROL,
+                "public, max-age=300, stale-while-revalidate=60",
+            ),
+        ],
+        RESOURCES_PAGE,
+    )
+        .into_response()
 }
 
 pub(super) fn st_page_for(team: &str) -> Response {
