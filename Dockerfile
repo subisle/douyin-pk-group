@@ -57,11 +57,13 @@ FROM --platform=$BUILDPLATFORM debian:bookworm-slim AS base
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tzdata \
     && rm -rf /var/lib/apt/lists/*
 
-# ---------- 阶段 4：运行时（只有 COPY，无 RUN） ----------
+# ---------- 阶段 4：运行时（含中文字体；业务二进制仍由构建阶段交叉编译） ----------
 FROM debian:bookworm-slim
 # 非 root 运行（2026-10-17 审计：原先容器以 root 跑，纵深防御缺口）。
 # 只挂 /app/data 写运行时状态，属主预先建好；监听 8787 非特权端口无需 CAP。
-RUN groupadd -r pk --gid=1000 && useradd -r -g pk --uid=1000 --home-dir=/app --shell=/usr/sbin/nologin pk \
+RUN apt-get update && apt-get install -y --no-install-recommends fonts-noto-cjk \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd -r pk --gid=1000 && useradd -r -g pk --uid=1000 --home-dir=/app --shell=/usr/sbin/nologin pk \
     && mkdir -p /app/data && chown -R pk:pk /app
 ENV TZ=Asia/Shanghai
 WORKDIR /app

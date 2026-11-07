@@ -10,6 +10,37 @@
 }
 .lm-toolbar select { min-width: 220px; }
 
+.lm-setup {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 14px;
+}
+@media (max-width: 900px) {
+  .lm-setup { grid-template-columns: 1fr; }
+}
+.lm-setup-form {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+.lm-setup-form h3 {
+  width: 100%;
+  margin: 0;
+  font-size: 14px;
+}
+.lm-setup-form input,
+.lm-setup-form select {
+  min-width: 0;
+}
+.lm-setup-form input:first-of-type { flex: 1 1 220px; }
+.lm-setup-form select { flex: 1 1 180px; }
+
 /* 状态点：颜色即语义，扫一眼就知道哪一卡住了 */
 .dot {
   width: 8px;
@@ -36,13 +67,47 @@
 .lm-tag.lm-bad { color: var(--bad); background: var(--bad-bg); border-color: transparent; }
 .lm-tag.lm-ok { color: var(--good); background: var(--good-bg); border-color: transparent; }
 
-.lm-rooms { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+.lm-rooms, .lm-workers { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+.lm-section-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.lm-section-head h3 { margin-right: auto; }
+.lm-inline-form {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.lm-inline-form input { min-width: 220px; }
 .lm-room {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
   padding: 7px 10px;
   background: var(--card);
   border: 1px solid var(--line);
   border-radius: var(--radius-ctl);
+}
+.lm-worker {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 6px 10px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-ctl);
+}
+.lm-command {
+  margin: 4px 0 0;
+  padding: 8px 10px;
+  overflow-x: auto;
+  color: var(--ink2);
+  background: var(--canvas);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-ctl);
+  font-size: 12px;
 }
 
 /* 主体：左实时分、右赛程，窄屏自动堆叠 */
@@ -104,6 +169,37 @@
 .lm-group-head button { margin-left: auto; }
 
 .lm-rounds { margin-top: 7px; display: flex; flex-direction: column; gap: 6px; }
+.lm-roster {
+  padding: 6px 7px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--canvas);
+}
+.lm-roster-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink2);
+}
+.lm-roster-list {
+  display: flex;
+  gap: 5px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+.lm-roster-person {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 3px 7px;
+  font-size: 12px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+}
+.lm-uid { color: var(--ink3); font-size: 10px; }
 .lm-round {
   border: 1px dashed var(--line-strong);
   border-radius: 6px;

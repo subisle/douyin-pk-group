@@ -58,6 +58,9 @@ ICONS = [
     # 2026-11-05 资源分享页
     "folder", "folder_special", "view_agenda", "grid_view", "content_copy",
     "open_in_new", "passkey", "play_circle", "api", "monitoring", "code", "key",
+    # 2026-11-07 资源分享分类（JSON 数据驱动）
+    "apps", "redeem", "flight", "apartment", "celebration", "touch_app",
+    "branding_watermark", "badge", "category",
 ]
 
 _DIGITS = ("zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine")

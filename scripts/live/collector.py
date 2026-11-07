@@ -54,10 +54,15 @@ class Api:
     def ingest(self, event_id: int, obs: dict) -> dict | None:
         return self._post(f"/api/internal/live/events/{event_id}/observations", obs)
 
-    def heartbeat(self, worker_id: str, rooms: int) -> None:
+    def heartbeat(self, worker_id: str, rooms: int, event_id: int) -> None:
         self._post(
             "/api/internal/live/worker/heartbeat",
-            {"workerId": worker_id, "version": "1.0.0", "rooms": rooms},
+            {
+                "workerId": worker_id,
+                "eventId": event_id,
+                "version": "1.0.0",
+                "rooms": rooms,
+            },
         )
 
 
@@ -78,19 +83,6 @@ class Api:
 Playwright 同步 API 的 response 回调只在把控制权交回浏览器的调用期间派发，
 time.sleep 期间一个事件都收不到（实测 60 秒里 linkmic 计数恒为 0）。
 """
-
-# 主动拉取（回落用）。能成功就用，失败由调用方忽略。
-FETCH_JS = """
-async () => {
-  try {
-    const r = await fetch(location.href, { credentials: 'include' });
-    return { ok: r.ok, status: r.status };
-  } catch (e) {
-    return { ok: false, error: String(e) };
-  }
-}
-"""
-
 
 def parse_linkmic(j: dict) -> dict:
     """把 linkmic/list 的原始 JSON 转成中间结构（字段与后端 Observation 对齐前的一步）"""
@@ -172,11 +164,14 @@ def parse_linkmic(j: dict) -> dict:
 
 def to_observation(web_rid: str, raw: dict, now_ms: int) -> dict:
     """把页面返回的原始结构转成后端 Observation（字段名与 Rust 侧一致）"""
+    raw_now_ms = int(raw.get("nowMs") or 0)
     obs: dict[str, Any] = {
         "webRid": web_rid,
         "roomId": str(raw.get("roomId", "")),
         "roomOnline": bool(raw.get("online", True)),
-        "nowMs": now_ms,
+        # 优先使用抖音接口的 extra.now；它和 battle 时间在同一条时间轴。
+        # 只有接口没给时才回落到本机时钟。
+        "nowMs": raw_now_ms if raw_now_ms > 0 else now_ms,
         "health": "ok",
         "error": "",
     }
@@ -210,6 +205,33 @@ def to_observation(web_rid: str, raw: dict, now_ms: int) -> dict:
             ],
         }
     return obs
+
+
+def build_ingest_payload(
+    web_rid: str,
+    raw: dict,
+    now_ms: int,
+    last_response_at: float,
+    wall_now: float,
+    interval: float,
+) -> tuple[dict, bool]:
+    """根据快照新鲜度生成上报内容；过期快照绝不能再更新实时分。"""
+    stale = wall_now - last_response_at > max(30.0, interval * 6)
+    if stale or not raw:
+        return (
+            {
+                "webRid": web_rid,
+                "roomOnline": True,
+                "nowMs": now_ms,
+                "health": "error" if stale else "ok",
+                "error": "页面长时间没发 linkmic 请求" if stale else "",
+            },
+            False,
+        )
+    obs = to_observation(web_rid, raw, now_ms)
+    if obs.get("nowMs", 0) <= 0:
+        obs["nowMs"] = now_ms
+    return obs, True
 
 
 def main() -> int:
@@ -246,7 +268,6 @@ def main() -> int:
 
     from playwright.sync_api import sync_playwright  # 延迟导入：--help 不需要浏览器
 
-    failures = 0
     launch = {"headless": not args.headed}
     # 用系统 Chrome：本机没装 Playwright 自带的 headless shell，
     # 下载浏览器既慢又占空间，系统 Chrome 版本足够跑这个接口。
@@ -256,19 +277,12 @@ def main() -> int:
         browser = p.chromium.launch(**launch)
         ctx = browser.new_context()
         pages = {}
-        for rid in args.room:
-            page = ctx.new_page()
-            page.goto(
-                f"https://live.douyin.com/{rid}",
-                wait_until="domcontentloaded",
-                timeout=60000,
-            )
-            pages[rid] = page
-            print(f"[info] 已打开直播间 {rid}")
 
-        # 每个房间留一份「最近一次 linkmic/list 的响应」，由页面自己的请求刷新
-        latest: dict[str, dict] = {rid: {} for rid in pages}
-        last_at: dict[str, float] = {rid: 0.0 for rid in pages}
+        # 每个房间留一份「最近一次 linkmic/list 的响应」，由页面自己的请求刷新。
+        # 监听必须在 goto 之前挂上：首次加载页面时就会发 linkmic/list，
+        # 先 goto 再 on(response) 会永远错过第一拍。
+        latest: dict[str, dict] = {}
+        last_at: dict[str, float] = {}
 
         def make_handler(rid: str):
             def on_response(resp):
@@ -284,8 +298,19 @@ def main() -> int:
 
             return on_response
 
-        for rid, page in pages.items():
+        for rid in args.room:
+            page = ctx.new_page()
+            latest[rid] = {}
+            # 从页面打开时开始计时。若这里留 0，首拍会被误判成“已过期”。
+            last_at[rid] = time.time()
             page.on("response", make_handler(rid))
+            page.goto(
+                f"https://live.douyin.com/{rid}",
+                wait_until="domcontentloaded",
+                timeout=60000,
+            )
+            pages[rid] = page
+            print(f"[info] 已打开直播间 {rid}")
 
         first_page = next(iter(pages.values()))
         started = time.time()
@@ -294,25 +319,18 @@ def main() -> int:
                 now_ms = int(time.time() * 1000)
                 for rid, page in pages.items():
                     raw = latest.get(rid) or {}
-                    # 页面还没发过（刚开播 / 没连麦）：数据过期，标 degraded 但不算错误
-                    stale = time.time() - last_at.get(rid, 0.0) > max(30.0, args.interval * 6)
-                    if not raw:
-                        api.ingest(
-                            args.event,
-                            {
-                                "webRid": rid,
-                                "roomOnline": True,
-                                "nowMs": now_ms,
-                                "health": "error" if stale else "ok",
-                                "error": "" if not stale else "页面长时间没发 linkmic 请求",
-                            },
-                        )
+                    obs, has_fresh_snapshot = build_ingest_payload(
+                        rid,
+                        raw,
+                        now_ms,
+                        last_at.get(rid, 0.0),
+                        time.time(),
+                        args.interval,
+                    )
+                    if not has_fresh_snapshot:
+                        api.ingest(args.event, obs)
                         print(f"[poll] {rid} 等待页面数据…")
                         continue
-                    failures = 0
-                    obs = to_observation(rid, raw, now_ms)
-                    if obs.get("nowMs", 0) <= 0:
-                        obs["nowMs"] = now_ms
                     res = api.ingest(args.event, obs)
                     bid = (obs.get("battle") or {}).get("battleId", "")
                     print(
@@ -320,7 +338,7 @@ def main() -> int:
                         f"phase={(res or {}).get('phase', '?')} "
                         f"users={raw.get('userCount', 0)}"
                     )
-                api.heartbeat(worker_id, len(pages))
+                api.heartbeat(worker_id, len(pages), args.event)
                 # --once 要等到真的拿到过数据才退出，否则「刚开播还没连麦」时
                 # 一拍就返回，调试时永远看不到页面数据。
                 if args.once and (

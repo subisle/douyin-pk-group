@@ -616,7 +616,7 @@ pub async fn ingest_observation(
 
     // 1) 定位小组：优先按当前正在进行的阶段找「已认领本 battle」的小组，
     //    否则找该阶段里第一个还没定稿的小组（运营按赛程顺序开打）。
-    let group_id = resolve_group(st, event_id, snap).await?;
+    let group_id = resolve_group(st, event_id, snap, &obs.web_rid).await?;
     if group_id == 0 {
         out.phase = "unassigned".into();
         out.note = "当前没有可接这一局的小组（阶段未开始或都已定稿）".into();
@@ -737,10 +737,36 @@ async fn resolve_group(
     st: &Arc<AppState>,
     event_id: i64,
     snap: &BattleSnapshot,
+    web_rid: &str,
 ) -> anyhow::Result<i64> {
     if let Some(g) = crate::store::live_round_group_of(st, &snap.battle_id).await? {
         return Ok(g);
     }
+
+    let signature = snap.roster_signature();
+    // 残留 battle_stats / 页面重发可能换一个 battle_id 但仍报同一批人。上一组
+    // 刚定稿时，这一局应回到上一组进入人工复核，而不是被顺延到下一组。
+    if let Some(g) =
+        crate::store::live_recent_finalized_group_for_roster(st, event_id, web_rid, &signature)
+            .await
+    {
+        return Ok(g);
+    }
+
+    // 有赛前名单时优先按 UID 集合精确认组，避免多直播间或乱序上报把局挂错。
+    let current: std::collections::HashSet<&str> =
+        snap.scores.iter().map(|s| s.user_id.as_str()).collect();
+    for (group_id, uids) in crate::store::live_open_group_rosters(st, event_id).await {
+        if uids.is_empty() {
+            continue;
+        }
+        let seeded: std::collections::HashSet<&str> = uids.iter().map(String::as_str).collect();
+        if seeded == current {
+            return Ok(group_id);
+        }
+    }
+
+    // 兼容没有登记采集号的旧方案：名单无法精确匹配时按赛程顺序接第一组。
     crate::store::live_next_open_group(st, event_id).await
 }
 
@@ -988,14 +1014,14 @@ pub async fn build_stage_groups(
     qualify_slots: i32,
 ) -> anyhow::Result<usize> {
     let stage_id = crate::store::live_stage_ensure(st, event_id, kind).await?;
-    crate::store::live_stage_set_status(st, stage_id, StageStatus::Pending).await?;
     let mut n = 0;
     for (i, b) in buckets.iter().enumerate() {
-        let name = b
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+        let raw_name = b.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let name = if raw_name.trim().is_empty() {
+            format!("第 {} 组", i + 1)
+        } else {
+            raw_name.to_string()
+        };
         let gid = crate::store::live_group_create(
             st,
             event_id,
@@ -1007,6 +1033,53 @@ pub async fn build_stage_groups(
             0,
         )
         .await?;
+
+        let players = b
+            .get("players")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let mut seeds = Vec::with_capacity(players.len());
+        for (order, player) in players.iter().enumerate() {
+            if player
+                .get("excluded")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            let person_id = player
+                .get("personId")
+                .and_then(|v| {
+                    v.as_i64()
+                        .or_else(|| v.as_str().and_then(|s| s.parse::<i64>().ok()))
+                })
+                .unwrap_or(0);
+            let plan_name = player
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let anchor = crate::store::live_anchor_for_person(st, person_id).await;
+            let (uid, anchor_name) = anchor.unwrap_or_default();
+            let nickname = if !plan_name.is_empty() {
+                plan_name
+            } else if !anchor_name.is_empty() {
+                anchor_name
+            } else if person_id > 0 {
+                format!("#{person_id}")
+            } else {
+                continue;
+            };
+            seeds.push(crate::store::GroupSeedSeat {
+                person_id,
+                douyin_uid: uid,
+                nickname,
+                seed_order: order as i32,
+            });
+        }
+        crate::store::live_group_seed_replace(st, gid, &seeds).await?;
         n += 1;
         tracing::debug!(group = gid, name = %name, "已建比赛小组");
     }
@@ -1065,7 +1138,8 @@ pub async fn build_revival_rooms(
         )
         .await?;
         // 预落席位（昵称 + UID 先占位，开打后由观测覆盖最终分）
-        for seat in room.iter() {
+        let mut seeds = Vec::with_capacity(room.len());
+        for (seat_order, seat) in room.iter().enumerate() {
             let uid = seat
                 .get("douyinUid")
                 .and_then(|v| v.as_str())
@@ -1075,8 +1149,14 @@ pub async fn build_revival_rooms(
                 .and_then(|v| v.as_str())
                 .unwrap_or_default();
             let person_id = seat.get("personId").and_then(|v| v.as_i64()).unwrap_or(0);
-            crate::store::live_group_seed_seat(st, gid, person_id, uid, nickname, i as i32).await?;
+            seeds.push(crate::store::GroupSeedSeat {
+                person_id,
+                douyin_uid: uid.to_string(),
+                nickname: nickname.to_string(),
+                seed_order: seat_order as i32,
+            });
         }
+        crate::store::live_group_seed_replace(st, gid, &seeds).await?;
         tracing::info!(
             group = gid,
             seats = room.len(),
@@ -1121,7 +1201,8 @@ pub async fn build_promotion_groups(st: &Arc<AppState>, event_id: i64) -> anyhow
             0,
         )
         .await?;
-        for seat in g.iter() {
+        let mut seeds = Vec::with_capacity(g.len());
+        for (seat_order, seat) in g.iter().enumerate() {
             let uid = seat
                 .get("douyinUid")
                 .and_then(|v| v.as_str())
@@ -1131,8 +1212,14 @@ pub async fn build_promotion_groups(st: &Arc<AppState>, event_id: i64) -> anyhow
                 .get("personName")
                 .and_then(|v| v.as_str())
                 .unwrap_or_default();
-            crate::store::live_group_seed_seat(st, gid, person_id, uid, name, i as i32).await?;
+            seeds.push(crate::store::GroupSeedSeat {
+                person_id,
+                douyin_uid: uid.to_string(),
+                nickname: name.to_string(),
+                seed_order: seat_order as i32,
+            });
         }
+        crate::store::live_group_seed_replace(st, gid, &seeds).await?;
     }
     Ok(groups.len())
 }

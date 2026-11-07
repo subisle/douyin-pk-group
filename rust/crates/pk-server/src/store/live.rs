@@ -290,7 +290,13 @@ pub async fn live_group_create(
 ) -> anyhow::Result<i64> {
     let row = sqlx::query(&crate::pq::rewrite(
         "INSERT INTO live_group (event_id, stage_id, kind, seq, name, status, qualify_slots, source_group_id)
-         VALUES (?, ?, ?, ?, ?, 'pending', ?, ?) RETURNING id",
+         VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
+         ON CONFLICT (stage_id, seq) DO UPDATE SET
+           kind = EXCLUDED.kind,
+           name = EXCLUDED.name,
+           qualify_slots = EXCLUDED.qualify_slots,
+           source_group_id = EXCLUDED.source_group_id
+         RETURNING id",
     ))
     .bind(event_id)
     .bind(stage_id)
@@ -352,6 +358,8 @@ pub async fn live_group_set_status(
     group_id: i64,
     status: GroupStatus,
 ) -> anyhow::Result<()> {
+    let pool = w(st)?;
+    let mut tx = pool.begin().await?;
     sqlx::query(
         "UPDATE live_group SET status = $1,
                 finalized_at = CASE WHEN $1 = 'finalized' THEN now() ELSE finalized_at END
@@ -359,8 +367,23 @@ pub async fn live_group_set_status(
     )
     .bind(status.as_str())
     .bind(group_id)
-    .execute(w(st)?)
+    .execute(&mut *tx)
     .await?;
+    // 第一次开打把阶段从 pending 推到 running；若已定稿的小组因重复局/人工
+    // 复核被拉回待确认，也把阶段恢复成 running，避免 UI 仍显示整阶段已结束。
+    sqlx::query(
+        "UPDATE live_stage s SET
+           status = CASE WHEN $1 = 'finalized' THEN s.status ELSE 'running' END,
+           started_at = CASE WHEN $1 = 'finalized' THEN s.started_at
+                             ELSE COALESCE(s.started_at, now()) END,
+           finished_at = CASE WHEN $1 = 'finalized' THEN s.finished_at ELSE NULL END
+         WHERE s.id = (SELECT stage_id FROM live_group WHERE id = $2)",
+    )
+    .bind(status.as_str())
+    .bind(group_id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -379,12 +402,17 @@ pub async fn live_round_upsert(
     parent_round_id: i64,
     attempt_no: i32,
 ) -> anyhow::Result<(i64, bool)> {
-    let row = sqlx::query(&crate::pq::rewrite(
+    let start_at = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(snap.start_time_ms);
+    let expected_end_at = snap
+        .expected_end_ms()
+        .and_then(chrono::DateTime::<chrono::Utc>::from_timestamp_millis);
+    let inserted = sqlx::query(&crate::pq::rewrite(
         "INSERT INTO live_round (event_id, group_id, battle_id, channel_id, room_web_rid,
-                round_kind, attempt_no, parent_round_id, roster_signature, status)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'detected')
-         ON CONFLICT (battle_id, group_id) DO UPDATE SET channel_id = EXCLUDED.channel_id
-         RETURNING id, (xmax = 0) AS inserted",
+                round_kind, attempt_no, parent_round_id, roster_signature, start_at,
+                expected_end_at, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'detected')
+         ON CONFLICT (battle_id, group_id) DO NOTHING
+         RETURNING id",
     ))
     .bind(event_id)
     .bind(group_id)
@@ -399,12 +427,30 @@ pub async fn live_round_upsert(
     .bind(attempt_no)
     .bind(parent_round_id)
     .bind(snap.roster_signature())
+    .bind(start_at)
+    .bind(expected_end_at)
+    .fetch_optional(w(st)?)
+    .await?;
+    if let Some(row) = inserted {
+        return Ok((row.try_get::<i64, _>("id").unwrap_or(0), true));
+    }
+    let row = sqlx::query(&crate::pq::rewrite(
+        "UPDATE live_round SET
+           channel_id = CASE WHEN channel_id = '' THEN ? ELSE channel_id END,
+           start_at = COALESCE(start_at, ?),
+           expected_end_at = COALESCE(expected_end_at, ?),
+           updated_at = now()
+         WHERE battle_id = ? AND group_id = ?
+         RETURNING id",
+    ))
+    .bind(&snap.channel_id)
+    .bind(start_at)
+    .bind(expected_end_at)
+    .bind(&snap.battle_id)
+    .bind(group_id)
     .fetch_one(w(st)?)
     .await?;
-    Ok((
-        row.try_get::<i64, _>("id").unwrap_or(0),
-        row.try_get::<bool, _>("inserted").unwrap_or(false),
-    ))
+    Ok((row.try_get::<i64, _>("id").unwrap_or(0), false))
 }
 
 /// 写席位（幂等：同一局同一 UID 只留一行，重复上报按最新分覆盖）
@@ -542,6 +588,17 @@ pub async fn live_round_set_official(st: &AppState, round_id: i64) -> anyhow::Re
                 finalized_at = now() WHERE id = $2",
     )
     .bind(round_id)
+    .bind(group_id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "UPDATE live_stage s SET status = 'finalized', finished_at = COALESCE(finished_at, now())
+         WHERE s.id = (SELECT stage_id FROM live_group WHERE id = $1)
+           AND EXISTS (SELECT 1 FROM live_group WHERE stage_id = s.id)
+           AND NOT EXISTS (
+             SELECT 1 FROM live_group WHERE stage_id = s.id AND status <> 'finalized'
+           )",
+    )
     .bind(group_id)
     .execute(&mut *tx)
     .await?;
@@ -729,7 +786,14 @@ pub async fn live_monitor_list(st: &AppState, event_id: i64) -> Vec<serde_json::
         return Vec::new();
     };
     sqlx::query(
-        "SELECT id, web_rid, room_id, url, label, enabled, health, last_seen_at, last_error
+        "SELECT id, web_rid, room_id, url, label, enabled,
+                CASE WHEN last_seen_at IS NULL
+                           OR last_seen_at < now() - interval '20 seconds'
+                     THEN 'idle' ELSE health END AS effective_health,
+                last_seen_at,
+                CASE WHEN last_seen_at IS NULL
+                           OR last_seen_at < now() - interval '20 seconds'
+                     THEN '采集器已停止上报' ELSE last_error END AS effective_error
          FROM live_monitor_room WHERE event_id = $1 ORDER BY id",
     )
     .bind(event_id)
@@ -745,10 +809,10 @@ pub async fn live_monitor_list(st: &AppState, event_id: i64) -> Vec<serde_json::
                     "url": r.try_get::<String, _>("url").unwrap_or_default(),
                     "label": r.try_get::<String, _>("label").unwrap_or_default(),
                     "enabled": r.try_get::<i16, _>("enabled").unwrap_or(0) == 1,
-                    "health": r.try_get::<String, _>("health").unwrap_or_default(),
+                    "health": r.try_get::<String, _>("effective_health").unwrap_or_default(),
                     "lastSeenAt": r.try_get::<chrono::DateTime<chrono::Utc>, _>("last_seen_at")
                         .map(|t| t.to_rfc3339()).ok(),
-                    "lastError": r.try_get::<String, _>("last_error").unwrap_or_default(),
+                    "lastError": r.try_get::<String, _>("effective_error").unwrap_or_default(),
                 })
             })
             .collect()
@@ -1246,22 +1310,61 @@ pub async fn live_set_person_push(st: &AppState, name: &str, on: bool) -> anyhow
 /// 采集进程心跳
 pub async fn live_worker_heartbeat(
     st: &AppState,
+    event_id: i64,
     worker_id: &str,
     version: &str,
     rooms: i32,
 ) -> anyhow::Result<()> {
     sqlx::query(&crate::pq::rewrite(
-        "INSERT INTO live_collector_worker (worker_id, version, rooms, last_heartbeat)
-         VALUES (?, ?, ?, now())
-         ON CONFLICT (worker_id) DO UPDATE SET version = EXCLUDED.version,
-           rooms = EXCLUDED.rooms, last_heartbeat = now()",
+        "INSERT INTO live_collector_worker (worker_id, event_id, version, rooms, last_heartbeat)
+         VALUES (?, ?, ?, ?, now())
+         ON CONFLICT (worker_id) DO UPDATE SET event_id = EXCLUDED.event_id,
+           version = EXCLUDED.version, rooms = EXCLUDED.rooms, last_heartbeat = now()",
     ))
     .bind(worker_id)
+    .bind(event_id)
     .bind(version)
     .bind(rooms)
     .execute(w(st)?)
     .await?;
     Ok(())
+}
+
+/// 某个赛事的采集进程。`online` 以 20 秒内收到心跳为准（采集间隔默认 4 秒）。
+pub async fn live_worker_list(st: &AppState, event_id: i64) -> Vec<serde_json::Value> {
+    let Ok(pool) = w(st) else {
+        return Vec::new();
+    };
+    sqlx::query(
+        "SELECT worker_id, version, rooms, last_heartbeat,
+                last_heartbeat > now() - interval '20 seconds' AS online,
+                GREATEST(0, EXTRACT(EPOCH FROM (now() - last_heartbeat))::BIGINT) AS age_secs
+         FROM live_collector_worker
+         WHERE event_id = $1
+         ORDER BY last_heartbeat DESC",
+    )
+    .bind(event_id)
+    .fetch_all(pool)
+    .await
+    .map(|rows| {
+        rows.iter()
+            .map(|r| {
+                serde_json::json!({
+                    "workerId": r.try_get::<String, _>("worker_id").unwrap_or_default(),
+                    "version": r.try_get::<String, _>("version").unwrap_or_default(),
+                    "rooms": r.try_get::<i32, _>("rooms").unwrap_or(0),
+                    "online": r.try_get::<bool, _>("online").unwrap_or(false),
+                    "ageSeconds": r.try_get::<i64, _>("age_secs").unwrap_or(0),
+                    "lastHeartbeat": r.try_get::<chrono::DateTime<chrono::Utc>, _>("last_heartbeat")
+                        .map(|t| t.to_rfc3339()).ok(),
+                })
+            })
+            .collect()
+    })
+    .unwrap_or_else(|e| {
+        tracing::error!(error = %e, event_id, "查直播采集进程失败");
+        Vec::new()
+    })
 }
 
 /// 分组方案里的分组卡（buckets）：[{name, players:[{name,...}]}]
@@ -1279,36 +1382,90 @@ pub async fn plan_buckets(st: &AppState, plan_id: i64) -> anyhow::Result<Vec<ser
     Ok(buckets)
 }
 
-/// 给还没开打的小组落参赛名单（复活 / 晋级分组生成时用）。
-/// 与 `live_round_seat` 分开：那张表是**某一局**的实际结果，这张是**赛前谁要上场**，
-/// 对局还没产生时也要能在监控页显示名单。
-pub async fn live_group_seed_seat(
+/// 赛前名单的一条。UID 可空：主播没登记采集号时，页面仍要能显示谁在这组。
+#[derive(Debug, Clone)]
+pub struct GroupSeedSeat {
+    pub person_id: i64,
+    pub douyin_uid: String,
+    pub nickname: String,
+    pub seed_order: i32,
+}
+
+/// 整体替换一个小组的赛前名单。
+///
+/// 生成小组是幂等操作，重复点击时应刷新名单而不是累加；先删后插也顺手处理了
+/// 「方案里把人从 A 组拖到 B 组」这种重组。`live_round_seat` 是完全独立的历史结果，
+/// 不会在这里被碰。
+pub async fn live_group_seed_replace(
     st: &AppState,
     group_id: i64,
-    person_id: i64,
-    uid: &str,
-    nickname: &str,
-    order: i32,
+    seats: &[GroupSeedSeat],
 ) -> anyhow::Result<()> {
-    if uid.is_empty() {
-        return Ok(());
+    let pool = w(st)?;
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM live_group_seat WHERE group_id = $1")
+        .bind(group_id)
+        .execute(&mut *tx)
+        .await?;
+
+    let mut seen = std::collections::HashSet::new();
+    for seat in seats {
+        let dedup = if !seat.douyin_uid.is_empty() {
+            format!("uid:{}", seat.douyin_uid)
+        } else if seat.person_id > 0 {
+            format!("person:{}", seat.person_id)
+        } else if !seat.nickname.is_empty() {
+            format!("name:{}", seat.nickname)
+        } else {
+            continue;
+        };
+        if !seen.insert(dedup) {
+            continue;
+        }
+        sqlx::query(&crate::pq::rewrite(
+            "INSERT INTO live_group_seat
+               (group_id, person_id, douyin_uid, nickname, seed_order)
+             VALUES (?, ?, ?, ?, ?)",
+        ))
+        .bind(group_id)
+        .bind(seat.person_id)
+        .bind(&seat.douyin_uid)
+        .bind(&seat.nickname)
+        .bind(seat.seed_order)
+        .execute(&mut *tx)
+        .await?;
     }
-    sqlx::query(&crate::pq::rewrite(
-        "INSERT INTO live_group_seat (group_id, person_id, douyin_uid, nickname, seed_order)
-         VALUES (?, ?, ?, ?, ?)
-         ON CONFLICT (group_id, douyin_uid) DO UPDATE SET nickname = EXCLUDED.nickname,
-           seed_order = EXCLUDED.seed_order,
-           person_id = CASE WHEN live_group_seat.person_id = 0 THEN EXCLUDED.person_id
-                            ELSE live_group_seat.person_id END",
-    ))
-    .bind(group_id)
-    .bind(person_id)
-    .bind(uid)
-    .bind(nickname)
-    .bind(order)
-    .execute(w(st)?)
-    .await?;
+    tx.commit().await?;
     Ok(())
+}
+
+/// 主播当前主号的抖音 UID 与展示昵称。没有主号时回落到任一有 UID 的账号。
+pub async fn live_anchor_for_person(st: &AppState, person_id: i64) -> Option<(String, String)> {
+    if person_id <= 0 {
+        return None;
+    }
+    let row = sqlx::query(
+        "SELECT COALESCE(a.anchor_id, '') AS anchor_id,
+                COALESCE(NULLIF(a.anchor_name, ''), p.name, '') AS nickname
+         FROM person p
+         LEFT JOIN LATERAL (
+           SELECT anchor_id, anchor_name
+           FROM account
+           WHERE person_id = p.id AND anchor_id <> ''
+           ORDER BY is_primary DESC, id
+           LIMIT 1
+         ) a ON true
+         WHERE p.id = $1",
+    )
+    .bind(person_id)
+    .fetch_optional(w(st).ok()?)
+    .await
+    .ok()
+    .flatten()?;
+    Some((
+        row.try_get::<String, _>("anchor_id").unwrap_or_default(),
+        row.try_get::<String, _>("nickname").unwrap_or_default(),
+    ))
 }
 
 /// 小组的赛前名单
@@ -1319,7 +1476,7 @@ pub async fn live_group_seats(st: &AppState, group_id: i64) -> Vec<serde_json::V
     sqlx::query(
         "SELECT person_id, douyin_uid, nickname, seed_order, COALESCE(p.name, '') AS person_name
          FROM live_group_seat s LEFT JOIN person p ON p.id = s.person_id
-         WHERE group_id = $1 ORDER BY seed_order, id",
+         WHERE group_id = $1 ORDER BY s.seed_order, s.id",
     )
     .bind(group_id)
     .fetch_all(pool)
@@ -1338,6 +1495,78 @@ pub async fn live_group_seats(st: &AppState, group_id: i64) -> Vec<serde_json::V
             .collect()
     })
     .unwrap_or_default()
+}
+
+/// 所有未定稿小组及其非空 UID 名单，用于按参赛者精确认组。
+pub async fn live_open_group_rosters(st: &AppState, event_id: i64) -> Vec<(i64, Vec<String>)> {
+    let Ok(pool) = w(st) else {
+        return Vec::new();
+    };
+    let rows = sqlx::query(
+        "SELECT g.id, s.douyin_uid
+         FROM live_group g
+         JOIN live_stage st ON st.id = g.stage_id
+         LEFT JOIN live_group_seat s
+           ON s.group_id = g.id AND s.douyin_uid <> ''
+         WHERE g.event_id = $1
+           AND st.status <> 'finalized'
+           AND g.status NOT IN ('finalized')
+         ORDER BY st.seq, g.seq, s.seed_order, s.id",
+    )
+    .bind(event_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+    let mut out: Vec<(i64, Vec<String>)> = Vec::new();
+    for row in rows {
+        let group_id = row.try_get::<i64, _>("id").unwrap_or(0);
+        if out.last().map(|v| v.0) != Some(group_id) {
+            out.push((group_id, Vec::new()));
+        }
+        if let Ok(Some(uid)) = row.try_get::<Option<String>, _>("douyin_uid") {
+            if !uid.is_empty() {
+                out.last_mut().expect("just pushed").1.push(uid);
+            }
+        }
+    }
+    out
+}
+
+/// 最近一场同房间、同参赛名单、且已经定稿的小组。
+///
+/// 抖音在 PK 结束后还会短暂残留旧 battle_stats；若页面随后给出一个新的
+/// battle_id，而名单仍是同一批人，不能把它算到「下一组」头上。这里只认
+/// 15 分钟内的同房间同名单，既覆盖残留/重发，又不会把很久以前的重名单
+/// 永远钉在旧组。
+pub async fn live_recent_finalized_group_for_roster(
+    st: &AppState,
+    event_id: i64,
+    web_rid: &str,
+    roster_signature: &str,
+) -> Option<i64> {
+    if roster_signature.is_empty() {
+        return None;
+    }
+    let row = sqlx::query(&crate::pq::rewrite(
+        "SELECT r.group_id
+         FROM live_round r
+         JOIN live_group g ON g.id = r.group_id
+         WHERE r.event_id = ?
+           AND r.room_web_rid = ?
+           AND r.roster_signature = ?
+           AND g.status = 'finalized'
+           AND r.created_at >= now() - interval '15 minutes'
+         ORDER BY r.id DESC
+         LIMIT 1",
+    ))
+    .bind(event_id)
+    .bind(web_rid)
+    .bind(roster_signature)
+    .fetch_optional(w(st).ok()?)
+    .await
+    .ok()
+    .flatten()?;
+    row.try_get::<i64, _>("group_id").ok().filter(|v| *v > 0)
 }
 
 /// 小组下所有对局（争议局并排对比用）

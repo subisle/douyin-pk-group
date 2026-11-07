@@ -240,6 +240,12 @@ const MIGRATIONS: &[(&str, &str)] = &[
     // 采样/时间线/晋级/监控房间/采集 worker/推送作业各组表。
     // battle_id / room_id / UID 一律 VARCHAR（19 位超 JS 安全整数）。幂等。
     ("044_live_pk", include_str!("migrations/044_live_pk.sql")),
+    // 045：直播监控联调加固。采集 worker 归属赛事；小组生成幂等；赛前名单允许
+    // 未登记采集号的主播先占位。幂等，可安全重放。
+    (
+        "045_live_monitor_hardening",
+        include_str!("migrations/045_live_monitor_hardening.sql"),
+    ),
 ];
 
 /// 迁移建连（migrator 账号；同样关语句缓存）
@@ -449,6 +455,7 @@ mod tests {
                         || upper.starts_with("INSERT")
                         || upper.starts_with("UPDATE")
                         || upper.starts_with("DROP TRIGGER")
+                        || upper.starts_with("DROP INDEX")
                         || upper.starts_with("SELECT")
                         // 043 起允许 DO $$ ... $$ 匿名块（幂等条件迁移的唯一手段，
                         // split_statements 已保证块体作为一条完整语句）。

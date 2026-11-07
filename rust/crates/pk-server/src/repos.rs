@@ -77,7 +77,9 @@ pub async fn get_available_dates(
 /// 只有整月表数据、没有日数据的 7/8/9 月无法进入月榜选择器。这里把两张
 /// 整月表里的 period 一并取回；任一表缺失只忽略该表，不影响站点启动。
 pub async fn get_imported_month_periods(st: &AppState, source: Option<&str>) -> Vec<String> {
-    let Ok(src) = st.source(source) else { return Vec::new() };
+    let Ok(src) = st.source(source) else {
+        return Vec::new();
+    };
     let id = src.id.clone();
     let mut out: Vec<String> = Vec::new();
     for table in ["monthly_duration", "monthly_wave"] {
@@ -88,7 +90,9 @@ pub async fn get_imported_month_periods(st: &AppState, source: Option<&str>) -> 
                     .filter_map(|r| r.try_get::<String, _>(0).ok())
                     .filter(|p| p.len() == 7 && p.as_bytes().get(4) == Some(&b'-')),
             ),
-            Err(e) => tracing::debug!(source = %id, table, error = %e, "读取整月数据月份失败，按空处理"),
+            Err(e) => {
+                tracing::debug!(source = %id, table, error = %e, "读取整月数据月份失败，按空处理")
+            }
         }
     }
     out.sort_unstable_by(|a, b| b.cmp(a));

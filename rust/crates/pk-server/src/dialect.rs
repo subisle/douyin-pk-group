@@ -470,20 +470,44 @@ pub fn period_rollup_sql(
     `TO_CHAR(d.biz_date,'YYYY-MM') LIKE '{like}'` 改成**日期范围比较**。
     TO_CHAR 是函数表达式，PG 用不上 biz_date 上的 B-tree 索引 → 每张月/年榜都要
     全表扫 daily_metric；改写成 `biz_date >= lo AND biz_date < hi` 后可走索引范围扫描。
-    本机 768 行实测：5.92ms → 0.76ms（约 7.8×），且数据量继续增长时差距会更大。
+    本机 768 行实测：5.92ms → 0.76ms（约 7.8×），数据量继续增长时差距会更大。
     等价性已用实库逐窗口比对（月窗口 / 年窗口的人与数值完全一致）。 */
     let (date_lo, date_hi) = like_to_date_range(like);
+    /* 一人多号口径（2026-10-30 修复）：daily_metric 每人每天只有主号一行；
+    副号音浪在 wave_snapshot、时长在 duration_snapshot。月/年榜与 CSV 导出
+    必须先把两路按 person/date 合并，再按 person/month 汇总；只查 daily_metric
+    会让副号历史音浪完全丢失（狼霆等一人多号账号明显偏低）。
+    - 主号仍只走 daily_metric（wave_reliable=1）；
+    - 副号按 account.is_primary=0 关联，避免主号快照重复计数；
+    - 三层派生表：先按人/日合并主副号 → 再按人/月汇总。
+    SQL 必须以 SELECT 开头（只读池 guard 只放 SELECT；WITH 会被拦）。 */
     format!(
         "SELECT {select} FROM ( \
-           SELECT d.person_id AS pid, TO_CHAR(d.biz_date, 'YYYY-MM') AS m, \
-             SUM(d.wave) AS w, SUM(d.minutes) AS dm, \
-             SUM(CASE WHEN d.wave >= 2 THEN 1 ELSE 0 END) AS live, \
-             SUM(CASE WHEN d.wave < 2 THEN 1 ELSE 0 END) AS off, \
-             COUNT(DISTINCT d.biz_date) AS days \
-           FROM daily_metric d \
-           WHERE d.wave_reliable = 1 \
-             AND d.biz_date >= '{date_lo}'::date AND d.biz_date < '{date_hi}'::date \
-           GROUP BY pid, m{month_wave_only} \
+           SELECT x.pid, TO_CHAR(x.biz_date, 'YYYY-MM') AS m, \
+             (SUM(x.w))::BIGINT AS w, (SUM(x.dm))::BIGINT AS dm, \
+             (SUM(CASE WHEN x.w >= 2 THEN 1 ELSE 0 END))::BIGINT AS live, \
+             (SUM(CASE WHEN x.w < 2 THEN 1 ELSE 0 END))::BIGINT AS off, \
+             (COUNT(DISTINCT x.biz_date))::BIGINT AS days \
+           FROM ( \
+             SELECT u.pid, u.biz_date, (SUM(u.w))::BIGINT AS w, (SUM(u.dm))::BIGINT AS dm \
+             FROM ( \
+               SELECT d.person_id AS pid, d.biz_date, d.wave AS w, d.minutes AS dm \
+                 FROM daily_metric d \
+                WHERE d.wave_reliable = 1 \
+                  AND d.biz_date >= '{date_lo}'::date AND d.biz_date < '{date_hi}'::date \
+               UNION ALL \
+               SELECT a.person_id AS pid, ws.biz_date, ws.wave_value AS w, 0 AS dm \
+                 FROM wave_snapshot ws \
+                 JOIN account a ON a.anchor_id = ws.anchor_id AND a.is_primary = 0 \
+                WHERE ws.biz_date >= '{date_lo}'::date AND ws.biz_date < '{date_hi}'::date \
+               UNION ALL \
+               SELECT a.person_id AS pid, ds.biz_date, 0 AS w, ds.minutes AS dm \
+                 FROM duration_snapshot ds \
+                 JOIN account a ON a.anchor_id = ds.anchor_id AND a.is_primary = 0 \
+                WHERE ds.biz_date >= '{date_lo}'::date AND ds.biz_date < '{date_hi}'::date \
+             ) u GROUP BY u.pid, u.biz_date \
+           ) x GROUP BY x.pid, TO_CHAR(x.biz_date, 'YYYY-MM') \
+           {month_wave_only} \
          ) t \
          JOIN person p ON p.id = t.pid{duration_join}{wave_join} \
          WHERE p.deleted_at IS NULL{team_clause}{extra_where} \
@@ -1029,6 +1053,29 @@ mod tests {
     /// 月榜骨架：某月有导入的整月音浪（monthly_wave）就用它，没有该月的整月值才回落
     /// 日明细求和 —— 与月度时长同一套 COALESCE 写法。
     #[test]
+    fn day_month_year_queries_all_merge_secondary_accounts() {
+        for sql in [WAVES_A, SERIES_A] {
+            assert!(sql.contains("FROM wave_snapshot ws"), "日查询缺副号音浪：{sql}");
+            assert!(
+                sql.contains("a.anchor_id = ws.anchor_id AND a.is_primary = 0"),
+                "副号必须按非主号关联，避免主号快照重复：{sql}"
+            );
+        }
+        let month = period_rollup_sql(
+            "{wave} AS wave, {minutes} AS minutes",
+            "2026-10%",
+            "",
+            "",
+            "wave DESC",
+            true,
+            true,
+        );
+        for token in ["FROM wave_snapshot ws", "FROM duration_snapshot ds"] {
+            assert!(month.contains(token), "月/年查询缺多号合并：{token}\n{month}");
+        }
+    }
+
+    #[test]
     fn month_rollup_prefers_imported_wave_over_daily_sum() {
         let sql = period_rollup_sql(
             "{wave} AS wave, {minutes} AS minutes",
@@ -1048,7 +1095,7 @@ mod tests {
             "整月音浪按 (人, 月) 对齐：{sql}"
         );
         // 回落的来源必须是「每人每月」的日明细求和，不是全期一把 SUM
-        assert!(sql.contains("SUM(d.wave) AS w"), "{sql}");
+        assert!(sql.contains("d.wave AS w"), "{sql}");
         /* 2026-10-17 性能优化：日明细窗口从 `TO_CHAR(...) LIKE` 改成**日期范围**
         （能走 biz_date 索引，实测 5.92ms → 0.76ms）。这里改成断言范围条件，
         并反向确认不再出现函数表达式比较。 */
@@ -1060,7 +1107,12 @@ mod tests {
             !sql.contains("TO_CHAR(d.biz_date, 'YYYY-MM') LIKE"),
             "不该再对 biz_date 做函数表达式比较（用不上索引）：{sql}"
         );
-        assert!(sql.contains("GROUP BY pid, m"), "{sql}");
+        assert!(
+            sql.contains("GROUP BY u.pid, u.biz_date"),
+            "必须先把主号与副号按人/日聚一次：{sql}"
+        );
+        assert!(sql.contains("FROM wave_snapshot ws"), "副号音浪要走 wave_snapshot：{sql}");
+        assert!(sql.contains("FROM duration_snapshot ds"), "副号时长要走 duration_snapshot：{sql}");
         // 两个占位符都必须被替换干净（写错占位名会留下 {wave} 进 SQL → PG 语法错）
         assert!(
             !sql.contains("{wave}") && !sql.contains("{minutes}"),

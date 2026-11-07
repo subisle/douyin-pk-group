@@ -52,6 +52,16 @@ export interface LiveGroup {
   sourceGroupId: number
   officialRoundId: number
   finalizedAt: string | null
+  /** 赛前名单；对局还没产生时前端也能显示这组有谁。 */
+  seats: LiveGroupSeat[]
+}
+
+export interface LiveGroupSeat {
+  personId: number
+  douyinUid: string
+  nickname: string
+  personName: string
+  seedOrder: number
 }
 
 export interface MonitorRoom {
@@ -64,6 +74,15 @@ export interface MonitorRoom {
   health: string
   lastSeenAt: string | null
   lastError: string
+}
+
+export interface LiveWorker {
+  workerId: string
+  version: string
+  rooms: number
+  online: boolean
+  ageSeconds: number
+  lastHeartbeat: string | null
 }
 
 export interface LiveQualifier {
@@ -84,6 +103,7 @@ export interface Overview {
   stages: LiveStage[]
   groups: LiveGroup[]
   rooms: MonitorRoom[]
+  workers: LiveWorker[]
   qualifiers: LiveQualifier[]
 }
 

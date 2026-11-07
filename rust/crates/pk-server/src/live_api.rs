@@ -226,8 +226,22 @@ pub async fn overview(State(st): State<Arc<AppState>>, Path(id): Path<i64>) -> A
         .await
         .into_iter()
         .find(|e| e.get("id").and_then(|v| v.as_i64()) == Some(id));
-    let groups = store::live_group_list(&st, id).await;
+    let mut groups = store::live_group_list(&st, id).await;
+    // 赛前名单单独查，避免 group 列表 SQL 变成 JSON 聚合后再猜字段类型。
+    // 对局还没开始时前端也要能看到「这组有谁」。
+    for group in &mut groups {
+        let group_id = group.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
+        if group_id > 0 {
+            if let Some(obj) = group.as_object_mut() {
+                obj.insert(
+                    "seats".to_string(),
+                    json!(store::live_group_seats(&st, group_id).await),
+                );
+            }
+        }
+    }
     let rooms = store::live_monitor_list(&st, id).await;
+    let workers = store::live_worker_list(&st, id).await;
     let qualifiers = store::live_qualifier_list(&st, id).await;
     let stages = store::live_stage_list(&st, id).await;
     Ok(Json(json!({
@@ -235,6 +249,7 @@ pub async fn overview(State(st): State<Arc<AppState>>, Path(id): Path<i64>) -> A
         "stages": stages,
         "groups": groups,
         "rooms": rooms,
+        "workers": workers,
         "qualifiers": qualifiers,
     })))
 }
@@ -627,6 +642,9 @@ pub async fn ingest(
 pub struct HeartbeatBody {
     #[serde(rename = "workerId")]
     pub worker_id: String,
+    /// 采集器当前服务的赛事。旧采集器没带时默认为 0。
+    #[serde(default, rename = "eventId")]
+    pub event_id: i64,
     pub version: Option<String>,
     pub rooms: Option<i32>,
 }
@@ -637,6 +655,7 @@ pub async fn heartbeat(
 ) -> ApiResult {
     store::live_worker_heartbeat(
         &st,
+        body.event_id,
         &body.worker_id,
         &body.version.unwrap_or_default(),
         body.rooms.unwrap_or(0),

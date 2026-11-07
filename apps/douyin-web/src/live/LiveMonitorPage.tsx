@@ -1,8 +1,13 @@
 import { useEffect, useMemo, useState } from 'react'
+import type { FormEvent } from 'react'
 import './live.css'
 import { useAutoRefresh } from '../useAutoRefresh'
+import { pk } from '../pk/api'
+import type { PlanBrief } from '../pk/types'
 import { live } from './api'
-import type { LiveEvent, LiveGroup, LiveRound, LiveSeat, MonitorRoom, Overview } from './api'
+import type {
+  LiveEvent, LiveGroup, LiveGroupSeat, LiveRound, LiveSeat, LiveWorker, MonitorRoom, Overview,
+} from './api'
 
 /* 直播分数监控（2026-10-20）
    分组只决定「谁和谁打」，实时分数来自抖音连麦接口，二者不混存。 */
@@ -14,6 +19,12 @@ const STAGE_LABEL: Record<string, string> = {
   rest_revival: '剩余复活赛',
   promotion: '晋级赛',
   final: '决赛',
+}
+
+function todayLocal() {
+  const d = new Date()
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
 }
 
 const GROUP_STATUS: Record<string, { label: string; cls: string }> = {
@@ -47,6 +58,7 @@ function GroupCard({
 
   const st = GROUP_STATUS[g.status] ?? { label: g.status, cls: 'idle' }
   const needReview = rounds?.filter(r => r.status === 'pending_review') ?? []
+  const roster: LiveGroupSeat[] = g.seats ?? []
 
   async function act(fn: () => Promise<unknown>, label: string) {
     if (busy) return
@@ -71,6 +83,20 @@ function GroupCard({
 
       {open && (
         <div className="lm-rounds">
+          <div className="lm-roster">
+            <div className="lm-roster-head">赛前名单 <span className="lm-tag">{roster.length} 人</span></div>
+            {roster.length === 0 && <p className="hint">还没有赛前名单，先从分组方案生成小组</p>}
+            {roster.length > 0 && (
+              <div className="lm-roster-list">
+                {roster.map((seat, i) => (
+                  <span key={`${seat.personId}-${seat.douyinUid}-${i}`} className="lm-roster-person">
+                    <span>{seat.personName || seat.nickname || seat.douyinUid || `#${seat.personId}`}</span>
+                    {seat.douyinUid && <span className="mono lm-uid">{seat.douyinUid}</span>}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
           {rounds === null && <p className="hint">加载中…</p>}
           {rounds?.length === 0 && <p className="hint">这一组还没有对局</p>}
           {rounds?.map(r => (
@@ -118,6 +144,7 @@ function GroupCard({
 
 export default function LiveMonitorPage() {
   const [events, setEvents] = useState<LiveEvent[]>([])
+  const [plans, setPlans] = useState<PlanBrief[]>([])
   const [eventId, setEventId] = useState<number>(0)
   const [ov, setOv] = useState<Overview | null>(null)
   const [groupId, setGroupId] = useState<number>(0)
@@ -125,6 +152,13 @@ export default function LiveMonitorPage() {
   const [roundId, setRoundId] = useState(0)
   const [err, setErr] = useState('')
   const [busy, setBusy] = useState('')
+  const [newTitle, setNewTitle] = useState('')
+  const [newDate, setNewDate] = useState(todayLocal())
+  const [newDayPlan, setNewDayPlan] = useState(0)
+  const [bindDay, setBindDay] = useState(0)
+  const [bindNight, setBindNight] = useState(0)
+  const [roomUrl, setRoomUrl] = useState('')
+  const [roomLabel, setRoomLabel] = useState('')
 
   const load = async () => {
     try {
@@ -133,6 +167,14 @@ export default function LiveMonitorPage() {
       if (!eventId && list.items[0]) setEventId(list.items[0].id)
       setErr('')
     } catch (e: any) { setErr(e?.message ?? String(e)) }
+    try {
+      const list = await pk.listPlans()
+      setPlans(list.items ?? [])
+    } catch (e: any) {
+      // 赛事仍可管理；只是新建/绑定方案下拉为空。
+      setPlans([])
+      setErr(e?.message ?? String(e))
+    }
   }
 
   const loadOverview = async () => {
@@ -158,6 +200,12 @@ export default function LiveMonitorPage() {
   useEffect(() => { load() }, [])
   useEffect(() => { loadOverview() }, [eventId])
   useEffect(() => { loadScores() }, [groupId, eventId])
+  useEffect(() => {
+    const event = ov?.event
+    if (!event || event.id !== eventId) return
+    setBindDay(event.dayPlanId || 0)
+    setBindNight(event.nightPlanId || 0)
+  }, [ov?.event?.id, ov?.event?.dayPlanId, ov?.event?.nightPlanId, eventId])
 
   // 直播变更（分数/对局/阶段）→ 立刻重拉；同时每 5 秒兜底轮询一次
   useAutoRefresh(loadOverview, ['live'])
@@ -167,6 +215,47 @@ export default function LiveMonitorPage() {
   }, [eventId, groupId])
 
   const cur = events.find(e => e.id === eventId) ?? null
+
+  async function createEvent(e: FormEvent) {
+    e.preventDefault()
+    if (!newTitle.trim()) return alert('请填写赛事名称')
+    setBusy('create-event')
+    try {
+      const r = await live.createEvent({
+        title: newTitle.trim(),
+        eventDate: newDate,
+        dayPlanId: newDayPlan || undefined,
+      })
+      setNewTitle('')
+      setNewDayPlan(0)
+      setEventId(r.id)
+      await load()
+    } catch (e: any) { alert(e?.message ?? String(e)) }
+    finally { setBusy('') }
+  }
+
+  async function bindPlans() {
+    if (!eventId) return
+    setBusy('bind-plans')
+    try {
+      await live.bindPlans(eventId, bindDay || undefined, bindNight || undefined)
+      await loadOverview()
+    } catch (e: any) { alert(e?.message ?? String(e)) }
+    finally { setBusy('') }
+  }
+
+  async function addMonitor(e: FormEvent) {
+    e.preventDefault()
+    if (!eventId || !roomUrl.trim()) return alert('请填写抖音直播间地址或房间号')
+    setBusy('add-monitor')
+    try {
+      await live.addMonitor(eventId, roomUrl.trim(), roomLabel.trim() || undefined)
+      setRoomUrl('')
+      setRoomLabel('')
+      await loadOverview()
+    } catch (e: any) { alert(e?.message ?? String(e)) }
+    finally { setBusy('') }
+  }
 
   async function step(label: string, fn: () => Promise<unknown>) {
     if (busy) return
@@ -205,12 +294,61 @@ export default function LiveMonitorPage() {
 
       {err && <div className="alert bad">{err}</div>}
 
-      {!eventId && <p className="hint">先选择一个赛事，或到下面「新建赛事」建一场。</p>}
+      <div className="lm-setup">
+        <form className="lm-setup-form" onSubmit={createEvent}>
+          <h3>新建赛事</h3>
+          <input
+            value={newTitle}
+            onChange={e => setNewTitle(e.target.value)}
+            placeholder="赛事名称，例如：10 月 20 日 PK 争霸赛"
+          />
+          <input type="date" value={newDate} onChange={e => setNewDate(e.target.value)} />
+          <select value={newDayPlan} onChange={e => setNewDayPlan(Number(e.target.value))}>
+            <option value={0}>白天分组方案（可稍后绑定）</option>
+            {plans.map(p => <option key={p.id} value={p.id}>{p.title}</option>)}
+          </select>
+          <button type="submit" disabled={busy === 'create-event'}>创建赛事</button>
+        </form>
+
+        {eventId > 0 && (
+          <div className="lm-setup-form">
+            <h3>绑定方案</h3>
+            <select value={bindDay} onChange={e => setBindDay(Number(e.target.value))}>
+              <option value={0}>白天小组赛方案</option>
+              {plans.map(p => <option key={p.id} value={p.id}>{p.title}</option>)}
+            </select>
+            <select value={bindNight} onChange={e => setBindNight(Number(e.target.value))}>
+              <option value={0}>晚上晋级赛方案</option>
+              {plans.map(p => <option key={p.id} value={p.id}>{p.title}</option>)}
+            </select>
+            <button type="button" onClick={bindPlans} disabled={!!busy || (!bindDay && !bindNight)}>
+              保存绑定
+            </button>
+          </div>
+        )}
+      </div>
+
+      {!eventId && <p className="hint">先创建一个赛事，或从上方选择已有赛事。</p>}
 
       {ov && (
         <>
           <div className="lm-rooms">
-            <h3>直播间</h3>
+            <div className="lm-section-head">
+              <h3>直播间</h3>
+              <form className="lm-inline-form" onSubmit={addMonitor}>
+                <input
+                  value={roomUrl}
+                  onChange={e => setRoomUrl(e.target.value)}
+                  placeholder="https://live.douyin.com/505899768449"
+                />
+                <input
+                  value={roomLabel}
+                  onChange={e => setRoomLabel(e.target.value)}
+                  placeholder="备注（可选）"
+                />
+                <button type="submit" disabled={busy === 'add-monitor'}>添加</button>
+              </form>
+            </div>
             {ov.rooms.length === 0 && <p className="hint">还没有监控直播间</p>}
             {ov.rooms.map((r: MonitorRoom) => (
               <div key={r.id} className={`lm-room lm-${r.health}`}>
@@ -221,6 +359,21 @@ export default function LiveMonitorPage() {
                 {r.lastError && <span className="lm-tag lm-bad">{r.lastError}</span>}
               </div>
             ))}
+          </div>
+
+          <div className="lm-workers">
+            <h3>采集器</h3>
+            {ov.workers.length === 0 && <p className="hint">还没有采集器心跳。按下面命令启动本地采集器。</p>}
+            {ov.workers.map((w: LiveWorker) => (
+              <div key={w.workerId} className="lm-worker">
+                <Dot kind={w.online ? 'live' : 'idle'} />
+                <span className="mono">{w.workerId}</span>
+                <span className="lm-tag">{w.online ? '在线' : `离线 ${w.ageSeconds}s`}</span>
+                <span className="lm-tag">{w.rooms} 个直播间</span>
+                {w.lastHeartbeat && <span className="hint">最后心跳 {new Date(w.lastHeartbeat).toLocaleTimeString()}</span>}
+              </div>
+            ))}
+            <pre className="lm-command">scripts/live/run-local.sh {eventId} {ov.rooms.map(r => r.webRid).join(' ') || 'ROOM_ID'}</pre>
           </div>
 
           <div className="lm-board">

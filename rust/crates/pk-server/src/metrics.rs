@@ -292,7 +292,11 @@ async fn period_metrics(st: &AppState, q: MetricsQuery, is_month: bool) -> ApiRe
         "",
         "wave DESC",
     )
-    .await?;
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, period = %period, team = %team, "月/年指标查询失败");
+        e
+    })?;
     let items: Vec<Value> = rows
         .iter()
         .map(|r| {
