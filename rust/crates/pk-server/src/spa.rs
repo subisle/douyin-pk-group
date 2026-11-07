@@ -148,12 +148,13 @@ pub async fn handler(
 /// 按路径给静态资源的缓存策略：
 /// - `/assets/*` 是 vite 内容哈希产物（文件名带指纹），内容不可变 → 长缓存；
 /// - `/fonts/*` 是自托管字体（无指纹），给 7 天短缓存，改字体最多一周内生效；
+/// - `/resources/thumbs/*` 是礼物素材缩略图（数量多、无指纹），给 7 天短缓存；
 /// - 其余（index.html、SPA 回退）必须 no-cache，否则前端重构建后旧 index.html
 ///   会引用已被删除的旧指纹资源。
 fn cache_control(path: &str) -> &'static str {
     if path.starts_with("/assets/") {
         "public, max-age=31536000, immutable"
-    } else if path.starts_with("/fonts/") {
+    } else if path.starts_with("/fonts/") || path.starts_with("/resources/thumbs/") {
         "public, max-age=604800"
     } else {
         "no-cache"
@@ -226,6 +227,16 @@ mod tests {
         // 编码过的上跳同样要拒
         assert_eq!(resolve(root, "/%2e%2e/etc/passwd"), None);
         assert_eq!(resolve(root, "/a/../../secret"), None);
+    }
+
+    #[test]
+    fn gift_thumbnails_use_short_public_cache() {
+        assert_eq!(
+            cache_control("/resources/thumbs/0001.svg"),
+            "public, max-age=604800"
+        );
+        assert_eq!(cache_control("/resources/videos.json"), "no-cache");
+        assert_eq!(cache_control("/resources"), "no-cache");
     }
 
     #[test]

@@ -1618,16 +1618,22 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
   border:1px solid rgba(255,255,255,.95); box-shadow:0 5px 16px rgba(15,23,42,.055);
   overflow:hidden; transition:transform .16s ease, box-shadow .16s ease; }
 .resource-card:hover { transform:translateY(-1px); box-shadow:0 9px 22px rgba(15,23,42,.09); }
-.resource-list .resource-card { display:grid; grid-template-columns:42px minmax(0,1fr) auto; gap:11px;
-  align-items:center; padding:13px; }
-.resource-grid .resource-card { display:flex; flex-direction:column; padding:13px; min-height:172px; }
-.resource-ico { width:42px; height:42px; flex:none; border-radius:12px; display:grid; place-items:center;
-  background:linear-gradient(135deg,rgba(79,70,229,.12),rgba(14,165,233,.1)); color:#4F46E5; }
-.resource-ico .material-symbols-outlined { font-size:22px; }
-.resource-grid .resource-ico { width:38px; height:38px; margin-bottom:11px; }
+.resource-list .resource-card { display:grid; grid-template-columns:94px minmax(0,1fr) 84px; gap:11px;
+  align-items:center; padding:10px; }
+.resource-grid .resource-card { display:flex; flex-direction:column; padding:0; min-height:0; }
+.resource-thumb { width:94px; height:70px; flex:none; border-radius:11px; display:block; overflow:hidden;
+  background:radial-gradient(circle at 50% 35%,#1e293b,#080b12 72%); }
+.resource-thumb img { width:100%; height:100%; object-fit:contain; display:block;
+  transition:transform .2s ease; }
+.resource-thumb:hover img { transform:scale(1.045); }
+.resource-grid .resource-thumb { width:100%; height:150px; border-radius:0;
+  border-bottom:1px solid rgba(226,232,240,.7); }
+.resource-grid .resource-main { padding:12px 13px 0; }
+.resource-grid .resource-actions { padding:0 13px 13px; }
 .resource-main { min-width:0; }
 .resource-card h3 { margin:0; font-size:14px; line-height:1.35; color:#0F172A; font-weight:700;
   overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.resource-card h3 a { color:inherit; text-decoration:none; }
 .resource-grid .resource-card h3 { white-space:normal; display:-webkit-box; -webkit-line-clamp:2;
   -webkit-box-orient:vertical; min-height:2.7em; }
 .resource-card .desc { margin-top:5px; font-size:11.5px; line-height:1.55; color:#64748B;
@@ -1636,7 +1642,10 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .resource-tag { padding:2px 6px; border-radius:6px; background:#EEF2FF; color:#4F46E5;
   font-size:9.5px; font-weight:600; }
 .resource-tag.category { background:#F1F5F9; color:#64748B; }
+.resource-tag.code { background:#0F172A; color:#E2E8F0; font-variant-numeric:tabular-nums; }
 .resource-actions { display:flex; align-items:center; gap:5px; margin-top:auto; padding-top:10px; }
+.resource-list .resource-actions { width:84px; flex-direction:column; align-items:stretch; padding-top:0; }
+.resource-list .resource-open, .resource-list .resource-copy { width:100%; }
 .resource-grid .resource-actions { width:100%; }
 .resource-open, .resource-copy { height:31px; border:0; border-radius:9px; display:inline-flex;
   align-items:center; justify-content:center; gap:4px; font:inherit; font-size:11px; font-weight:700;
@@ -1647,6 +1656,17 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .resource-empty { padding:42px 16px; text-align:center; border-radius:16px; background:rgba(255,255,255,.68);
   border:1px dashed #CBD5E1; color:#94A3B8; }
 .resource-empty .big { display:block; font-size:27px; margin-bottom:8px; }
+.resource-load-wrap { display:flex; justify-content:center; padding:8px 0 2px; }
+.resource-load-more { min-width:150px; height:38px; border:1px solid #C7D2FE; border-radius:11px;
+  background:rgba(255,255,255,.82); color:#4F46E5; font:inherit; font-size:12px; font-weight:700;
+  cursor:pointer; box-shadow:0 4px 12px rgba(79,70,229,.08); }
+.resource-load-more:active { transform:scale(.98); }
+@media (max-width:390px) {
+  .resource-list .resource-card { grid-template-columns:78px minmax(0,1fr) 72px; gap:8px; padding:8px; }
+  .resource-thumb { width:78px; height:62px; }
+  .resource-list .resource-actions { width:72px; }
+  .resource-open { padding:0 5px; }
+}
 @media (max-width:350px) { .resource-grid { grid-template-columns:1fr; } }
 
 /* ===== 我的页（My Profile）Stitch 版 ===== */
@@ -2940,24 +2960,24 @@ let mySub = null;
 /* WorkBuddy 绑定请求去重，防止重复点击产生多条 OAuth state */
 let wbBinding = false;
 
-/* 视频资源目录：卡片点击只跳网盘，不承载通用工具入口。
-   新视频按下面字段追加即可：
-   { id, title, category, desc, netdiskUrl, provider, duration, tags: [] } */
+/* 视频资源目录：数据由 /resources/videos.json 延迟加载，卡片点击只跳网盘。
+   JSON 里的 SVG 缩略图位于 /resources/thumbs/，源文件由
+   scripts/build-gift-resource-library.py 从运营导出的 ZIP 生成。 */
 const VIDEO_CATEGORIES = [
-  { key: 'all', label: '全部视频' },
-  { key: 'basic', label: '入门教学' },
-  { key: 'live', label: '直播运营' },
-  { key: 'edit', label: '剪辑课程' },
-  { key: 'growth', label: '账号增长' },
+  { key: 'all', label: '全部资源' },
+  { key: 'gift', label: '礼物特效' },
+  { key: 'buff', label: '加成卡' },
+  { key: 'ride', label: '座驾展馆' },
+  { key: 'event', label: '节日活动' },
+  { key: 'ui', label: '动画交互' },
 ];
-const VIDEO_RESOURCES = [
-  // 示例结构（拿到真实视频后追加；未配置时页面显示“暂无视频资源”）：
-  // { id: 'video-001', title: '视频标题', category: 'basic', desc: '视频简介',
-  //   netdiskUrl: 'https://pan.quark.cn/s/xxxx', provider: '夸克网盘',
-  //   duration: '12:30', tags: ['基础', '新手'] },
-];
+const VIDEO_RESOURCES_URL = '/resources/videos.json';
+const RESOURCE_PAGE_SIZE = 60;
+let VIDEO_RESOURCES = [];
+let videoResourcesLoaded = false;
 let resourceCategory = 'all';
 let resourceQuery = '';
+let resourceVisibleCount = RESOURCE_PAGE_SIZE;
 let resourceLayout = 'list';
 try { resourceLayout = localStorage.getItem('pk_resource_layout') === 'grid' ? 'grid' : 'list'; } catch (_) {}
 let curDate = null;      // 每日口径当前日期
@@ -6006,24 +6026,44 @@ function resourceCategoryLabel(key) {
   return (VIDEO_CATEGORIES.find(c => c.key === key) || {}).label || key;
 }
 
+async function loadVideoResources(signal) {
+  if (videoResourcesLoaded) return;
+  const r = await fetch(VIDEO_RESOURCES_URL, { cache: 'no-cache', signal });
+  if (!r.ok) throw new Error('资源目录加载失败（' + r.status + '）');
+  const data = await r.json();
+  const rows = Array.isArray(data) ? data : (data && Array.isArray(data.items) ? data.items : []);
+  VIDEO_RESOURCES = rows.filter(item => item && item.title && item.netdiskUrl);
+  videoResourcesLoaded = true;
+}
+
 function resourceCardHtml(item, layout) {
-  const tags = (item.tags || []).slice(0, 3).map(t => '<span class="resource-tag">' + esc(t) + '</span>').join('');
+  const url = esc(item.netdiskUrl);
+  const title = esc(item.title);
+  const tags = (item.tags || []).slice(0, 2).map(t => '<span class="resource-tag">' + esc(t) + '</span>').join('');
   const provider = item.provider ? '<span class="resource-tag">' + esc(item.provider) + '</span>' : '';
+  const code = item.code ? '<span class="resource-tag code">#' + esc(item.code) + '</span>' : '';
   const duration = item.duration ? '<span class="resource-tag">' + esc(item.duration) + '</span>' : '';
+  const thumb = item.thumbnail
+    ? '<a class="resource-thumb" href="' + url + '" target="_blank" rel="noopener" title="打开网盘">' +
+        '<img src="' + esc(item.thumbnail) + '" alt="' + title + '" loading="lazy" decoding="async">' +
+      '</a>'
+    : '<a class="resource-thumb" href="' + url + '" target="_blank" rel="noopener" title="打开网盘">' +
+        '<span class="material-symbols-outlined" style="color:#818CF8;font-size:28px;display:grid;height:100%;place-items:center">smart_display</span>' +
+      '</a>';
   return '<article class="resource-card" data-resource-id="' + esc(item.id) + '">' +
-    '<div class="resource-ico"><span class="material-symbols-outlined">smart_display</span></div>' +
+    thumb +
     '<div class="resource-main">' +
-      '<h3 title="' + esc(item.title) + '">' + esc(item.title) + '</h3>' +
+      '<h3 title="' + title + '"><a href="' + url + '" target="_blank" rel="noopener">' + title + '</a></h3>' +
       '<div class="desc">' + esc(item.desc) + '</div>' +
       '<div class="resource-row-meta">' +
         '<span class="resource-tag category">' + esc(resourceCategoryLabel(item.category)) + '</span>' +
-        provider + duration + tags +
+        code + provider + duration + tags +
       '</div>' +
     '</div>' +
     '<div class="resource-actions">' +
-      '<a class="resource-open" href="' + esc(item.netdiskUrl) + '" target="_blank" rel="noopener">' +
-        '<span class="material-symbols-outlined">open_in_new</span>网盘观看</a>' +
-      '<button class="resource-copy" type="button" data-copy-url="' + esc(item.netdiskUrl) + '" title="复制网盘链接">' +
+      '<a class="resource-open" href="' + url + '" target="_blank" rel="noopener">' +
+        '<span class="material-symbols-outlined">open_in_new</span>打开网盘</a>' +
+      '<button class="resource-copy" type="button" data-copy-url="' + url + '" title="复制网盘链接">' +
         '<span class="material-symbols-outlined">content_copy</span></button>' +
     '</div>' +
   '</article>';
@@ -6034,7 +6074,7 @@ function resourceFilteredItems() {
   return VIDEO_RESOURCES.filter(item => {
     if (resourceCategory !== 'all' && item.category !== resourceCategory) return false;
     if (!key) return true;
-    return [item.title, item.desc, resourceCategoryLabel(item.category), ...(item.tags || [])]
+    return [item.title, item.desc, item.code, item.provider, resourceCategoryLabel(item.category), ...(item.tags || [])]
       .join(' ').toLowerCase().includes(key);
   });
 }
@@ -6042,7 +6082,8 @@ function resourceFilteredItems() {
 function renderResourceResults() {
   const box = $('resourceResults');
   if (!box) return;
-  const items = resourceFilteredItems();
+  const allItems = resourceFilteredItems();
+  const items = allItems.slice(0, resourceVisibleCount);
   box.className = resourceLayout === 'grid' ? 'resource-grid' : 'resource-list';
   const noData = VIDEO_RESOURCES.length === 0;
   box.innerHTML = items.length
@@ -6051,7 +6092,13 @@ function renderResourceResults() {
       ? '<div class="resource-empty"><span class="big">🎬</span>暂无视频资源<br><span style="font-size:11px">管理员添加视频后会显示在这里</span></div>'
       : '<div class="resource-empty"><span class="big">⌕</span>没有找到匹配视频<br><span style="font-size:11px">换个关键词或视频分类试试</span></div>';
   const count = $('resourceCount');
-  if (count) count.innerHTML = '共 <b>' + items.length + '</b> 个视频';
+  if (count) count.innerHTML = '显示 <b>' + items.length + '</b> / 共 <b>' + allItems.length + '</b> 个素材';
+  const loadWrap = $('resourceLoadWrap');
+  if (loadWrap) {
+    loadWrap.innerHTML = items.length < allItems.length
+      ? '<button class="resource-load-more" type="button">加载更多（剩余 ' + (allItems.length - items.length) + '）</button>'
+      : '';
+  }
   document.querySelectorAll('[data-resource-cat]').forEach(b => {
     b.classList.toggle('on', b.dataset.resourceCat === resourceCategory);
   });
@@ -6062,7 +6109,8 @@ function renderResourceResults() {
   if (clear) clear.hidden = !resourceQuery.trim();
 }
 
-function renderResources() {
+async function renderResources(signal) {
+  await loadVideoResources(signal);
   const withCount = (key) => {
     const n = key === 'all' ? VIDEO_RESOURCES.length : VIDEO_RESOURCES.filter(x => x.category === key).length;
     return '<button class="resource-cat ' + (resourceCategory === key ? 'on' : '') +
@@ -6072,13 +6120,13 @@ function renderResources() {
   $('view').innerHTML = '<div class="section tab-content-enter resource-page">' +
     '<div class="resource-hero">' +
       '<div class="kicker"><span class="material-symbols-outlined">folder_special</span>RESOURCE HUB</div>' +
-      '<h2>视频资源</h2>' +
-      '<p>精选视频教学与运营课程，按分类或关键词查找，点击直接跳转网盘观看。</p>' +
+      '<h2>礼物视频素材</h2>' +
+      '<p>共 ' + VIDEO_RESOURCES.length + ' 个礼物动效素材，支持搜索、分类及列表/卡片浏览，点击缩略图直接跳转 UC 网盘。</p>' +
     '</div>' +
     '<div class="resource-tools">' +
       '<div class="resource-search">' +
         '<span class="material-symbols-outlined">search</span>' +
-        '<input id="resourceSearch" type="search" autocomplete="off" placeholder="搜索视频名称、说明、分类或标签" value="' + esc(resourceQuery) + '">' +
+        '<input id="resourceSearch" type="search" autocomplete="off" placeholder="搜索礼物名称、编号、分类或标签" value="' + esc(resourceQuery) + '">' +
         '<button class="clear" id="resourceClear" type="button" aria-label="清空搜索"' + (resourceQuery ? '' : ' hidden') + '><span class="material-symbols-outlined">close</span></button>' +
       '</div>' +
       '<div class="resource-filter-row">' +
@@ -6089,17 +6137,30 @@ function renderResources() {
         '</div>' +
       '</div>' +
     '</div>' +
-    '<div class="resource-meta"><span id="resourceCount"></span><span>点击视频跳转网盘</span></div>' +
+    '<div class="resource-meta"><span id="resourceCount"></span><span>点击缩略图跳转网盘</span></div>' +
     '<div id="resourceResults" class="resource-list"></div>' +
+    '<div id="resourceLoadWrap" class="resource-load-wrap"></div>' +
   '</div>';
 
   const search = $('resourceSearch');
-  search.oninput = () => { resourceQuery = search.value || ''; renderResourceResults(); };
+  search.oninput = () => {
+    resourceQuery = search.value || '';
+    resourceVisibleCount = RESOURCE_PAGE_SIZE;
+    renderResourceResults();
+  };
   $('resourceClear').onclick = () => {
-    resourceQuery = ''; search.value = ''; search.focus(); renderResourceResults();
+    resourceQuery = '';
+    resourceVisibleCount = RESOURCE_PAGE_SIZE;
+    search.value = '';
+    search.focus();
+    renderResourceResults();
   };
   document.querySelectorAll('[data-resource-cat]').forEach(b => {
-    b.onclick = () => { resourceCategory = b.dataset.resourceCat || 'all'; renderResourceResults(); };
+    b.onclick = () => {
+      resourceCategory = b.dataset.resourceCat || 'all';
+      resourceVisibleCount = RESOURCE_PAGE_SIZE;
+      renderResourceResults();
+    };
   });
   document.querySelectorAll('[data-resource-layout]').forEach(b => {
     b.onclick = () => {
@@ -6108,6 +6169,11 @@ function renderResources() {
       renderResourceResults();
     };
   });
+  $('resourceLoadWrap').onclick = (e) => {
+    if (!e.target.closest('.resource-load-more')) return;
+    resourceVisibleCount += RESOURCE_PAGE_SIZE;
+    renderResourceResults();
+  };
   $('resourceResults').onclick = async (e) => {
     const btn = e.target.closest('[data-copy-url]');
     if (!btn) return;
@@ -9083,7 +9149,7 @@ async function go() {
     if (view === 'data') await loadData(signal);
     else if (view === 'lineage') await loadLineage(null, signal);
     else if (view === 'my') await loadMy(signal);
-    else if (view === 'resources') renderResources();
+    else if (view === 'resources') await renderResources(signal);
     else await loadGroup(signal);
     if (seq !== loadSeq) return;          // 期间用户又点了别的：过期响应作废
     flushViewEnter();                      // 目标 DOM 已落地，再播短淡入
