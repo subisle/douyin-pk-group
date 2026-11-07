@@ -164,12 +164,22 @@ def classify(title: str) -> str:
     return "gift"
 
 
+# 运营素材名末尾的作者/来源标签（例：霸气感谢女神回家特效_小林）。
+# 用户口径 2026-11-07：资源页不要展示“小林 / 鱼发”这类昵称后缀，统一剥掉；
+# `_MP4` 这种格式后缀不属于来源，保留。
 def clean_title(value: str, where: str) -> str:
     title = re.sub(r"\s+", " ", value.replace("\ufeff", "")).strip()
     if not title:
         raise SystemExit(f"{where} 为空")
     if any(ord(ch) < 32 or ord(ch) == 127 for ch in title):
         raise SystemExit(f"{where} 含控制字符: {title!r}")
+    while True:
+        # 兼容两种形式：`..._小林` 与重名版本 `..._鱼发-2-2`；
+        # 只剥最后一节里完全由来源名 + 版本号组成的尾巴。
+        m = re.search(r"_(?P<tail>(?:小林|鱼发)(?:-\d+)*)$", title)
+        if not m:
+            break
+        title = title[: m.start()].rstrip(" -_\t")
     return title
 
 
