@@ -44,7 +44,9 @@ async fn cache_control_mw(
 
 /// [`cache_control_mw`] 的路径判定（纯函数，便于未来加单测）。
 fn cache_no_store(path: &str) -> bool {
-    if path.starts_with("/api/public/avatars/") {
+    if path.starts_with("/api/public/avatars/")
+        || path == "/api/public/resources"
+    {
         return false;
     }
     if path.starts_with("/api/") {
@@ -426,6 +428,8 @@ async fn main() -> anyhow::Result<()> {
             "/api/public/announcements",
             get(public_teams::public_announcements),
         )
+        // 资源分享页分页查询：只下发当前页素材，避免每次下载 755KB 全量清单。
+        .route("/api/public/resources", get(public_teams::resources))
         // 展示端轻量 SSE：只广播「数据已导入」，用于每日最高弹幕自动刷新。
         .route("/api/public/events", get(events::public_sse))
         // 登录前加密预取首屏 site + daily；登录后按团别释放一次性 AES-GCM 密钥。

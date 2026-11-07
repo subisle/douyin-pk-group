@@ -61,19 +61,19 @@ main{width:min(920px,100%);margin:0 auto;padding:18px 16px 48px}.hidden{display:
 (() => {
   const TOKEN_KEY = 'myToken_any';
   const PAGE_SIZE = 30;
-  const state = { items: [], groups: [], categories: [], group: 'all', category: 'all', query: '', sort: 'default', layout: localStorage.getItem('pk_resource_layout') === 'grid' ? 'grid' : 'list', shown: PAGE_SIZE, loading: false };
+  const state = { items: [], groups: [], group: 'all', category: 'all', query: '', sort: 'default', layout: localStorage.getItem('pk_resource_layout') === 'grid' ? 'grid' : 'list', total: 0, catalogTotal: 0, offset: 0, loading: false, seq: 0 };
   const $ = id => document.getElementById(id);
   const esc = value => String(value == null ? '' : value).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
   const token = () => sessionStorage.getItem(TOKEN_KEY) || '';
   const setToken = value => { if (value) sessionStorage.setItem(TOKEN_KEY, value); };
   const loginRequired = () => fetch('/api/public/announcements', {cache:'no-store'}).then(r => r.json()).then(d => d.loginRequired !== false).catch(() => true);
-  const categoryLabel = key => (state.categories.find(c => c.key === key) || {}).label || key;
+  const allCategories = () => state.groups.flatMap(g => Array.isArray(g.categories) ? g.categories : []);
+  const categoryLabel = key => (allCategories().find(c => c.key === key) || {}).label || key;
   const categoriesFor = key => {
-    if (key === 'all') return state.categories;
+    if (key === 'all') return allCategories();
     const group = state.groups.find(g => g.key === key);
     return group && Array.isArray(group.categories) ? group.categories : [];
   };
-  const priceOf = item => typeof item.price === 'number' && Number.isFinite(item.price) ? item.price : null;
 
   function toast(text) {
     const el = $('toast'); el.textContent = text; el.classList.add('show');
@@ -96,7 +96,7 @@ main{width:min(920px,100%);margin:0 auto;padding:18px 16px 48px}.hidden{display:
       const res = await fetch('/api/public/my/login', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({account, pass})});
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.token) throw new Error(data.error || '登录失败');
-      setToken(data.token); $('pass').value = ''; await boot();
+      setToken(data.token); $('pass').value = ''; await enterApp();
     } catch (error) {
       $('loginError').textContent = error.message || '登录失败，请稍后重试';
     } finally {
@@ -104,24 +104,11 @@ main{width:min(920px,100%);margin:0 auto;padding:18px 16px 48px}.hidden{display:
     }
   }
 
-  function filtered() {
-    const keyword = state.query.trim().toLowerCase();
-    const keys = new Set(categoriesFor(state.group).map(c => c.key));
-    const rows = state.items.filter(item => {
-      if (state.group !== 'all' && item.group !== state.group && !keys.has(item.category)) return false;
-      if (state.category !== 'all' && item.category !== state.category) return false;
-      return !keyword || String(item.title || '').toLowerCase().includes(keyword);
-    });
-    if (state.sort !== 'default') {
-      const direction = state.sort === 'price-asc' ? 1 : -1;
-      rows.sort((a, b) => {
-        const ap = priceOf(a), bp = priceOf(b);
-        if (ap == null && bp == null) return String(a.id).localeCompare(String(b.id));
-        if (ap == null) return 1; if (bp == null) return -1;
-        return (ap - bp) * direction || String(a.id).localeCompare(String(b.id));
-      });
-    }
-    return rows;
+  function skeleton() {
+    $('results').className = 'results ' + (state.layout === 'grid' ? 'grid' : '');
+    $('results').innerHTML = '<div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>';
+    $('count').textContent = '正在加载…';
+    $('more').classList.add('hidden');
   }
 
   function card(item) {
@@ -134,58 +121,77 @@ main{width:min(920px,100%);margin:0 auto;padding:18px 16px 48px}.hidden{display:
   }
 
   function renderChips() {
-    const groupCount = key => key === 'all' ? state.items.length : state.items.filter(i => i.group === key || new Set(categoriesFor(key).map(c => c.key)).has(i.category)).length;
-    $('groups').innerHTML = `<button class="chip group-chip ${state.group === 'all' ? 'on' : ''}" data-group="all">全部素材 <span class="n">${state.items.length}</span></button>` + state.groups.map(g => `<button class="chip group-chip ${state.group === g.key ? 'on' : ''}" data-group="${esc(g.key)}">${esc(g.label)} <span class="n">${groupCount(g.key)}</span></button>`).join('');
-    const filterBase = state.items.filter(i => state.group === 'all' || i.group === state.group || new Set(categoriesFor(state.group).map(c => c.key)).has(i.category));
-    const catCount = key => key === 'all' ? filterBase.length : filterBase.filter(i => i.category === key).length;
-    $('cats').innerHTML = `<button class="chip ${state.category === 'all' ? 'on' : ''}" data-cat="all">全部 <span class="n">${filterBase.length}</span></button>` + categoriesFor(state.group).map(c => `<button class="chip ${state.category === c.key ? 'on' : ''}" data-cat="${esc(c.key)}">${esc(c.label)} <span class="n">${catCount(c.key)}</span></button>`).join('');
+    const groupCount = g => Number(g.count || 0);
+    const filterGroup = state.groups.find(g => g.key === state.group);
+    const filterCount = state.group === 'all' ? Number(state.catalogTotal || 0) : Number(filterGroup && filterGroup.count || 0);
+    $('groups').innerHTML = `<button class="chip group-chip ${state.group === 'all' ? 'on' : ''}" data-group="all">全部素材 <span class="n">${Number(state.catalogTotal || 0).toLocaleString('zh-CN')}</span></button>` + state.groups.map(g => `<button class="chip group-chip ${state.group === g.key ? 'on' : ''}" data-group="${esc(g.key)}">${esc(g.label)} <span class="n">${groupCount(g)}</span></button>`).join('');
+    const catCount = key => key === 'all' ? filterCount : Number((categoriesFor(state.group).find(c => c.key === key) || {}).count || 0);
+    $('cats').innerHTML = `<button class="chip ${state.category === 'all' ? 'on' : ''}" data-cat="all">全部 <span class="n">${catCount('all')}</span></button>` + categoriesFor(state.group).map(c => `<button class="chip ${state.category === c.key ? 'on' : ''}" data-cat="${esc(c.key)}">${esc(c.label)} <span class="n">${catCount(c.key)}</span></button>`).join('');
     document.querySelectorAll('[data-layout]').forEach(button => button.classList.toggle('on', button.dataset.layout === state.layout));
   }
 
   function render() {
     renderChips();
-    const rows = filtered(), visible = rows.slice(0, state.shown);
     $('results').className = 'results ' + (state.layout === 'grid' ? 'grid' : '');
-    $('results').innerHTML = visible.length ? visible.map(card).join('') : '<div class="empty">没有找到匹配资源<br>换个关键词或分类试试</div>';
-    $('count').innerHTML = `显示 <b>${visible.length}</b> / 共 <b>${rows.length}</b> 个素材`;
-    $('heroCount').textContent = state.items.length.toLocaleString('zh-CN');
-    $('more').classList.toggle('hidden', visible.length >= rows.length);
-    if (visible.length < rows.length) $('more').textContent = `加载更多（剩余 ${rows.length - visible.length}）`;
+    $('results').innerHTML = state.items.length ? state.items.map(card).join('') : '<div class="empty">没有找到匹配资源<br>换个关键词或分类试试</div>';
+    $('count').innerHTML = `显示 <b>${state.items.length}</b> / 共 <b>${state.total.toLocaleString('zh-CN')}</b> 个素材`;
+    $('heroCount').textContent = state.catalogTotal.toLocaleString('zh-CN');
+    $('more').classList.toggle('hidden', state.items.length >= state.total);
+    if (state.items.length < state.total) $('more').textContent = `加载更多（剩余 ${state.total - state.items.length}）`;
     $('clear').hidden = !state.query;
   }
 
-  async function boot() {
+  async function load(reset) {
+    const seq = ++state.seq;
+    if (reset) { state.offset = 0; state.items = []; Object.assign(state, {group: state.group, category: state.category}); skeleton(); }
+    state.loading = true;
     try {
-      if (await loginRequired() && !token()) { showLogin(); return; }
-      $('loginView').classList.add('hidden'); $('appView').classList.remove('hidden'); $('logout').hidden = false;
-      if (state.items.length) { render(); return; }
-      state.loading = true;
-      const res = await fetch('/resources/videos.json', {cache:'default'});
+      const params = new URLSearchParams({limit:String(PAGE_SIZE), offset:String(state.offset), sort:state.sort});
+      if (state.group !== 'all') params.set('group', state.group);
+      if (state.category !== 'all') params.set('category', state.category);
+      if (state.query.trim()) params.set('q', state.query.trim());
+      const res = await fetch('/api/public/resources?' + params.toString(), {cache:'default'});
       if (!res.ok) throw new Error(`资源目录加载失败（${res.status}）`);
       const data = await res.json();
-      state.items = (Array.isArray(data) ? data : data.items || []).filter(x => x && x.title && x.netdiskUrl);
-      state.groups = !Array.isArray(data) && Array.isArray(data.groups) ? data.groups : [];
-      state.categories = !Array.isArray(data) && Array.isArray(data.categories) ? data.categories : state.groups.flatMap(g => g.categories || []);
+      if (seq !== state.seq) return;
+      state.groups = Array.isArray(data.groups) ? data.groups : [];
+      state.total = Number(data.total || 0);
+      state.catalogTotal = Number(data.catalogTotal || 0);
+      const rows = Array.isArray(data.items) ? data.items : [];
+      state.items = reset ? rows : state.items.concat(rows);
+      state.offset = Number(data.offset || 0) + rows.length;
       state.loading = false; render();
     } catch (error) {
+      if (seq !== state.seq) return;
       state.loading = false;
       $('results').innerHTML = `<div class="empty">${esc(error.message || '加载失败')}<br><button class="more" id="retry" type="button">重新加载</button></div>`;
-      const retry = $('retry'); if (retry) retry.onclick = boot;
+      const retry = $('retry'); if (retry) retry.onclick = () => load(true);
     }
   }
 
+  async function enterApp() {
+    try {
+      if (await loginRequired() && !token()) { showLogin(); return; }
+      $('loginView').classList.add('hidden'); $('appView').classList.remove('hidden'); $('logout').hidden = false;
+      await load(true);
+    } catch (error) {
+      showLogin(error.message || '加载失败');
+    }
+  }
+
+  let searchTimer;
   $('loginForm').addEventListener('submit', submitLogin);
   $('logout').addEventListener('click', () => { sessionStorage.removeItem(TOKEN_KEY); location.reload(); });
-  $('query').addEventListener('input', event => { state.query = event.target.value || ''; state.shown = PAGE_SIZE; render(); });
-  $('clear').addEventListener('click', () => { state.query = ''; $('query').value = ''; state.shown = PAGE_SIZE; render(); $('query').focus(); });
-  $('sort').addEventListener('change', event => { state.sort = event.target.value; state.shown = PAGE_SIZE; render(); });
-  $('groups').addEventListener('click', event => { const button = event.target.closest('[data-group]'); if (!button) return; state.group = button.dataset.group; state.category = 'all'; state.shown = PAGE_SIZE; render(); });
-  $('cats').addEventListener('click', event => { const button = event.target.closest('[data-cat]'); if (!button) return; state.category = button.dataset.cat; state.shown = PAGE_SIZE; render(); });
-  document.querySelector('.layout').addEventListener('click', event => { const button = event.target.closest('[data-layout]'); if (!button) return; state.layout = button.dataset.layout === 'grid' ? 'grid' : 'list'; localStorage.setItem('pk_resource_layout', state.layout); state.shown = PAGE_SIZE; render(); });
-  $('more').addEventListener('click', () => { state.shown += PAGE_SIZE; render(); });
+  $('query').addEventListener('input', event => { state.query = event.target.value || ''; state.offset = 0; clearTimeout(searchTimer); searchTimer = setTimeout(() => load(true), 220); });
+  $('clear').addEventListener('click', () => { state.query = ''; $('query').value = ''; clearTimeout(searchTimer); load(true); $('query').focus(); });
+  $('sort').addEventListener('change', event => { state.sort = event.target.value; load(true); });
+  $('groups').addEventListener('click', event => { const button = event.target.closest('[data-group]'); if (!button) return; state.group = button.dataset.group; state.category = 'all'; load(true); });
+  $('cats').addEventListener('click', event => { const button = event.target.closest('[data-cat]'); if (!button) return; state.category = button.dataset.cat; load(true); });
+  document.querySelector('.layout').addEventListener('click', event => { const button = event.target.closest('[data-layout]'); if (!button) return; state.layout = button.dataset.layout === 'grid' ? 'grid' : 'list'; localStorage.setItem('pk_resource_layout', state.layout); render(); });
+  $('more').addEventListener('click', () => { if (!state.loading) load(false); });
   $('results').addEventListener('click', async event => { const button = event.target.closest('[data-copy]'); if (!button) return; try { await navigator.clipboard.writeText(button.dataset.copy || ''); toast('链接已复制'); } catch (_) { toast('复制失败，请长按打开'); } });
 
-  boot();
+  enterApp();
 })();
 </script>
 </body>
