@@ -150,7 +150,7 @@ main{width:min(920px,100%);margin:0 auto;padding:18px 16px 48px}.hidden{display:
       if (state.group !== 'all') params.set('group', state.group);
       if (state.category !== 'all') params.set('category', state.category);
       if (state.query.trim()) params.set('q', state.query.trim());
-      const res = await fetch('/api/public/resources?' + params.toString(), {cache:'default'});
+      const res = await fetch('/resources/query.json?' + params.toString(), {cache:'default'});
       if (!res.ok) throw new Error(`资源目录加载失败（${res.status}）`);
       const data = await res.json();
       if (seq !== state.seq) return;
