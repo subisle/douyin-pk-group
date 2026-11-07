@@ -38,7 +38,16 @@ pub async fn st_page_sub(
 pub(super) fn st_page_for(team: &str) -> Response {
     let html = ST_PAGE.replace("{{TEAM}}", team);
     (
-        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        [
+            (axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            // 静态展示页不含用户数据；/resources 的 no-store 已在 cache_control_mw
+            // 白名单里放行，因此这里设置的头会生效。其它展示页仍由中间件覆盖成
+            // no-store，行为不变。
+            (
+                axum::http::header::CACHE_CONTROL,
+                "public, max-age=300, stale-while-revalidate=60",
+            ),
+        ],
         html,
     )
         .into_response()

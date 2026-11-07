@@ -156,6 +156,10 @@ fn cache_control(path: &str) -> &'static str {
         "public, max-age=31536000, immutable"
     } else if path.starts_with("/fonts/") || path.starts_with("/resources/thumbs/") {
         "public, max-age=604800"
+    } else if path == "/resources/videos.json" {
+        // 资源清单约 700KB（gzip 后约 70KB），且每次打开资源页都要用。
+        // 允许浏览器和 CDN 短缓存；运营换素材后最多 5 分钟自动刷新。
+        "public, max-age=300, stale-while-revalidate=86400"
     } else {
         "no-cache"
     }
@@ -235,7 +239,10 @@ mod tests {
             cache_control("/resources/thumbs/0001.svg"),
             "public, max-age=604800"
         );
-        assert_eq!(cache_control("/resources/videos.json"), "no-cache");
+        assert_eq!(
+            cache_control("/resources/videos.json"),
+            "public, max-age=300, stale-while-revalidate=86400"
+        );
         assert_eq!(cache_control("/resources"), "no-cache");
     }
 

@@ -50,17 +50,15 @@ fn cache_no_store(path: &str) -> bool {
     if path.starts_with("/api/") {
         return true;
     }
+    // 资源分享页只是静态壳：分类/素材都由 /resources/videos.json 在登录后拉取，
+    // HTML 本身不含任何用户数据。允许短缓存，避免每次打开都重新传约 256KB(gzip)
+    // 的展示页脚本。其它展示页仍保持 no-store。
+    if matches!(path, "/resources" | "/resource") {
+        return false;
+    }
     matches!(
         path,
-        "/" | "/1"
-            | "/0"
-            | "/report"
-            | "/lineage"
-            | "/resources"
-            | "/resource"
-            | "/my"
-            | "/wechat"
-            | "/group"
+        "/" | "/1" | "/0" | "/report" | "/lineage" | "/my" | "/wechat" | "/group"
     ) || path.starts_with("/my/")
         || path.starts_with("/wechat/")
         || path.starts_with("/group/")

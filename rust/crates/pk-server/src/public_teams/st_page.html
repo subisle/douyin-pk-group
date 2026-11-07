@@ -1633,7 +1633,9 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .resource-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }
 .resource-card { min-width:0; border-radius:15px; background:rgba(255,255,255,.78);
   border:1px solid rgba(255,255,255,.95); box-shadow:0 5px 16px rgba(15,23,42,.055);
-  overflow:hidden; transition:transform .16s ease, box-shadow .16s ease; }
+  overflow:hidden; transition:transform .16s ease, box-shadow .16s ease;
+  content-visibility:auto; contain-intrinsic-size:auto 92px; }
+.resource-grid .resource-card { contain-intrinsic-size:auto 250px; }
 .resource-card:hover { transform:translateY(-1px); box-shadow:0 9px 22px rgba(15,23,42,.09); }
 .resource-list .resource-card { display:grid; grid-template-columns:94px minmax(0,1fr) 84px; gap:11px;
   align-items:center; padding:10px; }
@@ -2996,7 +2998,7 @@ let VIDEO_CATEGORIES = [
   { key: 'account', label: '等级灯牌', icon: 'badge' },
 ];
 const VIDEO_RESOURCES_URL = '/resources/videos.json';
-const RESOURCE_PAGE_SIZE = 60;
+const RESOURCE_PAGE_SIZE = 30;
 let VIDEO_RESOURCES = [];
 let videoResourcesLoaded = false;
 let resourceCategory = 'all';
