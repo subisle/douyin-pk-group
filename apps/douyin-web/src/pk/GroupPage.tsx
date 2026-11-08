@@ -885,7 +885,7 @@ export default function GroupPage() {
       }
       const node = buildExportNode({
         title: title.trim() || 'PK 分组',
-        brandLine: `PK GROUP · ${dates[0] || isoLocal()}`,
+        brandLine: `PK GROUP · 分组名单 · ${dates[0] || isoLocal()}`,
         metaLine: `${eventType} · 共 ${buckets.reduce((s, b) => s + b.players.length, 0)} 人 · ${startTime} 后 / 间隔 ${intervalMin} 分${restOn ? ` · 第 ${restAfterGroup} 组后${revivalEvent ? '复活赛' : '休息'} ${restMin} 分` : ''}`,
         groups: buckets.map((b, i) => ({
           name: b.name,
@@ -932,7 +932,7 @@ export default function GroupPage() {
       const total = buckets.reduce((s, b) => s + b.players.length, 0);
       const node = buildGapExportNode({
         title: title.trim() || 'PK 分组',
-        brandLine: `PK GROUP · 总排名分差 · ${dates[0] || isoLocal()}`,
+        brandLine: `PK GROUP · 名次差距 · ${dates[0] || isoLocal()}`,
         metaLine: `${eventType} · 口径 ${waveLabel} · 共 ${buckets.length} 组 ${total} 人`,
         players: buckets.flatMap((b, gi) =>
           b.players.map((p) => ({
@@ -1607,15 +1607,15 @@ export default function GroupPage() {
             {busy === 'save' ? '保存中…' : '保存方案'}
           </button>
           <button disabled={busy === 'export'} onClick={exportImage}>
-            {busy === 'export' ? '导出中…' : '导出长图'}
+            {busy === 'export' ? '导出中…' : '导出分组图'}
           </button>
           {/* 总排名分差图：单独一张 PNG，只回答「谁排第几、相邻差多少分」 */}
           <button
             disabled={busy === 'gap'}
             onClick={exportGapImage}
-            title="总排名 + 相邻名次分差：看全体人员的总榜位次、每组占了哪一段、互相差多少分"
+            title="各名次门槛 + 距上一位 + 目标名次还差多少分"
           >
-            {busy === 'gap' ? '导出中…' : '导出分差图'}
+            {busy === 'gap' ? '导出中…' : '导出差距图'}
           </button>
           {/* PK 展板（2026-10-16 用户口径）：全屏独立页，不在侧边栏 —— 跳转新标签打开。
               展板要投屏/占满整屏，新标签里没有后台导航（地址栏除外）。 */}

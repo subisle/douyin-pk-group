@@ -122,12 +122,6 @@ const wanDec = (n: number) => {
   return (n / 10000).toFixed(1).replace(/\.0$/, '') + '万';
 };
 
-/** 竞赛排名：并列同名次，下一位跳号（1,1,3） */
-function rankOf(wave: number, sortedDesc: number[]): number {
-  const at = sortedDesc.findIndex((w) => w <= wave);
-  return at < 0 ? sortedDesc.length : at + 1;
-}
-
 /** 分组卡配色（对照参考图 8 色循环：粉/紫/青/橙/绿/红/蓝/青绿） */
 const THEMES = [
   { bg: '#fdeaf1', bd: '#f6a8c5', tc: '#e04f8a' },
@@ -142,38 +136,25 @@ const THEMES = [
 
 /** 拼一段纯内联样式的长图 DOM，宽 1024，挂到离屏容器后交给 nodeToPngBlob。
  *  版式对照参考图：渐变头部卡（品牌 + 场次信息 + N组/N人 胶囊）
- *  → 两列彩色分组卡（组员两列胶囊，含组内/全场名次统计行）→ 底部落款。 */
+ *  → 两列彩色分组卡（只放组名、开赛时间和成员姓名）→ 底部落款。 */
 export function buildExportNode(input: ExportInput): HTMLElement {
   const totalPlayers = input.groups.reduce((s, g) => s + g.players.length, 0);
-  const allWaves = input.groups
-    .flatMap((g) => g.players.map((p) => p.wave || 0))
-    .sort((a, b) => b - a);
-  const statLine = (wave: number, groupRank: number) => {
-    const parts = [`第${groupRank}位 · 全场第${rankOf(wave, allWaves)}位`];
-    if (!input.hideWave) parts.push(`${input.metricLabel || '音浪'} ${wanDec(wave)}`);
-    return parts.join(' · ');
-  };
-
   const cards = input.groups
     .map((g, gi) => {
       const t = THEMES[gi % THEMES.length];
-      const sorted = g.players.map((p) => p.wave || 0).sort((a, b) => b - a);
-      // 两列成员胶囊：奇数个时最后一格补一个占位，保持左右对称
-      const chips = g.players.map((p, i) => {
-        const wave = p.wave || 0;
-        const groupRank = rankOf(wave, sorted);
-        return `<div style="background:rgba(255,255,255,.8);border-radius:10px;padding:8px 10px">
-          <div style="font-size:14px;line-height:20px;color:#1f2937">
-            <span style="color:${t.tc};font-weight:800;margin-right:6px">${i + 1}</span>
-            <b style="font-weight:700">${esc(p.name)}</b>
-          </div>
-          <div style="margin-top:3px;font-size:11px;line-height:16px;color:#8590a2">${esc(statLine(wave, groupRank))}</div>
-        </div>`;
-      });
+      // 分组图只保留“谁在哪一组”，不混入音浪、全场名次或组内名次。
+      const chips = g.players.map((p, i) =>
+        `<div style="min-width:0;background:rgba(255,255,255,.82);border:1px solid rgba(255,255,255,.95);border-radius:10px;padding:9px 10px;display:flex;align-items:center;gap:8px">
+          <span style="flex:none;font-size:11px;font-weight:800;color:${t.tc};font-variant-numeric:tabular-nums">${String(i + 1).padStart(2, '0')}</span>
+          <b style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px;font-weight:700;color:#1f2937">${esc(p.name)}</b>
+        </div>`
+      );
       if (chips.length % 2 === 1) chips.push('<div></div>');
       return `<div style="break-inside:avoid;margin-bottom:14px;background:${t.bg};border:2px solid ${t.bd};border-radius:16px;padding:14px 14px 12px">
-        <div style="font-size:17px;font-weight:800;color:${t.tc}">${esc(g.name)}</div>
-        <div style="margin-top:2px;font-size:12px;color:#7b8494">${esc(g.slot ? g.slot + ' 开赛' : '')}${g.players.length ? ' · ' + g.players.length + ' 人' : ''}</div>
+        <div style="display:flex;align-items:baseline;justify-content:space-between;gap:10px">
+          <div style="font-size:18px;font-weight:800;color:${t.tc}">${esc(g.name)}</div>
+          <div style="font-size:11px;color:#7b8494">${esc(g.slot ? g.slot + ' 开赛' : '')}${g.players.length ? (g.slot ? ' · ' : '') + g.players.length + ' 人' : ''}</div>
+        </div>
         <div style="margin-top:10px;display:grid;grid-template-columns:1fr 1fr;gap:8px">${chips.join('') || '<div style="grid-column:1/3;color:#98a2b3;font-size:13px">空组</div>'}</div>
       </div>`;
     })
@@ -184,26 +165,6 @@ export function buildExportNode(input: ExportInput): HTMLElement {
       <div style="font-size:22px;font-weight:800;line-height:1.1">${esc(num)}</div>
       <div style="font-size:10px;opacity:.85;margin-top:1px">${esc(label)}</div>
     </div>`;
-
-  /* 赛制说明：内置规则整块打在标题下面、分组卡上面（用户 2026-10-07 要求放头部，
-     先看规则再看分组）。不用 <ol>/<li>——foreignObject 里列表符号渲染不稳，
-     改成手写序号的 div。 */
-  const ruleBlock =
-    input.rules && input.rules.items.length
-      ? `<div style="margin-top:14px;border:2px solid #ffd9c9;background:#fff7f3;border-radius:16px;padding:14px 16px">
-          <div style="font-size:15px;font-weight:800;color:#f4573d">${esc(input.rules.title)}</div>
-          <div style="margin-top:9px;display:grid;gap:6px">
-            ${input.rules.items
-              .map(
-                (t, i) =>
-                  `<div style="font-size:12.5px;line-height:19px;color:#5b6472">
-                    <span style="color:#f4573d;font-weight:800;margin-right:6px">${i + 1}</span>${esc(t)}
-                  </div>`,
-              )
-              .join('')}
-          </div>
-        </div>`
-      : '';
 
   /* ⚠️ box-sizing 必须内联：导出是把这段 HTML 序列化进 foreignObject，
     页面 styles.css 里的全局 `*{box-sizing:border-box}` 带不进去。不写这一行，
@@ -218,7 +179,6 @@ export function buildExportNode(input: ExportInput): HTMLElement {
         </div>
         <div style="display:flex;gap:10px;flex:none;margin-left:16px">${pill(String(input.groups.length), '组', false)}${pill(String(totalPlayers), '人', true)}</div>
       </div>
-      ${ruleBlock}
       <div style="column-count:2;column-gap:14px;margin-top:16px">${cards}</div>
       <div style="margin-top:10px;text-align:center;color:#98a2b3;font-size:11px">${esc(input.footer || '内部数据 · 请勿外传')}</div>
     </div>`;
@@ -272,11 +232,11 @@ const RANK_THEMES = [
 /** 固定档位「门槛」：每行标出离前10 / 前5 / 前三 / 前2 / 前1 还差多少分。
  *  按**顺序位**取门槛（第 k 位那个人的分数），并列时门槛 = 该位置的分数。 */
 const MILESTONES = [
-  { label: '前10', k: 10 },
-  { label: '前5', k: 5 },
-  { label: '前三', k: 3 },
-  { label: '前2', k: 2 },
   { label: '前1', k: 1 },
+  { label: '前2', k: 2 },
+  { label: '前三', k: 3 },
+  { label: '前5', k: 5 },
+  { label: '前10', k: 10 },
 ] as const;
 
 /** 拼一张「总排名 + 相邻名次分差 + 前 K 门槛差」的竖图，宽 1024，挂到离屏容器后交给 nodeToPngBlob。
@@ -299,110 +259,53 @@ export function buildGapExportNode(input: GapExportInput): HTMLElement {
     gaps.push(i === 0 ? 0 : prev - wave);
   });
 
-  /* 各组名次分布：一眼看出每个组的人在总榜占了哪一段 */
-  const legend = new Map<number, { name: string; best: number; worst: number; count: number }>();
-  players.forEach((p, i) => {
-    const cur = legend.get(p.groupIndex);
-    if (!cur) legend.set(p.groupIndex, { name: p.groupName, best: ranks[i], worst: ranks[i], count: 1 });
-    else {
-      cur.best = Math.min(cur.best, ranks[i]);
-      cur.worst = Math.max(cur.worst, ranks[i]);
-      cur.count += 1;
-    }
+  /* 各档目标名次的当前门槛分。这里放“目标名次 + 当前持有人 + 分数”，
+     让读者直接知道追到前 1/2/3/5/10 分别要多少分。 */
+  const milestoneTargets = MILESTONES.flatMap((m) => {
+    if (m.k > total) return [];
+    const target = players[m.k - 1];
+    return [{ label: m.label, k: m.k, name: target.name, score: target.wave || 0 }];
   });
-  const legendRows = [...legend.entries()]
-    .sort((a, b) => a[0] - b[0])
-    .map(([gi, g]) => {
-      const t = THEMES[gi % THEMES.length];
-      const range = g.best === g.worst ? `第${g.best}名` : `第${g.best}–${g.worst}名`;
-      return `<div style="display:flex;align-items:center;gap:5px;min-width:0;font-size:11px;color:#475467">
-        <span style="width:8px;height:8px;border-radius:3px;flex:none;background:${t.tc}"></span>
-        <b style="flex:none;color:${t.tc}">${esc(g.name)}</b>
-        <span style="color:#98a2b3;white-space:nowrap">${esc(range)} · ${g.count}人</span>
-      </div>`;
-    })
+  const milestoneCells = milestoneTargets
+    .map(
+      (t) => `<div style="min-width:0;padding:9px 10px;border-radius:11px;background:#fff;border:1px solid #f4e6df">
+        <div style="font-size:11px;font-weight:800;color:#f4573d">${esc(t.label)}</div>
+        <div style="margin-top:3px;font-size:12px;color:#475467;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(t.name)}</div>
+        <div style="margin-top:3px;font-size:16px;font-weight:800;color:#101828;line-height:1.15">${wanDec(t.score)}</div>
+        <div style="margin-top:1px;font-size:9px;color:#98a2b3">目标分</div>
+      </div>`,
+    )
     .join('');
 
-  /* 分差概览：最大断层 / 平均分差 / 并列人数 */
-  const nonZeroGaps = gaps.filter((g) => g > 0);
-  const maxGap = nonZeroGaps.length ? Math.max(...nonZeroGaps) : 0;
-  const maxGapAt = gaps.indexOf(maxGap);
-  const avgGap = nonZeroGaps.length ? nonZeroGaps.reduce((s, g) => s + g, 0) / nonZeroGaps.length : 0;
-  /* 并列人数 = 落在并列名次里的总人数（含并列的第一人），不是「多出来的人」 */
-  const tieCount = (() => {
-    const byWave = new Map<number, number>();
-    players.forEach((p) => byWave.set(p.wave || 0, (byWave.get(p.wave || 0) || 0) + 1));
-    return [...byWave.values()].filter((c) => c > 1).reduce((s, c) => s + c, 0);
-  })();
-  const maxGapText =
-    maxGap > 0 && maxGapAt > 0 ? `第${ranks[maxGapAt - 1]}→${ranks[maxGapAt]}名 差${wanDec(maxGap)}` : '—';
-  const stat = (value: string, label: string) =>
-    `<div style="min-width:0">
-      <div style="font-size:15px;font-weight:800;color:#101828;line-height:1.2;white-space:nowrap">${esc(value)}</div>
-      <div style="margin-top:3px;font-size:10px;color:#98a2b3">${esc(label)}</div>
-    </div>`;
-
-  /* 各档门槛分：第 k 位那个人的分数（并列时就是该位置的分数）；人数不够的档位不渲染 */
-  const milestoneTargets = MILESTONES.map(({ k }) => (k <= total ? players[k - 1].wave || 0 : null));
-  const milestoneCols = MILESTONES.filter((_, mi) => milestoneTargets[mi] !== null).length;
-  const milestoneCells = MILESTONES.map(({ label }, mi) => {
-    const target = milestoneTargets[mi];
-    return target === null ? '' : stat(wanDec(target), `${label}门槛`);
-  })
-    .filter(Boolean)
-    .join('');
-  const milestoneCard =
-    milestoneCols > 0
-      ? `<div style="margin-top:12px;border:1px solid #eef1f6;border-radius:14px;padding:11px 14px;display:flex;align-items:center;gap:16px">
-        <div style="flex:none">
-          <div style="font-size:12.5px;font-weight:800;color:#344054">名次门槛</div>
-          <div style="margin-top:3px;font-size:10px;color:#98a2b3">追到该名次要多少分</div>
-        </div>
-        <div style="flex:1;display:grid;grid-template-columns:repeat(${milestoneCols},1fr);gap:10px">${milestoneCells}</div>
-      </div>`
-      : '';
-
-  /* 排名行：名次奖牌 + 姓名/组别印章 + 分值；第二行音浪条 + 距上一位差多少；
-   * 第三行固定档位——已进到哪一档（绿）+ 逐档还差多少分（前10/前5/前三/前2/前1，红）。 */
+  /* 排名行：名次 + 姓名 + 当前分；副行只展示“距上一位”，
+     再列出该人尚未达到的目标名次还差多少分。已经超过的档位不再显示，减少噪音。 */
   const rows = players
     .map((p, i) => {
       const wave = p.wave || 0;
       const rank = ranks[i];
       const gap = gaps[i];
-      const t = THEMES[p.groupIndex % THEMES.length];
       const medal = rank <= 3 ? RANK_THEMES[rank - 1] : null;
       const badgeStyle = medal
         ? `background:${medal.bg};color:${medal.fg}`
         : 'background:#f2f4f8;color:#667085';
       const pct = Math.max(2, Math.round((wave / maxWave) * 100));
       const gapText =
-        i === 0 ? '总榜第 1 名' : gap === 0 ? '与上一位并列' : `距上一位差 ${wanDec(gap)}`;
-      /* 固定档位：已进到的最紧一档（如「已进前5」）+ 还没追上的档位逐档差多少分。
-         位置 = i + 1；k < 位置 的档位才算「还没进」，k >= 位置的档位都算已进。 */
+        i === 0 ? '当前第 1 名' : gap === 0 ? '与上一位并列' : `距上一位还差 ${wanDec(gap)}`;
       const position = i + 1;
-      const achieved = MILESTONES.filter(
-        (m, mi) => milestoneTargets[mi] !== null && position <= m.k,
-      );
-      const achievedLabel = achieved.length ? achieved[achieved.length - 1].label : '';
-      const aheadChips = MILESTONES.map((m, mi) => {
-        const target = milestoneTargets[mi];
-        if (target === null || m.k >= position) return '';
-        const diff = target - wave;
-        const text = diff > 0 ? `${m.label} 差${wanDec(diff)}` : `${m.label} 持平`;
-        return `<span style="color:${diff > 0 ? '#d95b4f' : '#dd8f1d'};font-weight:${diff > 0 ? 700 : 500}">${esc(text)}</span>`;
-      })
-        .filter(Boolean)
+      const aheadChips = milestoneTargets
+        .filter((t) => t.k < position)
+        .map((t) => {
+          const diff = t.score - wave;
+          return `<span style="color:${diff > 0 ? '#d95b4f' : '#dd8f1d'};font-weight:${diff > 0 ? 700 : 500}">${esc(t.label)} ${diff > 0 ? '+' + wanDec(diff) : '持平'}</span>`;
+        })
         .join('');
-      const milestoneLine = `<div style="margin-top:5px;display:flex;flex-wrap:wrap;gap:2px 8px;font-size:10px;line-height:15px;color:#98a2b3">
-          ${achievedLabel ? `<span style="color:#2f9e5d;font-weight:700">已进${esc(achievedLabel)}</span>` : ''}${aheadChips}
-        </div>`;
+      const aheadLine = aheadChips
+        ? `<div style="margin-top:5px;display:flex;flex-wrap:wrap;gap:2px 9px;font-size:10px;line-height:15px;color:#98a2b3">${aheadChips}</div>`
+        : '';
       return `<div style="break-inside:avoid;margin-bottom:7px;border:1px solid #eef1f6;border-radius:11px;padding:8px 10px 9px;background:#fff">
         <div style="display:flex;align-items:center;gap:7px">
           <div style="width:25px;height:25px;border-radius:8px;flex:none;text-align:center;line-height:25px;font-size:11.5px;font-weight:800;${badgeStyle}">${rank}</div>
-          <div style="flex:1;min-width:0;display:flex;align-items:center;gap:6px">
-            <b style="font-size:14px;color:#101828;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(p.name)}</b>
-            <span style="flex:none;font-size:10px;padding:1px 5px;border-radius:6px;background:${t.bg};border:1px solid ${t.bd};color:${t.tc};font-weight:700;white-space:nowrap">${esc(p.groupName)}</span>
-          </div>
+          <b style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px;color:#101828">${esc(p.name)}</b>
           <div style="flex:none;text-align:right">
             <div style="font-size:14px;font-weight:800;color:#101828;line-height:1.15">${wanDec(wave)}</div>
             <div style="font-size:9px;color:#98a2b3">${esc(metricLabel)}</div>
@@ -410,11 +313,11 @@ export function buildGapExportNode(input: GapExportInput): HTMLElement {
         </div>
         <div style="margin-top:6px;display:flex;align-items:center;gap:8px">
           <div style="flex:1;height:5px;border-radius:3px;background:#f1f4f9;overflow:hidden">
-            <div style="width:${pct}%;height:100%;border-radius:3px;background:linear-gradient(90deg,${t.bd},${t.tc})"></div>
+            <div style="width:${pct}%;height:100%;border-radius:3px;background:linear-gradient(90deg,#f7b267,#f4573d)"></div>
           </div>
           <div style="flex:none;font-size:10.5px;font-weight:${gap > 0 ? 700 : 400};color:${gap > 0 ? '#d95b4f' : '#98a2b3'};white-space:nowrap">${esc(gapText)}</div>
         </div>
-        ${milestoneLine}
+        ${aheadLine}
       </div>`;
     })
     .join('');
@@ -425,37 +328,29 @@ export function buildGapExportNode(input: GapExportInput): HTMLElement {
       <div style="font-size:10px;opacity:.85;margin-top:1px">${esc(label)}</div>
     </div>`;
 
-  /* 同 buildExportNode：box-sizing 必须内联，否则 1024 宽 + 左右内边距会被画布裁掉右边缘 */
+  const milestoneCard = milestoneTargets.length
+    ? `<div style="margin-top:14px;background:#fff8f2;border:1px solid #ffd9c9;border-radius:16px;padding:12px 14px">
+        <div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px">
+          <div style="font-size:13px;font-weight:800;color:#f4573d">目标名次门槛</div>
+          <div style="font-size:10px;color:#b0a9a3">追平看差值，超过目标还需再加 1 分</div>
+        </div>
+        <div style="margin-top:9px;display:grid;grid-template-columns:repeat(${milestoneTargets.length},1fr);gap:8px">${milestoneCells}</div>
+      </div>`
+    : '';
+
   const html = `<div style="box-sizing:border-box;width:1024px;padding:24px 26px 18px;background:#fff;font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;color:#101828">
       <div style="display:flex;align-items:center;justify-content:space-between;background:linear-gradient(120deg,#ff9a3d 0%,#ff6a5e 55%,#ff4d94 100%);border-radius:20px;padding:20px 24px;color:#fff">
         <div style="min-width:0">
-          <div style="font-size:11px;letter-spacing:2px;opacity:.85">${esc(input.brandLine || 'PK GROUP · 总排名分差')}</div>
+          <div style="font-size:11px;letter-spacing:2px;opacity:.85">${esc(input.brandLine || 'PK GROUP · 名次差距')}</div>
           <div style="margin-top:6px;font-size:28px;font-weight:800;letter-spacing:.02em">${esc(input.title)}</div>
           ${input.metaLine ? `<div style="margin-top:8px;font-size:12.5px;opacity:.95">${esc(input.metaLine)}</div>` : ''}
         </div>
-        <div style="display:flex;gap:10px;flex:none;margin-left:16px">${pill(String(legend.size), '组', false)}${pill(String(total), '人', true)}</div>
+        <div style="display:flex;gap:10px;flex:none;margin-left:16px">${pill(String(total), '人', true)}</div>
       </div>
-
-      <div style="margin-top:14px;background:#fff8f2;border:2px solid #ffd9c9;border-radius:16px;padding:12px 16px;display:flex;align-items:center;gap:20px">
-        <div style="flex:none">
-          <div style="font-size:13px;font-weight:800;color:#f4573d">分差概览</div>
-          <div style="margin-top:3px;font-size:10px;color:#b0a9a3">按总排名相邻两位计算</div>
-        </div>
-        <div style="flex:1;display:grid;grid-template-columns:repeat(3,1fr);gap:10px">
-          ${stat(maxGapText, '最大断层')}${stat(wanDec(avgGap), '平均分差')}${stat(`${tieCount} 人`, '并列人数')}
-        </div>
-      </div>
-
       ${milestoneCard}
-
-      ${legend.size > 1 ? `<div style="margin-top:12px;border:1px solid #eef1f6;border-radius:14px;padding:11px 14px">
-        <div style="font-size:12.5px;font-weight:800;color:#344054">各组名次分布<span style="margin-left:6px;font-weight:400;font-size:10px;color:#98a2b3">总榜里每组占了哪一段</span></div>
-        <div style="margin-top:8px;display:grid;grid-template-columns:repeat(4,1fr);gap:7px 12px">${legendRows}</div>
-      </div>` : ''}
-
       <div style="margin-top:16px;display:flex;align-items:baseline;justify-content:space-between">
-        <div style="font-size:15px;font-weight:800;color:#101828">总排名 · 全员</div>
-        <div style="font-size:10.5px;color:#98a2b3">共 ${total} 人 · 按${esc(metricLabel)}从高到低</div>
+        <div style="font-size:15px;font-weight:800;color:#101828">名次差距 · 全员</div>
+        <div style="font-size:10.5px;color:#98a2b3">按${esc(metricLabel)}从高到低 · 共 ${total} 人</div>
       </div>
       <div style="column-count:2;column-gap:14px;margin-top:10px">${rows}</div>
       <div style="margin-top:10px;text-align:center;color:#98a2b3;font-size:11px">${esc(input.footer || '内部数据 · 请勿外传')}</div>
