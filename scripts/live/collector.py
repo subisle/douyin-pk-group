@@ -254,6 +254,17 @@ def main() -> int:
         default=os.environ.get("LIVE_BROWSER_CHANNEL", "chrome"),
         help="Playwright 浏览器通道（默认 chrome = 系统 Chrome；空串 = 自带 chromium）",
     )
+    ap.add_argument(
+        "--executable",
+        default=os.environ.get("LIVE_BROWSER_EXECUTABLE", ""),
+        help="Chrome/Chromium 可执行文件路径（部署机未安装系统 Chrome 时使用）",
+    )
+    ap.add_argument(
+        "--no-sandbox",
+        action="store_true",
+        default=os.environ.get("LIVE_BROWSER_NO_SANDBOX") == "1",
+        help="VPS / 容器环境禁用 Chromium sandbox（等价 --no-sandbox）",
+    )
     args = ap.parse_args()
 
     if not args.token:
@@ -269,10 +280,13 @@ def main() -> int:
     from playwright.sync_api import sync_playwright  # 延迟导入：--help 不需要浏览器
 
     launch = {"headless": not args.headed}
-    # 用系统 Chrome：本机没装 Playwright 自带的 headless shell，
-    # 下载浏览器既慢又占空间，系统 Chrome 版本足够跑这个接口。
-    if args.channel and args.channel.strip():
+    # 本地默认用系统 Chrome；部署机可直接指定 Playwright 下载的 Chrome 路径。
+    if args.executable.strip():
+        launch["executable_path"] = args.executable.strip()
+    elif args.channel and args.channel.strip():
         launch["channel"] = args.channel.strip()
+    if args.no_sandbox:
+        launch["chromium_sandbox"] = False
     with sync_playwright() as p:
         browser = p.chromium.launch(**launch)
         ctx = browser.new_context()
