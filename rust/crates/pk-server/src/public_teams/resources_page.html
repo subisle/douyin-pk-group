@@ -49,7 +49,7 @@ main{width:min(920px,100%);margin:0 auto;padding:18px 16px 48px}.hidden{display:
     <div class="tools">
       <div class="search"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><input id="query" type="search" autocomplete="off" placeholder="搜索资源名称"><button class="clear" id="clear" type="button" hidden>×</button></div>
       <div class="filters"><div class="group-row" id="groups"></div><div class="cat-row" id="cats"></div></div>
-      <div class="controls"><label class="sort-wrap">排序<select class="sort" id="sort"><option value="default">默认排序</option><option value="price-asc">价格低到高</option><option value="price-desc">价格高到低</option></select></label><div class="layout"><button type="button" data-layout="list" class="on" title="列表布局">☷</button><button type="button" data-layout="grid" title="卡片布局">▦</button></div></div>
+      <div class="controls"><label class="sort-wrap">排序<select class="sort" id="sort"><option value="default">默认排序</option><option value="price-asc">价格低到高</option><option value="price-desc" selected>价格高到低</option></select></label><div class="layout"><button type="button" data-layout="list" class="on" title="列表布局">☷</button><button type="button" data-layout="grid" title="卡片布局">▦</button></div></div>
     </div>
     <div class="meta"><span id="count">正在加载…</span><span>点击缩略图跳转网盘</span></div>
     <div class="results" id="results"><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div></div>
@@ -61,7 +61,7 @@ main{width:min(920px,100%);margin:0 auto;padding:18px 16px 48px}.hidden{display:
 (() => {
   const TOKEN_KEY = 'myToken_any';
   const PAGE_SIZE = 30;
-  const state = { items: [], groups: [], group: 'all', category: 'all', query: '', sort: 'default', layout: localStorage.getItem('pk_resource_layout') === 'grid' ? 'grid' : 'list', total: 0, catalogTotal: 0, offset: 0, loading: false, seq: 0 };
+  const state = { items: [], groups: [], group: 'all', category: 'all', query: '', sort: 'price-desc', layout: localStorage.getItem('pk_resource_layout') === 'grid' ? 'grid' : 'list', total: 0, catalogTotal: 0, offset: 0, loading: false, seq: 0 };
   const $ = id => document.getElementById(id);
   const esc = value => String(value == null ? '' : value).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
   const token = () => sessionStorage.getItem(TOKEN_KEY) || '';

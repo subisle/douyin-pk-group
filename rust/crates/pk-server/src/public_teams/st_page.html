@@ -3005,7 +3005,7 @@ let resourceCategory = 'all';
 let resourceGroup = 'all';
 let resourceQuery = '';
 let resourceVisibleCount = RESOURCE_PAGE_SIZE;
-let resourceSort = 'default';
+let resourceSort = 'price-desc'; // 资源分享默认按价格从高到低
 let resourceLayout = 'list';
 try { resourceLayout = localStorage.getItem('pk_resource_layout') === 'grid' ? 'grid' : 'list'; } catch (_) {}
 let curDate = null;      // 每日口径当前日期
@@ -6287,7 +6287,7 @@ async function renderResources(signal) {
     };
   });
   $('resourceSort').onchange = (e) => {
-    resourceSort = e.target.value || 'default';
+    resourceSort = e.target.value || 'price-desc';
     resourceVisibleCount = RESOURCE_PAGE_SIZE;
     renderResourceResults();
   };
