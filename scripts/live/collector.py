@@ -107,6 +107,8 @@ def parse_linkmic(j: dict) -> dict:
         return out
     settings = bs.get("battle_settings") or {}
     infos = bs.get("user_infos") or {}
+    bonus_now_ms = int(out.get("nowMs") or 0) or int(time.time() * 1000)
+    bonus_map = _bonus_map(settings, bonus_now_ms)
     scores = []
     for s in bs.get("battle_scores") or []:
         uid = str(s.get("user_id_str") or s.get("user_id") or "")
@@ -134,6 +136,8 @@ def parse_linkmic(j: dict) -> dict:
                 "rank": int(s.get("battle_rank") or 0),
                 "scoreVersion": int(s.get("score_version") or 0),
                 "teamId": str(s.get("multi_pk_team_id") or ""),
+                **bonus_map.get(uid, _empty_bonus()),
+                "currentBonus": int(s.get("current_bonus") or 0),
             }
         )
     # multi_pk_team 实测是**字符串数组**（如 ["1","2"]），不是对象数组；
@@ -159,6 +163,93 @@ def parse_linkmic(j: dict) -> dict:
         "scores": scores,
         "teamScores": team_list,
     }
+    return out
+
+
+def _empty_bonus() -> dict[str, Any]:
+    """没有活动加成时的稳定默认值，避免前后端字段缺一块。"""
+    return {
+        "bonusMultiple": 100,
+        "bonusScore": 0,
+        "bonusActive": False,
+        "bonusEndMs": 0,
+    }
+
+
+def _bonus_map(settings: dict, now_ms: int) -> dict[str, dict[str, Any]]:
+    """从 battle_settings.lynx_data 提取抖音 PK 彩蛋/加成任务。
+
+    实测字段（2026-11-08）：
+      battle_easter_egg_info.easter_egg_info_map[uid].config.addition_multiple = "150"
+      update_info.reward_info.addition_score_map[uid] = "298"
+      config.period_list[[stage=4].start_time_sec/duration_sec → 生效区间
+
+    `addition_multiple=150` 表示 1.5 倍；`addition_score_map` 是已经计入
+    显示分的累计增量，所以去加成原分 = 显示分 - bonusScore。
+    """
+    raw = settings.get("lynx_data")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except Exception:
+            return {}
+    if not isinstance(raw, dict):
+        return {}
+    egg = raw.get("battle_easter_egg_info") or {}
+    infos = egg.get("easter_egg_info_map") if isinstance(egg, dict) else None
+    if not isinstance(infos, dict):
+        return {}
+
+    now_ms = int(now_ms or 0)
+    out: dict[str, dict[str, Any]] = {}
+    for uid, info in infos.items():
+        if not isinstance(info, dict):
+            continue
+        cfg = info.get("config") or {}
+        update = info.get("update_info") or {}
+        reward = update.get("reward_info") or {}
+        score_map = reward.get("addition_score_map") or {}
+        bonus_score = 0
+        if isinstance(score_map, dict):
+            try:
+                bonus_score = max(0, int(score_map.get(str(uid)) or 0))
+            except (TypeError, ValueError):
+                bonus_score = 0
+        try:
+            multiple = int(cfg.get("addition_multiple") or 100)
+        except (TypeError, ValueError):
+            multiple = 100
+        if multiple <= 0:
+            multiple = 100
+
+        active = False
+        end_ms = 0
+        periods = cfg.get("period_list") or []
+        if isinstance(periods, list):
+            for period in periods:
+                if not isinstance(period, dict):
+                    continue
+                try:
+                    stage = int(period.get("stage") or 0)
+                    start_sec = int(period.get("start_time_sec") or 0)
+                    duration_sec = int(period.get("duration_sec") or 0)
+                except (TypeError, ValueError):
+                    continue
+                # stage=4 是实际加成窗口；stage=1~3 是预告/动画。
+                if stage != 4 or start_sec <= 0 or duration_sec <= 0:
+                    continue
+                start_ms = start_sec * 1000
+                candidate_end_ms = (start_sec + duration_sec) * 1000
+                end_ms = max(end_ms, candidate_end_ms)
+                if now_ms > 0 and start_ms <= now_ms < candidate_end_ms:
+                    active = True
+
+        out[str(uid)] = {
+            "bonusMultiple": multiple,
+            "bonusScore": bonus_score,
+            "bonusActive": active,
+            "bonusEndMs": end_ms,
+        }
     return out
 
 
@@ -192,6 +283,11 @@ def to_observation(web_rid: str, raw: dict, now_ms: int) -> dict:
                     "rank": int(s.get("rank", 0)),
                     "scoreVersion": int(s.get("scoreVersion", 0)),
                     "teamId": str(s.get("teamId", "")),
+                    "bonusMultiple": int(s.get("bonusMultiple", 100)),
+                    "bonusScore": int(s.get("bonusScore", 0)),
+                    "bonusActive": bool(s.get("bonusActive", False)),
+                    "bonusEndMs": int(s.get("bonusEndMs", 0)),
+                    "currentBonus": int(s.get("currentBonus", 0)),
                 }
                 for s in b.get("scores", [])
             ],
@@ -297,6 +393,7 @@ def main() -> int:
         # 先 goto 再 on(response) 会永远错过第一拍。
         latest: dict[str, dict] = {}
         last_at: dict[str, float] = {}
+        last_reload: dict[str, float] = {}
 
         def make_handler(rid: str):
             def on_response(resp):
@@ -317,6 +414,7 @@ def main() -> int:
             latest[rid] = {}
             # 从页面打开时开始计时。若这里留 0，首拍会被误判成“已过期”。
             last_at[rid] = time.time()
+            last_reload[rid] = 0.0
             page.on("response", make_handler(rid))
             page.goto(
                 f"https://live.douyin.com/{rid}",
@@ -332,13 +430,29 @@ def main() -> int:
             while True:
                 now_ms = int(time.time() * 1000)
                 for rid, page in pages.items():
+                    wall_now = time.time()
+                    stale_after = max(30.0, args.interval * 6)
+                    # 页面在前台一段时间后会停止轮询 linkmic/list；长时间没新响应时
+                    # 重新加载一次直播间，重新触发页面自己的签名请求（不能手拼 URL）。
+                    if (
+                        wall_now - last_at.get(rid, 0.0) > stale_after
+                        and wall_now - last_reload.get(rid, 0.0) > 15.0
+                    ):
+                        last_reload[rid] = wall_now
+                        latest[rid] = {}
+                        try:
+                            page.reload(wait_until="domcontentloaded", timeout=60000)
+                            last_at[rid] = time.time()
+                            print(f"[info] {rid} linkmic 超时，已重新加载直播间")
+                        except Exception as e:
+                            print(f"[warn] {rid} 重新加载直播间失败: {e}", file=sys.stderr)
                     raw = latest.get(rid) or {}
                     obs, has_fresh_snapshot = build_ingest_payload(
                         rid,
                         raw,
                         now_ms,
                         last_at.get(rid, 0.0),
-                        time.time(),
+                        wall_now,
                         args.interval,
                     )
                     if not has_fresh_snapshot:

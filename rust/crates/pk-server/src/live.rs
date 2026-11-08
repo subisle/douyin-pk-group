@@ -201,6 +201,25 @@ pub struct BattleScore {
     pub score_version: i64,
     #[serde(default, rename = "teamId")]
     pub team_id: String,
+    /// 抖音 PK 彩蛋/加成倍率：100 = 无加成，150 = 1.5 倍。
+    #[serde(default = "default_bonus_multiple", rename = "bonusMultiple")]
+    pub bonus_multiple: i32,
+    /// 已经计入显示分的累计加成增量；去加成原分 = score - bonus_score。
+    #[serde(default, rename = "bonusScore")]
+    pub bonus_score: i64,
+    /// 当前采样时 stage=4 加成窗口是否生效。
+    #[serde(default, rename = "bonusActive")]
+    pub bonus_active: bool,
+    /// 当前/最近一次加成窗口的结束时间（毫秒）。
+    #[serde(default, rename = "bonusEndMs")]
+    pub bonus_end_ms: i64,
+    /// 抖音 battle_scores.current_bonus，保留原始字段便于后续校准。
+    #[serde(default, rename = "currentBonus")]
+    pub current_bonus: i64,
+}
+
+fn default_bonus_multiple() -> i32 {
+    100
 }
 
 /// 一支队伍的分数快照
@@ -1364,6 +1383,11 @@ mod tests {
                     rank: 0,
                     score_version: 1,
                     team_id: String::new(),
+                    bonus_multiple: 100,
+                    bonus_score: 0,
+                    bonus_active: false,
+                    bonus_end_ms: 0,
+                    current_bonus: 0,
                 })
                 .collect(),
             team_scores: Vec::new(),

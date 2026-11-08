@@ -215,7 +215,7 @@
 }
 .lm-live-summary {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(105px, 1fr));
   gap: 7px;
   margin-bottom: 13px;
 }
@@ -241,6 +241,10 @@
   font-variant-numeric: tabular-nums;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.lm-live-summary b.lm-bonus-live-text {
+  color: var(--good);
+  animation: lm-live-text-pulse 1.6s ease-in-out infinite;
 }
 .lm-live-empty {
   margin: 14px 0 4px;
@@ -321,6 +325,25 @@
 }
 .lm-rank-move.up { color: var(--good); }
 .lm-rank-move.down { color: var(--bad); }
+.lm-bonus-badge {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  color: var(--warn);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  border: 1px solid color-mix(in srgb, var(--warn) 24%, transparent);
+  border-radius: 999px;
+  background: var(--warn-bg);
+}
+.lm-bonus-badge.is-active {
+  color: var(--good);
+  border-color: color-mix(in srgb, var(--good) 28%, transparent);
+  background: var(--good-bg);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--good) 7%, transparent);
+}
 .lm-live-bar {
   height: 5px;
   overflow: hidden;
@@ -356,6 +379,12 @@
   font-variant-numeric: tabular-nums;
   animation: lm-score-delta 1.4s ease-out both;
 }
+.lm-real-score {
+  color: var(--ink3);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
 .score-bump { animation: lm-score-bump .38s ease-out; }
 
 @keyframes lm-live-pulse {
@@ -372,6 +401,10 @@
   20%, 70% { opacity: 1; transform: translateY(0); }
   100% { opacity: .75; transform: translateY(-1px); }
 }
+@keyframes lm-live-text-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: .55; }
+}
 @media (max-width: 620px) {
   .lm-live-scores { padding: 13px; }
   .lm-live-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -383,6 +416,7 @@
 @media (prefers-reduced-motion: reduce) {
   .lm-live-dot,
   .lm-score-delta,
+  .lm-live-summary b.lm-bonus-live-text,
   .score-bump,
   .lm-live-bar > span { animation: none; transition: none; }
 }

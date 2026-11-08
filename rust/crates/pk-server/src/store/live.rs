@@ -495,8 +495,10 @@ pub async fn live_sample_insert(
     team_rank: i32,
 ) -> anyhow::Result<()> {
     sqlx::query(&crate::pq::rewrite(
-        "INSERT INTO live_score_sample (round_id, douyin_uid, score, rank, team_score, team_rank, score_version)
-         VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO live_score_sample
+           (round_id, douyin_uid, score, rank, team_score, team_rank, score_version,
+            bonus_multiple, bonus_score, bonus_active, bonus_end_ms, current_bonus)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     ))
     .bind(round_id)
     .bind(&s.user_id)
@@ -505,6 +507,11 @@ pub async fn live_sample_insert(
     .bind(team_score)
     .bind(team_rank)
     .bind(s.score_version.to_string())
+    .bind(s.bonus_multiple)
+    .bind(s.bonus_score)
+    .bind(if s.bonus_active { 1i16 } else { 0i16 })
+    .bind(s.bonus_end_ms)
+    .bind(s.current_bonus)
     .execute(w(st)?)
     .await?;
     Ok(())
@@ -706,7 +713,8 @@ pub async fn live_latest_scores(st: &AppState, round_id: i64) -> Vec<serde_json:
         return Vec::new();
     };
     sqlx::query(
-        "SELECT DISTINCT ON (douyin_uid) douyin_uid, score, rank, team_score, team_rank, observed_at
+        "SELECT DISTINCT ON (douyin_uid) douyin_uid, score, rank, team_score, team_rank,
+                bonus_multiple, bonus_score, bonus_active, bonus_end_ms, current_bonus, observed_at
          FROM live_score_sample WHERE round_id = $1 ORDER BY douyin_uid, observed_at DESC",
     )
     .bind(round_id)
@@ -721,6 +729,11 @@ pub async fn live_latest_scores(st: &AppState, round_id: i64) -> Vec<serde_json:
                     "rank": r.try_get::<i32, _>("rank").unwrap_or(0),
                     "teamScore": r.try_get::<i64, _>("team_score").unwrap_or(0),
                     "teamRank": r.try_get::<i32, _>("team_rank").unwrap_or(0),
+                    "bonusMultiple": r.try_get::<i32, _>("bonus_multiple").unwrap_or(100),
+                    "bonusScore": r.try_get::<i64, _>("bonus_score").unwrap_or(0),
+                    "bonusActive": r.try_get::<i16, _>("bonus_active").unwrap_or(0) == 1,
+                    "bonusEndMs": r.try_get::<i64, _>("bonus_end_ms").unwrap_or(0),
+                    "currentBonus": r.try_get::<i64, _>("current_bonus").unwrap_or(0),
                     "observedAt": r.try_get::<chrono::DateTime<chrono::Utc>, _>("observed_at")
                         .map(|t| t.to_rfc3339()).unwrap_or_default(),
                 })

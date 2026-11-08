@@ -246,6 +246,13 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "045_live_monitor_hardening",
         include_str!("migrations/045_live_monitor_hardening.sql"),
     ),
+    // 046：直播 PK 加成监控。保留显示分、加成倍数、累计加成增量与
+    // stage=4 生效窗口；去加成原分由前端按 score - bonus_score 展示。
+    // 幂等，可安全重放。
+    (
+        "046_live_bonus",
+        include_str!("migrations/046_live_bonus.sql"),
+    ),
 ];
 
 /// 迁移建连（migrator 账号；同样关语句缓存）

@@ -129,6 +129,13 @@ export interface LiveSeat {
   score: number
   rank: number
   qualified: boolean
+  /** 100 = 无加成，150 = 1.5 倍（来自抖音 battle_easter_egg_info） */
+  bonusMultiple?: number
+  /** 已计入 score 的累计加成增量 */
+  bonusScore?: number
+  bonusActive?: boolean
+  bonusEndMs?: number
+  currentBonus?: number
 }
 
 export interface LiveScores {
@@ -141,6 +148,11 @@ export interface LiveScores {
     rank: number
     teamScore: number
     teamRank: number
+    bonusMultiple: number
+    bonusScore: number
+    bonusActive: boolean
+    bonusEndMs: number
+    currentBonus: number
     observedAt: string
   }>
   seats: LiveSeat[]

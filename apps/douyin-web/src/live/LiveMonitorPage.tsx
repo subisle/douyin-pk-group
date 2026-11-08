@@ -27,6 +27,11 @@ function todayLocal() {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
 }
 
+function formatMultiplier(multiple: number) {
+  const value = Math.max(1, multiple / 100)
+  return `${Number.isInteger(value) ? value : value.toFixed(2).replace(/0+$/, '')}x`
+}
+
 const GROUP_STATUS: Record<string, { label: string; cls: string }> = {
   pending: { label: '未开始', cls: 'idle' },
   running: { label: '进行中', cls: 'live' },
@@ -220,7 +225,18 @@ export default function LiveMonitorPage() {
       prevRanksRef.current = new Map(s.seats.map(seat => [seat.douyinUid, seat.rank]))
       setScoreDeltas(nextScoreDeltas)
       setRankDeltas(nextRankDeltas)
-      setSeats(s.seats)
+      const samples = new Map(s.scores.map(sample => [sample.douyinUid, sample]))
+      setSeats(s.seats.map(seat => {
+        const sample = samples.get(seat.douyinUid)
+        return {
+          ...seat,
+          bonusMultiple: sample?.bonusMultiple ?? 100,
+          bonusScore: sample?.bonusScore ?? 0,
+          bonusActive: sample?.bonusActive ?? false,
+          bonusEndMs: sample?.bonusEndMs ?? 0,
+          currentBonus: sample?.currentBonus ?? 0,
+        }
+      }))
       setRoundId(s.roundId)
       setLastScoreAt(s.seats.length > 0 ? new Date().toLocaleTimeString() : '')
     } catch { /* 分数拉取失败不打断监控 */ }
@@ -347,6 +363,9 @@ export default function LiveMonitorPage() {
   const currentGroup = ov?.groups.find(g => g.id === groupId)
   const maxScore = Math.max(1, ...seats.map(s => Number(s.score) || 0))
   const groupWave = seats.reduce((sum, s) => sum + (Number(s.score) || 0), 0)
+  const activeBonusCount = seats.filter(s => s.bonusActive).length
+  const hasBonusScore = seats.some(s => (s.bonusScore ?? 0) > 0)
+  const hasBonusData = seats.some(s => (s.bonusMultiple ?? 100) > 100 || (s.bonusScore ?? 0) > 0)
 
   const groupsByStage = useMemo(() => {
     const m = new Map<string, LiveGroup[]>()
@@ -499,6 +518,16 @@ export default function LiveMonitorPage() {
                 <div><span>当前组</span><b>{currentGroup?.name || '—'}</b></div>
                 <div><span>组内音浪</span><b>{groupWave.toLocaleString('zh-CN')}</b></div>
                 <div><span>在榜人数</span><b>{seats.length}</b></div>
+                {hasBonusData && (
+                  <div>
+                    <span>加成状态</span>
+                    <b className={activeBonusCount > 0 ? 'lm-bonus-live-text' : ''}>
+                      {activeBonusCount > 0
+                        ? `${activeBonusCount} 人加成中`
+                        : hasBonusScore ? '加成已结束' : '加成待触发'}
+                    </b>
+                  </div>
+                )}
                 {currentGroup && currentGroup.qualifySlots > 0 && (
                   <div><span>晋级名额</span><b>前 {currentGroup.qualifySlots}</b></div>
                 )}
@@ -510,6 +539,9 @@ export default function LiveMonitorPage() {
                   const rankDelta = rankDeltas[s.douyinUid] || 0
                   const pct = Math.max(2, Math.round(((Number(s.score) || 0) / maxScore) * 100))
                   const qualified = !!currentGroup && currentGroup.qualifySlots > 0 && i < currentGroup.qualifySlots
+                  const bonusMultiple = s.bonusMultiple ?? 100
+                  const bonusScore = Math.max(0, s.bonusScore ?? 0)
+                  const realScore = Math.max(0, (Number(s.score) || 0) - bonusScore)
                   return (
                     <div key={s.douyinUid} className={`lm-live-row${qualified ? ' is-qualified' : ''}`}>
                       <div className={`lm-live-rank rank-${Math.min(s.rank, 4)}`}>#{s.rank}</div>
@@ -521,14 +553,28 @@ export default function LiveMonitorPage() {
                               {rankDelta > 0 ? '↑' : '↓'}{Math.abs(rankDelta)}
                             </span>
                           )}
+                          {bonusMultiple > 100 && (
+                            <span
+                              className={`lm-bonus-badge${s.bonusActive ? ' is-active' : ''}`}
+                              title={s.bonusActive ? '当前加成窗口生效中' : '本场检测到加成任务'}
+                            >
+                              {s.bonusActive ? '加成中' : '加成'} {formatMultiplier(bonusMultiple)}
+                            </span>
+                          )}
                         </div>
                         <div className="lm-live-bar"><span style={{ width: `${pct}%` }} /></div>
                       </div>
-                      <div className="lm-live-value">
+                      <div
+                        className="lm-live-value"
+                        title={bonusScore > 0 ? `显示分 ${(Number(s.score) || 0).toLocaleString('zh-CN')} = 去加成 ${realScore.toLocaleString('zh-CN')} + 加成 ${bonusScore.toLocaleString('zh-CN')}` : undefined}
+                      >
                         <b key={`${s.douyinUid}-${s.score}`} className={delta ? 'score-bump' : ''}>
                           {(Number(s.score) || 0).toLocaleString('zh-CN')}
                         </b>
                         {delta > 0 && <span className="lm-score-delta">+{delta.toLocaleString('zh-CN')}</span>}
+                        {bonusScore > 0 && (
+                          <span className="lm-real-score">去加成 {realScore.toLocaleString('zh-CN')}</span>
+                        )}
                       </div>
                     </div>
                   )

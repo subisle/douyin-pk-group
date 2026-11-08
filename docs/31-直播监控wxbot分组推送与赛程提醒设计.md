@@ -229,7 +229,15 @@ male | female | all
 - 分数继续使用 `x万xxxx` 格式。
 - “一共是 X 分”中的 X 必须是**原始 PK 分 + 加成**后的最终分。
 - 不展示距上一位、跨组排名等额外信息。
-- 当前代码只有原始 PK 采样分，还没有“加成”字段或加成公式；实现前需要补齐加成录入/计算来源，否则不能把原始分冒充加成后总分。
+- 2026-11-08 实测已补齐：`battle_settings.lynx_data.battle_easter_egg_info` 中的
+  `addition_multiple`（`150` = 1.5 倍）和 `addition_score_map`（累计加成增量）
+  会随采样写入 `live_score_sample`。管理端展示：
+  `显示分 = 去加成原分 + bonus_score`，所以
+  `去加成原分 = score - bonus_score`；`score` 本身是带加成的显示分，推送最终分直接使用该显示分。
+- `period_list` 的 `stage=4` 是实际加成窗口，开始/结束时间由直播间任务进度返回，不能写死成“最后 2 分钟”。
+- 2026-11-08 实测：10 分钟场出现过 `06:30–09:00` 的加成窗口；5 分钟场出现过
+  `03:00–04:00`，也出现过一侧约 `01:35–03:59`、另一侧约 `02:00–03:59` 的不同步窗口。
+  因此实时页必须按每场返回的 `period_list` 判断，不能按 10 分钟/5 分钟套固定秒数。
 
 ### 6.4 去重与频率
 
@@ -403,14 +411,18 @@ ALTER TABLE live_round ADD COLUMN linkmic_phase VARCHAR(16) NOT NULL DEFAULT '';
 ALTER TABLE live_round ADD COLUMN roster_match VARCHAR(16) NOT NULL DEFAULT '';
 ```
 
-若进入“加成后总分”阶段，还需要为每位参赛者保存：
+实时采样表保存加成快照；不需要改写 `live_round_seat.final_score`（它仍是带加成的
+最终显示分）。采样表字段为：
 
 ```sql
-ALTER TABLE live_round_seat ADD COLUMN bonus_score BIGINT NOT NULL DEFAULT 0;
-ALTER TABLE live_round_seat ADD COLUMN score_with_bonus BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE live_score_sample ADD COLUMN bonus_multiple INTEGER NOT NULL DEFAULT 100;
+ALTER TABLE live_score_sample ADD COLUMN bonus_score BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE live_score_sample ADD COLUMN bonus_active SMALLINT NOT NULL DEFAULT 0;
+ALTER TABLE live_score_sample ADD COLUMN bonus_end_ms BIGINT NOT NULL DEFAULT 0;
 ```
 
-`score_with_bonus = final_score + bonus_score`；推送文案的“一共是 X 分”读取该字段。
+`bonus_score` 是已经计入显示分的增量，不是要再加一次；推送文案的“一共是 X 分”
+读取带加成的显示分。
 
 ### 9.4 `live_group` 增列
 
