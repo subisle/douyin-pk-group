@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import './live.css'
 import { useAutoRefresh } from '../useAutoRefresh'
@@ -165,6 +165,12 @@ export default function LiveMonitorPage() {
   const [roomUrl, setRoomUrl] = useState('')
   const [roomLabel, setRoomLabel] = useState('')
   const [pushSecs, setPushSecs] = useState(60)
+  const [scoreDeltas, setScoreDeltas] = useState<Record<string, number>>({})
+  const [rankDeltas, setRankDeltas] = useState<Record<string, number>>({})
+  const [lastScoreAt, setLastScoreAt] = useState('')
+  const prevScoresRef = useRef<Map<string, number>>(new Map())
+  const prevRanksRef = useRef<Map<string, number>>(new Map())
+  const scoreRefreshTimerRef = useRef<number | null>(null)
 
   const load = async () => {
     try {
@@ -198,14 +204,51 @@ export default function LiveMonitorPage() {
     if (!eventId || !groupId) return
     try {
       const s = await live.scores(eventId, groupId)
+      const nextScoreDeltas: Record<string, number> = {}
+      const nextRankDeltas: Record<string, number> = {}
+      for (const seat of s.seats) {
+        const prevScore = prevScoresRef.current.get(seat.douyinUid)
+        if (prevScore != null && seat.score !== prevScore) {
+          nextScoreDeltas[seat.douyinUid] = seat.score - prevScore
+        }
+        const prevRank = prevRanksRef.current.get(seat.douyinUid)
+        if (prevRank != null && seat.rank !== prevRank) {
+          nextRankDeltas[seat.douyinUid] = prevRank - seat.rank
+        }
+      }
+      prevScoresRef.current = new Map(s.seats.map(seat => [seat.douyinUid, seat.score]))
+      prevRanksRef.current = new Map(s.seats.map(seat => [seat.douyinUid, seat.rank]))
+      setScoreDeltas(nextScoreDeltas)
+      setRankDeltas(nextRankDeltas)
       setSeats(s.seats)
       setRoundId(s.roundId)
+      setLastScoreAt(s.seats.length > 0 ? new Date().toLocaleTimeString() : '')
     } catch { /* 分数拉取失败不打断监控 */ }
+  }
+  const loadScoresRef = useRef(loadScores)
+  loadScoresRef.current = loadScores
+
+  /** 采集器一拍可能连续广播多条 live；合并成 500ms 一次读取，避免追着事件风暴打接口。 */
+  const scheduleScoreRefresh = () => {
+    if (scoreRefreshTimerRef.current != null) return
+    scoreRefreshTimerRef.current = window.setTimeout(() => {
+      scoreRefreshTimerRef.current = null
+      void loadScoresRef.current()
+    }, 500)
   }
 
   useEffect(() => { load() }, [])
   useEffect(() => { loadOverview() }, [eventId])
-  useEffect(() => { loadScores() }, [groupId, eventId])
+  useEffect(() => {
+    prevScoresRef.current = new Map()
+    prevRanksRef.current = new Map()
+    setScoreDeltas({})
+    setRankDeltas({})
+    setSeats([])
+    setRoundId(0)
+    setLastScoreAt('')
+    loadScores()
+  }, [groupId, eventId])
   useEffect(() => {
     const event = ov?.event
     if (!event || event.id !== eventId) return
@@ -213,12 +256,23 @@ export default function LiveMonitorPage() {
     setBindNight(event.nightPlanId || 0)
   }, [ov?.event?.id, ov?.event?.dayPlanId, ov?.event?.nightPlanId, eventId])
 
-  // 直播变更（分数/对局/阶段）→ 立刻重拉；同时每 5 秒兜底轮询一次
-  useAutoRefresh(loadOverview, ['live'])
+  // 采集器每上报一拍都会广播 live：分数走 SSE 合并刷新，2 秒轮询只作兜底。
+  // 赛程结构变化仍由 5 秒 overview 轮询补齐，避免每拍都做一遍全量赛程查询。
+  useAutoRefresh(scheduleScoreRefresh, ['live'])
   useEffect(() => {
-    const t = window.setInterval(() => { loadOverview(); loadScores() }, 5000)
-    return () => window.clearInterval(t)
+    const overviewTimer = window.setInterval(loadOverview, 5000)
+    const scoreTimer = window.setInterval(loadScores, 2000)
+    return () => {
+      window.clearInterval(overviewTimer)
+      window.clearInterval(scoreTimer)
+    }
   }, [eventId, groupId])
+  useEffect(() => () => {
+    if (scoreRefreshTimerRef.current != null) {
+      window.clearTimeout(scoreRefreshTimerRef.current)
+      scoreRefreshTimerRef.current = null
+    }
+  }, [])
 
   const cur = events.find(e => e.id === eventId) ?? null
 
@@ -289,6 +343,10 @@ export default function LiveMonitorPage() {
     catch (e: any) { alert(e?.message ?? String(e)) }
     finally { setBusy('') }
   }
+
+  const currentGroup = ov?.groups.find(g => g.id === groupId)
+  const maxScore = Math.max(1, ...seats.map(s => Number(s.score) || 0))
+  const groupWave = seats.reduce((sum, s) => sum + (Number(s.score) || 0), 0)
 
   const groupsByStage = useMemo(() => {
     const m = new Map<string, LiveGroup[]>()
@@ -421,9 +479,9 @@ export default function LiveMonitorPage() {
           </div>
 
           <div className="lm-board">
-            <div className="lm-scores">
+            <div className="lm-scores lm-live-scores">
               <h3>
-                实时分
+                <span className="lm-live-title"><span className="lm-live-dot" />实时分</span>
                 {groupId > 0 && (
                   <select value={groupId} onChange={e => setGroupId(Number(e.target.value))}>
                     {(ov.groups ?? []).map(g => (
@@ -432,18 +490,50 @@ export default function LiveMonitorPage() {
                   </select>
                 )}
               </h3>
-              {seats.length === 0 && <p className="hint">这一局还没有分数</p>}
-              <table className="lm-table">
-                <tbody>
-                  {seats.map(s => (
-                    <tr key={s.douyinUid} className={s.qualified ? 'is-qualified' : ''}>
-                      <td className="lm-rank">#{s.rank}</td>
-                      <td>{s.nickname || s.douyinUid}</td>
-                      <td className="mono lm-score">{s.score}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+              <div className="lm-live-meta">
+                <span><i className="lm-live-dot small" /> 实时推送 · 2 秒兜底</span>
+                <span>{lastScoreAt ? `更新于 ${lastScoreAt}` : '等待第一笔分数'}</span>
+                {roundId > 0 && <span>第 {roundId} 局</span>}
+              </div>
+              <div className="lm-live-summary">
+                <div><span>当前组</span><b>{currentGroup?.name || '—'}</b></div>
+                <div><span>组内音浪</span><b>{groupWave.toLocaleString('zh-CN')}</b></div>
+                <div><span>在榜人数</span><b>{seats.length}</b></div>
+                {currentGroup && currentGroup.qualifySlots > 0 && (
+                  <div><span>晋级名额</span><b>前 {currentGroup.qualifySlots}</b></div>
+                )}
+              </div>
+              {seats.length === 0 && <p className="lm-live-empty">这一组正在等待分数…</p>}
+              <div className="lm-live-list">
+                {seats.map((s, i) => {
+                  const delta = scoreDeltas[s.douyinUid] || 0
+                  const rankDelta = rankDeltas[s.douyinUid] || 0
+                  const pct = Math.max(2, Math.round(((Number(s.score) || 0) / maxScore) * 100))
+                  const qualified = !!currentGroup && currentGroup.qualifySlots > 0 && i < currentGroup.qualifySlots
+                  return (
+                    <div key={s.douyinUid} className={`lm-live-row${qualified ? ' is-qualified' : ''}`}>
+                      <div className={`lm-live-rank rank-${Math.min(s.rank, 4)}`}>#{s.rank}</div>
+                      <div className="lm-live-player">
+                        <div className="lm-live-name-line">
+                          <b className="lm-live-name">{s.nickname || s.douyinUid}</b>
+                          {rankDelta !== 0 && (
+                            <span className={`lm-rank-move ${rankDelta > 0 ? 'up' : 'down'}`}>
+                              {rankDelta > 0 ? '↑' : '↓'}{Math.abs(rankDelta)}
+                            </span>
+                          )}
+                        </div>
+                        <div className="lm-live-bar"><span style={{ width: `${pct}%` }} /></div>
+                      </div>
+                      <div className="lm-live-value">
+                        <b key={`${s.douyinUid}-${s.score}`} className={delta ? 'score-bump' : ''}>
+                          {(Number(s.score) || 0).toLocaleString('zh-CN')}
+                        </b>
+                        {delta > 0 && <span className="lm-score-delta">+{delta.toLocaleString('zh-CN')}</span>}
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
             </div>
 
             <div className="lm-stages">

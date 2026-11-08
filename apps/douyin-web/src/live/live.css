@@ -154,6 +154,239 @@
 .lm-rank { color: var(--ink2); width: 34px; }
 .lm-score { text-align: right; font-variant-numeric: tabular-nums; }
 
+/* 实时分：用轻量动画和稳定的数字列，方便在后台长时间盯着看。 */
+.lm-live-scores {
+  position: relative;
+  overflow: hidden;
+  padding: 16px;
+  background:
+    radial-gradient(circle at 100% 0, color-mix(in srgb, var(--good) 9%, transparent), transparent 38%),
+    var(--card);
+}
+.lm-live-scores::before {
+  content: '';
+  position: absolute;
+  inset: 0 auto auto 0;
+  width: 100%;
+  height: 3px;
+  background: linear-gradient(90deg, var(--good), color-mix(in srgb, var(--good) 18%, transparent));
+}
+.lm-live-scores h3 {
+  margin-bottom: 5px;
+  font-size: 15px;
+}
+.lm-live-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  letter-spacing: .01em;
+}
+.lm-live-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  display: inline-block;
+  flex: 0 0 auto;
+  background: var(--good);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--good) 12%, transparent);
+  animation: lm-live-pulse 1.8s ease-out infinite;
+}
+.lm-live-dot.small {
+  width: 6px;
+  height: 6px;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--good) 10%, transparent);
+  animation-duration: 2.2s;
+}
+.lm-live-meta {
+  display: flex;
+  align-items: center;
+  gap: 7px 14px;
+  flex-wrap: wrap;
+  margin: 0 0 13px;
+  padding-bottom: 11px;
+  color: var(--ink3);
+  font-size: 11px;
+  border-bottom: 1px solid var(--line);
+}
+.lm-live-meta span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.lm-live-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 7px;
+  margin-bottom: 13px;
+}
+.lm-live-summary > div {
+  min-width: 0;
+  padding: 8px 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-ctl);
+  background: color-mix(in srgb, var(--canvas) 72%, transparent);
+}
+.lm-live-summary span {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--ink3);
+  font-size: 10px;
+  white-space: nowrap;
+}
+.lm-live-summary b {
+  display: block;
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lm-live-empty {
+  margin: 14px 0 4px;
+  padding: 18px 12px;
+  color: var(--ink3);
+  font-size: 12px;
+  text-align: center;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-ctl);
+  background: color-mix(in srgb, var(--canvas) 55%, transparent);
+}
+.lm-live-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.lm-live-row {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-ctl);
+  background: color-mix(in srgb, var(--card) 74%, transparent);
+  transition: border-color .2s ease, background .2s ease, transform .2s ease;
+}
+.lm-live-row:hover {
+  border-color: var(--line-strong);
+  background: var(--card);
+}
+.lm-live-row.is-qualified {
+  border-color: color-mix(in srgb, var(--good) 28%, transparent);
+  background: linear-gradient(90deg, var(--good-bg), color-mix(in srgb, var(--card) 88%, transparent));
+}
+.lm-live-rank {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 28px;
+  color: var(--ink2);
+  font-size: 12px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--canvas);
+}
+.lm-live-rank.rank-1 { color: #9a6700; border-color: #f0d58a; background: #fff8e6; }
+.lm-live-rank.rank-2 { color: #475467; border-color: #d0d5dd; background: #f2f4f7; }
+.lm-live-rank.rank-3 { color: #9a4b1e; border-color: #f1c9b3; background: #fff3ed; }
+.lm-live-rank.rank-4 { color: var(--ink2); border-color: #d0d5dd; background: #f8f9fb; }
+.lm-live-player { min-width: 0; }
+.lm-live-name-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  margin-bottom: 7px;
+}
+.lm-live-name {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lm-rank-move {
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.lm-rank-move.up { color: var(--good); }
+.lm-rank-move.down { color: var(--bad); }
+.lm-live-bar {
+  height: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ink) 7%, transparent);
+}
+.lm-live-bar > span {
+  display: block;
+  height: 100%;
+  min-width: 2px;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--good), #32b76c);
+  transition: width .35s ease;
+}
+.lm-live-value {
+  display: flex;
+  align-items: flex-end;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 76px;
+  text-align: right;
+}
+.lm-live-value > b {
+  color: var(--ink);
+  font-size: 15px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.15;
+}
+.lm-live-row.is-qualified .lm-live-value > b { color: var(--good); }
+.lm-score-delta {
+  color: var(--good);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  animation: lm-score-delta 1.4s ease-out both;
+}
+.score-bump { animation: lm-score-bump .38s ease-out; }
+
+@keyframes lm-live-pulse {
+  0%, 100% { box-shadow: 0 0 0 3px color-mix(in srgb, var(--good) 12%, transparent); }
+  50% { box-shadow: 0 0 0 6px color-mix(in srgb, var(--good) 3%, transparent); }
+}
+@keyframes lm-score-bump {
+  0% { transform: scale(1); color: var(--ink); }
+  45% { transform: scale(1.12); color: var(--good); }
+  100% { transform: scale(1); }
+}
+@keyframes lm-score-delta {
+  0% { opacity: 0; transform: translateY(3px); }
+  20%, 70% { opacity: 1; transform: translateY(0); }
+  100% { opacity: .75; transform: translateY(-1px); }
+}
+@media (max-width: 620px) {
+  .lm-live-scores { padding: 13px; }
+  .lm-live-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .lm-live-row { grid-template-columns: 38px minmax(0, 1fr) auto; gap: 8px; padding: 8px; }
+  .lm-live-rank { width: 32px; }
+  .lm-live-value { min-width: 64px; }
+  .lm-live-value > b { font-size: 14px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .lm-live-dot,
+  .lm-score-delta,
+  .score-bump,
+  .lm-live-bar > span { animation: none; transition: none; }
+}
+
 .lm-stage { margin-bottom: 12px; }
 .lm-stage-head {
   display: flex; align-items: center; gap: 8px;
