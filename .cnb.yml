@@ -17,3 +17,21 @@ main:
             docker build -t ${IMAGE}:latest -t ${IMAGE}:${CNB_COMMIT_SHORT} .
             docker push ${IMAGE}:latest
             docker push ${IMAGE}:${CNB_COMMIT_SHORT}
+
+# 本次迁移分支也允许从 CNB 直接构建并推送同名镜像。
+pg-migration:
+  push:
+    - services:
+        - docker
+      docker:
+        image: docker:27
+      env:
+        IMAGE: ${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}/pk-server
+      runner:
+        tags: cnb:arch:amd64
+      stages:
+        - name: build and push
+          script: |
+            docker build -t ${IMAGE}:latest -t ${IMAGE}:${CNB_COMMIT_SHORT} .
+            docker push ${IMAGE}:latest
+            docker push ${IMAGE}:${CNB_COMMIT_SHORT}
