@@ -1479,6 +1479,66 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .st-gmem-nm { font-size:14px; font-weight:500; color:var(--on-surface);
   overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 
+/* ===== 分组展示 / 分组差距：同一页两种阅读任务 ===== */
+.st-group-mode { display:flex; gap:4px; padding:4px; margin:.25rem 0 .75rem;
+  border-radius:14px; background:rgba(241,245,249,.86);
+  border:1px solid rgba(226,232,240,.78); }
+.st-group-mode button { flex:1; min-width:0; height:38px; border:0; border-radius:10px;
+  background:transparent; color:#64748B; font-size:13px; font-weight:700; cursor:pointer;
+  transition:background .15s, color .15s, box-shadow .15s; }
+.st-group-mode button.on { background:#fff; color:#0F172A;
+  box-shadow:0 3px 10px rgba(15,23,42,.08); }
+.st-group-mode button:focus-visible { outline:2px solid #D97706; outline-offset:2px; }
+.st-gap-target-board { margin:0 0 .75rem; padding:12px 13px; border-radius:16px;
+  background:rgba(255,248,242,.9); border:1px solid rgba(255,217,201,.9); }
+.st-gap-board-head { display:flex; align-items:baseline; justify-content:space-between; gap:10px; }
+.st-gap-board-title { color:#B45309; font-size:13px; font-weight:800; }
+.st-gap-board-note { color:#A8A29E; font-size:10px; text-align:right; }
+.st-gap-targets { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:7px; margin-top:9px; }
+.st-gap-target { min-width:0; padding:8px 8px 7px; border-radius:11px; background:#fff;
+  border:1px solid #F5E4DB; }
+.st-gap-target .lbl { color:#D97706; font-size:11px; font-weight:800; }
+.st-gap-target .nm { margin-top:3px; overflow:hidden; text-overflow:ellipsis;
+  white-space:nowrap; color:#475467; font-size:11px; }
+.st-gap-target .score { margin-top:3px; color:#101828; font-size:15px; font-weight:800;
+  line-height:1.15; font-variant-numeric:tabular-nums; }
+.st-gap-target .cap { margin-top:1px; color:#98A2B3; font-size:9px; }
+.st-gap-list { display:flex; flex-direction:column; gap:.5rem; }
+.st-gap-row { padding:10px 12px; border-radius:14px; background:rgba(255,255,255,.74);
+  border:1px solid rgba(255,255,255,.9); box-shadow:0 4px 14px rgba(148,163,184,.08); }
+.st-gap-row-top { display:flex; align-items:center; gap:8px; min-width:0; }
+.st-gap-rank { width:30px; height:30px; display:grid; place-items:center; flex:none;
+  border-radius:9px; background:#F1F4F9; color:#667085; font-size:12px; font-weight:800;
+  font-variant-numeric:tabular-nums; }
+.st-gap-rank.r1 { background:linear-gradient(135deg,#FFD873,#F0A51E); color:#6D4300; }
+.st-gap-rank.r2 { background:linear-gradient(135deg,#E8EDF4,#B7C2D0); color:#39465A; }
+.st-gap-rank.r3 { background:linear-gradient(135deg,#F3C9A4,#C9834A); color:#5A2E0C; }
+.st-gap-av { width:30px; height:30px; flex:none; display:grid; place-items:center;
+  border-radius:9999px; background:#F1F5F9; color:#64748B; font-size:12px; font-weight:800; }
+.st-gap-name { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  color:#0F172A; font-size:14px; font-weight:700; }
+.st-gap-group { flex:none; padding:2px 6px; border-radius:6px; background:#F8FAFC;
+  color:#64748B; font-size:10px; font-weight:600; }
+.st-gap-wave { margin-left:auto; flex:none; text-align:right; color:#101828;
+  font-size:14px; font-weight:800; font-variant-numeric:tabular-nums; }
+.st-gap-wave small { display:block; margin-top:1px; color:#98A2B3; font-size:9px; font-weight:400; }
+.st-gap-bottom { display:flex; align-items:center; flex-wrap:wrap; gap:6px 9px;
+  margin-top:7px; padding-left:38px; }
+.st-gap-gap { color:#D95B4F; font-size:10.5px; font-weight:700; }
+.st-gap-gap.lead { color:#2F9E5D; }
+.st-gap-gap.tie { color:#98A2B3; font-weight:400; }
+.st-gap-chips { display:flex; flex-wrap:wrap; gap:4px 8px; color:#98A2B3;
+  font-size:10px; line-height:15px; }
+.st-gap-chip { color:#D95B4F; font-weight:700; white-space:nowrap; }
+.st-gap-chip.tie { color:#DD8F1D; font-weight:500; }
+.st-gap-empty { padding:20px 14px; border-radius:14px; background:rgba(255,255,255,.7);
+  color:#64748B; text-align:center; font-size:12px; line-height:1.7; }
+@media (max-width: 420px) {
+  .st-gap-targets { grid-template-columns:repeat(3,minmax(0,1fr)); }
+  .st-gap-target:nth-child(n+4) { grid-column:span 1; }
+  .st-gap-bottom { padding-left:0; }
+}
+
 /* ===== 族谱页（Clan Lineage）Stitch 版 ===== */
 .st-ln-tools { display:flex; align-items:center; gap:.5rem; padding:.5rem 0 1rem; }
 /* 2026-10-18 玻璃化：族谱搜索框改白玻胶囊（白 .72 底 + 白 .85 描边 + 12px 圆角，参照看板页 .search） */
@@ -2974,6 +3034,14 @@ let dashboardRevealNotBefore = 0;
 let period = 'daily';    // daily | monthly | yearly
 let view = 'data';       // data | group | lineage | resources | my
 let curGroup = GROUP_PAGES[0].key;  // 分组子页当前 key
+let groupMode = 'groups'; // groups | gap：展示端分组页的两个阅读视图
+const GROUP_GAP_TARGETS = [
+  { label: '前1', k: 1 },
+  { label: '前2', k: 2 },
+  { label: '前三', k: 3 },
+  { label: '前5', k: 5 },
+  { label: '前10', k: 10 },
+];
 /* 「我的」子页（2026-10-13）：bind/push/chase/privacy/about。/my 是列表首页，
    点列表行进子页（下一页式，带返回），路由 /my/<sub> 可直达可分享。 */
 let mySub = null;
@@ -5842,7 +5910,7 @@ function groupHtml(d, page, list) {
   let html = '<div class="section tab-content-enter">';
   if (d.stale) html += '<div class="stale">分组用的是快照数据，可能不是最新</div>';
 
-  /* 场次信息卡 + 组别胶囊 */
+  /* 场次信息卡 + 分组/差距切换 */
   html +=
     '<div class="st-my-big" style="margin-top:0">' +
       '<div class="lbl"><span>' + esc(page.label) + (day ? ' · ' + esc(day) : '') + '</span>' +
@@ -5852,36 +5920,52 @@ function groupHtml(d, page, list) {
       (meta ? '<div style="margin-top:.25rem;font-size:12px;color:var(--on-surface-variant)">' +
         esc(meta) + '</div>' : '') +
     '</div>' +
-    '<div class="st-group-chips">' + groups.map((g, i) =>
+    '<div class="st-group-mode" role="tablist" aria-label="分组展示方式">' +
+      '<button type="button" role="tab" data-gmode="groups" aria-selected="' + (groupMode !== 'gap') + '"' +
+        ' class="' + (groupMode !== 'gap' ? 'on' : '') + '">分组</button>' +
+      '<button type="button" role="tab" data-gmode="gap" aria-selected="' + (groupMode === 'gap') + '"' +
+        ' class="' + (groupMode === 'gap' ? 'on' : '') + '">差距</button>' +
+    '</div>';
+
+  if (groupMode === 'gap') {
+    if (!showWave) {
+      html += '<div class="st-gap-empty">差距需要展示音浪数值<br>当前方案未开放音浪数据</div>';
+    } else {
+      html += groupGapHtml(d, groups);
+    }
+  } else {
+    if (!showGroups) {
+      return html + '<div class="empty">名单尚未开放<br>开赛时间如上</div></div>';
+    }
+    if (!groups.length) {
+      return html + '<div class="empty"><span class="big">📺</span>暂无分组数据</div></div>';
+    }
+
+    /* 组别胶囊 */
+    html += '<div class="st-group-chips">' + groups.map((g, i) =>
       '<button class="st-group-chip' + (i === 0 ? ' on' : '') + '" data-scroll="gcard-' + i + '">' +
         '<span class="n"></span><span>' + esc(g.name) + '</span>' +
         '<span class="c">' + (g.count || (g.players || []).length) + '人</span>' +
       '</button>').join('') + '</div>';
 
-  if (!showGroups) {
-    return html + '<div class="empty">名单尚未开放<br>开赛时间如上</div></div>';
+    /* 分组卡：横向滑动 + snap；只显示组名、开赛时间和成员姓名 */
+    html += '<div class="st-group-cards" id="stGroupCards">' + groups.map((g, gi) => {
+      const mems = (g.players || []).map((p, pi) =>
+        '<div class="st-gmem">' +
+          '<span class="st-gmem-rk">' + String(pi + 1).padStart(2, '0') + '</span>' +
+          '<div class="st-gmem-av">' + esc(String(p.name || '?').charAt(0)) + '</div>' +
+          '<span class="st-gmem-nm">' + esc(p.name) + '</span>' +
+        '</div>').join('');
+      return '<section class="st-gcard" id="gcard-' + gi + '">' +
+        '<div class="st-gcard-head"><div class="l">' +
+          '<span class="bar' + (gi % 2 ? ' alt' : '') + '"></span>' +
+          '<h2>' + esc(g.name) + '</h2></div>' +
+          '<span class="cnt">' + (g.count || (g.players || []).length) + '人' +
+          (g.slot ? ' · ' + esc(g.slot) + ' 开赛' : '') + '</span></div>' +
+        '<div class="st-gcard-body">' + (mems || '<div class="empty" style="padding:18px">空组</div>') + '</div>' +
+      '</section>';
+    }).join('') + '</div>';
   }
-  if (!groups.length) {
-    return html + '<div class="empty"><span class="big">📺</span>暂无分组数据</div></div>';
-  }
-
-  /* 分组卡：横向滑动 + snap；成员白卡列表（序号 / 首字头像 / 姓名） */
-  html += '<div class="st-group-cards" id="stGroupCards">' + groups.map((g, gi) => {
-    const mems = (g.players || []).map((p, pi) =>
-      '<div class="st-gmem">' +
-        '<span class="st-gmem-rk">' + String(pi + 1).padStart(2, '0') + '</span>' +
-        '<div class="st-gmem-av">' + esc(String(p.name || '?').charAt(0)) + '</div>' +
-        '<span class="st-gmem-nm">' + esc(p.name) + (p.leader ? ' · ' + esc(p.leader) : '') + '</span>' +
-      '</div>').join('');
-    return '<section class="st-gcard" id="gcard-' + gi + '">' +
-      '<div class="st-gcard-head"><div class="l">' +
-        '<span class="bar' + (gi % 2 ? ' alt' : '') + '"></span>' +
-        '<h2>' + esc(g.name) + '</h2></div>' +
-        '<span class="cnt">' + (g.count || (g.players || []).length) + (g.slot ? '人满员' : '人') +
-        (g.slot ? ' · ' + esc(g.slot) + ' 开赛' : '') + '</span></div>' +
-      '<div class="st-gcard-body">' + (mems || '<div class="empty" style="padding:18px">空组</div>') + '</div>' +
-    '</section>';
-  }).join('') + '</div>';
 
   html += '<div class="gx-foot" style="text-align:center;color:var(--on-surface-variant);font-size:11px;margin-top:.25rem">' +
     esc((d.title || 'PK 分组') + (d.eventType ? ' · ' + d.eventType : '') + ' | ' + todayStr()) + '</div>';
@@ -5900,6 +5984,76 @@ function groupHtml(d, page, list) {
   return html + '</div>';
 }
 
+function groupGapHtml(d, groups) {
+  const byName = new Map();
+  groups.forEach(g => (g.players || []).forEach(p => byName.set(p.name, g.name)));
+  let ranking = Array.isArray(d.ranking) ? d.ranking.slice() : [];
+  if (!ranking.length) {
+    ranking = groups.flatMap(g => (g.players || []).map(p => ({ ...p })));
+  }
+  ranking = ranking.filter(p => p && p.name).sort((a, b) =>
+    (Number(a.rank) || 999999) - (Number(b.rank) || 999999) ||
+    String(a.name || '').localeCompare(String(b.name || ''), 'zh-Hans-CN'));
+  if (!ranking.length) {
+    return '<div class="st-gap-empty">当前方案还没有可展示的音浪排名</div>';
+  }
+
+  const targets = GROUP_GAP_TARGETS
+    .filter(t => t.k <= ranking.length)
+    .map(t => ({
+      ...t,
+      name: ranking[t.k - 1].name,
+      score: Number(ranking[t.k - 1].wave) || 0,
+    }));
+  const targetCards = targets.map(t =>
+    '<div class="st-gap-target">' +
+      '<div class="lbl">' + esc(t.label) + '</div>' +
+      '<div class="nm">' + esc(t.name) + '</div>' +
+      '<div class="score">' + esc(wan(t.score)) + '</div>' +
+      '<div class="cap">目标分</div>' +
+    '</div>').join('');
+
+  const rows = ranking.map((p, i) => {
+    const rank = Number(p.rank) || i + 1;
+    const wave = Number(p.wave) || 0;
+    const previous = i > 0 ? Number(ranking[i - 1].wave) || 0 : null;
+    const gap = previous == null ? null : previous - wave;
+    const gapText = i === 0 ? '领跑' : gap === 0 ? '与上一位并列' : '距上一位还差 ' + wan(gap);
+    const gapClass = i === 0 ? ' lead' : gap === 0 ? ' tie' : '';
+    const groupName = byName.get(p.name) || '';
+    const position = i + 1;
+    const rankCls = rank <= 3 ? ' r' + rank : '';
+    const chips = targets
+      .filter(t => t.k < position)
+      .map(t => {
+        const diff = t.score - wave;
+        return diff > 0
+          ? '<span class="st-gap-chip">' + esc(t.label) + ' +' + esc(wan(diff)) + '</span>'
+          : '<span class="st-gap-chip tie">' + esc(t.label) + ' 持平</span>';
+      }).join('');
+    return '<div class="st-gap-row">' +
+      '<div class="st-gap-row-top">' +
+        '<span class="st-gap-rank' + rankCls + '">' + rank + '</span>' +
+        '<span class="st-gap-av">' + esc(String(p.name || '?').charAt(0)) + '</span>' +
+        '<b class="st-gap-name">' + esc(p.name) + '</b>' +
+        (groupName ? '<span class="st-gap-group">' + esc(groupName) + '</span>' : '') +
+        '<span class="st-gap-wave">' + esc(wan(wave)) + '<small>音浪</small></span>' +
+      '</div>' +
+      '<div class="st-gap-bottom">' +
+        '<span class="st-gap-gap' + gapClass + '">' + esc(gapText) + '</span>' +
+        (chips ? '<span class="st-gap-chips">' + chips + '</span>' : '') +
+      '</div>' +
+    '</div>';
+  }).join('');
+
+  return '<div class="st-gap-target-board">' +
+    '<div class="st-gap-board-head"><span class="st-gap-board-title">目标名次门槛</span>' +
+    '<span class="st-gap-board-note">追平看差值，超过目标还需再加 1 分</span></div>' +
+    '<div class="st-gap-targets">' + targetCards + '</div>' +
+  '</div>' +
+  '<div class="st-gap-list">' + rows + '</div>';
+}
+
 /** 分组页交互：组别胶囊滚动到卡片（赛事切换统一由顶部 #subnav 负责）。 */
 function bindGroupChips() {
   document.querySelectorAll('.st-group-chip[data-scroll]').forEach(c => {
@@ -5910,6 +6064,14 @@ function bindGroupChips() {
         c.classList.add('on');
         card.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' });
       }
+    };
+  });
+  document.querySelectorAll('.st-group-mode button[data-gmode]').forEach(b => {
+    b.onclick = () => {
+      const next = b.dataset.gmode === 'gap' ? 'gap' : 'groups';
+      if (next === groupMode) return;
+      groupMode = next;
+      loadGroup();
     };
   });
 }
