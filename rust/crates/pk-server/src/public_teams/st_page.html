@@ -3454,6 +3454,7 @@ function tbBindSnoozedToday(me) {
 }
 function maybePromptTencentBind(me) {
   try {
+    if (!site || !site.settings || site.settings.workbuddyEnabled !== true) return;
     if (!me || me.needBind || me.bound === false) return;   // 未绑定主播的先走首次补全
     if (!String(me.phone || '').trim()) return;             // 没手机号的交给补全流程
     if (localStorage.getItem(tbBindKey(me)) === '1') return; // 选过就不弹

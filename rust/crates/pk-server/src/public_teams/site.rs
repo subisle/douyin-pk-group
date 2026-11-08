@@ -132,6 +132,8 @@ pub(super) async fn site_payload(st: &AppState, s: &PublicSettings, query_team: 
             "lineageEnabled": s.lineage_enabled,
             "groupTypes": s.group_types,
             "loginRequired": s.login_required,
+            // WorkBuddy 未配置时前端不弹自动绑定提示；My 页的手动入口仍可提示未开放。
+            "workbuddyEnabled": crate::wbgateway::global().is_some(),
         },
     })))
 }
