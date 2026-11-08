@@ -586,7 +586,8 @@ pub async fn test_push(
     let (to_user, context_token) = crate::store::wx_session_get(&st, &a.conversation_id)
         .await
         .ok_or_else(|| crate::routes::ApiError::bad_request("wxbot 会话上下文不存在"))?;
-    crate::bot::weixin::user_send_text(
+    let mut via = "account";
+    if let Err(account_err) = crate::bot::weixin::user_send_text(
         &st,
         &a.base_url,
         &a.bot_token,
@@ -594,8 +595,26 @@ pub async fn test_push(
         &context_token,
         text,
     )
-    .await?;
-    Ok(Json(json!({ "ok": true, "account": account, "sent": 1 })))
+    .await
+    {
+        let account_err_text = account_err.to_string();
+        let wx = st
+            .bots
+            .get()
+            .and_then(|m| m.wechat.as_ref())
+            .ok_or(account_err)?;
+        wx.send_proactive(&a.conversation_id, text)
+            .await
+            .map_err(|global_err| {
+                anyhow::anyhow!(
+                    "账号通道失败: {account_err_text}; 全局机器人通道失败: {global_err}"
+                )
+            })?;
+        via = "global";
+    }
+    Ok(Json(
+        json!({ "ok": true, "account": account, "sent": 1, "via": via }),
+    ))
 }
 
 /// 主播侧直播推送开关（第三层）
