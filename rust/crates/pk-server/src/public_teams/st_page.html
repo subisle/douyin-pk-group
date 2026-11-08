@@ -1448,35 +1448,32 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .st-group-chip.on .n { background:#D97706; }
 .st-group-chip .c { color:#64748B; font-weight:400; }
 .st-group-chip.on .c { color:rgba(180,83,9,.8); }
-.st-group-cards { display:flex; overflow-x:auto; gap:1rem; padding-bottom:1rem;
-  scroll-snap-type:x mandatory; scrollbar-width:none; -webkit-overflow-scrolling:touch; }
-.st-group-cards::-webkit-scrollbar { display:none; }
-.st-gcard { scroll-snap-align:center; flex:none; width:86vw; max-width:360px;
-  display:flex; flex-direction:column; gap:.5rem; }
-.st-gcard-head { display:flex; align-items:center; justify-content:space-between; padding:0 .125rem; }
-.st-gcard-head .l { display:flex; align-items:center; gap:.5rem; }
-.st-gcard-head .bar { width:.375rem; height:1rem; border-radius:9999px; background:var(--primary); }
+/* 四个组同屏：窄卡片只保留组名、时间和成员姓名，长名单改为 4 列网格。 */
+.st-group-cards { display:grid; grid-template-columns:repeat(4,minmax(0,1fr));
+  gap:.5rem; align-items:start; padding-bottom:1rem; }
+.st-gcard { min-width:0; display:flex; flex-direction:column; gap:.375rem; }
+.st-gcard-head { display:flex; flex-direction:column; align-items:flex-start; gap:1px;
+  padding:0 .125rem; min-width:0; }
+.st-gcard-head .l { display:flex; align-items:center; gap:.25rem; min-width:0; width:100%; }
+.st-gcard-head .bar { width:.25rem; height:.75rem; border-radius:9999px; background:var(--primary); flex:none; }
 .st-gcard-head .bar.alt { background:var(--secondary); }
-.st-gcard-head h2 { margin:0; font-size:18px; font-weight:600; color:#0F172A; letter-spacing:-.01em; }
-.st-gcard-head .cnt { font-size:12px; color:#64748B; font-weight:500; }
-/* 2026-10-18 玻璃化：分组主体卡换玻璃卡 token（白 .72 底 + blur(20px) + 16px 圆角 + 同款投影） */
+.st-gcard-head h2 { margin:0; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  font-size:12.5px; font-weight:700; color:#0F172A; letter-spacing:-.01em; }
+.st-gcard-head .cnt { display:flex; flex-wrap:wrap; column-gap:3px; max-width:100%;
+  color:#64748B; font-size:8.5px; font-weight:500; line-height:11px; white-space:nowrap; }
+/* 2026-10-18 玻璃化：分组主体卡换玻璃卡 token（白 .72 底 + blur(20px) + 12px 圆角） */
 .st-gcard-body { background:rgba(255,255,255,.72); border:1px solid rgba(255,255,255,.85);
-  border-radius:16px; box-shadow:0 8px 32px rgba(148,163,184,.12), 0 1px 2px rgba(0,0,0,.03);
+  border-radius:12px; box-shadow:0 8px 32px rgba(148,163,184,.12), 0 1px 2px rgba(0,0,0,.03);
   -webkit-backdrop-filter:blur(20px); backdrop-filter:blur(20px);
-  overflow:hidden; display:flex; flex-direction:column; }
-.st-gmem { display:flex; align-items:center; gap:1rem; padding:.75rem 1rem;
+  overflow:hidden; display:flex; flex-direction:column; flex:1; }
+.st-gmem { display:flex; align-items:center; gap:.25rem; min-width:0; padding:.25rem .375rem;
   border-bottom:1px solid var(--surface-container); transition:background .15s; }
 .st-gmem:last-child { border-bottom:none; }
 .st-gmem:hover { background:var(--surface-container-low); }
-.st-gmem-rk { width:1.5rem; text-align:center; font-size:18px; font-weight:700;
-  color:var(--primary); flex:none; font-variant-numeric:tabular-nums; }
+.st-gmem-rk { width:.85rem; flex:none; text-align:center; font-size:9px; font-weight:700;
+  color:var(--primary); font-variant-numeric:tabular-nums; }
 .st-gmem:nth-child(n+3) .st-gmem-rk { color:var(--outline-variant); }
-.st-gmem-av { width:2.5rem; height:2.5rem; border-radius:9999px; background:var(--surface-container);
-  display:grid; place-items:center; font-size:18px; font-weight:700; color:var(--on-surface);
-  flex:none; }
-.st-gmem:nth-child(1) .st-gmem-av { color:var(--primary); }
-.st-gmem:nth-child(2) .st-gmem-av { color:var(--secondary); }
-.st-gmem-nm { font-size:14px; font-weight:500; color:var(--on-surface);
+.st-gmem-nm { min-width:0; font-size:11px; font-weight:600; color:var(--on-surface);
   overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 
 /* ===== 分组展示 / 分组差距：同一页两种阅读任务 ===== */
@@ -1503,6 +1500,15 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .st-gap-target .score { margin-top:3px; color:#101828; font-size:15px; font-weight:800;
   line-height:1.15; font-variant-numeric:tabular-nums; }
 .st-gap-target .cap { margin-top:1px; color:#98A2B3; font-size:9px; }
+.st-gap-groups { display:flex; flex-direction:column; gap:1rem; }
+.st-gap-section { display:flex; flex-direction:column; gap:.5rem; }
+.st-gap-section-head { display:flex; align-items:center; justify-content:space-between; gap:8px;
+  padding:0 .25rem; }
+.st-gap-section-head .l { display:flex; align-items:center; gap:6px; min-width:0; }
+.st-gap-section-head .bar { width:4px; height:14px; border-radius:9999px; background:#D97706; flex:none; }
+.st-gap-section-title { margin:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  color:#0F172A; font-size:13px; font-weight:800; }
+.st-gap-section-meta { flex:none; color:#94A3B8; font-size:10px; }
 .st-gap-list { display:flex; flex-direction:column; gap:.5rem; }
 .st-gap-row { padding:10px 12px; border-radius:14px; background:rgba(255,255,255,.74);
   border:1px solid rgba(255,255,255,.9); box-shadow:0 4px 14px rgba(148,163,184,.08); }
@@ -1517,8 +1523,6 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
   border-radius:9999px; background:#F1F5F9; color:#64748B; font-size:12px; font-weight:800; }
 .st-gap-name { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
   color:#0F172A; font-size:14px; font-weight:700; }
-.st-gap-group { flex:none; padding:2px 6px; border-radius:6px; background:#F8FAFC;
-  color:#64748B; font-size:10px; font-weight:600; }
 .st-gap-wave { margin-left:auto; flex:none; text-align:right; color:#101828;
   font-size:14px; font-weight:800; font-variant-numeric:tabular-nums; }
 .st-gap-wave small { display:block; margin-top:1px; color:#98A2B3; font-size:9px; font-weight:400; }
@@ -5953,16 +5957,15 @@ function groupHtml(d, page, list) {
       const mems = (g.players || []).map((p, pi) =>
         '<div class="st-gmem">' +
           '<span class="st-gmem-rk">' + String(pi + 1).padStart(2, '0') + '</span>' +
-          '<div class="st-gmem-av">' + esc(String(p.name || '?').charAt(0)) + '</div>' +
           '<span class="st-gmem-nm">' + esc(p.name) + '</span>' +
         '</div>').join('');
       return '<section class="st-gcard" id="gcard-' + gi + '">' +
         '<div class="st-gcard-head"><div class="l">' +
           '<span class="bar' + (gi % 2 ? ' alt' : '') + '"></span>' +
           '<h2>' + esc(g.name) + '</h2></div>' +
-          '<span class="cnt">' + (g.count || (g.players || []).length) + '人' +
-          (g.slot ? ' · ' + esc(g.slot) + ' 开赛' : '') + '</span></div>' +
-        '<div class="st-gcard-body">' + (mems || '<div class="empty" style="padding:18px">空组</div>') + '</div>' +
+          '<span class="cnt"><span>' + (g.count || (g.players || []).length) + '人</span>' +
+          (g.slot ? '<span>' + esc(g.slot) + ' 开赛</span>' : '') + '</span></div>' +
+        '<div class="st-gcard-body">' + (mems || '<div class="empty" style="padding:18px 4px;font-size:10px">空组</div>') + '</div>' +
       '</section>';
     }).join('') + '</div>';
   }
@@ -5985,11 +5988,17 @@ function groupHtml(d, page, list) {
 }
 
 function groupGapHtml(d, groups) {
-  const byName = new Map();
-  groups.forEach(g => (g.players || []).forEach(p => byName.set(p.name, g.name)));
+  /* 差距页先按方案里的组序排列，再在组内按组内名次排列。
+     每个玩家的「距上一位」和目标差值仍按全场总榜计算，不能拿相邻的组员冒充上一位。 */
+  const orderedGroups = (groups || []).map(g => ({
+    ...g,
+    players: (g.players || []).slice().sort((a, b) =>
+      (Number(a.group_rank) || 999999) - (Number(b.group_rank) || 999999) ||
+      (Number(a.rank) || 999999) - (Number(b.rank) || 999999)),
+  }));
   let ranking = Array.isArray(d.ranking) ? d.ranking.slice() : [];
   if (!ranking.length) {
-    ranking = groups.flatMap(g => (g.players || []).map(p => ({ ...p })));
+    ranking = orderedGroups.flatMap(g => (g.players || []).map(p => ({ ...p })));
   }
   ranking = ranking.filter(p => p && p.name).sort((a, b) =>
     (Number(a.rank) || 999999) - (Number(b.rank) || 999999) ||
@@ -5997,6 +6006,14 @@ function groupGapHtml(d, groups) {
   if (!ranking.length) {
     return '<div class="st-gap-empty">当前方案还没有可展示的音浪排名</div>';
   }
+
+  const rankIndexByName = new Map();
+  const previousWaveByName = new Map();
+  ranking.forEach((p, i) => {
+    const key = String(p.name);
+    rankIndexByName.set(key, i);
+    previousWaveByName.set(key, i > 0 ? Number(ranking[i - 1].wave) || 0 : null);
+  });
 
   const targets = GROUP_GAP_TARGETS
     .filter(t => t.k <= ranking.length)
@@ -6013,18 +6030,23 @@ function groupGapHtml(d, groups) {
       '<div class="cap">目标分</div>' +
     '</div>').join('');
 
-  const rows = ranking.map((p, i) => {
-    const rank = Number(p.rank) || i + 1;
+  const rowHtml = (p) => {
+    const key = String(p.name || '');
+    const overallIndex = rankIndexByName.has(key) ? rankIndexByName.get(key) : -1;
+    const rank = Number(p.rank) || (overallIndex >= 0 ? overallIndex + 1 : 0);
     const wave = Number(p.wave) || 0;
-    const previous = i > 0 ? Number(ranking[i - 1].wave) || 0 : null;
+    const previous = previousWaveByName.get(key);
     const gap = previous == null ? null : previous - wave;
-    const gapText = i === 0 ? '领跑' : gap === 0 ? '与上一位并列' : '距上一位还差 ' + wan(gap);
-    const gapClass = i === 0 ? ' lead' : gap === 0 ? ' tie' : '';
-    const groupName = byName.get(p.name) || '';
-    const position = i + 1;
-    const rankCls = rank <= 3 ? ' r' + rank : '';
+    const leader = overallIndex === 0;
+    const gapText = leader ? '领跑'
+      : gap == null ? '暂无上一位数据'
+      : gap === 0 ? '与上一位并列'
+      : '距上一位还差 ' + wan(gap);
+    const gapClass = leader ? ' lead' : gap === 0 ? ' tie' : '';
+    const position = overallIndex >= 0 ? overallIndex + 1 : 0;
+    const rankCls = rank > 0 && rank <= 3 ? ' r' + rank : '';
     const chips = targets
-      .filter(t => t.k < position)
+      .filter(t => position > 0 && t.k < position)
       .map(t => {
         const diff = t.score - wave;
         return diff > 0
@@ -6033,10 +6055,9 @@ function groupGapHtml(d, groups) {
       }).join('');
     return '<div class="st-gap-row">' +
       '<div class="st-gap-row-top">' +
-        '<span class="st-gap-rank' + rankCls + '">' + rank + '</span>' +
+        '<span class="st-gap-rank' + rankCls + '">' + (rank || '—') + '</span>' +
         '<span class="st-gap-av">' + esc(String(p.name || '?').charAt(0)) + '</span>' +
         '<b class="st-gap-name">' + esc(p.name) + '</b>' +
-        (groupName ? '<span class="st-gap-group">' + esc(groupName) + '</span>' : '') +
         '<span class="st-gap-wave">' + esc(wan(wave)) + '<small>音浪</small></span>' +
       '</div>' +
       '<div class="st-gap-bottom">' +
@@ -6044,6 +6065,24 @@ function groupGapHtml(d, groups) {
         (chips ? '<span class="st-gap-chips">' + chips + '</span>' : '') +
       '</div>' +
     '</div>';
+  };
+
+  const sections = (orderedGroups.length ? orderedGroups : [{
+    name: '总排名',
+    slot: '',
+    count: ranking.length,
+    players: ranking,
+  }]).map((g, gi) => {
+    const rows = (g.players || []).map(rowHtml).join('');
+    if (!rows) return '';
+    const count = g.count || (g.players || []).length;
+    return '<section class="st-gap-section">' +
+      '<div class="st-gap-section-head"><div class="l"><span class="bar"></span>' +
+        '<h3 class="st-gap-section-title">' + esc(g.name || ('第 ' + (gi + 1) + ' 组')) + '</h3></div>' +
+        '<span class="st-gap-section-meta">' + count + '人' +
+          (g.slot ? ' · ' + esc(g.slot) + ' 开赛' : '') + '</span></div>' +
+      '<div class="st-gap-list">' + rows + '</div>' +
+    '</section>';
   }).join('');
 
   return '<div class="st-gap-target-board">' +
@@ -6051,7 +6090,7 @@ function groupGapHtml(d, groups) {
     '<span class="st-gap-board-note">追平看差值，超过目标还需再加 1 分</span></div>' +
     '<div class="st-gap-targets">' + targetCards + '</div>' +
   '</div>' +
-  '<div class="st-gap-list">' + rows + '</div>';
+  '<div class="st-gap-groups">' + sections + '</div>';
 }
 
 /** 分组页交互：组别胶囊滚动到卡片（赛事切换统一由顶部 #subnav 负责）。 */
