@@ -3083,6 +3083,7 @@ try { resourceLayout = localStorage.getItem('pk_resource_layout') === 'grid' ? '
 let curDate = null;      // 每日口径当前日期
 let curPeriod = null;    // 月/年口径当前周期
 let plans = [];          // 已上架分组方案（各类型独立互斥，每类型最多一场）
+let plansReady = false;  // plans 拉取完成后，分组路由只保留当前有已上架方案的赛事
 let planByType = {};     // 分组子页 key → 正在看的方案 id（同类型多个上架时页内切换用）
 let searchOpen = false;
 let q = '';
@@ -5861,10 +5862,16 @@ function bindLineage(t, keepView) {
 
 /* ==================== 分组（按赛事类型拆页：初级/中级小组赛、月终争霸赛、两级晋级赛） ==================== */
 async function loadPlans() {
+  let loaded = false;
   try {
     const d = await api('/api/public/plans');
     plans = d.items || [];
+    loaded = true;
   } catch (_) { plans = []; }
+  /* 拉取失败时保留后台开关的完整导航，不能把临时网络故障误判成“没有方案”。 */
+  plansReady = loaded;
+  /* 成功拉取后按「有已上架方案」收口：只留下当前真正可打开的赛事类型。 */
+  try { syncNav(); groupSegMove(true); } catch (_) {}
 }
 
 async function loadGroup(signal) {
@@ -9560,11 +9567,15 @@ function syncNav() {
   const groupOn = s.groupEnabled !== false;
   // 族谱是男团专属页：女团视角不显示（2026-10-11）
   const linOn = s.lineageEnabled !== false && TEAM !== 'female';
-  /* 子导航：把后台关掉的赛事类型按钮摘掉 */
+  /* 子导航：后台关掉、或当前没有已上架方案的赛事类型都不显示。
+     plans 还没回来时先按后台开关占位，回来后立即收口，避免闪一下就消失。 */
   const gt = s.groupTypes || {};
+  const plannedTypes = new Set(plans.map(p => p.eventType || ''));
   document.querySelectorAll('#subnav button').forEach(b => {
     const page = GROUP_PAGES.find(p => p.key === b.dataset.g);
-    const on = groupOn && (!page || gt[page.type] !== false);
+    const configured = groupOn && (!page || gt[page.type] !== false);
+    const hasPlan = !plansReady || !page || plannedTypes.has(page.type);
+    const on = configured && hasPlan;
     b.disabled = !on;
     show(b, on);
   });
