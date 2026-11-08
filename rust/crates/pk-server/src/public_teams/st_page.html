@@ -1448,32 +1448,31 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .st-group-chip.on .n { background:#D97706; }
 .st-group-chip .c { color:#64748B; font-weight:400; }
 .st-group-chip.on .c { color:rgba(180,83,9,.8); }
-/* 四个组同屏：窄卡片只保留组名、时间和成员姓名，长名单改为 4 列网格。 */
-.st-group-cards { display:grid; grid-template-columns:repeat(4,minmax(0,1fr));
-  gap:.5rem; align-items:start; padding-bottom:1rem; }
-.st-gcard { min-width:0; display:flex; flex-direction:column; gap:.375rem; }
-.st-gcard-head { display:flex; flex-direction:column; align-items:flex-start; gap:1px;
+/* 一次一组：组别胶囊切换当前组，卡片只展示组名、时间和成员姓名。 */
+.st-group-cards { padding-bottom:1rem; }
+.st-gcard { display:flex; flex-direction:column; gap:.5rem; min-width:0; }
+.st-gcard-head { display:flex; align-items:center; justify-content:space-between; gap:8px;
   padding:0 .125rem; min-width:0; }
-.st-gcard-head .l { display:flex; align-items:center; gap:.25rem; min-width:0; width:100%; }
-.st-gcard-head .bar { width:.25rem; height:.75rem; border-radius:9999px; background:var(--primary); flex:none; }
+.st-gcard-head .l { display:flex; align-items:center; gap:.375rem; min-width:0; flex:1; }
+.st-gcard-head .bar { width:.375rem; height:1rem; border-radius:9999px; background:var(--primary); flex:none; }
 .st-gcard-head .bar.alt { background:var(--secondary); }
 .st-gcard-head h2 { margin:0; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
-  font-size:12.5px; font-weight:700; color:#0F172A; letter-spacing:-.01em; }
-.st-gcard-head .cnt { display:flex; flex-wrap:wrap; column-gap:3px; max-width:100%;
-  color:#64748B; font-size:8.5px; font-weight:500; line-height:11px; white-space:nowrap; }
-/* 2026-10-18 玻璃化：分组主体卡换玻璃卡 token（白 .72 底 + blur(20px) + 12px 圆角） */
-.st-gcard-body { background:rgba(255,255,255,.72); border:1px solid rgba(255,255,255,.85);
-  border-radius:12px; box-shadow:0 8px 32px rgba(148,163,184,.12), 0 1px 2px rgba(0,0,0,.03);
-  -webkit-backdrop-filter:blur(20px); backdrop-filter:blur(20px);
-  overflow:hidden; display:flex; flex-direction:column; flex:1; }
-.st-gmem { display:flex; align-items:center; gap:.25rem; min-width:0; padding:.25rem .375rem;
-  border-bottom:1px solid var(--surface-container); transition:background .15s; }
-.st-gmem:last-child { border-bottom:none; }
+  font-size:17px; font-weight:700; color:#0F172A; letter-spacing:-.01em; }
+.st-gcard-head .cnt { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:2px 6px; flex:none;
+  color:#64748B; font-size:10.5px; font-weight:500; line-height:15px; white-space:nowrap; }
+/* 2026-10-18 玻璃化：分组主体卡换玻璃卡 token（白 .72 底 + blur(20px) + 16px 圆角） */
+.st-gcard-body { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:1px;
+  background:var(--surface-container); border:1px solid rgba(255,255,255,.85);
+  border-radius:16px; box-shadow:0 8px 32px rgba(148,163,184,.12), 0 1px 2px rgba(0,0,0,.03);
+  -webkit-backdrop-filter:blur(20px); backdrop-filter:blur(20px); overflow:hidden; }
+.st-gmem { display:flex; align-items:center; gap:.375rem; min-width:0; padding:.6rem .75rem;
+  background:rgba(255,255,255,.78); transition:background .15s; }
+.st-gmem:last-child:nth-child(odd) { grid-column:1 / -1; }
 .st-gmem:hover { background:var(--surface-container-low); }
-.st-gmem-rk { width:.85rem; flex:none; text-align:center; font-size:9px; font-weight:700;
+.st-gmem-rk { width:1.25rem; flex:none; text-align:center; font-size:12px; font-weight:700;
   color:var(--primary); font-variant-numeric:tabular-nums; }
 .st-gmem:nth-child(n+3) .st-gmem-rk { color:var(--outline-variant); }
-.st-gmem-nm { min-width:0; font-size:11px; font-weight:600; color:var(--on-surface);
+.st-gmem-nm { min-width:0; font-size:14px; font-weight:600; color:var(--on-surface);
   overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 
 /* ===== 分组展示 / 分组差距：同一页两种阅读任务 ===== */
@@ -3039,6 +3038,7 @@ let period = 'daily';    // daily | monthly | yearly
 let view = 'data';       // data | group | lineage | resources | my
 let curGroup = GROUP_PAGES[0].key;  // 分组子页当前 key
 let groupMode = 'groups'; // groups | gap：展示端分组页的两个阅读视图
+let groupSel = 0;        // 当前展示的组序号：分组、差距两个视图共用
 const GROUP_GAP_TARGETS = [
   { label: '前1', k: 1 },
   { label: '前2', k: 2 },
@@ -5888,8 +5888,7 @@ async function loadGroup(signal) {
   try {
     const d = await api('/api/public/plans/' + pid, { signal });
     $('mhSub').textContent = page.label;
-    $('view').innerHTML = groupHtml(d, page, list);
-    bindGroupChips();
+    renderGroupView(d, page, list);
     groupSegMove(true);
   } catch (e) {
     if (e && e.name === 'AbortError') return;
@@ -5901,6 +5900,7 @@ function groupHtml(d, page, list) {
   const showWave = !d.display || d.display.wave !== false;
   const showGroups = !d.display || d.display.groups !== false;
   const groups = d.groups || [];
+  groupSel = groups.length ? Math.min(Math.max(Number(groupSel) || 0, 0), groups.length - 1) : 0;
   const sched = d.schedule || {};
   const nPlayers = d.counts ? d.counts.players : groups.reduce((s, g) => s + (g.count || 0), 0);
   const nGroups = d.counts ? d.counts.groups : groups.length;
@@ -5931,11 +5931,20 @@ function groupHtml(d, page, list) {
         ' class="' + (groupMode === 'gap' ? 'on' : '') + '">差距</button>' +
     '</div>';
 
+  /* 组别胶囊：两个视图共用，切换后只重绘当前组，不重新请求方案。 */
+  if (showGroups && groups.length) {
+    html += '<div class="st-group-chips">' + groups.map((g, i) =>
+      '<button class="st-group-chip' + (i === groupSel ? ' on' : '') + '" data-gsel="' + i + '">' +
+        '<span class="n"></span><span>' + esc(g.name) + '</span>' +
+        '<span class="c">' + (g.count || (g.players || []).length) + '人</span>' +
+      '</button>').join('') + '</div>';
+  }
+
   if (groupMode === 'gap') {
     if (!showWave) {
       html += '<div class="st-gap-empty">差距需要展示音浪数值<br>当前方案未开放音浪数据</div>';
     } else {
-      html += groupGapHtml(d, groups);
+      html += groupGapHtml(d, groups, groupSel);
     }
   } else {
     if (!showGroups) {
@@ -5945,29 +5954,24 @@ function groupHtml(d, page, list) {
       return html + '<div class="empty"><span class="big">📺</span>暂无分组数据</div></div>';
     }
 
-    /* 组别胶囊 */
-    html += '<div class="st-group-chips">' + groups.map((g, i) =>
-      '<button class="st-group-chip' + (i === 0 ? ' on' : '') + '" data-scroll="gcard-' + i + '">' +
-        '<span class="n"></span><span>' + esc(g.name) + '</span>' +
-        '<span class="c">' + (g.count || (g.players || []).length) + '人</span>' +
-      '</button>').join('') + '</div>';
-
-    /* 分组卡：横向滑动 + snap；只显示组名、开赛时间和成员姓名 */
-    html += '<div class="st-group-cards" id="stGroupCards">' + groups.map((g, gi) => {
-      const mems = (g.players || []).map((p, pi) =>
-        '<div class="st-gmem">' +
-          '<span class="st-gmem-rk">' + String(pi + 1).padStart(2, '0') + '</span>' +
-          '<span class="st-gmem-nm">' + esc(p.name) + '</span>' +
-        '</div>').join('');
-      return '<section class="st-gcard" id="gcard-' + gi + '">' +
+    /* 一次只渲染当前组；其它组通过上方胶囊切换。 */
+    const g = groups[groupSel];
+    const gi = groupSel;
+    const mems = (g.players || []).map((p, pi) =>
+      '<div class="st-gmem">' +
+        '<span class="st-gmem-rk">' + String(pi + 1).padStart(2, '0') + '</span>' +
+        '<span class="st-gmem-nm">' + esc(p.name) + '</span>' +
+      '</div>').join('');
+    html += '<div class="st-group-cards" id="stGroupCards">' +
+      '<section class="st-gcard" id="gcard-' + gi + '">' +
         '<div class="st-gcard-head"><div class="l">' +
           '<span class="bar' + (gi % 2 ? ' alt' : '') + '"></span>' +
           '<h2>' + esc(g.name) + '</h2></div>' +
           '<span class="cnt"><span>' + (g.count || (g.players || []).length) + '人</span>' +
           (g.slot ? '<span>' + esc(g.slot) + ' 开赛</span>' : '') + '</span></div>' +
-        '<div class="st-gcard-body">' + (mems || '<div class="empty" style="padding:18px 4px;font-size:10px">空组</div>') + '</div>' +
-      '</section>';
-    }).join('') + '</div>';
+        '<div class="st-gcard-body">' + (mems || '<div class="empty" style="padding:18px 4px;font-size:10px;grid-column:1/-1">空组</div>') + '</div>' +
+      '</section>' +
+    '</div>';
   }
 
   html += '<div class="gx-foot" style="text-align:center;color:var(--on-surface-variant);font-size:11px;margin-top:.25rem">' +
@@ -5981,13 +5985,13 @@ function groupHtml(d, page, list) {
         '<div class="r"><span class="pri">' + (p.id === planByType[curGroup] ? '当前' : '切换') + '</span>' +
         '<span class="material-symbols-outlined">chevron_right</span></div></button>').join('') + '</div>';
     setTimeout(() => document.querySelectorAll('[data-pid]').forEach(b => b.onclick = () => {
-      planByType[curGroup] = Number(b.dataset.pid); loadGroup();
+      planByType[curGroup] = Number(b.dataset.pid); groupSel = 0; loadGroup();
     }), 0);
   }
   return html + '</div>';
 }
 
-function groupGapHtml(d, groups) {
+function groupGapHtml(d, groups, selectedIndex) {
   /* 差距页先按方案里的组序排列，再在组内按组内名次排列。
      每个玩家的「距上一位」和目标差值仍按全场总榜计算，不能拿相邻的组员冒充上一位。 */
   const orderedGroups = (groups || []).map(g => ({
@@ -5996,6 +6000,9 @@ function groupGapHtml(d, groups) {
       (Number(a.group_rank) || 999999) - (Number(b.group_rank) || 999999) ||
       (Number(a.rank) || 999999) - (Number(b.rank) || 999999)),
   }));
+  const selected = orderedGroups.length
+    ? Math.min(Math.max(Number(selectedIndex) || 0, 0), orderedGroups.length - 1)
+    : -1;
   let ranking = Array.isArray(d.ranking) ? d.ranking.slice() : [];
   if (!ranking.length) {
     ranking = orderedGroups.flatMap(g => (g.players || []).map(p => ({ ...p })));
@@ -6067,7 +6074,7 @@ function groupGapHtml(d, groups) {
     '</div>';
   };
 
-  const sections = (orderedGroups.length ? orderedGroups : [{
+  const sections = (orderedGroups.length ? [orderedGroups[selected]] : [{
     name: '总排名',
     slot: '',
     count: ranking.length,
@@ -6093,16 +6100,20 @@ function groupGapHtml(d, groups) {
   '<div class="st-gap-groups">' + sections + '</div>';
 }
 
-/** 分组页交互：组别胶囊滚动到卡片（赛事切换统一由顶部 #subnav 负责）。 */
-function bindGroupChips() {
-  document.querySelectorAll('.st-group-chip[data-scroll]').forEach(c => {
+/** 分组页交互：组别胶囊切换当前组，视图切换只重绘、不重复请求方案。 */
+function renderGroupView(d, page, list) {
+  $('view').innerHTML = groupHtml(d, page, list);
+  bindGroupChips(d, page, list);
+}
+
+function bindGroupChips(d, page, list) {
+  document.querySelectorAll('.st-group-chip[data-gsel]').forEach(c => {
     c.onclick = () => {
-      const card = document.getElementById(c.dataset.scroll);
-      if (card) {
-        document.querySelectorAll('.st-group-chip').forEach(x => x.classList.remove('on'));
-        c.classList.add('on');
-        card.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' });
-      }
+      if (!d) return;
+      const next = Number(c.dataset.gsel);
+      if (!Number.isInteger(next) || next === groupSel) return;
+      groupSel = next;
+      renderGroupView(d, page, list);
     };
   });
   document.querySelectorAll('.st-group-mode button[data-gmode]').forEach(b => {
@@ -6110,9 +6121,20 @@ function bindGroupChips() {
       const next = b.dataset.gmode === 'gap' ? 'gap' : 'groups';
       if (next === groupMode) return;
       groupMode = next;
-      loadGroup();
+      if (d) renderGroupView(d, page, list);
+      else loadGroup();
     };
   });
+  const active = document.querySelector('.st-group-chip.on');
+  const rail = active && active.closest('.st-group-chips');
+  if (d && active && rail) {
+    requestAnimationFrame(() => {
+      rail.scrollTo({
+        left: active.offsetLeft - (rail.clientWidth - active.offsetWidth) / 2,
+        behavior: 'smooth',
+      });
+    });
+  }
 }
 
 /* ===== 分组赛事切换：独立苹果白玻分段控件（不共用底部水滴） =====
@@ -6144,6 +6166,7 @@ function groupSegChoose(key) {
   const btn = document.querySelector('#subnav button[data-g="' + key + '"]');
   if (!btn || btn.disabled) return;
   if (curGroup === key && view === 'group') { groupSegMove(); return; }
+  groupSel = 0;
   curGroup = key;
   switchView('group');
 }
