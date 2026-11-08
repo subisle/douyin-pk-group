@@ -1500,20 +1500,6 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .st-group-mode button.on { background:#fff; color:#0F172A;
   box-shadow:0 3px 10px rgba(15,23,42,.08); }
 .st-group-mode button:focus-visible { outline:2px solid #D97706; outline-offset:2px; }
-.st-gap-target-board { margin:0 0 .75rem; padding:12px 13px; border-radius:16px;
-  background:rgba(255,248,242,.9); border:1px solid rgba(255,217,201,.9); }
-.st-gap-board-head { display:flex; align-items:baseline; justify-content:space-between; gap:10px; }
-.st-gap-board-title { color:#B45309; font-size:13px; font-weight:800; }
-.st-gap-board-note { color:#A8A29E; font-size:10px; text-align:right; }
-.st-gap-targets { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:7px; margin-top:9px; }
-.st-gap-target { min-width:0; padding:8px 8px 7px; border-radius:11px; background:#fff;
-  border:1px solid #F5E4DB; }
-.st-gap-target .lbl { color:#D97706; font-size:11px; font-weight:800; }
-.st-gap-target .nm { margin-top:3px; overflow:hidden; text-overflow:ellipsis;
-  white-space:nowrap; color:#475467; font-size:11px; }
-.st-gap-target .score { margin-top:3px; color:#101828; font-size:15px; font-weight:800;
-  line-height:1.15; font-variant-numeric:tabular-nums; }
-.st-gap-target .cap { margin-top:1px; color:#98A2B3; font-size:9px; }
 .st-gap-groups { display:flex; flex-direction:column; gap:1rem; }
 .st-gap-section { display:flex; flex-direction:column; gap:.5rem; }
 .st-gap-section-head { display:flex; align-items:center; justify-content:space-between; gap:8px;
@@ -1552,8 +1538,6 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .st-gap-empty { padding:20px 14px; border-radius:14px; background:rgba(255,255,255,.7);
   color:#64748B; text-align:center; font-size:12px; line-height:1.7; }
 @media (max-width: 420px) {
-  .st-gap-targets { grid-template-columns:repeat(3,minmax(0,1fr)); }
-  .st-gap-target:nth-child(n+4) { grid-column:span 1; }
   .st-gap-bottom { padding-left:0; }
 }
 
@@ -3057,13 +3041,6 @@ let groupAutoFocusPending = false; // 用户每次进入分组页时，自动选
 let groupFocusIndex = -1;          // 本轮渲染完成后需要短暂定焦的组序号
 let groupLoadSeq = 0;              // 分组请求序号：旧请求不得覆盖新页面
 let groupRenderSeq = 0;            // 分组渲染序号：旧定焦回调不得作用于新页面
-const GROUP_GAP_TARGETS = [
-  { label: '前1', k: 1 },
-  { label: '前2', k: 2 },
-  { label: '前三', k: 3 },
-  { label: '前5', k: 5 },
-  { label: '前10', k: 10 },
-];
 /* 「我的」子页（2026-10-13）：bind/push/chase/privacy/about。/my 是列表首页，
    点列表行进子页（下一页式，带返回），路由 /my/<sub> 可直达可分享。 */
 let mySub = null;
@@ -5937,8 +5914,7 @@ async function loadGroup(signal) {
 function groupHtml(d, page, list) {
   const showWave = !d.display || d.display.wave !== false;
   const showGroups = !d.display || d.display.groups !== false;
-  const showRanking = !d.display || d.display.ranking !== false;
-  const showGap = showWave && showGroups && showRanking;
+  const showGap = showWave && showGroups;
   const mode = showGap ? groupMode : 'groups';
   const groups = d.groups || [];
   groupFocusIndex = -1;
@@ -5954,9 +5930,8 @@ function groupHtml(d, page, list) {
   const nGroups = d.counts ? d.counts.groups : groups.length;
   const day = d.eventDate || (d.dates && d.dates[0]) || String(d.createdAt || '').slice(0, 10);
   const meta = [
-    d.eventType || '',
-    '共 ' + nPlayers + ' 人',
-    sched.start ? sched.start + ' 后 / 间隔 ' + (sched.intervalMin || 15) + ' 分' : '',
+    sched.start ? sched.start + ' 开赛' : '',
+    '每组间隔 ' + (sched.intervalMin || 15) + ' 分钟',
   ].filter(Boolean).join(' · ');
 
   let html = '<div class="section tab-content-enter">';
@@ -5965,13 +5940,11 @@ function groupHtml(d, page, list) {
   /* 场次信息卡 + 分组/差距切换 */
   html +=
     '<div class="st-my-big" style="margin-top:0">' +
-      '<div class="lbl"><span>' + esc(page.label) + (day ? ' · ' + esc(day) : '') + '</span>' +
+      '<div class="lbl"><span>' + esc(day || page.label) + '</span>' +
       '<span class="chip">' + nGroups + '组 · ' + nPlayers + '人</span></div>' +
-      '<div style="margin-top:.375rem;font-size:18px;font-weight:600;color:var(--on-surface)">' +
-        esc(d.title || page.label) + '</div>' +
-      (meta ? '<div style="margin-top:.25rem;font-size:12px;color:var(--on-surface-variant)">' +
+      (meta ? '<div style="margin-top:.375rem;font-size:12px;color:var(--on-surface-variant)">' +
         esc(meta) + '</div>' : '') +
-      (d.rules ? '<div class="st-group-rule">赛制：' + esc(d.rules) + '</div>' : '') +
+      (d.rules ? '<div class="st-group-rule">比赛机制：' + esc(d.rules) + '</div>' : '') +
     '</div>' +
     (showGap ? '<div class="st-group-mode" role="tablist" aria-label="分组展示方式">' +
       '<button type="button" role="tab" data-gmode="groups" aria-selected="' + (mode !== 'gap') + '"' +
@@ -6013,7 +5986,7 @@ function groupHtml(d, page, list) {
   }
 
   html += '<div class="gx-foot" style="text-align:center;color:var(--on-surface-variant);font-size:11px;margin-top:.25rem">' +
-    esc((d.title || 'PK 分组') + (d.eventType ? ' · ' + d.eventType : '') + ' | ' + todayStr()) + '</div>';
+    esc('数据展示 · ' + todayStr()) + '</div>';
 
   if (list.length > 1) {
     html += '<div class="st-my-list" style="margin-top:1rem"><div class="sec">切换已上架方案</div>' +
@@ -6031,94 +6004,49 @@ function groupHtml(d, page, list) {
 }
 
 function groupGapHtml(d, groups) {
-  /* 差距页先按方案里的组序排列，再在组内按组内名次排列。
-     每个玩家的「距上一位」和目标差值仍按全场总榜计算，不能拿相邻的组员冒充上一位。 */
+  /* 差距只看组内个人成绩：组内名次、音浪、距上一位和距组内第一。
+     不再混入全场目标排名，避免把不同组的成员拿来横向比较。 */
   const orderedGroups = (groups || []).map(g => ({
     ...g,
     players: (g.players || []).slice().sort((a, b) =>
       (Number(a.group_rank) || 999999) - (Number(b.group_rank) || 999999) ||
-      (Number(a.rank) || 999999) - (Number(b.rank) || 999999)),
+      (Number(b.wave) || 0) - (Number(a.wave) || 0) ||
+      String(a.name || '').localeCompare(String(b.name || ''), 'zh-Hans-CN')),
   }));
-  let ranking = Array.isArray(d.ranking) ? d.ranking.slice() : [];
-  if (!ranking.length) {
-    ranking = orderedGroups.flatMap(g => (g.players || []).map(p => ({ ...p })));
-  }
-  ranking = ranking.filter(p => p && p.name).sort((a, b) =>
-    (Number(a.rank) || 999999) - (Number(b.rank) || 999999) ||
-    String(a.name || '').localeCompare(String(b.name || ''), 'zh-Hans-CN'));
-  if (!ranking.length) {
-    return '<div class="st-gap-empty">当前方案还没有可展示的音浪排名</div>';
-  }
 
-  const rankIndexByName = new Map();
-  const previousWaveByName = new Map();
-  ranking.forEach((p, i) => {
-    const key = String(p.name);
-    rankIndexByName.set(key, i);
-    previousWaveByName.set(key, i > 0 ? Number(ranking[i - 1].wave) || 0 : null);
-  });
-
-  const targets = GROUP_GAP_TARGETS
-    .filter(t => t.k <= ranking.length)
-    .map(t => ({
-      ...t,
-      name: ranking[t.k - 1].name,
-      score: Number(ranking[t.k - 1].wave) || 0,
-    }));
-  const targetCards = targets.map(t =>
-    '<div class="st-gap-target">' +
-      '<div class="lbl">' + esc(t.label) + '</div>' +
-      '<div class="nm">' + esc(t.name) + '</div>' +
-      '<div class="score">' + esc(wan(t.score)) + '</div>' +
-      '<div class="cap">目标分</div>' +
-    '</div>').join('');
-
-  const rowHtml = (p) => {
-    const key = String(p.name || '');
-    const overallIndex = rankIndexByName.has(key) ? rankIndexByName.get(key) : -1;
-    const rank = Number(p.rank) || (overallIndex >= 0 ? overallIndex + 1 : 0);
-    const wave = Number(p.wave) || 0;
-    const previous = previousWaveByName.get(key);
-    const gap = previous == null ? null : previous - wave;
-    const leader = overallIndex === 0;
-    const gapText = leader ? '领跑'
-      : gap == null ? '暂无上一位数据'
-      : gap === 0 ? '与上一位并列'
-      : '距上一位还差 ' + wan(gap);
-    const gapClass = leader ? ' lead' : gap === 0 ? ' tie' : '';
-    const position = overallIndex >= 0 ? overallIndex + 1 : 0;
-    const rankCls = rank > 0 && rank <= 3 ? ' r' + rank : '';
-    const chips = targets
-      .filter(t => position > 0 && t.k < position)
-      .map(t => {
-        const diff = t.score - wave;
-        return diff > 0
-          ? '<span class="st-gap-chip">' + esc(t.label) + ' +' + esc(wan(diff)) + '</span>'
-          : '<span class="st-gap-chip tie">' + esc(t.label) + ' 持平</span>';
-      }).join('');
-    return '<div class="st-gap-row">' +
-      '<div class="st-gap-row-top">' +
-        '<span class="st-gap-rank' + rankCls + '">' + (rank || '—') + '</span>' +
-        '<span class="st-gap-av">' + esc(String(p.name || '?').charAt(0)) + '</span>' +
-        '<b class="st-gap-name">' + esc(p.name) + '</b>' +
-        '<span class="st-gap-wave">' + esc(wan(wave)) + '<small>音浪</small></span>' +
-      '</div>' +
-      '<div class="st-gap-bottom">' +
-        '<span class="st-gap-gap' + gapClass + '">' + esc(gapText) + '</span>' +
-        (chips ? '<span class="st-gap-chips">' + chips + '</span>' : '') +
-      '</div>' +
-    '</div>';
-  };
-
-  const sections = (orderedGroups.length ? orderedGroups : [{
-    name: '总排名',
-    slot: '',
-    count: ranking.length,
-    players: ranking,
-  }]).map((g, gi) => {
-    const rows = (g.players || []).map(rowHtml).join('');
-    if (!rows) return '';
-    const count = g.count || (g.players || []).length;
+  const sections = orderedGroups.map((g, gi) => {
+    const players = g.players || [];
+    if (!players.length) return '';
+    const leaderWave = Number(players[0].wave) || 0;
+    const rows = players.map((p, i) => {
+      const rank = Number(p.group_rank) || i + 1;
+      const wave = Number(p.wave) || 0;
+      const previous = i > 0 ? Number(players[i - 1].wave) || 0 : null;
+      const gapPrev = previous == null ? null : previous - wave;
+      const gapLead = leaderWave - wave;
+      const gapText = i === 0 ? '组内领跑'
+        : gapPrev === 0 ? '与上一位并列'
+        : '距上一位还差 ' + wan(gapPrev);
+      const gapClass = i === 0 ? ' lead' : gapPrev === 0 ? ' tie' : '';
+      const leadText = i === 0 ? '组内第 1'
+        : gapLead === 0 ? '与组内第一持平'
+        : '距组内第一 +' + wan(gapLead);
+      const rankCls = rank <= 3 ? ' r' + rank : '';
+      return '<div class="st-gap-row">' +
+        '<div class="st-gap-row-top">' +
+          '<span class="st-gap-rank' + rankCls + '">' + rank + '</span>' +
+          '<span class="st-gap-av">' + esc(String(p.name || '?').charAt(0)) + '</span>' +
+          '<b class="st-gap-name">' + esc(p.name) + '</b>' +
+          '<span class="st-gap-wave">' + esc(wan(wave)) + '<small>音浪</small></span>' +
+        '</div>' +
+        '<div class="st-gap-bottom">' +
+          '<span class="st-gap-gap' + gapClass + '">' + esc(gapText) + '</span>' +
+          '<span class="st-gap-chips"><span class="st-gap-chip' + (i === 0 ? ' tie' : '') + '">' +
+            esc(leadText) + '</span></span>' +
+        '</div>' +
+      '</div>';
+    }).join('');
+    const count = g.count || players.length;
     return '<section class="st-gap-section" data-gindex="' + gi + '">' +
       '<div class="st-gap-section-head"><div class="l"><span class="bar"></span>' +
         '<h3 class="st-gap-section-title">' + esc(g.name || ('第 ' + (gi + 1) + ' 组')) + '</h3></div>' +
@@ -6128,12 +6056,7 @@ function groupGapHtml(d, groups) {
     '</section>';
   }).join('');
 
-  return '<div class="st-gap-target-board">' +
-    '<div class="st-gap-board-head"><span class="st-gap-board-title">目标名次门槛</span>' +
-    '<span class="st-gap-board-note">追平看差值，超过目标还需再加 1 分</span></div>' +
-    '<div class="st-gap-targets">' + targetCards + '</div>' +
-  '</div>' +
-  '<div class="st-gap-groups">' + sections + '</div>';
+  return '<div class="st-gap-groups">' + sections + '</div>';
 }
 
 /** 本人组短暂定焦：必要时先跳到目标，再高亮 1.35 秒，随后自动失焦。 */
