@@ -830,6 +830,7 @@ async fn main() -> anyhow::Result<()> {
             "/api/live/events/{id}/promotion",
             post(live_api::build_promotion),
         )
+        .route("/api/live/events/{id}/final", post(live_api::build_final))
         .route(
             "/api/live/groups/{group_id}/official",
             post(live_api::choose_official),
@@ -858,6 +859,7 @@ async fn main() -> anyhow::Result<()> {
             axum::routing::put(live_api::update_push),
         )
         .route("/api/live/push/person", post(live_api::set_person_push))
+        .route("/api/live/test-push", post(live_api::test_push))
         .route(
             "/api/live/rounds/{round_id}/push",
             post(live_api::push_round_now),

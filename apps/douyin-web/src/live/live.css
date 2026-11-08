@@ -65,6 +65,15 @@
   white-space: nowrap;
 }
 .lm-tag.lm-bad { color: var(--bad); background: var(--bad-bg); border-color: transparent; }
+.lm-push-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink2);
+  font-size: 12px;
+}
+.lm-push-controls label { display: inline-flex; align-items: center; gap: 4px; }
+.lm-push-controls input[type="number"] { width: 70px; }
 .lm-tag.lm-ok { color: var(--good); background: var(--good-bg); border-color: transparent; }
 
 .lm-rooms, .lm-workers { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }

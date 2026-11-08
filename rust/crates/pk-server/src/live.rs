@@ -16,6 +16,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::state::AppState;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 /* ------------------------------- 规则模型 ------------------------------- */
@@ -1172,6 +1173,22 @@ pub async fn build_promotion_groups(st: &Arc<AppState>, event_id: i64) -> anyhow
     let rules = crate::store::live_event_rules(st, event_id)
         .await
         .ok_or_else(|| anyhow::anyhow!("赛事不存在"))?;
+    /* 今晚这类“名单已经提前分好组”的场景，直接以绑定的晚上方案为准。
+    只有没绑晚上方案（或方案没有 buckets）时，才回退到白天晋级名单自动分房。 */
+    let night_plan_id = crate::store::live_event_night_plan(st, event_id).await?;
+    if night_plan_id > 0 {
+        let buckets = crate::store::plan_buckets(st, night_plan_id).await?;
+        if !buckets.is_empty() {
+            return build_stage_groups(
+                st,
+                event_id,
+                StageKind::Promotion,
+                &buckets,
+                rules.promotion_qualify_per_group,
+            )
+            .await;
+        }
+    }
     let qualifiers = crate::store::live_qualifier_list(st, event_id).await;
     let people: Vec<serde_json::Value> = qualifiers
         .into_iter()
@@ -1222,6 +1239,108 @@ pub async fn build_promotion_groups(st: &Arc<AppState>, event_id: i64) -> anyhow
         crate::store::live_group_seed_replace(st, gid, &seeds).await?;
     }
     Ok(groups.len())
+}
+
+/// 晋级赛全部定稿后，把各组出线者汇入一个决赛房。
+/// 决赛取前 3 名作为最终名次，因此 `qualify_slots=3`。
+pub async fn build_final_group(st: &Arc<AppState>, event_id: i64) -> anyhow::Result<usize> {
+    let rules = crate::store::live_event_rules(st, event_id)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("赛事不存在"))?;
+    let groups = crate::store::live_group_list(st, event_id).await;
+    let promotion_groups: Vec<&serde_json::Value> = groups
+        .iter()
+        .filter(|g| g.get("stageKind").and_then(|v| v.as_str()) == Some("promotion"))
+        .collect();
+    if promotion_groups.is_empty() {
+        anyhow::bail!("还没有晋级赛小组");
+    }
+    let pending = promotion_groups
+        .iter()
+        .filter(|g| g.get("status").and_then(|v| v.as_str()) != Some("finalized"))
+        .count();
+    if pending > 0 {
+        anyhow::bail!("还有 {pending} 个晋级赛小组没定稿，不能生成决赛");
+    }
+
+    let qualifiers = crate::store::live_qualifier_list(st, event_id).await;
+    let people: Vec<serde_json::Value> = qualifiers
+        .into_iter()
+        .filter(|q| q.get("source").and_then(|v| v.as_str()) == Some("promotion"))
+        .collect();
+    if people.is_empty() {
+        anyhow::bail!("还没有晋级赛出线名单，请先逐组冻结晋级结果");
+    }
+    if people.len() > rules.final_room_capacity as usize {
+        anyhow::bail!(
+            "决赛人数 {} 超过决赛房容量 {}，请先调整规则",
+            people.len(),
+            rules.final_room_capacity
+        );
+    }
+
+    let stage_id = crate::store::live_stage_ensure(st, event_id, StageKind::Final).await?;
+    let gid =
+        crate::store::live_group_create(st, event_id, stage_id, StageKind::Final, 1, "决赛", 3, 0)
+            .await?;
+
+    let mut seen = HashSet::new();
+    let mut seeds = Vec::with_capacity(people.len());
+    for (order, seat) in people.iter().enumerate() {
+        let person_id = seat.get("personId").and_then(|v| v.as_i64()).unwrap_or(0);
+        let mut uid = seat
+            .get("douyinUid")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let plan_name = seat
+            .get("personName")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let anchor = if uid.is_empty() && person_id > 0 {
+            crate::store::live_anchor_for_person(st, person_id).await
+        } else {
+            None
+        };
+        let (anchor_uid, anchor_name) = anchor.unwrap_or_default();
+        if uid.is_empty() {
+            uid = anchor_uid;
+        }
+        let dedup = if !uid.is_empty() {
+            format!("uid:{uid}")
+        } else if person_id > 0 {
+            format!("person:{person_id}")
+        } else if !plan_name.is_empty() {
+            format!("name:{plan_name}")
+        } else {
+            continue;
+        };
+        if !seen.insert(dedup) {
+            continue;
+        }
+        let nickname = if !plan_name.is_empty() {
+            plan_name
+        } else if !anchor_name.is_empty() {
+            anchor_name
+        } else if person_id > 0 {
+            format!("#{person_id}")
+        } else {
+            continue;
+        };
+        seeds.push(crate::store::GroupSeedSeat {
+            person_id,
+            douyin_uid: uid,
+            nickname,
+            seed_order: order as i32,
+        });
+    }
+    if seeds.is_empty() {
+        anyhow::bail!("晋级赛出线名单缺少可用主播");
+    }
+    crate::store::live_group_seed_replace(st, gid, &seeds).await?;
+    Ok(1)
 }
 
 #[cfg(test)]

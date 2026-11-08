@@ -1131,6 +1131,16 @@ pub async fn live_event_day_plan(st: &AppState, event_id: i64) -> anyhow::Result
         .unwrap_or(0))
 }
 
+pub async fn live_event_night_plan(st: &AppState, event_id: i64) -> anyhow::Result<i64> {
+    let row = sqlx::query("SELECT night_plan_id FROM live_event WHERE id = $1")
+        .bind(event_id)
+        .fetch_optional(w(st)?)
+        .await?;
+    Ok(row
+        .and_then(|r| r.try_get::<i64, _>("night_plan_id").ok())
+        .unwrap_or(0))
+}
+
 pub async fn live_event_of_group(st: &AppState, group_id: i64) -> anyhow::Result<i64> {
     let row = sqlx::query("SELECT event_id FROM live_group WHERE id = $1")
         .bind(group_id)

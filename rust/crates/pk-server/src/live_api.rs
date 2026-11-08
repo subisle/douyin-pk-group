@@ -438,9 +438,12 @@ pub async fn freeze_group(
     } else {
         body.source.clone()
     };
-    if !matches!(source.as_str(), "direct" | "revival" | "promotion") {
+    if !matches!(
+        source.as_str(),
+        "direct" | "revival" | "promotion" | "final"
+    ) {
         return Err(crate::routes::ApiError::bad_request(
-            "source 只能是 direct / revival / promotion",
+            "source 只能是 direct / revival / promotion / final",
         ));
     }
     let event_id = store::live_event_of_group(&st, group_id).await.unwrap_or(0);
@@ -552,6 +555,49 @@ pub async fn update_push(
     ))
 }
 
+/// 管理员测试推送：直接给某个已扫码 wxbot 账号发一条文本。
+/// 账号按 `wx_push_accounts.name` 选（例如 shuai4444），用于赛前确认通道是否可用。
+#[derive(Deserialize)]
+pub struct TestPushBody {
+    pub account: String,
+    pub text: String,
+}
+
+pub async fn test_push(
+    State(st): State<Arc<AppState>>,
+    Json(body): Json<TestPushBody>,
+) -> ApiResult {
+    let account = body.account.trim();
+    let text = body.text.trim();
+    if account.is_empty() || text.is_empty() {
+        return Err(crate::routes::ApiError::bad_request(
+            "account 和 text 都不能为空",
+        ));
+    }
+    let a = crate::store::wx_push_account_get(&st, account)
+        .await
+        .ok_or_else(|| crate::routes::ApiError::bad_request("wxbot 账号不存在"))?;
+    if a.bot_token.trim().is_empty() {
+        return Err(crate::routes::ApiError::bad_request("wxbot 账号凭证为空"));
+    }
+    if a.conversation_id.trim().is_empty() {
+        return Err(crate::routes::ApiError::bad_request("wxbot 账号还没有会话"));
+    }
+    let (to_user, context_token) = crate::store::wx_session_get(&st, &a.conversation_id)
+        .await
+        .ok_or_else(|| crate::routes::ApiError::bad_request("wxbot 会话上下文不存在"))?;
+    crate::bot::weixin::user_send_text(
+        &st,
+        &a.base_url,
+        &a.bot_token,
+        &to_user,
+        &context_token,
+        text,
+    )
+    .await?;
+    Ok(Json(json!({ "ok": true, "account": account, "sent": 1 })))
+}
+
 /// 主播侧直播推送开关（第三层）
 #[derive(Deserialize)]
 pub struct PersonPushBody {
@@ -614,6 +660,16 @@ pub async fn build_promotion(State(st): State<Arc<AppState>>, Path(id): Path<i64
     crate::events::emit(
         crate::events::SCOPE_LIVE,
         format!("赛事 {id} 晋级赛已生成 {} 组", groups),
+    );
+    Ok(Json(json!({ "groups": groups })))
+}
+
+/// 晋级赛全部定稿后，把各组第一名汇入一个决赛房。
+pub async fn build_final(State(st): State<Arc<AppState>>, Path(id): Path<i64>) -> ApiResult {
+    let groups = live::build_final_group(&st, id).await?;
+    crate::events::emit(
+        crate::events::SCOPE_LIVE,
+        format!("赛事 {id} 决赛房已生成（{groups} 个）"),
     );
     Ok(Json(json!({ "groups": groups })))
 }

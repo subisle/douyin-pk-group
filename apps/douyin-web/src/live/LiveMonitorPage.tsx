@@ -59,6 +59,11 @@ function GroupCard({
   const st = GROUP_STATUS[g.status] ?? { label: g.status, cls: 'idle' }
   const needReview = rounds?.filter(r => r.status === 'pending_review') ?? []
   const roster: LiveGroupSeat[] = g.seats ?? []
+  const freezeSource = g.stageKind === 'promotion'
+    ? 'promotion'
+    : g.stageKind === 'final'
+      ? 'final'
+      : g.stageKind.includes('revival') ? 'revival' : 'direct'
 
   async function act(fn: () => Promise<unknown>, label: string) {
     if (busy) return
@@ -127,8 +132,8 @@ function GroupCard({
             <button onClick={() => act(() => live.finalizeGroup(g.id), '强制把这一组定稿？')}>
               强制定稿
             </button>
-            <button onClick={() => act(() => live.freezeGroup(g.id, g.stageKind.includes('revival') ? 'revival' : 'direct'), '冻结这一组的晋级结果？')}>
-              冻结晋级
+            <button onClick={() => act(() => live.freezeGroup(g.id, freezeSource), g.stageKind === 'final' ? '冻结决赛前三名？' : '冻结这一组的晋级结果？')}>
+              {g.stageKind === 'final' ? '冻结决赛名次' : '冻结晋级'}
             </button>
             {g.officialRoundId > 0 && (
               <button onClick={() => act(() => live.pushRoundScores(g.officialRoundId), '给这一局的主播推一次当前分数？')}>
@@ -159,6 +164,7 @@ export default function LiveMonitorPage() {
   const [bindNight, setBindNight] = useState(0)
   const [roomUrl, setRoomUrl] = useState('')
   const [roomLabel, setRoomLabel] = useState('')
+  const [pushSecs, setPushSecs] = useState(60)
 
   const load = async () => {
     try {
@@ -215,6 +221,24 @@ export default function LiveMonitorPage() {
   }, [eventId, groupId])
 
   const cur = events.find(e => e.id === eventId) ?? null
+
+  useEffect(() => {
+    if (cur) setPushSecs(cur.pushIntervalSecs)
+  }, [cur?.id, cur?.pushIntervalSecs])
+
+  async function savePush(enabled: boolean, intervalSecs = pushSecs) {
+    if (!eventId || busy) return
+    const interval = Math.max(10, Math.min(3600, Math.round(Number(intervalSecs) || 60)))
+    setBusy('push')
+    try {
+      const r = await live.updatePush(eventId, enabled, interval)
+      setEvents(items => items.map(e => e.id === eventId
+        ? { ...e, pushEnabled: r.pushEnabled, pushIntervalSecs: r.pushIntervalSecs }
+        : e))
+      setPushSecs(r.pushIntervalSecs)
+    } catch (e: any) { alert(e?.message ?? String(e)) }
+    finally { setBusy('') }
+  }
 
   async function createEvent(e: FormEvent) {
     e.preventDefault()
@@ -285,9 +309,29 @@ export default function LiveMonitorPage() {
           {events.map(e => <option key={e.id} value={e.id}>{e.title}</option>)}
         </select>
         {cur && (
-          <span className="lm-tag">
-            推送 {cur.pushEnabled ? `开 · 每 ${cur.pushIntervalSecs} 秒` : '关'}
-          </span>
+          <div className="lm-push-controls" title="直播分数推送给已开启直播播报的主播">
+            <label>
+              <input
+                type="checkbox"
+                checked={cur.pushEnabled}
+                disabled={!!busy}
+                onChange={e => savePush(e.target.checked, pushSecs)}
+              />
+              分数推送
+            </label>
+            <input
+              type="number"
+              min={10}
+              max={3600}
+              value={pushSecs}
+              disabled={!!busy}
+              onChange={e => setPushSecs(Number(e.target.value))}
+              onBlur={() => {
+                if (pushSecs !== cur.pushIntervalSecs) savePush(cur.pushEnabled, pushSecs)
+              }}
+            />
+            <span>秒</span>
+          </div>
         )}
         <button onClick={() => loadOverview()} disabled={!eventId}>刷新</button>
       </div>
@@ -432,6 +476,9 @@ export default function LiveMonitorPage() {
             <button disabled={!!busy || !eventId} onClick={() => step('生成晚上晋级赛？', () => live.buildPromotion(eventId))}>
               生成晋级赛
             </button>
+            <button disabled={!!busy || !eventId} onClick={() => step('晋级赛全部定稿后生成决赛？', () => live.buildFinal(eventId))}>
+              生成决赛
+            </button>
           </div>
 
           {ov.qualifiers.length > 0 && (
@@ -442,7 +489,10 @@ export default function LiveMonitorPage() {
                 <tbody>
                   {ov.qualifiers.map((q, i) => (
                     <tr key={i}>
-                      <td>{q.source === 'direct' ? '直接晋级' : q.source === 'revival' ? '复活晋级' : '晋级赛'}</td>
+                      <td>{q.source === 'direct' ? '直接晋级'
+                        : q.source === 'revival' ? '复活晋级'
+                        : q.source === 'final' ? '决赛'
+                        : '晋级赛'}</td>
                       <td>{q.personName || q.douyinUid}</td>
                       <td>#{q.rank}</td>
                       <td className="mono">{q.score}</td>

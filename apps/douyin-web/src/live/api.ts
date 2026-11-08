@@ -195,6 +195,9 @@ export const live = {
   buildPromotion: (id: number) =>
     api<{ groups: number }>(`/api/live/events/${id}/promotion`, { method: 'POST' }),
 
+  buildFinal: (id: number) =>
+    api<{ groups: number }>(`/api/live/events/${id}/final`, { method: 'POST' }),
+
   groupRounds: (groupId: number) => api<{ items: LiveRound[] }>(`/api/live/groups/${groupId}/rounds`),
 
   /** 选正式局（同组两场完整对局时用） */
@@ -210,7 +213,7 @@ export const live = {
   finalizeGroup: (groupId: number) =>
     api<{ ok: boolean; roundId: number }>(`/api/live/groups/${groupId}/finalize`, { method: 'POST' }),
 
-  freezeGroup: (groupId: number, source: 'direct' | 'revival' | 'promotion') =>
+  freezeGroup: (groupId: number, source: 'direct' | 'revival' | 'promotion' | 'final') =>
     api<{ ok: boolean; qualified: number }>(`/api/live/groups/${groupId}/freeze`, {
       method: 'POST',
       body: JSON.stringify({ source }),
