@@ -206,6 +206,14 @@ pub async fn plan(
         .get("days")
         .and_then(|d| d.as_i64())
         .unwrap_or(row.days);
+    let event_date = payload
+        .get("eventDate")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let rules = payload
+        .get("rules")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
     let display = DisplayConfig::from_payload(&payload);
     let start = payload
         .get("schedule")
@@ -445,6 +453,8 @@ pub async fn plan(
         "title": row.title,
         "brand": as_str(&payload, "brand").unwrap_or_default(),
         "eventType": row.event_type,
+        "eventDate": event_date,
+        "rules": rules,
         "metric": metric,
         "days": days,
         "schedule": { "start": start, "intervalMin": interval },

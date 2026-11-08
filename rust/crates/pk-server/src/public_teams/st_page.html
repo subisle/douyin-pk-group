@@ -1460,6 +1460,26 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
   font-size:17px; font-weight:700; color:#0F172A; letter-spacing:-.01em; }
 .st-gcard-head .cnt { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:2px 6px; flex:none;
   color:#64748B; font-size:10.5px; font-weight:500; line-height:15px; white-space:nowrap; }
+.st-group-rule { margin-top:.5rem; padding:7px 10px; border-radius:10px;
+  background:rgba(255,248,242,.82); border:1px solid rgba(255,217,201,.76);
+  color:#92400E; font-size:11px; line-height:1.55; }
+/* 打开分组页时短暂定焦本人所在组，随后自动失焦，不留下常驻描边。 */
+.st-group-focus { position:relative; z-index:2; border-radius:16px;
+  animation:stGroupFocus 1.35s ease-out both; }
+.st-group-chip.st-group-focus { border-radius:9999px;
+  animation:stGroupChipFocus 1.35s ease-out both; }
+@keyframes stGroupFocus {
+  0% { box-shadow:0 0 0 0 rgba(245,158,11,0); }
+  20% { box-shadow:0 0 0 3px rgba(245,158,11,.38), 0 8px 24px rgba(217,119,6,.14); }
+  100% { box-shadow:0 0 0 0 rgba(245,158,11,0), 0 0 0 rgba(217,119,6,0); }
+}
+@keyframes stGroupChipFocus {
+  0%, 100% { box-shadow:0 2px 6px rgba(0,0,0,.04); }
+  20% { box-shadow:0 0 0 3px rgba(245,158,11,.34), 0 2px 10px rgba(217,119,6,.14); }
+}
+@media (prefers-reduced-motion:reduce) {
+  .st-group-focus, .st-group-chip.st-group-focus { animation:none; }
+}
 /* 2026-10-18 玻璃化：分组主体卡换玻璃卡 token（白 .72 底 + blur(20px) + 16px 圆角） */
 .st-gcard-body { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:1px;
   background:var(--surface-container); border:1px solid rgba(255,255,255,.85);
@@ -3039,6 +3059,8 @@ let view = 'data';       // data | group | lineage | resources | my
 let curGroup = GROUP_PAGES[0].key;  // 分组子页当前 key
 let groupMode = 'groups'; // groups | gap：展示端分组页的两个阅读视图
 let groupSel = 0;        // 当前展示的组序号：分组、差距两个视图共用
+let groupAutoFocusPending = false; // 用户每次进入分组页时，自动选到本人所在组
+let groupFocusIndex = -1;          // 本轮渲染完成后需要短暂定焦的组序号
 const GROUP_GAP_TARGETS = [
   { label: '前1', k: 1 },
   { label: '前2', k: 2 },
@@ -5881,6 +5903,8 @@ async function loadGroup(signal) {
   /* 展示端按类型各占一页：上架互斥也是按类型（同类型一场，不同类型互不影响） */
   const list = plans.filter(p => (p.eventType || '') === page.type);
   if (!list.length) {
+    groupAutoFocusPending = false;
+    groupFocusIndex = -1;
     $('view').innerHTML = '<div class="section tab-content-enter">' +
       '<div class="st-group-chips"><button class="st-group-chip" disabled>' +
         '<span class="n"></span><span>暂无场次</span><span class="c">0人</span></button></div>' +
@@ -5908,11 +5932,24 @@ function groupHtml(d, page, list) {
   const showGroups = !d.display || d.display.groups !== false;
   const groups = d.groups || [];
   groupSel = groups.length ? Math.min(Math.max(Number(groupSel) || 0, 0), groups.length - 1) : 0;
+  groupFocusIndex = -1;
+  if (groupAutoFocusPending) {
+    const myName = meState && meState.name ? String(meState.name).trim() : '';
+    const mine = myName ? groups.findIndex(g =>
+      (g.players || []).some(p => String(p.name || '').trim() === myName)) : -1;
+    if (mine >= 0) {
+      groupSel = mine;
+      groupFocusIndex = mine;
+    } else if (groups.length) {
+      groupSel = 0;
+    }
+    groupAutoFocusPending = false;
+  }
   const currentGroup = groups[groupSel];
   const sched = d.schedule || {};
   const nPlayers = d.counts ? d.counts.players : groups.reduce((s, g) => s + (g.count || 0), 0);
   const nGroups = d.counts ? d.counts.groups : groups.length;
-  const day = (d.dates && d.dates[0]) || String(d.createdAt || '').slice(0, 10);
+  const day = d.eventDate || (d.dates && d.dates[0]) || String(d.createdAt || '').slice(0, 10);
   const meta = [
     d.eventType || '',
     '共 ' + nPlayers + ' 人',
@@ -5931,6 +5968,7 @@ function groupHtml(d, page, list) {
         esc(currentGroup ? currentGroup.name : (d.title || page.label)) + '</div>' +
       (meta ? '<div style="margin-top:.25rem;font-size:12px;color:var(--on-surface-variant)">' +
         esc(meta) + '</div>' : '') +
+      (d.rules ? '<div class="st-group-rule">赛制：' + esc(d.rules) + '</div>' : '') +
     '</div>' +
     '<div class="st-group-mode" role="tablist" aria-label="分组展示方式">' +
       '<button type="button" role="tab" data-gmode="groups" aria-selected="' + (groupMode !== 'gap') + '"' +
@@ -5993,7 +6031,8 @@ function groupHtml(d, page, list) {
         '<div class="r"><span class="pri">' + (p.id === planByType[curGroup] ? '当前' : '切换') + '</span>' +
         '<span class="material-symbols-outlined">chevron_right</span></div></button>').join('') + '</div>';
     setTimeout(() => document.querySelectorAll('[data-pid]').forEach(b => b.onclick = () => {
-      planByType[curGroup] = Number(b.dataset.pid); groupSel = 0; loadGroup();
+      planByType[curGroup] = Number(b.dataset.pid); groupSel = 0;
+      groupAutoFocusPending = true; loadGroup();
     }), 0);
   }
   return html + '</div>';
@@ -6108,6 +6147,38 @@ function groupGapHtml(d, groups, selectedIndex) {
   '<div class="st-gap-groups">' + sections + '</div>';
 }
 
+/** 本人组短暂定焦：必要时先跳到目标，再高亮 1.35 秒，随后自动失焦。 */
+function focusGroupTarget(index) {
+  let ran = false;
+  const run = () => {
+    if (ran) return;
+    ran = true;
+    const chip = document.querySelector('.st-group-chip[data-gsel="' + index + '"]');
+    const card = document.getElementById('gcard-' + index);
+    const section = document.querySelector('.st-gap-section');
+    const target = card || section;
+    const anchor = card || document.querySelector('.st-gap-section-head');
+    if (!target || !target.isConnected || !anchor) return;
+    const rect = anchor.getBoundingClientRect();
+    const safeTop = 250;
+    const safeBottom = Math.max(safeTop + 100, window.innerHeight - 96);
+    if (rect.top < safeTop || rect.top > safeBottom - 80) {
+      const maxY = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+      const top = Math.max(0, Math.min(maxY, window.scrollY + rect.top - safeTop - 12));
+      window.scrollTo({ top, left: 0, behavior: 'auto' });
+    }
+    target.classList.add('st-group-focus');
+    if (chip) chip.classList.add('st-group-focus');
+    setTimeout(() => {
+      if (target.isConnected) target.classList.remove('st-group-focus');
+      if (chip && chip.isConnected) chip.classList.remove('st-group-focus');
+    }, 1400);
+  };
+  /* 后台标签页 rAF 会被冻结；setTimeout 兜底保证自动定焦一定发生。 */
+  requestAnimationFrame(() => requestAnimationFrame(run));
+  setTimeout(run, 80);
+}
+
 /** 分组页交互：组别胶囊切换当前组，视图切换只重绘、不重复请求方案。 */
 function renderGroupView(d, page, list) {
   $('view').innerHTML = groupHtml(d, page, list);
@@ -6136,12 +6207,23 @@ function bindGroupChips(d, page, list) {
   const active = document.querySelector('.st-group-chip.on');
   const rail = active && active.closest('.st-group-chips');
   if (d && active && rail) {
-    requestAnimationFrame(() => {
+    let centered = false;
+    const centerActive = () => {
+      if (centered || !active.isConnected) return;
+      centered = true;
       rail.scrollTo({
         left: active.offsetLeft - (rail.clientWidth - active.offsetWidth) / 2,
-        behavior: 'smooth',
+        behavior: 'auto',
       });
-    });
+    };
+    /* 与定焦一样补 setTimeout：后台标签页 rAF 冻结时，胶囊也要滚到当前组。 */
+    requestAnimationFrame(centerActive);
+    setTimeout(centerActive, 80);
+  }
+  if (d && groupFocusIndex >= 0) {
+    const focusIndex = groupFocusIndex;
+    groupFocusIndex = -1;
+    focusGroupTarget(focusIndex);
   }
 }
 
@@ -9421,6 +9503,10 @@ function switchView(v, opts) {
        上一次选中项 —— 于是只要第一个子页当前不是选中态，点第二个起的所有子页都会被
        改道回第一个（实测 5 次点击 3 次无效）。改成：curGroup 不在还开着的列表里才落到第一个。 */
     else if (!enabled.some(b => b.dataset.g === curGroup)) curGroup = enabled[0].dataset.g;
+    if (v === 'group') {
+      groupAutoFocusPending = true;
+      groupFocusIndex = -1;
+    }
   }
   if (v === 'lineage' && (s.lineageEnabled === false || TEAM === 'female')) v = 'data';
   if (v === 'my' && s.loginRequired === false) v = 'data';
