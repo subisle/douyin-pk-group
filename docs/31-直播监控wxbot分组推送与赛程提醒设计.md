@@ -213,6 +213,24 @@ male | female | all
   - 我的组已结束：显示“本组已结束”
 - 分数变化小于阈值时可跳过推送，避免消息刷屏。
 
+### 6.3.1 本场结束文案（2026-11-08 用户口径）
+
+每个参赛者的最终成绩推送：
+
+```text
+成绩如下
+本场比赛结束
+你的成绩带上加成
+一共是 5万4353 分
+```
+
+规则：
+
+- 分数继续使用 `x万xxxx` 格式。
+- “一共是 X 分”中的 X 必须是**原始 PK 分 + 加成**后的最终分。
+- 不展示距上一位、跨组排名等额外信息。
+- 当前代码只有原始 PK 采样分，还没有“加成”字段或加成公式；实现前需要补齐加成录入/计算来源，否则不能把原始分冒充加成后总分。
+
 ### 6.4 去重与频率
 
 新增 `live_push_job.group_id` 字段。
@@ -384,6 +402,15 @@ ALTER TABLE live_round ADD COLUMN talk_ended_at TIMESTAMPTZ;
 ALTER TABLE live_round ADD COLUMN linkmic_phase VARCHAR(16) NOT NULL DEFAULT '';
 ALTER TABLE live_round ADD COLUMN roster_match VARCHAR(16) NOT NULL DEFAULT '';
 ```
+
+若进入“加成后总分”阶段，还需要为每位参赛者保存：
+
+```sql
+ALTER TABLE live_round_seat ADD COLUMN bonus_score BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE live_round_seat ADD COLUMN score_with_bonus BIGINT NOT NULL DEFAULT 0;
+```
+
+`score_with_bonus = final_score + bonus_score`；推送文案的“一共是 X 分”读取该字段。
 
 ### 9.4 `live_group` 增列
 
