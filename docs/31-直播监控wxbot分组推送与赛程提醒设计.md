@@ -93,13 +93,15 @@ CREATE TABLE wxbot_admin (
 );
 ```
 
-初始映射：
+初始映射（2026-11-08 本地口径）：
 
 ```text
-帅帅   -> scope=all
-鹏先生 -> scope=all
-饭团   -> scope=female
+帅帅   -> account_name=shuai4444 -> scope=all
+鹏先生 -> account_name=666       -> scope=all
+饭团   -> account_name=饭团      -> scope=female
 ```
+
+密码只在管理端录入，不写入本文档；展示端账号是否绑定主播与 wxbot scope 分开维护。
 
 未绑定 `wx_account_name` 时，管理员状态显示“未绑定 wxbot”，不参与真实发送。
 
