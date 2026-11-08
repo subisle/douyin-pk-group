@@ -5901,6 +5901,7 @@ function groupHtml(d, page, list) {
   const showGroups = !d.display || d.display.groups !== false;
   const groups = d.groups || [];
   groupSel = groups.length ? Math.min(Math.max(Number(groupSel) || 0, 0), groups.length - 1) : 0;
+  const currentGroup = groups[groupSel];
   const sched = d.schedule || {};
   const nPlayers = d.counts ? d.counts.players : groups.reduce((s, g) => s + (g.count || 0), 0);
   const nGroups = d.counts ? d.counts.groups : groups.length;
@@ -5920,7 +5921,7 @@ function groupHtml(d, page, list) {
       '<div class="lbl"><span>' + esc(page.label) + (day ? ' · ' + esc(day) : '') + '</span>' +
       '<span class="chip">' + nGroups + '组 · ' + nPlayers + '人</span></div>' +
       '<div style="margin-top:.375rem;font-size:18px;font-weight:600;color:var(--on-surface)">' +
-        esc(d.title || page.label) + '</div>' +
+        esc(currentGroup ? currentGroup.name : (d.title || page.label)) + '</div>' +
       (meta ? '<div style="margin-top:.25rem;font-size:12px;color:var(--on-surface-variant)">' +
         esc(meta) + '</div>' : '') +
     '</div>' +
