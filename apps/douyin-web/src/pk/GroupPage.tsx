@@ -870,7 +870,7 @@ export default function GroupPage() {
     }
   }
 
-  /* ---------------- 导出长图 ---------------- */
+  /* ---------------- 导出分组图 ---------------- */
   async function exportImage() {
     if (!buckets.length) {
       setError('看板是空的');
@@ -900,7 +900,7 @@ export default function GroupPage() {
       try {
         const blob = await nodeToPngBlob(node, { scale: 2 });
         downloadBlob(blob, `${title.trim() || 'pk'}-${dates[0] || 'plan'}.png`);
-        setMsg('长图已导出');
+        setMsg('分组图已导出');
       } finally {
         disposeExportNode(node);
       }
@@ -911,16 +911,15 @@ export default function GroupPage() {
     }
   }
 
-  /* ---------------- 导出总排名分差图 ---------------- */
-  /** 与长图分开的一张图：所有参赛者按总排名排下来，标出与上一位差多少分、
-   *  各组的人在总榜占了哪一段。分差图必须看到音浪，所以「展示音浪数值」关着时拦下。 */
+  /* ---------------- 导出名次差距图 ---------------- */
+  /** 与分组图分开的一张图：列出目标名次门槛，以及每个人距上一位、追各个目标名次还差多少分。 */
   async function exportGapImage() {
     if (!buckets.length) {
       setError('看板是空的');
       return;
     }
     if (!display.wave) {
-      setError('「展示音浪数值」已关闭，分差图需要音浪数据：勾上再导出');
+      setError('「展示音浪数值」已关闭，差距图需要音浪数据：勾上再导出');
       return;
     }
     setBusy('gap');
@@ -947,8 +946,8 @@ export default function GroupPage() {
       });
       try {
         const blob = await nodeToPngBlob(node, { scale: 2 });
-        downloadBlob(blob, `${title.trim() || 'pk'}-总排名分差-${dates[0] || 'plan'}.png`);
-        setMsg('分差图已导出');
+        downloadBlob(blob, `${title.trim() || 'pk'}-名次差距-${dates[0] || 'plan'}.png`);
+        setMsg('差距图已导出');
       } finally {
         disposeExportNode(node);
       }
@@ -1002,7 +1001,7 @@ export default function GroupPage() {
     return `${String(hh).padStart(2, '0')}:${String(t % 60).padStart(2, '0')}`;
   };
   const spreadPct = balance && balance.max ? ((balance.max - balance.min) / balance.max) * 100 : 0;
-  /** 该赛事的赛制说明（内置），会随导出长图一起打出来 */
+  /** 该赛事的赛制说明（内置，仅后台展示） */
   const eventRule = rulesOf(eventType);
   /** 名单自带分数（晋级赛名单）时口径不再是库里音浪，文案整体换掉 */
   const byScore = scoredCount > 0;
@@ -1661,7 +1660,7 @@ export default function GroupPage() {
 
         {eventRule && (
           <details className="pk-meta">
-            <summary>赛制说明（会随导出长图一起打出来）</summary>
+            <summary>赛制说明（仅供参考）</summary>
             <div className="pk-meta-body">
               <div style={{ fontWeight: 700 }}>{eventRule.title}</div>
               <div style={{ marginTop: 6, display: 'grid', gap: 4 }}>
