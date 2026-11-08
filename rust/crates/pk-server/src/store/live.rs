@@ -743,6 +743,156 @@ pub async fn live_latest_scores(st: &AppState, round_id: i64) -> Vec<serde_json:
     .unwrap_or_default()
 }
 
+/* ------------------------------ 独立直播间监控 ------------------------------ */
+
+/// 独立房间监控状态：只记录 web_rid，不要求赛事/小组存在。
+pub async fn live_room_monitor_upsert(
+    st: &AppState,
+    web_rid: &str,
+    room_id: &str,
+    health: &str,
+    last_error: &str,
+    battle_id: &str,
+) -> anyhow::Result<()> {
+    sqlx::query(&crate::pq::rewrite(
+        "INSERT INTO live_room_monitor
+           (web_rid, room_id, health, last_error, last_battle_id, last_seen_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, now(), now())
+         ON CONFLICT (web_rid) DO UPDATE SET
+           room_id = CASE WHEN EXCLUDED.room_id = '' THEN live_room_monitor.room_id ELSE EXCLUDED.room_id END,
+           health = EXCLUDED.health,
+           last_error = EXCLUDED.last_error,
+           last_battle_id = CASE WHEN EXCLUDED.last_battle_id = '' THEN live_room_monitor.last_battle_id ELSE EXCLUDED.last_battle_id END,
+           last_seen_at = now(),
+           updated_at = now()",
+    ))
+    .bind(web_rid)
+    .bind(room_id)
+    .bind(health)
+    .bind(last_error.chars().take(200).collect::<String>())
+    .bind(battle_id)
+    .execute(w(st)?)
+    .await?;
+    Ok(())
+}
+
+/// 独立房间采样：与 live_score_sample 同口径，但不带 round_id/group_id。
+pub async fn live_room_sample_insert(
+    st: &AppState,
+    web_rid: &str,
+    room_id: &str,
+    battle_id: &str,
+    s: &crate::live::BattleScore,
+    team_score: i64,
+    team_rank: i32,
+) -> anyhow::Result<()> {
+    sqlx::query(&crate::pq::rewrite(
+        "INSERT INTO live_room_score_sample
+           (web_rid, room_id, battle_id, douyin_uid, nickname, team_id, score, rank,
+            team_score, team_rank, score_version, bonus_multiple, bonus_score,
+            bonus_active, bonus_end_ms, current_bonus)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    ))
+    .bind(web_rid)
+    .bind(room_id)
+    .bind(battle_id)
+    .bind(&s.user_id)
+    .bind(&s.nickname)
+    .bind(&s.team_id)
+    .bind(s.score)
+    .bind(s.rank)
+    .bind(team_score)
+    .bind(team_rank)
+    .bind(s.score_version.to_string())
+    .bind(s.bonus_multiple)
+    .bind(s.bonus_score)
+    .bind(if s.bonus_active { 1i16 } else { 0i16 })
+    .bind(s.bonus_end_ms)
+    .bind(s.current_bonus)
+    .execute(w(st)?)
+    .await?;
+    Ok(())
+}
+
+/// 独立房间最新状态（含最近一局 battle_id）。
+pub async fn live_room_monitor_get(st: &AppState, web_rid: &str) -> Option<serde_json::Value> {
+    let pool = w(st).ok()?;
+    let row = sqlx::query(
+        "SELECT web_rid, room_id, health, last_error, last_battle_id, last_seen_at,
+                CASE WHEN last_seen_at < now() - interval '20 seconds'
+                     THEN 'idle' ELSE health END AS effective_health
+         FROM live_room_monitor WHERE web_rid = $1",
+    )
+    .bind(web_rid)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()?;
+    Some(serde_json::json!({
+        "webRid": row.try_get::<String, _>("web_rid").unwrap_or_default(),
+        "roomId": row.try_get::<String, _>("room_id").unwrap_or_default(),
+        "health": row.try_get::<String, _>("effective_health").unwrap_or_else(|_| "idle".into()),
+        "lastError": row.try_get::<String, _>("last_error").unwrap_or_default(),
+        "battleId": row.try_get::<String, _>("last_battle_id").unwrap_or_default(),
+        "lastSeenAt": row.try_get::<chrono::DateTime<chrono::Utc>, _>("last_seen_at")
+            .map(|t| t.to_rfc3339()).ok(),
+    }))
+}
+
+/// 独立房间某一局的最新分数（每个 UID 只取最后一拍）。
+pub async fn live_room_latest_scores(
+    st: &AppState,
+    web_rid: &str,
+    battle_id: &str,
+) -> Vec<serde_json::Value> {
+    let Ok(pool) = w(st) else {
+        return Vec::new();
+    };
+    if battle_id.is_empty() {
+        return Vec::new();
+    }
+    sqlx::query(
+        "SELECT douyin_uid, nickname, score, rank, team_id, team_score, team_rank,
+                bonus_multiple, bonus_score, bonus_active, bonus_end_ms, current_bonus, observed_at
+         FROM (
+           SELECT DISTINCT ON (douyin_uid) douyin_uid, nickname, score, rank, team_id,
+                  team_score, team_rank, bonus_multiple, bonus_score, bonus_active,
+                  bonus_end_ms, current_bonus, observed_at
+           FROM live_room_score_sample
+           WHERE web_rid = $1 AND battle_id = $2
+           ORDER BY douyin_uid, observed_at DESC, id DESC
+         ) latest
+         ORDER BY rank, score DESC, douyin_uid",
+    )
+    .bind(web_rid)
+    .bind(battle_id)
+    .fetch_all(pool)
+    .await
+    .map(|rows| {
+        rows.iter()
+            .map(|r| {
+                serde_json::json!({
+                    "douyinUid": r.try_get::<String, _>("douyin_uid").unwrap_or_default(),
+                    "nickname": r.try_get::<String, _>("nickname").unwrap_or_default(),
+                    "score": r.try_get::<i64, _>("score").unwrap_or(0),
+                    "rank": r.try_get::<i32, _>("rank").unwrap_or(0),
+                    "teamId": r.try_get::<String, _>("team_id").unwrap_or_default(),
+                    "teamScore": r.try_get::<i64, _>("team_score").unwrap_or(0),
+                    "teamRank": r.try_get::<i32, _>("team_rank").unwrap_or(0),
+                    "bonusMultiple": r.try_get::<i32, _>("bonus_multiple").unwrap_or(100),
+                    "bonusScore": r.try_get::<i64, _>("bonus_score").unwrap_or(0),
+                    "bonusActive": r.try_get::<i16, _>("bonus_active").unwrap_or(0) == 1,
+                    "bonusEndMs": r.try_get::<i64, _>("bonus_end_ms").unwrap_or(0),
+                    "currentBonus": r.try_get::<i64, _>("current_bonus").unwrap_or(0),
+                    "observedAt": r.try_get::<chrono::DateTime<chrono::Utc>, _>("observed_at")
+                        .map(|t| t.to_rfc3339()).unwrap_or_default(),
+                })
+            })
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
 /* ------------------------------ 监控房间 ------------------------------ */
 
 pub async fn live_monitor_upsert(

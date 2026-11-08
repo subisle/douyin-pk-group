@@ -803,6 +803,7 @@ async fn main() -> anyhow::Result<()> {
         // 管理端接口挂在 /api/live 下，走全局 require_admin（与其它 /api 同一层）；
         // 采集器上报走 /api/internal/live 下，单独鉴权（X-Live-Token），
         // 见下面 internal_live 路由与 live_api::require_collector。
+        .route("/api/live/rooms/{web_rid}", get(live_api::room_scores))
         .route(
             "/api/live/events",
             get(live_api::events).post(live_api::create_event),
@@ -956,6 +957,10 @@ async fn main() -> anyhow::Result<()> {
     管理员凭证；这里也**不合并进上面的 api**（那层会要求管理员口令）。
     只有两个端点：观测上报 + 心跳，能写的数据局限于 live_* 表。 */
     let internal_live = Router::new()
+        .route(
+            "/api/internal/live/rooms/{web_rid}/observations",
+            post(live_api::ingest_room),
+        )
         .route(
             "/api/internal/live/events/{event_id}/observations",
             post(live_api::ingest),

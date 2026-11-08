@@ -16,6 +16,7 @@ const AnnouncePage = lazy(() => import('./AnnouncePage'))
 const BotPage = lazy(() => import('./BotPage'))
 const SendPage = lazy(() => import('./SendPage'))
 const LiveMonitorPage = lazy(() => import('./live/LiveMonitorPage'))
+const RoomMonitorPage = lazy(() => import('./live/RoomMonitorPage'))
 const GroupPage = lazy(() => import('./pk/GroupPage'))
 const BoardPage = lazy(() => import('./pk/BoardPage'))
 
@@ -33,6 +34,7 @@ const NAV_ICONS: Record<RouteKey, string> = {
   bots: '🤖',
   send: '📢',
   live: '📡',
+  'live-room': '🎯',
 }
 
 export default function App() {
@@ -179,6 +181,7 @@ export default function App() {
           {route === 'bots' && <BotPage />}
           {route === 'send' && <SendPage />}
           {route === 'live' && <LiveMonitorPage />}
+          {route === 'live-room' && <RoomMonitorPage />}
         </Suspense>
       </main>
       {toast && (

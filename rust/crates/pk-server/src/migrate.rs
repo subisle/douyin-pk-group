@@ -253,6 +253,12 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "046_live_bonus",
         include_str!("migrations/046_live_bonus.sql"),
     ),
+    // 047：独立直播间监控。只按 web_rid / battle_id 保存实时采样，
+    // 不要求赛事、小组或晋级上下文；采集器可以单独跑一个房间。
+    (
+        "047_live_room_standalone",
+        include_str!("migrations/047_live_room_standalone.sql"),
+    ),
 ];
 
 /// 迁移建连（migrator 账号；同样关语句缓存）

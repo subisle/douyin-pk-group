@@ -9,6 +9,7 @@
 使用：
     export LIVE_COLLECTOR_TOKEN=xxx
     python3 scripts/live/collector.py --event 1 --room 505899768449
+    python3 scripts/live/collector.py --room 505899768449   # 独立房间监控，不关联分组
 
 纪律：
 - battle_id / room_id / UID 一律当**字符串**（19 位超 JS 安全整数，转数字会丢精度）
@@ -53,6 +54,9 @@ class Api:
 
     def ingest(self, event_id: int, obs: dict) -> dict | None:
         return self._post(f"/api/internal/live/events/{event_id}/observations", obs)
+
+    def ingest_room(self, web_rid: str, obs: dict) -> dict | None:
+        return self._post(f"/api/internal/live/rooms/{web_rid}/observations", obs)
 
     def heartbeat(self, worker_id: str, rooms: int, event_id: int) -> None:
         self._post(
@@ -332,7 +336,12 @@ def build_ingest_payload(
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="抖音直播间 PK 分数采集器")
-    ap.add_argument("--event", type=int, required=True, help="后端赛事 id")
+    ap.add_argument(
+        "--event",
+        type=int,
+        default=0,
+        help="后端赛事 id；省略/0 = 独立房间监控，不关联分组",
+    )
     ap.add_argument("--room", action="append", default=[], help="直播间 web_rid，可重复")
     ap.add_argument("--api", default=os.environ.get("LIVE_API", DEFAULT_API))
     ap.add_argument("--token", default=os.environ.get("LIVE_COLLECTOR_TOKEN", ""))
@@ -456,17 +465,25 @@ def main() -> int:
                         args.interval,
                     )
                     if not has_fresh_snapshot:
-                        api.ingest(args.event, obs)
+                        if args.event > 0:
+                            api.ingest(args.event, obs)
+                        else:
+                            api.ingest_room(rid, obs)
                         print(f"[poll] {rid} 等待页面数据…")
                         continue
-                    res = api.ingest(args.event, obs)
+                    res = (
+                        api.ingest(args.event, obs)
+                        if args.event > 0
+                        else api.ingest_room(rid, obs)
+                    )
                     bid = (obs.get("battle") or {}).get("battleId", "")
                     print(
                         f"[poll] {rid} battle={bid or '-'} "
                         f"phase={(res or {}).get('phase', '?')} "
                         f"users={raw.get('userCount', 0)}"
                     )
-                api.heartbeat(worker_id, len(pages), args.event)
+                if args.event > 0:
+                    api.heartbeat(worker_id, len(pages), args.event)
                 # --once 要等到真的拿到过数据才退出，否则「刚开播还没连麦」时
                 # 一拍就返回，调试时永远看不到页面数据。
                 if args.once and (

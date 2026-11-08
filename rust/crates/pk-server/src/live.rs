@@ -749,6 +749,101 @@ pub async fn ingest_observation(
     Ok(out)
 }
 
+/// 独立房间观测结果：不填写 group_id/round_id，也不触碰赛事表。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RoomIngestOutcome {
+    pub battle_id: String,
+    pub score_count: usize,
+    pub phase: String,
+    pub note: String,
+}
+
+/// 独立直播间监控入口。
+///
+/// 与 `ingest_observation` 的区别只有一个但很关键：这里**不调用 resolve_group**，
+/// 只按 web_rid + battle_id 保存采样。它适合“先验证房间能不能稳定抓到分数”的阶段；
+/// 等赛事分组确定后，再决定是否把同一 battle 接入 `live_round`。
+pub async fn ingest_room_observation(
+    st: &Arc<AppState>,
+    web_rid: &str,
+    obs: &Observation,
+) -> anyhow::Result<RoomIngestOutcome> {
+    let mut out = RoomIngestOutcome::default();
+    let snap = obs.battle.as_ref();
+    let battle_id = snap.map(|b| b.battle_id.as_str()).unwrap_or("");
+    let health = if obs.health == "error" || !obs.room_online {
+        "degraded"
+    } else {
+        "live"
+    };
+    crate::store::live_room_monitor_upsert(
+        st,
+        web_rid,
+        &obs.room_id,
+        health,
+        &obs.error,
+        battle_id,
+    )
+    .await?;
+
+    if obs.health == "error" {
+        out.phase = "degraded".into();
+        out.note = obs.error.clone();
+        return Ok(out);
+    }
+    let Some(snap) = snap else {
+        out.phase = if obs.room_online {
+            "idle"
+        } else {
+            "room_ended"
+        }
+        .into();
+        return Ok(out);
+    };
+    if snap.battle_id.is_empty() || snap.scores.is_empty() {
+        out.phase = "idle".into();
+        return Ok(out);
+    }
+
+    out.battle_id = snap.battle_id.clone();
+    out.score_count = snap.scores.len();
+    let team_of = |tid: &str| {
+        snap.team_scores
+            .iter()
+            .find(|t| t.team_id == tid)
+            .map(|t| (t.score, t.rank))
+            .unwrap_or((0, 0))
+    };
+    for score in &snap.scores {
+        let (team_score, team_rank) = team_of(&score.team_id);
+        crate::store::live_room_sample_insert(
+            st,
+            web_rid,
+            &obs.room_id,
+            &snap.battle_id,
+            score,
+            team_score,
+            team_rank,
+        )
+        .await?;
+    }
+
+    let now_ms = if obs.now_ms > 0 {
+        obs.now_ms
+    } else {
+        chrono::Utc::now().timestamp_millis()
+    };
+    out.phase =
+        match classify_battle(snap, now_ms, LiveRules::default().settle_grace_secs as i64) {
+            BattlePhase::Running => "live",
+            BattlePhase::Settling => "settling",
+            BattlePhase::Ended => "ended",
+            BattlePhase::Idle => "idle",
+        }
+        .into();
+    Ok(out)
+}
+
 /// 定位这一局属于哪个小组。
 ///
 /// 顺序：① 该局已落在某个小组（重复上报）→ 沿用；② 当前阶段里第一个未定稿小组。

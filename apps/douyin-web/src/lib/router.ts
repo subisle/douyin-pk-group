@@ -25,6 +25,7 @@ export type RouteKey =
   | 'bots'
   | 'send'
   | 'live'
+  | 'live-room'
 
 export const DEFAULT_ROUTE: RouteKey = 'data'
 
@@ -42,6 +43,7 @@ export const ROUTES: { key: RouteKey; path: string; label: string }[] = [
   { key: 'bots', path: '/bots', label: '机器人' },
   { key: 'send', path: '/send', label: '消息下发' },
   { key: 'live', path: '/live', label: '直播分数监控' },
+  { key: 'live-room', path: '/live-room', label: '独立直播监控' },
 ]
 
 /** 全屏独立路由：有地址（可收藏/刷新不丢）但不进侧边栏，App 对它整屏渲染无壳。 */

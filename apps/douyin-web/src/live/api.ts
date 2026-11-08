@@ -158,6 +158,37 @@ export interface LiveScores {
   seats: LiveSeat[]
 }
 
+export interface StandaloneRoomScore {
+  douyinUid: string
+  nickname: string
+  score: number
+  rank: number
+  teamId: string
+  teamScore: number
+  teamRank: number
+  bonusMultiple: number
+  bonusScore: number
+  bonusActive: boolean
+  bonusEndMs: number
+  currentBonus: number
+  observedAt: string
+}
+
+export interface StandaloneRoomState {
+  webRid: string
+  roomId: string
+  health: string
+  lastError: string
+  battleId: string
+  lastSeenAt: string | null
+}
+
+export interface StandaloneRoomScores {
+  webRid: string
+  room: StandaloneRoomState | null
+  scores: StandaloneRoomScore[]
+}
+
 export const live = {
   events: () => api<{ items: LiveEvent[] }>('/api/live/events'),
 
@@ -191,6 +222,9 @@ export const live = {
 
   scores: (id: number, groupId: number) =>
     api<LiveScores>(`/api/live/events/${id}/scores?groupId=${groupId}`),
+
+  /** 独立房间监控：不关联 event / group，只按 web_rid 取最新一局。 */
+  roomScores: (webRid: string) => api<StandaloneRoomScores>(`/api/live/rooms/${webRid}`),
 
   bindPlans: (id: number, dayPlanId?: number, nightPlanId?: number) =>
     api<{ ok: boolean }>(`/api/live/events/${id}/plans`, {

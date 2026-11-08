@@ -712,6 +712,61 @@ pub async fn ingest(
     })))
 }
 
+/* ------------------------------ 独立房间监控 ------------------------------ */
+
+/// 独立采集器上报：路径里的 web_rid 是唯一分组依据，body 不要伪装成赛事事件。
+pub async fn ingest_room(
+    State(st): State<Arc<AppState>>,
+    Path(web_rid): Path<String>,
+    Json(mut obs): Json<Observation>,
+) -> ApiResult {
+    let web_rid = web_rid.trim().to_string();
+    if web_rid.is_empty() || web_rid.len() > 40 {
+        return Err(crate::routes::ApiError::bad_request("web_rid 不合法"));
+    }
+    if obs.web_rid.is_empty() {
+        obs.web_rid = web_rid.clone();
+    }
+    if obs.web_rid != web_rid {
+        return Err(crate::routes::ApiError::bad_request(
+            "请求路径 web_rid 与上报内容不一致",
+        ));
+    }
+    let out = live::ingest_room_observation(&st, &web_rid, &obs).await?;
+    Ok(Json(json!({
+        "ok": true,
+        "webRid": web_rid,
+        "battleId": out.battle_id,
+        "scoreCount": out.score_count,
+        "phase": out.phase,
+        "note": out.note,
+    })))
+}
+
+/// 管理端查看一个独立房间的当前最新局。没有赛事/小组也能返回。
+pub async fn room_scores(
+    State(st): State<Arc<AppState>>,
+    Path(web_rid): Path<String>,
+) -> ApiResult {
+    let web_rid = web_rid.trim().to_string();
+    if web_rid.is_empty() {
+        return Err(crate::routes::ApiError::bad_request("web_rid 不能为空"));
+    }
+    let room = store::live_room_monitor_get(&st, &web_rid).await;
+    let battle_id = room
+        .as_ref()
+        .and_then(|v| v.get("battleId"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let scores = store::live_room_latest_scores(&st, &web_rid, &battle_id).await;
+    Ok(Json(json!({
+        "webRid": web_rid,
+        "room": room,
+        "scores": scores,
+    })))
+}
+
 /// 采集进程心跳（排查「采集器还活着吗」用）
 #[derive(Deserialize)]
 pub struct HeartbeatBody {
