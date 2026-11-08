@@ -1448,51 +1448,46 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .st-group-chip.on .n { background:#D97706; }
 .st-group-chip .c { color:#64748B; font-weight:400; }
 .st-group-chip.on .c { color:rgba(180,83,9,.8); }
-/* 一次一组：组别胶囊切换当前组，卡片只展示组名、时间和成员姓名。 */
-.st-group-cards { padding-bottom:1rem; }
-.st-gcard { display:flex; flex-direction:column; gap:.5rem; min-width:0; }
-.st-gcard-head { display:flex; align-items:center; justify-content:space-between; gap:8px;
+/* 一次展示全部组：3 列紧凑卡片，不切换、不横向滚动。 */
+.st-group-cards { display:grid; grid-template-columns:repeat(3,minmax(0,1fr));
+  gap:.5rem; align-items:start; padding-bottom:1rem; }
+.st-gcard { min-width:0; display:flex; flex-direction:column; gap:.375rem; }
+.st-gcard-head { display:flex; flex-direction:column; align-items:flex-start; gap:1px;
   padding:0 .125rem; min-width:0; }
-.st-gcard-head .l { display:flex; align-items:center; gap:.375rem; min-width:0; flex:1; }
-.st-gcard-head .bar { width:.375rem; height:1rem; border-radius:9999px; background:var(--primary); flex:none; }
+.st-gcard-head .l { display:flex; align-items:center; gap:.25rem; min-width:0; width:100%; }
+.st-gcard-head .bar { width:.25rem; height:.75rem; border-radius:9999px; background:var(--primary); flex:none; }
 .st-gcard-head .bar.alt { background:var(--secondary); }
 .st-gcard-head h2 { margin:0; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
-  font-size:17px; font-weight:700; color:#0F172A; letter-spacing:-.01em; }
-.st-gcard-head .cnt { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:2px 6px; flex:none;
-  color:#64748B; font-size:10.5px; font-weight:500; line-height:15px; white-space:nowrap; }
+  font-size:12.5px; font-weight:700; color:#0F172A; letter-spacing:-.01em; }
+.st-gcard-head .cnt { display:flex; flex-wrap:wrap; column-gap:3px; max-width:100%;
+  color:#64748B; font-size:8.5px; font-weight:500; line-height:11px; white-space:nowrap; }
 .st-group-rule { margin-top:.5rem; padding:7px 10px; border-radius:10px;
   background:rgba(255,248,242,.82); border:1px solid rgba(255,217,201,.76);
   color:#92400E; font-size:11px; line-height:1.55; }
 /* 打开分组页时短暂定焦本人所在组，随后自动失焦，不留下常驻描边。 */
 .st-group-focus { position:relative; z-index:2; border-radius:16px;
   animation:stGroupFocus 1.35s ease-out both; }
-.st-group-chip.st-group-focus { border-radius:9999px;
-  animation:stGroupChipFocus 1.35s ease-out both; }
 @keyframes stGroupFocus {
   0% { box-shadow:0 0 0 0 rgba(245,158,11,0); }
   20% { box-shadow:0 0 0 3px rgba(245,158,11,.38), 0 8px 24px rgba(217,119,6,.14); }
   100% { box-shadow:0 0 0 0 rgba(245,158,11,0), 0 0 0 rgba(217,119,6,0); }
 }
-@keyframes stGroupChipFocus {
-  0%, 100% { box-shadow:0 2px 6px rgba(0,0,0,.04); }
-  20% { box-shadow:0 0 0 3px rgba(245,158,11,.34), 0 2px 10px rgba(217,119,6,.14); }
-}
 @media (prefers-reduced-motion:reduce) {
-  .st-group-focus, .st-group-chip.st-group-focus { animation:none; }
+  .st-group-focus { animation:none; }
 }
-/* 2026-10-18 玻璃化：分组主体卡换玻璃卡 token（白 .72 底 + blur(20px) + 16px 圆角） */
-.st-gcard-body { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:1px;
-  background:var(--surface-container); border:1px solid rgba(255,255,255,.85);
-  border-radius:16px; box-shadow:0 8px 32px rgba(148,163,184,.12), 0 1px 2px rgba(0,0,0,.03);
-  -webkit-backdrop-filter:blur(20px); backdrop-filter:blur(20px); overflow:hidden; }
-.st-gmem { display:flex; align-items:center; gap:.375rem; min-width:0; padding:.6rem .75rem;
-  background:rgba(255,255,255,.78); transition:background .15s; }
-.st-gmem:last-child:nth-child(odd) { grid-column:1 / -1; }
+/* 2026-10-18 玻璃化：分组主体卡换玻璃卡 token（白 .72 底 + blur(20px) + 12px 圆角） */
+.st-gcard-body { background:rgba(255,255,255,.72); border:1px solid rgba(255,255,255,.85);
+  border-radius:12px; box-shadow:0 8px 32px rgba(148,163,184,.12), 0 1px 2px rgba(0,0,0,.03);
+  -webkit-backdrop-filter:blur(20px); backdrop-filter:blur(20px);
+  overflow:hidden; display:flex; flex-direction:column; flex:1; }
+.st-gmem { display:flex; align-items:center; gap:.25rem; min-width:0; padding:.25rem .375rem;
+  border-bottom:1px solid var(--surface-container); transition:background .15s; }
+.st-gmem:last-child { border-bottom:none; }
 .st-gmem:hover { background:var(--surface-container-low); }
-.st-gmem-rk { width:1.25rem; flex:none; text-align:center; font-size:12px; font-weight:700;
+.st-gmem-rk { width:.85rem; flex:none; text-align:center; font-size:9px; font-weight:700;
   color:var(--primary); font-variant-numeric:tabular-nums; }
 .st-gmem:nth-child(n+3) .st-gmem-rk { color:var(--outline-variant); }
-.st-gmem-nm { min-width:0; font-size:14px; font-weight:600; color:var(--on-surface);
+.st-gmem-nm { min-width:0; font-size:11px; font-weight:600; color:var(--on-surface);
   overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 
 /* ===== 分组展示 / 分组差距：同一页两种阅读任务 ===== */
@@ -3058,7 +3053,6 @@ let period = 'daily';    // daily | monthly | yearly
 let view = 'data';       // data | group | lineage | resources | my
 let curGroup = GROUP_PAGES[0].key;  // 分组子页当前 key
 let groupMode = 'groups'; // groups | gap：展示端分组页的两个阅读视图
-let groupSel = 0;        // 当前展示的组序号：分组、差距两个视图共用
 let groupAutoFocusPending = false; // 用户每次进入分组页时，自动选到本人所在组
 let groupFocusIndex = -1;          // 本轮渲染完成后需要短暂定焦的组序号
 const GROUP_GAP_TARGETS = [
@@ -5906,11 +5900,8 @@ async function loadGroup(signal) {
     groupAutoFocusPending = false;
     groupFocusIndex = -1;
     $('view').innerHTML = '<div class="section tab-content-enter">' +
-      '<div class="st-group-chips"><button class="st-group-chip" disabled>' +
-        '<span class="n"></span><span>暂无场次</span><span class="c">0人</span></button></div>' +
       '<div class="empty"><span class="big">📺</span>' + esc(page.label) +
       '暂未公布<br>上架后这里会自动出现</div></div>';
-    bindGroupChips();
     return;
   }
   if (!list.some(p => p.id === planByType[curGroup])) planByType[curGroup] = list[0].id;
@@ -5931,21 +5922,14 @@ function groupHtml(d, page, list) {
   const showWave = !d.display || d.display.wave !== false;
   const showGroups = !d.display || d.display.groups !== false;
   const groups = d.groups || [];
-  groupSel = groups.length ? Math.min(Math.max(Number(groupSel) || 0, 0), groups.length - 1) : 0;
   groupFocusIndex = -1;
   if (groupAutoFocusPending) {
     const myName = meState && meState.name ? String(meState.name).trim() : '';
     const mine = myName ? groups.findIndex(g =>
       (g.players || []).some(p => String(p.name || '').trim() === myName)) : -1;
-    if (mine >= 0) {
-      groupSel = mine;
-      groupFocusIndex = mine;
-    } else if (groups.length) {
-      groupSel = 0;
-    }
+    if (mine >= 0) groupFocusIndex = mine;
     groupAutoFocusPending = false;
   }
-  const currentGroup = groups[groupSel];
   const sched = d.schedule || {};
   const nPlayers = d.counts ? d.counts.players : groups.reduce((s, g) => s + (g.count || 0), 0);
   const nGroups = d.counts ? d.counts.groups : groups.length;
@@ -5965,7 +5949,7 @@ function groupHtml(d, page, list) {
       '<div class="lbl"><span>' + esc(page.label) + (day ? ' · ' + esc(day) : '') + '</span>' +
       '<span class="chip">' + nGroups + '组 · ' + nPlayers + '人</span></div>' +
       '<div style="margin-top:.375rem;font-size:18px;font-weight:600;color:var(--on-surface)">' +
-        esc(currentGroup ? currentGroup.name : (d.title || page.label)) + '</div>' +
+        esc(d.title || page.label) + '</div>' +
       (meta ? '<div style="margin-top:.25rem;font-size:12px;color:var(--on-surface-variant)">' +
         esc(meta) + '</div>' : '') +
       (d.rules ? '<div class="st-group-rule">赛制：' + esc(d.rules) + '</div>' : '') +
@@ -5977,20 +5961,11 @@ function groupHtml(d, page, list) {
         ' class="' + (groupMode === 'gap' ? 'on' : '') + '">差距</button>' +
     '</div>';
 
-  /* 组别胶囊：两个视图共用，切换后只重绘当前组，不重新请求方案。 */
-  if (showGroups && groups.length) {
-    html += '<div class="st-group-chips">' + groups.map((g, i) =>
-      '<button class="st-group-chip' + (i === groupSel ? ' on' : '') + '" data-gsel="' + i + '">' +
-        '<span class="n"></span><span>' + esc(g.name) + '</span>' +
-        '<span class="c">' + (g.count || (g.players || []).length) + '人</span>' +
-      '</button>').join('') + '</div>';
-  }
-
   if (groupMode === 'gap') {
     if (!showWave) {
       html += '<div class="st-gap-empty">差距需要展示音浪数值<br>当前方案未开放音浪数据</div>';
     } else {
-      html += groupGapHtml(d, groups, groupSel);
+      html += groupGapHtml(d, groups);
     }
   } else {
     if (!showGroups) {
@@ -6000,24 +5975,22 @@ function groupHtml(d, page, list) {
       return html + '<div class="empty"><span class="big">📺</span>暂无分组数据</div></div>';
     }
 
-    /* 一次只渲染当前组；其它组通过上方胶囊切换。 */
-    const g = groups[groupSel];
-    const gi = groupSel;
-    const mems = (g.players || []).map((p, pi) =>
-      '<div class="st-gmem">' +
-        '<span class="st-gmem-rk">' + String(pi + 1).padStart(2, '0') + '</span>' +
-        '<span class="st-gmem-nm">' + esc(p.name) + '</span>' +
-      '</div>').join('');
-    html += '<div class="st-group-cards" id="stGroupCards">' +
-      '<section class="st-gcard" id="gcard-' + gi + '">' +
+    /* 一次性展示全部组：不再需要组别胶囊，也不再逐组切换。 */
+    html += '<div class="st-group-cards" id="stGroupCards">' + groups.map((g, gi) => {
+      const mems = (g.players || []).map((p, pi) =>
+        '<div class="st-gmem">' +
+          '<span class="st-gmem-rk">' + String(pi + 1).padStart(2, '0') + '</span>' +
+          '<span class="st-gmem-nm">' + esc(p.name) + '</span>' +
+        '</div>').join('');
+      return '<section class="st-gcard" id="gcard-' + gi + '" data-gindex="' + gi + '">' +
         '<div class="st-gcard-head"><div class="l">' +
           '<span class="bar' + (gi % 2 ? ' alt' : '') + '"></span>' +
           '<h2>' + esc(g.name) + '</h2></div>' +
           '<span class="cnt"><span>' + (g.count || (g.players || []).length) + '人</span>' +
           (g.slot ? '<span>' + esc(g.slot) + ' 开赛</span>' : '') + '</span></div>' +
-        '<div class="st-gcard-body">' + (mems || '<div class="empty" style="padding:18px 4px;font-size:10px;grid-column:1/-1">空组</div>') + '</div>' +
-      '</section>' +
-    '</div>';
+        '<div class="st-gcard-body">' + (mems || '<div class="empty" style="padding:18px 4px;font-size:10px">空组</div>') + '</div>' +
+      '</section>';
+    }).join('') + '</div>';
   }
 
   html += '<div class="gx-foot" style="text-align:center;color:var(--on-surface-variant);font-size:11px;margin-top:.25rem">' +
@@ -6031,14 +6004,14 @@ function groupHtml(d, page, list) {
         '<div class="r"><span class="pri">' + (p.id === planByType[curGroup] ? '当前' : '切换') + '</span>' +
         '<span class="material-symbols-outlined">chevron_right</span></div></button>').join('') + '</div>';
     setTimeout(() => document.querySelectorAll('[data-pid]').forEach(b => b.onclick = () => {
-      planByType[curGroup] = Number(b.dataset.pid); groupSel = 0;
+      planByType[curGroup] = Number(b.dataset.pid);
       groupAutoFocusPending = true; loadGroup();
     }), 0);
   }
   return html + '</div>';
 }
 
-function groupGapHtml(d, groups, selectedIndex) {
+function groupGapHtml(d, groups) {
   /* 差距页先按方案里的组序排列，再在组内按组内名次排列。
      每个玩家的「距上一位」和目标差值仍按全场总榜计算，不能拿相邻的组员冒充上一位。 */
   const orderedGroups = (groups || []).map(g => ({
@@ -6047,9 +6020,6 @@ function groupGapHtml(d, groups, selectedIndex) {
       (Number(a.group_rank) || 999999) - (Number(b.group_rank) || 999999) ||
       (Number(a.rank) || 999999) - (Number(b.rank) || 999999)),
   }));
-  const selected = orderedGroups.length
-    ? Math.min(Math.max(Number(selectedIndex) || 0, 0), orderedGroups.length - 1)
-    : -1;
   let ranking = Array.isArray(d.ranking) ? d.ranking.slice() : [];
   if (!ranking.length) {
     ranking = orderedGroups.flatMap(g => (g.players || []).map(p => ({ ...p })));
@@ -6121,7 +6091,7 @@ function groupGapHtml(d, groups, selectedIndex) {
     '</div>';
   };
 
-  const sections = (orderedGroups.length ? [orderedGroups[selected]] : [{
+  const sections = (orderedGroups.length ? orderedGroups : [{
     name: '总排名',
     slot: '',
     count: ranking.length,
@@ -6130,7 +6100,7 @@ function groupGapHtml(d, groups, selectedIndex) {
     const rows = (g.players || []).map(rowHtml).join('');
     if (!rows) return '';
     const count = g.count || (g.players || []).length;
-    return '<section class="st-gap-section">' +
+    return '<section class="st-gap-section" data-gindex="' + gi + '">' +
       '<div class="st-gap-section-head"><div class="l"><span class="bar"></span>' +
         '<h3 class="st-gap-section-title">' + esc(g.name || ('第 ' + (gi + 1) + ' 组')) + '</h3></div>' +
         '<span class="st-gap-section-meta">' + count + '人' +
@@ -6153,11 +6123,10 @@ function focusGroupTarget(index) {
   const run = () => {
     if (ran) return;
     ran = true;
-    const chip = document.querySelector('.st-group-chip[data-gsel="' + index + '"]');
-    const card = document.getElementById('gcard-' + index);
-    const section = document.querySelector('.st-gap-section');
+    const card = document.querySelector('.st-gcard[data-gindex="' + index + '"]');
+    const section = document.querySelector('.st-gap-section[data-gindex="' + index + '"]');
     const target = card || section;
-    const anchor = card || document.querySelector('.st-gap-section-head');
+    const anchor = card || (target && target.querySelector('.st-gap-section-head'));
     if (!target || !target.isConnected || !anchor) return;
     const rect = anchor.getBoundingClientRect();
     const safeTop = 250;
@@ -6168,10 +6137,8 @@ function focusGroupTarget(index) {
       window.scrollTo({ top, left: 0, behavior: 'auto' });
     }
     target.classList.add('st-group-focus');
-    if (chip) chip.classList.add('st-group-focus');
     setTimeout(() => {
       if (target.isConnected) target.classList.remove('st-group-focus');
-      if (chip && chip.isConnected) chip.classList.remove('st-group-focus');
     }, 1400);
   };
   /* 后台标签页 rAF 会被冻结；setTimeout 兜底保证自动定焦一定发生。 */
@@ -6179,22 +6146,13 @@ function focusGroupTarget(index) {
   setTimeout(run, 80);
 }
 
-/** 分组页交互：组别胶囊切换当前组，视图切换只重绘、不重复请求方案。 */
+/** 分组页交互：视图切换只重绘、不重复请求方案。 */
 function renderGroupView(d, page, list) {
   $('view').innerHTML = groupHtml(d, page, list);
-  bindGroupChips(d, page, list);
+  bindGroupView(d, page, list);
 }
 
-function bindGroupChips(d, page, list) {
-  document.querySelectorAll('.st-group-chip[data-gsel]').forEach(c => {
-    c.onclick = () => {
-      if (!d) return;
-      const next = Number(c.dataset.gsel);
-      if (!Number.isInteger(next) || next === groupSel) return;
-      groupSel = next;
-      renderGroupView(d, page, list);
-    };
-  });
+function bindGroupView(d, page, list) {
   document.querySelectorAll('.st-group-mode button[data-gmode]').forEach(b => {
     b.onclick = () => {
       const next = b.dataset.gmode === 'gap' ? 'gap' : 'groups';
@@ -6204,22 +6162,6 @@ function bindGroupChips(d, page, list) {
       else loadGroup();
     };
   });
-  const active = document.querySelector('.st-group-chip.on');
-  const rail = active && active.closest('.st-group-chips');
-  if (d && active && rail) {
-    let centered = false;
-    const centerActive = () => {
-      if (centered || !active.isConnected) return;
-      centered = true;
-      rail.scrollTo({
-        left: active.offsetLeft - (rail.clientWidth - active.offsetWidth) / 2,
-        behavior: 'auto',
-      });
-    };
-    /* 与定焦一样补 setTimeout：后台标签页 rAF 冻结时，胶囊也要滚到当前组。 */
-    requestAnimationFrame(centerActive);
-    setTimeout(centerActive, 80);
-  }
   if (d && groupFocusIndex >= 0) {
     const focusIndex = groupFocusIndex;
     groupFocusIndex = -1;
@@ -6256,7 +6198,6 @@ function groupSegChoose(key) {
   const btn = document.querySelector('#subnav button[data-g="' + key + '"]');
   if (!btn || btn.disabled) return;
   if (curGroup === key && view === 'group') { groupSegMove(); return; }
-  groupSel = 0;
   curGroup = key;
   switchView('group');
 }
