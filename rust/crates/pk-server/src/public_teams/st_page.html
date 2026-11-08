@@ -4415,23 +4415,29 @@ function applyDashboardSort() {
   const byDuration = durationSortActive();
   if (byDuration) {
     listAll.sort((a, b) => {
+      /* 无数据行没有有效名次（rank=0），必须固定到榜单底部，
+         否则会排到第 1/4 名之前，出现“未开播的人在第四名上边”。 */
+      const aMissing = a.hasData === false ? 1 : 0;
+      const bMissing = b.hasData === false ? 1 : 0;
       const am = a.minutes == null ? Number.NEGATIVE_INFINITY : Number(a.minutes) || 0;
       const bm = b.minutes == null ? Number.NEGATIVE_INFINITY : Number(b.minutes) || 0;
-      return bm - am || (Number(b.wave) || 0) - (Number(a.wave) || 0) ||
+      return aMissing - bMissing || bm - am || (Number(b.wave) || 0) - (Number(a.wave) || 0) ||
         String(a.name || '').localeCompare(String(b.name || ''), 'zh-Hans-CN');
     });
     listAll.forEach((it, i) => {
       const v = it.minutes == null ? Number.NEGATIVE_INFINITY : Number(it.minutes) || 0;
       /* 时长榜按稳定排序位置展示名次：同分钟用音浪/姓名打破并列。
-         不能保留「1,1,3」的并列名次，否则领奖台只按 rank=2 找人时第二名会空出来。 */
-      it.rank = i + 1;
+         无数据行保留 0，不参与有效名次。 */
+      it.rank = it.hasData === false ? 0 : i + 1;
       it.sortValue = v;
     });
   } else {
     listAll.sort((a, b) => {
+      const aMissing = a.hasData === false ? 1 : 0;
+      const bMissing = b.hasData === false ? 1 : 0;
       const ar = a.waveRank != null ? Number(a.waveRank) : Number(a.rank || 0);
       const br = b.waveRank != null ? Number(b.waveRank) : Number(b.rank || 0);
-      return ar - br || String(a.name || '').localeCompare(String(b.name || ''), 'zh-Hans-CN');
+      return aMissing - bMissing || ar - br || String(a.name || '').localeCompare(String(b.name || ''), 'zh-Hans-CN');
     });
     listAll.forEach((it) => {
       it.rank = it.waveRank != null ? it.waveRank : it.rank;
