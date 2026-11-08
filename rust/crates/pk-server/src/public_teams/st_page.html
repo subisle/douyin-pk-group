@@ -3055,6 +3055,8 @@ let curGroup = GROUP_PAGES[0].key;  // 分组子页当前 key
 let groupMode = 'groups'; // groups | gap：展示端分组页的两个阅读视图
 let groupAutoFocusPending = false; // 用户每次进入分组页时，自动选到本人所在组
 let groupFocusIndex = -1;          // 本轮渲染完成后需要短暂定焦的组序号
+let groupLoadSeq = 0;              // 分组请求序号：旧请求不得覆盖新页面
+let groupRenderSeq = 0;            // 分组渲染序号：旧定焦回调不得作用于新页面
 const GROUP_GAP_TARGETS = [
   { label: '前1', k: 1 },
   { label: '前2', k: 2 },
@@ -5888,15 +5890,27 @@ async function loadPlans() {
   plansReady = loaded;
   /* 成功拉取后按「有已上架方案」收口：只留下当前真正可打开的赛事类型。 */
   try { syncNav(); groupSegMove(true); } catch (_) {}
+  /* 用户可能在方案列表返回前就点进分组页；列表到位后补拉当前分组，避免永久停在加载态。 */
+  if (loaded && view === 'group') {
+    const enabled = [...document.querySelectorAll('#subnav button:not([disabled])')];
+    if (enabled.length && !enabled.some(b => b.dataset.g === curGroup)) curGroup = enabled[0].dataset.g;
+    if (enabled.length) loadGroup().catch(() => {});
+  }
 }
 
 async function loadGroup(signal) {
+  const seq = ++groupLoadSeq;
   const page = GROUP_PAGES.find(p => p.key === curGroup) || GROUP_PAGES[0];
   curGroup = page.key;
   $('mhSub').textContent = page.label;
   /* 展示端按类型各占一页：上架互斥也是按类型（同类型一场，不同类型互不影响） */
   const list = plans.filter(p => (p.eventType || '') === page.type);
   if (!list.length) {
+    if (!plansReady) {
+      $('view').innerHTML = '<div class="section tab-content-enter"><div class="empty">' +
+        '<span class="big">📺</span>分组方案加载中…<br>稍后仍无数据请刷新重试</div></div>';
+      return;
+    }
     groupAutoFocusPending = false;
     groupFocusIndex = -1;
     $('view').innerHTML = '<div class="section tab-content-enter">' +
@@ -5909,11 +5923,13 @@ async function loadGroup(signal) {
   $('view').innerHTML = '<div class="section">' + shimmerList() + '</div>';
   try {
     const d = await api('/api/public/plans/' + pid, { signal });
+    if (seq !== groupLoadSeq || (signal && signal.aborted) ||
+        view !== 'group' || curGroup !== page.key) return;
     $('mhSub').textContent = page.label;
     renderGroupView(d, page, list);
     groupSegMove(true);
   } catch (e) {
-    if (e && e.name === 'AbortError') return;
+    if ((e && e.name === 'AbortError') || seq !== groupLoadSeq || view !== 'group') return;
     $('view').innerHTML = '<div class="empty"><span class="big">📺</span>取不到分组数据<br>' + esc(e.message) + '</div>';
   }
 }
@@ -5921,6 +5937,9 @@ async function loadGroup(signal) {
 function groupHtml(d, page, list) {
   const showWave = !d.display || d.display.wave !== false;
   const showGroups = !d.display || d.display.groups !== false;
+  const showRanking = !d.display || d.display.ranking !== false;
+  const showGap = showWave && showGroups && showRanking;
+  const mode = showGap ? groupMode : 'groups';
   const groups = d.groups || [];
   groupFocusIndex = -1;
   if (groupAutoFocusPending) {
@@ -5954,14 +5973,14 @@ function groupHtml(d, page, list) {
         esc(meta) + '</div>' : '') +
       (d.rules ? '<div class="st-group-rule">赛制：' + esc(d.rules) + '</div>' : '') +
     '</div>' +
-    '<div class="st-group-mode" role="tablist" aria-label="分组展示方式">' +
-      '<button type="button" role="tab" data-gmode="groups" aria-selected="' + (groupMode !== 'gap') + '"' +
-        ' class="' + (groupMode !== 'gap' ? 'on' : '') + '">分组</button>' +
-      '<button type="button" role="tab" data-gmode="gap" aria-selected="' + (groupMode === 'gap') + '"' +
-        ' class="' + (groupMode === 'gap' ? 'on' : '') + '">差距</button>' +
-    '</div>';
+    (showGap ? '<div class="st-group-mode" role="tablist" aria-label="分组展示方式">' +
+      '<button type="button" role="tab" data-gmode="groups" aria-selected="' + (mode !== 'gap') + '"' +
+        ' class="' + (mode !== 'gap' ? 'on' : '') + '">分组</button>' +
+      '<button type="button" role="tab" data-gmode="gap" aria-selected="' + (mode === 'gap') + '"' +
+        ' class="' + (mode === 'gap' ? 'on' : '') + '">差距</button>' +
+    '</div>' : '');
 
-  if (groupMode === 'gap') {
+  if (mode === 'gap') {
     if (!showWave) {
       html += '<div class="st-gap-empty">差距需要展示音浪数值<br>当前方案未开放音浪数据</div>';
     } else {
@@ -6118,11 +6137,12 @@ function groupGapHtml(d, groups) {
 }
 
 /** 本人组短暂定焦：必要时先跳到目标，再高亮 1.35 秒，随后自动失焦。 */
-function focusGroupTarget(index) {
+function focusGroupTarget(index, renderSeq) {
   let ran = false;
   const run = () => {
     if (ran) return;
     ran = true;
+    if (renderSeq !== groupRenderSeq || view !== 'group') return;
     const card = document.querySelector('.st-gcard[data-gindex="' + index + '"]');
     const section = document.querySelector('.st-gap-section[data-gindex="' + index + '"]');
     const target = card || section;
@@ -6148,6 +6168,7 @@ function focusGroupTarget(index) {
 
 /** 分组页交互：视图切换只重绘、不重复请求方案。 */
 function renderGroupView(d, page, list) {
+  groupRenderSeq++;
   $('view').innerHTML = groupHtml(d, page, list);
   bindGroupView(d, page, list);
 }
@@ -6165,7 +6186,7 @@ function bindGroupView(d, page, list) {
   if (d && groupFocusIndex >= 0) {
     const focusIndex = groupFocusIndex;
     groupFocusIndex = -1;
-    focusGroupTarget(focusIndex);
+    focusGroupTarget(focusIndex, groupRenderSeq);
   }
 }
 

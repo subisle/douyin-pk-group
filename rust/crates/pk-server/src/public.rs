@@ -189,6 +189,14 @@ pub async fn plan(
     let Some(row) = store::get_published_plan(&st, id).await else {
         return not_found();
     };
+    /* 路由导航隐藏分组 / 某个赛事类型时，详情接口也必须同口径拒绝，
+    否则知道方案 id 就能绕过列表开关直接拿到名单和音浪。 */
+    let settings = crate::public_teams::PublicSettings::load(&st).await;
+    if settings.group_enabled == false
+        || !crate::public_teams::plan_visible_by_settings(&settings, &row.event_type)
+    {
+        return not_found();
+    }
     let Ok(payload) = serde_json::from_str::<serde_json::Value>(&row.payload) else {
         tracing::warn!(id, "方案 payload 不是合法 JSON");
         return not_found();
@@ -211,7 +219,7 @@ pub async fn plan(
         .and_then(|v| v.as_str())
         .unwrap_or_default();
     let rules = payload
-        .get("rules")
+        .get("publicRules")
         .and_then(|v| v.as_str())
         .unwrap_or_default();
     let display = DisplayConfig::from_payload(&payload);
@@ -321,7 +329,7 @@ pub async fn plan(
     /* ---- 2b. 每日明细：按日期切换分组明细 ----
     管理端关掉「每日音浪」或「音浪数值」时直接省略（每日明细本质也是音浪数据）。
     取不到就省略，前端退回纯列表展示，不留空壳。 */
-    let (trend, daily) = if display.daily && display.wave {
+    let (trend, daily) = if display.daily && display.wave && display.groups {
         match repos::get_wave_series(&st, false, None).await {
             Ok(series) if !series.dates.is_empty() => {
                 let dates = series.dates;
@@ -424,7 +432,7 @@ pub async fn plan(
 
     // 管理端关掉「音浪数值」：数字一律不外泄——音浪清零、全场排行省略、组合计清零。
     // 组内序号保留，它只反映组内顺序，公布页本来就在用。
-    let ranking: Vec<_> = if display.wave {
+    let mut ranking: Vec<_> = if display.wave {
         let mut r = all_players;
         r.sort_by(|a, b| {
             a.rank
@@ -442,6 +450,23 @@ pub async fn plan(
         }
         Vec::new()
     };
+
+    let count_groups = groups.len();
+    let count_players = groups.iter().map(|g| g.players.len()).sum::<usize>();
+    /* 展示开关必须落在接口层：关闭总排行时连每人的全场 rank 一起抹掉；
+    关闭公开名单时连 groups / ranking / 每日明细一起不下发，不能只靠前端隐藏。 */
+    if !display.ranking {
+        for g in groups.iter_mut() {
+            for p in g.players.iter_mut() {
+                p.rank = 0;
+            }
+        }
+        ranking.clear();
+    }
+    if !display.groups {
+        groups.clear();
+        ranking.clear();
+    }
 
     // 比赛日 = 最新采集日就是今天（+08:00）。分组页只在比赛日展示——
     // 非比赛日没有对局，名单挂出去只会让人困惑；这是「后端支持显示和不显示」的那一刀。
@@ -464,9 +489,13 @@ pub async fn plan(
         "dates": dates,
         "stale": stale,
         "counts": {
-            "groups": groups.len(),
-            "players": if display.wave { ranking.len() } else { groups.iter().map(|g| g.count).sum() },
-            "totalWave": if display.wave { ranking.iter().map(|p| p.wave).sum::<f64>() } else { 0.0 },
+            "groups": count_groups,
+            "players": count_players,
+            "totalWave": if display.wave && display.groups && display.ranking {
+                ranking.iter().map(|p| p.wave).sum::<f64>()
+            } else {
+                0.0
+            },
         },
         "groups": groups,
         "ranking": ranking,
