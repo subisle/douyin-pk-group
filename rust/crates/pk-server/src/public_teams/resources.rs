@@ -1,7 +1,7 @@
 //! 资源分享目录 API。
 //!
 //! 前端不再下载 755KB 的 `videos.json` 全量清单，而是按页请求这里：
-//! `GET /api/public/resources?group=&category=&q=&sort=&offset=0&limit=30`。
+//! `GET /api/public/resources?group=&category=&q=&offset=0&limit=30`。
 //! 清单只在进程内解析一次；2176 条数据的内存过滤足够快，单次响应只传首屏素材。
 
 use super::*;
@@ -30,7 +30,6 @@ pub struct ResourcesQuery {
     pub group: Option<String>,
     pub category: Option<String>,
     pub q: Option<String>,
-    pub sort: Option<String>,
     pub offset: Option<usize>,
     pub limit: Option<usize>,
 }
@@ -41,6 +40,18 @@ fn parse_catalog(doc: Value) -> Arc<Catalog> {
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    // 资源分享页不再展示价格；在公开 API 边界统一剥离，避免接口继续泄露
+    // 或让旧客户端重新显示价格。源 JSON 保留字段，便于未来运营侧维护。
+    let items: Vec<Value> = items
+        .into_iter()
+        .map(|mut item| {
+            if let Some(obj) = item.as_object_mut() {
+                obj.remove("price");
+                obj.remove("priceLabel");
+            }
+            item
+        })
+        .collect();
     let mut groups = doc
         .get("groups")
         .and_then(Value::as_array)
@@ -134,15 +145,10 @@ fn category_set(groups: &[Value], group_key: &str) -> HashSet<String> {
         .unwrap_or_default()
 }
 
-fn price(item: &Value) -> Option<f64> {
-    item.get("price").and_then(Value::as_f64)
-}
-
 fn page(catalog: &Catalog, query: ResourcesQuery) -> Value {
     let group = query.group.as_deref().unwrap_or("").trim();
     let category = query.category.as_deref().unwrap_or("").trim();
     let keyword = query.q.as_deref().unwrap_or("").trim().to_lowercase();
-    let sort = query.sort.as_deref().unwrap_or("default");
     let limit = query.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
     let offset = query.offset.unwrap_or(0).min(catalog.total);
 
@@ -152,7 +158,7 @@ fn page(catalog: &Catalog, query: ResourcesQuery) -> Value {
         category_set(&catalog.groups, group)
     };
 
-    let mut rows: Vec<&Value> = catalog
+    let rows: Vec<&Value> = catalog
         .items
         .iter()
         .filter(|item| {
@@ -181,26 +187,6 @@ fn page(catalog: &Catalog, query: ResourcesQuery) -> Value {
             true
         })
         .collect();
-
-    if sort == "price-asc" || sort == "price-desc" {
-        let direction = if sort == "price-asc" { 1.0 } else { -1.0 };
-        rows.sort_by(|a, b| {
-            match (price(a), price(b)) {
-                (Some(ap), Some(bp)) => (ap - bp) * direction,
-                (Some(_), None) => -1.0,
-                (None, Some(_)) => 1.0,
-                (None, None) => 0.0,
-            }
-            .partial_cmp(&0.0)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| {
-                a.get("id")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .cmp(b.get("id").and_then(Value::as_str).unwrap_or(""))
-            })
-        });
-    }
 
     let total = rows.len();
     let items: Vec<Value> = rows.into_iter().skip(offset).take(limit).cloned().collect();
@@ -257,7 +243,6 @@ mod tests {
                 group: Some("thanks".into()),
                 category: None,
                 q: None,
-                sort: Some("price-asc".into()),
                 offset: Some(0),
                 limit: Some(1),
             },
@@ -265,7 +250,9 @@ mod tests {
         assert_eq!(body["total"], 2);
         assert_eq!(body["catalogTotal"], 3);
         assert_eq!(body["items"].as_array().unwrap().len(), 1);
-        assert_eq!(body["items"][0]["id"], "3");
+        assert_eq!(body["items"][0]["id"], "2");
+        assert!(body["items"][0].get("price").is_none());
+        assert!(body["items"][0].get("priceLabel").is_none());
         assert_eq!(body["groups"][0]["count"], 1);
         assert_eq!(body["groups"][1]["count"], 2);
         assert_eq!(body["groups"][1]["categories"][0]["count"], 2);
@@ -280,7 +267,6 @@ mod tests {
                 group: None,
                 category: None,
                 q: Some("感谢".into()),
-                sort: None,
                 offset: Some(0),
                 limit: Some(999),
             },
