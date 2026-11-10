@@ -2412,6 +2412,43 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
   .gate-box.dlg-box { max-width:100%; }
   .gate-box .qq-wrap input { padding-right:72px; }
 }
+
+/* ===== 添加到 iPhone 主屏幕引导（2026-11-10） ===== */
+#pwaGuide { position:fixed; inset:0; z-index:94; display:flex; align-items:flex-end;
+  justify-content:center; padding:12px 12px calc(env(safe-area-inset-bottom,0px) + 12px);
+  background:rgba(15,23,42,.42); -webkit-backdrop-filter:blur(10px); backdrop-filter:blur(10px);
+  animation:stFadeIn .16s ease-out; }
+#pwaGuide.hidden { display:none; }
+.pwa-sheet { position:relative; width:100%; max-width:430px; padding:22px 20px 18px;
+  border-radius:26px; border:1px solid rgba(255,255,255,.92);
+  background:rgba(255,255,255,.96); color:#0F172A;
+  box-shadow:0 24px 70px rgba(15,23,42,.28);
+  font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Helvetica Neue",sans-serif; }
+.pwa-close { position:absolute; top:9px; right:10px; width:34px; height:34px;
+  border:0; border-radius:9999px; background:transparent; color:#94A3B8;
+  font-size:24px; line-height:1; cursor:pointer; }
+.pwa-kicker { color:#4F46E5; font-size:11px; font-weight:800; letter-spacing:.14em; }
+.pwa-sheet h3 { margin:6px 0 7px; font-size:22px; line-height:1.25; letter-spacing:-.025em; }
+.pwa-lead { margin:0 0 17px; color:#64748B; font-size:13px; line-height:1.7; }
+.pwa-steps { display:grid; gap:11px; }
+.pwa-step { display:flex; align-items:center; gap:11px; padding:11px 12px;
+  border-radius:15px; background:#F8FAFC; border:1px solid #E9EEF5; }
+.pwa-num { flex:none; width:27px; height:27px; border-radius:9999px;
+  display:grid; place-items:center; background:#EEF2FF; color:#4F46E5;
+  font-size:12px; font-weight:800; }
+.pwa-step-copy { min-width:0; flex:1; color:#334155; font-size:13px; line-height:1.55; }
+.pwa-step-copy b { color:#0F172A; }
+.pwa-share-ico { flex:none; width:38px; height:38px; border-radius:11px;
+  display:grid; place-items:center; color:#fff; background:#0A84FF;
+  box-shadow:0 5px 13px rgba(10,132,255,.24); }
+.pwa-note { margin:13px 0 0; color:#94A3B8; font-size:11.5px; line-height:1.65; text-align:center; }
+.pwa-actions { display:flex; gap:9px; margin-top:16px; }
+.pwa-actions .later { flex:.72; height:47px; border-radius:13px; border:1px solid #E2E8F0;
+  background:#fff; color:#64748B; font-size:14px; font-weight:700; }
+.pwa-actions .ok { flex:1.28; height:47px; border-radius:13px; border:0;
+  background:#0066FF; color:#fff; font-size:15px; font-weight:700;
+  box-shadow:0 5px 16px rgba(0,102,255,.25); }
+.pwa-actions button:active { transform:scale(.985); filter:brightness(.96); }
 .team-pick .pick-title { font-weight:800; font-size:17px; margin-bottom:16px; }
 .team-pick .pick-row { display:flex; gap:12px; }
 .team-pick .pick-btn { flex:1; height:96px; border:1px solid #E2E8F0; border-radius:1rem;
@@ -3001,6 +3038,8 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
      maybeAnnounceItemsPopup 重建；z-index 89：低于登录门 #gate(90)
      登录门打开时被自然盖住，也低于引导(100)与消息弹窗(95)，各层互不叠架。 -->
 <div id="itemPopup" class="hidden"></div>
+<!-- iPhone 主屏幕安装引导：只在 iOS 且尚未以独立 App 运行时展示 -->
+<div id="pwaGuide" class="hidden"></div>
 <div id="wm" hidden></div>
 
 <script>
@@ -3034,6 +3073,8 @@ let site = null;         // 站点配置（含后台级显隐开关）
 /* 本次登录只定焦一次自己的排名；页面内刷新 / 切日期不会反复抢滚动。 */
 let rankFocusPending = false;
 let rankFocusDone = false;
+/* 首次手机号绑定成功后，本次不再紧接着弹可选 QQ 提醒，优先展示主屏幕安装引导。 */
+let skipNextQqNudge = false;
 let rankFocusIdentity = '';
 let numberAnimationPending = false;
 let dashboardRevealTimer = null;
@@ -3297,7 +3338,7 @@ function apiErrText(e) {
     SMTP_UNAVAILABLE: '邮件服务暂时不可用，请稍后再试或联系管理员帅帅（本次没有改密码）',
     RATE_LIMITED: '操作太频繁了，请 1 分钟后再试',
     PROFILE_ALREADY_DONE: '该账号已完成绑定，如需修改手机号请联系管理员帅帅',
-    NEED_PROFILE: '请先补全手机号和密码',
+    NEED_PROFILE: '请先绑定手机号',
     UNAUTHORIZED: '登录已过期，请重新登录',
   };
   if (MAP[code]) return MAP[code];
@@ -3640,6 +3681,11 @@ function afterGateFlow(me) {
     setTimeout(() => { try { openMustChangeDlg(); } catch (_) {} }, 420);
     return;
   }
+  if (skipNextQqNudge) {
+    skipNextQqNudge = false;
+    setTimeout(() => { try { maybeShowPwaGuide(true); } catch (_) {} }, 900);
+    return;
+  }
   if (me.needQq) setTimeout(() => { try { maybeQqNudge(); } catch (_) {} }, 650);
 }
 
@@ -3905,84 +3951,50 @@ function openForgotDlg() {
   };
 }
 
-/* ==================== 首次登录强制补全（契约 v2 §4.3 / §3.3） ====================
-   2026-10-18 用户拍板：手机号**必填**；QQ **选填**（没有 QQ 邮箱的找管理员）；
-   新密码选填（留空沿用当前密码）。**不可关闭**：复用 #gate 容器渲染（没有关闭按钮、
-   没有点外关闭、不绑 Esc），补全成功换 token + 重拉 who 之后才走正常收尾。
-   刷新页面 → ensureLogin() 重新判定 needProfile → 引导再出现（阻断逻辑自愈）。 */
+/* ==================== 首次登录绑定手机号 ====================
+   用户口径（2026-11-10）：首次登录只需要绑定手机号，不再同时要求 QQ / 新密码。
+   后端仍兼容旧客户端的 qq/newPass 可选字段，但新前端只提交 phone。
+   绑定成功后换发 token，并优先展示“添加到主屏幕”引导。 */
 function renderProfileGuide(me) {
   const g = $('gate');
   if (!g) return;
   me = me || {};
-  /* 引导会盖住整屏：让公告引导（z-index 100）与消息弹窗（95）让位，
-     否则刷新恢复登录态时它们会压在 #gate(90) 上面、把引导挡掉。 */
   dismissAnnounce();
   dismissMsgModal();
   const name = String(me.name || '');
-  /* 预填：后端若下发 personPhone（台账手机号）就用它；who 的 phone 通常是打码值，
-     含 `*` 时 isValidPhone 校验不过，天然跳过（契约 §4.3「可预填 personPhone/phone」）。 */
   const prePhone = String(me.personPhone || '').trim();
   const phoneVal = isValidPhone(prePhone) ? prePhone
     : (isValidPhone(String(me.phone || '').trim()) ? String(me.phone).trim() : '');
   g.classList.remove('hidden');
-  /* 卡片高度控制：375×667 下主按钮要在首屏可见（03 §6.3「按钮不被顶出屏幕」），
-     所以这里不放圆形徽标、每条提示只留一行（2026-10-18 实测内容高 774px → 收紧后 <620px）。 */
   g.innerHTML = '<div class="gate-col"><div class="gate-box dlg-box guide-box" role="dialog" aria-modal="true">' +
-    '<h3>绑定账号信息</h3>' +
+    '<h3>绑定手机号</h3>' +
     '<p class="tip">第一次登录' + (name ? '「' + esc(name) + '」' : '') +
-      '，先把手机号补上（QQ 选填），之后忘记密码可以自己重置。</p>' +
+      '，绑定手机号后即可开始使用。</p>' +
     '<div class="field-label">手机号 <span class="req">*</span></div>' +
-    '<input id="obPhone" inputmode="numeric" maxlength="20" placeholder="5~20 位数字手机号" value="' +
-      esc(phoneVal) + '" autocomplete="off">' +
-    '<div class="field-label">QQ 号（选填）</div>' +
-    '<div class="qq-wrap"><input id="obQq" inputmode="numeric" maxlength="12" placeholder="QQ 号，可留空" autocomplete="off">' +
-      '<span class="qq-suffix">@qq.com</span></div>' +
-    '<div class="qq-preview" id="obQqPreview">没有 QQ 邮箱？<b>请联系管理员帅帅</b>；不填也能继续使用。</div>' +
-    '<div class="field-label">新密码（选填，留空沿用当前密码）</div>' +
-    '<input id="obPass" type="password" placeholder="留空沿用当前密码" autocomplete="new-password">' +
-    '<input id="obPass2" type="password" placeholder="确认新密码" autocomplete="new-password">' +
+    '<input id="obPhone" inputmode="numeric" maxlength="20" placeholder="请输入 5~20 位数字手机号" value="' +
+      esc(phoneVal) + '" autocomplete="tel">' +
     '<div class="form-err hidden" id="obErr"></div>' +
-    '<button class="btn-main" id="obGo">完成绑定，进入数据榜</button>' +
-    '<div class="gate-foot">绑定后才能正常使用（忘记密码、接收通知都要用到手机号和 QQ 邮箱）</div>' +
+    '<button class="btn-main" id="obGo">绑定手机号，进入每日数据</button>' +
+    '<div class="gate-foot">手机号用于登录和账号找回；以后可在「我的」里补充其他信息。</div>' +
     '<button class="gate-link-plain" id="obSwitch">换个账号登录</button>' +
     '</div></div>';
-  const phoneEl = $('obPhone'), qqEl = $('obQq');
+  const phoneEl = $('obPhone');
   const errEl = $('obErr');
   const fail = (m) => { errEl.textContent = m; errEl.classList.remove('hidden'); };
-  const syncPreview = () => {
-    const q = String(qqEl.value || '');
-    $('obQqPreview').textContent = isValidQq(q) ? '将绑定：' + q + '@qq.com'
-      : (q ? 'QQ 号应为 5~12 位数字，且不能以 0 开头' : '没有 QQ 邮箱？请联系管理员帅帅（不填也能继续使用）');
-  };
-  const digitsOnly = (el, maxLen) => {
-    el.addEventListener('input', () => {
-      el.value = String(el.value || '').replace(/\D/g, '').slice(0, maxLen);
-      errEl.classList.add('hidden');
-      syncPreview();
-    });
-  };
-  digitsOnly(phoneEl, 20);
-  /* 手机号只收数字；QQ 号另外要求首位非 0（契约 §2.1 normalize_qq），输入时直接剔掉 */
-  qqEl.addEventListener('input', () => {
-    const v = String(qqEl.value || '').replace(/\D/g, '').replace(/^0+/, '').slice(0, 12);
-    if (v !== qqEl.value) qqEl.value = v;
+  phoneEl.addEventListener('input', () => {
+    phoneEl.value = String(phoneEl.value || '').replace(/\D/g, '').slice(0, 20);
     errEl.classList.add('hidden');
-    syncPreview();
   });
-  phoneEl.onkeydown = (e) => { if (e.key === 'Enter') qqEl.focus(); };
-  qqEl.onkeydown = (e) => { if (e.key === 'Enter') $('obPass').focus(); };
-  $('obPass').onkeydown = (e) => { if (e.key === 'Enter') $('obPass2').focus(); };
-  $('obPass2').onkeydown = (e) => { if (e.key === 'Enter') $('obGo').click(); };
+  phoneEl.onkeydown = (e) => { if (e.key === 'Enter') $('obGo').click(); };
   $('obSwitch').onclick = () => { myLogout(); removeWatermark(); location.reload(); };
   $('obGo').onclick = submitProfile;
   setTimeout(() => { if (!phoneEl.value) phoneEl.focus(); }, 60);
 }
 
-/** 提交首次补全（契约 §3.3）：成功 → 换 token → 重拉 who → 关登录门进数据榜。 */
+/** 提交首次手机号绑定：成功 → 换 token → 重拉 who → 关闭登录门。 */
 async function submitProfile() {
-  const phoneEl = $('obPhone'), qqEl = $('obQq');
-  const p1 = $('obPass'), p2 = $('obPass2');
-  if (!phoneEl || !p1 || !p2) return;
+  const phoneEl = $('obPhone');
+  if (!phoneEl) return;
   const errEl = $('obErr');
   const fail = (m) => {
     if (!errEl) return;
@@ -3991,33 +4003,22 @@ async function submitProfile() {
   };
   errEl.classList.add('hidden');
   const phone = String(phoneEl.value || '').trim();
-  const qq = String(qqEl.value || '').trim();
-  const pass = p1.value || '';
-  const pass2 = p2.value || '';
   if (!isValidPhone(phone)) return fail('手机号应为 5~20 位数字');
-  if (qq && !isValidQq(qq)) return fail('QQ 号应为 5~12 位数字，且不能以 0 开头');
-  if (pass || pass2) {
-    if (!isValidPass(pass)) return fail(PASS_RULE);
-    if (pass !== pass2) return fail('两次输入的新密码不一致');
-  }
   const btn = $('obGo');
-  const fields = [phoneEl, qqEl, p1, p2];
   btn.disabled = true; btn.textContent = '提交中…';
-  fields.forEach((el) => { el.disabled = true; });
-  const body = { phone: phone };
-  if (qq) body.qq = qq;
-  if (pass) body.newPass = pass;
+  phoneEl.disabled = true;
   const restore = () => {
-    btn.disabled = false; btn.textContent = '完成绑定，进入数据榜';
-    fields.forEach((el) => { el.disabled = false; });
+    btn.disabled = false; btn.textContent = '绑定手机号，进入每日数据';
+    phoneEl.disabled = false;
   };
   try {
-    const d = await postJson('/api/public/my/profile/bind', body, { auth: true });
-    setMyToken(d && d.token);   // 后端吊销全部旧 token → 必须换发，否则下一个请求 401
+    const d = await postJson('/api/public/my/profile/bind', { phone: phone }, { auth: true });
+    setMyToken(d && d.token);
     let who = null;
-    try { who = await refreshWho(); } catch (_) { /* who 失败就先用响应兜底，不挡收尾 */ }
+    try { who = await refreshWho(); } catch (_) { /* who 失败时用响应兜底 */ }
+    skipNextQqNudge = true;
     closeGate(who || buildMe(d, meState && meState.name));
-    toast('绑定完成，开始使用吧');
+    toast('手机号绑定完成，开始使用吧');
   } catch (e) {
     if (isAuthError(e)) {
       myLogout();
@@ -4026,14 +4027,14 @@ async function submitProfile() {
       toast('登录已过期，请重新登录');
       return;
     }
-    /* 已成功但前端没收到响应（超时）再提交会拿 PROFILE_ALREADY_DONE：
-       先重拉 who，若已经补全完成就按成功收尾（契约 §4.3 第 6 步） */
+    /* 已成功但响应超时：重拉身份，已补全就直接收尾。 */
     if (e.code === 'PROFILE_ALREADY_DONE') {
       let who = null;
       try { who = await refreshWho(); } catch (_) {}
       if (who && !who.needProfile) {
+        skipNextQqNudge = true;
         closeGate(who);
-        toast('绑定完成，开始使用吧');
+        toast('手机号绑定完成，开始使用吧');
         return;
       }
       restore();
@@ -4042,6 +4043,111 @@ async function submitProfile() {
     restore();
     fail(apiErrText(e) || '提交失败，稍后再试');
   }
+}
+
+/* ==================== 添加到 iPhone 主屏幕引导 ==================== */
+const PWA_GUIDE_KEY = 'pkPwaGuideV1';
+const PWA_GUIDE_RETRY_MS = 1400;
+let pwaGuideOpen = false;
+let pwaGuideRetryTimer = null;
+
+function isIOSDevice() {
+  const ua = navigator.userAgent || '';
+  return /iPhone|iPad|iPod/i.test(ua) ||
+    (navigator.platform === 'MacIntel' && Number(navigator.maxTouchPoints) > 1);
+}
+function isStandaloneWebApp() {
+  return window.navigator.standalone === true ||
+    (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
+}
+function isIOSSafari() {
+  const ua = navigator.userAgent || '';
+  if (!isIOSDevice()) return false;
+  if (!/Safari/i.test(ua)) return false;
+  return !/(CriOS|FxiOS|EdgiOS|OPiOS|MicroMessenger|QQ\/|DingTalk|AlipayClient|Weibo|aweme|ByteDance|baiduboxapp)/i.test(ua);
+}
+function pwaGuideNextAt() {
+  try {
+    const v = JSON.parse(localStorage.getItem(PWA_GUIDE_KEY) || '{}');
+    return Number(v && v.nextAt) || 0;
+  } catch (_) { return 0; }
+}
+function markPwaGuideSeen(days) {
+  try {
+    const now = Date.now();
+    localStorage.setItem(PWA_GUIDE_KEY, JSON.stringify({
+      seenAt: now,
+      nextAt: now + Number(days || 7) * 24 * 60 * 60 * 1000,
+    }));
+  } catch (_) {}
+}
+function pwaGuideBlocked() {
+  const visible = (id) => {
+    const el = $(id);
+    return !!(el && !el.classList.contains('hidden'));
+  };
+  return visible('gate') || visible('announce') || visible('msgModal') ||
+    visible('itemPopup') || !!$('obPhone') || !!$('mustPwdMask') || !!$('qqMask');
+}
+function closePwaGuide(days) {
+  const g = $('pwaGuide');
+  if (!g) return;
+  markPwaGuideSeen(days || 7);
+  g.classList.add('hidden');
+  g.innerHTML = '';
+  if (pwaGuideOpen) {
+    pwaGuideOpen = false;
+    try { unlockScroll(); } catch (_) {}
+  }
+}
+function openPwaGuide() {
+  const g = $('pwaGuide');
+  if (!g || pwaGuideOpen) return;
+  const safari = isIOSSafari();
+  const shareIco = '<span class="pwa-share-ico"><svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 16V4"/><path d="m8 8 4-4 4 4"/><path d="M5 12v6a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-6"/></svg></span>';
+  const moreIco = '<span class="pwa-share-ico" style="background:#334155"><svg width="21" height="21" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/></svg></span>';
+  const steps = safari ? [
+    { icon: shareIco, text: '<b>点 Safari 底部的“分享”</b><br>就是方框向上箭头的按钮' },
+    { num: '2', text: '<b>选择“添加到主屏幕”</b><br>菜单较长时可向上滑动' },
+    { num: '3', text: '<b>点右上角“添加”</b><br>桌面上就会出现“每日数据”' },
+  ] : [
+    { icon: moreIco, text: '<b>先在当前页面打开右上角菜单</b><br>选择“在 Safari 中打开”' },
+    { num: '2', text: '<b>在 Safari 底部点“分享”</b><br>找到方框向上箭头的按钮' },
+    { num: '3', text: '<b>选择“添加到主屏幕”并点“添加”</b>' },
+  ];
+  g.innerHTML = '<div class="pwa-sheet" role="dialog" aria-modal="true" aria-labelledby="pwaGuideTitle">' +
+    '<button class="pwa-close" id="pwaGuideClose" aria-label="关闭">×</button>' +
+    '<div class="pwa-kicker">IPHONE · 每日数据</div>' +
+    '<h3 id="pwaGuideTitle">' + (safari ? '把每日数据放到主屏幕' : '先在 Safari 中打开') + '</h3>' +
+    '<p class="pwa-lead">以后点桌面图标就能直接进入，登录状态也会保留，不用每次输入密码。</p>' +
+    '<div class="pwa-steps">' + steps.map((s) => '<div class="pwa-step">' +
+      (s.icon || '<span class="pwa-num">' + s.num + '</span>') +
+      '<div class="pwa-step-copy">' + s.text + '</div></div>').join('') + '</div>' +
+    '<p class="pwa-note">如果菜单里没有“添加到主屏幕”，请升级 iOS 后重试。</p>' +
+    '<div class="pwa-actions"><button class="later" id="pwaGuideLater">以后再说</button>' +
+    '<button class="ok" id="pwaGuideOk">我知道了</button></div>' +
+    '</div>';
+  g.classList.remove('hidden');
+  pwaGuideOpen = true;
+  try { lockScroll(); } catch (_) {}
+  $('pwaGuideClose').onclick = () => closePwaGuide(7);
+  $('pwaGuideLater').onclick = () => closePwaGuide(3);
+  $('pwaGuideOk').onclick = () => closePwaGuide(30);
+  g.onclick = (e) => { if (e.target === g) closePwaGuide(3); };
+}
+function maybeShowPwaGuide(force, attempt) {
+  attempt = Number(attempt) || 0;
+  if (!isIOSDevice() || isStandaloneWebApp() || !myToken() || pwaGuideOpen) return false;
+  if (!force && pwaGuideNextAt() > Date.now()) return false;
+  if (pwaGuideBlocked()) {
+    if (attempt < 6) {
+      clearTimeout(pwaGuideRetryTimer);
+      pwaGuideRetryTimer = setTimeout(() => maybeShowPwaGuide(force, attempt + 1), PWA_GUIDE_RETRY_MS);
+    }
+    return false;
+  }
+  openPwaGuide();
+  return true;
 }
 
 /* ==================== 绑定 QQ 提醒（契约 v2 §4.4） ====================
@@ -9845,6 +9951,8 @@ function maybeAnnounce() {
     box.classList.remove('ann-overlay-in');
     /* 引导关闭 = 弹幕挂载闸解除：首帧若被引导按住，这里立即补挂当日冠军。 */
     try { renderDanmaku(); } catch (_) {}
+    /* 用户口径：公告读完后再引导添加主屏幕，不在公告上方叠层。 */
+    setTimeout(function () { try { maybeShowPwaGuide(false); } catch (_) {} }, 180);
   }
   announceCtx = close;
 
@@ -10871,6 +10979,8 @@ function maybeAnnounceItemsPopup() {
     unlockScroll();
     /* 🎈 通报弹窗关掉 = 挂载闸放开，补挂弹幕（renderDanmaku 幂等，此时多半还没挂） */
     try { renderDanmaku(); } catch (e) {}
+    /* 用户口径：三甲通报读完后，再显示“添加到主屏幕”引导。 */
+    setTimeout(() => { try { maybeShowPwaGuide(false); } catch (_) {} }, 180);
   };
 
   /* ---- 常驻骨架：卡片双层边框 + 内层琉璃底 + 天光/粒子装饰层 ---- */
@@ -11818,6 +11928,8 @@ async function bootRest(opts) {
      弹窗编排都放完后补一次（没有弹窗的访客第一次加载也能挂上；闸仍开着时
      renderDanmaku 自己保持 hidden，通报 close / applyLoginSuccess 再补挂）。 */
   try { renderDanmaku(); } catch (e) {}
+  /* iPhone 主屏幕引导放最后，每周最多一次；首次绑定手机号后会立即优先展示。 */
+  setTimeout(() => { try { maybeShowPwaGuide(false); } catch (_) {} }, 1600);
 }
 
 /* 字段面板已随「严格按排行榜版式」移除：显示内容固定，后台级开关仍在后端生效。 */

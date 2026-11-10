@@ -163,6 +163,16 @@ mod pwa_tests {
         assert_eq!(png_size(PWA_ICON_192), (192, 192));
         assert_eq!(png_size(PWA_ICON_512), (512, 512));
     }
+
+    #[test]
+    fn public_page_has_phone_only_onboarding_and_pwa_guide() {
+        assert!(ST_PAGE.contains("id=\"pwaGuide\""));
+        assert!(ST_PAGE.contains("把每日数据放到主屏幕"));
+        assert!(ST_PAGE.contains("首次登录绑定手机号"));
+        assert!(ST_PAGE.contains("id=\"obPhone\""));
+        assert!(!ST_PAGE.contains("id=\"obQq\""), "首次登录不再要求 QQ");
+        assert!(!ST_PAGE.contains("id=\"obPass\""), "首次登录不再要求改密");
+    }
 }
 
 #[cfg(test)]

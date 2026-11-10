@@ -716,7 +716,7 @@ pub async fn my_profile_bind(
         account = %account_name,
         person_id,
         phone = %mask_phone(phone),
-        "展示端账号完成首次补全（手机号 + QQ + 密码），旧 token 已吊销并换发"
+        "展示端账号完成首次手机号绑定（QQ/密码由旧客户端可选），旧 token 已吊销并换发"
     );
     Ok(Json(v))
 }
