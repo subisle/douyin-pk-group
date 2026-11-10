@@ -48,10 +48,10 @@ android/dist/每日数据-v1.0-release.apk.sha256
 
 Web 展示页已内置平台分流：
 
-- 微信 / QQ / 抖音 / 通用 Android WebView 等内置浏览器：顶部常驻「请在浏览器中打开」，完整引导弹层也提示改用系统浏览器，并提供复制当前地址。
-- iOS Safari：推荐「分享 → 添加到主屏幕」。
-- Android 浏览器：推荐下载同源 `/download/daily.apk` 轻量版 APK；同时提供 `/download/daily.apk.sha256` 校验文件。
-- Android APK 内 WebView：UA 追加 `DailyDataAndroid/1.0`，页面识别为已安装，永久关闭安装引导。
+- 微信 / QQ / 抖音 / 通用 Android WebView 等内置浏览器：顶部常驻「请在浏览器中打开」，完整引导弹层提示切换系统浏览器后下载 App / 添加 App 到主屏幕，并提供复制当前地址。
+- iOS Safari：推荐「分享 → 添加到主屏幕」，把每日数据作为 App 使用。
+- Android 浏览器：推荐下载同源 `/download/daily.apk` 的「每日数据 App」；同时提供 `/download/daily.apk.sha256` 校验文件。
+- Android App 内 WebView：UA 追加 `DailyDataAndroid/1.0`，页面识别为已安装，永久关闭安装引导。
 - 桌面浏览器：不弹安装推荐，避免干扰。
 
 `scripts/build-android-apk.sh` 会把签名后的 APK 与校验文件同步到 `rust/crates/pk-server/src/public_teams/assets/pwa/`，由 Rust 服务作为同源公开资源下发。重新构建后需重新发布服务端代码，线上下载入口才会更新。

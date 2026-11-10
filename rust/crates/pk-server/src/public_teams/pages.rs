@@ -209,7 +209,7 @@ mod pwa_tests {
     #[test]
     fn public_page_has_phone_only_onboarding_and_pwa_guide() {
         assert!(ST_PAGE.contains("id=\"pwaGuide\""));
-        assert!(ST_PAGE.contains("把每日数据放到主屏幕"));
+        assert!(ST_PAGE.contains("把每日数据 App 放到主屏幕"));
         assert!(ST_PAGE.contains("稍后提醒"));
         assert!(ST_PAGE.contains("我已添加"));
         assert!(ST_PAGE.contains("pkPwaInstalledV1"));
@@ -222,7 +222,8 @@ mod pwa_tests {
         assert!(ST_PAGE.contains("isWechatOrInAppBrowser"), "需识别微信及内嵌浏览器");
         assert!(ST_PAGE.contains("isAndroidDevice"), "需识别 Android 设备");
         assert!(ST_PAGE.contains("请在浏览器中打开"), "微信内需提示用浏览器打开");
-        assert!(ST_PAGE.contains("推荐安装安卓轻量版"), "Android 需推荐 APK");
+        assert!(ST_PAGE.contains("微信内无法下载 App"), "微信内需提示切换浏览器下载 App");
+        assert!(ST_PAGE.contains("下载 App"), "需出现下载 App 提示");
         assert!(ST_PAGE.contains("/download/daily.apk"), "Android 下载入口应为同源公开路由");
         assert!(ST_PAGE.contains("id=\"inappBrowserTip\""), "微信内需有顶部常驻提示");
         assert!(ST_PAGE.contains("pwaGuideVariant"), "平台分流函数需存在");

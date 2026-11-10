@@ -2930,7 +2930,7 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 <div class="inapp-browser-tip hidden" id="inappBrowserTip">
   <div class="inapp-browser-tip-card" role="alert">
     <div class="inapp-browser-tip-icon" aria-hidden="true">↗</div>
-    <div class="inapp-browser-tip-copy"><b>请在浏览器中打开</b><span>微信内置浏览器无法安装到桌面或下载 APK。点右上角「…」选「在浏览器打开」。</span></div>
+    <div class="inapp-browser-tip-copy"><b>请在浏览器中打开</b><span>微信内置浏览器无法下载 App 或添加到主屏幕。点右上角「…」选「在浏览器打开」。</span></div>
     <button id="inappBrowserTipClose" aria-label="关闭提示">×</button>
   </div>
 </div>
@@ -4080,8 +4080,8 @@ async function submitProfile() {
 }
 
 /* ==================== 首页快捷方式 / 轻量 App 引导 ====================
-   先识别微信及其它 App 内嵌浏览器：提示“请在浏览器中打开”；
-   iOS 推荐 Safari 添加到主屏幕；Android 推荐同源下载轻量版 APK；
+   先识别微信及其它 App 内嵌浏览器：提示“请在浏览器中打开后下载 App”；
+   iOS 推荐把 App 添加到主屏幕；Android 推荐同源下载 App；
    从 Android APK 或主屏幕独立打开则永久静默。微信里复制当前地址后用户可自行粘贴。 */
 const PWA_GUIDE_KEY = 'pkPwaGuideV2';
 const PWA_INSTALLED_KEY = 'pkPwaInstalledV1';
@@ -4193,28 +4193,28 @@ function pwaGuideContent() {
     return {
       kicker: '微信 / APP 内置浏览器 · 每日数据',
       title: '请在浏览器中打开',
-      lead: '微信等内置浏览器不支持安装到桌面或下载 APK。请用系统浏览器打开本页，再按设备类型继续。',
+      lead: '微信等内置浏览器不支持下载 App 或添加到主屏幕。请用系统浏览器打开本页：iPhone 添加 App 到主屏幕，Android 下载 App。',
       steps: [
         { icon: moreIco, text: '<b>点右上角「…」菜单</b><br>不同 App 也可能显示在右上角的更多按钮' },
-        { icon: browserIco, text: '<b>选择「在浏览器打开」</b><br>iPhone 选 Safari，安卓选 Chrome / 系统浏览器' },
+        { icon: browserIco, text: '<b>选择「在浏览器打开」</b><br>iPhone 选 Safari 添加 App 到主屏幕，安卓选 Chrome / 系统浏览器下载 App' },
         { num: '3', text: '<b>复制地址或重新打开本页</b><br>下方可以直接复制当前网址' },
       ],
       note: '登录状态保存在浏览器里，换浏览器打开后需要重新登录一次。',
       later: '稍后提醒',
       ok: null,
-      extra: copyBox + '<p class="pwa-warn">微信内无法直接安装；请勿在这里点击下载 APK。</p>',
+      extra: copyBox + '<p class="pwa-warn">微信内无法下载 App；请先按上方步骤切换浏览器。</p>',
     };
   }
   if (variant === 'ios') {
     const safari = isIOSSafari();
     return {
       kicker: 'IPHONE · 每日数据',
-      title: safari ? '把每日数据放到主屏幕' : '先在 Safari 中打开',
-      lead: '以后点桌面图标就能直接进入，登录状态也会保留，不用每次输入密码。',
+      title: safari ? '把每日数据 App 放到主屏幕' : '先在 Safari 中打开',
+      lead: '以后点桌面 App 图标就能直接进入，登录状态也会保留，不用每次输入密码。',
       steps: safari ? [
         { icon: shareIco, text: '<b>点 Safari 底部的“分享”</b><br>就是方框向上箭头的按钮' },
         { num: '2', text: '<b>选择“添加到主屏幕”</b><br>菜单较长时可向上滑动' },
-        { num: '3', text: '<b>点右上角“添加”</b><br>桌面上就会出现“每日数据”' },
+        { num: '3', text: '<b>点右上角“添加”</b><br>桌面上就会出现“每日数据”App' },
       ] : [
         { icon: moreIco, text: '<b>先在当前页面打开右上角菜单</b><br>选择“在 Safari 中打开”' },
         { icon: shareIco, text: '<b>在 Safari 底部点“分享”</b><br>找到方框向上箭头的按钮' },
@@ -4229,16 +4229,16 @@ function pwaGuideContent() {
   if (variant === 'android') {
     return {
       kicker: 'ANDROID · 每日数据',
-      title: '推荐安装安卓轻量版',
-      lead: '约 230KB，固定打开每日数据，保留登录状态，点桌面图标直接进入。仅申请联网权限。',
+      title: '下载 App',
+      lead: '每日数据 App 约 230KB，固定打开每日数据，保留登录状态，点桌面图标直接进入。仅申请联网权限。',
       steps: [
-        { icon: androidIco, text: '<b>点下方「下载轻量版 APK」</b><br>下载的是同源正式签名安装包' },
+        { icon: androidIco, text: '<b>点下方「下载 App」</b><br>下载的是同源正式签名安装包' },
         { num: '2', text: '<b>按系统提示允许安装</b><br>首次侧载会提示未知来源，这是系统安全确认' },
         { num: '3', text: '<b>安装完成后打开一次</b><br>之后不再弹出本提醒' },
       ],
       note: '如被浏览器拦截，请允许当前来源安装；后续同签名升级不会再冲突。',
       later: '稍后提醒',
-      ok: '下载轻量版 APK',
+      ok: '下载 App',
       extra: '<p class="pwa-note">校验文件：<a href="/download/daily.apk.sha256" target="_blank" rel="noopener">daily.apk.sha256</a></p>',
     };
   }
