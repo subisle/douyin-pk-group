@@ -581,6 +581,8 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/icons/icon-192.png", get(public_teams::pwa_icon_192))
         .route("/icons/icon-512.png", get(public_teams::pwa_icon_512))
+        .route("/download/daily.apk", get(public_teams::android_apk))
+        .route("/download/daily.apk.sha256", get(public_teams::android_apk_sha256))
         .route("/", get(public_teams::st_root))
         .route("/report", get(public_teams::st_root))
         .route("/lineage", get(public_teams::st_root))

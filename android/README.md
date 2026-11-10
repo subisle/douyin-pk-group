@@ -44,6 +44,18 @@ android/dist/每日数据-v1.0-release.apk.sha256
 修改 `android/app/src/main/java/cc/subisle/daily/MainActivity.java` 的 `APP_URL`，重新构建即可。
 后续建议把 43 的 HTTP 入口换成已备案域名的 HTTPS，并同步把 `APP_URL` 改成 HTTPS；届时可以把网络安全配置里的明文例外彻底去掉。
 
+## 展示端平台推荐
+
+Web 展示页已内置平台分流：
+
+- 微信 / QQ / 抖音 / 通用 Android WebView 等内置浏览器：顶部常驻「请在浏览器中打开」，完整引导弹层也提示改用系统浏览器，并提供复制当前地址。
+- iOS Safari：推荐「分享 → 添加到主屏幕」。
+- Android 浏览器：推荐下载同源 `/download/daily.apk` 轻量版 APK；同时提供 `/download/daily.apk.sha256` 校验文件。
+- Android APK 内 WebView：UA 追加 `DailyDataAndroid/1.0`，页面识别为已安装，永久关闭安装引导。
+- 桌面浏览器：不弹安装推荐，避免干扰。
+
+`scripts/build-android-apk.sh` 会把签名后的 APK 与校验文件同步到 `rust/crates/pk-server/src/public_teams/assets/pwa/`，由 Rust 服务作为同源公开资源下发。重新构建后需重新发布服务端代码，线上下载入口才会更新。
+
 ## 安装提示说明
 
 首次从浏览器、微信或文件管理器安装时，Android 通常会提示“未知来源应用 / 需要允许安装”。这是系统安全机制，不是 APK 有风险。让用户允许当前来源安装即可；后续同签名升级不会再出现签名冲突。若仍被 Play Protect 拦截，选择“仍要安装 / 更多信息”属于用户侧确认，应用本身不依赖任何绕过逻辑。

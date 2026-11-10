@@ -9,13 +9,16 @@ pub(super) const ST_PAGE: &str = include_str!("st_page.html");
 /// 独立轻量资源页：避免为了 2176 条素材加载整站约 719KB 的展示页脚本。
 const RESOURCES_PAGE: &str = include_str!("resources_page.html");
 
-/* ---------------------- iPhone 主屏幕 Web App ---------------------- */
+/* ---------------------- iOS PWA / Android APK 公开资源 ---------------------- */
 
-/// 轻量版 iOS App 使用 Web App Manifest；不需要 Xcode、签名或 App Store。
+/// iOS 主屏幕 Web App：Manifest + 不透明 PNG 图标，不需要 Xcode、签名或 App Store。
 const PWA_MANIFEST: &str = include_str!("assets/pwa/manifest.webmanifest");
 const PWA_APPLE_TOUCH_ICON: &[u8] = include_bytes!("assets/pwa/apple-touch-icon.png");
 const PWA_ICON_192: &[u8] = include_bytes!("assets/pwa/icon-192.png");
 const PWA_ICON_512: &[u8] = include_bytes!("assets/pwa/icon-512.png");
+/// Android 轻量版 release APK：由 scripts/build-android-apk.sh 同步进来。
+const ANDROID_APK: &[u8] = include_bytes!("assets/pwa/daily-release.apk");
+const ANDROID_APK_SHA256: &[u8] = include_bytes!("assets/pwa/daily-release.apk.sha256");
 
 fn pwa_asset(bytes: &'static [u8], content_type: &'static str) -> Response {
     (
@@ -31,7 +34,7 @@ fn pwa_asset(bytes: &'static [u8], content_type: &'static str) -> Response {
         .into_response()
 }
 
-/// GET /manifest.webmanifest：Safari「添加到主屏幕」读取的 App 配置。
+/// GET /manifest.webmanifest：Safari / 浏览器「添加到主屏幕」读取的 App 配置。
 pub async fn pwa_manifest() -> Response {
     (
         [
@@ -62,6 +65,45 @@ pub async fn pwa_icon_192() -> Response {
 /// GET /icons/icon-512.png。
 pub async fn pwa_icon_512() -> Response {
     pwa_asset(PWA_ICON_512, "image/png")
+}
+
+/// GET /download/daily.apk：Android 轻量版安装包。
+/// 与站点同源；微信内浏览器由前端提示改用系统浏览器后再下载。
+pub async fn android_apk() -> Response {
+    (
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "application/vnd.android.package-archive",
+            ),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                "attachment; filename=\"daily-release.apk\"",
+            ),
+            (
+                axum::http::header::CACHE_CONTROL,
+                "public, max-age=300, stale-while-revalidate=60",
+            ),
+        ],
+        ANDROID_APK,
+    )
+        .into_response()
+}
+
+/// GET /download/daily.apk.sha256：方便下载后校验完整性。
+/// 值由构建脚本生成后随 APK 同步，不把哈希库拉进服务端依赖树。
+pub async fn android_apk_sha256() -> Response {
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+            (
+                axum::http::header::CACHE_CONTROL,
+                "public, max-age=300, stale-while-revalidate=60",
+            ),
+        ],
+        ANDROID_APK_SHA256,
+    )
+        .into_response()
 }
 
 /// GET / 根路径：展示页（2026-10-11 起不分男女，统一读 /api/public/teams/all）
@@ -177,6 +219,54 @@ mod pwa_tests {
         assert!(!ST_PAGE.contains("id=\"obPass\""), "首次登录不再要求改密");
         assert!(ST_PAGE.contains("isAndroidAppShell"), "Android APK 入口应被识别为已安装");
         assert!(ST_PAGE.contains("DailyDataAndroid\\/"), "APK 的 UA 标记需与 Web 端一致");
+        assert!(ST_PAGE.contains("isWechatOrInAppBrowser"), "需识别微信及内嵌浏览器");
+        assert!(ST_PAGE.contains("isAndroidDevice"), "需识别 Android 设备");
+        assert!(ST_PAGE.contains("请在浏览器中打开"), "微信内需提示用浏览器打开");
+        assert!(ST_PAGE.contains("推荐安装安卓轻量版"), "Android 需推荐 APK");
+        assert!(ST_PAGE.contains("/download/daily.apk"), "Android 下载入口应为同源公开路由");
+        assert!(ST_PAGE.contains("id=\"inappBrowserTip\""), "微信内需有顶部常驻提示");
+        assert!(ST_PAGE.contains("pwaGuideVariant"), "平台分流函数需存在");
+        assert!(ST_PAGE.contains("variant === 'android'"), "Android 推荐分支需存在");
+    }
+
+    fn guide_source() -> &'static str {
+        let start = ST_PAGE
+            .find("const PWA_GUIDE_KEY")
+            .expect("平台引导常量应存在");
+        let end = ST_PAGE[start..]
+            .find("/* ==================== 绑定 QQ")
+            .map(|i| start + i)
+            .expect("平台引导段应有结束标记");
+        &ST_PAGE[start..end]
+    }
+
+    #[test]
+    fn platform_guide_detects_inapp_ios_and_android() {
+        let src = guide_source();
+        assert!(src.contains("if (/DailyDataAndroid\\//i.test(ua)) return false;"));
+        assert!(src.contains("variant === 'inapp'"));
+        assert!(src.contains("请在浏览器中打开"));
+        assert!(src.contains("variant === 'ios'"));
+        assert!(src.contains("variant === 'android'"));
+        assert!(src.contains("'/download/daily.apk'"));
+        assert!(src.contains("window.location.href = ANDROID_APK_URL"));
+        assert!(src.contains("/* 仅识别安卓 / 苹果；其他环境不弹推荐层。 */"), "仅手机推荐、其它环境不应展示");
+        assert!(src.contains("/;\\s*wv\\)/i.test(ua)"), "需识别通用 Android WebView");
+    }
+
+    #[test]
+    fn android_apk_asset_is_a_signed_zip() {
+        assert_eq!(&ANDROID_APK[..2], b"PK", "APK 必须是 ZIP 容器");
+        assert!(ANDROID_APK.len() > 100_000, "APK 体积异常，可能未同步构建产物");
+        assert!(ANDROID_APK.len() < 1_000_000, "轻量 APK 不应超过 1MB");
+        assert!(
+            ANDROID_APK.windows(11).any(|w| w == b"classes.dex"),
+            "APK 必须包含 classes.dex"
+        );
+        assert!(
+            ANDROID_APK.windows(9).any(|w| w == b"META-INF/") || ANDROID_APK.windows(5).any(|w| w == b".RSA"),
+            "APK 必须带签名元数据"
+        );
     }
 }
 

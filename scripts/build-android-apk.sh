@@ -16,6 +16,7 @@ APKSIGNER="$BT/apksigner"
 
 APP="$ROOT/android"
 SRC="$APP/app/src/main"
+WEB_ASSETS="$ROOT/rust/crates/pk-server/src/public_teams/assets/pwa"
 BUILD="$APP/build"
 DIST="$APP/dist"
 KEY_DIR="$APP/keystore"
@@ -104,6 +105,13 @@ cp "$ALIGNED" "$OUT_APK"
   "$OUT_APK"
 "$APKSIGNER" verify --verbose --min-sdk-version 26 "$OUT_APK" > "$DIST/apksigner-verify.txt"
 shasum -a 256 "$OUT_APK" > "$OUT_APK.sha256"
+
+# 6) 同步一份到 Web 端公开资源，Android 浏览器可直接下载安装。
+# 这是 release 签名产物，不是签名私钥；换签名后需重新构建并重新发布。
+mkdir -p "$WEB_ASSETS"
+cp "$OUT_APK" "$WEB_ASSETS/daily-release.apk"
+sed 's|  .*/每日数据-v1\.0-release\.apk$|  daily-release.apk|' "$OUT_APK.sha256" \
+  > "$WEB_ASSETS/daily-release.apk.sha256"
 
 printf '\nAPK: %s\n' "$OUT_APK"
 printf 'SHA256: %s\n' "$(cat "$OUT_APK.sha256")"

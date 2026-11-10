@@ -78,7 +78,14 @@ public final class MainActivity extends Activity {
         s.setCacheMode(WebSettings.LOAD_DEFAULT);
         s.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
         String ua = s.getUserAgentString();
-        s.setUserAgentString((ua == null || ua.isEmpty() ? "Mozilla/5.0" : ua) + " " + APK_UA_TOKEN);
+        String cleanUa = ua == null ? "" : ua;
+        if (cleanUa.contains("; wv") || cleanUa.contains("MicroMessenger")) {
+            cleanUa = cleanUa.replaceAll("(?i)MicroMessenger/[^ ]+", "")
+                    .replace("; wv", "")
+                    .replaceAll("\\s+", " ")
+                    .trim();
+        }
+        s.setUserAgentString((cleanUa.isEmpty() ? "Mozilla/5.0" : cleanUa) + " " + APK_UA_TOKEN);
 
         CookieManager.getInstance().setAcceptCookie(true);
         CookieManager.getInstance().setAcceptThirdPartyCookies(web, false);

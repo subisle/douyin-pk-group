@@ -25,6 +25,7 @@ backups
 **/*.dump
 **/*.sql.gz
 **/*.sha256
+!rust/crates/pk-server/src/public_teams/assets/pwa/daily-release.apk.sha256
 # 运营数据与审计/入库现场报告（含真实手机号、口令、内网拓扑）
 音浪数据
 audit-*.md

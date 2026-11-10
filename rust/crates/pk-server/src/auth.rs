@@ -368,6 +368,8 @@ const OPEN_PREFIXES: &[&str] = &[
     // iPhone 主屏幕 Web App 的公开静态资源：Manifest 与主屏幕图标不能要求后台口令。
     "/manifest.webmanifest",
     "/icons/",
+    "/download/daily.apk",
+    "/download/daily.apk.sha256",
     "/api/auth/session",
     "/api/auth/login",
     "/api/health",
@@ -827,6 +829,8 @@ mod tests {
             "/api/public/",
             "/api/public/teams/f",
             "/api/health",
+            "/download/daily.apk",
+            "/download/daily.apk.sha256",
             // 不带尾斜杠的展示端子路径入口：白名单写的是 `/my/`，
             // 但浏览器和前端 router 用的是 `/my`（历史上这里漏了，
             // `/my` 被鉴权中间件拦成 401，展示端「我的」整页打不开）

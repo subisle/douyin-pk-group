@@ -2413,8 +2413,25 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
   .gate-box .qq-wrap input { padding-right:72px; }
 }
 
-/* ===== 添加到 iPhone 主屏幕引导（2026-11-10） ===== */
-#pwaGuide { position:fixed; inset:0; z-index:94; display:flex; align-items:flex-end;
+/* ===== 微信 / 内置浏览器顶部提示 ===== */
+.inapp-browser-tip { position:fixed; z-index:88; top:calc(env(safe-area-inset-top,0px) + 8px);
+  left:10px; right:10px; pointer-events:none; }
+.inapp-browser-tip.hidden { display:none; }
+.inapp-browser-tip-card { pointer-events:auto; max-width:520px; margin:0 auto;
+  display:flex; align-items:center; gap:10px; padding:10px 12px; border-radius:16px;
+  background:rgba(255,247,237,.96); border:1px solid rgba(251,146,60,.55);
+  box-shadow:0 12px 34px rgba(120,53,15,.18); color:#9A3412;
+  -webkit-backdrop-filter:blur(12px); backdrop-filter:blur(12px); }
+.inapp-browser-tip-icon { flex:none; width:30px; height:30px; border-radius:10px;
+  display:grid; place-items:center; background:#FFEDD5; color:#C2410C; font-size:18px; font-weight:900; }
+.inapp-browser-tip-copy { min-width:0; flex:1; display:flex; flex-direction:column; gap:2px;
+  font-size:12px; line-height:1.45; }
+.inapp-browser-tip-copy b { font-size:13px; }
+.inapp-browser-tip-card button { flex:none; width:28px; height:28px; border:0; border-radius:9999px;
+  background:transparent; color:#9A3412; font-size:22px; line-height:1; cursor:pointer; }
+
+/* ===== 首页快捷方式 / 轻量 App 引导（2026-11-10；按平台分流） ===== */
+#pwaGuide { position:fixed; inset:0; z-index:101; display:flex; align-items:flex-end;
   justify-content:center; padding:12px 12px calc(env(safe-area-inset-bottom,0px) + 12px);
   background:rgba(15,23,42,.42); -webkit-backdrop-filter:blur(10px); backdrop-filter:blur(10px);
   animation:stFadeIn .16s ease-out; }
@@ -2449,6 +2466,14 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
   background:#0066FF; color:#fff; font-size:15px; font-weight:700;
   box-shadow:0 5px 16px rgba(0,102,255,.25); }
 .pwa-actions button:active { transform:scale(.985); filter:brightness(.96); }
+.pwa-actions .ok[disabled] { opacity:.62; box-shadow:none; }
+.pwa-copy { display:flex; gap:8px; margin:0 0 14px; }
+.pwa-copy input { min-width:0; flex:1; height:42px; padding:0 11px; border:1px solid #E2E8F0;
+  border-radius:12px; background:#F8FAFC; color:#334155; font-size:12px; }
+.pwa-copy button { flex:none; width:72px; height:42px; border:0; border-radius:12px;
+  background:#EEF2FF; color:#4F46E5; font-size:13px; font-weight:700; }
+.pwa-warn { margin:13px 0 0; padding:10px 12px; border-radius:12px; background:#FFF7ED;
+  color:#9A3412; font-size:12px; line-height:1.6; }
 .team-pick .pick-title { font-weight:800; font-size:17px; margin-bottom:16px; }
 .team-pick .pick-row { display:flex; gap:12px; }
 .team-pick .pick-btn { flex:1; height:96px; border:1px solid #E2E8F0; border-radius:1rem;
@@ -2901,6 +2926,15 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 </head>
 <body>
 
+<!-- 微信/内置浏览器打开时优先提示，登录后由平台引导弹层接管详细步骤。 -->
+<div class="inapp-browser-tip hidden" id="inappBrowserTip">
+  <div class="inapp-browser-tip-card" role="alert">
+    <div class="inapp-browser-tip-icon" aria-hidden="true">↗</div>
+    <div class="inapp-browser-tip-copy"><b>请在浏览器中打开</b><span>微信内置浏览器无法安装到桌面或下载 APK。点右上角「…」选「在浏览器打开」。</span></div>
+    <button id="inappBrowserTipClose" aria-label="关闭提示">×</button>
+  </div>
+</div>
+
 <div class="stale hidden" id="stale">网络不太顺，显示的可能不是最新数据</div>
 <!-- 账号还没绑主播（历史遗留）：全站提醒。绑定由管理员在后台处理，前端没有自助入口（2026-10-14） -->
 <div class="bindbar" id="bindBar" hidden>你还没有绑定主播，请联系管理员帅帅处理</div>
@@ -3038,7 +3072,7 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
      maybeAnnounceItemsPopup 重建；z-index 89：低于登录门 #gate(90)
      登录门打开时被自然盖住，也低于引导(100)与消息弹窗(95)，各层互不叠架。 -->
 <div id="itemPopup" class="hidden"></div>
-<!-- iPhone 主屏幕安装引导：只在 iOS 且尚未以独立 App 运行时展示 -->
+<!-- 首页快捷方式 / 轻量 App 引导：先提示微信内置浏览器用系统浏览器打开，再按 iOS / Android 分流 -->
 <div id="pwaGuide" class="hidden"></div>
 <div id="wm" hidden></div>
 
@@ -4045,11 +4079,14 @@ async function submitProfile() {
   }
 }
 
-/* ==================== 添加到 iPhone 主屏幕引导 ====================
-   未添加：每 24 小时最多提醒一次；从主屏幕独立打开或点“我已添加”后永久静默。 */
+/* ==================== 首页快捷方式 / 轻量 App 引导 ====================
+   先识别微信及其它 App 内嵌浏览器：提示“请在浏览器中打开”；
+   iOS 推荐 Safari 添加到主屏幕；Android 推荐同源下载轻量版 APK；
+   从 Android APK 或主屏幕独立打开则永久静默。微信里复制当前地址后用户可自行粘贴。 */
 const PWA_GUIDE_KEY = 'pkPwaGuideV2';
 const PWA_INSTALLED_KEY = 'pkPwaInstalledV1';
 const PWA_GUIDE_RETRY_MS = 1400;
+const ANDROID_APK_URL = '/download/daily.apk';
 let pwaGuideOpen = false;
 let pwaGuideRetryTimer = null;
 
@@ -4057,6 +4094,17 @@ function isIOSDevice() {
   const ua = navigator.userAgent || '';
   return /iPhone|iPad|iPod/i.test(ua) ||
     (navigator.platform === 'MacIntel' && Number(navigator.maxTouchPoints) > 1);
+}
+function isAndroidDevice() {
+  return /Android/i.test(navigator.userAgent || '');
+}
+function isWechatOrInAppBrowser() {
+  const ua = navigator.userAgent || '';
+  /* APK 壳会先剥掉系统 WebView 的 MicroMessenger/wv 标记，再追加 DailyDataAndroid/；
+     这里必须让 APK 壳优先于内嵌浏览器识别，否则会误弹“请用浏览器打开”。 */
+  if (/DailyDataAndroid\//i.test(ua)) return false;
+  return /MicroMessenger|QQ\/|DingTalk|AlipayClient|Weibo|aweme|ByteDance|baiduboxapp/i.test(ua) ||
+    /;\s*wv\)/i.test(ua);
 }
 function isStandaloneWebApp() {
   return window.navigator.standalone === true ||
@@ -4125,39 +4173,131 @@ function closePwaGuide(days, installed) {
     try { unlockScroll(); } catch (_) {}
   }
 }
+function pwaGuideVariant() {
+  if (isAndroidAppShell() || isStandaloneWebApp() || pwaGuideInstalled()) return null;
+  if (isWechatOrInAppBrowser()) return 'inapp';
+  if (isIOSDevice()) return 'ios';
+  if (isAndroidDevice()) return 'android';
+  /* 仅识别安卓 / 苹果；其他环境不弹推荐层。 */
+  return null;
+}
+function pwaGuideContent() {
+  const variant = pwaGuideVariant();
+  if (!variant) return null;
+  const shareIco = '<span class="pwa-share-ico"><svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 16V4"/><path d="m8 8 4-4 4 4"/><path d="M5 12v6a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-6"/></svg></span>';
+  const moreIco = '<span class="pwa-share-ico" style="background:#334155"><svg width="21" height="21" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/></svg></span>';
+  const androidIco = '<span class="pwa-share-ico" style="background:#16A34A"><svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 19h14"/></svg></span>';
+  const browserIco = '<span class="pwa-share-ico" style="background:#F97316"><svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a15 15 0 0 1 0 18"/><path d="M12 3a15 15 0 0 0 0 18"/></svg></span>';
+  const copyBox = '<div class="pwa-copy"><input id="pwaGuideUrl" readonly aria-label="当前页面地址"><button id="pwaGuideCopy">复制地址</button></div>';
+  if (variant === 'inapp') {
+    return {
+      kicker: '微信 / APP 内置浏览器 · 每日数据',
+      title: '请在浏览器中打开',
+      lead: '微信等内置浏览器不支持安装到桌面或下载 APK。请用系统浏览器打开本页，再按设备类型继续。',
+      steps: [
+        { icon: moreIco, text: '<b>点右上角「…」菜单</b><br>不同 App 也可能显示在右上角的更多按钮' },
+        { icon: browserIco, text: '<b>选择「在浏览器打开」</b><br>iPhone 选 Safari，安卓选 Chrome / 系统浏览器' },
+        { num: '3', text: '<b>复制地址或重新打开本页</b><br>下方可以直接复制当前网址' },
+      ],
+      note: '登录状态保存在浏览器里，换浏览器打开后需要重新登录一次。',
+      later: '稍后提醒',
+      ok: null,
+      extra: copyBox + '<p class="pwa-warn">微信内无法直接安装；请勿在这里点击下载 APK。</p>',
+    };
+  }
+  if (variant === 'ios') {
+    const safari = isIOSSafari();
+    return {
+      kicker: 'IPHONE · 每日数据',
+      title: safari ? '把每日数据放到主屏幕' : '先在 Safari 中打开',
+      lead: '以后点桌面图标就能直接进入，登录状态也会保留，不用每次输入密码。',
+      steps: safari ? [
+        { icon: shareIco, text: '<b>点 Safari 底部的“分享”</b><br>就是方框向上箭头的按钮' },
+        { num: '2', text: '<b>选择“添加到主屏幕”</b><br>菜单较长时可向上滑动' },
+        { num: '3', text: '<b>点右上角“添加”</b><br>桌面上就会出现“每日数据”' },
+      ] : [
+        { icon: moreIco, text: '<b>先在当前页面打开右上角菜单</b><br>选择“在 Safari 中打开”' },
+        { icon: shareIco, text: '<b>在 Safari 底部点“分享”</b><br>找到方框向上箭头的按钮' },
+        { num: '3', text: '<b>选择“添加到主屏幕”并点“添加”</b>' },
+      ],
+      note: '添加后从桌面打开一次，之后将永久关闭此提醒。',
+      later: '稍后提醒',
+      ok: '我已添加',
+      extra: '',
+    };
+  }
+  if (variant === 'android') {
+    return {
+      kicker: 'ANDROID · 每日数据',
+      title: '推荐安装安卓轻量版',
+      lead: '约 230KB，固定打开每日数据，保留登录状态，点桌面图标直接进入。仅申请联网权限。',
+      steps: [
+        { icon: androidIco, text: '<b>点下方「下载轻量版 APK」</b><br>下载的是同源正式签名安装包' },
+        { num: '2', text: '<b>按系统提示允许安装</b><br>首次侧载会提示未知来源，这是系统安全确认' },
+        { num: '3', text: '<b>安装完成后打开一次</b><br>之后不再弹出本提醒' },
+      ],
+      note: '如被浏览器拦截，请允许当前来源安装；后续同签名升级不会再冲突。',
+      later: '稍后提醒',
+      ok: '下载轻量版 APK',
+      extra: '<p class="pwa-note">校验文件：<a href="/download/daily.apk.sha256" target="_blank" rel="noopener">daily.apk.sha256</a></p>',
+    };
+  }
+  return null;
+}
 function openPwaGuide() {
   const g = $('pwaGuide');
   if (!g || pwaGuideOpen) return;
-  const safari = isIOSSafari();
-  const shareIco = '<span class="pwa-share-ico"><svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 16V4"/><path d="m8 8 4-4 4 4"/><path d="M5 12v6a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-6"/></svg></span>';
-  const moreIco = '<span class="pwa-share-ico" style="background:#334155"><svg width="21" height="21" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/></svg></span>';
-  const steps = safari ? [
-    { icon: shareIco, text: '<b>点 Safari 底部的“分享”</b><br>就是方框向上箭头的按钮' },
-    { num: '2', text: '<b>选择“添加到主屏幕”</b><br>菜单较长时可向上滑动' },
-    { num: '3', text: '<b>点右上角“添加”</b><br>桌面上就会出现“每日数据”' },
-  ] : [
-    { icon: moreIco, text: '<b>先在当前页面打开右上角菜单</b><br>选择“在 Safari 中打开”' },
-    { num: '2', text: '<b>在 Safari 底部点“分享”</b><br>找到方框向上箭头的按钮' },
-    { num: '3', text: '<b>选择“添加到主屏幕”并点“添加”</b>' },
-  ];
+  const cfg = pwaGuideContent();
+  if (!cfg) return;
+  let actions = '<button class="later" id="pwaGuideLater">' + cfg.later + '</button>';
+  if (cfg.ok) actions += '<button class="ok" id="pwaGuideOk">' + cfg.ok + '</button>';
   g.innerHTML = '<div class="pwa-sheet" role="dialog" aria-modal="true" aria-labelledby="pwaGuideTitle">' +
     '<button class="pwa-close" id="pwaGuideClose" aria-label="关闭">×</button>' +
-    '<div class="pwa-kicker">IPHONE · 每日数据</div>' +
-    '<h3 id="pwaGuideTitle">' + (safari ? '把每日数据放到主屏幕' : '先在 Safari 中打开') + '</h3>' +
-    '<p class="pwa-lead">以后点桌面图标就能直接进入，登录状态也会保留，不用每次输入密码。</p>' +
-    '<div class="pwa-steps">' + steps.map((s) => '<div class="pwa-step">' +
+    '<div class="pwa-kicker">' + cfg.kicker + '</div>' +
+    '<h3 id="pwaGuideTitle">' + cfg.title + '</h3>' +
+    '<p class="pwa-lead">' + cfg.lead + '</p>' +
+    '<div class="pwa-steps">' + cfg.steps.map((s) => '<div class="pwa-step">' +
       (s.icon || '<span class="pwa-num">' + s.num + '</span>') +
       '<div class="pwa-step-copy">' + s.text + '</div></div>').join('') + '</div>' +
-    '<p class="pwa-note">添加后从桌面打开一次，之后将永久关闭此提醒。</p>' +
-    '<div class="pwa-actions"><button class="later" id="pwaGuideLater">稍后提醒</button>' +
-    '<button class="ok" id="pwaGuideOk">我已添加</button></div>' +
+    (cfg.extra || '') +
+    '<p class="pwa-note">' + cfg.note + '</p>' +
+    '<div class="pwa-actions">' + actions + '</div>' +
     '</div>';
   g.classList.remove('hidden');
   pwaGuideOpen = true;
   try { lockScroll(); } catch (_) {}
   $('pwaGuideClose').onclick = () => closePwaGuide(1);
   $('pwaGuideLater').onclick = () => closePwaGuide(1);
-  $('pwaGuideOk').onclick = () => closePwaGuide(1, true);
+  const okBtn = $('pwaGuideOk');
+  if (okBtn) {
+    okBtn.onclick = () => {
+      const variant = pwaGuideVariant();
+      if (variant === 'android') {
+        okBtn.disabled = true;
+        okBtn.textContent = '正在下载…';
+        window.location.href = ANDROID_APK_URL;
+        setTimeout(() => { okBtn.disabled = false; okBtn.textContent = cfg.ok; }, 1800);
+      } else {
+        closePwaGuide(1, true);
+      }
+    };
+  }
+  const urlInput = $('pwaGuideUrl');
+  if (urlInput) urlInput.value = location.href;
+  const copyBtn = $('pwaGuideCopy');
+  if (copyBtn) {
+    copyBtn.onclick = async () => {
+      const text = (urlInput && urlInput.value) || location.href;
+      try {
+        await navigator.clipboard.writeText(text);
+        copyBtn.textContent = '已复制';
+      } catch (_) {
+        if (urlInput) { urlInput.select(); document.execCommand('copy'); }
+        copyBtn.textContent = '请手动复制';
+      }
+      setTimeout(() => { copyBtn.textContent = '复制地址'; }, 1600);
+    };
+  }
   g.onclick = (e) => { if (e.target === g) closePwaGuide(1); };
 }
 function maybeShowPwaGuide(force, attempt) {
@@ -4167,7 +4307,7 @@ function maybeShowPwaGuide(force, attempt) {
     markPwaGuideInstalled();
     return false;
   }
-  if (pwaGuideInstalled() || !isIOSDevice() || !myToken() || pwaGuideOpen) return false;
+  if (pwaGuideInstalled() || !myToken() || pwaGuideOpen) return false;
   if (!force && pwaGuideNextAt() > Date.now()) return false;
   if (pwaGuideBlocked()) {
     if (attempt < 6) {
@@ -11702,6 +11842,12 @@ function hideBootGate() {
 
 (async function boot() {
   applyTeam();
+  try {
+    const wechatTip = $('inappBrowserTip');
+    if (wechatTip && isWechatOrInAppBrowser() && !pwaGuideInstalled()) wechatTip.classList.remove('hidden');
+    const closeWechatTip = $('inappBrowserTipClose');
+    if (closeWechatTip) closeWechatTip.onclick = () => wechatTip && wechatTip.classList.add('hidden');
+  } catch (_) {}
   /* 与登录门并行：先拉密文，登录后只取一次性密钥并本地解密。
      有历史团别时只预取一个；首次访问并行预取 all/male/female，登录后选命中的那份。 */
   const prefetchHint = prefetchTeamHint();
@@ -11958,7 +12104,7 @@ async function bootRest(opts) {
      弹窗编排都放完后补一次（没有弹窗的访客第一次加载也能挂上；闸仍开着时
      renderDanmaku 自己保持 hidden，通报 close / applyLoginSuccess 再补挂）。 */
   try { renderDanmaku(); } catch (e) {}
-  /* iPhone 主屏幕引导放最后，每周最多一次；首次绑定手机号后会立即优先展示。 */
+  /* 平台推荐引导放最后，每天最多一次；首次绑定手机号后会立即优先展示。 */
   setTimeout(() => { try { maybeShowPwaGuide(false); } catch (_) {} }, 1600);
 }
 
