@@ -168,6 +168,9 @@ mod pwa_tests {
     fn public_page_has_phone_only_onboarding_and_pwa_guide() {
         assert!(ST_PAGE.contains("id=\"pwaGuide\""));
         assert!(ST_PAGE.contains("把每日数据放到主屏幕"));
+        assert!(ST_PAGE.contains("稍后提醒"));
+        assert!(ST_PAGE.contains("我已添加"));
+        assert!(ST_PAGE.contains("pkPwaInstalledV1"));
         assert!(ST_PAGE.contains("首次登录绑定手机号"));
         assert!(ST_PAGE.contains("id=\"obPhone\""));
         assert!(!ST_PAGE.contains("id=\"obQq\""), "首次登录不再要求 QQ");
