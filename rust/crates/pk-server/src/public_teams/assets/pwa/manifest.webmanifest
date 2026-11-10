@@ -1,7 +1,7 @@
 {
   "id": "/",
-  "name": "抖音PK数据",
-  "short_name": "PK数据",
+  "name": "每日数据",
+  "short_name": "每日数据",
   "description": "抖音PK分组、比赛成绩与主播数据展示",
   "lang": "zh-CN",
   "dir": "ltr",

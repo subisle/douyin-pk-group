@@ -149,7 +149,8 @@ mod pwa_tests {
         assert_eq!(manifest["start_url"], "/");
         assert_eq!(manifest["scope"], "/");
         assert_eq!(manifest["display"], "standalone");
-        assert_eq!(manifest["short_name"], "PK数据");
+        assert_eq!(manifest["name"], "每日数据");
+        assert_eq!(manifest["short_name"], "每日数据");
 
         let icons = manifest["icons"].as_array().unwrap();
         assert!(icons.iter().any(|i| i["sizes"] == "192x192"));
