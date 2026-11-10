@@ -972,6 +972,9 @@ async fn main() -> anyhow::Result<()> {
         .layer(axum::middleware::from_fn(live_api::require_collector))
         .with_state(st.clone());
 
+    // 图片生成 API：不占用管理员会话，调用方使用管理员口令作为 X-API-Key。
+    let image_api = image_api::router(st.clone());
+
     /* 前端静态资源 + SPA 回退（生产单端口模式）。
     启动时只判断 index.html 在不在，内容由 spa::handler 每次回退时现读，
     这样前端重新构建不用重启服务。 */
@@ -991,11 +994,11 @@ async fn main() -> anyhow::Result<()> {
             let spa_router = Router::new()
                 .fallback(spa::handler)
                 .with_state((dist_dir.clone(), index));
-            api.fallback_service(spa_router)
+            api.merge(image_api).fallback_service(spa_router)
         }
         false => {
             tracing::warn!(dir = %dist_dir.display(), "没有前端构建产物，仅提供 API（先跑 pnpm --filter @pk/douyin-web build）");
-            api
+            api.merge(image_api)
         }
     }
     // 2026-10-12 安全审计 L4：基础安全响应头（全站，含静态页）。

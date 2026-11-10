@@ -11,6 +11,7 @@ pub mod dialect;
 pub mod events;
 pub mod grouping;
 pub mod ipinfo;
+pub mod image_api;
 pub mod lineage_report;
 pub mod live;
 pub mod live_api;

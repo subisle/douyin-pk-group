@@ -66,6 +66,7 @@ apps/server          pk-server (Rust) 的 pnpm 包装：`pnpm dev:api` 直接跑
 - 只有 `/api/public/*`、`/api/auth/login`、`/api/health` 免鉴权
 - 口令换 token 走 `POST /api/auth/login`，token 只存内存，进程重启即失效，空闲 8 小时自动清理
 - 管理员口令只读 `ADMIN_PASSWORD`（可轮换、不用重编二进制）。**环境变量优先**：配置了就用它（短口令只打 WARN 不拦截）；未配置/留空时用内置默认口令 `shuai4444`（`auth::DEFAULT_ADMIN_PASSWORD`，2026-10-19 用户口径）兜底，改后重启生效
+- 图片生成接口 `/api/images/*` 不走后台 session token，而是把同一个管理员口令放在 `X-API-Key`（或 `Authorization: Bearer`）里直接调用；参数与示例见 `docs/33-图片生成API.md`
 - CORS 默认只允许同源（前后端同端口），跨域时用 `CORS_ORIGINS` 显式放行
 
 **展示端「我的」账号**（`public_teams.rs` + `store.rs`）
