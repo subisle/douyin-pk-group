@@ -100,3 +100,11 @@ scripts/design-diff/last-diff.json
 scripts/design-diff/last-droplet-nav.json
 scripts/design-diff/last-droplet-nav.md
 scripts/design-diff/droplet-nav/
+
+# Android APK 本地构建缓存、签名库与产物（绝不入库）
+.android-tools/
+android/build/
+android/dist/
+!android/keystore/
+!android/keystore/.gitkeep
+!android/keystore/keystore.env.example

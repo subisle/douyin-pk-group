@@ -4068,8 +4068,12 @@ function isIOSSafari() {
   if (!/Safari/i.test(ua)) return false;
   return !/(CriOS|FxiOS|EdgiOS|OPiOS|MicroMessenger|QQ\/|DingTalk|AlipayClient|Weibo|aweme|ByteDance|baiduboxapp)/i.test(ua);
 }
+function isAndroidAppShell() {
+  const ua = navigator.userAgent || '';
+  return /DailyDataAndroid\//i.test(ua);
+}
 function pwaGuideInstalled() {
-  if (isStandaloneWebApp()) return true;
+  if (isAndroidAppShell() || isStandaloneWebApp()) return true;
   try { return localStorage.getItem(PWA_INSTALLED_KEY) === '1'; } catch (_) { return false; }
 }
 function markPwaGuideInstalled() {
@@ -4158,8 +4162,8 @@ function openPwaGuide() {
 }
 function maybeShowPwaGuide(force, attempt) {
   attempt = Number(attempt) || 0;
-  /* 从主屏幕独立打开是“已安装”的最强信号：立即永久关闭所有后续提醒。 */
-  if (isStandaloneWebApp()) {
+  /* 从 Android APK 或主屏幕独立打开是“已安装”的最强信号：立即永久关闭所有后续提醒。 */
+  if (isAndroidAppShell() || isStandaloneWebApp()) {
     markPwaGuideInstalled();
     return false;
   }

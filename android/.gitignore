@@ -1,0 +1,10 @@
+!keystore/
+keystore/*
+!keystore/.gitkeep
+!keystore/keystore.env.example
+build/
+dist/
+*.apk
+*.apks
+*.jks
+*.keystore

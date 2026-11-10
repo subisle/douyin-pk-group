@@ -175,6 +175,8 @@ mod pwa_tests {
         assert!(ST_PAGE.contains("id=\"obPhone\""));
         assert!(!ST_PAGE.contains("id=\"obQq\""), "首次登录不再要求 QQ");
         assert!(!ST_PAGE.contains("id=\"obPass\""), "首次登录不再要求改密");
+        assert!(ST_PAGE.contains("isAndroidAppShell"), "Android APK 入口应被识别为已安装");
+        assert!(ST_PAGE.contains("DailyDataAndroid\\/"), "APK 的 UA 标记需与 Web 端一致");
     }
 }
 
