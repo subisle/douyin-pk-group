@@ -365,6 +365,9 @@ const OPEN_PREFIXES: &[&str] = &[
     不用 starts_with，避免 `/wechat-xxx` 这类路径被顺带放过。 */
     "/wechat",
     "/api/public/",
+    // iPhone 主屏幕 Web App 的公开静态资源：Manifest 与主屏幕图标不能要求后台口令。
+    "/manifest.webmanifest",
+    "/icons/",
     "/api/auth/session",
     "/api/auth/login",
     "/api/health",

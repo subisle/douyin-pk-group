@@ -9,6 +9,61 @@ pub(super) const ST_PAGE: &str = include_str!("st_page.html");
 /// 独立轻量资源页：避免为了 2176 条素材加载整站约 719KB 的展示页脚本。
 const RESOURCES_PAGE: &str = include_str!("resources_page.html");
 
+/* ---------------------- iPhone 主屏幕 Web App ---------------------- */
+
+/// 轻量版 iOS App 使用 Web App Manifest；不需要 Xcode、签名或 App Store。
+const PWA_MANIFEST: &str = include_str!("assets/pwa/manifest.webmanifest");
+const PWA_APPLE_TOUCH_ICON: &[u8] = include_bytes!("assets/pwa/apple-touch-icon.png");
+const PWA_ICON_192: &[u8] = include_bytes!("assets/pwa/icon-192.png");
+const PWA_ICON_512: &[u8] = include_bytes!("assets/pwa/icon-512.png");
+
+fn pwa_asset(bytes: &'static [u8], content_type: &'static str) -> Response {
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, content_type),
+            (
+                axum::http::header::CACHE_CONTROL,
+                "public, max-age=31536000, immutable",
+            ),
+        ],
+        bytes,
+    )
+        .into_response()
+}
+
+/// GET /manifest.webmanifest：Safari「添加到主屏幕」读取的 App 配置。
+pub async fn pwa_manifest() -> Response {
+    (
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "application/manifest+json; charset=utf-8",
+            ),
+            (
+                axum::http::header::CACHE_CONTROL,
+                "public, max-age=3600, stale-while-revalidate=300",
+            ),
+        ],
+        PWA_MANIFEST,
+    )
+        .into_response()
+}
+
+/// GET /icons/apple-touch-icon.png：iOS 主屏幕图标，必须为不透明 PNG。
+pub async fn pwa_apple_touch_icon() -> Response {
+    pwa_asset(PWA_APPLE_TOUCH_ICON, "image/png")
+}
+
+/// GET /icons/icon-192.png。
+pub async fn pwa_icon_192() -> Response {
+    pwa_asset(PWA_ICON_192, "image/png")
+}
+
+/// GET /icons/icon-512.png。
+pub async fn pwa_icon_512() -> Response {
+    pwa_asset(PWA_ICON_512, "image/png")
+}
+
 /// GET / 根路径：展示页（2026-10-11 起不分男女，统一读 /api/public/teams/all）
 pub async fn st_root() -> Response {
     st_page_for("all")
@@ -74,6 +129,40 @@ pub(super) fn st_page_for(team: &str) -> Response {
 
 /* 2026-10-14 注册功能移除：`register_route_tests`（注册页团别白名单用例）随之删除，
 它唯一断言的 `normalize_team` 也已在 my.rs 里一并清理。 */
+
+#[cfg(test)]
+mod pwa_tests {
+    use super::*;
+    use serde_json::Value;
+
+    fn png_size(bytes: &[u8]) -> (u32, u32) {
+        assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n", "必须是不透明 PNG");
+        (
+            u32::from_be_bytes(bytes[16..20].try_into().unwrap()),
+            u32::from_be_bytes(bytes[20..24].try_into().unwrap()),
+        )
+    }
+
+    #[test]
+    fn manifest_is_valid_and_has_ios_sized_icons() {
+        let manifest: Value = serde_json::from_str(PWA_MANIFEST).unwrap();
+        assert_eq!(manifest["start_url"], "/");
+        assert_eq!(manifest["scope"], "/");
+        assert_eq!(manifest["display"], "standalone");
+        assert_eq!(manifest["short_name"], "PK数据");
+
+        let icons = manifest["icons"].as_array().unwrap();
+        assert!(icons.iter().any(|i| i["sizes"] == "192x192"));
+        assert!(icons.iter().any(|i| i["sizes"] == "512x512"));
+    }
+
+    #[test]
+    fn web_app_icons_have_expected_dimensions() {
+        assert_eq!(png_size(PWA_APPLE_TOUCH_ICON), (180, 180));
+        assert_eq!(png_size(PWA_ICON_192), (192, 192));
+        assert_eq!(png_size(PWA_ICON_512), (512, 512));
+    }
+}
 
 #[cfg(test)]
 mod announcement_tests {

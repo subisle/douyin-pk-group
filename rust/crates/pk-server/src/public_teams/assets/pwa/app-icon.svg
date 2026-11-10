@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="96" y1="48" x2="928" y2="976" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#111827"/>
+      <stop offset="0.48" stop-color="#312E81"/>
+      <stop offset="1" stop-color="#7C3AED"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0" cy="0" r="1" gradientTransform="translate(512 440) rotate(90) scale(470)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#A78BFA" stop-opacity=".62"/>
+      <stop offset=".58" stop-color="#6D28D9" stop-opacity=".18"/>
+      <stop offset="1" stop-color="#111827" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="gold" x1="278" y1="290" x2="758" y2="724" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFF3B0"/>
+      <stop offset=".44" stop-color="#FFD166"/>
+      <stop offset="1" stop-color="#F59E0B"/>
+    </linearGradient>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="24" stdDeviation="26" flood-color="#160B33" flood-opacity=".6"/>
+    </filter>
+    <filter id="pkGlow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="12" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+  <g>
+    <rect width="1024" height="1024" fill="url(#bg)"/>
+    <rect width="1024" height="1024" fill="url(#glow)"/>
+    <g opacity=".14" stroke="#FFFFFF" stroke-width="2">
+      <path d="M0 256h1024M0 512h1024M0 768h1024"/>
+      <path d="M256 0v1024M512 0v1024M768 0v1024"/>
+    </g>
+    <circle cx="512" cy="512" r="350" fill="#FFFFFF" fill-opacity=".055" stroke="#FFFFFF" stroke-opacity=".18" stroke-width="3"/>
+    <path d="M512 156l45 90 99 14-72 70 17 99-89-47-89 47 17-99-72-70 99-14 45-90z" fill="#FFD166" fill-opacity=".95" filter="url(#shadow)"/>
+    <text x="512" y="690" text-anchor="middle" font-family="Arial Black, Arial, Helvetica, sans-serif" font-size="350" font-weight="900" letter-spacing="-26" fill="url(#gold)" stroke="#8B4A04" stroke-width="9" paint-order="stroke fill" filter="url(#pkGlow)">PK</text>
+    <path d="M278 754h468" stroke="#FFFFFF" stroke-opacity=".55" stroke-width="7" stroke-linecap="round"/>
+    <circle cx="278" cy="754" r="9" fill="#FFD166"/>
+    <circle cx="746" cy="754" r="9" fill="#FFD166"/>
+  </g>
+</svg>

@@ -574,6 +574,13 @@ async fn main() -> anyhow::Result<()> {
         // 对外展示页（静态 HTML，粉丝/主播手机直开）：/ 为唯一入口（2026-10-11 起
         // 不分男女、不弹团别选择卡），/1、/0、/st/m、/st/f 为兼容旧链接的别名；
         // 子路径（/report、/lineage、/my、/group/*）也是同一页，前端 history 路由接管
+        .route("/manifest.webmanifest", get(public_teams::pwa_manifest))
+        .route(
+            "/icons/apple-touch-icon.png",
+            get(public_teams::pwa_apple_touch_icon),
+        )
+        .route("/icons/icon-192.png", get(public_teams::pwa_icon_192))
+        .route("/icons/icon-512.png", get(public_teams::pwa_icon_512))
         .route("/", get(public_teams::st_root))
         .route("/report", get(public_teams::st_root))
         .route("/lineage", get(public_teams::st_root))
