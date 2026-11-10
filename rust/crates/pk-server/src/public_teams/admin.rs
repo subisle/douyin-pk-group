@@ -122,7 +122,7 @@ pub async fn admin_my_account_get(
 }
 
 /// DELETE /api/admin/my-accounts/{name}：删除账号（幂等，不存在也返回 ok）。
-/// 删号同时吊销该账号全部 my token（内存 token 24h TTL，不能等它自然过期）。
+/// 删号同时吊销该账号全部 my token（内存 token 30 天 TTL，不能等它自然过期）。
 pub async fn admin_my_account_delete(
     State(st): State<ArcState>,
     axum::extract::Path(name): axum::extract::Path<String>,
@@ -291,11 +291,11 @@ pub(super) fn client_ip_for_limit(addr: std::net::SocketAddr, headers: &HeaderMa
     addr.ip().to_string()
 }
 
-/// 我的 token → (personId, 团别, 账号姓名, **过期时刻**)（内存；前端 sessionStorage 保存）。
+/// 我的 token → (personId, 团别, 账号姓名, **过期时刻**)（内存；前端 localStorage 持久化）。
 /// 管理员观看账号 personId=0（不对应台账主播，姓名直接来自 my_accounts）。
 ///
 /// 2026-10-17 审计 4-P2-8：第 4 个字段语义从「创建时刻」改为「过期时刻」——
-/// put 写 `now+24h`，restore 回填写 `now+Redis 剩余 TTL`，两者都不再无条件续满 24h。
+/// put 写 `now+30天`，restore 回填写 `now+Redis 剩余 TTL`；正常打开 App 时滑动续期。
 pub(super) type MyTokenMap = HashMap<String, (u64, String, String, Instant)>;
 
 pub(super) static MY_TOKENS: std::sync::OnceLock<std::sync::Mutex<MyTokenMap>> =
@@ -307,7 +307,7 @@ pub(super) fn my_tokens() -> &'static std::sync::Mutex<MyTokenMap> {
 
 /// 2026-10-14 审计 P2：my token 改 **CSPRNG**。原先用 RandomState（SipHash，
 /// 每进程一个随机 key）——不是密码学生成器，输出可被观测/预测，而 token 一旦
-/// 被猜中就是 24h 的完整登录态。改用 crate::random::random_code（getrandom →
+/// 被猜中就是完整登录态。改用 crate::random::random_code（getrandom →
 /// OS CSPRNG，auth.rs 的 ticket 也走它），长度与 `my-<16hex>-<16hex>` 格式不变。
 fn my_token_random() -> String {
     const HEX: &[u8] = b"0123456789abcdef";
@@ -327,7 +327,7 @@ pub fn register_app_state(st: std::sync::Arc<crate::state::AppState>) {
     let _ = APP_STATE.set(st);
 }
 
-const MYTOK_TTL: u64 = 24 * 3600;
+const MYTOK_TTL: u64 = 30 * 24 * 3600;
 fn mytok_key(token: &str) -> String {
     format!("mytok:{}", token)
 }
@@ -343,8 +343,10 @@ fn mytok_name_key(name: &str) -> String {
 
 /// token 内存 TTL（Duration 形态）。**内存映射的第 4 个字段已从「创建时刻」
 /// 改成「过期时刻」**（2026-10-17 审计 4-P2-8）：restore 回填时必须用 Redis 的
-/// 剩余 TTL 续期，不能重新起算满 24h，否则接近到期的登录态会被重启无限续命。
+/// 剩余 TTL，不能无条件重新起算；正常打开 App 时由 my_token_touch 滑动续期。
 const MYTOK_TTL_DUR: Duration = Duration::from_secs(MYTOK_TTL);
+/// 避免每个页面请求都写 Redis：剩余寿命少了一天以上才续期，最多每天一次。
+const MYTOK_TOUCH_AFTER: Duration = Duration::from_secs(24 * 3600);
 
 /// 进程内「吊销墓碑」：token → 吊销时刻（2026-10-17 审计 4-P2-8）。
 ///
@@ -352,7 +354,7 @@ const MYTOK_TTL_DUR: Duration = Duration::from_secs(MYTOK_TTL);
 /// `mytok_redis_sync` 子线程里的异步删除（可能排队 / 超时 / Redis 降级）。
 /// 在这个窗口里，`my_token_restore` 若先从 Redis 读回旧 token 并回填内存，
 /// 刚吊销的登录态就被「复活」了。墓碑同步写入、take/restore 先查，
-/// 把窗口关死；24h 后自动清理（token 最大寿命），不会无限增长。
+/// 把窗口关死；超过 token 最大寿命后自动清理，不会无限增长。
 static MYTOK_REVOKED: std::sync::OnceLock<std::sync::Mutex<HashMap<String, Instant>>> =
     std::sync::OnceLock::new();
 
@@ -402,7 +404,7 @@ fn mytok_mask(token: &str) -> String {
 }
 
 /// 回填内存时使用的过期时刻（纯函数，便于单测）：现在 + Redis 剩余 TTL，
-/// 并以 24h 为上限兜底（Redis 侧理论不会超，防脏数据放大寿命）。
+/// 并以 30 天为上限兜底（Redis 侧理论不会超，防脏数据放大寿命）。
 fn restore_expiry(now: Instant, ttl_secs: u64) -> Instant {
     now + Duration::from_secs(ttl_secs.min(MYTOK_TTL))
 }
@@ -488,6 +490,28 @@ async fn mytok_redis_set(
     Ok(())
 }
 
+/// 滑动续期只延长已存在的 token 与反向索引，**不再 SADD 索引成员**。
+/// 这样即使与“管理员吊销”并发，也不会把刚被摘除的 token 重新加回可恢复集合。
+async fn mytok_redis_touch(
+    st: &crate::state::AppState,
+    token: &str,
+    pid: u64,
+    team: &str,
+    name: &str,
+) {
+    let v = serde_json::json!({ "pid": pid, "team": team, "name": name });
+    let token_ok = crate::store::cache::set(st, &mytok_key(token), &v.to_string(), MYTOK_TTL).await;
+    let index_ok = crate::store::cache::expire(st, &mytok_name_key(name), MYTOK_TTL).await;
+    if !token_ok || !index_ok {
+        tracing::warn!(
+            token = %mytok_mask(token),
+            token_ok,
+            index_ok,
+            "my token 滑动续期未完整写入 Redis：当前进程仍有效，重启后需重新登录"
+        );
+    }
+}
+
 // 2026-10-13 安全修复：原 mytok_redis_del 已并入 mytok_redis_revoke（吊销要连
 // 反向索引一起清，单删 token 键不足以让旧登录失效），函数体保留在 revoke 里。
 
@@ -498,7 +522,7 @@ async fn mytok_redis_revoke(
     name: &str,
 ) -> anyhow::Result<()> {
     crate::store::cache::del(st, &mytok_key(token)).await;
-    // SREM 失败只是降级（SET 有 24h EXPIRE 兜底），不冒泡
+    // SREM 失败只是降级（SET 有 30 天 EXPIRE 兜底），不冒泡
     let _ = crate::store::cache::srem(st, &mytok_name_key(name), &[token]).await;
     Ok(())
 }
@@ -544,6 +568,38 @@ pub(super) fn my_token_take(token: &str) -> Option<(u64, String, String)> {
         .map(|(pid, team, name, _)| (*pid, team.clone(), name.clone()))
 }
 
+/// 正常打开 App / 恢复登录态时滑动续期 30 天。
+///
+/// 为了控制 Redis 写入，剩余寿命仍超过 29 天时直接返回；也就是说活跃用户最多
+/// 每天写一次，30 天未打开才要求重新登录。已吊销 token 永远不会被续回来。
+pub(crate) async fn my_token_touch(st: &crate::state::AppState, token: &str) -> bool {
+    if mytok_is_revoked(token) {
+        return false;
+    }
+    let now = Instant::now();
+    let touched = {
+        let mut m = my_tokens().lock().expect("my token 锁 poisoned");
+        m.retain(|_, (_, _, _, exp)| *exp > now);
+        let Some((pid, team, name, exp)) = m.get_mut(token) else {
+            return false;
+        };
+        if exp.saturating_duration_since(now) > MYTOK_TTL_DUR - MYTOK_TOUCH_AFTER {
+            return true;
+        }
+        *exp = now + MYTOK_TTL_DUR;
+        (*pid, team.clone(), name.clone())
+    };
+    // 与吊销并发时以墓碑为准；Redis 侧只 EXPIRE 现有反查索引，不重新 SADD。
+    if mytok_is_revoked(token) {
+        let mut m = my_tokens().lock().expect("my token 锁 poisoned");
+        m.remove(token);
+        return false;
+    }
+    let (pid, team, name) = touched;
+    mytok_redis_touch(st, token, pid, &team, &name).await;
+    true
+}
+
 /// 内存 miss 时从 Redis 回填（2026-10-12 登录态持久化）：
 /// who/token 校验路径（async）在 take 失败后调用，命中即回填内存。
 /// 只回填不消费（take 语义是只读），让 token 继续在 TTL 内可用。
@@ -583,9 +639,9 @@ pub(crate) async fn my_token_restore(
     if !members.iter().any(|t| t == token) {
         return None; // 不在反向索引里 = 已吊销：不回填内存，视为未登录
     }
-    /* 2026-10-17 审计 4-P2-8：内存 TTL 用 Redis 的**剩余** TTL，不再重置满 24h。
+    /* 2026-10-17 审计 4-P2-8：内存 TTL 用 Redis 的**剩余** TTL，不再重置满 30 天。
     原实现回填时 `Instant::now()` 重新起算，导致「签发后 23h 重启」会把只剩 1h 的
-    登录态续成 24h（跨重启最多 ~48h 会话）。拿不到 TTL（未配置 Redis / 命令失败 /
+    登录态续成 30 天（跨重启大幅放大会话）。拿不到 TTL（未配置 Redis / 命令失败 /
     键没有过期时间）→ 无法确认寿命，保守按无效处理：宁可让用户重新登录，
     也不放大一个寿命未知的登录态。 */
     let Some(ttl_secs) = crate::store::cache::ttl(st, &mytok_key(token)).await else {
@@ -609,9 +665,9 @@ pub(crate) async fn my_token_restore(
     Some((pid, team, name))
 }
 
-/// 吊销某账号的全部 my token（2026-10-12 安全审计：token 是 24h 内存态、原本无撤销手段）。
+/// 吊销某账号的全部 my token（2026-10-12 安全审计：token 是 30 天内存态、原本无撤销手段）。
 /// 调用点：改密 / 找回（重置）密码 / 绑定审核通过 / 管理员改绑 / 删除账号——
-/// 这些动作之后旧登录态必须立刻失效，不能等 24h TTL 自然过期。
+/// 这些动作之后旧登录态必须立刻失效，不能等 30 天 TTL 自然过期。
 /// （token 挂的是**账号名**：绑定会把 name 从手机号占位改写成主播姓名，所以绑定类操作
 /// 新旧两个名字都要吊销。）
 pub(crate) fn my_tokens_revoke(name: &str) {
@@ -673,7 +729,7 @@ pub(crate) fn my_token_peek(token: &str) -> Option<(u64, String, String)> {
 ///
 /// 不再接受 `?token=` / `?access_token=` URL query（审计安全修复）：
 /// URL 会进网关/服务器访问日志、浏览器历史与 Referer 头，token 走 query 等于把
-/// 24h 有效的登录态写进各种日志。POST JSON body 里的 `token` 字段保留（不进 URL/日志）。
+/// 登录态写进各种日志。POST JSON body 里的 `token` 字段保留（不进 URL/日志）。
 pub(super) fn header_my_token(headers: &HeaderMap) -> Option<String> {
     headers
         .get("x-my-token")
@@ -700,7 +756,7 @@ pub(super) async fn gate_team(
     // 有 token 就先验（开关关着时也认，访客拿旧 token 仍能看「我的」）
     if let Some(t) = token.as_deref().filter(|s| !s.is_empty()) {
         // 登录态持久化（2026-10-12）：内存 miss 先从 Redis 回填（服务重启后
-        // 24h 内的登录态自动恢复），再走原判定。
+        // 30 天内的登录态自动恢复），再走原判定。
         if my_token_take(t).is_none() {
             let _ = my_token_restore(st, t).await;
         }
@@ -755,7 +811,7 @@ mod token_lifecycle_tests {
     use std::collections::HashMap;
     use std::time::{Duration, Instant};
 
-    /// 墓碑：登记后拒绝；不同 token 不误伤；超 24h 自动清理（不无限增长）。
+    /// 墓碑：登记后拒绝；不同 token 不误伤；超 30 天自动清理（不无限增长）。
     #[test]
     fn revoked_tombstone_rejects_and_prunes() {
         let now = Instant::now();
@@ -772,24 +828,32 @@ mod token_lifecycle_tests {
         // 别的 token 不受牵连
         assert!(!revoked_contains(&mut map, "my-ffffffff-ffffffff", now));
 
-        // 24h 后墓碑失效并被 prune 掉（token 最大寿命已过，无需再挡）
+        // 30 天后墓碑失效并被 prune 掉（token 最大寿命已过，无需再挡）
         let later = now + MYTOK_TTL_DUR + Duration::from_secs(1);
         assert!(!revoked_contains(&mut map, &token, later));
         assert!(map.is_empty(), "过期墓碑应被清理，避免无限增长");
     }
 
-    /// 回填 TTL：内存过期时刻 = now + Redis 剩余 TTL，而不是重置满 24h；
-    /// 异常大的 TTL 以 24h 为上限兜底。
+    /// 回填 TTL：内存过期时刻 = now + Redis 剩余 TTL，而不是重置满 30 天；
+    /// 异常大的 TTL 以 30 天为上限兜底。
     #[test]
     fn restore_expiry_uses_remaining_ttl_not_full_lifetime() {
         let now = Instant::now();
         // 只剩 60 秒：回填后也只剩 60 秒（不续命）
         assert_eq!(restore_expiry(now, 60), now + Duration::from_secs(60));
-        // 脏数据（超过 24h）：封顶到 24h
+        // 脏数据（超过 30 天）：封顶到 30 天
         assert_eq!(
             restore_expiry(now, MYTOK_TTL + 10 * 24 * 3600),
             now + MYTOK_TTL_DUR
         );
+    }
+
+    /// 主屏幕免密：token 生命周期 30 天，活跃使用最多每天续一次。
+    #[test]
+    fn remembered_login_lifetime_is_thirty_days() {
+        assert_eq!(MYTOK_TTL, 30 * 24 * 3600);
+        assert_eq!(MYTOK_TTL_DUR, Duration::from_secs(30 * 24 * 3600));
+        assert_eq!(MYTOK_TOUCH_AFTER, Duration::from_secs(24 * 3600));
     }
 
     /// 日志打码：只暴露前 8 位，完整 token 不进日志。

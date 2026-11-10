@@ -1351,7 +1351,7 @@ async fn fallback_or_blocked(
 /* ------------------------------ §6 公开接口（我的页弹窗） ------------------------------ */
 
 /// 从请求头取 my token（2026-10-17 审计 4-P2-9 收口）。
-/// 原先是 头→query→body 三级兜底：24h 登录态挂在 URL query 上会落反向代理 /
+/// 原先是 头→query→body 三级兜底：登录态挂在 URL query 上会落反向代理 /
 /// 网关访问日志。审计盘点全仓调用方（st_page.html 三个口、uicheck 脚本、e2e）
 /// 已全部走 X-My-Token 头（图片端点用 fetch+blob 取图，不依赖 <img> 丢头行为），
 /// query 兜底无消费者 → 删除。body 兜底保留给 read 接口（POST JSON 不进 URL/日志）。

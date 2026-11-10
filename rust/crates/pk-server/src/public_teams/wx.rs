@@ -744,7 +744,7 @@ pub async fn my_push_code(
     axum::Json(_body): axum::Json<Value>,
 ) -> ApiResult {
     /* 2026-10-17 审计 4-N15：token 收口到 X-My-Token 头（与 targets_batch 同口径），
-    24h 登录态不再过 POST body。前端 postPush 本就两头都带，无破坏。 */
+    登录态不再过 POST body。前端 postPush 本就两头都带，无破坏。 */
     let token = header_my_token(&headers).unwrap_or_default();
     let (person_id, _t, name) = my_ident(&st, &team, &token).await?;
     if person_id == 0 {

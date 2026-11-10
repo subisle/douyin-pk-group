@@ -3659,7 +3659,7 @@ function showGate() {
     '<div class="gate-box">' +
     '<div class="big-av" style="background:' + avColor(av) + '"><span class="material-symbols-outlined" style="font-size:28px">person</span></div>' +
     '<h3>' + esc(title) + '</h3>' +
-    '<div id="paneLogin"><p class="tip">用「手机号 / 艺名 + 密码」登录。<br>第一次用艺名登录会自动开通账号，之后按提示绑定手机号即可。</p>' +
+    '<div id="paneLogin"><p class="tip">用「手机号 / 艺名 + 密码」登录。<br>登录一次后，本设备会自动保持登录。</p>' +
       '<input id="gateAcct" placeholder="手机号 / 艺名" autocomplete="off">' +
       /* 2026-10-14：密码规则是 4~20 位字母/数字（2026-10-17 起也允许点），原先 inputmode="numeric" 在手机上
          只弹数字键盘、字母打不出来（自助设置了字母密码就登不进来）。去掉该属性用默认键盘。 */
@@ -6506,7 +6506,9 @@ async function renderResources(signal) {
 /* ==================== 我的（手机号+密码登录） ==================== */
 /* 账号来源：只有管理员在后台手动添加这一条路径（2026-10-14 注册功能已下线）。
    历史遗留的账号要先绑定主播，才有个人的音浪数据。
-   token 存 sessionStorage，关闭浏览器后需重新登录；服务重启或失效自动退回登录卡。 */
+   token 持久化在 localStorage：iPhone 从主屏幕再次打开无需重复输入密码；
+   退出登录、改密、管理员吊销或长期未使用后，才自动退回登录卡。
+   只缓存随机 token，不缓存账号密码。 */
 const MY_ANY_KEY = 'myToken_any';
 const MY_ANY_NAME = 'myName_any';
 const MY_KEY = () => MY_ANY_KEY;
@@ -6521,14 +6523,22 @@ function myTokenKeys() {
 const myTeamOfKey = (k) =>
   (k === 'myToken_male' ? 'male' : k === 'myToken_female' ? 'female' : '');
 function readMyToken(key) {
-  const token = sessionStorage.getItem(key);
-  if (token) return token;
-  const legacyToken = localStorage.getItem(key);   // 老版本存 localStorage：读到就搬进 sessionStorage
-  if (legacyToken) {
-    sessionStorage.setItem(key, legacyToken);
-    localStorage.removeItem(key);
+  try {
+    const persisted = localStorage.getItem(key);
+    if (persisted) return persisted;
+  } catch (_) {}
+  /* 兼容旧版 sessionStorage 登录态：首次读取时迁移到 localStorage。 */
+  try {
+    const legacy = sessionStorage.getItem(key);
+    if (!legacy) return '';
+    try {
+      localStorage.setItem(key, legacy);
+      sessionStorage.removeItem(key);
+    } catch (_) {}
+    return legacy;
+  } catch (_) {
+    return '';
   }
-  return legacyToken || '';
 }
 
 /** 当前登录态：{ token, team }（team 空串 = 团别待定，两团都能看；没登录则 token 为空） */
@@ -6554,13 +6564,22 @@ function myTokenHeaders(extra) {
    漏掉任何一处，下一次请求就会带着已吊销的死 token 打过去、全站 401。 */
 function setMyToken(token) {
   if (!token) return;
-  sessionStorage.setItem(MY_ANY_KEY, token);
+  let persisted = false;
+  try {
+    localStorage.setItem(MY_ANY_KEY, token);
+    persisted = true;
+  } catch (_) {}
+  /* 极端情况下 localStorage 不可用（隐私限制等）才回退 sessionStorage。 */
+  if (persisted) {
+    sessionStorage.removeItem(MY_ANY_KEY);
+  } else {
+    sessionStorage.setItem(MY_ANY_KEY, token);
+  }
   myTokenKeys().forEach((k) => {
     if (k === MY_ANY_KEY) return;
     sessionStorage.removeItem(k);
     localStorage.removeItem(k);
   });
-  localStorage.removeItem(MY_ANY_KEY);   // 读侧有 localStorage→sessionStorage 的迁移兜底，这里清掉避免回灌旧值
 }
 function myLogout() {
   ['myToken_male', 'myToken_female', MY_ANY_KEY].forEach((k) => {
@@ -6692,7 +6711,7 @@ function renderMyLogin() {
       /* 2026-10-14：后端已区分「密码错误」和「账号还没开通」，这里优先显示后端下发的原因 d.error；
          后端仍有个别分支只回 {ok:false} 不带 error（台账查无此人、管理观看账号未通过等），回落到原兜底文案 */
       if (!d.ok) throw new Error(d.error || '账号或密码不对，或账号还没开通');
-      sessionStorage.setItem(MY_ANY_KEY, d.token);
+      setMyToken(d.token);
       localStorage.setItem(MY_NAME_KEY(), d.name || nm);
       toast('验证通过');
       loadMy();

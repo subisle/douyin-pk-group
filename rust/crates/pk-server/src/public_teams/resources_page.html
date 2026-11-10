@@ -33,7 +33,7 @@ main{width:min(920px,100%);margin:0 auto;padding:18px 16px 48px}.hidden{display:
     <div class="login-card">
       <div class="login-kicker">RESOURCE HUB</div>
       <h1>登录查看资源</h1>
-      <p>使用展示端账号登录。登录成功后会自动进入视频素材库。</p>
+      <p>使用展示端账号登录。登录一次后本设备自动保持登录。</p>
       <form id="loginForm">
         <div class="field"><label for="account">手机号 / 艺名</label><input id="account" name="account" autocomplete="username" required></div>
         <div class="field"><label for="pass">密码</label><input id="pass" name="pass" type="password" autocomplete="current-password" required></div>
@@ -64,8 +64,15 @@ main{width:min(920px,100%);margin:0 auto;padding:18px 16px 48px}.hidden{display:
   const state = { items: [], groups: [], group: 'all', category: 'all', query: '', layout: localStorage.getItem('pk_resource_layout') === 'grid' ? 'grid' : 'list', total: 0, catalogTotal: 0, offset: 0, loading: false, seq: 0 };
   const $ = id => document.getElementById(id);
   const esc = value => String(value == null ? '' : value).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
-  const token = () => sessionStorage.getItem(TOKEN_KEY) || '';
-  const setToken = value => { if (value) sessionStorage.setItem(TOKEN_KEY, value); };
+  const token = () => {
+    try { return localStorage.getItem(TOKEN_KEY) || sessionStorage.getItem(TOKEN_KEY) || ''; }
+    catch (_) { return ''; }
+  };
+  const setToken = value => {
+    if (!value) return;
+    try { localStorage.setItem(TOKEN_KEY, value); sessionStorage.removeItem(TOKEN_KEY); }
+    catch (_) { sessionStorage.setItem(TOKEN_KEY, value); }
+  };
   const loginRequired = () => fetch('/api/public/announcements', {cache:'no-store'}).then(r => r.json()).then(d => d.loginRequired !== false).catch(() => true);
   const allCategories = () => state.groups.flatMap(g => Array.isArray(g.categories) ? g.categories : []);
   const categoryLabel = key => (allCategories().find(c => c.key === key) || {}).label || key;
@@ -180,7 +187,7 @@ main{width:min(920px,100%);margin:0 auto;padding:18px 16px 48px}.hidden{display:
 
   let searchTimer;
   $('loginForm').addEventListener('submit', submitLogin);
-  $('logout').addEventListener('click', () => { sessionStorage.removeItem(TOKEN_KEY); location.reload(); });
+  $('logout').addEventListener('click', () => { localStorage.removeItem(TOKEN_KEY); sessionStorage.removeItem(TOKEN_KEY); location.reload(); });
   $('query').addEventListener('input', event => { state.query = event.target.value || ''; state.offset = 0; clearTimeout(searchTimer); searchTimer = setTimeout(() => load(true), 220); });
   $('clear').addEventListener('click', () => { state.query = ''; $('query').value = ''; clearTimeout(searchTimer); load(true); $('query').focus(); });
   $('groups').addEventListener('click', event => { const button = event.target.closest('[data-group]'); if (!button) return; state.group = button.dataset.group; state.category = 'all'; load(true); });

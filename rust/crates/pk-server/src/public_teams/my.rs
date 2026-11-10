@@ -858,7 +858,7 @@ pub async fn my_password_set(
         return Err(ApiError::auth("登录已过期，请重新登录"));
     };
     /* 内存 miss 时从 Redis 回填（与 my_token_required_with_restore 同口径）：
-    服务重启后 24h 内的登录态照常可以改密，不必先重新登录。 */
+    服务重启后 30 天内的登录态照常可以改密，不必先重新登录。 */
     let mut ident = my_token_take(&token);
     if ident.is_none() {
         ident = super::admin::my_token_restore(&st, &token).await;
@@ -1061,7 +1061,7 @@ pub async fn my_email_set(
         return Err(ApiError::auth("登录已过期，请重新登录"));
     };
     /* 内存 miss 时从 Redis 回填（与 my_password_set 同口径）：
-    服务重启后 24h 内的登录态照常可以改邮箱，不必先重新登录。 */
+    服务重启后 30 天内的登录态照常可以改邮箱，不必先重新登录。 */
     let mut ident = my_token_take(&token);
     if ident.is_none() {
         ident = super::admin::my_token_restore(&st, &token).await;
@@ -1148,7 +1148,7 @@ pub(super) fn my_token_required(headers: &HeaderMap) -> Result<(u64, String, Str
 }
 
 /// 异步版（2026-10-12 登录态持久化）：内存 miss 时从 Redis 回填再取。
-/// 服务重启清空内存后，24h 内的登录态经此恢复——用户不再被强制二次登录。
+/// 服务重启清空内存后，30 天内的登录态经此恢复——用户不再被强制二次登录。
 pub(super) async fn my_token_required_with_restore(
     st: &crate::state::AppState,
     headers: &HeaderMap,
@@ -1156,13 +1156,17 @@ pub(super) async fn my_token_required_with_restore(
     let Some(token) = header_my_token(headers) else {
         return Err(ApiError::auth("缺少验证 token，请先验证姓名和密码"));
     };
-    if let Some(v) = my_token_take(&token) {
-        return Ok(v);
-    }
-    if let Some(v) = super::admin::my_token_restore(st, &token).await {
-        return Ok(v);
-    }
-    Err(ApiError::auth("验证已过期，请重新登录"))
+    let ident = if let Some(v) = my_token_take(&token) {
+        v
+    } else if let Some(v) = super::admin::my_token_restore(st, &token).await {
+        v
+    } else {
+        return Err(ApiError::auth("验证已过期，请重新登录"));
+    };
+    /* iPhone 主屏幕 App 的免密体验：who 等启动接口验证成功后滑动续期。
+     * 函数内部最多每天写一次 Redis，避免每次页面请求都续。 */
+    super::admin::my_token_touch(st, &token).await;
+    Ok(ident)
 }
 
 /* ------------------------------- 契约单测 -------------------------------
