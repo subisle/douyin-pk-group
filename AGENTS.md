@@ -54,6 +54,24 @@
   （`ALTER DEFAULT PRIVILEGES ... SELECT TO pk_reader / ALL TO pk_writer`），
   `pg_restore` 重建表后默认权限自动覆盖，读写账号不受影响。
 
+## 6. 部署构建口径（2026-11-11 用户口径，长期有效）
+
+> **纪律**：镜像一律由 CNB 构建；**禁止在 43 或其他生产服务器上执行 `docker build` / 源码编译 / `pnpm install` / `apt-get` 等构建动作**。生产服务器只负责 `docker login`、`docker pull`、`docker tag`、`docker compose ... up -d --no-deps pk-server` 与只读验收。
+
+- 代码仓库与构建平台：`https://cnb.cool/` 的 `course-deploy/artifacts`；推送分支 `pg-migration`。
+- Git 凭据：本地 `git remote cnb` 已配置，令牌名 `1111`，Git Username `cnb`；**Token 只保存在本地 Git remote / 本机环境，不写入 AGENTS.md、代码、脚本、日志、URL 或提交历史**。
+- CNB 构建配置：`.cnb.yml` 在 `pg-migration` 分支 push 时构建 `docker.cnb.cool/course-deploy/artifacts/pk-server:<CNB_COMMIT_SHORT>` 与 `:latest`，其中 `CNB_COMMIT_SHORT` 为 8 位短 SHA。
+- 部署 43 前：先确认 CNB registry 里存在目标 8 位短 SHA tag，且 `:latest` digest 与目标 tag 一致；若不一致，等待 CNB 构建完成或排查构建状态，不能用旧 `latest` 冒充新版本。
+- 部署 43 固定流程：
+  1. `docker login docker.cnb.cool --username cnb --password-stdin`（口令从本地 Git remote 取，不打印）。
+  2. `docker pull docker.cnb.cool/course-deploy/artifacts/pk-server:<8 位 SHA>`。
+  3. `docker tag` 成 `ghcr.io/subisle/douyin-pk-group:<8 位 SHA>`，以适配 `/opt/pk-server/docker-compose.prod.yml` 的 `GHCR_REPO/PK_TAG`。
+  4. 把旧镜像打 `rollback-before-<8 位 SHA>` 标签，备份 `.env.prod`，再改 `PK_TAG=<8 位 SHA>`。
+  5. 仅 `docker compose --env-file .env.prod -f docker-compose.prod.yml -f docker-compose.override.yml up -d --no-deps --force-recreate pk-server`。
+  6. 验收 `/api/health`、`/download/daily.apk`、`/download/daily.apk.sha256`、页面新文案、`pk-postgres` / `pk-redis` 容器 ID 不变。
+- 禁止事项：不得在 43 上 `git clone` 源码、解压源码包、`docker build`、`pnpm install`、`cargo build`、`apt-get`；不得重建 / 覆盖 / 恢复 PostgreSQL、Redis 数据卷；不得为了图快把旧镜像或本地临时产物部署上线。
+- 回滚：把 `.env.prod` 的 `PK_TAG` 改回上一个稳定 8 位 SHA（或 `rollback-before-<当前 SHA>`），再只重建 `pk-server`；数据库/Redis 不动。
+
 ## 附：本地环境速查
 
 | 项 | 值 |
