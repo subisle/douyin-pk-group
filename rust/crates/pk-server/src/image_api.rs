@@ -24,6 +24,10 @@ use crate::{dialect, lineage_report, pgrs, push, routes::ApiError, state::AppSta
 
 const API_PREFIX: &str = "/api/images";
 
+/// 月榜导出图水印（2026-11-13 用户口径：导出图水印为「鹏先生」）。
+/// 只出现在图片接口产出的 PNG 里，不影响后台页面预览。
+const RANKING_WATERMARK: &str = "鹏先生";
+
 /// 图片 API Key 与管理员口令共用 Argon2 校验，属于 CPU 密集操作。
 /// 限制同时校验数，避免错误 Key 并发请求把 4 核机器打满。
 static KEY_VERIFY_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
@@ -382,8 +386,32 @@ fn ranking_svg(rows: &[RankRow], metric: &str, team_label: &str, period: &str) -
             lineage_report::esc(&names)
         ));
     }
+    // 水印压在最顶层：斜排平铺、低透明度，不影响读数。
+    svg.push_str(&watermark_svg(width, height, font, RANKING_WATERMARK));
     svg.push_str("</svg>");
     svg
+}
+
+/// 斜排平铺水印。与师门图的「内部数据 · 请勿外传」不同，月榜导出图只标
+/// 出品人（鹏先生），既能防无源转发，又不会让榜单看起来像内部密件。
+fn watermark_svg(width: f64, height: f64, font: &str, text: &str) -> String {
+    let mark = lineage_report::esc(text);
+    let step_x = 320.0;
+    let step_y = 190.0;
+    let cols = (width / step_x).ceil() as i64 + 2;
+    let rows = (height / step_y).ceil() as i64 + 1;
+    let mut out = String::new();
+    for yi in 0..rows {
+        for xi in 0..cols {
+            let wx = xi as f64 * step_x + if yi % 2 == 1 { step_x / 2.0 } else { 0.0 };
+            let wy = yi as f64 * step_y + 40.0;
+            out.push_str(&format!(
+                r##"<text x="{wx:.0}" y="{wy:.0}" font-family="{font}" font-size="24" font-weight="700" fill="#0F3B63" fill-opacity="0.045" text-anchor="middle" transform="rotate(-24 {wx:.0} {wy:.0})">{mark}</text>
+"##
+            ));
+        }
+    }
+    out
 }
 
 /// 前三名奖牌：彩带 + 圆形徽章 + 名次数字（不用 emoji，避免字体缺字）。
@@ -658,6 +686,17 @@ mod tests {
                 < svg.find(">乙</text>").unwrap_or(usize::MAX)
         );
         assert!(!svg.contains("MONTHLY RANKING"));
+        // 导出图水印：鹏先生（平铺多次）
+        assert!(svg.matches(">鹏先生</text>").count() > 1);
+    }
+
+    #[test]
+    fn watermark_tiles_and_escapes() {
+        let svg = watermark_svg(600.0, 300.0, "sans-serif", "鹏先生");
+        assert!(svg.matches(">鹏先生</text>").count() >= 2);
+        let escaped = watermark_svg(600.0, 300.0, "sans-serif", "A<B");
+        assert!(escaped.contains("A&lt;B"));
+        assert!(!escaped.contains("A<B"));
     }
 
     #[test]
