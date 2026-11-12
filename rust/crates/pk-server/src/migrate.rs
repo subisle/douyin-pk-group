@@ -259,6 +259,12 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "047_live_room_standalone",
         include_str!("migrations/047_live_room_standalone.sql"),
     ),
+    // 048：按日导入批次贡献表。同一业务日多批次导入按人/日汇总，
+    // 后一批 0 行不再覆盖前一批正数；重发同批次保持幂等。
+    (
+        "048_daily_import_contrib",
+        include_str!("migrations/048_daily_import_contrib.sql"),
+    ),
 ];
 
 /// 迁移建连（migrator 账号；同样关语句缓存）

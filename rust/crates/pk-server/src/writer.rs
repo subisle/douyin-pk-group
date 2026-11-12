@@ -18,11 +18,12 @@ const DDL_KEYWORDS: [&str; 8] = [
 const FORBIDDEN_PHRASES: [&str; 2] = ["INTO OUTFILE", "LOAD_FILE"];
 
 /// 业务写连接允许的语句前缀
-const WRITE_PREFIXES: [&str; 10] = [
+const WRITE_PREFIXES: [&str; 11] = [
     "SELECT",
     "INSERT",
     "UPDATE",
     "DELETE",
+    "WITH",
     "ON CONFLICT",
     "START",
     "BEGIN",
@@ -30,6 +31,11 @@ const WRITE_PREFIXES: [&str; 10] = [
     "ROLLBACK",
     "SET",
 ];
+
+/// CTE 写语句只允许业务数据域：DDL 关键字仍由上面的通用守卫拦截，
+/// 这里额外确保 WITH 语句最终是 SELECT/INSERT/UPDATE/DELETE 之一，
+/// 避免把 `WITH ... CREATE TABLE` 这类伪装语句放过去。
+const CTE_WRITE_VERBS: [&str; 4] = ["SELECT", "INSERT", "UPDATE", "DELETE"];
 
 /// 把单引号字符串字面量里的内容替换成空格，避免值里的关键字（如 'DROP it'）误伤守卫
 fn strip_string_literals(sql: &str) -> String {
@@ -72,7 +78,10 @@ pub fn write_guard(sql: &str) -> anyhow::Result<()> {
         anyhow::bail!("写连接拒绝执行：检测到 DDL 关键字 {kw}（DDL 只能走显式 migrate）");
     }
     if !WRITE_PREFIXES.iter().any(|p| upper.starts_with(p)) {
-        anyhow::bail!("写连接拒绝执行：仅允许业务写语句（INSERT/UPDATE/DELETE/SELECT）");
+        anyhow::bail!("写连接拒绝执行：仅允许业务写语句（INSERT/UPDATE/DELETE/SELECT/WITH）");
+    }
+    if upper.starts_with("WITH") && !CTE_WRITE_VERBS.iter().any(|verb| upper.contains(verb)) {
+        anyhow::bail!("写连接拒绝执行：WITH 语句必须最终落到业务读写动词");
     }
     Ok(())
 }
@@ -143,5 +152,15 @@ mod tests {
     fn denies_unknown_statements() {
         assert!(write_guard("CALL do_something()").is_err());
         assert!(write_guard("USE other_db").is_err());
+    }
+
+    #[test]
+    fn allows_business_cte_write_but_still_blocks_ddl() {
+        assert!(write_guard(
+            "WITH agg AS (SELECT 1 AS x) INSERT INTO daily_metric (wave) SELECT x FROM agg"
+        )
+        .is_ok());
+        assert!(write_guard("WITH x AS (SELECT 1) CREATE TABLE t (id int)").is_err());
+        assert!(write_guard("WITH x AS (SELECT 1) DROP TABLE t").is_err());
     }
 }
