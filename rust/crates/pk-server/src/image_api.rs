@@ -28,6 +28,22 @@ const API_PREFIX: &str = "/api/images";
 /// 只出现在图片接口产出的 PNG 里，不影响后台页面预览。
 const RANKING_WATERMARK: &str = "鹏先生";
 
+/// 导出图不展示的账号（2026-11-13 用户口径）：默认排除测试号 `st001`。
+/// 需要临时加人可设 `RANKING_EXCLUDED_NAMES=st001,某某`（半角/全角逗号都认）。
+fn excluded_ranking_names() -> Vec<String> {
+    parse_excluded_names(
+        &std::env::var("RANKING_EXCLUDED_NAMES").unwrap_or_else(|_| "st001".to_string()),
+    )
+}
+
+fn parse_excluded_names(raw: &str) -> Vec<String> {
+    raw.split([';', ',', '，', '、'])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 /// 图片 API Key 与管理员口令共用 Argon2 校验，属于 CPU 密集操作。
 /// 限制同时校验数，避免错误 Key 并发请求把 4 核机器打满。
 static KEY_VERIFY_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
@@ -144,19 +160,20 @@ async fn ranking_png(
         _ => return Err(ApiError::bad_request("metric 只能是 wave 或 minutes")),
     };
 
-    // 与 /api/admin/metrics/monthly 完全同一份月榜 SQL 口径：整月导入优先，
-    // 缺月回落到日明细，多抖音号已按人合并。
+    // 与 /api/admin/metrics/monthly 同一份月榜 SQL 口径：整月导入优先，
+    // 缺月回落到日明细，多抖音号已按人合并；但导出图按**对外口径**再过滤
+    // 一次「榜单隐藏」的人（鹏先生 / 薇姐等，hide_in_daily_report=1）。
     let db_rows = dialect::query_period(
         &st.pools,
         "LOCAL",
         dialect::ADMIN_PERIOD_SELECT,
         &format!("{period}%"),
         team,
-        "",
+        " AND p.hide_in_daily_report = 0",
         "wave DESC",
     )
     .await?;
-    let rows: Vec<RankRow> = db_rows
+    let mut rows: Vec<RankRow> = db_rows
         .iter()
         .map(|r| {
             Ok(RankRow {
@@ -166,6 +183,19 @@ async fn ranking_png(
             })
         })
         .collect::<Result<Vec<_>, sqlx::Error>>()?;
+    // 测试号 / 运营号按名字兜底排除（默认 st001，可用 RANKING_EXCLUDED_NAMES 覆盖）。
+    let excluded = excluded_ranking_names();
+    if !excluded.is_empty() {
+        let before = rows.len();
+        rows.retain(|r| !excluded.iter().any(|n| n == &r.name));
+        if rows.len() != before {
+            tracing::debug!(
+                removed = before - rows.len(),
+                excluded = ?excluded,
+                "导出图已排除测试/运营账号"
+            );
+        }
+    }
     if rows.is_empty() {
         return Err(ApiError::bad_request("这个周期没有榜单数据"));
     }
@@ -804,6 +834,16 @@ mod tests {
         assert!(svg.contains(r#"height="1068""#), "两列高度不对");
         // 排名连续：左列 01-15，右列从 16 开始
         assert!(svg.contains(">16<"));
+    }
+
+    #[test]
+    fn excluded_names_parse() {
+        assert_eq!(parse_excluded_names("st001"), vec!["st001"]);
+        assert_eq!(
+            parse_excluded_names(" st001，鹏先生, 薇姐 "),
+            vec!["st001", "鹏先生", "薇姐"]
+        );
+        assert!(parse_excluded_names("  , ").is_empty());
     }
 
     #[test]
