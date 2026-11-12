@@ -191,7 +191,7 @@ async fn ranking_png(
     image_response(png, &filename)
 }
 
-/// 月榜长图（2026-11-13 改版）：单列、奖牌名次、青色圆角条、底部统计条。
+/// 月榜长图（2026-11-13 改版）：人数 > 20 自动分两列，奖牌名次、青色圆角条、底部统计条。
 /// 版式对齐用户提供的「鹏仔传媒主播时长统计」参考图。
 fn ranking_svg(rows: &[RankRow], metric: &str, team_label: &str, period: &str) -> String {
     let mut ordered = rows.to_vec();
@@ -219,23 +219,35 @@ fn ranking_svg(rows: &[RankRow], metric: &str, team_label: &str, period: &str) -
         if is_wave { "音浪" } else { "有效时长" }
     );
 
+    let n = ordered.len();
+    // 2026-11-13 用户口径：长榜不用一张竖图，超过 20 人分两列，左列先排。
+    let col_count = if n > 20 { 2usize } else { 1 };
+    let per_col = n.div_ceil(col_count);
+    let two_cols = col_count == 2;
+
     let width = 1500.0;
     let margin = 60.0;
+    let col_gap = 54.0;
+    let col_w = (width - margin * 2.0 - col_gap * (col_count as f64 - 1.0)) / col_count as f64;
+    let row_height = if two_cols { 46.0 } else { 54.0 };
     let header_y = 216.0;
     let row_start = 234.0;
-    let row_height = 54.0;
-    let footer_y = row_start + ordered.len() as f64 * row_height + 36.0;
+    let footer_y = row_start + per_col as f64 * row_height + 36.0;
     let height = footer_y + 108.0;
-    let rank_x = margin + 16.0;
-    // 名次列用居中锚点：奖牌圆心与两位序号中心落在同一竖线上。
-    let rank_cx = rank_x + 17.0;
-    let name_x = margin + 92.0;
-    let bar_x = margin + 340.0;
-    let value_x = width - margin;
-    let bar_w = value_x - bar_x - 168.0;
+    let name_font = if two_cols { 21.0 } else { 24.0 };
+    let value_font = if two_cols { 19.0 } else { 22.0 };
+    let bar_h = if two_cols { 16.0 } else { 20.0 };
+    let rank_font = if two_cols { 18.0 } else { 20.0 };
+    let medal_r = if two_cols { 16.0 } else { 20.0 };
+    let name_max = if two_cols { 8 } else { 10 };
+    let rank_dx = if two_cols { 26.0 } else { 33.0 };
+    let name_dx = if two_cols { 56.0 } else { 92.0 };
+    let bar_dx = if two_cols { 250.0 } else { 340.0 };
+    let value_reserve = if two_cols { 96.0 } else { 168.0 };
     let strip_x = margin - 20.0;
     let strip_w = width - strip_x * 2.0;
     let title_x = width / 2.0;
+    let value_x = width - margin;
     let max_value = ordered
         .iter()
         .map(|r| if is_wave { r.wave } else { r.minutes })
@@ -285,19 +297,34 @@ fn ranking_svg(rows: &[RankRow], metric: &str, team_label: &str, period: &str) -
 <text x="{title_x}" y="144" text-anchor="middle" font-family="{font}" font-size="19" fill="#5E7E99">{subtitle}</text>
 <rect x="{accent_x}" y="160" width="140" height="5" rx="2.5" fill="url(#bar)"/>
 <rect x="{strip_x}" y="{strip_y}" width="{strip_w}" height="42" rx="12" fill="#EAF5FF" opacity="0.9"/>
-<text x="{rank_x}" y="{header_y}" font-family="{font}" font-size="17" font-weight="700" fill="#7E97AE">序号</text>
-<text x="{name_x}" y="{header_y}" font-family="{font}" font-size="17" font-weight="700" fill="#7E97AE">主播姓名</text>
-<text x="{bar_x}" y="{header_y}" font-family="{font}" font-size="17" font-weight="700" fill="#7E97AE">{bar_header}</text>
-<text x="{value_x}" y="{header_y}" text-anchor="end" font-family="{font}" font-size="17" font-weight="700" fill="#7E97AE">{value_header}</text>
-<line x1="{margin}" y1="{header_y_line}" x2="{width_minus_margin}" y2="{header_y_line}" stroke="#D5E6F5" stroke-width="2"/>
 "##,
         width_glow_right = width - 140.0,
         title_text = lineage_report::esc(&title),
         accent_x = title_x - 70.0,
         strip_y = header_y - 32.0,
+    );
+
+    // 表头按列重复：分两列后每列都要有自己的「序号 / 姓名 / 条 / 数值」。
+    for c in 0..col_count {
+        let x0 = margin + c as f64 * (col_w + col_gap);
+        svg.push_str(&format!(
+            r##"<text x="{rank_cx}" y="{header_y}" text-anchor="middle" font-family="{font}" font-size="17" font-weight="700" fill="#7E97AE">序号</text>
+<text x="{name_x}" y="{header_y}" font-family="{font}" font-size="17" font-weight="700" fill="#7E97AE">主播姓名</text>
+<text x="{bar_x}" y="{header_y}" font-family="{font}" font-size="17" font-weight="700" fill="#7E97AE">{bar_header}</text>
+<text x="{col_right}" y="{header_y}" text-anchor="end" font-family="{font}" font-size="17" font-weight="700" fill="#7E97AE">{value_header}</text>
+"##,
+            rank_cx = x0 + rank_dx,
+            name_x = x0 + name_dx,
+            bar_x = x0 + bar_dx,
+            col_right = x0 + col_w,
+        ));
+    }
+    svg.push_str(&format!(
+        r##"<line x1="{margin}" y1="{header_y_line}" x2="{width_minus_margin}" y2="{header_y_line}" stroke="#D5E6F5" stroke-width="2"/>
+"##,
         header_y_line = header_y + 14.0,
         width_minus_margin = width - margin,
-    );
+    ));
 
     // 名次先算出来（同值同名次），行底色与奖牌共用。
     let values: Vec<i64> = ordered
@@ -316,43 +343,54 @@ fn ranking_svg(rows: &[RankRow], metric: &str, team_label: &str, period: &str) -
     }
 
     // 行底色先整段铺底：前三名奖牌彩带会略微越出本行，若随行绘制会被
-    // 下一行的底色盖住。2026-11-13 用户口径：不做前三名行底特殊标记，只保留隔行斑马纹。
-    for (i, _value) in values.iter().enumerate() {
+    // 下一行的底色盖住。只做隔行斑马纹，不做前三名行底特殊标记。
+    for i in 0..n {
         if i % 2 == 0 {
             continue;
         }
-        let fill = "#EFF7FF";
-        let y = row_start + i as f64 * row_height;
+        let col = i / per_col;
+        let k = i % per_col;
+        let x0 = margin + col as f64 * (col_w + col_gap);
+        let y = row_start + k as f64 * row_height;
         svg.push_str(&format!(
-            r##"<rect x="{}" y="{}" width="{}" height="{}" rx="12" fill="{fill}"/>
+            r##"<rect x="{}" y="{}" width="{col_rx_w}" height="{}" rx="12" fill="#EFF7FF"/>
 "##,
-            margin - 20.0,
+            x0 - 20.0,
             y + 2.0,
-            width - (margin - 20.0) * 2.0,
-            row_height - 4.0
+            row_height - 4.0,
+            col_rx_w = col_w + 40.0,
         ));
     }
 
     for (i, row) in ordered.iter().enumerate() {
         let value = values[i];
         let rank = ranks[i];
-        let y = row_start + i as f64 * row_height;
+        let col = i / per_col;
+        let k = i % per_col;
+        let x0 = margin + col as f64 * (col_w + col_gap);
+        let y = row_start + k as f64 * row_height;
         let center = y + row_height / 2.0;
+        let rank_cx = x0 + rank_dx;
+        let name_x = x0 + name_dx;
+        let bar_x = x0 + bar_dx;
+        let col_right = x0 + col_w;
+        let bar_w = col_w - bar_dx - value_reserve;
+
         if rank <= 3 && value > 0 {
-            svg.push_str(&medal_svg(rank_cx, center, rank, font));
+            svg.push_str(&medal_svg(rank_cx, center, rank, font, medal_r));
         } else {
             svg.push_str(&format!(
-                r##"<text x="{rank_cx}" y="{}" text-anchor="middle" font-family="{font}" font-size="20" font-weight="700" fill="#9FB2C4">{:02}</text>
+                r##"<text x="{rank_cx}" y="{}" text-anchor="middle" font-family="{font}" font-size="{rank_font}" font-weight="700" fill="#9FB2C4">{:02}</text>
 "##,
-                center + 7.0,
+                center + rank_font * 0.35,
                 rank
             ));
         }
-        let name = truncate_chars(&row.name, 10);
+        let name = truncate_chars(&row.name, name_max);
         svg.push_str(&format!(
-            r##"<text x="{name_x}" y="{}" font-family="{font}" font-size="24" font-weight="700" fill="{}">{}</text>
+            r##"<text x="{name_x}" y="{}" font-family="{font}" font-size="{name_font}" font-weight="700" fill="{}">{}</text>
 "##,
-            center + 8.0,
+            center + name_font * 0.32,
             if value > 0 { "#13395C" } else { "#A9B8C6" },
             lineage_report::esc(&name)
         ));
@@ -365,19 +403,21 @@ fn ranking_svg(rows: &[RankRow], metric: &str, team_label: &str, period: &str) -
                 fmt_minutes(value)
             };
             svg.push_str(&format!(
-                r##"<rect x="{bar_x}" y="{}" width="{bar_w}" height="20" rx="10" fill="#E1F0FB"/>
-<rect x="{bar_x}" y="{}" width="{fill}" height="20" rx="10" fill="url(#bar)"/>
-<text x="{value_x}" y="{}" text-anchor="end" font-family="{font}" font-size="22" font-weight="800" fill="#12699C">{value_text}</text>
+                r##"<rect x="{bar_x}" y="{}" width="{bar_w}" height="{bar_h}" rx="{}" fill="#E1F0FB"/>
+<rect x="{bar_x}" y="{}" width="{fill}" height="{bar_h}" rx="{}" fill="url(#bar)"/>
+<text x="{col_right}" y="{}" text-anchor="end" font-family="{font}" font-size="{value_font}" font-weight="800" fill="#12699C">{value_text}</text>
 "##,
-                center - 10.0,
-                center - 10.0,
-                center + 8.0
+                center - bar_h / 2.0,
+                bar_h / 2.0,
+                center - bar_h / 2.0,
+                bar_h / 2.0,
+                center + value_font * 0.34
             ));
         } else {
             svg.push_str(&format!(
-                r##"<text x="{value_x}" y="{}" text-anchor="end" font-family="{font}" font-size="22" font-weight="800" fill="#E34B4B">未开播</text>
+                r##"<text x="{col_right}" y="{}" text-anchor="end" font-family="{font}" font-size="{value_font}" font-weight="800" fill="#E34B4B">未开播</text>
 "##,
-                center + 8.0
+                center + value_font * 0.34
             ));
         }
     }
@@ -453,37 +493,41 @@ fn watermark_svg(width: f64, height: f64, font: &str, text: &str) -> String {
 }
 
 /// 前三名奖牌：V 形彩带 + 圆形徽章 + 名次数字（不用 emoji，避免字体缺字）。
-fn medal_svg(cx: f64, cy: f64, rank: usize, font: &str) -> String {
+/// `r` 为徽章半径，两列窄版用小一号。
+fn medal_svg(cx: f64, cy: f64, rank: usize, font: &str, r: f64) -> String {
     let dark = match rank {
         1 => "#C68A00",
         2 => "#8292A6",
         _ => "#A9662F",
     };
+    let s = r / 20.0;
     format!(
         r##"<g>
 <path d="M{},{} L{},{} L{},{} L{},{} Z" fill="{dark}"/>
 <path d="M{},{} L{},{} L{},{} L{},{} Z" fill="{dark}" opacity="0.82"/>
-<circle cx="{cx}" cy="{cy}" r="20" fill="url(#medal-{rank})" stroke="{dark}" stroke-width="2"/>
-<text x="{cx}" y="{}" text-anchor="middle" font-family="{font}" font-size="21" font-weight="800" fill="#FFFFFF">{rank}</text>
+<circle cx="{cx}" cy="{cy}" r="{r}" fill="url(#medal-{rank})" stroke="{dark}" stroke-width="{}"/>
+<text x="{cx}" y="{}" text-anchor="middle" font-family="{font}" font-size="{}" font-weight="800" fill="#FFFFFF">{rank}</text>
 </g>
 "##,
-        cx - 17.0,
-        cy - 2.0,
-        cx - 3.0,
-        cy - 2.0,
-        cx - 12.0,
-        cy + 34.0,
-        cx - 26.0,
-        cy + 26.0,
-        cx + 17.0,
-        cy - 2.0,
-        cx + 3.0,
-        cy - 2.0,
-        cx + 12.0,
-        cy + 34.0,
-        cx + 26.0,
-        cy + 26.0,
-        cy + 7.0
+        cx - 17.0 * s,
+        cy - 2.0 * s,
+        cx - 3.0 * s,
+        cy - 2.0 * s,
+        cx - 12.0 * s,
+        cy + 34.0 * s,
+        cx - 26.0 * s,
+        cy + 26.0 * s,
+        cx + 17.0 * s,
+        cy - 2.0 * s,
+        cx + 3.0 * s,
+        cy - 2.0 * s,
+        cx + 12.0 * s,
+        cy + 34.0 * s,
+        cx + 26.0 * s,
+        cy + 26.0 * s,
+        2.0 * s,
+        cy + 7.0 * s,
+        21.0 * s
     )
 }
 
@@ -742,6 +786,24 @@ mod tests {
         let escaped = watermark_svg(600.0, 300.0, "sans-serif", "A<B");
         assert!(escaped.contains("A&lt;B"));
         assert!(!escaped.contains("A<B"));
+    }
+
+    #[test]
+    fn ranking_svg_uses_two_columns_for_long_lists() {
+        let rows: Vec<RankRow> = (0..30)
+            .map(|i| RankRow {
+                name: format!("主播{i:02}"),
+                wave: 1000 - i,
+                minutes: 100 - i,
+            })
+            .collect();
+        let svg = ranking_svg(&rows, "wave", "全团", "2026-06");
+        // 两列表头各一套
+        assert_eq!(svg.matches("主播姓名").count(), 2);
+        // 30 人两列 = 每列 15 行；高度 234 + 15*46 + 36 + 108 = 1068
+        assert!(svg.contains(r#"height="1068""#), "两列高度不对");
+        // 排名连续：左列 01-15，右列从 16 开始
+        assert!(svg.contains(">16<"));
     }
 
     #[test]
