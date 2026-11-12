@@ -277,6 +277,12 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "050_daily_contrib_has_wave",
         include_str!("migrations/050_daily_contrib_has_wave.sql"),
     ),
+    // 051：未认领导入全部暂存。只有艺名、没有抖音号/采集 ID 的行也落
+    // import_pending(_month)，以 claim_key 幂等等待后续同名主播建号/认领补账。
+    (
+        "051_unclaimed_imports",
+        include_str!("migrations/051_unclaimed_imports.sql"),
+    ),
 ];
 
 /// 迁移建连（migrator 账号；同样关语句缓存）

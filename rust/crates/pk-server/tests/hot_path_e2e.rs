@@ -1,9 +1,13 @@
-//! 热路径真库回归：直播批量采样/席位、旧分数版本，以及按日贡献 has_wave。
+//! 热路径真库回归：直播批量采样/席位、旧分数版本、按日贡献 has_wave，
+//! 以及只有艺名的未认领数据暂存 → 认领补账 / 删除清理。
 //!
 //! 需要独立测试库环境变量（DB_LOCAL_* + DB_WRITER_*）；未配置时显式跳过。
 //! 测试数据使用时间戳 ID，结束即清理，不触碰真实赛事。
 
-use pk_server::admin::{commit_import, commit_month_metrics, ImportRow, MonthMetrics};
+use pk_server::admin::{
+    absorb_pending, absorb_pending_month, commit_import, commit_month_metrics, import_day_delete,
+    import_month_delete, DayQuery, ImportRow, MonthMetrics, MonthQuery,
+};
 use pk_server::live::{BattleScore, BattleSnapshot, LiveRules, RankedSeat, StageKind};
 use pk_server::{config, pgrs, state::AppState, store};
 use sqlx::Row;
@@ -468,6 +472,285 @@ async fn monthly_import_bulk_upsert_preserves_unchanged_contract() {
         .await;
     let _ = sqlx::query("DELETE FROM person WHERE id = $1")
         .bind(person_id)
+        .execute(pool)
+        .await;
+}
+
+#[tokio::test]
+#[ignore = "需要真实 PostgreSQL（DB_LOCAL_* + DB_WRITER_*）；加 -- --ignored 运行"]
+async fn name_only_import_is_stored_and_absorbed_after_claim() {
+    let Some(st) = setup().await else { return };
+    let st = std::sync::Arc::new(st);
+    if st.writer.is_none() {
+        eprintln!("跳过：douyin_writer 未配置");
+        return;
+    }
+    let stamp = chrono::Utc::now().timestamp_millis();
+    let daily_name = format!("__e2e_claim_daily_{stamp}");
+    let month_name = format!("__e2e_claim_month_{stamp}");
+    let daily_date = "2999-03-01";
+    let period = "2999-04";
+    let pool = st.writer.as_ref().expect("writer");
+
+    let daily_report = commit_import(
+        &st,
+        "auto",
+        daily_date,
+        vec![ImportRow {
+            name: daily_name.clone(),
+            wave: Some(777.0),
+            minutes: Some(55.0),
+            ..Default::default()
+        }],
+        "merge",
+        "__e2e_name_only_daily.csv",
+    )
+    .await
+    .expect("仅艺名按日导入");
+    assert_eq!(daily_report.pending.len(), 1, "未认得的人也必须暂存");
+    assert!(daily_report.failures.is_empty());
+
+    let pending_daily = sqlx::query(
+        "SELECT name, douyin_no, claim_key FROM import_pending
+          WHERE claim_key = $1 AND biz_date = $2::date AND absorbed_at IS NULL",
+    )
+    .bind(&daily_name)
+    .bind(daily_date)
+    .fetch_one(pool)
+    .await
+    .expect("按日暂存行");
+    assert_eq!(pending_daily.try_get::<String, _>("douyin_no").unwrap(), "");
+    assert_eq!(
+        pending_daily.try_get::<String, _>("name").unwrap(),
+        daily_name
+    );
+
+    let month_report = commit_month_metrics(
+        &st,
+        period,
+        "auto",
+        vec![ImportRow {
+            name: month_name.clone(),
+            wave: Some(888.0),
+            minutes: Some(66.0),
+            ..Default::default()
+        }],
+        "merge",
+        "__e2e_name_only_month.csv",
+        MonthMetrics::BOTH,
+    )
+    .await
+    .expect("仅艺名按月导入");
+    assert!(
+        month_report
+            .failures
+            .iter()
+            .any(|v| v["reason"].as_str().is_some_and(|s| s.contains("已暂存"))),
+        "月度未认领行也必须提示已暂存"
+    );
+    let pending_month = sqlx::query(
+        "SELECT name, douyin_no, claim_key FROM import_pending_month
+          WHERE claim_key = $1 AND btrim(period) = $2 AND absorbed_at IS NULL",
+    )
+    .bind(&month_name)
+    .bind(period)
+    .fetch_one(pool)
+    .await
+    .expect("月度暂存行");
+    assert_eq!(pending_month.try_get::<String, _>("douyin_no").unwrap(), "");
+
+    let daily_pid: i64 =
+        sqlx::query("INSERT INTO person (name, gender) VALUES ($1, 'male') RETURNING id")
+            .bind(&daily_name)
+            .fetch_one(pool)
+            .await
+            .expect("按日认领建档")
+            .try_get("id")
+            .unwrap();
+    let month_pid: i64 =
+        sqlx::query("INSERT INTO person (name, gender) VALUES ($1, 'female') RETURNING id")
+            .bind(&month_name)
+            .fetch_one(pool)
+            .await
+            .expect("月度认领建档")
+            .try_get("id")
+            .unwrap();
+
+    assert_eq!(absorb_pending(&st, daily_pid as u64).await.unwrap(), 1);
+    assert_eq!(
+        absorb_pending_month(&st, month_pid as u64).await.unwrap(),
+        1
+    );
+
+    let daily = sqlx::query(
+        "SELECT wave, (minutes)::BIGINT AS minutes FROM daily_metric
+          WHERE person_id = $1 AND biz_date = $2::date",
+    )
+    .bind(daily_pid)
+    .bind(daily_date)
+    .fetch_one(pool)
+    .await
+    .expect("按日补账结果");
+    assert_eq!(daily.try_get::<i64, _>("wave").unwrap(), 777);
+    assert_eq!(daily.try_get::<i64, _>("minutes").unwrap(), 55);
+
+    let wave: i64 =
+        sqlx::query_scalar("SELECT wave FROM monthly_wave WHERE person_id = $1 AND period = $2")
+            .bind(month_pid)
+            .bind(period)
+            .fetch_one(pool)
+            .await
+            .expect("月度音浪补账");
+    let minutes: i32 = sqlx::query_scalar(
+        "SELECT minutes FROM monthly_duration WHERE person_id = $1 AND period = $2",
+    )
+    .bind(month_pid)
+    .bind(period)
+    .fetch_one(pool)
+    .await
+    .expect("月时长补账");
+    assert_eq!((wave, minutes), (888, 66));
+
+    for batch_id in [daily_report.batch_id, month_report.batch_id] {
+        let _ = sqlx::query("DELETE FROM daily_import_contrib WHERE batch_id = $1")
+            .bind(batch_id)
+            .execute(pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM import_batch WHERE id = $1")
+            .bind(batch_id)
+            .execute(pool)
+            .await;
+    }
+    let _ = sqlx::query("DELETE FROM import_pending WHERE claim_key = $1")
+        .bind(&daily_name)
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("DELETE FROM import_pending_month WHERE claim_key = $1")
+        .bind(&month_name)
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("DELETE FROM daily_metric WHERE person_id = $1 AND biz_date = $2::date")
+        .bind(daily_pid)
+        .bind(daily_date)
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("DELETE FROM monthly_wave WHERE person_id = $1 AND period = $2")
+        .bind(month_pid)
+        .bind(period)
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("DELETE FROM monthly_duration WHERE person_id = $1 AND period = $2")
+        .bind(month_pid)
+        .bind(period)
+        .execute(pool)
+        .await;
+    for pid in [daily_pid, month_pid] {
+        let _ = sqlx::query("DELETE FROM person WHERE id = $1")
+            .bind(pid)
+            .execute(pool)
+            .await;
+    }
+}
+
+#[tokio::test]
+#[ignore = "需要真实 PostgreSQL（DB_LOCAL_* + DB_WRITER_*）；加 -- --ignored 运行"]
+async fn deleting_day_or_month_clears_its_unclaimed_rows() {
+    let Some(st) = setup().await else { return };
+    let st = std::sync::Arc::new(st);
+    if st.writer.is_none() {
+        eprintln!("跳过：douyin_writer 未配置");
+        return;
+    }
+    let stamp = chrono::Utc::now().timestamp_millis();
+    let daily_name = format!("__e2e_delete_daily_{stamp}");
+    let month_name = format!("__e2e_delete_month_{stamp}");
+    let daily_date = "2999-05-01";
+    let period = "2999-06";
+    let pool = st.writer.as_ref().expect("writer");
+
+    let daily_batch = commit_import(
+        &st,
+        "auto",
+        daily_date,
+        vec![ImportRow {
+            name: daily_name.clone(),
+            wave: Some(100.0),
+            ..Default::default()
+        }],
+        "merge",
+        "__e2e_delete_daily.csv",
+    )
+    .await
+    .expect("按日暂存导入")
+    .batch_id;
+    let month_batch = commit_month_metrics(
+        &st,
+        period,
+        "auto",
+        vec![ImportRow {
+            name: month_name.clone(),
+            wave: Some(200.0),
+            ..Default::default()
+        }],
+        "merge",
+        "__e2e_delete_month.csv",
+        MonthMetrics {
+            minutes: false,
+            wave: true,
+        },
+    )
+    .await
+    .expect("月度暂存导入")
+    .batch_id;
+
+    let _ = import_day_delete(
+        axum::extract::State(st.clone()),
+        axum::extract::Query(DayQuery {
+            biz_date: daily_date.into(),
+            team: "auto".into(),
+        }),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("删除按日数据失败"));
+    let daily_left: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM import_pending WHERE claim_key = $1 AND absorbed_at IS NULL",
+    )
+    .bind(&daily_name)
+    .fetch_one(pool)
+    .await
+    .expect("核查按日暂存");
+    assert_eq!(daily_left, 0, "删日必须同步清理未认领暂存");
+
+    let _ = import_month_delete(
+        axum::extract::State(st.clone()),
+        axum::extract::Query(MonthQuery {
+            period: period.into(),
+            team: "auto".into(),
+        }),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("删除月度数据失败"));
+    let month_left: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM import_pending_month WHERE claim_key = $1 AND absorbed_at IS NULL",
+    )
+    .bind(&month_name)
+    .fetch_one(pool)
+    .await
+    .expect("核查月度暂存");
+    assert_eq!(month_left, 0, "删月必须同步清理未认领暂存");
+
+    for batch_id in [daily_batch, month_batch] {
+        let _ = sqlx::query("DELETE FROM import_batch WHERE id = $1")
+            .bind(batch_id)
+            .execute(pool)
+            .await;
+    }
+    let _ = sqlx::query("DELETE FROM import_pending WHERE claim_key = $1")
+        .bind(&daily_name)
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("DELETE FROM import_pending_month WHERE claim_key = $1")
+        .bind(&month_name)
         .execute(pool)
         .await;
 }

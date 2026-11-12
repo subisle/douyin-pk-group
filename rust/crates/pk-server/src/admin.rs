@@ -1001,7 +1001,7 @@ fn truncate_chars(s: &str, max: usize) -> String {
     out
 }
 
-/// 行里的「认人标识」：抖音号优先，其次采集 ID。都没有 = None（暂存也没意义）。
+/// 行里的「认人标识」：抖音号优先，其次采集 ID。
 fn row_ident(row: &ImportRow) -> Option<String> {
     [row.douyin_no.as_deref(), row.anchor_id.as_deref()]
         .into_iter()
@@ -1009,6 +1009,15 @@ fn row_ident(row: &ImportRow) -> Option<String> {
         .map(str::trim)
         .find(|s| !s.is_empty())
         .map(|s| truncate_chars(s, IDENT_MAX_CHARS))
+}
+
+/// 暂存认领键：有抖音号 / 采集 ID 就用标识；没有标识则用艺名。
+/// 艺名-only 行也必须落暂存，后续同名主播建号 / 认领时再补账。
+fn row_claim_key(row: &ImportRow) -> Option<String> {
+    row_ident(row).or_else(|| {
+        let name = row.name.trim();
+        (!name.is_empty()).then(|| truncate_chars(name, PENDING_NAME_MAX_CHARS))
+    })
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -1716,8 +1725,8 @@ pub struct CommitReport {
     /// 库里已有该人该日、且值完全一样 → 没动它（用户口径 2026-10-10：相同不覆盖，不同才覆盖）
     pub unchanged: u32,
     pub failures: Vec<Value>,
-    /// 暂存行：有抖音号 / ID 但台账还没有这个主播 —— 只落 import_pending，
-    /// 不写 daily_metric，所以不进台账 / 榜单 / 统计；建档或绑号后自动补账。
+    /// 暂存行：台账还没有这个主播 —— 有号按号、只有艺名按名落 import_pending，
+    /// 不写 daily_metric，所以不进台账 / 榜单 / 统计；建档 / 绑号 / 认领后自动补账。
     pub pending: Vec<Value>,
     /// 跳过行：命中主播但当天一行数值都没有（不算失败，交给缺数据完整度报告）
     pub skipped: Vec<String>,
@@ -1739,11 +1748,11 @@ pub struct CommitReport {
 enum RowClass {
     /// 命中主播且有数值 → 写 daily_metric
     Ok,
-    /// 未命中但有抖音号 / ID → import_pending 暂存
+    /// 未命中但有抖音号 / ID / 艺名认领键 → import_pending 暂存
     Pending,
     /// 命中主播但一行数值都没有 → 跳过
     Skipped,
-    /// 没命中、也没有任何 ID → 失败
+    /// 没命中、也没有任何可认领文本 → 失败
     Unmatched,
     /// 团别冲突 → 失败
     TeamConflict(String),
@@ -1751,7 +1760,7 @@ enum RowClass {
 
 fn classify_row(r: &ResolvedRow) -> RowClass {
     if !r.matched {
-        return match row_ident(&r.raw) {
+        return match row_claim_key(&r.raw) {
             Some(_) => RowClass::Pending,
             None => RowClass::Unmatched,
         };
@@ -2053,35 +2062,36 @@ async fn record_import_contrib(
 
     writer::write_guard(DAILY_CONTRIB_UPSERT_SQL)?;
     let contrib_date = NaiveDate::parse_from_str(biz_date, "%Y-%m-%d")?;
-    let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new(
-        "INSERT INTO daily_import_contrib
-           (batch_id, person_id, biz_date, wave, minutes, is_live, has_minutes, has_wave) ",
-    );
-    qb.push_values(
-        ok_rows.iter().filter_map(|r| r.person_id.map(|pid| (r, pid))),
-        |mut b, (r, pid)| {
+    let contrib_rows: Vec<(&ResolvedRow, u64)> = ok_rows
+        .iter()
+        .filter_map(|r| r.person_id.map(|pid| (*r, pid)))
+        .collect();
+    if !contrib_rows.is_empty() {
+        let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+            "INSERT INTO daily_import_contrib
+               (batch_id, person_id, biz_date, wave, minutes, is_live, has_minutes, has_wave) ",
+        );
+        qb.push_values(&contrib_rows, |mut b, (r, pid)| {
             let wave = r.raw.wave.unwrap_or(0.0).round().max(0.0) as i64;
             let minutes = r.raw.minutes.unwrap_or(0.0).round().max(0.0) as i64;
             let has_minutes = i16::from(r.raw.minutes.is_some());
             let has_wave = i16::from(r.raw.wave.is_some());
             let is_live = i16::from(r.raw.is_live.unwrap_or(false)) | i16::from(wave >= 2);
             b.push_bind(batch_id)
-                .push_bind(pid as i64)
+                .push_bind(*pid as i64)
                 .push_bind(contrib_date)
                 .push_bind(wave)
                 .push_bind(minutes)
                 .push_bind(is_live)
                 .push_bind(has_minutes)
                 .push_bind(has_wave);
-        },
-    );
-    qb.push(
-        " ON CONFLICT (batch_id, person_id, biz_date) DO UPDATE SET
-             wave = EXCLUDED.wave, minutes = EXCLUDED.minutes,
-             is_live = EXCLUDED.is_live, has_minutes = EXCLUDED.has_minutes,
-             has_wave = EXCLUDED.has_wave",
-    );
-    if ok_rows.iter().any(|r| r.person_id.is_some()) {
+        });
+        qb.push(
+            " ON CONFLICT (batch_id, person_id, biz_date) DO UPDATE SET
+                 wave = EXCLUDED.wave, minutes = EXCLUDED.minutes,
+                 is_live = EXCLUDED.is_live, has_minutes = EXCLUDED.has_minutes,
+                 has_wave = EXCLUDED.has_wave",
+        );
         qb.build().execute(&mut **tx).await?;
     }
     Ok(true)
@@ -2162,7 +2172,7 @@ pub async fn commit_import(
             RowClass::Skipped => skipped.push(truncate_chars(&r.raw.name, 64)),
             RowClass::Unmatched => failures.push(json!({
                 "name": r.raw.name,
-                "reason": "未匹配到主播，也没有抖音号/ID 可以暂存；请先在主播台账建档或绑定"
+                "reason": "未匹配到主播，也没有艺名/抖音号/ID 可以暂存；请先在主播台账建档或绑定"
             })),
             RowClass::TeamConflict(reason) => {
                 failures.push(json!({ "name": r.raw.name, "reason": reason }))
@@ -2298,19 +2308,19 @@ pub async fn commit_import(
         }
     }
 
-    /* 暂存：未建档但有抖音号 / ID 的行 → import_pending。
-    同一「号码 + 日期」重导按最新值覆盖（幂等，跟 daily_metric 的 merge 口径一致），
-    运营删号重发同一个文件不会翻倍。 */
+    /* 暂存：未建档的行全部 → import_pending。有号按号，只有艺名按名，
+    同一 claim_key + 日期重导按最新值覆盖（幂等，跟 daily_metric 的 merge 口径一致）。 */
     let mut pending_count: u32 = 0;
     for r in &staged_rows {
-        let Some(no) = row_ident(&r.raw) else {
+        let Some(claim_key) = row_claim_key(&r.raw) else {
             continue;
         };
-        let res = sqlx::query(&crate::pq::rewrite(
+        let no = row_ident(&r.raw).unwrap_or_default();
+        sqlx::query(&crate::pq::rewrite(
             "INSERT INTO import_pending
-                 (name, douyin_no, biz_date, wave, cumulative_wave, minutes, is_live, source_batch_id)
-             VALUES (?,?,?::date,?,?,?,?,?)
-             ON CONFLICT (douyin_no, biz_date) DO UPDATE SET
+                 (name, douyin_no, claim_key, biz_date, wave, cumulative_wave, minutes, is_live, source_batch_id)
+             VALUES (?,?,?,?::date,?,?,?,?,?)
+             ON CONFLICT (claim_key, biz_date) WHERE claim_key <> '' DO UPDATE SET
                  name = EXCLUDED.name, wave = EXCLUDED.wave,
                  cumulative_wave = EXCLUDED.cumulative_wave,
                  /* 时长（2026-10-19）：按日文件带时长时暂存行也有真实 minutes。
@@ -2321,6 +2331,7 @@ pub async fn commit_import(
         ))
         .bind(truncate_chars(&r.raw.name, PENDING_NAME_MAX_CHARS))
         .bind(&no)
+        .bind(&claim_key)
         .bind(biz_date)
         .bind(r.raw.wave.map(|v| v as i64))
         .bind(r.raw.cumulative_wave.map(|v| v as i64))
@@ -2328,15 +2339,9 @@ pub async fn commit_import(
         .bind(r.raw.is_live.map(|b| b as i16))
         .bind(batch_id as i64)
         .execute(&mut *tx)
-        .await;
-        // 暂存区写不进去（例如线上还没跑 006 迁移 → 表不存在）不能拖垮整批导入：
-        // 记日志、这行不暂存，其余行照常入库。
-        match res {
-            Ok(_) => pending_count += 1,
-            Err(e) => {
-                tracing::warn!(error = %e, name = %r.raw.name, "暂存写入失败（该行不进暂存区）");
-            }
-        }
+        .await?;
+        // 未认领数据必须落库：暂存失败就整批回滚，不能用“导入成功”掩盖数据丢失。
+        pending_count += 1;
     }
 
     // 备注在写库后再刷一次：写入阶段的行级错误也要进摘要（同样先截断，别炸事务）
@@ -2447,6 +2452,7 @@ pub async fn commit_import(
                 json!({
                     "name": truncate_chars(&r.raw.name, 64),
                     "douyinNo": row_ident(&r.raw).unwrap_or_default(),
+                    "claimKey": row_claim_key(&r.raw).unwrap_or_default(),
                 })
             })
             .collect(),
@@ -2852,6 +2858,7 @@ pub async fn absorb_pending(st: &AppState, person_id: u64) -> anyhow::Result<u32
     let rows = sqlx::query(&crate::pq::rewrite(dialect::PENDING_FOR_PERSON_SQL))
         .bind(person_id as i64)
         .bind(person_id as i64)
+        .bind(person_id as i64)
         .map(|r: sqlx::postgres::PgRow| PendingRow {
             id: read_u64(&r, "id").unwrap_or(0),
             name: read_str(&r, "name"),
@@ -2985,9 +2992,9 @@ async fn absorb_pending_best_effort(st: &AppState, person_id: u64, ctx: &str) ->
 /// 不会被下一次 absorb 再次叠加（补账幂等的第二道防线；第一道是查询里的
 /// absorbed_at IS NULL）。
 const PENDING_MONTH_UPSERT_SQL: &str = "INSERT INTO import_pending_month
-         (name, douyin_no, period, wave, minutes, source_batch_id)
-     VALUES (?,?,?,?,?,?)
-     ON CONFLICT (douyin_no, period) DO UPDATE SET
+         (name, douyin_no, claim_key, period, wave, minutes, source_batch_id)
+     VALUES (?,?,?,?,?,?,?)
+     ON CONFLICT (claim_key, period) WHERE claim_key <> '' DO UPDATE SET
          name = EXCLUDED.name, wave = EXCLUDED.wave, minutes = EXCLUDED.minutes,
          source_batch_id = EXCLUDED.source_batch_id";
 
@@ -3012,10 +3019,6 @@ const PENDING_MONTH_ABSORB_MINUTES_SQL: &str = "INSERT INTO monthly_duration
 /// 未匹配行已暂存时给运营看的结论（出现在导入结果的失败列表里，替代原来的「未匹配」）
 const MONTH_PENDING_STAGED_REASON: &str =
     "未匹配到主播：已暂存，绑定/建档后会自动补账（本次不计入月度数据）";
-/// 连暂存都写不进去（典型：库还没跑 042 迁移）时的兜底文案
-const MONTH_PENDING_FAILED_REASON: &str =
-    "未匹配到主播，暂存失败（库可能还没跑 042 迁移）：先建档或绑定抖音号，再重导该月文件";
-
 /// 一条月度暂存行（补账用）
 struct PendingMonthRow {
     id: u64,
@@ -3041,6 +3044,7 @@ pub async fn absorb_pending_month(st: &AppState, person_id: u64) -> anyhow::Resu
         return Ok(0);
     };
     let rows = sqlx::query(&crate::pq::rewrite(dialect::PENDING_MONTH_FOR_PERSON_SQL))
+        .bind(person_id as i64)
         .bind(person_id as i64)
         .bind(person_id as i64)
         .map(|r: sqlx::postgres::PgRow| PendingMonthRow {
@@ -3159,6 +3163,7 @@ pub async fn import_pending_list(State(st): State<ArcState>) -> ApiResult {
                 "id": read_u64(r, "id").unwrap_or(0),
                 "name": read_str(r, "name"),
                 "douyinNo": read_str(r, "douyin_no"),
+                "claimKey": read_str(r, "claim_key"),
                 "bizDate": read_opt_str(r, "bd"),
                 "wave": read_opt_i64(r, "wave"),
                 "cumulativeWave": read_opt_i64(r, "cumulative_wave"),
@@ -3384,6 +3389,30 @@ pub async fn import_day_delete(
         }
     }
 
+    // 同一批导入产生的未认领暂存行也一起删：否则删日后重新绑号会把旧数据补回来。
+    let pending = if auto_team {
+        sqlx::query(&crate::pq::rewrite(
+            "DELETE FROM import_pending p USING import_batch b \
+             WHERE p.source_batch_id = b.id AND p.absorbed_at IS NULL \
+               AND b.source <> 'admin-import-month' AND b.biz_date = ?::date",
+        ))
+        .bind(&q.biz_date)
+        .execute(&mut *tx)
+        .await?
+        .affected()
+    } else {
+        sqlx::query(&crate::pq::rewrite(
+            "DELETE FROM import_pending p USING import_batch b \
+             WHERE p.source_batch_id = b.id AND p.absorbed_at IS NULL \
+               AND b.source <> 'admin-import-month' AND b.biz_date = ?::date AND b.team = ?",
+        ))
+        .bind(&q.biz_date)
+        .bind(team)
+        .execute(&mut *tx)
+        .await?
+        .affected()
+    };
+
     // 只删按日导入的批次：月度时长批次也用当月 1 号当 biz_date 占位，
     // 少了 source 过滤，删「某一天」会连坐删掉整月的月报审计记录（审计栈断裂）。
     let batches = if auto_team {
@@ -3421,7 +3450,7 @@ pub async fn import_day_delete(
         ),
     );
     Ok(Json(
-        json!({ "ok": true, "metrics": metrics, "batches": batches }),
+        json!({ "ok": true, "metrics": metrics, "batches": batches, "pending": pending }),
     ))
 }
 
@@ -3819,15 +3848,15 @@ pub async fn commit_month_metrics(
     for r in &merged {
         if !r.matched {
             /* 2026-10-18「先有数据后绑定」：月度未匹配行不再直接丢弃 ——
-            有抖音号 / 采集 ID 的先落 import_pending_month（按 period 暂存，不摊到某一天），
-            台账建档或绑定该号后由 absorb_pending_month 自动补进
-            monthly_wave / monthly_duration。连号码都没有的行无从补账，仍按失败报出来。
+            有号的按号、只有艺名的按名落 import_pending_month（按 period 暂存，不摊到某一天），
+            台账建档 / 绑号 / 认领后由 absorb_pending_month 自动补进
+            monthly_wave / monthly_duration。连艺名都没有的行无从补账，仍按失败报出来。
             暂存行依旧**不计入 ok_rows**（本次不写 monthly_*）。 */
-            match row_ident(&r.raw) {
+            match row_claim_key(&r.raw) {
                 Some(_) => pending_rows.push(r),
                 None => failures.push(json!({
                     "name": truncate_chars(&r.raw.name, 64),
-                    "reason": "未匹配到主播，也没有抖音号/ID 可以暂存；请先在主播台账建档或绑定"
+                    "reason": "未匹配到主播，也没有艺名/抖音号/ID 可以暂存；请先在主播台账建档或绑定"
                 })),
             }
             continue;
@@ -3994,19 +4023,21 @@ pub async fn commit_month_metrics(
             .map_err(month_table_err)?;
     }
 
-    /* 月度未匹配但有号的行 → import_pending_month（2026-10-18「先有数据后绑定」）。
-    与按日导入的暂存同口径：同一「号码 + 月份」重导按最新值覆盖（幂等，不翻倍），
+    /* 月度未匹配行 → import_pending_month（2026-10-18「先有数据后绑定」）。
+    与按日导入的暂存同口径：同一 claim_key + 月份重导按最新值覆盖（幂等，不翻倍），
     不写 monthly_*、不进月榜 / 个人月卡；建档或绑号后 absorb_pending_month 自动补账。
-    暂存失败（典型：库没跑 042）不能拖垮整批导入 —— 记日志，该行退化成原来的失败提示。 */
+    暂存写失败时整批回滚，不能出现“页面显示导入成功但数据没存”的静默丢行。 */
     let mut staged_count: u32 = 0;
     for r in &pending_rows {
-        let Some(no) = row_ident(&r.raw) else {
+        let Some(claim_key) = row_claim_key(&r.raw) else {
             continue;
         };
+        let no = row_ident(&r.raw).unwrap_or_default();
         let (stage_wave, stage_minutes) = month_stage_values(&r.raw, metrics);
-        let res = sqlx::query(&crate::pq::rewrite(PENDING_MONTH_UPSERT_SQL))
+        sqlx::query(&crate::pq::rewrite(PENDING_MONTH_UPSERT_SQL))
             .bind(truncate_chars(&r.raw.name, PENDING_NAME_MAX_CHARS))
             .bind(&no)
+            .bind(&claim_key)
             .bind(period)
             // 只暂存「勾了的指标」：与匹配行写库口径一致（只导时长时，文件里的音浪
             // 不该被偷偷暂存下来，否则补账会写进一个本次根本没导入的指标）
@@ -4014,23 +4045,13 @@ pub async fn commit_month_metrics(
             .bind(stage_minutes)
             .bind(batch_id as i64)
             .execute(&mut *tx)
-            .await;
-        match res {
-            Ok(_) => {
-                staged_count += 1;
-                failures.push(json!({
-                    "name": truncate_chars(&r.raw.name, 64),
-                    "reason": MONTH_PENDING_STAGED_REASON
-                }));
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, name = %r.raw.name, "月度暂存写入失败（该行不进暂存区）");
-                failures.push(json!({
-                    "name": truncate_chars(&r.raw.name, 64),
-                    "reason": MONTH_PENDING_FAILED_REASON
-                }));
-            }
-        }
+            .await?;
+        // 未认领月度数据也必须落库；暂存失败整批回滚，不静默丢行。
+        staged_count += 1;
+        failures.push(json!({
+            "name": truncate_chars(&r.raw.name, 64),
+            "reason": MONTH_PENDING_STAGED_REASON
+        }));
     }
 
     let note = month_note(&failures, &skipped);
@@ -4190,6 +4211,29 @@ pub async fn import_month_delete(
     }
     let rows = deleted[0];
     let wave_rows = deleted[1];
+    // 删除该月批次对应的未认领月度暂存行，避免后续同号/同名认领时旧数据复活。
+    let pending = if auto_team {
+        sqlx::query(&crate::pq::rewrite(
+            "DELETE FROM import_pending_month p USING import_batch b \
+             WHERE p.source_batch_id = b.id AND p.absorbed_at IS NULL \
+               AND b.source = 'admin-import-month' AND b.biz_date = ?::date",
+        ))
+        .bind(&biz_date)
+        .execute(&mut *tx)
+        .await?
+        .affected()
+    } else {
+        sqlx::query(&crate::pq::rewrite(
+            "DELETE FROM import_pending_month p USING import_batch b \
+             WHERE p.source_batch_id = b.id AND p.absorbed_at IS NULL \
+               AND b.source = 'admin-import-month' AND b.biz_date = ?::date AND b.team = ?",
+        ))
+        .bind(&biz_date)
+        .bind(&team)
+        .execute(&mut *tx)
+        .await?
+        .affected()
+    };
     let batches = if auto_team {
         sqlx::query(&crate::pq::rewrite(
             "DELETE FROM import_batch WHERE source = 'admin-import-month' AND biz_date = ?::date",
@@ -4221,7 +4265,8 @@ pub async fn import_month_delete(
         "ok": true,
         "rows": rows,
         "waveRows": wave_rows,
-        "batches": batches
+        "batches": batches,
+        "pending": pending
     })))
 }
 
@@ -4721,13 +4766,17 @@ pub async fn unbind_account(
             // import_pending 以 douyin_no 认领（bind_account 后 absorb 自动补进 daily_metric
             // 的是暂存行里的 wave 值）；这里 wave 写合计，单日快照明细仍在 wave_snapshot 表里。
             let _ = sqlx::query(&crate::pq::rewrite(
-                "INSERT INTO import_pending (name, douyin_no, biz_date, wave, source_batch_id)
-                 VALUES (?,?,?::date,?,NULL)",
+                "INSERT INTO import_pending
+                     (name, douyin_no, claim_key, biz_date, wave, source_batch_id)
+                 VALUES (?,?,?,?::date,?,NULL)
+                 ON CONFLICT (claim_key, biz_date) WHERE claim_key <> '' DO UPDATE SET
+                     name = EXCLUDED.name, wave = EXCLUDED.wave",
             ))
             .bind(format!(
                 "（解绑留档）{} 副号快照 {} 条，音浪合计 {}",
                 douyin_no, n, sum
             ))
+            .bind(&anchor_id)
             .bind(&anchor_id)
             .bind(chrono::Local::now().format("%Y-%m-%d").to_string())
             .bind(sum)
@@ -6145,8 +6194,11 @@ mod tests {
         let mut raw = raw_row("啸泉", None, Some(50.0));
         raw.anchor_id = Some("7543117871536407610".into());
         assert_eq!(classify_row(&resolved(raw, None, None)), RowClass::Pending);
-        // 什么 ID 都没有 → 失败
-        let r = resolved(raw_row("：：", None, Some(1.0)), None, None);
+        // 只有艺名也要暂存，等同名主播后续建档/认领
+        let r = resolved(raw_row("未来主播", None, Some(1.0)), None, None);
+        assert_eq!(classify_row(&r), RowClass::Pending);
+        // 连艺名 / ID 都没有 → 才失败
+        let r = resolved(raw_row("", None, Some(1.0)), None, None);
         assert_eq!(classify_row(&r), RowClass::Unmatched);
     }
 
@@ -6187,6 +6239,13 @@ mod tests {
         assert_eq!(row_ident(&raw).as_deref(), Some("anchor-9"));
         raw.anchor_id = None;
         assert!(row_ident(&raw).is_none());
+    }
+
+    #[test]
+    fn row_claim_key_falls_back_to_name() {
+        let raw = raw_row("未来主播", None, Some(1.0));
+        assert_eq!(row_claim_key(&raw).as_deref(), Some("未来主播"));
+        assert_eq!(row_ident(&raw), None);
     }
 
     /* ---------------- 月度指标导入（2026-10-10 时长；2026-10-16 起音浪也按月） ---------------- */
@@ -6235,17 +6294,17 @@ mod tests {
 
     /* ---------------- 月度暂存补账（042，2026-10-18「先有数据后绑定」） ---------------- */
 
-    /// 月度暂存的写入 SQL 必须按 (douyin_no, period) 幂等覆盖，且**不能**把
+    /// 月度暂存的写入 SQL 必须按 (claim_key, period) 幂等覆盖，且**不能**把
     /// absorbed_* 标记重置 —— 已补账的行若在重导时被「复活」，下一次 absorb 会把
     /// 同一个整月值再叠加一遍（音浪 / 时长静默翻倍）。
     #[test]
     fn month_pending_upsert_is_idempotent_and_keeps_claim() {
         assert!(PENDING_MONTH_UPSERT_SQL.contains("INSERT INTO import_pending_month"));
         assert!(
-            PENDING_MONTH_UPSERT_SQL.contains("ON CONFLICT (douyin_no, period)"),
+            PENDING_MONTH_UPSERT_SQL.contains("ON CONFLICT (claim_key, period)"),
             "重导同月同号要覆盖而不是插第二条：{PENDING_MONTH_UPSERT_SQL}"
         );
-        for col in ["name", "wave", "minutes", "source_batch_id"] {
+        for col in ["name", "claim_key", "wave", "minutes", "source_batch_id"] {
             assert!(
                 PENDING_MONTH_UPSERT_SQL.contains(col),
                 "重导要覆盖 {col}：{PENDING_MONTH_UPSERT_SQL}"
@@ -6319,8 +6378,6 @@ mod tests {
             !MONTH_PENDING_STAGED_REASON.contains("重导"),
             "已经暂存的行不用再重导文件：{MONTH_PENDING_STAGED_REASON}"
         );
-        // 暂存失败时要点名 042，运营能直接说清「库没跑迁移」
-        assert!(MONTH_PENDING_FAILED_REASON.contains("042"));
     }
 
     /// 没勾的指标不该进暂存区（只导时长时文件里的音浪列不该被暂存），

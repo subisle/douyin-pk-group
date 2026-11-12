@@ -175,9 +175,9 @@ async fn absorb_pending_is_idempotent_across_repeated_calls() {
     // 两行暂存：一行能对上号（应命中），一行无关（不应命中）
     for (no2, w) in [(no.clone(), 500i64), (nomatch.clone(), 700i64)] {
         sqlx::query(
-            "INSERT INTO import_pending (name, douyin_no, biz_date, wave, minutes)
-             VALUES ($1,$2,$3::date,$4,$5)
-             ON CONFLICT (douyin_no, biz_date) DO UPDATE SET wave = EXCLUDED.wave",
+            "INSERT INTO import_pending (name, douyin_no, claim_key, biz_date, wave, minutes)
+             VALUES ($1,$2,$2,$3::date,$4,$5)
+             ON CONFLICT (claim_key, biz_date) WHERE claim_key <> '' DO UPDATE SET wave = EXCLUDED.wave",
         )
         .bind(&name)
         .bind(&no2)
@@ -317,9 +317,9 @@ async fn absorb_pending_month_is_idempotent_across_repeated_calls() {
         (nomatch.clone(), 700i64, 60i32),
     ] {
         sqlx::query(
-            "INSERT INTO import_pending_month (name, douyin_no, period, wave, minutes)
-             VALUES ($1,$2,$3::char(7),$4,$5)
-             ON CONFLICT (douyin_no, period) DO UPDATE SET wave = EXCLUDED.wave, minutes = EXCLUDED.minutes",
+            "INSERT INTO import_pending_month (name, douyin_no, claim_key, period, wave, minutes)
+             VALUES ($1,$2,$2,$3::char(7),$4,$5)
+             ON CONFLICT (claim_key, period) WHERE claim_key <> '' DO UPDATE SET wave = EXCLUDED.wave, minutes = EXCLUDED.minutes",
         )
         .bind(&name)
         .bind(&no2)
@@ -428,8 +428,8 @@ async fn absorb_pending_month_is_idempotent_across_repeated_calls() {
     .await
     .expect("挂第二个号");
     sqlx::query(
-        "INSERT INTO import_pending_month (name, douyin_no, period, wave, minutes)
-         VALUES ($1,$2,$3::char(7),$4,$5)",
+        "INSERT INTO import_pending_month (name, douyin_no, claim_key, period, wave, minutes)
+         VALUES ($1,$2,$2,$3::char(7),$4,$5)",
     )
     .bind(&name)
     .bind(&no2)

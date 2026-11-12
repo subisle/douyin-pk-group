@@ -66,6 +66,47 @@ const ADMIN_PASSWORD_MIN_LEN: usize = 16;
 /// 不是偷偷兜底 —— 启动日志会 WARN 提醒生产环境覆盖。
 pub const DEFAULT_ADMIN_PASSWORD: &str = "shuai4444";
 
+/// 登录限速：所有登录入口共享，同一真实来源 IP 60 秒最多 10 次。
+/// 计数的是“尝试”而不是只计失败，避免正确密码请求被当成免费探测通道。
+pub(crate) const LOGIN_RATE_LIMIT: usize = 10;
+const LOGIN_RATE_WINDOW: Duration = Duration::from_secs(60);
+
+#[derive(Default)]
+struct LoginRateLimiter {
+    hits: Mutex<HashMap<String, Vec<Instant>>>,
+}
+
+impl LoginRateLimiter {
+    fn allow_at(&self, source: &str, now: Instant) -> bool {
+        let mut hits = self.hits.lock().expect("登录限流锁 poisoned");
+        hits.retain(|_, list| {
+            list.retain(|at| now.duration_since(*at) < LOGIN_RATE_WINDOW);
+            !list.is_empty()
+        });
+        let key = if source.trim().is_empty() {
+            "<unknown>"
+        } else {
+            source.trim()
+        };
+        let list = hits.entry(key.to_string()).or_default();
+        list.retain(|at| now.duration_since(*at) < LOGIN_RATE_WINDOW);
+        if list.len() >= LOGIN_RATE_LIMIT {
+            return false;
+        }
+        list.push(now);
+        true
+    }
+}
+
+static LOGIN_RATE_LIMITER: std::sync::OnceLock<LoginRateLimiter> = std::sync::OnceLock::new();
+
+/// 管理端、展示端 verify/my/login 共用的登录尝试闸门。
+pub(crate) fn login_rate_allow(source: &str) -> bool {
+    LOGIN_RATE_LIMITER
+        .get_or_init(LoginRateLimiter::default)
+        .allow_at(source, Instant::now())
+}
+
 /// 管理员口令强度闸门（trim 后）：**只做长度下限**。
 ///
 /// 为什么不再内置「已知泄露口令」名单（2026-10-17 审计 4-P0-A 二次整改）：
@@ -109,14 +150,11 @@ pub struct Auth {
     /// 一次性 ticket → 过期时刻（SSE / 日报图等只能把凭证放进 URL 的场景）
     tickets: Mutex<HashMap<String, Instant>>,
     ttl: Duration,
-    /* 2026-10-17 用户口径「去除登录限速」：LoginLimiter（连续失败 5 次锁 10 分钟）
-    已连同 /api/auth/login 上的挂载一起移除；展示端（verify / my_login）的限速
-    同日更早也已摘除。防爆破层次现在只剩：argon2id 校验本身（故意慢哈希）+
-    默认/短口令的启动 WARN（2026-10-19 起口令长度不再 fail-closed）。
-    若后续要恢复限流，参考 git 历史里的 LoginLimiter。 */
+    /* 2026-11-12 用户口径：所有登录入口统一每来源 IP 60 秒最多 10 次。
+    限速状态独立于 Auth 实例，见文件顶部的 LoginRateLimiter。 */
 }
 
-/// 登录来源：日志用（2026-10-17 限速移除后仅打日志，不再做限流 key）。
+/// 登录来源：访问日志与每 IP 登录限流共用同一个真实来源 key。
 ///
 /// 2026-10-17 修正「后端登录 IP 不对」：生产链路是 Cloudflare → Caddy →
 /// docker-proxy → 容器，容器里 ConnectInfo 看到的是 Docker 网关（如 172.26.0.1），
@@ -238,11 +276,7 @@ impl Auth {
         self.check_password(input)
     }
 
-    /* ───── 登录失败限流已整条移除（2026-10-17 用户口径「去除登录限速」）─────
-    LoginLimiter（连续失败 5 次锁 10 分钟）原先先后挂在展示端登录（verify /
-    my_login，2026-10-14 审计 P1 接入）与后台 /api/auth/login（P1-4）上，
-    今日全部摘除。防爆破层次现在只剩：argon2id 故意慢哈希 + 默认/短口令 WARN。
-    要恢复限流请翻 git 历史找回 LoginLimiter。 */
+    /* 登录限流在 handler 入口统一执行：每来源 IP 60 秒最多 10 次。 */
 
     pub fn issue(&self) -> String {
         let token = random_token();
@@ -453,9 +487,8 @@ pub async fn require_admin(
 
 /// `POST /api/auth/login`：口令换 token（口令错返回 401）
 ///
-/// 2026-10-17 用户口径「去除登录限速」：原先这里挂 LoginLimiter（连续失败 5 次
-/// 锁 10 分钟），本 handler 已整条移除 —— 口令错就 401，不计数、不锁定。
-/// 地区门禁与登录日志不在本层（管理端无地区门禁）。source 仅用于日志。
+/// 2026-11-12 用户口径：每来源 IP 60 秒最多 10 次登录尝试，超限返回 429。
+/// 地区门禁与登录日志不在本层（管理端无地区门禁）。source 同时用于日志与限流。
 pub async fn login(
     State(st): State<std::sync::Arc<crate::state::AppState>>,
     axum::extract::ConnectInfo(remote): axum::extract::ConnectInfo<std::net::SocketAddr>,
@@ -472,6 +505,14 @@ pub async fn login(
             .into_response();
     }
     let source = login_source_key(Some(remote), &headers);
+    if !login_rate_allow(&source) {
+        tracing::warn!(source = %source, "后台登录尝试过于频繁，已限速");
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({ "error": "登录尝试过于频繁，请 1 分钟后再试" })),
+        )
+            .into_response();
+    }
 
     let password = body
         .get("password")
@@ -493,7 +534,7 @@ pub async fn login(
         }
     };
     if !verified {
-        // 2026-10-17 用户口径「去除登录限速」：失败不计数、不锁定，仅记日志
+        // 请求已在入口计入 10 次/分钟限流；这里只记录失败原因。
         tracing::warn!(source = %source, "后台登录口令不正确");
         return (
             StatusCode::UNAUTHORIZED,
@@ -862,9 +903,6 @@ mod tests {
             assert!(is_open(p), "{p} 应该免鉴权");
         }
     }
-    /* LoginLimiter 的两条单元测试（连续失败锁定 / 到期自动解锁）已随限速
-    一起移除（2026-10-17「去除登录限速」口径）；要恢复请翻 git 历史。 */
-
     /// 2026-10-17 修正「后端登录 IP 不对」：来源提取的信任边界从「仅回环直连」
     /// 扩为「回环或私网直连」（生产容器里 ConnectInfo 是 Docker 网关 172.26.0.1），
     /// 且 `X-Real-IP`（Caddy 注入的 CF-Connecting-IP）优先于 XFF 链尾。
@@ -906,5 +944,27 @@ mod tests {
         // 没有直连地址（测试环境）→ 视为可信，走头；无头时空 key
         assert_eq!(login_source_key(None, &h), "10.0.0.1");
         assert_eq!(login_source_key(None, &axum::http::HeaderMap::new()), "");
+    }
+
+    #[test]
+    fn login_rate_limit_is_ten_per_minute_per_source() {
+        let limiter = LoginRateLimiter::default();
+        let t0 = Instant::now();
+        for i in 0..LOGIN_RATE_LIMIT {
+            assert!(limiter.allow_at("203.0.113.10", t0), "第 {} 次应放行", i + 1);
+        }
+        assert!(!limiter.allow_at("203.0.113.10", t0), "第 11 次应限速");
+        assert!(
+            limiter.allow_at("203.0.113.11", t0),
+            "不同来源不能互相影响"
+        );
+        assert!(
+            !limiter.allow_at("203.0.113.10", t0 + Duration::from_secs(59)),
+            "60 秒窗口内仍应限速"
+        );
+        assert!(
+            limiter.allow_at("203.0.113.10", t0 + Duration::from_secs(60)),
+            "窗口过期后应恢复"
+        );
     }
 }

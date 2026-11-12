@@ -230,11 +230,16 @@ pub async fn verify(
         );
         return Err(ApiError::forbidden("当前地区暂不支持访问"));
     }
-    /* 2026-10-17 用户口径「去除登录限速」：原先这里有两道闸 ——
-    ① public_write_allow 每 IP 每分钟 5 次滑窗（VERIFY_LIMITER）；
-    ② LoginLimiter 连续失败 5 次锁 10 分钟（key = myverify:<IP>）。
-    两道已全部移除：登录（含失败）不限速、不锁定，输错直接走账号校验返回
-    「密码错误 / 账号还没开通」。地区门禁与 access_logs 登录日志保留不动。 */
+    if !crate::auth::login_rate_allow(&client_ip) {
+        tracing::warn!(ip = %client_ip, "展示端 verify 登录尝试过于频繁，已限速");
+        return Err(api_err(
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            "RATE_LIMITED",
+            "登录尝试过于频繁，请 1 分钟后再试",
+        ));
+    }
+    /* 2026-11-12 用户口径：展示端登录与后台共用全局闸门，
+    每来源 IP 60 秒最多 10 次；地区门禁与 access_logs 登录日志保持不变。 */
     // 账号 = 手机号或姓名：新前端传 account，老前端传 name，两者都行
     let acct = body
         .get("account")
@@ -274,8 +279,8 @@ pub async fn verify(
         Ok(outcome) => outcome.name,
         Err(why) => {
             crate::ipinfo::log_login(&st, &client_ip, &geo, &team, &acct, false).await;
-            // 2026-10-17 用户口径「去除登录限速」：失败不计数、不锁定
-            // 2026-10-18：失败回 `{ok:false, code, error}`；NO_ACCOUNT 且可认领时带 canClaim
+            // 尝试次数已在入口限流；失败回 `{ok:false, code, error}`，
+            // NO_ACCOUNT 且可认领时带 canClaim。
             return Ok(Json(login_fail_with_claim(&st, why, &acct).await));
         }
     };
@@ -404,12 +409,16 @@ pub async fn my_login(
         );
         return Err(ApiError::forbidden("当前地区暂不支持访问"));
     }
-    /* 2026-10-17 用户口径「去除登录限速」：原先这里有两道闸 ——
-    ① public_write_allow 每 IP 每分钟 5 次滑窗（VERIFY_LIMITER）；
-    ② LoginLimiter 连续失败 5 次锁 10 分钟（key = mylogin:<IP>，2026-10-14 审计 P1
-      接入，2026-10-17 审计 4-P1-1 又给 verify 加了同款）。
-    两道已全部移除：登录（含失败与管理员快捷口令爆破尝试）不限速、不锁定。
-    地区门禁与 access_logs 登录日志保留不动 —— 失败尝试仍全部进访客日志。 */
+    if !crate::auth::login_rate_allow(&client_ip) {
+        tracing::warn!(ip = %client_ip, "展示端 my_login 登录尝试过于频繁，已限速");
+        return Err(api_err(
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            "RATE_LIMITED",
+            "登录尝试过于频繁，请 1 分钟后再试",
+        ));
+    }
+    /* 2026-11-12 用户口径：展示端登录与后台共用全局闸门，
+    每来源 IP 60 秒最多 10 次；失败尝试仍全部进访客日志。 */
     let acct = body
         .get("account")
         .and_then(|v| v.as_str())
@@ -472,9 +481,7 @@ pub async fn my_login(
         v["admin"] = json!(true);
         return Ok(Json(v));
     }
-    /* 2026-10-17 用户口径「去除登录限速」：原先这里对「已配置口令 + 非快捷登录」
-    记一次连续失败（5 次锁 10 分钟），现已整条移除 —— 不再计数、不再锁定，
-    每次失败尝试照常进 access_logs（上面账号校验分支里的 log_login_path）。 */
+    /* 每次请求已在入口计入 10 次/分钟限流；失败尝试照常进 access_logs。 */
 
     /* 1. 账号校验（与 verify 同一套 my_accounts）
     2026-10-14：失败原因（密码错 / 账号没开通）下发前端照实显示。 */
@@ -618,7 +625,7 @@ pub async fn my_login(
 /// 性别不合法 / 密码不合法 / 并发撞主键（「账号已存在，请直接登录」）。
 ///
 /// 限流：**独立**一档 5 次/分/IP（`CLAIM_LIMITER`）。认领无身份校验，限流防批量抢注；
-/// 它与登录限速无关（登录链路 2026-10-17 起仍不限速）。
+/// 它与登录限速独立（登录链路另有 10 次/分/IP 的全局闸门）。
 pub async fn my_claim(
     State(st): State<ArcState>,
     axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
@@ -723,8 +730,8 @@ pub async fn my_profile_bind(
 
 /// 展示端写接口限流：每 IP 每分钟 5 次。
 ///
-/// 2026-10-17 用户口径「去除登录限速」：登录链路（verify / my_login）原先挂的
-/// 这道闸已摘除 —— 本函数只给**已登录**写口挡脚本刷，不再用于登录限速。
+/// 本函数只给**已登录**写口挡脚本刷；verify / my_login 使用 auth.rs 的
+/// 独立登录闸门（10 次/分/IP）。
 /// 2026-10-18 起调用方：个人页改密（`my_password_set`）、首次补全
 /// （`my_profile_bind`）、绑定 QQ 邮箱（`my_email_set`）—— 三者共用同一档 5 次/分
 /// （契约 §3.3 / §3.4 都是「5 次/分/IP」）。
@@ -844,8 +851,7 @@ pub async fn my_password_set(
     axum::Json(body): axum::Json<Value>,
 ) -> ApiResult {
     /* 改密写接口限流（每 IP 每分钟 5 次）：改密要跑 argon2，挡脚本刷写口。
-    2026-10-17 用户口径「去除登录限速」只去了登录链路（verify / my_login）的
-    两道闸；这里是**已登录**的改密写口，不属于登录限速，保留。 */
+    登录入口另有 10 次/分/IP 的全局闸门，两者互不替代。 */
     if !public_write_allow(&client_ip_for_limit(addr, &headers)) {
         // 与 profile/bind、email 同形：429 + code（前端 apiErrText 按 RATE_LIMITED 出文案）
         return Err(api_err(

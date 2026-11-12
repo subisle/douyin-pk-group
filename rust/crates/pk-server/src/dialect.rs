@@ -669,7 +669,7 @@ pub const ACCOUNT_ANCHOR_MAP_SQL: &str =
     "SELECT person_id, anchor_id FROM account WHERE anchor_id <> ''";
 
 /// 暂存区列表（未认领的导入行）。不进任何榜单/统计，只给管理端处理用。
-pub const PENDING_LIST_SQL: &str = "SELECT id, name, douyin_no,
+pub const PENDING_LIST_SQL: &str = "SELECT id, name, douyin_no, claim_key,
        TO_CHAR(biz_date, 'YYYY-MM-DD') AS bd, wave, cumulative_wave, minutes, is_live,
        source_batch_id, TO_CHAR(created_at, 'YYYY-MM-DD HH24:MI') AS ts
      FROM import_pending WHERE absorbed_at IS NULL
@@ -684,7 +684,9 @@ pub const PENDING_FOR_PERSON_SQL: &str = "SELECT id, name, douyin_no,
        AND (douyin_no IN (SELECT a.douyin_no FROM account a
                             WHERE a.person_id = ? AND a.douyin_no <> '')
          OR douyin_no IN (SELECT a.anchor_id FROM account a
-                            WHERE a.person_id = ? AND a.anchor_id <> ''))
+                            WHERE a.person_id = ? AND a.anchor_id <> '')
+         OR (douyin_no = '' AND claim_key IN (SELECT p.name FROM person p
+                                               WHERE p.id = ? AND p.deleted_at IS NULL)))
      ORDER BY biz_date, id";
 
 /// 月度暂存区里「某个主播名下、还没认领」的整月行（042，建档 / 绑号后补账用）。
@@ -701,7 +703,9 @@ pub const PENDING_MONTH_FOR_PERSON_SQL: &str =
        AND (douyin_no IN (SELECT a.douyin_no FROM account a
                             WHERE a.person_id = ? AND a.douyin_no <> '')
          OR douyin_no IN (SELECT a.anchor_id FROM account a
-                            WHERE a.person_id = ? AND a.anchor_id <> ''))
+                            WHERE a.person_id = ? AND a.anchor_id <> '')
+         OR (douyin_no = '' AND claim_key IN (SELECT p.name FROM person p
+                                               WHERE p.id = ? AND p.deleted_at IS NULL)))
      ORDER BY period, id";
 
 /// 在册主播总数（未删除且未离开）
@@ -750,9 +754,9 @@ mod tests {
         assert!(BATCH_LIST_SQL.contains("ok_rows"), "002 迁移后的审计字段");
     }
 
-    /// 042：月度暂存补账的命中口径必须和按日 `PENDING_FOR_PERSON_SQL` 一致 ——
-    /// 该主播名下任一抖音号 / 采集 ID 命中即算，且只认未认领行（幂等的前提）。
-    /// 钉死关键子句是防「顺手改成按 name 命中」或「漏掉 absorbed_at IS NULL 导致重复补账」。
+    /// 042/051：月度暂存补账的命中口径必须和按日 `PENDING_FOR_PERSON_SQL` 一致 ——
+    /// 该主播名下任一抖音号 / 采集 ID 或同名艺名暂存行命中即算，且只认未认领行。
+    /// 钉死关键子句是防「漏掉 absorbed_at IS NULL 导致重复补账」。
     #[test]
     fn pending_month_sql_matches_person_scoped_by_account() {
         for must in [
@@ -760,6 +764,7 @@ mod tests {
             "absorbed_at IS NULL",
             "a.douyin_no <> ''",
             "a.anchor_id <> ''",
+            "claim_key IN",
             "ORDER BY period, id",
         ] {
             assert!(
@@ -767,8 +772,8 @@ mod tests {
                 "月度暂存补账缺「{must}」：{PENDING_MONTH_FOR_PERSON_SQL}"
             );
         }
-        // 两个绑定：douyin_no 一个、anchor_id 一个（与 bind 调用严格对齐，多一个就 panic）
-        assert_eq!(placeholder_count(PENDING_MONTH_FOR_PERSON_SQL), 2);
+        // 三个绑定：douyin_no、anchor_id、艺名归属 person_id。
+        assert_eq!(placeholder_count(PENDING_MONTH_FOR_PERSON_SQL), 3);
         assert!(
             !PENDING_MONTH_FOR_PERSON_SQL.contains("biz_date"),
             "月度暂存按 period 认，不是某一天：{PENDING_MONTH_FOR_PERSON_SQL}"

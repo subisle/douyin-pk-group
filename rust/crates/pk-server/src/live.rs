@@ -222,6 +222,24 @@ fn default_bonus_multiple() -> i32 {
     100
 }
 
+/// 把一拍快照展开成采样行，并补齐个人所在队伍的总分 / 名次。
+fn battle_sample_rows(snap: &BattleSnapshot) -> Vec<(&BattleScore, i64, i32)> {
+    let team_of = |tid: &str| {
+        snap.team_scores
+            .iter()
+            .find(|t| t.team_id == tid)
+            .map(|t| (t.score, t.rank))
+            .unwrap_or((0, 0))
+    };
+    snap.scores
+        .iter()
+        .map(|score| {
+            let (team_score, team_rank) = team_of(&score.team_id);
+            (score, team_score, team_rank)
+        })
+        .collect()
+}
+
 /// 一支队伍的分数快照
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TeamScore {
@@ -722,6 +740,25 @@ pub async fn ingest_observation(
     let (group_id, existing_round_id) =
         resolve_group(st, event_id, snap, &obs.web_rid).await?;
     if group_id == 0 {
+        // 还没归组也不能丢数据：先按直播间原始采样保留，等待后续认领 / 归组。
+        crate::store::live_room_monitor_upsert(
+            st,
+            &obs.web_rid,
+            &obs.room_id,
+            "live",
+            &obs.error,
+            &snap.battle_id,
+        )
+        .await?;
+        let sample_rows = battle_sample_rows(snap);
+        crate::store::live_room_sample_insert_batch(
+            st,
+            &obs.web_rid,
+            &obs.room_id,
+            &snap.battle_id,
+            &sample_rows,
+        )
+        .await?;
         out.phase = "unassigned".into();
         out.note = "当前没有可接这一局的小组（阶段未开始或都已定稿）".into();
         return Ok(out);
@@ -785,18 +822,7 @@ pub async fn ingest_observation(
 
     // 3) 写采样 + 席位（旧 score_version 不覆盖新版本，防止乱序上报让分数倒退）
     let ranked = snap.ranked();
-    let team_of = |tid: &str| {
-        snap.team_scores
-            .iter()
-            .find(|t| t.team_id == tid)
-            .map(|t| (t.score, t.rank))
-            .unwrap_or((0, 0))
-    };
-    let mut sample_rows = Vec::with_capacity(snap.scores.len());
-    for s in &snap.scores {
-        let (ts, tr) = team_of(&s.team_id);
-        sample_rows.push((s, ts, tr));
-    }
+    let sample_rows = battle_sample_rows(snap);
     crate::store::live_sample_insert_batch(st, round_id, &sample_rows).await?;
 
     let uids: Vec<String> = ranked.iter().map(|seat| seat.user_id.clone()).collect();
@@ -906,18 +932,7 @@ pub async fn ingest_room_observation(
 
     out.battle_id = snap.battle_id.clone();
     out.score_count = snap.scores.len();
-    let team_of = |tid: &str| {
-        snap.team_scores
-            .iter()
-            .find(|t| t.team_id == tid)
-            .map(|t| (t.score, t.rank))
-            .unwrap_or((0, 0))
-    };
-    let mut sample_rows = Vec::with_capacity(snap.scores.len());
-    for score in &snap.scores {
-        let (team_score, team_rank) = team_of(&score.team_id);
-        sample_rows.push((score, team_score, team_rank));
-    }
+    let sample_rows = battle_sample_rows(snap);
     crate::store::live_room_sample_insert_batch(
         st,
         web_rid,
@@ -1738,6 +1753,30 @@ mod tests {
         let ranked = s.ranked();
         assert_eq!(ranked[0].score_version, 1);
         assert_eq!(ranked[1].score_version, 1);
+    }
+
+    #[test]
+    fn sample_rows_keep_team_score_and_rank() {
+        let mut s = snap(&["a", "b"], &[10, 5], 1, 1_000, 300);
+        s.scores[0].team_id = "red".into();
+        s.scores[1].team_id = "blue".into();
+        s.team_scores = vec![
+            TeamScore {
+                team_id: "red".into(),
+                score: 10,
+                rank: 1,
+            },
+            TeamScore {
+                team_id: "blue".into(),
+                score: 5,
+                rank: 2,
+            },
+        ];
+        let rows = battle_sample_rows(&s);
+        assert_eq!(rows[0].1, 10);
+        assert_eq!(rows[0].2, 1);
+        assert_eq!(rows[1].1, 5);
+        assert_eq!(rows[1].2, 2);
     }
 
     #[test]
