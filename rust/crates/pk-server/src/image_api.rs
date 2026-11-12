@@ -230,9 +230,6 @@ fn ranking_svg(rows: &[RankRow], metric: &str, team_label: &str, period: &str) -
     // 名次列用居中锚点：奖牌圆心与两位序号中心落在同一竖线上。
     let rank_cx = rank_x + 17.0;
     let name_x = margin + 92.0;
-    // 姓名前加首字头像圆，姓名文字相应右移。
-    let avatar_cx = name_x + 20.0;
-    let name_text_x = name_x + 50.0;
     let bar_x = margin + 340.0;
     let value_x = width - margin;
     let bar_w = value_x - bar_x - 168.0;
@@ -289,7 +286,7 @@ fn ranking_svg(rows: &[RankRow], metric: &str, team_label: &str, period: &str) -
 <rect x="{accent_x}" y="160" width="140" height="5" rx="2.5" fill="url(#bar)"/>
 <rect x="{strip_x}" y="{strip_y}" width="{strip_w}" height="42" rx="12" fill="#EAF5FF" opacity="0.9"/>
 <text x="{rank_x}" y="{header_y}" font-family="{font}" font-size="17" font-weight="700" fill="#7E97AE">序号</text>
-<text x="{name_text_x}" y="{header_y}" font-family="{font}" font-size="17" font-weight="700" fill="#7E97AE">主播姓名</text>
+<text x="{name_x}" y="{header_y}" font-family="{font}" font-size="17" font-weight="700" fill="#7E97AE">主播姓名</text>
 <text x="{bar_x}" y="{header_y}" font-family="{font}" font-size="17" font-weight="700" fill="#7E97AE">{bar_header}</text>
 <text x="{value_x}" y="{header_y}" text-anchor="end" font-family="{font}" font-size="17" font-weight="700" fill="#7E97AE">{value_header}</text>
 <line x1="{margin}" y1="{header_y_line}" x2="{width_minus_margin}" y2="{header_y_line}" stroke="#D5E6F5" stroke-width="2"/>
@@ -319,20 +316,12 @@ fn ranking_svg(rows: &[RankRow], metric: &str, team_label: &str, period: &str) -
     }
 
     // 行底色先整段铺底：前三名奖牌彩带会略微越出本行，若随行绘制会被
-    // 下一行的底色盖住。前三名用浅金/浅银/浅铜，其余隔行斑马纹。
-    for (i, &value) in values.iter().enumerate() {
-        let fill = if ranks[i] <= 3 && value > 0 {
-            Some(match ranks[i] {
-                1 => "#FFF7E4",
-                2 => "#F2F7FC",
-                _ => "#FDF2E8",
-            })
-        } else if i % 2 == 1 {
-            Some("#EFF7FF")
-        } else {
-            None
-        };
-        let Some(fill) = fill else { continue };
+    // 下一行的底色盖住。2026-11-13 用户口径：不做前三名行底特殊标记，只保留隔行斑马纹。
+    for (i, _value) in values.iter().enumerate() {
+        if i % 2 == 0 {
+            continue;
+        }
+        let fill = "#EFF7FF";
         let y = row_start + i as f64 * row_height;
         svg.push_str(&format!(
             r##"<rect x="{}" y="{}" width="{}" height="{}" rx="12" fill="{fill}"/>
@@ -359,23 +348,9 @@ fn ranking_svg(rows: &[RankRow], metric: &str, team_label: &str, period: &str) -
                 rank
             ));
         }
-        // 姓名首字头像：导出图没有头像数据，用稳定配色的字头圆点让长榜不呆板。
-        let avatar_fill = if value > 0 {
-            avatar_color(&row.name)
-        } else {
-            "#C7D3DF"
-        };
-        let initial: String = row.name.chars().take(1).collect();
+        let name = truncate_chars(&row.name, 10);
         svg.push_str(&format!(
-            r##"<circle cx="{avatar_cx}" cy="{center}" r="19" fill="{avatar_fill}"/>
-<text x="{avatar_cx}" y="{}" text-anchor="middle" font-family="{font}" font-size="19" font-weight="800" fill="#FFFFFF">{}</text>
-"##,
-            center + 7.0,
-            lineage_report::esc(&initial)
-        ));
-        let name = truncate_chars(&row.name, 7);
-        svg.push_str(&format!(
-            r##"<text x="{name_text_x}" y="{}" font-family="{font}" font-size="24" font-weight="700" fill="{}">{}</text>
+            r##"<text x="{name_x}" y="{}" font-family="{font}" font-size="24" font-weight="700" fill="{}">{}</text>
 "##,
             center + 8.0,
             if value > 0 { "#13395C" } else { "#A9B8C6" },
@@ -510,19 +485,6 @@ fn medal_svg(cx: f64, cy: f64, rank: usize, font: &str) -> String {
         cy + 26.0,
         cy + 7.0
     )
-}
-
-/// 姓名首字头像的稳定配色：同名永远同色，纯装饰，无业务含义。
-fn avatar_color(name: &str) -> &'static str {
-    const PALETTE: [&str; 8] = [
-        "#5B8FF9", "#45BFA4", "#E3A23C", "#E8684A", "#54B8DC", "#9270CA", "#EE8F55", "#2A9D8F",
-    ];
-    let mut h: u32 = 2_166_136_261;
-    for b in name.as_bytes() {
-        h ^= u32::from(*b);
-        h = h.wrapping_mul(16_777_619);
-    }
-    PALETTE[(h % PALETTE.len() as u32) as usize]
 }
 
 fn fmt_wave(value: i64) -> String {
@@ -768,16 +730,9 @@ mod tests {
         assert!(!svg.contains("MONTHLY RANKING"));
         // 导出图水印：鹏先生（平铺多次）
         assert!(svg.matches(">鹏先生</text>").count() > 1);
-        // 前三名浅金行底 + 首字头像
-        assert!(svg.contains("#FFF7E4"));
-        assert!(svg.contains("<circle"));
-    }
-
-    #[test]
-    fn avatar_color_is_stable() {
-        assert_eq!(avatar_color("甲"), avatar_color("甲"));
-        assert_ne!(avatar_color("甲"), avatar_color("乙"));
-        assert!(avatar_color("甲").starts_with('#'));
+        // 2026-11-13 用户口径：不做头像圆 / 前三名行底特殊标记
+        assert!(!svg.contains("#FFF7E4"));
+        assert!(!svg.contains("#C7D3DF"));
     }
 
     #[test]
