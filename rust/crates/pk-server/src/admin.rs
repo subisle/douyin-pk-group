@@ -6,7 +6,7 @@
 //! - 导入幂等：daily_metric 按 uk_person_date upsert；批次落 import_batch 审计
 //! - 团别 male/female 是导入与台账的必填口径，冲突行标红由调用方确认
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
@@ -1768,6 +1768,21 @@ fn classify_row(r: &ResolvedRow) -> RowClass {
 /// 导入落库成功后异步触发一次异地备份（脚本有指纹/并发去重，重复触发无害；
 /// 脚本不存在或执行失败只记日志，绝不影响导入本身）。按日导入与月度时长导入共用。
 fn spawn_post_import_backup() {
+    /* 本地 debug 构建默认不触发外部备份脚本：AGENTS 的本地测试纪律明确要求
+    不生成备份，同时避免“跑一次导入测试就产生远端 I/O”。release 镜像保持原行为；
+    POST_IMPORT_BACKUP_ENABLED=1/0 仍可显式覆盖。 */
+    let enabled = match std::env::var("POST_IMPORT_BACKUP_ENABLED")
+        .ok()
+        .map(|v| v.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("1" | "true") => true,
+        Some("0" | "false") => false,
+        _ => !cfg!(debug_assertions),
+    };
+    if !enabled {
+        return;
+    }
     if let Ok(mut child) = tokio::process::Command::new("/opt/pk-server/backup-to-remote.sh")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -1876,15 +1891,16 @@ fn import_source_fingerprint(biz_date: &str, rows: &[ImportRow]) -> String {
 
 const DAILY_CONTRIB_RECOMPUTE_SQL: &str = r#"
 WITH agg AS (
-    SELECT person_id,
+    SELECT person_id, biz_date,
            SUM(wave)::BIGINT AS wave,
            SUM(minutes)::BIGINT AS minutes,
            MAX(is_live)::SMALLINT AS is_live,
            BOOL_OR(has_minutes = 1) AS has_minutes,
+           BOOL_OR(has_wave = 1) AS has_wave,
            MAX(batch_id)::BIGINT AS source_batch_id
       FROM daily_import_contrib
      WHERE biz_date = ?::date
-     GROUP BY person_id
+     GROUP BY person_id, biz_date
 ), prev AS (
     SELECT person_id, cumulative_wave
       FROM daily_metric
@@ -1901,6 +1917,8 @@ WITH agg AS (
            a.minutes,
            a.is_live,
            a.has_minutes,
+           a.has_wave,
+           a.biz_date,
            a.source_batch_id,
            COALESCE(p.cumulative_wave, 0) AS prev_cum
       FROM agg a
@@ -1913,13 +1931,16 @@ WITH agg AS (
            COALESCE((SELECT a.anchor_id FROM account a
                       WHERE a.person_id=t.person_id AND a.is_primary=1 LIMIT 1), ''),
            ?::date,
-           t.wave,
-           t.prev_cum + t.wave,
-           (?::date - 1),
-           1,
-           1,
+           CASE WHEN t.has_wave THEN t.wave ELSE COALESCE(d.wave, 0) END,
+           CASE WHEN t.has_wave THEN t.prev_cum + t.wave
+                ELSE COALESCE(d.cumulative_wave, 0) END,
+           CASE WHEN t.has_wave THEN (t.biz_date - 1)
+                ELSE COALESCE(d.prev_snapshot_date, t.biz_date - 1) END,
+           CASE WHEN t.has_wave THEN 1 ELSE COALESCE(d.wave_span, 1) END,
+           CASE WHEN t.has_wave THEN 1 ELSE COALESCE(d.wave_reliable, 1) END,
            CASE WHEN t.has_minutes THEN t.minutes ELSE COALESCE(d.minutes, 0) END,
-           CASE WHEN t.wave >= 2 THEN 1 ELSE t.is_live END,
+           CASE WHEN t.has_wave THEN CASE WHEN t.wave >= 2 THEN 1 ELSE t.is_live END
+                ELSE COALESCE(d.is_live, t.is_live) END,
            t.source_batch_id,
            now()
       FROM target t
@@ -1929,8 +1950,8 @@ WITH agg AS (
         wave = EXCLUDED.wave,
         cumulative_wave = EXCLUDED.cumulative_wave,
         prev_snapshot_date = EXCLUDED.prev_snapshot_date,
-        wave_span = 1,
-        wave_reliable = 1,
+        wave_span = EXCLUDED.wave_span,
+        wave_reliable = EXCLUDED.wave_reliable,
         minutes = CASE
             WHEN EXISTS (
                 SELECT 1 FROM daily_import_contrib c
@@ -1949,11 +1970,28 @@ SELECT COUNT(*) FROM upsert
 "#;
 
 const DAILY_CONTRIB_UPSERT_SQL: &str = "INSERT INTO daily_import_contrib \
-         (batch_id, person_id, biz_date, wave, minutes, is_live, has_minutes) \
-     VALUES (?,?,?::date,?,?,?,?) \
+         (batch_id, person_id, biz_date, wave, minutes, is_live, has_minutes, has_wave) \
+     VALUES (?,?,?::date,?,?,?,?,?) \
      ON CONFLICT (batch_id, person_id, biz_date) DO UPDATE SET \
          wave = EXCLUDED.wave, minutes = EXCLUDED.minutes, \
-         is_live = EXCLUDED.is_live, has_minutes = EXCLUDED.has_minutes";
+         is_live = EXCLUDED.is_live, has_minutes = EXCLUDED.has_minutes, \
+         has_wave = EXCLUDED.has_wave";
+
+/// 同一业务日/月份的导入按事务级 advisory lock 串行化。
+///
+/// 仅靠唯一索引不够：两个事务可能各自先写贡献、再各看重算结果，
+/// 后提交者会把先提交者的贡献覆盖出 `daily_metric`。锁的范围只到业务日/月，
+/// 不同日期仍可并行。
+async fn lock_import_scope(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    scope: &str,
+) -> anyhow::Result<()> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(scope)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
 
 /// 按批次贡献重算某业务日的 daily_metric：同日多文件导入 = 各批次 wave/minutes 求和。
 /// 只对贡献表里出现的人生效；未导入过的人保持现状（兼容历史数据 / 手工修正）。
@@ -1962,7 +2000,7 @@ async fn recompute_daily_from_contrib(
     biz_date: &str,
 ) -> anyhow::Result<usize> {
     // 兼容旧库：贡献表还没跑 048 时退回旧的单批覆盖写入语义，不让导入整体 500。
-    let has_contrib: Option<i64> = sqlx::query_scalar(
+    let has_contrib: Option<i32> = sqlx::query_scalar(
         "SELECT 1 FROM information_schema.tables \
          WHERE table_schema='public' AND table_name='daily_import_contrib' LIMIT 1",
     )
@@ -1995,7 +2033,7 @@ async fn record_import_contrib(
     biz_date: &str,
     ok_rows: &[&ResolvedRow],
 ) -> anyhow::Result<bool> {
-    let has_contrib: Option<i64> = sqlx::query_scalar(
+    let has_contrib: Option<i32> = sqlx::query_scalar(
         "SELECT 1 FROM information_schema.tables \
          WHERE table_schema='public' AND table_name='daily_import_contrib' LIMIT 1",
     )
@@ -2013,23 +2051,38 @@ async fn record_import_contrib(
     .execute(&mut **tx)
     .await?;
 
-    for r in ok_rows {
-        let Some(pid) = r.person_id else { continue };
-        let wave = r.raw.wave.unwrap_or(0.0).round().max(0.0) as i64;
-        let minutes = r.raw.minutes.unwrap_or(0.0).round().max(0.0) as i64;
-        let has_minutes = i16::from(r.raw.minutes.is_some());
-        let is_live = i16::from(r.raw.is_live.unwrap_or(false)) | i16::from(wave >= 2);
-        writer::write_guard(DAILY_CONTRIB_UPSERT_SQL)?;
-        sqlx::query(&crate::pq::rewrite(DAILY_CONTRIB_UPSERT_SQL))
-            .bind(batch_id)
-            .bind(pid as i64)
-            .bind(biz_date)
-            .bind(wave)
-            .bind(minutes)
-            .bind(is_live)
-            .bind(has_minutes)
-            .execute(&mut **tx)
-            .await?;
+    writer::write_guard(DAILY_CONTRIB_UPSERT_SQL)?;
+    let contrib_date = NaiveDate::parse_from_str(biz_date, "%Y-%m-%d")?;
+    let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+        "INSERT INTO daily_import_contrib
+           (batch_id, person_id, biz_date, wave, minutes, is_live, has_minutes, has_wave) ",
+    );
+    qb.push_values(
+        ok_rows.iter().filter_map(|r| r.person_id.map(|pid| (r, pid))),
+        |mut b, (r, pid)| {
+            let wave = r.raw.wave.unwrap_or(0.0).round().max(0.0) as i64;
+            let minutes = r.raw.minutes.unwrap_or(0.0).round().max(0.0) as i64;
+            let has_minutes = i16::from(r.raw.minutes.is_some());
+            let has_wave = i16::from(r.raw.wave.is_some());
+            let is_live = i16::from(r.raw.is_live.unwrap_or(false)) | i16::from(wave >= 2);
+            b.push_bind(batch_id)
+                .push_bind(pid as i64)
+                .push_bind(contrib_date)
+                .push_bind(wave)
+                .push_bind(minutes)
+                .push_bind(is_live)
+                .push_bind(has_minutes)
+                .push_bind(has_wave);
+        },
+    );
+    qb.push(
+        " ON CONFLICT (batch_id, person_id, biz_date) DO UPDATE SET
+             wave = EXCLUDED.wave, minutes = EXCLUDED.minutes,
+             is_live = EXCLUDED.is_live, has_minutes = EXCLUDED.has_minutes,
+             has_wave = EXCLUDED.has_wave",
+    );
+    if ok_rows.iter().any(|r| r.person_id.is_some()) {
+        qb.build().execute(&mut **tx).await?;
     }
     Ok(true)
 }
@@ -2127,6 +2180,7 @@ pub async fn commit_import(
         .sum();
 
     let mut tx = pool.begin().await?;
+    lock_import_scope(&mut tx, &format!("daily-import:{biz_date}")).await?;
 
     if mode == "reject" {
         /* 2026-10-14 审计 P1-4：bind 个数必须**跟着 SQL 走**。
@@ -2165,7 +2219,7 @@ pub async fn commit_import(
 
     // 同一业务日 + 同一文件内容重发：复用原 batch_id，贡献表先删后写，避免重复累计。
     // source_fingerprint 由 048 迁移提供；旧库没该列时退回「不复用」语义。
-    let has_fp_col: Option<i64> = sqlx::query_scalar(
+    let has_fp_col: Option<i32> = sqlx::query_scalar(
         "SELECT 1 FROM information_schema.columns \
          WHERE table_schema='public' AND table_name='import_batch' \
            AND column_name='source_fingerprint' LIMIT 1",
@@ -2821,6 +2875,21 @@ pub async fn absorb_pending(st: &AppState, person_id: u64) -> anyhow::Result<u32
         let Some(date) = NaiveDate::parse_from_str(&p.biz_date, "%Y-%m-%d").ok() else {
             continue; // 日期列坏了：留着人工处理，别把事务搞挂
         };
+        // 先原子抢占，再写指标。两个并发请求同时看到同一未补账行时，
+        // 只有一个能拿到 absorbed_at IS NULL 的更新，另一个 rows_affected=0 直接跳过。
+        let claimed = sqlx::query(&crate::pq::rewrite(
+            "UPDATE import_pending SET absorbed_person_id = ?, absorbed_at = now()
+             WHERE id = ? AND absorbed_at IS NULL",
+        ))
+        .bind(person_id as i64)
+        .bind(p.id as i64)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+            > 0;
+        if !claimed {
+            continue;
+        }
         // 一行数值都没有（只有名字 + 号）：没有可写的指标，直接标记已认领即可
         let has_values = p.wave.is_some()
             || p.cumulative_wave.is_some()
@@ -2870,13 +2939,6 @@ pub async fn absorb_pending(st: &AppState, person_id: u64) -> anyhow::Result<u32
                 }
             }
         }
-        sqlx::query(&crate::pq::rewrite(
-            "UPDATE import_pending SET absorbed_person_id = ?, absorbed_at = now() WHERE id = ?",
-        ))
-        .bind(person_id as i64)
-        .bind(p.id as i64)
-        .execute(&mut *tx)
-        .await?;
         absorbed += 1;
     }
     tx.commit().await?;
@@ -3296,7 +3358,7 @@ pub async fn import_day_delete(
     };
     // 多批次贡献表也按日期清掉；否则删日后重导会把已删批次再次累计回来。
     // 旧库没跑 048 时跳过，不影响原有删日功能。
-    let has_contrib: Option<i64> = sqlx::query_scalar(
+    let has_contrib: Option<i32> = sqlx::query_scalar(
         "SELECT 1 FROM information_schema.tables \
          WHERE table_schema='public' AND table_name='daily_import_contrib' LIMIT 1",
     )
@@ -3493,6 +3555,44 @@ fn month_note(failures: &[Value], skipped: &[String]) -> Option<String> {
         ));
     }
     (!parts.is_empty()).then(|| truncate_chars(&parts.join("；"), NOTE_MAX_CHARS))
+}
+
+/// 按月导入前一次性读取本批主播的现有值，避免每人每指标一次 SELECT。
+/// `table` / `col` 只由本文件的白名单调用点传入（monthly_duration/minutes、
+/// monthly_wave/wave），不来自请求。
+async fn month_existing_values(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    table: &'static str,
+    col: &'static str,
+    period: &str,
+    person_ids: &[i64],
+) -> anyhow::Result<HashMap<i64, i64>> {
+    debug_assert!(matches!(
+        (table, col),
+        ("monthly_duration", "minutes") | ("monthly_wave", "wave")
+    ));
+    if person_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let sql = format!(
+        "SELECT person_id, ({col})::BIGINT AS metric_value \
+           FROM {table} WHERE period = $1 AND person_id = ANY($2)"
+    );
+    let rows = sqlx::query(&sql)
+        .bind(period)
+        .bind(person_ids)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(month_table_err)?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|r| {
+            Some((
+                r.try_get::<i64, _>("person_id").ok()?,
+                r.try_get::<i64, _>("metric_value").ok()?,
+            ))
+        })
+        .collect())
 }
 
 /// 月度未匹配行落暂存区时要写的值：只取**本次勾选**的指标（与匹配行写库口径一致）。
@@ -3756,6 +3856,7 @@ pub async fn commit_month_metrics(
     }
 
     let mut tx = pool.begin().await?;
+    lock_import_scope(&mut tx, &format!("monthly-import:{period}")).await?;
     if mode == "reject" {
         // 勾了哪个指标就判哪个：只导时长时不该被「该月已有音浪」拦住，反之亦然。
         // 表名是下面这两个字面量之一，不来自请求。
@@ -3797,44 +3898,44 @@ pub async fn commit_month_metrics(
     .await?;
     let batch_id = batch.try_get::<i64, _>(0)?;
 
-    let mut ok_count: u32 = 0;
-    let mut unchanged: u32 = 0;
     let mut minutes_total: i64 = 0;
     let mut wave_total: i64 = 0;
+    let person_ids: Vec<i64> = ok_rows
+        .iter()
+        .filter_map(|r| r.person_id.map(|pid| pid as i64))
+        .collect();
+    let current_minutes = if metrics.minutes {
+        month_existing_values(
+            &mut tx,
+            "monthly_duration",
+            "minutes",
+            period,
+            &person_ids,
+        )
+        .await?
+    } else {
+        HashMap::new()
+    };
+    let current_wave = if metrics.wave {
+        month_existing_values(&mut tx, "monthly_wave", "wave", period, &person_ids).await?
+    } else {
+        HashMap::new()
+    };
+    let mut duration_changes: Vec<(i64, i64)> = Vec::new();
+    let mut wave_changes: Vec<(i64, i64)> = Vec::new();
+    let mut wrote_people: HashSet<i64> = HashSet::new();
     for r in &ok_rows {
         let person_id = r.person_id.expect("调用前已保证 matched");
+        let pid = person_id as i64;
         // 勾了哪个指标就写哪个：两种都写、都同值才算「未覆盖」。
         // 相同不覆盖（与按日导入同一口径）：值一样就一行不写，updated_at 也不动。
-        let mut wrote = false;
         if metrics.minutes {
             if let Some(m) = r.raw.minutes {
                 let minutes = m as i64;
                 minutes_total += minutes;
-                let cur: Option<i64> = sqlx::query(&crate::pq::rewrite(
-                    // minutes 是 INT4：直接 try_get::<i64> 会解码失败、被 unwrap_or(0) 吞成 0，
-                    // 于是每次重导都被判成「值变了」照写一遍（幂等报告失真）。这里显式转 BIGINT。
-                    "SELECT (minutes)::BIGINT FROM monthly_duration WHERE person_id = ? AND period = ?",
-                ))
-                .bind(person_id as i64)
-                .bind(period)
-                .map(|row: sqlx::postgres::PgRow| row.try_get::<i64, _>(0).unwrap_or(0))
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(month_table_err)?;
-                if cur != Some(minutes) {
-                    sqlx::query(&crate::pq::rewrite(
-                        "INSERT INTO monthly_duration (person_id, period, minutes, source_batch_id)
-                         VALUES (?,?,?,?)
-                         ON CONFLICT (person_id, period) DO UPDATE SET minutes = EXCLUDED.minutes, source_batch_id = EXCLUDED.source_batch_id",
-                    ))
-                    .bind(person_id as i64)
-                    .bind(period)
-                    .bind(minutes)
-                    .bind(batch_id as i64)
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(month_table_err)?;
-                    wrote = true;
+                if current_minutes.get(&pid).copied() != Some(minutes) {
+                    duration_changes.push((pid, minutes));
+                    wrote_people.insert(pid);
                 }
             }
         }
@@ -3842,37 +3943,55 @@ pub async fn commit_month_metrics(
             if let Some(w) = r.raw.wave {
                 let wave = w as i64;
                 wave_total += wave;
-                let cur: Option<i64> = sqlx::query(&crate::pq::rewrite(
-                    "SELECT wave FROM monthly_wave WHERE person_id = ? AND period = ?",
-                ))
-                .bind(person_id as i64)
-                .bind(period)
-                .map(|row: sqlx::postgres::PgRow| row.try_get::<i64, _>(0).unwrap_or(0))
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(month_table_err)?;
-                if cur != Some(wave) {
-                    sqlx::query(&crate::pq::rewrite(
-                        "INSERT INTO monthly_wave (person_id, period, wave, source_batch_id)
-                         VALUES (?,?,?,?)
-                         ON CONFLICT (person_id, period) DO UPDATE SET wave = EXCLUDED.wave, source_batch_id = EXCLUDED.source_batch_id",
-                    ))
-                    .bind(person_id as i64)
-                    .bind(period)
-                    .bind(wave)
-                    .bind(batch_id as i64)
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(month_table_err)?;
-                    wrote = true;
+                if current_wave.get(&pid).copied() != Some(wave) {
+                    wave_changes.push((pid, wave));
+                    wrote_people.insert(pid);
                 }
             }
         }
-        if wrote {
-            ok_count += 1;
-        } else {
-            unchanged += 1;
-        }
+    }
+    let ok_count = wrote_people.len() as u32;
+    let unchanged = ok_rows.len().saturating_sub(wrote_people.len()) as u32;
+
+    if !duration_changes.is_empty() {
+        let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+            "INSERT INTO monthly_duration (person_id, period, minutes, source_batch_id) ",
+        );
+        qb.push_values(&duration_changes, |mut b, (pid, minutes)| {
+            b.push_bind(*pid)
+                .push_bind(period)
+                .push_bind(*minutes)
+                .push_bind(batch_id);
+        });
+        qb.push(
+            " ON CONFLICT (person_id, period) DO UPDATE SET
+                 minutes = EXCLUDED.minutes,
+                 source_batch_id = EXCLUDED.source_batch_id",
+        );
+        qb.build()
+            .execute(&mut *tx)
+            .await
+            .map_err(month_table_err)?;
+    }
+    if !wave_changes.is_empty() {
+        let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+            "INSERT INTO monthly_wave (person_id, period, wave, source_batch_id) ",
+        );
+        qb.push_values(&wave_changes, |mut b, (pid, wave)| {
+            b.push_bind(*pid)
+                .push_bind(period)
+                .push_bind(*wave)
+                .push_bind(batch_id);
+        });
+        qb.push(
+            " ON CONFLICT (person_id, period) DO UPDATE SET
+                 wave = EXCLUDED.wave,
+                 source_batch_id = EXCLUDED.source_batch_id",
+        );
+        qb.build()
+            .execute(&mut *tx)
+            .await
+            .map_err(month_table_err)?;
     }
 
     /* 月度未匹配但有号的行 → import_pending_month（2026-10-18「先有数据后绑定」）。
@@ -6996,10 +7115,15 @@ mod tests {
     fn contrib_recompute_sums_batches_not_overwrites() {
         assert!(DAILY_CONTRIB_RECOMPUTE_SQL.contains("SUM(wave)::BIGINT AS wave"));
         assert!(DAILY_CONTRIB_RECOMPUTE_SQL.contains("SUM(minutes)::BIGINT AS minutes"));
+        assert!(DAILY_CONTRIB_RECOMPUTE_SQL.contains("BOOL_OR(has_wave = 1) AS has_wave"));
+        assert!(DAILY_CONTRIB_RECOMPUTE_SQL.contains("CASE WHEN t.has_wave THEN t.wave"));
+        assert!(DAILY_CONTRIB_RECOMPUTE_SQL
+            .contains("ELSE COALESCE(d.cumulative_wave, 0) END"));
         assert!(DAILY_CONTRIB_RECOMPUTE_SQL.contains("GROUP BY person_id"));
         assert!(DAILY_CONTRIB_RECOMPUTE_SQL.contains("FROM daily_import_contrib"));
         assert!(DAILY_CONTRIB_RECOMPUTE_SQL.contains("t.prev_cum + t.wave"));
         assert!(DAILY_CONTRIB_UPSERT_SQL.contains("ON CONFLICT (batch_id, person_id, biz_date)"));
+        assert!(DAILY_CONTRIB_UPSERT_SQL.contains("has_wave"));
         writer::write_guard(DAILY_CONTRIB_RECOMPUTE_SQL).expect("重算 SQL 过业务写守卫");
         writer::write_guard(DAILY_CONTRIB_UPSERT_SQL).expect("贡献写入 SQL 过业务写守卫");
         writer::write_guard("UPDATE import_batch SET source_fingerprint = ? WHERE id = ?")

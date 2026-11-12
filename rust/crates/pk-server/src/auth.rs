@@ -473,8 +473,26 @@ pub async fn login(
     }
     let source = login_source_key(Some(remote), &headers);
 
-    let password = body.get("password").and_then(|v| v.as_str()).unwrap_or("");
-    if !auth.check_password(password) {
+    let password = body
+        .get("password")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let auth_for_check = auth.clone();
+    let verified = match tokio::task::spawn_blocking(move || auth_for_check.check_password(&password))
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(error = %e, "管理员口令校验任务失败");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "登录服务暂时不可用" })),
+            )
+                .into_response();
+        }
+    };
+    if !verified {
         // 2026-10-17 用户口径「去除登录限速」：失败不计数、不锁定，仅记日志
         tracing::warn!(source = %source, "后台登录口令不正确");
         return (

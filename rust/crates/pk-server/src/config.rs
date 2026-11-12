@@ -212,6 +212,18 @@ pub fn redis_pool_limit() -> usize {
         .unwrap_or(4)
 }
 
+/// 直播原始分数采样保留天数：默认 90 天（与 044 迁移注释一致），
+/// 0 = 关闭自动清理。只清理已结束超过保留期的对局，不动进行中/待复核数据。
+pub fn live_sample_retention_days() -> i32 {
+    match env("LIVE_SAMPLE_RETENTION_DAYS")
+        .and_then(|v| v.parse::<i32>().ok())
+    {
+        Some(0) => 0,
+        Some(v) if (1..=3650).contains(&v) => v,
+        _ => 90,
+    }
+}
+
 /* --------------------------- 邮箱发信（SMTP，2026-10-17） --------------------------- */
 
 /// SMTP 主机（发件）。163 邮箱用 smtp.163.com（收件 POP3 是 pop.163.com，不能发信）。

@@ -175,7 +175,21 @@ pub fn parse_wave(raw: &str) -> anyhow::Result<i64> {
         .trim()
         .parse()
         .map_err(|_| anyhow::anyhow!("音浪值无法解析: {raw}"))?;
-    Ok((v * multiplier) as i64)
+    non_negative_i64(v * multiplier, "音浪", raw)
+}
+
+fn non_negative_i64(value: f64, label: &str, raw: &str) -> anyhow::Result<i64> {
+    if !value.is_finite() || value < 0.0 || value >= i64::MAX as f64 {
+        anyhow::bail!("{label}必须是有限非负整数范围，当前: {raw}");
+    }
+    Ok(value as i64)
+}
+
+/// 空单元格 / 单个占位横线表示“文件没有提供这个指标”，
+/// 必须与明确写出的数字 `0` 区分，否则时长-only 导入会把旧音浪清零。
+fn metric_is_missing(raw: &str) -> bool {
+    let s = raw.trim();
+    s.is_empty() || matches!(s, "-" | "—" | "–")
 }
 
 /// 取 "37小时" 里的 37。primary 优先，其次 fallback。
@@ -215,9 +229,19 @@ pub fn parse_duration(raw: &str) -> anyhow::Result<i64> {
                     .map_err(|_| anyhow::anyhow!("时长无法解析: {raw}"))
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
+        if vals.iter().any(|v| *v < 0) {
+            anyhow::bail!("时长不能为负数: {raw}");
+        }
         return match vals.len() {
-            3 => Ok(vals[0] * 60 + vals[1] + vals[2] / 60),
-            2 => Ok(vals[0] * 60 + vals[1]),
+            3 => vals[0]
+                .checked_mul(60)
+                .and_then(|v| v.checked_add(vals[1]))
+                .and_then(|v| v.checked_add(vals[2] / 60))
+                .ok_or_else(|| anyhow::anyhow!("时长超出范围: {raw}")),
+            2 => vals[0]
+                .checked_mul(60)
+                .and_then(|v| v.checked_add(vals[1]))
+                .ok_or_else(|| anyhow::anyhow!("时长超出范围: {raw}")),
             _ => anyhow::bail!("时长无法解析: {raw}"),
         };
     }
@@ -226,7 +250,7 @@ pub fn parse_duration(raw: &str) -> anyhow::Result<i64> {
         let hours = extract_int(&s, "小时", "时");
         let minutes = extract_int(&s, "分钟", "分");
         let seconds = extract_int(&s, "秒", "");
-        return Ok((hours * 60.0 + minutes + seconds / 60.0) as i64);
+        return non_negative_i64(hours * 60.0 + minutes + seconds / 60.0, "时长", raw);
     }
     // 纯数字：150分钟 或 150
     let s = s
@@ -237,7 +261,7 @@ pub fn parse_duration(raw: &str) -> anyhow::Result<i64> {
     let v: f64 = s
         .parse()
         .map_err(|_| anyhow::anyhow!("时长无法解析: {raw}"))?;
-    Ok(v as i64)
+    non_negative_i64(v, "时长", raw)
 }
 
 /// 按引号感知的方式切一行 CSV（支持 "a,b" 带逗号字段）
@@ -329,15 +353,21 @@ pub fn parse(text: &str) -> anyhow::Result<(Kind, ParseOut)> {
         }
         row.name = get(name_col);
         if wave_col >= 0 {
-            match parse_wave(&get(wave_col)) {
-                Ok(v) => row.wave = Some(v as f64),
-                Err(e) => row.err = e.to_string(),
+            let raw = get(wave_col);
+            if !metric_is_missing(&raw) {
+                match parse_wave(&raw) {
+                    Ok(v) => row.wave = Some(v as f64),
+                    Err(e) => row.err = e.to_string(),
+                }
             }
         }
         if dur_col >= 0 {
-            match parse_duration(&get(dur_col)) {
-                Ok(v) => row.minutes = Some(v as f64),
-                Err(e) => row.err = e.to_string(),
+            let raw = get(dur_col);
+            if !metric_is_missing(&raw) {
+                match parse_duration(&raw) {
+                    Ok(v) => row.minutes = Some(v as f64),
+                    Err(e) => row.err = e.to_string(),
+                }
             }
         }
         if rank_col >= 0 && get(rank_col).parse::<i64>().is_ok() {
@@ -549,6 +579,33 @@ mod tests {
         let (_, rows) = parse(csv).unwrap();
         assert_eq!(rows[0].name, "浩龙,团队");
         assert_eq!(rows[0].wave, Some(12500.0));
+    }
+
+    #[test]
+    fn blank_metrics_are_none_but_explicit_zero_is_kept() {
+        let csv = "主播昵称,音浪,直播时长\n\
+                   浩龙,,\n\
+                   玖玉,0,0\n\
+                   狼耀,-,—\n";
+        let (_, rows) = parse(csv).unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].wave, None, "空音浪不能当成显式 0");
+        assert_eq!(rows[0].minutes, None, "空时长不能当成显式 0");
+        assert_eq!(rows[1].wave, Some(0.0));
+        assert_eq!(rows[1].minutes, Some(0.0));
+        assert_eq!(rows[2].wave, None, "占位横线也按缺值处理");
+        assert_eq!(rows[2].minutes, None);
+    }
+
+    #[test]
+    fn negative_or_non_finite_metrics_are_rejected() {
+        assert!(parse_wave("-1").is_err());
+        assert!(parse_wave("NaN").is_err());
+        assert!(parse_wave("inf").is_err());
+        assert!(parse_duration("-1").is_err());
+        assert!(parse_duration("1:-30").is_err());
+        assert!(parse_duration("NaN").is_err());
+        assert!(parse_duration("inf").is_err());
     }
 
     /// 抖音公会后台的月度时长文件（9月份时长.csv 的真实表头）。

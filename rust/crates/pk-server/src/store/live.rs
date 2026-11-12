@@ -10,7 +10,7 @@ use crate::live::{
     StageStatus,
 };
 use serde_json::Value;
-use sqlx::Row;
+use sqlx::{Postgres, QueryBuilder, Row};
 
 /* ------------------------------ 赛事 ------------------------------ */
 
@@ -70,6 +70,25 @@ pub async fn live_event_list(st: &AppState, limit: i64) -> Vec<serde_json::Value
         tracing::error!(error = %e, "查直播赛事失败");
         Vec::new()
     })
+}
+
+/// 单个赛事详情。监控总览按 id 精确查询，避免先取 200 条再在内存里 find。
+pub async fn live_event_get(st: &AppState, event_id: i64) -> Option<serde_json::Value> {
+    let pool = w(st).ok()?;
+    sqlx::query(
+        "SELECT id, title, event_date, status, day_plan_id, night_plan_id, rule_version,
+                first_wave_group_count, group_rounds_per_group, direct_qualify_per_group,
+                revival_room_capacity, revival_qualify_per_room, promotion_group_count,
+                promotion_group_size, promotion_qualify_per_group, final_room_capacity,
+                settle_grace_secs, push_enabled, push_interval_secs, updated_at
+           FROM live_event WHERE id = $1",
+    )
+    .bind(event_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .map(|row| live_event_json(&row))
 }
 
 fn live_event_json(r: &sqlx::postgres::PgRow) -> serde_json::Value {
@@ -461,28 +480,66 @@ pub async fn live_seat_upsert(
     person_id: i64,
     qualified: bool,
 ) -> anyhow::Result<()> {
-    sqlx::query(&crate::pq::rewrite(
+    live_seat_upsert_batch(st, round_id, &[(seat, person_id)], qualified).await
+}
+
+/// 批量写席位。每拍最多一二十人，单条多行 upsert 把 SQL 往返从 O(人数)
+/// 降到 1 次；分数只允许同版本或更高版本覆盖，避免晚到的旧快照回退实时榜。
+pub async fn live_seat_upsert_batch(
+    st: &AppState,
+    round_id: i64,
+    seats: &[(&RankedSeat, i64)],
+    qualified: bool,
+) -> anyhow::Result<()> {
+    if seats.is_empty() {
+        return Ok(());
+    }
+    // 同一拍里若上游重复给了同一 UID，多行 VALUES 不能对同一冲突键更新两次。
+    // 先按 UID 去重，只保留版本最高的一条；同版本以后出现的一条为准。
+    let mut unique: Vec<(&RankedSeat, i64)> = Vec::with_capacity(seats.len());
+    let mut index_by_uid: std::collections::HashMap<&str, usize> =
+        std::collections::HashMap::with_capacity(seats.len());
+    for &(seat, person_id) in seats {
+        match index_by_uid.get(seat.user_id.as_str()).copied() {
+            Some(idx) if seat.score_version >= unique[idx].0.score_version => {
+                unique[idx] = (seat, person_id);
+            }
+            Some(_) => {}
+            None => {
+                index_by_uid.insert(seat.user_id.as_str(), unique.len());
+                unique.push((seat, person_id));
+            }
+        }
+    }
+    let mut qb = QueryBuilder::<Postgres>::new(
         "INSERT INTO live_round_seat (round_id, person_id, douyin_uid, nickname, team_id,
-                final_score, final_rank, qualified)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT (round_id, douyin_uid) DO UPDATE SET
-           final_score = EXCLUDED.final_score,
-           final_rank = EXCLUDED.final_rank,
-           nickname = EXCLUDED.nickname,
-           qualified = EXCLUDED.qualified,
+                final_score, final_rank, score_version, qualified) ",
+    );
+    qb.push_values(unique.iter(), |mut b, (seat, person_id)| {
+        b.push_bind(round_id)
+            .push_bind(*person_id)
+            .push_bind(&seat.user_id)
+            .push_bind(&seat.nickname)
+            .push_bind(&seat.team_id)
+            .push_bind(seat.score)
+            .push_bind(seat.rank)
+            .push_bind(seat.score_version)
+            .push_bind(if qualified { 1i16 } else { 0i16 });
+    });
+    qb.push(
+        " ON CONFLICT (round_id, douyin_uid) DO UPDATE SET
+           final_score = CASE WHEN EXCLUDED.score_version >= live_round_seat.score_version
+                              THEN EXCLUDED.final_score ELSE live_round_seat.final_score END,
+           final_rank = CASE WHEN EXCLUDED.score_version >= live_round_seat.score_version
+                             THEN EXCLUDED.final_rank ELSE live_round_seat.final_rank END,
+           nickname = CASE WHEN EXCLUDED.score_version >= live_round_seat.score_version
+                           THEN EXCLUDED.nickname ELSE live_round_seat.nickname END,
+           score_version = GREATEST(live_round_seat.score_version, EXCLUDED.score_version),
+           qualified = GREATEST(live_round_seat.qualified, EXCLUDED.qualified),
            person_id = CASE WHEN live_round_seat.person_id = 0 THEN EXCLUDED.person_id
                             ELSE live_round_seat.person_id END",
-    ))
-    .bind(round_id)
-    .bind(person_id)
-    .bind(&seat.user_id)
-    .bind(&seat.nickname)
-    .bind(&seat.team_id)
-    .bind(seat.score)
-    .bind(seat.rank)
-    .bind(if qualified { 1i16 } else { 0i16 })
-    .execute(w(st)?)
-    .await?;
+    );
+    qb.build().execute(w(st)?).await?;
     Ok(())
 }
 
@@ -494,26 +551,41 @@ pub async fn live_sample_insert(
     team_score: i64,
     team_rank: i32,
 ) -> anyhow::Result<()> {
-    sqlx::query(&crate::pq::rewrite(
+    live_sample_insert_batch(st, round_id, &[(s, team_score, team_rank)]).await
+}
+
+/// 批量追加一拍分数。采样语义保持为“每拍每个人都写一行”，
+/// 只是把 N 条 INSERT 合并成 1 条多行 INSERT。
+pub async fn live_sample_insert_batch(
+    st: &AppState,
+    round_id: i64,
+    samples: &[(&crate::live::BattleScore, i64, i32)],
+) -> anyhow::Result<()> {
+    if samples.is_empty() {
+        return Ok(());
+    }
+    let mut qb = QueryBuilder::<Postgres>::new(
         "INSERT INTO live_score_sample
            (round_id, douyin_uid, score, rank, team_score, team_rank, score_version,
-            bonus_multiple, bonus_score, bonus_active, bonus_end_ms, current_bonus)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    ))
-    .bind(round_id)
-    .bind(&s.user_id)
-    .bind(s.score)
-    .bind(s.rank)
-    .bind(team_score)
-    .bind(team_rank)
-    .bind(s.score_version.to_string())
-    .bind(s.bonus_multiple)
-    .bind(s.bonus_score)
-    .bind(if s.bonus_active { 1i16 } else { 0i16 })
-    .bind(s.bonus_end_ms)
-    .bind(s.current_bonus)
-    .execute(w(st)?)
-    .await?;
+            score_version_num, bonus_multiple, bonus_score, bonus_active, bonus_end_ms,
+            current_bonus) ",
+    );
+    qb.push_values(samples.iter(), |mut b, (s, team_score, team_rank)| {
+        b.push_bind(round_id)
+            .push_bind(&s.user_id)
+            .push_bind(s.score)
+            .push_bind(s.rank)
+            .push_bind(*team_score)
+            .push_bind(*team_rank)
+            .push_bind(s.score_version.to_string())
+            .push_bind(s.score_version)
+            .push_bind(s.bonus_multiple)
+            .push_bind(s.bonus_score)
+            .push_bind(if s.bonus_active { 1i16 } else { 0i16 })
+            .push_bind(s.bonus_end_ms)
+            .push_bind(s.current_bonus);
+    });
+    qb.build().execute(w(st)?).await?;
     Ok(())
 }
 
@@ -661,7 +733,8 @@ pub async fn live_seat_list(
     round_id: i64,
 ) -> anyhow::Result<Vec<serde_json::Value>> {
     let rows = sqlx::query(
-        "SELECT person_id, douyin_uid, nickname, team_id, final_score, final_rank, qualified
+        "SELECT person_id, douyin_uid, nickname, team_id, final_score, final_rank,
+                score_version, qualified
          FROM live_round_seat WHERE round_id = $1 ORDER BY final_rank, douyin_uid",
     )
     .bind(round_id)
@@ -677,6 +750,7 @@ pub async fn live_seat_list(
                 "teamId": r.try_get::<String, _>("team_id").unwrap_or_default(),
                 "score": r.try_get::<i64, _>("final_score").unwrap_or(0),
                 "rank": r.try_get::<i32, _>("final_rank").unwrap_or(0),
+                "scoreVersion": r.try_get::<i64, _>("score_version").unwrap_or(-1),
                 "qualified": r.try_get::<i16, _>("qualified").unwrap_or(0) == 1,
             })
         })
@@ -713,9 +787,19 @@ pub async fn live_latest_scores(st: &AppState, round_id: i64) -> Vec<serde_json:
         return Vec::new();
     };
     sqlx::query(
-        "SELECT DISTINCT ON (douyin_uid) douyin_uid, score, rank, team_score, team_rank,
-                bonus_multiple, bonus_score, bonus_active, bonus_end_ms, current_bonus, observed_at
-         FROM live_score_sample WHERE round_id = $1 ORDER BY douyin_uid, observed_at DESC",
+        "SELECT douyin_uid, score, rank, team_score, team_rank,
+                score_version_num, bonus_multiple, bonus_score, bonus_active,
+                bonus_end_ms, current_bonus, observed_at
+           FROM (
+             SELECT DISTINCT ON (douyin_uid)
+                    douyin_uid, score, rank, team_score, team_rank,
+                    score_version_num, bonus_multiple, bonus_score,
+                    bonus_active, bonus_end_ms, current_bonus, observed_at
+               FROM live_score_sample
+              WHERE round_id = $1
+              ORDER BY douyin_uid, score_version_num DESC, observed_at DESC, id DESC
+           ) latest
+          ORDER BY rank, score DESC, douyin_uid",
     )
     .bind(round_id)
     .fetch_all(pool)
@@ -729,6 +813,7 @@ pub async fn live_latest_scores(st: &AppState, round_id: i64) -> Vec<serde_json:
                     "rank": r.try_get::<i32, _>("rank").unwrap_or(0),
                     "teamScore": r.try_get::<i64, _>("team_score").unwrap_or(0),
                     "teamRank": r.try_get::<i32, _>("team_rank").unwrap_or(0),
+                    "scoreVersion": r.try_get::<i64, _>("score_version_num").unwrap_or(-1),
                     "bonusMultiple": r.try_get::<i32, _>("bonus_multiple").unwrap_or(100),
                     "bonusScore": r.try_get::<i64, _>("bonus_score").unwrap_or(0),
                     "bonusActive": r.try_get::<i16, _>("bonus_active").unwrap_or(0) == 1,
@@ -786,32 +871,120 @@ pub async fn live_room_sample_insert(
     team_score: i64,
     team_rank: i32,
 ) -> anyhow::Result<()> {
-    sqlx::query(&crate::pq::rewrite(
+    live_room_sample_insert_batch(
+        st,
+        web_rid,
+        room_id,
+        battle_id,
+        &[(s, team_score, team_rank)],
+    )
+    .await
+}
+
+/// 独立房间采样批量写：与赛事采样同一口径，每拍一条多行 INSERT。
+pub async fn live_room_sample_insert_batch(
+    st: &AppState,
+    web_rid: &str,
+    room_id: &str,
+    battle_id: &str,
+    samples: &[(&crate::live::BattleScore, i64, i32)],
+) -> anyhow::Result<()> {
+    if samples.is_empty() {
+        return Ok(());
+    }
+    let mut qb = QueryBuilder::<Postgres>::new(
         "INSERT INTO live_room_score_sample
            (web_rid, room_id, battle_id, douyin_uid, nickname, team_id, score, rank,
-            team_score, team_rank, score_version, bonus_multiple, bonus_score,
-            bonus_active, bonus_end_ms, current_bonus)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    ))
-    .bind(web_rid)
-    .bind(room_id)
-    .bind(battle_id)
-    .bind(&s.user_id)
-    .bind(&s.nickname)
-    .bind(&s.team_id)
-    .bind(s.score)
-    .bind(s.rank)
-    .bind(team_score)
-    .bind(team_rank)
-    .bind(s.score_version.to_string())
-    .bind(s.bonus_multiple)
-    .bind(s.bonus_score)
-    .bind(if s.bonus_active { 1i16 } else { 0i16 })
-    .bind(s.bonus_end_ms)
-    .bind(s.current_bonus)
-    .execute(w(st)?)
-    .await?;
+            team_score, team_rank, score_version, score_version_num, bonus_multiple,
+            bonus_score, bonus_active, bonus_end_ms, current_bonus) ",
+    );
+    qb.push_values(samples.iter(), |mut b, (s, team_score, team_rank)| {
+        b.push_bind(web_rid)
+            .push_bind(room_id)
+            .push_bind(battle_id)
+            .push_bind(&s.user_id)
+            .push_bind(&s.nickname)
+            .push_bind(&s.team_id)
+            .push_bind(s.score)
+            .push_bind(s.rank)
+            .push_bind(*team_score)
+            .push_bind(*team_rank)
+            .push_bind(s.score_version.to_string())
+            .push_bind(s.score_version)
+            .push_bind(s.bonus_multiple)
+            .push_bind(s.bonus_score)
+            .push_bind(if s.bonus_active { 1i16 } else { 0i16 })
+            .push_bind(s.bonus_end_ms)
+            .push_bind(s.current_bonus);
+    });
+    qb.build().execute(w(st)?).await?;
     Ok(())
+}
+
+const LIVE_SAMPLE_PRUNE_BATCH: u64 = 5_000;
+
+/// 分批清理过期直播原始采样。只删已结束（completed/aborted/void）且
+/// observed_at 早于保留期的对局采样；正在打、待复核或官方局未定稿的数据永不在此删除。
+/// 独立房间采样没有晋级语义，同样只按时间保留。
+pub async fn live_samples_prune(
+    st: &AppState,
+    retention_days: i32,
+) -> anyhow::Result<(u64, u64)> {
+    if retention_days <= 0 {
+        return Ok((0, 0));
+    }
+    let pool = w(st)?;
+    let mut event_total = 0u64;
+    let mut room_total = 0u64;
+    // 单次调度最多清 20 批（10 万行），避免积压很大时长时间占锁；
+    // 剩余数据留给下一次日任务。
+    for _ in 0..20 {
+        let n = sqlx::query(
+            "WITH doomed AS (
+               SELECT s.id
+                 FROM live_score_sample s
+                WHERE s.observed_at < now() - make_interval(days => $1)
+                  AND NOT EXISTS (
+                    SELECT 1 FROM live_round r
+                     WHERE r.id = s.round_id
+                       AND r.status NOT IN ('completed', 'aborted', 'void')
+                  )
+                ORDER BY s.observed_at
+                LIMIT $2
+             )
+             DELETE FROM live_score_sample s USING doomed d WHERE s.id = d.id",
+        )
+        .bind(retention_days)
+        .bind(LIVE_SAMPLE_PRUNE_BATCH as i64)
+        .execute(pool)
+        .await?
+        .rows_affected();
+        event_total += n;
+        if n < LIVE_SAMPLE_PRUNE_BATCH {
+            break;
+        }
+    }
+    for _ in 0..20 {
+        let n = sqlx::query(
+            "WITH doomed AS (
+               SELECT id FROM live_room_score_sample
+                WHERE observed_at < now() - make_interval(days => $1)
+                ORDER BY observed_at
+                LIMIT $2
+             )
+             DELETE FROM live_room_score_sample s USING doomed d WHERE s.id = d.id",
+        )
+        .bind(retention_days)
+        .bind(LIVE_SAMPLE_PRUNE_BATCH as i64)
+        .execute(pool)
+        .await?
+        .rows_affected();
+        room_total += n;
+        if n < LIVE_SAMPLE_PRUNE_BATCH {
+            break;
+        }
+    }
+    Ok((event_total, room_total))
 }
 
 /// 独立房间最新状态（含最近一局 battle_id）。
@@ -853,14 +1026,15 @@ pub async fn live_room_latest_scores(
     }
     sqlx::query(
         "SELECT douyin_uid, nickname, score, rank, team_id, team_score, team_rank,
-                bonus_multiple, bonus_score, bonus_active, bonus_end_ms, current_bonus, observed_at
+                score_version_num, bonus_multiple, bonus_score, bonus_active,
+                bonus_end_ms, current_bonus, observed_at
          FROM (
            SELECT DISTINCT ON (douyin_uid) douyin_uid, nickname, score, rank, team_id,
-                  team_score, team_rank, bonus_multiple, bonus_score, bonus_active,
-                  bonus_end_ms, current_bonus, observed_at
+                  team_score, team_rank, score_version_num, bonus_multiple,
+                  bonus_score, bonus_active, bonus_end_ms, current_bonus, observed_at
            FROM live_room_score_sample
            WHERE web_rid = $1 AND battle_id = $2
-           ORDER BY douyin_uid, observed_at DESC, id DESC
+           ORDER BY douyin_uid, score_version_num DESC, observed_at DESC, id DESC
          ) latest
          ORDER BY rank, score DESC, douyin_uid",
     )
@@ -879,6 +1053,7 @@ pub async fn live_room_latest_scores(
                     "teamId": r.try_get::<String, _>("team_id").unwrap_or_default(),
                     "teamScore": r.try_get::<i64, _>("team_score").unwrap_or(0),
                     "teamRank": r.try_get::<i32, _>("team_rank").unwrap_or(0),
+                    "scoreVersion": r.try_get::<i64, _>("score_version_num").unwrap_or(-1),
                     "bonusMultiple": r.try_get::<i32, _>("bonus_multiple").unwrap_or(100),
                     "bonusScore": r.try_get::<i64, _>("bonus_score").unwrap_or(0),
                     "bonusActive": r.try_get::<i16, _>("bonus_active").unwrap_or(0) == 1,
@@ -1079,17 +1254,82 @@ pub async fn live_person_by_uid(st: &AppState, uid: &str) -> Option<i64> {
     .filter(|v| *v > 0)
 }
 
+/// 批量把本拍所有抖音 UID 映射到 person_id。
+///
+/// 旧实现每人一次 SELECT；一局 8 人每 3~5 秒就会多出 8 次往返。
+/// 这里用一条 IN 查询，行为与 [`live_person_by_uid`] 相同：空 UID 忽略，
+/// 查询失败按未认人处理（返回空映射，不阻塞采样）。
+pub async fn live_person_ids_by_uids(
+    st: &AppState,
+    uids: &[String],
+) -> std::collections::HashMap<String, i64> {
+    let mut unique: Vec<&str> = uids
+        .iter()
+        .map(String::as_str)
+        .filter(|uid| !uid.is_empty())
+        .collect();
+    unique.sort_unstable();
+    unique.dedup();
+    if unique.is_empty() {
+        return std::collections::HashMap::new();
+    }
+    let Ok(pool) = w(st) else {
+        return std::collections::HashMap::new();
+    };
+    let mut qb = QueryBuilder::<Postgres>::new(
+        "SELECT anchor_id, person_id FROM account WHERE person_id > 0 AND anchor_id IN (",
+    );
+    let mut separated = qb.separated(", ");
+    for uid in &unique {
+        separated.push_bind(*uid);
+    }
+    separated.push_unseparated(")");
+    match qb.build().fetch_all(pool).await {
+        Ok(rows) => rows
+            .into_iter()
+            .filter_map(|r| {
+                let uid = r.try_get::<String, _>("anchor_id").ok()?;
+                let pid = r.try_get::<i64, _>("person_id").ok()?;
+                (pid > 0).then_some((uid, pid))
+            })
+            .collect(),
+        Err(e) => {
+            tracing::warn!(error = %e, "批量查直播 UID→person 映射失败，按未认人处理");
+            std::collections::HashMap::new()
+        }
+    }
+}
+
 /* ------------------------------ 对局定位辅助 ------------------------------ */
 
 /// 这个 battle_id 已经落在哪个小组（0 = 还没有）
 pub async fn live_round_group_of(st: &AppState, battle_id: &str) -> anyhow::Result<Option<i64>> {
+    Ok(live_round_ref_by_battle(st, battle_id)
+        .await?
+        .map(|(group_id, _)| group_id))
+}
+
+/// 这个 battle_id 已落在哪个小组、哪一局。已有对局的热路径据此跳过
+/// “局数 / 最近一局 / 名单签名”等只对首次识别需要的查询。
+pub async fn live_round_ref_by_battle(
+    st: &AppState,
+    battle_id: &str,
+) -> anyhow::Result<Option<(i64, i64)>> {
+    if battle_id.is_empty() {
+        return Ok(None);
+    }
     let row = sqlx::query(&crate::pq::rewrite(
-        "SELECT group_id FROM live_round WHERE battle_id = ? ORDER BY id LIMIT 1",
+        "SELECT id, group_id FROM live_round WHERE battle_id = ? ORDER BY id LIMIT 1",
     ))
     .bind(battle_id)
     .fetch_optional(w(st)?)
     .await?;
-    Ok(row.and_then(|r| r.try_get::<i64, _>("group_id").ok()))
+    Ok(row.and_then(|r| {
+        Some((
+            r.try_get::<i64, _>("group_id").ok()?,
+            r.try_get::<i64, _>("id").ok()?,
+        ))
+    }))
 }
 
 /// 当前阶段里第一个未定稿小组（运营按赛程顺序开打，所以这就是该打的那组）
@@ -1668,6 +1908,43 @@ pub async fn live_group_seats(st: &AppState, group_id: i64) -> Vec<serde_json::V
             .collect()
     })
     .unwrap_or_default()
+}
+
+/// 一个赛事下所有小组的赛前名单，按 group_id 分组。
+/// 监控总览每 5 秒刷新；一次 JOIN 查询替代“每组一条 SELECT”的 N+1。
+pub async fn live_group_seats_for_event(
+    st: &AppState,
+    event_id: i64,
+) -> std::collections::HashMap<i64, Vec<serde_json::Value>> {
+    let Ok(pool) = w(st) else {
+        return std::collections::HashMap::new();
+    };
+    let rows = sqlx::query(
+        "SELECT s.group_id, s.person_id, s.douyin_uid, s.nickname, s.seed_order,
+                COALESCE(p.name, '') AS person_name
+           FROM live_group_seat s
+           JOIN live_group g ON g.id = s.group_id
+           LEFT JOIN person p ON p.id = s.person_id
+          WHERE g.event_id = $1
+          ORDER BY s.group_id, s.seed_order, s.id",
+    )
+    .bind(event_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+    let mut out: std::collections::HashMap<i64, Vec<serde_json::Value>> =
+        std::collections::HashMap::new();
+    for r in rows {
+        let group_id = r.try_get::<i64, _>("group_id").unwrap_or(0);
+        out.entry(group_id).or_default().push(serde_json::json!({
+            "personId": r.try_get::<i64, _>("person_id").unwrap_or(0),
+            "douyinUid": r.try_get::<String, _>("douyin_uid").unwrap_or_default(),
+            "nickname": r.try_get::<String, _>("nickname").unwrap_or_default(),
+            "personName": r.try_get::<String, _>("person_name").unwrap_or_default(),
+            "seedOrder": r.try_get::<i32, _>("seed_order").unwrap_or(0),
+        }));
+    }
+    out
 }
 
 /// 所有未定稿小组及其非空 UID 名单，用于按参赛者精确认组。

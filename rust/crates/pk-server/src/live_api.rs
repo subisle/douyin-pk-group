@@ -222,20 +222,17 @@ pub fn extract_web_rid(url: &str) -> Option<String> {
 
 /// 监控总览：赛事 + 阶段/小组 + 直播间健康 + 晋级名单
 pub async fn overview(State(st): State<Arc<AppState>>, Path(id): Path<i64>) -> ApiResult {
-    let event = store::live_event_list(&st, 200)
-        .await
-        .into_iter()
-        .find(|e| e.get("id").and_then(|v| v.as_i64()) == Some(id));
+    let event = store::live_event_get(&st, id).await;
     let mut groups = store::live_group_list(&st, id).await;
-    // 赛前名单单独查，避免 group 列表 SQL 变成 JSON 聚合后再猜字段类型。
-    // 对局还没开始时前端也要能看到「这组有谁」。
+    // 赛前名单一次批量查完，避免 5 秒轮询下按组 N+1。
+    let mut seats_by_group = store::live_group_seats_for_event(&st, id).await;
     for group in &mut groups {
         let group_id = group.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
         if group_id > 0 {
             if let Some(obj) = group.as_object_mut() {
                 obj.insert(
                     "seats".to_string(),
-                    json!(store::live_group_seats(&st, group_id).await),
+                    json!(seats_by_group.remove(&group_id).unwrap_or_default()),
                 );
             }
         }
@@ -322,6 +319,15 @@ pub async fn choose_official(
     Path(group_id): Path<i64>,
     Json(body): Json<OfficialBody>,
 ) -> ApiResult {
+    let actual_group = store::live_round_group_of_id(&st, body.round_id).await?;
+    if actual_group == 0 {
+        return Err(crate::routes::ApiError::bad_request("对局不存在"));
+    }
+    if actual_group != group_id {
+        return Err(crate::routes::ApiError::bad_request(
+            "该对局不属于当前小组，已拒绝切换正式局",
+        ));
+    }
     store::live_round_set_official(&st, body.round_id).await?;
     store::live_round_event_add(
         &st,
@@ -428,6 +434,10 @@ fn default_source() -> String {
     "direct".into()
 }
 
+fn valid_freeze_source(source: &str) -> bool {
+    matches!(source, "direct" | "revival" | "promotion" | "final")
+}
+
 pub async fn freeze_group(
     State(st): State<Arc<AppState>>,
     Path(group_id): Path<i64>,
@@ -438,10 +448,7 @@ pub async fn freeze_group(
     } else {
         body.source.clone()
     };
-    if !matches!(
-        source.as_str(),
-        "direct" | "revival" | "promotion" | "final"
-    ) {
+    if !valid_freeze_source(&source) {
         return Err(crate::routes::ApiError::bad_request(
             "source 只能是 direct / revival / promotion / final",
         ));
@@ -478,6 +485,11 @@ pub async fn freeze_stage(
     } else {
         body.source.clone()
     };
+    if !valid_freeze_source(&source) {
+        return Err(crate::routes::ApiError::bad_request(
+            "source 只能是 direct / revival / promotion / final",
+        ));
+    }
     let event_id: i64 = q.get("eventId").and_then(|v| v.parse().ok()).unwrap_or(0);
     if event_id <= 0 {
         return Err(crate::routes::ApiError::bad_request("缺少 eventId"));
@@ -701,6 +713,7 @@ pub async fn ingest(
     Path(event_id): Path<i64>,
     Json(obs): Json<Observation>,
 ) -> ApiResult {
+    live::validate_observation(&obs).map_err(crate::routes::ApiError::bad_request)?;
     let out = live::ingest_observation(&st, event_id, &obs).await?;
     Ok(Json(json!({
         "ok": true,
@@ -732,6 +745,7 @@ pub async fn ingest_room(
             "请求路径 web_rid 与上报内容不一致",
         ));
     }
+    live::validate_observation(&obs).map_err(crate::routes::ApiError::bad_request)?;
     let out = live::ingest_room_observation(&st, &web_rid, &obs).await?;
     Ok(Json(json!({
         "ok": true,
@@ -783,11 +797,28 @@ pub async fn heartbeat(
     State(st): State<Arc<AppState>>,
     Json(body): Json<HeartbeatBody>,
 ) -> ApiResult {
+    let worker_id = body.worker_id.trim();
+    if worker_id.is_empty() || worker_id.chars().count() > 64 {
+        return Err(crate::routes::ApiError::bad_request(
+            "workerId 必须是 1~64 字符",
+        ));
+    }
+    if body.event_id < 0 || body.rooms.unwrap_or(0) < 0 {
+        return Err(crate::routes::ApiError::bad_request(
+            "eventId / rooms 不能为负数",
+        ));
+    }
+    let version = body.version.as_deref().unwrap_or("").trim();
+    if version.chars().count() > 32 {
+        return Err(crate::routes::ApiError::bad_request(
+            "version 最多 32 字符",
+        ));
+    }
     store::live_worker_heartbeat(
         &st,
         body.event_id,
-        &body.worker_id,
-        &body.version.unwrap_or_default(),
+        worker_id,
+        version,
         body.rooms.unwrap_or(0),
     )
     .await?;

@@ -1289,14 +1289,6 @@ async fn run_inner(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result
                 // 图片版（2026-10-12）：日报按「每页 40 行」分页渲染（榜单太长微信看不清），
                 // 每人一份带艺名水印的 PNG（防转发扩散），逐张发送；
                 // caption = 问候语 + 我的名次行。渲染/取数失败退回纯文本，不中断整轮。
-                let accounts = person_account_waves(st, b.person_id, date).await;
-                let text = daily_report_text_with_accounts(
-                    team,
-                    date,
-                    &rank_items,
-                    b.person_id,
-                    &accounts,
-                );
                 /* 月榜口径（2026-10-12 用户要求）：图里发本月累计音浪 + 当月未播天数，
                 日榜不发；头部 🚩 流动小红旗条，称号/人名后台可配：
                 - config star_title：称号（如「初级争霸赛冠军」），缺省「每日之星」
@@ -1319,6 +1311,14 @@ async fn run_inner(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result
                     }
                 };
                 if cached_pngs.is_none() && svgs.is_empty() {
+                    let accounts = person_account_waves(st, b.person_id, date).await;
+                    let text = daily_report_text_with_accounts(
+                        team,
+                        date,
+                        &rank_items,
+                        b.person_id,
+                        &accounts,
+                    );
                     tracing::info!(account = %b.name, text = %text.replace('\n', " | "), "推送·每日报告(文本)");
                     match send_binding(st, b, wx_global.as_ref(), &text).await {
                         Ok(()) => {
@@ -1357,6 +1357,14 @@ async fn run_inner(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result
                     };
                     if pngs.is_empty() {
                         tracing::warn!(account = %b.name, "全部页面转 PNG 失败，退回文本推送");
+                        let accounts = person_account_waves(st, b.person_id, date).await;
+                        let text = daily_report_text_with_accounts(
+                            team,
+                            date,
+                            &rank_items,
+                            b.person_id,
+                            &accounts,
+                        );
                         match send_binding(st, b, wx_global.as_ref(), &text).await {
                             Ok(()) => {
                                 sent_any = true;
@@ -1393,6 +1401,14 @@ async fn run_inner(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result
                                     tracing::warn!(account = %b.name, "每日报告(图片)：闸门拦截，未发（去重标记不推进）");
                                 } else {
                                     tracing::warn!(account = %b.name, error = %e, "每日报告图片推送失败，退回文本");
+                                    let accounts = person_account_waves(st, b.person_id, date).await;
+                                    let text = daily_report_text_with_accounts(
+                                        team,
+                                        date,
+                                        &rank_items,
+                                        b.person_id,
+                                        &accounts,
+                                    );
                                     match send_binding(st, b, wx_global.as_ref(), &text).await {
                                         Ok(()) => {
                                             sent_any = true;

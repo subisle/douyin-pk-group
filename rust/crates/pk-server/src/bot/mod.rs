@@ -1146,7 +1146,7 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
             channel = inbound.channel,
             conversation = %inbound.conversation_id,
             kind = if inbound.is_group { "group" } else { "private" },
-            text = %inbound.text,
+            text_chars = inbound.text.chars().count(),
             "未授权 / 未绑定会话消息，静默忽略（微信可在管理端勾选管理员，或先绑定推送）"
         );
         return None;
@@ -1182,7 +1182,7 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
     for att in &inbound.attachments {
         tracing::info!(
             file = %att.file_name,
-            url_head = %att.url.chars().take(80).collect::<String>(),
+            target = %attachment_log_target(&att.url),
             "机器人收到附件，开始下载"
         );
         // 传平台给的真实文件名：CDN URL 推不出扩展名时 xlsx 会被当文本，
@@ -2033,10 +2033,21 @@ fn export_period_or_current(raw: Option<&str>) -> Option<String> {
 }
 
 fn csv_cell(s: &str) -> String {
-    if s.contains([',', '"', '\n', '\r']) {
-        format!("\"{}\"", s.replace('"', "\"\""))
+    // Excel formula injection：即使加引号，Excel 仍会执行 = / + / - / @ 开头的单元格。
+    // 仅对异常前缀加单引号；正常中文名 / 英文名输出保持不变。
+    let safe = if s
+        .chars()
+        .next()
+        .is_some_and(|c| matches!(c, '=' | '+' | '-' | '@' | '\t' | '\r'))
+    {
+        format!("'{s}")
     } else {
         s.to_string()
+    };
+    if safe.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", safe.replace('"', "\"\""))
+    } else {
+        safe
     }
 }
 
@@ -2270,7 +2281,7 @@ async fn cmd_export_date(st: &Arc<AppState>, date: &str) -> String {
     let mut out = format!("名字,{date}音浪\n");
     for (name, w) in rows {
         // CSV 是机器格式：数值不能带千分位逗号（会把一行拆成三列）
-        out.push_str(&format!("{},{}\n", name, w.round() as i64));
+        out.push_str(&format!("{},{}\n", csv_cell(&name), w.round() as i64));
     }
     out
 }
@@ -2291,7 +2302,7 @@ async fn csv_of(st: &Arc<AppState>, metric: &str, days: i64, label: &str) -> Str
     let mut out = format!("名字,{label}音浪\n");
     for (name, w) in rows {
         // CSV 是机器格式：数值不能带千分位逗号（会把一行拆成三列）
-        out.push_str(&format!("{},{}\n", name, w.round() as i64));
+        out.push_str(&format!("{},{}\n", csv_cell(&name), w.round() as i64));
     }
     out
 }
@@ -2614,24 +2625,43 @@ fn extra_attachment_hosts() -> Vec<String> {
 /// 下载 URL 主机校验：解析 host，必须与白名单域名相等或以其为后缀（`.qq.com`）。
 /// e2e / 本机联调用 `BOT_ATTACHMENT_HOSTS=127.0.0.1,localhost` 放行测试服务器。
 fn attachment_host_allowed(url: &str) -> bool {
-    let rest = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))
-        .unwrap_or(url);
-    let host = rest
-        .split(['/', ':', '?', '#'])
-        .next()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    if host.is_empty() {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    if !matches!(parsed.scheme(), "http" | "https")
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
         return false;
     }
-    ATTACHMENT_HOSTS
+    let Some(host) = parsed.host_str().map(str::to_ascii_lowercase) else {
+        return false;
+    };
+    let builtin = ATTACHMENT_HOSTS
+        .iter()
+        .any(|h| host == *h || host.ends_with(&format!(".{h}")));
+    if builtin {
+        // 官方 CDN 只允许 http/https 的默认端口，显式 :8443 之类不因域名
+        // 命中白名单就跳过端口边界。
+        return parsed.port().is_none()
+            || (parsed.scheme() == "http" && parsed.port() == Some(80))
+            || (parsed.scheme() == "https" && parsed.port() == Some(443));
+    }
+    // BOT_ATTACHMENT_HOSTS 是运维显式放行口，保留自定义端口以兼容本机 e2e。
+    extra_attachment_hosts()
         .iter()
         .any(|h| host == *h || host.ends_with(&format!(".{h}")))
-        || extra_attachment_hosts()
-            .iter()
-            .any(|h| host == *h || host.ends_with(&format!(".{h}")))
+}
+
+/// 附件日志只保留 scheme + host + path，绝不记录 query 中的 rkey / 签名 / 临时凭证。
+fn attachment_log_target(url: &str) -> String {
+    match reqwest::Url::parse(url) {
+        Ok(parsed) => {
+            let host = parsed.host_str().unwrap_or("<invalid-host>");
+            format!("{}://{}{}", parsed.scheme(), host, parsed.path())
+        }
+        Err(_) => "<invalid-url>".to_string(),
+    }
 }
 
 /// 下载附件文本（QQ CDN 直链 / 微信文件）。
@@ -2643,10 +2673,7 @@ fn attachment_host_allowed(url: &str) -> bool {
 /// 扩展名判据失效 → xlsx 被当纯文本 → 二进制垃圾进暂存区（批次 #287 就是这么来的）。
 async fn download_text(url: &str, file_name: Option<&str>) -> anyhow::Result<String> {
     if !attachment_host_allowed(url) {
-        tracing::warn!(
-            url_head = %url.chars().take(80).collect::<String>(),
-            "附件下载被拒：主机不在白名单"
-        );
+        tracing::warn!(target = %attachment_log_target(url), "附件下载被拒：主机不在白名单");
         anyhow::bail!("附件链接的域名不受支持（只接受 QQ 开放平台官方 CDN）");
     }
     // 不跟随重定向（P2-16）：白名单只在首跳生效，跟随会把「qq.com 已放行」当成
@@ -2872,6 +2899,16 @@ mod tests {
             "总排名-2026-10-男团.csv"
         );
         assert_eq!(export_file_name("female", "2026"), "总排名-2026-女团.csv");
+    }
+
+    #[test]
+    fn csv_cell_blocks_formula_injection() {
+        assert_eq!(csv_cell("浩雨"), "浩雨");
+        assert_eq!(csv_cell("甲,乙"), "\"甲,乙\"");
+        assert_eq!(csv_cell("=cmd|'/C calc'!A0"), "'=cmd|'/C calc'!A0");
+        assert_eq!(csv_cell("+1+2"), "'+1+2");
+        assert_eq!(csv_cell("-2+3"), "'-2+3");
+        assert_eq!(csv_cell("@SUM(A1)"), "'@SUM(A1)");
     }
 
     #[test]
@@ -3318,6 +3355,9 @@ mod tests {
             "http://evil.com/steal.csv",
             "https://evil.com/steal.csv",
             "http://qq.com.evil.com/x.csv", // 后缀伪装
+            "http://qq.com@169.254.169.254/x.csv", // userinfo 伪装
+            "https://multimedia.nt.qq.com.cn:8443/x.csv", // 非默认端口
+            "https://[::1]/x.csv", // IPv6 loopback
             "file:///etc/passwd",
         ] {
             assert!(!attachment_host_allowed(u), "应拒绝：{u}");
@@ -3342,6 +3382,11 @@ mod tests {
             "env 追加后本机应放行（e2e 依赖这条）"
         );
         assert!(attachment_host_allowed("http://localhost/data.csv"));
+        assert_eq!(
+            attachment_log_target("https://groupfile.qq.com/a.csv?rkey=secret&token=x"),
+            "https://groupfile.qq.com/a.csv",
+            "日志不能带 query 中的临时凭证"
+        );
         // 追加不得削弱原有防护
         assert!(!attachment_host_allowed("http://169.254.169.254/"));
         match saved {

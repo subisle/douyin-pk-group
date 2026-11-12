@@ -412,6 +412,8 @@ async fn main() -> anyhow::Result<()> {
     写库不可用时 push_job_take 直接返回 None，循环空转，不影响服务。
     P1-20：调度循环监听全局 shutdown token，graceful shutdown 时随之退出。 */
     let scheduler = tokio::spawn(push::scheduler_loop(st.clone()));
+    /* 直播原始采样保留期清理：默认 90 天，分批删除，不碰进行中/待复核对局。 */
+    let live_sample_prune = tokio::spawn(live::sample_prune_loop(st.clone()));
 
     /* 对外公开的只读端点：不要鉴权，单独一层 */
     /* 展示端公开 API（2026-10-10 门禁）：只有河南 / 安徽访客放行，
@@ -978,6 +980,9 @@ async fn main() -> anyhow::Result<()> {
             "/api/internal/live/worker/heartbeat",
             post(live_api::heartbeat),
         )
+        // 一局真实 PK 的观测 body 远小于 64KB；单独收紧到 256KB，
+        // 避免内部令牌泄露或采集器异常时用超大 JSON 放大内存与数据库写入。
+        .layer(axum::extract::DefaultBodyLimit::max(256 * 1024))
         .layer(axum::middleware::from_fn(live_api::require_collector))
         .with_state(st.clone());
 
@@ -1133,6 +1138,11 @@ async fn main() -> anyhow::Result<()> {
             // 等待点退出并把 cursor flush 落库（硬超时兜底 10 秒）。
             let _ =
                 tokio::time::timeout(std::time::Duration::from_secs(10), wxpush_supervisor).await;
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                live_sample_prune,
+            )
+            .await;
             tracing::info!("pk-server 已退出");
             Ok(())
         }

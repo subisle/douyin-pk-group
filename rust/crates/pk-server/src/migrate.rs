@@ -265,6 +265,18 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "048_daily_import_contrib",
         include_str!("migrations/048_daily_import_contrib.sql"),
     ),
+    // 049：直播热路径。分数版本落库、最新分覆盖索引、保留期清理索引；
+    // 旧版本响应晚到时不能把实时榜/最终榜分数覆盖回去。幂等，可安全重放。
+    (
+        "049_live_hot_path",
+        include_str!("migrations/049_live_hot_path.sql"),
+    ),
+    // 050：按日贡献区分“没有音浪”和“显式音浪 0”。只导时长的新批次
+    // 不再把此前已导入的当日音浪重算为 0。幂等，可安全重放。
+    (
+        "050_daily_contrib_has_wave",
+        include_str!("migrations/050_daily_contrib_has_wave.sql"),
+    ),
 ];
 
 /// 迁移建连（migrator 账号；同样关语句缓存）

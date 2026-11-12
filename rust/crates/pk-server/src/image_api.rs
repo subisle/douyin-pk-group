@@ -24,6 +24,10 @@ use crate::{dialect, lineage_report, pgrs, push, routes::ApiError, state::AppSta
 
 const API_PREFIX: &str = "/api/images";
 
+/// 图片 API Key 与管理员口令共用 Argon2 校验，属于 CPU 密集操作。
+/// 限制同时校验数，避免错误 Key 并发请求把 4 核机器打满。
+static KEY_VERIFY_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+
 /// 返回仍待注入 `AppState` 的子路由，合并到主路由后由主入口统一 `with_state`。
 /// 鉴权中间件自己捕获同一份状态，因此图片路由不会走后台 session 鉴权。
 pub fn router(st: Arc<AppState>) -> Router<Arc<AppState>> {
@@ -54,7 +58,22 @@ async fn require_admin_key(
         )
             .into_response();
     };
-    if !st.auth.verify_admin_password(&key) {
+    let permit = match KEY_VERIFY_SLOTS.try_acquire() {
+        Ok(permit) => permit,
+        Err(_) => {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({ "error": "鉴权校验繁忙，请稍后重试" })),
+            )
+                .into_response();
+        }
+    };
+    let auth = st.auth.clone();
+    let verified = tokio::task::spawn_blocking(move || auth.verify_admin_password(&key))
+        .await
+        .unwrap_or(false);
+    drop(permit);
+    if !verified {
         return (
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({ "error": "API Key 无效" })),
@@ -167,7 +186,12 @@ async fn ranking_png(
         "按累计开播有效时长从高到低"
     };
     let svg = ranking_svg(&rows, metric, &label, subtitle, &period);
-    let png = push::svg_to_png_at(&svg, 2.0).map_err(ApiError::from)?;
+    // resvg 是同步 CPU 密集任务，不能直接占住 Tokio worker；3600px 长图
+    // 单张可达数十 MB RGBA，放 blocking 池可避免拖慢健康检查与其它请求。
+    let png = tokio::task::spawn_blocking(move || push::svg_to_png_at(&svg, 2.0))
+        .await
+        .map_err(|e| ApiError::from(anyhow::anyhow!("图片渲染任务失败: {e}")))?
+        .map_err(ApiError::from)?;
     let filename = format!(
         "ranking-{period}-{}-{metric}.png",
         if team.is_empty() { "all" } else { team }

@@ -233,13 +233,94 @@ pub struct TeamScore {
     pub rank: i32,
 }
 
+/// 单次采集请求的硬边界。真实 PK 房间远小于这些值；边界只拦截异常/恶意大包，
+/// 不改变正常采集行为。
+const MAX_OBSERVATION_PARTICIPANTS: usize = 64;
+const MAX_BATTLE_DURATION_SECS: i64 = 24 * 60 * 60;
+
+/// 校验内部采集上报，防止超长字符串、超大数组、负数分数和溢出时间进入热路径。
+///
+/// 这是输入边界校验，不承担权限判断（权限由 `X-Live-Token` 中间件负责）。
+pub fn validate_observation(obs: &Observation) -> Result<(), String> {
+    let check_len = |name: &str, value: &str, max: usize| -> Result<(), String> {
+        if value.chars().count() > max {
+            Err(format!("{name} 超过 {max} 字符"))
+        } else {
+            Ok(())
+        }
+    };
+    check_len("webRid", &obs.web_rid, 40)?;
+    check_len("roomId", &obs.room_id, 40)?;
+    check_len("health", &obs.health, 32)?;
+    if obs.now_ms < 0 {
+        return Err("nowMs 不能为负数".into());
+    }
+    let Some(snap) = &obs.battle else {
+        return Ok(());
+    };
+    check_len("battleId", &snap.battle_id, 40)?;
+    check_len("channelId", &snap.channel_id, 40)?;
+    if snap.start_time_ms < 0 {
+        return Err("startTimeMs 不能为负数".into());
+    }
+    if !(0..=MAX_BATTLE_DURATION_SECS).contains(&snap.duration_secs) {
+        return Err(format!(
+            "durationSecs 要在 0~{MAX_BATTLE_DURATION_SECS} 之间"
+        ));
+    }
+    if snap.scores.len() > MAX_OBSERVATION_PARTICIPANTS {
+        return Err(format!(
+            "scores 最多 {MAX_OBSERVATION_PARTICIPANTS} 人，当前 {}",
+            snap.scores.len()
+        ));
+    }
+    if snap.team_scores.len() > MAX_OBSERVATION_PARTICIPANTS {
+        return Err(format!(
+            "teamScores 最多 {MAX_OBSERVATION_PARTICIPANTS} 队，当前 {}",
+            snap.team_scores.len()
+        ));
+    }
+    for score in &snap.scores {
+        check_len("userId", &score.user_id, 40)?;
+        check_len("nickname", &score.nickname, 128)?;
+        check_len("teamId", &score.team_id, 40)?;
+        if score.score < 0 || score.bonus_score < 0 || score.current_bonus < 0 {
+            return Err("分数 / 加成分不能为负数".into());
+        }
+        if score.score_version < 0 {
+            return Err("scoreVersion 不能为负数".into());
+        }
+        if !(0..=1000).contains(&score.rank) {
+            return Err("rank 要在 0~1000 之间".into());
+        }
+        if !(100..=10_000).contains(&score.bonus_multiple) {
+            return Err("bonusMultiple 要在 100~10000 之间".into());
+        }
+        if score.bonus_end_ms < 0 {
+            return Err("bonusEndMs 不能为负数".into());
+        }
+    }
+    for team in &snap.team_scores {
+        check_len("teamId", &team.team_id, 40)?;
+        if team.score < 0 {
+            return Err("队伍分不能为负数".into());
+        }
+        if !(0..=1000).contains(&team.rank) {
+            return Err("队伍 rank 要在 0~1000 之间".into());
+        }
+    }
+    Ok(())
+}
+
 impl BattleSnapshot {
     /// 预计结束时间（毫秒）。没有开始时间或时长时返回 None。
     pub fn expected_end_ms(&self) -> Option<i64> {
         if self.start_time_ms <= 0 || self.duration_secs <= 0 {
             return None;
         }
-        Some(self.start_time_ms + self.duration_secs * 1000)
+        self.duration_secs
+            .checked_mul(1000)
+            .and_then(|duration_ms| self.start_time_ms.checked_add(duration_ms))
     }
 
     /// 参与者签名：判定「同一批人重开一局」用（排序后的 UID 集合）
@@ -260,6 +341,7 @@ impl BattleSnapshot {
                 score: s.score,
                 rank: 0,
                 team_id: s.team_id.clone(),
+                score_version: s.score_version,
             })
             .collect();
         seats.sort_by(|a, b| {
@@ -287,6 +369,7 @@ pub struct RankedSeat {
     pub score: i64,
     pub rank: i32,
     pub team_id: String,
+    pub score_version: i64,
 }
 
 /* ------------------------------ 对局状态判定 ------------------------------ */
@@ -636,7 +719,8 @@ pub async fn ingest_observation(
 
     // 1) 定位小组：优先按当前正在进行的阶段找「已认领本 battle」的小组，
     //    否则找该阶段里第一个还没定稿的小组（运营按赛程顺序开打）。
-    let group_id = resolve_group(st, event_id, snap, &obs.web_rid).await?;
+    let (group_id, existing_round_id) =
+        resolve_group(st, event_id, snap, &obs.web_rid).await?;
     if group_id == 0 {
         out.phase = "unassigned".into();
         out.note = "当前没有可接这一局的小组（阶段未开始或都已定稿）".into();
@@ -644,16 +728,22 @@ pub async fn ingest_observation(
     }
     out.group_id = group_id;
 
-    // 2) 该组已有几局（判断是首发还是重开）
-    let attempts = crate::store::live_round_count(st, group_id)
-        .await
-        .unwrap_or(0);
-    let parent = if attempts > 0 {
-        crate::store::live_latest_round_id(st, group_id)
-            .await
-            .unwrap_or(0)
+    // 2) 只有第一次识别这个 battle 时才查“已有几局 / 上一局是谁”；
+    // 同一 battle 的后续每拍直接沿用现有 round_id，少两次数据库往返。
+    let (parent, attempt_no) = if existing_round_id.is_some() {
+        (0, 1)
     } else {
-        0
+        let attempts = crate::store::live_round_count(st, group_id)
+            .await
+            .unwrap_or(0);
+        let parent = if attempts > 0 {
+            crate::store::live_latest_round_id(st, group_id)
+                .await
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        (parent, attempts as i32 + 1)
     };
     let (round_id, is_new) = crate::store::live_round_upsert(
         st,
@@ -662,7 +752,7 @@ pub async fn ingest_observation(
         snap,
         &obs.web_rid,
         parent,
-        attempts as i32 + 1,
+        attempt_no,
     )
     .await?;
     out.round_id = round_id;
@@ -702,16 +792,25 @@ pub async fn ingest_observation(
             .map(|t| (t.score, t.rank))
             .unwrap_or((0, 0))
     };
+    let mut sample_rows = Vec::with_capacity(snap.scores.len());
     for s in &snap.scores {
         let (ts, tr) = team_of(&s.team_id);
-        crate::store::live_sample_insert(st, round_id, s, ts, tr).await?;
+        sample_rows.push((s, ts, tr));
     }
-    for seat in &ranked {
-        let person_id = crate::store::live_person_by_uid(st, &seat.user_id)
-            .await
-            .unwrap_or(0);
-        crate::store::live_seat_upsert(st, round_id, seat, person_id, false).await?;
-    }
+    crate::store::live_sample_insert_batch(st, round_id, &sample_rows).await?;
+
+    let uids: Vec<String> = ranked.iter().map(|seat| seat.user_id.clone()).collect();
+    let person_ids = crate::store::live_person_ids_by_uids(st, &uids).await;
+    let seat_rows: Vec<(&RankedSeat, i64)> = ranked
+        .iter()
+        .map(|seat| {
+            (
+                seat,
+                person_ids.get(&seat.user_id).copied().unwrap_or(0),
+            )
+        })
+        .collect();
+    crate::store::live_seat_upsert_batch(st, round_id, &seat_rows, false).await?;
 
     // 4) 判定阶段
     let phase = classify_battle(snap, now_ms, rules.settle_grace_secs as i64);
@@ -814,19 +913,19 @@ pub async fn ingest_room_observation(
             .map(|t| (t.score, t.rank))
             .unwrap_or((0, 0))
     };
+    let mut sample_rows = Vec::with_capacity(snap.scores.len());
     for score in &snap.scores {
         let (team_score, team_rank) = team_of(&score.team_id);
-        crate::store::live_room_sample_insert(
-            st,
-            web_rid,
-            &obs.room_id,
-            &snap.battle_id,
-            score,
-            team_score,
-            team_rank,
-        )
-        .await?;
+        sample_rows.push((score, team_score, team_rank));
     }
+    crate::store::live_room_sample_insert_batch(
+        st,
+        web_rid,
+        &obs.room_id,
+        &snap.battle_id,
+        &sample_rows,
+    )
+    .await?;
 
     let now_ms = if obs.now_ms > 0 {
         obs.now_ms
@@ -844,6 +943,32 @@ pub async fn ingest_room_observation(
     Ok(out)
 }
 
+/// 每日清理直播原始采样。默认保留 90 天，LIVE_SAMPLE_RETENTION_DAYS=0 可关闭。
+/// 清理失败只记日志，不影响采集和推送主链路。
+pub async fn sample_prune_loop(st: Arc<AppState>) {
+    let days = crate::config::live_sample_retention_days();
+    if days <= 0 {
+        tracing::info!("直播采样自动清理已关闭（LIVE_SAMPLE_RETENTION_DAYS=0）");
+        return;
+    }
+    let shutdown = crate::push::shutdown_token();
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(24 * 60 * 60));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            _ = shutdown.cancelled() => return,
+            _ = tick.tick() => {}
+        }
+        match crate::store::live_samples_prune(&st, days).await {
+            Ok((event_rows, room_rows)) if event_rows + room_rows > 0 => {
+                tracing::info!(event_rows, room_rows, retention_days = days, "直播过期采样已清理");
+            }
+            Ok(_) => tracing::debug!(retention_days = days, "直播采样清理：没有过期数据"),
+            Err(e) => tracing::warn!(error = %e, retention_days = days, "直播采样清理失败（下轮重试）"),
+        }
+    }
+}
+
 /// 定位这一局属于哪个小组。
 ///
 /// 顺序：① 该局已落在某个小组（重复上报）→ 沿用；② 当前阶段里第一个未定稿小组。
@@ -853,9 +978,11 @@ async fn resolve_group(
     event_id: i64,
     snap: &BattleSnapshot,
     web_rid: &str,
-) -> anyhow::Result<i64> {
-    if let Some(g) = crate::store::live_round_group_of(st, &snap.battle_id).await? {
-        return Ok(g);
+) -> anyhow::Result<(i64, Option<i64>)> {
+    if let Some((group_id, round_id)) =
+        crate::store::live_round_ref_by_battle(st, &snap.battle_id).await?
+    {
+        return Ok((group_id, Some(round_id)));
     }
 
     let signature = snap.roster_signature();
@@ -865,7 +992,7 @@ async fn resolve_group(
         crate::store::live_recent_finalized_group_for_roster(st, event_id, web_rid, &signature)
             .await
     {
-        return Ok(g);
+        return Ok((g, None));
     }
 
     // 有赛前名单时优先按 UID 集合精确认组，避免多直播间或乱序上报把局挂错。
@@ -877,12 +1004,12 @@ async fn resolve_group(
         }
         let seeded: std::collections::HashSet<&str> = uids.iter().map(String::as_str).collect();
         if seeded == current {
-            return Ok(group_id);
+            return Ok((group_id, None));
         }
     }
 
     // 兼容没有登记采集号的旧方案：名单无法精确匹配时按赛程顺序接第一组。
-    crate::store::live_next_open_group(st, event_id).await
+    Ok((crate::store::live_next_open_group(st, event_id).await?, None))
 }
 
 /// 定稿一局：判断正常 / 异常，只有正常且唯一才设正式局。
@@ -1565,6 +1692,52 @@ mod tests {
     fn battle_status_ended_shortcircuits_clock() {
         let s = snap(&["a", "b"], &[10, 5], 2, 1_000, 300);
         assert_eq!(classify_battle(&s, 20_000, 60), BattlePhase::Settling);
+    }
+
+    #[test]
+    fn expected_end_uses_checked_arithmetic() {
+        let mut s = snap(&["a"], &[1], 1, i64::MAX - 10, 1);
+        assert_eq!(s.expected_end_ms(), None, "溢出不能 panic / 回绕");
+        s.start_time_ms = 1_000;
+        s.duration_secs = 300;
+        assert_eq!(s.expected_end_ms(), Some(301_000));
+    }
+
+    #[test]
+    fn observation_validation_rejects_oversized_or_negative_values() {
+        let mut obs = Observation {
+            web_rid: "505899768449".into(),
+            room_id: "7705758224691399458".into(),
+            room_online: true,
+            now_ms: 1_700_000_000_000,
+            battle: Some(snap(&["a"], &[10], 1, 1_000, 300)),
+            health: "ok".into(),
+            error: String::new(),
+        };
+        assert!(validate_observation(&obs).is_ok());
+
+        obs.battle.as_mut().unwrap().scores[0].score = -1;
+        assert!(validate_observation(&obs).is_err());
+
+        obs.battle.as_mut().unwrap().scores[0].score = 10;
+        obs.battle.as_mut().unwrap().scores[0].nickname = "x".repeat(129);
+        assert!(validate_observation(&obs).is_err());
+
+        obs.battle.as_mut().unwrap().scores[0].nickname = "a".into();
+        obs.battle.as_mut().unwrap().duration_secs = MAX_BATTLE_DURATION_SECS + 1;
+        assert!(validate_observation(&obs).is_err());
+
+        obs.battle.as_mut().unwrap().duration_secs = 300;
+        obs.web_rid = "x".repeat(41);
+        assert!(validate_observation(&obs).is_err());
+    }
+
+    #[test]
+    fn ranked_seats_keep_score_version() {
+        let s = snap(&["a", "b"], &[10, 5], 1, 1_000, 300);
+        let ranked = s.ranked();
+        assert_eq!(ranked[0].score_version, 1);
+        assert_eq!(ranked[1].score_version, 1);
     }
 
     #[test]
