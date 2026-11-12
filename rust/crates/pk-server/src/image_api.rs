@@ -171,24 +171,12 @@ async fn ranking_png(
         "female" => "女团",
         _ => "全团",
     };
-    let metric_label = if metric == "wave" {
-        "累计音浪"
-    } else {
-        "累计时长"
-    };
-    let label = format!(
-        "{team_label} · {}月{metric_label}",
-        period.get(5..7).unwrap_or("")
-    );
-    let subtitle = if metric == "wave" {
-        "按累计音浪从高到低"
-    } else {
-        "按累计开播有效时长从高到低"
-    };
-    let svg = ranking_svg(&rows, metric, &label, subtitle, &period);
-    // resvg 是同步 CPU 密集任务，不能直接占住 Tokio worker；3600px 长图
+    let svg = ranking_svg(&rows, metric, team_label, &period);
+    // resvg 是同步 CPU 密集任务，不能直接占住 Tokio worker；整月长榜
     // 单张可达数十 MB RGBA，放 blocking 池可避免拖慢健康检查与其它请求。
-    let png = tokio::task::spawn_blocking(move || push::svg_to_png_at(&svg, 2.0))
+    // 85 行左右的长图按 1.5 倍渲染（2250px 宽），清晰度够用且体积减半。
+    let scale = if rows.len() > 45 { 1.5 } else { 2.0 };
+    let png = tokio::task::spawn_blocking(move || push::svg_to_png_at(&svg, scale))
         .await
         .map_err(|e| ApiError::from(anyhow::anyhow!("图片渲染任务失败: {e}")))?
         .map_err(ApiError::from)?;
@@ -199,121 +187,234 @@ async fn ranking_png(
     image_response(png, &filename)
 }
 
-fn ranking_svg(
-    rows: &[RankRow],
-    metric: &str,
-    label: &str,
-    subtitle: &str,
-    period: &str,
-) -> String {
+/// 月榜长图（2026-11-13 改版）：单列、奖牌名次、青色圆角条、底部统计条。
+/// 版式对齐用户提供的「鹏仔传媒主播时长统计」参考图。
+fn ranking_svg(rows: &[RankRow], metric: &str, team_label: &str, period: &str) -> String {
     let mut ordered = rows.to_vec();
     ordered.sort_by(|a, b| {
         let av = if metric == "wave" { a.wave } else { a.minutes };
         let bv = if metric == "wave" { b.wave } else { b.minutes };
         bv.cmp(&av).then_with(|| a.name.cmp(&b.name))
     });
-    let columns = if ordered.len() <= 20 { 1 } else { 2 };
-    let per_col = ordered.len().div_ceil(columns);
-    let width = 1800.0;
-    let margin = 66.0;
-    let gap = 54.0;
-    let col_width = (width - margin * 2.0 - gap * (columns as f64 - 1.0)) / columns as f64;
-    let header_y = 205.0;
-    let row_start = 260.0;
-    let row_height = 50.0;
-    let height = row_start + per_col as f64 * row_height + 95.0;
+
+    let is_wave = metric == "wave";
+    let (metric_word, bar_header, value_header) = if is_wave {
+        ("音浪", "音浪条", "月音浪")
+    } else {
+        ("时长", "时长条", "月时长")
+    };
+    let period_label = format!(
+        "{}年{}月",
+        period.get(0..4).unwrap_or(""),
+        period.get(5..7).unwrap_or("").trim_start_matches('0')
+    );
+    let title = format!("鹏仔传媒主播{metric_word}统计 {period_label}");
+    let subtitle = format!(
+        "{team_label} · 共 {} 人 · 按累计{}从高到低",
+        ordered.len(),
+        if is_wave { "音浪" } else { "有效时长" }
+    );
+
+    let width = 1500.0;
+    let margin = 60.0;
+    let header_y = 216.0;
+    let row_start = 234.0;
+    let row_height = 54.0;
+    let footer_y = row_start + ordered.len() as f64 * row_height + 36.0;
+    let height = footer_y + 108.0;
+    let rank_x = margin + 16.0;
+    let name_x = margin + 92.0;
+    let bar_x = margin + 340.0;
+    let value_x = width - margin;
+    let bar_w = value_x - bar_x - 168.0;
     let max_value = ordered
         .iter()
-        .map(|r| if metric == "wave" { r.wave } else { r.minutes })
+        .map(|r| if is_wave { r.wave } else { r.minutes })
         .max()
         .unwrap_or(0)
         .max(1);
-    let title = format!("{label}排名");
-    let font = "Noto Sans CJK SC, PingFang SC, Microsoft YaHei, sans-serif";
+    let font = "PingFang SC, Noto Sans CJK SC, Microsoft YaHei, sans-serif";
+
     let mut svg = format!(
         r##"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">
-<rect width="100%" height="100%" fill="#ffffff"/>
-<text x="{margin}" y="62" font-family="{font}" font-size="15" font-weight="700" letter-spacing="2" fill="#667085">MONTHLY RANKING · {period}</text>
-<text x="{margin}" y="124" font-family="{font}" font-size="58" font-weight="800" fill="#111827">{}</text>
-<text x="{margin}" y="160" font-family="{font}" font-size="18" fill="#667085">{subtitle} · {period}</text>
-<line x1="{margin}" y1="194" x2="{}" y2="194" stroke="#111827" stroke-width="4"/>
+<defs>
+<linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+<stop offset="0" stop-color="#E7F3FF"/>
+<stop offset="0.45" stop-color="#F7FBFF"/>
+<stop offset="1" stop-color="#FFFFFF"/>
+</linearGradient>
+<linearGradient id="bar" x1="0" y1="0" x2="1" y2="0">
+<stop offset="0" stop-color="#8AD9FA"/>
+<stop offset="1" stop-color="#1E9EE6"/>
+</linearGradient>
+<linearGradient id="medal-1" x1="0" y1="0" x2="0" y2="1">
+<stop offset="0" stop-color="#FFE9A8"/>
+<stop offset="1" stop-color="#F0A81C"/>
+</linearGradient>
+<linearGradient id="medal-2" x1="0" y1="0" x2="0" y2="1">
+<stop offset="0" stop-color="#F5F9FD"/>
+<stop offset="1" stop-color="#B4C2D2"/>
+</linearGradient>
+<linearGradient id="medal-3" x1="0" y1="0" x2="0" y2="1">
+<stop offset="0" stop-color="#FFE2C4"/>
+<stop offset="1" stop-color="#CE854A"/>
+</linearGradient>
+</defs>
+<rect width="100%" height="100%" fill="url(#bg)"/>
+<text x="{}" y="96" text-anchor="middle" font-family="{font}" font-size="50" font-weight="800" fill="#0F3B63">{}</text>
+<text x="{}" y="142" text-anchor="middle" font-family="{font}" font-size="19" fill="#6F8AA3">{subtitle}</text>
+<text x="{rank_x}" y="{header_y}" font-family="{font}" font-size="17" font-weight="700" fill="#8FA3B8">序号</text>
+<text x="{name_x}" y="{header_y}" font-family="{font}" font-size="17" font-weight="700" fill="#8FA3B8">主播姓名</text>
+<text x="{bar_x}" y="{header_y}" font-family="{font}" font-size="17" font-weight="700" fill="#8FA3B8">{bar_header}</text>
+<text x="{value_x}" y="{header_y}" text-anchor="end" font-family="{font}" font-size="17" font-weight="700" fill="#8FA3B8">{value_header}</text>
+<line x1="{margin}" y1="{}" x2="{}" y2="{}" stroke="#D5E6F5" stroke-width="2"/>
 "##,
+        width / 2.0,
         lineage_report::esc(&title),
-        width - margin
+        width / 2.0,
+        header_y + 14.0,
+        width - margin,
+        header_y + 14.0
     );
+
+    // 斑马纹先整段铺底：前三名奖牌彩带会略微越出本行，若随行绘制会被
+    // 下一行的底色盖住。
+    for i in (1..ordered.len()).step_by(2) {
+        let y = row_start + i as f64 * row_height;
+        svg.push_str(&format!(
+            r##"<rect x="{}" y="{}" width="{}" height="{}" rx="12" fill="#EFF7FF" opacity="0.85"/>
+"##,
+            margin - 20.0,
+            y + 2.0,
+            width - (margin - 20.0) * 2.0,
+            row_height - 4.0
+        ));
+    }
     let mut prev: Option<i64> = None;
     let mut rank = 0usize;
     for (i, row) in ordered.iter().enumerate() {
-        let col = if columns == 1 { 0 } else { i / per_col };
-        let idx = if columns == 1 { i } else { i % per_col };
-        if col >= columns || idx >= per_col {
-            continue;
-        }
-        let value = if metric == "wave" {
-            row.wave
-        } else {
-            row.minutes
-        };
+        let value = if is_wave { row.wave } else { row.minutes };
         if prev != Some(value) {
             rank = i + 1;
             prev = Some(value);
         }
-        let x = margin + col as f64 * (col_width + gap);
-        let y = row_start + idx as f64 * row_height;
-        if idx == 0 {
+        let y = row_start + i as f64 * row_height;
+        let center = y + row_height / 2.0;
+        if rank <= 3 && value > 0 {
+            svg.push_str(&medal_svg(rank_x + 17.0, center, rank, font));
+        } else {
             svg.push_str(&format!(
-                r##"<text x="{x}" y="{header_y}" font-family="{font}" font-size="14" fill="#8a94a6">名次</text>
-<text x="{}" y="{header_y}" font-family="{font}" font-size="14" fill="#8a94a6">主播</text>
-<text x="{}" y="{header_y}" font-family="{font}" font-size="14" fill="#8a94a6">占比</text>
-<text x="{}" y="{header_y}" text-anchor="end" font-family="{font}" font-size="14" fill="#8a94a6">{}</text>
-<line x1="{x}" y1="{header_y}" x2="{}" y2="{header_y}" stroke="#e5e9f0"/>
+                r##"<text x="{}" y="{}" font-family="{font}" font-size="20" font-weight="700" fill="#9FB2C4">{:02}</text>
 "##,
-                x + 62.0,
-                x + 210.0,
-                x + col_width - 10.0,
-                if metric == "wave" { "累计音浪" } else { "累计时长" },
-                x + col_width
+                rank_x,
+                center + 7.0,
+                rank
             ));
         }
-        let name = truncate_chars(&row.name, 16);
-        let value_text = if metric == "wave" {
-            fmt_wave(value)
-        } else {
-            fmt_minutes(value)
-        };
-        let text_color = if value <= 0 { "#aab2bf" } else { "#111827" };
-        let name_color = if value <= 0 { "#aab2bf" } else { "#111827" };
-        let bar_total = col_width - 330.0;
-        let bar_fill = if value <= 0 {
-            0.0
-        } else {
-            (value as f64 / max_value as f64 * bar_total).max(2.0)
-        };
+        let name = truncate_chars(&row.name, 10);
         svg.push_str(&format!(
-            r##"<line x1="{x}" y1="{}" x2="{}" y2="{}" stroke="#edf0f4"/>
-<text x="{x}" y="{}" font-family="{font}" font-size="16" font-weight="600" fill="#7b8798">{rank}</text>
-<text x="{}" y="{}" font-family="{font}" font-size="18" font-weight="700" fill="{name_color}">{}</text>
-<rect x="{}" y="{}" width="{bar_total}" height="13" rx="6.5" fill="#edf1f5"/>
-<rect x="{}" y="{}" width="{bar_fill}" height="13" rx="6.5" fill="#111827"/>
-<text x="{}" y="{}" text-anchor="end" font-family="{font}" font-size="20" font-weight="700" fill="{text_color}">{value_text}</text>
+            r##"<text x="{name_x}" y="{}" font-family="{font}" font-size="24" font-weight="700" fill="{}">{}</text>
 "##,
-            y + row_height - 1.0,
-            x + col_width,
-            y + row_height - 1.0,
-            y + 31.0,
-            x + 62.0,
-            y + 31.0,
-            lineage_report::esc(&name),
-            x + 210.0,
-            y + 22.0,
-            x + 210.0,
-            y + 22.0,
-            x + col_width - 10.0,
-            y + 31.0,
+            center + 8.0,
+            if value > 0 { "#13395C" } else { "#A9B8C6" },
+            lineage_report::esc(&name)
+        ));
+
+        if value > 0 {
+            let fill = (value as f64 / max_value as f64 * bar_w).max(10.0);
+            let value_text = if is_wave {
+                fmt_wave(value)
+            } else {
+                fmt_minutes(value)
+            };
+            svg.push_str(&format!(
+                r##"<rect x="{bar_x}" y="{}" width="{bar_w}" height="20" rx="10" fill="#E1F0FB"/>
+<rect x="{bar_x}" y="{}" width="{fill}" height="20" rx="10" fill="url(#bar)"/>
+<text x="{value_x}" y="{}" text-anchor="end" font-family="{font}" font-size="22" font-weight="800" fill="#12699C">{value_text}</text>
+"##,
+                center - 10.0,
+                center - 10.0,
+                center + 8.0
+            ));
+        } else {
+            svg.push_str(&format!(
+                r##"<text x="{value_x}" y="{}" text-anchor="end" font-family="{font}" font-size="22" font-weight="800" fill="#E34B4B">未开播</text>
+"##,
+                center + 8.0
+            ));
+        }
+    }
+
+    let zero_names: Vec<&str> = ordered
+        .iter()
+        .filter(|r| (if is_wave { r.wave } else { r.minutes }) <= 0)
+        .map(|r| r.name.as_str())
+        .collect();
+    let footer_people = if team_label == "全团" {
+        format!("全部主播 {} 人", ordered.len())
+    } else {
+        format!("{team_label}主播 {} 人", ordered.len())
+    };
+    svg.push_str(&format!(
+        r##"<line x1="{margin}" y1="{footer_y}" x2="{}" y2="{footer_y}" stroke="#D5E6F5" stroke-width="2"/>
+<text x="{margin}" y="{}" font-family="{font}" font-size="22" font-weight="800" fill="#1B6F9E">{footer_people}</text>
+<text x="{margin}" y="{}" font-family="{font}" font-size="16" fill="#93A3B5">导出月份 {period_label}</text>
+"##,
+        width - margin,
+        footer_y + 44.0,
+        footer_y + 76.0
+    ));
+    if zero_names.is_empty() {
+        svg.push_str(&format!(
+            r##"<text x="{value_x}" y="{}" text-anchor="end" font-family="{font}" font-size="20" font-weight="800" fill="#1F9D6B">全员开播</text>
+"##,
+            footer_y + 44.0
+        ));
+    } else {
+        let names = truncate_chars(&zero_names.join("、"), 40);
+        svg.push_str(&format!(
+            r##"<text x="{value_x}" y="{}" text-anchor="end" font-family="{font}" font-size="20" font-weight="800" fill="#E34B4B">未开播 {} 人</text>
+<text x="{value_x}" y="{}" text-anchor="end" font-family="{font}" font-size="16" fill="#E34B4B">{}</text>
+"##,
+            footer_y + 44.0,
+            zero_names.len(),
+            footer_y + 76.0,
+            lineage_report::esc(&names)
         ));
     }
-    svg.push_str(&format!(r##"<line x1="{margin}" y1="{}" x2="{}" y2="{}" stroke="#111827" stroke-width="2"/><text x="{margin}" y="{}" font-family="{font}" font-size="13" fill="#98a2b3">{label} · {period}</text></svg>"##, height - 64.0, width - margin, height - 64.0, height - 30.0));
+    svg.push_str("</svg>");
     svg
+}
+
+/// 前三名奖牌：彩带 + 圆形徽章 + 名次数字（不用 emoji，避免字体缺字）。
+fn medal_svg(cx: f64, cy: f64, rank: usize, font: &str) -> String {
+    let dark = match rank {
+        1 => "#B97D00",
+        2 => "#7E8FA3",
+        _ => "#8C5326",
+    };
+    format!(
+        r##"<g>
+<path d="M{},{} L{},{} L{},{} Z" fill="{dark}" opacity="0.85"/>
+<path d="M{},{} L{},{} L{},{} Z" fill="{dark}" opacity="0.85"/>
+<circle cx="{cx}" cy="{cy}" r="18" fill="url(#medal-{rank})" stroke="{dark}" stroke-width="1.5"/>
+<text x="{cx}" y="{}" text-anchor="middle" font-family="{font}" font-size="20" font-weight="800" fill="#FFFFFF">{rank}</text>
+</g>
+"##,
+        cx - 15.0,
+        cy + 6.0,
+        cx - 24.0,
+        cy + 33.0,
+        cx - 7.0,
+        cy + 27.0,
+        cx + 15.0,
+        cy + 6.0,
+        cx + 24.0,
+        cy + 33.0,
+        cx + 7.0,
+        cy + 27.0,
+        cy + 7.0
+    )
 }
 
 fn fmt_wave(value: i64) -> String {
@@ -537,18 +638,45 @@ mod tests {
                     wave: 50,
                     minutes: 30,
                 },
+                RankRow {
+                    name: "丙".into(),
+                    wave: 0,
+                    minutes: 0,
+                },
             ],
             "wave",
-            "全团 · 10月累计音浪",
-            "按累计音浪从高到低",
+            "全团",
             "2026-10",
         );
-        assert!(svg.contains("MONTHLY RANKING · 2026-10"));
-        assert!(svg.contains("全团 · 10月累计音浪排名"));
+        assert!(svg.contains("鹏仔传媒主播音浪统计 2026年10月"));
+        assert!(svg.contains("全部主播 3 人"));
+        assert!(svg.contains("未开播 1 人"));
+        assert!(svg.contains("丙"));
+        assert!(svg.contains(">01<") || svg.contains("medal-1"));
         assert!(
             svg.find(">甲</text>").unwrap_or(usize::MAX)
                 < svg.find(">乙</text>").unwrap_or(usize::MAX)
         );
+        assert!(!svg.contains("MONTHLY RANKING"));
+    }
+
+    #[test]
+    fn ranking_svg_switches_headers_by_metric() {
+        let rows = [RankRow {
+            name: "甲".into(),
+            wave: 10,
+            minutes: 90,
+        }];
+        let duration = ranking_svg(&rows, "minutes", "女团", "2026-06");
+        assert!(duration.contains("鹏仔传媒主播时长统计 2026年6月"));
+        assert!(duration.contains("时长条"));
+        assert!(duration.contains("月时长"));
+        assert!(duration.contains("1时30分"));
+
+        let wave = ranking_svg(&rows, "wave", "男团", "2026-06");
+        assert!(wave.contains("音浪条"));
+        assert!(wave.contains("月音浪"));
+        assert!(wave.contains("男团主播 1 人"));
     }
 
     #[test]
