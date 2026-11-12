@@ -227,10 +227,18 @@ fn ranking_svg(rows: &[RankRow], metric: &str, team_label: &str, period: &str) -
     let footer_y = row_start + ordered.len() as f64 * row_height + 36.0;
     let height = footer_y + 108.0;
     let rank_x = margin + 16.0;
+    // 名次列用居中锚点：奖牌圆心与两位序号中心落在同一竖线上。
+    let rank_cx = rank_x + 17.0;
     let name_x = margin + 92.0;
+    // 姓名前加首字头像圆，姓名文字相应右移。
+    let avatar_cx = name_x + 20.0;
+    let name_text_x = name_x + 50.0;
     let bar_x = margin + 340.0;
     let value_x = width - margin;
     let bar_w = value_x - bar_x - 168.0;
+    let strip_x = margin - 20.0;
+    let strip_w = width - strip_x * 2.0;
+    let title_x = width / 2.0;
     let max_value = ordered
         .iter()
         .map(|r| if is_wave { r.wave } else { r.minutes })
@@ -247,6 +255,15 @@ fn ranking_svg(rows: &[RankRow], metric: &str, team_label: &str, period: &str) -
 <stop offset="0.45" stop-color="#F7FBFF"/>
 <stop offset="1" stop-color="#FFFFFF"/>
 </linearGradient>
+<linearGradient id="title" x1="0" y1="0" x2="1" y2="0">
+<stop offset="0" stop-color="#0F3B63"/>
+<stop offset="0.62" stop-color="#14639B"/>
+<stop offset="1" stop-color="#1E86C9"/>
+</linearGradient>
+<radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+<stop offset="0" stop-color="#8AD9FA" stop-opacity="0.42"/>
+<stop offset="1" stop-color="#8AD9FA" stop-opacity="0"/>
+</radialGradient>
 <linearGradient id="bar" x1="0" y1="0" x2="1" y2="0">
 <stop offset="0" stop-color="#8AD9FA"/>
 <stop offset="1" stop-color="#1E9EE6"/>
@@ -265,28 +282,60 @@ fn ranking_svg(rows: &[RankRow], metric: &str, team_label: &str, period: &str) -
 </linearGradient>
 </defs>
 <rect width="100%" height="100%" fill="url(#bg)"/>
-<text x="{}" y="96" text-anchor="middle" font-family="{font}" font-size="50" font-weight="800" fill="#0F3B63">{}</text>
-<text x="{}" y="142" text-anchor="middle" font-family="{font}" font-size="19" fill="#6F8AA3">{subtitle}</text>
-<text x="{rank_x}" y="{header_y}" font-family="{font}" font-size="17" font-weight="700" fill="#8FA3B8">序号</text>
-<text x="{name_x}" y="{header_y}" font-family="{font}" font-size="17" font-weight="700" fill="#8FA3B8">主播姓名</text>
-<text x="{bar_x}" y="{header_y}" font-family="{font}" font-size="17" font-weight="700" fill="#8FA3B8">{bar_header}</text>
-<text x="{value_x}" y="{header_y}" text-anchor="end" font-family="{font}" font-size="17" font-weight="700" fill="#8FA3B8">{value_header}</text>
-<line x1="{margin}" y1="{}" x2="{}" y2="{}" stroke="#D5E6F5" stroke-width="2"/>
+<circle cx="140" cy="30" r="430" fill="url(#glow)"/>
+<circle cx="{width_glow_right}" cy="210" r="480" fill="url(#glow)"/>
+<text x="{title_x}" y="98" text-anchor="middle" font-family="{font}" font-size="52" font-weight="800" letter-spacing="1" fill="url(#title)">{title_text}</text>
+<text x="{title_x}" y="144" text-anchor="middle" font-family="{font}" font-size="19" fill="#5E7E99">{subtitle}</text>
+<rect x="{accent_x}" y="160" width="140" height="5" rx="2.5" fill="url(#bar)"/>
+<rect x="{strip_x}" y="{strip_y}" width="{strip_w}" height="42" rx="12" fill="#EAF5FF" opacity="0.9"/>
+<text x="{rank_x}" y="{header_y}" font-family="{font}" font-size="17" font-weight="700" fill="#7E97AE">序号</text>
+<text x="{name_text_x}" y="{header_y}" font-family="{font}" font-size="17" font-weight="700" fill="#7E97AE">主播姓名</text>
+<text x="{bar_x}" y="{header_y}" font-family="{font}" font-size="17" font-weight="700" fill="#7E97AE">{bar_header}</text>
+<text x="{value_x}" y="{header_y}" text-anchor="end" font-family="{font}" font-size="17" font-weight="700" fill="#7E97AE">{value_header}</text>
+<line x1="{margin}" y1="{header_y_line}" x2="{width_minus_margin}" y2="{header_y_line}" stroke="#D5E6F5" stroke-width="2"/>
 "##,
-        width / 2.0,
-        lineage_report::esc(&title),
-        width / 2.0,
-        header_y + 14.0,
-        width - margin,
-        header_y + 14.0
+        width_glow_right = width - 140.0,
+        title_text = lineage_report::esc(&title),
+        accent_x = title_x - 70.0,
+        strip_y = header_y - 32.0,
+        header_y_line = header_y + 14.0,
+        width_minus_margin = width - margin,
     );
 
-    // 斑马纹先整段铺底：前三名奖牌彩带会略微越出本行，若随行绘制会被
-    // 下一行的底色盖住。
-    for i in (1..ordered.len()).step_by(2) {
+    // 名次先算出来（同值同名次），行底色与奖牌共用。
+    let values: Vec<i64> = ordered
+        .iter()
+        .map(|r| if is_wave { r.wave } else { r.minutes })
+        .collect();
+    let mut ranks: Vec<usize> = Vec::with_capacity(values.len());
+    let mut prev: Option<i64> = None;
+    let mut rank = 0usize;
+    for (i, value) in values.iter().enumerate() {
+        if prev != Some(*value) {
+            rank = i + 1;
+            prev = Some(*value);
+        }
+        ranks.push(rank);
+    }
+
+    // 行底色先整段铺底：前三名奖牌彩带会略微越出本行，若随行绘制会被
+    // 下一行的底色盖住。前三名用浅金/浅银/浅铜，其余隔行斑马纹。
+    for (i, &value) in values.iter().enumerate() {
+        let fill = if ranks[i] <= 3 && value > 0 {
+            Some(match ranks[i] {
+                1 => "#FFF7E4",
+                2 => "#F2F7FC",
+                _ => "#FDF2E8",
+            })
+        } else if i % 2 == 1 {
+            Some("#EFF7FF")
+        } else {
+            None
+        };
+        let Some(fill) = fill else { continue };
         let y = row_start + i as f64 * row_height;
         svg.push_str(&format!(
-            r##"<rect x="{}" y="{}" width="{}" height="{}" rx="12" fill="#EFF7FF" opacity="0.85"/>
+            r##"<rect x="{}" y="{}" width="{}" height="{}" rx="12" fill="{fill}"/>
 "##,
             margin - 20.0,
             y + 2.0,
@@ -294,30 +343,39 @@ fn ranking_svg(rows: &[RankRow], metric: &str, team_label: &str, period: &str) -
             row_height - 4.0
         ));
     }
-    let mut prev: Option<i64> = None;
-    let mut rank = 0usize;
+
     for (i, row) in ordered.iter().enumerate() {
-        let value = if is_wave { row.wave } else { row.minutes };
-        if prev != Some(value) {
-            rank = i + 1;
-            prev = Some(value);
-        }
+        let value = values[i];
+        let rank = ranks[i];
         let y = row_start + i as f64 * row_height;
         let center = y + row_height / 2.0;
         if rank <= 3 && value > 0 {
-            svg.push_str(&medal_svg(rank_x + 17.0, center, rank, font));
+            svg.push_str(&medal_svg(rank_cx, center, rank, font));
         } else {
             svg.push_str(&format!(
-                r##"<text x="{}" y="{}" font-family="{font}" font-size="20" font-weight="700" fill="#9FB2C4">{:02}</text>
+                r##"<text x="{rank_cx}" y="{}" text-anchor="middle" font-family="{font}" font-size="20" font-weight="700" fill="#9FB2C4">{:02}</text>
 "##,
-                rank_x,
                 center + 7.0,
                 rank
             ));
         }
-        let name = truncate_chars(&row.name, 10);
+        // 姓名首字头像：导出图没有头像数据，用稳定配色的字头圆点让长榜不呆板。
+        let avatar_fill = if value > 0 {
+            avatar_color(&row.name)
+        } else {
+            "#C7D3DF"
+        };
+        let initial: String = row.name.chars().take(1).collect();
         svg.push_str(&format!(
-            r##"<text x="{name_x}" y="{}" font-family="{font}" font-size="24" font-weight="700" fill="{}">{}</text>
+            r##"<circle cx="{avatar_cx}" cy="{center}" r="19" fill="{avatar_fill}"/>
+<text x="{avatar_cx}" y="{}" text-anchor="middle" font-family="{font}" font-size="19" font-weight="800" fill="#FFFFFF">{}</text>
+"##,
+            center + 7.0,
+            lineage_report::esc(&initial)
+        ));
+        let name = truncate_chars(&row.name, 7);
+        svg.push_str(&format!(
+            r##"<text x="{name_text_x}" y="{}" font-family="{font}" font-size="24" font-weight="700" fill="{}">{}</text>
 "##,
             center + 8.0,
             if value > 0 { "#13395C" } else { "#A9B8C6" },
@@ -359,20 +417,25 @@ fn ranking_svg(rows: &[RankRow], metric: &str, team_label: &str, period: &str) -
     } else {
         format!("{team_label}主播 {} 人", ordered.len())
     };
+    let live = ordered.len() - zero_names.len();
     svg.push_str(&format!(
         r##"<line x1="{margin}" y1="{footer_y}" x2="{}" y2="{footer_y}" stroke="#D5E6F5" stroke-width="2"/>
-<text x="{margin}" y="{}" font-family="{font}" font-size="22" font-weight="800" fill="#1B6F9E">{footer_people}</text>
-<text x="{margin}" y="{}" font-family="{font}" font-size="16" fill="#93A3B5">导出月份 {period_label}</text>
+<rect x="{footer_card_x}" y="{footer_card_y}" width="{footer_card_w}" height="84" rx="16" fill="#F3FAFF" stroke="#DCEBFA" stroke-width="1.5"/>
+<text x="{margin}" y="{footer_text_y}" font-family="{font}" font-size="22" font-weight="800" fill="#1B6F9E">{footer_people}</text>
+<text x="{margin}" y="{footer_sub_y}" font-family="{font}" font-size="16" fill="#93A3B5">导出月份 {period_label} · 已开播 {live} 人</text>
 "##,
         width - margin,
-        footer_y + 44.0,
-        footer_y + 76.0
+        footer_card_x = margin - 20.0,
+        footer_card_y = footer_y + 14.0,
+        footer_card_w = width - (margin - 20.0) * 2.0,
+        footer_text_y = footer_y + 50.0,
+        footer_sub_y = footer_y + 78.0
     ));
     if zero_names.is_empty() {
         svg.push_str(&format!(
             r##"<text x="{value_x}" y="{}" text-anchor="end" font-family="{font}" font-size="20" font-weight="800" fill="#1F9D6B">全员开播</text>
 "##,
-            footer_y + 44.0
+            footer_y + 50.0
         ));
     } else {
         let names = truncate_chars(&zero_names.join("、"), 40);
@@ -380,9 +443,9 @@ fn ranking_svg(rows: &[RankRow], metric: &str, team_label: &str, period: &str) -
             r##"<text x="{value_x}" y="{}" text-anchor="end" font-family="{font}" font-size="20" font-weight="800" fill="#E34B4B">未开播 {} 人</text>
 <text x="{value_x}" y="{}" text-anchor="end" font-family="{font}" font-size="16" fill="#E34B4B">{}</text>
 "##,
-            footer_y + 44.0,
+            footer_y + 50.0,
             zero_names.len(),
-            footer_y + 76.0,
+            footer_y + 78.0,
             lineage_report::esc(&names)
         ));
     }
@@ -414,35 +477,52 @@ fn watermark_svg(width: f64, height: f64, font: &str, text: &str) -> String {
     out
 }
 
-/// 前三名奖牌：彩带 + 圆形徽章 + 名次数字（不用 emoji，避免字体缺字）。
+/// 前三名奖牌：V 形彩带 + 圆形徽章 + 名次数字（不用 emoji，避免字体缺字）。
 fn medal_svg(cx: f64, cy: f64, rank: usize, font: &str) -> String {
     let dark = match rank {
-        1 => "#B97D00",
-        2 => "#7E8FA3",
-        _ => "#8C5326",
+        1 => "#C68A00",
+        2 => "#8292A6",
+        _ => "#A9662F",
     };
     format!(
         r##"<g>
-<path d="M{},{} L{},{} L{},{} Z" fill="{dark}" opacity="0.85"/>
-<path d="M{},{} L{},{} L{},{} Z" fill="{dark}" opacity="0.85"/>
-<circle cx="{cx}" cy="{cy}" r="18" fill="url(#medal-{rank})" stroke="{dark}" stroke-width="1.5"/>
-<text x="{cx}" y="{}" text-anchor="middle" font-family="{font}" font-size="20" font-weight="800" fill="#FFFFFF">{rank}</text>
+<path d="M{},{} L{},{} L{},{} L{},{} Z" fill="{dark}"/>
+<path d="M{},{} L{},{} L{},{} L{},{} Z" fill="{dark}" opacity="0.82"/>
+<circle cx="{cx}" cy="{cy}" r="20" fill="url(#medal-{rank})" stroke="{dark}" stroke-width="2"/>
+<text x="{cx}" y="{}" text-anchor="middle" font-family="{font}" font-size="21" font-weight="800" fill="#FFFFFF">{rank}</text>
 </g>
 "##,
-        cx - 15.0,
-        cy + 6.0,
-        cx - 24.0,
-        cy + 33.0,
-        cx - 7.0,
-        cy + 27.0,
-        cx + 15.0,
-        cy + 6.0,
-        cx + 24.0,
-        cy + 33.0,
-        cx + 7.0,
-        cy + 27.0,
+        cx - 17.0,
+        cy - 2.0,
+        cx - 3.0,
+        cy - 2.0,
+        cx - 12.0,
+        cy + 34.0,
+        cx - 26.0,
+        cy + 26.0,
+        cx + 17.0,
+        cy - 2.0,
+        cx + 3.0,
+        cy - 2.0,
+        cx + 12.0,
+        cy + 34.0,
+        cx + 26.0,
+        cy + 26.0,
         cy + 7.0
     )
+}
+
+/// 姓名首字头像的稳定配色：同名永远同色，纯装饰，无业务含义。
+fn avatar_color(name: &str) -> &'static str {
+    const PALETTE: [&str; 8] = [
+        "#5B8FF9", "#45BFA4", "#E3A23C", "#E8684A", "#54B8DC", "#9270CA", "#EE8F55", "#2A9D8F",
+    ];
+    let mut h: u32 = 2_166_136_261;
+    for b in name.as_bytes() {
+        h ^= u32::from(*b);
+        h = h.wrapping_mul(16_777_619);
+    }
+    PALETTE[(h % PALETTE.len() as u32) as usize]
 }
 
 fn fmt_wave(value: i64) -> String {
@@ -688,6 +768,16 @@ mod tests {
         assert!(!svg.contains("MONTHLY RANKING"));
         // 导出图水印：鹏先生（平铺多次）
         assert!(svg.matches(">鹏先生</text>").count() > 1);
+        // 前三名浅金行底 + 首字头像
+        assert!(svg.contains("#FFF7E4"));
+        assert!(svg.contains("<circle"));
+    }
+
+    #[test]
+    fn avatar_color_is_stable() {
+        assert_eq!(avatar_color("甲"), avatar_color("甲"));
+        assert_ne!(avatar_color("甲"), avatar_color("乙"));
+        assert!(avatar_color("甲").starts_with('#'));
     }
 
     #[test]
