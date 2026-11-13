@@ -112,7 +112,9 @@ async fn wb_identity(st: &ArcState, headers: &HeaderMap) -> Result<(u64, String)
     let info = crate::store::my_account_info(st, &token_name)
         .await
         .ok_or_else(|| ApiError::auth("登录已过期，请重新登录"))?;
-    if !info.bound || info.phone.trim().is_empty() {
+    /* 绑定 WorkBuddy 不再要求账号先填手机号：管理员观看账号（如 shuai4444）
+    也要能绑定；只保留“已开通展示端账号”这一层归属校验。 */
+    if !info.bound {
         return Err(ApiError::bad_request("请先完成展示端账号信息绑定"));
     }
     Ok((person_id, info.name.trim().to_string()))

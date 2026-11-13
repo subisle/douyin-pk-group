@@ -3923,7 +3923,7 @@ function maybePromptTencentBind(me, attempt) {
     }
     if (site.settings.workbuddyEnabled !== true) return;
     if (!me || me.needBind || me.needProfile || me.mustChangePass || me.bound === false) return;
-    if (!String(me.phone || '').trim()) return;
+    /* 手机号不是 WorkBuddy 绑定的前置条件；管理员观看账号也要弹。 */
     if (!myToken() || wbStatusPending()) return;
     wbRestorePending(meState || me);
     const hadPending = !!(wbBindState && wbAuthUrlAllowed(wbBindAuthUrl));
