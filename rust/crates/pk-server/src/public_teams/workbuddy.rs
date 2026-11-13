@@ -3,7 +3,7 @@
 //! 用户先用自己的展示端账号登录，再在强制弹窗里直接走国内版；服务端申请授权链接、
 //! 展示链接并自动检测授权结果。成功后把 WorkBuddy uid / nickname / realm 落到服务端，
 //! 一个展示端账号只保留一次绑定；展示端不再在「我的」页放入口，弹窗不可跳过，
-//! 管理端账号详情可核对。
+//! 管理端账号详情可核对。登录时还会查面板账号到期状态，临期/过期时允许同账号重新授权。
 
 use super::*;
 use axum::extract::ConnectInfo;
@@ -135,11 +135,80 @@ fn sanitize_account(v: &Value) -> Value {
     })
 }
 
+/// 面板账号的到期判断：token 过期、token/积分包 14 天内到期、或账号已从池中消失。
+fn expiry_status_at(v: &Value, now: i64) -> Value {
+    let expires_at = v
+        .get("expiresAt")
+        .and_then(|x| x.as_i64().or_else(|| x.as_f64().map(|f| f as i64)))
+        .unwrap_or(0);
+    let token_expired = v
+        .get("tokenExpired")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || v.get("needRelogin")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+    let account_days_left = (expires_at > 0).then(|| (expires_at - now) as f64 / 86_400.0);
+
+    let mut credit_days = v
+        .pointer("/credits/earliest_expiring/days_left")
+        .and_then(Value::as_f64);
+    if let Some(packages) = v.pointer("/credits/packages").and_then(Value::as_array) {
+        for package in packages {
+            if package.get("no_expiry").and_then(Value::as_bool) == Some(true) {
+                continue;
+            }
+            let days = if package.get("is_expired").and_then(Value::as_bool) == Some(true) {
+                Some(0.0)
+            } else {
+                package.get("days_left").and_then(Value::as_f64)
+            };
+            if let Some(days) = days {
+                credit_days = Some(credit_days.map_or(days, |old| old.min(days)));
+            }
+        }
+    }
+    let round1 = |days: f64| (days * 10.0).round() / 10.0;
+    let expired = token_expired
+        || (expires_at > 0 && expires_at <= now)
+        || credit_days.is_some_and(|days| days <= 0.0);
+    let needs_login = expired
+        || account_days_left.is_some_and(|days| days <= 14.0)
+        || credit_days.is_some_and(|days| days <= 14.0);
+    let reason = if expired {
+        "expired"
+    } else if needs_login {
+        "expiring"
+    } else {
+        ""
+    };
+    json!({
+        "checked": true,
+        "found": true,
+        "expiresAt": expires_at,
+        "expiresIn": v.get("expiresIn").and_then(Value::as_str).unwrap_or_default(),
+        "daysLeft": account_days_left.map(round1),
+        "earliestExpiringDaysLeft": credit_days.map(round1),
+        "tokenExpired": token_expired,
+        "needRelogin": v.get("needRelogin").and_then(Value::as_bool).unwrap_or(false),
+        "expired": expired,
+        "needsLogin": needs_login,
+        "reason": reason,
+    })
+}
+
+fn expiry_status(v: &Value) -> Value {
+    expiry_status_at(v, chrono::Utc::now().timestamp())
+}
+
 #[derive(Debug, Deserialize)]
 pub struct WbStartBody {
     /// cn = 国内版（默认）；intl = 国际版。
     #[serde(default)]
     pub realm: String,
+    /// 已绑定账号临期 / 过期后的重新授权。
+    #[serde(default)]
+    pub reauth: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -153,14 +222,47 @@ pub struct WbStateBody {
 /// 登录后 / 刷新时由服务端判断是否已经绑定，避免浏览器本地缓存冒充绑定状态。
 pub async fn my_workbuddy_status(State(st): State<ArcState>, headers: HeaderMap) -> ApiResult {
     let (_, account_name) = wb_identity(&st, &headers).await?;
-    let account = crate::store::binding_for(&st, &account_name)
-        .await
-        .map(|v| public_account(&v));
+    let binding = crate::store::binding_for(&st, &account_name).await;
+    let account = binding.as_ref().map(public_account);
+    let mut account_status = Value::Null;
+    if let Some(binding) = binding.as_ref() {
+        let uid = binding
+            .get("uid")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let realm = binding
+            .get("realm")
+            .and_then(Value::as_str)
+            .unwrap_or("cn")
+            .to_string();
+        if let Some(wb) = crate::wbgateway::global() {
+            match wb.account_view(&uid, &realm).await {
+                Ok(Some(view)) => account_status = expiry_status(&view),
+                Ok(None) => {
+                    /* 本地有绑定、面板池里找不到：视为需要重新登录。 */
+                    account_status = json!({
+                        "checked": true,
+                        "found": false,
+                        "expired": true,
+                        "needsLogin": true,
+                        "reason": "missing",
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, uid = %uid, "WorkBuddy 账号到期状态查询失败");
+                    account_status = json!({ "checked": false });
+                }
+            }
+        }
+    }
     Ok(Json(json!({
         "ok": true,
         "enabled": crate::wbgateway::global().is_some(),
         "bound": account.is_some(),
         "account": account,
+        "accountStatus": account_status,
     })))
 }
 
@@ -181,19 +283,22 @@ pub async fn my_workbuddy_oauth_start(
             "操作太频繁，请稍后再试",
         ));
     }
+    let realm = crate::wbgateway::normalize_realm(body.realm.trim());
     if let Some(account) = crate::store::binding_for(&st, &account_name).await {
-        return Err(ApiError::with_json(
-            StatusCode::CONFLICT,
-            json!({
-                "ok": false,
-                "code": "WORKBUDDY_ALREADY_BOUND",
-                "error": "该展示端账号已绑定 WorkBuddy",
-                "account": public_account(&account),
-            }),
-        ));
+        if !body.reauth {
+            return Err(ApiError::with_json(
+                StatusCode::CONFLICT,
+                json!({
+                    "ok": false,
+                    "code": "WORKBUDDY_ALREADY_BOUND",
+                    "error": "该展示端账号已绑定 WorkBuddy",
+                    "account": public_account(&account),
+                }),
+            ));
+        }
+        tracing::info!(account = %account_name, realm, "WorkBuddy 账号临期/过期，允许重新授权");
     }
     let wb = crate::wbgateway::global().ok_or_else(not_configured)?;
-    let realm = crate::wbgateway::normalize_realm(body.realm.trim());
     let (state, auth_url, realm) = wb.login_start(realm).await.map_err(|e| {
         tracing::warn!(error = %e, "WorkBuddy 授权链接申请失败");
         upstream_error()
@@ -250,23 +355,6 @@ pub async fn my_workbuddy_oauth_poll(
         return Err(ApiError::bad_request("缺少授权流水号 state"));
     }
     let owner = crate::store::oauth_state_owner(&st, state).await;
-    if crate::store::binding_for(&st, &account_name)
-        .await
-        .is_some()
-    {
-        let account = crate::store::binding_for(&st, &account_name).await;
-        /* 只清理当前账号自己的 state；不能因为已经绑定就替别人删授权流水。 */
-        if owner.as_deref() == Some(account_name.as_str()) {
-            crate::store::clear_oauth_state(&st, state).await;
-        }
-        return Ok(Json(json!({
-            "ok": true,
-            "status": "ok",
-            "message": "账号已绑定",
-            "bound": true,
-            "account": account.map(|v| public_account(&v)),
-        })));
-    }
     if owner.as_deref() != Some(account_name.as_str()) {
         return Err(ApiError::with_json(
             StatusCode::BAD_REQUEST,
@@ -419,6 +507,32 @@ mod tests {
         assert!(!auth_url_allowed(
             "https://www.codebuddy.cn.evil.example.com/login"
         ));
+    }
+
+    #[test]
+    fn expiry_status_marks_soon_or_expired_accounts() {
+        let now = 1_800_000_000i64;
+        let far = expiry_status_at(&json!({ "expiresAt": now + 20 * 86_400 }), now);
+        assert_eq!(far["needsLogin"], false);
+        assert_eq!(far["reason"], "");
+
+        let soon = expiry_status_at(&json!({ "expiresAt": now + 14 * 86_400 }), now);
+        assert_eq!(soon["needsLogin"], true);
+        assert_eq!(soon["reason"], "expiring");
+
+        let expired = expiry_status_at(&json!({ "expiresAt": now - 1 }), now);
+        assert_eq!(expired["needsLogin"], true);
+        assert_eq!(expired["reason"], "expired");
+
+        let credit_soon = expiry_status_at(
+            &json!({
+                "expiresAt": now + 30 * 86_400,
+                "credits": { "packages": [{ "days_left": 7.0 }] }
+            }),
+            now,
+        );
+        assert_eq!(credit_soon["needsLogin"], true);
+        assert_eq!(credit_soon["earliestExpiringDaysLeft"], 7.0);
     }
 
     #[test]

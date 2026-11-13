@@ -86,7 +86,8 @@ apps/server          pk-server (Rust) 的 pnpm 包装：`pnpm dev:api` 直接跑
   就提前申请国内版（`copilot.tencent.com`）OAuth 链接；弹窗只保留「直接跳转 WorkBuddy
   国内版」按钮，不提供国际版、关闭或「稍后」。授权页返回后页面恢复 pending 状态，每 2.5 秒
   自动轮询完成入池。一个展示端账号只绑定一次；成功后弹窗展示对应的 WorkBuddy 昵称 + uid，
-  管理端账号详情也能查。
+  管理端账号详情也能查。每次登录还会从 43 面板检查账号 token / 积分包：已过期或剩余
+  ≤14 天时，弹「重新登录 WorkBuddy」而不是普通绑定态。
   当前网关为 `http://43.142.30.113:8788/`，反代 API 为
   `http://43.142.30.113:8788/v1`。面板密码只存在服务端环境变量
   `WORKBUDDY_PANEL_PASSWORD`；未配置时返回 `WORKBUDDY_NOT_CONFIGURED`（503）。

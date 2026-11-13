@@ -133,6 +133,25 @@ impl WbGateway {
             .await;
     }
 
+    /// 取某个已入池账号的当前面板视图（用于检查 token / 积分包到期）。
+    pub async fn account_view(&self, uid: &str, realm: &str) -> Result<Option<Value>, String> {
+        let uid = uid.trim();
+        if uid.is_empty() {
+            return Ok(None);
+        }
+        let realm = normalize_realm(realm);
+        let path = format!("/accounts?realm={}", urlencode(realm));
+        let v = self.authed_get(&path).await?;
+        Ok(v.get("accounts")
+            .and_then(Value::as_array)
+            .and_then(|accounts| {
+                accounts
+                    .iter()
+                    .find(|account| account.get("uid").and_then(Value::as_str) == Some(uid))
+                    .cloned()
+            }))
+    }
+
     /* ------------------------------ 内部 ------------------------------ */
 
     /// 面板登录换 token（缓存住）

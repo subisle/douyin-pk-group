@@ -3648,7 +3648,8 @@ function wbClearError() {
   const el = $('wbBindErr');
   if (el) { el.textContent = ''; el.classList.add('hidden'); }
 }
-async function wbEnsureLink(realm) {
+async function wbEnsureLink(realm, opts) {
+  opts = opts || {};
   realm = realm === 'intl' ? 'intl' : 'cn';
   if (wbBindState && wbBindAuthUrl && wbBindRealm === realm && wbAuthUrlAllowed(wbBindAuthUrl)) {
     return { state: wbBindState, realm: wbBindRealm, authUrl: wbBindAuthUrl };
@@ -3665,7 +3666,7 @@ async function wbEnsureLink(realm) {
   wbPrefetchRealm = realm;
   const promise = (async () => {
     const d = await postJson('/api/public/my/workbuddy/oauth/start',
-      { realm: realm }, { auth: true });
+      { realm: realm, reauth: !!opts.reauth }, { auth: true });
     if (token !== wbPrefetchToken) {
       if (d && d.state) postJson('/api/public/my/workbuddy/oauth/cancel', { state: d.state }, { auth: true }).catch(() => {});
       throw new Error('授权请求已取消');
@@ -3761,16 +3762,16 @@ function wbRenderSuccess(dlg, account) {
     '<button class="btn-main" id="wbBindDoneOk">知道了</button>';
   $('wbBindDoneOk').onclick = () => wbCancelCurrent(dlg.close);
 }
-async function wbPrefetchDomestic(dlg) {
+async function wbPrefetchDomestic(dlg, reauth) {
   const hint = $('wbBindPrep');
   const jump = $('wbBindJump');
-  if (hint) hint.textContent = '正在提前获取国内版授权链接…';
-  if (jump) { jump.disabled = true; jump.textContent = '正在获取国内版链接…'; }
+  if (hint) hint.textContent = reauth ? '正在获取重新登录授权链接…' : '正在提前获取国内版授权链接…';
+  if (jump) { jump.disabled = true; jump.textContent = reauth ? '正在获取重新登录链接…' : '正在获取国内版链接…'; }
   try {
-    await wbEnsureLink('cn');
+    await wbEnsureLink('cn', { reauth: !!reauth });
     if (!wbBindModal || wbBindModal.mask !== dlg.mask) return;
-    if (jump) { jump.disabled = false; jump.textContent = '直接跳转 WorkBuddy 国内版'; }
-    if (hint) hint.textContent = '国内版授权链接已提前获取，点下方按钮直接跳转。';
+    if (jump) { jump.disabled = false; jump.textContent = reauth ? '重新登录 WorkBuddy 国内版' : '直接跳转 WorkBuddy 国内版'; }
+    if (hint) hint.textContent = reauth ? '重新登录授权链接已准备好，点下方按钮继续。' : '国内版授权链接已提前获取，点下方按钮直接跳转。';
   } catch (e) {
     if (!wbBindModal || wbBindModal.mask !== dlg.mask) return;
     if (e && e.code === 'WORKBUDDY_ALREADY_BOUND') {
@@ -3791,7 +3792,7 @@ async function wbRequestLink(realm, opts) {
   const pick = $('wbBindPick');
   if (pick) { Array.from(pick.querySelectorAll('button')).forEach(b => { b.disabled = true; }); }
   try {
-    const d = await wbEnsureLink(realm);
+    const d = await wbEnsureLink(realm, { reauth: !!opts.reauth });
     if (!wbBindModal) return;
     wbRenderLink(d, false);
     if (opts.direct) {
@@ -3837,9 +3838,27 @@ function wbRenderLink(d, resume) {
   $('wbBindCopy').onclick = (e) => wbCopyLink(e.currentTarget);
   $('wbBindRestart').onclick = () => { wbCancelCurrent(null); wbRenderPick(dlg); };
 }
+function wbRenderExpiry(dlg, status) {
+  const daysA = Number(status && status.daysLeft);
+  const daysB = Number(status && status.earliestExpiringDaysLeft);
+  const candidates = [daysA, daysB].filter((n) => Number.isFinite(n));
+  const minDays = candidates.length ? Math.min.apply(null, candidates) : null;
+  const expired = !!(status && (status.expired || status.reason === 'expired' || status.reason === 'missing'));
+  const when = expired ? '当前绑定的 WorkBuddy 账号已过期' :
+    (minDays == null ? '当前绑定的 WorkBuddy 账号即将到期' : '当前绑定的 WorkBuddy 账号仅剩 ' + minDays.toFixed(1) + ' 天到期');
+  dlg.box.innerHTML =
+    '<h3>WorkBuddy 账号需要重新登录</h3>' +
+    '<p class="tip">' + esc(when) + '。请使用同一个 WorkBuddy 账号重新登录，完成后自动更新授权。</p>' +
+    wbAccountLine(wbBoundAccount) +
+    '<div class="form-hint" id="wbBindPrep" style="margin:10px 0">正在获取重新登录授权链接…</div>' +
+    '<button class="btn-main" id="wbBindJump" disabled style="margin-bottom:10px">正在获取重新登录链接…</button>' +
+    '<div class="form-err hidden" id="wbBindErr"></div>';
+  $('wbBindJump').onclick = () => wbRequestLink('cn', { direct: true, reauth: true });
+  wbPrefetchDomestic(dlg, true);
+}
 function wbRenderPick(dlg) {
   dlg.box.innerHTML =
-    '<h3>需要绑定账号</h3>' +
+    '<h3>需要绑定腾讯账号</h3>' +
     '<p class="tip">你已登录自己的展示端账号。国内版授权链接已提前准备好，点击下方按钮直接跳转登录。每个人都需要完成一次绑定。</p>' +
     '<div class="form-hint" id="wbBindPrep" style="margin-bottom:10px">正在提前获取国内版授权链接…</div>' +
     '<button class="btn-main" id="wbBindJump" disabled style="margin-bottom:10px">正在获取国内版链接…</button>' +
@@ -3869,7 +3888,9 @@ function openWbBindModal(opts) {
   wbBindModal = dlg;
   /* 强制绑定：不允许 Esc / 点遮罩关闭；成功态由「知道了」关闭。 */
   dlg.locked(true);
-  if (wbBoundAccount && !opts.force) {
+  if (opts.expiry && !resume) {
+    wbRenderExpiry(dlg, opts.expiry);
+  } else if (wbBoundAccount && !opts.force) {
     wbRenderSuccess(dlg, wbBoundAccount);
   } else if (resume && wbBindState) {
     wbRenderLink({ realm: wbBindRealm, realmHost: wbBindRealm === 'intl' ? 'www.workbuddy.ai' : 'copilot.tencent.com',
@@ -3897,9 +3918,24 @@ function maybePromptTencentBind(me, attempt) {
     fetchWbStatus().then((d) => {
       if (!d) return;
       wbApplyBoundAccount(d.account || null);
+      const accountStatus = d.accountStatus || null;
+      const needsReauth = !!(accountStatus && accountStatus.needsLogin);
+      const blocked = () => !!($('mustPwdMask') || $('qqMask') || ($('gate') && !$('gate').classList.contains('hidden')));
+      if (d.bound && needsReauth) {
+        if (blocked()) {
+          setTimeout(() => { try { maybePromptTencentBind(meState || me, attempt + 1); } catch (_) {} }, 1200);
+          return;
+        }
+        if (hadPending) {
+          openWbBindModal({ force: true, resume: true });
+        } else {
+          openWbBindModal({ force: true, reauth: true, expiry: accountStatus });
+        }
+        return;
+      }
       if (d.bound) {
         if (!hadPending) return;
-        if ($('mustPwdMask') || $('qqMask') || $('gate') && !$('gate').classList.contains('hidden')) {
+        if (blocked()) {
           setTimeout(() => { try { maybePromptTencentBind(meState || me, attempt + 1); } catch (_) {} }, 1200);
           return;
         }
@@ -3908,7 +3944,7 @@ function maybePromptTencentBind(me, attempt) {
         return;
       }
       if (!d.enabled) return;
-      if ($('mustPwdMask') || $('qqMask') || $('gate') && !$('gate').classList.contains('hidden')) {
+      if (blocked()) {
         setTimeout(() => { try { maybePromptTencentBind(meState || me, attempt + 1); } catch (_) {} }, 1200);
         return;
       }
