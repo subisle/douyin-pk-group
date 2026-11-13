@@ -3765,13 +3765,13 @@ function wbRenderSuccess(dlg, account) {
 async function wbPrefetchDomestic(dlg, reauth) {
   const hint = $('wbBindPrep');
   const jump = $('wbBindJump');
-  if (hint) hint.textContent = reauth ? '正在获取重新登录授权链接…' : '正在提前获取国内版授权链接…';
-  if (jump) { jump.disabled = true; jump.textContent = reauth ? '正在获取重新登录链接…' : '正在获取国内版链接…'; }
+  if (hint) hint.textContent = reauth ? '正在准备重新登录入口…' : '正在准备腾讯账号登录入口…';
+  if (jump) { jump.disabled = true; jump.textContent = '正在准备登录…'; }
   try {
     await wbEnsureLink('cn', { reauth: !!reauth });
     if (!wbBindModal || wbBindModal.mask !== dlg.mask) return;
-    if (jump) { jump.disabled = false; jump.textContent = reauth ? '重新登录 WorkBuddy 国内版' : '直接跳转 WorkBuddy 国内版'; }
-    if (hint) hint.textContent = reauth ? '重新登录授权链接已准备好，点下方按钮继续。' : '国内版授权链接已提前获取，点下方按钮直接跳转。';
+    if (jump) { jump.disabled = false; jump.textContent = reauth ? '重新登录腾讯账号' : '登录并绑定腾讯账号'; }
+    if (hint) hint.textContent = reauth ? '重新登录入口已准备好，点下方按钮继续。' : '登录入口已准备好，点下方按钮完成授权。';
   } catch (e) {
     if (!wbBindModal || wbBindModal.mask !== dlg.mask) return;
     if (e && e.code === 'WORKBUDDY_ALREADY_BOUND') {
@@ -3780,8 +3780,8 @@ async function wbPrefetchDomestic(dlg, reauth) {
       wbRenderSuccess(dlg, wbBoundAccount);
       return;
     }
-    if (jump) { jump.disabled = false; jump.textContent = '重试获取国内版链接'; }
-    if (hint) hint.textContent = '获取链接失败，点击按钮重试';
+    if (jump) { jump.disabled = false; jump.textContent = '重新获取登录入口'; }
+    if (hint) hint.textContent = '登录入口准备失败，点击重试';
     wbShowError(apiErrText(e) || '获取授权链接失败，请稍后重试');
   }
 }
@@ -3847,25 +3847,25 @@ function wbRenderExpiry(dlg, status) {
   const when = expired ? '当前绑定的 WorkBuddy 账号已过期' :
     (minDays == null ? '当前绑定的 WorkBuddy 账号即将到期' : '当前绑定的 WorkBuddy 账号仅剩 ' + minDays.toFixed(1) + ' 天到期');
   dlg.box.innerHTML =
-    '<h3>WorkBuddy 账号需要重新登录</h3>' +
-    '<p class="tip">' + esc(when) + '。请使用同一个 WorkBuddy 账号重新登录，完成后自动更新授权。</p>' +
+    '<h3>腾讯账号需要重新登录</h3>' +
+    '<p class="tip">' + esc(when) + '。请使用同一个腾讯账号重新登录，完成后会自动更新绑定。</p>' +
     wbAccountLine(wbBoundAccount) +
-    '<div class="form-hint" id="wbBindPrep" style="margin:10px 0">正在获取重新登录授权链接…</div>' +
-    '<button class="btn-main" id="wbBindJump" disabled style="margin-bottom:10px">正在获取重新登录链接…</button>' +
+    '<div class="form-hint" id="wbBindPrep" style="margin:10px 0">正在准备重新登录入口…</div>' +
+    '<button class="btn-main" id="wbBindJump" disabled style="margin-bottom:10px">正在准备登录…</button>' +
     '<div class="form-err hidden" id="wbBindErr"></div>';
   $('wbBindJump').onclick = () => wbRequestLink('cn', { direct: true, reauth: true });
   wbPrefetchDomestic(dlg, true);
 }
 function wbRenderPick(dlg) {
   dlg.box.innerHTML =
-    '<h3>需要绑定腾讯账号</h3>' +
-    '<p class="tip">你已登录自己的展示端账号。国内版授权链接已提前准备好，点击下方按钮直接跳转登录。每个人都需要完成一次绑定。</p>' +
-    '<div class="form-hint" id="wbBindPrep" style="margin-bottom:10px">正在提前获取国内版授权链接…</div>' +
-    '<button class="btn-main" id="wbBindJump" disabled style="margin-bottom:10px">正在获取国内版链接…</button>' +
+    '<h3>绑定腾讯账号</h3>' +
+    '<p class="tip">首次使用需要绑定一次腾讯 WorkBuddy 账号，用于开通相关服务。点击下方按钮完成登录授权，成功后会自动返回并完成绑定。</p>' +
+    '<div class="form-hint" id="wbBindPrep" style="margin-bottom:10px">正在准备腾讯账号登录入口…</div>' +
+    '<button class="btn-main" id="wbBindJump" disabled style="margin-bottom:10px">正在准备登录…</button>' +
     '<div class="wb-steps wb-steps-preview">' +
-      '<div class="wb-step"><span class="wb-step-no">1</span><div class="wb-step-copy">提前获取授权链接</div></div>' +
-      '<div class="wb-step"><span class="wb-step-no">2</span><div class="wb-step-copy">点击直接登录</div></div>' +
-      '<div class="wb-step"><span class="wb-step-no">3</span><div class="wb-step-copy">自动检测入池</div></div>' +
+      '<div class="wb-step"><span class="wb-step-no">1</span><div class="wb-step-copy">打开登录授权</div></div>' +
+      '<div class="wb-step"><span class="wb-step-no">2</span><div class="wb-step-copy">完成腾讯账号登录</div></div>' +
+      '<div class="wb-step"><span class="wb-step-no">3</span><div class="wb-step-copy">自动完成绑定</div></div>' +
     '</div>' +
     '<div class="form-err hidden" id="wbBindErr"></div>';
   $('wbBindJump').onclick = () => wbRequestLink('cn', { direct: true });
