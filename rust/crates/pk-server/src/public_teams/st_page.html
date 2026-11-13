@@ -3151,8 +3151,6 @@ let groupRenderSeq = 0;            // 分组渲染序号：旧定焦回调不得
 /* 「我的」子页（2026-10-13）：bind/push/chase/privacy/about。/my 是列表首页，
    点列表行进子页（下一页式，带返回），路由 /my/<sub> 可直达可分享。 */
 let mySub = null;
-/* WorkBuddy 绑定请求去重，防止重复点击产生多条 OAuth state */
-let wbBinding = false;
 
 /* 视频资源目录：数据由 /resources/videos.json 延迟加载，卡片点击只跳网盘。
    JSON 里的 SVG 缩略图位于 /resources/thumbs/，源文件由
@@ -3620,19 +3618,6 @@ function wbCancelPrefetch() {
 }
 function wbApplyBoundAccount(account) {
   wbBoundAccount = account && account.uid ? account : null;
-  const rowRight = document.querySelector('#myWorkbuddyRow .r');
-  if (rowRight) {
-    if (wbBoundAccount) {
-      const realmText = wbBoundAccount.realm === 'intl' ? '国际版' : '国内版';
-      rowRight.innerHTML = '<span>' + esc(String(wbBoundAccount.nickname || wbBoundAccount.uid || '已绑定')) +
-        ' · ' + esc(String(wbBoundAccount.uid || '')) + '</span>' +
-        '<span class="material-symbols-outlined">verified</span>';
-      rowRight.title = 'WorkBuddy ' + realmText + ' · uid ' + String(wbBoundAccount.uid || '');
-    } else {
-      rowRight.innerHTML = '<span class="pri">去绑定</span><span class="material-symbols-outlined">chevron_right</span>';
-      rowRight.title = '';
-    }
-  }
 }
 function wbAccountLine(account) {
   if (!account) return '';
@@ -7557,21 +7542,6 @@ async function exportMyLineage(period, btn) {
   }
 }
 
-/* WorkBuddy 绑定：「我的」行与登录后引导共用同一个三步弹窗。 */
-async function startWbBind() {
-  if (wbBinding) return;
-  wbBinding = true;
-  try {
-    if (!wbBoundAccount) {
-      const d = await fetchWbStatus();
-      if (d) wbApplyBoundAccount(d.account || null);
-    }
-    openWbBindModal({ force: false });
-  } finally {
-    wbBinding = false;
-  }
-}
-
 function renderMy(d, series, push, accounts) {
   accounts = accounts || null;
   myLastData = d || null;
@@ -7614,17 +7584,20 @@ function renderMy(d, series, push, accounts) {
       '<div class="bars">' + bars + '</div><div class="xs">' + xs + '</div></div>';
   }
   /* Stitch 版我的页：资料卡 → 大数字卡 → Grouped List */
+  /* 管理员观看账号没有绑主播，/my 的 d.name 为空；回退到登录账号名，
+     否则 shuai4444 这类账号会显示成「—」。 */
+  const myDisplayName = d.name || (meState && meState.name) || '—';
   /* 副标题（2026-10-12）：「团名 · 师承【师傅】」。masterName 是 /my 接口字段（没有师傅 = null，
      整段只显示团名）；原「日期 · 未开播」挪到大数字卡「预估折合收益」行尾，信息不丢 */
   const head = '<div class="st-my-head">' +
     '<div class="st-my-av' + (d.avatar ? ' has-img' : '') + '">' +
       (d.avatar
         ? '<img data-av src="' + esc(d.avatar) + '" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer">'
-        : esc(String(d.name || '?').charAt(0))) +
+        : esc(String(myDisplayName).charAt(0))) +
       '<span class="badge"><span class="material-symbols-outlined">verified</span></span>' +
     '</div>' +
     '<div style="flex:1;min-width:0">' +
-      '<div style="display:flex;align-items:center;gap:.375rem"><span class="nm">' + esc(d.name || '—') + '</span>' +
+      '<div style="display:flex;align-items:center;gap:.375rem"><span class="nm">' + esc(myDisplayName) + '</span>' +
       '<span class="tag">主账号</span></div>' +
       '<div class="sub">' + esc(LABEL()) + (d.masterName ? ' · 师承【' + esc(d.masterName) + '】' : '') + '</div>' +
     '</div>' +
@@ -7710,11 +7683,6 @@ function renderMy(d, series, push, accounts) {
       '<div style="min-width:0"><div class="t">追分设置</div>' +
       '<div class="d">追人 · 定目标分，进度变化 wxbot 私聊提醒</div></div></div>' +
       '<div class="r"><span>' + esc(chaseSummary(push)) + '</span>' +
-      '<span class="material-symbols-outlined">chevron_right</span></div></div>' +
-      '<div class="st-my-item" id="myWorkbuddyRow" style="cursor:pointer"><div class="l"><div class="ico"><span class="material-symbols-outlined">hub</span></div>' +
-      '<div style="min-width:0"><div class="t">WorkBuddy 账号绑定</div>' +
-      '<div class="d">' + (wbBoundAccount ? '查看已绑定的 WorkBuddy 账号' : '选择版本后获取登录链接，一人绑定一次') + '</div></div></div>' +
-      '<div class="r"><span class="pri">去绑定</span>' +
       '<span class="material-symbols-outlined">chevron_right</span></div></div>' +
       '<div class="st-my-item" id="myEmailRow" style="cursor:pointer">' +
       '<div class="l"><div class="ico"><span class="material-symbols-outlined">mail</span></div>' +
@@ -7811,9 +7779,6 @@ function renderMy(d, series, push, accounts) {
   $('myAbout').onclick = () => { mySub = 'about'; pushRoute(); renderMySub(); };
   $('myPushRow').onclick = () => { mySub = 'wechat'; pushRoute(); renderMySub(); };
   $('myChaseRow').onclick = () => { mySub = 'chase'; pushRoute(); renderMySub(); };
-  $('myWorkbuddyRow').onclick = startWbBind;
-  wbApplyBoundAccount(wbBoundAccount);
-  fetchWbStatus().then((d) => { if (d) wbApplyBoundAccount(d.account || null); }).catch(() => {});
   renderPushBox(push);
   /* 「追分设置」独立卡（2026-10-13）：**这里绝不能再补一次 renderChaseBox**（2026-10-15 task-7）。
      renderPushBox → bindPushBox 末尾已经 renderChaseBox + bindChaseHandlers；在这里再渲染一次
