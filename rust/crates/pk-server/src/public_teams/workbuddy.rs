@@ -1,7 +1,8 @@
-//! 「我的」页 WorkBuddy 账号绑定（2026-11-01 恢复）。
+//! 「我的」页 WorkBuddy 账号绑定（2026-11-13）。
 //!
-//! 用户只看到「获取授权链接 → 在 WorkBuddy 登录 → 自动检测成功」。面板密码始终留在
-//! pk-server 环境变量里，浏览器只拿到 WorkBuddy 返回的 `authUrl` 和随机 `state`。
+//! 用户先用自己的展示端账号登录，再在弹窗里选国内版 / 国际版；服务端申请授权链接、
+//! 展示链接并自动检测授权结果。成功后把 WorkBuddy uid / nickname / realm 落到服务端，
+//! 一个展示端账号只保留一次绑定，刷新页面也能看到对应账号。
 
 use super::*;
 use axum::extract::ConnectInfo;
@@ -46,9 +47,89 @@ fn upstream_error() -> ApiError {
     )
 }
 
+fn store_error() -> ApiError {
+    ApiError::with_json(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        json!({
+            "ok": false,
+            "code": "WORKBUDDY_STORE",
+            "error": "绑定状态保存失败，请稍后重试"
+        }),
+    )
+}
+
 fn valid_state(state: &str) -> bool {
     let state = state.trim();
     !state.is_empty() && state.len() <= 128
+}
+
+fn realm_label(realm: &str) -> &'static str {
+    if realm == "intl" {
+        "国际版 (www.workbuddy.ai)"
+    } else {
+        "国内版 (copilot.tencent.com)"
+    }
+}
+
+fn realm_host(realm: &str) -> &'static str {
+    if realm == "intl" {
+        "www.workbuddy.ai"
+    } else {
+        "copilot.tencent.com"
+    }
+}
+
+fn auth_url_allowed(url: &str) -> bool {
+    let rest = match url.strip_prefix("https://") {
+        Some(rest) => rest,
+        None => return false,
+    };
+    let host = rest
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default()
+        .split(':')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    [
+        "copilot.tencent.com",
+        "codebuddy.cn",
+        "workbuddy.cn",
+        "www.workbuddy.ai",
+        "workbuddy.ai",
+        "codebuddy.ai",
+    ]
+    .iter()
+    .any(|allowed| host == *allowed || host.ends_with(&format!(".{allowed}")))
+}
+
+async fn wb_identity(st: &ArcState, headers: &HeaderMap) -> Result<(u64, String), ApiError> {
+    let (person_id, _, token_name) = my_token_required_with_restore(st, headers).await?;
+    if token_name.trim() == "admin-gate" {
+        return Err(ApiError::bad_request("请先登录自己的展示端账号"));
+    }
+    let info = crate::store::my_account_info(st, &token_name)
+        .await
+        .ok_or_else(|| ApiError::auth("登录已过期，请重新登录"))?;
+    if !info.bound || info.phone.trim().is_empty() {
+        return Err(ApiError::bad_request("请先完成展示端账号信息绑定"));
+    }
+    Ok((person_id, info.name.trim().to_string()))
+}
+
+fn public_account(v: &Value) -> Value {
+    crate::store::public_binding(v)
+}
+
+fn sanitize_account(v: &Value) -> Value {
+    json!({
+        "uid": v.get("uid").and_then(Value::as_str).unwrap_or_default(),
+        "nickname": v.get("nickname").and_then(Value::as_str).unwrap_or_default(),
+        "realm": v.get("realm").and_then(Value::as_str).unwrap_or_default(),
+        "domain": v.get("domain").and_then(Value::as_str).unwrap_or_default(),
+        "platform": v.get("platform").and_then(Value::as_str).unwrap_or_default(),
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -64,16 +145,32 @@ pub struct WbStateBody {
     pub state: String,
 }
 
+/// GET /api/public/my/workbuddy/status
+///
+/// 登录后 / 刷新时由服务端判断是否已经绑定，避免浏览器本地缓存冒充绑定状态。
+pub async fn my_workbuddy_status(State(st): State<ArcState>, headers: HeaderMap) -> ApiResult {
+    let (_, account_name) = wb_identity(&st, &headers).await?;
+    let account = crate::store::binding_for(&st, &account_name)
+        .await
+        .map(|v| public_account(&v));
+    Ok(Json(json!({
+        "ok": true,
+        "enabled": crate::wbgateway::global().is_some(),
+        "bound": account.is_some(),
+        "account": account,
+    })))
+}
+
 /// POST /api/public/my/workbuddy/oauth/start
 ///
-/// 必须已登录展示端；返回 `{ok,state,authUrl,realm}`。
+/// 必须已登录展示端；返回网关下发的 `{ok,state,authUrl,realm}`。
 pub async fn my_workbuddy_oauth_start(
     State(st): State<ArcState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(body): Json<WbStartBody>,
 ) -> ApiResult {
-    let _ = my_token_required_with_restore(&st, &headers).await?;
+    let (person_id, account_name) = wb_identity(&st, &headers).await?;
     let ip = super::admin::client_ip_for_limit(addr, &headers);
     if !start_allow(&ip) {
         return Err(ApiError::with_status(
@@ -81,32 +178,63 @@ pub async fn my_workbuddy_oauth_start(
             "操作太频繁，请稍后再试",
         ));
     }
+    if let Some(account) = crate::store::binding_for(&st, &account_name).await {
+        return Err(ApiError::with_json(
+            StatusCode::CONFLICT,
+            json!({
+                "ok": false,
+                "code": "WORKBUDDY_ALREADY_BOUND",
+                "error": "该展示端账号已绑定 WorkBuddy",
+                "account": public_account(&account),
+            }),
+        ));
+    }
     let wb = crate::wbgateway::global().ok_or_else(not_configured)?;
-    let realm = body.realm.trim();
+    let realm = crate::wbgateway::normalize_realm(body.realm.trim());
     let (state, auth_url, realm) = wb.login_start(realm).await.map_err(|e| {
         tracing::warn!(error = %e, "WorkBuddy 授权链接申请失败");
         upstream_error()
     })?;
+    if !auth_url_allowed(&auth_url) {
+        tracing::warn!(auth_url = %auth_url, "WorkBuddy 返回了不在白名单内的授权链接");
+        wb.login_cancel(&state).await;
+        return Err(ApiError::with_json(
+            StatusCode::BAD_GATEWAY,
+            json!({
+                "ok": false,
+                "code": "WORKBUDDY_INVALID_AUTH_URL",
+                "error": "WorkBuddy 返回的授权链接格式不正确"
+            }),
+        ));
+    }
+    crate::store::save_oauth_state(&st, &state, &account_name, person_id, &realm)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "WorkBuddy 授权流水落库失败");
+            store_error()
+        })?;
     let api_base = wb.public_api_base();
     Ok(Json(json!({
         "ok": true,
         "state": state,
         "authUrl": auth_url,
         "realm": realm,
+        "realmLabel": realm_label(&realm),
+        "realmHost": realm_host(&realm),
         "apiBase": api_base,
     })))
 }
 
 /// POST /api/public/my/workbuddy/oauth/poll
 ///
-/// 必须已登录展示端；原样转发网关状态，`status=ok` 即账号已加入反代池。
+/// 必须已登录展示端且 state 属于当前账号；`status=ok` 时持久化绑定并返回账号。
 pub async fn my_workbuddy_oauth_poll(
     State(st): State<ArcState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(body): Json<WbStateBody>,
 ) -> ApiResult {
-    let _ = my_token_required_with_restore(&st, &headers).await?;
+    let (person_id, account_name) = wb_identity(&st, &headers).await?;
     let ip = super::admin::client_ip_for_limit(addr, &headers);
     if !poll_allow(&ip) {
         return Err(ApiError::with_status(
@@ -118,6 +246,34 @@ pub async fn my_workbuddy_oauth_poll(
     if !valid_state(state) {
         return Err(ApiError::bad_request("缺少授权流水号 state"));
     }
+    let owner = crate::store::oauth_state_owner(&st, state).await;
+    if crate::store::binding_for(&st, &account_name)
+        .await
+        .is_some()
+    {
+        let account = crate::store::binding_for(&st, &account_name).await;
+        /* 只清理当前账号自己的 state；不能因为已经绑定就替别人删授权流水。 */
+        if owner.as_deref() == Some(account_name.as_str()) {
+            crate::store::clear_oauth_state(&st, state).await;
+        }
+        return Ok(Json(json!({
+            "ok": true,
+            "status": "ok",
+            "message": "账号已绑定",
+            "bound": true,
+            "account": account.map(|v| public_account(&v)),
+        })));
+    }
+    if owner.as_deref() != Some(account_name.as_str()) {
+        return Err(ApiError::with_json(
+            StatusCode::BAD_REQUEST,
+            json!({
+                "ok": false,
+                "code": "WORKBUDDY_STATE_MISMATCH",
+                "error": "授权链接已失效，请重新获取"
+            }),
+        ));
+    }
     let wb = crate::wbgateway::global().ok_or_else(not_configured)?;
     let v = wb.login_poll(state).await.map_err(|e| {
         tracing::warn!(error = %e, "WorkBuddy 授权状态查询失败");
@@ -125,16 +281,49 @@ pub async fn my_workbuddy_oauth_poll(
     })?;
     let status = v.get("status").and_then(Value::as_str).unwrap_or("unknown");
     let message = v.get("message").and_then(Value::as_str).unwrap_or_default();
-    let nickname = v
-        .pointer("/account/nickname")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty());
+    if status != "ok" {
+        return Ok(Json(json!({
+            "ok": true,
+            "status": status,
+            "message": message,
+            "bound": false,
+            "account": null,
+        })));
+    }
+    let upstream = v.get("account").cloned().ok_or_else(|| {
+        ApiError::with_json(
+            StatusCode::BAD_GATEWAY,
+            json!({
+                "ok": false,
+                "code": "WORKBUDDY_ACCOUNT_MISSING",
+                "error": "WorkBuddy 没有返回账号信息，请联系管理员"
+            }),
+        )
+    })?;
+    let account = sanitize_account(&upstream);
+    let committed = crate::store::commit_binding(&st, &account_name, person_id, &account)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "WorkBuddy 绑定落库失败");
+            store_error()
+        })?;
+    if committed.is_none() {
+        return Err(ApiError::with_json(
+            StatusCode::CONFLICT,
+            json!({
+                "ok": false,
+                "code": "WORKBUDDY_UID_TAKEN",
+                "error": "这个 WorkBuddy 账号已绑定给其他人，请换一个账号登录"
+            }),
+        ));
+    }
+    crate::store::clear_oauth_state(&st, state).await;
     Ok(Json(json!({
         "ok": true,
-        "status": status,
-        "message": message,
-        "nickname": nickname,
-        "bound": status == "ok",
+        "status": "ok",
+        "message": "绑定成功",
+        "bound": true,
+        "account": committed.map(|v| public_account(&v)),
     })))
 }
 
@@ -147,7 +336,7 @@ pub async fn my_workbuddy_oauth_cancel(
     headers: HeaderMap,
     Json(body): Json<WbStateBody>,
 ) -> ApiResult {
-    let _ = my_token_required_with_restore(&st, &headers).await?;
+    let (_, account_name) = wb_identity(&st, &headers).await?;
     let ip = super::admin::client_ip_for_limit(addr, &headers);
     if !poll_allow(&ip) {
         return Err(ApiError::with_status(
@@ -159,10 +348,39 @@ pub async fn my_workbuddy_oauth_cancel(
     if !valid_state(state) {
         return Err(ApiError::bad_request("缺少授权流水号 state"));
     }
+    let owner = crate::store::oauth_state_owner(&st, state).await;
+    if owner.as_deref() != Some(account_name.as_str()) {
+        return Ok(Json(json!({ "ok": true })));
+    }
     if let Some(wb) = crate::wbgateway::global() {
         wb.login_cancel(state).await;
     }
+    crate::store::clear_oauth_state(&st, state).await;
     Ok(Json(json!({ "ok": true })))
+}
+
+/// GET /api/admin/my/workbuddy-bindings
+///
+/// 管理端只读绑定列表，用于核对每个展示端账号对应的 WorkBuddy 账号。
+pub async fn admin_workbuddy_bindings(State(st): State<ArcState>) -> ApiResult {
+    let mut items: Vec<Value> = crate::store::all_bindings(&st)
+        .await
+        .into_iter()
+        .map(|(name, account)| {
+            json!({
+                "name": name,
+                "bound": true,
+                "account": public_account(&account),
+            })
+        })
+        .collect();
+    items.sort_by(|a, b| {
+        a.get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .cmp(b.get("name").and_then(Value::as_str).unwrap_or_default())
+    });
+    Ok(Json(json!({ "ok": true, "items": items })))
 }
 
 #[cfg(test)]
@@ -176,5 +394,45 @@ mod tests {
         assert!(!valid_state(""));
         assert!(!valid_state("   "));
         assert!(!valid_state("a".repeat(129).as_str()));
+    }
+
+    #[test]
+    fn realm_copy_matches_user_flow() {
+        assert_eq!(realm_label("cn"), "国内版 (copilot.tencent.com)");
+        assert_eq!(realm_label("intl"), "国际版 (www.workbuddy.ai)");
+        assert_eq!(realm_host("cn"), "copilot.tencent.com");
+        assert_eq!(realm_host("intl"), "www.workbuddy.ai");
+    }
+
+    #[test]
+    fn auth_url_whitelist_blocks_arbitrary_urls() {
+        assert!(auth_url_allowed(
+            "https://www.codebuddy.cn/login?platform=CLI&state=abc"
+        ));
+        assert!(auth_url_allowed("https://www.workbuddy.ai/login?state=abc"));
+        assert!(auth_url_allowed("https://copilot.tencent.com/login"));
+        assert!(!auth_url_allowed("http://www.codebuddy.cn/login?state=abc"));
+        assert!(!auth_url_allowed("https://evil.example.com/login"));
+        assert!(!auth_url_allowed(
+            "https://www.codebuddy.cn.evil.example.com/login"
+        ));
+    }
+
+    #[test]
+    fn poll_account_is_a_public_subset() {
+        let account = sanitize_account(&json!({
+            "uid": "u-1",
+            "nickname": "小鹏",
+            "realm": "cn",
+            "domain": "copilot.tencent.com",
+            "platform": "CLI",
+            "accessToken": "secret",
+            "credentialMask": "mask",
+        }));
+        assert_eq!(account["uid"], "u-1");
+        assert_eq!(account["nickname"], "小鹏");
+        assert_eq!(account["realm"], "cn");
+        assert!(account.get("accessToken").is_none());
+        assert!(account.get("credentialMask").is_none());
     }
 }

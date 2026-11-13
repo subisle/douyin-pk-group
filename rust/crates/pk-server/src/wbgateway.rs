@@ -1,6 +1,6 @@
 //! WorkBuddy 网关（wb-proxy 用量看板）客户端。
 //!
-//! 用途：展示端「注册」时，顺手把注册人本人的 WorkBuddy 账号加进网关账号池 ——
+//! 用途：展示端用户登录后，把自己的 WorkBuddy 账号绑定进网关账号池 ——
 //! 面板 `?tab=gateway` 上那个「+ 添加账号 (OAuth)」按钮走的就是这套接口，
 //! 用户在授权页用**手机号 + 短信验证码**登录，登录完成后账号自动入池。
 //!
@@ -12,10 +12,10 @@
 //!   status: pending（等授权）| ok（已入池）| error | expired | unknown
 //!
 //! 配置（.env）：
-//!   WORKBUDDY_PANEL_URL       面板地址，默认 <http://64.188.8.149:8788>
+//!   WORKBUDDY_PANEL_URL       面板地址，默认 <http://43.142.30.113:8788>
 //!                             （2026-10-13 安全修复：默认值仅为向后兼容，
 //!                              生产必须配成 HTTPS —— 面板密码要过这条链路）
-//!   WORKBUDDY_PANEL_PASSWORD  面板密码；**没配 = 注册页不显示 OAuth 步骤**，其余注册照常
+//!   WORKBUDDY_PANEL_PASSWORD  面板密码；**没配 = 绑定入口提示未开放**
 //!
 //! 安全：面板密码只留在服务端（环境变量 + 内存里的 token），`/panel/*` 一律不转发给浏览器；
 //! 展示端只拿到 state 与 authUrl（authUrl 本来就是给用户浏览器打开的授权页）。
@@ -25,13 +25,13 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-/// 默认面板地址（用户 2026-10-11 给的口径）。
+/// 默认面板地址（用户 2026-11-13 给的口径：WorkBuddy 登录已迁到 43）。
 ///
 /// 2026-10-13 安全修复：面板密码经这条链路明文 POST（/panel/login），硬编码公网
 /// IP + http 意味着密码全程明文过公网。保留默认值只为向后兼容（没配环境变量的
 /// 旧部署不炸），**生产必须通过 WORKBUDDY_PANEL_URL 配成 HTTPS 地址**；
 /// 该地址也可按 config.rs::env 的口径用环境变量覆盖（空串视为未配置）。
-pub const DEFAULT_PANEL_URL: &str = "http://64.188.8.149:8788";
+pub const DEFAULT_PANEL_URL: &str = "http://43.142.30.113:8788";
 
 /// 读环境变量口径（与 config.rs 的 env()/env_or() 一致：未配置或空串都算没配）。
 /// 2026-10-13 安全修复：面板地址从硬编码改为可被环境覆盖，配合生产切 HTTPS。
@@ -43,7 +43,7 @@ fn panel_url_or_default() -> String {
         .unwrap_or_else(|| DEFAULT_PANEL_URL.to_string())
 }
 
-const UA: &str = "pk-server/1.0 (+workbuddy-register)";
+const UA: &str = "pk-server/1.0 (+workbuddy-binding)";
 
 pub struct WbGateway {
     base: String,

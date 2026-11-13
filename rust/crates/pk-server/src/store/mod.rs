@@ -35,6 +35,7 @@ mod legacy;
 mod live;
 pub mod my_account;
 mod push_jobs;
+mod workbuddy;
 mod wx_sessions;
 /// 微信 iLink 图片发送（getuploadurl → CDN 上传 → image_item），供每日报告图片推送
 pub mod wxmedia;
@@ -47,6 +48,7 @@ pub use legacy::*;
 pub use live::*;
 pub use my_account::*;
 pub use push_jobs::*;
+pub use workbuddy::*;
 pub use wx_sessions::*;
 pub use wxpush::*;
 

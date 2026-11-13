@@ -23,9 +23,31 @@ fn account_store_err(e: String) -> ApiError {
 
 /// GET /api/admin/my-accounts：账号列表
 pub async fn admin_my_accounts(State(st): State<ArcState>) -> ApiResult {
-    Ok(Json(
-        json!({ "items": crate::store::my_account_list(&st).await }),
-    ))
+    let mut items = crate::store::my_account_list(&st).await;
+    let bindings = crate::store::all_bindings(&st).await;
+    for item in &mut items {
+        let name = item
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let account = bindings.get(&name);
+        item["workbuddyBound"] = json!(account.is_some());
+        item["workbuddyNickname"] = json!(account
+            .and_then(|v| v.get("nickname"))
+            .and_then(Value::as_str)
+            .unwrap_or_default());
+        item["workbuddyUid"] = json!(account
+            .and_then(|v| v.get("uid"))
+            .and_then(Value::as_str)
+            .unwrap_or_default());
+        item["workbuddyRealm"] = json!(account
+            .and_then(|v| v.get("realm"))
+            .and_then(Value::as_str)
+            .unwrap_or_default());
+    }
+    Ok(Json(json!({ "items": items })))
 }
 
 /// POST /api/admin/my-accounts {name, phone, pass?}：手动设置账号（存在则覆盖更新；手机号选填）。
@@ -118,6 +140,23 @@ pub async fn admin_my_account_get(
     v["emailMask"] = json!(auth.email_mask);
     v["qqBound"] = json!(auth.qq_bound);
     v["mustChangePass"] = json!(auth.must_change_pass);
+    let binding = crate::store::binding_for(&st, name.trim()).await;
+    v["workbuddyBound"] = json!(binding.is_some());
+    v["workbuddyNickname"] = json!(binding
+        .as_ref()
+        .and_then(|v| v.get("nickname"))
+        .and_then(Value::as_str)
+        .unwrap_or_default());
+    v["workbuddyUid"] = json!(binding
+        .as_ref()
+        .and_then(|v| v.get("uid"))
+        .and_then(Value::as_str)
+        .unwrap_or_default());
+    v["workbuddyRealm"] = json!(binding
+        .as_ref()
+        .and_then(|v| v.get("realm"))
+        .and_then(Value::as_str)
+        .unwrap_or_default());
     Ok(Json(v))
 }
 

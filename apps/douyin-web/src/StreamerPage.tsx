@@ -255,6 +255,11 @@ export default function StreamerPage() {
     qqBound: boolean
     mustChangePass: boolean
     qqStatusKnown: boolean
+    /** 2026-11-13 WorkBuddy 绑定状态；旧后端不下发时显示「未绑定」。 */
+    workbuddyBound: boolean
+    workbuddyNickname: string
+    workbuddyUid: string
+    workbuddyRealm: string
   } | null>(null)
   /** 批量开号弹窗：给勾选的主播批量建展示端登录账号（result 非空 = 展示结果表） */
   const [batchAcc, setBatchAcc] = useState<{ defaultPass: string; forceReset: boolean; result: any | null } | null>(null)
@@ -379,6 +384,10 @@ export default function StreamerPage() {
         qqBound: d.found ? d.qqBound === true : false,
         mustChangePass: d.found ? d.mustChangePass === true : false,
         qqStatusKnown: d.found && qqStatusKnown,
+        workbuddyBound: !!d.workbuddyBound,
+        workbuddyNickname: String(d.workbuddyNickname ?? ''),
+        workbuddyUid: String(d.workbuddyUid ?? ''),
+        workbuddyRealm: String(d.workbuddyRealm ?? ''),
       })
     } catch (e: any) {
       setError(e.message ?? String(e))
@@ -1295,6 +1304,19 @@ export default function StreamerPage() {
                 <div style={{ marginTop: 4 }}>
                   绑定 / 解绑 QQ 由主播在展示端「我的」页自助完成；管理员在此改密会同时清掉「待改密」标记。
                 </div>
+              </div>
+            )}
+            {myAccPop.exists && (
+              <div className="hint" style={{ marginTop: 8 }}>
+                WorkBuddy 账号：
+                {myAccPop.workbuddyBound ? (
+                  <span title="展示端账号绑定的 WorkBuddy uid">
+                    {myAccPop.workbuddyNickname || '已绑定'} · {myAccPop.workbuddyUid || 'uid 未返回'} ·
+                    {myAccPop.workbuddyRealm === 'intl' ? '国际版' : '国内版'}
+                  </span>
+                ) : (
+                  <span>未绑定</span>
+                )}
               </div>
             )}
             <label className="hint" style={{ display: 'block', marginTop: 8 }}>

@@ -536,6 +536,10 @@ async fn main() -> anyhow::Result<()> {
         /* WorkBuddy 反代账号绑定（已登录用户）：服务端拿面板口令换取授权链接，
          * 浏览器只接触 authUrl/state，完成 OAuth 后账号自动进入反代池。 */
         .route(
+            "/api/public/my/workbuddy/status",
+            get(public_teams::my_workbuddy_status),
+        )
+        .route(
             "/api/public/my/workbuddy/oauth/start",
             post(public_teams::my_workbuddy_oauth_start),
         )
@@ -778,6 +782,10 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/admin/my-accounts",
             get(public_teams::admin_my_accounts).post(public_teams::admin_my_account_set),
+        )
+        .route(
+            "/api/admin/my/workbuddy-bindings",
+            get(public_teams::admin_workbuddy_bindings),
         )
         .route(
             "/api/admin/my-accounts/{name}",

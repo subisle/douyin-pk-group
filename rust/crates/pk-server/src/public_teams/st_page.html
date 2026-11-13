@@ -2408,6 +2408,33 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .gate-box .dlg-ok-txt { font-size:13px; color:#64748B; line-height:1.8; text-align:center; }
 .gate-box .dlg-ok-txt .ok-line { text-align:left; margin:6px 0 0; }
 .gate-box .dlg-readonly { background:#F8FAFC; color:#64748B; }
+/* WorkBuddy 绑定三步弹窗：两列版本卡片 + 授权链接 + 自动检测进度 */
+.wb-realm-pick { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin:14px 0 16px; }
+.wb-realm-card { min-height:76px; padding:12px 8px; border:1px solid #BFD3F7; border-radius:14px;
+  background:linear-gradient(145deg,#F8FBFF,#EEF4FF); color:#0B1C30; cursor:pointer;
+  display:flex; flex-direction:column; align-items:center; justify-content:center; gap:5px;
+  font-family:inherit; transition:transform .15s ease, box-shadow .15s ease, border-color .15s ease; }
+.wb-realm-card b { font-size:15px; font-weight:700; }
+.wb-realm-card span { font-size:11px; color:#64748B; word-break:break-all; }
+.wb-realm-card:hover { transform:translateY(-1px); border-color:#0066FF; box-shadow:0 8px 20px rgba(0,102,255,.14); }
+.wb-realm-card:disabled { opacity:.6; cursor:default; transform:none; box-shadow:none; }
+.wb-steps { display:grid; gap:8px; margin:0 0 14px; text-align:left; }
+.wb-step { display:flex; align-items:center; gap:10px; padding:9px 10px; border-radius:12px;
+  background:#F8FAFC; border:1px solid #E2E8F0; font-size:12.5px; color:#64748B; line-height:1.55; }
+.wb-step-no { flex:none; width:22px; height:22px; border-radius:9999px; display:grid; place-items:center;
+  background:#E2E8F0; color:#64748B; font-size:11px; font-weight:700; }
+.wb-step-active { background:#EFF6FF; border-color:#BFD3F7; color:#1E3A8A; }
+.wb-step-active .wb-step-no { background:#0066FF; color:#fff; }
+.wb-step-done { background:#F0FDFA; border-color:#99F6E4; color:#0F766E; }
+.wb-step-done .wb-step-no { background:#08A484; color:#fff; }
+.wb-steps-preview { opacity:.72; }
+.wb-link { width:100%; max-height:92px; overflow:auto; padding:10px 11px; border-radius:12px;
+  background:#F8FAFC; border:1px solid #E2E8F0; color:#334155; font-size:11.5px; line-height:1.6;
+  text-align:left; word-break:break-all; user-select:all; }
+.wb-account-line { display:grid; gap:6px; margin:14px 0; padding:12px; border-radius:14px;
+  background:#F0FDFA; border:1px solid #99F6E4; color:#0F766E; font-size:12.5px; text-align:left; }
+.wb-account-line b { font-size:15px; color:#0B1C30; }
+.wb-account-line span { word-break:break-all; }
 @media (max-width:375px) {
   .gate-box.dlg-box { max-width:100%; }
   .gate-box .qq-wrap input { padding-right:72px; }
@@ -3515,74 +3542,284 @@ function queueMyRankFocus(me) {
   dashboardRevealNotBefore = performance.now() + 900;
 }
 
-/* ===== WorkBuddy / CodeBuddy 账号绑定提示（2026-11-04）
-   登录后弹一次：点「去绑定」自动申请 OAuth 链接并当前页跳转。
+/* ===== WorkBuddy 账号绑定（2026-11-13）
+   用户先完成展示端登录，再选国内版 / 国际版拿授权链接；链接不由前端拼接，
+   由服务端向网关申请。一人只绑定一次，绑定结果以服务端 config 状态为准。
    ===== */
-function tbBindKey(me) {
-  return 'tbBindDone:' + String((me && (me.phone || me.name)) || '');
+let wbBoundAccount = null;
+let wbBindModal = null;
+let wbBindPollTimer = null;
+let wbBindState = '';
+let wbBindRealm = '';
+let wbBindAuthUrl = '';
+let wbBindStartedAt = 0;
+
+function wbStatusHint() {
+  try { sessionStorage.setItem('wbStatusPending', '1'); } catch (_) {}
 }
-function tbBindSnoozeKey(me) {
-  return 'tbBindSnooze:' + String((me && (me.phone || me.name)) || '');
+function wbStatusDone() {
+  try { sessionStorage.removeItem('wbStatusPending'); } catch (_) {}
 }
-function tbBindSnoozedToday(me) {
+function wbStatusPending() {
+  try { return sessionStorage.getItem('wbStatusPending') === '1'; } catch (_) { return false; }
+}
+function wbBindSnoozeKey(me) {
+  return 'wbBindSnooze:' + String((me && (me.phone || me.name)) || '');
+}
+function wbBindSnoozedToday(me) {
   try {
-    const v = localStorage.getItem(tbBindSnoozeKey(me));
-    if (!v) return false;
-    return new Date(Number(v)).toDateString() === new Date().toDateString();
+    const v = localStorage.getItem(wbBindSnoozeKey(me));
+    return !!v && new Date(Number(v)).toDateString() === new Date().toDateString();
   } catch (_) { return false; }
+}
+function wbBindSnooze(me) {
+  try { localStorage.setItem(wbBindSnoozeKey(me), String(Date.now())); } catch (_) {}
+}
+function wbApplyBoundAccount(account) {
+  wbBoundAccount = account && account.uid ? account : null;
+  const rowRight = document.querySelector('#myWorkbuddyRow .r');
+  if (rowRight) {
+    if (wbBoundAccount) {
+      const realmText = wbBoundAccount.realm === 'intl' ? '国际版' : '国内版';
+      rowRight.innerHTML = '<span>' + esc(String(wbBoundAccount.nickname || wbBoundAccount.uid || '已绑定')) +
+        ' · ' + esc(String(wbBoundAccount.uid || '')) + '</span>' +
+        '<span class="material-symbols-outlined">verified</span>';
+      rowRight.title = 'WorkBuddy ' + realmText + ' · uid ' + String(wbBoundAccount.uid || '');
+    } else {
+      rowRight.innerHTML = '<span class="pri">去绑定</span><span class="material-symbols-outlined">chevron_right</span>';
+      rowRight.title = '';
+    }
+  }
+}
+function wbAccountLine(account) {
+  if (!account) return '';
+  const realmText = account.realm === 'intl' ? '国际版 (www.workbuddy.ai)' : '国内版 (copilot.tencent.com)';
+  return '<div class="wb-account-line"><b>' + esc(account.nickname || account.uid || 'WorkBuddy 账号') + '</b>' +
+    '<span>uid：' + esc(account.uid || '') + '</span><span>' + esc(realmText) + '</span></div>';
+}
+function wbAuthUrlAllowed(url) {
+  try {
+    const u = new URL(String(url || ''));
+    if (u.protocol !== 'https:') return false;
+    const host = u.hostname.toLowerCase();
+    return ['copilot.tencent.com', 'codebuddy.cn', 'workbuddy.cn', 'www.workbuddy.ai', 'workbuddy.ai', 'codebuddy.ai']
+      .some((allowed) => host === allowed || host.endsWith('.' + allowed));
+  } catch (_) { return false; }
+}
+function wbStopPoll() {
+  if (wbBindPollTimer) { clearTimeout(wbBindPollTimer); wbBindPollTimer = null; }
+}
+function wbCancelCurrent(close) {
+  const state = wbBindState;
+  if (close) close();
+  wbStopPoll();
+  wbBindState = '';
+  wbBindAuthUrl = '';
+  wbBindStartedAt = 0;
+  if (state) {
+    postJson('/api/public/my/workbuddy/oauth/cancel', { state: state }, { auth: true }).catch(() => {});
+  }
+}
+function wbShowError(msg) {
+  const el = $('wbBindErr');
+  if (!el) return;
+  el.textContent = msg || '操作失败，请稍后重试';
+  el.classList.remove('hidden');
+}
+function wbClearError() {
+  const el = $('wbBindErr');
+  if (el) { el.textContent = ''; el.classList.add('hidden'); }
+}
+function wbOpenLink() {
+  if (!wbAuthUrlAllowed(wbBindAuthUrl)) { wbShowError('授权链接格式不正确，请重新获取'); return; }
+  window.open(wbBindAuthUrl, '_blank', 'noopener,noreferrer');
+}
+async function wbCopyLink(btn) {
+  if (!wbAuthUrlAllowed(wbBindAuthUrl)) { wbShowError('授权链接格式不正确，请重新获取'); return; }
+  try {
+    await navigator.clipboard.writeText(wbBindAuthUrl);
+    if (btn) { btn.textContent = '已复制'; setTimeout(() => { if (btn.isConnected) btn.textContent = '复制登录链接'; }, 1600); }
+    toast('登录链接已复制');
+  } catch (_) {
+    const input = document.createElement('textarea');
+    input.value = wbBindAuthUrl;
+    input.style.cssText = 'position:fixed;left:-9999px;top:0';
+    document.body.appendChild(input);
+    input.select();
+    try { document.execCommand('copy'); toast('登录链接已复制'); }
+    catch (_) { wbShowError('复制失败，请长按链接手动复制'); }
+    input.remove();
+  }
+}
+function wbStartPolling(dlg) {
+  const tick = async () => {
+    if (!wbBindState || !wbBindModal || wbBindModal.mask !== dlg.mask) return;
+    if (wbBindStartedAt && Date.now() - wbBindStartedAt > 10 * 60 * 1000) {
+      wbStopPoll();
+      wbShowError('授权等待已超时，请重新获取链接');
+      return;
+    }
+    try {
+      const d = await postJson('/api/public/my/workbuddy/oauth/poll',
+        { state: wbBindState }, { auth: true });
+      if (!wbBindModal || wbBindModal.mask !== dlg.mask) return;
+      if (d.status === 'ok' || d.bound === true) {
+        wbApplyBoundAccount(d.account || null);
+        wbStopPoll();
+        wbBindState = '';
+        wbRenderSuccess(dlg, d.account || wbBoundAccount);
+        return;
+      }
+      if (d.status === 'error' || d.status === 'expired' || d.status === 'unknown') {
+        wbStopPoll();
+        wbShowError(d.message || '授权状态异常，请重新获取链接');
+        return;
+      }
+      const step = $('wbBindStep3');
+      if (step) step.classList.add('wb-step-active');
+      wbBindPollTimer = setTimeout(tick, 2500);
+    } catch (e) {
+      if (e && e.code === 'UNAUTHORIZED') { wbStopPoll(); dlg.close(); sessionExpired(); return; }
+      wbStopPoll();
+      wbShowError(apiErrText(e) || '自动检测失败，请稍后重试');
+    }
+  };
+  wbStopPoll();
+  wbBindPollTimer = setTimeout(tick, 1200);
+}
+function wbRenderSuccess(dlg, account) {
+  dlg.box.innerHTML = '<div class="dlg-ok" style="background:linear-gradient(135deg,#08A484,#12CEAA)">' +
+      '<span class="material-symbols-outlined">check</span></div>' +
+    '<h3>绑定成功</h3>' +
+    '<div class="dlg-ok-txt">已完成入池，下面就是这个展示端账号对应的 WorkBuddy 账号：</div>' +
+    wbAccountLine(account) +
+    '<div class="form-hint" style="text-align:center;margin-top:12px">一人一次，后续无需重复绑定。</div>' +
+    '<button class="btn-main" id="wbBindDoneOk">知道了</button>';
+  $('wbBindDoneOk').onclick = () => wbCancelCurrent(dlg.close);
+}
+async function wbRequestLink(realm) {
+  wbClearError();
+  wbBindRealm = realm;
+  const label = realm === 'intl' ? 'www.workbuddy.ai (国际版)' : 'copilot.tencent.com (国内版)';
+  const step1 = $('wbBindStep1');
+  if (step1) { step1.classList.add('wb-step-active'); step1.querySelector('.wb-step-copy').textContent = '正在向 ' + label + ' 申请授权…'; }
+  const pick = $('wbBindPick');
+  if (pick) { Array.from(pick.querySelectorAll('button')).forEach(b => { b.disabled = true; }); }
+  try {
+    const d = await postJson('/api/public/my/workbuddy/oauth/start',
+      { realm: realm }, { auth: true });
+    if (!wbAuthUrlAllowed(d.authUrl)) throw new Error('WorkBuddy 返回的授权链接格式不正确');
+    wbBindState = String(d.state || '');
+    wbBindAuthUrl = String(d.authUrl || '');
+    wbBindStartedAt = Date.now();
+    if (!wbBindState) throw new Error('WorkBuddy 没有返回授权流水号');
+    wbRenderLink(d);
+    if (wbBindModal) wbStartPolling(wbBindModal);
+  } catch (e) {
+    if (e && e.code === 'UNAUTHORIZED') { if (wbBindModal) wbBindModal.close(); sessionExpired(); return; }
+    if (e && e.code === 'WORKBUDDY_ALREADY_BOUND') {
+      wbApplyBoundAccount(e.data && e.data.account);
+      if (wbBindModal) wbRenderSuccess(wbBindModal, wbBoundAccount);
+      return;
+    }
+    if (pick) { Array.from(pick.querySelectorAll('button')).forEach(b => { b.disabled = false; }); }
+    wbShowError(apiErrText(e) || '获取授权链接失败，请稍后再试');
+  }
+}
+function wbRenderLink(d) {
+  const dlg = wbBindModal;
+  if (!dlg) return;
+  const host = d.realmHost || (d.realm === 'intl' ? 'www.workbuddy.ai' : 'copilot.tencent.com');
+  const label = d.realmLabel || (d.realm === 'intl' ? '国际版 (www.workbuddy.ai)' : '国内版 (copilot.tencent.com)');
+  dlg.box.innerHTML =
+    '<button class="dialog-close" id="wbBindX" aria-label="关闭"><span class="material-symbols-outlined">close</span></button>' +
+    '<h3>绑定 WorkBuddy 账号</h3>' +
+    '<p class="tip" style="margin-bottom:14px">当前选择：' + esc(label) + '。请用你自己的 WorkBuddy 账号完成登录授权。</p>' +
+    '<div class="wb-steps">' +
+      '<div class="wb-step wb-step-done" id="wbBindStep1"><span class="wb-step-no">1</span><div class="wb-step-copy">正在向 ' + esc(host) + ' (' + (d.realm === 'intl' ? '国际版' : '国内版') + ') 申请授权…</div></div>' +
+      '<div class="wb-step wb-step-active" id="wbBindStep2"><span class="wb-step-no">2</span><div class="wb-step-copy">在浏览器里打开下方链接并完成登录授权</div></div>' +
+      '<div class="wb-step" id="wbBindStep3"><span class="wb-step-no">3</span><div class="wb-step-copy">等待授权回调完成（自动检测）</div></div>' +
+    '</div>' +
+    '<div class="wb-link" id="wbBindLink">' + esc(wbBindAuthUrl) + '</div>' +
+    '<div class="btn-row"><button class="go gray" id="wbBindOpen">打开登录链接</button>' +
+      '<button class="go" id="wbBindCopy">复制登录链接</button></div>' +
+    '<div class="form-hint" style="margin-top:10px">点击上方链接在浏览器里完成登录授权。登录完成后本窗口会自动检测并完成入池。</div>' +
+    '<div class="form-err hidden" id="wbBindErr"></div>' +
+    '<button class="gate-link-plain" id="wbBindRestart">重新选择版本 / 获取新链接</button>';
+  $('wbBindX').onclick = () => wbCancelCurrent(dlg.close);
+  $('wbBindOpen').onclick = wbOpenLink;
+  $('wbBindCopy').onclick = (e) => wbCopyLink(e.currentTarget);
+  $('wbBindRestart').onclick = () => { wbCancelCurrent(null); wbRenderPick(dlg); };
+}
+function wbRenderPick(dlg) {
+  dlg.box.innerHTML =
+    '<button class="dialog-close" id="wbBindX" aria-label="关闭"><span class="material-symbols-outlined">close</span></button>' +
+    '<h3>需要绑定账号</h3>' +
+    '<p class="tip">你已登录自己的展示端账号。请选择要登录的 WorkBuddy 版本，再用你本人的 WorkBuddy 账号完成授权。一人绑定一次即可。</p>' +
+    '<div class="wb-realm-pick" id="wbBindPick">' +
+      '<button class="wb-realm-card" data-realm="cn"><b>国内版</b><span>copilot.tencent.com</span></button>' +
+      '<button class="wb-realm-card" data-realm="intl"><b>国际版</b><span>www.workbuddy.ai</span></button>' +
+    '</div>' +
+    '<div class="wb-steps wb-steps-preview">' +
+      '<div class="wb-step"><span class="wb-step-no">1</span><div class="wb-step-copy">申请授权</div></div>' +
+      '<div class="wb-step"><span class="wb-step-no">2</span><div class="wb-step-copy">打开登录链接</div></div>' +
+      '<div class="wb-step"><span class="wb-step-no">3</span><div class="wb-step-copy">自动检测入池</div></div>' +
+    '</div>' +
+    '<div class="form-err hidden" id="wbBindErr"></div>' +
+    '<button class="gate-link-plain" id="wbBindLater">稍后再说</button>';
+  $('wbBindX').onclick = () => wbCancelCurrent(dlg.close);
+  $('wbBindLater').onclick = () => { wbBindSnooze(meState); wbCancelCurrent(dlg.close); };
+  Array.from($('wbBindPick').querySelectorAll('button')).forEach((btn) => {
+    btn.onclick = () => wbRequestLink(btn.dataset.realm);
+  });
+}
+function openWbBindModal(opts) {
+  opts = opts || {};
+  if (wbBindModal) { wbBindModal.mask.remove(); wbBindModal = null; }
+  wbStopPoll();
+  wbBindState = '';
+  wbBindAuthUrl = '';
+  wbBindStartedAt = 0;
+  wbClearError();
+  const dlg = makeDialog('wbBindMask', '');
+  wbBindModal = dlg;
+  dlg.mask.addEventListener('click', (e) => {
+    if (e.target === dlg.mask && !wbBindState) wbCancelCurrent(dlg.close);
+  });
+  if (wbBoundAccount && !opts.force) wbRenderSuccess(dlg, wbBoundAccount);
+  else wbRenderPick(dlg);
+  return dlg;
 }
 function maybePromptTencentBind(me) {
   try {
     if (!site || !site.settings || site.settings.workbuddyEnabled !== true) return;
-    if (!me || me.needBind || me.bound === false) return;   // 未绑定主播的先走首次补全
-    if (!String(me.phone || '').trim()) return;             // 没手机号的交给补全流程
-    if (localStorage.getItem(tbBindKey(me)) === '1') return; // 选过就不弹
-    if (tbBindSnoozedToday(me)) return;                      // 当天点过「稍后」
-    showTbBindModal(me);
+    if (!me || me.needBind || me.needProfile || me.mustChangePass || me.bound === false) return;
+    if (!String(me.phone || '').trim()) return;
+    if (!myToken() || wbStatusPending()) return;
+    wbStatusHint();
+    fetchWbStatus().then((d) => {
+      if (!d) return;
+      wbApplyBoundAccount(d.account || null);
+      if (!d.enabled || d.bound || wbBindSnoozedToday(meState || me)) return;
+      if ($('mustPwdMask') || $('qqMask') || $('gate') && !$('gate').classList.contains('hidden')) {
+        setTimeout(() => { try { maybePromptTencentBind(meState || me); } catch (_) {} }, 1200);
+        return;
+      }
+      openWbBindModal({ force: true });
+    }).catch(() => {}).finally(() => wbStatusDone());
   } catch (_) {}
 }
-function showTbBindModal(me) {
-  if (document.getElementById('tb-bind-mask')) return;
-  const mask = document.createElement('div');
-  mask.id = 'tb-bind-mask';
-  mask.style.cssText = 'position:fixed;inset:0;background:rgba(15,23,42,.55);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);z-index:320;display:flex;align-items:center;justify-content:center;padding:20px';
-  mask.innerHTML = ''
-    + '<div style="background:#fff;border-radius:16px;max-width:352px;width:100%;padding:22px 20px 14px;box-shadow:0 18px 50px rgba(2,6,23,.28);font-family:inherit">'
-    +   '<div style="font-size:17px;font-weight:700;color:#0f172a;margin-bottom:8px">需要绑定腾讯账号</div>'
-    +   '<div style="font-size:13.5px;line-height:1.75;color:#475569;margin-bottom:18px">'
-    +     '还没绑定的：点「去绑定」后会直接跳到 WorkBuddy 登录授权页，用 <b>微信或手机号</b> 登录完成；已经绑定过的：直接点「我已绑定」。'
-    +   '</div>'
-    +   '<button id="tb-bind-go" style="width:100%;height:44px;border:0;border-radius:12px;background:linear-gradient(135deg,#4f46e5,#7c3aed);color:#fff;font-size:15px;font-weight:700;letter-spacing:.5px">去绑定</button>'
-    +   '<button id="tb-bind-done" style="width:100%;height:42px;margin-top:10px;border:1px solid #e2e8f0;border-radius:12px;background:#fff;color:#0f172a;font-size:14.5px;font-weight:600">我已绑定</button>'
-    +   '<div id="tb-bind-later" style="text-align:center;font-size:12.5px;color:#94a3b8;padding:12px 0 2px;cursor:pointer">稍后再说</div>'
-    + '</div>';
-  document.body.appendChild(mask);
-  document.getElementById('tb-bind-go').onclick = async function () {
-    const btn = this;
-    btn.disabled = true;
-    btn.textContent = '正在获取授权链接…';
-    try {
-      const d = await postJson('/api/public/my/workbuddy/oauth/start',
-        { realm: 'cn' }, { auth: true });
-      const link = String(d.authUrl || '');
-      if (!/^https?:\/\//i.test(link)) throw new Error('WorkBuddy 返回的授权链接格式不正确');
-      try { localStorage.setItem(tbBindKey(me), '1'); } catch (_) {}
-      window.location.assign(link);
-    } catch (e) {
-      btn.disabled = false;
-      btn.textContent = '重新去绑定';
-      try { toast(e.message || '获取授权链接失败，请稍后重试'); } catch (_) {}
-    }
-  };
-  document.getElementById('tb-bind-done').onclick = function () {
-    try { localStorage.setItem(tbBindKey(me), '1'); } catch (_) {}
-    try { toast('已记录'); } catch (_) {}
-    mask.remove();
-  };
-  document.getElementById('tb-bind-later').onclick = function () {
-    try { localStorage.setItem(tbBindSnoozeKey(me), String(Date.now())); } catch (_) {}
-    mask.remove();
-  };
+async function fetchWbStatus() {
+  const r = await fetch('/api/public/my/workbuddy/status', { headers: myTokenHeaders() });
+  let d = {};
+  try { d = await r.json(); } catch (_) {}
+  if (r.status === 401) {
+    wbStatusDone();
+    sessionExpired();
+    return null;
+  }
+  if (!r.ok || d.ok === false) return null;
+  return d;
 }
 
 /** 登录成功后统一收口：水印 + 未绑定提醒条 + 换团条显隐 */
@@ -7156,24 +7393,18 @@ async function exportMyLineage(period, btn) {
   }
 }
 
-/* WorkBuddy / CodeBuddy 绑定：点击行即自动申请 OAuth 链接并当前页跳转。 */
+/* WorkBuddy 绑定：「我的」行与登录后引导共用同一个三步弹窗。 */
 async function startWbBind() {
   if (wbBinding) return;
   wbBinding = true;
-  const row = $('myWorkbuddyRow');
-  if (row) { row.style.pointerEvents = 'none'; row.style.opacity = '.65'; }
   try {
-    toast('正在获取授权链接…');
-    const d = await postJson('/api/public/my/workbuddy/oauth/start',
-      { realm: 'cn' }, { auth: true });
-    const link = String(d.authUrl || '');
-    if (!/^https?:\/\//i.test(link)) throw new Error('WorkBuddy 返回的授权链接格式不正确');
-    window.location.assign(link);
-  } catch (e) {
+    if (!wbBoundAccount) {
+      const d = await fetchWbStatus();
+      if (d) wbApplyBoundAccount(d.account || null);
+    }
+    openWbBindModal({ force: false });
+  } finally {
     wbBinding = false;
-    if (row) { row.style.pointerEvents = ''; row.style.opacity = ''; }
-    if (e && e.status === 401) sessionExpired();
-    else toast(e.message || '获取授权链接失败，请稍后重试');
   }
 }
 
@@ -7318,7 +7549,7 @@ function renderMy(d, series, push, accounts) {
       '<span class="material-symbols-outlined">chevron_right</span></div></div>' +
       '<div class="st-my-item" id="myWorkbuddyRow" style="cursor:pointer"><div class="l"><div class="ico"><span class="material-symbols-outlined">hub</span></div>' +
       '<div style="min-width:0"><div class="t">WorkBuddy 账号绑定</div>' +
-      '<div class="d">点击后自动跳转 WorkBuddy 登录授权</div></div></div>' +
+      '<div class="d">' + (wbBoundAccount ? '查看已绑定的 WorkBuddy 账号' : '选择版本后获取登录链接，一人绑定一次') + '</div></div></div>' +
       '<div class="r"><span class="pri">去绑定</span>' +
       '<span class="material-symbols-outlined">chevron_right</span></div></div>' +
       '<div class="st-my-item" id="myEmailRow" style="cursor:pointer">' +
@@ -7417,6 +7648,8 @@ function renderMy(d, series, push, accounts) {
   $('myPushRow').onclick = () => { mySub = 'wechat'; pushRoute(); renderMySub(); };
   $('myChaseRow').onclick = () => { mySub = 'chase'; pushRoute(); renderMySub(); };
   $('myWorkbuddyRow').onclick = startWbBind;
+  wbApplyBoundAccount(wbBoundAccount);
+  fetchWbStatus().then((d) => { if (d) wbApplyBoundAccount(d.account || null); }).catch(() => {});
   renderPushBox(push);
   /* 「追分设置」独立卡（2026-10-13）：**这里绝不能再补一次 renderChaseBox**（2026-10-15 task-7）。
      renderPushBox → bindPushBox 末尾已经 renderChaseBox + bindChaseHandlers；在这里再渲染一次
