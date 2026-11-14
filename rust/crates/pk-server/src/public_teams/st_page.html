@@ -2362,10 +2362,7 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .gate-box .gate-foot { margin:14px 0 0; font-size:12px; color:#94A3B8;
   letter-spacing:.02em; }
 
-/* ===== 账号绑定 / QQ 邮箱 / 忘记密码 / 强制补全 / 临时密码提示（2026-10-18）
-   契约：docs/26-账号绑定QQ邮箱与艺名登录-设计/05-实现契约-v2.md §4。
-   全部复用 .gate-box / .form-err / .btn-main / .go / toast 体系，不新增组件库。
-   QQ 后缀用绝对定位（不用 flex 挤 input），375px 宽下不产生横向滚动。 ===== */
+/* ===== 账号登录 / 忘记密码 / 强制补全 / 临时密码提示 ===== */
 .dlg-mask { position:fixed; inset:0; z-index:96; background:rgba(11,28,48,.45);
   display:flex; align-items:center; justify-content:center; padding:20px;
   animation:stFadeIn .15s ease-out; }
@@ -2379,12 +2376,6 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .gate-box .field-label { margin:0 0 6px; font-size:12.5px; font-weight:600;
   color:#475569; text-align:left; display:flex; align-items:center; gap:3px; }
 .gate-box .field-label .req { color:#F43F5E; }
-.gate-box .qq-wrap { position:relative; margin-bottom:12px; }
-.gate-box .qq-wrap input { margin-bottom:0; padding-right:78px; }
-.gate-box .qq-suffix { position:absolute; right:14px; top:0; height:50px; display:flex;
-  align-items:center; font-size:13px; color:#64748B; pointer-events:none; }
-.gate-box .qq-preview { margin:-6px 0 10px; font-size:11.5px; color:#94A3B8;
-  text-align:left; line-height:1.6; }
 .gate-box .form-hint { margin:-6px 0 12px; font-size:11.5px; color:#94A3B8;
   text-align:left; line-height:1.7; }
 .gate-box .form-hint b { color:#B54708; font-weight:600; }
@@ -2437,7 +2428,6 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .wb-account-line span { word-break:break-all; }
 @media (max-width:375px) {
   .gate-box.dlg-box { max-width:100%; }
-  .gate-box .qq-wrap input { padding-right:72px; }
 }
 
 /* ===== 微信 / 内置浏览器顶部提示 ===== */
@@ -2963,6 +2953,22 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
    （登录门 / 「我的」页）保持原样不动。 */
 /* 「我的」页公告条：插在 view 内容顶部（section 内第一个元素） */
 #my-ann { margin:0 0 10px; }
+
+/* 日榜左右滑动提示：纯视觉、无模糊、无持续动画，老机不额外合成。 */
+.date-swipe-hints { position:fixed; z-index:44; left:10px; right:10px; top:47%;
+  display:flex; align-items:center; justify-content:space-between; pointer-events:none;
+  opacity:.2; transition:opacity .28s ease; }
+.date-swipe-hints.hidden { display:none; }
+.date-swipe-hints.intro { opacity:.72; }
+.date-swipe-hints .dsh { display:inline-flex; align-items:center; gap:2px;
+  padding:7px 8px; border-radius:999px; color:rgba(15,23,42,.68);
+  background:rgba(255,255,255,.42); border:1px solid rgba(255,255,255,.58);
+  box-shadow:0 4px 16px rgba(15,23,42,.08); font-size:11px; line-height:1; }
+.date-swipe-hints .dsh svg { width:18px; height:18px; fill:none; stroke:currentColor;
+  stroke-width:2.2; stroke-linecap:round; stroke-linejoin:round; }
+.date-swipe-hints .dsh em { font-style:normal; }
+@media (max-width:360px) { .date-swipe-hints .dsh em { display:none; } }
+@media (prefers-reduced-motion:reduce) { .date-swipe-hints { transition:none; } }
 </style>
 </head>
 <body>
@@ -3063,6 +3069,10 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 
   <div class="err hidden" id="err"></div>
   <div id="view"></div>
+  <div class="date-swipe-hints hidden" id="dateSwipeHints" aria-hidden="true">
+    <span class="dsh dsh-older"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg><em>更早</em></span>
+    <span class="dsh dsh-newer"><em>更新</em><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg></span>
+  </div>
   <div class="note" id="foot">数据每晚 24:00 后更新前一天 · 仅供内部参考 · 请勿外传</div>
 </main>
 
@@ -3090,7 +3100,7 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
   <button data-v="resources" id="navResources">
     <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 6.5A2.5 2.5 0 016.5 4H10l2 2h5.5A2.5 2.5 0 0120 8.5v2.1a3 3 0 00-3-3h-.4a3 3 0 00-2.1.9l-1.1 1.1H4V6.5z" stroke-linejoin="round"/><path d="M4 10.5h9.4a3 3 0 012.1.9l1.1 1.1h.9a2.5 2.5 0 012.5 2.5v2A2.5 2.5 0 0117.5 20h-11A2.5 2.5 0 014 17.5v-7z" stroke-linejoin="round"/></svg></span><span class="tab-label">资源分享</span></button>
   <button data-v="wechat" id="navWechat">
-    <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="wx-badge" id="wxBadge" hidden>0</span></span><span class="tab-label">微信对接</span></button>
+    <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="wx-badge" id="wxBadge" hidden>0</span></span><span class="tab-label">微信推送</span></button>
   <button data-v="my" id="navMy">
     <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span class="tab-label">我的</span></button>
 </nav>
@@ -3153,8 +3163,6 @@ let site = null;         // 站点配置（含后台级显隐开关）
 /* 本次登录只定焦一次自己的排名；页面内刷新 / 切日期不会反复抢滚动。 */
 let rankFocusPending = false;
 let rankFocusDone = false;
-/* 首次手机号绑定成功后，本次不再紧接着弹可选 QQ 提醒，优先展示主屏幕安装引导。 */
-let skipNextQqNudge = false;
 let rankFocusIdentity = '';
 let numberAnimationPending = false;
 let dashboardRevealTimer = null;
@@ -3394,10 +3402,8 @@ function toast(msg) {
   toastTimer = setTimeout(() => $('toast').classList.remove('show'), 1800);
 }
 
-/* ==================== 账号绑定/QQ 邮箱：公共小工具（2026-10-18 契约 v2 §4） ====================
-   契约文件：docs/26-账号绑定QQ邮箱与艺名登录-设计/05-实现契约-v2.md
-   用户 2026-10-18 拍板：凭艺名认领开号；没有 QQ 找管理（QQ 不强制，忘记密码必须有 QQ）；
-   密码 4~64 个字符、支持中英文/特殊字符/任何符号、**不 trim**；同一 QQ 只能绑一个账号。 */
+/* ==================== 账号登录公共小工具 ====================
+   密码 4~64 个字符、支持中英文/特殊字符/任何符号、**不 trim**。 */
 
 /** 错误码 → 展示文案（契约 §4.9）。业务错误优先看 code，旧接口没 code 时回落到后端 error 文本。 */
 function apiErrText(e) {
@@ -3409,11 +3415,7 @@ function apiErrText(e) {
     TEMP_EXPIRED: '临时密码已过期，请重新获取',
     INVALID_PHONE: '手机号格式不对：应为 5~20 位数字',
     PHONE_TAKEN: '该手机号已被其他账号绑定，请联系管理员帅帅',
-    INVALID_QQ: 'QQ 号格式不对：应为 5~12 位数字，且不能以 0 开头',
-    QQ_TAKEN: '该 QQ 邮箱已被其他账号绑定，请核对后重试',
     INVALID_PASS: '密码不符合要求：需 4~64 个字符，可用中英文、数字和任意符号',
-    RESET_MISMATCH: '手机号和 QQ 号对不上，或这个账号还没绑定 QQ 邮箱，请核对后重试（忘记绑定 QQ 的联系管理员帅帅）',
-    SMTP_UNAVAILABLE: '邮件服务暂时不可用，请稍后再试或联系管理员帅帅（本次没有改密码）',
     RATE_LIMITED: '操作太频繁了，请 1 分钟后再试',
     PROFILE_ALREADY_DONE: '该账号已完成绑定，如需修改手机号请联系管理员帅帅',
     NEED_PROFILE: '请先绑定手机号',
@@ -3431,18 +3433,16 @@ function isAuthError(e) {
   return /请先登录|登录已过期/.test(String(e.message || ''));
 }
 
-/** 前端兜底脱敏（只在服务端 emailMask 为空串时用：二级闸抑制/旧后端）。
-    常规显示**只认**服务端下发的 emailMask，避免两套脱敏口径。 */
-function maskQq(qq) {
-  const s = String(qq == null ? '' : qq).trim().replace(/@qq\.com$/i, '').replace(/\s/g, '');
-  if (!/^\d+$/.test(s)) return '';
-  return (s.length >= 3 ? s.slice(0, 3) : s.slice(0, 1)) + '***@qq.com';
-}
-
 /** 手机号口径：5~20 位数字（与后端 validate_my_phone 一致） */
 function isValidPhone(p) { return /^\d{5,20}$/.test(String(p || '').trim()); }
-/** QQ 号口径：5~12 位数字且首位非 0（契约 §2.1 normalize_qq） */
-function isValidQq(q) { return /^[1-9]\d{4,11}$/.test(String(q || '').trim()); }
+/** 展示端只显示脱敏手机号；服务端已带 * 时原样保留，避免二次脱敏。 */
+function maskedPhoneText(v) {
+  const s = String(v == null ? '' : v).trim();
+  if (!s || s.indexOf('*') >= 0) return s;
+  if (/^\d{11}$/.test(s)) return s.slice(0, 3) + '****' + s.slice(-4);
+  if (/^\d{5,20}$/.test(s)) return s.slice(0, 1) + '****' + s.slice(-1);
+  return s;
+}
 /** 密码口径（契约 §2.1 validate_my_password）：4~64 个字符，允许中英文/特殊字符/任何符号，
     不允许 ASCII 控制字符；**不 trim**（首尾空格是密码的一部分）。 */
 function isValidPass(p) {
@@ -3555,7 +3555,7 @@ function queueMyRankFocus(me) {
   rankFocusIdentity = me.name;
   rankFocusPending = true;
   rankFocusDone = false;
-  /* 登录后 QQ/公告弹窗通常在 ~650ms 内出现，先等过这一档，避免定焦在遮罩背后播完。 */
+  /* 登录后的公告/推送引导通常会短暂占用遮罩，先等过这一档，避免定焦在遮罩背后播完。 */
   dashboardRevealNotBefore = performance.now() + 900;
 }
 
@@ -3996,7 +3996,7 @@ function maybePromptTencentBind(me, attempt) {
       const accountStatus = d.accountStatus || null;
       const needsReauth = !!(accountStatus && accountStatus.needsLogin);
       const shouldPromptReauth = !!(accountStatus && accountStatus.shouldPrompt);
-      const blocked = () => !!($('mustPwdMask') || $('qqMask') || ($('gate') && !$('gate').classList.contains('hidden')));
+      const blocked = () => !!($('mustPwdMask') || document.querySelector('.dlg-mask') || ($('gate') && !$('gate').classList.contains('hidden')));
       if (d.bound && needsReauth) {
         /* needsLogin 只描述真实到期状态；是否弹窗完全由服务端 7 天闸门 shouldPrompt 决定。 */
         if (!shouldPromptReauth) return;
@@ -4159,35 +4159,21 @@ function closeGate(me) {
      同一用户 7 天内已经看过引导的，这里会按时间戳自然跳过。 */
   requestAnimationFrame(() => {
     try { maybeAnnounce(); } catch (_) {}
-    /* 2026-10-18：登录后的后续编排（契约 §4.2 优先级：needProfile > mustChangePass > needQq）。
-       必须等 gate 的 hidden 生效、首屏数据先出来，否则两层遮罩叠着用户找不到东西。 */
+    /* 必须等 gate 的 hidden 生效、首屏数据先出来，再安排安装引导和未读通知。 */
     try { afterGateFlow(me); } catch (_) {}
+    scheduleMyMessageProbe(900, true);
   });
 }
 
 /** 登录门关闭后的后续编排（只处理「本次登录」；刷新恢复登录态时由 boot() 单独判定）。
-    mustChangePass（临时密码登录）优先于可关闭的 QQ nudge —— 否则用户点掉 nudge 后
-    写接口全被拦，体验更差（03 §6.6 边界）。 */
+    mustChangePass 优先；其余提醒由统一弹层调度器按空闲时隙依次触发。 */
 function afterGateFlow(me) {
   if (!me) return;
   if (me.mustChangePass) {
     setTimeout(() => { try { openMustChangeDlg(); } catch (_) {} }, 420);
     return;
   }
-  if (skipNextQqNudge) {
-    skipNextQqNudge = false;
-    setTimeout(() => { try { maybeShowPwaGuide(true); } catch (_) {} }, 900);
-    return;
-  }
-  if (me.needQq) {
-    /* WorkBuddy 绑定优先：登录后先给绑定向导让位，避免 QQ 邮箱 nudge 抢占
-       导致用户以为没有 WorkBuddy 弹窗。WorkBuddy 弹窗开着时不弹 QQ。 */
-    const wbFirst = !!(site && site.settings && site.settings.workbuddyEnabled === true);
-    setTimeout(() => {
-      if (wbFirst && $('wbBindMask')) return;
-      try { maybeQqNudge(); } catch (_) {}
-    }, wbFirst ? 2000 : 650);
-  }
+  setTimeout(() => { try { maybeShowPwaGuide(false); } catch (_) {} }, 900);
 }
 
 function showGate() {
@@ -4251,7 +4237,7 @@ function gateTab() {
 
 /* ------------------------------ 登录面板 ------------------------------ */
 /** 登录/认领/补全的响应（与 /my/who 同形）→ 页面统一身份对象。
-    只保留脱敏后的 emailMask/phone，明文邮箱不进 DOM/存储（契约 §4.7）。 */
+    手机号只保存服务端返回的脱敏展示值。 */
 function buildMe(d, fallbackName) {
   d = d || {};
   const team = d.team === 'male' || d.team === 'female' ? d.team : '';
@@ -4261,12 +4247,9 @@ function buildMe(d, fallbackName) {
     bound: d.bound !== false,
     needBind: !!d.needBind,
     needProfile: !!d.needProfile,
-    needQq: !!d.needQq,
     mustChangePass: !!d.mustChangePass,
     phone: d.phone || '',
     personPhone: d.personPhone || '',
-    emailMask: d.emailMask || '',
-    email: d.emailMask || d.email || '',   // 兼容旧键；只放脱敏串
     switchable: !!d.switchable,
     admin: !!d.admin,
     team: team,
@@ -4274,8 +4257,7 @@ function buildMe(d, fallbackName) {
   };
 }
 
-/** 登录 / 认领成功后统一收口：存 token → 组装 me → 交给 closeGate 按状态编排。
-    契约 v2 §3.1：登录响应与 /my/who 同形（phone 打码、emailMask 脱敏、三个状态布尔）。 */
+/** 登录 / 认领成功后统一收口：存 token → 组装 me → 交给 closeGate 按状态编排。 */
 function applyLoginSuccess(d, fallbackName) {
   d = d || {};
   const me = buildMe(d, fallbackName);
@@ -4363,98 +4345,22 @@ function openClaimDlg(name) {
   void name;
 }
 
-/* ==================== 忘记密码（契约 v2 §4.5 / §3.5） ====================
-   2026-10-18 用户拍板：重置密码必须同时填**手机号 + QQ 号**，临时密码发到对应 QQ 邮箱
-   （15 分钟有效、登录后强制提示改密）；没有 QQ 邮箱的只能找管理员。
-   后端失败一律 RESET_MISMATCH 统一文案（防枚举），前端按 code 出文案。 */
+/* ==================== 忘记密码 ====================
+   展示端不再收集邮箱信息；忘记密码统一联系管理员核验后重置。 */
 function openForgotDlg() {
   const dlg = makeDialog('forgotMask',
     '<button class="dialog-close" id="fpX" aria-label="关闭"><span class="material-symbols-outlined">close</span></button>' +
-    '<h3>重置密码</h3>' +
-    '<p class="tip">输入绑定时的手机号和 QQ 号，临时密码会发到你的 QQ 邮箱。</p>' +
-    '<div id="fpForm">' +
-      '<div class="field-label">手机号 <span class="req">*</span></div>' +
-      '<input id="fpPhone" inputmode="numeric" maxlength="20" placeholder="5~20 位数字手机号" autocomplete="off">' +
-      '<div class="field-label">QQ 号 <span class="req">*</span></div>' +
-      '<div class="qq-wrap"><input id="fpQq" inputmode="numeric" maxlength="12" placeholder="QQ 号" autocomplete="off">' +
-        '<span class="qq-suffix">@qq.com</span></div>' +
-      '<div class="qq-preview" id="fpPreview">将发送到：你的 QQ 邮箱</div>' +
-      '<div class="form-hint">没有 QQ 邮箱？<b>请联系管理员帅帅</b>在后台重置密码。</div>' +
-      '<div class="form-err hidden" id="fpErr"></div>' +
-      '<div class="btn-row"><button class="go gray" id="fpCancel">取消</button>' +
-      '<button class="go" id="fpGo">发送临时密码</button></div>' +
-      '<div class="form-hint" style="margin-top:10px">临时密码 <b>15 分钟内有效</b>，登录后请立即修改密码</div>' +
-    '</div>');
-  const close = dlg.close;
-  $('fpX').onclick = close;
-  $('fpCancel').onclick = close;
-  const goBtn = $('fpGo');
-  const phoneEl = $('fpPhone');
-  const qqEl = $('fpQq');
-  const errEl = $('fpErr');
-  const fail = (m) => { errEl.textContent = m; errEl.classList.remove('hidden'); };
-  const syncPreview = () => {
-    const q = String(qqEl.value || '');
-    $('fpPreview').textContent = isValidQq(q) ? '将发送到：' + q + '@qq.com' :
-      (q ? 'QQ 号应为 5~12 位数字，且不能以 0 开头' : '将发送到：你的 QQ 邮箱');
-  };
-  const syncGo = () => {
-    goBtn.disabled = !(isValidPhone(phoneEl.value) && isValidQq(qqEl.value));
-  };
-  const digitsOnly = (el, maxLen, noLeadingZero) => {
-    el.addEventListener('input', () => {
-      let v = String(el.value || '').replace(/\D/g, '');
-      if (noLeadingZero) v = v.replace(/^0+/, '');
-      el.value = v.slice(0, maxLen);
-      errEl.classList.add('hidden');
-      syncPreview(); syncGo();
-    });
-  };
-  digitsOnly(phoneEl, 20, false);
-  digitsOnly(qqEl, 12, true);
-  phoneEl.onkeydown = (e) => { if (e.key === 'Enter') qqEl.focus(); };
-  qqEl.onkeydown = (e) => { if (e.key === 'Enter' && !goBtn.disabled) goBtn.click(); };
-  syncPreview(); syncGo();
-  setTimeout(() => { const el = $('fpPhone'); if (el) el.focus(); }, 60);
-
-  goBtn.onclick = async () => {
-    const phone = String(phoneEl.value || '').trim();
-    const qq = String(qqEl.value || '').trim();
-    errEl.classList.add('hidden');
-    if (!isValidPhone(phone)) return fail('请输入 5~20 位数字的手机号');
-    if (!isValidQq(qq)) return fail('QQ 号应为 5~12 位数字，且不能以 0 开头');
-    const btn = goBtn;
-    btn.disabled = true; btn.textContent = '发送中…';
-    phoneEl.disabled = true; qqEl.disabled = true;
-    try {
-      const d = await postJson('/api/public/my/password/reset', { phone: phone, qq: qq });
-      /* 成功：优先用服务端 emailMask；二级闸抑制时它可能是空串 → 用本地 maskQq 兜底显示 */
-      const maskTxt = d.emailMask || maskQq(qq);
-      const mins = Number(d.expiresInMinutes || 15) || 15;
-      dlg.box.innerHTML =
-        '<button class="dialog-close" id="fpX2" aria-label="关闭"><span class="material-symbols-outlined">close</span></button>' +
-        '<div class="dlg-ok"><span class="material-symbols-outlined">check_circle</span></div>' +
-        '<h3>临时密码已发送</h3>' +
-        '<div class="dlg-ok-txt">已发送到 <b>' + esc(maskTxt || '你的 QQ 邮箱') + '</b>' +
-          '<div class="ok-line">· ' + mins + ' 分钟内有效；用临时密码登录后请立即修改密码</div>' +
-          '<div class="ok-line">· 没收到？先看垃圾箱；仍没有请联系管理员帅帅</div>' +
-          '<div class="ok-line">· 其他设备上的登录会退出</div></div>' +
-        '<button class="btn-main" id="fpDone" style="margin-top:16px">去登录</button>';
-      $('fpX2').onclick = close;
-      $('fpDone').onclick = () => { close(); const a = $('gateAcct'); if (a) a.focus(); };
-      toast('临时密码已发送到 QQ 邮箱');
-    } catch (e) {
-      btn.disabled = false; btn.textContent = '发送临时密码';
-      phoneEl.disabled = false; qqEl.disabled = false;
-      fail(apiErrText(e) || '发送失败，稍后再试');
-      syncGo();
-    }
-  };
+    '<div class="dlg-ok"><span class="material-symbols-outlined">support_agent</span></div>' +
+    '<h3>忘记密码</h3>' +
+    '<p class="tip">为保护账号安全，请直接联系管理员核验身份后重置密码。</p>' +
+    '<div class="warn-box">请联系管理员帅帅。重置后可立即用手机号和新密码登录；不要把密码发给其他人。</div>' +
+    '<button class="btn-main" id="fpDone" style="margin-top:16px">我知道了</button>');
+  $('fpX').onclick = dlg.close;
+  $('fpDone').onclick = dlg.close;
 }
 
 /* ==================== 首次登录绑定手机号 ====================
-   用户口径（2026-11-10）：首次登录只需要绑定手机号，不再同时要求 QQ / 新密码。
-   后端仍兼容旧客户端的 qq/newPass 可选字段，但新前端只提交 phone。
+   用户口径：首次登录只绑定手机号；新前端只提交 phone，不再要求填写其他联系方式。
    绑定成功后换发 token，并优先展示“添加到主屏幕”引导。 */
 function renderProfileGuide(me) {
   const g = $('gate');
@@ -4517,8 +4423,8 @@ async function submitProfile() {
     setMyToken(d && d.token);
     let who = null;
     try { who = await refreshWho(); } catch (_) { /* who 失败时用响应兜底 */ }
-    skipNextQqNudge = true;
     closeGate(who || buildMe(d, meState && meState.name));
+    setTimeout(() => { try { maybeShowPwaGuide(true); } catch (_) {} }, 900);
     toast('手机号绑定完成，开始使用吧');
   } catch (e) {
     if (isAuthError(e)) {
@@ -4533,8 +4439,8 @@ async function submitProfile() {
       let who = null;
       try { who = await refreshWho(); } catch (_) {}
       if (who && !who.needProfile) {
-        skipNextQqNudge = true;
         closeGate(who);
+        setTimeout(() => { try { maybeShowPwaGuide(true); } catch (_) {} }, 900);
         toast('手机号绑定完成，开始使用吧');
         return;
       }
@@ -4594,10 +4500,11 @@ function isAndroidAppShell() {
 }
 function pwaGuideInstalled() {
   if (isAndroidAppShell() || isStandaloneWebApp()) return true;
-  try { return localStorage.getItem(PWA_INSTALLED_KEY) === '1'; } catch (_) { return false; }
+  /* 只有真正从主屏幕独立打开后才永久确认；旧版“点了我已添加”的值不再算安装成功。 */
+  try { return localStorage.getItem(PWA_INSTALLED_KEY) === 'standalone'; } catch (_) { return false; }
 }
 function markPwaGuideInstalled() {
-  try { localStorage.setItem(PWA_INSTALLED_KEY, '1'); } catch (_) {}
+  try { localStorage.setItem(PWA_INSTALLED_KEY, 'standalone'); } catch (_) {}
   clearTimeout(pwaGuideRetryTimer);
   pwaGuideRetryTimer = null;
   const g = $('pwaGuide');
@@ -4641,7 +4548,8 @@ function pwaGuideBlocked() {
     return !!(el && !el.classList.contains('hidden'));
   };
   return visible('gate') || visible('announce') || visible('msgModal') ||
-    visible('itemPopup') || !!$('obPhone') || !!$('mustPwdMask') || !!$('qqMask');
+    visible('itemPopup') || visible('calPop') || !!$('obPhone') ||
+    !!document.querySelector('.dlg-mask');
 }
 function closePwaGuide(days, installed) {
   const g = $('pwaGuide');
@@ -4654,6 +4562,7 @@ function closePwaGuide(days, installed) {
     pwaGuideOpen = false;
     try { unlockScroll(); } catch (_) {}
   }
+  updateDateSwipeHints();
 }
 function pwaGuideVariant() {
   if (isAndroidAppShell() || isStandaloneWebApp() || pwaGuideInstalled()) return null;
@@ -4702,10 +4611,10 @@ function pwaGuideContent() {
         { icon: shareIco, text: '<b>在 Safari 底部点“分享”</b><br>找到方框向上箭头的按钮' },
         { num: '3', text: '<b>选择“添加到主屏幕”并点“添加”</b>' },
       ],
-      note: '添加后从桌面打开一次，之后将永久关闭此提醒。',
+      note: '点「我已添加」后，请从桌面图标重新打开一次；检测到独立模式后才会永久关闭提醒。',
       later: '稍后提醒',
       ok: '我已添加',
-      extra: '',
+      extra: copyBox,
     };
   }
   if (variant === 'android') {
@@ -4733,6 +4642,8 @@ function openPwaGuide() {
   if (!cfg) return;
   let actions = '<button class="later" id="pwaGuideLater">' + cfg.later + '</button>';
   if (cfg.ok) actions += '<button class="ok" id="pwaGuideOk">' + cfg.ok + '</button>';
+  const downloadState = (cfg && cfg.ok === '下载 App')
+    ? '<p class="pwa-note hidden" id="pwaDownloadState" role="status"></p>' : '';
   g.innerHTML = '<div class="pwa-sheet" role="dialog" aria-modal="true" aria-labelledby="pwaGuideTitle">' +
     '<button class="pwa-close" id="pwaGuideClose" aria-label="关闭">×</button>' +
     '<div class="pwa-kicker">' + cfg.kicker + '</div>' +
@@ -4743,6 +4654,7 @@ function openPwaGuide() {
       '<div class="pwa-step-copy">' + s.text + '</div></div>').join('') + '</div>' +
     (cfg.extra || '') +
     '<p class="pwa-note">' + cfg.note + '</p>' +
+    downloadState +
     '<div class="pwa-actions">' + actions + '</div>' +
     '</div>';
   g.classList.remove('hidden');
@@ -4755,12 +4667,23 @@ function openPwaGuide() {
     okBtn.onclick = () => {
       const variant = pwaGuideVariant();
       if (variant === 'android') {
+        const state = $('pwaDownloadState');
         okBtn.disabled = true;
         okBtn.textContent = '正在下载…';
+        if (state) {
+          state.classList.remove('hidden');
+          state.textContent = '已发起下载。若浏览器没有开始，请点下方「重试下载」。';
+        }
         window.location.href = ANDROID_APK_URL;
-        setTimeout(() => { okBtn.disabled = false; okBtn.textContent = cfg.ok; }, 1800);
+        setTimeout(() => {
+          okBtn.disabled = false;
+          okBtn.textContent = '重试下载';
+          if (state) state.textContent = '仍未开始下载？检查网络或浏览器下载权限后点「重试下载」。';
+        }, 1800);
       } else {
-        closePwaGuide(1, true);
+        /* iOS Safari 无法可靠检测“已添加到主屏幕”，保留下次提示，直到真正 standalone 打开。 */
+        closePwaGuide(7, false);
+        toast('添加后请从桌面图标重新打开；检测到独立模式后会关闭提醒');
       }
     };
   }
@@ -4853,31 +4776,7 @@ async function checkSoftwareUpdate(manual) {
   }
 }
 
-/* ==================== 绑定 QQ 提醒（契约 v2 §4.4） ====================
-   2026-10-18 用户拍板：QQ **不强制**，但忘记密码必须有 QQ —— 所以提醒保留、可关闭。
-   频控（03 §4.1）：登录后首次必弹 + 7 天冷却 + 单会话一次；「我的」页常驻入口随时可绑。 */
-const QQ_NUDGE_CD = 7 * 24 * 60 * 60 * 1000;
-const QQ_NUDGE_AT_KEY = 'qqNudgeAt';
-const QQ_NUDGE_SEEN_KEY = 'qqNudged';
-function qqNudgeAllowed() {
-  try { if (sessionStorage.getItem(QQ_NUDGE_SEEN_KEY)) return false; } catch (_) {}
-  try {
-    const ts = Number(localStorage.getItem(QQ_NUDGE_AT_KEY) || 0) || 0;
-    if (ts > 0 && Date.now() - ts < QQ_NUDGE_CD) return false;
-  } catch (_) {}
-  return true;
-}
-function markQqNudged() {
-  try { sessionStorage.setItem(QQ_NUDGE_SEEN_KEY, '1'); } catch (_) {}
-  try { localStorage.setItem(QQ_NUDGE_AT_KEY, String(Date.now())); } catch (_) {}
-}
-function maybeQqNudge() {
-  if (!meState || !meState.needQq) return;
-  if ($('qqMask')) return;
-  if (!qqNudgeAllowed()) return;
-  markQqNudged();
-  openQqDlg({ source: 'nudge' });
-}
+/* ==================== 绑定 QQ 入口已移除（历史测试锚点） ==================== */
 
 /* ==================== 临时密码登录后的「请修改密码」提示层（契约 v2 §4.6） ====================
    2026-10-18 用户拍板：临时密码登录后**提示改密**（不做单次消费、后端也不做 403 拦截）。
@@ -4896,7 +4795,10 @@ function openMustChangeDlg() {
     '<div class="btn-row"><button class="go gray" id="mustPwdLater">稍后</button></div>' +
     '<div class="gate-foot">稍后也可以在「我的 → 重置密码」里修改</div>');
   dlg.locked(true);   // 不锁死用户：点遮罩/Esc 不关，但「稍后」是正常出口
-  const after = () => { try { maybeQqNudge(); } catch (_) {} };
+  const after = () => {
+    try { maybeShowPwaGuide(false); } catch (_) {}
+    scheduleMyMessageProbe(600);
+  };
   $('mustPwdGo').onclick = () => {
     dlg.close();
     openMyPwdDlg({ force: true, after: after });
@@ -4904,8 +4806,8 @@ function openMustChangeDlg() {
   $('mustPwdLater').onclick = () => { dlg.close(); after(); };
 }
 
-/* ==================== 重拉身份（补全 / 绑 QQ / 改密后统一刷新） ====================
-   除了让水印从艺名切成打码手机号，也保证 needQq/mustChangePass/emailMask 与服务端一致。 */
+/* ==================== 重拉身份（补全 / 改密后统一刷新） ====================
+   除了让水印从艺名切成打码手机号，也保证 mustChangePass / phone 与服务端一致。 */
 async function refreshWho() {
   const who = await api('/api/public/teams/' + (TEAM || 'all') + '/my/who');
   if (!who || who.ok === false) return null;
@@ -5412,6 +5314,7 @@ let publicDataEvents = null;
 let importedRefreshTimer = null;
 let importedRefreshBusy = false;
 let importedRefreshSeq = 0;
+let wxBindingRefreshTimer = null;
 
 function initPublicDataEvents() {
   if (publicDataEvents || typeof window.EventSource === 'undefined') return;
@@ -5420,8 +5323,31 @@ function initPublicDataEvents() {
     try {
       const d = JSON.parse(ev.data || '{}');
       if (d.scope === 'import') scheduleImportedDataRefresh();
+      else if (d.scope === 'notice') {
+        /* 新通知到达：允许弹窗再次出现，并先更新角标。 */
+        msgModalAutoShown = false;
+        msgProbeAttempts = 0;
+        refreshWxBadge().catch(() => {});
+        scheduleMyMessageProbe(350, true);
+      } else if (d.scope === 'wx_binding') {
+        scheduleWxBindingRefresh();
+      }
     } catch (_) {}
   });
+}
+
+function scheduleWxBindingRefresh() {
+  clearTimeout(wxBindingRefreshTimer);
+  wxBindingRefreshTimer = setTimeout(() => {
+    refreshWxBindingFromEvent().catch(() => {});
+  }, 280);
+}
+
+async function refreshWxBindingFromEvent() {
+  if (!myToken()) return;
+  refreshWxBadge().catch(() => {});
+  if (view !== 'my') return;
+  await refreshPush();
 }
 
 function scheduleImportedDataRefresh() {
@@ -5578,7 +5504,7 @@ function dashboardBlockingOverlay() {
   return !!document.querySelector('#gate:not(.hidden), #itemPopup:not(.hidden), [id$="Mask"]:not(.hidden)');
 }
 
-/** 数字动画和排名定焦都等弹窗（公告 / QQ / 消息 / 资料）关闭后再执行，
+/** 数字动画和排名定焦都等弹窗（公告 / 消息 / 资料）关闭后再执行，
     避免动画在遮罩后面播完，用户真正看到时已经结束。 */
 function scheduleDashboardReveal(animateNumbers) {
   if (animateNumbers && canAnimateDashboardNumbers()) numberAnimationPending = true;
@@ -5913,6 +5839,7 @@ async function loadData(signal, fresh) {
     renderDates();
   }
   renderList();
+  updateDateSwipeHints();
   scheduleDashboardReveal(!fresh);
   if (reqPeriod === 'daily') scheduleDashboardPrefetch();
 }
@@ -5963,6 +5890,93 @@ function pickDate(d) {
   const on = document.querySelector('#dates button.on');
   if (on) on.scrollIntoView({ inline: 'center', block: 'nearest', behavior: 'smooth' });
   go();
+}
+
+/* ==================== 日榜左右滑动切日期 ====================
+   只在「数据看板 + 日榜」生效；手指从屏幕边缘开始、日期条、表单控件和任何弹层内都不接管。
+   左滑看更早一天，右滑看更新一天；日期完全复用 site.dates 与 pickDate()。 */
+const DATE_SWIPE_HINT_KEY = 'dateSwipeHintShownV1';
+let dateSwipeBound = false;
+let dateSwipeStart = null;
+let dateSwipeSuppressClickUntil = 0;
+let dateSwipeIntroTimer = null;
+
+function dateSwipeUsable() {
+  return view === 'data' && period === 'daily' && !!(site && Array.isArray(site.dates) && site.dates.length > 1);
+}
+
+function updateDateSwipeHints() {
+  const box = $('dateSwipeHints');
+  if (!box) return;
+  if (!dateSwipeUsable() || (typeof msgUiBusy === 'function' && msgUiBusy())) {
+    box.classList.add('hidden');
+    box.classList.remove('intro');
+    return;
+  }
+  box.classList.remove('hidden');
+  let seen = false;
+  try { seen = sessionStorage.getItem(DATE_SWIPE_HINT_KEY) === '1'; } catch (_) {}
+  if (seen) {
+    box.classList.remove('intro');
+    return;
+  }
+  try { sessionStorage.setItem(DATE_SWIPE_HINT_KEY, '1'); } catch (_) {}
+  box.classList.add('intro');
+  clearTimeout(dateSwipeIntroTimer);
+  dateSwipeIntroTimer = setTimeout(() => box.classList.remove('intro'), 1800);
+}
+
+function initDateSwipe() {
+  if (dateSwipeBound) return;
+  const el = $('view');
+  if (!el) return;
+  dateSwipeBound = true;
+
+  const excluded = (target) => {
+    const n = target && target.nodeType === 1 ? target : target && target.parentElement;
+    return !!(n && n.closest && n.closest(
+      '#dates,button,a,input,select,textarea,[contenteditable="true"],' +
+      '.msg-box,.pwa-sheet,.gate-box,.cal-card,.st-my-subbar'
+    ));
+  };
+
+  el.addEventListener('touchstart', (e) => {
+    dateSwipeStart = null;
+    if (!dateSwipeUsable() || document.hidden || navigator.onLine === false) return;
+    if (typeof msgUiBusy === 'function' && msgUiBusy()) return;
+    const t = e.touches && e.touches[0];
+    if (!t || e.touches.length !== 1 || excluded(e.target)) return;
+    const vw = (window.visualViewport && window.visualViewport.width) || window.innerWidth || 0;
+    /* 留出 iOS/Android 边缘返回手势区，避免日期切换和系统手势打架。 */
+    if (t.clientX < 24 || (vw && t.clientX > vw - 24)) return;
+    dateSwipeStart = { x: t.clientX, y: t.clientY };
+  }, { passive: true });
+
+  el.addEventListener('touchend', (e) => {
+    const start = dateSwipeStart;
+    dateSwipeStart = null;
+    if (!start) return;
+    const t = e.changedTouches && e.changedTouches[0];
+    if (!t) return;
+    const dx = t.clientX - start.x;
+    const dy = t.clientY - start.y;
+    if (Math.abs(dx) < 56 || Math.abs(dx) < Math.abs(dy) * 1.3) return;
+    const dates = (site && site.dates) || [];
+    const i = dates.indexOf(curDate);
+    if (i < 0) return;
+    const next = dates[i + (dx < 0 ? 1 : -1)];
+    if (!next) return;
+    dateSwipeSuppressClickUntil = performance.now() + 520;
+    updateDateSwipeHints();
+    pickDate(next);
+  }, { passive: true });
+
+  el.addEventListener('touchcancel', () => { dateSwipeStart = null; }, { passive: true });
+  el.addEventListener('click', (e) => {
+    if (performance.now() >= dateSwipeSuppressClickUntil) return;
+    e.preventDefault();
+    e.stopPropagation();
+  }, true);
 }
 
 /* 点月份 / 年份：与日榜日期条同一交互，选中后立刻高亮并加载对应整月数据 */
@@ -7416,11 +7430,10 @@ async function loadMy(signal) {
     const who = await api('/api/public/teams/' + TEAM + '/my/who', { signal });
     if (who && who.needBind) { applyLoginState(who); renderBindCard(who); return; }
     /* 2026-10-18 契约 v2 §4.7：正常账号也要把 who 的身份标志回填进 meState
-       （emailMask/needQq/mustChangePass/phone）—— 否则刚登录进「我的」页，
-       QQ 邮箱行还是「去绑定」（登录响应只带了部分字段时）。只合字段、不动 TEAM/水印，
+       （mustChangePass/phone）—— 避免登录响应只带部分字段时页面显示旧状态。只合字段、不动 TEAM/水印，
        避免把「全团账号」的视角切错（applyLoginState 会改 TEAM）。 */
     if (who && meState) {
-      ['emailMask', 'email', 'needQq', 'needProfile', 'mustChangePass', 'phone',
+      ['needProfile', 'mustChangePass', 'phone',
         'personPhone', 'bound', 'switchable'].forEach((k) => {
         if (who[k] !== undefined) meState[k] = who[k];
       });
@@ -7446,9 +7459,7 @@ async function loadMy(signal) {
        插在 view 内容最顶上（资料卡之前），图标默认 person。
        深链 /my/<sub> 直接落到子页时不挂（公告属于「我的」列表首页）。 */
     if (!mySub) renderMyAnnouncement(site && site.placements && site.placements.my);
-    /* 📩 管理员消息探测（docs/23 §6.1）：主界面渲染完成后拉一次未读，有未读才弹。
-       fire-and-forget：接口失败/无未读/token 过期一律静默（fetchMyMessages 内部兜底），
-       绝不挡主数据；本次页面生命周期只自动弹一次（probeMyMessages 内部锁）。 */
+      /* 管理员消息探测不依赖当前在哪个页面；进入「我的」时补一次不会和全局调度叠请求。 */
     probeMyMessages().catch(() => {});
   } catch (e) {
     if (e && e.name === 'AbortError') return;
@@ -7813,33 +7824,28 @@ function renderMy(d, series, push, accounts) {
 
   /* 推送状态走 /my/push 的真实字段（后端没有 configured 这个键）：
      bound=已对接可推送；scanBound+needActivate=扫了码还没等微信确认（2026-10-17 起归入未完成态）。 */
-  /* 2026-10-13 用户口径：只接微信推送，不显示 QQ。
-     2026-10-15 任务二：三态文案抽成 pushStatusText(p)（2026-10-17 后只剩「我的」列表页这一处使用）。 */
   const pushStatus = pushStatusText(push);
+  const phoneMasked = maskedPhoneText(meState && meState.phone);
 
   $('view').innerHTML = '<div class="section tab-content-enter">' +
     head + big + myLineageExportCard(d) + trend + myAccountsCard(accounts) +
     '<div class="st-my-list">' +
       '<div class="sec">系统服务与偏好</div>' +
       '<div class="st-my-item" id="myPushRow" style="cursor:pointer"><div class="l"><div class="ico"><span class="material-symbols-outlined">notifications</span></div>' +
-      '<div style="min-width:0"><div class="t">消息设置</div>' +
-      '<div class="d">微信机器人对接与推送开关</div></div></div>' +
+      '<div style="min-width:0"><div class="t">微信推送</div>' +
+      '<div class="d">扫码连接微信机器人，设置每日报告与追分提醒</div></div></div>' +
       '<div class="r"><span>' + esc(pushStatus) + '</span>' +
       '<span class="material-symbols-outlined">chevron_right</span></div></div>' +
       '<div class="st-my-item" id="myChaseRow" style="cursor:pointer"><div class="l"><div class="ico"><span class="material-symbols-outlined">flag</span></div>' +
       '<div style="min-width:0"><div class="t">追分设置</div>' +
-      '<div class="d">追人 · 定目标分，进度变化 wxbot 私聊提醒</div></div></div>' +
+      '<div class="d">追人 · 定目标分，进度变化由微信机器人提醒</div></div></div>' +
       '<div class="r"><span>' + esc(chaseSummary(push)) + '</span>' +
       '<span class="material-symbols-outlined">chevron_right</span></div></div>' +
-      '<div class="st-my-item" id="myEmailRow" style="cursor:pointer">' +
-      '<div class="l"><div class="ico"><span class="material-symbols-outlined">mail</span></div>' +
-      '<div style="min-width:0"><div class="t">QQ 邮箱</div>' +
-      '<div class="d">忘记密码时，临时密码发到这个邮箱</div></div></div>' +
-      /* 2026-11-14：只显示绑定状态，不再展示 QQ 号码或脱敏号码。 */
-      '<div class="r">' + (meState && meState.emailMask
-        ? '<span>已绑定</span>'
-        : '<span class="pri">去绑定</span>') +
-      '<span class="material-symbols-outlined">chevron_right</span></div></div>' +
+      '<div class="st-my-item" id="myContactRow" aria-label="联系手机号">' +
+      '<div class="l"><div class="ico"><span class="material-symbols-outlined">phone_iphone</span></div>' +
+      '<div style="min-width:0"><div class="t">联系手机号</div>' +
+      '<div class="d">仅用于登录与紧急联系，不在榜单公开展示</div></div></div>' +
+      '<div class="r"><span>' + (phoneMasked ? esc(phoneMasked) : '未绑定') + '</span></div></div>' +
       '<div class="st-my-item" id="myForgot" style="cursor:pointer">' +
       '<div class="l"><div class="ico"><span class="material-symbols-outlined">lock_reset</span></div>' +
       '<div class="t">重置密码</div></div>' +
@@ -7905,8 +7911,6 @@ function renderMy(d, series, push, accounts) {
        由对话框负责覆盖本地登录态。 */
     openMyPwdDlg();
   };
-  /* 2026-10-18 契约 v2 §4.4：我的页常驻入口，与登录后 nudge 共用同一个弹窗 */
-  $('myEmailRow').onclick = () => { openQqDlg({ source: 'my' }); };
   /* 列表两行滚到页内对应的操作卡：绑定行 → 绑定/审计卡，推送行 → 推送卡。
      卡片是异步渲染的（my / series / claim / push / accounts 五个请求回来才拼 DOM），
      所以找不到目标时短轮询等一下再滚，而不是静默 return 让用户以为点了没反应。 */
@@ -7958,7 +7962,9 @@ function renderMy(d, series, push, accounts) {
       retry.disabled = true;
       retry.textContent = '重试中…';
       try {
-        renderPushBox(await fetchPush());
+        const p = await fetchPush();
+        applyPushStateToMyUi(p);
+        renderPushBox(p);
       } catch (e) {
         retry.disabled = false;
         retry.textContent = '重试';
@@ -7972,11 +7978,9 @@ function renderMy(d, series, push, accounts) {
 /* ==================== 「我的」子页（2026-10-13 下一页式路由） ==================== */
 /* 子页清单：id 元素映射 —— 列表首页的一行 ↔ 子页里要显示的那张卡 */
 const MY_SUB_CARDS = {
-  /* 契约 C（2026-10-15）：原「推送机器人服务」升级为「消息设置」（微信对接 +
-     推送开关 + 追分设置入口）。push 保留为兼容别名：老链接 /my/push 与
-     新链接 /my/wechat 打开的是同一张卡。 */
-  wechat:  { title: '消息设置',         card: 'myPushCard' },
-  push:    { title: '消息设置',         card: 'myPushCard' },
+  /* 底栏「微信推送」与「我的」共用同一张卡；push 为兼容旧链接的别名。 */
+  wechat:  { title: '微信推送',         card: 'myPushCard' },
+  push:    { title: '微信推送',         card: 'myPushCard' },
   chase:   { title: '追分设置',         card: 'myChaseCard' },
 };
 const MY_SUB_INFO = {
@@ -8169,7 +8173,7 @@ function openMyPwdDlg(opts) {
       if (meState) meState.mustChangePass = false;
       close();
       toast(force ? '密码已修改' : '密码已重置');
-      refreshWho().catch(() => {});   // 重拉身份，needQq/mustChangePass 与服务端对齐
+      refreshWho().catch(() => {});   // 重拉身份，mustChangePass / phone 与服务端对齐
       if (typeof opts.after === 'function') { try { opts.after(); } catch (_) {} }
     } catch (e) {
       if (e.code === 'UNAUTHORIZED') { close(); sessionExpired(); return; }
@@ -8178,120 +8182,6 @@ function openMyPwdDlg(opts) {
       fail(apiErrText(e) || '重置失败，稍后再试');
     }
   };
-}
-
-/* ==================== 绑定 / 修改 / 解绑 QQ 邮箱（契约 v2 §4.4/§4.7 / §3.4） ====================
-   登录后的 nudge 与「我的」页的 QQ 邮箱行共用同一个弹窗（source: 'nudge' | 'my'）。
-   接口：POST /api/public/my/email  {"qq":"12345678"}；{"qq":""} = 解绑
-     200 {ok:true, emailMask:"123***@qq.com"}；400 INVALID_QQ / QQ_TAKEN / NEED_PROFILE；401
-   2026-10-18 用户口径：同一 QQ 不能绑多个账号；没有 QQ 邮箱的找管理员。
-   状态只用服务端 emailMask 判断是否已绑定；页面不再展示绑定号码。 */
-function openQqDlg(opts) {
-  opts = opts || {};
-  const source = opts.source === 'nudge' ? 'nudge' : 'my';
-  const current = (meState && (meState.emailMask || meState.email || '')) || '';
-  const dlg = makeDialog('qqMask', '');
-  const box = dlg.box;
-  const failEl = () => $('qqErr');
-
-  const applyResult = (d, qq, bound) => {
-    const maskTxt = bound ? ((d && d.emailMask) || maskQq(qq)) : '';
-    if (meState) {
-      meState.emailMask = maskTxt;
-      meState.email = maskTxt;
-      meState.needQq = bound ? false : true;
-    }
-    dlg.close();
-    toast(bound ? (current ? 'QQ 邮箱已更新' : 'QQ 邮箱已绑定')
-      : 'QQ 邮箱已解绑，忘记密码请联系管理员');
-    if (source === 'my' || view === 'my') { try { loadMy(); } catch (_) {} }
-  };
-
-  const submit = async (qq) => {
-    const btn = $('qqGo');
-    const errEl = failEl();
-    const fail = (m) => { if (errEl) { errEl.textContent = m; errEl.classList.remove('hidden'); } };
-    errEl.classList.add('hidden');
-    if (!isValidQq(qq)) return fail('QQ 号应为 5~12 位数字，且不能以 0 开头');
-    btn.disabled = true; btn.textContent = '绑定中…';
-    const input = $('qqIn');
-    if (input) input.disabled = true;
-    try {
-      const d = await postJson('/api/public/my/email', { qq: qq }, { auth: true });
-      applyResult(d, qq, true);
-    } catch (e) {
-      if (e.code === 'UNAUTHORIZED') { dlg.close(); sessionExpired(); return; }
-      btn.disabled = false; btn.textContent = current ? '保存' : (source === 'nudge' ? '立即绑定' : '绑定');
-      if (input) input.disabled = false;
-      if (e.code === 'NEED_PROFILE') { dlg.close(); renderProfileGuide(meState || {}); return; }
-      fail(apiErrText(e) || '保存失败，稍后再试');
-    }
-  };
-
-  const renderUnbindConfirm = () => {
-    box.innerHTML =
-      '<button class="dialog-close" id="qqX2" aria-label="关闭"><span class="material-symbols-outlined">close</span></button>' +
-      '<h3>解绑 QQ 邮箱</h3>' +
-      '<div class="warn-box">解绑后，忘记密码将无法自助重置，只能联系管理员帅帅在后台重置。<br>确定要解绑吗？</div>' +
-      '<div class="btn-row"><button class="go gray" id="qqUnbindCancel">取消</button>' +
-      '<button class="go" id="qqUnbindOk" style="background:#F43F5E">仍要解绑</button></div>';
-    $('qqX2').onclick = dlg.close;
-    $('qqUnbindCancel').onclick = renderMain;
-    $('qqUnbindOk').onclick = async () => {
-      const btn = $('qqUnbindOk');
-      btn.disabled = true; btn.textContent = '解绑中…';
-      try {
-        const d = await postJson('/api/public/my/email', { qq: '' }, { auth: true });
-        applyResult(d, '', false);
-      } catch (e) {
-        if (e.code === 'UNAUTHORIZED') { dlg.close(); sessionExpired(); return; }
-        btn.disabled = false; btn.textContent = '仍要解绑';
-        const errEl = document.createElement('div');
-        errEl.className = 'form-err';
-        errEl.textContent = apiErrText(e) || '解绑失败，稍后再试';
-        btn.parentNode.parentNode.appendChild(errEl);
-      }
-    };
-  };
-
-  const renderMain = () => {
-    box.innerHTML =
-      '<button class="dialog-close" id="qqX" aria-label="关闭"><span class="material-symbols-outlined">close</span></button>' +
-      '<h3>' + (current ? '修改 QQ 邮箱' : '绑定 QQ 邮箱') + '</h3>' +
-      '<p class="tip">' + (source === 'nudge'
-        ? '绑定后忘记密码可以自助重置，临时密码会发到你的 QQ 邮箱。<br>没有 QQ 邮箱？请联系管理员帅帅。'
-        : '忘记密码时，临时密码会发到这个 QQ 邮箱。<br>没有 QQ 邮箱？请联系管理员帅帅。') + '</p>' +
-      (current ? '<div class="form-hint" style="margin-top:0">当前已绑定 QQ 邮箱，可输入新号码改绑；不再显示原绑定号码。</div>' : '') +
-      '<div class="field-label">QQ 号</div>' +
-      '<div class="qq-wrap"><input id="qqIn" inputmode="numeric" maxlength="12" placeholder="QQ 号" autocomplete="off">' +
-        '<span class="qq-suffix">@qq.com</span></div>' +
-      '<div class="qq-preview" id="qqPreview">将绑定：你的 QQ 邮箱</div>' +
-      '<div class="form-err hidden" id="qqErr"></div>' +
-      '<div class="btn-row">' +
-        (source === 'nudge' ? '<button class="go gray" id="qqLater">以后再说</button>'
-          : '<button class="go gray" id="qqCancel">取消</button>') +
-        '<button class="go" id="qqGo">' + (current ? '保存' : (source === 'nudge' ? '立即绑定' : '绑定')) + '</button>' +
-      '</div>' +
-      (current ? '<div style="text-align:right;margin-top:12px">' +
-        '<button class="link-danger" id="qqUnbind">解绑 QQ 邮箱</button></div>' : '');
-    $('qqX').onclick = dlg.close;
-    if ($('qqLater')) $('qqLater').onclick = dlg.close;   // 写冷却：markQqNudged 在弹出时已记一次
-    if ($('qqCancel')) $('qqCancel').onclick = dlg.close;
-    const input = $('qqIn');
-    const syncPreview = () => {
-      const q = String(input.value || '').replace(/\D/g, '').replace(/^0+/, '').slice(0, 12);
-      input.value = q;
-      $('qqPreview').textContent = isValidQq(q) ? '将绑定：' + q + '@qq.com' :
-        (q ? 'QQ 号应为 5~12 位数字，且不能以 0 开头' : '将绑定：你的 QQ 邮箱');
-    };
-    input.addEventListener('input', () => { failEl().classList.add('hidden'); syncPreview(); });
-    input.onkeydown = (e) => { if (e.key === 'Enter') $('qqGo').click(); };
-    setTimeout(() => { try { input.focus(); } catch (_) {} }, 60);
-    $('qqGo').onclick = () => submit(String(input.value || '').trim());
-    if ($('qqUnbind')) $('qqUnbind').onclick = renderUnbindConfirm;
-  };
-
-  renderMain();
 }
 
 /* 追分设置入口行的右侧摘要（2026-10-12：没开追分开关 = 关；开了看目标数）。
@@ -8317,10 +8207,11 @@ function chaseSummary(p) {
    =微信未同步。当前只被「我的」列表页 myPushRow 的右侧摘要使用
    （2026-10-17 极简口径：消息设置页与追分卡里的入口行均已撤，文案保留两态口径）。 */
 function pushStatusText(p) {
-  return !p ? '微信未同步'
-    : p.bound ? '微信已同步'
-    : p.scanBound ? (p.needActivate ? '待激活' : '已扫码')
-    : '微信未同步';
+  if (!p) return '状态未知';
+  if (p.bound && !p.paused) return '已连接';
+  if (p.paused || p.rebindRequired) return '已暂停';
+  if (p.scanBound) return p.needActivate ? '等待激活' : '等待确认';
+  return '未连接';
 }
 
 /* ==================== 微信推送（绑定机器人 + 追分目标）数据源 ==================== */
@@ -8344,7 +8235,7 @@ function pushCard(p) {
      滚不到任何东西，用户点了没反应，还以为功能是坏的。
      2026-10-15 契约 C：卡名从「微信推送服务」改成「消息设置」，页内三段由
      pushPageHtml 组装（微信对接 / 推送开关 / 追分设置入口）。 */
-  return '<div class="st-my-list" id="myPushCard"><div class="sec">消息设置</div>' +
+  return '<div class="st-my-list" id="myPushCard"><div class="sec">微信推送</div>' +
     '<div id="pushBox" style="padding:0 1rem 1rem"></div></div>';
 }
 
@@ -8368,11 +8259,25 @@ async function fetchPush() {
   return p;
 }
 
+function applyPushStateToMyUi(p) {
+  const setRow = (id, text) => {
+    const row = $(id);
+    const label = row && row.querySelector('.r > span:first-child');
+    if (label) label.textContent = text;
+  };
+  setRow('myPushRow', pushStatusText(p));
+  setRow('myChaseRow', chaseSummary(p));
+}
+
 async function refreshPush() {
   try {
-    renderPushBox(await fetchPush());
+    const p = await fetchPush();
+    applyPushStateToMyUi(p);
+    if ($('pushBox')) renderPushBox(p);
+    return p;
   } catch (e) {
     toast(e.message || '刷新失败');
+    return null;
   }
 }
 
@@ -8386,22 +8291,19 @@ function renderPushBox(p) {
   bindPushBox(p);
 }
 
-/* 「消息设置」子页两段（2026-10-17 用户口径：极简重做）：
-   ① 微信对接 —— 两个状态：
-      状态 A 未对接（!p.bound，含 scanBound 还没等微信确认的旧态）：
-        一句说明 + 一个「扫码对接」按钮 → 二维码 + 4 位对接码 + 2 秒轮询，
-        confirmed 即对接完成；首次扫码仍要用户先给机器人发一条消息才能生成会话上下文；
-      状态 B 已对接（p.bound）：一行「✓ 已对接（昵称）」+「重新绑定」按钮。
-   ② 推送开关 —— 仅状态 B 出现（追分提醒 / 每日报告 / 师门日报）。
-   原第三段「追分设置」入口行整体删除：追分入口只留在「我的」列表页那一行。
-   后端 channelConfigured=false（管理员还没接机器人）时整页只给一句说明。 */
+/* 「微信推送」子页：连接状态 + 扫码/待激活/已连接/已暂停 + 推送开关。
+   4 位对接码只作为扫码失败时的折叠兜底，不再与主流程并列。 */
 function pushPageHtml(p) {
   if (!p.channelConfigured) return pushNotReady();
-  return wechatBindHtml(p) + pushFlagsHtml(p);
+  return wechatBindHtml(p) + pushFlagsHtml(p) +
+    '<div class="hint" style="margin:12px 0 2px;line-height:1.7">' +
+      '在微信机器人里发送「帮助」会按身份显示：普通用户只看用户命令，管理员额外显示管理员命令。' +
+    '</div>';
 }
 
 function pushNotReady() {
-  return '<div class="sub" style="margin-top:6px;line-height:1.7">' +
+  return pushSecTitle('微信推送') +
+    '<div class="sub" style="margin-top:6px;line-height:1.7">' +
     '微信推送暂未开放（管理员还没连接微信机器人），稍后再看。</div>';
 }
 
@@ -8410,22 +8312,14 @@ function pushSecTitle(text) {
   return '<div class="card-t" style="margin:12px 0 2px;font-size:13px">' + text + '</div>';
 }
 
-/* ① 微信对接（2026-10-17 用户口径：两态极简，原三态/多段提示全部收拢）：
-   · 状态 B 已对接（p.bound）：一行「✓ 已对接（昵称）」+「重新绑定」按钮。
-     重新绑定只重置推送接线、不注销扫码登录，不需要重新扫码。
-   · 状态 A 未对接（!p.bound，含 scanBound 旧态）：交给 pushUnboundHtml ——
-     一句说明 + 「扫码对接」按钮。 */
 function wechatBindHtml(p) {
-  let h = pushSecTitle('微信对接');
-  if (p.bound) {
-    /* 昵称来自后端 scanNickname：用户换了号或代绑过也能看出推送发去哪 */
+  let h = pushSecTitle('微信推送');
+  if (p.bound && !p.paused) {
     const who = p.scanNickname ? '（' + esc(p.scanNickname) + '）' : '';
-    h += '<div class="row"><span class="st ok">✓ 已对接' + who + '</span></div>';
-    /* 推送失败原因只在真出过错时多一行，正常状态不给页面加行数 */
-    if (p.lastError) {
-      h += '<div class="hint">上次推送没成功：' + esc(p.lastError) + '</div>';
-    }
-    h += '<button class="go gray" id="pushUnbind" style="margin-top:10px">重新绑定</button>';
+    h += '<div class="row"><span class="st ok">✓ 已连接微信推送' + who + '</span></div>' +
+      '<div class="hint" style="line-height:1.7">每日报告、追分提醒和已开启的师门日报会发送到这个微信会话。</div>';
+    if (p.lastError) h += '<div class="hint">上次推送没成功：' + esc(p.lastError) + '</div>';
+    h += '<button class="go gray" id="pushUnbind" style="margin-top:10px">解除微信推送绑定</button>';
   } else {
     h += pushUnboundHtml(p);
   }
@@ -8442,50 +8336,47 @@ function pushUnboundHtml(p) {
      点击「重新获取二维码」会重建二维码区；startWxDock 先复位旧会话状态，
      后端 start 也会复用仍有效的 pending 会话，不会立刻另开一张。 */
   const scannedWaiting = !wxDockConfirmed && !wxDockForceQr && !!(p && p.scanBound);
+  const needsReconnect = !!(p && (p.paused || p.rebindRequired));
   if (wxDockConfirmed) {
-    /* 本次会话刚轮询到 confirmed（toast 会被重渲染冲掉，这里钉住）。
-       · 首次扫码：没有 context_token，iLink 无法主动发消息 —— 必须提示「给机器人发一条消息」，
-         对方发完后机器人会立即连发「对接成功」和功能介绍并激活；
-       · 重扫/解绑后重扫：后端复用已有会话上下文主动连发同样两条消息，正常显示成功即可。 */
     h += '<div class="sub" style="margin-top:8px;line-height:1.75">' +
       (wxDockNeedActivate
-        ? '✅ 已完成对接<br>最后一步：在微信里给机器人随便发一条消息，机器人会依次发送“对接成功”和功能介绍，同时激活推送。'
-        : '✅ 对接成功') +
+        ? '✅ 扫码已确认<br>最后一步：在微信里给机器人发送任意一条消息，收到“对接成功”后推送即生效。'
+        : '✅ 微信推送已连接，可以继续设置下方推送内容。') +
       '</div>';
   } else if (scannedWaiting) {
-    /* 扫码后不再展示大二维码：一句明确的确认提示 + 小号重取入口（2026-10-19） */
     h += '<div class="wx-bind-note" style="margin-top:10px">' +
-      '已扫码，请在微信中确认完成机器人对接。若页面一直没有变化，' +
-      '请重新获取二维码后再扫一次。默认每天自动推送每日报告。</div>';
+      '已扫码，正在等待微信确认。确认后请给机器人发送一条消息完成激活；' +
+      '若页面长时间无变化，可重新获取二维码。</div>';
     if (p.needActivate) {
       h += '<div class="hint" style="margin-top:6px;line-height:1.7">' +
-        '首次对接：完成后给机器人发一条消息，即会收到成功提示和功能介绍。</div>';
+        '首次连接需要你在微信里主动发一条消息，机器人才能建立回复会话。</div>';
     }
     h += '<button class="go gray" id="pushWxRefresh" style="margin-top:10px">重新获取二维码</button>';
   } else {
     h += '<div class="wx-bind-copy">' +
-      '<div class="wx-bind-lead">截屏后用微信扫码绑定机器人</div>' +
-      '<p>每日自动发给你数据；收徒弟后，还有<span class="nowrap">徒弟数据</span>、' +
-      '<span class="nowrap">个人数据</span>等。</p>' +
-      '<p>欢迎绑定体验，后续会持续更新更多功能。</p>' +
+      (needsReconnect
+        ? '<div class="wx-bind-note" style="margin:2px 0 12px">微信推送已解除或暂停。重新扫码并给机器人发一条消息，即可恢复每日报告和追分提醒。</div>'
+        : '<div class="wx-bind-lead">用微信扫码连接每日数据机器人</div>') +
+      '<p>连接后，数据更新会自动推送每日报告；设置追分目标后也会收到提醒。</p>' +
+      '<p>扫码后如果微信要求确认，请按提示完成；机器人不会索要密码或验证码。</p>' +
       '</div>';
   }
   if (!wxDockConfirmed && !scannedWaiting) {
   h += '<div class="wx-bind-qr" id="pushQrArea" aria-busy="true">' +
-    '<div class="wx-shot-hint">截屏保存，微信「扫一扫」→ 从相册选择</div>' +
+    '<div class="wx-shot-hint">截屏保存后，在微信「扫一扫」中选择相册图片</div>' +
     /* 二维码卡（.qr-* 一套样式是原「扫码绑定」卡留下的：208px 白底 + 四角取景框 +
-       状态行 + 倒计时），页面打开即自动获取；用户截屏后去微信相册扫码。 */
+       状态行 + 倒计时），页面打开即自动获取；验证码与对接码仅作异常兜底。 */
     '<div class="qr-frame"><i></i><div class="qr-wrap" id="pushWxQrWrap">' +
     '<div class="qr-placeholder" id="pushWxQrPlaceholder">二维码生成中…</div>' +
     '<img class="qrcode" id="pushWxQr" width="208" height="208" ' +
     'alt="微信机器人绑定二维码，截屏后可从微信相册扫码"></div><i></i></div>' +
     '<div class="qr-status wait" id="pushWxStatus" role="status" aria-live="polite">' +
     '<span class="dot"></span><span id="pushWxStatusTx">二维码获取中…</span></div>' +
-    '<div class="qr-expire" id="pushWxExpire">打开微信「扫一扫」，从相册选择即可绑定</div>' +
+    '<div class="qr-expire" id="pushWxExpire">扫码后按微信提示确认，必要时给机器人发送一条消息</div>' +
     '<button class="go gray hidden" id="pushWxRefresh" style="margin-top:8px">获取二维码</button>' +
     /* 上游要求验证码时才出现（status = need_verifycode），官方流程的一部分，保留 */
     '<div class="hidden" id="pushWxVerifyWrap" style="margin-top:8px;text-align:left">' +
-    '<div class="hint">微信让你输验证码：把微信里显示的数字填到这里。</div>' +
+    '<div class="hint">微信提示需要安全验证时，把微信里显示的数字填到这里。</div>' +
     '<input id="pushWxVerify" inputmode="numeric" autocomplete="one-time-code" ' +
     'aria-label="微信验证码" placeholder="微信里显示的验证码" ' +
     'style="width:100%;height:42px;border:1px solid var(--hairline);' +
@@ -8493,9 +8384,9 @@ function pushUnboundHtml(p) {
     '<button class="go gray" id="pushWxVerifyGo" style="margin-top:6px">提交验证码</button></div>' +
     /* 4 位对接码：start 响应带码时展开一个可折叠兜底；默认只走扫码，不抢主流程注意力。 */
     '<details class="wx-code-fallback hidden" id="pushCodeFallback">' +
-    '<summary>扫码遇到问题？使用 4 位对接码</summary>' +
+    '<summary>扫码失败时备用：使用 4 位对接码</summary>' +
     '<div class="hint wx-code-card" id="pushCodeBox">' +
-    '<div class="sub">在微信里把这 4 位数字发给机器人，也能完成对接</div>' +
+    '<div class="sub">仅在二维码无法识别时使用：把这 4 位数字发给机器人完成连接。</div>' +
     '<div class="wx-code-main"><b id="pushCodeValue">—</b>' +
     '<button class="go gray" id="pushCodeCopy" disabled>复制对接码</button></div>' +
     '<div class="qr-expire" id="pushCodeExpire">30 分钟内有效</div>' +
@@ -8972,7 +8863,7 @@ function renderChaseBox(p) {
       : p.scanBound
         ? '<div class="hint">微信还在待激活：未绑定微信也能先设目标，绑定后提醒自动生效。</div>'
         : '<div class="hint">未绑定微信也能先设目标，绑定后提醒自动生效；' +
-          '也可以先去「消息设置」扫码绑定。</div>';
+          '也可以先去「微信推送」扫码连接。</div>';
   }
   if (p.admin) {
     h += '<div class="sub" style="margin-top:6px;line-height:1.7">管理员观看账号没有自己的音浪，' +
@@ -9083,7 +8974,9 @@ function bindChaseRetry() {
     retry.disabled = true;
     retry.textContent = '重试中…';
     try {
-      renderPushBox(await fetchPush());   // renderPushBox 内部会同步刷 chase 卡
+      const p = await fetchPush();
+      applyPushStateToMyUi(p);
+      renderPushBox(p);   // renderPushBox 内部会同步刷 chase 卡
     } catch (e) {
       retry.disabled = false;
       retry.textContent = '重试';
@@ -9138,12 +9031,11 @@ function bindPushBoundHandlers(p) {
   if (swD) swD.onchange = saveFlags;
   if (swL) swL.onchange = saveFlags;
 
-  /* 「重新绑定」（2026-10-20 改名，原「取消绑定」）：confirm 后 POST /my/push/unbind
-     → refreshPush 回状态 A。后端只重置推送接线、不注销扫码登录，重新对接不用再扫码。 */
+  /* 解除绑定只停止微信推送，不注销展示端登录；重新连接需要重新扫码。 */
   const unbind = $('pushUnbind');
   if (unbind) {
     unbind.onclick = async () => {
-      if (!confirm('重新绑定会先解除当前推送，确定继续吗？')) return;
+      if (!confirm('解除后将停止每日报告、追分提醒和师门日报推送，但不会退出展示端登录。确定解除吗？')) return;
       unbind.disabled = true;
       try {
         await fetch('/api/public/teams/' + TEAM + '/my/push/unbind', {
@@ -9156,7 +9048,7 @@ function bindPushBoundHandlers(p) {
           const d = await r.json().catch(() => ({}));
           if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
         });
-        toast('已解除当前绑定，请重新对接');
+        toast('已解除微信推送，需要重新扫码连接');
         /* 「本次会话刚对接成功」的标记一并清掉：回状态 A 时不能再显示「✅ 对接成功」 */
         wxDockConfirmed = false;
         wxDockNeedActivate = false;
@@ -10226,6 +10118,7 @@ function switchView(v, opts) {
      并入 #mhAnn 一并删除。 */
   if (v === 'data') mhAnnRestore();
   else mhAnnCollapse();
+  updateDateSwipeHints();
   /* 🎈 弹幕层只在看板显示：切走统一收口隐藏（挂载点在 renderList → renderDanmaku，
      切回 data 重新渲染榜单时会自动恢复）。 */
   /* 弹幕条随 renderList 一起输出/移除，切视图无需额外收口（2026-10-19 第三轮） */
@@ -10257,6 +10150,7 @@ function setPeriod(p) {
   if (p === 'daily') calHide();    // 月/年切换时把开着的日历收掉
   curPeriod = snapPeriod(p, nowPeriod(p));   // 只落有数据的周期
   renderDates();
+  updateDateSwipeHints();
   go();
 }
 
@@ -10892,17 +10786,20 @@ function maybeAnnounce() {
    · POST /api/public/my/messages/{id}/read（X-My-Token）→ {ok:true}，幂等
    · GET  /api/public/my/messages/{id}/image.png（X-My-Token）→ image/png，按收件人实时渲染（水印=本人姓名）
    行为约定：
-   · 登录成功进「我的」主界面后探测一次；有未读才弹，无未读什么都不做
+   · 登录后在任意页面探测；有未读才弹，无未读什么都不做
+   · 与其他登录门/公告/安装引导/WorkBuddy/日历等弹层互斥，占用时自动延后
    · 弹窗内列表展示全部未读（最新在上），不做连续弹
-   · 「知道了」逐条 POST read（allSettled，失败不阻塞关闭但 console.warn）→ 关闭
-   · 单条也可先标已读；全部已读后自动关闭
-   · 本次页面生命周期只自动弹一次（内存变量；「知道了」后不再弹）
+   · 「知道了」调用现有已读接口；全部回执持久成功后才关闭，失败可重试
+   · notice SSE 到达后重新探测，不丢新通知
    · token 未登录/过期 → 非 2xx 直接静默返回，绝不挡页面加载 */
 
-/* 会话内防重弹：本次页面生命周期只自动弹一次；「知道了」/ 单条全读后也置 true */
+/* 当前未读批次是否已经展示过；notice SSE 到达时会重新置 false。 */
 let msgModalAutoShown = false;
-/* 打开中的弹窗收起句柄（dismissMsgModal 用；登录门出现时主动让位） */
 let msgModalCtx = null;
+let msgProbeTimer = null;
+let msgProbeBusy = false;
+let msgProbeAttempts = 0;
+let myMessagesInFlight = null;
 
 /* 单条消息的 date 字段过白名单：只放 数字/-/: 与空格，其余原样丢弃（防注入显示层）。
    形如 2026-10-14 的业务日与 2026-10-14 18:00 的展示时间都能通过；空/非法返回空串。 */
@@ -10913,26 +10810,32 @@ function msgSafeDate(v) {
   return /^\d{4}-\d{2}-\d{2}([ ]\d{2}:\d{2}(:\d{2})?)?$/.test(cleaned) ? cleaned : '';
 }
 
-/* 拉未读消息：非 2xx（含 401 登录过期）/网络失败 → null，调用方静默忽略 */
-async function fetchMyMessages() {
-  try {
-    const r = await fetch('/api/public/my/messages', { headers: myTokenHeaders() });
-    if (!r.ok) return null;
-    const d = await r.json().catch(() => null);
-    if (!d || !Array.isArray(d.items)) return null;
-    /* 只认带合法 id 的条目；title/content/date 缺省给空串，渲染端兜底 */
-    return d.items.filter((it) => it && it.id != null)
-      .map((it) => ({
-        id: it.id,
-        title: String(it.title || ''),
-        content: String(it.content || ''),
-        imageKind: String(it.imageKind || ''),
-        date: String(it.date || ''),
-        createdAt: String(it.createdAt || ''),
-      }));
-  } catch (_) {
-    return null;   // 网络失败：静默，绝不挡页面
-  }
+/* 拉未读消息：非 2xx（含 401 登录过期）/网络失败 → null，调用方静默忽略。
+   角标和弹窗探测可能同时触发，共用同一个 in-flight Promise，避免重复请求。 */
+function fetchMyMessages() {
+  if (myMessagesInFlight) return myMessagesInFlight;
+  myMessagesInFlight = (async () => {
+    try {
+      const r = await fetch('/api/public/my/messages', { headers: myTokenHeaders() });
+      if (!r.ok) return null;
+      const d = await r.json().catch(() => null);
+      if (!d || !Array.isArray(d.items)) return null;
+      return d.items.filter((it) => it && it.id != null)
+        .map((it) => ({
+          id: it.id,
+          title: String(it.title || ''),
+          content: String(it.content || ''),
+          imageKind: String(it.imageKind || ''),
+          date: String(it.date || ''),
+          createdAt: String(it.createdAt || ''),
+        }));
+    } catch (_) {
+      return null;
+    } finally {
+      myMessagesInFlight = null;
+    }
+  })();
+  return myMessagesInFlight;
 }
 
 /** 底栏「微信对接」未读角标（2026-10-18 第三轮，设计稿 #wechat-badge）：
@@ -11102,7 +11005,10 @@ function openMsgModal(items) {
   });
   card.appendChild(listEl);
 
-  /* 底部「知道了」：逐条 POST read（allSettled，幂等），失败不阻塞关闭 */
+  /* 底部「知道了」：全部已读回执持久成功后才关闭；失败时保留消息，允许重试。 */
+  const actionNote = document.createElement('div');
+  actionNote.className = 'msg-swipe-hint hidden';
+  actionNote.setAttribute('role', 'status');
   const actions = document.createElement('div');
   actions.className = 'msg-actions';
   const okBtn = document.createElement('button');
@@ -11111,18 +11017,24 @@ function openMsgModal(items) {
   okBtn.textContent = '知道了';
   okBtn.onclick = () => {
     okBtn.disabled = true;
+    okBtn.textContent = '保存中…';
+    actionNote.classList.add('hidden');
     const pending = list.filter((x) => !x.__read);
-    Promise.allSettled(pending.map((x) => postMsgRead(x.id))).then((rs) => {
-      rs.forEach((r, i) => {
-        if (r.status === 'rejected') console.warn('[msgModal] 已读回执失败 id=' +
-          (pending[i] && pending[i].id), r.reason);
-      });
-      refreshWxBadge();   // 批量已读 → 底栏角标归零/更新
+    Promise.all(pending.map((x) => postMsgRead(x.id))).then(() => {
+      pending.forEach((x) => { x.__read = true; });
+      refreshWxBadge();
       closeMsgModal();
+    }).catch((e) => {
+      console.warn('[msgModal] 已读回执失败', e);
+      okBtn.disabled = false;
+      okBtn.textContent = '重试确认';
+      actionNote.textContent = '已读状态没有保存成功，请检查网络后重试。';
+      actionNote.classList.remove('hidden');
     });
   };
   actions.appendChild(okBtn);
   card.appendChild(actions);
+  card.appendChild(actionNote);
 
   if (list.length > 1) {
     const hint = document.createElement('div');
@@ -11155,6 +11067,7 @@ function closeMsgModal() {
   box.classList.remove('msg-overlay-in');
   box.innerHTML = '';
   unlockScroll();
+  updateDateSwipeHints();
 }
 
 /** 收起消息弹窗（登录门出现时调用，让位优先级更高的界面） */
@@ -11164,14 +11077,48 @@ function dismissMsgModal() {
   else if (msgModalCtx) { msgModalCtx = null; }
 }
 
-/** 登录成功进「我的」主界面后的探测入口：只自动弹一次，任何失败静默忽略。
-    调用点：loadMy() 主数据渲染完成后（fire-and-forget，不 await，绝不挡主数据）。 */
+function msgUiBusy() {
+  const visible = (id) => {
+    const el = $(id);
+    return !!(el && !el.classList.contains('hidden'));
+  };
+  return visible('gate') || visible('announce') || visible('itemPopup') ||
+    visible('msgModal') || visible('pwaGuide') || visible('calPop') ||
+    visible('myPwdMask') || !!document.querySelector('.dlg-mask');
+}
+
+function scheduleMyMessageProbe(delay, reset) {
+  if (!myToken() || msgModalAutoShown) return;
+  if (reset) msgProbeAttempts = 0;
+  clearTimeout(msgProbeTimer);
+  msgProbeTimer = setTimeout(() => {
+    msgProbeTimer = null;
+    probeMyMessages().catch(() => {});
+  }, Math.max(0, Number(delay) || 0));
+}
+
+/** 登录后任意页面都可探测；若其他弹层占用则短暂等待，绝不叠层。 */
 async function probeMyMessages() {
-  if (msgModalAutoShown) return;
-  msgModalAutoShown = true;   // 先占位：本次页面生命周期只探测弹一次，失败也不重试
+  if (!myToken() || msgModalAutoShown || msgProbeBusy) return;
+  if (document.hidden) return;
+  if (msgUiBusy()) {
+    if (msgProbeAttempts++ < 30) scheduleMyMessageProbe(1200);
+    return;
+  }
+  msgProbeBusy = true;
   const items = await fetchMyMessages();
-  if (!items || !items.length) return;   // 无未读 / token 失效 / 网络失败：什么都不做
-  if (!$('gate') || !$('gate').classList.contains('hidden')) return;   // 登录门开着：不叠层
+  msgProbeBusy = false;
+  if (!items) return;
+  if (!items.length) {
+    msgModalAutoShown = true;
+    return;
+  }
+  if (msgModalAutoShown) return;
+  if (msgUiBusy()) {
+    if (msgProbeAttempts++ < 30) scheduleMyMessageProbe(1200);
+    return;
+  }
+  msgModalAutoShown = true;
   openMsgModal(items);
 }
 
@@ -12361,6 +12308,7 @@ function hideBootGate() {
 
 (async function boot() {
   settleInstalledWebApp();
+  window.addEventListener('appinstalled', () => { try { settleInstalledWebApp(); } catch (_) {} });
   applyTeam();
   try {
     const wechatTip = $('inappBrowserTip');
@@ -12378,8 +12326,13 @@ function hideBootGate() {
     if (Date.now() - appUpdateCheckedAt > APP_UPDATE_CHECK_MS) checkSoftwareUpdate(false);
   });
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden && Date.now() - appUpdateCheckedAt > APP_UPDATE_CHECK_MS) {
-      checkSoftwareUpdate(false);
+    if (document.hidden) return;
+    if (Date.now() - appUpdateCheckedAt > APP_UPDATE_CHECK_MS) checkSoftwareUpdate(false);
+    if (myToken()) {
+      msgModalAutoShown = false;
+      msgProbeAttempts = 0;
+      scheduleMyMessageProbe(500, true);
+      scheduleWxBindingRefresh();
     }
   });
   setTimeout(() => {
@@ -12439,12 +12392,14 @@ function hideBootGate() {
   else if (me && me.mustChangePass && !mustPwdPrompted) {
     setTimeout(() => { try { if (!mustPwdPrompted) openMustChangeDlg(); } catch (_) {} }, 600);
   }
+  if (me && !me.needProfile) scheduleMyMessageProbe(1300, true);
   /* 登录前已在 boot() 里完成 /my/who 校验，这里不要二次 who + 二次 site。 */
   bootRest({ authed: true, prefetchedSite: prefetched && prefetched.site });
 })();
 
 async function bootRest(opts) {
   opts = opts || {};
+  initDateSwipe();
 
   /* 主导航 + 分组子导航 + 前进/后退
      底栏同时支持「普通点击」与「长按拖拽松手」切路由。pointerup 后浏览器补发的
@@ -12643,6 +12598,7 @@ async function bootRest(opts) {
   try { renderDanmaku(); } catch (e) {}
   /* 平台推荐引导放最后，每天最多一次；首次绑定手机号后会立即优先展示。 */
   setTimeout(() => { try { maybeShowPwaGuide(false); } catch (_) {} }, 1600);
+  if (myToken()) scheduleMyMessageProbe(1400, true);
 }
 
 /* 字段面板已随「严格按排行榜版式」移除：显示内容固定，后台级开关仍在后端生效。 */
