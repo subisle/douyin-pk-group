@@ -45,6 +45,12 @@ pk-board.png
 # uicheck 截图产物
 .uicheck/
 
+# 本地性能测量脚本与一次性探测截图（脚本可能含本机账号信息）
+.perf-nav/
+
+# 本地现场导出 / 数据库 dump（保留磁盘，不入公共仓库）
+data/
+
 # .dbmerge：拉取/合并数据库的现场产物（dump、转换中间 SQL、灌库前备份）
 # 脚本 scripts/pull-db-147.sh、scripts/mysql2pg.py 入库，数据产物只在本地
 # 2026-10-17 审计补：整目录忽略 —— 原先后缀规则漏掉 sha256/verification.sql，
