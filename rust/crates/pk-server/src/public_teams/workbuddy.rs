@@ -150,28 +150,44 @@ fn expiry_status_at(v: &Value, now: i64) -> Value {
             .unwrap_or(false);
     let account_days_left = (expires_at > 0).then(|| (expires_at - now) as f64 / 86_400.0);
 
+    // 积分包口径统一为「未过期且仍有余额」：面板的 `earliest_expiring` 已经是这类
+    // 包里最早到期的一个，优先信它。只有这个字段缺失或不可用时才回退遍历 packages；
+    // 回退时同样跳过余额为 0、已过期和永久包。真实面板里用尽的旧包仍返回
+    // days_left=0.5，曾因此把 28 天有效期误报成 0.5 天。
+    fn usable_credit_days(package: &Value) -> Option<f64> {
+        if package.get("no_expiry").and_then(Value::as_bool) == Some(true)
+            || package.get("is_expired").and_then(Value::as_bool) == Some(true)
+        {
+            return None;
+        }
+        if package
+            .get("remain")
+            .and_then(Value::as_f64)
+            .is_some_and(|remain| remain <= 0.0)
+        {
+            return None;
+        }
+        package
+            .get("days_left")
+            .and_then(Value::as_f64)
+            .map(|days| days.max(0.0))
+    }
+
     let mut credit_days = v
-        .pointer("/credits/earliest_expiring/days_left")
-        .and_then(Value::as_f64);
-    if let Some(packages) = v.pointer("/credits/packages").and_then(Value::as_array) {
-        for package in packages {
-            if package.get("no_expiry").and_then(Value::as_bool) == Some(true) {
-                continue;
-            }
-            let days = if package.get("is_expired").and_then(Value::as_bool) == Some(true) {
-                Some(0.0)
-            } else {
-                package.get("days_left").and_then(Value::as_f64)
-            };
-            if let Some(days) = days {
-                credit_days = Some(credit_days.map_or(days, |old| old.min(days)));
+        .pointer("/credits/earliest_expiring")
+        .and_then(usable_credit_days);
+    if credit_days.is_none() {
+        if let Some(packages) = v.pointer("/credits/packages").and_then(Value::as_array) {
+            for package in packages {
+                if let Some(days) = usable_credit_days(package) {
+                    credit_days = Some(credit_days.map_or(days, |old| old.min(days)));
+                }
             }
         }
     }
     let round1 = |days: f64| (days * 10.0).round() / 10.0;
-    let expired = token_expired
-        || (expires_at > 0 && expires_at <= now)
-        || credit_days.is_some_and(|days| days <= 0.0);
+    // 积分包到期不等于账号登录凭证失效；只把 token / 账号 expiresAt 视为 expired。
+    let expired = token_expired || (expires_at > 0 && expires_at <= now);
     let needs_login = expired
         || account_days_left.is_some_and(|days| days <= 14.0)
         || credit_days.is_some_and(|days| days <= 14.0);
@@ -182,6 +198,16 @@ fn expiry_status_at(v: &Value, now: i64) -> Value {
     } else {
         ""
     };
+    let expiry_source = if token_expired {
+        "token"
+    } else {
+        match (account_days_left, credit_days) {
+            (Some(account), Some(credit)) if credit < account => "credits",
+            (Some(_), _) => "account",
+            (None, Some(_)) => "credits",
+            (None, None) => "",
+        }
+    };
     json!({
         "checked": true,
         "found": true,
@@ -189,16 +215,26 @@ fn expiry_status_at(v: &Value, now: i64) -> Value {
         "expiresIn": v.get("expiresIn").and_then(Value::as_str).unwrap_or_default(),
         "daysLeft": account_days_left.map(round1),
         "earliestExpiringDaysLeft": credit_days.map(round1),
+        "expirySource": expiry_source,
         "tokenExpired": token_expired,
         "needRelogin": v.get("needRelogin").and_then(Value::as_bool).unwrap_or(false),
         "expired": expired,
         "needsLogin": needs_login,
         "reason": reason,
+        "shouldPrompt": false,
     })
 }
 
 fn expiry_status(v: &Value) -> Value {
     expiry_status_at(v, chrono::Utc::now().timestamp())
+}
+
+/// `needsLogin` / `reason` 始终描述真实账号状态；`shouldPrompt` 只控制前端本次是否弹窗。
+fn with_should_prompt(mut status: Value, should_prompt: bool) -> Value {
+    if let Some(object) = status.as_object_mut() {
+        object.insert("shouldPrompt".to_string(), Value::Bool(should_prompt));
+    }
+    status
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -227,6 +263,7 @@ pub struct WbStateBody {
 /// GET /api/public/my/workbuddy/status
 ///
 /// 登录后 / 刷新时由服务端判断是否已经绑定，避免浏览器本地缓存冒充绑定状态。
+/// 本接口只读：`shouldPrompt` 表示 7 天窗口是否开放，真正消费发生在 oauth/start。
 pub async fn my_workbuddy_status(
     State(st): State<ArcState>,
     headers: HeaderMap,
@@ -259,15 +296,35 @@ pub async fn my_workbuddy_status(
                         "expired": true,
                         "needsLogin": true,
                         "reason": "missing",
+                        "shouldPrompt": false,
                     });
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, uid = %uid, "WorkBuddy 账号到期状态查询失败");
-                    account_status = json!({ "checked": false });
+                    account_status = json!({ "checked": false, "shouldPrompt": false });
                 }
             }
         }
     }
+    let needs_login = account_status
+        .get("needsLogin")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let should_prompt = if needs_login {
+        crate::store::reauth_prompt_window_open(&st, &account_name)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    error = %e,
+                    account = %account_name,
+                    "WorkBuddy 重新登录提示窗口读取失败，本次不弹窗"
+                );
+                false
+            })
+    } else {
+        false
+    };
+    account_status = with_should_prompt(account_status, should_prompt);
     Ok(Json(json!({
         "ok": true,
         "enabled": crate::wbgateway::global().is_some(),
@@ -280,6 +337,7 @@ pub async fn my_workbuddy_status(
 /// POST /api/public/my/workbuddy/oauth/start
 ///
 /// 必须已登录展示端；返回网关下发的 `{ok,state,authUrl,realm}`。
+/// 已绑定账号以 reauth=true 成功拿到授权链接后，才原子消费 7 天提示窗口。
 pub async fn my_workbuddy_oauth_start(
     State(st): State<ArcState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
@@ -295,6 +353,7 @@ pub async fn my_workbuddy_oauth_start(
         ));
     }
     let realm = crate::wbgateway::normalize_realm(body.realm.trim());
+    let mut prompt_binding = None;
     if let Some(account) = crate::store::binding_for(&st, &account_name).await {
         if !body.reauth {
             return Err(ApiError::with_json(
@@ -307,6 +366,7 @@ pub async fn my_workbuddy_oauth_start(
                 }),
             ));
         }
+        prompt_binding = Some(account);
         tracing::info!(account = %account_name, realm, "WorkBuddy 账号临期/过期，允许重新授权");
     }
     let wb = crate::wbgateway::global().ok_or_else(not_configured)?;
@@ -332,6 +392,22 @@ pub async fn my_workbuddy_oauth_start(
             tracing::error!(error = %e, "WorkBuddy 授权流水落库失败");
             store_error()
         })?;
+    if let Some(expected_binding) = prompt_binding {
+        /* 只有成功拿到且校验通过重新登录链接，才消费 7 天提示窗口。
+        绑定行锁会挡住已并发完成的重绑；多标签并发时也只有第一个 claim=true。
+        无论 claim=false 还是写库失败，都继续返回授权链接，不阻断主动重登。 */
+        match crate::store::claim_reauth_prompt_for_binding(&st, &account_name, &expected_binding)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::info!(account = %account_name, "WorkBuddy 重登提示窗口已消费或绑定已更新，继续授权");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, account = %account_name, "WorkBuddy 重登提示标记写入失败，继续授权");
+            }
+        }
+    }
     let api_base = wb.public_api_base();
     Ok(Json(json!({
         "ok": true,
@@ -526,24 +602,165 @@ mod tests {
         let far = expiry_status_at(&json!({ "expiresAt": now + 20 * 86_400 }), now);
         assert_eq!(far["needsLogin"], false);
         assert_eq!(far["reason"], "");
+        assert_eq!(far["expirySource"], "account");
 
         let soon = expiry_status_at(&json!({ "expiresAt": now + 14 * 86_400 }), now);
         assert_eq!(soon["needsLogin"], true);
         assert_eq!(soon["reason"], "expiring");
+        assert_eq!(soon["expirySource"], "account");
 
         let expired = expiry_status_at(&json!({ "expiresAt": now - 1 }), now);
         assert_eq!(expired["needsLogin"], true);
         assert_eq!(expired["reason"], "expired");
+        assert_eq!(expired["expirySource"], "account");
+        assert_eq!(expired["shouldPrompt"], false);
 
         let credit_soon = expiry_status_at(
             &json!({
                 "expiresAt": now + 30 * 86_400,
-                "credits": { "packages": [{ "days_left": 7.0 }] }
+                "credits": { "packages": [{ "remain": 10.0, "days_left": 7.0 }] }
             }),
             now,
         );
         assert_eq!(credit_soon["needsLogin"], true);
         assert_eq!(credit_soon["earliestExpiringDaysLeft"], 7.0);
+        assert_eq!(credit_soon["expirySource"], "credits");
+    }
+
+    /// 真实面板回归：账号 28 天到期、有效积分包最早 16.9 天；
+    /// 已用尽的旧积分包仍返回 days_left=0.5，不能被当成账号到期依据。
+    #[test]
+    fn exhausted_credit_packages_do_not_override_account_expiry() {
+        let now = 1_800_000_000i64;
+        let status = expiry_status_at(
+            &json!({
+                "expiresAt": now + 28 * 86_400,
+                "expiresIn": "28 days",
+                "tokenExpired": false,
+                "needRelogin": false,
+                "credits": {
+                    "remain": 954.79,
+                    "earliest_expiring": {
+                        "remain": 53.57,
+                        "days_left": 16.9,
+                        "no_expiry": false,
+                        "is_expired": false
+                    },
+                    "packages": [
+                        {
+                            "remain": 0.0,
+                            "days_left": 0.5,
+                            "no_expiry": false,
+                            "is_expired": false,
+                            "status": 3
+                        }
+                    ]
+                }
+            }),
+            now,
+        );
+        assert_eq!(status["daysLeft"], 28.0);
+        assert_eq!(status["earliestExpiringDaysLeft"], 16.9);
+        assert_eq!(status["needsLogin"], false);
+        assert_eq!(status["reason"], "");
+        assert_eq!(status["expirySource"], "credits");
+    }
+
+    #[test]
+    fn zero_balance_packages_are_ignored_when_earliest_field_is_missing() {
+        let now = 1_800_000_000i64;
+        let status = expiry_status_at(
+            &json!({
+                "expiresAt": now + 28 * 86_400,
+                "credits": {
+                    "packages": [
+                        { "remain": 0.0, "days_left": 0.5, "is_expired": false },
+                        { "remain": 10.0, "days_left": 7.0, "is_expired": false }
+                    ]
+                }
+            }),
+            now,
+        );
+        assert_eq!(status["earliestExpiringDaysLeft"], 7.0);
+        assert_eq!(status["needsLogin"], true);
+        assert_eq!(status["reason"], "expiring");
+    }
+
+    #[test]
+    fn expired_credit_packages_are_ignored_even_with_balance() {
+        let now = 1_800_000_000i64;
+        let expired_only = expiry_status_at(
+            &json!({
+                "expiresAt": now + 28 * 86_400,
+                "credits": {
+                    "earliest_expiring": {
+                        "remain": 10.0,
+                        "days_left": 0.5,
+                        "no_expiry": false,
+                        "is_expired": true
+                    },
+                    "packages": [{
+                        "remain": 10.0,
+                        "days_left": 0.5,
+                        "no_expiry": false,
+                        "is_expired": true
+                    }]
+                }
+            }),
+            now,
+        );
+        assert!(expired_only["earliestExpiringDaysLeft"].is_null());
+        assert_eq!(expired_only["needsLogin"], false);
+        assert_eq!(expired_only["expirySource"], "account");
+
+        let mixed = expiry_status_at(
+            &json!({
+                "expiresAt": now + 28 * 86_400,
+                "credits": {
+                    "earliest_expiring": {
+                        "remain": 10.0,
+                        "days_left": 0.5,
+                        "no_expiry": false,
+                        "is_expired": true
+                    },
+                    "packages": [
+                        {
+                            "remain": 10.0,
+                            "days_left": 0.5,
+                            "no_expiry": false,
+                            "is_expired": true
+                        },
+                        {
+                            "remain": 8.0,
+                            "days_left": 7.0,
+                            "no_expiry": false,
+                            "is_expired": false
+                        }
+                    ]
+                }
+            }),
+            now,
+        );
+        assert_eq!(mixed["earliestExpiringDaysLeft"], 7.0);
+        assert_eq!(mixed["needsLogin"], true);
+        assert_eq!(mixed["expirySource"], "credits");
+    }
+
+    #[test]
+    fn should_prompt_does_not_change_account_health() {
+        let status = expiry_status_at(
+            &json!({ "expiresAt": 1_800_000_000i64 - 1 }),
+            1_800_000_000i64,
+        );
+        let suppressed = with_should_prompt(status, false);
+        assert_eq!(suppressed["needsLogin"], true);
+        assert_eq!(suppressed["reason"], "expired");
+        assert_eq!(suppressed["shouldPrompt"], false);
+
+        let prompted = with_should_prompt(suppressed.clone(), true);
+        assert_eq!(prompted["needsLogin"], true);
+        assert_eq!(prompted["reason"], "expired");
+        assert_eq!(prompted["shouldPrompt"], true);
     }
 
     #[test]

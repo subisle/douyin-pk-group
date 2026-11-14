@@ -3575,15 +3575,43 @@ let wbPrefetchPromise = null;
 let wbPrefetchRealm = '';
 let wbPrefetchToken = 0;
 const wbPendingKey = 'wbOauthPending';
+const wbStatusPendingKey = 'wbStatusPending';
+const wbStatusPendingTtlMs = 60 * 1000;
+let wbStatusRetryTimer = null;
 
 function wbStatusHint() {
-  try { sessionStorage.setItem('wbStatusPending', '1'); } catch (_) {}
+  wbCancelStatusRetry();
+  try { sessionStorage.setItem(wbStatusPendingKey, String(Date.now())); } catch (_) {}
 }
 function wbStatusDone() {
-  try { sessionStorage.removeItem('wbStatusPending'); } catch (_) {}
+  wbCancelStatusRetry();
+  try { sessionStorage.removeItem(wbStatusPendingKey); } catch (_) {}
 }
 function wbStatusPending() {
-  try { return sessionStorage.getItem('wbStatusPending') === '1'; } catch (_) { return false; }
+  try {
+    const raw = sessionStorage.getItem(wbStatusPendingKey);
+    if (!raw) return false;
+    const startedAt = Number(raw);
+    const age = Date.now() - startedAt;
+    /* 旧版写入的 '1'、坏时间戳、时钟倒退或超过 TTL 的 pending 都视为已失效并自愈。 */
+    if (!Number.isFinite(startedAt) || startedAt <= 0 || age < 0 || age >= wbStatusPendingTtlMs) {
+      sessionStorage.removeItem(wbStatusPendingKey);
+      return false;
+    }
+    return true;
+  } catch (_) { return false; }
+}
+function wbCancelStatusRetry() {
+  if (wbStatusRetryTimer === null) return;
+  clearTimeout(wbStatusRetryTimer);
+  wbStatusRetryTimer = null;
+}
+function wbScheduleStatusRetry(me) {
+  if (wbStatusRetryTimer !== null) return;
+  wbStatusRetryTimer = setTimeout(function () {
+    wbStatusRetryTimer = null;
+    try { maybePromptTencentBind(meState || me); } catch (_) {}
+  }, wbStatusPendingTtlMs + 50);
 }
 function wbPendingAccount(me) {
   return String((me && (me.name || me.phone)) || '').trim();
@@ -3862,16 +3890,26 @@ function wbRenderLink(d, resume) {
   $('wbBindRestart').onclick = () => { wbCancelCurrent(null); wbRenderPick(dlg); };
 }
 function wbRenderExpiry(dlg, status) {
-  const daysA = Number(status && status.daysLeft);
-  const daysB = Number(status && status.earliestExpiringDaysLeft);
-  const candidates = [daysA, daysB].filter((n) => Number.isFinite(n));
+  const finiteDays = (value) => typeof value === 'number' && Number.isFinite(value);
+  const daysA = finiteDays(status && status.daysLeft) ? status.daysLeft : null;
+  const daysB = finiteDays(status && status.earliestExpiringDaysLeft) ? status.earliestExpiringDaysLeft : null;
+  const candidates = [daysA, daysB].filter(finiteDays);
   const minDays = candidates.length ? Math.min.apply(null, candidates) : null;
   const expired = !!(status && (status.expired || status.reason === 'expired' || status.reason === 'missing'));
-  const when = expired ? '当前绑定的 WorkBuddy 账号已过期' :
-    (minDays == null ? '当前绑定的 WorkBuddy 账号即将到期' : '当前绑定的 WorkBuddy 账号仅剩 ' + minDays.toFixed(1) + ' 天到期');
+  const source = (status && status.expirySource) || '';
+  const creditFirst = !expired && source === 'credits';
+  const when = expired
+    ? (source === 'token' ? '当前绑定的 WorkBuddy 登录凭证已过期' : '当前绑定的 WorkBuddy 账号登录有效期已过期')
+    : creditFirst
+      ? (daysB !== null ? '当前账号内有积分包将在 ' + daysB.toFixed(1) + ' 天后到期' : '当前账号内有积分包即将到期')
+      : (minDays == null ? '当前绑定的 WorkBuddy 账号即将到期' : '当前绑定的 WorkBuddy 账号登录有效期仅剩 ' + minDays.toFixed(1) + ' 天');
+  const title = creditFirst ? 'WorkBuddy 积分包即将到期' : '腾讯账号需要重新登录';
+  const action = creditFirst
+    ? '。请使用同一个腾讯账号重新登录，完成后会自动刷新绑定与账号权益。'
+    : '。请使用同一个腾讯账号重新登录，完成后会自动更新绑定。';
   dlg.box.innerHTML =
-    '<h3>腾讯账号需要重新登录</h3>' +
-    '<p class="tip">' + esc(when) + '。请使用同一个腾讯账号重新登录，完成后会自动更新绑定。</p>' +
+    '<h3>' + title + '</h3>' +
+    '<p class="tip">' + esc(when) + action + '</p>' +
     wbAccountLine(wbBoundAccount) +
     '<div class="form-hint" id="wbBindPrep" style="margin:10px 0">正在准备重新登录入口…</div>' +
     '<button class="btn-main" id="wbBindJump" disabled style="margin-bottom:10px">正在准备登录…</button>' +
@@ -3934,7 +3972,12 @@ function maybePromptTencentBind(me, attempt) {
     if (site.settings.workbuddyEnabled !== true) return;
     if (!me || me.needBind || me.needProfile || me.mustChangePass || me.bound === false) return;
     /* 手机号不是 WorkBuddy 绑定的前置条件；管理员观看账号也要弹。 */
-    if (!myToken() || wbStatusPending()) return;
+    if (!myToken()) return;
+    if (wbStatusPending()) {
+      /* 上次 status 请求可能在刷新时被中断；保留 TTL 自愈重试，不能让 pending 永久卡住。 */
+      wbScheduleStatusRetry(me);
+      return;
+    }
     wbRestorePending(meState || me);
     const hadPending = !!(wbBindState && wbAuthUrlAllowed(wbBindAuthUrl));
     wbStatusHint();
@@ -3944,8 +3987,11 @@ function maybePromptTencentBind(me, attempt) {
       wbApplyBoundAccount(d.account || null);
       const accountStatus = d.accountStatus || null;
       const needsReauth = !!(accountStatus && accountStatus.needsLogin);
+      const shouldPromptReauth = !!(accountStatus && accountStatus.shouldPrompt);
       const blocked = () => !!($('mustPwdMask') || $('qqMask') || ($('gate') && !$('gate').classList.contains('hidden')));
       if (d.bound && needsReauth) {
+        /* needsLogin 只描述真实到期状态；是否弹窗完全由服务端 7 天闸门 shouldPrompt 决定。 */
+        if (!shouldPromptReauth) return;
         if (blocked()) {
           setTimeout(() => { try { maybePromptTencentBind(meState || me, attempt + 1); } catch (_) {} }, 1200);
           return;
