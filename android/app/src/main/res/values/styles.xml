@@ -2,8 +2,12 @@
 <resources>
     <style name="AppTheme" parent="@android:style/Theme.Material.Light.NoActionBar">
         <item name="android:windowNoTitle">true</item>
-        <item name="android:windowBackground">@color/background</item>
+        <item name="android:windowBackground">@drawable/splash_background</item>
         <item name="android:statusBarColor">@color/primary</item>
         <item name="android:windowLightStatusBar">false</item>
+    </style>
+
+    <style name="AppTheme.Starting" parent="@style/AppTheme">
+        <item name="android:windowBackground">@drawable/splash_background</item>
     </style>
 </resources>

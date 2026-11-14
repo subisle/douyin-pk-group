@@ -1,12 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
-    <!-- 默认禁止明文流量；仅为当前固定的线上 HTTP 入口保留一个窄例外。 -->
+    <!-- 构建脚本根据最终 APP_URL 写入窄域名例外；源码不保存第二份地址。 -->
     <base-config cleartextTrafficPermitted="false">
         <trust-anchors>
             <certificates src="system" />
         </trust-anchors>
     </base-config>
-    <domain-config cleartextTrafficPermitted="true">
-        <domain includeSubdomains="false">43.142.30.113</domain>
-    </domain-config>
 </network-security-config>

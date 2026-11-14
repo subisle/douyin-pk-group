@@ -5,6 +5,7 @@ public final class NavigationPolicyTest {
     private static int assertions;
 
     public static void main(String[] args) {
+        NavigationPolicy.configure("http://43.142.30.113:81/");
         expect(NavigationPolicy.Action.LOAD_IN_WEB_VIEW,
                 "http://43.142.30.113:81/", true, "app entry");
         expect(NavigationPolicy.Action.LOAD_IN_WEB_VIEW,

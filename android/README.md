@@ -1,68 +1,118 @@
 # 每日数据 Android APK
 
-一个极小的 Android WebView 壳，固定访问当前线上地址：
+一个轻量 Android WebView 壳。应用只主动打开构建时配置的展示端地址，登录态保存在 WebView 的 Cookies / localStorage 中。
 
-```text
-http://43.142.30.113:81/
-```
+当前版本：`1.2`（versionCode `3`），`minSdk 26` / `targetSdk 35`。
 
-设计上尽量降低安装风险提示：
+## 稳定性与安全
 
 - release APK 使用独立长期签名（RSA 3072 / SHA-256，30 年有效期）。
-- 只声明 `android.permission.INTERNET`，没有短信、通讯录、定位、存储、相机、电话、通知、后台服务等敏感权限。
+- 只声明 `android.permission.INTERNET`，没有短信、通讯录、定位、存储、相机、电话、通知、后台服务等权限。
 - 没有第三方 SDK、广告、统计、推送、动态加载、反射调用、原生库或可执行 dex 下载。
-- 只加载一个固定入口；本站 HTTP/HTTPS 留在 WebView，用户点击的非本站 HTTP/HTTPS 会交给系统浏览器；无点击的外站跳转及 `tel:`、`sms:`、`mailto:`、`intent:`、`javascript:` 等协议继续拦截。
-- 不暴露 `addJavascriptInterface`；`dailyapp://check-update` 只作为页面按钮调用原生更新检查的私有入口，必须带用户点击且不会转交外部应用。
-- 禁用文件访问、任意内容 URL、数据库、DOM storage 以外的本地存储接口通过 WebView 配置收紧；登录态所需的 `localStorage` 开启。
-- `minSdk 26` / `targetSdk 35`，不申请 `QUERY_ALL_PACKAGES`，导出组件只有启动 Activity。
-- 未使用调试证书签名；`android:debuggable` 由构建命令显式设为 false。
+- 只主动加载 `app_url` 对应站点；用户点击的外站 HTTP/HTTPS 交给系统浏览器；无点击的外站跳转及 `tel:`、`sms:`、`mailto:`、`intent:`、`javascript:` 等协议继续拦截。
+- 不暴露 `addJavascriptInterface`；`dailyapp://check-update` 只作为页面按钮调用原生更新检查的私有入口，必须带用户点击。
+- 禁用文件访问、任意内容 URL 和数据库；保留登录所需的 DOM storage / Cookies。
+- 主页面网络错误、HTTP 4xx/5xx、SSL 校验失败都会显示中文错误页和「重新加载」按钮，不再白屏。
+- WebView 渲染进程被系统回收时自动重建并重新加载；短时间连续失败后提示关闭其他应用后重试。
+- 启动页不会在进度 60% 时提前消失，而是在页面可见或加载完成时退出；异常时显示可重试错误页。
+- Android 12+ 使用系统 SplashScreen，Android 8–11 使用统一的 `windowBackground` 启动画面。
 
-> 说明：Android 对“未知来源 / 未识别开发者”的提示由系统、应用商店或 Play Protect 决定，APK 本身不能绕过。能做的是保持签名稳定、权限最小、代码透明、站点固定；后续如果接入正式域名 HTTPS 与应用商店分发，提示会进一步减少。
+## 构建前提
+
+构建不依赖 Android Studio / Gradle，也不会联网下载 Android SDK。需要本机已经准备：
+
+```text
+.android-tools/bt35/android-15/{aapt,aapt2,d8,zipalign,apksigner}
+.android-tools/platform35/android-35/android.jar
+android/keystore/daily-release.jks
+android/keystore/keystore.env
+```
+
+另外需要 `java`、`javac`、`keytool`、`python3`、`zip`、`shasum`。缺少工具时构建脚本会直接报错退出，不会自动下载大 SDK。
 
 ## 构建
 
-在本仓库根目录执行：
+在仓库根目录执行：
 
 ```bash
-# 先回归网盘外链、站内链接与危险协议的路由规则
-./scripts/test-android-navigation.sh
-
-# 再构建签名 APK
 ./scripts/build-android-apk.sh
 ```
 
 脚本会：
 
-1. 在 `.android-tools/` 下准备 Android SDK build-tools 35 与 platform 35（不入库）。
-2. 在 `android/keystore/daily-release.jks` 下生成/复用 release 签名（不入库）。
-3. 用 Java 源码编译出极小 classes.dex，再用 aapt2 / zipalign / apksigner 产出：
+1. 运行无需设备的导航与版本一致性测试。
+2. 校验原生工具链和 release JKS。
+3. 清理旧 `classes`、`res-flat`、`gen`、`obj-final` 后重新编译，避免旧文件残留。
+4. 使用 Manifest 中的版本契约构建、对齐并签名 APK。
+5. 用 `aapt dump badging` 校验实际产物版本，用 `apksigner verify` 校验 v2/v3 签名。
+6. 生成：
 
 ```text
 android/dist/每日数据-v1.2-release.apk
 android/dist/每日数据-v1.2-release.apk.sha256
+android/dist/aapt-badging.txt
+android/dist/apksigner-verify.txt
 ```
 
-签名口令保存在 `android/keystore/keystore.env`（权限 600，不入库）。请离线妥善保管这个文件和 JKS；更换签名会导致用户必须卸载旧版才能升级。
+7. 默认把 APK 同步到服务端嵌入资源，并逐字节确认嵌入 APK 与 `android/dist` 产物一致。
 
-## 线上地址切换
+只做本地构建、不更新服务端嵌入资源时：
 
-修改 `android/app/src/main/java/cc/subisle/daily/MainActivity.java` 的 `APP_URL`，重新构建即可。
-后续建议把 43 的 HTTP 入口换成已备案域名的 HTTPS，并同步把 `APP_URL` 改成 HTTPS；届时可以把网络安全配置里的明文例外彻底去掉。
+```bash
+./scripts/build-android-apk.sh --no-web-sync
+```
+
+## 签名保护
+
+默认构建时如果缺少 `daily-release.jks` 或 `keystore.env`，脚本会失败，绝不自动生成新签名。
+
+只有首次初始化签名时才允许：
+
+```bash
+./scripts/build-android-apk.sh --init-keystore
+```
+
+如果已有 JKS 但口令文件丢失，脚本仍会拒绝生成新签名，因为换签名会导致已安装用户无法覆盖升级。请从离线备份找回 `keystore.env` 和 JKS。
+
+签名口令只保存在权限 `600` 的 `android/keystore/keystore.env`，不得入库或发送到远端。
+
+## 配置 APP_URL
+
+本地默认地址只保存在：
+
+```text
+android/app/src/main/res/values/strings.xml  ->  app_url
+```
+
+构建时可覆盖，无需改 Java：
+
+```bash
+PK_APP_URL='https://example.com/' ./scripts/build-android-apk.sh
+```
+
+`PK_APP_URL` 必须是完整的 HTTP(S) 地址，不能带用户名、密码、query 或 fragment。构建脚本会把最终地址写入临时资源，并为 HTTP 地址生成仅限该域名的明文例外；HTTPS 不保留明文例外。
+
+正式分发建议使用已备案域名的 HTTPS。当前网络配置仍为安卓端本地/旧服务器的 HTTP 入口保留单一域名例外。
+
+## 安装与应用内更新
+
+- 启动及回到前台时会检查 `/api/public/app-version`。
+- 「我的 → 检查软件更新」可手动触发。
+- 更新通过系统浏览器下载；同签名升级会保留登录数据。
+- UA 追加 `DailyDataAndroid/1.2`，展示端据此识别 Android App 并关闭安装引导。
 
 ## 展示端平台推荐
 
-Web 展示页已内置平台分流：
-
-- 微信 / QQ / 抖音 / 通用 Android WebView 等内置浏览器：顶部常驻「请在浏览器中打开」，完整引导弹层提示切换系统浏览器后下载 App / 添加 App 到主屏幕，并提供复制当前地址。
 - iOS Safari：推荐「分享 → 添加到主屏幕」，把每日数据作为 App 使用。
-- Android 浏览器：推荐下载同源 `/download/daily.apk` 的「每日数据 App」；同时提供 `/download/daily.apk.sha256` 校验文件。
-- Android App 内 WebView：UA 追加 `DailyDataAndroid/1.0`，页面识别为已安装，永久关闭安装引导。
-- 桌面浏览器：不弹安装推荐，避免干扰。
+- Android 浏览器：推荐下载同源 `/download/daily.apk`，同时提供 `.sha256` 校验文件。
+- Android App 内 WebView：UA 识别为已安装，不再显示安装引导。
+- 微信、抖音等内置浏览器：提示切换系统浏览器，并提供复制当前地址。
+- 桌面浏览器：不弹安装推荐。
 
-`scripts/build-android-apk.sh` 会把签名后的 APK 与校验文件同步到 `rust/crates/pk-server/src/public_teams/assets/pwa/`，由 Rust 服务作为同源公开资源下发。重新构建后需重新发布服务端代码，线上下载入口才会更新。
+## 安装提示
 
-APK 启动及回到前台时会检查 `/api/public/app-version`，发现更高 versionCode 会提醒用户通过系统浏览器下载；「我的 → 检查软件更新」也可手动触发。
+首次从浏览器、微信或文件管理器安装时，Android 通常会提示“未知来源应用 / 需要允许安装”。这是系统安全机制，不是 APK 有风险。让用户允许当前来源安装即可；后续同签名升级不会再出现签名冲突。若被 Play Protect 拦截，选择“仍要安装 / 更多信息”属于用户侧确认。
 
-## 安装提示说明
+## 旧设备说明
 
-首次从浏览器、微信或文件管理器安装时，Android 通常会提示“未知来源应用 / 需要允许安装”。这是系统安全机制，不是 APK 有风险。让用户允许当前来源安装即可；后续同签名升级不会再出现签名冲突。若仍被 Play Protect 拦截，选择“仍要安装 / 更多信息”属于用户侧确认，应用本身不依赖任何绕过逻辑。
+本 Activity 已限制为单一 WebView、无原生后台服务，并在页面进入后台时暂停 WebView 定时器。网络异常、低内存导致渲染进程回收、WebView 页面提交延迟时均有明确状态或恢复路径。Android 8/9 低内存设备仍建议在真机上验证冷启动、断网重试和前后台切换。
