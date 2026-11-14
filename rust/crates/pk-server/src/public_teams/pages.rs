@@ -1,6 +1,10 @@
 //! public_teams::pages —— 自 public_teams.rs 按业务域拆分（对外语义不变）。
 
 use super::*;
+use axum::body::{Body, Bytes};
+use axum::http::{header, HeaderMap, StatusCode};
+use std::io::Write;
+use std::sync::OnceLock;
 
 /* --------------------------- 公开展示页 --------------------------- */
 
@@ -117,7 +121,10 @@ pub async fn android_apk() -> Response {
 pub async fn android_apk_sha256() -> Response {
     (
         [
-            (axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+            (
+                axum::http::header::CONTENT_TYPE,
+                "text/plain; charset=utf-8",
+            ),
             (
                 axum::http::header::CACHE_CONTROL,
                 "public, max-age=300, stale-while-revalidate=60",
@@ -128,24 +135,93 @@ pub async fn android_apk_sha256() -> Response {
         .into_response()
 }
 
+struct StPageVariants {
+    identity: Bytes,
+    brotli: Bytes,
+    gzip: Bytes,
+    etag: &'static str,
+}
+
+fn st_page_variants() -> &'static StPageVariants {
+    static VARIANTS: OnceLock<StPageVariants> = OnceLock::new();
+    VARIANTS.get_or_init(|| {
+        let html = ST_PAGE
+            .replace("{{TEAM}}", "all")
+            .replace("{{WEB_APP_VERSION}}", WEB_APP_VERSION);
+        let raw = html.into_bytes();
+        let mut br = Vec::new();
+        {
+            let mut writer = brotli::CompressorWriter::new(&mut br, 4096, 6, 22);
+            writer.write_all(&raw).expect("brotli 压缩展示页失败");
+        }
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+        gz.write_all(&raw).expect("gzip 压缩展示页失败");
+        let gzip = gz.finish().expect("gzip 完成展示页失败");
+        StPageVariants {
+            identity: Bytes::from(raw),
+            brotli: Bytes::from(br),
+            gzip: Bytes::from(gzip),
+            etag: "\"web-2026.11.14.2\"",
+        }
+    })
+}
+
+fn st_page_response(headers: &HeaderMap) -> Response {
+    let variants = st_page_variants();
+    let cache = "private, max-age=60, stale-while-revalidate=300";
+    if headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.split(',').any(|x| x.trim() == variants.etag))
+    {
+        return Response::builder()
+            .status(StatusCode::NOT_MODIFIED)
+            .header(header::CACHE_CONTROL, cache)
+            .header(header::ETAG, variants.etag)
+            .header(header::VARY, "Accept-Encoding")
+            .body(Body::empty())
+            .expect("构造展示页 304 失败");
+    }
+    let (body, encoding) = if crate::spa::accepts_encoding(headers, "br") {
+        (variants.brotli.clone(), Some("br"))
+    } else if crate::spa::accepts_encoding(headers, "gzip") {
+        (variants.gzip.clone(), Some("gzip"))
+    } else {
+        (variants.identity.clone(), None)
+    };
+    let mut builder = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .header(header::CACHE_CONTROL, cache)
+        .header(header::ETAG, variants.etag)
+        .header(header::VARY, "Accept-Encoding");
+    if let Some(encoding) = encoding {
+        builder = builder.header(header::CONTENT_ENCODING, encoding);
+    }
+    builder.body(Body::from(body)).expect("构造展示页响应失败")
+}
+
 /// GET / 根路径：展示页（2026-10-11 起不分男女，统一读 /api/public/teams/all）
-pub async fn st_root() -> Response {
-    st_page_for("all")
+pub async fn st_root(headers: HeaderMap) -> Response {
+    st_page_for("all", &headers)
 }
 
 /// GET /1 旧男团链接：兼容重定向到统一首页
-pub async fn st_m() -> Response {
-    st_page_for("all")
+pub async fn st_m(headers: HeaderMap) -> Response {
+    st_page_for("all", &headers)
 }
 
 /// GET /0 旧女团链接：兼容重定向到统一首页
-pub async fn st_0() -> Response {
-    st_page_for("all")
+pub async fn st_0(headers: HeaderMap) -> Response {
+    st_page_for("all", &headers)
 }
 
 /// GET /st/{team}：旧团别链接统一渲染首页
-pub async fn st_page(axum::extract::Path(_team): axum::extract::Path<String>) -> Response {
-    st_page_for("all")
+pub async fn st_page(
+    axum::extract::Path(_team): axum::extract::Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    st_page_for("all", &headers)
 }
 
 /// GET /st/{team}/{*rest}：展示端子路径路由（/report、/group/junior、/lineage…）。
@@ -153,8 +229,9 @@ pub async fn st_page(axum::extract::Path(_team): axum::extract::Path<String>) ->
 /// 刷新/分享子路径链接都不会 404。
 pub async fn st_page_sub(
     axum::extract::Path((_team, _rest)): axum::extract::Path<(String, String)>,
+    headers: HeaderMap,
 ) -> Response {
-    st_page_for("all")
+    st_page_for("all", &headers)
 }
 
 /// GET /resources、/resource：独立资源分享页。
@@ -173,20 +250,17 @@ pub async fn resources_page() -> Response {
         .into_response()
 }
 
-pub(super) fn st_page_for(team: &str) -> Response {
+pub(super) fn st_page_for(team: &str, headers: &HeaderMap) -> Response {
+    if team == "all" {
+        return st_page_response(headers);
+    }
     let html = ST_PAGE
         .replace("{{TEAM}}", team)
         .replace("{{WEB_APP_VERSION}}", WEB_APP_VERSION);
     (
         [
-            (axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8"),
-            // 静态展示页不含用户数据；/resources 的 no-store 已在 cache_control_mw
-            // 白名单里放行，因此这里设置的头会生效。其它展示页仍由中间件覆盖成
-            // no-store，行为不变。
-            (
-                axum::http::header::CACHE_CONTROL,
-                "public, max-age=300, stale-while-revalidate=60",
-            ),
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CACHE_CONTROL, "private, max-age=60"),
         ],
         html,
     )
@@ -241,17 +315,41 @@ mod pwa_tests {
         assert!(ST_PAGE.contains("id=\"obPhone\""));
         assert!(!ST_PAGE.contains("id=\"obQq\""), "首次登录不再要求 QQ");
         assert!(!ST_PAGE.contains("id=\"obPass\""), "首次登录不再要求改密");
-        assert!(ST_PAGE.contains("isAndroidAppShell"), "Android APK 入口应被识别为已安装");
-        assert!(ST_PAGE.contains("DailyDataAndroid\\/"), "APK 的 UA 标记需与 Web 端一致");
-        assert!(ST_PAGE.contains("isWechatOrInAppBrowser"), "需识别微信及内嵌浏览器");
+        assert!(
+            ST_PAGE.contains("isAndroidAppShell"),
+            "Android APK 入口应被识别为已安装"
+        );
+        assert!(
+            ST_PAGE.contains("DailyDataAndroid\\/"),
+            "APK 的 UA 标记需与 Web 端一致"
+        );
+        assert!(
+            ST_PAGE.contains("isWechatOrInAppBrowser"),
+            "需识别微信及内嵌浏览器"
+        );
         assert!(ST_PAGE.contains("isAndroidDevice"), "需识别 Android 设备");
-        assert!(ST_PAGE.contains("请在浏览器中打开"), "微信内需提示用浏览器打开");
-        assert!(ST_PAGE.contains("微信内无法下载 App"), "微信内需提示切换浏览器下载 App");
+        assert!(
+            ST_PAGE.contains("请在浏览器中打开"),
+            "微信内需提示用浏览器打开"
+        );
+        assert!(
+            ST_PAGE.contains("微信内无法下载 App"),
+            "微信内需提示切换浏览器下载 App"
+        );
         assert!(ST_PAGE.contains("下载 App"), "需出现下载 App 提示");
-        assert!(ST_PAGE.contains("/download/daily.apk"), "Android 下载入口应为同源公开路由");
-        assert!(ST_PAGE.contains("id=\"inappBrowserTip\""), "微信内需有顶部常驻提示");
+        assert!(
+            ST_PAGE.contains("/download/daily.apk"),
+            "Android 下载入口应为同源公开路由"
+        );
+        assert!(
+            ST_PAGE.contains("id=\"inappBrowserTip\""),
+            "微信内需有顶部常驻提示"
+        );
         assert!(ST_PAGE.contains("pwaGuideVariant"), "平台分流函数需存在");
-        assert!(ST_PAGE.contains("variant === 'android'"), "Android 推荐分支需存在");
+        assert!(
+            ST_PAGE.contains("variant === 'android'"),
+            "Android 推荐分支需存在"
+        );
     }
 
     fn guide_source() -> &'static str {
@@ -275,8 +373,14 @@ mod pwa_tests {
         assert!(src.contains("variant === 'android'"));
         assert!(src.contains("'/download/daily.apk'"));
         assert!(src.contains("window.location.href = ANDROID_APK_URL"));
-        assert!(src.contains("/* 仅识别安卓 / 苹果；其他环境不弹推荐层。 */"), "仅手机推荐、其它环境不应展示");
-        assert!(src.contains("/;\\s*wv\\)/i.test(ua)"), "需识别通用 Android WebView");
+        assert!(
+            src.contains("/* 仅识别安卓 / 苹果；其他环境不弹推荐层。 */"),
+            "仅手机推荐、其它环境不应展示"
+        );
+        assert!(
+            src.contains("/;\\s*wv\\)/i.test(ua)"),
+            "需识别通用 Android WebView"
+        );
     }
 
     #[test]
@@ -295,14 +399,18 @@ mod pwa_tests {
     #[test]
     fn android_apk_asset_is_a_signed_zip() {
         assert_eq!(&ANDROID_APK[..2], b"PK", "APK 必须是 ZIP 容器");
-        assert!(ANDROID_APK.len() > 100_000, "APK 体积异常，可能未同步构建产物");
+        assert!(
+            ANDROID_APK.len() > 100_000,
+            "APK 体积异常，可能未同步构建产物"
+        );
         assert!(ANDROID_APK.len() < 1_000_000, "轻量 APK 不应超过 1MB");
         assert!(
             ANDROID_APK.windows(11).any(|w| w == b"classes.dex"),
             "APK 必须包含 classes.dex"
         );
         assert!(
-            ANDROID_APK.windows(9).any(|w| w == b"META-INF/") || ANDROID_APK.windows(5).any(|w| w == b".RSA"),
+            ANDROID_APK.windows(9).any(|w| w == b"META-INF/")
+                || ANDROID_APK.windows(5).any(|w| w == b".RSA"),
             "APK 必须带签名元数据"
         );
     }

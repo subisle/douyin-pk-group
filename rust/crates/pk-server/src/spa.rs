@@ -121,7 +121,7 @@ pub async fn handler(
     // 对外展示页（2026-10-10）：根路径 = 展示页（男女共用，页内弹团别选择卡），
     // 管理后台挪到 /admin。
     if path == "/" {
-        return crate::public_teams::st_root().await;
+        return crate::public_teams::st_root(headers.clone()).await;
     }
 
     // 管理后台：/admin 与 /admin/* —— 剥掉前缀后按 dist 解析
@@ -167,7 +167,7 @@ fn cache_control(path: &str) -> &'static str {
 }
 
 /// 当前请求是否明确接受某个内容编码（支持 `*` 和 `q=0`）。
-fn accepts_encoding(headers: &HeaderMap, wanted: &str) -> bool {
+pub(crate) fn accepts_encoding(headers: &HeaderMap, wanted: &str) -> bool {
     let Some(raw) = headers
         .get(header::ACCEPT_ENCODING)
         .and_then(|v| v.to_str().ok())

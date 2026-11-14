@@ -10,8 +10,8 @@ use std::sync::{Arc, Mutex};
 
 use axum::routing::{delete, get, post, put};
 use axum::Router;
-use tower_http::compression::CompressionLayer;
 use tower_http::compression::predicate::{DefaultPredicate, NotForContentType, Predicate};
+use tower_http::compression::CompressionLayer;
 
 /* ------------------- 2026-10-17 第四轮审计 D 域：缓存策略收口 ------------------- */
 
@@ -52,19 +52,9 @@ fn cache_no_store(path: &str) -> bool {
     if path.starts_with("/api/") {
         return true;
     }
-    // 资源分享页只是静态壳：分类/素材都由 /resources/videos.json 在登录后拉取，
-    // HTML 本身不含任何用户数据。允许短缓存，避免每次打开都重新传约 256KB(gzip)
-    // 的展示页脚本。其它展示页仍保持 no-store。
-    if matches!(path, "/resources" | "/resource") {
-        return false;
-    }
-    matches!(
-        path,
-        "/" | "/1" | "/0" | "/report" | "/lineage" | "/my" | "/wechat" | "/group"
-    ) || path.starts_with("/my/")
-        || path.starts_with("/wechat/")
-        || path.starts_with("/group/")
-        || path.starts_with("/st/")
+    // 展示页是静态壳，用户数据全部走 no-store API；页面响应自己设置
+    // `private, max-age=60` + ETag，避免老手机每次冷启动都重新下载约 215KB(br) HTML。
+    false
 }
 
 #[tokio::main]
@@ -591,7 +581,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/icons/icon-192.png", get(public_teams::pwa_icon_192))
         .route("/icons/icon-512.png", get(public_teams::pwa_icon_512))
         .route("/download/daily.apk", get(public_teams::android_apk))
-        .route("/download/daily.apk.sha256", get(public_teams::android_apk_sha256))
+        .route(
+            "/download/daily.apk.sha256",
+            get(public_teams::android_apk_sha256),
+        )
         .route("/", get(public_teams::st_root))
         .route("/report", get(public_teams::st_root))
         .route("/lineage", get(public_teams::st_root))
@@ -1154,11 +1147,8 @@ async fn main() -> anyhow::Result<()> {
             // 等待点退出并把 cursor flush 落库（硬超时兜底 10 秒）。
             let _ =
                 tokio::time::timeout(std::time::Duration::from_secs(10), wxpush_supervisor).await;
-            let _ = tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                live_sample_prune,
-            )
-            .await;
+            let _ =
+                tokio::time::timeout(std::time::Duration::from_secs(5), live_sample_prune).await;
             tracing::info!("pk-server 已退出");
             Ok(())
         }
