@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from './api'
+import DateCalendar from './DateCalendar'
 import { useAutoRefresh } from './useAutoRefresh'
 
 type Row = {
@@ -766,21 +767,15 @@ export default function ImportPage() {
         {kind === 'daily' ? (
           <>
             <div className="row row-end">
-              <label className="field">
+              <div className="field">
                 删除日期
-                <input
-                  type="date"
-                  list="imported-day-dates"
+                <DateCalendar
                   value={deleteDate}
-                  onChange={(e) => setDeleteDate(e.target.value)}
+                  onChange={setDeleteDate}
+                  highlightedDates={importedDayDates}
                   disabled={busy}
                 />
-                <datalist id="imported-day-dates">
-                  {importedDayDates.map((d) => (
-                    <option key={d} value={d} />
-                  ))}
-                </datalist>
-              </label>
+              </div>
               <label className="field">
                 删除范围
                 <select value={deleteTeam} onChange={(e) => setDeleteTeam(e.target.value)} disabled={busy}>

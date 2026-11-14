@@ -189,7 +189,7 @@
   flex: 0 0 auto;
   background: var(--good);
   box-shadow: 0 0 0 4px color-mix(in srgb, var(--good) 12%, transparent);
-  animation: lm-live-pulse 1.8s ease-out infinite;
+  animation: lm-live-pulse 1.8s ease-in-out infinite;
 }
 .lm-live-dot.small {
   width: 6px;
@@ -388,8 +388,8 @@
 .score-bump { animation: lm-score-bump .38s ease-out; }
 
 @keyframes lm-live-pulse {
-  0%, 100% { box-shadow: 0 0 0 3px color-mix(in srgb, var(--good) 12%, transparent); }
-  50% { box-shadow: 0 0 0 6px color-mix(in srgb, var(--good) 3%, transparent); }
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: .72; transform: scale(.82); }
 }
 @keyframes lm-score-bump {
   0% { transform: scale(1); color: var(--ink); }

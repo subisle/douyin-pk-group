@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use axum::routing::{delete, get, post, put};
 use axum::Router;
 use tower_http::compression::CompressionLayer;
+use tower_http::compression::predicate::{DefaultPredicate, NotForContentType, Predicate};
 
 /* ------------------- 2026-10-17 第四轮审计 D 域：缓存策略收口 ------------------- */
 
@@ -1068,7 +1069,9 @@ async fn main() -> anyhow::Result<()> {
     .layer(axum::middleware::from_fn(cache_control_mw))
     /* 移动端网络优化：静态 JS/CSS、JSON、SVG 默认走 br/gzip。
        tower-http 的默认谓词会排除 SSE（text/event-stream），不会破坏实时刷新。 */
-    .layer(CompressionLayer::new());
+    .layer(CompressionLayer::new().compress_when(
+        DefaultPredicate::new().and(NotForContentType::const_new("font/")),
+    ));
 
     // 采集上报口挂在最外层之后：它有自己的鉴权与状态，不进管理端那棵路由树
     let app = app.merge(internal_live);

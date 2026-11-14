@@ -2,8 +2,24 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from './api'
 import { useAutoRefresh } from './useAutoRefresh'
 import LineageCanvas, { type FocusReq } from './LineageCanvas'
-import { exportLineagePng } from './lineageExport'
 import './lineage.css'
+
+type LineageExportModule = typeof import('./lineageExport')
+let lineageExportModulePromise: Promise<LineageExportModule> | null = null
+
+function loadLineageExportModule(): Promise<LineageExportModule> {
+  if (!lineageExportModulePromise) {
+    lineageExportModulePromise = import('./lineageExport').catch((error) => {
+      lineageExportModulePromise = null
+      throw error
+    })
+  }
+  return lineageExportModulePromise
+}
+
+function prefetchLineageExportModule() {
+  void loadLineageExportModule().catch(() => {})
+}
 
 /** /api/admin/streamers 的一行（族谱只用得上这几列） */
 interface Row {
@@ -163,6 +179,7 @@ export default function LineagePage() {
     setError('')
     setMsg('')
     try {
+      const { exportLineagePng } = await loadLineageExportModule()
       const scope = team ? teamLabel(team) : '男女团'
       const r = await exportLineagePng(rows, {
         title: `${scope} · 族谱`,
@@ -392,7 +409,12 @@ export default function LineagePage() {
               <button onClick={() => expandAll(false)}>全部收起</button>
             </>
           )}
-          <button disabled={exporting} onClick={() => doExport(treeRows, stats)}>
+          <button
+            disabled={exporting}
+            onClick={() => doExport(treeRows, stats)}
+            onPointerEnter={prefetchLineageExportModule}
+            onTouchStart={prefetchLineageExportModule}
+          >
             {exporting ? '导出中…' : '导出图片'}
           </button>
           <button

@@ -209,11 +209,19 @@ export default function SendPage() {
   /* 搜索防抖 300ms（docs/23 §5.5 targets?q=）；seq 防竞态：慢的旧响应不覆盖新结果 */
   const seqRef = useRef(0)
   useEffect(() => {
+    const term = q.trim()
+    const seq = ++seqRef.current
+    if (!term) {
+      // 空搜索直接复用首屏全量名单，不再重复请求一次 targets。
+      setHits(full)
+      setSearchErr('')
+      setSearching(false)
+      return
+    }
     const t = window.setTimeout(async () => {
-      const seq = ++seqRef.current
       setSearching(true)
       try {
-        const d = await fetchSendTargets(q)
+        const d = await fetchSendTargets(term)
         if (seqRef.current === seq) {
           setHits(d.items ?? [])
           setSearchErr('')
@@ -228,7 +236,7 @@ export default function SendPage() {
       }
     }, 300)
     return () => window.clearTimeout(t)
-  }, [q])
+  }, [q, full])
 
   const channels: SendChannel[] = useMemo(() => {
     const list: SendChannel[] = []
@@ -426,7 +434,7 @@ export default function SendPage() {
       {/* 顶部说明条 */}
       <section className="card">
         <div className="row" style={{ margin: 0 }}>
-          <span style={{ flex: 1, minWidth: 260 }}>
+          <span className="send-intro">
             <b>消息下发</b>
             <span className="hint" style={{ marginLeft: 8 }}>
               管理员手动给主播发文字 / 师门日报图（微信机器人私聊 + 展示端「我的」页弹窗），
@@ -447,7 +455,7 @@ export default function SendPage() {
               <h2>编辑消息</h2>
               <div className="row">
                 <input
-                  style={{ flex: 1, minWidth: 220 }}
+                  className="send-title"
                   placeholder="弹窗标题（必填）"
                   maxLength={64}
                   value={title}
@@ -998,29 +1006,76 @@ function DetailCard({ id, onBack }: { id: number; onBack: () => void }) {
   const pager = usePager(outbox.length, '')
 
   useEffect(() => {
-    let alive = true
+    let stopped = false
     let timer: number | null = null
+    let inFlight = false
+    let queued = false
+    let keepPolling = true
+
+    const canPoll = () => document.visibilityState !== 'hidden' && navigator.onLine !== false
+    const clearTimer = () => {
+      if (timer != null) window.clearTimeout(timer)
+      timer = null
+    }
+    const schedule = (delay = 3000) => {
+      clearTimer()
+      if (stopped || !keepPolling || !canPoll()) return
+      // 上一次完成后再排下一次，慢请求不会叠成并发轮询。
+      timer = window.setTimeout(() => { void tick() }, delay)
+    }
     const tick = async () => {
+      clearTimer()
+      if (stopped || !keepPolling || !canPoll()) return
+      if (inFlight) {
+        queued = true
+        return
+      }
+      inFlight = true
       try {
         const d = await fetchSendMessageDetail(id)
-        if (!alive) return
+        if (stopped) return
         setData(d)
         setErr('')
-        const hasPending = (d.outbox ?? []).some((r) => r.status === 'pending')
-        if (!hasPending && timer != null) {
-          window.clearInterval(timer)
-          timer = null
-        }
+        keepPolling = (d.message.counts?.pending ?? 0) > 0
+          || (d.outbox ?? []).some((r) => r.status === 'pending')
       } catch (e: unknown) {
         // 轮询中的单次失败不终止轮询（worker 还在跑，下一轮再试）
-        if (alive) setErr(e instanceof Error ? e.message : String(e))
+        if (!stopped) setErr(e instanceof Error ? e.message : String(e))
+      } finally {
+        inFlight = false
+        if (stopped) return
+        if (queued) {
+          queued = false
+          if (canPoll()) void tick()
+        } else {
+          schedule()
+        }
       }
     }
+
+    const onVisibility = () => {
+      if (document.hidden) {
+        queued = true
+        clearTimer()
+      } else {
+        void tick()
+      }
+    }
+    const onOffline = () => {
+      queued = true
+      clearTimer()
+    }
+
     void tick()
-    timer = window.setInterval(tick, 3000)
+    document.addEventListener('visibilitychange', onVisibility)
+    window.addEventListener('offline', onOffline)
+    window.addEventListener('online', onVisibility)
     return () => {
-      alive = false
-      if (timer != null) window.clearInterval(timer)
+      stopped = true
+      clearTimer()
+      document.removeEventListener('visibilitychange', onVisibility)
+      window.removeEventListener('offline', onOffline)
+      window.removeEventListener('online', onVisibility)
     }
   }, [id])
 
@@ -1112,7 +1167,12 @@ function DetailCard({ id, onBack }: { id: number; onBack: () => void }) {
 
 /* ---------------- 页面私有样式（不动全局 styles.css） ---------------- */
 const SEND_CSS = `
-.send-stack { display: grid; gap: 14px; min-width: 0; }
+.send-stack { display: grid; gap: 14px; min-width: 0; max-width: 100%; }
+.send-stack > *,
+.send-stack .card { min-width: 0; max-width: 100%; }
+.send-intro { flex: 1 1 260px; min-width: 0; }
+.send-title { flex: 1 1 220px; width: 100%; min-width: 0; }
+.send-stack .table-scroll { width: 100%; max-width: 100%; }
 
 .send-tabs { display: flex; gap: 4px; background: color-mix(in srgb, var(--ink) 5%, transparent); padding: 4px; border-radius: 10px; width: fit-content; margin: 8px 0; }
 .send-tabs button { border: none; background: transparent; padding: 6px 16px; border-radius: 8px; font: inherit; font-size: 13px; cursor: pointer; color: var(--ink2); }
@@ -1138,4 +1198,21 @@ const SEND_CSS = `
 .send-upload-meta { font-size: 12px; color: var(--ink2); word-break: break-all; }
 
 .send-detail-content { white-space: pre-wrap; word-break: break-word; background: color-mix(in srgb, var(--ink) 4%, transparent); border-radius: 8px; padding: 10px 12px; font-size: 13.5px; }
+
+@media (max-width: 640px) {
+  .send-stack .row { align-items: stretch; }
+  .send-stack .row > input,
+  .send-stack .row > textarea,
+  .send-stack .row > label {
+    flex: 1 1 100%;
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+  }
+  .send-stack .row > textarea { min-width: 0; }
+  .send-stack .row > .hint { align-self: flex-end; }
+  .send-stack .send-upload { align-items: flex-start; }
+  .send-tabs { width: 100%; overflow-x: auto; }
+  .send-tabs button { flex: 1 0 auto; }
+}
 `

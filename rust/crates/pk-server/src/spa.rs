@@ -12,7 +12,7 @@
 use std::path::{Path, PathBuf};
 
 use axum::body::Body;
-use axum::http::{header, StatusCode, Uri};
+use axum::http::{header, HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::json;
@@ -113,6 +113,7 @@ fn percent_decode(s: &str) -> String {
 
 pub async fn handler(
     axum::extract::State((dist_dir, index)): axum::extract::State<(PathBuf, Index)>,
+    headers: HeaderMap,
     uri: Uri,
 ) -> Response {
     let path = uri.path();
@@ -130,7 +131,7 @@ pub async fn handler(
             "" | "/" => "/",
             p => p,
         };
-        return serve_dist(&dist_dir, index, new_path).await;
+        return serve_dist(&dist_dir, index, new_path, &headers).await;
     }
 
     // API 没命中路由：给前端一个能解析的 JSON 404
@@ -142,7 +143,7 @@ pub async fn handler(
             .into_response();
     }
 
-    serve_dist(&dist_dir, index, path).await
+    serve_dist(&dist_dir, index, path, &headers).await
 }
 
 /// 按路径给静态资源的缓存策略：
@@ -165,16 +166,68 @@ fn cache_control(path: &str) -> &'static str {
     }
 }
 
+/// 当前请求是否明确接受某个内容编码（支持 `*` 和 `q=0`）。
+fn accepts_encoding(headers: &HeaderMap, wanted: &str) -> bool {
+    let Some(raw) = headers
+        .get(header::ACCEPT_ENCODING)
+        .and_then(|v| v.to_str().ok())
+    else {
+        return false;
+    };
+    let mut wildcard_q = 0.0f32;
+    let mut explicit_q: Option<f32> = None;
+    for part in raw.split(',') {
+        let mut bits = part.trim().split(';');
+        let name = bits.next().unwrap_or_default().trim().to_ascii_lowercase();
+        let q = bits
+            .find_map(|p| p.trim().strip_prefix("q="))
+            .and_then(|v| v.parse::<f32>().ok())
+            .unwrap_or(1.0)
+            .clamp(0.0, 1.0);
+        if name == "*" {
+            wildcard_q = q;
+        } else if name == wanted {
+            // 显式 q=0 必须压过通配符；RFC 下这是客户端明确拒绝该编码。
+            explicit_q = Some(q);
+        }
+    }
+    explicit_q.unwrap_or(wildcard_q) > 0.0
+}
+
+async fn encoded_variant(file: &Path, headers: &HeaderMap) -> (PathBuf, Option<&'static str>) {
+    for (suffix, encoding) in [(".br", "br"), (".gz", "gzip")] {
+        if !accepts_encoding(headers, encoding) {
+            continue;
+        }
+        let mut candidate = file.as_os_str().to_owned();
+        candidate.push(suffix);
+        let candidate = PathBuf::from(candidate);
+        if tokio::fs::metadata(&candidate)
+            .await
+            .is_ok_and(|m| m.is_file())
+        {
+            return (candidate, Some(encoding));
+        }
+    }
+    (file.to_path_buf(), None)
+}
+
 /// 按 dist 解析：真实文件 → 静态资源 404 → index.html 回退
-async fn serve_dist(dist_dir: &Path, index: Index, path: &str) -> Response {
+async fn serve_dist(dist_dir: &Path, index: Index, path: &str, headers: &HeaderMap) -> Response {
     // 真实文件
     if let Some(file) = resolve(dist_dir, path) {
-        if let Ok(bytes) = tokio::fs::read(&file).await {
+        let (actual, encoding) = encoded_variant(&file, headers).await;
+        if let Ok(bytes) = tokio::fs::read(&actual).await {
             let ct = content_type(&file);
-            return Response::builder()
+            let mut builder = Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, ct)
                 .header(header::CACHE_CONTROL, cache_control(path))
+                .header(header::VARY, "Accept-Encoding");
+            if let Some(encoding) = encoding {
+                builder = builder.header(header::CONTENT_ENCODING, encoding);
+            }
+            return builder
                 .body(Body::from(bytes))
                 .expect("构造静态资源响应失败");
         }
@@ -191,13 +244,20 @@ async fn serve_dist(dist_dir: &Path, index: Index, path: &str) -> Response {
     if !index {
         return (StatusCode::NOT_FOUND, "not found").into_response();
     }
-    match tokio::fs::read(dist_dir.join("index.html")).await {
-        Ok(bytes) => Response::builder()
-            .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-            .header(header::CACHE_CONTROL, "no-cache")
-            .body(Body::from(bytes))
-            .expect("构造 SPA 响应失败"),
+    let index_file = dist_dir.join("index.html");
+    let (actual, encoding) = encoded_variant(&index_file, headers).await;
+    match tokio::fs::read(actual).await {
+        Ok(bytes) => {
+            let mut builder = Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+                .header(header::CACHE_CONTROL, "no-cache")
+                .header(header::VARY, "Accept-Encoding");
+            if let Some(encoding) = encoding {
+                builder = builder.header(header::CONTENT_ENCODING, encoding);
+            }
+            builder.body(Body::from(bytes)).expect("构造 SPA 响应失败")
+        }
         // 启动时有、现在没了（构建中途重跑）：按 404 处理，别把错误当 HTML 吐给浏览器
         Err(e) => {
             tracing::warn!(error = %e, "回退 index.html 读取失败");
@@ -209,6 +269,20 @@ async fn serve_dist(dist_dir: &Path, index: Index, path: &str) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn call_handler(state: axum::extract::State<(PathBuf, Index)>, uri: Uri) -> Response {
+        handler(state, HeaderMap::new(), uri).await
+    }
+
+    async fn call_handler_with_encoding(
+        state: axum::extract::State<(PathBuf, Index)>,
+        uri: Uri,
+        accept_encoding: &'static str,
+    ) -> Response {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::ACCEPT_ENCODING, accept_encoding.parse().unwrap());
+        handler(state, headers, uri).await
+    }
 
     #[test]
     fn decodes_percent_escapes() {
@@ -301,6 +375,67 @@ mod tests {
     }
 
     #[test]
+    fn accepts_encoding_honors_wildcards_and_zero_quality() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::ACCEPT_ENCODING, "br, gzip;q=0".parse().unwrap());
+        assert!(accepts_encoding(&headers, "br"));
+        assert!(!accepts_encoding(&headers, "gzip"));
+        headers.insert(header::ACCEPT_ENCODING, "*;q=0.5".parse().unwrap());
+        assert!(accepts_encoding(&headers, "br"));
+        headers.insert(header::ACCEPT_ENCODING, "identity".parse().unwrap());
+        assert!(!accepts_encoding(&headers, "br"));
+        headers.insert(header::ACCEPT_ENCODING, "*, br;q=0".parse().unwrap());
+        assert!(!accepts_encoding(&headers, "br"), "显式 q=0 必须压过通配符");
+    }
+
+    #[tokio::test]
+    async fn serves_precompressed_asset_and_falls_back_to_original() {
+        let dir = std::env::temp_dir().join(format!("pk-spa-br-{}", std::process::id()));
+        tokio::fs::create_dir_all(dir.join("assets")).await.unwrap();
+        tokio::fs::write(dir.join("index.html"), b"<html>ok</html>")
+            .await
+            .unwrap();
+        tokio::fs::write(dir.join("assets/app.js"), b"console.log('raw')")
+            .await
+            .unwrap();
+        tokio::fs::write(dir.join("assets/app.js.br"), b"fake-br")
+            .await
+            .unwrap();
+        let index = load_index(&dir).await;
+
+        let res = call_handler_with_encoding(
+            axum::extract::State((dir.clone(), index)),
+            Uri::from_static("/assets/app.js"),
+            "br, gzip",
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(
+            res.headers()
+                .get(header::CONTENT_ENCODING)
+                .and_then(|v| v.to_str().ok()),
+            Some("br")
+        );
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"fake-br");
+
+        let res = call_handler(
+            axum::extract::State((dir.clone(), index)),
+            Uri::from_static("/assets/app.js"),
+        )
+        .await;
+        assert!(res.headers().get(header::CONTENT_ENCODING).is_none());
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"console.log('raw')");
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[test]
     fn content_types_cover_frontend_assets() {
         assert_eq!(
             content_type(Path::new("/a/index.html")),
@@ -332,7 +467,7 @@ mod tests {
         let index = load_index(&dir).await;
         let state = (dir.clone(), index);
 
-        let res = handler(axum::extract::State(state), Uri::from_static("/api/nope")).await;
+        let res = call_handler(axum::extract::State(state), Uri::from_static("/api/nope")).await;
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
         assert_eq!(
             res.headers()
@@ -342,7 +477,7 @@ mod tests {
         );
 
         // 未知路径 -> index.html + 200（这是分享链接 /s/12 依赖的行为）
-        let res = handler(
+        let res = call_handler(
             axum::extract::State((dir.clone(), load_index(&dir).await)),
             Uri::from_static("/s/12"),
         )
@@ -377,7 +512,7 @@ mod tests {
             .await
             .unwrap();
 
-        let res = handler(
+        let res = call_handler(
             axum::extract::State((dir.clone(), index)),
             Uri::from_static("/s/1"),
         )
@@ -406,7 +541,7 @@ mod tests {
             .unwrap();
         let index = load_index(&dir).await;
 
-        let res = handler(
+        let res = call_handler(
             axum::extract::State((dir.clone(), index)),
             Uri::from_static("/assets/index-gone.js"),
         )
@@ -436,7 +571,7 @@ mod tests {
             .unwrap();
 
         for path in ["/admin", "/admin/", "/admin/import", "/admin/group"] {
-            let res = handler(
+            let res = call_handler(
                 axum::extract::State((dir.clone(), load_index(&dir).await)),
                 Uri::from_str(path).unwrap(),
             )
@@ -449,7 +584,7 @@ mod tests {
         }
 
         // 构建产物：/admin/assets/x.js 要能拿到真文件，缺文件时 404 而不是 HTML
-        let res = handler(
+        let res = call_handler(
             axum::extract::State((dir.clone(), load_index(&dir).await)),
             Uri::from_str("/admin/assets/index-new.js").unwrap(),
         )
@@ -462,7 +597,7 @@ mod tests {
             Some("text/javascript; charset=utf-8")
         );
 
-        let res = handler(
+        let res = call_handler(
             axum::extract::State((dir.clone(), load_index(&dir).await)),
             Uri::from_str("/admin/assets/index-gone.js").unwrap(),
         )

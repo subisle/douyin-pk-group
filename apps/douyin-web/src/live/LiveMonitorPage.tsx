@@ -41,6 +41,10 @@ const GROUP_STATUS: Record<string, { label: string; cls: string }> = {
   finalized: { label: '已定稿', cls: 'ok' },
 }
 
+/** SSE 是分数主路径；页面可见时只保留低频轮询兜底，断线也能在一拍内恢复。 */
+const SCORE_FALLBACK_MS = 10000
+const OVERVIEW_FALLBACK_MS = 15000
+
 /** 状态点：颜色即语义，运营扫一眼就知道哪一卡住了 */
 function Dot({ kind }: { kind: string }) {
   return <span className={`dot dot-${kind}`} aria-hidden />
@@ -243,12 +247,16 @@ export default function LiveMonitorPage() {
   }
   const loadScoresRef = useRef(loadScores)
   loadScoresRef.current = loadScores
+  const loadOverviewRef = useRef(loadOverview)
+  loadOverviewRef.current = loadOverview
 
   /** 采集器一拍可能连续广播多条 live；合并成 500ms 一次读取，避免追着事件风暴打接口。 */
   const scheduleScoreRefresh = () => {
+    if (document.visibilityState === 'hidden' || navigator.onLine === false) return
     if (scoreRefreshTimerRef.current != null) return
     scoreRefreshTimerRef.current = window.setTimeout(() => {
       scoreRefreshTimerRef.current = null
+      if (document.visibilityState === 'hidden' || navigator.onLine === false) return
       void loadScoresRef.current()
     }, 500)
   }
@@ -272,15 +280,112 @@ export default function LiveMonitorPage() {
     setBindNight(event.nightPlanId || 0)
   }, [ov?.event?.id, ov?.event?.dayPlanId, ov?.event?.nightPlanId, eventId])
 
-  // 采集器每上报一拍都会广播 live：分数走 SSE 合并刷新，2 秒轮询只作兜底。
-  // 赛程结构变化仍由 5 秒 overview 轮询补齐，避免每拍都做一遍全量赛程查询。
+  // 采集器每上报一拍都会广播 live：分数走 SSE 合并刷新，低频轮询只作兜底。
+  // 赛程结构变化同样低频补齐，避免每拍都做一遍全量赛程查询。
   useAutoRefresh(scheduleScoreRefresh, ['live'])
   useEffect(() => {
-    const overviewTimer = window.setInterval(loadOverview, 5000)
-    const scoreTimer = window.setInterval(loadScores, 2000)
+    let stopped = false
+    let overviewTimer: number | null = null
+    let scoreTimer: number | null = null
+    let overviewBusy = false
+    let scoreBusy = false
+    let overviewQueued = false
+    let scoreQueued = false
+
+    const canPoll = () => document.visibilityState !== 'hidden' && navigator.onLine !== false
+    const clearTimers = () => {
+      if (overviewTimer != null) window.clearTimeout(overviewTimer)
+      if (scoreTimer != null) window.clearTimeout(scoreTimer)
+      overviewTimer = null
+      scoreTimer = null
+    }
+    const scheduleOverview = (delay = OVERVIEW_FALLBACK_MS) => {
+      if (overviewTimer != null) window.clearTimeout(overviewTimer)
+      overviewTimer = null
+      if (stopped || !canPoll()) return
+      overviewTimer = window.setTimeout(() => { void runOverview() }, delay)
+    }
+    const scheduleScores = (delay = SCORE_FALLBACK_MS) => {
+      if (scoreTimer != null) window.clearTimeout(scoreTimer)
+      scoreTimer = null
+      if (stopped || !canPoll()) return
+      scoreTimer = window.setTimeout(() => { void runScores() }, delay)
+    }
+    const runOverview = async () => {
+      if (overviewTimer != null) window.clearTimeout(overviewTimer)
+      overviewTimer = null
+      if (stopped || !canPoll()) return
+      if (overviewBusy) {
+        overviewQueued = true
+        return
+      }
+      overviewBusy = true
+      try {
+        await loadOverviewRef.current()
+      } finally {
+        overviewBusy = false
+        if (stopped) return
+        if (overviewQueued) {
+          overviewQueued = false
+          if (canPoll()) void runOverview()
+        } else if (canPoll()) {
+          scheduleOverview()
+        }
+      }
+    }
+    const runScores = async () => {
+      if (scoreTimer != null) window.clearTimeout(scoreTimer)
+      scoreTimer = null
+      if (stopped || !canPoll()) return
+      if (scoreBusy) {
+        scoreQueued = true
+        return
+      }
+      scoreBusy = true
+      try {
+        await loadScoresRef.current()
+      } finally {
+        scoreBusy = false
+        if (stopped) return
+        if (scoreQueued) {
+          scoreQueued = false
+          if (canPoll()) void runScores()
+        } else if (canPoll()) {
+          scheduleScores()
+        }
+      }
+    }
+    const resume = () => {
+      if (!canPoll()) return
+      void runOverview()
+      void runScores()
+    }
+    const onVisibility = () => {
+      if (document.hidden) {
+        overviewQueued = true
+        scoreQueued = true
+        clearTimers()
+      } else {
+        resume()
+      }
+    }
+    const onOffline = () => {
+      overviewQueued = true
+      scoreQueued = true
+      clearTimers()
+    }
+
+    scheduleOverview()
+    scheduleScores()
+    document.addEventListener('visibilitychange', onVisibility)
+    window.addEventListener('offline', onOffline)
+    window.addEventListener('online', resume)
     return () => {
-      window.clearInterval(overviewTimer)
-      window.clearInterval(scoreTimer)
+      stopped = true
+      clearTimers()
+      document.removeEventListener('visibilitychange', onVisibility)
+      window.removeEventListener('offline', onOffline)
+      window.removeEventListener('online', resume)
     }
   }, [eventId, groupId])
   useEffect(() => () => {

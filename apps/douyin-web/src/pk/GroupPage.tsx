@@ -14,13 +14,6 @@ import {
   type EventType,
 } from './api';
 import {
-  buildExportNode,
-  buildGapExportNode,
-  disposeExportNode,
-  downloadBlob,
-  nodeToPngBlob,
-} from './exportImage';
-import {
   BREAK_AFTER_GROUP,
   REVIVAL_EVENTS,
   REVIVAL_MINUTES,
@@ -46,6 +39,23 @@ import type {
   WaveMetric,
 } from './types';
 import './pk.css';
+
+type GroupExportModule = typeof import('./exportImage');
+let groupExportModulePromise: Promise<GroupExportModule> | null = null;
+
+function loadGroupExportModule(): Promise<GroupExportModule> {
+  if (!groupExportModulePromise) {
+    groupExportModulePromise = import('./exportImage').catch((error) => {
+      groupExportModulePromise = null;
+      throw error;
+    });
+  }
+  return groupExportModulePromise;
+}
+
+function prefetchGroupExportModule() {
+  void loadGroupExportModule().catch(() => {});
+}
 
 let seq = 0;
 const newId = () => `b${++seq}`;
@@ -878,6 +888,8 @@ export default function GroupPage() {
     }
     setBusy('export');
     try {
+      const { buildExportNode, disposeExportNode, downloadBlob, nodeToPngBlob } =
+        await loadGroupExportModule();
       // P1-13：导出前强制等最新的 inspect 落地 —— 拖完立刻点导出时，
       // slots 可能还是上一次分组的开赛时间，错的时间会被印进长图发到群里。
       if (inspectInflightRef.current) {
@@ -924,6 +936,8 @@ export default function GroupPage() {
     }
     setBusy('gap');
     try {
+      const { buildGapExportNode, disposeExportNode, downloadBlob, nodeToPngBlob } =
+        await loadGroupExportModule();
       // 与长图同一口径：等最新一次 inspect 落地，避免拖完立刻导出拿到旧数据
       if (inspectInflightRef.current) {
         await inspectInflightRef.current;
@@ -1605,13 +1619,20 @@ export default function GroupPage() {
           <button className="primary" disabled={busy === 'save'} onClick={savePlanFn}>
             {busy === 'save' ? '保存中…' : '保存方案'}
           </button>
-          <button disabled={busy === 'export'} onClick={exportImage}>
+          <button
+            disabled={busy === 'export'}
+            onClick={exportImage}
+            onPointerEnter={prefetchGroupExportModule}
+            onTouchStart={prefetchGroupExportModule}
+          >
             {busy === 'export' ? '导出中…' : '导出分组图'}
           </button>
           {/* 总排名分差图：单独一张 PNG，只回答「谁排第几、相邻差多少分」 */}
           <button
             disabled={busy === 'gap'}
             onClick={exportGapImage}
+            onPointerEnter={prefetchGroupExportModule}
+            onTouchStart={prefetchGroupExportModule}
             title="各名次门槛 + 距上一位 + 目标名次还差多少分"
           >
             {busy === 'gap' ? '导出中…' : '导出差距图'}

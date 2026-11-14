@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import './live.css'
 import './room.css'
@@ -30,26 +30,88 @@ export default function RoomMonitorPage() {
   const [data, setData] = useState<StandaloneRoomScores | null>(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+  const requestSeqRef = useRef(0)
 
-  async function load(webRid: string) {
+  async function load(webRid: string, showLoading = false) {
     if (!webRid) return
-    setLoading(true)
+    const seq = ++requestSeqRef.current
+    if (showLoading) setLoading(true)
     try {
       const next = await live.roomScores(webRid)
+      if (seq !== requestSeqRef.current) return
       setData(next)
       setError('')
     } catch (e: any) {
+      if (seq !== requestSeqRef.current) return
       setError(e?.message ?? String(e))
     } finally {
-      setLoading(false)
+      if (showLoading && seq === requestSeqRef.current) setLoading(false)
     }
   }
 
   useEffect(() => {
     if (!room) return
-    void load(room)
-    const timer = window.setInterval(() => { void load(room) }, 2000)
-    return () => window.clearInterval(timer)
+    let stopped = false
+    let timer: number | null = null
+    let busy = false
+    let queued = false
+
+    const canPoll = () => document.visibilityState !== 'hidden' && navigator.onLine !== false
+    const clearTimer = () => {
+      if (timer != null) window.clearTimeout(timer)
+      timer = null
+    }
+    const schedule = (delay = 2000) => {
+      clearTimer()
+      if (stopped || !canPoll()) return
+      timer = window.setTimeout(() => { void run() }, delay)
+    }
+    const run = async (initial = false) => {
+      clearTimer()
+      if (stopped || !canPoll()) return
+      if (busy) {
+        queued = true
+        return
+      }
+      busy = true
+      try {
+        await load(room, initial)
+      } finally {
+        busy = false
+        if (stopped) return
+        if (queued) {
+          queued = false
+          if (canPoll()) void run()
+        } else if (canPoll()) {
+          schedule()
+        }
+      }
+    }
+    const onVisibility = () => {
+      if (document.hidden) {
+        queued = true
+        clearTimer()
+      } else {
+        void run()
+      }
+    }
+    const onOffline = () => {
+      queued = true
+      clearTimer()
+    }
+
+    void run(true)
+    document.addEventListener('visibilitychange', onVisibility)
+    window.addEventListener('offline', onOffline)
+    window.addEventListener('online', onVisibility)
+    return () => {
+      stopped = true
+      requestSeqRef.current += 1
+      clearTimer()
+      document.removeEventListener('visibilitychange', onVisibility)
+      window.removeEventListener('offline', onOffline)
+      window.removeEventListener('online', onVisibility)
+    }
   }, [room])
 
   function submit(e: FormEvent) {

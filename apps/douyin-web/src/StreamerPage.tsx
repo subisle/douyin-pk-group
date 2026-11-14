@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from './api'
 import Pager, { usePager } from './Pager'
 import { useAutoRefresh } from './useAutoRefresh'
@@ -268,16 +268,35 @@ export default function StreamerPage() {
   /* 导入暂存区相关 state / 拉取 / 建档 / 丢弃已整块移除（2026-10-14 用户口径：
      暂存内容不需要在台账页显示）。后端端点与补账逻辑不动，只是前端不再呈现。 */
 
+  const abortRef = useRef<AbortController | null>(null)
   const load = useCallback(() => {
+    abortRef.current?.abort()
+    const controller = new AbortController()
+    abortRef.current = controller
     const qs = new URLSearchParams()
     if (q) qs.set('q', q)
     if (team) qs.set('team', team)
-    api(`/api/admin/streamers?${qs}`)
-      .then((d) => setItems(d.items ?? []))
-      .catch((e) => setError(e.message ?? String(e)))
+    api(`/api/admin/streamers?${qs}`, { signal: controller.signal })
+      .then((d) => {
+        if (!controller.signal.aborted && abortRef.current === controller) setItems(d.items ?? [])
+      })
+      .catch((e) => {
+        if (!controller.signal.aborted && abortRef.current === controller) {
+          setError(e.message ?? String(e))
+        }
+      })
   }, [q, team])
 
-  useEffect(load, [load])
+  useEffect(() => {
+    // 搜索输入 250ms 防抖；切团别或首次进入仍立即加载。清理时真正取消旧请求。
+    const timer = window.setTimeout(load, q.trim() ? 250 : 0)
+    return () => {
+      window.clearTimeout(timer)
+      abortRef.current?.abort()
+    }
+  }, [load, q])
+
+  useEffect(() => () => abortRef.current?.abort(), [])
 
   /** 重名提示：姓名是行的唯一标识，从当前 items 现算同名（不在后端接口里新增）。 */
   const dupNames = useMemo(() => {

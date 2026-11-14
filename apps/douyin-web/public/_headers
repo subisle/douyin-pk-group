@@ -1,11 +1,15 @@
 /assets/*
   Cache-Control: public, max-age=31536000, immutable
 /fonts/*
-  Cache-Control: public, max-age=31536000, immutable
+  Cache-Control: public, max-age=604800
 /
   Cache-Control: no-cache
 /index.html
   Cache-Control: no-cache
+/resources/thumbs/*
+  Cache-Control: public, max-age=604800
+/resources/videos.json
+  Cache-Control: public, max-age=300, stale-while-revalidate=86400
 /*
   X-Content-Type-Options: nosniff
   X-Frame-Options: DENY
