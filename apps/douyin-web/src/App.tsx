@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState } from 'react'
+import { lazy, Suspense, useEffect, useRef, useState } from 'react'
 import DashboardPage from './DashboardPage'
 import { hasToken, login, logout, UNAUTHORIZED_EVENT } from './api'
 import { subscribeChanges } from './useAutoRefresh'
@@ -19,6 +19,9 @@ const LiveMonitorPage = lazy(() => import('./live/LiveMonitorPage'))
 const RoomMonitorPage = lazy(() => import('./live/RoomMonitorPage'))
 const GroupPage = lazy(() => import('./pk/GroupPage'))
 const BoardPage = lazy(() => import('./pk/BoardPage'))
+
+/** 移动端导航断点：与 styles.css 的移动外壳保持一致。 */
+const MOBILE_NAV_QUERY = '(max-width: 760px)'
 
 /** 侧边栏导航图标（emoji，零依赖；与 router.ts 的 ROUTES 一一对应，
  *  全屏独立页（PK 展板）不在侧边栏里，因此没有图标项）。 */
@@ -42,8 +45,53 @@ export default function App() {
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [toast, setToast] = useState('')
+  const [navOpen, setNavOpen] = useState(false)
+  const [isMobileNav, setIsMobileNav] = useState(() =>
+    typeof window !== 'undefined' && window.matchMedia(MOBILE_NAV_QUERY).matches,
+  )
+  const menuButtonRef = useRef<HTMLButtonElement>(null)
+  const drawerCloseRef = useRef<HTMLButtonElement>(null)
+  const activeNavRef = useRef<HTMLAnchorElement>(null)
   /** 当前页面由 URL 决定（/admin/data、/admin/import …），不再是页内 state */
   const { route, go } = useRoute()
+  const activeRoute = ROUTES.find((r) => r.key === route)
+
+  useEffect(() => {
+    const mq = window.matchMedia(MOBILE_NAV_QUERY)
+    const sync = () => {
+      setIsMobileNav(mq.matches)
+      if (!mq.matches) setNavOpen(false)
+    }
+    sync()
+    mq.addEventListener?.('change', sync)
+    return () => mq.removeEventListener?.('change', sync)
+  }, [])
+
+  useEffect(() => {
+    setNavOpen(false)
+  }, [route])
+
+  useEffect(() => {
+    if (!navOpen || !isMobileNav) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      setNavOpen(false)
+      menuButtonRef.current?.focus()
+    }
+    document.body.classList.add('admin-nav-open')
+    drawerCloseRef.current?.focus()
+    requestAnimationFrame(() => activeNavRef.current?.scrollIntoView({ block: 'center' }))
+    window.addEventListener('keydown', onKey)
+    return () => {
+      document.body.classList.remove('admin-nav-open')
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [navOpen, isMobileNav])
+
+  function closeNav(returnFocus = false) {
+    setNavOpen(false)
+    if (returnFocus) menuButtonRef.current?.focus()
+  }
 
   /* 全局变更提示：机器人导入、台账变更、数据源切换这类「不是本页操作触发」的更新，
      弹一条短提示，让用户知道页面已经自己刷新过了（页面数据由各页的
@@ -116,21 +164,36 @@ export default function App() {
      地址仍在 /admin/pk-board（可收藏、刷新不丢、鉴权同后台一套）。 */
   if (FULLSCREEN_ROUTES.some((r) => r.key === route)) {
     return (
-      <Suspense fallback={<div className="route-loading">加载中…</div>}>
-        <BoardPage />
-      </Suspense>
+      <div className="pk-board-shell">
+        <Suspense fallback={<div className="route-loading">加载中…</div>}>
+          <BoardPage />
+        </Suspense>
+      </div>
     )
   }
 
   return (
     <div className="app-shell">
-      <aside className="sidebar">
+      <aside
+        id="admin-navigation"
+        className={navOpen ? 'sidebar is-open' : 'sidebar'}
+        aria-hidden={isMobileNav ? !navOpen : undefined}
+      >
         <div className="side-brand">
           <span className="brand-mark" aria-hidden />
           <div className="side-brand-text">
             <div className="side-title">抖音数据管理</div>
             <div className="side-sub">鹏仔传媒 · 运营后台</div>
           </div>
+          <button
+            ref={drawerCloseRef}
+            className="mobile-drawer-close"
+            type="button"
+            aria-label="关闭菜单"
+            onClick={() => closeNav(true)}
+          >
+            ×
+          </button>
         </div>
         <nav className="side-nav">
           {ROUTES.map((t) => (
@@ -138,12 +201,15 @@ export default function App() {
                普通左键交给 history.pushState，避免整页重载。 */
             <a
               key={t.key}
+              ref={route === t.key ? activeNavRef : undefined}
               className={route === t.key ? 'side-link active' : 'side-link'}
               href={routeHref(t.key)}
+              tabIndex={isMobileNav && !navOpen ? -1 : undefined}
               aria-current={route === t.key ? 'page' : undefined}
               onClick={(e) => {
                 if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return
                 e.preventDefault()
+                closeNav()
                 go(t.key)
               }}
             >
@@ -158,6 +224,7 @@ export default function App() {
           <button
             className="side-link"
             onClick={() => {
+              closeNav()
               logout()
               setAuthed(false)
             }}
@@ -169,7 +236,31 @@ export default function App() {
           </button>
         </div>
       </aside>
+      <button
+        className="mobile-nav-backdrop"
+        type="button"
+        aria-label="关闭菜单"
+        tabIndex={navOpen ? 0 : -1}
+        onClick={() => closeNav(true)}
+      />
       <main className="main">
+        <header className="mobile-bar">
+          <button
+            ref={menuButtonRef}
+            className="mobile-menu-btn"
+            type="button"
+            aria-label={navOpen ? '关闭菜单' : '打开菜单'}
+            aria-expanded={navOpen}
+            aria-controls="admin-navigation"
+            onClick={() => setNavOpen((open) => !open)}
+          >
+            <span aria-hidden>{navOpen ? '×' : '☰'}</span>
+          </button>
+          <div className="mobile-bar-copy" aria-live="polite">
+            <span>鹏仔传媒 · 运营后台</span>
+            <strong>{activeRoute?.label ?? '后台管理'}</strong>
+          </div>
+        </header>
         <Suspense fallback={<div className="route-loading">加载中…</div>}>
           {route === 'data' && <DashboardPage />}
           {route === 'import' && <ImportPage />}

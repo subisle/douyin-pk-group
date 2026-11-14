@@ -7,11 +7,12 @@
   --ink: #101828;
   --ink2: #475467;
   --ink3: #98a2b3;
-  --line: color-mix(in srgb, #101828 8%, transparent);
-  --line-strong: color-mix(in srgb, #101828 14%, transparent);
+  /* 老 Android WebView 没有 color-mix 时使用这些静态回退，避免边框/背景失效。 */
+  --line: rgba(16, 24, 40, 0.08);
+  --line-strong: rgba(16, 24, 40, 0.14);
   --brand: #4f46e5;
   --brand-dark: #4338ca;
-  --brand-soft: color-mix(in srgb, #4f46e5 8%, transparent);
+  --brand-soft: rgba(79, 70, 229, 0.08);
   --violet: #7c3aed;
   --pink: #db2777;
   --good: #067647;
@@ -22,10 +23,24 @@
   --bad-bg: #fef3f2;
   --radius: 12px;
   --radius-ctl: 8px;
-  --shadow-card: 0 1px 2px rgb(16 24 40 / 4%), 0 1px 3px rgb(16 24 40 / 4%);
-  --shadow-pop: 0 12px 40px rgb(16 24 40 / 18%);
-  --ring: 0 0 0 3px color-mix(in srgb, var(--brand) 18%, transparent);
+  --shadow-card: 0 1px 2px rgba(16, 24, 40, 0.04), 0 1px 3px rgba(16, 24, 40, 0.04);
+  --shadow-pop: 0 12px 40px rgba(16, 24, 40, 0.18);
+  --ring: 0 0 0 3px rgba(79, 70, 229, 0.18);
   --ease: 150ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+@supports (color: color-mix(in srgb, red 50%, blue)) {
+  :root {
+    --line: color-mix(in srgb, #101828 8%, transparent);
+    --line-strong: color-mix(in srgb, #101828 14%, transparent);
+    --brand-soft: color-mix(in srgb, #4f46e5 8%, transparent);
+    --ring: 0 0 0 3px color-mix(in srgb, var(--brand) 18%, transparent);
+  }
+}
+
+#root {
+  min-height: 100vh;
+  min-height: 100dvh;
 }
 
 * {
@@ -322,6 +337,7 @@ a.tab {
 .app-shell {
   display: flex;
   min-height: 100vh;
+  min-height: 100dvh;
 }
 .sidebar {
   width: 216px;
@@ -329,6 +345,7 @@ a.tab {
   position: sticky;
   top: 0;
   height: 100vh;
+  height: 100dvh;
   display: flex;
   flex-direction: column;
   background: #fff;
@@ -449,54 +466,197 @@ a.tab {
   }
 }
 
-@media (max-width: 560px) {
+.mobile-bar,
+.mobile-nav-backdrop,
+.mobile-drawer-close {
+  display: none;
+}
+
+/* 手机外壳：不再横向铺 11 个入口，改为固定当前页标题 + 左侧菜单抽屉。
+  抽屉与按钮均考虑 safe-area；当前页会在打开时自动滚入可视区。 */
+@media (max-width: 760px) {
   .app-shell {
-    flex-direction: column;
+    display: block;
+    min-height: 100vh;
+    min-height: 100dvh;
+  }
+  .main {
+    min-height: 100vh;
+    min-height: 100dvh;
+  }
+  .mobile-bar {
+    position: sticky;
+    top: 0;
+    z-index: 30;
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    min-height: calc(58px + env(safe-area-inset-top));
+    padding: calc(8px + env(safe-area-inset-top)) 14px 8px;
+    background: rgba(255, 255, 255, 0.96);
+    border-bottom: 1px solid var(--line);
+  }
+  .mobile-menu-btn {
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: 44px;
+    height: 44px;
+    min-height: 44px;
+    padding: 0;
+    border: 1px solid var(--line-strong);
+    border-radius: 11px;
+    background: var(--card);
+    color: var(--ink);
+    font-size: 22px;
+    line-height: 1;
+    box-shadow: 0 1px 2px rgba(16, 24, 40, 0.05);
+  }
+  .mobile-bar-copy {
+    min-width: 0;
+    display: grid;
+    line-height: 1.3;
+  }
+  .mobile-bar-copy span {
+    overflow: hidden;
+    color: var(--ink3);
+    font-size: 10.5px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .mobile-bar-copy strong {
+    overflow: hidden;
+    color: var(--ink);
+    font-size: 16px;
+    font-weight: 700;
+    letter-spacing: 0.01em;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .sidebar {
-    position: static;
-    width: 100%;
-    height: auto;
-    flex-direction: row;
-    align-items: center;
-    border-right: none;
-    border-bottom: 1px solid var(--line);
-    overflow-x: auto;
-    overflow-y: hidden;
-    overscroll-behavior-x: contain;
+    position: fixed;
+    z-index: 111;
+    inset: 0 auto 0 0;
+    width: min(86vw, 320px);
+    height: 100vh;
+    height: 100dvh;
+    overflow: hidden;
+    border-right: 1px solid var(--line-strong);
+    border-bottom: none;
+    transform: translateX(-104%);
+    visibility: hidden;
+    transition: transform var(--ease), visibility var(--ease);
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+    overscroll-behavior: contain;
     -webkit-overflow-scrolling: touch;
-    scrollbar-width: none;
   }
-  .sidebar::-webkit-scrollbar {
-    display: none;
+  .sidebar.is-open {
+    transform: translateX(0);
+    visibility: visible;
+    box-shadow: 18px 0 48px rgba(16, 24, 40, 0.18);
   }
   .side-brand {
-    border-bottom: none;
-    padding: 10px 12px;
+    justify-content: flex-start;
+    padding: 15px 12px 13px 16px;
+    border-bottom: 1px solid var(--line);
+  }
+  .side-brand-text {
+    display: block;
   }
   .side-nav {
-    flex-direction: row;
-    align-items: center;
-    gap: 4px;
-    padding: 6px 8px;
-    overflow-x: auto;
-    overflow-y: hidden;
+    flex: 1 1 auto;
+    min-height: 0;
+    padding: 10px;
+    overflow-x: hidden;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
   }
   .side-link {
-    width: auto;
-    padding: 8px 10px;
-    flex: none;
+    justify-content: flex-start;
+    width: 100%;
+    min-height: 44px;
+    padding: 10px 12px;
   }
-  /* 横排导航有空间，标签回来（图标窄栏的隐藏规则只适用于竖排） */
   .side-label {
     display: inline;
-    font-size: 12.5px;
+    font-size: 13.5px;
   }
   .side-foot {
-    flex: none;
-    border-top: none;
-    padding: 6px 8px;
+    border-top: 1px solid var(--line);
+    padding: 10px;
   }
+  .mobile-drawer-close {
+    display: grid;
+    place-items: center;
+    flex: none;
+    width: 40px;
+    height: 40px;
+    min-height: 40px;
+    margin-left: auto;
+    padding: 0;
+    border: 0;
+    border-radius: 10px;
+    background: var(--canvas);
+    color: var(--ink2);
+    font-size: 24px;
+    line-height: 1;
+  }
+  .mobile-nav-backdrop {
+    position: fixed;
+    z-index: 110;
+    inset: 0;
+    display: block;
+    width: 100%;
+    height: 100%;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: rgba(16, 24, 40, 0.42);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity var(--ease);
+  }
+  .sidebar.is-open + .mobile-nav-backdrop {
+    opacity: 1;
+    pointer-events: auto;
+  }
+  body.admin-nav-open {
+    overflow: hidden;
+  }
+}
+
+.pk-board-shell {
+  width: 100%;
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+.pk-board-shell > .page {
+  width: 100%;
+  max-width: none;
+  min-height: 100vh;
+  min-height: 100dvh;
+  margin: 0;
+}
+
+/* 分页条 */
+.pager {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+.pager-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+.pager-size {
+  min-height: 28px;
+  padding: 2px 6px;
+  font-size: 12.5px;
 }
 
 /* ---------------- 页面骨架 ---------------- */
@@ -1377,7 +1537,7 @@ input.switch::after {
   height: 18px;
   border-radius: 50%;
   background: #fff;
-  box-shadow: 0 1px 3px rgb(16 24 40 / 25%);
+  box-shadow: 0 1px 3px rgba(16, 24, 40, 0.25);
   transition: transform var(--ease);
 }
 input.switch:checked {
@@ -1670,7 +1830,7 @@ input.switch:focus-visible {
   .mask {
     -webkit-backdrop-filter: none;
     backdrop-filter: none;
-    background: rgb(16 24 40 / 42%);
+    background: rgba(16, 24, 40, 0.42);
   }
 }
 @supports (content-visibility: auto) {
@@ -1725,7 +1885,7 @@ input.switch:focus-visible {
   display: grid;
   place-items: center;
   padding: 16px;
-  background: rgb(16 24 40 / 22%);
+  background: rgba(16, 24, 40, 0.22);
 }
 .date-picker-pop {
   width: 322px;
@@ -1852,5 +2012,70 @@ input.switch:focus-visible {
   }
   .date-picker-day {
     height: 40px;
+  }
+}
+
+
+/* ---------------- 手机全局兼容基线（2026-11-15） ----------------
+   小屏不再沿用桌面的 28px 外边距和 300px 卡片轨宽；输入框保持 16px，
+   避免 iOS 聚焦自动放大；所有触控按钮给最低 40px 点击高度。 */
+@media (max-width: 640px) {
+  .page {
+    max-width: 100%;
+    padding: 16px 14px calc(28px + env(safe-area-inset-bottom));
+    gap: 12px;
+  }
+  .cards,
+  .cards-kpi {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+  }
+  .card {
+    min-width: 0;
+    padding: 14px 12px;
+  }
+  input:not([type='checkbox']):not([type='radio']):not([type='file']):not([type='range']),
+  select,
+  textarea {
+    min-width: 0;
+    min-height: 44px;
+    font-size: 16px;
+  }
+  button {
+    min-height: 40px;
+  }
+  .row textarea {
+    min-width: 0;
+  }
+  /* 直播监控的设置表单在 320px 下会被 flex 的 min-content 撑到 398px；
+     压回容器宽度，让输入/下拉单列排列，功能不隐藏。 */
+  .lm-setup > *,
+  .lm-setup-form > * {
+    min-width: 0;
+  }
+  .lm-setup-form {
+    width: 100%;
+    max-width: 100%;
+  }
+  .lm-setup-form input,
+  .lm-setup-form select {
+    flex: 1 1 100%;
+    width: 100%;
+    max-width: 100%;
+  }
+  .pager {
+    align-items: stretch;
+  }
+  .pager-controls {
+    width: 100%;
+    margin-left: 0;
+    flex-wrap: wrap;
+  }
+  .pager-size {
+    min-height: 40px;
+    font-size: 16px;
+  }
+  .pager button {
+    flex: 1 1 88px;
   }
 }
