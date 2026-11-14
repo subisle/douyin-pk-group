@@ -53,12 +53,14 @@ pub async fn push_binding_conversation(st: &AppState, name: &str) -> String {
 /// 展示端「我的」页看到的推送状态（不含会话 id 等内部字段）
 pub async fn push_state(st: &AppState, name: &str) -> serde_json::Value {
     let Some(pool) = w(st).ok() else {
-        return serde_json::json!({ "bound": false, "code": "", "codeExpires": "" });
+        return serde_json::json!({
+            "bound": false, "code": "", "codeExpires": "", "paused": false
+        });
     };
     let row = sqlx::query(&crate::pq::rewrite(
         "SELECT conversation_id, nickname, bind_code, code_expires, bound_at,
                 notify_target, daily_report, last_push, last_error,
-                lineage_report, last_lineage_date
+                lineage_report, last_lineage_date, paused
          FROM push_bindings WHERE name = ?",
     ))
     .bind(name.trim())
@@ -70,7 +72,7 @@ pub async fn push_state(st: &AppState, name: &str) -> serde_json::Value {
         return serde_json::json!({
             "bound": false, "code": "", "codeExpires": "",
             "notifyTarget": false, "dailyReport": true,
-            "lineageReport": false, "hasDisciples": false,
+            "lineageReport": false, "hasDisciples": false, "paused": false,
         });
     };
     let conv: String = r
@@ -93,6 +95,7 @@ pub async fn push_state(st: &AppState, name: &str) -> serde_json::Value {
         "lineageReport": r.try_get::<i16, _>("lineage_report").unwrap_or(0) == 1,
         "lastPush": r.try_get::<String, _>("last_push").unwrap_or_default(),
         "lastError": r.try_get::<String, _>("last_error").unwrap_or_default(),
+        "paused": r.try_get::<i16, _>("paused").unwrap_or(0) == 1,
     })
 }
 
@@ -632,50 +635,96 @@ pub async fn push_set_team(st: &AppState, name: &str, team: &str) -> bool {
 /// 解绑（保留目标配置与扫码凭证，只断开微信）。
 /// 2026-10-17 用户口径「解绑 = 停止数据传输」：除清会话接线外，paused 置 1 ——
 /// wxpush::supervisor_loop 不再为该账号补拉长轮询，正在跑的 poll_body 下一轮
-/// 检查到 paused=1 即退出（最多一个轮询周期内停止收发）。重新对接时由
+/// 检查到 paused=1 即退出（最多一个轮询周期内停止收发）。重新扫码绑定后由
 /// [`push_bind_account`] / [`push_bind_by_code`] 把 paused 置回 0 恢复。
-pub async fn push_unbind(st: &AppState, name: &str) -> bool {
-    matches!(w(st), Ok(pool) if sqlx::query(&crate::pq::rewrite("UPDATE push_bindings SET conversation_id = '', to_user_id = '', bound_at = '',
-           bind_code = '', code_expires = '', paused = 1, updated_at = ? WHERE name = ?"))
-                .bind(now_str())
-        .bind(name.trim())
-        .execute(pool)
-        .await
-        .map(|r| r.affected() > 0)
-        .unwrap_or(false))
-}
-
-/// 按微信会话解绑（机器人里回复「解绑」）：返回被解绑的账号姓名。
-/// 与 [`push_unbind`] 同口径：paused 置 1，停止该账号的数据传输，
-/// 重新对接时恢复。
-pub async fn push_unbind_by_conversation(st: &AppState, conversation_id: &str) -> Option<String> {
-    let pool = w(st).ok()?;
+///
+/// 返回值必须来自真实 DB 结果：`Ok(false)` = 没有绑定行，`Err` = 事务失败。
+/// 更新成功时同一事务内删除对应 `wx_sessions`，避免解绑后残留可复用会话上下文。
+pub async fn push_unbind(st: &AppState, name: &str) -> Result<bool> {
+    let pool = w(st)?;
+    let mut tx = pool.begin().await?;
     let row = sqlx::query(&crate::pq::rewrite(
-        "SELECT name FROM push_bindings WHERE conversation_id = ?",
+        "SELECT conversation_id FROM push_bindings WHERE name = ? FOR UPDATE",
     ))
-    .bind(conversation_id)
-    .fetch_optional(pool)
-    .await
-    .ok()
-    .flatten()?;
-    let name: String = row.try_get::<String, _>("name").ok()?;
-    let _ = sqlx::query(&crate::pq::rewrite(
+    .bind(name.trim())
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(row) = row else {
+        tx.commit().await?;
+        return Ok(false);
+    };
+    let conversation_id: String = row.try_get("conversation_id").unwrap_or_default();
+    let affected = sqlx::query(&crate::pq::rewrite(
         "UPDATE push_bindings SET conversation_id = '', to_user_id = '', bound_at = '',
            bind_code = '', code_expires = '', paused = 1, updated_at = ? WHERE name = ?",
     ))
     .bind(now_str())
+    .bind(name.trim())
+    .execute(&mut *tx)
+    .await?
+    .affected();
+    if affected != 1 {
+        anyhow::bail!("解绑未更新到唯一绑定行（affected={affected}）");
+    }
+    // 主绑定会话 + 扫码账号记录里的会话一起删，避免解绑后留下可复用的旧上下文。
+    sqlx::query(&crate::pq::rewrite(
+        "DELETE FROM wx_sessions
+         WHERE conversation_id = ?
+            OR conversation_id IN (
+                SELECT conversation_id FROM wx_push_accounts
+                WHERE name = ? AND conversation_id <> ''
+            )",
+    ))
+    .bind(&conversation_id)
+    .bind(name.trim())
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(true)
+}
+
+/// 按微信会话解绑（机器人里回复「解绑」）：返回被解绑的账号姓名。
+/// 与 [`push_unbind`] 同口径：事务内条件更新 + 删除会话，任何 DB 错误都返回 Err，
+/// 调用方不得回复“已解绑”。
+pub async fn push_unbind_by_conversation(
+    st: &AppState,
+    conversation_id: &str,
+) -> Result<Option<String>> {
+    let pool = w(st)?;
+    let mut tx = pool.begin().await?;
+    let row = sqlx::query(&crate::pq::rewrite(
+        "SELECT name FROM push_bindings WHERE conversation_id = ? FOR UPDATE",
+    ))
+    .bind(conversation_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(row) = row else {
+        tx.commit().await?;
+        return Ok(None);
+    };
+    let name: String = row.try_get("name")?;
+    let affected = sqlx::query(&crate::pq::rewrite(
+        "UPDATE push_bindings SET conversation_id = '', to_user_id = '', bound_at = '',
+           bind_code = '', code_expires = '', paused = 1, updated_at = ?
+         WHERE name = ? AND conversation_id = ?",
+    ))
+    .bind(now_str())
     .bind(&name)
-    .execute(pool)
-    .await;
-    // 顺带清掉这个会话的 iLink 上下文（2026-10-10 审计）：context_token 留着无害
-    // 但会积累脏数据；删掉后换人重绑时由新入站消息重建。
-    let _ = sqlx::query(&crate::pq::rewrite(
+    .bind(conversation_id)
+    .execute(&mut *tx)
+    .await?
+    .affected();
+    if affected != 1 {
+        anyhow::bail!("解绑未更新到唯一绑定行（affected={affected}）");
+    }
+    sqlx::query(&crate::pq::rewrite(
         "DELETE FROM wx_sessions WHERE conversation_id = ?",
     ))
     .bind(conversation_id)
-    .execute(pool)
-    .await;
-    Some(name)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(Some(name))
 }
 
 /// 两个推送开关

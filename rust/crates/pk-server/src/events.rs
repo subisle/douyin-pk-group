@@ -1,6 +1,6 @@
 //! 数据变更广播：管理端写入（含机器人导入）后，通知所有已打开的后台页面自动刷新。
 //!
-//! 为什么不用轮询：后台有 5 个页签，每个都轮询会白跑一堆查询；而且导入往往发生在
+//! 为什么不用轮询：后台有多个页签，每个都轮询会白跑一堆查询；而且导入往往发生在
 //! 手机 QQ 上（机器人），用户在电脑前看页面，需要「一导入就跳」。SSE 只走一条长连接，
 //! 事件到达即时推送。
 //!
@@ -15,7 +15,8 @@ use tokio::sync::broadcast;
 /// 一次数据变更。`scope` 用于让前端只刷新关心的页签，避免无谓请求。
 #[derive(Clone, Debug, Serialize)]
 pub struct Change {
-    /// 影响的数据域：import / roster / plans / settings / source / bot
+    /// 影响的数据域：import / roster / plans / settings / source / bot / live /
+    /// visits / notice / wx_binding
     pub scope: &'static str,
     /// 人类可读的说明（前端可展示成「刚刚有导入」这类提示）
     pub detail: String,
@@ -35,6 +36,10 @@ pub const SCOPE_LIVE: &str = "live";
 /// 访客日志新增（2026-10-17：后台「访客日志」页原先订阅的 scope 与页面数据无关，
 /// 页面永远不自动刷新；给它一个专用域，由 `ipinfo::log_access` 写入成功后广播）
 pub const SCOPE_VISITS: &str = "visits";
+/// 展示端管理员通知有新内容。事件只做刷新信号，不携带正文或收件人。
+pub const SCOPE_NOTICE: &str = "notice";
+/// 展示端微信推送绑定发生变化。事件不携带账号名、会话或 UID。
+pub const SCOPE_WX_BINDING: &str = "wx_binding";
 
 /// 缓冲区 64：慢客户端（手机挂后台）最多落后 64 条后收到 Lagged，
 /// 前端对 Lagged 的处理就是「重新拉一次」，所以丢事件是安全的。
@@ -57,6 +62,16 @@ pub fn emit(scope: &'static str, detail: impl Into<String>) {
     };
     tracing::debug!(scope, detail = %change.detail, "数据变更广播");
     let _ = bus().send(change);
+}
+
+/// 管理员通知可用：只发刷新信号，正文与收件人由登录后的私有接口读取。
+pub fn emit_notice_available() {
+    emit(SCOPE_NOTICE, "");
+}
+
+/// 微信推送绑定变化：公开事件不得携带账号名、会话 id、UID 等敏感信息。
+pub fn emit_wx_binding_changed() {
+    emit(SCOPE_WX_BINDING, "");
 }
 
 use std::convert::Infallible;
@@ -104,10 +119,30 @@ pub async fn sse(
     )
 }
 
-/// `GET /api/public/events`：展示端用的轻量 SSE。
+/// 公开 SSE 白名单：只放行页面确实需要的刷新信号。
+fn public_scope_allowed(scope: &str) -> Option<&'static str> {
+    match scope {
+        SCOPE_IMPORT => Some(SCOPE_IMPORT),
+        SCOPE_NOTICE => Some(SCOPE_NOTICE),
+        SCOPE_WX_BINDING => Some(SCOPE_WX_BINDING),
+        _ => None,
+    }
+}
+
+/// 公开事件只输出 `scope` / `at`（可选 `resync`），绝不序列化后台 `detail`。
+fn public_change_payload(scope: &str, at: &str, resync: bool) -> Option<String> {
+    let scope = public_scope_allowed(scope)?;
+    let mut payload = serde_json::json!({ "scope": scope, "at": at });
+    if resync {
+        payload["resync"] = serde_json::Value::Bool(true);
+    }
+    Some(payload.to_string())
+}
+
+/// `GET /api/public/events`：展示端轻量 SSE。
 ///
-/// 只公开「数据已导入」这一件事，不携带后台 detail / 操作者 / 业务数字，
-/// 前端收到后清掉榜单缓存并重拉当前团队数据，从而让每日最高弹幕随导入自动更新。
+/// 白名单转发导入、管理员通知、微信绑定变化；其他后台 scope 全部丢弃。
+/// 所有公开事件都不携带后台 detail / 操作者 / 账号名 / 会话 / 业务数字。
 pub async fn public_sse(
     State(_st): State<Arc<AppState>>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
@@ -115,22 +150,15 @@ pub async fn public_sse(
     let stream = futures_util::stream::unfold(rx, |mut rx| async move {
         loop {
             match rx.recv().await {
-                Ok(c) if c.scope == SCOPE_IMPORT => {
-                    let data = serde_json::json!({
-                        "scope": SCOPE_IMPORT,
-                        "at": c.at,
-                    })
-                    .to_string();
-                    return Some((Ok(Event::default().event("change").data(data)), rx));
+                Ok(c) => {
+                    if let Some(data) = public_change_payload(c.scope, &c.at, false) {
+                        return Some((Ok(Event::default().event("change").data(data)), rx));
+                    }
                 }
-                Ok(_) => continue,
                 Err(broadcast::error::RecvError::Lagged(_)) => {
-                    let data = serde_json::json!({
-                        "scope": SCOPE_IMPORT,
-                        "at": chrono::Local::now().to_rfc3339(),
-                        "resync": true,
-                    })
-                    .to_string();
+                    let at = chrono::Local::now().to_rfc3339();
+                    let data = public_change_payload(SCOPE_IMPORT, &at, true)
+                        .expect("import 必须在公开 SSE 白名单内");
                     return Some((Ok(Event::default().event("change").data(data)), rx));
                 }
                 Err(broadcast::error::RecvError::Closed) => return None,
@@ -161,6 +189,18 @@ mod tests {
         }
     }
 
+    async fn wait_for_scope(rx: &mut broadcast::Receiver<Change>, scope: &str) -> Change {
+        loop {
+            let c = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+                .await
+                .expect("等事件超时")
+                .expect("总线已关闭");
+            if c.scope == scope {
+                return c;
+            }
+        }
+    }
+
     #[tokio::test]
     async fn emit_reaches_subscriber() {
         let mut rx = subscribe();
@@ -183,5 +223,59 @@ mod tests {
         emit(SCOPE_PLANS, "多订阅用例");
         assert_eq!(wait_for(&mut a, "多订阅用例").await.scope, SCOPE_PLANS);
         assert_eq!(wait_for(&mut b, "多订阅用例").await.scope, SCOPE_PLANS);
+    }
+
+    #[test]
+    fn public_sse_whitelist_excludes_private_scopes() {
+        for scope in [
+            SCOPE_ROSTER,
+            SCOPE_PLANS,
+            SCOPE_SETTINGS,
+            SCOPE_SOURCE,
+            SCOPE_BOT,
+            SCOPE_LIVE,
+            SCOPE_VISITS,
+        ] {
+            assert_eq!(
+                public_scope_allowed(scope),
+                None,
+                "私域 scope 泄露：{scope}"
+            );
+            assert_eq!(
+                public_change_payload(scope, "2026-11-15T01:00:00+08:00", false),
+                None
+            );
+        }
+        for scope in [SCOPE_IMPORT, SCOPE_NOTICE, SCOPE_WX_BINDING] {
+            assert_eq!(public_scope_allowed(scope), Some(scope));
+        }
+    }
+
+    #[test]
+    fn public_payload_never_contains_detail() {
+        for scope in [SCOPE_IMPORT, SCOPE_NOTICE, SCOPE_WX_BINDING] {
+            let raw = public_change_payload(scope, "2026-11-15T01:00:00+08:00", false)
+                .expect("白名单事件应生成 payload");
+            let v: serde_json::Value = serde_json::from_str(&raw).expect("payload 必须是 JSON");
+            assert_eq!(v["scope"], scope);
+            assert_eq!(v.as_object().map(|o| o.len()), Some(2), "{v}");
+            assert!(v.get("detail").is_none(), "{v}");
+            assert!(
+                v.get("nickname").is_none() && v.get("conversationId").is_none(),
+                "{v}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn public_signal_helpers_have_empty_detail() {
+        let mut notice = subscribe();
+        let mut wx = subscribe();
+        emit_notice_available();
+        emit_wx_binding_changed();
+        let n = wait_for_scope(&mut notice, SCOPE_NOTICE).await;
+        assert!(n.detail.is_empty(), "notice 不能携带敏感 detail");
+        let w = wait_for_scope(&mut wx, SCOPE_WX_BINDING).await;
+        assert!(w.detail.is_empty(), "wx_binding 不能携带敏感 detail");
     }
 }

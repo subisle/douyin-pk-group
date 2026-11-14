@@ -111,6 +111,24 @@ async fn add_targets(
     })
 }
 
+/// 推送连接四态（纯逻辑，便于钉死“解绑 ≠ 已扫码待确认”）：
+/// - paused：用户主动解绑，必须显示可重新连接；
+/// - scanBound：只有未暂停且存在扫码凭证才算“已扫码”；
+/// - sessionReady：有会话且已拿到 context_token，可主动推送；
+/// - needActivate：已扫码但还缺会话上下文，需要用户在微信里发一条消息。
+fn push_connection_flags(
+    has_credentials: bool,
+    conversation_id: &str,
+    context_ready: bool,
+    paused: bool,
+) -> (bool, bool, bool, bool) {
+    let scan_bound = has_credentials && !paused;
+    let session_ready = scan_bound && !conversation_id.is_empty() && context_ready;
+    let need_activate = scan_bound && !session_ready;
+    let rebind_required = paused;
+    (scan_bound, need_activate, session_ready, rebind_required)
+}
+
 /// GET /api/public/teams/{team}/my/push（token 走 X-My-Token 头）：推送设置全量状态
 /// （绑定状态 + 两个开关 + 追分目标 + 是否已配机器人二维码）
 pub async fn my_push(
@@ -122,6 +140,10 @@ pub async fn my_push(
     let token = header_my_token(&headers).unwrap_or_default();
     let (person_id, _my_team, name) = my_ident(&st, &team, &token).await?;
     let mut state = crate::store::push_state(&st, &name).await;
+    let paused = state
+        .get("paused")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let targets = crate::store::targets_list(&st, &name).await;
     let counts = crate::store::target_counts(&st, &name).await;
     let has_qr = crate::store::config_get(&st, "wechat_add_qr")
@@ -139,32 +161,33 @@ pub async fn my_push(
         // 管理员观看账号（personId=0）没有自己的音浪，追分对比没有意义
         obj.insert("admin".into(), json!(person_id == 0));
         obj.insert("channelConfigured".into(), json!(true));
-        // 用户自助扫码（2026-10-11）：凭证已保存 = 可推送；等待首次消息才有会话上下文
+        // 用户自助扫码：凭证是否存在、会话是否已激活、是否刚解绑，分别表达。
         let wxacct = crate::store::wx_push_account_get(&st, &name).await;
-        obj.insert("scanBound".into(), json!(wxacct.is_some()));
-        /* 「待激活」= **还缺会话语境（context_token）**，不是「wx_push_accounts 里没会话」。
-        2026-10-16 修正：原来拿 `wx_push_accounts.conversation_id` 判，而那列在
-        push_bindings 写失败时照样是满的 → 页面既不显示「未绑定」（bound=false）
-        也不显示「还差最后一步」（needActivate=false），用户完全不知道该做什么。
-        现在直接问推送真正要用的那张表（wx_sessions 的 context_token）：
-        · 扫了码、会话已记 → 看 wx_sessions 有没有 context_token；
-        · 扫了码、还没会话 → 待激活；
-        · 没扫码 → false（走「未绑定」分支）。 */
-        let need_activate = match wxacct.as_ref() {
-            None => false,
-            Some(a) if a.conversation_id.is_empty() => true,
-            Some(a) => crate::store::wx_session_get(&st, &a.conversation_id)
-                .await
-                .map(|(_, ctx)| ctx.is_empty())
-                .unwrap_or(true),
+        let (conversation_id, context_ready) = match wxacct.as_ref() {
+            None => (String::new(), false),
+            Some(a) if a.conversation_id.is_empty() => (String::new(), false),
+            Some(a) => {
+                let (_, ctx) = crate::store::wx_session_get(&st, &a.conversation_id)
+                    .await
+                    .unwrap_or_default();
+                (a.conversation_id.clone(), !ctx.is_empty())
+            }
         };
+        let (scan_bound, need_activate, session_ready, rebind_required) =
+            push_connection_flags(wxacct.is_some(), &conversation_id, context_ready, paused);
+        obj.insert("paused".into(), json!(paused));
+        obj.insert("scanBound".into(), json!(scan_bound));
         obj.insert("needActivate".into(), json!(need_activate));
+        obj.insert("sessionReady".into(), json!(session_ready));
+        obj.insert("rebindRequired".into(), json!(rebind_required));
         obj.insert(
             "scanNickname".into(),
-            json!(wxacct
-                .as_ref()
-                .map(|a| a.nickname.clone())
-                .unwrap_or_default()),
+            json!(
+                wxacct
+                    .as_ref()
+                    .map(|a| a.nickname.clone())
+                    .unwrap_or_default()
+            ),
         );
         // 手机号绑定（2026-10-10）：登记过手机号就走「发手机号」路径；
         // 只回显脱敏手机号（138****8000），不全量下发，避免页面被别人瞄到就能拿走号。
@@ -796,14 +819,10 @@ pub async fn my_push_settings(
 
 /// POST /api/public/teams/{team}/my/push/unbind {token}
 ///
-/// 2026-10-17 用户口径：页面「解除绑定」只断开推送绑定（push_bindings 的会话接线），
-/// **不注销扫码登录状态** —— `wx_push_accounts` 的凭证（bot_token / ilink_user_id）
-/// 原样保留。长轮询立即停止（push_unbind 置 paused=1：supervisor 不再补拉，
-/// 正在跑的 poll_body 最多一个轮询周期内退出，不再收发任何数据）；之后重新对接
-/// 不用再扫码，把新的 4 位对接码发给机器人即可（重新对接 = paused 置回 0 恢复，
-/// 本人消息会按「push_bindings 未接上该会话 → 重跑激活」的幂等口径自动回接）。
-/// 与机器人里回复「解绑」（push_unbind_by_conversation）的行为对齐 —— 那条路同样
-/// 置 paused=1。唯一还删凭证的地方：换了微信号重扫（wx.rs rescan_new_wechat）。
+/// 只断开微信推送绑定并停止数据传输；`wx_push_accounts` 凭证保留，但会话上下文
+/// 在同一事务内删除。重新接收需要重新扫码并给机器人发一条消息激活。
+/// DB 失败或没有绑定行不得返回 `{ok:true}`；成功广播无敏感 detail 的
+/// `wx_binding` 公开事件，让其他展示端立即刷新。
 pub async fn my_push_unbind(
     State(st): State<ArcState>,
     Path(team): Path<String>,
@@ -812,8 +831,20 @@ pub async fn my_push_unbind(
 ) -> ApiResult {
     let token = header_my_token(&headers).unwrap_or_default();
     let (_pid, _t, name) = my_ident(&st, &team, &token).await?;
-    crate::store::push_unbind(&st, &name).await;
-    Ok(Json(json!({ "ok": true })))
+    match crate::store::push_unbind(&st, &name).await {
+        Ok(true) => {
+            crate::events::emit_wx_binding_changed();
+            Ok(Json(json!({ "ok": true, "unbound": true })))
+        }
+        Ok(false) => Err(ApiError::bad_request("当前没有可解绑的微信推送")),
+        Err(e) => {
+            tracing::error!(account = %name, error = %e, "展示端微信解绑失败");
+            Err(ApiError::with_status(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "解绑失败，请稍后重试",
+            ))
+        }
+    }
 }
 
 /// POST /api/public/teams/{team}/my/push/targets {token, kind, personId?|valueWan?}
@@ -1385,5 +1416,45 @@ mod welcome_target_tests {
             "scanned-user",
         );
         assert_eq!(got, Some(("scanned-user".into(), "CTX-123".into())));
+    }
+}
+
+/* --------------- 微信推送连接四态：解绑后不得误显示“待确认” --------------- */
+
+#[cfg(test)]
+mod push_connection_flags_tests {
+    use super::push_connection_flags;
+
+    #[test]
+    fn never_scanned_is_unbound_without_activate_prompt() {
+        assert_eq!(
+            push_connection_flags(false, "", false, false),
+            (false, false, false, false)
+        );
+    }
+
+    #[test]
+    fn scanned_without_context_needs_activation() {
+        assert_eq!(
+            push_connection_flags(true, "conv-1", false, false),
+            (true, true, false, false)
+        );
+    }
+
+    #[test]
+    fn active_session_is_ready() {
+        assert_eq!(
+            push_connection_flags(true, "conv-1", true, false),
+            (true, false, true, false)
+        );
+    }
+
+    #[test]
+    fn paused_unbind_requires_rebind_not_activation() {
+        assert_eq!(
+            push_connection_flags(true, "conv-1", true, true),
+            (false, false, false, true),
+            "解绑后必须显示重新连接，不能继续显示已扫码待确认"
+        );
     }
 }

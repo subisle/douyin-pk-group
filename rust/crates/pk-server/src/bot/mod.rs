@@ -4,7 +4,7 @@
 //! - QQ 只认 `BOT_QQ_ADMINS` 白名单（2026-10-17 第四轮审计 P1-3 起 **fail-closed**：
 //!   未配置 = 一个都不认；docs 早期「QQ 收到即可服务、不需要管理员白名单」的口径作废）；
 //!   微信私聊发送内置口令可成为管理员；已完成推送绑定的主播私聊 = 普通用户
-//!   （只有「每日报告 / 个人报告 / 暂停·开启接收每日推送 / 帮助」5 条，见 [`commands`]）；
+//!   （只允许 7 条用户命令，见 [`commands`]；管理员帮助不会下发给普通用户）；
 //!   未绑定会话静默忽略（日志留痕，不回复）
 //! - 命令路由确定性：同命令同输入同输出，不调用任何模型
 //! - 限流 10 条/分钟/会话；写类命令（导入）走 douyin_writer，与 HTTP 端同一套校验
@@ -711,20 +711,36 @@ pub async fn weixin_add_qr_set(
 /// P1-1 审计原口径是「回复不带姓名，
 /// 防会话被截图外传」，2026-10-16 深夜用户口径改为**欢迎语带名字** —— 主播自己一眼确认
 /// 绑对了号，比防外传更值。要退回匿名口径只改这一个函数即可（扫码路径的入站回执同理）。
+/// 微信解绑结果 → 回复文案 / 是否广播绑定变化。
+/// 只有真实解绑成功才返回 `true`；DB 失败绝不能伪装成“已解绑”。
+fn wx_unbind_reply(result: Result<Option<String>, String>) -> (String, bool) {
+    match result {
+        Ok(Some(_)) => (
+            "已解绑，不会再收到推送。\n要重新接收，打开展示端「我的」→「消息设置」→「微信推送」，\n重新扫码并在微信里给机器人发一条消息即可。".to_string(),
+            true,
+        ),
+        Ok(None) => ("这条会话还没有绑定过，不用解绑。".to_string(), false),
+        Err(_) => ("解绑失败，请稍后重试。".to_string(), false),
+    }
+}
+
 async fn try_bind_weixin(st: &Arc<AppState>, inbound: &Inbound) -> Option<Outbound> {
     let conversation = inbound.conversation_id.clone();
     let text = inbound.text.trim();
     // 解绑：任何微信私聊都可以发；没绑过也回一句解释（绑定流程本身对未绑定会话开放）
     let lower = text.to_lowercase();
     if matches!(lower.as_str(), "解绑" | "取消绑定" | "unbind") {
-        let name = crate::store::push_unbind_by_conversation(st, &conversation).await;
-        return Some(Outbound::to(
-            &conversation,
-            match name {
-                Some(_) => "已解绑，不会再收到推送。\n要重新对接，打开展示端「我的」页 →「消息设置」→ 微信对接，\n点「获取二维码」，把 4 位对接码发给我即可。".to_string(),
-                None => "这条会话还没有绑定过，不用解绑。".to_string(),
-            },
-        ));
+        let result = crate::store::push_unbind_by_conversation(st, &conversation)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "微信解绑失败");
+                e.to_string()
+            });
+        let (reply, changed) = wx_unbind_reply(result);
+        if changed {
+            crate::events::emit_wx_binding_changed();
+        }
+        return Some(Outbound::to(&conversation, reply));
     }
 
     // 绑定：认 4 位数字绑定码（带不带「绑定」关键词都行）
@@ -1386,7 +1402,7 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
     }
     // 角色判定（2026-10-10 用户口径，2026-10-11 复核确认）：
     // - Admin：QQ 白名单 / 微信白名单 / 会话表标记过管理员 —— 拥有全部命令
-    // - User：微信私聊且 push_bindings 命中的已绑定主播 —— 只允许 5 条命令
+    // - User：微信私聊且 push_bindings 命中的已绑定主播 —— 只允许 7 条命令
     // - 其余：完全静默（不回复任何内容），日志留痕
     //
     // QQ 的管理员判定（2026-10-17 第四轮审计 P1-3，**行为已改 fail-closed**）：
@@ -4260,5 +4276,22 @@ mod tests {
         assert!(success.contains("微信对接成功"), "{success}");
         assert!(!intro.contains("微信对接成功"), "{intro}");
         assert!(intro.contains("解绑"), "要留解绑指引：{intro}");
+    }
+
+    #[test]
+    fn wx_unbind_reply_never_reports_db_failure_as_success() {
+        let (ok_reply, changed) = wx_unbind_reply(Ok(Some("示例".into())));
+        assert!(changed);
+        assert!(ok_reply.contains("已解绑"));
+        assert!(ok_reply.contains("重新扫码"));
+
+        let (none_reply, changed) = wx_unbind_reply(Ok(None));
+        assert!(!changed);
+        assert!(none_reply.contains("还没有绑定过"));
+
+        let (err_reply, changed) = wx_unbind_reply(Err("db down".into()));
+        assert!(!changed, "DB 失败不得广播绑定变化");
+        assert!(err_reply.contains("解绑失败"));
+        assert!(!err_reply.contains("已解绑"), "失败不能回复成功：{err_reply}");
     }
 }

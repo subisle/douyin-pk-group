@@ -749,6 +749,10 @@ pub async fn send_create(State(st): State<ArcState>, Json(body): Json<Value>) ->
         }
     }
     let queued = crate::store::admin_outbox_insert_batch(&st, message_id, &rows).await?;
+    if has_reachable_popup(&rows) {
+        // 只发公开刷新信号；通知正文仍由登录后的 /my/messages 私有接口读取。
+        crate::events::emit_notice_available();
+    }
     tracing::info!(
         message_id,
         recipients = recipients.len(),
@@ -762,6 +766,12 @@ pub async fn send_create(State(st): State<ArcState>, Json(body): Json<Value>) ->
         "messageId": message_id,
         "recipients": recipients.len(),
     })))
+}
+
+/// 只要至少一条 popup 收件人可达，就通知已登录展示端补查未读消息。
+fn has_reachable_popup(rows: &[OutboxRow]) -> bool {
+    rows.iter()
+        .any(|r| r.channel == "popup" && r.status == "sent")
 }
 
 /// 这些 person 的微信绑定名（conversation_id 非空才算绑了 bot）：person_id → 绑定名
@@ -2090,5 +2100,27 @@ mod tests {
             "非法日期不能原样使用"
         );
         assert_ne!(lineage_claim_date("2026-13-99"), "2026-13-99");
+    }
+    #[test]
+    fn notice_signal_only_for_reachable_popup() {
+        fn row(channel: &str, status: &str) -> OutboxRow {
+            OutboxRow {
+                id: 0,
+                message_id: 1,
+                person_id: 1,
+                recipient_name: "示例".into(),
+                channel: channel.into(),
+                status: status.into(),
+                error: String::new(),
+            }
+        }
+        assert!(has_reachable_popup(&[row("popup", "sent")]));
+        assert!(has_reachable_popup(&[
+            row("wxbot", "pending"),
+            row("popup", "sent")
+        ]));
+        assert!(!has_reachable_popup(&[row("wxbot", "pending")]));
+        assert!(!has_reachable_popup(&[row("popup", "skipped")]));
+        assert!(!has_reachable_popup(&[]));
     }
 }

@@ -3,10 +3,11 @@
 //! 路由（`bot::route_command`）的权限门控与帮助文案（[`help_for`]）都由这张表生成，
 //! 加命令 / 改文案只动这一处；单元测试守住「注册表 ↔ 解析 ↔ 帮助文案」不漂移。
 //!
-//! 权限口径（2026-10-10 用户定稿）：
-//! - [`Role::User`] 普通用户 = 微信私聊且已绑定推送的主播，只允许 5 条：
-//!   帮助 / 每日报告 / 个人报告 / 暂停接收每日推送 / 开启接收每日推送
-//! - [`Role::Admin`] 管理员 = QQ 全部会话 + 微信管理员会话，拥有全部命令
+//! 权限口径（2026-11-15 复核）：
+//! - [`Role::User`] 普通用户 = 微信私聊且已绑定推送的主播，只允许 7 条：
+//!   每日榜单 / 个人播报 / 徒弟榜 / 追分榜 / 帮助 / 暂停推送 / 开启推送
+//! - [`Role::Admin`] 管理员 = `BOT_QQ_ADMINS` 白名单、微信管理员白名单或后台勾选的
+//!   管理员会话，拥有全部命令；普通用户永远不会生成管理员帮助段
 
 /// 角色：Admin 拥有全部命令；User 只有最小集合
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -325,9 +326,10 @@ pub fn help_for(role: Role) -> String {
         }
     }
     out.push_str(
-        "\n\n对接 / 解绑：\n\
-         直接发 4 位对接码 —— 展示端「我的」页点「获取二维码」后把数字发过来（30 分钟内有效）\n\
-         解绑 —— 断开微信与账号的对接，随时可以重新对接",
+        "\n\n微信推送：\n\
+         展示端「我的」→「消息设置」→「微信推送」扫码，然后在微信里给机器人发一条消息激活。\n\
+         扫码失败：把页面显示的 4 位对接码发来（30 分钟内有效，用一次即作废）。\n\
+         解绑：直接发「解绑」，会停止每日报告和追分提醒。",
     );
     if role == Role::Admin {
         // 运营口径：日期黏住 / CSV 附件导入 / 默认日期（原帮助文案的等价信息）
@@ -509,6 +511,14 @@ mod tests {
     }
 
     #[test]
+    fn user_role_can_never_execute_admin_commands() {
+        for spec in COMMANDS.iter().filter(|s| s.role == Role::Admin) {
+            assert!(!Role::User.allows(spec.id.required_role()), "{}", spec.name);
+            assert!(Role::Admin.allows(spec.id.required_role()), "{}", spec.name);
+        }
+    }
+
+    #[test]
     fn parse_unknown_returns_none() {
         for s in [
             "",
@@ -528,8 +538,15 @@ mod tests {
         let text = help_for(Role::User);
         assert!(text.contains("可用命令"), "{text}");
         assert!(text.contains("【普通用户命令】"), "{text}");
+        assert!(
+            !text.contains("管理员"),
+            "用户帮助绝不能出现管理员内容：{text}"
+        );
+        assert!(
+            !text.contains("【管理员命令】"),
+            "用户帮助绝不能出现管理员段：{text}"
+        );
         for admin_only in [
-            "【管理员命令】",
             "状态",
             "排行",
             "导入",

@@ -47,6 +47,8 @@ use crate::state::AppState;
 /// `028_push_bind_code_unique` 的部分唯一索引（`bind_code <> ''`）兜底，
 /// 写入侧 [`crate::store::push_rotate_code`] 撞号自动重摇。
 pub const BIND_CODE_LEN: usize = 4;
+/// 每日报告图片/文本的统一短入口：不重复榜单正文，只告诉用户怎么继续操作。
+const DAILY_REPORT_FOOTER: &str = "回复「帮助」查看命令\n设置或解绑：展示端「我的」→「消息设置」";
 /// 每人最多几个追分目标（用户口径 2026-10-09：5 个）
 pub const MAX_TARGETS: i64 = 5;
 /// 每日报告图片分页（2026-10-17 用户口径「分成两页即可」）：无论名册多少人，
@@ -1340,8 +1342,7 @@ async fn run_inner(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result
                         }
                     }
                 } else {
-                    // 2026-10-17 口径：有图就不发文字 —— 每日报告只发榜单图（带水印），
-                    // 不再前置文字 caption（问候语/名次/小红旗都在图里，避免文字与图重复）。
+                    // 有图时不重复榜单正文；首张图只带统一短入口（帮助 / 消息设置）。
                     let pngs: Vec<Vec<u8>> = match cached_pngs {
                         Some(p) => p,
                         None => {
@@ -1358,13 +1359,13 @@ async fn run_inner(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result
                     if pngs.is_empty() {
                         tracing::warn!(account = %b.name, "全部页面转 PNG 失败，退回文本推送");
                         let accounts = person_account_waves(st, b.person_id, date).await;
-                        let text = daily_report_text_with_accounts(
+                        let text = daily_report_text_with_footer(&daily_report_text_with_accounts(
                             team,
                             date,
                             &rank_items,
                             b.person_id,
                             &accounts,
-                        );
+                        ));
                         match send_binding(st, b, wx_global.as_ref(), &text).await {
                             Ok(()) => {
                                 sent_any = true;
@@ -1382,7 +1383,7 @@ async fn run_inner(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result
                         }
                     } else {
                         tracing::info!(account = %b.name, pages = pngs.len(), bytes = pngs.iter().map(|p| p.len()).sum::<usize>(), "推送·每日报告(图片)");
-                        match send_binding_images(st, b, "", &pngs).await {
+                        match send_binding_images(st, b, DAILY_REPORT_FOOTER, &pngs).await {
                             Ok(_) => {
                                 sent_any = true;
                                 finalize_report_claim(st, &b.name).await;
@@ -1401,13 +1402,16 @@ async fn run_inner(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result
                                     tracing::warn!(account = %b.name, "每日报告(图片)：闸门拦截，未发（去重标记不推进）");
                                 } else {
                                     tracing::warn!(account = %b.name, error = %e, "每日报告图片推送失败，退回文本");
-                                    let accounts = person_account_waves(st, b.person_id, date).await;
-                                    let text = daily_report_text_with_accounts(
-                                        team,
-                                        date,
-                                        &rank_items,
-                                        b.person_id,
-                                        &accounts,
+                                    let accounts =
+                                        person_account_waves(st, b.person_id, date).await;
+                                    let text = daily_report_text_with_footer(
+                                        &daily_report_text_with_accounts(
+                                            team,
+                                            date,
+                                            &rank_items,
+                                            b.person_id,
+                                            &accounts,
+                                        ),
                                     );
                                     match send_binding(st, b, wx_global.as_ref(), &text).await {
                                         Ok(()) => {
@@ -3085,6 +3089,16 @@ pub async fn target_push_pngs(text: &str, personal_mark: &str) -> Vec<Vec<u8>> {
 /// 2026-10-15 起名次行后按名次补一句：≤3 名给「🏆 上榜 TOP3」肯定行，
 /// >3 名且上一名可算时给「距上一名」差距行（我未开播则两者都不出）。
 /// `accounts` 为空 / 只有 1 个号时 [`account_waves_section`] 返回空串，文案与旧版一致。
+/// 每日报告文本兜底统一追加短入口，保证图片失败时用户仍知道可用命令和设置入口。
+fn daily_report_text_with_footer(text: &str) -> String {
+    let body = text.trim_end();
+    if body.is_empty() {
+        DAILY_REPORT_FOOTER.to_string()
+    } else {
+        format!("{body}\n\n{DAILY_REPORT_FOOTER}")
+    }
+}
+
 pub(crate) fn daily_report_text_with_accounts(
     team: &str,
     date: &str,
@@ -4385,5 +4399,19 @@ mod tests {
             run_lease_name("male", "2026-10-17"),
             target_lease_name("male", "2026-10-17")
         );
+    }
+    #[test]
+    fn daily_report_footer_is_short_and_actionable() {
+        assert_eq!(
+            daily_report_text_with_footer("榜单正文"),
+            "榜单正文\n\n回复「帮助」查看命令\n设置或解绑：展示端「我的」→「消息设置」"
+        );
+        assert_eq!(
+            daily_report_text_with_footer(""),
+            "回复「帮助」查看命令\n设置或解绑：展示端「我的」→「消息设置」"
+        );
+        assert!(DAILY_REPORT_FOOTER.contains("回复「帮助」"));
+        assert!(DAILY_REPORT_FOOTER.contains("展示端「我的」"));
+        assert!(DAILY_REPORT_FOOTER.contains("消息设置"));
     }
 }
