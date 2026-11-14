@@ -4738,7 +4738,7 @@ function compareAppVersions(a, b) {
 }
 function supportsAndroidUpdateCheck() {
   const m = (navigator.userAgent || '').match(/DailyDataAndroid\/([0-9.]+)/i);
-  return !!m && compareAppVersions(m[1], '1.2') >= 0;
+  return !!m && compareAppVersions(m[1], '1.3') >= 0;
 }
 function showAppUpdate(version) {
   const bar = $('appUpdate');

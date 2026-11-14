@@ -2,7 +2,7 @@
 
 一个轻量 Android WebView 壳。应用只主动打开构建时配置的展示端地址，登录态保存在 WebView 的 Cookies / localStorage 中。
 
-当前版本：`1.2`（versionCode `3`），`minSdk 26` / `targetSdk 35`。
+当前版本：`1.3`（versionCode `4`），`minSdk 26` / `targetSdk 35`。
 
 ## 稳定性与安全
 
@@ -48,8 +48,8 @@ android/keystore/keystore.env
 6. 生成：
 
 ```text
-android/dist/每日数据-v1.2-release.apk
-android/dist/每日数据-v1.2-release.apk.sha256
+android/dist/每日数据-v1.3-release.apk
+android/dist/每日数据-v1.3-release.apk.sha256
 android/dist/aapt-badging.txt
 android/dist/apksigner-verify.txt
 ```
@@ -99,7 +99,7 @@ PK_APP_URL='https://example.com/' ./scripts/build-android-apk.sh
 - 启动及回到前台时会检查 `/api/public/app-version`。
 - 「我的 → 检查软件更新」可手动触发。
 - 更新通过系统浏览器下载；同签名升级会保留登录数据。
-- UA 追加 `DailyDataAndroid/1.2`，展示端据此识别 Android App 并关闭安装引导。
+- UA 追加 `DailyDataAndroid/1.3`，展示端据此识别 Android App 并关闭安装引导。
 
 ## 展示端平台推荐
 

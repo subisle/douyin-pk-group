@@ -25,9 +25,9 @@ const ANDROID_APK: &[u8] = include_bytes!("assets/pwa/daily-release.apk");
 const ANDROID_APK_SHA256: &[u8] = include_bytes!("assets/pwa/daily-release.apk.sha256");
 
 /// 展示页与 Android 安装包的公开版本契约。发布时与 APK Manifest / 构建脚本同步递增。
-const WEB_APP_VERSION: &str = "2026.11.14.2";
-const ANDROID_VERSION_CODE: u64 = 3;
-const ANDROID_VERSION_NAME: &str = "1.2";
+const WEB_APP_VERSION: &str = "2026.11.15.1";
+const ANDROID_VERSION_CODE: u64 = 4;
+const ANDROID_VERSION_NAME: &str = "1.3";
 
 fn app_version_payload() -> serde_json::Value {
     serde_json::json!({
@@ -139,7 +139,7 @@ struct StPageVariants {
     identity: Bytes,
     brotli: Bytes,
     gzip: Bytes,
-    etag: &'static str,
+    etag: String,
 }
 
 fn st_page_variants() -> &'static StPageVariants {
@@ -161,7 +161,7 @@ fn st_page_variants() -> &'static StPageVariants {
             identity: Bytes::from(raw),
             brotli: Bytes::from(br),
             gzip: Bytes::from(gzip),
-            etag: "\"web-2026.11.14.2\"",
+            etag: format!("\"web-{WEB_APP_VERSION}\""),
         }
     })
 }
@@ -172,12 +172,12 @@ fn st_page_response(headers: &HeaderMap) -> Response {
     if headers
         .get(header::IF_NONE_MATCH)
         .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v.split(',').any(|x| x.trim() == variants.etag))
+        .is_some_and(|v| v.split(',').any(|x| x.trim() == variants.etag.as_str()))
     {
         return Response::builder()
             .status(StatusCode::NOT_MODIFIED)
             .header(header::CACHE_CONTROL, cache)
-            .header(header::ETAG, variants.etag)
+            .header(header::ETAG, variants.etag.as_str())
             .header(header::VARY, "Accept-Encoding")
             .body(Body::empty())
             .expect("构造展示页 304 失败");
@@ -193,7 +193,7 @@ fn st_page_response(headers: &HeaderMap) -> Response {
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
         .header(header::CACHE_CONTROL, cache)
-        .header(header::ETAG, variants.etag)
+        .header(header::ETAG, variants.etag.as_str())
         .header(header::VARY, "Accept-Encoding");
     if let Some(encoding) = encoding {
         builder = builder.header(header::CONTENT_ENCODING, encoding);

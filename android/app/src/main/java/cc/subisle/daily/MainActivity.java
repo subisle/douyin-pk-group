@@ -42,7 +42,7 @@ import android.widget.Toast;
  * - 仅保留登录态所需的 DOM storage / Cookies。
  */
 public final class MainActivity extends Activity {
-    private static final String APK_UA_TOKEN = "DailyDataAndroid/1.2";
+    private static final String APK_UA_TOKEN = "DailyDataAndroid/1.3";
     private static final int SPLASH_TIMEOUT_MS = 12_000;
     private static final int RENDERER_RECOVERY_WINDOW_MS = 60_000;
     private static final int MAX_RENDERER_RECOVERIES = 3;
