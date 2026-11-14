@@ -3158,6 +3158,119 @@ pub async fn bots_session_admin(
 mod tests {
     use super::*;
 
+    use axum::extract::{Path as AxumPath, State as AxumState};
+    use axum::response::IntoResponse;
+    use axum::routing::get;
+    use axum::Router;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn unique_qq_conversation(label: &str) -> String {
+        static NEXT: AtomicUsize = AtomicUsize::new(1);
+        format!(
+            "test-{label}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        )
+    }
+
+    async fn test_bot_state() -> Arc<AppState> {
+        let sources = Vec::new();
+        let pools = crate::pgrs::build_pools(&sources)
+            .await
+            .expect("空数据源不应建池失败");
+        Arc::new(AppState {
+            auth: Arc::new(crate::auth::Auth::from_env()),
+            sources,
+            pools,
+            writer: None,
+            redis: None,
+            active: Mutex::new("LOCAL".to_string()),
+            cache: Mutex::new(Default::default()),
+            wave_ttl: Duration::from_secs(60),
+            bots: std::sync::OnceLock::new(),
+        })
+    }
+
+    fn test_qq_config(conversation_id: &str) -> BotConfig {
+        BotConfig {
+            qq_app_id: String::new(),
+            qq_app_secret: String::new(),
+            wechat_token: String::new(),
+            qq_admins: vec![conversation_id.to_string()],
+            wechat_admins: Vec::new(),
+            rate_limit_per_min: 100,
+        }
+    }
+
+    fn test_qq_inbound(conversation_id: &str, text: &str, attachments: Vec<Attachment>) -> Inbound {
+        Inbound {
+            channel: "qq",
+            conversation_id: conversation_id.to_string(),
+            is_group: false,
+            text: text.to_string(),
+            attachments,
+        }
+    }
+
+    #[derive(Clone)]
+    struct TestAttachmentServer {
+        hits: Arc<AtomicUsize>,
+        files: Arc<HashMap<&'static str, &'static str>>,
+    }
+
+    async fn serve_test_attachment(
+        AxumState(server): AxumState<TestAttachmentServer>,
+        AxumPath(path): AxumPath<String>,
+    ) -> impl IntoResponse {
+        server.hits.fetch_add(1, Ordering::SeqCst);
+        let body = server.files.get(path.as_str()).copied().unwrap_or_default();
+        (
+            [(axum::http::header::CONTENT_TYPE, "text/csv; charset=utf-8")],
+            body,
+        )
+    }
+
+    async fn spawn_test_attachment_server(
+        files: &[(&'static str, &'static str)],
+    ) -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("绑定本地附件服务");
+        let addr = listener.local_addr().expect("读取本地端口");
+        let hits = Arc::new(AtomicUsize::new(0));
+        let app = Router::new()
+            .route("/{name}", get(serve_test_attachment))
+            .with_state(TestAttachmentServer {
+                hits: hits.clone(),
+                files: Arc::new(files.iter().copied().collect()),
+            });
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("本地附件服务退出");
+        });
+        (format!("http://{addr}"), hits, server)
+    }
+
+    struct TestAttachmentHostsEnv {
+        old: Option<String>,
+    }
+
+    impl TestAttachmentHostsEnv {
+        fn set_localhost() -> Self {
+            let old = std::env::var(KEY).ok();
+            std::env::set_var(KEY, "127.0.0.1");
+            Self { old }
+        }
+    }
+
+    impl Drop for TestAttachmentHostsEnv {
+        fn drop(&mut self) {
+            match self.old.take() {
+                Some(value) => std::env::set_var(KEY, value),
+                None => std::env::remove_var(KEY),
+            }
+        }
+    }
+
     /// 提权口令比对（2026-10-11 审计整改：口令改走 env，未配置 = 关闭）
     #[test]
     fn admin_code_match_rules() {
@@ -3246,6 +3359,205 @@ mod tests {
         assert_eq!(batch.daily_rows.len(), 1, "{:?}", batch.daily_rows);
         assert_eq!(batch.daily_rows[0].wave, Some(7717.0));
         assert_eq!(batch.daily_rows[0].minutes, Some(227.0));
+    }
+
+    #[test]
+    fn qq_two_attachments_merge_by_anchor_id_across_files() {
+        let docs: Vec<AttachmentText> = vec![
+            (
+                "音浪.csv".into(),
+                "主播ID,主播昵称,总音浪\n\
+                 1001,玖玉旧名,7717\n\
+                 1002,撞名旧名,200\n"
+                    .into(),
+            ),
+            (
+                "时长.csv".into(),
+                "主播昵称,开播有效时长,主播ID（主账号）\n\
+                 玖玉新名,3小时47分钟17秒,1001\n\
+                 撞名新名,30分钟,1002\n"
+                    .into(),
+            ),
+        ];
+
+        let batch = parse_attachment_batch(&docs);
+        assert!(batch.metric_errors.is_empty(), "{:?}", batch.metric_errors);
+        assert_eq!(batch.daily_files, vec!["音浪.csv", "时长.csv"]);
+        assert_eq!(
+            batch.daily_rows.len(),
+            2,
+            "必须按主播 ID 合并，不能按昵称合并：{:?}",
+            batch.daily_rows
+        );
+
+        let a = batch
+            .daily_rows
+            .iter()
+            .find(|r| r.anchor_id.as_deref() == Some("1001"))
+            .expect("主播 1001");
+        assert_eq!(a.name, "玖玉新名", "后文件的非空昵称覆盖旧值");
+        assert_eq!(a.wave, Some(7717.0), "后文件缺音浪时保留前值");
+        assert_eq!(a.minutes, Some(227.0), "并入后文件时长");
+
+        let b = batch
+            .daily_rows
+            .iter()
+            .find(|r| r.anchor_id.as_deref() == Some("1002"))
+            .expect("主播 1002");
+        assert_eq!(b.name, "撞名新名");
+        assert_eq!(b.wave, Some(200.0));
+        assert_eq!(b.minutes, Some(30.0));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn qq_handle_rejects_three_attachments_before_download_and_keeps_date() {
+        // 本地服务既用于证明“没有发下载请求”，也避免测试接触真实 QQ/CDN。
+        let _env_lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _restore_hosts = TestAttachmentHostsEnv::set_localhost();
+        let (base, hits, server) =
+            spawn_test_attachment_server(&[("file.csv", "主播ID,总音浪\n1001,100\n")]).await;
+
+        let conversation_id = unique_qq_conversation("three-files");
+        let key = format!("qq:{conversation_id}");
+        pending_date_put(&key, "2026-11-13");
+
+        let attachments = (0..3)
+            .map(|_| Attachment {
+                url: format!("{base}/file.csv"),
+                file_name: "file.csv".to_string(),
+            })
+            .collect();
+        let st = test_bot_state().await;
+        let cfg = test_qq_config(&conversation_id);
+        let out = handle(
+            &st,
+            &cfg,
+            test_qq_inbound(&conversation_id, "11.14", attachments),
+        )
+        .await
+        .expect("管理员消息应有回复");
+
+        assert!(out.text.contains("最多只能导入 2 个文件"), "{}", out.text);
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "超限必须在下载前拒绝");
+        assert_eq!(
+            pending_date_get(&key).as_deref(),
+            Some("2026-11-13"),
+            "整条拒绝不能消费或覆盖已黏住的业务日期"
+        );
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn qq_handle_day_and_month_commands_replace_same_sticky_scope() {
+        let conversation_id = unique_qq_conversation("scope");
+        let key = format!("qq:{conversation_id}");
+        let st = test_bot_state().await;
+        let cfg = test_qq_config(&conversation_id);
+
+        let out = handle(
+            &st,
+            &cfg,
+            test_qq_inbound(&conversation_id, "11.13", Vec::new()),
+        )
+        .await
+        .expect("日期指令应有回复");
+        assert!(
+            out.text.contains("已记下业务日期 2026-11-13"),
+            "{}",
+            out.text
+        );
+        assert_eq!(pending_date_get(&key).as_deref(), Some("2026-11-13"));
+        assert_eq!(pending_month_get(&key), None);
+
+        let out = handle(
+            &st,
+            &cfg,
+            test_qq_inbound(&conversation_id, "导入月 2026-10 男团", Vec::new()),
+        )
+        .await
+        .expect("月度指令应有回复");
+        assert!(
+            out.text.contains("已记下月度导入：2026-10 男团"),
+            "{}",
+            out.text
+        );
+        assert_eq!(pending_date_get(&key), None, "月度模式必须覆盖日模式");
+        assert_eq!(
+            pending_month_get(&key),
+            Some(("2026-10".to_string(), "male".to_string()))
+        );
+
+        let out = handle(
+            &st,
+            &cfg,
+            test_qq_inbound(&conversation_id, "11.14", Vec::new()),
+        )
+        .await
+        .expect("日期指令应有回复");
+        assert!(
+            out.text.contains("已记下业务日期 2026-11-14"),
+            "{}",
+            out.text
+        );
+        assert_eq!(
+            pending_date_get(&key).as_deref(),
+            Some("2026-11-14"),
+            "日期模式必须覆盖月模式"
+        );
+        assert_eq!(pending_month_get(&key), None);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn qq_handle_rejects_whole_batch_when_any_attachment_has_metric_error() {
+        let _env_lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _restore_hosts = TestAttachmentHostsEnv::set_localhost();
+        let (base, hits, server) = spawn_test_attachment_server(&[
+            ("有效.csv", "主播ID,主播昵称,总音浪\n1001,玖玉,7717\n"),
+            (
+                "有坏值.csv",
+                "主播ID,主播昵称,总音浪,开播有效时长\n1002,浩龙,abc,oops\n",
+            ),
+        ])
+        .await;
+
+        let conversation_id = unique_qq_conversation("bad-metric");
+        let st = test_bot_state().await;
+        let cfg = test_qq_config(&conversation_id);
+        let attachments = vec![
+            Attachment {
+                url: format!("{base}/%E6%9C%89%E6%95%88.csv"),
+                file_name: "有效.csv".to_string(),
+            },
+            Attachment {
+                url: format!("{base}/%E6%9C%89%E5%9D%8F%E5%80%BC.csv"),
+                file_name: "有坏值.csv".to_string(),
+            },
+        ];
+        let out = handle(
+            &st,
+            &cfg,
+            test_qq_inbound(&conversation_id, "", attachments),
+        )
+        .await
+        .expect("解析失败应有回复");
+
+        assert!(
+            out.text
+                .contains("附件里有无法解析的音浪或时长，未导入任何数据"),
+            "{}",
+            out.text
+        );
+        assert!(out.text.contains("有坏值.csv"), "{}", out.text);
+        assert!(out.text.contains("音浪"), "{}", out.text);
+        assert!(
+            out.text.contains("时长"),
+            "同一条坏行里的两个错误都要报：{}",
+            out.text
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 2, "两个附件都应先被读取");
+
+        server.abort();
     }
 
     #[test]

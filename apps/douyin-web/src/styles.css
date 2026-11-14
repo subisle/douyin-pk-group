@@ -1277,6 +1277,32 @@ tbody tr td.empty-cell {
   margin-right: auto;
 }
 
+/* 窄屏导入预览：弹窗头部、模式和告警会把固定 max-height 占满，表格若继续
+   flex: 1; min-height: 0 会被压成一条线。这里改为遮罩整体滚动，并给预览表格
+   可用的最小高度；表格仍可横向 / 纵向查看，“取消 / 确认”在内容末尾可滚动到达。 */
+@media (max-width: 640px) {
+  .mask:has(> .import-pop) {
+    overflow-y: auto;
+    padding: 12px;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+  .import-pop {
+    width: 100%;
+    max-height: none;
+    padding: 14px;
+  }
+  .pop-table {
+    flex: 0 0 auto;
+    min-height: 240px;
+    max-height: 52vh;
+  }
+  .pop-table table {
+    width: max-content;
+    min-width: 720px;
+  }
+}
+
 /* 主播管理：表格行右键菜单（fixed 定位跟鼠标，菜单内按钮纵向排列） */
 .ctx-menu {
   position: fixed;
