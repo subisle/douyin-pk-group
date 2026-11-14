@@ -197,9 +197,16 @@ async fn ranking_png(
         }
     }
     /* 2026-11-14 用户口径：整月导出图不再保留「未开播」账号。
-    分钟数为 0 的人不进入榜单，也不进入底部未开播名单。 */
+    按当前指标过滤：音浪图去 wave=0，时长图去 minutes=0，避免
+    “有时长但音浪为 0” 的人仍在音浪图里显示未开播。 */
     let before_live = rows.len();
-    rows.retain(|r| r.minutes > 0);
+    rows.retain(|r| {
+        if metric == "wave" {
+            r.wave > 0
+        } else {
+            r.minutes > 0
+        }
+    });
     if rows.len() != before_live {
         tracing::debug!(removed = before_live - rows.len(), "导出图已排除未开播账号");
     }
