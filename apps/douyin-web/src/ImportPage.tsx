@@ -113,6 +113,9 @@ type ImportDraft = {
   team: string
   bizDate: string
   mode: string
+  /** 删除区独立选择，避免误用当前导入日期 */
+  deleteDate: string
+  deleteTeam: string
   year: number
   monthNum: number
   dateFromFile: boolean
@@ -194,6 +197,9 @@ export default function ImportPage() {
   const [team, setTeam] = useState(() => importDraft?.team ?? 'auto')
   const [bizDate, setBizDate] = useState(() => importDraft?.bizDate ?? yesterday())
   const [mode, setMode] = useState(() => importDraft?.mode ?? 'merge')
+  /** 删除区独立于“导入日期”，默认跟随草稿，否则前一天 */
+  const [deleteDate, setDeleteDate] = useState(() => importDraft?.deleteDate ?? importDraft?.bizDate ?? yesterday())
+  const [deleteTeam, setDeleteTeam] = useState(() => importDraft?.deleteTeam ?? 'auto')
   const [busy, setBusy] = useState(false)
   const [parsing, setParsing] = useState(false)
   /** 业务日期是从文件名推出来的（不是默认的前一天），弹窗里要标出来 */
@@ -248,6 +254,8 @@ export default function ImportPage() {
       team,
       bizDate,
       mode,
+      deleteDate,
+      deleteTeam,
       year,
       monthNum,
       dateFromFile,
@@ -263,7 +271,7 @@ export default function ImportPage() {
     } catch {
       /* 隐私模式 / 容量超限：草稿存不下就算了，页面照常工作 */
     }
-  }, [kind, team, bizDate, mode, year, monthNum, dateFromFile, filename, rows, monthRows, suggest, report, monthMetrics])
+  }, [kind, team, bizDate, mode, deleteDate, deleteTeam, year, monthNum, dateFromFile, filename, rows, monthRows, suggest, report, monthMetrics])
 
   /** 按月导入的业务月份 YYYY-MM */
   const period = `${year}-${String(monthNum).padStart(2, '0')}`
@@ -281,6 +289,14 @@ export default function ImportPage() {
 
   /** 预览弹窗：解析出内容就打开；取消/入库后 rows 清空即关闭 */
   const previewOpen = rows.length > 0 || monthRows.length > 0
+  /** 最近导入批次里的日导入日期，作为删除日期输入框的可选建议。 */
+  const importedDayDates = Array.from(
+    new Set(
+      batches
+        .filter((b) => b.source !== 'admin-import-month' && /^\d{4}-\d{2}-\d{2}$/.test(String(b.bizDate ?? '')))
+        .map((b) => String(b.bizDate)),
+    ),
+  ).slice(0, 30)
 
   const loadBatches = useCallback(() => {
     api('/api/admin/import/batches')
@@ -487,18 +503,22 @@ export default function ImportPage() {
       }
       return
     }
-    const label = `${bizDate} ${teamLabel(team)}`
-    if (!confirm(`确认删除 ${label} 的音浪和时长数据？对应导入批次也会删除，操作不可恢复。`)) return
+    if (!deleteDate) {
+      setError('请选择要删除的日期')
+      return
+    }
+    const label = `${deleteDate} ${teamLabel(deleteTeam)}`
+    if (!confirm(`确认删除 ${label} 的音浪和时长数据？只影响所选单个日期，对应导入批次也会删除，操作不可恢复。`)) return
     setBusy(true)
     reset()
     try {
       const d = await api<DeleteDayReport>(
-        `/api/admin/import/day?bizDate=${bizDate}&team=${team}&metrics=wave,minutes`,
+        `/api/admin/import/day?bizDate=${deleteDate}&team=${deleteTeam}&metrics=wave,minutes`,
         { method: 'DELETE' },
       )
       setStatusNonce((n) => n + 1)
       loadBatches()
-      setNotice(`已删除 ${d.metrics} 条音浪和时长数据、${d.batches} 个导入批次。`)
+      setNotice(`已删除 ${deleteDate} ${teamLabel(deleteTeam)} 的 ${d.metrics} 条音浪和时长数据、${d.batches} 个导入批次。`)
     } catch (e: any) {
       setError(e.message ?? String(e))
     } finally {
@@ -564,7 +584,7 @@ export default function ImportPage() {
         (!!monthStatusError ||
           (monthStatus?.rows ?? 0) > 0 ||
           (monthStatus?.waveRows ?? 0) > 0)
-      : !!bizDate && !!team && !busy && (!!dayStatusError || (dayStatus.checked && (dayStatus.rows ?? 0) > 0))
+      : !!deleteDate && !!deleteTeam && !busy
 
   const errorBox = error ? <div className="alert bad">{error}</div> : null
   /** 成功提示走绿色 good 样式（P2-2），删除 / 操作成功不再显示成红框 */
@@ -612,6 +632,8 @@ export default function ImportPage() {
 
   return (
     <div className="page">
+      {errorBox}
+      {noticeBox}
       <section className="card">
         <h2>导入数据</h2>
 
@@ -685,26 +707,7 @@ export default function ImportPage() {
           解析结果先在弹窗里逐行核对，确认才入库。
         </p>
 
-        {errorBox}
-        {noticeBox}
-        {/* 状态获取失败提示挂在主卡片（删除按钮旁边）：P2-5 —— 失败可见 + 重试，不再静默 */}
         {statusErrorHint}
-        <div className="row">
-          <button className="danger" disabled={!canDelete} onClick={deleteDay}>
-            {kind === 'month'
-              ? `删除 ${period} 整月时长 / 音浪${team === 'auto' ? '（不限团别）' : ''}`
-              : team === 'auto'
-                ? '删除当前日期数据（不限团别）'
-                : '删除当前日期 / 团别数据'}
-          </button>
-          <span className="hint">
-            {kind === 'month'
-              ? `删除 ${period} 已导入的整月时长与整月音浪（月榜 / 个人月卡立刻回落成日明细口径）；没有解析中的文件也可以操作。`
-              : team === 'auto'
-                ? '删除该业务日期的全部音浪和时长数据（男女团一起）；没有解析中的文件也可以操作。'
-                : '按上方业务日期和团别删除已入库的音浪和时长数据；没有解析中的文件也可以操作。'}
-          </span>
-        </div>
         {report && (
           <div className="alert good">
             导入完成：成功 {report.okRows} 行，失败 {report.failedRows} 行（批次 #{report.batchId}）
@@ -755,6 +758,59 @@ export default function ImportPage() {
                 </div>
               ))}
           </div>
+        )}
+      </section>
+
+      <section className="card">
+        <h2>删除已导入数据</h2>
+        {kind === 'daily' ? (
+          <>
+            <div className="row row-end">
+              <label className="field">
+                删除日期
+                <input
+                  type="date"
+                  list="imported-day-dates"
+                  value={deleteDate}
+                  onChange={(e) => setDeleteDate(e.target.value)}
+                  disabled={busy}
+                />
+                <datalist id="imported-day-dates">
+                  {importedDayDates.map((d) => (
+                    <option key={d} value={d} />
+                  ))}
+                </datalist>
+              </label>
+              <label className="field">
+                删除范围
+                <select value={deleteTeam} onChange={(e) => setDeleteTeam(e.target.value)} disabled={busy}>
+                  <option value="auto">全部团别</option>
+                  <option value="male">仅男团</option>
+                  <option value="female">仅女团</option>
+                </select>
+              </label>
+              <button className="danger" disabled={!canDelete} onClick={deleteDay}>
+                删除该日期数据
+              </button>
+            </div>
+            <p className="hint">
+              ⚠️ 只删除所选 <b>单个日期</b> 的音浪和时长，不影响其它日期；日期输入框可从最近导入日期中选择，也可直接打开日历选任意日期。
+            </p>
+          </>
+        ) : (
+          <>
+            <div className="row row-end">
+              <span className="hint">
+                月度删除使用上方选择的 <b>{period}</b> 与 <b>{teamLabel(team)}</b> 范围。
+              </span>
+              <button className="danger" disabled={!canDelete} onClick={deleteDay}>
+                删除 {period} 整月时长 / 音浪
+              </button>
+            </div>
+            <p className="hint">
+              ⚠️ 删除该月已导入的整月时长与整月音浪，月榜 / 个人月卡会立即回落成日明细口径。
+            </p>
+          </>
         )}
       </section>
 
