@@ -188,34 +188,111 @@ static LIMITER: std::sync::OnceLock<RateLimiter> = std::sync::OnceLock::new();
 
 /* --------------------------- 导入会话（不用再问团别） --------------------------- */
 
-/* ---- 运营先发「10.1」再发 CSV：这个业务日期要黏住（两个文件都按它入库）---- */
+/* ---- 运营先发「10.1」/「导入月 2026-10」再发 CSV：导入模式要黏住 ---- */
 
-/// 黏性业务日期：key = 渠道:会话，值 = (业务日期, 设置时间)。
-/// 12 小时有效（当天报一次，当天发的文件都用它）；再发一个日期就覆盖。
-static PENDING_DATES: std::sync::OnceLock<Mutex<HashMap<String, (String, Instant)>>> =
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PendingImportScope {
+    Day(String),
+    Month { period: String, team: String },
+}
+
+/// 黏性导入模式：key = 渠道:会话，值 = (日 / 月模式, 设置时间)。
+/// 12 小时有效（当天报一次，当天发的文件都用它）；日模式和月模式互斥，
+/// 后发的一个覆盖前一个，避免月度指令粘住后续按日文件。
+static PENDING_SCOPES: std::sync::OnceLock<Mutex<HashMap<String, (PendingImportScope, Instant)>>> =
     std::sync::OnceLock::new();
-const PENDING_DATE_TTL: Duration = Duration::from_secs(12 * 3600);
+const PENDING_SCOPE_TTL: Duration = Duration::from_secs(12 * 3600);
 
-fn pending_dates() -> &'static Mutex<HashMap<String, (String, Instant)>> {
-    PENDING_DATES.get_or_init(|| Mutex::new(HashMap::new()))
+fn pending_scopes() -> &'static Mutex<HashMap<String, (PendingImportScope, Instant)>> {
+    PENDING_SCOPES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn pending_date_put(key: &str, date: &str) {
-    let mut m = pending_dates().lock().expect("pending_date 锁 poisoned");
-    m.retain(|_, (_, at)| at.elapsed() < PENDING_DATE_TTL);
-    m.insert(key.to_string(), (date.to_string(), Instant::now()));
+fn pending_scope_put(key: &str, scope: PendingImportScope) {
+    let mut m = pending_scopes().lock().expect("pending_scope 锁 poisoned");
+    m.retain(|_, (_, at)| at.elapsed() < PENDING_SCOPE_TTL);
+    m.insert(key.to_string(), (scope, Instant::now()));
 }
 
-fn pending_date_get(key: &str) -> Option<String> {
-    let mut m = pending_dates().lock().expect("pending_date 锁 poisoned");
+fn pending_scope_get(key: &str) -> Option<PendingImportScope> {
+    let mut m = pending_scopes().lock().expect("pending_scope 锁 poisoned");
     match m.get(key) {
-        Some((d, at)) if at.elapsed() < PENDING_DATE_TTL => Some(d.clone()),
+        Some((scope, at)) if at.elapsed() < PENDING_SCOPE_TTL => Some(scope.clone()),
         Some(_) => {
             m.remove(key);
             None
         }
         None => None,
     }
+}
+
+fn pending_date_put(key: &str, date: &str) {
+    pending_scope_put(key, PendingImportScope::Day(date.to_string()));
+}
+
+fn pending_date_get(key: &str) -> Option<String> {
+    match pending_scope_get(key)? {
+        PendingImportScope::Day(date) => Some(date),
+        PendingImportScope::Month { .. } => None,
+    }
+}
+
+fn pending_month_put(key: &str, period: &str, team: &str) {
+    pending_scope_put(
+        key,
+        PendingImportScope::Month {
+            period: period.to_string(),
+            team: team.to_string(),
+        },
+    );
+}
+
+fn pending_month_get(key: &str) -> Option<(String, String)> {
+    match pending_scope_get(key)? {
+        PendingImportScope::Month { period, team } => Some((period, team)),
+        PendingImportScope::Day(_) => None,
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ImportMonthCommand {
+    period: String,
+    team: String,
+}
+
+/// 明确月度导入指令：
+/// `导入月 2026-10` / `导入月 10月` / `导入 月 2026-10` / `月导入 2026-10`。
+/// 支持在月份前后带 `男团|女团`；不写团别 = auto（按主播档案归属）。
+fn parse_import_month_command(text: &str) -> Result<Option<ImportMonthCommand>, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    let lower = text.to_lowercase();
+    let rest = if let Some(rest) = text.strip_prefix("导入月") {
+        Some(rest)
+    } else if let Some(rest) = text.strip_prefix("月导入") {
+        Some(rest)
+    } else if let Some(rest) = text.strip_prefix("导入") {
+        rest.trim_start().strip_prefix('月')
+    } else if lower.starts_with("importmonth") {
+        text.get("importmonth".len()..)
+    } else {
+        None
+    };
+    let Some(rest) = rest else {
+        return Ok(None);
+    };
+    let rest = rest.trim();
+    let Some((year, month)) = crate::csvparse::month_from_filename(rest) else {
+        return Err(
+            "导入月格式：导入月 [男团|女团] 2026-10（也可写「10月」，默认当前年）".to_string(),
+        );
+    };
+    let team = rest.split_whitespace().find_map(team_of).unwrap_or("auto");
+    Ok(Some(ImportMonthCommand {
+        period: format!("{year}-{month:02}"),
+        team: team.to_string(),
+    }))
 }
 
 /// 运营报日期的写法都收：「10.1」「10-1」「10/1」「10月1日」「10月1号」「2026-10-01」。
@@ -1074,6 +1151,197 @@ fn qq_admin_ok(qq_admins: &[String], conversation_id: &str) -> bool {
     qq_admins.iter().any(|a| a == conversation_id)
 }
 
+/// QQ 一次导入最多两个 CSV：通常对应同一天的两份全团文件。
+/// 超过上限整条拒绝，避免多份文件混在一批里造成顺序/覆盖难以核对。
+const QQ_IMPORT_MAX_FILES: usize = 2;
+
+fn qq_attachment_limit_error(count: usize) -> Option<String> {
+    (count > QQ_IMPORT_MAX_FILES).then(|| {
+        format!(
+            "一次最多只能导入 {QQ_IMPORT_MAX_FILES} 个文件，本次收到 {count} 个，未导入。
+             业务日期会保留，请拆成每批 1~2 个文件重新发送。"
+        )
+    })
+}
+
+/// 下载后的附件正文。文件名和正文必须成对保留到解析阶段，不能先拼成一个大字符串。
+type AttachmentText = (String, String);
+
+#[derive(Default)]
+struct AttachmentBatchParse {
+    daily_rows: Vec<admin::ImportRow>,
+    month_rows: Vec<admin::ImportRow>,
+    daily_files: Vec<String>,
+    month_files: Vec<String>,
+    empty_files: Vec<String>,
+    metric_errors: Vec<String>,
+}
+
+fn attachment_names_label(files: &[String]) -> String {
+    if files.is_empty() {
+        return "附件".to_string();
+    }
+    files
+        .iter()
+        .map(|f| format!("「{f}」"))
+        .collect::<Vec<_>>()
+        .join("、")
+}
+
+fn attachment_metric_errors(filename: &str, body: &str) -> Vec<String> {
+    let Ok((kind, out)) = crate::csvparse::parse(body) else {
+        return Vec::new();
+    };
+    if kind == crate::csvparse::Kind::Unknown {
+        return Vec::new();
+    }
+    out.rows
+        .into_iter()
+        .filter(|r| !r.err.is_empty())
+        .map(|r| {
+            let who = if !r.name.is_empty() {
+                r.name
+            } else if !r.anchor_id.is_empty() {
+                r.anchor_id
+            } else if !r.douyin_no.is_empty() {
+                r.douyin_no
+            } else {
+                format!("第 {} 行", r.raw_index)
+            };
+            format!("{filename} · {who}：{}", r.err)
+        })
+        .collect()
+}
+
+fn attachment_row_key(row: &admin::ImportRow) -> String {
+    if let Some(id) = row
+        .anchor_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return format!("id:{id}");
+    }
+    if let Some(no) = row
+        .douyin_no
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return format!("douyin:{no}");
+    }
+    format!("name:{}", row.name.trim())
+}
+
+/// 同一主播在多个附件里各带一部分指标时，按附件顺序做字段级合并：
+/// 后出现的非空值覆盖前值，缺值保留前一份。这样音浪文件和时长文件同发不会互相清空。
+fn merge_attachment_rows(rows: Vec<admin::ImportRow>) -> Vec<admin::ImportRow> {
+    let mut out: Vec<admin::ImportRow> = Vec::with_capacity(rows.len());
+    let mut index: HashMap<String, usize> = HashMap::new();
+    for row in rows {
+        let key = attachment_row_key(&row);
+        let Some(&i) = index.get(&key) else {
+            index.insert(key, out.len());
+            out.push(row);
+            continue;
+        };
+        let base = &mut out[i];
+        if !row.name.trim().is_empty() {
+            base.name = row.name;
+        }
+        if row.anchor_id.is_some() {
+            base.anchor_id = row.anchor_id;
+        }
+        if row.douyin_no.is_some() {
+            base.douyin_no = row.douyin_no;
+        }
+        if row.wave.is_some() {
+            base.wave = row.wave;
+        }
+        if row.cumulative_wave.is_some() {
+            base.cumulative_wave = row.cumulative_wave;
+        }
+        if row.minutes.is_some() {
+            base.minutes = row.minutes;
+        }
+        if row.is_live.is_some() {
+            base.is_live = row.is_live;
+        }
+        if row.err.is_some() {
+            base.err = row.err;
+        }
+    }
+    out
+}
+
+/// 逐附件解析，再按附件顺序合并。每个附件保留自己的表头、列序、分隔符和文件名。
+/// QQ 默认始终按日；只有用户明确发「导入月」时才走月度。
+fn parse_attachment_batch_mode(
+    attachments: &[AttachmentText],
+    month_mode: bool,
+) -> AttachmentBatchParse {
+    let mut batch = AttachmentBatchParse::default();
+    for (filename, body) in attachments {
+        batch
+            .metric_errors
+            .extend(attachment_metric_errors(filename, body));
+        if month_mode {
+            let rows = admin::parse_month_metrics_text(body);
+            if rows.is_empty() {
+                batch.empty_files.push(filename.clone());
+            } else {
+                batch.month_rows.extend(rows);
+                batch.month_files.push(filename.clone());
+            }
+        } else {
+            let rows = admin::parse_any_text(body);
+            if rows.is_empty() {
+                batch.empty_files.push(filename.clone());
+            } else {
+                batch.daily_rows.extend(rows);
+                batch.daily_files.push(filename.clone());
+            }
+        }
+    }
+    batch.daily_rows = merge_attachment_rows(batch.daily_rows);
+    // 同一账号重复转发同一份月报时只保留后一份字段值，避免月度提交再按人求和翻倍；
+    // 同一人的不同账号 key 不同，仍会保留给 commit_month_metrics 做一人多号求和。
+    batch.month_rows = merge_attachment_rows(batch.month_rows);
+    batch
+}
+
+/// QQ 默认按日导入。文件名里的“月份”“时长”都不改变模式。
+fn parse_attachment_batch(attachments: &[AttachmentText]) -> AttachmentBatchParse {
+    parse_attachment_batch_mode(attachments, false)
+}
+
+/// 只有明确「导入月」指令才调用。
+fn parse_month_attachment_batch(attachments: &[AttachmentText]) -> AttachmentBatchParse {
+    parse_attachment_batch_mode(attachments, true)
+}
+
+fn format_attachment_metric_errors(errors: &[String]) -> String {
+    let mut out = String::from("❌ 附件里有无法解析的音浪或时长，未导入任何数据：");
+    for e in errors.iter().take(10) {
+        out.push_str("\n· ");
+        out.push_str(e);
+    }
+    if errors.len() > 10 {
+        out.push_str(&format!("\n… 还有 {} 条", errors.len() - 10));
+    }
+    out
+}
+
+fn append_empty_attachment_warning(mut reply: String, empty_files: &[String]) -> String {
+    if !empty_files.is_empty() {
+        reply.push_str(&format!(
+            "\n⚠️ 未解析到数据行：{}",
+            attachment_names_label(empty_files)
+        ));
+    }
+    reply
+}
+
 /// 处理一条入站消息。返回 None = 静默忽略（非管理员 / 空消息）。
 pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Option<Outbound> {
     // 登记会话（含非管理员）：管理界面据此展示群聊/私聊列表并勾选管理员
@@ -1177,8 +1445,14 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
 
     // —— 以下为管理员流程（附件下载 / 日期黏住 / 命令路由）——
 
-    // 附件：即时下载（QQ CDN 直链带 rkey，有时效），存为待确认导入
-    let mut attachment_text = String::new();
+    // QQ 单次最多两个文件。超限时在下载前就拒绝，且不清除已黏住的业务日期。
+    if let Some(message) = qq_attachment_limit_error(inbound.attachments.len()) {
+        return Some(Outbound::to(&inbound.conversation_id, message));
+    }
+
+    // 附件：即时下载（QQ CDN 直链带 rkey，有时效）。正文必须逐附件保留，
+    // 不能先拼成一个大字符串——那样第二份文件的表头 / 列序会被第一份覆盖。
+    let mut attachment_bodies: Vec<AttachmentText> = Vec::new();
     for att in &inbound.attachments {
         tracing::info!(
             file = %att.file_name,
@@ -1190,8 +1464,7 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
         match download_text(&att.url, Some(&att.file_name)).await {
             Ok(body) => {
                 tracing::info!(file = %att.file_name, bytes = body.len(), "附件下载完成");
-                attachment_text.push_str(&body);
-                attachment_text.push('\n');
+                attachment_bodies.push((att.file_name.clone(), body));
             }
             Err(e) => {
                 tracing::warn!(file = %att.file_name, error = %e, "附件下载失败");
@@ -1202,65 +1475,130 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
             }
         }
     }
-    // 运营先发「10.1」这种纯日期：记下来，接下来发的 CSV 文件都按这个业务日期入库。
-    // （两个文件只报一次日期就够；再发一个日期可以改）
-    if attachment_text.is_empty() && !text.is_empty() {
+    let month_cmd = match parse_import_month_command(&text) {
+        Ok(cmd) => cmd,
+        Err(e) => return Some(Outbound::to(&inbound.conversation_id, e)),
+    };
+
+    // 管理员只发「10.1」或「导入月 2026-10」不带附件时，记下后续文件的导入模式。
+    if attachment_bodies.is_empty() && !text.is_empty() {
+        if let Some(cmd) = month_cmd.clone() {
+            pending_month_put(&key, &cmd.period, &cmd.team);
+            let team_label = if crate::admin::is_auto_team(&cmd.team) {
+                "全部团别"
+            } else if cmd.team == "female" {
+                "女团"
+            } else {
+                "男团"
+            };
+            return Some(Outbound::to(
+                &inbound.conversation_id,
+                format!(
+                    "已记下月度导入：{} {team_label}。把月度 CSV 发过来就按月入库；\n发一个日期（如 11.13）会切回按日导入。",
+                    cmd.period
+                ),
+            ));
+        }
         if let Some(d) = parse_short_date(&text) {
             pending_date_put(&key, &d);
             return Some(Outbound::to(
                 &inbound.conversation_id,
                 format!(
-                    "已记下业务日期 {d}。把 CSV 文件发过来就按这个日期入库（不分男女团，团别按主播档案归属）；\n再发一个日期可以改，发「帮助」看全部命令。"
+                    "已记下业务日期 {d}。把 CSV 文件发过来就按这个日期入库（不分男女团，团别按主播档案归属）；\n再发一个日期可以改，发「导入月 2026-10」可切到月度导入。"
                 ),
             ));
         }
     }
 
-    if !attachment_text.is_empty() {
-        let rows = admin::parse_any_text(&attachment_text);
-        let filename = inbound
+    if !attachment_bodies.is_empty() {
+        let all_files: Vec<String> = inbound
             .attachments
-            .first()
+            .iter()
             .map(|a| a.file_name.clone())
-            .unwrap_or_else(|| "文件".into());
+            .collect();
+        let msg_date = parse_short_date(&text);
 
-        /* 只有时长的月度文件（2026-10-10 用户口径：每日不能导入时长，只有月时长）：
-        只有「时长」列、没有音浪列的附件不能按日导 —— 那会「成功 0 行」，看着像成功其实什么都没进。
-        文件名带月份（9月份时长.csv）就直接按那个月导；没带月份让运营改名或去管理端选月份。
-        2026-10-16 起按月导入也支持音浪（admin 的「按月导入」可选两种指标），但机器人这边
-        只对「只有时长」的文件自动分流：带音浪的概览列表既可能是按日快照也可能是月报，
-        机器判不出来，交给管理端弹窗里人工选。 */
-        let month_rows = admin::parse_month_metrics_text(&attachment_text);
-        if admin::is_month_duration_file(&month_rows, &rows) {
-            let Some((y, m)) = crate::csvparse::month_from_filename(&filename) else {
+        // 默认（以及只要消息里出现日期）都是按日。只有明确「导入月」指令或此前
+        // 单独发过「导入月」且本条没有日期时，才进入月度模式。日期与月份互斥。
+        let month_scope = if let Some(cmd) = month_cmd {
+            pending_month_put(&key, &cmd.period, &cmd.team);
+            Some((cmd.period, cmd.team))
+        } else if msg_date.is_none() {
+            pending_month_get(&key)
+        } else {
+            None
+        };
+
+        if let Some((period, team)) = month_scope {
+            let AttachmentBatchParse {
+                month_rows,
+                month_files,
+                empty_files,
+                metric_errors,
+                ..
+            } = parse_month_attachment_batch(&attachment_bodies);
+            if !metric_errors.is_empty() {
+                return Some(Outbound::to(
+                    &inbound.conversation_id,
+                    format_attachment_metric_errors(&metric_errors),
+                ));
+            }
+            if month_rows.is_empty() {
                 return Some(Outbound::to(
                     &inbound.conversation_id,
                     format!(
-                        "文件「{filename}」看着是月度时长（只有时长列、没有音浪列），但文件名里没有月份。\n\
-                         把文件名改成「9月份时长.csv」这样再发，或到管理端「数据导入」页选年份 + 月份导入。"
+                        "附件{}里没解析到月度音浪或时长。",
+                        attachment_names_label(&all_files)
                     ),
                 ));
+            }
+            let files_label = if month_files.is_empty() {
+                all_files.join(",")
+            } else {
+                month_files.join(",")
             };
-            let period = format!("{y}-{m:02}");
+            let metrics = admin::MonthMetrics {
+                minutes: month_rows.iter().any(|r| r.minutes.is_some()),
+                wave: month_rows.iter().any(|r| r.wave.is_some()),
+            };
+            if !metrics.minutes && !metrics.wave {
+                return Some(Outbound::to(
+                    &inbound.conversation_id,
+                    "附件里没有可导入的月度音浪或时长".to_string(),
+                ));
+            }
+            let team_label = if crate::admin::is_auto_team(&team) {
+                "全部团别"
+            } else if team == "female" {
+                "女团"
+            } else {
+                "男团"
+            };
             tracing::info!(
-                file = %filename,
+                files = %files_label,
                 period = %period,
+                team = %team,
                 rows = month_rows.len(),
-                "机器人月度时长导入"
+                metrics = metrics.label(),
+                "机器人按指令月度导入"
             );
-            let reply = match admin::commit_month_metrics(
+            let reply = match admin::commit_month_metrics_anchor_only(
                 st,
                 &period,
-                "auto",
+                &team,
                 month_rows,
                 "merge",
-                &format!("机器人·{filename}"),
-                admin::MonthMetrics::MINUTES_ONLY,
+                &format!("机器人·{files_label}"),
+                metrics,
             )
             .await
             {
                 Ok(r) => {
-                    let mut s = format!("✅ {period} 月度时长导入成功 {} 人", r.ok_rows);
+                    let mut s = format!(
+                        "✅ {period} {team_label} 月度{}导入成功 {} 人",
+                        metrics.label(),
+                        r.ok_rows
+                    );
                     for f in r.failures.iter().take(10) {
                         s.push_str(&format!(
                             "\n· {}：{}",
@@ -1273,61 +1611,85 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
                     }
                     s
                 }
-                Err(e) => format!("❌ {period} 月度时长导入失败：{e}"),
+                Err(e) => format!(
+                    "❌ {period} {team_label} 月度{}导入失败：{e}",
+                    metrics.label()
+                ),
             };
-            return Some(Outbound::to(&inbound.conversation_id, reply));
-        }
-
-        // 业务日期优先级：本条消息里带的日期 > 之前报过的日期（12h 内）> 文件名里的日期 > 收到日 − 1
-        let (file_date, _file_team) = hints_from_filename(&filename);
-        let msg_date = parse_short_date(&text);
-        let sticky = pending_date_get(&key);
-        let (biz_date, date_src) = pick_biz_date(
-            msg_date.as_deref(),
-            sticky.as_deref(),
-            file_date.as_deref(),
-            &default_biz_date(),
-        );
-        if msg_date.is_some() {
-            // 同一条消息里带了日期：黏住，后面那个文件不用再报
-            pending_date_put(&key, &biz_date);
-        }
-
-        if rows.is_empty() {
             return Some(Outbound::to(
                 &inbound.conversation_id,
-                format!("文件「{filename}」里没解析到数据行，请确认是 CSV 或「名字 音浪」格式。"),
+                append_empty_attachment_warning(reply, &empty_files),
             ));
         }
 
-        /* 团别（2026-10-17 修复，审计 6-4）：
-        原先附件分支**先于**命令路由执行且硬编码 "auto"，运营发「导入 女团 2026-10-05」
-        + 附件时团别被**静默丢弃**，只会按主播档案逐行归属。
-        现在按「消息文本里的团别 > 文件名里的团别 > auto」三级取：
-        文本优先（运营当下说的算），文件名兜底（老习惯 `2026-10-07-男团.csv`），
-        都没有才 auto（一个文件男女混着也能导，团别按档案归属）。 */
+        // 按日：同一条消息里的多个附件按顺序做字段级合并，同 ID 后文件覆盖前文件；
+        // 后文件没带音浪或时长时分别保留前面的值，显式 0 仍覆盖。
+        let AttachmentBatchParse {
+            daily_rows,
+            daily_files,
+            empty_files,
+            metric_errors,
+            ..
+        } = parse_attachment_batch(&attachment_bodies);
+        if !metric_errors.is_empty() {
+            return Some(Outbound::to(
+                &inbound.conversation_id,
+                format_attachment_metric_errors(&metric_errors),
+            ));
+        }
+
+        let files_label = if daily_files.is_empty() {
+            all_files.join(",")
+        } else {
+            daily_files.join(",")
+        };
+        if daily_rows.is_empty() {
+            return Some(Outbound::to(
+                &inbound.conversation_id,
+                format!(
+                    "附件{}里没解析到数据行，请确认是 CSV 或「名字 音浪」格式。",
+                    attachment_names_label(&all_files)
+                ),
+            ));
+        }
+
+        // 业务日期只认：本条消息里的日期 > 之前报过的日期（12h 内）> 收到日 − 1。
+        // 文件名只是审计信息，绝不参与日期判断。
+        let sticky = pending_date_get(&key);
+        let (biz_date, date_src) =
+            pick_biz_date(msg_date.as_deref(), sticky.as_deref(), &default_biz_date());
+        if msg_date.is_some() {
+            // 同一条消息里带了日期：黏住，后面那个文件不用再报；同时覆盖月度模式。
+            pending_date_put(&key, &biz_date);
+        }
+
+        // 团别只认消息文本里明确写的「男团 / 女团」；没写就是 auto，
+        // 逐行按主播档案归属。文件名不参与团别判断。
         let msg_team = text.split_whitespace().find_map(team_of);
-        let team = msg_team.or(_file_team).unwrap_or("auto");
+        let team = msg_team.unwrap_or("auto");
         tracing::info!(
-            file = %filename,
+            files = %files_label,
             biz_date = %biz_date,
             date_src = %date_src,
             team = %team,
-            team_src = if msg_team.is_some() { "消息文本" } else if _file_team.is_some() { "文件名" } else { "auto（按档案归属）" },
-            rows = rows.len(),
-            "机器人文件导入"
+            team_src = if msg_team.is_some() { "消息文本" } else { "auto（按档案归属）" },
+            rows = daily_rows.len(),
+            "机器人按日文件导入"
         );
-        let report = admin::commit_import(
+        let report = admin::commit_import_anchor_only(
             st,
             team,
             &biz_date,
-            rows,
+            daily_rows,
             "merge",
-            &format!("机器人·{filename}"),
+            &format!("机器人·{files_label}"),
         )
         .await;
-        let reply = format_report(&filename, &biz_date, team, report);
-        return Some(Outbound::to(&inbound.conversation_id, reply));
+        let reply = format_report(&files_label, &biz_date, team, report);
+        return Some(Outbound::to(
+            &inbound.conversation_id,
+            append_empty_attachment_warning(reply, &empty_files),
+        ));
     }
 
     if text.is_empty() {
@@ -1513,6 +1875,7 @@ async fn route_command(
         CmdId::DailySquadReport => cmd_daily_report(st, &args_ref).await,
         CmdId::MissingData => cmd_missing(st, &args_ref).await,
         CmdId::Import => cmd_import(st, inbound, &args_ref).await,
+        CmdId::ImportMonth => "用法：导入月 [男团|女团] 2026-10，然后再发月度 CSV。".to_string(),
     };
     Outbound::to(&inbound.conversation_id, text)
         .with_images(images)
@@ -2337,7 +2700,11 @@ async fn cmd_import(st: &Arc<AppState>, inbound: &Inbound, args: &[&str]) -> Str
         // 传平台给的真实文件名：CDN URL 推不出扩展名时 xlsx 会被当文本，
         // 二进制垃圾直接进暂存区（批次 #287 就是这么来的）
         match download_text(&att.url, Some(&att.file_name)).await {
-            Ok(body) => text.push_str(&body),
+            Ok(body) => {
+                // 命令路由的兼容分支也不能让两份附件首尾粘连；正常附件入口已逐附件解析。
+                text.push_str(&body);
+                text.push('\n');
+            }
             Err(e) => return format!("附件下载失败（{}）：{e}", att.file_name),
         }
     }
@@ -2487,52 +2854,11 @@ fn team_of(s: &str) -> Option<&'static str> {
     }
 }
 
-/// 从文件名读日期与团别，运营命名习惯：`2026-10-07-男团.csv`。
-/// 读得出来就直接入库，省掉「请回复团别」这一轮。
-fn hints_from_filename(name: &str) -> (Option<String>, Option<&'static str>) {
-    let lower = name.to_lowercase();
-    let team = if lower.contains("男团") || lower.contains("male") {
-        Some("male")
-    } else if lower.contains("女团") || lower.contains("female") {
-        Some("female")
-    } else {
-        None
-    };
-    (find_date(name), team)
-}
-
-/// 在任意文本里找第一个合法的 `YYYY-MM-DD`。
-/// 按字节滑窗，但只认「4 数字 - 2 数字 - 2 数字」且能通过日历校验的片段——
-/// 数字和 `-` 都是 ASCII，多字节汉字的字节都 ≥ 0x80，不会误配。
-fn find_date(s: &str) -> Option<String> {
-    let b = s.as_bytes();
-    if b.len() < 10 {
-        return None;
-    }
-    let digits = |r: &[u8]| r.iter().all(u8::is_ascii_digit);
-    for i in 0..=b.len() - 10 {
-        let w = &b[i..i + 10];
-        if w[4] != b'-' || w[7] != b'-' {
-            continue;
-        }
-        if !digits(&w[..4]) || !digits(&w[5..7]) || !digits(&w[8..10]) {
-            continue;
-        }
-        if let Ok(cand) = std::str::from_utf8(w) {
-            if valid_date(cand) {
-                return Some(cand.to_string());
-            }
-        }
-    }
-    None
-}
-
 /// 默认业务日期 = 前一天。数据有延迟：每晚 24 点后发前一天的数据，
 /// 8 号发的 CSV 全部是 7 号的（用户口径，2026-10-05 确认）。
 ///
-/// 2026-10-12 用户复述：「11 号接收的就是 10 号的数据，**前提是没指定日期**」——
-/// 它是四条日期来源里**最低优先级**的一条（`pick_biz_date` 的兜底），
-/// 报过日期 / 文件名带日期时都不会走到这里。
+/// 2026-10-12 用户复述：「11 号接收的就是 10 号的数据，**前提是没指定日期**」。
+/// 2026-11-14 明确：QQ 文件名不参与日期判断，只有消息日期 / 黏住日期会覆盖这里。
 fn default_biz_date() -> String {
     prev_biz_date(chrono::Local::now().date_naive())
 }
@@ -2545,26 +2871,23 @@ fn prev_biz_date(today: chrono::NaiveDate) -> String {
         .to_string()
 }
 
-/// 业务日期的四条来源按优先级取一条（纯函数，好测）。
+/// 业务日期的三个来源按优先级取一条（纯函数，好测）。
 ///
-/// 优先级（用户口径 2026-10-05 / 2026-10-12）：
-/// 1. **本条消息里带的日期**（运营发「10.1」时顺手把日期粘住，后面几个文件不用再报）
+/// 优先级（用户口径 2026-11-14）：
+/// 1. **本条消息里带的日期**（运营发「11.13」时顺手把日期粘住，后面几个文件不用再报）
 /// 2. 之前贴住的日期（12h 内）
-/// 3. 文件名里的日期（补录历史数据时靠它）
-/// 4. **收到日 − 1**（兜底：抖音后台半夜才出前一天的数据）
+/// 3. **收到日 − 1**（兜底：抖音后台半夜才出前一天的数据）
 ///
 /// 返回 `(业务日期, 来源说明)`，来源说明进日志与回复文案。
 fn pick_biz_date(
     msg_date: Option<&str>,
     sticky: Option<&str>,
-    file_date: Option<&str>,
     default_date: &str,
 ) -> (String, &'static str) {
-    match (msg_date, sticky, file_date) {
-        (Some(d), _, _) => (d.to_string(), "本条消息指定"),
-        (None, Some(d), _) => (d.to_string(), "沿用你报的日期"),
-        (None, None, Some(d)) => (d.to_string(), "文件名里的日期（补录）"),
-        (None, None, None) => (
+    match (msg_date, sticky) {
+        (Some(d), _) => (d.to_string(), "本条消息指定"),
+        (None, Some(d)) => (d.to_string(), "沿用你报的日期"),
+        (None, None) => (
             default_date.to_string(),
             "默认「收到日 − 1」（数据半夜才更新）",
         ),
@@ -2856,6 +3179,240 @@ mod tests {
         assert_eq!(team_of("male"), Some("male"));
         assert_eq!(team_of("女团"), Some("female"));
         assert_eq!(team_of("boy"), None);
+    }
+
+    /* ---- QQ 多附件：每个文件保留自己的表头和列序 ---- */
+
+    #[test]
+    fn qq_multi_attachment_parses_each_header_and_merges() {
+        let docs: Vec<AttachmentText> = vec![
+            (
+                "淮北13.csv".into(),
+                "\u{feff}主播ID,主播昵称,抖音号,会员订阅音浪,总音浪,feed看播时长,开播有效时长\n\
+                 1001,玖玉🎹,dy-1,999,7717,8小时,3小时47分钟17秒\n"
+                    .into(),
+            ),
+            (
+                "永城13.csv".into(),
+                "\u{feff}主播_昵称,总 音浪,主播ID（主账号）,抖音号,直播时长\n\
+                 浩龙🎹,5508,2002,dy-2,1小时48分钟15秒\n\
+                 狼耀🎹,0,2003,dy-3,0\n"
+                    .into(),
+            ),
+        ];
+
+        let batch = parse_attachment_batch(&docs);
+        assert!(batch.metric_errors.is_empty(), "{:?}", batch.metric_errors);
+        assert!(batch.month_rows.is_empty());
+        assert_eq!(batch.daily_files, vec!["淮北13.csv", "永城13.csv"]);
+        assert_eq!(batch.daily_rows.len(), 3, "{:?}", batch.daily_rows);
+        assert!(
+            batch
+                .daily_rows
+                .iter()
+                .all(|r| r.name != "主播昵称" && r.name != "主播_昵称"),
+            "重复表头不能变成假主播：{:?}",
+            batch.daily_rows
+        );
+
+        assert_eq!(batch.daily_rows[0].name, "玖玉🎹");
+        assert_eq!(batch.daily_rows[0].anchor_id.as_deref(), Some("1001"));
+        assert_eq!(batch.daily_rows[0].douyin_no.as_deref(), Some("dy-1"));
+        assert_eq!(batch.daily_rows[0].wave, Some(7717.0));
+        assert_eq!(batch.daily_rows[0].minutes, Some(227.0));
+
+        assert_eq!(batch.daily_rows[1].name, "浩龙🎹");
+        assert_eq!(batch.daily_rows[1].anchor_id.as_deref(), Some("2002"));
+        assert_eq!(batch.daily_rows[1].douyin_no.as_deref(), Some("dy-2"));
+        assert_eq!(batch.daily_rows[1].wave, Some(5508.0));
+        assert_eq!(batch.daily_rows[1].minutes, Some(108.0));
+        assert_eq!(batch.daily_rows[2].wave, Some(0.0), "显式 0 不能当空值");
+        assert_eq!(batch.daily_rows[2].minutes, Some(0.0));
+    }
+
+    #[test]
+    fn qq_attachment_rows_merge_complementary_metrics_without_clearing() {
+        let docs: Vec<AttachmentText> = vec![
+            (
+                "音浪.csv".into(),
+                "主播ID,主播昵称,总音浪\n1001,玖玉,7717\n".into(),
+            ),
+            (
+                "时长.csv".into(),
+                "主播ID,主播昵称,开播有效时长\n1001,玖玉,3小时47分钟17秒\n".into(),
+            ),
+        ];
+        let batch = parse_attachment_batch(&docs);
+        assert_eq!(batch.daily_rows.len(), 1, "{:?}", batch.daily_rows);
+        assert_eq!(batch.daily_rows[0].wave, Some(7717.0));
+        assert_eq!(batch.daily_rows[0].minutes, Some(227.0));
+    }
+
+    #[test]
+    fn qq_invalid_metrics_are_reported_not_silently_dropped() {
+        let csv = "主播昵称,总音浪,开播有效时长\n浩龙,abc,oops\n";
+        let errors = attachment_metric_errors("坏值.csv", csv);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("音浪"), "{errors:?}");
+        assert!(errors[0].contains("时长"), "{errors:?}");
+
+        let batch = parse_attachment_batch(&[("坏值.csv".into(), csv.into())]);
+        assert!(!batch.metric_errors.is_empty());
+        assert!(format_attachment_metric_errors(&batch.metric_errors).contains("未导入任何数据"));
+    }
+
+    #[test]
+    fn explicit_month_mode_imports_both_metrics() {
+        let docs: Vec<AttachmentText> = vec![(
+            "淮北10月份.csv".into(),
+            "主播ID,主播昵称,总音浪,开播有效时长\n1001,玖安,214126,107小时40分9秒\n".into(),
+        )];
+        // 默认仍按日：文件名里的“月份”不影响模式。
+        let daily = parse_attachment_batch(&docs);
+        assert_eq!(daily.daily_rows.len(), 1);
+        assert!(daily.month_rows.is_empty());
+
+        let monthly = parse_month_attachment_batch(&docs);
+        assert!(monthly.daily_rows.is_empty());
+        assert_eq!(monthly.month_files, vec!["淮北10月份.csv"]);
+        assert_eq!(monthly.month_rows.len(), 1);
+        assert_eq!(monthly.month_rows[0].wave, Some(214126.0));
+        assert_eq!(monthly.month_rows[0].minutes, Some(6460.0));
+    }
+
+    #[test]
+    fn later_files_overwrite_same_id_metric_by_metric() {
+        let docs: Vec<AttachmentText> = vec![
+            (
+                "第一份.csv".into(),
+                "主播ID,主播昵称,总音浪,开播有效时长\n                 A,甲,100,1小时\nB,乙,200,30分钟\n"
+                    .into(),
+            ),
+            (
+                "第二份.csv".into(),
+                "主播ID,主播昵称,总音浪\nA,甲改名,120\n".into(),
+            ),
+            (
+                "第三份.csv".into(),
+                "主播ID,主播昵称,开播有效时长\nA,甲最新,1小时30分钟\n".into(),
+            ),
+        ];
+        let batch = parse_attachment_batch(&docs);
+        assert_eq!(batch.daily_rows.len(), 2, "{:?}", batch.daily_rows);
+        let a = batch
+            .daily_rows
+            .iter()
+            .find(|r| r.anchor_id.as_deref() == Some("A"))
+            .unwrap();
+        assert_eq!(a.wave, Some(120.0), "后文件音浪覆盖前值");
+        assert_eq!(
+            a.minutes,
+            Some(90.0),
+            "后文件时长覆盖前值，缺音浪时保留前面的音浪"
+        );
+        let b = batch
+            .daily_rows
+            .iter()
+            .find(|r| r.anchor_id.as_deref() == Some("B"))
+            .unwrap();
+        assert_eq!(b.wave, Some(200.0));
+        assert_eq!(b.minutes, Some(30.0));
+    }
+
+    #[test]
+    fn duplicate_monthly_attachment_is_merged_before_person_sum() {
+        let body = "主播ID,主播昵称,开播有效时长\n1001,玖玉,10小时\n";
+        let batch = parse_month_attachment_batch(&[
+            ("2026-09-时长.csv".into(), body.into()),
+            ("2026-09-时长.csv".into(), body.into()),
+        ]);
+        assert_eq!(
+            batch.month_rows.len(),
+            1,
+            "同一账号重复月报不能留两行再求和"
+        );
+        assert_eq!(batch.month_rows[0].minutes, Some(600.0));
+    }
+
+    #[test]
+    fn qq_attachments_are_daily_by_default_even_with_month_names() {
+        let docs: Vec<AttachmentText> = vec![
+            (
+                "2026-09-时长.csv".into(),
+                "主播昵称,开播有效时长\n浩龙,1小时\n".into(),
+            ),
+            (
+                "2026-10-01-男团.csv".into(),
+                "主播ID,主播昵称,总音浪\n1001,玖玉,100\n".into(),
+            ),
+        ];
+        let batch = parse_attachment_batch(&docs);
+        assert!(batch.month_rows.is_empty(), "没有「导入月」指令时全部按日");
+        assert_eq!(batch.daily_rows.len(), 2);
+        assert_eq!(batch.daily_files.len(), 2);
+    }
+
+    #[test]
+    fn duration_only_attachment_is_daily_without_explicit_month_command() {
+        let docs: Vec<AttachmentText> = vec![(
+            "淮北13.csv".into(),
+            "主播ID,主播昵称,开播有效时长\n1001,玖玉,3小时47分钟17秒\n".into(),
+        )];
+        let daily = parse_attachment_batch(&docs);
+        assert!(daily.month_rows.is_empty(), "默认按日导");
+        assert_eq!(daily.daily_rows.len(), 1);
+        assert_eq!(daily.daily_rows[0].minutes, Some(227.0));
+
+        let monthly = parse_month_attachment_batch(&docs);
+        assert!(monthly.daily_rows.is_empty());
+        assert_eq!(monthly.month_rows.len(), 1);
+        assert_eq!(monthly.month_rows[0].minutes, Some(227.0));
+    }
+
+    #[test]
+    fn import_month_command_parses_period_and_team() {
+        assert_eq!(
+            parse_import_month_command("导入月 2026-10").unwrap(),
+            Some(ImportMonthCommand {
+                period: "2026-10".into(),
+                team: "auto".into(),
+            })
+        );
+        assert_eq!(
+            parse_import_month_command("导入 月 女团 10月").unwrap(),
+            Some(ImportMonthCommand {
+                period: format!("{}-10", chrono::Local::now().format("%Y")),
+                team: "female".into(),
+            })
+        );
+        assert_eq!(
+            parse_import_month_command("月导入 2026年9月 男团").unwrap(),
+            Some(ImportMonthCommand {
+                period: "2026-09".into(),
+                team: "male".into(),
+            })
+        );
+        assert_eq!(parse_import_month_command("导入 2026-10-01").unwrap(), None);
+        assert!(parse_import_month_command("导入月").is_err());
+    }
+
+    #[test]
+    fn day_and_month_sticky_modes_are_mutually_exclusive() {
+        let key = format!("test:scope:{}", std::process::id());
+        pending_month_put(&key, "2026-10", "male");
+        assert_eq!(
+            pending_month_get(&key),
+            Some(("2026-10".to_string(), "male".to_string()))
+        );
+        assert_eq!(pending_date_get(&key), None);
+
+        pending_date_put(&key, "2026-11-13");
+        assert_eq!(pending_date_get(&key), Some("2026-11-13".to_string()));
+        assert_eq!(pending_month_get(&key), None);
+
+        pending_month_put(&key, "2026-09", "auto");
+        assert_eq!(pending_month_get(&key).unwrap().0, "2026-09");
+        assert_eq!(pending_date_get(&key), None);
     }
 
     #[test]
@@ -3229,42 +3786,29 @@ mod tests {
         assert!(!is_bind_keyword("今天 1234 分"));
     }
 
-    /* ---------------- 业务日期来源（2026-10-12 用户口径） ----------------
-    「11 号接收的就是 10 号的数据，前提是没指定日期；同日期再导入就是覆盖」 */
+    /* ---------------- 业务日期来源（2026-11-14 用户口径） ----------------
+    QQ 导入日期只看消息日期 / 12h 黏住日期 / 默认前一天；文件名完全不参与。 */
 
-    /// 兜底：四条来源都没给 → 收到日 − 1
+    /// 兜底：没有消息日期、也没有黏住日期 → 收到日 − 1
     #[test]
     fn biz_date_falls_back_to_yesterday_when_nothing_specified() {
-        let (d, src) = pick_biz_date(None, None, None, "2026-10-10");
+        let (d, src) = pick_biz_date(None, None, "2026-10-10");
         assert_eq!(d, "2026-10-10", "11 号收到的文件 = 10 号的数据");
         assert!(src.contains("收到日 − 1"), "来源要说清是兜底：{src}");
     }
 
-    /// 优先级：本条消息指定 > 贴住的日期 > 文件名里的日期 > 收到日 − 1
+    /// 优先级：本条消息指定 > 贴住的日期 > 收到日 − 1
     #[test]
     fn biz_date_priority_order() {
-        // ① 消息里报了日期 → 它说了算，后面三个都不看
-        let (d, src) = pick_biz_date(
-            Some("2026-10-01"),
-            Some("2026-09-09"),
-            Some("2026-08-08"),
-            "2026-10-10",
-        );
+        let (d, src) = pick_biz_date(Some("2026-10-01"), Some("2026-09-09"), "2026-10-10");
         assert_eq!(d, "2026-10-01");
         assert_eq!(src, "本条消息指定");
 
-        // ② 没报但之前贴住过（12h 内）→ 沿用，不看文件名与兜底
-        let (d, src) = pick_biz_date(None, Some("2026-09-09"), Some("2026-08-08"), "2026-10-10");
+        let (d, src) = pick_biz_date(None, Some("2026-09-09"), "2026-10-10");
         assert_eq!(d, "2026-09-09");
         assert!(src.contains("沿用"), "{src}");
 
-        // ③ 只有文件名带日期（补录）→ 用它
-        let (d, src) = pick_biz_date(None, None, Some("2019-03-13"), "2026-10-10");
-        assert_eq!(d, "2019-03-13");
-        assert!(src.contains("文件名"), "{src}");
-
-        // ④ 全都没有 → 兜底
-        let (d, _) = pick_biz_date(None, None, None, "2026-10-10");
+        let (d, _) = pick_biz_date(None, None, "2026-10-10");
         assert_eq!(d, "2026-10-10");
     }
 
@@ -3277,41 +3821,6 @@ mod tests {
         assert_eq!(prev_biz_date(d("2027-01-01")), "2026-12-31", "跨年");
         assert_eq!(prev_biz_date(d("2026-03-01")), "2026-02-28", "平年 2 月");
         assert_eq!(prev_biz_date(d("2024-03-01")), "2024-02-29", "闰年 2 月");
-    }
-
-    #[test]
-    fn filename_hints_read_date_and_team() {
-        let (d, t) = hints_from_filename("2026-10-07-男团.csv");
-        assert_eq!(d.as_deref(), Some("2026-10-07"));
-        assert_eq!(t, Some("male"));
-
-        let (d, t) = hints_from_filename("女团 2026-10-06.xlsx");
-        assert_eq!(d.as_deref(), Some("2026-10-06"));
-        assert_eq!(t, Some("female"));
-
-        // 只有团别没日期：日期回落到默认（前一天）
-        let (d, t) = hints_from_filename("male-1007.csv");
-        assert_eq!(d, None);
-        assert_eq!(t, Some("male"));
-
-        // 都没有：留给数据行推断
-        assert_eq!(hints_from_filename("export.csv"), (None, None));
-    }
-
-    #[test]
-    fn date_scan_ignores_junk_and_bad_dates() {
-        assert_eq!(find_date("没有日期"), None);
-        assert_eq!(
-            find_date("2026-13-45.csv"),
-            None,
-            "不存在的日期应被日历校验挡掉"
-        );
-        assert_eq!(find_date("short"), None);
-        // 前缀有汉字也不影响（多字节不会误配）
-        assert_eq!(
-            find_date("男团数据-2026-10-07-导出.csv").as_deref(),
-            Some("2026-10-07")
-        );
     }
 
     // ---- 附件域名白名单（防 SSRF）----
@@ -3354,10 +3863,10 @@ mod tests {
             "http://10.0.0.5/internal",
             "http://evil.com/steal.csv",
             "https://evil.com/steal.csv",
-            "http://qq.com.evil.com/x.csv", // 后缀伪装
-            "http://qq.com@169.254.169.254/x.csv", // userinfo 伪装
+            "http://qq.com.evil.com/x.csv",               // 后缀伪装
+            "http://qq.com@169.254.169.254/x.csv",        // userinfo 伪装
             "https://multimedia.nt.qq.com.cn:8443/x.csv", // 非默认端口
-            "https://[::1]/x.csv", // IPv6 loopback
+            "https://[::1]/x.csv",                        // IPv6 loopback
             "file:///etc/passwd",
         ] {
             assert!(!attachment_host_allowed(u), "应拒绝：{u}");
@@ -3397,6 +3906,17 @@ mod tests {
 
     /// QQ 管理员必须 fail-closed（2026-10-17 第四轮审计 P1-3）：
     /// 未配置 BOT_QQ_ADMINS = 一个都不认；配了只认名单内的会话。
+    #[test]
+    fn qq_import_accepts_at_most_two_files() {
+        assert!(qq_attachment_limit_error(0).is_none());
+        assert!(qq_attachment_limit_error(1).is_none());
+        assert!(qq_attachment_limit_error(2).is_none());
+        let msg = qq_attachment_limit_error(3).expect("3 个文件必须拒绝");
+        assert!(msg.contains("最多只能导入 2 个文件"), "{msg}");
+        assert!(msg.contains("未导入"), "{msg}");
+        assert!(msg.contains("业务日期会保留"), "{msg}");
+    }
+
     #[test]
     fn qq_admin_defaults_fail_closed() {
         assert!(

@@ -259,8 +259,8 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "047_live_room_standalone",
         include_str!("migrations/047_live_room_standalone.sql"),
     ),
-    // 048：按日导入批次贡献表。同一业务日多批次导入按人/日汇总，
-    // 后一批 0 行不再覆盖前一批正数；重发同批次保持幂等。
+    // 048：按日导入批次贡献表与 source_fingerprint 审计列。表保留作历史/审计，
+    // 但当前按日导入直接覆盖写 daily_metric，不再读取该表做 SUM 重算（2026-11-14）。
     (
         "048_daily_import_contrib",
         include_str!("migrations/048_daily_import_contrib.sql"),
@@ -271,8 +271,8 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "049_live_hot_path",
         include_str!("migrations/049_live_hot_path.sql"),
     ),
-    // 050：按日贡献区分“没有音浪”和“显式音浪 0”。只导时长的新批次
-    // 不再把此前已导入的当日音浪重算为 0。幂等，可安全重放。
+    // 050：历史修复，给 daily_import_contrib 增加 has_wave，区分“没有音浪”和
+    // “显式音浪 0”。048 求和口径停用后该列仅为历史审计保留；迁移仍需保留。
     (
         "050_daily_contrib_has_wave",
         include_str!("migrations/050_daily_contrib_has_wave.sql"),

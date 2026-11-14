@@ -707,7 +707,8 @@ async fn deleting_day_or_month_clears_its_unclaimed_rows() {
         axum::extract::State(st.clone()),
         axum::extract::Query(DayQuery {
             biz_date: daily_date.into(),
-            team: "auto".into(),
+            team: Some("auto".into()),
+            metrics: None,
         }),
     )
     .await

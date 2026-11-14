@@ -64,12 +64,18 @@ const ID_HEADERS: [&str; 7] = [
     "uid",
     "id",
 ];
-const NAME_HEADERS: [&str; 12] = [
+/// 真主播 ID 的候选。必须先于抖音号做完「精确 + 包含」匹配，否则
+/// `主播ID（主账号）` 会被表头里精确的「抖音号」抢走。
+const ANCHOR_ID_HEADERS: [&str; 4] = ["主播id", "主播账号", "anchorid", "uid"];
+const GENERIC_ID_HEADERS: [&str; 1] = ["id"];
+const NAME_HEADERS: [&str; 14] = [
     "主播名",
     "主播昵称",
+    "主播姓名",
     "昵称",
     "用户昵称",
     "姓名",
+    "名字",
     "抖音昵称",
     "达人昵称",
     "作者昵称",
@@ -78,35 +84,65 @@ const NAME_HEADERS: [&str; 12] = [
     "name",
     "nickname",
 ];
-const WAVE_HEADERS: [&str; 4] = ["音浪", "wavevalue", "wave", "总音浪"];
+/// 具体业务列优先于泛化列。真实公会文件同时出现
+/// `总音浪 / 会员订阅音浪 / 分成比-直播音浪收益` 时，必须先锁定 `总音浪`。
+const WAVE_HEADERS: [&str; 6] = [
+    "总音浪",
+    "当日音浪",
+    "dailywave",
+    "音浪",
+    "wavevalue",
+    "wave",
+];
 const DUR_HEADERS: [&str; 7] = [
-    "时长",
-    "duration",
-    "durationminutes",
-    "直播时长",
     "开播有效时长",
-    "有效时长",
     "开播时长",
+    "直播时长",
+    "有效时长",
+    "durationminutes",
+    "duration",
+    "时长",
 ];
 const RANK_HEADERS: [&str; 2] = ["排名", "rank"];
 const DOUYIN_HEADERS: [&str; 3] = ["抖音号", "抖音id", "douyinno"];
 
 /// 含这些词的列不是音浪列：「分成比-直播音浪收益」这种比例列一旦被当成音浪，
 /// 月度时长文件里每个人的当日音浪会变成分成比（35 / 40 / 50），榜单直接失真。
-const WAVE_HEADER_EXCLUDE: [&str; 4] = ["分成", "比例", "占比", "系数"];
+const WAVE_HEADER_EXCLUDE: [&str; 14] = [
+    "分成",
+    "比例",
+    "占比",
+    "系数",
+    "会员订阅",
+    "星守护",
+    "粉丝团",
+    "礼物",
+    "互动",
+    "member",
+    "subscri",
+    "guard",
+    "gift",
+    "fansclub",
+];
 
-/// 找音浪列：精确匹配优先；包含匹配时跳过分成比 / 占比这类「带音浪字样的比例列」。
-fn find_wave_column(headers: &[String]) -> i32 {
-    for c in WAVE_HEADERS {
+/// 这些是「看播 / 观众停留」类指标，不是主播自己的开播有效时长。
+const DUR_HEADER_EXCLUDE: [&str; 9] = [
+    "feed", "看播", "观看", "观众", "停留", "watch", "view", "avg", "average",
+];
+
+fn find_column_filtered(headers: &[String], candidates: &[&str], exclude: &[&str]) -> i32 {
+    // 先按候选词的业务优先级找精确列，再退到包含匹配。不能按表头出现顺序
+    // 先命中泛化词，否则 `会员订阅音浪` / `feed看播时长` 会抢走真正指标列。
+    for c in candidates {
         for (i, n) in headers.iter().enumerate() {
             if n == c {
                 return i as i32;
             }
         }
     }
-    for c in WAVE_HEADERS {
+    for c in candidates {
         for (i, n) in headers.iter().enumerate() {
-            if n.contains(c) && !WAVE_HEADER_EXCLUDE.iter().any(|x| n.contains(x)) {
+            if n.contains(c) && !exclude.iter().any(|x| n.contains(x)) {
                 return i as i32;
             }
         }
@@ -114,16 +150,13 @@ fn find_wave_column(headers: &[String]) -> i32 {
     -1
 }
 
-/// 在表头里找第一个命中的列下标；先精确匹配，再包含匹配（应对"主播ID（必填）"）
-fn find_column(headers: &[String], candidates: &[&str]) -> i32 {
+fn find_column_by_candidate_priority(headers: &[String], candidates: &[&str]) -> i32 {
     for c in candidates {
         for (i, n) in headers.iter().enumerate() {
             if n == c {
                 return i as i32;
             }
         }
-    }
-    for c in candidates {
         for (i, n) in headers.iter().enumerate() {
             if n.contains(c) {
                 return i as i32;
@@ -133,19 +166,43 @@ fn find_column(headers: &[String], candidates: &[&str]) -> i32 {
     -1
 }
 
+/// 找音浪列：精确匹配优先；包含匹配时跳过分成比 / 占比这类「带音浪字样的比例列」。
+fn find_wave_column(headers: &[String]) -> i32 {
+    find_column_filtered(headers, &WAVE_HEADERS, &WAVE_HEADER_EXCLUDE)
+}
+
+/// 找开播时长列：`开播有效时长 / 直播时长` 优先，明确排除 feed 看播时长。
+fn find_duration_column(headers: &[String]) -> i32 {
+    find_column_filtered(headers, &DUR_HEADERS, &DUR_HEADER_EXCLUDE)
+}
+
+/// 在表头里找第一个命中的列下标；先精确匹配，再包含匹配（应对"主播ID（必填）"）
+fn find_column(headers: &[String], candidates: &[&str]) -> i32 {
+    find_column_filtered(headers, candidates, &[])
+}
+
+fn find_id_column(headers: &[String]) -> i32 {
+    let anchor = find_column_by_candidate_priority(headers, &ANCHOR_ID_HEADERS);
+    if anchor >= 0 {
+        return anchor;
+    }
+    let douyin = find_column(headers, &DOUYIN_HEADERS);
+    if douyin >= 0 {
+        return douyin;
+    }
+    find_column_by_candidate_priority(headers, &GENERIC_ID_HEADERS)
+}
+
 /// 按表头猜 CSV 类型：时长 → 音浪 → 主播档案
 pub fn detect_kind(headers: &[String]) -> Kind {
-    let all = headers.join("");
-    for kw in ["时长", "duration", "开播", "有效时长"] {
-        if all.contains(kw) {
-            return Kind::Duration;
-        }
+    let normalized: Vec<String> = headers.iter().map(|h| normalize_header(h)).collect();
+    if find_duration_column(&normalized) >= 0 {
+        return Kind::Duration;
     }
-    for kw in ["音浪", "wave", "总音浪"] {
-        if all.contains(kw) {
-            return Kind::Wave;
-        }
+    if find_wave_column(&normalized) >= 0 {
+        return Kind::Wave;
     }
+    let all = normalized.join("");
     for kw in ["主播", "昵称", "抖音号"] {
         if all.contains(kw) {
             return Kind::Anchors;
@@ -156,10 +213,17 @@ pub fn detect_kind(headers: &[String]) -> Kind {
 
 /// 解析音浪值，支持 "12.5万" / "125000" / "12,500" / "1.2亿" / "3w"
 pub fn parse_wave(raw: &str) -> anyhow::Result<i64> {
-    let mut s = raw.trim().replace([',', '，'], "").replace("音浪", "");
-    if s.is_empty() || s == "-" {
+    if metric_is_missing(raw) {
         return Ok(0);
     }
+    let cleaned = raw.trim().replace([',', '，'], "").replace(' ', "");
+    let mut s = if let Some(stripped) = cleaned.strip_suffix("音浪") {
+        stripped.to_string()
+    } else if let Some(stripped) = cleaned.strip_prefix("音浪") {
+        stripped.to_string()
+    } else {
+        cleaned
+    };
     let mut multiplier: f64 = 1.0;
     if let Some(stripped) = s.strip_suffix('万') {
         multiplier = 10_000.0;
@@ -192,76 +256,150 @@ fn metric_is_missing(raw: &str) -> bool {
     s.is_empty() || matches!(s, "-" | "—" | "–")
 }
 
-/// 取 "37小时" 里的 37。primary 优先，其次 fallback。
-fn extract_int(s: &str, primary: &str, fallback: &str) -> f64 {
-    let idx = s.find(primary).or_else(|| {
-        if fallback.is_empty() {
-            None
-        } else {
-            // "分" 可能跟在 "分钟" 后面，只认独立的"分"
-            s.find(fallback)
-                .filter(|&i| !s[i + fallback.len()..].starts_with("钟"))
-        }
-    });
-    let Some(idx) = idx else { return 0.0 };
-    let mut start = idx;
-    let bytes = s.as_bytes();
-    while start > 0 && (bytes[start - 1].is_ascii_digit() || bytes[start - 1] == b'.') {
-        start -= 1;
+fn append_row_error(row: &mut CsvRow, err: String) {
+    if row.err.is_empty() {
+        row.err = err;
+    } else {
+        row.err.push_str("；");
+        row.err.push_str(&err);
     }
-    s[start..idx].trim().parse().unwrap_or(0.0)
+}
+
+fn parse_clock_duration(s: &str, raw: &str) -> anyhow::Result<f64> {
+    let parts: Vec<&str> = s.split(':').collect();
+    if !matches!(parts.len(), 2 | 3) {
+        anyhow::bail!("时长无法解析: {raw}");
+    }
+    let vals: Vec<i64> = parts
+        .iter()
+        .map(|p| {
+            p.parse::<i64>()
+                .map_err(|_| anyhow::anyhow!("时长无法解析: {raw}"))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    if vals.iter().any(|v| *v < 0) {
+        anyhow::bail!("时长不能为负数: {raw}");
+    }
+    // 分、秒必须落在 0..60；小时位可以超过 24（例如 37:16:05）。
+    if vals[1..].iter().any(|v| *v >= 60) {
+        anyhow::bail!("时长分/秒必须小于 60: {raw}");
+    }
+    Ok(match vals.as_slice() {
+        [h, m] => h
+            .checked_mul(60)
+            .and_then(|v| v.checked_add(*m))
+            .ok_or_else(|| anyhow::anyhow!("时长超出范围: {raw}"))? as f64,
+        [h, m, sec] => {
+            let minutes = h
+                .checked_mul(60)
+                .and_then(|v| v.checked_add(*m))
+                .ok_or_else(|| anyhow::anyhow!("时长超出范围: {raw}"))?;
+            minutes as f64 + *sec as f64 / 60.0
+        }
+        _ => unreachable!(),
+    })
+}
+
+fn duration_unit_at(chars: &[char], i: usize) -> Option<(usize, u8, f64)> {
+    // 长单位放前面，避免 `分钟` 被 `分` 抢先；rank 只能严格递减。
+    for (unit, rank, mult) in [
+        ("小时", 3, 60.0),
+        ("hours", 3, 60.0),
+        ("hour", 3, 60.0),
+        ("minutes", 2, 1.0),
+        ("分钟", 2, 1.0),
+        ("minute", 2, 1.0),
+        ("mins", 2, 1.0),
+        ("min", 2, 1.0),
+        ("秒钟", 1, 1.0 / 60.0),
+        ("seconds", 1, 1.0 / 60.0),
+        ("second", 1, 1.0 / 60.0),
+        ("secs", 1, 1.0 / 60.0),
+        ("sec", 1, 1.0 / 60.0),
+        ("时", 3, 60.0),
+        ("分", 2, 1.0),
+        ("秒", 1, 1.0 / 60.0),
+        ("h", 3, 60.0),
+        ("m", 2, 1.0),
+        ("s", 1, 1.0 / 60.0),
+    ] {
+        let uc: Vec<char> = unit.chars().collect();
+        if chars.get(i..i + uc.len()) == Some(uc.as_slice()) {
+            return Some((uc.len(), rank, mult));
+        }
+    }
+    None
+}
+
+fn parse_unit_duration(s: &str, raw: &str) -> anyhow::Result<f64> {
+    let chars: Vec<char> = s.chars().collect();
+    let mut i = 0;
+    let mut total = 0.0;
+    let mut last_rank = u8::MAX;
+    while i < chars.len() {
+        let start = i;
+        let mut saw_digit = false;
+        let mut saw_dot = false;
+        while i < chars.len() {
+            if chars[i].is_ascii_digit() {
+                saw_digit = true;
+                i += 1;
+            } else if chars[i] == '.' && !saw_dot {
+                saw_dot = true;
+                i += 1;
+            } else {
+                break;
+            }
+        }
+        if !saw_digit {
+            anyhow::bail!("时长无法解析: {raw}");
+        }
+        let number: String = chars[start..i].iter().collect();
+        let value: f64 = number
+            .parse()
+            .map_err(|_| anyhow::anyhow!("时长无法解析: {raw}"))?;
+        let Some((unit_len, rank, multiplier)) = duration_unit_at(&chars, i) else {
+            anyhow::bail!("时长缺少有效单位或含非法字符: {raw}");
+        };
+        if rank >= last_rank {
+            anyhow::bail!("时长单位顺序不正确: {raw}");
+        }
+        total += value * multiplier;
+        last_rank = rank;
+        i += unit_len;
+    }
+    if !total.is_finite() || total < 0.0 {
+        anyhow::bail!("时长必须是有限非负数: {raw}");
+    }
+    Ok(total)
 }
 
 /// 解析时长，统一换算为分钟。
 /// 支持：2:30:45 / 1:30 / 37小时16分钟5秒 / 1小时30分 / 150分钟 / 150
 pub fn parse_duration(raw: &str) -> anyhow::Result<i64> {
-    let s = raw.trim().replace('：', ":");
-    if s.is_empty() || s == "-" {
+    let trimmed = raw.trim();
+    if metric_is_missing(trimmed) {
         return Ok(0);
+    }
+    // 空格在中文时长里只作分隔（`1 小时 30 分钟`），不参与数值解析。
+    let compact: String = trimmed.chars().filter(|c| !c.is_whitespace()).collect();
+    let s = compact.replace('：', ":").to_ascii_lowercase();
+    if s.starts_with('-') || s.contains("-") {
+        anyhow::bail!("时长不能为负数: {raw}");
     }
     // 2:30:45 或 1:30
     if s.contains(':') {
-        let vals: Vec<i64> = s
-            .split(':')
-            .map(|p| {
-                p.trim()
-                    .parse()
-                    .map_err(|_| anyhow::anyhow!("时长无法解析: {raw}"))
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?;
-        if vals.iter().any(|v| *v < 0) {
-            anyhow::bail!("时长不能为负数: {raw}");
-        }
-        return match vals.len() {
-            3 => vals[0]
-                .checked_mul(60)
-                .and_then(|v| v.checked_add(vals[1]))
-                .and_then(|v| v.checked_add(vals[2] / 60))
-                .ok_or_else(|| anyhow::anyhow!("时长超出范围: {raw}")),
-            2 => vals[0]
-                .checked_mul(60)
-                .and_then(|v| v.checked_add(vals[1]))
-                .ok_or_else(|| anyhow::anyhow!("时长超出范围: {raw}")),
-            _ => anyhow::bail!("时长无法解析: {raw}"),
-        };
+        return non_negative_i64(parse_clock_duration(&s, raw)?, "时长", raw);
     }
-    // 中文：37小时16分钟5秒
-    if s.contains("小时") || s.contains("分钟") || s.contains("分") || s.contains("秒") {
-        let hours = extract_int(&s, "小时", "时");
-        let minutes = extract_int(&s, "分钟", "分");
-        let seconds = extract_int(&s, "秒", "");
-        return non_negative_i64(hours * 60.0 + minutes + seconds / 60.0, "时长", raw);
+    // 中文 / 英文单位：37小时16分钟5秒 / 1.5h / 150分钟。
+    // 纯数字（没有单位）沿用旧口径，按分钟。
+    if s.chars().all(|c| c.is_ascii_digit() || c == '.') {
+        let v: f64 = s
+            .parse()
+            .map_err(|_| anyhow::anyhow!("时长无法解析: {raw}"))?;
+        return non_negative_i64(v, "时长", raw);
     }
-    // 纯数字：150分钟 或 150
-    let s = s
-        .trim()
-        .trim_end_matches("分钟")
-        .trim_end_matches("min")
-        .trim();
-    let v: f64 = s
-        .parse()
-        .map_err(|_| anyhow::anyhow!("时长无法解析: {raw}"))?;
-    non_negative_i64(v, "时长", raw)
+    non_negative_i64(parse_unit_duration(&s, raw)?, "时长", raw)
 }
 
 /// 按引号感知的方式切一行 CSV（支持 "a,b" 带逗号字段）
@@ -308,32 +446,88 @@ fn is_blank(rec: &[String]) -> bool {
     rec.iter().all(|f| f.trim().is_empty())
 }
 
-/// 解析整个 CSV。返回类型 + 行（含表头里时长列是否存在，见 [`ParseOut`]）。
-pub fn parse(text: &str) -> anyhow::Result<(Kind, ParseOut)> {
-    let mut lines = text.lines().filter(|l| !l.trim().is_empty());
-    let Some(header_line) = lines.next() else {
-        anyhow::bail!("CSV 是空的");
-    };
-    let delimiter = sniff_delimiter(header_line);
-    let headers: Vec<String> = split_csv_line(header_line, delimiter)
+fn normalized_fields(rec: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = rec.iter().map(|f| normalize_header(f)).collect();
+    while out.last().is_some_and(|s| s.is_empty()) {
+        out.pop();
+    }
+    out
+}
+
+/// 判断某一行是否还是 CSV 表头。不能只看第一份表头：QQ / 粘贴入口一旦把
+/// 多个附件正文拼在一起，第二份文件的列数、列序甚至分隔符都可能不同。
+fn looks_like_header(rec: &[String]) -> bool {
+    let fields = normalized_fields(rec);
+    if fields.len() < 2 {
+        return false;
+    }
+    let known = fields
         .iter()
-        .map(|h| normalize_header(h))
-        .collect();
-    let kind = detect_kind(&headers);
+        .filter(|n| {
+            let n = n.as_str();
+            ID_HEADERS
+                .iter()
+                .chain(NAME_HEADERS.iter())
+                .chain(DOUYIN_HEADERS.iter())
+                .chain(WAVE_HEADERS.iter())
+                .chain(DUR_HEADERS.iter())
+                .chain(RANK_HEADERS.iter())
+                .any(|h| n == *h || (h.chars().count() >= 3 && n.contains(*h)))
+        })
+        .count();
+    known >= 2
+}
 
-    let id_col = find_column(&headers, &ID_HEADERS);
-    let name_col = find_column(&headers, &NAME_HEADERS);
-    let wave_col = find_wave_column(&headers);
-    let dur_col = find_column(&headers, &DUR_HEADERS);
-    let rank_col = find_column(&headers, &RANK_HEADERS);
-    let douyin_col = find_column(&headers, &DOUYIN_HEADERS);
+fn is_repeated_header(rec: &[String], headers: &[String]) -> bool {
+    normalized_fields(rec) == normalized_fields(headers)
+}
 
-    let mut rows = Vec::new();
-    for (i, line) in lines.enumerate() {
-        let rec = split_csv_line(line, delimiter);
-        if is_blank(&rec) {
-            continue;
+fn merge_kind(a: Kind, b: Kind) -> Kind {
+    match (a, b) {
+        (Kind::Duration, _) | (_, Kind::Duration) => Kind::Duration,
+        (Kind::Wave, _) | (_, Kind::Wave) => Kind::Wave,
+        (Kind::Anchors, _) | (_, Kind::Anchors) => Kind::Anchors,
+        _ => Kind::Unknown,
+    }
+}
+
+fn usable_ident(raw: &str) -> bool {
+    !matches!(raw.trim(), "" | "0" | "-" | "—" | "–" | "账号已注销")
+}
+
+/// 一个 CSV block 的列映射。多附件被拼接时，每遇到新表头就重新解析 schema，
+/// 后续数据行不会再被第一份文件的列序解释。
+struct CsvSchema {
+    delimiter: char,
+    headers: Vec<String>,
+    kind: Kind,
+    id_col: i32,
+    name_col: i32,
+    wave_col: i32,
+    dur_col: i32,
+    douyin_col: i32,
+}
+
+impl CsvSchema {
+    fn from_header(header_line: &str) -> Self {
+        let delimiter = sniff_delimiter(header_line);
+        let headers = split_csv_line(header_line, delimiter)
+            .iter()
+            .map(|h| normalize_header(h))
+            .collect::<Vec<_>>();
+        Self {
+            delimiter,
+            kind: detect_kind(&headers),
+            id_col: find_id_column(&headers),
+            name_col: find_column(&headers, &NAME_HEADERS),
+            wave_col: find_wave_column(&headers),
+            dur_col: find_duration_column(&headers),
+            douyin_col: find_column(&headers, &DOUYIN_HEADERS),
+            headers,
         }
+    }
+
+    fn parse_row(&self, rec: &[String], raw_index: usize) -> CsvRow {
         let get = |col: i32| -> String {
             if col >= 0 {
                 rec.get(col as usize).cloned().unwrap_or_default()
@@ -342,45 +536,89 @@ pub fn parse(text: &str) -> anyhow::Result<(Kind, ParseOut)> {
             }
         };
         let mut row = CsvRow {
-            raw_index: i + 2, // +2：跳过表头且行号从 1 开始
+            raw_index,
             ..Default::default()
         };
-        row.anchor_id = get(id_col);
-        row.douyin_no = get(douyin_col);
+        let anchor_id = get(self.id_col);
+        let douyin_no = get(self.douyin_col);
+        row.anchor_id = usable_ident(&anchor_id)
+            .then_some(anchor_id)
+            .unwrap_or_default();
+        row.douyin_no = usable_ident(&douyin_no)
+            .then_some(douyin_no)
+            .unwrap_or_default();
         if row.anchor_id.is_empty() && !row.douyin_no.is_empty() {
-            // 没有主播 id 列时用抖音号顶替（与 615/3328 一致）
+            // 主播 ID 才是稳定标识；列缺失、为空或写 0/横线时才回退抖音号。
             row.anchor_id = row.douyin_no.clone();
         }
-        row.name = get(name_col);
-        if wave_col >= 0 {
-            let raw = get(wave_col);
+        row.name = get(self.name_col);
+        if self.wave_col >= 0 {
+            let raw = get(self.wave_col);
             if !metric_is_missing(&raw) {
                 match parse_wave(&raw) {
                     Ok(v) => row.wave = Some(v as f64),
-                    Err(e) => row.err = e.to_string(),
+                    Err(e) => append_row_error(&mut row, e.to_string()),
                 }
             }
         }
-        if dur_col >= 0 {
-            let raw = get(dur_col);
+        if self.dur_col >= 0 {
+            let raw = get(self.dur_col);
             if !metric_is_missing(&raw) {
                 match parse_duration(&raw) {
                     Ok(v) => row.minutes = Some(v as f64),
-                    Err(e) => row.err = e.to_string(),
+                    Err(e) => append_row_error(&mut row, e.to_string()),
                 }
             }
         }
-        if rank_col >= 0 && get(rank_col).parse::<i64>().is_ok() {
-            // 排名列暂不消费，保留在原始行里即可
+        row
+    }
+}
+
+/// 解析整个 CSV。返回类型 + 行（含表头里时长列是否存在，见 [`ParseOut`]）。
+///
+/// 同一段文本里若出现多个表头（QQ 多附件被上游拼接），每个 block 都用自己的
+/// 表头/分隔符解析，并合并结果；重复表头只切 schema，绝不当成主播数据。
+pub fn parse(text: &str) -> anyhow::Result<(Kind, ParseOut)> {
+    let lines: Vec<&str> = text
+        .lines()
+        .map(|l| l.trim_end_matches('\r'))
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    let Some(header_line) = lines.first() else {
+        anyhow::bail!("CSV 是空的");
+    };
+    let mut schema = CsvSchema::from_header(header_line);
+    let mut kind = schema.kind;
+    let mut has_dur_col = schema.dur_col >= 0;
+    let mut has_wave_col = schema.wave_col >= 0;
+    let mut rows = Vec::new();
+
+    for (i, line) in lines.iter().enumerate().skip(1) {
+        // 先按当前行自己的分隔符试探表头；命中后切换该 block 的完整列映射。
+        let probe_delimiter = sniff_delimiter(line);
+        let probe = split_csv_line(line, probe_delimiter);
+        if !is_blank(&probe)
+            && (is_repeated_header(&probe, &schema.headers) || looks_like_header(&probe))
+        {
+            schema = CsvSchema::from_header(line);
+            kind = merge_kind(kind, schema.kind);
+            has_dur_col |= schema.dur_col >= 0;
+            has_wave_col |= schema.wave_col >= 0;
+            continue;
         }
-        rows.push(row);
+
+        let rec = split_csv_line(line, schema.delimiter);
+        if is_blank(&rec) {
+            continue;
+        }
+        rows.push(schema.parse_row(&rec, i + 1));
     }
     Ok((
         kind,
         ParseOut {
             rows,
-            has_dur_col: dur_col >= 0,
-            has_wave_col: wave_col >= 0,
+            has_dur_col,
+            has_wave_col,
         },
     ))
 }
@@ -528,11 +766,14 @@ mod tests {
         assert_eq!(parse_wave("12.5万").unwrap(), 125_000);
         assert_eq!(parse_wave("125000").unwrap(), 125_000);
         assert_eq!(parse_wave("12,500").unwrap(), 12_500);
+        assert_eq!(parse_wave("12 500").unwrap(), 12_500);
         assert_eq!(parse_wave("3w").unwrap(), 30_000);
         assert_eq!(parse_wave("1.2亿").unwrap(), 120_000_000);
         assert_eq!(parse_wave("-").unwrap(), 0);
         assert_eq!(parse_wave("").unwrap(), 0);
         assert!(parse_wave("abc").is_err());
+        assert!(parse_wave("音浪").is_err());
+        assert!(parse_wave("12音浪34").is_err());
     }
 
     #[test]
@@ -542,8 +783,13 @@ mod tests {
         assert_eq!(parse_duration("37小时16分钟5秒").unwrap(), 37 * 60 + 16);
         assert_eq!(parse_duration("1小时30分").unwrap(), 90);
         assert_eq!(parse_duration("150分钟").unwrap(), 150);
+        assert_eq!(parse_duration("2 小时 30 分钟 45 秒").unwrap(), 150);
+        assert_eq!(parse_duration("1.5小时").unwrap(), 90);
+        assert_eq!(parse_duration("1h30m").unwrap(), 90);
+        assert_eq!(parse_duration("150min").unwrap(), 150);
         assert_eq!(parse_duration("150").unwrap(), 150);
         assert_eq!(parse_duration("-").unwrap(), 0);
+        assert_eq!(parse_duration("—").unwrap(), 0);
     }
 
     #[test]
@@ -606,6 +852,65 @@ mod tests {
         assert!(parse_duration("1:-30").is_err());
         assert!(parse_duration("NaN").is_err());
         assert!(parse_duration("inf").is_err());
+        for raw in [
+            "abc",
+            "abc小时",
+            "1小时oops",
+            "1小时30",
+            "1:99",
+            "9999999999999999999:00",
+        ] {
+            assert!(parse_duration(raw).is_err(), "非空非法时长不能变 0：{raw}");
+        }
+    }
+
+    #[test]
+    fn exact_metric_columns_beat_decoy_columns_regardless_of_order() {
+        let csv =
+            "主播昵称,会员订阅音浪,分成比-直播音浪收益,总音浪,feed看播时长,直播时长,开播有效时长\n\
+                   浩龙,88888,35,5508,26小时7分钟4秒,120分钟,1小时48分钟15秒\n";
+        let (kind, out) = parse(csv).unwrap();
+        assert_eq!(kind, Kind::Duration);
+        assert_eq!(out.rows[0].wave, Some(5508.0), "音浪必须取总音浪");
+        assert_eq!(
+            out.rows[0].minutes,
+            Some(108.0),
+            "时长必须取开播有效时长，不能取 feed看播时长"
+        );
+
+        let only_derivatives = "主播昵称,星守护音浪,会员订阅音浪\n浩龙,999,888\n";
+        let (_, out) = parse(only_derivatives).unwrap();
+        assert_eq!(
+            out.rows[0].wave, None,
+            "没有总/当日音浪时，不能把星守护或会员订阅音浪顶上"
+        );
+    }
+
+    #[test]
+    fn anchor_id_beats_douyin_no_and_placeholder_id_falls_back() {
+        let csv = "抖音号,主播账号,主播昵称,主播ID,总音浪\n\
+                   dy-1,acc-1,浩龙,id-1,100\n\
+                   dy-2,acc-2,玖玉,0,200\n\
+                   dy-3,acc-3,狼耀,—,300\n";
+        let (_, out) = parse(csv).unwrap();
+        assert_eq!(out.rows[0].anchor_id, "id-1");
+        assert_eq!(out.rows[0].douyin_no, "dy-1");
+        assert_eq!(out.rows[1].anchor_id, "dy-2");
+        assert_eq!(out.rows[2].anchor_id, "dy-3");
+    }
+
+    #[test]
+    fn invalid_metrics_keep_errors_and_do_not_become_zero() {
+        let csv = "主播昵称,总音浪,开播有效时长\n浩龙,abc,oops\n玖玉,0,0\n";
+        let (_, out) = parse(csv).unwrap();
+        assert_eq!(out.rows.len(), 2);
+        assert_eq!(out.rows[0].wave, None);
+        assert_eq!(out.rows[0].minutes, None);
+        assert!(out.rows[0].err.contains("音浪"), "{}", out.rows[0].err);
+        assert!(out.rows[0].err.contains("时长"), "{}", out.rows[0].err);
+        assert_eq!(out.rows[1].wave, Some(0.0), "显式 0 必须保留");
+        assert_eq!(out.rows[1].minutes, Some(0.0), "显式 0 必须保留");
+        assert!(out.rows[1].err.is_empty());
     }
 
     /// 抖音公会后台的月度时长文件（9月份时长.csv 的真实表头）。
@@ -679,6 +984,59 @@ mod tests {
         assert_eq!(rows[0].anchor_id, "2436948398193464");
         assert_eq!(rows[0].douyin_no, "cyl765");
         assert_eq!(rows[0].name, "浩龙🎹");
+    }
+
+    /// 表头归一化只影响比较，不能影响数据行或列识别。
+    #[test]
+    fn header_normalization_ignores_formatting_and_bom() {
+        assert_eq!(
+            normalize_header("\u{feff} 主播_ID（直播）.总音浪 "),
+            "主播id直播总音浪"
+        );
+    }
+
+    /// QQ 同时转发两份同格式 CSV：正文被拼成一段，两份文件都带 BOM，
+    /// 第二份表头还带空格/下划线/括号/点，归一化后应跳过而不是成为数据行。
+    #[test]
+    fn concatenated_csv_skips_normalized_repeated_header_and_keeps_data() {
+        let first = "\u{feff}主播ID,主播昵称,抖音号,总音浪,开播有效时长\r\n\
+                     7616689691311686705,玖玉🎹,37181712726,7717,3小时47分钟17秒\r\n";
+        let second = "\u{feff}主播 ID,主播_昵称,抖音.号,总 音浪,开播(有效)时长\r\n\
+                      2436948398193464,浩龙🎹,cyl765,5508,1小时48分钟15秒\r\n";
+        let (kind, out) = parse(&format!("{first}{second}")).unwrap();
+        assert_eq!(kind, Kind::Duration);
+        assert!(out.has_wave_col && out.has_dur_col);
+        assert_eq!(out.rows.len(), 2, "重复表头必须跳过：{:?}", out.rows);
+        assert_eq!(out.rows[0].name, "玖玉🎹");
+        assert_eq!(out.rows[0].anchor_id, "7616689691311686705");
+        assert_eq!(out.rows[0].douyin_no, "37181712726");
+        assert_eq!(out.rows[0].wave, Some(7717.0));
+        assert_eq!(out.rows[0].minutes, Some(227.0));
+        assert_eq!(out.rows[1].name, "浩龙🎹");
+        assert_eq!(out.rows[1].anchor_id, "2436948398193464");
+        assert_eq!(out.rows[1].douyin_no, "cyl765");
+        assert_eq!(out.rows[1].wave, Some(5508.0));
+        assert_eq!(out.rows[1].minutes, Some(108.0));
+    }
+
+    /// 更极端：第二份 CSV 的列顺序和表头写法都不同。每个 block 必须切换自己的
+    /// schema；否则第二份表头会变成假主播，后续数据也会按第一份列序错读。
+    #[test]
+    fn concatenated_csv_with_different_schema_uses_each_header() {
+        let text = "\u{feff}主播ID,主播昵称,抖音号,总音浪,开播有效时长\r\n\
+                    1001,玖玉🎹,dy-1,7717,3小时47分钟17秒\r\n\
+                    \u{feff}主播_昵称,总 音浪,主播ID（主账号）,抖音号,直播时长,\r\n\
+                    浩龙🎹,5508,2002,dy-2,1小时48分钟15秒,\r\n";
+        let (_, out) = parse(text).unwrap();
+        assert_eq!(out.rows.len(), 2, "表头不能成为假行：{:?}", out.rows);
+        assert_eq!(out.rows[0].name, "玖玉🎹");
+        assert_eq!(out.rows[0].anchor_id, "1001");
+        assert_eq!(out.rows[0].wave, Some(7717.0));
+        assert_eq!(out.rows[1].name, "浩龙🎹");
+        assert_eq!(out.rows[1].anchor_id, "2002");
+        assert_eq!(out.rows[1].douyin_no, "dy-2");
+        assert_eq!(out.rows[1].wave, Some(5508.0));
+        assert_eq!(out.rows[1].minutes, Some(108.0));
     }
 
     #[test]

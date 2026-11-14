@@ -46,6 +46,7 @@ pub enum CmdId {
     DailySquadReport,
     MissingData,
     Import,
+    ImportMonth,
 }
 
 /// 命令注册项
@@ -192,7 +193,14 @@ pub const COMMANDS: &[CmdSpec] = &[
         name: "导入",
         aliases: &["import"],
         role: Role::Admin,
-        summary: "命令行导入数据（用法：导入 [男团|女团] [日期] + 数据行）",
+        summary: "按日导入（默认；用法：导入 [男团|女团] [日期] + 数据行，或发 CSV 附件）",
+    },
+    CmdSpec {
+        id: CmdId::ImportMonth,
+        name: "导入月",
+        aliases: &["月导入", "importmonth"],
+        role: Role::Admin,
+        summary: "月度导入（用法：导入月 [男团|女团] 2026-10，再发月度 CSV）",
     },
 ];
 
@@ -325,7 +333,10 @@ pub fn help_for(role: Role) -> String {
         // 运营口径：日期黏住 / CSV 附件导入 / 默认日期（原帮助文案的等价信息）
         out.push_str(
             "\n\n发「10.1」= 指定业务日期（之后发的 CSV 文件都按它入库，不用带团别）\n\
-             发 CSV 文件 = 直接入库（不分男女团，团别按主播档案归属；同一天重复导，值相同不覆盖）\n\
+             发 CSV 文件 = 默认按日入库（不分男女团，团别按主播档案归属）\n\
+             每次最多发 2 个 CSV；超过 2 个会整条拒绝，请拆成每批 1~2 个文件\n\
+             同一条消息发 2 份 CSV：按主播 ID 合并，后一份的音浪 / 时长覆盖前一份\n\
+             只有发「导入月 2026-10」后，后续 CSV 才按月导入；再发日期即切回按日\n\
              默认日期为前一天（数据晚一天）；同日重复导入，后发的覆盖先发的。",
         );
     }
@@ -354,6 +365,7 @@ mod tests {
         CmdId::DailySquadReport,
         CmdId::MissingData,
         CmdId::Import,
+        CmdId::ImportMonth,
     ];
 
     /// 帮助里的「· 命令名 —— …」行 → 命令名
@@ -428,6 +440,14 @@ mod tests {
         assert_eq!(
             parse("导出 总榜"),
             Some((CmdId::Export, vec!["总榜".into()]))
+        );
+        assert_eq!(
+            parse("导入月 2026-10"),
+            Some((CmdId::ImportMonth, vec!["2026-10".into()]))
+        );
+        assert_eq!(
+            parse("月导入 2026-10"),
+            Some((CmdId::ImportMonth, vec!["2026-10".into()]))
         );
         // 无参命令整句匹配：带尾巴就不再是整句，走 token 解析，参数忽略即可
         assert_eq!(parse("帮助 我"), Some((CmdId::Help, vec!["我".into()])));

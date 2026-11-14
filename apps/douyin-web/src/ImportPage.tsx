@@ -12,6 +12,8 @@ type Row = {
   isLive?: boolean | null
   douyinNo?: string | null
   anchorId?: string | null
+  /** 文件里有值但音浪 / 时长解析失败；该行提交时整行失败，不能只写另一个指标 */
+  err?: string | null
 }
 
 type CommitReport = {
@@ -270,6 +272,7 @@ export default function ImportPage() {
   const monthWaveRows = monthRows.filter((r) => r.wave != null).length
   /** 按日预览：文件里有人带「开播有效时长」（minutes）才渲染「当日时长」列，老文件版式不变 */
   const dailyMinutesRows = rows.filter((r) => r.minutes != null).length
+  const dailyParseErrors = rows.filter((r) => !!r.err?.trim()).length
   /** 预览表格列：文件里有、或被勾选的指标列才渲染（只导时长就不显示音浪列） */
   const showMinutes = monthMinutesRows > 0 || monthMetrics.minutes
   const showWave = monthWaveRows > 0 || monthMetrics.wave
@@ -485,17 +488,17 @@ export default function ImportPage() {
       return
     }
     const label = `${bizDate} ${teamLabel(team)}`
-    if (!confirm(`确认删除 ${label} 的音浪数据？对应导入批次也会删除，操作不可恢复。`)) return
+    if (!confirm(`确认删除 ${label} 的音浪和时长数据？对应导入批次也会删除，操作不可恢复。`)) return
     setBusy(true)
     reset()
     try {
       const d = await api<DeleteDayReport>(
-        `/api/admin/import/day?bizDate=${bizDate}&team=${team}`,
+        `/api/admin/import/day?bizDate=${bizDate}&team=${team}&metrics=wave,minutes`,
         { method: 'DELETE' },
       )
       setStatusNonce((n) => n + 1)
       loadBatches()
-      setNotice(`已删除 ${d.metrics} 条音浪数据、${d.batches} 个导入批次。`)
+      setNotice(`已删除 ${d.metrics} 条音浪和时长数据、${d.batches} 个导入批次。`)
     } catch (e: any) {
       setError(e.message ?? String(e))
     } finally {
@@ -546,6 +549,7 @@ export default function ImportPage() {
 
   const monthView: MonthPreviewRow[] =
     monthPreview?.rows ?? monthRows.map((r) => ({ raw: r, name: r.name, matched: false }))
+  const monthParseErrors = monthView.filter((r) => !!r.raw.err?.trim()).length
 
   const canCommit =
     kind === 'month'
@@ -697,8 +701,8 @@ export default function ImportPage() {
             {kind === 'month'
               ? `删除 ${period} 已导入的整月时长与整月音浪（月榜 / 个人月卡立刻回落成日明细口径）；没有解析中的文件也可以操作。`
               : team === 'auto'
-                ? '删除该业务日期的全部音浪数据（男女团一起）；没有解析中的文件也可以操作。'
-                : '按上方业务日期和团别删除已入库的音浪数据；没有解析中的文件也可以操作。'}
+                ? '删除该业务日期的全部音浪和时长数据（男女团一起）；没有解析中的文件也可以操作。'
+                : '按上方业务日期和团别删除已入库的音浪和时长数据；没有解析中的文件也可以操作。'}
           </span>
         </div>
         {report && (
@@ -1013,6 +1017,15 @@ export default function ImportPage() {
               </div>
             )}
 
+            {(kind === 'month' ? monthParseErrors : dailyParseErrors) > 0 && (
+              <div className="row">
+                <span className="alert bad">
+                  ⚠️ {kind === 'month' ? monthParseErrors : dailyParseErrors} 行有音浪 / 时长解析错误：
+                  这些行提交时不会写入（不会只写另一个指标），请先核对原文件。
+                </span>
+              </div>
+            )}
+
             {kind === 'month' && !!monthPreview?.diffs.length && (
               <div className="row">
                 <span className="alert warn">
@@ -1053,6 +1066,7 @@ export default function ImportPage() {
                       {showMinutes && <th>整月时长(x时x分)</th>}
                       {showWave && <th>整月音浪</th>}
                       <th>匹配</th>
+                      {monthParseErrors > 0 && <th>解析</th>}
                       <th>抖音号</th>
                     </tr>
                   </thead>
@@ -1080,6 +1094,9 @@ export default function ImportPage() {
                                 ? '❓ 未建档'
                                 : '—'}
                         </td>
+                        {monthParseErrors > 0 && (
+                          <td className="hint">{r.raw.err ? `⚠️ ${r.raw.err}` : '—'}</td>
+                        )}
                         <td>{r.raw.douyinNo ?? r.raw.anchorId ?? '—'}</td>
                       </tr>
                     ))}
@@ -1097,6 +1114,7 @@ export default function ImportPage() {
                       <th>累计音浪</th>
                       <th>抖音号</th>
                       <th>开播</th>
+                      {dailyParseErrors > 0 && <th>解析</th>}
                     </tr>
                   </thead>
                   <tbody>
@@ -1111,6 +1129,9 @@ export default function ImportPage() {
                         <td className="num">{r.cumulativeWave ?? '—'}</td>
                         <td>{r.douyinNo ?? r.anchorId ?? '—'}</td>
                         <td>{r.isLive == null ? '—' : r.isLive ? '开播' : '未开播'}</td>
+                        {dailyParseErrors > 0 && (
+                          <td className="hint">{r.err ? `⚠️ ${r.err}` : '—'}</td>
+                        )}
                       </tr>
                     ))}
                   </tbody>
@@ -1124,7 +1145,7 @@ export default function ImportPage() {
               <span className="hint">
                 {kind === 'month'
                   ? '入库后不可撤销；导错可先「删除该月整月时长 / 音浪」再重导。'
-                  : '入库后不可撤销；同一天导错可先「删除当前日期 / 团别数据」再重导。'}
+                  : '入库后不可撤销；同一天导错可先「删除当前日期 / 团别数据」再重导（音浪和时长一起清）。'}
               </span>
               <button disabled={busy} onClick={closePreview}>
                 取消

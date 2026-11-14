@@ -1282,11 +1282,29 @@ async fn load_match_ctx(st: &AppState) -> anyhow::Result<MatchCtx> {
     })
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ImportMatchMode {
+    /// 管理端 / 文本导入：主播 ID → 抖音号 → 艺名兜底。
+    Normal,
+    /// QQ 文件导入：只认主播 ID。ID 未知就进暂存，绝不按抖音号/艺名猜人。
+    AnchorOnly,
+}
+
 fn resolve_row(
     row: &ImportRow,
     ctx: &MatchCtx,
     aliases: &HashMap<String, String>,
     expect_team: Option<&str>,
+) -> ResolvedRow {
+    resolve_row_mode(row, ctx, aliases, expect_team, ImportMatchMode::Normal)
+}
+
+fn resolve_row_mode(
+    row: &ImportRow,
+    ctx: &MatchCtx,
+    aliases: &HashMap<String, String>,
+    expect_team: Option<&str>,
+    match_mode: ImportMatchMode,
 ) -> ResolvedRow {
     let streamers = &ctx.streamers;
     // 名字先过别名表
@@ -1301,8 +1319,19 @@ fn resolve_row(
 
     两个数字列各查各的映射，绝不做交叉兜底：主播 ID 偶然和别人的抖音号相同、
     或抖音号偶然和别人的主播 ID 相同，都不能因此换一个人。 */
-    let anchor_id = clean_import_ident(row.anchor_id.as_deref());
-    let douyin_no = clean_import_ident(row.douyin_no.as_deref());
+    let (anchor_id, douyin_no) = match match_mode {
+        ImportMatchMode::Normal => (
+            clean_import_ident(row.anchor_id.as_deref()),
+            clean_import_ident(row.douyin_no.as_deref()),
+        ),
+        // csvparse 在缺少主播 ID 列时会把抖音号顶到 anchor_id；QQ 严格模式
+        // 不能把这个顶替值当成稳定主播 ID，否则会新建错误主号。
+        ImportMatchMode::AnchorOnly => {
+            let (anchor, douyin) =
+                clean_import_ids(row.anchor_id.as_deref(), row.douyin_no.as_deref());
+            (anchor.unwrap_or_default(), douyin.unwrap_or_default())
+        }
+    };
     let anchor_pid = (!anchor_id.is_empty())
         .then(|| anchor_id.as_str())
         .and_then(|aid| ctx.by_anchor.get(aid))
@@ -1311,11 +1340,13 @@ fn resolve_row(
         .then(|| douyin_no.as_str())
         .and_then(|no| ctx.by_douyin.get(no))
         .copied();
-    let ident_pid = anchor_pid.or(douyin_pid);
-    // 艺名兜底要扫全量艺名。号码已命中时完全不需要做，既避免误命中，也省掉大文件
-    // 每人一次的 O(人数 × 昵称长度) 扫描。
-    let name_hit = ident_pid
-        .is_none()
+    let ident_pid = match match_mode {
+        ImportMatchMode::Normal => anchor_pid.or(douyin_pid),
+        ImportMatchMode::AnchorOnly => anchor_pid,
+    };
+    // 只有普通导入允许艺名兜底。QQ 明确要求“只识别主播 ID”，未知 ID 必须
+    // 进暂存，不能让同名/同抖音号把别人覆盖掉。
+    let name_hit = (match_mode == ImportMatchMode::Normal && ident_pid.is_none())
         .then(|| {
             let nick = row.name.trim();
             let stage_hit = extract_stage_name(nick, &ctx.stage_names)
@@ -1451,6 +1482,15 @@ fn is_placeholder_import_row(row: &ImportRow) -> bool {
     let name = row.name.trim();
     let no_real_anchor = anchor.is_empty() || anchor == "0";
     let cancelled = douyin == "账号已注销" || name == "账号已注销";
+    // 真实后台会遇到「账号已注销」仍带真实主播 ID、音浪/时长却为 0 的占位行。
+    // 只按“指标为空”过滤会把它送进暂存区；有正数的同名行则保留，避免误伤真实数据。
+    let zero_metrics = [row.wave, row.cumulative_wave, row.minutes]
+        .into_iter()
+        .all(|v| v.is_none_or(|n| n == 0.0));
+    let not_live = row.is_live != Some(true);
+    if cancelled && zero_metrics && not_live {
+        return true;
+    }
     (no_real_anchor || cancelled)
         && row.wave.is_none()
         && row.cumulative_wave.is_none()
@@ -1460,6 +1500,7 @@ fn is_placeholder_import_row(row: &ImportRow) -> bool {
 
 fn import_row_from_csv(r: crate::csvparse::CsvRow) -> ImportRow {
     let (anchor_id, douyin_no) = clean_import_ids(Some(&r.anchor_id), Some(&r.douyin_no));
+    let err = (!r.err.trim().is_empty()).then_some(r.err);
     let name = if r.name.trim().is_empty() {
         anchor_id
             .clone()
@@ -1476,7 +1517,7 @@ fn import_row_from_csv(r: crate::csvparse::CsvRow) -> ImportRow {
         cumulative_wave: None,
         minutes: r.minutes,
         is_live: None,
-        err: None,
+        err,
     }
 }
 
@@ -1925,6 +1966,8 @@ enum RowClass {
     TeamConflict(String),
     /// 主播 ID 与抖音号分别指向不同人 → 硬失败，避免交叉改号 / 覆盖指标
     IdentityConflict(String),
+    /// 文件里的音浪 / 时长有值但解析失败 → 整行失败，不能只写另一个指标
+    ParseError(String),
 }
 
 fn classify_row(r: &ResolvedRow) -> RowClass {
@@ -1932,6 +1975,9 @@ fn classify_row(r: &ResolvedRow) -> RowClass {
     // 必须先于 Pending 判定，否则会落进同一个 claim_key 互相覆盖。
     if let Some(reason) = &r.identity_conflict {
         return RowClass::IdentityConflict(reason.clone());
+    }
+    if let Some(reason) = r.raw.err.as_deref().filter(|e| !e.trim().is_empty()) {
+        return RowClass::ParseError(reason.to_string());
     }
     if !r.matched {
         return match row_claim_key(&r.raw) {
@@ -2046,6 +2092,10 @@ fn ensure_month_values_not_all_same(
 
 /// 多批次按日导入的文件指纹：同一业务日 + 同一批解析行，重复提交视为同批次覆盖。
 /// 文件名字只用于审计，刻意不参与指纹，避免 QQ 附件自动改名导致重复累计。
+const IMPORT_FINGERPRINT_EXISTS_SQL: &str = "SELECT 1 FROM import_batch
+      WHERE source = 'admin-import' AND biz_date = ?::date
+        AND source_fingerprint = ? LIMIT 1";
+
 fn import_source_fingerprint(biz_date: &str, rows: &[ImportRow]) -> String {
     use md5::Digest;
     let mut h = md5::Md5::new();
@@ -2101,6 +2151,7 @@ async fn lock_import_scope(
     Ok(())
 }
 
+/// 管理端 / 文本导入：保留 ID → 抖音号 → 艺名兜底。
 pub async fn commit_import(
     st: &Arc<AppState>,
     team: &str,
@@ -2108,6 +2159,48 @@ pub async fn commit_import(
     rows: Vec<ImportRow>,
     mode: &str,
     filename: &str,
+) -> anyhow::Result<CommitReport> {
+    commit_import_with_mode(
+        st,
+        team,
+        biz_date,
+        rows,
+        mode,
+        filename,
+        ImportMatchMode::Normal,
+    )
+    .await
+}
+
+/// QQ 文件导入：只认主播 ID；未知 ID 进暂存，不按抖音号 / 艺名猜人。
+pub async fn commit_import_anchor_only(
+    st: &Arc<AppState>,
+    team: &str,
+    biz_date: &str,
+    rows: Vec<ImportRow>,
+    mode: &str,
+    filename: &str,
+) -> anyhow::Result<CommitReport> {
+    commit_import_with_mode(
+        st,
+        team,
+        biz_date,
+        rows,
+        mode,
+        filename,
+        ImportMatchMode::AnchorOnly,
+    )
+    .await
+}
+
+async fn commit_import_with_mode(
+    st: &Arc<AppState>,
+    team: &str,
+    biz_date: &str,
+    rows: Vec<ImportRow>,
+    mode: &str,
+    filename: &str,
+    match_mode: ImportMatchMode,
 ) -> anyhow::Result<CommitReport> {
     // 按日导入也写时长（2026-10-19 用户口径变更）：旧的 strip_minutes 已删除，
     // 机器人 / 粘贴文本 / 任何直连调用都一样把行里的 minutes 落进 daily_metric.minutes。
@@ -2146,14 +2239,20 @@ pub async fn commit_import(
     let team_filter = if auto_team { None } else { Some(team) };
     let mut resolved: Vec<ResolvedRow> = rows
         .iter()
-        .map(|r| resolve_row(r, &ctx, &aliases, team_filter))
+        .map(|r| resolve_row_mode(r, &ctx, &aliases, team_filter, match_mode))
         .collect();
     mark_duplicate_import_anchor_conflicts(&mut resolved);
 
     /* 同一业务日多份文件 / 同一主播多行（2026-11-14 用户口径）：后导入覆盖前导入。
     QQ 把多个附件正文拼成一段时，两份文件是同一天数据的修正或不同团队名单，不是
     一人多号各自播的量；按 person 求和会把音浪/时长翻倍。月度导入仍用旧的求和口径。 */
-    let merged = merge_rows_by_person_daily_latest(&resolved);
+    /* QQ 严格 ID 模式：同一个 ID 的重复行已在附件层做「后者覆盖」；这里再按
+    person 汇总不同 ID，一人多号当天各自产生的音浪 / 时长必须相加。
+    普通管理端导入仍沿用同人同日 latest 覆盖口径。 */
+    let merged = match match_mode {
+        ImportMatchMode::Normal => merge_rows_by_person_daily_latest(&resolved),
+        ImportMatchMode::AnchorOnly => merge_rows_by_person(&resolved),
+    };
 
     /* 行分类（2026-10-10 用户口径：只要有抖音号或者 id 都导入，但不进榜单和统计，
     主播在台账建档 / 绑号之后才显示）：
@@ -2176,7 +2275,9 @@ pub async fn commit_import(
                 "name": r.raw.name,
                 "reason": "未匹配到主播，也没有艺名/抖音号/ID 可以暂存；请先在主播台账建档或绑定"
             })),
-            RowClass::TeamConflict(reason) | RowClass::IdentityConflict(reason) => {
+            RowClass::TeamConflict(reason)
+            | RowClass::IdentityConflict(reason)
+            | RowClass::ParseError(reason) => {
                 failures.push(json!({ "name": r.raw.name, "reason": reason }))
             }
         }
@@ -2254,16 +2355,13 @@ pub async fn commit_import(
     // 048 对 (biz_date, source_fingerprint) 建了唯一索引。首次导入保留指纹，
     // 后续同内容重导的新批次指纹留空（不撞索引），但 batch_id 仍单调递增。
     let fingerprint_exists: bool = if has_fp_col.is_some() {
-        sqlx::query_scalar::<_, i32>(
-            "SELECT 1 FROM import_batch
-              WHERE source = 'admin-import' AND biz_date = ?::date
-                AND source_fingerprint = ? LIMIT 1",
-        )
-        .bind(biz_date)
-        .bind(&fingerprint)
-        .fetch_optional(&mut *tx)
-        .await?
-        .is_some()
+        let sql = crate::pq::rewrite(IMPORT_FINGERPRINT_EXISTS_SQL);
+        sqlx::query_scalar::<_, i32>(&sql)
+            .bind(biz_date)
+            .bind(&fingerprint)
+            .fetch_optional(&mut *tx)
+            .await?
+            .is_some()
     } else {
         true
     };
@@ -2478,7 +2576,8 @@ pub async fn commit_import(
 
 /// 月度导入 / 预览用：按 person_id 合并一人多账号的多行（仍按求和口径）。
 ///
-/// 注意：按日导入已改用 [`merge_rows_by_person_daily_latest`]，同日多文件是覆盖口径。
+/// 注意：普通管理端按日导入仍用 [`merge_rows_by_person_daily_latest`]；QQ 严格 ID
+/// 模式会先用附件层同 ID 覆盖，再调用本函数把同一人的不同 ID 账号汇总成总值。
 /// 合并口径：
 /// - 当日音浪 `wave`：**求和**（每个号当天各自播的，加起来才是这个人当天的量）
 /// - 累计 `cumulative_wave`：**取最大**（各号的累计快照不是同一个池子，求和会虚高；
@@ -4294,6 +4393,52 @@ pub async fn commit_month_metrics(
     filename: &str,
     metrics: MonthMetrics,
 ) -> anyhow::Result<CommitReport> {
+    commit_month_metrics_with_mode(
+        st,
+        period,
+        team,
+        rows,
+        mode,
+        filename,
+        metrics,
+        ImportMatchMode::Normal,
+    )
+    .await
+}
+
+/// QQ 月度导入：只认主播 ID；未知 ID 进月度暂存，不按抖音号 / 艺名猜人。
+pub async fn commit_month_metrics_anchor_only(
+    st: &Arc<AppState>,
+    period: &str,
+    team: &str,
+    rows: Vec<ImportRow>,
+    mode: &str,
+    filename: &str,
+    metrics: MonthMetrics,
+) -> anyhow::Result<CommitReport> {
+    commit_month_metrics_with_mode(
+        st,
+        period,
+        team,
+        rows,
+        mode,
+        filename,
+        metrics,
+        ImportMatchMode::AnchorOnly,
+    )
+    .await
+}
+
+async fn commit_month_metrics_with_mode(
+    st: &Arc<AppState>,
+    period: &str,
+    team: &str,
+    rows: Vec<ImportRow>,
+    mode: &str,
+    filename: &str,
+    metrics: MonthMetrics,
+    match_mode: ImportMatchMode,
+) -> anyhow::Result<CommitReport> {
     anyhow::ensure!(
         st.sources.iter().any(|s| s.id == "LOCAL"),
         "管理端需要 LOCAL 数据源（douyin_writer 对应的本地 PostgreSQL）"
@@ -4325,7 +4470,7 @@ pub async fn commit_month_metrics(
     let team_filter = if auto_team { None } else { Some(team) };
     let mut resolved: Vec<ResolvedRow> = rows
         .iter()
-        .map(|r| resolve_row(r, &ctx, &aliases, team_filter))
+        .map(|r| resolve_row_mode(r, &ctx, &aliases, team_filter, match_mode))
         .collect();
     mark_duplicate_import_anchor_conflicts(&mut resolved);
     // 一人多号（一个主播挂 2~3 个抖音号）→ 整月时长 / 音浪各自求和，与按日导入的合并口径一致
@@ -7393,6 +7538,74 @@ mod tests {
         assert_eq!(r.person_id, None, "anchor 列不能借用 douyin 映射");
     }
 
+    /// QQ 文件导入只认主播 ID：未知 ID 即使同名/同抖音号命中，也必须落暂存，
+    /// 不能把已知主播的当日数据覆盖成 0。
+    #[test]
+    fn anchor_only_mode_never_falls_back_to_douyin_or_name() {
+        let ctx = MatchCtx {
+            streamers: vec![LocalStreamer {
+                id: 172,
+                name: "玖玉".into(),
+                gender: "male".into(),
+            }],
+            stage_names: vec!["玖玉".into()],
+            by_douyin: HashMap::from([("37181712726".to_string(), 172u64)]),
+            by_anchor: HashMap::from([("7616689691311686705".to_string(), 172u64)]),
+        };
+        // 同一个人已知 ID：严格模式正常命中。
+        let mut known = raw_row("玖玉🎹", Some("37181712726"), Some(19197.0));
+        known.anchor_id = Some("7616689691311686705".into());
+        let r = resolve_row_mode(
+            &known,
+            &ctx,
+            &HashMap::new(),
+            None,
+            ImportMatchMode::AnchorOnly,
+        );
+        assert_eq!(r.person_id, Some(172));
+
+        // 未知 ID + 同抖音号 + 同昵称：普通模式按兜底认人，QQ 严格模式不认。
+        let mut unknown = raw_row("玖玉🎹", Some("37181712726"), Some(0.0));
+        unknown.anchor_id = Some("7655278984414430257".into());
+        let normal = resolve_row_mode(
+            &unknown,
+            &ctx,
+            &HashMap::new(),
+            None,
+            ImportMatchMode::Normal,
+        );
+        assert_eq!(normal.person_id, Some(172));
+        let strict = resolve_row_mode(
+            &unknown,
+            &ctx,
+            &HashMap::new(),
+            None,
+            ImportMatchMode::AnchorOnly,
+        );
+        assert_eq!(strict.person_id, None, "未知主播 ID 必须进暂存");
+        assert!(matches!(classify_row(&strict), RowClass::Pending));
+    }
+
+    /// QQ 严格 ID 模式：不同 ID 属于同一人时，当天音浪 / 时长求和；
+    /// 不能因为后一行副号是 0/0 就把主号正数覆盖掉。
+    #[test]
+    fn anchor_only_daily_merge_sums_distinct_accounts_of_one_person() {
+        let mut primary = row(Some(49), Some(11688.0), None, Some(638.0));
+        primary.raw.anchor_id = Some("1297017303475853".into());
+        let mut secondary = row(Some(49), Some(0.0), None, Some(0.0));
+        secondary.raw.anchor_id = Some("1259362145804579".into());
+        let rows = vec![primary, secondary];
+
+        let normal = merge_rows_by_person_daily_latest(&rows);
+        assert_eq!(normal.len(), 1);
+        assert_eq!(normal[0].raw.wave, Some(0.0));
+
+        let strict = merge_rows_by_person(&rows);
+        assert_eq!(strict.len(), 1);
+        assert_eq!(strict[0].raw.wave, Some(11688.0));
+        assert_eq!(strict[0].raw.minutes, Some(638.0));
+    }
+
     /* ---------------------- 批量开号入参（016，docs/13） ---------------------- */
 
     /// 前端传的 items 里可能混着 personId=0 / 缺失 / 空手机号，解析层要全部收敛掉，
@@ -7682,6 +7895,16 @@ mod tests {
     }
 
     #[test]
+    fn cancelled_placeholder_with_real_id_and_zero_metrics_is_dropped() {
+        // 真实公会文件里会出现带真实 ID、但昵称和抖音号都是“账号已注销”、指标为 0
+        // 的占位行。它不能因为 ID 看起来有效就进暂存区，否则榜单外会多一个幽灵主播。
+        let csv = "主播ID,主播昵称,抖音号,总音浪,开播有效时长\n\
+                   1801450141023456,账号已注销,23137470138,0,0小时0分钟0秒\n";
+        let rows = parse_any_text(csv);
+        assert!(rows.is_empty(), "注销占位行必须整行丢弃：{:?}", rows);
+    }
+
+    #[test]
     fn merge_leaves_single_rows_untouched() {
         let rows = vec![row(Some(7), Some(1.0), Some(2.0), None)];
         let out = merge_rows_by_person(&rows);
@@ -7734,6 +7957,26 @@ mod tests {
             "「2.5万」必须走 csvparse 的单位换算"
         );
         assert!(rows[0].minutes.is_some(), "直播时长要解析成分钟");
+    }
+
+    #[test]
+    fn parse_any_text_preserves_metric_parse_errors() {
+        let rows = parse_any_text("主播昵称,总音浪,开播有效时长\n浩龙,abc,30\n");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].minutes, Some(30.0));
+        let err = rows[0].err.as_deref().unwrap_or_default();
+        assert!(err.contains("音浪"), "解析错误必须带到预览/提交层：{err}");
+    }
+
+    #[test]
+    fn parse_error_row_fails_instead_of_partial_write() {
+        let mut raw = raw_row("浩龙", None, None);
+        raw.minutes = Some(30.0);
+        raw.err = Some("音浪值无法解析: abc".into());
+        assert!(matches!(
+            classify_row(&resolved(raw, Some(7), None)),
+            RowClass::ParseError(_)
+        ));
     }
 
     #[test]
@@ -8149,6 +8392,14 @@ mod tests {
             is_live: None,
             err: None,
         }
+    }
+
+    #[test]
+    fn import_fingerprint_query_rewrites_all_placeholders() {
+        let sql = crate::pq::rewrite(IMPORT_FINGERPRINT_EXISTS_SQL);
+        assert!(!sql.contains('?'), "SQLx 只认 $N，残留 ? 会语法错误: {sql}");
+        assert!(sql.contains("biz_date = $1::date"), "{sql}");
+        assert!(sql.contains("source_fingerprint = $2"), "{sql}");
     }
 
     #[test]
