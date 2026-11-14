@@ -1063,7 +1063,12 @@ async fn main() -> anyhow::Result<()> {
     /* 移动端网络优化：静态 JS/CSS、JSON、SVG 默认走 br/gzip。
        tower-http 的默认谓词会排除 SSE（text/event-stream），不会破坏实时刷新。 */
     .layer(CompressionLayer::new().compress_when(
-        DefaultPredicate::new().and(NotForContentType::const_new("font/")),
+        DefaultPredicate::new()
+            .and(NotForContentType::const_new("font/"))
+            .and(NotForContentType::const_new(
+                "application/vnd.android.package-archive",
+            ))
+            .and(NotForContentType::const_new("application/zip")),
     ));
 
     // 采集上报口挂在最外层之后：它有自己的鉴权与状态，不进管理端那棵路由树
