@@ -1299,7 +1299,7 @@ function MyAccountsCard() {
                   )}
                 </td>
                 <td>
-                  {/* QQ 绑定状态（脱敏）：后端新增字段缺失时显示「—」，不误报「未绑定」；
+                  {/* QQ 绑定状态：只显示状态，不展示号码；后端字段缺失时显示「—」，不误报「未绑定」；
                       管理员账号不参与 QQ 绑定，直接显示「—」。 */}
                   {a.isAdmin ? (
                     <span className="hint">—</span>
@@ -1308,10 +1308,10 @@ function MyAccountsCard() {
                       —
                     </span>
                   ) : a.qqBound ? (
-                    <span title="只显示脱敏地址，管理端不显示完整 QQ 号">{a.emailMask || '已绑定'}</span>
+                    <span title="已绑定 QQ 邮箱；为保护隐私不显示号码">已绑定</span>
                   ) : a.emailMask ? (
                     <span className="hint" title="历史非 QQ 邮箱：忘记密码不支持自助重置，只能联系管理员">
-                      {a.emailMask}（非 QQ）
+                      已绑定其他邮箱（不能自助重置）
                     </span>
                   ) : (
                     <span className="hint" title="未绑 QQ 的账号忘记密码只能联系管理员重置">

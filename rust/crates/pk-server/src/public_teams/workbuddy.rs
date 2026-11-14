@@ -6,7 +6,7 @@
 //! 管理端账号详情可核对。登录时还会查面板账号到期状态，临期/过期时允许同账号重新授权。
 
 use super::*;
-use axum::extract::ConnectInfo;
+use axum::extract::{ConnectInfo, Query};
 use axum::http::StatusCode;
 use std::net::SocketAddr;
 use std::sync::OnceLock;
@@ -201,6 +201,13 @@ fn expiry_status(v: &Value) -> Value {
     expiry_status_at(v, chrono::Utc::now().timestamp())
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub struct WbStatusQuery {
+    /// 授权返回只确认本地绑定结果，跳过面板到期检查，避免额外一次上游等待。
+    #[serde(default)]
+    pub quick: bool,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct WbStartBody {
     /// cn = 国内版（默认）；intl = 国际版。
@@ -220,12 +227,16 @@ pub struct WbStateBody {
 /// GET /api/public/my/workbuddy/status
 ///
 /// 登录后 / 刷新时由服务端判断是否已经绑定，避免浏览器本地缓存冒充绑定状态。
-pub async fn my_workbuddy_status(State(st): State<ArcState>, headers: HeaderMap) -> ApiResult {
+pub async fn my_workbuddy_status(
+    State(st): State<ArcState>,
+    headers: HeaderMap,
+    Query(query): Query<WbStatusQuery>,
+) -> ApiResult {
     let (_, account_name) = wb_identity(&st, &headers).await?;
     let binding = crate::store::binding_for(&st, &account_name).await;
     let account = binding.as_ref().map(public_account);
     let mut account_status = Value::Null;
-    if let Some(binding) = binding.as_ref() {
+    if let Some(binding) = binding.as_ref().filter(|_| !query.quick) {
         let uid = binding
             .get("uid")
             .and_then(Value::as_str)

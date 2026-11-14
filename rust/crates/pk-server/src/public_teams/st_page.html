@@ -3588,6 +3588,9 @@ function wbStatusPending() {
 function wbPendingAccount(me) {
   return String((me && (me.name || me.phone)) || '').trim();
 }
+function wbHasPending() {
+  try { return !!sessionStorage.getItem(wbPendingKey); } catch (_) { return false; }
+}
 function wbSavePending() {
   if (!wbBindState || !wbAuthUrlAllowed(wbBindAuthUrl)) return;
   try {
@@ -3768,7 +3771,8 @@ function wbStartPolling(dlg) {
     }
   };
   wbStopPoll();
-  wbBindPollTimer = setTimeout(tick, 1200);
+  /* 授权返回后第一次查询立即发出；pending 时才按 2.5 秒间隔继续轮询。 */
+  wbBindPollTimer = setTimeout(tick, 0);
 }
 function wbRenderSuccess(dlg, account) {
   wbClearPending();
@@ -3924,7 +3928,7 @@ function maybePromptTencentBind(me, attempt) {
   attempt = attempt || 0;
   try {
     if (!site || !site.settings) {
-      if (attempt < 20) setTimeout(function () { try { maybePromptTencentBind(me, attempt + 1); } catch (_) {} }, 600);
+      if (attempt < 20) setTimeout(function () { try { maybePromptTencentBind(me, attempt + 1); } catch (_) {} }, wbHasPending() ? 100 : 600);
       return;
     }
     if (site.settings.workbuddyEnabled !== true) return;
@@ -3934,7 +3938,8 @@ function maybePromptTencentBind(me, attempt) {
     wbRestorePending(meState || me);
     const hadPending = !!(wbBindState && wbAuthUrlAllowed(wbBindAuthUrl));
     wbStatusHint();
-    fetchWbStatus().then((d) => {
+    /* 授权返回只查本地绑定结果；已绑定时不再同步等待面板到期状态（最长 20 秒）。 */
+    fetchWbStatus(hadPending).then((d) => {
       if (!d) return;
       wbApplyBoundAccount(d.account || null);
       const accountStatus = d.accountStatus || null;
@@ -3971,8 +3976,9 @@ function maybePromptTencentBind(me, attempt) {
     }).catch(() => {}).finally(() => wbStatusDone());
   } catch (_) {}
 }
-async function fetchWbStatus() {
-  const r = await fetch('/api/public/my/workbuddy/status', { headers: myTokenHeaders() });
+async function fetchWbStatus(quick) {
+  const url = '/api/public/my/workbuddy/status' + (quick ? '?quick=true' : '');
+  const r = await fetch(url, { headers: myTokenHeaders() });
   let d = {};
   try { d = await r.json(); } catch (_) {}
   if (r.status === 401) {
@@ -3987,7 +3993,7 @@ async function fetchWbStatus() {
 /** 登录成功后统一收口：水印 + 未绑定提醒条 + 换团条显隐 */
 function applyLoginState(me) {
   meState = me || null;
-  try { setTimeout(function () { maybePromptTencentBind(meState); }, 900); } catch (_) {}
+  try { setTimeout(function () { maybePromptTencentBind(meState); }, wbHasPending() ? 0 : 900); } catch (_) {}
   try { queueMyRankFocus(me); } catch (_) {}
   /* 换团条：只有「全团」账号（后端 switchable=true）才显示。
      钉死某团的账号（饭团=女团）压根不给切换入口，不是「显示但点了报错」。
@@ -7775,9 +7781,9 @@ function renderMy(d, series, push, accounts) {
       '<div class="l"><div class="ico"><span class="material-symbols-outlined">mail</span></div>' +
       '<div style="min-width:0"><div class="t">QQ 邮箱</div>' +
       '<div class="d">忘记密码时，临时密码发到这个邮箱</div></div></div>' +
-      /* 2026-10-18 契约 v2 §4.7：只显示服务端脱敏 emailMask；未绑显示「去绑定」（主色） */
+      /* 2026-11-14：只显示绑定状态，不再展示 QQ 号码或脱敏号码。 */
       '<div class="r">' + (meState && meState.emailMask
-        ? '<span>' + esc(meState.emailMask) + '</span>'
+        ? '<span>已绑定</span>'
         : '<span class="pri">去绑定</span>') +
       '<span class="material-symbols-outlined">chevron_right</span></div></div>' +
       '<div class="st-my-item" id="myForgot" style="cursor:pointer">' +
@@ -8125,7 +8131,7 @@ function openMyPwdDlg(opts) {
    接口：POST /api/public/my/email  {"qq":"12345678"}；{"qq":""} = 解绑
      200 {ok:true, emailMask:"123***@qq.com"}；400 INVALID_QQ / QQ_TAKEN / NEED_PROFILE；401
    2026-10-18 用户口径：同一 QQ 不能绑多个账号；没有 QQ 邮箱的找管理员。
-   脱敏只用服务端 emailMask 回填，**不用输入原值**拼显示。 */
+   状态只用服务端 emailMask 判断是否已绑定；页面不再展示绑定号码。 */
 function openQqDlg(opts) {
   opts = opts || {};
   const source = opts.source === 'nudge' ? 'nudge' : 'my';
@@ -8201,8 +8207,7 @@ function openQqDlg(opts) {
       '<p class="tip">' + (source === 'nudge'
         ? '绑定后忘记密码可以自助重置，临时密码会发到你的 QQ 邮箱。<br>没有 QQ 邮箱？请联系管理员帅帅。'
         : '忘记密码时，临时密码会发到这个 QQ 邮箱。<br>没有 QQ 邮箱？请联系管理员帅帅。') + '</p>' +
-      (current ? '<div class="field-label">当前绑定</div>' +
-        '<input class="dlg-readonly" value="' + esc(current) + '" readonly autocomplete="off">' : '') +
+      (current ? '<div class="form-hint" style="margin-top:0">当前已绑定 QQ 邮箱，可输入新号码改绑；不再显示原绑定号码。</div>' : '') +
       '<div class="field-label">QQ 号</div>' +
       '<div class="qq-wrap"><input id="qqIn" inputmode="numeric" maxlength="12" placeholder="QQ 号" autocomplete="off">' +
         '<span class="qq-suffix">@qq.com</span></div>' +

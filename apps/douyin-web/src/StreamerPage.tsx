@@ -1272,7 +1272,7 @@ export default function StreamerPage() {
               placeholder="未设置"
               onChange={(e) => setMyAccPop({ ...myAccPop, phone: e.target.value })}
             />
-            {/* QQ 绑定状态（2026-10-18）：只展示后端下发的脱敏值 emailMask，管理端不出现明文 QQ / 邮箱；
+            {/* QQ 绑定状态（2026-11-14）：只显示状态，不展示号码或脱敏号码；
                 绑定/解绑由主播在展示端「我的」页自助完成，管理员只做兜底改密。 */}
             {myAccPop.exists && !myAccPop.isAdmin && (
               <div className="hint" style={{ marginTop: 8 }}>
@@ -1280,12 +1280,10 @@ export default function StreamerPage() {
                 {!myAccPop.qqStatusKnown ? (
                   <span title="后端尚未下发 emailMask/qqBound，升级后自动显示">—（暂不显示绑定状态）</span>
                 ) : myAccPop.qqBound ? (
-                  <span title="只显示脱敏地址，管理端不显示完整 QQ 号">
-                    {myAccPop.emailMask || '已绑定'}
-                  </span>
+                  <span title="已绑定 QQ 邮箱；为保护隐私不显示号码">已绑定</span>
                 ) : myAccPop.emailMask ? (
                   <span title="历史非 QQ 邮箱：忘记密码不支持自助重置，只能联系管理员">
-                    {myAccPop.emailMask}（非 QQ 邮箱，不能自助重置）
+                    已绑定其他邮箱（不能自助重置）
                   </span>
                 ) : (
                   <span title="未绑定 QQ 的账号忘记密码只能联系管理员重置">
