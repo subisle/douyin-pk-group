@@ -1001,14 +1001,40 @@ fn truncate_chars(s: &str, max: usize) -> String {
     out
 }
 
-/// 行里的「认人标识」：抖音号优先，其次采集 ID。
+/// 导入文件里的身份标识清洗：空值 / 0 / 占位横线 / 注销账号都不算 ID。
+fn clean_import_ident(value: Option<&str>) -> String {
+    let s = value.unwrap_or("").trim();
+    if matches!(s, "" | "0" | "-" | "—" | "–" | "账号已注销") {
+        String::new()
+    } else {
+        truncate_chars(s, IDENT_MAX_CHARS)
+    }
+}
+
+/// 同时清洗两列身份。csvparse 在没有「主播ID」列时会把「抖音号」顶到
+/// `anchor_id` 里；两者完全相同说明它不是独立的主播 ID，不能拿它去建主号。
+fn clean_import_ids(
+    anchor: Option<&str>,
+    douyin: Option<&str>,
+) -> (Option<String>, Option<String>) {
+    let anchor = clean_import_ident(anchor);
+    let douyin = clean_import_ident(douyin);
+    let anchor = (!anchor.is_empty() && anchor != douyin).then_some(anchor);
+    let douyin = (!douyin.is_empty()).then_some(douyin);
+    (anchor, douyin)
+}
+
+/// 行里的「认人标识」：主播 ID 优先，其次抖音号（2026-11-14 用户口径）。
+///
+/// 抖音号会被主播修改，主播 ID 才是稳定唯一值；暂存 claim_key 也跟着这个优先级，
+/// 避免换抖音号后同一主播在同一天落成两条暂存。
 fn row_ident(row: &ImportRow) -> Option<String> {
-    [row.douyin_no.as_deref(), row.anchor_id.as_deref()]
-        .into_iter()
-        .flatten()
-        .map(str::trim)
-        .find(|s| !s.is_empty())
-        .map(|s| truncate_chars(s, IDENT_MAX_CHARS))
+    [
+        clean_import_ident(row.anchor_id.as_deref()),
+        clean_import_ident(row.douyin_no.as_deref()),
+    ]
+    .into_iter()
+    .find(|s| !s.is_empty())
 }
 
 /// 暂存认领键：有抖音号 / 采集 ID 就用标识；没有标识则用艺名。
@@ -1029,6 +1055,9 @@ struct ResolvedRow {
     matched: bool,
     #[serde(rename = "teamConflict")]
     team_conflict: Option<String>,
+    /// 稳定 ID 与抖音号分别命中了不同主播：按主播 ID 认人，但标出来让运营核对。
+    #[serde(rename = "identityConflict")]
+    identity_conflict: Option<String>,
     candidates: Vec<Value>,
     /// 命中方式：true = 按抖音号精确匹配（false = 按名字）
     #[serde(rename = "matchedByDouyin")]
@@ -1059,13 +1088,19 @@ fn token_num(t: &str) -> Option<f64> {
 }
 
 /// 表头行关键词：字段名级别的词（不含「开播」这类会出现在值里的词）
-const HEADER_KEYWORDS: [&str; 8] = [
+const HEADER_KEYWORDS: [&str; 14] = [
     "名字",
     "姓名",
+    "昵称",
+    "主播id",
+    "主播昵称",
     "抖音号",
     "当日音浪",
     "累计音浪",
+    "总音浪",
     "直播时长",
+    "开播有效时长",
+    "主播标签",
     "name",
     "wave",
 ];
@@ -1199,24 +1234,41 @@ impl MatchCtx {
 /// 加载匹配上下文（台账 + 抖音号/采集ID 映射）
 async fn load_match_ctx(st: &AppState) -> anyhow::Result<MatchCtx> {
     let streamers = load_local_streamers(st).await?;
+    let known_people: HashSet<u64> = streamers.iter().map(|s| s.id).collect();
+
     let rows = pgrs::query(&st.pools, "LOCAL", dialect::ACCOUNT_DOUYIN_MAP_SQL).await?;
     let mut by_douyin: HashMap<String, u64> = HashMap::new();
+    let mut ambiguous_douyin: HashSet<String> = HashSet::new();
     for r in &rows {
         if let (Some(pid), Some(no)) = (read_opt_u64(r, "person_id"), read_opt_str(r, "douyin_no"))
         {
             let no = no.trim().to_string();
-            if !no.is_empty() {
-                by_douyin.insert(no, pid);
+            if no.is_empty() || !known_people.contains(&pid) {
+                continue;
+            }
+            match by_douyin.get(&no).copied() {
+                Some(existing) if existing != pid => {
+                    // 历史脏数据里同一个抖音号挂到不同人：不能按查询返回顺序随机认人。
+                    ambiguous_douyin.insert(no);
+                }
+                Some(_) => {}
+                None => {
+                    by_douyin.insert(no, pid);
+                }
             }
         }
     }
+    for no in ambiguous_douyin {
+        by_douyin.remove(&no);
+    }
+
     let anchor_rows = pgrs::query(&st.pools, "LOCAL", dialect::ACCOUNT_ANCHOR_MAP_SQL).await?;
     let mut by_anchor: HashMap<String, u64> = HashMap::new();
     for r in &anchor_rows {
         if let (Some(pid), Some(aid)) = (read_opt_u64(r, "person_id"), read_opt_str(r, "anchor_id"))
         {
             let aid = aid.trim().to_string();
-            if !aid.is_empty() {
+            if !aid.is_empty() && known_people.contains(&pid) {
                 by_anchor.insert(aid, pid);
             }
         }
@@ -1243,40 +1295,54 @@ fn resolve_row(
         .cloned()
         .unwrap_or_else(|| row.name.trim().to_string());
     let key = normalize_name(&name);
-    /* 匹配优先级：抖音号精确 → 采集 ID 精确（两列都试）→ 名字归一化 → 名字原文。
-    2026-10-10 月度时长导入踩到：运营文件里「抖音号 + 主播ID」两列都有时老实现只看抖音号，
-    而台账里的账号可能只有采集 ID、没有抖音号（早期采集数据），整批人就白白匹配不上。
-    两个列都是身份证，谁命中都算命中；`matchedByDouyin` 仍表示「按号码命中」而不是按名字。 */
-    let ident_hit = row
-        .douyin_no
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .and_then(|no| ctx.by_douyin.get(no).or_else(|| ctx.by_anchor.get(no)))
-        .or_else(|| {
-            row.anchor_id
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .and_then(|aid| ctx.by_anchor.get(aid).or_else(|| ctx.by_douyin.get(aid)))
-        });
-    let douyin_hit = ident_hit.and_then(|pid| streamers.iter().find(|s| s.id == *pid));
-    /* 新增兜底（2026-10-18 用户口径）：号码认不出时，从抖音昵称里抽艺名认人。
-    为什么需要：有的人换过号 / 开过小号，库里 account 只有旧号；还有人的抖音号是
-    `haoyi6725` `xn_0213_` 这类字母串，从来没录进过台账。这些行按号码匹配全部掉进
-    暂存区，数据就丢了。实测 445 行里靠艺名多认出 34 行。
-    为什么放在号码之后：`matched_by_douyin` 仍只表示「按号码命中」，号码命中永远优先，
-    艺名兜底不会抢走已经绑定的人（实测号码命中与艺名命中零冲突）。 */
-    let stage_hit = douyin_hit.is_none().then(|| {
-        let nick = row.name.trim();
-        let stage = extract_stage_name(nick, &ctx.stage_names);
-        stage.and_then(|n| streamers.iter().find(|s| s.name == n))
-    });
-    let stage_hit = stage_hit.flatten();
-    let hit = douyin_hit
-        .or(stage_hit)
-        .or_else(|| streamers.iter().find(|s| normalize_name(&s.name) == key))
-        .or_else(|| streamers.iter().find(|s| s.name == name));
+    /* 匹配优先级（2026-11-14 用户口径）：主播 ID 精确 → 抖音号精确 → 艺名/名字。
+    主播 ID 是唯一值且不会随主播改抖音号变化；抖音号只作次级认人线索。
+    `matchedByDouyin` 字段名沿用前端契约，语义仍是「按号码命中」而不是按名字。
+
+    两个数字列各查各的映射，绝不做交叉兜底：主播 ID 偶然和别人的抖音号相同、
+    或抖音号偶然和别人的主播 ID 相同，都不能因此换一个人。 */
+    let anchor_id = clean_import_ident(row.anchor_id.as_deref());
+    let douyin_no = clean_import_ident(row.douyin_no.as_deref());
+    let anchor_pid = (!anchor_id.is_empty())
+        .then(|| anchor_id.as_str())
+        .and_then(|aid| ctx.by_anchor.get(aid))
+        .copied();
+    let douyin_pid = (!douyin_no.is_empty())
+        .then(|| douyin_no.as_str())
+        .and_then(|no| ctx.by_douyin.get(no))
+        .copied();
+    let ident_pid = anchor_pid.or(douyin_pid);
+    // 艺名兜底要扫全量艺名。号码已命中时完全不需要做，既避免误命中，也省掉大文件
+    // 每人一次的 O(人数 × 昵称长度) 扫描。
+    let name_hit = ident_pid
+        .is_none()
+        .then(|| {
+            let nick = row.name.trim();
+            let stage_hit = extract_stage_name(nick, &ctx.stage_names)
+                .and_then(|n| streamers.iter().find(|s| s.name == n));
+            stage_hit
+                .or_else(|| streamers.iter().find(|s| normalize_name(&s.name) == key))
+                .or_else(|| streamers.iter().find(|s| s.name == name))
+        })
+        .flatten();
+    let ident_hit = ident_pid.and_then(|pid| streamers.iter().find(|s| s.id == pid));
+    let anchor_name = |pid: u64| {
+        streamers
+            .iter()
+            .find(|s| s.id == pid)
+            .map(|s| s.name.as_str())
+            .unwrap_or("主播 ID 对应主播")
+    };
+    // 只有两列号码都命中且指向不同人时才是硬冲突；昵称噪声不参与硬冲突判断。
+    let identity_conflict = match (anchor_pid, douyin_pid) {
+        (Some(a), Some(d)) if a != d => Some(format!(
+            "主播 ID 命中 {}，抖音号命中 {}；两列归属冲突，本行不导入",
+            anchor_name(a),
+            anchor_name(d)
+        )),
+        _ => None,
+    };
+    let hit = ident_hit.or(name_hit);
     let team_conflict = match (hit, expect_team) {
         (Some(s), Some(team)) if s.gender != team => Some(format!(
             "主播「{}」团别是 {}，与导入团别 {team} 不符",
@@ -1303,8 +1369,55 @@ fn resolve_row(
         name,
         matched: hit.is_some(),
         team_conflict,
+        identity_conflict,
         candidates,
-        matched_by_douyin: douyin_hit.is_some(),
+        matched_by_douyin: ident_pid.is_some(),
+    }
+}
+
+/// 同一份导入里两个不同身份都声称同一个“库里尚未登记”的新主播 ID：
+/// 不能按行顺序让先写的人抢到，也不能让未建档行在 import_pending 里互相覆盖。
+/// 已匹配行按 person_id 区分；未匹配行按“昵称 + 抖音号”区分。
+fn mark_duplicate_import_anchor_conflicts(rows: &mut [ResolvedRow]) {
+    let mut by_anchor: HashMap<String, Vec<usize>> = HashMap::new();
+    for (i, r) in rows.iter().enumerate() {
+        if r.identity_conflict.is_some() {
+            continue;
+        }
+        let anchor = clean_import_ident(r.raw.anchor_id.as_deref());
+        let douyin = clean_import_ident(r.raw.douyin_no.as_deref());
+        if anchor.is_empty() || anchor == douyin {
+            continue;
+        }
+        by_anchor.entry(anchor).or_default().push(i);
+    }
+    for (anchor, indexes) in by_anchor {
+        let identities: HashSet<String> = indexes
+            .iter()
+            .map(|&i| {
+                let r = &rows[i];
+                match r.person_id {
+                    Some(pid) => format!("person:{pid}"),
+                    None => format!(
+                        "unmatched:{}|{}:{}",
+                        normalize_name(&r.raw.name),
+                        r.raw.name.trim(),
+                        clean_import_ident(r.raw.douyin_no.as_deref())
+                    ),
+                }
+            })
+            .collect();
+        if identities.len() <= 1 {
+            continue;
+        }
+        for i in indexes {
+            if rows[i].identity_conflict.is_none() {
+                rows[i].identity_conflict = Some(format!(
+                    "主播 ID「{anchor}」在同一份导入里同时指向 {} 个不同身份，本行不导入",
+                    identities.len()
+                ));
+            }
+        }
     }
 }
 
@@ -1330,6 +1443,51 @@ pub fn looks_like_binary(text: &str) -> bool {
     bad * 100 / sample.len() > 5
 }
 
+/// 运营后台导出的「账号已注销」占位行：主播ID=0、抖音号/昵称=账号已注销、
+/// 音浪/时长都是 `-`。它没有真实 ID、也没有任何指标，不能进暂存区或榜单。
+fn is_placeholder_import_row(row: &ImportRow) -> bool {
+    let anchor = row.anchor_id.as_deref().unwrap_or("").trim();
+    let douyin = row.douyin_no.as_deref().unwrap_or("").trim();
+    let name = row.name.trim();
+    let no_real_anchor = anchor.is_empty() || anchor == "0";
+    let cancelled = douyin == "账号已注销" || name == "账号已注销";
+    (no_real_anchor || cancelled)
+        && row.wave.is_none()
+        && row.cumulative_wave.is_none()
+        && row.minutes.is_none()
+        && row.is_live.is_none()
+}
+
+fn import_row_from_csv(r: crate::csvparse::CsvRow) -> ImportRow {
+    let (anchor_id, douyin_no) = clean_import_ids(Some(&r.anchor_id), Some(&r.douyin_no));
+    let name = if r.name.trim().is_empty() {
+        anchor_id
+            .clone()
+            .or_else(|| douyin_no.clone())
+            .unwrap_or_default()
+    } else {
+        r.name
+    };
+    ImportRow {
+        name,
+        douyin_no,
+        anchor_id,
+        wave: r.wave,
+        cumulative_wave: None,
+        minutes: r.minutes,
+        is_live: None,
+        err: None,
+    }
+}
+
+/// 前端回传的结构化行也要过同一套 ID 清洗，避免把抖音号当主播 ID。
+fn normalize_import_row(mut r: ImportRow) -> ImportRow {
+    let (anchor_id, douyin_no) = clean_import_ids(r.anchor_id.as_deref(), r.douyin_no.as_deref());
+    r.anchor_id = anchor_id;
+    r.douyin_no = douyin_no;
+    r
+}
+
 pub fn parse_any_text(text: &str) -> Vec<ImportRow> {
     // 二进制护栏：宁可整批解析不出让运营重发，也不让一屏乱码变成一批待建档主播
     if looks_like_binary(text) {
@@ -1337,36 +1495,45 @@ pub fn parse_any_text(text: &str) -> Vec<ImportRow> {
     }
     if let Ok((kind, out)) = crate::csvparse::parse(text) {
         if kind != crate::csvparse::Kind::Unknown && !out.rows.is_empty() {
-            let mapped: Vec<ImportRow> = out
-                .rows
+            let converted: Vec<ImportRow> = out.rows.into_iter().map(import_row_from_csv).collect();
+            let saw_placeholder = converted.iter().any(is_placeholder_import_row);
+            let mapped: Vec<ImportRow> = converted
                 .into_iter()
-                .map(|r| ImportRow {
-                    name: if r.name.is_empty() {
-                        r.anchor_id.clone()
-                    } else {
-                        r.name
-                    },
-                    wave: r.wave,
-                    cumulative_wave: None,
-                    minutes: r.minutes,
-                    is_live: None,
-                    douyin_no: (!r.douyin_no.is_empty()).then_some(r.douyin_no),
-                    // 「主播id / uid / anchor_id」列也留着认人（用户口径：有 id 就导入）
-                    anchor_id: (!r.anchor_id.is_empty()).then_some(r.anchor_id),
-                    err: None,
-                })
-                .filter(|r| !r.name.is_empty())
+                .filter(|r| !r.name.trim().is_empty())
+                .filter(|r| !is_placeholder_import_row(r))
                 .collect();
-            // csvparse 认出了表头、却一行可用名字都没剩下，说明类型判错了：
-            // 「名字,当日音浪,累计,开播」里的「开播」会被 detect_kind 判成时长表，
-            // 名字列对不上 → 整批行丢空。这时不能直接返回空，回落裸列序解析，
-            // 前端提示承诺的「列序不严格 / 开播未开播自动识别」才成立。
+            // 全是注销占位行时不能回落裸列序，否则又会把占位行重新捞回来。
+            if saw_placeholder && mapped.is_empty() {
+                return Vec::new();
+            }
+            // 「名字,当日音浪,累计,开播」这类老表：csvparse 能把名字/音浪读出来，
+            // 但「累计/开播」不在它的标准列里，必须用裸列序解析补齐累计与开播状态。
+            let legacy_header = text
+                .lines()
+                .next()
+                .is_some_and(|h| h.contains("名字") && h.contains("累计") && h.contains("开播"));
+            if legacy_header {
+                let fallback: Vec<ImportRow> = parse_import_text(text)
+                    .into_iter()
+                    .map(normalize_import_row)
+                    .filter(|r| !is_placeholder_import_row(r))
+                    .collect();
+                if !fallback.is_empty() {
+                    return fallback;
+                }
+            }
             if !mapped.is_empty() {
                 return mapped;
             }
+            // csvparse 认出了表头、却一行可用名字都没剩下，说明类型判错了：
+            // 例如旧格式里的名字列对不上 → 这时回落裸列序解析。
         }
     }
     parse_import_text(text)
+        .into_iter()
+        .map(normalize_import_row)
+        .filter(|r| !is_placeholder_import_row(r))
+        .collect()
 }
 
 /// 月度指标文件解析（用户口径 2026-10-10 时长按月；2026-10-16 起音浪也能按月导）。
@@ -1387,22 +1554,16 @@ pub fn parse_month_metrics_text(text: &str) -> Vec<ImportRow> {
     crate::csvparse::parse_month_metrics(text)
         .rows
         .into_iter()
-        .map(|r| ImportRow {
-            name: if r.name.is_empty() {
-                r.anchor_id.clone()
-            } else {
-                r.name
-            },
-            douyin_no: (!r.douyin_no.is_empty()).then_some(r.douyin_no),
-            anchor_id: (!r.anchor_id.is_empty()).then_some(r.anchor_id),
-            wave: r.wave,
-            minutes: r.minutes,
+        .map(|r| {
             // CsvRow.err 是 String（空串 = 没问题），转成 Option 好让上层区分
             // 「没填这个指标」和「填了但解析不过」——后者是运营要立刻知道的数据问题。
-            err: (!r.err.is_empty()).then_some(r.err),
-            ..Default::default()
+            let err = (!r.err.is_empty()).then_some(r.err.clone());
+            let mut row = import_row_from_csv(r);
+            row.err = err;
+            row
         })
-        .filter(|r| !r.name.is_empty())
+        .filter(|r| !r.name.trim().is_empty())
+        .filter(|r| !is_placeholder_import_row(r))
         .collect()
 }
 
@@ -1532,9 +1693,9 @@ async fn body_rows(
     let mut out: Vec<ImportRow> = Vec::new();
     if let Some(rs) = rows {
         for r in rs {
-            let mut r = r.clone();
+            let mut r = normalize_import_row(r.clone());
             r.name = r.name.trim().to_string();
-            if !r.name.is_empty() {
+            if !r.name.is_empty() && !is_placeholder_import_row(&r) {
                 out.push(r);
             }
         }
@@ -1564,9 +1725,12 @@ async fn month_body_rows(
     let mut out: Vec<ImportRow> = Vec::new();
     if let Some(rs) = rows {
         for r in rs {
-            let mut r = r.clone();
+            let mut r = normalize_import_row(r.clone());
             r.name = r.name.trim().to_string();
-            if !r.name.is_empty() && (r.minutes.is_some() || r.wave.is_some()) {
+            if !r.name.is_empty()
+                && !is_placeholder_import_row(&r)
+                && (r.minutes.is_some() || r.wave.is_some())
+            {
                 out.push(r);
             }
         }
@@ -1639,11 +1803,11 @@ pub async fn import_preview(State(st): State<ArcState>, Json(body): Json<ImportB
     if !team.is_empty() {
         valid_team(team)?;
     }
-    let (raw_rows, duration_rows) = body_rows(&body.text, &body.rows).await.map_err(nice_400)?;
+    let (raw_rows, _duration_rows) = body_rows(&body.text, &body.rows).await.map_err(nice_400)?;
     ensure(!raw_rows.is_empty(), "没有解析到任何数据行")?;
     let ctx = load_match_ctx(&st).await?;
     let aliases = merged_aliases(&st).await;
-    let resolved: Vec<ResolvedRow> = raw_rows
+    let mut resolved: Vec<ResolvedRow> = raw_rows
         .iter()
         .map(|r| {
             resolve_row(
@@ -1654,17 +1818,20 @@ pub async fn import_preview(State(st): State<ArcState>, Json(body): Json<ImportB
             )
         })
         .collect();
-    let matched = resolved.iter().filter(|r| r.matched).count();
-    // 文件里的当日时长合计（分钟）：rows 原样带 minutes，前端按日预览显示「本次会写入多少时长」
-    let minutes_total: i64 = raw_rows
+    mark_duplicate_import_anchor_conflicts(&mut resolved);
+    // 预览必须和提交同口径：同一主播同日多行按后行覆盖，否则预览人数 / 时长会翻倍。
+    let merged = merge_rows_by_person_daily_latest(&resolved);
+    let matched = merged.iter().filter(|r| r.matched).count();
+    let duration_rows = merged.iter().filter(|r| r.raw.minutes.is_some()).count();
+    let minutes_total: i64 = merged
         .iter()
-        .filter_map(|r| r.minutes)
+        .filter_map(|r| r.raw.minutes)
         .map(|m| m as i64)
         .sum();
     Ok(Json(json!({
-        "total": resolved.len(),
+        "total": merged.len(),
         "matched": matched,
-        "unmatched": resolved.len() - matched,
+        "unmatched": merged.len() - matched,
         "bizDate": body.biz_date,
         "team": team,
         // 2026-10-19 用户口径变更：按日导入也写时长（daily_metric.minutes）。
@@ -1673,7 +1840,7 @@ pub async fn import_preview(State(st): State<ArcState>, Json(body): Json<ImportB
         "droppedMinutes": 0,
         "durationRows": duration_rows,
         "minutesTotal": minutes_total,
-        "rows": resolved,
+        "rows": merged,
     })))
 }
 
@@ -1736,7 +1903,7 @@ pub struct CommitReport {
     /// （2026-10-19 起按日导入也写 daily_metric.minutes），保留字段只为旧前端不报错。
     pub dropped_minutes: u32,
     /// 本次写入的时长合计（分钟）：
-    /// - 按日导入 = 本次 ok 行的当日时长合计（merge 后，一人多号已求和）；
+    /// - 按日导入 = 本次 ok 行的当日时长合计（merge 后，同日多文件取最新值）；
     /// - 按月导入 = 勾了时长时的整月合计。
     pub minutes_total: i64,
     /// 本次写入的音浪合计：按月导入（且勾了音浪）才有值，按日导入恒为 0
@@ -1756,9 +1923,16 @@ enum RowClass {
     Unmatched,
     /// 团别冲突 → 失败
     TeamConflict(String),
+    /// 主播 ID 与抖音号分别指向不同人 → 硬失败，避免交叉改号 / 覆盖指标
+    IdentityConflict(String),
 }
 
 fn classify_row(r: &ResolvedRow) -> RowClass {
+    // 身份冲突可能发生在未建档行之间（同一新 anchor 被两个人声称），
+    // 必须先于 Pending 判定，否则会落进同一个 claim_key 互相覆盖。
+    if let Some(reason) = &r.identity_conflict {
+        return RowClass::IdentityConflict(reason.clone());
+    }
     if !r.matched {
         return match row_claim_key(&r.raw) {
             Some(_) => RowClass::Pending,
@@ -1809,8 +1983,8 @@ fn spawn_post_import_backup() {
 
 /// 导入提交核心：匹配 + 校验 + 事务写入 + 批次审计 + 清缓存。
 /// bot 命令与 HTTP 端共用，保证同一套口径与校验。
-/// 异常文件防御（2026-10-13 QQ 机器人导入口径）：全部数据行音浪完全相同（≥3 行）
-/// → 拒绝导入（像拿错文件/列错位/把某日快照当全员当日）。抽成纯函数方便单测。
+/// 异常文件防御（2026-10-13 QQ 机器人导入口径）：全部数据行音浪相同且非 0（≥3 行）
+/// → 拒绝导入（像拿错文件/列错位/把某日快照当全员当日）；全员 0 是合法零音浪日。
 pub(crate) fn ensure_not_all_same_wave(rows: &[ImportRow]) -> anyhow::Result<()> {
     let wave_values: Vec<i64> = rows
         .iter()
@@ -1818,7 +1992,9 @@ pub(crate) fn ensure_not_all_same_wave(rows: &[ImportRow]) -> anyhow::Result<()>
         .collect();
     if wave_values.len() >= 3 {
         let first = wave_values[0];
-        if wave_values.iter().all(|&w| w == first) {
+        // 全员 0 是合法的“当天没人产生音浪”，与月度口径一致放行；
+        // 只拦截全员相同的非 0 值（更像拿错列 / 拿错文件）。
+        if first != 0 && wave_values.iter().all(|&w| w == first) {
             anyhow::bail!(
                 "异常文件：全部 {} 行的音浪值都相同（{}）——像是一份与日期无关的全员同值文件，                 已拒绝导入。请核对文件里的日期列与音浪列后再试；确实要导入请用管理端手工分批。",
                 wave_values.len(),
@@ -1873,6 +2049,9 @@ fn ensure_month_values_not_all_same(
 fn import_source_fingerprint(biz_date: &str, rows: &[ImportRow]) -> String {
     use md5::Digest;
     let mut h = md5::Md5::new();
+    // 版本前缀：区分 None（文件没有该列）和 Some(0)（显式 0）后，指纹格式变了，
+    // 不能和历史版本的同值指纹混用。
+    h.update(b"daily-import-v2\0");
     h.update(biz_date.as_bytes());
     for r in rows {
         for part in [
@@ -1884,10 +2063,19 @@ fn import_source_fingerprint(biz_date: &str, rows: &[ImportRow]) -> String {
             h.update([0]);
         }
         for v in [r.wave, r.cumulative_wave, r.minutes] {
-            let bytes = v.map(|x| x.to_bits()).unwrap_or(0).to_be_bytes();
-            h.update(bytes);
+            match v {
+                None => h.update([0]),
+                Some(x) => {
+                    h.update([1]);
+                    h.update(x.to_bits().to_be_bytes());
+                }
+            }
         }
-        h.update([u8::from(r.is_live.unwrap_or(false))]);
+        match r.is_live {
+            None => h.update([0]),
+            Some(false) => h.update([1]),
+            Some(true) => h.update([2]),
+        }
         h.update([0xff]);
     }
     let digest = h.finalize();
@@ -1898,99 +2086,10 @@ fn import_source_fingerprint(biz_date: &str, rows: &[ImportRow]) -> String {
     out
 }
 
-const DAILY_CONTRIB_RECOMPUTE_SQL: &str = r#"
-WITH agg AS (
-    SELECT person_id, biz_date,
-           SUM(wave)::BIGINT AS wave,
-           SUM(minutes)::BIGINT AS minutes,
-           MAX(is_live)::SMALLINT AS is_live,
-           BOOL_OR(has_minutes = 1) AS has_minutes,
-           BOOL_OR(has_wave = 1) AS has_wave,
-           MAX(batch_id)::BIGINT AS source_batch_id
-      FROM daily_import_contrib
-     WHERE biz_date = ?::date
-     GROUP BY person_id, biz_date
-), prev AS (
-    SELECT person_id, cumulative_wave
-      FROM daily_metric
-     WHERE biz_date < ?::date
-       AND (person_id, biz_date) IN (
-            SELECT person_id, MAX(biz_date)
-              FROM daily_metric
-             WHERE biz_date < ?::date
-             GROUP BY person_id
-       )
-), target AS (
-    SELECT a.person_id,
-           a.wave,
-           a.minutes,
-           a.is_live,
-           a.has_minutes,
-           a.has_wave,
-           a.biz_date,
-           a.source_batch_id,
-           COALESCE(p.cumulative_wave, 0) AS prev_cum
-      FROM agg a
-      LEFT JOIN prev p ON p.person_id = a.person_id
-), upsert AS (
-    INSERT INTO daily_metric
-        (person_id, anchor_id, biz_date, wave, cumulative_wave, prev_snapshot_date,
-         wave_span, wave_reliable, minutes, is_live, source_batch_id, recomputed_at)
-    SELECT t.person_id,
-           COALESCE((SELECT a.anchor_id FROM account a
-                      WHERE a.person_id=t.person_id AND a.is_primary=1 LIMIT 1), ''),
-           ?::date,
-           CASE WHEN t.has_wave THEN t.wave ELSE COALESCE(d.wave, 0) END,
-           CASE WHEN t.has_wave THEN t.prev_cum + t.wave
-                ELSE COALESCE(d.cumulative_wave, 0) END,
-           CASE WHEN t.has_wave THEN (t.biz_date - 1)
-                ELSE COALESCE(d.prev_snapshot_date, t.biz_date - 1) END,
-           CASE WHEN t.has_wave THEN 1 ELSE COALESCE(d.wave_span, 1) END,
-           CASE WHEN t.has_wave THEN 1 ELSE COALESCE(d.wave_reliable, 1) END,
-           CASE WHEN t.has_minutes THEN t.minutes ELSE COALESCE(d.minutes, 0) END,
-           CASE WHEN t.has_wave THEN CASE WHEN t.wave >= 2 THEN 1 ELSE t.is_live END
-                ELSE COALESCE(d.is_live, t.is_live) END,
-           t.source_batch_id,
-           now()
-      FROM target t
-      LEFT JOIN daily_metric d
-        ON d.person_id=t.person_id AND d.biz_date=?::date
-    ON CONFLICT (person_id, biz_date) DO UPDATE SET
-        wave = EXCLUDED.wave,
-        cumulative_wave = EXCLUDED.cumulative_wave,
-        prev_snapshot_date = EXCLUDED.prev_snapshot_date,
-        wave_span = EXCLUDED.wave_span,
-        wave_reliable = EXCLUDED.wave_reliable,
-        minutes = CASE
-            WHEN EXISTS (
-                SELECT 1 FROM daily_import_contrib c
-                 WHERE c.person_id=EXCLUDED.person_id
-                   AND c.biz_date=EXCLUDED.biz_date
-                   AND c.has_minutes=1
-            ) THEN EXCLUDED.minutes
-            ELSE daily_metric.minutes
-        END,
-        is_live = EXCLUDED.is_live,
-        source_batch_id = EXCLUDED.source_batch_id,
-        recomputed_at = now()
-    RETURNING 1
-)
-SELECT COUNT(*) FROM upsert
-"#;
-
-const DAILY_CONTRIB_UPSERT_SQL: &str = "INSERT INTO daily_import_contrib \
-         (batch_id, person_id, biz_date, wave, minutes, is_live, has_minutes, has_wave) \
-     VALUES (?,?,?::date,?,?,?,?,?) \
-     ON CONFLICT (batch_id, person_id, biz_date) DO UPDATE SET \
-         wave = EXCLUDED.wave, minutes = EXCLUDED.minutes, \
-         is_live = EXCLUDED.is_live, has_minutes = EXCLUDED.has_minutes, \
-         has_wave = EXCLUDED.has_wave";
-
 /// 同一业务日/月份的导入按事务级 advisory lock 串行化。
 ///
-/// 仅靠唯一索引不够：两个事务可能各自先写贡献、再各看重算结果，
-/// 后提交者会把先提交者的贡献覆盖出 `daily_metric`。锁的范围只到业务日/月，
-/// 不同日期仍可并行。
+/// 仅靠唯一索引不够：两个并发导入可能各自先读旧值、再写回自己的结果，
+/// 后提交者会把先提交者的数据覆盖掉。锁的范围只到业务日/月，不同日期仍可并行。
 async fn lock_import_scope(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     scope: &str,
@@ -2000,101 +2099,6 @@ async fn lock_import_scope(
         .execute(&mut **tx)
         .await?;
     Ok(())
-}
-
-/// 按批次贡献重算某业务日的 daily_metric：同日多文件导入 = 各批次 wave/minutes 求和。
-/// 只对贡献表里出现的人生效；未导入过的人保持现状（兼容历史数据 / 手工修正）。
-async fn recompute_daily_from_contrib(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    biz_date: &str,
-) -> anyhow::Result<usize> {
-    // 兼容旧库：贡献表还没跑 048 时退回旧的单批覆盖写入语义，不让导入整体 500。
-    let has_contrib: Option<i32> = sqlx::query_scalar(
-        "SELECT 1 FROM information_schema.tables \
-         WHERE table_schema='public' AND table_name='daily_import_contrib' LIMIT 1",
-    )
-    .fetch_optional(&mut **tx)
-    .await?;
-    if has_contrib.is_none() {
-        return Ok(0);
-    }
-
-    let sql = DAILY_CONTRIB_RECOMPUTE_SQL;
-
-    writer::write_guard(sql)?;
-    let n: i64 = sqlx::query_scalar(&crate::pq::rewrite(sql))
-        .bind(biz_date)
-        .bind(biz_date)
-        .bind(biz_date)
-        .bind(biz_date)
-        .bind(biz_date)
-        .bind(biz_date)
-        .fetch_one(&mut **tx)
-        .await?;
-    Ok(n.max(0) as usize)
-}
-
-/// 把本次 ok 行记录为「批次贡献」；返回是否启用了多批次汇总口径。
-async fn record_import_contrib(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    batch_id: i64,
-    _fingerprint: &str,
-    biz_date: &str,
-    ok_rows: &[&ResolvedRow],
-) -> anyhow::Result<bool> {
-    let has_contrib: Option<i32> = sqlx::query_scalar(
-        "SELECT 1 FROM information_schema.tables \
-         WHERE table_schema='public' AND table_name='daily_import_contrib' LIMIT 1",
-    )
-    .fetch_optional(&mut **tx)
-    .await?;
-    if has_contrib.is_none() {
-        return Ok(false);
-    }
-
-    sqlx::query(&crate::pq::rewrite(
-        "DELETE FROM daily_import_contrib WHERE batch_id = ? AND biz_date = ?::date",
-    ))
-    .bind(batch_id)
-    .bind(biz_date)
-    .execute(&mut **tx)
-    .await?;
-
-    writer::write_guard(DAILY_CONTRIB_UPSERT_SQL)?;
-    let contrib_date = NaiveDate::parse_from_str(biz_date, "%Y-%m-%d")?;
-    let contrib_rows: Vec<(&ResolvedRow, u64)> = ok_rows
-        .iter()
-        .filter_map(|r| r.person_id.map(|pid| (*r, pid)))
-        .collect();
-    if !contrib_rows.is_empty() {
-        let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new(
-            "INSERT INTO daily_import_contrib
-               (batch_id, person_id, biz_date, wave, minutes, is_live, has_minutes, has_wave) ",
-        );
-        qb.push_values(&contrib_rows, |mut b, (r, pid)| {
-            let wave = r.raw.wave.unwrap_or(0.0).round().max(0.0) as i64;
-            let minutes = r.raw.minutes.unwrap_or(0.0).round().max(0.0) as i64;
-            let has_minutes = i16::from(r.raw.minutes.is_some());
-            let has_wave = i16::from(r.raw.wave.is_some());
-            let is_live = i16::from(r.raw.is_live.unwrap_or(false)) | i16::from(wave >= 2);
-            b.push_bind(batch_id)
-                .push_bind(*pid as i64)
-                .push_bind(contrib_date)
-                .push_bind(wave)
-                .push_bind(minutes)
-                .push_bind(is_live)
-                .push_bind(has_minutes)
-                .push_bind(has_wave);
-        });
-        qb.push(
-            " ON CONFLICT (batch_id, person_id, biz_date) DO UPDATE SET
-                 wave = EXCLUDED.wave, minutes = EXCLUDED.minutes,
-                 is_live = EXCLUDED.is_live, has_minutes = EXCLUDED.has_minutes,
-                 has_wave = EXCLUDED.has_wave",
-        );
-        qb.build().execute(&mut **tx).await?;
-    }
-    Ok(true)
 }
 
 pub async fn commit_import(
@@ -2140,18 +2144,16 @@ pub async fn commit_import(
     let aliases = merged_aliases(st).await;
     // 自动模式不做团别冲突校验：谁是哪个团由主播档案说了算
     let team_filter = if auto_team { None } else { Some(team) };
-    let resolved: Vec<ResolvedRow> = rows
+    let mut resolved: Vec<ResolvedRow> = rows
         .iter()
         .map(|r| resolve_row(r, &ctx, &aliases, team_filter))
         .collect();
+    mark_duplicate_import_anchor_conflicts(&mut resolved);
 
-    /* 一人多号合并音浪（2026-10-10）：运营按抖音号导出，一个主播挂 2~3 个号就会在
-    文件里出现 2~3 行。同一个 person_id 的行必须合成一行后再入库，
-    否则后一行会把前一行覆盖掉（daily_metric 按 person+date 唯一），
-    主播看到的音浪只是他最后一个号的。
-    合并口径：当日音浪求和；累计取最大（多个号的累计快照不是同一个池子，
-    求和会虚高，取最大是保守且不重复计数的做法）；时长求和；有任一号开播 = 开播。 */
-    let merged = merge_rows_by_person(&resolved);
+    /* 同一业务日多份文件 / 同一主播多行（2026-11-14 用户口径）：后导入覆盖前导入。
+    QQ 把多个附件正文拼成一段时，两份文件是同一天数据的修正或不同团队名单，不是
+    一人多号各自播的量；按 person 求和会把音浪/时长翻倍。月度导入仍用旧的求和口径。 */
+    let merged = merge_rows_by_person_daily_latest(&resolved);
 
     /* 行分类（2026-10-10 用户口径：只要有抖音号或者 id 都导入，但不进榜单和统计，
     主播在台账建档 / 绑号之后才显示）：
@@ -2174,14 +2176,14 @@ pub async fn commit_import(
                 "name": r.raw.name,
                 "reason": "未匹配到主播，也没有艺名/抖音号/ID 可以暂存；请先在主播台账建档或绑定"
             })),
-            RowClass::TeamConflict(reason) => {
+            RowClass::TeamConflict(reason) | RowClass::IdentityConflict(reason) => {
                 failures.push(json!({ "name": r.raw.name, "reason": reason }))
             }
         }
     }
 
     /* 本次时长合计（分钟）：按日导入从 2026-10-19 起写 daily_metric.minutes，
-    这里报的是**本次 ok 行**的当日时长合计（merge 后，一人多号已求和）。
+    这里报的是**本次 ok 行**的当日时长合计（merge 后，同一主播取最后一份文件的值）。
     没带时长列的行（minutes = None）不计入 —— 它们落库时保留库里旧值（见 write_daily_row）。 */
     let minutes_total: i64 = ok_rows
         .iter()
@@ -2227,8 +2229,21 @@ pub async fn commit_import(
 
     let staged_rows: Vec<&ResolvedRow> = pending_rows.clone();
 
-    // 同一业务日 + 同一文件内容重发：复用原 batch_id，贡献表先删后写，避免重复累计。
-    // source_fingerprint 由 048 迁移提供；旧库没该列时退回「不复用」语义。
+    // 同一主播的换号 / 主号切换必须跨业务日串行：日期锁只防同一天，不能防两个
+    // 不同日期同时把同一 person 的主号切来切去。固定按 person_id 升序拿锁，
+    // 避免同一批多人换号时两个事务互相死锁。
+    for pid in identity_lock_person_ids(&ok_rows) {
+        lock_import_scope(&mut tx, &format!("account-identity:{pid}")).await?;
+    }
+    for douyin in identity_lock_douyin_nos(&ok_rows) {
+        lock_import_scope(&mut tx, &format!("account-douyin:{douyin}")).await?;
+    }
+
+    // 每次提交都新建审计批次，绝不复用旧 batch_id：
+    //   - source_batch_id 是同日覆盖 / 暂存补账判断“谁更新”的单调序；
+    //   - 复用旧 id 会让“先导 A、再导 B、又重导 A”在 pending 里排不出真实先后；
+    //   - 也不删旧 batch，避免 daily_metric / import_pending 留下悬空引用。
+    // 同一文件重复导入仍由内容指纹记录，并由 write_daily_row 值比对得到 Unchanged。
     let has_fp_col: Option<i32> = sqlx::query_scalar(
         "SELECT 1 FROM information_schema.columns \
          WHERE table_schema='public' AND table_name='import_batch' \
@@ -2236,48 +2251,37 @@ pub async fn commit_import(
     )
     .fetch_optional(&mut *tx)
     .await?;
-    let existing_batch: Option<i64> = if has_fp_col.is_some() {
-        sqlx::query_scalar(&crate::pq::rewrite(
-            "SELECT id FROM import_batch \
-              WHERE source='admin-import' AND biz_date=?::date AND source_fingerprint=? \
-              ORDER BY id DESC LIMIT 1",
-        ))
+    // 048 对 (biz_date, source_fingerprint) 建了唯一索引。首次导入保留指纹，
+    // 后续同内容重导的新批次指纹留空（不撞索引），但 batch_id 仍单调递增。
+    let fingerprint_exists: bool = if has_fp_col.is_some() {
+        sqlx::query_scalar::<_, i32>(
+            "SELECT 1 FROM import_batch
+              WHERE source = 'admin-import' AND biz_date = ?::date
+                AND source_fingerprint = ? LIMIT 1",
+        )
         .bind(biz_date)
         .bind(&fingerprint)
         .fetch_optional(&mut *tx)
         .await?
+        .is_some()
     } else {
-        None
+        true
     };
 
+    let initial_note = batch_note(&failures, staged_rows.len(), &skipped);
     let batch = sqlx::query(&crate::pq::rewrite(
         "INSERT INTO import_batch (source, filename, biz_date, team, imported_rows, ok_rows, failed_rows, note)
          VALUES ('admin-import', ?, ?::date, ?, ?, 0, 0, ?) RETURNING id",
     ))
-    // filename 也是 VARCHAR(255)：超长同样 1406（机器人转发长文件名踩过），先截断
     .bind(truncate_chars(filename, FILENAME_MAX_CHARS))
     .bind(biz_date)
     .bind(team_col)
     .bind(merged.len() as i64)
-    .bind(batch_note(&failures, staged_rows.len(), &skipped))
+    .bind(&initial_note)
     .fetch_one(&mut *tx)
     .await?;
     let batch_id = batch.try_get::<i64, _>(0)?;
-    if let Some(old) = existing_batch {
-        // 审计批次保留最新一条即可：旧批次贡献先删，避免同文件重复提交越积越多。
-        sqlx::query(&crate::pq::rewrite(
-            "DELETE FROM daily_import_contrib WHERE batch_id = ? AND biz_date = ?::date",
-        ))
-        .bind(old)
-        .bind(biz_date)
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query(&crate::pq::rewrite("DELETE FROM import_batch WHERE id = ?"))
-            .bind(old)
-            .execute(&mut *tx)
-            .await?;
-    }
-    if has_fp_col.is_some() {
+    if has_fp_col.is_some() && !fingerprint_exists {
         sqlx::query(&crate::pq::rewrite(
             "UPDATE import_batch SET source_fingerprint = ? WHERE id = ?",
         ))
@@ -2287,23 +2291,39 @@ pub async fn commit_import(
         .await?;
     }
 
-    let contrib_enabled =
-        record_import_contrib(&mut tx, batch_id, &fingerprint, biz_date, &ok_rows).await?;
+    /* 2026-11-14 用户口径：同一业务日后一次导入覆盖前一次导入，不再走 048 的
+    daily_import_contrib 求和重算。保留旧贡献表数据仅供审计，导入/删除不再读取它；
+    同一文件重发由 write_daily_row 的 Unchanged 保证数据幂等，首见内容指纹留在审计批次。 */
     let mut ok_count: u32 = 0;
     let mut unchanged: u32 = 0;
-    if contrib_enabled {
-        let touched = recompute_daily_from_contrib(&mut tx, biz_date).await?;
-        ok_count = touched as u32;
-        unchanged = 0;
-    } else {
-        for r in &ok_rows {
-            match write_daily_row(&mut tx, batch_id, biz_date, date, r).await {
-                Ok(WriteOutcome::Written) => ok_count += 1,
-                Ok(WriteOutcome::Unchanged) => unchanged += 1,
-                Err(e) => {
-                    tracing::error!(name = %r.raw.name, error = %e, "写入 daily_metric 失败");
-                    failures.push(json!({ "name": r.raw.name, "reason": e.to_string() }));
-                }
+    for r in &ok_rows {
+        // PostgreSQL 一条 SQL 出错后整个事务会进入 aborted 状态，不能“catch 后继续”。
+        // 每行包 savepoint：业务冲突或意外约束失败只回滚这一行，其他主播仍能落库。
+        sqlx::query("SAVEPOINT import_row")
+            .execute(&mut *tx)
+            .await?;
+        match write_daily_row(&mut tx, batch_id, biz_date, date, r).await {
+            Ok(WriteOutcome::Written) => {
+                sqlx::query("RELEASE SAVEPOINT import_row")
+                    .execute(&mut *tx)
+                    .await?;
+                ok_count += 1;
+            }
+            Ok(WriteOutcome::Unchanged) => {
+                sqlx::query("RELEASE SAVEPOINT import_row")
+                    .execute(&mut *tx)
+                    .await?;
+                unchanged += 1;
+            }
+            Err(e) => {
+                sqlx::query("ROLLBACK TO SAVEPOINT import_row")
+                    .execute(&mut *tx)
+                    .await?;
+                sqlx::query("RELEASE SAVEPOINT import_row")
+                    .execute(&mut *tx)
+                    .await?;
+                tracing::error!(name = %r.raw.name, error = %e, "写入 daily_metric 失败");
+                failures.push(json!({ "name": r.raw.name, "reason": e.to_string() }));
             }
         }
     }
@@ -2316,30 +2336,18 @@ pub async fn commit_import(
             continue;
         };
         let no = row_ident(&r.raw).unwrap_or_default();
-        sqlx::query(&crate::pq::rewrite(
-            "INSERT INTO import_pending
-                 (name, douyin_no, claim_key, biz_date, wave, cumulative_wave, minutes, is_live, source_batch_id)
-             VALUES (?,?,?,?::date,?,?,?,?,?)
-             ON CONFLICT (claim_key, biz_date) WHERE claim_key <> '' DO UPDATE SET
-                 name = EXCLUDED.name, wave = EXCLUDED.wave,
-                 cumulative_wave = EXCLUDED.cumulative_wave,
-                 /* 时长（2026-10-19）：按日文件带时长时暂存行也有真实 minutes。
-                 重导「老格式（没有时长列）」文件时 EXCLUDED.minutes 是 NULL，
-                 无条件覆盖会把已暂存的时长冲没（绑号后补账就丢了），所以保留旧值。 */
-                 minutes = COALESCE(EXCLUDED.minutes, import_pending.minutes),
-                 is_live = EXCLUDED.is_live, source_batch_id = EXCLUDED.source_batch_id",
-        ))
-        .bind(truncate_chars(&r.raw.name, PENDING_NAME_MAX_CHARS))
-        .bind(&no)
-        .bind(&claim_key)
-        .bind(biz_date)
-        .bind(r.raw.wave.map(|v| v as i64))
-        .bind(r.raw.cumulative_wave.map(|v| v as i64))
-        .bind(r.raw.minutes.map(|v| v as i64))
-        .bind(r.raw.is_live.map(|b| b as i16))
-        .bind(batch_id as i64)
-        .execute(&mut *tx)
-        .await?;
+        sqlx::query(&crate::pq::rewrite(PENDING_DAY_UPSERT_SQL))
+            .bind(truncate_chars(&r.raw.name, PENDING_NAME_MAX_CHARS))
+            .bind(&no)
+            .bind(&claim_key)
+            .bind(biz_date)
+            .bind(r.raw.wave.map(|v| v as i64))
+            .bind(r.raw.cumulative_wave.map(|v| v as i64))
+            .bind(r.raw.minutes.map(|v| v as i64))
+            .bind(r.raw.is_live.map(|b| b as i16))
+            .bind(batch_id as i64)
+            .execute(&mut *tx)
+            .await?;
         // 未认领数据必须落库：暂存失败就整批回滚，不能用“导入成功”掩盖数据丢失。
         pending_count += 1;
     }
@@ -2468,8 +2476,9 @@ pub async fn commit_import(
     })
 }
 
-/// 按 person_id 合并同一人的多行（一人多个抖音号时运营文件里会有多行）。
+/// 月度导入 / 预览用：按 person_id 合并一人多账号的多行（仍按求和口径）。
 ///
+/// 注意：按日导入已改用 [`merge_rows_by_person_daily_latest`]，同日多文件是覆盖口径。
 /// 合并口径：
 /// - 当日音浪 `wave`：**求和**（每个号当天各自播的，加起来才是这个人当天的量）
 /// - 累计 `cumulative_wave`：**取最大**（各号的累计快照不是同一个池子，求和会虚高；
@@ -2484,7 +2493,7 @@ fn merge_rows_by_person(rows: &[ResolvedRow]) -> Vec<ResolvedRow> {
     // person_id → 在 out 里的下标
     let mut index: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
     for r in rows {
-        let mergeable = r.matched && r.team_conflict.is_none();
+        let mergeable = r.matched && r.team_conflict.is_none() && r.identity_conflict.is_none();
         let Some(pid) = r.person_id.filter(|_| mergeable) else {
             out.push(r.clone());
             continue;
@@ -2519,6 +2528,52 @@ fn merge_rows_by_person(rows: &[ResolvedRow]) -> Vec<ResolvedRow> {
     out
 }
 
+/// 按日导入同批次内同一个人多行时的口径（2026-11-14 用户口径）：后出现的行覆盖前值。
+///
+/// 同一业务日 QQ 一次转发多份文件时，机器人把全部 CSV 正文拼成一段文本；这些文件
+/// 是同一天数据的多次导出/修正，不是一人多号各自播的量，不能求和。主播 ID / 抖音号
+/// 也可能在两份文件里不同，以最后一份为准；显式给出的指标覆盖前行，缺失的指标列保留
+/// 前行值（显式 0 仍覆盖）。未匹配/团别/身份冲突行仍逐条保留，便于运营核对。
+fn merge_rows_by_person_daily_latest(rows: &[ResolvedRow]) -> Vec<ResolvedRow> {
+    let mut out: Vec<ResolvedRow> = Vec::with_capacity(rows.len());
+    let mut index: HashMap<u64, usize> = HashMap::new();
+    for r in rows {
+        let mergeable = r.matched && r.team_conflict.is_none() && r.identity_conflict.is_none();
+        let Some(pid) = r.person_id.filter(|_| mergeable) else {
+            out.push(r.clone());
+            continue;
+        };
+        match index.get(&pid).copied() {
+            Some(i) => {
+                let prev = out[i].clone();
+                let mut latest = r.clone();
+                // 后一份文件没带某列，不等于把该列清空：只有“显式给出”才覆盖。
+                // 音浪 / 累计是一个快照组，后行只要给出其中一个就整体采用后行，
+                // 避免拼出前一份的累计 + 后一份的当日值这种不存在的组合。
+                if latest.raw.wave.is_none() && latest.raw.cumulative_wave.is_none() {
+                    latest.raw.wave = prev.raw.wave;
+                    latest.raw.cumulative_wave = prev.raw.cumulative_wave;
+                }
+                latest.raw.minutes = latest.raw.minutes.or(prev.raw.minutes);
+                latest.raw.is_live = latest.raw.is_live.or(prev.raw.is_live);
+                // 身份也按组继承：只有 anchor / douyin 两列都没给时才整组沿用前行。
+                // 后行只给新 anchor 时不能把前行旧抖音号拼过来，避免生成混合身份。
+                if latest.raw.anchor_id.is_none() && latest.raw.douyin_no.is_none() {
+                    latest.raw.anchor_id = prev.raw.anchor_id;
+                    latest.raw.douyin_no = prev.raw.douyin_no;
+                }
+                latest.matched_by_douyin |= prev.matched_by_douyin;
+                out[i] = latest;
+            }
+            None => {
+                index.insert(pid, out.len());
+                out.push(r.clone());
+            }
+        }
+    }
+    out
+}
+
 /// 失败摘要（写进 import_batch.note 的审计文本）。
 /// **必须限长**：note 是 VARCHAR(512)，STRICT_TRANS_TABLES 下超长直接 1406 炸掉
 /// 整个导入事务（2026-10-10 覆盖导入踩过：一次几十行未匹配就把事务打回）。
@@ -2539,6 +2594,29 @@ fn failures_summary(failures: &[Value]) -> Option<String> {
 }
 
 /// 批次备注：失败 + 暂存 + 跳过，三者都限长（见 failures_summary 的说明）
+/// 换号事务锁的 person_id：去重后升序，保证两个多人换号导入不会交叉加锁死锁。
+fn identity_lock_person_ids(rows: &[&ResolvedRow]) -> Vec<u64> {
+    let mut ids: Vec<u64> = rows.iter().filter_map(|r| r.person_id).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
+/// 新抖音号也要跨业务日串行校验，避免两个 person 同时通过 SELECT 后写成重复映射。
+fn identity_lock_douyin_nos(rows: &[&ResolvedRow]) -> Vec<String> {
+    let mut nos: Vec<String> = rows
+        .iter()
+        .filter_map(|r| {
+            let anchor = clean_import_ident(r.raw.anchor_id.as_deref());
+            let douyin = clean_import_ident(r.raw.douyin_no.as_deref());
+            (!anchor.is_empty() && anchor != douyin && !douyin.is_empty()).then_some(douyin)
+        })
+        .collect();
+    nos.sort_unstable();
+    nos.dedup();
+    nos
+}
+
 fn batch_note(failures: &[Value], pending: usize, skipped: &[String]) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
     if let Some(f) = failures_summary(failures) {
@@ -2578,82 +2656,215 @@ enum WriteOutcome {
 /// 有 account 行但全是 is_primary=0 时（生产实测 person 1000001 哈基勺 / 1000004 狼森），
 /// PRIMARY_ANCHOR_SQL 取不到 → 导入回填 anchor_id=''。导入回填 anchor_id 前调用：
 /// 没有主号就把最早（id 最小）的号置为主号，再按 PRIMARY_ANCHOR_SQL 取。
-/// 幂等：已有主号（或根本没有账号）时一条 UPDATE 都不发，直接返回。
-/// 失败只记日志不阻断导入：宁缺 anchor_id，不能让当天数据写不进去。
-async fn ensure_primary(conn: &mut sqlx::PgConnection, person_id: u64) {
-    let has_primary: i64 = sqlx::query(&crate::pq::rewrite(
+///
+/// PostgreSQL 一条失败 SQL 会让事务进入 aborted 状态，所以这里不能再吞错继续；
+/// 查询 / 更新失败直接返回，由调用方按“该行失败”处理。
+async fn ensure_primary(conn: &mut sqlx::PgConnection, person_id: u64) -> anyhow::Result<()> {
+    let has_primary: i64 = sqlx::query_scalar(&crate::pq::rewrite(
         "SELECT COUNT(*) FROM account WHERE person_id = ? AND is_primary = 1",
     ))
     .bind(person_id as i64)
     .fetch_one(&mut *conn)
-    .await
-    .map(|r| r.try_get::<i64, _>(0).unwrap_or(0))
-    .unwrap_or(1); // 查询失败按「有主号」处理：不做任何写入
+    .await?;
     if has_primary > 0 {
-        return;
+        return Ok(());
     }
-    let has_any: i64 = sqlx::query(&crate::pq::rewrite(
+    let has_any: i64 = sqlx::query_scalar(&crate::pq::rewrite(
         "SELECT COUNT(*) FROM account WHERE person_id = ?",
     ))
     .bind(person_id as i64)
     .fetch_one(&mut *conn)
-    .await
-    .map(|r| r.try_get::<i64, _>(0).unwrap_or(0))
-    .unwrap_or(0);
+    .await?;
     if has_any == 0 {
-        return; // 连账号都没有：没有可提的号，anchor_id 保持空
+        return Ok(()); // 连账号都没有：没有可提的号，anchor_id 保持空
     }
-    match sqlx::query(&crate::pq::rewrite(
+    let res = sqlx::query(&crate::pq::rewrite(
         "UPDATE account SET is_primary = 1 WHERE person_id = ? AND id = \
            (SELECT min_id FROM (SELECT MIN(id) AS min_id FROM account WHERE person_id = ?) t)",
     ))
     .bind(person_id as i64)
     .bind(person_id as i64)
     .execute(&mut *conn)
-    .await
-    {
-        Ok(res) if res.affected() > 0 => {
-            tracing::warn!(
-                person_id,
-                "该主播有抖音号但没有主号（is_primary 全 0），已把最早的一个号收敛为主号"
-            );
-        }
-        Ok(_) => {}
-        Err(e) => {
-            tracing::warn!(error = %e, person_id, "收敛主号失败（导入继续，anchor_id 可能为空）")
-        }
+    .await?;
+    if res.affected() > 0 {
+        tracing::warn!(
+            person_id,
+            "该主播有抖音号但没有主号（is_primary 全 0），已把最早的一个号收敛为主号"
+        );
     }
+    Ok(())
 }
 
 async fn existing_day_row(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     person_id: u64,
     biz_date: &str,
-) -> anyhow::Result<Option<(i64, i64, i64, i16)>> {
+) -> anyhow::Result<Option<(i64, i64, i64, i16, String, Option<i64>)>> {
     let row = sqlx::query(&crate::pq::rewrite(
-        "SELECT wave, cumulative_wave, minutes, is_live FROM daily_metric
-         WHERE person_id = ? AND biz_date = ?::date",
+        "SELECT wave, cumulative_wave, minutes, is_live, anchor_id, source_batch_id
+           FROM daily_metric
+          WHERE person_id = ? AND biz_date = ?::date",
     ))
     .bind(person_id as i64)
     .bind(biz_date)
     .map(|row: sqlx::postgres::PgRow| {
-        let num = |col: &str| -> i64 {
-            row.try_get::<Option<i64>, _>(col)
-                .ok()
-                .flatten()
-                .or_else(|| row.try_get::<f64, _>(col).ok().map(|v| v as i64))
-                .unwrap_or(0)
-        };
         (
-            num("wave"),
-            num("cumulative_wave"),
-            num("minutes"),
-            row.try_get::<i16, _>("is_live").unwrap_or(0),
+            read_opt_i64(&row, "wave").unwrap_or(0),
+            read_opt_i64(&row, "cumulative_wave").unwrap_or(0),
+            // minutes 是 INT4；read_opt_i64 会按 i32 精确类型回退解码。
+            read_opt_i64(&row, "minutes").unwrap_or(0),
+            read_opt_i64(&row, "is_live").unwrap_or(0) as i16,
+            row.try_get::<String, _>("anchor_id").unwrap_or_default(),
+            read_opt_i64(&row, "source_batch_id"),
         )
     })
     .fetch_optional(&mut **tx)
     .await?;
     Ok(row)
+}
+
+/// 新主播 ID 的 owner 查询必须单独做，绝不能和本人旧抖音号放进同一个 OR + LIMIT 1：
+/// 后者会先捞出本人旧账号，把真正占用 anchor 的别人遮住，随后 INSERT 撞 uk_anchor。
+const IMPORT_ANCHOR_OWNER_SQL: &str = "SELECT person_id FROM account WHERE anchor_id = ? LIMIT 1";
+const IMPORT_DOUYIN_OWNER_SQL: &str =
+    "SELECT person_id FROM account WHERE douyin_no = ? AND person_id <> ? LIMIT 1";
+
+const IMPORT_IDENTITY_UPSERT_SQL: &str =
+    "INSERT INTO account (person_id, anchor_id, douyin_no, anchor_name, is_primary)
+     VALUES (?,?,?,?,1)
+     ON CONFLICT (anchor_id) DO UPDATE SET
+       douyin_no = CASE WHEN EXCLUDED.douyin_no <> '' THEN EXCLUDED.douyin_no ELSE account.douyin_no END,
+       anchor_name = CASE WHEN EXCLUDED.anchor_name <> '' THEN EXCLUDED.anchor_name ELSE account.anchor_name END
+     WHERE account.person_id = EXCLUDED.person_id
+     RETURNING id";
+
+const SYNC_DAILY_ANCHOR_SQL: &str = "UPDATE daily_metric SET anchor_id = ?
+      WHERE person_id = ? AND anchor_id IS DISTINCT FROM ?";
+
+/// 纯身份闸门：anchor 为空、只是从抖音号顶替来的同值，或已被别人占用时，都不许建主号。
+fn can_apply_import_anchor(
+    anchor: &str,
+    douyin: &str,
+    person_id: u64,
+    anchor_owner: Option<u64>,
+) -> bool {
+    if anchor.is_empty() {
+        return false;
+    }
+    if anchor == douyin && anchor_owner.is_none() {
+        return false;
+    }
+    anchor_owner.map_or(true, |owner| owner == person_id)
+}
+
+/// 导入行携带了新的主播 ID / 抖音号时，把台账主号切到最新 ID。
+///
+/// 顺序是硬约束：
+/// 1. 先精确查 `anchor_id` owner；被别人占用 → 本行失败，绝不降旧主号/插入；
+/// 2. 再查抖音号是否属于别人；跨人 → 本行失败，避免交叉改号；
+/// 3. anchor 用 ON CONFLICT 原子 upsert，堵住并发插入同一 ID 的窗口；
+/// 4. 只有“此前不存在的 anchor”才作为新主号并降其它主号；已登记的主 / 副号
+///    只更新抖音号等属性，绝不因为导入顺序反复切主号；
+/// 5. 历史 `daily_metric.anchor_id` 不在这里写死入参 anchor，而是在 `ensure_primary` 后
+///    由 [`sync_daily_metric_anchor`] 按事务内最终主号统一回扫。
+async fn apply_import_identity(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    person_id: u64,
+    r: &ResolvedRow,
+) -> anyhow::Result<()> {
+    let anchor = clean_import_ident(r.raw.anchor_id.as_deref());
+    let douyin = clean_import_ident(r.raw.douyin_no.as_deref());
+    if anchor.is_empty() {
+        return Ok(());
+    }
+
+    let anchor_owner: Option<u64> =
+        sqlx::query_scalar(&crate::pq::rewrite(IMPORT_ANCHOR_OWNER_SQL))
+            .bind(&anchor)
+            .fetch_optional(&mut **tx)
+            .await?
+            .map(|owner: i64| owner as u64);
+    if !can_apply_import_anchor(&anchor, &douyin, person_id, anchor_owner) {
+        if let Some(owner) = anchor_owner.filter(|&owner| owner != person_id) {
+            anyhow::bail!("主播 ID「{anchor}」已被其他主播占用（person {owner}），本行未导入");
+        }
+        return Ok(());
+    }
+
+    if !douyin.is_empty() {
+        let douyin_owner: Option<u64> =
+            sqlx::query_scalar(&crate::pq::rewrite(IMPORT_DOUYIN_OWNER_SQL))
+                .bind(&douyin)
+                .bind(person_id as i64)
+                .fetch_optional(&mut **tx)
+                .await?
+                .map(|owner: i64| owner as u64);
+        if let Some(owner) = douyin_owner {
+            anyhow::bail!("抖音号「{douyin}」已属于其他主播（person {owner}），本行未导入");
+        }
+    }
+
+    let account_id: Option<i64> =
+        sqlx::query_scalar(&crate::pq::rewrite(IMPORT_IDENTITY_UPSERT_SQL))
+            .bind(person_id as i64)
+            .bind(&anchor)
+            .bind(&douyin)
+            .bind(truncate_chars(&r.raw.name, 128))
+            .fetch_optional(&mut **tx)
+            .await?;
+    let Some(account_id) = account_id else {
+        // 查到未占用之后、INSERT 之前被另一个不同业务日的并发导入抢先插入。
+        anyhow::bail!("主播 ID「{anchor}」刚被其他主播占用，本行未导入");
+    };
+
+    // 全新 anchor 才成为主号；已登记副号重导时保持原主号不变，避免附件顺序
+    // 决定谁是一号。插入成功后再降旧主号，失败时本人不会暂时没有主号。
+    if anchor_owner.is_none() {
+        sqlx::query(&crate::pq::rewrite(
+            "UPDATE account SET is_primary = 0
+              WHERE person_id = ? AND is_primary = 1 AND id <> ?",
+        ))
+        .bind(person_id as i64)
+        .bind(account_id)
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok(())
+}
+
+async fn sync_daily_metric_anchor(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    person_id: u64,
+    anchor: &str,
+) -> anyhow::Result<()> {
+    if anchor.is_empty() {
+        return Ok(());
+    }
+    sqlx::query(&crate::pq::rewrite(SYNC_DAILY_ANCHOR_SQL))
+        .bind(anchor)
+        .bind(person_id as i64)
+        .bind(anchor)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+const TOUCH_DAILY_SOURCE_BATCH_SQL: &str = "UPDATE daily_metric SET source_batch_id = ?
+      WHERE person_id = ? AND biz_date = ?::date";
+
+async fn touch_daily_source_batch(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    batch_id: i64,
+    person_id: u64,
+    biz_date: &str,
+) -> anyhow::Result<()> {
+    sqlx::query(&crate::pq::rewrite(TOUCH_DAILY_SOURCE_BATCH_SQL))
+        .bind(batch_id)
+        .bind(person_id as i64)
+        .bind(biz_date)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
 }
 
 async fn write_daily_row(
@@ -2685,9 +2896,12 @@ async fn write_daily_row(
             .fetch_optional(&mut **tx)
             .await?;
 
+    // 主播 ID 是唯一值：文件里换了 ID / 抖音号时，先把台账主号切到最新 ID，
+    // 再取 PRIMARY_ANCHOR_SQL，保证 daily_metric.anchor_id 一定是有效主号。
+    apply_import_identity(tx, person_id, r).await?;
     // P2-11 收敛：有账号但无主号（生产 1000001/1000004）时 PRIMARY_ANCHOR_SQL 取不到，
     // 先把最早的号提为主号再取（幂等，正常情况零开销）。
-    ensure_primary(tx, person_id).await;
+    ensure_primary(tx, person_id).await?;
 
     let anchor: String = sqlx::query(&crate::pq::rewrite(dialect::PRIMARY_ANCHOR_SQL))
         .bind(person_id as i64)
@@ -2695,6 +2909,8 @@ async fn write_daily_row(
         .fetch_optional(&mut **tx)
         .await?
         .unwrap_or_default();
+    // 以事务内最终确认的主号回扫，而不是用文件里可能已被并发抢走的 anchor。
+    sync_daily_metric_anchor(tx, person_id, &anchor).await?;
 
     /* 库里当天已有的行（可能来自这个主播另一个号的导入 / 上一次按日导入 / 暂存补账）。
     **只查一次**：Unchanged 判定、minutes-only 分支、以及下面「文件没有时长列时保留旧值」
@@ -2742,16 +2958,25 @@ async fn write_daily_row(
       新行才写 0。旧实现 `unwrap_or(0.0)` 会在没有时长列的文件重导时把已有 minutes 静默清零。 */
     let minutes = match r.raw.minutes {
         Some(v) => v as i64,
-        None => existing.map(|(_, _, m, _)| m).unwrap_or(0),
+        None => existing.as_ref().map(|(_, _, m, _, _, _)| *m).unwrap_or(0),
     };
-    let is_live = r.raw.is_live.map(|b| b as i16).unwrap_or(0);
+    // 没带开播状态列同样保旧值；显式 false 才是“未开播”覆盖。
+    let is_live = r
+        .raw
+        .is_live
+        .map(|b| b as i16)
+        .or_else(|| existing.as_ref().map(|(_, _, _, live, _, _)| *live))
+        .unwrap_or(0);
 
     // 时长-only 行（时长 CSV）：只更新 minutes/is_live，不把已导入的音浪覆盖成 0
     if r.raw.wave.is_none() && r.raw.cumulative_wave.is_none() {
         // 连分钟和开播都没给（暂存补账时可能出现的「只有名字」行）：库里已有当日行就什么都不动
         let presence_only = r.raw.minutes.is_none() && r.raw.is_live.is_none();
-        if let Some((_, _, m, live)) = existing {
-            if presence_only || (m == minutes && live == is_live) {
+        if let Some((_, _, m, live, old_anchor, _)) = existing.as_ref() {
+            // anchor 已由 sync_daily_metric_anchor 对齐；这里再比一次，防止空主号等
+            // 特殊数据下把 anchor 变化误判成 Unchanged。
+            if old_anchor == &anchor && (presence_only || (*m == minutes && *live == is_live)) {
+                touch_daily_source_batch(tx, batch_id, person_id, biz_date).await?;
                 return Ok(WriteOutcome::Unchanged);
             }
         }
@@ -2760,6 +2985,7 @@ async fn write_daily_row(
                  (person_id, anchor_id, biz_date, minutes, is_live, source_batch_id)
              VALUES (?,?,?::date,?,?,?)
              ON CONFLICT (person_id, biz_date) DO UPDATE SET
+                 anchor_id = EXCLUDED.anchor_id,
                  minutes = EXCLUDED.minutes, is_live = EXCLUDED.is_live,
                  source_batch_id = EXCLUDED.source_batch_id",
         ))
@@ -2775,8 +3001,9 @@ async fn write_daily_row(
     }
 
     // 库里已有该人该日、且算出来的值与库里完全一致 → 不动它（幂等：同一天重复发同一个文件不产生任何写入）
-    if let Some((w, c, m, live)) = existing {
-        if w == wave && c == cumulative && m == minutes && live == is_live {
+    if let Some((w, c, m, live, old_anchor, _)) = existing {
+        if w == wave && c == cumulative && m == minutes && live == is_live && old_anchor == anchor {
+            touch_daily_source_batch(tx, batch_id, person_id, biz_date).await?;
             return Ok(WriteOutcome::Unchanged);
         }
     }
@@ -2839,44 +3066,106 @@ struct PendingRow {
     batch_id: u64,
 }
 
-const ABSORB_EXISTING_DAY_SQL: &str =
-    "UPDATE daily_metric SET wave = ?, cumulative_wave = ?, minutes = ?, is_live = ?, \
-       anchor_id = COALESCE((SELECT anchor_id FROM account \
-                             WHERE person_id = ? AND is_primary = 1 LIMIT 1), anchor_id) \
-     WHERE person_id = ? AND biz_date = ?::date";
+fn pending_row_from_pg(r: sqlx::postgres::PgRow) -> PendingRow {
+    PendingRow {
+        id: read_u64(&r, "id").unwrap_or(0),
+        name: read_str(&r, "name"),
+        ident: read_str(&r, "douyin_no"),
+        biz_date: read_str(&r, "bd"),
+        wave: read_opt_i64(&r, "wave"),
+        cumulative_wave: read_opt_i64(&r, "cumulative_wave"),
+        minutes: read_opt_i64(&r, "minutes"),
+        is_live: r.try_get::<Option<i16>, _>("is_live").ok().flatten(),
+        batch_id: read_opt_u64(&r, "source_batch_id").unwrap_or(0),
+    }
+}
+
+/// `import_pending.douyin_no` 历史上混存过 anchor 与 douyin（表没有独立 anchor 列）。
+/// 补账时必须要求这个标识只属于当前 person；若同时撞到别人的 anchor/douyin，
+/// 宁可留在暂存区人工核对，也不能按调用时机补到错误主播。
+const PENDING_FOR_PERSON_UNIQUE_SQL: &str = "SELECT ip.id, ip.name, ip.douyin_no,
+       TO_CHAR(ip.biz_date, 'YYYY-MM-DD') AS bd,
+       ip.wave, ip.cumulative_wave, ip.minutes, ip.is_live, ip.source_batch_id
+     FROM import_pending ip
+     WHERE ip.absorbed_at IS NULL
+       AND (ip.douyin_no IN (SELECT a.douyin_no FROM account a
+                              WHERE a.person_id = ? AND a.douyin_no <> '')
+         OR ip.douyin_no IN (SELECT a.anchor_id FROM account a
+                              WHERE a.person_id = ? AND a.anchor_id <> '')
+         OR (ip.douyin_no = '' AND ip.claim_key IN (SELECT p.name FROM person p
+                                                     WHERE p.id = ? AND p.deleted_at IS NULL)))
+       AND NOT EXISTS (
+         SELECT 1 FROM account other
+          WHERE other.person_id <> ?
+            AND (other.anchor_id = ip.douyin_no
+              OR (ip.douyin_no <> '' AND other.douyin_no = ip.douyin_no))
+       )
+     ORDER BY ip.biz_date, ip.id";
+
+/// 暂存行是否比当天已有数据更新。source_batch_id 单调递增；旧数据没有批次号时
+/// 允许补账，避免历史暂存永远卡住。
+fn pending_has_source_batch(pending_batch_id: u64) -> bool {
+    pending_batch_id > 0
+}
+
+fn pending_batch_is_newer(pending_batch_id: u64, existing_batch_id: Option<i64>) -> bool {
+    if pending_batch_id == 0 {
+        // 调用这个函数时当天已经有一行数据。解绑留档 / 历史暂存没有批次号，
+        // 无法证明自己更新，绝不能覆盖现有行（无论现有行有没有 source）。
+        return false;
+    }
+    existing_batch_id.map_or(true, |existing| pending_batch_id as i64 > existing)
+}
 
 /// 把暂存区里「已经能对上号」的行补账进 daily_metric（建档 / 绑号 / 绑定审核通过后调用）。
 ///
 /// 命中条件：暂存行的号码出现在该主播的 account.douyin_no 或 account.anchor_id 里。
-/// 已有当日数据时按一人多号口径叠加（音浪求和、累计取最大、时长求和、开播取或），
-/// 不覆盖该主播其它账号已经导入的量；补账和标记 absorbed 在同一个事务里，避免重复补。
+/// 补账也遵守 2026-11-14 同日覆盖口径：先比较 source_batch_id，只有更新的暂存行才
+/// 走 `write_daily_row`；旧暂存只标记已处理，不再求和 / 覆盖新数据。
 /// 返回补账行数。写库不可用时返回 0（不阻塞建档本身）。
 pub async fn absorb_pending(st: &AppState, person_id: u64) -> anyhow::Result<u32> {
     let Some(pool) = st.writer.as_ref() else {
         return Ok(0);
     };
-    let rows = sqlx::query(&crate::pq::rewrite(dialect::PENDING_FOR_PERSON_SQL))
+    let candidate_rows = sqlx::query(&crate::pq::rewrite(PENDING_FOR_PERSON_UNIQUE_SQL))
         .bind(person_id as i64)
         .bind(person_id as i64)
         .bind(person_id as i64)
-        .map(|r: sqlx::postgres::PgRow| PendingRow {
-            id: read_u64(&r, "id").unwrap_or(0),
-            name: read_str(&r, "name"),
-            ident: read_str(&r, "douyin_no"),
-            biz_date: read_str(&r, "bd"),
-            wave: read_opt_i64(&r, "wave"),
-            cumulative_wave: read_opt_i64(&r, "cumulative_wave"),
-            minutes: read_opt_i64(&r, "minutes"),
-            is_live: r.try_get::<Option<i16>, _>("is_live").ok().flatten(),
-            batch_id: read_opt_u64(&r, "source_batch_id").unwrap_or(0),
-        })
+        .bind(person_id as i64)
+        .map(pending_row_from_pg)
         .fetch_all(pool)
         .await?;
-    if rows.is_empty() {
+    if candidate_rows.is_empty() {
         return Ok(0);
     }
 
+    // 先按 commit_import 同样的顺序加锁：业务日锁（排序）→ person 锁。
+    // 锁内重新读取 pending，避免“读到旧值后与并发导入交错”导致旧批次反向覆盖。
+    let mut locked_dates: Vec<String> = candidate_rows.iter().map(|r| r.biz_date.clone()).collect();
+    locked_dates.sort_unstable();
+    locked_dates.dedup();
+    let locked_date_set: HashSet<String> = locked_dates.iter().cloned().collect();
     let mut tx = pool.begin().await?;
+    for date in &locked_dates {
+        lock_import_scope(&mut tx, &format!("daily-import:{date}")).await?;
+    }
+    lock_import_scope(&mut tx, &format!("account-identity:{person_id}")).await?;
+    let rows: Vec<PendingRow> = sqlx::query(&crate::pq::rewrite(PENDING_FOR_PERSON_UNIQUE_SQL))
+        .bind(person_id as i64)
+        .bind(person_id as i64)
+        .bind(person_id as i64)
+        .bind(person_id as i64)
+        .map(pending_row_from_pg)
+        .fetch_all(&mut *tx)
+        .await?
+        .into_iter()
+        .filter(|r| locked_date_set.contains(&r.biz_date))
+        .collect();
+    if rows.is_empty() {
+        tx.commit().await?;
+        return Ok(0);
+    }
+
     let mut absorbed: u32 = 0;
     for p in &rows {
         let Some(date) = NaiveDate::parse_from_str(&p.biz_date, "%Y-%m-%d").ok() else {
@@ -2897,54 +3186,50 @@ pub async fn absorb_pending(st: &AppState, person_id: u64) -> anyhow::Result<u32
         if !claimed {
             continue;
         }
+        if !pending_has_source_batch(p.batch_id) {
+            // 解绑留档 / 历史无来源暂存只做审计，绝不写 daily_metric。
+            tracing::warn!(
+                pending_id = p.id,
+                person_id,
+                "暂存行无来源批次，已标记处理但不写日数据"
+            );
+            absorbed += 1;
+            continue;
+        }
         // 一行数值都没有（只有名字 + 号）：没有可写的指标，直接标记已认领即可
         let has_values = p.wave.is_some()
             || p.cumulative_wave.is_some()
             || p.minutes.is_some()
             || p.is_live.is_some();
         if has_values {
-            match existing_day_row(&mut tx, person_id, &p.biz_date).await? {
-                // 当日已有数据（可能是这个主播的另一个号）：叠加，不覆盖
-                Some((w, c, m, live)) => {
-                    let new_wave = w + p.wave.unwrap_or(0);
-                    let new_cum = c.max(p.cumulative_wave.unwrap_or(0));
-                    let new_min = m + p.minutes.unwrap_or(0);
-                    let new_live = live | p.is_live.unwrap_or(0);
-                    sqlx::query(&crate::pq::rewrite(ABSORB_EXISTING_DAY_SQL))
-                        .bind(new_wave)
-                        .bind(new_cum)
-                        .bind(new_min)
-                        .bind(new_live)
-                        .bind(person_id as i64)
-                        .bind(person_id as i64)
-                        .bind(&p.biz_date)
-                        .execute(&mut *tx)
-                        .await?;
-                }
-                // 当日还没有数据：按正常导入口径写（累计差分 / 基线日语义都在 write_daily_row 里）
-                None => {
-                    let resolved = ResolvedRow {
-                        raw: ImportRow {
-                            name: p.name.clone(),
-                            douyin_no: Some(p.ident.clone()),
-                            anchor_id: None,
-                            wave: p.wave.map(|v| v as f64),
-                            cumulative_wave: p.cumulative_wave.map(|v| v as f64),
-                            minutes: p.minutes.map(|v| v as f64),
-                            is_live: p.is_live.map(|v| v != 0),
-                            err: None,
-                        },
-                        person_id: Some(person_id),
-                        name: p.name.clone(),
-                        matched: true,
-                        team_conflict: None,
-                        candidates: Vec::new(),
-                        matched_by_douyin: true,
-                    };
-                    write_daily_row(&mut tx, p.batch_id as i64, &p.biz_date, date, &resolved)
-                        .await?;
+            let existing = existing_day_row(&mut tx, person_id, &p.biz_date).await?;
+            if let Some((_, _, _, _, _, existing_batch_id)) = existing {
+                if !pending_batch_is_newer(p.batch_id, existing_batch_id) {
+                    // 旧暂存已经被更新的同人同日数据覆盖，标记已处理即可，不能反向覆盖。
+                    absorbed += 1;
+                    continue;
                 }
             }
+            let resolved = ResolvedRow {
+                raw: ImportRow {
+                    name: p.name.clone(),
+                    douyin_no: Some(p.ident.clone()),
+                    anchor_id: None,
+                    wave: p.wave.map(|v| v as f64),
+                    cumulative_wave: p.cumulative_wave.map(|v| v as f64),
+                    minutes: p.minutes.map(|v| v as f64),
+                    is_live: p.is_live.map(|v| v != 0),
+                    err: None,
+                },
+                person_id: Some(person_id),
+                name: p.name.clone(),
+                matched: true,
+                team_conflict: None,
+                identity_conflict: None,
+                candidates: Vec::new(),
+                matched_by_douyin: true,
+            };
+            write_daily_row(&mut tx, p.batch_id as i64, &p.biz_date, date, &resolved).await?;
         }
         absorbed += 1;
     }
@@ -2986,6 +3271,24 @@ async fn absorb_pending_best_effort(st: &AppState, person_id: u64, ctx: &str) ->
    monthly_wave / monthly_duration —— 与按日补账同一个触发时机、同一套「不阻塞」语义。
 */
 
+/// 按日未匹配行 → 暂存区。后发文件没带某列时保留该列旧值；显式 0 不是 NULL，
+/// 仍会覆盖。`wave` / `cumulative_wave` 是一条快照组，两者都没带才整体保留，
+/// 避免拼出“前一份累计 + 后一份当日音浪”这种不存在的组合。
+const PENDING_DAY_UPSERT_SQL: &str = "INSERT INTO import_pending
+         (name, douyin_no, claim_key, biz_date, wave, cumulative_wave, minutes, is_live, source_batch_id)
+     VALUES (?,?,?,?::date,?,?,?,?,?)
+     ON CONFLICT (claim_key, biz_date) WHERE claim_key <> '' DO UPDATE SET
+         name = EXCLUDED.name,
+         wave = COALESCE(EXCLUDED.wave, import_pending.wave),
+         cumulative_wave = CASE
+             WHEN EXCLUDED.wave IS NULL AND EXCLUDED.cumulative_wave IS NULL
+             THEN import_pending.cumulative_wave
+             ELSE EXCLUDED.cumulative_wave
+         END,
+         minutes = COALESCE(EXCLUDED.minutes, import_pending.minutes),
+         is_live = COALESCE(EXCLUDED.is_live, import_pending.is_live),
+         source_batch_id = EXCLUDED.source_batch_id";
+
 /// 月度未匹配行 → 月度暂存区（重导同月同号按最新值覆盖，不翻倍）。
 ///
 /// 注意 **不重置** absorbed_person_id / absorbed_at：已补账的行再重导只更新数值，
@@ -2995,7 +3298,9 @@ const PENDING_MONTH_UPSERT_SQL: &str = "INSERT INTO import_pending_month
          (name, douyin_no, claim_key, period, wave, minutes, source_batch_id)
      VALUES (?,?,?,?,?,?,?)
      ON CONFLICT (claim_key, period) WHERE claim_key <> '' DO UPDATE SET
-         name = EXCLUDED.name, wave = EXCLUDED.wave, minutes = EXCLUDED.minutes,
+         name = EXCLUDED.name,
+         wave = COALESCE(EXCLUDED.wave, import_pending_month.wave),
+         minutes = COALESCE(EXCLUDED.minutes, import_pending_month.minutes),
          source_batch_id = EXCLUDED.source_batch_id";
 
 /// 月度暂存补账 · 音浪：**叠加**而非覆盖。
@@ -3321,25 +3626,178 @@ pub async fn import_batches(State(st): State<ArcState>) -> ApiResult {
 pub struct DayQuery {
     #[serde(rename = "bizDate")]
     pub biz_date: String,
-    pub team: String,
+    /// 不传 = auto（全部团别）；显式 male / female / auto 行为不变。
+    pub team: Option<String>,
+    /// 要删除的指标：不传 = wave,minutes（兼容旧调用）；只认
+    /// `wave` / `minutes`，用英文逗号分隔，例如 `metrics=wave,minutes`。
+    /// 不支持重复 query 参数（`metrics=wave&metrics=minutes`）。
+    pub metrics: Option<String>,
 }
 
-/// DELETE /api/admin/import/day?bizDate=&team=：删除某天某团已入库的音浪数据
-/// 只删 daily_metric 对应日/团的数据，并同步清理导入批次记录，便于重新导入。
+/// 按日删除的团别口径：缺省 / 空值 / auto 系列值都按全部团别处理。
+/// 返回 `(响应里的规范 team, 是否全部团别)`；非法值保持旧接口的 400。
+fn parse_day_team(raw: Option<&str>) -> anyhow::Result<(String, bool)> {
+    let raw = raw.unwrap_or_default().trim();
+    let auto = is_auto_team(raw);
+    if !auto {
+        valid_team(raw)?;
+    }
+    Ok((
+        if auto {
+            "auto".to_string()
+        } else {
+            raw.to_string()
+        },
+        auto,
+    ))
+}
+
+/// 按日删除所选指标。`metrics` 省略时两项都选，保持旧接口「整行删除」语义。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DayMetrics {
+    wave: bool,
+    minutes: bool,
+}
+
+impl DayMetrics {
+    const BOTH: Self = Self {
+        wave: true,
+        minutes: true,
+    };
+    #[cfg(test)]
+    const WAVE_ONLY: Self = Self {
+        wave: true,
+        minutes: false,
+    };
+    #[cfg(test)]
+    const MINUTES_ONLY: Self = Self {
+        wave: false,
+        minutes: true,
+    };
+
+    /// 解析 query 参数。未传 → 两项；显式空值 / 空项 / 未知值 → 400。
+    /// 重复值允许（`wave,wave` 仍是只删音浪），方便机器人拼参数。
+    fn from_query(raw: Option<&str>) -> anyhow::Result<Self> {
+        let Some(raw) = raw else {
+            return Ok(Self::BOTH);
+        };
+        let raw = raw.trim();
+        if raw.is_empty() {
+            anyhow::bail!("metrics 不能为空；合法值是 wave / minutes（英文逗号分隔）");
+        }
+        let mut out = Self {
+            wave: false,
+            minutes: false,
+        };
+        for item in raw.split(',') {
+            match item.trim() {
+                "wave" => out.wave = true,
+                "minutes" => out.minutes = true,
+                "" => {
+                    anyhow::bail!("metrics 不能包含空项；合法值是 wave / minutes（英文逗号分隔）")
+                }
+                other => anyhow::bail!(
+                    "未知的指标：{other}（metrics 只认 wave / minutes，英文逗号分隔）"
+                ),
+            }
+        }
+        Ok(out)
+    }
+
+    fn both(self) -> bool {
+        self.wave && self.minutes
+    }
+
+    fn wire_values(self) -> Vec<&'static str> {
+        let mut out = Vec::with_capacity(2);
+        if self.wave {
+            out.push("wave");
+        }
+        if self.minutes {
+            out.push("minutes");
+        }
+        out
+    }
+
+    fn label(self) -> &'static str {
+        match (self.wave, self.minutes) {
+            (true, true) => "音浪和时长",
+            (true, false) => "音浪",
+            (false, true) => "时长",
+            (false, false) => unreachable!("from_query 至少会选一种指标"),
+        }
+    }
+}
+
+/* 只删一个指标时保留 daily_metric 行；累计 / 可靠性字段必须一起归零。
+`wave_reliable=0` / `minutes_reliable=0` 表示该指标当前没有可信数据，
+`recomputed_at=now()` 留一条最近重置时间，避免后续累计差分继续引用旧快照。
+团队过滤用空串代表 auto，一条 SQL 同时覆盖全团和指定团。 */
+const DAY_WAVE_RESET_SQL: &str = "UPDATE daily_metric d SET \
+    wave = 0, cumulative_wave = 0, prev_snapshot_date = NULL, \
+    wave_span = 1, wave_reliable = 0, recomputed_at = now() \
+    WHERE d.biz_date = ?::date \
+      AND (? = '' OR EXISTS (SELECT 1 FROM person p WHERE p.id = d.person_id AND p.gender = ?))";
+
+const DAY_MINUTES_RESET_SQL: &str = "UPDATE daily_metric d SET \
+    minutes = 0, cumulative_minutes = 0, minutes_span = 1, minutes_reliable = 0, \
+    is_live = 0, recomputed_at = now() \
+    WHERE d.biz_date = ?::date \
+      AND (? = '' OR EXISTS (SELECT 1 FROM person p WHERE p.id = d.person_id AND p.gender = ?))";
+
+/* 暂存区不是 daily_metric：只清所选指标对应的列，不删除 pending 行。
+另一项指标和认领信息保留，后续绑定主播时只会补回尚未删除的数据。 */
+const DAY_PENDING_WAVE_RESET_SQL: &str = "UPDATE import_pending p SET \
+    wave = NULL, cumulative_wave = NULL, updated_at = now() \
+    FROM import_batch b \
+    WHERE p.source_batch_id = b.id AND p.absorbed_at IS NULL \
+      AND b.source <> 'admin-import-month' AND b.biz_date = ?::date \
+      AND (? = '' OR b.team = ?) \
+      AND (p.wave IS NOT NULL OR p.cumulative_wave IS NOT NULL)";
+
+const DAY_PENDING_MINUTES_RESET_SQL: &str = "UPDATE import_pending p SET \
+    minutes = NULL, is_live = NULL, updated_at = now() \
+    FROM import_batch b \
+    WHERE p.source_batch_id = b.id AND p.absorbed_at IS NULL \
+      AND b.source <> 'admin-import-month' AND b.biz_date = ?::date \
+      AND (? = '' OR b.team = ?) \
+      AND (p.minutes IS NOT NULL OR p.is_live IS NOT NULL)";
+
+/// DELETE /api/admin/import/day?bizDate=&team=[&metrics=wave,minutes]
+///
+/// - 不传 `metrics`：兼容旧调用，删除整行 daily_metric（音浪 + 时长）；
+/// - `metrics=wave,minutes`：同上，并清理贡献表、未认领暂存行、按日导入批次；
+/// - `metrics=wave` / `metrics=minutes`：只重置所选指标及累计 / 可靠性字段，
+///   保留 daily_metric 行和 import_batch，只清暂存行里对应的指标列。
 pub async fn import_day_delete(
     State(st): State<ArcState>,
     axum::extract::Query(q): axum::extract::Query<DayQuery>,
 ) -> ApiResult {
     require_local(&st)?;
-    let team = q.team.trim();
-    let auto_team = is_auto_team(team);
-    if !auto_team {
-        valid_team(team)?;
-    }
+    let selected = DayMetrics::from_query(q.metrics.as_deref())
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    let (team, auto_team) = parse_day_team(q.team.as_deref())?;
     valid_biz_date(&q.biz_date)?;
     let pool = writer_pool(&st)?;
     let mut tx = pool.begin().await?;
-    let metrics = if auto_team {
+    // 与 commit_import 共用同一把业务日锁：删除和导入不能交错提交，否则
+    // “删除成功但旧数据仍在”或 pending/batch 残留会取决于事务先后。
+    lock_import_scope(&mut tx, &format!("daily-import:{}", q.biz_date)).await?;
+    let metrics = if !selected.both() {
+        let team_filter = if auto_team { "" } else { team.as_str() };
+        let sql = if selected.wave {
+            DAY_WAVE_RESET_SQL
+        } else {
+            DAY_MINUTES_RESET_SQL
+        };
+        sqlx::query(&crate::pq::rewrite(sql))
+            .bind(&q.biz_date)
+            .bind(team_filter)
+            .bind(team_filter)
+            .execute(&mut *tx)
+            .await?
+            .affected()
+    } else if auto_team {
         sqlx::query(&crate::pq::rewrite(
             "DELETE FROM daily_metric WHERE TO_CHAR(biz_date, 'YYYY-MM-DD') = ?",
         ))
@@ -3356,88 +3814,109 @@ pub async fn import_day_delete(
                AND TO_CHAR(d.biz_date, 'YYYY-MM-DD') = ? AND p.gender = ?",
         ))
         .bind(&q.biz_date)
-        .bind(team)
+        .bind(team.as_str())
         .execute(&mut *tx)
         .await?
         .affected()
     };
-    // 多批次贡献表也按日期清掉；否则删日后重导会把已删批次再次累计回来。
-    // 旧库没跑 048 时跳过，不影响原有删日功能。
-    let has_contrib: Option<i32> = sqlx::query_scalar(
-        "SELECT 1 FROM information_schema.tables \
-         WHERE table_schema='public' AND table_name='daily_import_contrib' LIMIT 1",
-    )
-    .fetch_optional(&mut *tx)
-    .await?;
-    if has_contrib.is_some() {
-        if auto_team {
+    let (pending, batches) = if selected.both() {
+        // 048 贡献表曾用于同日多批次求和；2026-11-14 起导入改为后一次覆盖前一次，
+        // 这里仍按日期清掉历史贡献，避免旧数据留在库里造成审计困惑。
+        let has_contrib: Option<i32> = sqlx::query_scalar(
+            "SELECT 1 FROM information_schema.tables \
+             WHERE table_schema='public' AND table_name='daily_import_contrib' LIMIT 1",
+        )
+        .fetch_optional(&mut *tx)
+        .await?;
+        if has_contrib.is_some() {
+            if auto_team {
+                sqlx::query(&crate::pq::rewrite(
+                    "DELETE FROM daily_import_contrib WHERE biz_date = ?::date",
+                ))
+                .bind(&q.biz_date)
+                .execute(&mut *tx)
+                .await?;
+            } else {
+                sqlx::query(&crate::pq::rewrite(
+                    "DELETE FROM daily_import_contrib c USING person p \
+                     WHERE c.person_id = p.id AND c.biz_date = ?::date AND p.gender = ?",
+                ))
+                .bind(&q.biz_date)
+                .bind(team.as_str())
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
+
+        // 同一批导入产生的未认领暂存行也一起删：否则删日后重新绑号会把旧数据补回来。
+        let pending = if auto_team {
             sqlx::query(&crate::pq::rewrite(
-                "DELETE FROM daily_import_contrib WHERE biz_date = ?::date",
+                "DELETE FROM import_pending p USING import_batch b \
+                 WHERE p.source_batch_id = b.id AND p.absorbed_at IS NULL \
+                   AND b.source <> 'admin-import-month' AND b.biz_date = ?::date",
             ))
             .bind(&q.biz_date)
             .execute(&mut *tx)
-            .await?;
+            .await?
+            .affected()
         } else {
             sqlx::query(&crate::pq::rewrite(
-                "DELETE FROM daily_import_contrib c USING person p \
-                 WHERE c.person_id = p.id AND c.biz_date = ?::date AND p.gender = ?",
+                "DELETE FROM import_pending p USING import_batch b \
+                 WHERE p.source_batch_id = b.id AND p.absorbed_at IS NULL \
+                   AND b.source <> 'admin-import-month' AND b.biz_date = ?::date AND b.team = ?",
             ))
             .bind(&q.biz_date)
-            .bind(team)
+            .bind(team.as_str())
             .execute(&mut *tx)
-            .await?;
-        }
-    }
+            .await?
+            .affected()
+        };
 
-    // 同一批导入产生的未认领暂存行也一起删：否则删日后重新绑号会把旧数据补回来。
-    let pending = if auto_team {
-        sqlx::query(&crate::pq::rewrite(
-            "DELETE FROM import_pending p USING import_batch b \
-             WHERE p.source_batch_id = b.id AND p.absorbed_at IS NULL \
-               AND b.source <> 'admin-import-month' AND b.biz_date = ?::date",
-        ))
-        .bind(&q.biz_date)
-        .execute(&mut *tx)
-        .await?
-        .affected()
+        // 只删按日导入的批次：月度时长批次也用当月 1 号当 biz_date 占位，
+        // 少了 source 过滤，删「某一天」会连坐删掉整月的月报审计记录（审计栈断裂）。
+        let batches = if auto_team {
+            sqlx::query(&crate::pq::rewrite(
+                "DELETE FROM import_batch WHERE source <> 'admin-import-month' AND biz_date = ?::date",
+            ))
+            .bind(&q.biz_date)
+            .execute(&mut *tx)
+            .await?
+            .affected()
+        } else {
+            sqlx::query(&crate::pq::rewrite(
+                "DELETE FROM import_batch WHERE source <> 'admin-import-month' AND biz_date = ?::date AND team = ?",
+            ))
+            .bind(&q.biz_date)
+            .bind(team.as_str())
+            .execute(&mut *tx)
+            .await?
+            .affected()
+        };
+        (pending, batches)
     } else {
-        sqlx::query(&crate::pq::rewrite(
-            "DELETE FROM import_pending p USING import_batch b \
-             WHERE p.source_batch_id = b.id AND p.absorbed_at IS NULL \
-               AND b.source <> 'admin-import-month' AND b.biz_date = ?::date AND b.team = ?",
-        ))
-        .bind(&q.biz_date)
-        .bind(team)
-        .execute(&mut *tx)
-        .await?
-        .affected()
-    };
-
-    // 只删按日导入的批次：月度时长批次也用当月 1 号当 biz_date 占位，
-    // 少了 source 过滤，删「某一天」会连坐删掉整月的月报审计记录（审计栈断裂）。
-    let batches = if auto_team {
-        sqlx::query(&crate::pq::rewrite(
-            "DELETE FROM import_batch WHERE source <> 'admin-import-month' AND biz_date = ?::date",
-        ))
-        .bind(&q.biz_date)
-        .execute(&mut *tx)
-        .await?
-        .affected()
-    } else {
-        sqlx::query(&crate::pq::rewrite(
-            "DELETE FROM import_batch WHERE source <> 'admin-import-month' AND biz_date = ?::date AND team = ?",
-        ))
-        .bind(&q.biz_date)
-        .bind(team)
-        .execute(&mut *tx)
-        .await?
-        .affected()
+        let team_filter = if auto_team { "" } else { team.as_str() };
+        let sql = if selected.wave {
+            DAY_PENDING_WAVE_RESET_SQL
+        } else {
+            DAY_PENDING_MINUTES_RESET_SQL
+        };
+        let pending = sqlx::query(&crate::pq::rewrite(sql))
+            .bind(&q.biz_date)
+            .bind(team_filter)
+            .bind(team_filter)
+            .execute(&mut *tx)
+            .await?
+            .affected();
+        // 单选指标不能删批次：另一项指标可能仍由这批导入提供，删掉审计会让其来源断链。
+        (pending, 0)
     };
     tx.commit().await?;
+    st.clear_cache();
+    crate::push::clear_daily_image_cache();
     crate::events::emit(
         crate::events::SCOPE_IMPORT,
         format!(
-            "已删除「{}」{} 的音浪数据（{} 条）",
+            "已删除「{}」{} 的{}数据（{} 条）",
             q.biz_date,
             if auto_team {
                 "全部团别"
@@ -3446,12 +3925,23 @@ pub async fn import_day_delete(
             } else {
                 "女团"
             },
+            selected.label(),
             metrics
         ),
     );
-    Ok(Json(
-        json!({ "ok": true, "metrics": metrics, "batches": batches, "pending": pending }),
-    ))
+    Ok(Json(json!({
+        "ok": true,
+        "bizDate": q.biz_date,
+        "team": team,
+        // 兼容旧前端：始终是本次受影响/删除的 daily_metric 行数。
+        "metrics": metrics,
+        // 单选只清指标、不删行；deletedRows 只报告真正被整行删除的数量。
+        "deletedRows": if selected.both() { metrics } else { 0 },
+        "affectedRows": metrics,
+        "selectedMetrics": selected.wire_values(),
+        "batches": batches,
+        "pending": pending,
+    })))
 }
 
 /* ------------------------ 月度指标导入（按平台月报） ------------------------ */
@@ -3657,7 +4147,7 @@ pub async fn import_month_preview(
     )?;
     let ctx = load_match_ctx(&st).await?;
     let aliases = merged_aliases(&st).await;
-    let resolved: Vec<ResolvedRow> = raw_rows
+    let mut resolved: Vec<ResolvedRow> = raw_rows
         .iter()
         .map(|r| {
             resolve_row(
@@ -3672,6 +4162,7 @@ pub async fn import_month_preview(
             )
         })
         .collect();
+    mark_duplicate_import_anchor_conflicts(&mut resolved);
     let merged = merge_rows_by_person(&resolved);
     let matched = merged.iter().filter(|r| r.matched).count();
     // 勾选前的「文件里到底有什么」：前端据此自动勾选指标（文件只有时长就只勾时长）。
@@ -3832,10 +4323,11 @@ pub async fn commit_month_metrics(
     let ctx = load_match_ctx(st).await?;
     let aliases = merged_aliases(st).await;
     let team_filter = if auto_team { None } else { Some(team) };
-    let resolved: Vec<ResolvedRow> = rows
+    let mut resolved: Vec<ResolvedRow> = rows
         .iter()
         .map(|r| resolve_row(r, &ctx, &aliases, team_filter))
         .collect();
+    mark_duplicate_import_anchor_conflicts(&mut resolved);
     // 一人多号（一个主播挂 2~3 个抖音号）→ 整月时长 / 音浪各自求和，与按日导入的合并口径一致
     let merged = merge_rows_by_person(&resolved);
     // 全员同值防御（同按日导入口径）：拿错文件 / 勾错列时早点拒，别把 35 这种比例值当整月音浪写进去
@@ -3846,6 +4338,10 @@ pub async fn commit_month_metrics(
     let mut pending_rows: Vec<&ResolvedRow> = Vec::new();
     let mut skipped: Vec<String> = Vec::new();
     for r in &merged {
+        if let Some(reason) = &r.identity_conflict {
+            failures.push(json!({ "name": r.raw.name, "reason": reason }));
+            continue;
+        }
         if !r.matched {
             /* 2026-10-18「先有数据后绑定」：月度未匹配行不再直接丢弃 ——
             有号的按号、只有艺名的按名落 import_pending_month（按 period 暂存，不摊到某一天），
@@ -3934,14 +4430,7 @@ pub async fn commit_month_metrics(
         .filter_map(|r| r.person_id.map(|pid| pid as i64))
         .collect();
     let current_minutes = if metrics.minutes {
-        month_existing_values(
-            &mut tx,
-            "monthly_duration",
-            "minutes",
-            period,
-            &person_ids,
-        )
-        .await?
+        month_existing_values(&mut tx, "monthly_duration", "minutes", period, &person_ids).await?
     } else {
         HashMap::new()
     };
@@ -4763,8 +5252,8 @@ pub async fn unbind_account(
         let (n, sum) = snap;
         if n > 0 {
             // 一行汇总快照（每天不展开）：解除绑定的事实 + 快照条数与合计，够运营对账。
-            // import_pending 以 douyin_no 认领（bind_account 后 absorb 自动补进 daily_metric
-            // 的是暂存行里的 wave 值）；这里 wave 写合计，单日快照明细仍在 wave_snapshot 表里。
+            // source_batch_id 故意写 NULL：absorb_pending 只把它标记为已处理，绝不把它
+            // 当成某一天的日数据回写 daily_metric；单日明细仍在 wave_snapshot 表里。
             let _ = sqlx::query(&crate::pq::rewrite(
                 "INSERT INTO import_pending
                      (name, douyin_no, claim_key, biz_date, wave, source_batch_id)
@@ -5964,7 +6453,19 @@ mod tests {
             mk_import_row(Some(100.0)),
             mk_import_row(Some(100.0)),
         ];
-        assert!(ensure_not_all_same_wave(&rows).is_err(), "全员同值应拒绝");
+        assert!(
+            ensure_not_all_same_wave(&rows).is_err(),
+            "全员相同的非 0 值应拒绝"
+        );
+        let all_zero = vec![
+            mk_import_row(Some(0.0)),
+            mk_import_row(Some(0.0)),
+            mk_import_row(Some(0.0)),
+        ];
+        assert!(
+            ensure_not_all_same_wave(&all_zero).is_ok(),
+            "全员 0 是合法日期数据"
+        );
         let rows = vec![
             mk_import_row(Some(100.0)),
             mk_import_row(Some(200.0)),
@@ -6089,6 +6590,84 @@ mod tests {
         assert!(pick_wxbot(&[], 7, "阿猫").is_none());
     }
 
+    #[test]
+    fn identity_gate_checks_anchor_owner_before_douyin() {
+        // 本人旧抖音号再怎么命中，也不能遮住“新 anchor 已被别人占用”。
+        assert!(!can_apply_import_anchor(
+            "new-anchor",
+            "old-douyin",
+            7,
+            Some(8)
+        ));
+        assert!(can_apply_import_anchor(
+            "new-anchor",
+            "old-douyin",
+            7,
+            Some(7)
+        ));
+        assert!(can_apply_import_anchor("new-anchor", "old-douyin", 7, None));
+        assert!(
+            !can_apply_import_anchor("dy-only", "dy-only", 7, None),
+            "csvparse 的抖音号顶替 anchor 不能新建主号"
+        );
+
+        // 同一 import 先给 A 落了新 anchor，B 再声称同一 anchor 时必须被挡住。
+        let mut owners = HashMap::new();
+        assert!(can_apply_import_anchor(
+            "shared-anchor",
+            "dy-a",
+            7,
+            owners.get("shared-anchor").copied()
+        ));
+        owners.insert("shared-anchor", 7u64);
+        assert!(!can_apply_import_anchor(
+            "shared-anchor",
+            "dy-b",
+            8,
+            owners.get("shared-anchor").copied()
+        ));
+    }
+
+    #[test]
+    fn identity_lock_person_ids_are_sorted_and_deduped() {
+        let a = row(Some(8), Some(1.0), None, None);
+        let b = row(Some(7), Some(2.0), None, None);
+        let c = row(Some(8), Some(3.0), None, None);
+        let d = row(None, Some(4.0), None, None);
+        assert_eq!(
+            identity_lock_person_ids(&[&a, &b, &c, &d]),
+            vec![7, 8],
+            "锁顺序必须稳定，且不锁未匹配行"
+        );
+
+        let mut x = row(Some(7), Some(1.0), None, None);
+        x.raw.anchor_id = Some("anchor-x".into());
+        x.raw.douyin_no = Some("dy-z".into());
+        let mut y = row(Some(8), Some(2.0), None, None);
+        y.raw.anchor_id = Some("anchor-y".into());
+        y.raw.douyin_no = Some("dy-a".into());
+        let mut z = row(Some(7), Some(3.0), None, None);
+        z.raw.anchor_id = Some("anchor-z".into());
+        z.raw.douyin_no = Some("dy-z".into());
+        assert_eq!(
+            identity_lock_douyin_nos(&[&x, &y, &z]),
+            vec!["dy-a".to_string(), "dy-z".to_string()],
+            "抖音号锁也要排序去重"
+        );
+    }
+
+    #[test]
+    fn identity_sql_separates_anchor_and_douyin_owner_checks() {
+        assert!(IMPORT_ANCHOR_OWNER_SQL.contains("WHERE anchor_id = ?"));
+        assert!(!IMPORT_ANCHOR_OWNER_SQL.contains(" OR "));
+        assert!(!IMPORT_ANCHOR_OWNER_SQL.contains("douyin_no"));
+        assert!(IMPORT_DOUYIN_OWNER_SQL.contains("douyin_no = ?"));
+        assert!(IMPORT_DOUYIN_OWNER_SQL.contains("person_id <> ?"));
+        assert!(IMPORT_IDENTITY_UPSERT_SQL.contains("ON CONFLICT (anchor_id)"));
+        assert!(IMPORT_IDENTITY_UPSERT_SQL.contains("WHERE account.person_id = EXCLUDED.person_id"));
+        assert!(SYNC_DAILY_ANCHOR_SQL.contains("anchor_id IS DISTINCT FROM ?"));
+    }
+
     /* ---------------- 一人多号音浪合并（2026-10-10） ---------------- */
 
     fn row(
@@ -6112,6 +6691,7 @@ mod tests {
             name: "某人".into(),
             matched: pid.is_some(),
             team_conflict: None,
+            identity_conflict: None,
             candidates: Vec::new(),
             matched_by_douyin: true,
         }
@@ -6180,6 +6760,7 @@ mod tests {
             person_id: pid,
             matched: pid.is_some(),
             team_conflict: conflict.map(str::to_string),
+            identity_conflict: None,
             candidates: Vec::new(),
             matched_by_douyin: false,
         }
@@ -6231,13 +6812,39 @@ mod tests {
     }
 
     #[test]
-    fn row_ident_prefers_douyin_no_then_anchor_id() {
+    fn identity_conflict_blocks_write_even_when_anchor_wins() {
+        let mut r = resolved(raw_row("狼澈", Some("dy-b"), Some(1.0)), Some(7), None);
+        r.identity_conflict = Some("主播 ID 命中 A，抖音号命中 B；两列归属冲突，本行不导入".into());
+        assert!(matches!(classify_row(&r), RowClass::IdentityConflict(_)));
+    }
+
+    #[test]
+    fn clean_import_ids_rejects_douyin_as_fallback_anchor() {
+        let (anchor, douyin) = clean_import_ids(Some("dy-1"), Some("dy-1"));
+        assert_eq!(anchor, None, "csvparse 用抖音号顶替的 anchor 不能建主号");
+        assert_eq!(douyin.as_deref(), Some("dy-1"));
+
+        let (anchor, douyin) = clean_import_ids(Some("0"), Some("账号已注销"));
+        assert_eq!(anchor, None);
+        assert_eq!(douyin, None);
+
+        let (anchor, douyin) = clean_import_ids(Some("anchor-1"), Some("dy-1"));
+        assert_eq!(anchor.as_deref(), Some("anchor-1"));
+        assert_eq!(douyin.as_deref(), Some("dy-1"));
+    }
+
+    #[test]
+    fn row_ident_prefers_anchor_id_then_douyin_no() {
         let mut raw = raw_row("某人", Some(" dy-01 "), Some(1.0));
         raw.anchor_id = Some("anchor-9".into());
-        assert_eq!(row_ident(&raw).as_deref(), Some("dy-01"));
-        raw.douyin_no = None;
         assert_eq!(row_ident(&raw).as_deref(), Some("anchor-9"));
         raw.anchor_id = None;
+        assert_eq!(row_ident(&raw).as_deref(), Some("dy-01"));
+        raw.douyin_no = None;
+        assert!(row_ident(&raw).is_none());
+        // 注销占位值不是可用身份标识
+        raw.anchor_id = Some("0".into());
+        raw.douyin_no = Some("账号已注销".into());
         assert!(row_ident(&raw).is_none());
     }
 
@@ -6246,6 +6853,21 @@ mod tests {
         let raw = raw_row("未来主播", None, Some(1.0));
         assert_eq!(row_claim_key(&raw).as_deref(), Some("未来主播"));
         assert_eq!(row_ident(&raw), None);
+    }
+
+    #[test]
+    fn monthly_parser_cleans_ids_and_drops_cancelled_rows() {
+        let cancelled = "主播ID,主播昵称,抖音号,总音浪,开播有效时长\n                         0,账号已注销,账号已注销,-,-\n";
+        assert!(
+            parse_month_metrics_text(cancelled).is_empty(),
+            "注销占位行不能生成假 pending"
+        );
+
+        let ids = "主播昵称,抖音号,总音浪\n临时主播,dy-only,100\n";
+        let rows = parse_month_metrics_text(ids);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].douyin_no.as_deref(), Some("dy-only"));
+        assert_eq!(rows[0].anchor_id, None, "抖音号不能冒充主播 ID");
     }
 
     /* ---------------- 月度指标导入（2026-10-10 时长；2026-10-16 起音浪也按月） ---------------- */
@@ -6293,6 +6915,33 @@ mod tests {
     }
 
     /* ---------------- 月度暂存补账（042，2026-10-18「先有数据后绑定」） ---------------- */
+
+    #[test]
+    fn pending_upserts_preserve_missing_metric_columns() {
+        for sql in [PENDING_DAY_UPSERT_SQL, PENDING_MONTH_UPSERT_SQL] {
+            assert!(
+                sql.contains("wave = COALESCE(EXCLUDED.wave"),
+                "缺音浪列必须保旧值：{sql}"
+            );
+            assert!(
+                sql.contains("minutes = COALESCE(EXCLUDED.minutes"),
+                "缺时长列必须保旧值：{sql}"
+            );
+            assert!(
+                !sql.contains("wave = EXCLUDED.wave"),
+                "无条件覆盖会把另一份文件的音浪清空：{sql}"
+            );
+        }
+        assert!(
+            PENDING_DAY_UPSERT_SQL
+                .contains("EXCLUDED.wave IS NULL AND EXCLUDED.cumulative_wave IS NULL"),
+            "音浪 / 累计必须作为快照组继承"
+        );
+        assert!(
+            PENDING_DAY_UPSERT_SQL.contains("is_live = COALESCE(EXCLUDED.is_live"),
+            "缺开播列不能把已有开播状态清空"
+        );
+    }
 
     /// 月度暂存的写入 SQL 必须按 (claim_key, period) 幂等覆盖，且**不能**把
     /// absorbed_* 标记重置 —— 已补账的行若在重导时被「复活」，下一次 absorb 会把
@@ -6354,17 +7003,32 @@ mod tests {
         );
     }
 
-    /// 暂存补账遇到当天已有 0 值行时，必须把 anchor_id 切到当前主号；
-    /// 否则总音浪正确，但 /my/accounts 的主号分支会漏掉这些日行。
+    /// 暂存补账不能反向覆盖当天更新的数据：只有 pending 的 source_batch_id
+    /// 比 daily_metric 更大时才走 write_daily_row；旧批次只标记处理完。
     #[test]
-    fn daily_pending_absorb_repairs_anchor_on_existing_day() {
-        assert!(ABSORB_EXISTING_DAY_SQL.contains("anchor_id = COALESCE"));
-        assert!(ABSORB_EXISTING_DAY_SQL.contains("is_primary = 1"));
+    fn daily_pending_absorb_only_applies_newer_batch() {
+        assert!(!pending_has_source_batch(0));
+        assert!(pending_has_source_batch(1));
+        assert!(TOUCH_DAILY_SOURCE_BATCH_SQL.contains("source_batch_id = ?"));
+        assert!(PENDING_FOR_PERSON_UNIQUE_SQL.contains("NOT EXISTS"));
+        assert!(PENDING_FOR_PERSON_UNIQUE_SQL.contains("other.person_id <> ?"));
         assert_eq!(
-            crate::pq::rewrite(ABSORB_EXISTING_DAY_SQL)
+            crate::pq::rewrite(PENDING_FOR_PERSON_UNIQUE_SQL)
                 .matches('$')
                 .count(),
-            7
+            4
+        );
+        assert!(pending_batch_is_newer(11, Some(10)));
+        assert!(pending_batch_is_newer(11, None));
+        assert!(!pending_batch_is_newer(10, Some(11)));
+        assert!(!pending_batch_is_newer(10, Some(10)));
+        assert!(
+            !pending_batch_is_newer(0, Some(11)),
+            "无批次号的解绑留档 / 历史数据不能覆盖 sourced 新数据"
+        );
+        assert!(
+            !pending_batch_is_newer(0, None),
+            "已有当天行时，无批次旧暂存也不能覆盖"
         );
     }
 
@@ -6661,9 +7325,9 @@ mod tests {
         );
     }
 
-    /// 台账账号可能只有采集 ID（没有抖音号）：文件里两列都给时，抖音号没命中要用采集 ID 兜住。
+    /// 主播 ID 是唯一值：两列都给且分别命中不同人时，按主播 ID 归属。
     #[test]
-    fn resolve_row_tries_douyin_then_anchor_id() {
+    fn resolve_row_prefers_anchor_id_over_douyin_no() {
         let ctx = MatchCtx {
             streamers: vec![LocalStreamer {
                 id: 7,
@@ -6677,31 +7341,56 @@ mod tests {
         let mut raw = raw_row("狼澈🎤🎹", Some("63665387875"), Some(1.0));
         raw.anchor_id = Some("2262157006222251".into());
         let r = resolve_row(&raw, &ctx, &HashMap::new(), None);
-        assert_eq!(r.person_id, Some(7), "抖音号没命中时要用采集 ID 兜住");
+        assert_eq!(r.person_id, Some(7), "主播 ID 命中时用它兜住");
         assert!(r.matched_by_douyin);
 
-        // 抖音号命中优先（同一个 id，两个列都能用）
+        // 抖音号命中另一个人，主播 ID 仍优先；冲突信息带出来给运营核对。
         let ctx2 = MatchCtx {
-            streamers: vec![LocalStreamer {
-                id: 9,
-                name: "浩龙".into(),
-                gender: "male".into(),
-            }],
-            stage_names: vec!["浩龙".into()],
+            streamers: vec![
+                LocalStreamer {
+                    id: 7,
+                    name: "狼澈".into(),
+                    gender: "male".into(),
+                },
+                LocalStreamer {
+                    id: 9,
+                    name: "浩龙".into(),
+                    gender: "male".into(),
+                },
+            ],
+            stage_names: vec!["狼澈".into(), "浩龙".into()],
             by_douyin: HashMap::from([("cyl765".to_string(), 9u64)]),
-            by_anchor: HashMap::new(),
+            by_anchor: HashMap::from([("2436948398193464".to_string(), 7u64)]),
         };
         let mut raw = raw_row("浩龙🎹", Some("cyl765"), Some(1.0));
         raw.anchor_id = Some("2436948398193464".into());
         let r = resolve_row(&raw, &ctx2, &HashMap::new(), None);
-        assert_eq!(r.person_id, Some(9));
+        assert_eq!(r.person_id, Some(7), "主播 ID 优先于抖音号");
         assert!(r.matched_by_douyin);
+        assert!(r.identity_conflict.is_some());
+        assert!(matches!(classify_row(&r), RowClass::IdentityConflict(_)));
 
         // 两个号码都没有 → 仍按名字归一化命中（去空格）
         let raw = raw_row("狼 澈", None, Some(1.0));
         let r = resolve_row(&raw, &ctx, &HashMap::new(), None);
         assert_eq!(r.person_id, Some(7));
         assert!(!r.matched_by_douyin, "按名字命中不算号码命中");
+
+        // 两列不能交叉查：主播 ID 恰好等于别人的抖音号时，不能按抖音号认成别人。
+        let cross = MatchCtx {
+            streamers: vec![LocalStreamer {
+                id: 9,
+                name: "浩龙".into(),
+                gender: "male".into(),
+            }],
+            stage_names: vec!["浩龙".into()],
+            by_douyin: HashMap::from([("shared-number".to_string(), 9u64)]),
+            by_anchor: HashMap::new(),
+        };
+        let mut raw = raw_row("未知主播", None, Some(1.0));
+        raw.anchor_id = Some("shared-number".into());
+        let r = resolve_row(&raw, &cross, &HashMap::new(), None);
+        assert_eq!(r.person_id, None, "anchor 列不能借用 douyin 映射");
     }
 
     /* ---------------------- 批量开号入参（016，docs/13） ---------------------- */
@@ -6802,6 +7491,194 @@ mod tests {
         ];
         let out = merge_rows_by_person(&rows);
         assert_eq!(out.len(), 2, "未匹配的行一条一条报出来");
+    }
+
+    #[test]
+    fn daily_merge_uses_latest_row_for_same_person() {
+        let mut first = row(Some(7), Some(100.0), Some(5000.0), Some(60.0));
+        first.raw.anchor_id = Some("old-anchor".into());
+        first.raw.douyin_no = Some("old-douyin".into());
+        let mut second = row(Some(7), Some(20.0), Some(6000.0), Some(30.0));
+        second.raw.anchor_id = Some("new-anchor".into());
+        second.raw.douyin_no = Some("new-douyin".into());
+        let other = row(Some(8), Some(50.0), None, None);
+        let out = merge_rows_by_person_daily_latest(&[first, second, other]);
+        assert_eq!(out.len(), 2);
+        let a = &out[0];
+        assert_eq!(a.person_id, Some(7));
+        assert_eq!(a.raw.wave, Some(20.0), "后导入的音浪覆盖前值，不相加");
+        assert_eq!(a.raw.cumulative_wave, Some(6000.0));
+        assert_eq!(a.raw.minutes, Some(30.0), "后导入的时长覆盖前值，不相加");
+        assert_eq!(a.raw.anchor_id.as_deref(), Some("new-anchor"));
+        assert_eq!(a.raw.douyin_no.as_deref(), Some("new-douyin"));
+        assert_eq!(out[1].person_id, Some(8), "其他主播不受影响");
+    }
+
+    #[test]
+    fn daily_merge_explicit_zero_overrides_previous_values() {
+        let first = row(Some(7), Some(100.0), Some(5000.0), Some(60.0));
+        let mut second = row(Some(7), Some(0.0), Some(0.0), Some(0.0));
+        second.raw.is_live = Some(false);
+        let out = merge_rows_by_person_daily_latest(&[first, second]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].raw.wave, Some(0.0), "显式 0 必须覆盖旧音浪");
+        assert_eq!(out[0].raw.cumulative_wave, Some(0.0));
+        assert_eq!(out[0].raw.minutes, Some(0.0), "显式 0 必须覆盖旧时长");
+        assert_eq!(out[0].raw.is_live, Some(false), "显式 false 必须覆盖");
+    }
+
+    #[test]
+    fn same_import_two_people_keep_distinct_new_anchors() {
+        let mut a = row(Some(7), Some(100.0), None, Some(60.0));
+        a.raw.anchor_id = Some("anchor-a-new".into());
+        let mut b = row(Some(8), Some(20.0), None, Some(30.0));
+        b.raw.anchor_id = Some("anchor-b-new".into());
+        let mut rows = vec![a, b];
+        mark_duplicate_import_anchor_conflicts(&mut rows);
+        assert!(rows.iter().all(|r| r.identity_conflict.is_none()));
+        let out = merge_rows_by_person_daily_latest(&rows);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].raw.anchor_id.as_deref(), Some("anchor-a-new"));
+        assert_eq!(out[1].raw.anchor_id.as_deref(), Some("anchor-b-new"));
+        assert_eq!(out[0].raw.wave, Some(100.0));
+        assert_eq!(out[1].raw.wave, Some(20.0));
+    }
+
+    #[test]
+    fn daily_merge_inherits_metrics_absent_from_later_file() {
+        let mut first = row(Some(7), Some(100.0), Some(5000.0), Some(60.0));
+        first.raw.anchor_id = Some("old-anchor".into());
+        first.raw.douyin_no = Some("old-douyin".into());
+
+        // 后一份只带音浪：累计快照组整体采用后行（这里累计为空），时长 / 开播保留。
+        let mut second = row(Some(7), Some(20.0), None, None);
+        second.raw.is_live = None;
+        second.raw.anchor_id = None;
+        second.raw.douyin_no = None;
+        let out = merge_rows_by_person_daily_latest(&[first.clone(), second]);
+        let a = &out[0];
+        assert_eq!(a.raw.wave, Some(20.0));
+        assert_eq!(a.raw.cumulative_wave, None);
+        assert_eq!(a.raw.minutes, Some(60.0), "后行没带时长，保留前行值");
+        assert_eq!(a.raw.is_live, Some(true), "后行没带开播状态，保留前行值");
+        assert_eq!(a.raw.anchor_id.as_deref(), Some("old-anchor"));
+        assert_eq!(a.raw.douyin_no.as_deref(), Some("old-douyin"));
+
+        // 后行只给新 anchor、没给 douyin：身份整组采用后行，不能拼上前行旧抖音号。
+        let mut fourth = row(Some(7), None, None, None);
+        fourth.raw.anchor_id = Some("new-anchor".into());
+        fourth.raw.douyin_no = None;
+        let out = merge_rows_by_person_daily_latest(&[first.clone(), fourth]);
+        assert_eq!(out[0].raw.anchor_id.as_deref(), Some("new-anchor"));
+        assert_eq!(out[0].raw.douyin_no, None, "身份两列不能各取一份拼起来");
+
+        // 后一份完全没带音浪组：整组继承前行，不会被清成 0。
+        let mut third = row(Some(7), None, None, Some(30.0));
+        third.raw.is_live = None;
+        let out = merge_rows_by_person_daily_latest(&[first, third]);
+        assert_eq!(out[0].raw.wave, Some(100.0));
+        assert_eq!(out[0].raw.cumulative_wave, Some(5000.0));
+        assert_eq!(out[0].raw.minutes, Some(30.0), "后行显式时长覆盖");
+    }
+
+    #[test]
+    fn duplicate_new_anchor_across_people_is_hard_conflict() {
+        let mut first = row(Some(7), Some(10.0), None, None);
+        first.raw.anchor_id = Some("same-new-anchor".into());
+        let mut second = row(Some(8), Some(20.0), None, None);
+        second.raw.anchor_id = Some("same-new-anchor".into());
+        let mut rows = vec![first, second];
+        mark_duplicate_import_anchor_conflicts(&mut rows);
+        assert!(rows.iter().all(|r| r.identity_conflict.is_some()));
+
+        // 同一个人的重复行不是冲突，后面会按 latest 合并。
+        let mut a = row(Some(7), Some(10.0), None, None);
+        a.raw.anchor_id = Some("same-anchor".into());
+        let mut b = row(Some(7), Some(20.0), None, None);
+        b.raw.anchor_id = Some("same-anchor".into());
+        let mut rows = vec![a, b];
+        mark_duplicate_import_anchor_conflicts(&mut rows);
+        assert!(rows.iter().all(|r| r.identity_conflict.is_none()));
+
+        // 两个都未建档的人争同一 anchor：不能落成同一个 pending claim_key 互相覆盖。
+        let mut pending_a = row(None, Some(10.0), None, None);
+        pending_a.raw.name = "待建档甲".into();
+        pending_a.raw.douyin_no = Some("dy-a".into());
+        pending_a.raw.anchor_id = Some("shared-new-anchor".into());
+        let mut pending_b = row(None, Some(20.0), None, None);
+        pending_b.raw.name = "待建档乙".into();
+        pending_b.raw.douyin_no = Some("dy-b".into());
+        pending_b.raw.anchor_id = Some("shared-new-anchor".into());
+        let mut rows = vec![pending_a, pending_b];
+        mark_duplicate_import_anchor_conflicts(&mut rows);
+        assert!(rows.iter().all(|r| r.identity_conflict.is_some()));
+        assert!(rows
+            .iter()
+            .all(|r| matches!(classify_row(r), RowClass::IdentityConflict(_))));
+
+        // 一个已匹配、一个未匹配抢同一 anchor，也不能只让 pending 那边落库。
+        let mut matched = row(Some(7), Some(10.0), None, None);
+        matched.raw.anchor_id = Some("matched-pending-anchor".into());
+        let mut pending = row(None, Some(20.0), None, None);
+        pending.raw.anchor_id = Some("matched-pending-anchor".into());
+        let mut rows = vec![matched, pending];
+        mark_duplicate_import_anchor_conflicts(&mut rows);
+        assert!(rows.iter().all(|r| r.identity_conflict.is_some()));
+
+        // 同 person 的冲突行不能被 normal row 合并吞掉，否则运营看不到失败。
+        let normal = row(Some(7), Some(100.0), None, None);
+        let mut conflict = row(Some(7), Some(20.0), None, None);
+        conflict.identity_conflict = Some("two identities".into());
+        let out = merge_rows_by_person_daily_latest(&[normal, conflict]);
+        assert_eq!(out.len(), 2, "冲突行必须单独保留以便报失败");
+    }
+
+    #[test]
+    fn parse_concatenated_qq_csv_skips_header_and_cancelled_rows() {
+        let first = "\u{feff}主播ID,主播昵称,抖音号,总音浪,开播有效时长\n\
+                     7616689691311686705,玖玉🎹,37181712726,7717,3小时47分钟17秒\n";
+        let second = "主播ID,主播昵称,抖音号,总音浪,开播有效时长\n\
+                      7655278984414430257,玖玉🎹,36084775193,0,0小时0分钟0秒\n\
+                      0,账号已注销,账号已注销,-,-\n";
+        let rows = parse_any_text(&format!("{first}{second}"));
+        assert_eq!(rows.len(), 2, "重复表头和注销占位行都不能进导入：{rows:?}");
+        assert!(rows.iter().all(|r| r.name != "主播昵称"));
+        assert!(rows.iter().all(|r| r.name != "账号已注销"));
+        assert_eq!(rows[0].wave, Some(7717.0));
+        assert_eq!(rows[0].minutes, Some(227.0));
+        assert_eq!(
+            rows[1].wave,
+            Some(0.0),
+            "同一主播后一份文件里的 0 要保留覆盖"
+        );
+        assert_eq!(rows[1].minutes, Some(0.0));
+    }
+
+    #[test]
+    fn concatenated_qq_csv_can_switch_schema_without_losing_columns() {
+        let first =
+            "主播ID,主播昵称,抖音号,总音浪,开播有效时长\n                     7,某人,dy-1,100,30\n";
+        let second = "主播ID,主播昵称,抖音号,总音浪\n                      7,某人,dy-1,20\n";
+        let rows = parse_any_text(&format!("{first}{second}"));
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].wave, Some(100.0));
+        assert_eq!(rows[0].minutes, Some(30.0));
+        assert_eq!(rows[1].wave, Some(20.0));
+        assert_eq!(
+            rows[1].minutes, None,
+            "第二块没有时长列必须是 None，不能伪造 0"
+        );
+    }
+
+    #[test]
+    fn placeholder_id_zero_with_metrics_is_kept() {
+        // 没有真实 ID 但确有数值：不能因为 ID=0 就把数据吞掉，仍按抖音号/名字暂存。
+        let csv = "主播ID,主播昵称,抖音号,总音浪,开播有效时长\n\
+                   0,临时主播,temp-1,100,30\n";
+        let rows = parse_any_text(csv);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "临时主播");
+        assert_eq!(rows[0].wave, Some(100.0));
     }
 
     #[test]
@@ -6941,8 +7818,8 @@ mod tests {
     }
 
     #[test]
-    fn resolve_by_douyin_no_first() {
-        // 一人多账号：文件里任意一个抖音号都归到同一人；抖音号优先于名字
+    fn resolve_by_douyin_no_when_anchor_id_absent() {
+        // 没有主播 ID 时，文件里任意一个抖音号都归到同一人；抖音号优先于名字
         let ctx = MatchCtx {
             streamers: vec![LocalStreamer {
                 id: 86,
@@ -7067,10 +7944,10 @@ mod tests {
         assert_eq!(r4.person_id, None);
     }
 
-    /// 号码命中永远压过艺名兜底：昵称写着别人的艺名，但号是 A 的 → 归 A。
+    /// 号码命中压过艺名兜底：昵称写着别人的艺名，但号是 A 的 → 归 A。
     /// （实测 445 行里号码与艺名零冲突，这条是防止以后艺名规则放宽时认错人）
     #[test]
-    fn douyin_no_beats_stage_name() {
+    fn number_hit_beats_stage_name() {
         let ctx = MatchCtx {
             streamers: vec![LocalStreamer {
                 id: 172,
@@ -7133,6 +8010,134 @@ mod tests {
         assert!(valid_biz_date("10-04").is_err());
     }
 
+    #[test]
+    fn day_metrics_query_defaults_to_both_and_parses_csv() {
+        assert_eq!(DayMetrics::from_query(None).unwrap(), DayMetrics::BOTH);
+        assert_eq!(
+            DayMetrics::from_query(Some("wave")).unwrap(),
+            DayMetrics::WAVE_ONLY
+        );
+        assert_eq!(
+            DayMetrics::from_query(Some("minutes")).unwrap(),
+            DayMetrics::MINUTES_ONLY
+        );
+        // 逗号分隔是唯一支持的 query 写法；顺序、空格和重复 token 都不影响选择。
+        assert_eq!(
+            DayMetrics::from_query(Some(" minutes, wave ,minutes ")).unwrap(),
+            DayMetrics::BOTH
+        );
+        assert_eq!(
+            DayMetrics::from_query(Some("wave,wave")).unwrap(),
+            DayMetrics::WAVE_ONLY
+        );
+    }
+
+    #[test]
+    fn day_metrics_query_rejects_empty_and_unknown_values() {
+        for raw in ["", "   ", "wave,", ",minutes", "wave,,minutes"] {
+            assert!(
+                DayMetrics::from_query(Some(raw)).is_err(),
+                "空值/空项必须 400：{raw:?}"
+            );
+        }
+        for raw in ["duration", "音浪", "wave,unknown", "WAVE"] {
+            assert!(
+                DayMetrics::from_query(Some(raw)).is_err(),
+                "非法指标必须 400：{raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn day_query_team_defaults_to_auto_and_keeps_explicit_teams() {
+        // query 里完全没有 team 时，Deserialize 得到 None，handler 按 auto 处理。
+        let q: DayQuery = serde_json::from_value(json!({
+            "bizDate": "2026-11-14",
+            "metrics": "wave"
+        }))
+        .unwrap();
+        assert!(q.team.is_none());
+        assert_eq!(
+            parse_day_team(q.team.as_deref()).unwrap(),
+            ("auto".to_string(), true)
+        );
+
+        for raw in [None, Some(""), Some("auto"), Some("mixed"), Some("all")] {
+            assert_eq!(
+                parse_day_team(raw).unwrap(),
+                ("auto".to_string(), true),
+                "team={raw:?} 应走全部团别"
+            );
+        }
+        for raw in ["male", "female"] {
+            assert_eq!(
+                parse_day_team(Some(raw)).unwrap(),
+                (raw.to_string(), false),
+                "显式团别必须保持不变"
+            );
+        }
+        assert!(parse_day_team(Some("boy")).is_err(), "非法团别仍要 400");
+    }
+
+    #[test]
+    fn day_metrics_selection_controls_row_and_batch_semantics() {
+        // 两项都选才会走旧路径：整行删除 + 清贡献/暂存/批次。
+        assert!(DayMetrics::BOTH.both());
+        assert_eq!(DayMetrics::BOTH.wire_values(), vec!["wave", "minutes"]);
+
+        // 单选只更新 daily_metric 的对应列；不得删行，也不得删批次。
+        for selected in [DayMetrics::WAVE_ONLY, DayMetrics::MINUTES_ONLY] {
+            assert!(
+                !selected.both(),
+                "单选不能触发整行删除/批次清理：{selected:?}"
+            );
+        }
+        assert_eq!(DayMetrics::WAVE_ONLY.wire_values(), vec!["wave"]);
+        assert_eq!(DayMetrics::MINUTES_ONLY.wire_values(), vec!["minutes"]);
+        assert_eq!(DayMetrics::BOTH.label(), "音浪和时长");
+        assert_eq!(DayMetrics::WAVE_ONLY.label(), "音浪");
+        assert_eq!(DayMetrics::MINUTES_ONLY.label(), "时长");
+    }
+
+    #[test]
+    fn partial_day_delete_sql_resets_stale_metric_state_only() {
+        for sql in [
+            DAY_WAVE_RESET_SQL,
+            DAY_MINUTES_RESET_SQL,
+            DAY_PENDING_WAVE_RESET_SQL,
+            DAY_PENDING_MINUTES_RESET_SQL,
+        ] {
+            assert!(!sql.contains("DELETE"), "单选路径不能删除行：{sql}");
+            writer::write_guard(sql).expect("单选重置 SQL 必须过写守卫");
+        }
+
+        for field in [
+            "wave = 0",
+            "cumulative_wave = 0",
+            "prev_snapshot_date = NULL",
+            "wave_span = 1",
+            "wave_reliable = 0",
+        ] {
+            assert!(DAY_WAVE_RESET_SQL.contains(field), "音浪重置缺少 {field}");
+        }
+        for field in [
+            "minutes = 0",
+            "cumulative_minutes = 0",
+            "minutes_span = 1",
+            "minutes_reliable = 0",
+            "is_live = 0",
+        ] {
+            assert!(
+                DAY_MINUTES_RESET_SQL.contains(field),
+                "时长重置缺少 {field}"
+            );
+        }
+        assert!(DAY_PENDING_WAVE_RESET_SQL.contains("wave = NULL"));
+        assert!(DAY_PENDING_WAVE_RESET_SQL.contains("cumulative_wave = NULL"));
+        assert!(DAY_PENDING_MINUTES_RESET_SQL.contains("minutes = NULL"));
+        assert!(DAY_PENDING_MINUTES_RESET_SQL.contains("is_live = NULL"));
+    }
+
     fn fp_row(name: &str, wave: Option<f64>, minutes: Option<f64>) -> ImportRow {
         ImportRow {
             name: name.into(),
@@ -7166,31 +8171,24 @@ mod tests {
             import_source_fingerprint("2026-11-10", &a),
             "业务日期变化必须生成新指纹"
         );
-    }
 
-    #[test]
-    fn contrib_recompute_sums_batches_not_overwrites() {
-        assert!(DAILY_CONTRIB_RECOMPUTE_SQL.contains("SUM(wave)::BIGINT AS wave"));
-        assert!(DAILY_CONTRIB_RECOMPUTE_SQL.contains("SUM(minutes)::BIGINT AS minutes"));
-        assert!(DAILY_CONTRIB_RECOMPUTE_SQL.contains("BOOL_OR(has_wave = 1) AS has_wave"));
-        assert!(DAILY_CONTRIB_RECOMPUTE_SQL.contains("CASE WHEN t.has_wave THEN t.wave"));
-        assert!(DAILY_CONTRIB_RECOMPUTE_SQL
-            .contains("ELSE COALESCE(d.cumulative_wave, 0) END"));
-        assert!(DAILY_CONTRIB_RECOMPUTE_SQL.contains("GROUP BY person_id"));
-        assert!(DAILY_CONTRIB_RECOMPUTE_SQL.contains("FROM daily_import_contrib"));
-        assert!(DAILY_CONTRIB_RECOMPUTE_SQL.contains("t.prev_cum + t.wave"));
-        assert!(DAILY_CONTRIB_UPSERT_SQL.contains("ON CONFLICT (batch_id, person_id, biz_date)"));
-        assert!(DAILY_CONTRIB_UPSERT_SQL.contains("has_wave"));
-        writer::write_guard(DAILY_CONTRIB_RECOMPUTE_SQL).expect("重算 SQL 过业务写守卫");
-        writer::write_guard(DAILY_CONTRIB_UPSERT_SQL).expect("贡献写入 SQL 过业务写守卫");
-        writer::write_guard("UPDATE import_batch SET source_fingerprint = ? WHERE id = ?")
-            .expect("指纹写入 SQL 过业务写守卫");
-        writer::write_guard("DELETE FROM import_batch WHERE id = ?")
-            .expect("旧批次删除 SQL 过业务写守卫");
-        writer::write_guard(
-            "DELETE FROM daily_import_contrib c USING person p WHERE c.person_id = p.id AND c.biz_date = ?::date AND p.gender = ?",
-        )
-        .expect("按团删除贡献 SQL 过业务写守卫");
+        let absent = vec![fp_row("南方楠", None, None)];
+        let explicit_zero = vec![fp_row("南方楠", Some(0.0), Some(0.0))];
+        assert_ne!(
+            import_source_fingerprint("2026-11-11", &absent),
+            import_source_fingerprint("2026-11-11", &explicit_zero),
+            "None（无该列）和显式 0 不能撞同一指纹"
+        );
+
+        let mut live_none = fp_row("南方楠", Some(1.0), None);
+        live_none.is_live = None;
+        let mut live_false = live_none.clone();
+        live_false.is_live = Some(false);
+        assert_ne!(
+            import_source_fingerprint("2026-11-11", &[live_none]),
+            import_source_fingerprint("2026-11-11", &[live_false]),
+            "is_live None 和显式 false 不能撞同一指纹"
+        );
     }
 }
 
