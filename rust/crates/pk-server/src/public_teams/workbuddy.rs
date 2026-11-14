@@ -135,7 +135,10 @@ fn sanitize_account(v: &Value) -> Value {
     })
 }
 
-/// 面板账号的到期判断：token 过期、token/积分包 14 天内到期、或账号已从池中消失。
+/// WorkBuddy 重新登录提示阈值：只有真实剩余时间严格小于 24 小时才提示。
+const REAUTH_PROMPT_THRESHOLD_DAYS: f64 = 1.0;
+
+/// 面板账号的到期判断：token 过期，或账号/有效积分包剩余不足 1 天。
 fn expiry_status_at(v: &Value, now: i64) -> Value {
     let expires_at = v
         .get("expiresAt")
@@ -188,9 +191,14 @@ fn expiry_status_at(v: &Value, now: i64) -> Value {
     let round1 = |days: f64| (days * 10.0).round() / 10.0;
     // 积分包到期不等于账号登录凭证失效；只把 token / 账号 expiresAt 视为 expired。
     let expired = token_expired || (expires_at > 0 && expires_at <= now);
-    let needs_login = expired
-        || account_days_left.is_some_and(|days| days <= 14.0)
-        || credit_days.is_some_and(|days| days <= 14.0);
+    let effective_days_left = match (account_days_left, credit_days) {
+        (Some(account), Some(credit)) => Some(account.min(credit)),
+        (Some(account), None) => Some(account),
+        (None, Some(credit)) => Some(credit),
+        (None, None) => None,
+    };
+    let needs_login =
+        expired || effective_days_left.is_some_and(|days| days < REAUTH_PROMPT_THRESHOLD_DAYS);
     let reason = if expired {
         "expired"
     } else if needs_login {
@@ -215,6 +223,8 @@ fn expiry_status_at(v: &Value, now: i64) -> Value {
         "expiresIn": v.get("expiresIn").and_then(Value::as_str).unwrap_or_default(),
         "daysLeft": account_days_left.map(round1),
         "earliestExpiringDaysLeft": credit_days.map(round1),
+        "effectiveDaysLeft": effective_days_left.map(round1),
+        "promptThresholdDays": REAUTH_PROMPT_THRESHOLD_DAYS,
         "expirySource": expiry_source,
         "tokenExpired": token_expired,
         "needRelogin": v.get("needRelogin").and_then(Value::as_bool).unwrap_or(false),
@@ -604,8 +614,11 @@ mod tests {
         assert_eq!(far["reason"], "");
         assert_eq!(far["expirySource"], "account");
 
-        let soon = expiry_status_at(&json!({ "expiresAt": now + 14 * 86_400 }), now);
+        let soon = expiry_status_at(&json!({ "expiresAt": now + 86_399 }), now);
         assert_eq!(soon["needsLogin"], true);
+
+        let exactly_one_day = expiry_status_at(&json!({ "expiresAt": now + 86_400 }), now);
+        assert_eq!(exactly_one_day["needsLogin"], false, "正好 24 小时不提示");
         assert_eq!(soon["reason"], "expiring");
         assert_eq!(soon["expirySource"], "account");
 
@@ -618,12 +631,12 @@ mod tests {
         let credit_soon = expiry_status_at(
             &json!({
                 "expiresAt": now + 30 * 86_400,
-                "credits": { "packages": [{ "remain": 10.0, "days_left": 7.0 }] }
+                "credits": { "packages": [{ "remain": 10.0, "days_left": 0.9 }] }
             }),
             now,
         );
         assert_eq!(credit_soon["needsLogin"], true);
-        assert_eq!(credit_soon["earliestExpiringDaysLeft"], 7.0);
+        assert_eq!(credit_soon["earliestExpiringDaysLeft"], 0.9);
         assert_eq!(credit_soon["expirySource"], "credits");
     }
 
@@ -675,13 +688,13 @@ mod tests {
                 "credits": {
                     "packages": [
                         { "remain": 0.0, "days_left": 0.5, "is_expired": false },
-                        { "remain": 10.0, "days_left": 7.0, "is_expired": false }
+                        { "remain": 10.0, "days_left": 0.9, "is_expired": false }
                     ]
                 }
             }),
             now,
         );
-        assert_eq!(status["earliestExpiringDaysLeft"], 7.0);
+        assert_eq!(status["earliestExpiringDaysLeft"], 0.9);
         assert_eq!(status["needsLogin"], true);
         assert_eq!(status["reason"], "expiring");
     }
@@ -732,7 +745,7 @@ mod tests {
                         },
                         {
                             "remain": 8.0,
-                            "days_left": 7.0,
+                            "days_left": 0.9,
                             "no_expiry": false,
                             "is_expired": false
                         }
@@ -741,7 +754,7 @@ mod tests {
             }),
             now,
         );
-        assert_eq!(mixed["earliestExpiringDaysLeft"], 7.0);
+        assert_eq!(mixed["earliestExpiringDaysLeft"], 0.9);
         assert_eq!(mixed["needsLogin"], true);
         assert_eq!(mixed["expirySource"], "credits");
     }

@@ -3803,14 +3803,19 @@ function wbStartPolling(dlg) {
   wbBindPollTimer = setTimeout(tick, 0);
 }
 function wbRenderSuccess(dlg, account) {
+  const returnedFromOAuth = wbHasPending();
   wbClearPending();
+  const title = returnedFromOAuth ? '登录完成，请返回原页面' : '绑定成功';
+  const lead = returnedFromOAuth
+    ? '腾讯账号登录已经完成。请返回刚才打开本页面的页面，点击下方「返回」继续。'
+    : 'WorkBuddy 账号已完成绑定。点击下方「返回」回到原页面继续使用。';
   dlg.box.innerHTML = '<div class="dlg-ok" style="background:linear-gradient(135deg,#08A484,#12CEAA)">' +
       '<span class="material-symbols-outlined">check</span></div>' +
-    '<h3>绑定成功</h3>' +
-    '<div class="dlg-ok-txt">已完成入池，下面就是这个展示端账号对应的 WorkBuddy 账号：</div>' +
+    '<h3>' + title + '</h3>' +
+    '<div class="dlg-ok-txt">' + lead + '</div>' +
     wbAccountLine(account) +
-    '<div class="form-hint" style="text-align:center;margin-top:12px">一人一次，后续无需重复绑定。</div>' +
-    '<button class="btn-main" id="wbBindDoneOk">知道了</button>';
+    '<div class="form-hint" style="text-align:center;margin-top:12px">当前展示端账号已经完成绑定，后续无需重复绑定。</div>' +
+    '<button class="btn-main" id="wbBindDoneOk">返回</button>';
   $('wbBindDoneOk').onclick = () => wbCancelCurrent(dlg.close);
 }
 async function wbPrefetchDomestic(dlg, reauth) {
@@ -3880,8 +3885,8 @@ function wbRenderLink(d, resume) {
     '<div class="btn-row"><button class="go" id="wbBindOpen">直接登录</button>' +
       '<button class="go gray" id="wbBindCopy">复制登录链接</button></div>' +
     '<div class="form-hint" style="margin-top:10px">' +
-      (resume ? '上次授权链接已准备好，点击「直接登录」继续；登录完成后本窗口会自动检测并完成入池。' :
-        '点击「直接登录」会在新窗口打开授权页；登录完成后本窗口会自动检测并完成入池。') +
+      (resume ? '上次授权链接已准备好，点击「直接登录」继续；登录完成后请返回本页面，系统会自动检测并完成绑定。' :
+        '点击「直接登录」会在新窗口打开授权页；登录完成后请返回本页面，系统会自动检测并完成绑定。') +
     '</div>' +
     '<div class="form-err hidden" id="wbBindErr"></div>' +
     '<button class="gate-link-plain" id="wbBindRestart">重新获取国内版链接</button>';
@@ -3891,6 +3896,11 @@ function wbRenderLink(d, resume) {
 }
 function wbRenderExpiry(dlg, status) {
   const finiteDays = (value) => typeof value === 'number' && Number.isFinite(value);
+  const durationText = (days) => {
+    if (!finiteDays(days)) return '即将';
+    if (days >= 1) return days.toFixed(1) + ' 天';
+    return Math.max(1, Math.ceil(days * 24)) + ' 小时';
+  };
   const daysA = finiteDays(status && status.daysLeft) ? status.daysLeft : null;
   const daysB = finiteDays(status && status.earliestExpiringDaysLeft) ? status.earliestExpiringDaysLeft : null;
   const candidates = [daysA, daysB].filter(finiteDays);
@@ -3901,12 +3911,10 @@ function wbRenderExpiry(dlg, status) {
   const when = expired
     ? (source === 'token' ? '当前绑定的 WorkBuddy 登录凭证已过期' : '当前绑定的 WorkBuddy 账号登录有效期已过期')
     : creditFirst
-      ? (daysB !== null ? '当前账号内有积分包将在 ' + daysB.toFixed(1) + ' 天后到期' : '当前账号内有积分包即将到期')
-      : (minDays == null ? '当前绑定的 WorkBuddy 账号即将到期' : '当前绑定的 WorkBuddy 账号登录有效期仅剩 ' + minDays.toFixed(1) + ' 天');
+      ? (daysB !== null ? '当前账号内有积分包将在 ' + durationText(daysB) + '后到期' : '当前账号内有积分包即将到期')
+      : (minDays == null ? '当前绑定的 WorkBuddy 账号即将到期' : '当前绑定的 WorkBuddy 账号登录有效期仅剩 ' + durationText(minDays));
   const title = creditFirst ? 'WorkBuddy 积分包即将到期' : '腾讯账号需要重新登录';
-  const action = creditFirst
-    ? '。请使用同一个腾讯账号重新登录，完成后会自动刷新绑定与账号权益。'
-    : '。请使用同一个腾讯账号重新登录，完成后会自动更新绑定。';
+  const action = '。请使用同一个腾讯账号重新登录；登录完成后请返回本页面，点击下方「返回」继续。';
   dlg.box.innerHTML =
     '<h3>' + title + '</h3>' +
     '<p class="tip">' + esc(when) + action + '</p>' +
@@ -3920,7 +3928,7 @@ function wbRenderExpiry(dlg, status) {
 function wbRenderPick(dlg) {
   dlg.box.innerHTML =
     '<h3>绑定腾讯账号</h3>' +
-    '<p class="tip">首次使用需要绑定一次腾讯 WorkBuddy 账号，用于开通相关服务。点击下方按钮完成登录授权，成功后会自动返回并完成绑定。</p>' +
+    '<p class="tip">首次使用需要绑定一次腾讯 WorkBuddy 账号，用于开通相关服务。点击下方按钮完成登录授权；登录完成后请返回本页面，系统会自动检测并完成绑定。</p>' +
     '<div class="form-hint" id="wbBindPrep" style="margin-bottom:10px">正在准备腾讯账号登录入口…</div>' +
     '<button class="btn-main" id="wbBindJump" disabled style="margin-bottom:10px">正在准备登录…</button>' +
     '<div class="wb-steps wb-steps-preview">' +
