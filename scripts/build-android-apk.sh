@@ -22,7 +22,7 @@ DIST="$APP/dist"
 KEY_DIR="$APP/keystore"
 KEYSTORE="$KEY_DIR/daily-release.jks"
 KEY_ENV="$KEY_DIR/keystore.env"
-OUT_APK="$DIST/每日数据-v1.0-release.apk"
+OUT_APK="$DIST/每日数据-v1.1-release.apk"
 
 mkdir -p "$TOOLS" "$BUILD" "$DIST" "$KEY_DIR"
 
@@ -61,7 +61,7 @@ if [ ! -f "$KEYSTORE" ]; then
 fi
 chmod 600 "$KEYSTORE" "$KEY_ENV"
 
-# 3) aapt2 先编译资源并生成 R.java；再一次性编译 MainActivity + R.java -> DEX。
+# 3) aapt2 先编译资源并生成 R.java；再一次性编译 Java 源码 + R.java -> DEX。
 CLASSES="$BUILD/classes"
 RES_FLAT="$BUILD/res-flat"
 mkdir -p "$CLASSES" "$RES_FLAT" "$BUILD/gen" "$BUILD/obj-final"
@@ -73,8 +73,8 @@ mkdir -p "$CLASSES" "$RES_FLAT" "$BUILD/gen" "$BUILD/obj-final"
   --java "$BUILD/gen" \
   --min-sdk-version 26 \
   --target-sdk-version 35 \
-  --version-code 1 \
-  --version-name 1.0 \
+  --version-code 2 \
+  --version-name 1.1 \
   $(find "$RES_FLAT" -name '*.flat' | sort)
 
 javac \
@@ -83,6 +83,7 @@ javac \
   -classpath "$PLATFORM" \
   -d "$CLASSES" \
   "$SRC/java/cc/subisle/daily/MainActivity.java" \
+  "$SRC/java/cc/subisle/daily/NavigationPolicy.java" \
   $(find "$BUILD/gen" -name '*.java' | sort)
 "$D8" --min-api 26 --lib "$PLATFORM" --output "$BUILD/obj-final" $(find "$CLASSES" -name '*.class' | sort)
 
@@ -110,7 +111,7 @@ shasum -a 256 "$OUT_APK" > "$OUT_APK.sha256"
 # 这是 release 签名产物，不是签名私钥；换签名后需重新构建并重新发布。
 mkdir -p "$WEB_ASSETS"
 cp "$OUT_APK" "$WEB_ASSETS/daily-release.apk"
-sed 's|  .*/每日数据-v1\.0-release\.apk$|  daily-release.apk|' "$OUT_APK.sha256" \
+sed 's|  .*/每日数据-v1\.1-release\.apk$|  daily-release.apk|' "$OUT_APK.sha256" \
   > "$WEB_ASSETS/daily-release.apk.sha256"
 
 printf '\nAPK: %s\n' "$OUT_APK"

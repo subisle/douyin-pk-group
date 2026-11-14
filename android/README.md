@@ -11,7 +11,7 @@ http://43.142.30.113:81/
 - release APK 使用独立长期签名（RSA 3072 / SHA-256，30 年有效期）。
 - 只声明 `android.permission.INTERNET`，没有短信、通讯录、定位、存储、相机、电话、通知、后台服务等敏感权限。
 - 没有第三方 SDK、广告、统计、推送、动态加载、反射调用、原生库或可执行 dex 下载。
-- 只加载一个固定入口；`shouldOverrideUrlLoading` 会拦截非本站 HTTP/HTTPS、`tel:`、`sms:`、`mailto:`、`intent:`、`javascript:` 等外部 URL。
+- 只加载一个固定入口；本站 HTTP/HTTPS 留在 WebView，用户点击的非本站 HTTP/HTTPS 会交给系统浏览器；无点击的外站跳转及 `tel:`、`sms:`、`mailto:`、`intent:`、`javascript:` 等协议继续拦截。
 - 禁用文件访问、任意内容 URL、数据库、DOM storage 以外的本地存储接口通过 WebView 配置收紧；登录态所需的 `localStorage` 开启。
 - `minSdk 26` / `targetSdk 35`，不申请 `QUERY_ALL_PACKAGES`，导出组件只有启动 Activity。
 - 未使用调试证书签名；`android:debuggable` 由构建命令显式设为 false。
@@ -23,6 +23,10 @@ http://43.142.30.113:81/
 在本仓库根目录执行：
 
 ```bash
+# 先回归网盘外链、站内链接与危险协议的路由规则
+./scripts/test-android-navigation.sh
+
+# 再构建签名 APK
 ./scripts/build-android-apk.sh
 ```
 
@@ -33,8 +37,8 @@ http://43.142.30.113:81/
 3. 用 Java 源码编译出极小 classes.dex，再用 aapt2 / zipalign / apksigner 产出：
 
 ```text
-android/dist/每日数据-v1.0-release.apk
-android/dist/每日数据-v1.0-release.apk.sha256
+android/dist/每日数据-v1.1-release.apk
+android/dist/每日数据-v1.1-release.apk.sha256
 ```
 
 签名口令保存在 `android/keystore/keystore.env`（权限 600，不入库）。请离线妥善保管这个文件和 JKS；更换签名会导致用户必须卸载旧版才能升级。

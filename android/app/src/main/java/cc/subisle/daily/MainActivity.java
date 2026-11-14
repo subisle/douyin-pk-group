@@ -2,6 +2,7 @@ package cc.subisle.daily;
 
 import android.annotation.SuppressLint;
 import android.app.Activity;
+import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.graphics.Color;
 import android.net.Uri;
@@ -17,21 +18,21 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.FrameLayout;
 import android.widget.TextView;
+import android.widget.Toast;
 
 /**
  * 每日数据轻量版：固定站点 WebView 壳。
  *
  * 安全约束：
  * - 只主动加载 APP_URL；
- * - 非本站 HTTP(S) 与所有非 HTTP(S) scheme 一律不交给 WebView / 外部应用；
+ * - 本站 HTTP(S) 留在 WebView；用户点击的外站 HTTP(S) 交给系统浏览器；
+ * - 无点击的外站跳转与所有非 HTTP(S) scheme 一律拦截；
  * - 不启用文件访问、通用内容访问、自动文件下载；
  * - 不暴露 addJavascriptInterface；
  * - 仅保留登录态所需的 DOM storage / Cookies。
  */
 public final class MainActivity extends Activity {
     private static final String APP_URL = "http://43.142.30.113:81/";
-    private static final String APP_HOST = "43.142.30.113";
-    private static final int APP_PORT = 81;
     private static final String APK_UA_TOKEN = "DailyDataAndroid/1.0";
 
     private WebView web;
@@ -103,12 +104,13 @@ public final class MainActivity extends Activity {
         web.setWebViewClient(new WebViewClient() {
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
-                return !isAllowed(request.getUrl());
+                return handleNavigation(request.getUrl(), request.hasGesture());
             }
 
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, String url) {
-                return !isAllowed(Uri.parse(url));
+                // minSdk 26 normally uses the WebResourceRequest overload above.
+                return handleNavigation(Uri.parse(url), true);
             }
 
             @Override
@@ -124,7 +126,7 @@ public final class MainActivity extends Activity {
             web.loadUrl(APP_URL);
         } else {
             web.restoreState(savedInstanceState);
-            if (web.getUrl() == null || !isAllowed(Uri.parse(web.getUrl()))) {
+            if (web.getUrl() == null || !NavigationPolicy.isAppUrl(web.getUrl())) {
                 web.loadUrl(APP_URL);
             }
         }
@@ -145,16 +147,24 @@ public final class MainActivity extends Activity {
         return box;
     }
 
-    private static boolean isAllowed(Uri uri) {
-        if (uri == null) return false;
-        String scheme = uri.getScheme();
-        if (scheme == null || (!"http".equalsIgnoreCase(scheme) && !"https".equalsIgnoreCase(scheme))) {
-            return false;
+    private boolean handleNavigation(Uri uri, boolean userGesture) {
+        NavigationPolicy.Action action = NavigationPolicy.decide(
+                uri == null ? null : uri.toString(), userGesture);
+        if (action == NavigationPolicy.Action.LOAD_IN_WEB_VIEW) return false;
+        if (action == NavigationPolicy.Action.OPEN_EXTERNAL_BROWSER) {
+            openExternalBrowser(uri);
         }
-        if (!APP_HOST.equalsIgnoreCase(uri.getHost())) return false;
-        int port = uri.getPort();
-        if (port == -1) return "https".equalsIgnoreCase(scheme);
-        return port == APP_PORT;
+        return true;
+    }
+
+    private void openExternalBrowser(Uri uri) {
+        try {
+            Intent intent = new Intent(Intent.ACTION_VIEW, uri);
+            intent.addCategory(Intent.CATEGORY_BROWSABLE);
+            startActivity(intent);
+        } catch (ActivityNotFoundException | SecurityException e) {
+            Toast.makeText(this, "无法打开浏览器，请使用“复制链接”", Toast.LENGTH_LONG).show();
+        }
     }
 
     @Override
