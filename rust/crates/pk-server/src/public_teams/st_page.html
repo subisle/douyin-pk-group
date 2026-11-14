@@ -2463,7 +2463,9 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
   background:rgba(15,23,42,.42); -webkit-backdrop-filter:blur(10px); backdrop-filter:blur(10px);
   animation:stFadeIn .16s ease-out; }
 #pwaGuide.hidden { display:none; }
-.pwa-sheet { position:relative; width:100%; max-width:430px; padding:22px 20px 18px;
+.pwa-sheet { position:relative; width:100%; max-width:430px; max-height:calc(100vh - 24px);
+  max-height:calc(100dvh - 24px - env(safe-area-inset-bottom,0px)); overflow-y:auto;
+  -webkit-overflow-scrolling:touch; overscroll-behavior:contain; padding:22px 20px 18px;
   border-radius:26px; border:1px solid rgba(255,255,255,.92);
   background:rgba(255,255,255,.96); color:#0F172A;
   box-shadow:0 24px 70px rgba(15,23,42,.28);
@@ -2501,6 +2503,18 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
   background:#EEF2FF; color:#4F46E5; font-size:13px; font-weight:700; }
 .pwa-warn { margin:13px 0 0; padding:10px 12px; border-radius:12px; background:#FFF7ED;
   color:#9A3412; font-size:12px; line-height:1.6; }
+/* 更新提醒是不锁滚动、不盖全屏的轻横幅，避免重现安装引导卡屏。 */
+#appUpdate { position:fixed; left:50%; bottom:calc(82px + env(safe-area-inset-bottom,0px));
+  z-index:120; transform:translateX(-50%); width:min(430px,calc(100% - 24px));
+  display:flex; align-items:center; gap:10px; padding:12px 12px 12px 15px;
+  border:1px solid rgba(255,255,255,.9); border-radius:16px; background:rgba(15,23,42,.96);
+  color:#fff; box-shadow:0 12px 36px rgba(15,23,42,.28); font-size:13px; }
+#appUpdate.hidden { display:none; }
+#appUpdateText { min-width:0; flex:1; line-height:1.5; }
+#appUpdateGo { flex:none; min-width:64px; height:36px; padding:0 12px; border:0; border-radius:10px;
+  background:#fff; color:#312E81; font-size:13px; font-weight:800; }
+#appUpdateClose { flex:none; width:28px; height:32px; border:0; background:transparent;
+  color:#CBD5E1; font-size:21px; line-height:1; }
 .team-pick .pick-title { font-weight:800; font-size:17px; margin-bottom:16px; }
 .team-pick .pick-row { display:flex; gap:12px; }
 .team-pick .pick-btn { flex:1; height:96px; border:1px solid #E2E8F0; border-radius:1rem;
@@ -3101,6 +3115,11 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 <div id="itemPopup" class="hidden"></div>
 <!-- 首页快捷方式 / 轻量 App 引导：先提示微信内置浏览器用系统浏览器打开，再按 iOS / Android 分流 -->
 <div id="pwaGuide" class="hidden"></div>
+<div id="appUpdate" class="hidden" role="status" aria-live="polite">
+  <span id="appUpdateText">发现新版本</span>
+  <button id="appUpdateGo" type="button">刷新更新</button>
+  <button id="appUpdateClose" type="button" aria-label="关闭更新提醒">×</button>
+</div>
 <div id="wm" hidden></div>
 
 <script>
@@ -4471,12 +4490,17 @@ async function submitProfile() {
    先识别微信及其它 App 内嵌浏览器：提示“请在浏览器中打开后下载 App”；
    iOS 推荐把 App 添加到主屏幕；Android 推荐同源下载 App；
    从 Android APK 或主屏幕独立打开则永久静默。微信里复制当前地址后用户可自行粘贴。 */
+const WEB_APP_VERSION = '{{WEB_APP_VERSION}}';
+const APP_VERSION_URL = '/api/public/app-version';
+const APP_UPDATE_CHECK_MS = 6 * 60 * 60 * 1000;
 const PWA_GUIDE_KEY = 'pkPwaGuideV2';
 const PWA_INSTALLED_KEY = 'pkPwaInstalledV1';
 const PWA_GUIDE_RETRY_MS = 1400;
 const ANDROID_APK_URL = '/download/daily.apk';
 let pwaGuideOpen = false;
 let pwaGuideRetryTimer = null;
+let appUpdateCheckRunning = false;
+let appUpdateCheckedAt = 0;
 
 function isIOSDevice() {
   const ua = navigator.userAgent || '';
@@ -4516,15 +4540,25 @@ function markPwaGuideInstalled() {
   try { localStorage.setItem(PWA_INSTALLED_KEY, '1'); } catch (_) {}
   clearTimeout(pwaGuideRetryTimer);
   pwaGuideRetryTimer = null;
-  if (pwaGuideOpen) {
-    const g = $('pwaGuide');
-    if (g) {
-      g.classList.add('hidden');
-      g.innerHTML = '';
-    }
+  const g = $('pwaGuide');
+  const hadVisibleGuide = !!(g && !g.classList.contains('hidden'));
+  if (g) {
+    g.classList.add('hidden');
+    g.innerHTML = '';
+  }
+  /* pageshow / BFCache 恢复时 DOM 可能还显示引导，但 JS 标记已经丢失；
+     因此不能只靠 pwaGuideOpen 决定是否清理遮罩与对应的一层滚动锁。 */
+  if (pwaGuideOpen || hadVisibleGuide) {
     pwaGuideOpen = false;
     try { unlockScroll(); } catch (_) {}
   }
+}
+function settleInstalledWebApp() {
+  if (!isAndroidAppShell() && !isStandaloneWebApp()) return false;
+  markPwaGuideInstalled();
+  const tip = $('inappBrowserTip');
+  if (tip) tip.classList.add('hidden');
+  return true;
 }
 function pwaGuideNextAt() {
   try {
@@ -4706,6 +4740,57 @@ function maybeShowPwaGuide(force, attempt) {
   }
   openPwaGuide();
   return true;
+}
+
+/* ==================== 软件更新：网页 / 主屏幕 App / Android APK ==================== */
+function compareAppVersions(a, b) {
+  const pa = String(a || '').split(/[.-]/).map((n) => parseInt(n, 10) || 0);
+  const pb = String(b || '').split(/[.-]/).map((n) => parseInt(n, 10) || 0);
+  const len = Math.max(pa.length, pb.length);
+  for (let i = 0; i < len; i++) {
+    const d = (pa[i] || 0) - (pb[i] || 0);
+    if (d) return d < 0 ? -1 : 1;
+  }
+  return 0;
+}
+function supportsAndroidUpdateCheck() {
+  const m = (navigator.userAgent || '').match(/DailyDataAndroid\/([0-9.]+)/i);
+  return !!m && compareAppVersions(m[1], '1.2') >= 0;
+}
+function showAppUpdate(version) {
+  const bar = $('appUpdate');
+  if (!bar) return;
+  $('appUpdateText').textContent = '发现新版本 ' + version + '，刷新后即可使用';
+  bar.classList.remove('hidden');
+}
+async function checkSoftwareUpdate(manual) {
+  /* APK 的版本检查由原生层完成，能同时拿到 versionCode 并调起系统安装包下载。 */
+  if (isAndroidAppShell()) {
+    if (manual) {
+      if (supportsAndroidUpdateCheck()) window.location.href = 'dailyapp://check-update';
+      else toast('当前安装包不支持在线检查，请在浏览器中打开本站下载新版');
+    }
+    return;
+  }
+  if (appUpdateCheckRunning) {
+    if (manual) toast('正在检查更新，请稍候');
+    return;
+  }
+  appUpdateCheckRunning = true;
+  try {
+    const r = await fetchWithTimeout(APP_VERSION_URL, { cache: 'no-store' }, 4000);
+    if (!r.ok) throw new Error('version http ' + r.status);
+    const d = await r.json();
+    const latest = String(d && d.webVersion || '');
+    if (!latest) throw new Error('missing web version');
+    appUpdateCheckedAt = Date.now();
+    if (compareAppVersions(latest, WEB_APP_VERSION) > 0) showAppUpdate(latest);
+    else if (manual) toast('已是最新版本 · ' + WEB_APP_VERSION);
+  } catch (_) {
+    if (manual) toast('检查更新失败，请稍后重试');
+  } finally {
+    appUpdateCheckRunning = false;
+  }
 }
 
 /* ==================== 绑定 QQ 提醒（契约 v2 §4.4） ====================
@@ -7699,6 +7784,11 @@ function renderMy(d, series, push, accounts) {
       '<div class="l"><div class="ico"><span class="material-symbols-outlined">lock_reset</span></div>' +
       '<div class="t">重置密码</div></div>' +
       '<div class="r"><span class="material-symbols-outlined">chevron_right</span></div></div>' +
+      '<div class="st-my-item" id="myUpdate" style="cursor:pointer"><div class="l"><div class="ico"><span class="material-symbols-outlined">info</span></div>' +
+      '<div style="min-width:0"><div class="t">检查软件更新</div>' +
+      '<div class="d">网页 / 主屏幕 App / Android APK</div></div></div>' +
+      '<div class="r"><span id="myUpdateState">检查</span>' +
+      '<span class="material-symbols-outlined">chevron_right</span></div></div>' +
       '<div class="st-my-item" id="myAbout" style="cursor:pointer"><div class="l"><div class="ico"><span class="material-symbols-outlined">info</span></div>' +
       '<div class="t">关于系统与内部版本</div></div>' +
       '<div class="r"><span>v7.10-FINAL</span></div></div>' +
@@ -7779,6 +7869,12 @@ function renderMy(d, series, push, accounts) {
   /* 2026-10-14：myPrivacy 行已删除，对应 onclick 一并移除
      （$() 找不到元素会返回 null，留着赋值会 TypeError 白屏）。 */
   $('myAbout').onclick = () => { mySub = 'about'; pushRoute(); renderMySub(); };
+  $('myUpdate').onclick = async () => {
+    const state = $('myUpdateState');
+    if (state) state.textContent = '检查中';
+    try { await checkSoftwareUpdate(true); }
+    finally { if (state) state.textContent = '检查'; }
+  };
   $('myPushRow').onclick = () => { mySub = 'wechat'; pushRoute(); renderMySub(); };
   $('myChaseRow').onclick = () => { mySub = 'chase'; pushRoute(); renderMySub(); };
   renderPushBox(push);
@@ -12205,6 +12301,7 @@ function hideBootGate() {
 }
 
 (async function boot() {
+  settleInstalledWebApp();
   applyTeam();
   try {
     const wechatTip = $('inappBrowserTip');
@@ -12212,6 +12309,23 @@ function hideBootGate() {
     const closeWechatTip = $('inappBrowserTipClose');
     if (closeWechatTip) closeWechatTip.onclick = () => wechatTip && wechatTip.classList.add('hidden');
   } catch (_) {}
+  const updateBar = $('appUpdate');
+  const updateGo = $('appUpdateGo');
+  const updateClose = $('appUpdateClose');
+  if (updateGo) updateGo.onclick = () => window.location.reload();
+  if (updateClose) updateClose.onclick = () => updateBar && updateBar.classList.add('hidden');
+  window.addEventListener('pageshow', () => {
+    settleInstalledWebApp();
+    if (Date.now() - appUpdateCheckedAt > APP_UPDATE_CHECK_MS) checkSoftwareUpdate(false);
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && Date.now() - appUpdateCheckedAt > APP_UPDATE_CHECK_MS) {
+      checkSoftwareUpdate(false);
+    }
+  });
+  setTimeout(() => {
+    if (Date.now() - appUpdateCheckedAt > APP_UPDATE_CHECK_MS) checkSoftwareUpdate(false);
+  }, 2500);
   /* 与登录门并行：先拉密文，登录后只取一次性密钥并本地解密。
      有历史团别时只预取一个；首次访问并行预取 all/male/female，登录后选命中的那份。 */
   const prefetchHint = prefetchTeamHint();

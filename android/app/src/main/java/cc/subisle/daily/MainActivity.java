@@ -8,10 +8,13 @@ import android.graphics.Color;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.view.View;
 import android.view.ViewGroup;
 import android.webkit.CookieManager;
 import android.webkit.WebChromeClient;
+import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
@@ -26,23 +29,33 @@ import android.widget.Toast;
  * 安全约束：
  * - 只主动加载 APP_URL；
  * - 本站 HTTP(S) 留在 WebView；用户点击的外站 HTTP(S) 交给系统浏览器；
- * - 无点击的外站跳转与所有非 HTTP(S) scheme 一律拦截；
+ * - 无点击的外站跳转与非 HTTP(S) scheme 拦截（内部更新指令除外）；
  * - 不启用文件访问、通用内容访问、自动文件下载；
  * - 不暴露 addJavascriptInterface；
  * - 仅保留登录态所需的 DOM storage / Cookies。
  */
 public final class MainActivity extends Activity {
     private static final String APP_URL = "http://43.142.30.113:81/";
-    private static final String APK_UA_TOKEN = "DailyDataAndroid/1.0";
+    private static final String APK_UA_TOKEN = "DailyDataAndroid/1.2";
 
     private WebView web;
     private View splash;
+    private Handler mainHandler;
+    private AppUpdateChecker updateChecker;
+    private final Runnable splashTimeout = new Runnable() {
+        @Override
+        public void run() {
+            hideSplash();
+        }
+    };
 
     @Override
     @SuppressLint("SetJavaScriptEnabled")
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setTheme(R.style.AppTheme);
+        mainHandler = new Handler(Looper.getMainLooper());
+        updateChecker = new AppUpdateChecker(this, APP_URL);
 
         FrameLayout root = new FrameLayout(this);
         root.setBackgroundColor(getResources().getColor(R.color.background, getTheme()));
@@ -94,10 +107,7 @@ public final class MainActivity extends Activity {
         web.setWebChromeClient(new WebChromeClient() {
             @Override
             public void onProgressChanged(WebView view, int newProgress) {
-                if (newProgress >= 60 && splash != null) {
-                    ((ViewGroup) splash.getParent()).removeView(splash);
-                    splash = null;
-                }
+                if (newProgress >= 60) hideSplash();
             }
         });
 
@@ -115,10 +125,13 @@ public final class MainActivity extends Activity {
 
             @Override
             public void onPageFinished(WebView view, String url) {
-                if (splash != null) {
-                    ((ViewGroup) splash.getParent()).removeView(splash);
-                    splash = null;
-                }
+                hideSplash();
+            }
+
+            @Override
+            public void onReceivedError(WebView view, WebResourceRequest request,
+                                        WebResourceError error) {
+                if (request.isForMainFrame()) hideSplash();
             }
         });
 
@@ -130,6 +143,15 @@ public final class MainActivity extends Activity {
                 web.loadUrl(APP_URL);
             }
         }
+        mainHandler.postDelayed(splashTimeout, 8000);
+    }
+
+    private void hideSplash() {
+        if (splash == null) return;
+        if (splash.getParent() instanceof ViewGroup) {
+            ((ViewGroup) splash.getParent()).removeView(splash);
+        }
+        splash = null;
     }
 
     private View createSplash() {
@@ -148,6 +170,11 @@ public final class MainActivity extends Activity {
     }
 
     private boolean handleNavigation(Uri uri, boolean userGesture) {
+        if (userGesture && uri != null && "dailyapp".equalsIgnoreCase(uri.getScheme())
+                && "check-update".equalsIgnoreCase(uri.getHost())) {
+            updateChecker.check(true);
+            return true;
+        }
         NavigationPolicy.Action action = NavigationPolicy.decide(
                 uri == null ? null : uri.toString(), userGesture);
         if (action == NavigationPolicy.Action.LOAD_IN_WEB_VIEW) return false;
@@ -168,6 +195,17 @@ public final class MainActivity extends Activity {
     }
 
     @Override
+    protected void onResume() {
+        super.onResume();
+        mainHandler.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                updateChecker.check(false);
+            }
+        }, 2000);
+    }
+
+    @Override
     protected void onSaveInstanceState(Bundle outState) {
         super.onSaveInstanceState(outState);
         web.saveState(outState);
@@ -180,6 +218,19 @@ public final class MainActivity extends Activity {
         } else {
             super.onBackPressed();
         }
+    }
+
+    @Override
+    protected void onDestroy() {
+        mainHandler.removeCallbacksAndMessages(null);
+        updateChecker.shutdown();
+        if (web != null) {
+            if (web.getParent() instanceof ViewGroup) {
+                ((ViewGroup) web.getParent()).removeView(web);
+            }
+            web.destroy();
+        }
+        super.onDestroy();
     }
 
     @Override

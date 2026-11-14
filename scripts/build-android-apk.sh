@@ -6,6 +6,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+"$ROOT/scripts/test-android-navigation.sh"
+
 TOOLS="$ROOT/.android-tools"
 BT="$TOOLS/bt35/android-15"
 PLATFORM="$TOOLS/platform35/android-35/android.jar"
@@ -22,7 +24,7 @@ DIST="$APP/dist"
 KEY_DIR="$APP/keystore"
 KEYSTORE="$KEY_DIR/daily-release.jks"
 KEY_ENV="$KEY_DIR/keystore.env"
-OUT_APK="$DIST/每日数据-v1.1-release.apk"
+OUT_APK="$DIST/每日数据-v1.2-release.apk"
 
 mkdir -p "$TOOLS" "$BUILD" "$DIST" "$KEY_DIR"
 
@@ -73,8 +75,8 @@ mkdir -p "$CLASSES" "$RES_FLAT" "$BUILD/gen" "$BUILD/obj-final"
   --java "$BUILD/gen" \
   --min-sdk-version 26 \
   --target-sdk-version 35 \
-  --version-code 2 \
-  --version-name 1.1 \
+  --version-code 3 \
+  --version-name 1.2 \
   $(find "$RES_FLAT" -name '*.flat' | sort)
 
 javac \
@@ -84,6 +86,7 @@ javac \
   -d "$CLASSES" \
   "$SRC/java/cc/subisle/daily/MainActivity.java" \
   "$SRC/java/cc/subisle/daily/NavigationPolicy.java" \
+  "$SRC/java/cc/subisle/daily/AppUpdateChecker.java" \
   $(find "$BUILD/gen" -name '*.java' | sort)
 "$D8" --min-api 26 --lib "$PLATFORM" --output "$BUILD/obj-final" $(find "$CLASSES" -name '*.class' | sort)
 
@@ -111,7 +114,7 @@ shasum -a 256 "$OUT_APK" > "$OUT_APK.sha256"
 # 这是 release 签名产物，不是签名私钥；换签名后需重新构建并重新发布。
 mkdir -p "$WEB_ASSETS"
 cp "$OUT_APK" "$WEB_ASSETS/daily-release.apk"
-sed 's|  .*/每日数据-v1\.1-release\.apk$|  daily-release.apk|' "$OUT_APK.sha256" \
+sed 's|  .*/每日数据-v1\.2-release\.apk$|  daily-release.apk|' "$OUT_APK.sha256" \
   > "$WEB_ASSETS/daily-release.apk.sha256"
 
 printf '\nAPK: %s\n' "$OUT_APK"

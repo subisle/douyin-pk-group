@@ -20,6 +20,28 @@ const PWA_ICON_512: &[u8] = include_bytes!("assets/pwa/icon-512.png");
 const ANDROID_APK: &[u8] = include_bytes!("assets/pwa/daily-release.apk");
 const ANDROID_APK_SHA256: &[u8] = include_bytes!("assets/pwa/daily-release.apk.sha256");
 
+/// 展示页与 Android 安装包的公开版本契约。发布时与 APK Manifest / 构建脚本同步递增。
+const WEB_APP_VERSION: &str = "2026.11.14.1";
+const ANDROID_VERSION_CODE: u64 = 3;
+const ANDROID_VERSION_NAME: &str = "1.2";
+
+fn app_version_payload() -> serde_json::Value {
+    serde_json::json!({
+        "webVersion": WEB_APP_VERSION,
+        "android": {
+            "versionCode": ANDROID_VERSION_CODE,
+            "versionName": ANDROID_VERSION_NAME,
+            "downloadUrl": "/download/daily.apk",
+            "sha256Url": "/download/daily.apk.sha256",
+        }
+    })
+}
+
+/// GET /api/public/app-version：主屏幕 App / 浏览器页面 / Android APK 的更新探测。
+pub async fn app_version() -> axum::Json<serde_json::Value> {
+    axum::Json(app_version_payload())
+}
+
 fn pwa_asset(bytes: &'static [u8], content_type: &'static str) -> Response {
     (
         [
@@ -152,7 +174,9 @@ pub async fn resources_page() -> Response {
 }
 
 pub(super) fn st_page_for(team: &str) -> Response {
-    let html = ST_PAGE.replace("{{TEAM}}", team);
+    let html = ST_PAGE
+        .replace("{{TEAM}}", team)
+        .replace("{{WEB_APP_VERSION}}", WEB_APP_VERSION);
     (
         [
             (axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8"),
@@ -253,6 +277,19 @@ mod pwa_tests {
         assert!(src.contains("window.location.href = ANDROID_APK_URL"));
         assert!(src.contains("/* 仅识别安卓 / 苹果；其他环境不弹推荐层。 */"), "仅手机推荐、其它环境不应展示");
         assert!(src.contains("/;\\s*wv\\)/i.test(ua)"), "需识别通用 Android WebView");
+    }
+
+    #[test]
+    fn app_version_contract_covers_web_and_android() {
+        let version = app_version_payload();
+        assert_eq!(version["webVersion"], WEB_APP_VERSION);
+        assert_eq!(version["android"]["versionCode"], ANDROID_VERSION_CODE);
+        assert_eq!(version["android"]["versionName"], ANDROID_VERSION_NAME);
+        assert_eq!(version["android"]["downloadUrl"], "/download/daily.apk");
+        assert!(ST_PAGE.contains("const WEB_APP_VERSION = '{{WEB_APP_VERSION}}'"));
+        assert!(ST_PAGE.contains("id=\"appUpdate\""));
+        assert!(ST_PAGE.contains("id=\"myUpdate\""));
+        assert!(ST_PAGE.contains("dailyapp://check-update"));
     }
 
     #[test]

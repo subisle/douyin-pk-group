@@ -12,6 +12,7 @@ http://43.142.30.113:81/
 - 只声明 `android.permission.INTERNET`，没有短信、通讯录、定位、存储、相机、电话、通知、后台服务等敏感权限。
 - 没有第三方 SDK、广告、统计、推送、动态加载、反射调用、原生库或可执行 dex 下载。
 - 只加载一个固定入口；本站 HTTP/HTTPS 留在 WebView，用户点击的非本站 HTTP/HTTPS 会交给系统浏览器；无点击的外站跳转及 `tel:`、`sms:`、`mailto:`、`intent:`、`javascript:` 等协议继续拦截。
+- 不暴露 `addJavascriptInterface`；`dailyapp://check-update` 只作为页面按钮调用原生更新检查的私有入口，必须带用户点击且不会转交外部应用。
 - 禁用文件访问、任意内容 URL、数据库、DOM storage 以外的本地存储接口通过 WebView 配置收紧；登录态所需的 `localStorage` 开启。
 - `minSdk 26` / `targetSdk 35`，不申请 `QUERY_ALL_PACKAGES`，导出组件只有启动 Activity。
 - 未使用调试证书签名；`android:debuggable` 由构建命令显式设为 false。
@@ -37,8 +38,8 @@ http://43.142.30.113:81/
 3. 用 Java 源码编译出极小 classes.dex，再用 aapt2 / zipalign / apksigner 产出：
 
 ```text
-android/dist/每日数据-v1.1-release.apk
-android/dist/每日数据-v1.1-release.apk.sha256
+android/dist/每日数据-v1.2-release.apk
+android/dist/每日数据-v1.2-release.apk.sha256
 ```
 
 签名口令保存在 `android/keystore/keystore.env`（权限 600，不入库）。请离线妥善保管这个文件和 JKS；更换签名会导致用户必须卸载旧版才能升级。
@@ -59,6 +60,8 @@ Web 展示页已内置平台分流：
 - 桌面浏览器：不弹安装推荐，避免干扰。
 
 `scripts/build-android-apk.sh` 会把签名后的 APK 与校验文件同步到 `rust/crates/pk-server/src/public_teams/assets/pwa/`，由 Rust 服务作为同源公开资源下发。重新构建后需重新发布服务端代码，线上下载入口才会更新。
+
+APK 启动及回到前台时会检查 `/api/public/app-version`，发现更高 versionCode 会提醒用户通过系统浏览器下载；「我的 → 检查软件更新」也可手动触发。
 
 ## 安装提示说明
 

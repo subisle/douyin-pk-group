@@ -581,6 +581,7 @@ async fn main() -> anyhow::Result<()> {
         // 不分男女、不弹团别选择卡），/1、/0、/st/m、/st/f 为兼容旧链接的别名；
         // 子路径（/report、/lineage、/my、/group/*）也是同一页，前端 history 路由接管
         .route("/manifest.webmanifest", get(public_teams::pwa_manifest))
+        .route("/api/public/app-version", get(public_teams::app_version))
         .route(
             "/icons/apple-touch-icon.png",
             get(public_teams::pwa_apple_touch_icon),

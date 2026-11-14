@@ -20,6 +20,8 @@ public final class NavigationPolicyTest {
         expect(NavigationPolicy.Action.BLOCK,
                 "intent://scan/#Intent;scheme=zxing;end", true, "intent scheme");
         expect(NavigationPolicy.Action.BLOCK,
+                "dailyapp://check-update", true, "private scheme never leaves the app");
+        expect(NavigationPolicy.Action.BLOCK,
                 "javascript:alert(1)", true, "JavaScript URL");
         expect(NavigationPolicy.Action.BLOCK,
                 "file:///sdcard/private.txt", true, "file URL");
