@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from './api'
 import { useAutoRefresh } from './useAutoRefresh'
 import { routeHref, useRoute } from './lib/router'
@@ -193,47 +193,57 @@ export default function DashboardPage() {
   const [days, setDays] = useState(30)
   const [error, setError] = useState('')
   const [team, setTeam] = useState('male')
-  const [reportUrl, setReportUrl] = useState('')
+  const [reportLoading, setReportLoading] = useState(false)
+  const [reportError, setReportError] = useState('')
+  const reportUrlRef = useRef('')
   const { go } = useRoute()
-
-  /* 日报 SVG 只认 Authorization 头（审计后 `?access_token=` 已废），
-     而 <a href> 带不了请求头 → 先 fetch 成 blob 再挂 object URL
-     （与「消息下发」页的图片预览同一套写法）。 */
-  const loadReport = useCallback(async (date: string, t: string) => {
-    try {
-      const resp = await fetch(`/api/admin/report/daily.svg?date=${date}&team=${t}`, {
-        headers: { Authorization: `Bearer ${sessionStorage.getItem('pk_token') ?? ''}` },
-      })
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
-      setReportUrl(URL.createObjectURL(await resp.blob()))
-    } catch {
-      setReportUrl('')   // 日报图拿不到不挡主数据：KPI 照常显示
-    }
-  }, [])
 
   const load = useCallback(async () => {
     setError('')
     try {
-      const d = await api(`/api/admin/dashboard?days=${days}&top=10`)
-      setData(d)
-      // 空库（全新部署 / 刚清空音浪数据）没有基准日，日报 SVG 也没得画
-      if (d?.summary?.date) await loadReport(d.summary.date, team)
-      else setReportUrl('')
+      setData(await api(`/api/admin/dashboard?days=${days}&top=10`))
     } catch (e: any) {
       setError(e.message ?? String(e))
     }
-  }, [days, team, loadReport])
+  }, [days])
 
   useEffect(() => {
     load()
   }, [load])
 
   useEffect(() => {
-    // 日报图是 blob URL：换图 / 卸载时用完即还
+    // 日报 blob URL 只在用户点开时生成；卸载时统一释放。
     return () => {
-      if (reportUrl) URL.revokeObjectURL(reportUrl)
+      if (reportUrlRef.current) URL.revokeObjectURL(reportUrlRef.current)
     }
-  }, [reportUrl])
+  }, [])
+
+  /* 日报 SVG 约 600KB，不能随首页自动拉取。只在点击时按需生成；
+     先同步开空白页，避免异步 fetch 后被移动浏览器拦成弹窗。 */
+  const openReport = useCallback(async () => {
+    const date = data?.summary?.date
+    if (!date || reportLoading) return
+    setReportLoading(true)
+    setReportError('')
+    const popup = window.open('', '_blank')
+    if (popup) popup.opener = null
+    try {
+      const resp = await fetch(`/api/admin/report/daily.svg?date=${date}&team=${team}`, {
+        headers: { Authorization: `Bearer ${sessionStorage.getItem('pk_token') ?? ''}` },
+      })
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+      const url = URL.createObjectURL(await resp.blob())
+      if (reportUrlRef.current) URL.revokeObjectURL(reportUrlRef.current)
+      reportUrlRef.current = url
+      if (popup) popup.location.href = url
+      else window.location.href = url
+    } catch {
+      popup?.close()
+      setReportError('日报生成失败，请稍后重试')
+    } finally {
+      setReportLoading(false)
+    }
+  }, [data?.summary?.date, reportLoading, team])
 
   // 机器人/网页导入、台账变更、数据源切换后自动重拉
   useAutoRefresh(load, ['import', 'roster', 'source'])
@@ -294,9 +304,16 @@ export default function DashboardPage() {
             <option value="female">女团</option>
           </select>
         </label>
-        <a className="file-btn" href={reportUrl} target="_blank" rel="noreferrer">
-          打开日报 SVG
-        </a>
+        <button
+          className="file-btn"
+          type="button"
+          disabled={!s.date || reportLoading}
+          aria-busy={reportLoading}
+          onClick={openReport}
+        >
+          {reportLoading ? '生成日报中…' : '打开日报 SVG'}
+        </button>
+        {reportError && <span className="alert bad">{reportError}</span>}
       </div>
 
       <div className="cards cards-kpi">

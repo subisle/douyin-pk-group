@@ -1,4 +1,5 @@
 import { lazy, Suspense, useEffect, useState } from 'react'
+import DashboardPage from './DashboardPage'
 import { hasToken, login, logout, UNAUTHORIZED_EVENT } from './api'
 import { subscribeChanges } from './useAutoRefresh'
 import { FULLSCREEN_ROUTES, ROUTES, routeHref, useRoute, type RouteKey } from './lib/router'
@@ -7,7 +8,6 @@ import { FULLSCREEN_ROUTES, ROUTES, routeHref, useRoute, type RouteKey } from '.
  * 其余页（主播管理 / 导入 / 族谱 / 公告 / 机器人 / 下发 / PK）切到才加载。
  * pk.css 也从 App 移到 GroupPage/BoardPage，只有进 PK 页才拉。
  * 之前 10 个页面全打进一个 449KB 的 bundle，首屏一次全下载。 */
-const DashboardPage = lazy(() => import('./DashboardPage'))
 const ImportPage = lazy(() => import('./ImportPage'))
 const StreamerPage = lazy(() => import('./StreamerPage'))
 const VisitPage = lazy(() => import('./VisitPage'))

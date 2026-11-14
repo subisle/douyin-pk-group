@@ -463,6 +463,12 @@ a.tab {
     border-bottom: 1px solid var(--line);
     overflow-x: auto;
     overflow-y: hidden;
+    overscroll-behavior-x: contain;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .sidebar::-webkit-scrollbar {
+    display: none;
   }
   .side-brand {
     border-bottom: none;
@@ -601,6 +607,14 @@ a.tab {
 }
 
 /* ---------------- 按钮 ---------------- */
+button,
+a,
+label,
+input,
+select,
+textarea {
+  touch-action: manipulation;
+}
 button {
   font: inherit;
   padding: 7px 14px;
@@ -1641,4 +1655,25 @@ input.switch:focus-visible {
   text-align: center;
   color: var(--ink3);
   font-size: 13px;
+}
+
+
+/* 安卓移动端性能：毛玻璃会让部分 GPU 较弱的机型在滚动时反复做模糊合成，
+   窄屏直接退回实色；同时把首屏之外的大卡片延迟渲染，减少首次布局/绘制成本。 */
+@media (max-width: 640px) {
+  .topbar,
+  .ann-savebar {
+    background: #fff;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+}
+@supports (content-visibility: auto) {
+  @media (max-width: 640px) {
+    .page > .cards > .card,
+    .page > .card {
+      content-visibility: auto;
+      contain-intrinsic-size: auto 320px;
+    }
+  }
 }
