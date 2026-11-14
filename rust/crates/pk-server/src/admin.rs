@@ -1703,7 +1703,8 @@ fn nice_400(e: anyhow::Error) -> ApiError {
         // commit_import 的两类显式拒绝：文案由代码拼好（含日期/行数/团别，不含底层细节）
         "异常文件：",
         "reject 模式：",
-        // mode 只能是 merge / reject：非法值是请求错误（与 metrics 非法同为 400，别一个 400 一个 500）
+        "locked 模式：",
+        // mode 只能是 merge / reject / locked：非法值是请求错误（与 metrics 非法同为 400）
         "mode 只能是",
         // 按月导入的指标勾选（2026-10-16）：空数组 / 不认识的指标是请求错误，不是 500
         "至少要选一种指标",
@@ -1804,6 +1805,7 @@ pub struct ImportBody {
     pub metrics: Option<Vec<String>>,
     pub team: Option<String>,
     /// merge（幂等覆盖，默认）/ reject（当日已有数据则整批拒绝）
+    /// / locked（写一次并锁定，后续导入遇到已锁指标跳过）
     pub mode: Option<String>,
     pub filename: Option<String>,
 }
@@ -1914,6 +1916,7 @@ pub async fn import_commit(State(st): State<ArcState>, Json(body): Json<ImportBo
         "total": report.total,
         "okRows": report.ok_rows,
         "unchanged": report.unchanged,
+        "locked": report.locked,
         "failedRows": report.failures.len(),
         "failures": report.failures,
         "pending": report.pending,
@@ -1932,6 +1935,8 @@ pub struct CommitReport {
     pub ok_rows: u32,
     /// 库里已有该人该日、且值完全一样 → 没动它（用户口径 2026-10-10：相同不覆盖，不同才覆盖）
     pub unchanged: u32,
+    /// 命中了已锁定指标，按锁定规则跳过（不算失败）
+    pub locked: u32,
     pub failures: Vec<Value>,
     /// 暂存行：台账还没有这个主播 —— 有号按号、只有艺名按名落 import_pending，
     /// 不写 daily_metric，所以不进台账 / 榜单 / 统计；建档 / 绑号 / 认领后自动补账。
@@ -2220,10 +2225,7 @@ async fn commit_import_with_mode(
     }
     // 批次审计里的团别列：自动导入记 mixed（库列注释本来就支持 male/female/mixed）
     let team_col = if auto_team { "mixed" } else { team };
-    anyhow::ensure!(
-        mode == "merge" || mode == "reject",
-        "mode 只能是 merge / reject"
-    );
+    validate_import_mode(mode)?;
     anyhow::ensure!(!rows.is_empty(), "没有解析到任何数据行");
 
     /* 异常文件防御（2026-10-13 QQ 机器人导入口径）：
@@ -2394,13 +2396,14 @@ async fn commit_import_with_mode(
     同一文件重发由 write_daily_row 的 Unchanged 保证数据幂等，首见内容指纹留在审计批次。 */
     let mut ok_count: u32 = 0;
     let mut unchanged: u32 = 0;
+    let mut locked: u32 = 0;
     for r in &ok_rows {
         // PostgreSQL 一条 SQL 出错后整个事务会进入 aborted 状态，不能“catch 后继续”。
         // 每行包 savepoint：业务冲突或意外约束失败只回滚这一行，其他主播仍能落库。
         sqlx::query("SAVEPOINT import_row")
             .execute(&mut *tx)
             .await?;
-        match write_daily_row(&mut tx, batch_id, biz_date, date, r).await {
+        match write_daily_row(&mut tx, batch_id, biz_date, date, r, mode).await {
             Ok(WriteOutcome::Written) => {
                 sqlx::query("RELEASE SAVEPOINT import_row")
                     .execute(&mut *tx)
@@ -2412,6 +2415,12 @@ async fn commit_import_with_mode(
                     .execute(&mut *tx)
                     .await?;
                 unchanged += 1;
+            }
+            Ok(WriteOutcome::Locked) => {
+                sqlx::query("RELEASE SAVEPOINT import_row")
+                    .execute(&mut *tx)
+                    .await?;
+                locked += 1;
             }
             Err(e) => {
                 sqlx::query("ROLLBACK TO SAVEPOINT import_row")
@@ -2550,6 +2559,7 @@ async fn commit_import_with_mode(
         total: merged.len(),
         ok_rows: ok_count,
         unchanged,
+        locked,
         failures,
         // 暂存行：有抖音号/ID 但台账还没有这个主播，不进 daily_metric / 榜单 / 统计
         pending: staged_rows
@@ -2748,6 +2758,8 @@ fn batch_note(failures: &[Value], pending: usize, skipped: &[String]) -> Option<
 enum WriteOutcome {
     Written,
     Unchanged,
+    /// 本行涉及的指标均已锁定，未修改数据
+    Locked,
 }
 
 /// 已有行的当前值（比对用）
@@ -2794,28 +2806,97 @@ async fn ensure_primary(conn: &mut sqlx::PgConnection, person_id: u64) -> anyhow
     Ok(())
 }
 
+#[derive(Debug, Clone)]
+struct ExistingDayRow {
+    wave: i64,
+    cumulative_wave: i64,
+    minutes: i64,
+    is_live: i16,
+    anchor_id: String,
+    source_batch_id: Option<i64>,
+    wave_state: i16,
+    minutes_state: i16,
+}
+
+/// 单个指标字段组的写入计划。状态只作用于对应指标：音浪锁不会连带锁时长。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MetricWritePlan {
+    write_value: bool,
+    next_state: i16,
+}
+
+fn plan_metric_write(
+    current_state: i16,
+    supplied: bool,
+    value_changed: bool,
+    is_new_row: bool,
+    locked_mode: bool,
+) -> MetricWritePlan {
+    if !supplied {
+        return MetricWritePlan {
+            write_value: false,
+            next_state: current_state,
+        };
+    }
+    if is_new_row {
+        return MetricWritePlan {
+            write_value: true,
+            next_state: if locked_mode { 2 } else { 1 },
+        };
+    }
+    match current_state {
+        // 已锁：任何导入都不能再改值。
+        2 => MetricWritePlan {
+            write_value: false,
+            next_state: 2,
+        },
+        // 从未导入：locked 写入并封存；merge 写入但保持可覆盖。
+        0 => MetricWritePlan {
+            write_value: true,
+            next_state: if locked_mode { 2 } else { 1 },
+        },
+        // locked 首次封存旧值（不采用本次新值）；merge 只改不同值。
+        1 if locked_mode => MetricWritePlan {
+            write_value: false,
+            next_state: 2,
+        },
+        1 => MetricWritePlan {
+            write_value: value_changed,
+            next_state: 1,
+        },
+        // 兼容历史脏状态：按未导入处理，下一次导入会修正为合法状态。
+        _ => MetricWritePlan {
+            write_value: true,
+            next_state: if locked_mode { 2 } else { 1 },
+        },
+    }
+}
+
 async fn existing_day_row(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     person_id: u64,
     biz_date: &str,
-) -> anyhow::Result<Option<(i64, i64, i64, i16, String, Option<i64>)>> {
+) -> anyhow::Result<Option<ExistingDayRow>> {
     let row = sqlx::query(&crate::pq::rewrite(
-        "SELECT wave, cumulative_wave, minutes, is_live, anchor_id, source_batch_id
+        "SELECT wave, cumulative_wave, minutes, is_live, anchor_id, source_batch_id,
+                wave_state, minutes_state
            FROM daily_metric
           WHERE person_id = ? AND biz_date = ?::date",
     ))
     .bind(person_id as i64)
     .bind(biz_date)
     .map(|row: sqlx::postgres::PgRow| {
-        (
-            read_opt_i64(&row, "wave").unwrap_or(0),
-            read_opt_i64(&row, "cumulative_wave").unwrap_or(0),
+        ExistingDayRow {
+            wave: read_opt_i64(&row, "wave").unwrap_or(0),
+            cumulative_wave: read_opt_i64(&row, "cumulative_wave").unwrap_or(0),
             // minutes 是 INT4；read_opt_i64 会按 i32 精确类型回退解码。
-            read_opt_i64(&row, "minutes").unwrap_or(0),
-            read_opt_i64(&row, "is_live").unwrap_or(0) as i16,
-            row.try_get::<String, _>("anchor_id").unwrap_or_default(),
-            read_opt_i64(&row, "source_batch_id"),
-        )
+            minutes: read_opt_i64(&row, "minutes").unwrap_or(0),
+            is_live: read_opt_i64(&row, "is_live").unwrap_or(0) as i16,
+            anchor_id: row.try_get::<String, _>("anchor_id").unwrap_or_default(),
+            source_batch_id: read_opt_i64(&row, "source_batch_id"),
+            wave_state: read_opt_i64(&row, "wave_state").unwrap_or(0) as i16,
+            minutes_state: read_opt_i64(&row, "minutes_state").unwrap_or(0) as i16,
+        }
     })
     .fetch_optional(&mut **tx)
     .await?;
@@ -2966,14 +3047,24 @@ async fn touch_daily_source_batch(
     Ok(())
 }
 
+fn validate_import_mode(mode: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        matches!(mode, "merge" | "reject" | "locked"),
+        "mode 只能是 merge / reject / locked"
+    );
+    Ok(())
+}
+
 async fn write_daily_row(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     batch_id: i64,
     biz_date: &str,
     date: NaiveDate,
     r: &ResolvedRow,
+    mode: &str,
 ) -> anyhow::Result<WriteOutcome> {
     let person_id = r.person_id.expect("调用前已保证 matched");
+    let locked_mode = mode == "locked";
     let prev: Option<(f64, String)> =
         sqlx::query(&crate::pq::rewrite(dialect::PREV_CUMULATIVE_SQL))
             .bind(person_id as i64)
@@ -2995,31 +3086,45 @@ async fn write_daily_row(
             .fetch_optional(&mut **tx)
             .await?;
 
-    // 主播 ID 是唯一值：文件里换了 ID / 抖音号时，先把台账主号切到最新 ID，
-    // 再取 PRIMARY_ANCHOR_SQL，保证 daily_metric.anchor_id 一定是有效主号。
-    apply_import_identity(tx, person_id, r).await?;
-    // P2-11 收敛：有账号但无主号（生产 1000001/1000004）时 PRIMARY_ANCHOR_SQL 取不到，
-    // 先把最早的号提为主号再取（幂等，正常情况零开销）。
-    ensure_primary(tx, person_id).await?;
+    // 锁定模式遇到已有行时不再改账号/主号/历史 anchor：锁定的是数据，不应反向触发台账重排。
+    let existing_before_identity = existing_day_row(tx, person_id, biz_date).await?;
+    let preserve_identity = locked_mode && existing_before_identity.is_some();
+    if !preserve_identity {
+        apply_import_identity(tx, person_id, r).await?;
+        ensure_primary(tx, person_id).await?;
+        // 历史回扫会改到所有日期的 anchor；locked 模式不做全历史变更。
+        if !locked_mode {
+            let anchor: String = sqlx::query(&crate::pq::rewrite(dialect::PRIMARY_ANCHOR_SQL))
+                .bind(person_id as i64)
+                .map(|row: sqlx::postgres::PgRow| row.try_get::<String, _>(0).unwrap_or_default())
+                .fetch_optional(&mut **tx)
+                .await?
+                .unwrap_or_default();
+            sync_daily_metric_anchor(tx, person_id, &anchor).await?;
+        }
+    }
 
-    let anchor: String = sqlx::query(&crate::pq::rewrite(dialect::PRIMARY_ANCHOR_SQL))
-        .bind(person_id as i64)
-        .map(|row: sqlx::postgres::PgRow| row.try_get::<String, _>(0).unwrap_or_default())
-        .fetch_optional(&mut **tx)
-        .await?
-        .unwrap_or_default();
-    // 以事务内最终确认的主号回扫，而不是用文件里可能已被并发抢走的 anchor。
-    sync_daily_metric_anchor(tx, person_id, &anchor).await?;
-
-    /* 库里当天已有的行（可能来自这个主播另一个号的导入 / 上一次按日导入 / 暂存补账）。
-    **只查一次**：Unchanged 判定、minutes-only 分支、以及下面「文件没有时长列时保留旧值」
-    都复用这一个 existing，避免同一行在一笔写入里查两遍。 */
-    let existing = existing_day_row(tx, person_id, biz_date).await?;
+    let existing = if preserve_identity {
+        existing_before_identity
+    } else {
+        existing_day_row(tx, person_id, biz_date).await?
+    };
+    let anchor = if preserve_identity {
+        existing
+            .as_ref()
+            .map(|e| e.anchor_id.clone())
+            .unwrap_or_default()
+    } else {
+        sqlx::query(&crate::pq::rewrite(dialect::PRIMARY_ANCHOR_SQL))
+            .bind(person_id as i64)
+            .map(|row: sqlx::postgres::PgRow| row.try_get::<String, _>(0).unwrap_or_default())
+            .fetch_optional(&mut **tx)
+            .await?
+            .unwrap_or_default()
+    };
 
     let (wave, cumulative, prev_date, span, reliable): (i64, i64, Option<String>, i16, i16) =
         match (r.raw.wave, r.raw.cumulative_wave) {
-            // 两个都给了：以「当日音浪」为准（运营文件里这一列就是当天值），累计只当快照。
-            // 否则清库/新部署后的第一天没有前一天快照，会被算成「累计值」当成当日音浪（踩过）。
             (Some(w), Some(cum)) => (
                 w as i64,
                 cum as i64,
@@ -3044,86 +3149,89 @@ async fn write_daily_row(
                     let reliable = if diff >= 0 && days <= 1 { 1 } else { 0 };
                     (diff, cum as i64, Some(pd.clone()), span, reliable)
                 }
-                None => (cum as i64, cum as i64, None, 1, 0), // 基线日：只记累计
+                None => (cum as i64, cum as i64, None, 1, 0),
             },
-            // 没有音浪（时长 CSV / 只有开播状态的行）：不写音浪列，走下面的 minutes-only 分支。
-            // 以前这里直接 bail「没有音浪数据」，导致时长行永远进不来（2026-10-10 修）。
             (None, None) => (0, 0, None, 1, 1),
         };
-
-    /* 时长（2026-10-19 用户口径：按日导入也写 daily_metric.minutes）：
-    - 行里有 minutes（Some(v)）→ 写 v；0 也是运营的显式数据，照写；
-    - 行里没有（None，典型是老文件没有「时长 / 开播有效时长」列）→ **保留库里当天已有值**，
-      新行才写 0。旧实现 `unwrap_or(0.0)` 会在没有时长列的文件重导时把已有 minutes 静默清零。 */
-    let minutes = match r.raw.minutes {
-        Some(v) => v as i64,
-        None => existing.as_ref().map(|(_, _, m, _, _, _)| *m).unwrap_or(0),
-    };
-    // 没带开播状态列同样保旧值；显式 false 才是“未开播”覆盖。
+    let minutes = r
+        .raw
+        .minutes
+        .map(|v| v as i64)
+        .or_else(|| existing.as_ref().map(|e| e.minutes))
+        .unwrap_or(0);
     let is_live = r
         .raw
         .is_live
         .map(|b| b as i16)
-        .or_else(|| existing.as_ref().map(|(_, _, _, live, _, _)| *live))
+        .or_else(|| existing.as_ref().map(|e| e.is_live))
         .unwrap_or(0);
 
-    // 时长-only 行（时长 CSV）：只更新 minutes/is_live，不把已导入的音浪覆盖成 0
-    if r.raw.wave.is_none() && r.raw.cumulative_wave.is_none() {
-        // 连分钟和开播都没给（暂存补账时可能出现的「只有名字」行）：库里已有当日行就什么都不动
-        let presence_only = r.raw.minutes.is_none() && r.raw.is_live.is_none();
-        if let Some((_, _, m, live, old_anchor, _)) = existing.as_ref() {
-            // anchor 已由 sync_daily_metric_anchor 对齐；这里再比一次，防止空主号等
-            // 特殊数据下把 anchor 变化误判成 Unchanged。
-            if old_anchor == &anchor && (presence_only || (*m == minutes && *live == is_live)) {
-                touch_daily_source_batch(tx, batch_id, person_id, biz_date).await?;
-                return Ok(WriteOutcome::Unchanged);
-            }
-        }
-        sqlx::query(&crate::pq::rewrite(
-            "INSERT INTO daily_metric
-                 (person_id, anchor_id, biz_date, minutes, is_live, source_batch_id)
-             VALUES (?,?,?::date,?,?,?)
-             ON CONFLICT (person_id, biz_date) DO UPDATE SET
-                 anchor_id = EXCLUDED.anchor_id,
-                 minutes = EXCLUDED.minutes, is_live = EXCLUDED.is_live,
-                 source_batch_id = EXCLUDED.source_batch_id",
-        ))
-        .bind(person_id as i64)
-        .bind(&anchor)
-        .bind(biz_date)
-        .bind(minutes)
-        .bind(is_live)
-        .bind(batch_id)
-        .execute(&mut **tx)
-        .await?;
-        return Ok(WriteOutcome::Written);
-    }
+    let wave_supplied = r.raw.wave.is_some() || r.raw.cumulative_wave.is_some();
+    let minutes_supplied = r.raw.minutes.is_some() || r.raw.is_live.is_some();
+    let current_wave_state = existing.as_ref().map(|e| e.wave_state).unwrap_or(0);
+    let current_minutes_state = existing.as_ref().map(|e| e.minutes_state).unwrap_or(0);
+    let wave_value_changed = existing
+        .as_ref()
+        .is_none_or(|e| e.wave != wave || e.cumulative_wave != cumulative);
+    let minutes_value_changed = existing
+        .as_ref()
+        .is_none_or(|e| e.minutes != minutes || e.is_live != is_live);
+    let wave_plan = plan_metric_write(
+        current_wave_state,
+        wave_supplied,
+        wave_value_changed,
+        existing.is_none(),
+        locked_mode,
+    );
+    let minutes_plan = plan_metric_write(
+        current_minutes_state,
+        minutes_supplied,
+        minutes_value_changed,
+        existing.is_none(),
+        locked_mode,
+    );
+    let wave_state_update = existing.is_some() && wave_plan.next_state != current_wave_state;
+    let minutes_state_update =
+        existing.is_some() && minutes_plan.next_state != current_minutes_state;
 
-    // 库里已有该人该日、且算出来的值与库里完全一致 → 不动它（幂等：同一天重复发同一个文件不产生任何写入）
-    if let Some((w, c, m, live, old_anchor, _)) = existing {
-        if w == wave && c == cumulative && m == minutes && live == is_live && old_anchor == anchor {
+    if existing.is_some()
+        && !wave_plan.write_value
+        && !minutes_plan.write_value
+        && !wave_state_update
+        && !minutes_state_update
+    {
+        let hit_locked = (wave_supplied && current_wave_state == 2)
+            || (minutes_supplied && current_minutes_state == 2);
+        if hit_locked {
+            return Ok(WriteOutcome::Locked);
+        }
+        if !locked_mode {
             touch_daily_source_batch(tx, batch_id, person_id, biz_date).await?;
-            return Ok(WriteOutcome::Unchanged);
         }
+        return Ok(WriteOutcome::Unchanged);
     }
 
+    let wave_write = wave_plan.write_value;
+    let minutes_write = minutes_plan.write_value;
+    let source_update = wave_write || minutes_write;
     sqlx::query(&crate::pq::rewrite(
         "INSERT INTO daily_metric
              (person_id, anchor_id, biz_date, wave, cumulative_wave, prev_snapshot_date,
-              wave_span, wave_reliable, minutes, is_live, source_batch_id)
-         VALUES (?,?,?::date,?,?,?::date,?,?,?,?,?)
+              wave_span, wave_reliable, minutes, is_live, wave_state, minutes_state,
+              source_batch_id)
+         VALUES (?,?,?::date,?,?,?::date,?,?,?,?,?,?,?)
          ON CONFLICT (person_id, biz_date) DO UPDATE SET
-             /* anchor_id 也要跟着更新（2026-10-17 修复，审计 P1-4）：
-             分号口径主号分支要求 `account.anchor_id = daily_metric.anchor_id
-             AND is_primary = 1`，而这个 anchor_id 是**写库那一刻**的主号。
-             运营在台账换主号后，旧行的 anchor 还卡在老号上，老号已降为副号
-             （走 wave_snapshot）→ 两边都取不到，该主播在「我的抖音号」卡上主号=0、副号=0。
-             原来这里不写 anchor_id，**重导同一天也不会自愈**。 */
-             anchor_id = EXCLUDED.anchor_id,
-             wave = EXCLUDED.wave, cumulative_wave = EXCLUDED.cumulative_wave,
-             prev_snapshot_date = EXCLUDED.prev_snapshot_date, wave_span = EXCLUDED.wave_span,
-             wave_reliable = EXCLUDED.wave_reliable, minutes = EXCLUDED.minutes,
-             is_live = EXCLUDED.is_live, source_batch_id = EXCLUDED.source_batch_id",
+             anchor_id = CASE WHEN ? THEN daily_metric.anchor_id ELSE EXCLUDED.anchor_id END,
+             wave = CASE WHEN ? THEN EXCLUDED.wave ELSE daily_metric.wave END,
+             cumulative_wave = CASE WHEN ? THEN EXCLUDED.cumulative_wave ELSE daily_metric.cumulative_wave END,
+             prev_snapshot_date = CASE WHEN ? THEN EXCLUDED.prev_snapshot_date ELSE daily_metric.prev_snapshot_date END,
+             wave_span = CASE WHEN ? THEN EXCLUDED.wave_span ELSE daily_metric.wave_span END,
+             wave_reliable = CASE WHEN ? THEN EXCLUDED.wave_reliable ELSE daily_metric.wave_reliable END,
+             minutes = CASE WHEN ? THEN EXCLUDED.minutes ELSE daily_metric.minutes END,
+             is_live = CASE WHEN ? THEN EXCLUDED.is_live ELSE daily_metric.is_live END,
+             wave_state = CASE WHEN ? THEN ? ELSE daily_metric.wave_state END,
+             minutes_state = CASE WHEN ? THEN ? ELSE daily_metric.minutes_state END,
+             source_batch_id = CASE WHEN ? THEN EXCLUDED.source_batch_id ELSE daily_metric.source_batch_id END",
     ))
     .bind(person_id as i64)
     .bind(&anchor)
@@ -3135,7 +3243,22 @@ async fn write_daily_row(
     .bind(reliable)
     .bind(minutes)
     .bind(is_live)
+    .bind(wave_plan.next_state)
+    .bind(minutes_plan.next_state)
     .bind(batch_id)
+    .bind(preserve_identity)
+    .bind(wave_write)
+    .bind(wave_write)
+    .bind(wave_write)
+    .bind(wave_write)
+    .bind(wave_write)
+    .bind(minutes_write)
+    .bind(minutes_write)
+    .bind(wave_state_update)
+    .bind(wave_plan.next_state)
+    .bind(minutes_state_update)
+    .bind(minutes_plan.next_state)
+    .bind(source_update)
     .execute(&mut **tx)
     .await?;
     Ok(WriteOutcome::Written)
@@ -3302,8 +3425,8 @@ pub async fn absorb_pending(st: &AppState, person_id: u64) -> anyhow::Result<u32
             || p.is_live.is_some();
         if has_values {
             let existing = existing_day_row(&mut tx, person_id, &p.biz_date).await?;
-            if let Some((_, _, _, _, _, existing_batch_id)) = existing {
-                if !pending_batch_is_newer(p.batch_id, existing_batch_id) {
+            if let Some(existing) = existing {
+                if !pending_batch_is_newer(p.batch_id, existing.source_batch_id) {
                     // 旧暂存已经被更新的同人同日数据覆盖，标记已处理即可，不能反向覆盖。
                     absorbed += 1;
                     continue;
@@ -3328,7 +3451,15 @@ pub async fn absorb_pending(st: &AppState, person_id: u64) -> anyhow::Result<u32
                 candidates: Vec::new(),
                 matched_by_douyin: true,
             };
-            write_daily_row(&mut tx, p.batch_id as i64, &p.biz_date, date, &resolved).await?;
+            write_daily_row(
+                &mut tx,
+                p.batch_id as i64,
+                &p.biz_date,
+                date,
+                &resolved,
+                "merge",
+            )
+            .await?;
         }
         absorbed += 1;
     }
@@ -3406,19 +3537,23 @@ const PENDING_MONTH_UPSERT_SQL: &str = "INSERT INTO import_pending_month
 /// 一个主播可能挂多个号、每个号各有一条暂存行（与月度导入「一人多号求和」、
 /// 按日补账「一人多号求和」口径一致）；库里已有该月导入值时也不能把它冲掉。
 const PENDING_MONTH_ABSORB_WAVE_SQL: &str = "INSERT INTO monthly_wave
-         (person_id, period, wave, source_batch_id)
-     VALUES (?,?,?,?)
+         (person_id, period, wave, state, source_batch_id)
+     VALUES (?,?,?,1,?)
      ON CONFLICT (person_id, period) DO UPDATE SET
          wave = monthly_wave.wave + EXCLUDED.wave,
-         source_batch_id = COALESCE(EXCLUDED.source_batch_id, monthly_wave.source_batch_id)";
+         state = CASE WHEN monthly_wave.state = 0 THEN 1 ELSE monthly_wave.state END,
+         source_batch_id = COALESCE(EXCLUDED.source_batch_id, monthly_wave.source_batch_id)
+     WHERE monthly_wave.state <> 2";
 
 /// 月度暂存补账 · 时长：同音浪，按月叠加
 const PENDING_MONTH_ABSORB_MINUTES_SQL: &str = "INSERT INTO monthly_duration
-         (person_id, period, minutes, source_batch_id)
-     VALUES (?,?,?,?)
+         (person_id, period, minutes, state, source_batch_id)
+     VALUES (?,?,?,1,?)
      ON CONFLICT (person_id, period) DO UPDATE SET
          minutes = monthly_duration.minutes + EXCLUDED.minutes,
-         source_batch_id = COALESCE(EXCLUDED.source_batch_id, monthly_duration.source_batch_id)";
+         state = CASE WHEN monthly_duration.state = 0 THEN 1 ELSE monthly_duration.state END,
+         source_batch_id = COALESCE(EXCLUDED.source_batch_id, monthly_duration.source_batch_id)
+     WHERE monthly_duration.state <> 2";
 
 /// 未匹配行已暂存时给运营看的结论（出现在导入结果的失败列表里，替代原来的「未匹配」）
 const MONTH_PENDING_STAGED_REASON: &str =
@@ -3469,6 +3604,31 @@ pub async fn absorb_pending_month(st: &AppState, person_id: u64) -> anyhow::Resu
     for p in &rows {
         // 坏行（id / period 不可用）：留着人工处理，别写进 monthly_* 也别标记认领
         if p.id == 0 || valid_period(&p.period).is_err() {
+            continue;
+        }
+        let (wave_state, minutes_state): (i16, i16) = sqlx::query(
+            "SELECT
+                 COALESCE((SELECT state FROM monthly_wave WHERE person_id = $1 AND period = $2), 0) AS wave_state,
+                 COALESCE((SELECT state FROM monthly_duration WHERE person_id = $1 AND period = $2), 0) AS minutes_state",
+        )
+        .bind(person_id as i64)
+        .bind(&p.period)
+        .map(|r: sqlx::postgres::PgRow| {
+            (
+                r.try_get::<i16, _>("wave_state").unwrap_or(0),
+                r.try_get::<i16, _>("minutes_state").unwrap_or(0),
+            )
+        })
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(month_table_err)?;
+        if (p.wave.is_some() && wave_state == 2) || (p.minutes.is_some() && minutes_state == 2) {
+            tracing::warn!(
+                pending_id = p.id,
+                person_id,
+                period = %p.period,
+                "月度暂存遇到已锁定指标，保留暂存行等待人工处理"
+            );
             continue;
         }
         // 先抢占：并发 / 重复 absorb 只有一方能把这一行认领走，写值因此只会发生一次。
@@ -3688,11 +3848,31 @@ pub async fn import_day_status(
         })
         .fetch_optional(pool)
         .await?;
+    let team_filter = if auto_team { "" } else { team };
+    let lock_rows = sqlx::query(&crate::pq::rewrite(
+        "SELECT
+             COUNT(*) FILTER (WHERE d.wave_state = 2 OR d.minutes_state = 2)::BIGINT AS locked_rows,
+             COUNT(*) FILTER (WHERE d.wave_state = 2)::BIGINT AS wave_locked_rows,
+             COUNT(*) FILTER (WHERE d.minutes_state = 2)::BIGINT AS minutes_locked_rows
+           FROM daily_metric d
+          WHERE d.biz_date = ?::date
+            AND (? = '' OR EXISTS (
+                SELECT 1 FROM person p WHERE p.id = d.person_id AND p.gender = ?
+            ))",
+    ))
+    .bind(biz_date)
+    .bind(team_filter)
+    .bind(team_filter)
+    .fetch_one(pool)
+    .await?;
     Ok(Json(json!({
         "checked": true,
         "bizDate": biz_date,
         "team": if auto_team { "auto" } else { team },
         "rows": rows,
+        "lockedRows": lock_rows.try_get::<i64, _>("locked_rows").unwrap_or(0),
+        "waveLockedRows": lock_rows.try_get::<i64, _>("wave_locked_rows").unwrap_or(0),
+        "minutesLockedRows": lock_rows.try_get::<i64, _>("minutes_locked_rows").unwrap_or(0),
         "lastBatch": last,
     })))
 }
@@ -3834,20 +4014,20 @@ impl DayMetrics {
 团队过滤用空串代表 auto，一条 SQL 同时覆盖全团和指定团。 */
 const DAY_WAVE_RESET_SQL: &str = "UPDATE daily_metric d SET \
     wave = 0, cumulative_wave = 0, prev_snapshot_date = NULL, \
-    wave_span = 1, wave_reliable = 0, recomputed_at = now() \
+    wave_span = 1, wave_reliable = 0, wave_state = 0, recomputed_at = now() \
     WHERE d.biz_date = ?::date \
       AND (? = '' OR EXISTS (SELECT 1 FROM person p WHERE p.id = d.person_id AND p.gender = ?))";
 
 const DAY_MINUTES_RESET_SQL: &str = "UPDATE daily_metric d SET \
     minutes = 0, cumulative_minutes = 0, minutes_span = 1, minutes_reliable = 0, \
-    is_live = 0, recomputed_at = now() \
+    is_live = 0, minutes_state = 0, recomputed_at = now() \
     WHERE d.biz_date = ?::date \
       AND (? = '' OR EXISTS (SELECT 1 FROM person p WHERE p.id = d.person_id AND p.gender = ?))";
 
 /* 暂存区不是 daily_metric：只清所选指标对应的列，不删除 pending 行。
 另一项指标和认领信息保留，后续绑定主播时只会补回尚未删除的数据。 */
 const DAY_PENDING_WAVE_RESET_SQL: &str = "UPDATE import_pending p SET \
-    wave = NULL, cumulative_wave = NULL, updated_at = now() \
+    wave = NULL, cumulative_wave = NULL, wave_state = 0, updated_at = now() \
     FROM import_batch b \
     WHERE p.source_batch_id = b.id AND p.absorbed_at IS NULL \
       AND b.source <> 'admin-import-month' AND b.biz_date = ?::date \
@@ -3855,7 +4035,7 @@ const DAY_PENDING_WAVE_RESET_SQL: &str = "UPDATE import_pending p SET \
       AND (p.wave IS NOT NULL OR p.cumulative_wave IS NOT NULL)";
 
 const DAY_PENDING_MINUTES_RESET_SQL: &str = "UPDATE import_pending p SET \
-    minutes = NULL, is_live = NULL, updated_at = now() \
+    minutes = NULL, is_live = NULL, minutes_state = 0, updated_at = now() \
     FROM import_batch b \
     WHERE p.source_batch_id = b.id AND p.absorbed_at IS NULL \
       AND b.source <> 'admin-import-month' AND b.biz_date = ?::date \
@@ -4126,6 +4306,23 @@ async fn month_existing_wave(st: &AppState, period: &str) -> anyhow::Result<(i64
     month_existing_of(st, period, "monthly_wave", "wave").await
 }
 
+async fn month_locked_count(
+    st: &AppState,
+    period: &str,
+    table: &'static str,
+) -> anyhow::Result<i64> {
+    debug_assert!(matches!(table, "monthly_duration" | "monthly_wave"));
+    let sql = format!("SELECT COUNT(*) AS n FROM {table} WHERE period = ? AND state = 2");
+    let rewritten = crate::pq::rewrite(&sql);
+    let pool = pgrs::pool_of(&st.pools, "LOCAL")?;
+    let n = sqlx::query_scalar::<_, i64>(&rewritten)
+        .bind(period)
+        .fetch_one(&pool)
+        .await
+        .map_err(month_table_err)?;
+    Ok(n)
+}
+
 /// 某月「日明细指标」求和（person_id → 值）。只用于对账提示：
 /// 月度口径以平台月报为准，这里的数字只是告诉运营「日明细加起来差多少」。
 /// col 是写死的字面量（minutes / wave），不接受外部输入。
@@ -4184,7 +4381,7 @@ async fn month_existing_values(
     col: &'static str,
     period: &str,
     person_ids: &[i64],
-) -> anyhow::Result<HashMap<i64, i64>> {
+) -> anyhow::Result<HashMap<i64, (i64, i16)>> {
     debug_assert!(matches!(
         (table, col),
         ("monthly_duration", "minutes") | ("monthly_wave", "wave")
@@ -4193,7 +4390,7 @@ async fn month_existing_values(
         return Ok(HashMap::new());
     }
     let sql = format!(
-        "SELECT person_id, ({col})::BIGINT AS metric_value \
+        "SELECT person_id, ({col})::BIGINT AS metric_value, state \
            FROM {table} WHERE period = $1 AND person_id = ANY($2)"
     );
     let rows = sqlx::query(&sql)
@@ -4207,7 +4404,10 @@ async fn month_existing_values(
         .filter_map(|r| {
             Some((
                 r.try_get::<i64, _>("person_id").ok()?,
-                r.try_get::<i64, _>("metric_value").ok()?,
+                (
+                    r.try_get::<i64, _>("metric_value").ok()?,
+                    r.try_get::<i16, _>("state").unwrap_or(0),
+                ),
             ))
         })
         .collect())
@@ -4368,6 +4568,7 @@ pub async fn import_month_commit(
         "total": report.total,
         "okRows": report.ok_rows,
         "unchanged": report.unchanged,
+        "locked": report.locked,
         "failedRows": report.failures.len(),
         "failures": report.failures,
         "skipped": report.skipped,
@@ -4454,10 +4655,7 @@ async fn commit_month_metrics_with_mode(
         valid_team(team)?;
     }
     let team_col = if auto_team { "mixed" } else { team };
-    anyhow::ensure!(
-        mode == "merge" || mode == "reject",
-        "mode 只能是 merge / reject"
-    );
+    validate_import_mode(mode)?;
     anyhow::ensure!(!rows.is_empty(), "没有解析到任何数据行");
     anyhow::ensure!(
         metrics.any(),
@@ -4525,6 +4723,14 @@ async fn commit_month_metrics_with_mode(
         ok_rows.push(r);
     }
 
+    // 未匹配行会进入 import_pending_month，现有补账链路是“叠加”语义，无法可靠遵守
+    // 字段级锁定。先在月度 locked 导入入口明确拒绝，避免暂存后补账绕过锁。
+    anyhow::ensure!(
+        mode != "locked" || pending_rows.is_empty(),
+        "locked 模式：本次有 {} 行未建档。请先建档/绑定后再锁定导入，或改用 merge 暂存",
+        pending_rows.len()
+    );
+
     let mut tx = pool.begin().await?;
     lock_import_scope(&mut tx, &format!("monthly-import:{period}")).await?;
     if mode == "reject" {
@@ -4584,52 +4790,102 @@ async fn commit_month_metrics_with_mode(
     } else {
         HashMap::new()
     };
-    let mut duration_changes: Vec<(i64, i64)> = Vec::new();
-    let mut wave_changes: Vec<(i64, i64)> = Vec::new();
+    let locked_mode = mode == "locked";
+    // (person_id, 最终值, 最终状态)。状态 2 的指标永不覆盖。
+    let mut duration_changes: Vec<(i64, i64, i16)> = Vec::new();
+    let mut wave_changes: Vec<(i64, i64, i16)> = Vec::new();
     let mut wrote_people: HashSet<i64> = HashSet::new();
+    let mut locked_people: HashSet<i64> = HashSet::new();
     for r in &ok_rows {
         let person_id = r.person_id.expect("调用前已保证 matched");
         let pid = person_id as i64;
-        // 勾了哪个指标就写哪个：两种都写、都同值才算「未覆盖」。
-        // 相同不覆盖（与按日导入同一口径）：值一样就一行不写，updated_at 也不动。
+        let mut changed = false;
+        let mut hit_locked = false;
         if metrics.minutes {
             if let Some(m) = r.raw.minutes {
-                let minutes = m as i64;
-                minutes_total += minutes;
-                if current_minutes.get(&pid).copied() != Some(minutes) {
-                    duration_changes.push((pid, minutes));
-                    wrote_people.insert(pid);
+                let incoming = m as i64;
+                minutes_total += incoming;
+                let current = current_minutes.get(&pid).copied();
+                let plan = plan_metric_write(
+                    current.map(|(_, state)| state).unwrap_or(0),
+                    true,
+                    current.map(|(value, _)| value != incoming).unwrap_or(true),
+                    current.is_none(),
+                    locked_mode,
+                );
+                let old_value = current.map(|(value, _)| value).unwrap_or(incoming);
+                let current_state = current.map(|(_, state)| state).unwrap_or(0);
+                if plan.write_value || plan.next_state != current_state {
+                    let value = if plan.write_value {
+                        incoming
+                    } else {
+                        old_value
+                    };
+                    duration_changes.push((pid, value, plan.next_state));
+                    changed = true;
+                } else if current_state == 2 {
+                    hit_locked = true;
                 }
             }
         }
         if metrics.wave {
             if let Some(w) = r.raw.wave {
-                let wave = w as i64;
-                wave_total += wave;
-                if current_wave.get(&pid).copied() != Some(wave) {
-                    wave_changes.push((pid, wave));
-                    wrote_people.insert(pid);
+                let incoming = w as i64;
+                wave_total += incoming;
+                let current = current_wave.get(&pid).copied();
+                let plan = plan_metric_write(
+                    current.map(|(_, state)| state).unwrap_or(0),
+                    true,
+                    current.map(|(value, _)| value != incoming).unwrap_or(true),
+                    current.is_none(),
+                    locked_mode,
+                );
+                let old_value = current.map(|(value, _)| value).unwrap_or(incoming);
+                let current_state = current.map(|(_, state)| state).unwrap_or(0);
+                if plan.write_value || plan.next_state != current_state {
+                    let value = if plan.write_value {
+                        incoming
+                    } else {
+                        old_value
+                    };
+                    wave_changes.push((pid, value, plan.next_state));
+                    changed = true;
+                } else if current_state == 2 {
+                    hit_locked = true;
                 }
             }
         }
+        if changed {
+            wrote_people.insert(pid);
+        } else if hit_locked {
+            locked_people.insert(pid);
+        }
     }
     let ok_count = wrote_people.len() as u32;
-    let unchanged = ok_rows.len().saturating_sub(wrote_people.len()) as u32;
+    let locked = locked_people.len() as u32;
+    let unchanged = ok_rows
+        .len()
+        .saturating_sub(wrote_people.len())
+        .saturating_sub(locked_people.len()) as u32;
 
     if !duration_changes.is_empty() {
         let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new(
-            "INSERT INTO monthly_duration (person_id, period, minutes, source_batch_id) ",
+            "INSERT INTO monthly_duration (person_id, period, minutes, state, source_batch_id) ",
         );
-        qb.push_values(&duration_changes, |mut b, (pid, minutes)| {
+        qb.push_values(&duration_changes, |mut b, (pid, minutes, state)| {
             b.push_bind(*pid)
                 .push_bind(period)
                 .push_bind(*minutes)
+                .push_bind(*state)
                 .push_bind(batch_id);
         });
         qb.push(
             " ON CONFLICT (person_id, period) DO UPDATE SET
-                 minutes = EXCLUDED.minutes,
-                 source_batch_id = EXCLUDED.source_batch_id",
+                 minutes = CASE WHEN EXCLUDED.minutes IS DISTINCT FROM monthly_duration.minutes
+                                THEN EXCLUDED.minutes ELSE monthly_duration.minutes END,
+                 state = EXCLUDED.state,
+                 source_batch_id = CASE WHEN EXCLUDED.minutes IS DISTINCT FROM monthly_duration.minutes
+                                       THEN EXCLUDED.source_batch_id ELSE monthly_duration.source_batch_id END",
         );
         qb.build()
             .execute(&mut *tx)
@@ -4638,18 +4894,22 @@ async fn commit_month_metrics_with_mode(
     }
     if !wave_changes.is_empty() {
         let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new(
-            "INSERT INTO monthly_wave (person_id, period, wave, source_batch_id) ",
+            "INSERT INTO monthly_wave (person_id, period, wave, state, source_batch_id) ",
         );
-        qb.push_values(&wave_changes, |mut b, (pid, wave)| {
+        qb.push_values(&wave_changes, |mut b, (pid, wave, state)| {
             b.push_bind(*pid)
                 .push_bind(period)
                 .push_bind(*wave)
+                .push_bind(*state)
                 .push_bind(batch_id);
         });
         qb.push(
             " ON CONFLICT (person_id, period) DO UPDATE SET
-                 wave = EXCLUDED.wave,
-                 source_batch_id = EXCLUDED.source_batch_id",
+                 wave = CASE WHEN EXCLUDED.wave IS DISTINCT FROM monthly_wave.wave
+                             THEN EXCLUDED.wave ELSE monthly_wave.wave END,
+                 state = EXCLUDED.state,
+                 source_batch_id = CASE WHEN EXCLUDED.wave IS DISTINCT FROM monthly_wave.wave
+                                       THEN EXCLUDED.source_batch_id ELSE monthly_wave.source_batch_id END",
         );
         qb.build()
             .execute(&mut *tx)
@@ -4741,6 +5001,7 @@ async fn commit_month_metrics_with_mode(
         total: merged.len(),
         ok_rows: ok_count,
         unchanged,
+        locked,
         failures,
         // 月度暂存行同时列在 failures 里（reason = 「已暂存…」），
         // 这个字段留给「暂存区」视图复用，本次不再重复列人名。
@@ -4771,6 +5032,12 @@ pub async fn import_month_status(
     valid_period(&period)?;
     let (rows, minutes) = month_existing(&st, &period).await.map_err(nice_400)?;
     let (wave_rows, wave) = month_existing_wave(&st, &period).await.map_err(nice_400)?;
+    let minutes_locked = month_locked_count(&st, &period, "monthly_duration")
+        .await
+        .map_err(nice_400)?;
+    let wave_locked = month_locked_count(&st, &period, "monthly_wave")
+        .await
+        .map_err(nice_400)?;
     let biz_date = period_first_day(&period);
     let last = pgrs::query(
         &st.pools,
@@ -4799,6 +5066,8 @@ pub async fn import_month_status(
         // 月度音浪（monthly_wave）：2026-10-16 起与时长同页展示
         "waveRows": wave_rows,
         "wave": wave,
+        "minutesLocked": minutes_locked,
+        "waveLocked": wave_locked,
         "lastBatch": last,
     })))
 }
@@ -8360,6 +8629,7 @@ mod tests {
             "prev_snapshot_date = NULL",
             "wave_span = 1",
             "wave_reliable = 0",
+            "wave_state = 0",
         ] {
             assert!(DAY_WAVE_RESET_SQL.contains(field), "音浪重置缺少 {field}");
         }
@@ -8369,6 +8639,7 @@ mod tests {
             "minutes_span = 1",
             "minutes_reliable = 0",
             "is_live = 0",
+            "minutes_state = 0",
         ] {
             assert!(
                 DAY_MINUTES_RESET_SQL.contains(field),
@@ -8377,8 +8648,83 @@ mod tests {
         }
         assert!(DAY_PENDING_WAVE_RESET_SQL.contains("wave = NULL"));
         assert!(DAY_PENDING_WAVE_RESET_SQL.contains("cumulative_wave = NULL"));
+        assert!(DAY_PENDING_WAVE_RESET_SQL.contains("wave_state = 0"));
         assert!(DAY_PENDING_MINUTES_RESET_SQL.contains("minutes = NULL"));
         assert!(DAY_PENDING_MINUTES_RESET_SQL.contains("is_live = NULL"));
+        assert!(DAY_PENDING_MINUTES_RESET_SQL.contains("minutes_state = 0"));
+    }
+
+    #[test]
+    fn import_modes_include_locked_and_reject_unknown_values() {
+        for mode in ["merge", "reject", "locked"] {
+            validate_import_mode(mode).expect("合法导入模式");
+        }
+        for mode in ["", "overwrite", "LOCKED", "yes"] {
+            assert!(
+                validate_import_mode(mode).is_err(),
+                "非法模式不能放行: {mode}"
+            );
+        }
+    }
+
+    #[test]
+    fn metric_lock_plan_is_field_level_and_never_overwrites_locked_value() {
+        // 新行：locked 直接写并封存；merge 写但保持可覆盖。
+        assert_eq!(
+            plan_metric_write(0, true, true, true, true),
+            MetricWritePlan {
+                write_value: true,
+                next_state: 2
+            }
+        );
+        assert_eq!(
+            plan_metric_write(0, true, true, true, false),
+            MetricWritePlan {
+                write_value: true,
+                next_state: 1
+            }
+        );
+
+        // 历史可覆盖值：locked 第一次只封存旧值，不采用本次新值。
+        assert_eq!(
+            plan_metric_write(1, true, true, false, true),
+            MetricWritePlan {
+                write_value: false,
+                next_state: 2
+            }
+        );
+
+        // merge：同值不动，不同值覆盖；locked：任何值都不再覆盖。
+        assert_eq!(
+            plan_metric_write(1, true, false, false, false),
+            MetricWritePlan {
+                write_value: false,
+                next_state: 1
+            }
+        );
+        assert_eq!(
+            plan_metric_write(1, true, true, false, false),
+            MetricWritePlan {
+                write_value: true,
+                next_state: 1
+            }
+        );
+        assert_eq!(
+            plan_metric_write(2, true, true, false, true),
+            MetricWritePlan {
+                write_value: false,
+                next_state: 2
+            }
+        );
+
+        // 文件没提供该指标时，不触碰它的状态，避免“只导时长却把音浪锁住”。
+        assert_eq!(
+            plan_metric_write(1, false, true, false, true),
+            MetricWritePlan {
+                write_value: false,
+                next_state: 1
+            }
+        );
     }
 
     fn fp_row(name: &str, wave: Option<f64>, minutes: Option<f64>) -> ImportRow {

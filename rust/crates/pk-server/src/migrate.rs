@@ -283,6 +283,12 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "051_unclaimed_imports",
         include_str!("migrations/051_unclaimed_imports.sql"),
     ),
+    // 052：导入后锁定字段。daily_metric 按音浪 / 时长分别记录三态，
+    // monthly_duration / monthly_wave 各记录一个三态；历史数据回填为可覆盖（1）。
+    (
+        "052_import_lock_state",
+        include_str!("migrations/052_import_lock_state.sql"),
+    ),
 ];
 
 /// 迁移建连（migrator 账号；同样关语句缓存）

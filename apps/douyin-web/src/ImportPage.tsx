@@ -23,6 +23,8 @@ type CommitReport = {
   okRows: number
   /** 库里已有该人该日、值完全一样 → 没动它（相同不覆盖，不同才覆盖） */
   unchanged?: number
+  /** 命中了已锁定指标而跳过（不算失败） */
+  locked?: number
   failedRows: number
   failures: { name: string; reason: string }[]
   /** 未建档但有抖音号/ID：已暂存，不进榜单和统计，台账建档/绑号后自动补账 */
@@ -101,6 +103,8 @@ type MonthStatus = {
   minutes: number
   waveRows: number
   wave: number
+  minutesLocked?: number
+  waveLocked?: number
   lastBatch?: { filename: string; at: string } | null
 }
 
@@ -154,6 +158,9 @@ function teamLabel(team: string | null | undefined): string {
 type DayStatus = {
   checked: boolean
   rows?: number
+  lockedRows?: number
+  waveLockedRows?: number
+  minutesLockedRows?: number
   lastBatch?: { filename: string; at: string } | null
 }
 
@@ -197,7 +204,7 @@ export default function ImportPage() {
   const [filename, setFilename] = useState(() => importDraft?.filename ?? '')
   const [team, setTeam] = useState(() => importDraft?.team ?? 'auto')
   const [bizDate, setBizDate] = useState(() => importDraft?.bizDate ?? yesterday())
-  const [mode, setMode] = useState(() => importDraft?.mode ?? 'merge')
+  const [mode, setMode] = useState(() => importDraft?.mode ?? 'locked')
   /** 删除区独立于“导入日期”，默认跟随草稿，否则前一天 */
   const [deleteDate, setDeleteDate] = useState(() => importDraft?.deleteDate ?? importDraft?.bizDate ?? yesterday())
   const [deleteTeam, setDeleteTeam] = useState(() => importDraft?.deleteTeam ?? 'auto')
@@ -609,6 +616,10 @@ export default function ImportPage() {
   const dayHint = (() => {
     if (!dayStatus.checked || dayStatus.rows == null) return null
     const n = dayStatus.rows
+    const lockedRows = dayStatus.lockedRows ?? 0
+    const lockedTxt = lockedRows > 0
+      ? `；其中 ${lockedRows} 行含已锁定指标（音浪锁 ${dayStatus.waveLockedRows ?? 0} / 时长锁 ${dayStatus.minutesLockedRows ?? 0}），已锁字段不会覆盖`
+      : ''
     const last = dayStatus.lastBatch
     const lastTxt = last ? `（上次导入：${last.at} ${last.filename}）` : ''
     if (n === 0)
@@ -619,10 +630,14 @@ export default function ImportPage() {
       )
     return (
       <span className="alert warn">
-        ⚠️ {bizDate} {teamWord}已有 <b>{n}</b> 行数据{lastTxt}
-        {mode === 'merge' ? (
+        ⚠️ {bizDate} {teamWord}已有 <b>{n}</b> 行数据{lastTxt}{lockedTxt}
+        {mode === 'locked' ? (
           <>
-            ，这次导入会<b>覆盖</b>同名主播的行（以新数据为准）
+            ，这次导入会<b>封存本次涉及的指标</b>：首次写入后，后续导入遇到已锁指标自动跳过
+          </>
+        ) : mode === 'merge' ? (
+          <>
+            ，这次导入会<b>覆盖</b>同名主播中尚未锁定的字段（已锁字段保持不动）
           </>
         ) : (
           <>，当前模式「当日已有则拒绝」会<b>导入失败</b></>
@@ -731,6 +746,11 @@ export default function ImportPage() {
             {!!report.unchanged && (
               <div>
                 ♻️ 另有 {report.unchanged} 行{report.period ? '整月值（时长 / 音浪）' : '音浪 / 时长值'}与库里完全相同，未覆盖（改过的值才会覆盖）
+              </div>
+            )}
+            {!!report.locked && (
+              <div>
+                🔒 另有 {report.locked} {report.period ? '人' : '行'}命中已锁定指标，按锁定规则跳过，未修改数据。
               </div>
             )}
             {/* 导入结果里的「另有 N 行已暂存」一行已移除（2026-10-14 用户口径：
@@ -971,6 +991,7 @@ export default function ImportPage() {
               <label className="field">
                 模式
                 <select value={mode} onChange={(e) => setMode(e.target.value)}>
+                  <option value="locked">锁定（推荐）</option>
                   <option value="merge">覆盖（幂等）</option>
                   <option value="reject">{kind === 'month' ? '该月已有则拒绝' : '当日已有则拒绝'}</option>
                 </select>
@@ -1058,7 +1079,9 @@ export default function ImportPage() {
                     {monthStatus.lastBatch
                       ? `（上次导入：${monthStatus.lastBatch.at} ${monthStatus.lastBatch.filename}）`
                       : ''}
-                    ：这次导入会覆盖值不同的记录，值相同的保持不动
+                    {mode === 'locked'
+                      ? `：其中已锁定时长 ${monthStatus.minutesLocked ?? 0} 人、已锁定音浪 ${monthStatus.waveLocked ?? 0} 人；本次会封存尚未锁定的指标`
+                      : '：这次导入会覆盖值不同的记录，已锁指标保持不动'}
                   </span>
                 ) : (
                   <span className="alert good">
