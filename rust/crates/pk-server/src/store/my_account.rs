@@ -83,6 +83,8 @@ pub const MSG_QQ_TAKEN: &str = "该 QQ 邮箱已被其他账号绑定";
 pub const MSG_PHONE_TAKEN: &str = "该手机号已被其他账号绑定，请联系管理员";
 /// 首次补全缺少手机号（400 INVALID_PHONE）
 pub const MSG_PHONE_REQUIRED: &str = "请输入手机号";
+/// 首次补全的新手机号建议使用中国大陆 11 位号码；存量 5~20 位号码仍可正常登录。
+pub const MSG_PROFILE_PHONE_INVALID: &str = "请输入中国大陆 11 位手机号";
 /// 已不再是「待补全」态（400 PROFILE_ALREADY_DONE）
 pub const MSG_PROFILE_ALREADY_DONE: &str = "该账号已完成绑定，如需修改手机号请联系管理员";
 /// S1（phone=''）账号试图只绑 QQ（403 NEED_PROFILE）
@@ -283,6 +285,36 @@ pub fn validate_my_phone(phone: &str) -> std::result::Result<String, String> {
     }
     if !p.chars().all(|c| c.is_ascii_digit()) || p.len() < 5 || p.len() > 20 {
         return Err(biz("手机号格式不对：应为 5~20 位数字"));
+    }
+    Ok(p)
+}
+
+/// 首次补全的新手机号校验（2026-11-15 用户口径）。
+///
+/// 存量账号历史上允许 5~20 位数字，**继续兼容**；这里只收紧“新补全”入口，
+/// 优先接受中国大陆 11 位手机号，并容忍粘贴 `+86` / `86` 国家码、空格和横线。
+/// 已有账号的原手机号读取、登录与管理员维护仍走 [`validate_my_phone`]，不会因本函数被阻断。
+pub fn validate_profile_phone(phone: &str) -> std::result::Result<String, String> {
+    let mut p: String = phone
+        .trim()
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '-')
+        .collect();
+    if let Some(rest) = p.strip_prefix('+') {
+        p = rest.to_string();
+    }
+    if p.len() == 13 && p.starts_with("86") {
+        p = p[2..].to_string();
+    }
+    if p.is_empty() {
+        return Err(biz(MSG_PHONE_REQUIRED));
+    }
+    if p.len() != 11
+        || !p.starts_with('1')
+        || !p.as_bytes()[1..].iter().all(|c| c.is_ascii_digit())
+        || !(b'3'..=b'9').contains(&p.as_bytes()[1])
+    {
+        return Err(biz(MSG_PROFILE_PHONE_INVALID));
     }
     Ok(p)
 }
@@ -2056,6 +2088,9 @@ pub struct MyAuthFlags {
     pub is_admin: bool,
     /// 原始手机号（**handler 必须用 `wx::mask_phone` 打码后再下发**，不要原样外发）
     pub phone: String,
+    /// 主播档案手机号原始值（**仅内部投影用**；handler 必须脱敏后才能下发）。
+    /// 与登录账号手机号可不同：首次补全时若档案已有不同号码，会保留档案原值。
+    pub person_phone: String,
     /// 原始邮箱（**仅内部用**；对外一律用 `email_mask`，禁止明文下发）
     pub email: String,
     /// 是否已绑合法 QQ 邮箱（038 存量非 QQ 邮箱算「未绑」）
@@ -2074,6 +2109,7 @@ impl MyAuthFlags {
     /// 从账号行算标志。`must_change_pass` 单独传入：039 未跑时调用方给 false。
     fn from_row(r: &sqlx::postgres::PgRow, must_change_pass: bool) -> Self {
         let phone: String = r.try_get("phone").unwrap_or_default();
+        let person_phone: String = r.try_get("person_phone").unwrap_or_default();
         let email: String = r.try_get("email").unwrap_or_default();
         let is_admin = r.try_get::<i16, _>("is_admin").unwrap_or(0) == 1;
         let bound = r.try_get::<i16, _>("bound").unwrap_or(1) == 1;
@@ -2087,6 +2123,7 @@ impl MyAuthFlags {
             email_mask: mask_qq_email(&email),
             email,
             phone,
+            person_phone,
             qq_bound,
             need_profile,
             need_qq,
@@ -2106,10 +2143,21 @@ pub async fn my_account_auth_flags(st: &AppState, name: &str) -> Option<MyAuthFl
         return None;
     }
     let sqls = [
-        "SELECT phone, is_admin, bound, email, must_change_pass \
-         FROM my_accounts WHERE name = ? LIMIT 1",
-        "SELECT phone, is_admin, bound, email FROM my_accounts WHERE name = ? LIMIT 1",
-        "SELECT phone, is_admin, bound FROM my_accounts WHERE name = ? LIMIT 1",
+        "SELECT a.phone, a.is_admin, a.bound, a.email, a.must_change_pass, \
+                COALESCE(p.phone, '') AS person_phone \
+         FROM my_accounts a LEFT JOIN person p \
+           ON p.id = a.person_id AND p.deleted_at IS NULL \
+         WHERE a.name = ? LIMIT 1",
+        "SELECT a.phone, a.is_admin, a.bound, a.email, \
+                COALESCE(p.phone, '') AS person_phone \
+         FROM my_accounts a LEFT JOIN person p \
+           ON p.id = a.person_id AND p.deleted_at IS NULL \
+         WHERE a.name = ? LIMIT 1",
+        "SELECT a.phone, a.is_admin, a.bound, \
+                COALESCE(p.phone, '') AS person_phone \
+         FROM my_accounts a LEFT JOIN person p \
+           ON p.id = a.person_id AND p.deleted_at IS NULL \
+         WHERE a.name = ? LIMIT 1",
     ];
     for sql in sqls {
         let got = sqlx::query(&crate::pq::rewrite(sql))
@@ -2433,27 +2481,152 @@ pub async fn my_account_set_qq(
 /// 首次补全（S1 → S2/S3，契约 §2.6 / 设计 02 §3.2）。
 ///
 /// 身份只认 token 传入的 `name`（**不接受请求体里的账号名**）；`phone` 必填
-/// （5~20 位数字、全局唯一）；`qq` 选填（空 = 暂不绑，登录后 `needQq` 继续提醒，
-/// 没 QQ 的用户可找管理员）；`new_pass` 选填（`Some` 时改密并清三列临时态）。
+/// （新补全优先中国大陆 11 位手机号、全局唯一；存量 5~20 位只读兼容）；`qq` 选填
+/// （空 = 暂不绑，登录后 `needQq` 继续提醒，没 QQ 的用户可找管理员）；`new_pass`
+/// 选填（`Some` 时改密并清三列临时态）。同一事务内还会在档案手机号为空时同步
+/// `person.phone`，已有不同号码不覆盖，并返回明确的同步状态供审计。
 ///
 /// 单事务 `UPDATE ... WHERE name = ? AND phone = '' AND is_admin = 0`：
 /// rowcount ≠ 1 → [`MSG_PROFILE_ALREADY_DONE`]（已补全过 / 账号不存在 / 管理员账号，
 /// 统一文案，不让「是不是管理员」成为探测信号）。并发唯一冲突（23505）按索引名翻文案。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProfilePersonPhoneSync {
+    /// 账号没有主播档案（或档案已删除），不执行同步。
+    NoPerson,
+    /// 档案手机号为空，已在本事务内写入。
+    Synced,
+    /// 档案手机号与账号手机号一致，无需更新。
+    AlreadySame,
+    /// 档案已有不同号码，按口径保留不动。
+    KeptExisting,
+    /// 该号码已被另一位主播档案占用，保留账号补全结果并记录冲突。
+    Conflict,
+}
+
+impl ProfilePersonPhoneSync {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NoPerson => "no_person",
+            Self::Synced => "synced",
+            Self::AlreadySame => "already_same",
+            Self::KeptExisting => "kept_existing",
+            Self::Conflict => "conflict",
+        }
+    }
+}
+
+/// 首次补全结果。账号手机号落库成功时，附带主播档案同步状态供 handler 审计/回显。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProfileBindOutcome {
+    pub person_phone_sync: ProfilePersonPhoneSync,
+}
+
+/// 在补全事务内同步 `person.phone`。
+///
+/// 口径：
+/// - 档案为空 → 写入；
+/// - 已是同一号码 → 幂等；
+/// - 档案已有不同号码 → 不覆盖，返回明确状态；
+/// - 号码被另一主播占用 → 回滚该子操作但保留账号补全，返回 `conflict` 供审计。
+async fn sync_profile_person_phone(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    person_id: i64,
+    phone: &str,
+) -> std::result::Result<ProfilePersonPhoneSync, String> {
+    if person_id <= 0 {
+        return Ok(ProfilePersonPhoneSync::NoPerson);
+    }
+    let existing = sqlx::query(&crate::pq::rewrite(
+        "SELECT phone FROM person WHERE id = ? AND deleted_at IS NULL FOR UPDATE",
+    ))
+    .bind(person_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|e| format!("读取主播档案手机号失败：{e}"))?;
+    let Some(row) = existing else {
+        return Ok(ProfilePersonPhoneSync::NoPerson);
+    };
+    let existing_phone: String = row.try_get("phone").unwrap_or_default();
+    if existing_phone == phone {
+        return Ok(ProfilePersonPhoneSync::AlreadySame);
+    }
+    if !existing_phone.is_empty() {
+        return Ok(ProfilePersonPhoneSync::KeptExisting);
+    }
+
+    let taken = sqlx::query(&crate::pq::rewrite(
+        "SELECT 1 FROM person WHERE phone = ? AND phone <> '' AND id <> ? LIMIT 1",
+    ))
+    .bind(phone)
+    .bind(person_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|e| format!("主播档案手机号查重失败：{e}"))?
+    .is_some();
+    if taken {
+        return Ok(ProfilePersonPhoneSync::Conflict);
+    }
+
+    // 并发写入可能撞 uk_person_phone_uniq。用保存点隔离冲突，确保账号手机号补全
+    // 仍可提交，同时把明确状态交给 handler 写审计日志。
+    sqlx::query("SAVEPOINT profile_person_phone_sync")
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| format!("创建主播手机号同步保存点失败：{e}"))?;
+    let updated = sqlx::query(&crate::pq::rewrite(
+        "UPDATE person SET phone = ?, updated_at = CURRENT_TIMESTAMP \
+         WHERE id = ? AND phone = '' AND deleted_at IS NULL",
+    ))
+    .bind(phone)
+    .bind(person_id)
+    .execute(&mut **tx)
+    .await;
+    match updated {
+        Ok(r) if r.rows_affected() == 1 => {
+            sqlx::query("RELEASE SAVEPOINT profile_person_phone_sync")
+                .execute(&mut **tx)
+                .await
+                .map_err(|e| format!("释放主播手机号同步保存点失败：{e}"))?;
+            Ok(ProfilePersonPhoneSync::Synced)
+        }
+        Ok(_) => {
+            sqlx::query("ROLLBACK TO SAVEPOINT profile_person_phone_sync")
+                .execute(&mut **tx)
+                .await
+                .map_err(|e| format!("回滚主播手机号同步保存点失败：{e}"))?;
+            sqlx::query("RELEASE SAVEPOINT profile_person_phone_sync")
+                .execute(&mut **tx)
+                .await
+                .map_err(|e| format!("释放主播手机号同步保存点失败：{e}"))?;
+            Ok(ProfilePersonPhoneSync::KeptExisting)
+        }
+        Err(e) if is_unique_violation(&e) => {
+            sqlx::query("ROLLBACK TO SAVEPOINT profile_person_phone_sync")
+                .execute(&mut **tx)
+                .await
+                .map_err(|e| format!("回滚主播手机号同步保存点失败：{e}"))?;
+            sqlx::query("RELEASE SAVEPOINT profile_person_phone_sync")
+                .execute(&mut **tx)
+                .await
+                .map_err(|e| format!("释放主播手机号同步保存点失败：{e}"))?;
+            Ok(ProfilePersonPhoneSync::Conflict)
+        }
+        Err(e) => Err(format!("同步主播档案手机号失败：{e}")),
+    }
+}
+
 pub async fn my_account_profile_bind(
     st: &AppState,
     name: &str,
     phone: &str,
     qq: &str,
     new_pass: Option<&str>,
-) -> std::result::Result<(), String> {
+) -> std::result::Result<ProfileBindOutcome, String> {
     let key = name.trim();
     if key.is_empty() {
         return Err(biz("登录已过期，请重新登录"));
     }
-    let phone = validate_my_phone(phone)?;
-    if phone.is_empty() {
-        return Err(biz(MSG_PHONE_REQUIRED));
-    }
+    let phone = validate_profile_phone(phone)?;
     let qq = qq.trim();
     let email = if qq.is_empty() {
         String::new()
@@ -2550,10 +2723,20 @@ pub async fn my_account_profile_bind(
     if rowcount != 1 {
         return Err(biz(MSG_PROFILE_ALREADY_DONE));
     }
+    let person_id = sqlx::query(&crate::pq::rewrite(
+        "SELECT COALESCE(person_id, 0) AS person_id FROM my_accounts WHERE name = ? LIMIT 1",
+    ))
+    .bind(key)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| format!("读取账号主播绑定失败：{e}"))?
+    .and_then(|r| r.try_get::<i64, _>("person_id").ok())
+    .unwrap_or(0);
+    let person_phone_sync = sync_profile_person_phone(&mut tx, person_id, &phone).await?;
     tx.commit()
         .await
         .map_err(|e| format!("补全提交失败：{e}"))?;
-    Ok(())
+    Ok(ProfileBindOutcome { person_phone_sync })
 }
 
 /// 绑定结果：绑定后的主播身份（前端拿它重新发 token / 换团）
@@ -2722,6 +2905,49 @@ mod tests {
         assert!(is_biz(&validate_my_account("狼哲", "短").unwrap_err()));
         assert!(is_biz(&validate_my_phone("abc").unwrap_err()));
         assert!(is_biz(&validate_douyin_no("中文抖音号").unwrap_err()));
+    }
+
+    /// 新补全只收中国大陆 11 位手机号；旧 5~20 位校验器保持兼容，供存量账号登录/台账使用。
+    #[test]
+    fn profile_phone_is_strict_but_legacy_validator_stays_compatible() {
+        for old in ["12345", "12345678901234567890"] {
+            assert_eq!(validate_my_phone(old).unwrap(), old);
+            assert_eq!(
+                biz_msg(&validate_profile_phone(old).unwrap_err()),
+                MSG_PROFILE_PHONE_INVALID
+            );
+        }
+        for (raw, want) in [
+            ("19900000001", "19900000001"),
+            ("+86 199-0000-0001", "19900000001"),
+            ("86 13800138000", "13800138000"),
+        ] {
+            assert_eq!(validate_profile_phone(raw).unwrap(), want);
+        }
+        for bad in [
+            "",
+            "12000000000",
+            "1990000000",
+            "199000000012",
+            "1990000000a",
+        ] {
+            assert!(
+                is_biz(&validate_profile_phone(bad).unwrap_err()),
+                "{bad:?} 应被新补全校验拒绝"
+            );
+        }
+    }
+
+    #[test]
+    fn person_phone_sync_status_is_stable_for_audit() {
+        assert_eq!(ProfilePersonPhoneSync::NoPerson.as_str(), "no_person");
+        assert_eq!(ProfilePersonPhoneSync::Synced.as_str(), "synced");
+        assert_eq!(ProfilePersonPhoneSync::AlreadySame.as_str(), "already_same");
+        assert_eq!(
+            ProfilePersonPhoneSync::KeptExisting.as_str(),
+            "kept_existing"
+        );
+        assert_eq!(ProfilePersonPhoneSync::Conflict.as_str(), "conflict");
     }
 
     /* --------------------- 可看团别 view_team（迁移 024） --------------------- */
@@ -3300,8 +3526,11 @@ mod tests {
      */
     const IT_NAME_MALE: &str = "__t1_verify_flow_男";
     const IT_NAME_FEMALE: &str = "__t1_verify_flow_女";
+    const IT_NAME_CONFLICT: &str = "__t1_verify_flow_冲突";
+    const IT_NAME_PHONE_OWNER: &str = "__t1_verify_flow_档案占号";
     const IT_PHONE_MALE: &str = "19900000001";
     const IT_PHONE_FEMALE: &str = "19900000002";
+    const IT_PHONE_CONFLICT: &str = "13700000003";
     const IT_QQ_MALE: &str = "10000001";
     const IT_QQ_FEMALE: &str = "10000002";
 
@@ -3347,7 +3576,12 @@ mod tests {
         let Some(pool) = st.writer.as_ref() else {
             return;
         };
-        for name in [IT_NAME_MALE, IT_NAME_FEMALE] {
+        for name in [
+            IT_NAME_MALE,
+            IT_NAME_FEMALE,
+            IT_NAME_CONFLICT,
+            IT_NAME_PHONE_OWNER,
+        ] {
             let _ = sqlx::query(&crate::pq::rewrite(
                 "DELETE FROM my_accounts WHERE name = ?",
             ))
@@ -3482,7 +3716,7 @@ mod tests {
             );
 
             // ---- 4) 首次补全：手机号 + QQ + 新密码 ----
-            my_account_profile_bind(
+            let bind_outcome = my_account_profile_bind(
                 &st,
                 IT_NAME_MALE,
                 IT_PHONE_MALE,
@@ -3491,6 +3725,20 @@ mod tests {
             )
             .await
             .expect("首次补全应成功");
+            assert_eq!(
+                bind_outcome.person_phone_sync,
+                ProfilePersonPhoneSync::Synced,
+                "档案手机号为空时应在补全事务内同步"
+            );
+            let person_phone: String =
+                sqlx::query(&crate::pq::rewrite("SELECT phone FROM person WHERE id = ?"))
+                    .bind(p1)
+                    .fetch_one(st.writer.as_ref().unwrap())
+                    .await
+                    .expect("读主播档案手机号")
+                    .try_get("phone")
+                    .unwrap_or_default();
+            assert_eq!(person_phone, IT_PHONE_MALE, "person.phone 已同步");
             assert_eq!(
                 biz_msg(
                     &my_account_profile_bind(&st, IT_NAME_MALE, "19900000009", "", None)
@@ -3505,6 +3753,10 @@ mod tests {
                 .expect("flags");
             assert!(!f.need_profile && !f.need_qq);
             assert!(f.qq_bound);
+            assert_eq!(
+                f.person_phone, IT_PHONE_MALE,
+                "身份标志带出档案手机号原始值"
+            );
             assert_eq!(f.email_mask, "100***@qq.com", "脱敏：本地部分留前 3 位");
             assert!(!f.must_change_pass);
             assert_eq!(
@@ -3525,7 +3777,15 @@ mod tests {
             );
 
             // ---- 5) 手机号 / QQ 唯一 ----
-            let _p2 = it_add_person(&st, IT_NAME_FEMALE, "female").await;
+            let p2 = it_add_person(&st, IT_NAME_FEMALE, "female").await;
+            sqlx::query(&crate::pq::rewrite(
+                "UPDATE person SET phone = ? WHERE id = ?",
+            ))
+            .bind("13600000002")
+            .bind(p2)
+            .execute(st.writer.as_ref().unwrap())
+            .await
+            .expect("预置女测试主播档案手机号");
             assert!(my_account_can_claim(&st, IT_NAME_FEMALE).await);
             my_account_claim(&st, IT_NAME_FEMALE, "另一个密码1")
                 .await
@@ -3555,13 +3815,68 @@ mod tests {
                 "手机号唯一"
             );
             // 暂不绑 QQ（qq 空）→ S2：needQq=true
-            my_account_profile_bind(&st, IT_NAME_FEMALE, IT_PHONE_FEMALE, "", None)
-                .await
-                .expect("第二人补全（暂不绑 QQ）");
+            let bind_outcome =
+                my_account_profile_bind(&st, IT_NAME_FEMALE, IT_PHONE_FEMALE, "", None)
+                    .await
+                    .expect("第二人补全（暂不绑 QQ）");
+            assert_eq!(
+                bind_outcome.person_phone_sync,
+                ProfilePersonPhoneSync::KeptExisting,
+                "档案已有不同号码时不得覆盖"
+            );
+            let person_phone: String =
+                sqlx::query(&crate::pq::rewrite("SELECT phone FROM person WHERE id = ?"))
+                    .bind(p2)
+                    .fetch_one(st.writer.as_ref().unwrap())
+                    .await
+                    .expect("读女测试主播档案手机号")
+                    .try_get("phone")
+                    .unwrap_or_default();
+            assert_eq!(person_phone, "13600000002", "保留档案原手机号");
             let f2 = my_account_auth_flags(&st, IT_NAME_FEMALE)
                 .await
                 .expect("flags");
             assert!(f2.need_qq && !f2.qq_bound, "没 QQ 的用户由 needQq 引导");
+            assert_eq!(f2.phone, IT_PHONE_FEMALE, "账号手机号仍成功写入");
+            assert_eq!(f2.person_phone, "13600000002", "档案手机号独立保留");
+
+            // 档案手机号被另一主播占用：账号补全成功，但不得覆盖/回滚成通用 500，
+            // 返回 conflict 供 handler 记审计，两个 person 行都保持不变。
+            let p_conflict = it_add_person(&st, IT_NAME_CONFLICT, "male").await;
+            let p_owner = it_add_person(&st, IT_NAME_PHONE_OWNER, "female").await;
+            sqlx::query(&crate::pq::rewrite(
+                "UPDATE person SET phone = ? WHERE id = ?",
+            ))
+            .bind(IT_PHONE_CONFLICT)
+            .bind(p_owner)
+            .execute(st.writer.as_ref().unwrap())
+            .await
+            .expect("预置占号主播");
+            my_account_claim(&st, IT_NAME_CONFLICT, "冲突测试密码1")
+                .await
+                .expect("冲突测试账号认领");
+            let bind_outcome =
+                my_account_profile_bind(&st, IT_NAME_CONFLICT, IT_PHONE_CONFLICT, "", None)
+                    .await
+                    .expect("档案占号不应阻断账号首次补全");
+            assert_eq!(
+                bind_outcome.person_phone_sync,
+                ProfilePersonPhoneSync::Conflict
+            );
+            for (pid, want, why) in [
+                (p_conflict, "", "冲突账号的档案不能被写入重复号码"),
+                (p_owner, IT_PHONE_CONFLICT, "原占号主播必须保持原值"),
+            ] {
+                let got: String =
+                    sqlx::query(&crate::pq::rewrite("SELECT phone FROM person WHERE id = ?"))
+                        .bind(pid)
+                        .fetch_one(st.writer.as_ref().unwrap())
+                        .await
+                        .expect("读冲突场景档案手机号")
+                        .try_get("phone")
+                        .unwrap_or_default();
+                assert_eq!(got, want, "{why}");
+            }
             assert_eq!(
                 biz_msg(
                     &my_account_set_qq(&st, IT_NAME_FEMALE, IT_QQ_MALE)

@@ -20,6 +20,10 @@ pub(super) struct AuthExtra {
     pub(super) qq_bound: bool,
     /// 已脱敏手机号（服务端唯一打码点）
     pub(super) phone: String,
+    /// 已脱敏主播档案手机号；档案未登记时为空串。
+    pub(super) person_phone: String,
+    /// 展示端只读联系方式：优先档案手机号，缺省回落到账号手机号；始终脱敏。
+    pub(super) contact_phone: String,
     pub(super) email_mask: String,
 }
 
@@ -31,23 +35,41 @@ impl AuthExtra {
             must_change_pass: false,
             qq_bound: false,
             phone: String::new(),
+            person_phone: String::new(),
+            contact_phone: String::new(),
             email_mask: String::new(),
         }
     }
+}
+
+/// 账号/档案手机号的唯一脱敏投影：`personPhone` 只表示档案值；`contactPhone`
+/// 优先档案值、缺省回落账号值。返回值绝不包含明文。
+fn masked_contact_phones(account_phone: &str, person_phone: &str) -> (String, String) {
+    let contact = if person_phone.is_empty() {
+        account_phone
+    } else {
+        person_phone
+    };
+    (mask_phone(person_phone), mask_phone(contact))
 }
 
 /// 读账号状态；账号行读不到（如管理员快捷口令身份 `admin-gate`）时回全 false / 空串，
 /// 保证响应结构不因账号类型而缺字段。
 pub(super) async fn auth_extra(st: &ArcState, name: &str) -> AuthExtra {
     match crate::store::my_account_auth_flags(st, name).await {
-        Some(f) => AuthExtra {
-            need_profile: f.need_profile,
-            need_qq: f.need_qq,
-            must_change_pass: f.must_change_pass,
-            qq_bound: f.qq_bound,
-            phone: mask_phone(&f.phone),
-            email_mask: f.email_mask,
-        },
+        Some(f) => {
+            let (person_phone, contact_phone) = masked_contact_phones(&f.phone, &f.person_phone);
+            AuthExtra {
+                need_profile: f.need_profile,
+                need_qq: f.need_qq,
+                must_change_pass: f.must_change_pass,
+                qq_bound: f.qq_bound,
+                phone: mask_phone(&f.phone),
+                person_phone,
+                contact_phone,
+                email_mask: f.email_mask,
+            }
+        }
         None => AuthExtra::empty(),
     }
 }
@@ -72,6 +94,8 @@ async fn login_ok(st: &ArcState, person_id: u64, name: &str, team: &str, token: 
         "needQq": x.need_qq,
         "mustChangePass": x.must_change_pass,
         "phone": x.phone,
+        "personPhone": x.person_phone,
+        "contactPhone": x.contact_phone,
         "emailMask": x.email_mask,
     })
 }
@@ -141,7 +165,10 @@ fn bind_code(msg: &str) -> &'static str {
         "PROFILE_ALREADY_DONE"
     } else if msg == s::MSG_NEED_PROFILE {
         "NEED_PROFILE"
-    } else if msg == s::MSG_PHONE_REQUIRED || msg.contains("手机号格式") {
+    } else if msg == s::MSG_PHONE_REQUIRED
+        || msg == s::MSG_PROFILE_PHONE_INVALID
+        || msg.contains("手机号格式")
+    {
         "INVALID_PHONE"
     } else if msg == s::MSG_PHONE_TAKEN {
         "PHONE_TAKEN"
@@ -305,6 +332,8 @@ pub async fn verify(
                 "needQq": x.need_qq,
                 "mustChangePass": x.must_change_pass,
                 "phone": x.phone,
+                "personPhone": x.person_phone,
+                "contactPhone": x.contact_phone,
                 "emailMask": x.email_mask,
             })));
         }
@@ -535,6 +564,8 @@ pub async fn my_login(
                 "needQq": x.need_qq,
                 "mustChangePass": x.must_change_pass,
                 "phone": x.phone,
+                "personPhone": x.person_phone,
+                "contactPhone": x.contact_phone,
                 "emailMask": x.email_mask,
             })));
         }
@@ -711,20 +742,37 @@ pub async fn my_profile_bind(
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .map(str::to_string);
-    crate::store::my_account_profile_bind(&st, &account_name, phone, qq, new_pass.as_deref())
-        .await
-        .map_err(|e| store_err(e, bind_code))?;
+    let outcome =
+        crate::store::my_account_profile_bind(&st, &account_name, phone, qq, new_pass.as_deref())
+            .await
+            .map_err(|e| store_err(e, bind_code))?;
     my_tokens_revoke(&account_name);
     let token = my_token_put(person_id, team.clone(), account_name.clone());
     let view_team = crate::store::my_account_view_team(&st, &account_name).await;
     let mut v = login_ok(&st, person_id, &account_name, &team, &token).await;
     v["switchable"] = json!(view_team.switchable());
+    v["personPhoneSync"] = json!(outcome.person_phone_sync.as_str());
+    let person_phone_mask = v["personPhone"].as_str().unwrap_or_default();
     tracing::info!(
         account = %account_name,
         person_id,
         phone = %mask_phone(phone),
+        person_phone = %person_phone_mask,
+        person_phone_sync = outcome.person_phone_sync.as_str(),
         "展示端账号完成首次手机号绑定（QQ/密码由旧客户端可选），旧 token 已吊销并换发"
     );
+    match outcome.person_phone_sync {
+        crate::store::ProfilePersonPhoneSync::KeptExisting
+        | crate::store::ProfilePersonPhoneSync::Conflict => tracing::warn!(
+            account = %account_name,
+            person_id,
+            account_phone = %mask_phone(phone),
+            person_phone = %person_phone_mask,
+            status = outcome.person_phone_sync.as_str(),
+            "首次补全未覆盖主播档案手机号，已记录审计状态"
+        ),
+        _ => {}
+    }
     Ok(Json(v))
 }
 
@@ -1215,6 +1263,7 @@ mod contract_tests {
     fn bind_code_maps_store_text_to_contract_codes() {
         use crate::store as s;
         assert_eq!(bind_code(s::MSG_PHONE_REQUIRED), "INVALID_PHONE");
+        assert_eq!(bind_code(s::MSG_PROFILE_PHONE_INVALID), "INVALID_PHONE");
         assert_eq!(
             bind_code("手机号格式不对：应为 5~20 位数字"),
             "INVALID_PHONE"
@@ -1232,6 +1281,20 @@ mod contract_tests {
         assert_eq!(bind_code(s::MSG_PASS_CTRL), "INVALID_PASS");
         // 库里读不到账号之类的新文案：不瞎猜，回落通用码（error 原样仍可读）
         assert_eq!(bind_code("账号不存在，请重新登录"), "BAD_REQUEST");
+    }
+
+    #[test]
+    fn person_and_contact_phone_projection_never_leaks_plaintext() {
+        let (person, contact) = masked_contact_phones("19900000001", "13600000002");
+        assert_eq!(person, "136****0002");
+        assert_eq!(contact, "136****0002");
+        assert!(!person.contains("13600000002"));
+        assert!(!contact.contains("13600000002"));
+
+        let (person, contact) = masked_contact_phones("19900000001", "");
+        assert_eq!(person, "", "档案未登记时 personPhone 为空");
+        assert_eq!(contact, "199****0001", "contactPhone 回落账号手机号并脱敏");
+        assert!(!contact.contains("19900000001"));
     }
 
     /// 契约 §3.2：认领失败按语义映射（批量开号/并发撞主键等场景都能归位）。
