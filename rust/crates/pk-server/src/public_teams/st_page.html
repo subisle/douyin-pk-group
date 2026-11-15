@@ -5314,6 +5314,7 @@ let publicDataEvents = null;
 let importedRefreshTimer = null;
 let importedRefreshBusy = false;
 let importedRefreshSeq = 0;
+let importedRefreshAt = 0;
 let wxBindingRefreshTimer = null;
 
 function initPublicDataEvents() {
@@ -5358,7 +5359,7 @@ function scheduleImportedDataRefresh() {
   }, 800);
 }
 
-async function refreshDataAfterImport() {
+async function refreshDataAfterImport(silent) {
   if (importedRefreshBusy) { scheduleImportedDataRefresh(); return; }
   importedRefreshBusy = true;
   const seq = ++importedRefreshSeq;
@@ -5371,22 +5372,35 @@ async function refreshDataAfterImport() {
     try { nextSite = await api('/api/public/teams/' + team); } catch (_) {}
     if (seq !== importedRefreshSeq || TEAM !== team) return;
     if (nextSite && nextSite.published !== false) site = nextSite;
+    calDays = null;
+    calMonths = null;
     if (period === 'daily') {
-      const latest = site && site.latestDate ? site.latestDate : '';
-      /* 用户原本看的就是最新一天：自动跟到刚导入的新业务日；
-         若用户在翻历史日期，则保持当前日期，只清缓存。 */
-      if (latest && (!curDate || curDate === oldLatest)) curDate = latest;
+      const dates = Array.isArray(site && site.dates) ? site.dates : [];
+      const latest = (site && site.latestDate) || dates[0] || '';
+      /* 当前正在看的日期被后台删除时，必须立刻跳到最新业务日。
+         不能保留旧 curDate，否则日期条虽已移除，内容区仍继续渲染被删那天。
+         用户原本看最新一天时也跟随新业务日；看其它仍存在的历史日则保持不动。 */
+      if (!curDate || curDate === oldLatest || (dates.length && !dates.includes(curDate))) {
+        curDate = latest;
+      }
     }
+    importedRefreshAt = Date.now();
     if (view !== 'data') return;
     renderDates();
     await loadData(null, true);
     renderAnnounceItems(Array.isArray(site.items) ? site.items : []);
     renderHomeAnnouncement(site.placements && site.placements.home);
     try { renderDanmaku(); } catch (_) {}
-    toast('数据已更新，每日最高已刷新');
+    if (!silent) toast('数据已更新，每日最高已刷新');
   } finally {
     if (seq === importedRefreshSeq) importedRefreshBusy = false;
   }
+}
+function refreshDataOnResume() {
+  if (document.hidden || view !== 'data' || period !== 'daily' || !site) return;
+  /* 手机从后台恢复时 SSE 可能已被系统挂起，补一次轻量站点/当前日刷新。 */
+  if (Date.now() - importedRefreshAt < 15000) return;
+  refreshDataAfterImport(true).catch(() => {});
 }
 
 /* ==================== 登录前加密预取（2026-10-22） ====================
@@ -12324,10 +12338,12 @@ function hideBootGate() {
   window.addEventListener('pageshow', () => {
     settleInstalledWebApp();
     if (Date.now() - appUpdateCheckedAt > APP_UPDATE_CHECK_MS) checkSoftwareUpdate(false);
+    refreshDataOnResume();
   });
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) return;
     if (Date.now() - appUpdateCheckedAt > APP_UPDATE_CHECK_MS) checkSoftwareUpdate(false);
+    refreshDataOnResume();
     if (myToken()) {
       msgModalAutoShown = false;
       msgProbeAttempts = 0;

@@ -352,6 +352,22 @@ mod pwa_tests {
         );
     }
 
+    #[test]
+    fn deleted_daily_date_moves_display_to_latest_and_resume_refreshes() {
+        assert!(
+            ST_PAGE.contains("dates.length && !dates.includes(curDate)"),
+            "删除当前日期后必须切到仍存在的最新业务日"
+        );
+        assert!(
+            ST_PAGE.contains("refreshDataOnResume();"),
+            "手机从后台恢复时要补拉站点和当前日"
+        );
+        assert!(
+            ST_PAGE.contains("if (Date.now() - importedRefreshAt < 15000) return;"),
+            "恢复刷新要有节流，避免老手机反复请求"
+        );
+    }
+
     fn guide_source() -> &'static str {
         let start = ST_PAGE
             .find("const PWA_GUIDE_KEY")
