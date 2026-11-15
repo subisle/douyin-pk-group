@@ -26,6 +26,8 @@ const PREFETCH_TTL: Duration = Duration::from_secs(10 * 60);
 struct StoredKey {
     team: String,
     key: [u8; 32],
+    /// 生成密文时的数据缓存代次；导入/删除推进代次后，旧密文必须作废。
+    epoch: u64,
     expires: Instant,
 }
 
@@ -81,6 +83,8 @@ pub async fn encrypted_prefetch(
         })));
     }
     let query_team = if hint == "all" { "" } else { hint };
+    // 必须在查询前取代次：若查询期间数据被导入/删除，代次会变化，密钥环节拒发。
+    let epoch = crate::state::cache_epoch();
     let (site, daily) = tokio::try_join!(
         site_payload(&st, &s, query_team),
         daily_payload(&st, &s, query_team, None),
@@ -123,6 +127,7 @@ pub async fn encrypted_prefetch(
             StoredKey {
                 team: hint.to_string(),
                 key,
+                epoch,
                 expires,
             },
         );
@@ -172,6 +177,11 @@ pub async fn prefetch_key(
             return Err(ApiError::forbidden("预取数据不属于当前团"));
         }
         map.remove(sid);
+        // 发送密钥前再核对代次：导入/删除已经发生则旧密文不能继续使用，
+        // 前端收到非 2xx 会直接走正常明文接口，不会渲染过期快照。
+        if entry.epoch != crate::state::cache_epoch() {
+            return Err(ApiError::bad_request("预取数据已更新，请直接加载"));
+        }
         entry
     };
     Ok(Json(json!({

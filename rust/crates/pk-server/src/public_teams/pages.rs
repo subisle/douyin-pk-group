@@ -172,9 +172,13 @@ fn st_page_variants() -> &'static StPageVariants {
     })
 }
 
+/// 展示页壳必须每次打开先协商 ETag：内容哈希仍能让未变化时只回 304，
+/// 但不能在部署修复后的 60 秒里继续复用带旧脚本的 HTML。
+const ST_PAGE_CACHE_CONTROL: &str = "private, no-cache, must-revalidate";
+
 fn st_page_response(headers: &HeaderMap) -> Response {
     let variants = st_page_variants();
-    let cache = "private, max-age=60, stale-while-revalidate=300";
+    let cache = ST_PAGE_CACHE_CONTROL;
     if headers
         .get(header::IF_NONE_MATCH)
         .and_then(|v| v.to_str().ok())
@@ -266,7 +270,7 @@ pub(super) fn st_page_for(team: &str, headers: &HeaderMap) -> Response {
     (
         [
             (header::CONTENT_TYPE, "text/html; charset=utf-8"),
-            (header::CACHE_CONTROL, "private, max-age=60"),
+            (header::CACHE_CONTROL, ST_PAGE_CACHE_CONTROL),
         ],
         html,
     )
@@ -356,6 +360,30 @@ mod pwa_tests {
             ST_PAGE.contains("variant === 'android'"),
             "Android 推荐分支需存在"
         );
+    }
+
+    #[test]
+    fn display_shell_revalidates_cached_html_with_etag() {
+        let resp = st_page_response(&HeaderMap::new());
+        assert_eq!(
+            resp.headers()[header::CACHE_CONTROL],
+            ST_PAGE_CACHE_CONTROL,
+            "展示页每次打开都必须协商 ETag，不能直接复用旧 HTML"
+        );
+        assert_eq!(
+            resp.headers()[header::CACHE_CONTROL],
+            "private, no-cache, must-revalidate"
+        );
+
+        let variants = st_page_variants();
+        let mut req_headers = HeaderMap::new();
+        req_headers.insert(
+            header::IF_NONE_MATCH,
+            variants.etag.parse().expect("ETag 应为合法 header"),
+        );
+        let cached = st_page_response(&req_headers);
+        assert_eq!(cached.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(cached.headers()[header::ETAG], variants.etag);
     }
 
     #[test]

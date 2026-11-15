@@ -1,6 +1,7 @@
 //! 全局状态：数据源（LOCAL / A）、连接池、写池、查询缓存
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -9,6 +10,14 @@ use std::sync::Arc;
 use crate::auth::Auth;
 use crate::config::SourceConfig;
 use crate::pgrs::Pools;
+
+/// 数据缓存代次。`clear_cache()` 先递增代次再清表；慢查询回填前核对代次，
+/// 避免删除/导入提交前启动的旧查询在清缓存之后又把旧结果写回来。
+static CACHE_EPOCH: AtomicU64 = AtomicU64::new(1);
+
+pub(crate) fn cache_epoch() -> u64 {
+    CACHE_EPOCH.load(Ordering::Acquire)
+}
 
 pub struct Cached<T> {
     pub at: Instant,
@@ -109,6 +118,9 @@ impl AppState {
     }
 
     pub fn clear_cache(&self) {
+        // 先推进代次，再拿缓存锁：正在回填的查询即使持有旧数据，
+        // 也一定会在拿到锁后看到新代次并放弃写入。
+        CACHE_EPOCH.fetch_add(1, Ordering::AcqRel);
         let mut c = self.cache.lock().expect("cache 锁 poisoned");
         c.waves.clear();
         c.dates.clear();

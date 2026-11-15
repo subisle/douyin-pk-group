@@ -37,6 +37,9 @@ pub async fn get_dates_info(
             return Ok(hit.clone());
         }
     }
+    // 查询开始时的代次：删日/导入结束后 clear_cache() 会推进它。若查询跨越了
+    // 一次失效，即使拿到的还是旧快照，也不能回填到刚清空的缓存里。
+    let epoch = crate::state::cache_epoch();
     let dia = dialect_of(&id);
     let rows = pgrs::query(&st.pools, &id, dia.dates_sql).await?;
     let mut dates: Vec<String> = rows
@@ -55,11 +58,12 @@ pub async fn get_dates_info(
     };
 
     let info = DateInfo { dates, baseline };
-    st.cache
-        .lock()
-        .expect("cache 锁 poisoned")
-        .dates
-        .insert(id, Cached::new(info.clone()));
+    {
+        let mut cache = st.cache.lock().expect("cache 锁 poisoned");
+        if crate::state::cache_epoch() == epoch {
+            cache.dates.insert(id, Cached::new(info.clone()));
+        }
+    }
     Ok(info)
 }
 

@@ -53,7 +53,8 @@ fn cache_no_store(path: &str) -> bool {
         return true;
     }
     // 展示页是静态壳，用户数据全部走 no-store API；页面响应自己设置
-    // `private, max-age=60` + ETag，避免老手机每次冷启动都重新下载约 215KB(br) HTML。
+    // `private, no-cache, must-revalidate` + ETag：每次先协商，未变化只回 304；
+    // 老手机不会重复下载约 215KB(br) HTML，也不会在发布后短暂复用旧脚本。
     false
 }
 
