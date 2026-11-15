@@ -400,6 +400,18 @@ mod pwa_tests {
             ST_PAGE.contains("if (Date.now() - importedRefreshAt < 15000) return;"),
             "恢复刷新要有节流，避免老手机反复请求"
         );
+        assert!(
+            ST_PAGE.contains("if ((scope || currentScope) && currentScope !== scope) return;"),
+            "旧日期请求晚到不得覆盖当前日期"
+        );
+        assert!(
+            ST_PAGE.contains("publicDataEvents.addEventListener('open'"),
+            "SSE 断线恢复后要补拉站点日期"
+        );
+        assert!(
+            ST_PAGE.contains("if (ev && ev.persisted) importedRefreshAt = 0;"),
+            "BFCache 恢复要绕过节流补刷"
+        );
     }
 
     fn guide_source() -> &'static str {

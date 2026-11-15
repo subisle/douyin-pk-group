@@ -5311,6 +5311,7 @@ function scheduleDashboardPrefetch() {
    公开 SSE 只通知「数据已导入」，不携带后台明细；收到后清掉榜单缓存并重拉当前
    团别 / 口径。每日最高弹幕由新的 listAll 重新计算，所以数据导入完成后无需刷新页面。 */
 let publicDataEvents = null;
+let publicDataEventsWasOpen = false;
 let importedRefreshTimer = null;
 let importedRefreshBusy = false;
 let importedRefreshSeq = 0;
@@ -5320,6 +5321,15 @@ let wxBindingRefreshTimer = null;
 function initPublicDataEvents() {
   if (publicDataEvents || typeof window.EventSource === 'undefined') return;
   publicDataEvents = new EventSource('/api/public/events');
+  /* 首次连接不重复拉数据；断线恢复后补一次站点+当前日刷新，避免断线期间
+     后台删除当前日、SSE 没收到事件而一直保留旧日期。 */
+  publicDataEvents.addEventListener('open', () => {
+    if (publicDataEventsWasOpen) scheduleImportedDataRefresh();
+    publicDataEventsWasOpen = true;
+  });
+  publicDataEvents.addEventListener('error', () => {
+    if (publicDataEventsWasOpen) scheduleImportedDataRefresh();
+  });
   publicDataEvents.addEventListener('change', (ev) => {
     try {
       const d = JSON.parse(ev.data || '{}');
@@ -5802,11 +5812,17 @@ async function loadData(signal, fresh) {
   if (!d) {
     d = await api(url, { signal });
     /* 可切团账号在请求飞行中切团：旧团响应绝不能写入新团缓存/DOM。 */
+    /* 用户切日期/切口径后，旧请求即使晚到也不能写 DOM 或缓存。
+       `scope` 为空只代表首屏尚未确定日期，此时允许服务器回最新业务日。 */
+    const currentScope = reqPeriod === 'daily' ? curDate : curPeriod;
     if (TEAM !== team || period !== reqPeriod) return;
+    if ((scope || currentScope) && currentScope !== scope) return;
     if (reqPeriod === 'daily' && d && d.date) key = pageDataKey(team, 'daily', d.date);
     else if (d && d.period) key = pageDataKey(team, reqPeriod, d.period);
     cachePageData(key, d);
   }
+  const finalScope = reqPeriod === 'daily' ? curDate : curPeriod;
+  if ((scope || finalScope) && finalScope !== scope) return;
   if (reqPeriod === 'daily') {
     curDate = d.date;
     listAll = (d.items || []).map(x => ({ ...x, waveRank: x.rank }));
@@ -12335,9 +12351,11 @@ function hideBootGate() {
   const updateClose = $('appUpdateClose');
   if (updateGo) updateGo.onclick = () => window.location.reload();
   if (updateClose) updateClose.onclick = () => updateBar && updateBar.classList.add('hidden');
-  window.addEventListener('pageshow', () => {
+  window.addEventListener('pageshow', (ev) => {
     settleInstalledWebApp();
     if (Date.now() - appUpdateCheckedAt > APP_UPDATE_CHECK_MS) checkSoftwareUpdate(false);
+    /* BFCache 恢复的页面可能带着部署前脚本，强制补一次刷新，不吃 15 秒节流。 */
+    if (ev && ev.persisted) importedRefreshAt = 0;
     refreshDataOnResume();
   });
   document.addEventListener('visibilitychange', () => {
