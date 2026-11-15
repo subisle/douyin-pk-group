@@ -2141,6 +2141,200 @@ fn import_source_fingerprint(biz_date: &str, rows: &[ImportRow]) -> String {
     out
 }
 
+/// 按日导入的账号贡献表（048/050）：
+/// - 同一业务日不同批次、同一人的不同账号分别写一行，重算时按 person 汇总；
+/// - `batch_id=0` 是首次引入贡献口径时，从已有 daily_metric 继承的旧基线；
+/// - 同一文件重发会复用原 batch_id，避免贡献重复累计。
+const DAILY_CONTRIB_RECOMPUTE_SQL: &str = r#"
+WITH agg AS (
+    SELECT person_id,
+           COALESCE(SUM(wave) FILTER (WHERE has_wave = 1), 0)::BIGINT AS wave,
+           COALESCE(SUM(minutes) FILTER (WHERE has_minutes = 1), 0)::BIGINT AS minutes,
+           BOOL_OR(has_wave = 1) AS has_wave,
+           BOOL_OR(has_minutes = 1) AS has_minutes,
+           MAX(is_live)::SMALLINT AS is_live,
+           MAX(batch_id)::BIGINT AS source_batch_id
+      FROM daily_import_contrib
+     WHERE biz_date = ?::date
+     GROUP BY person_id
+), prev AS (
+    SELECT person_id, cumulative_wave
+      FROM daily_metric
+     WHERE biz_date < ?::date
+       AND (person_id, biz_date) IN (
+            SELECT person_id, MAX(biz_date)
+              FROM daily_metric
+             WHERE biz_date < ?::date
+             GROUP BY person_id
+       )
+), target AS (
+    SELECT a.person_id,
+           a.wave,
+           a.minutes,
+           a.is_live,
+           a.has_wave,
+           a.has_minutes,
+           a.source_batch_id,
+           COALESCE(p.cumulative_wave, 0) AS prev_cum
+      FROM agg a
+      LEFT JOIN prev p ON p.person_id = a.person_id
+), upsert AS (
+    INSERT INTO daily_metric
+        (person_id, anchor_id, biz_date, wave, cumulative_wave, prev_snapshot_date,
+         wave_span, wave_reliable, minutes, minutes_reliable, is_live,
+         source_batch_id, wave_state, minutes_state, recomputed_at)
+    SELECT t.person_id,
+           COALESCE((SELECT a.anchor_id FROM account a
+                      WHERE a.person_id = t.person_id AND a.is_primary = 1 LIMIT 1), ''),
+           ?::date,
+           CASE WHEN t.has_wave THEN t.wave ELSE COALESCE(d.wave, 0) END,
+           CASE WHEN t.has_wave THEN t.prev_cum + t.wave ELSE COALESCE(d.cumulative_wave, 0) END,
+           (?::date - 1),
+           1,
+           1,
+           CASE WHEN t.has_minutes THEN t.minutes ELSE COALESCE(d.minutes, 0) END,
+           1,
+           CASE WHEN t.wave >= 2 THEN 1 ELSE t.is_live END,
+           t.source_batch_id,
+           CASE WHEN t.has_wave THEN 1 ELSE COALESCE(d.wave_state, 0) END,
+           CASE WHEN t.has_minutes THEN 1 ELSE COALESCE(d.minutes_state, 0) END,
+           now()
+      FROM target t
+      LEFT JOIN daily_metric d
+        ON d.person_id = t.person_id AND d.biz_date = ?::date
+    ON CONFLICT (person_id, biz_date) DO UPDATE SET
+        wave = CASE WHEN daily_metric.wave_state = 2 THEN daily_metric.wave ELSE EXCLUDED.wave END,
+        cumulative_wave = CASE WHEN daily_metric.wave_state = 2 THEN daily_metric.cumulative_wave ELSE EXCLUDED.cumulative_wave END,
+        prev_snapshot_date = EXCLUDED.prev_snapshot_date,
+        wave_span = 1,
+        wave_reliable = 1,
+        minutes = CASE WHEN daily_metric.minutes_state = 2 THEN daily_metric.minutes ELSE EXCLUDED.minutes END,
+        minutes_reliable = 1,
+        is_live = EXCLUDED.is_live,
+        source_batch_id = EXCLUDED.source_batch_id,
+        wave_state = CASE WHEN daily_metric.wave_state = 2 THEN 2 ELSE EXCLUDED.wave_state END,
+        minutes_state = CASE WHEN daily_metric.minutes_state = 2 THEN 2 ELSE EXCLUDED.minutes_state END,
+        recomputed_at = now()
+    RETURNING 1
+)
+SELECT COUNT(*) FROM upsert
+"#;
+
+const DAILY_CONTRIB_UPSERT_SQL: &str = "INSERT INTO daily_import_contrib \
+         (batch_id, person_id, biz_date, wave, minutes, is_live, has_minutes, has_wave) \
+     VALUES (?,?,?::date,?,?,?,?,?) \
+     ON CONFLICT (batch_id, person_id, biz_date) DO UPDATE SET \
+         wave = EXCLUDED.wave, minutes = EXCLUDED.minutes, \
+         is_live = EXCLUDED.is_live, has_minutes = EXCLUDED.has_minutes, \
+         has_wave = EXCLUDED.has_wave";
+
+/// 重新按贡献表计算某业务日的 daily_metric。没有贡献表时返回 0，调用方回退旧写法。
+async fn recompute_daily_from_contrib(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    biz_date: &str,
+) -> anyhow::Result<usize> {
+    if !table_exists(tx, "daily_import_contrib").await {
+        return Ok(0);
+    }
+    writer::write_guard(DAILY_CONTRIB_RECOMPUTE_SQL)?;
+    let n: i64 = sqlx::query_scalar(&crate::pq::rewrite(DAILY_CONTRIB_RECOMPUTE_SQL))
+        .bind(biz_date)
+        .bind(biz_date)
+        .bind(biz_date)
+        .bind(biz_date)
+        .bind(biz_date)
+        .bind(biz_date)
+        .fetch_one(&mut **tx)
+        .await?;
+    Ok(n.max(0) as usize)
+}
+
+/// 写入本批次对每人的贡献。只有 QQ 严格 ID 模式启用，管理端普通导入仍保持最新覆盖口径。
+async fn record_import_contrib(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    batch_id: i64,
+    biz_date: &str,
+    rows: &[&ResolvedRow],
+) -> anyhow::Result<bool> {
+    if !table_exists(tx, "daily_import_contrib").await {
+        return Ok(false);
+    }
+    sqlx::query(&crate::pq::rewrite(
+        "DELETE FROM daily_import_contrib WHERE batch_id = ? AND biz_date = ?::date",
+    ))
+    .bind(batch_id)
+    .bind(biz_date)
+    .execute(&mut **tx)
+    .await?;
+
+    for r in rows {
+        let Some(pid) = r.person_id else { continue };
+        let existing = existing_day_row(tx, pid, biz_date).await?;
+        let incoming_anchor = clean_import_ident(r.raw.anchor_id.as_deref());
+        let incoming_minutes = r.raw.minutes.unwrap_or(0.0).max(0.0);
+        let incoming_wave = r.raw.wave.unwrap_or(0.0).max(0.0);
+        // 副号 0/0 是未开播占位，不算贡献；否则会清掉主号已有数据。
+        if existing
+            .as_ref()
+            .is_some_and(|e| is_cross_account_zero_placeholder(e, r))
+        {
+            continue;
+        }
+        // 主号有修正时，旧的 batch_id=0 基线要退场，避免和新主号贡献重复。
+        if let Some(existing) = existing.as_ref() {
+            if !incoming_anchor.is_empty() && incoming_anchor == existing.anchor_id.trim() {
+                sqlx::query(&crate::pq::rewrite(
+                    "DELETE FROM daily_import_contrib WHERE batch_id = 0 AND person_id = ? AND biz_date = ?::date",
+                ))
+                .bind(pid as i64)
+                .bind(biz_date)
+                .execute(&mut **tx)
+                .await?;
+            }
+            let has_contrib: Option<i32> = sqlx::query_scalar(&crate::pq::rewrite(
+                "SELECT 1 FROM daily_import_contrib WHERE person_id = ? AND biz_date = ?::date LIMIT 1",
+            ))
+            .bind(pid as i64)
+            .bind(biz_date)
+            .fetch_optional(&mut **tx)
+            .await?;
+            // 首次引入贡献表时，先把原来的主号聚合保留成基线；后续副号正数再相加。
+            if has_contrib.is_none()
+                && !incoming_anchor.is_empty()
+                && incoming_anchor != existing.anchor_id.trim()
+            {
+                writer::write_guard(DAILY_CONTRIB_UPSERT_SQL)?;
+                sqlx::query(&crate::pq::rewrite(DAILY_CONTRIB_UPSERT_SQL))
+                    .bind(0_i64)
+                    .bind(pid as i64)
+                    .bind(biz_date)
+                    .bind(existing.wave.max(0))
+                    .bind(existing.minutes.max(0) as i64)
+                    .bind(existing.is_live)
+                    .bind(1_i16)
+                    .bind(1_i16)
+                    .execute(&mut **tx)
+                    .await?;
+            }
+        }
+        writer::write_guard(DAILY_CONTRIB_UPSERT_SQL)?;
+        sqlx::query(&crate::pq::rewrite(DAILY_CONTRIB_UPSERT_SQL))
+            .bind(batch_id)
+            .bind(pid as i64)
+            .bind(biz_date)
+            .bind(incoming_wave.round() as i64)
+            .bind(incoming_minutes.round() as i64)
+            .bind(i16::from(r.raw.is_live.unwrap_or(false)) | i16::from(incoming_wave >= 2.0))
+            .bind(i16::from(r.raw.minutes.is_some()))
+            .bind(i16::from(
+                r.raw.wave.is_some() || r.raw.cumulative_wave.is_some(),
+            ))
+            .execute(&mut **tx)
+            .await?;
+    }
+    Ok(true)
+}
+
 /// 同一业务日/月份的导入按事务级 advisory lock 串行化。
 ///
 /// 仅靠唯一索引不够：两个并发导入可能各自先读旧值、再写回自己的结果，
@@ -2342,11 +2536,8 @@ async fn commit_import_with_mode(
         lock_import_scope(&mut tx, &format!("account-douyin:{douyin}")).await?;
     }
 
-    // 每次提交都新建审计批次，绝不复用旧 batch_id：
-    //   - source_batch_id 是同日覆盖 / 暂存补账判断“谁更新”的单调序；
-    //   - 复用旧 id 会让“先导 A、再导 B、又重导 A”在 pending 里排不出真实先后；
-    //   - 也不删旧 batch，避免 daily_metric / import_pending 留下悬空引用。
-    // 同一文件重复导入仍由内容指纹记录，并由 write_daily_row 值比对得到 Unchanged。
+    // 普通管理端仍每次新建审计批次；QQ 严格 ID 模式若同一业务日/同一内容已导入，
+    // 复用原 batch_id，把贡献替换而不是再累计一遍。
     let has_fp_col: Option<i32> = sqlx::query_scalar(
         "SELECT 1 FROM information_schema.columns \
          WHERE table_schema='public' AND table_name='import_batch' \
@@ -2354,8 +2545,6 @@ async fn commit_import_with_mode(
     )
     .fetch_optional(&mut *tx)
     .await?;
-    // 048 对 (biz_date, source_fingerprint) 建了唯一索引。首次导入保留指纹，
-    // 后续同内容重导的新批次指纹留空（不撞索引），但 batch_id 仍单调递增。
     let fingerprint_exists: bool = if has_fp_col.is_some() {
         let sql = crate::pq::rewrite(IMPORT_FINGERPRINT_EXISTS_SQL);
         sqlx::query_scalar::<_, i32>(&sql)
@@ -2367,21 +2556,50 @@ async fn commit_import_with_mode(
     } else {
         true
     };
+    let reusable_contrib_batch: Option<i64> =
+        if match_mode == ImportMatchMode::AnchorOnly && has_fp_col.is_some() {
+            let sql = crate::pq::rewrite(
+                "SELECT id FROM import_batch WHERE source='admin-import' AND biz_date=?::date \
+             AND source_fingerprint=? ORDER BY id DESC LIMIT 1",
+            );
+            sqlx::query_scalar::<_, i64>(&sql)
+                .bind(biz_date)
+                .bind(&fingerprint)
+                .fetch_optional(&mut *tx)
+                .await?
+        } else {
+            None
+        };
 
     let initial_note = batch_note(&failures, staged_rows.len(), &skipped);
-    let batch = sqlx::query(&crate::pq::rewrite(
-        "INSERT INTO import_batch (source, filename, biz_date, team, imported_rows, ok_rows, failed_rows, note)
-         VALUES ('admin-import', ?, ?::date, ?, ?, 0, 0, ?) RETURNING id",
-    ))
-    .bind(truncate_chars(filename, FILENAME_MAX_CHARS))
-    .bind(biz_date)
-    .bind(team_col)
-    .bind(merged.len() as i64)
-    .bind(&initial_note)
-    .fetch_one(&mut *tx)
-    .await?;
-    let batch_id = batch.try_get::<i64, _>(0)?;
-    if has_fp_col.is_some() && !fingerprint_exists {
+    let batch_id = if let Some(existing_id) = reusable_contrib_batch {
+        let batch = sqlx::query(&crate::pq::rewrite(
+            "UPDATE import_batch SET filename=?, team=?, imported_rows=?, ok_rows=0, failed_rows=0, note=? \
+             WHERE id=? RETURNING id",
+        ))
+        .bind(truncate_chars(filename, FILENAME_MAX_CHARS))
+        .bind(team_col)
+        .bind(merged.len() as i64)
+        .bind(&initial_note)
+        .bind(existing_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        batch.try_get::<i64, _>(0)?
+    } else {
+        let batch = sqlx::query(&crate::pq::rewrite(
+            "INSERT INTO import_batch (source, filename, biz_date, team, imported_rows, ok_rows, failed_rows, note)
+             VALUES ('admin-import', ?, ?::date, ?, ?, 0, 0, ?) RETURNING id",
+        ))
+        .bind(truncate_chars(filename, FILENAME_MAX_CHARS))
+        .bind(biz_date)
+        .bind(team_col)
+        .bind(merged.len() as i64)
+        .bind(&initial_note)
+        .fetch_one(&mut *tx)
+        .await?;
+        batch.try_get::<i64, _>(0)?
+    };
+    if has_fp_col.is_some() && !fingerprint_exists && reusable_contrib_batch.is_none() {
         sqlx::query(&crate::pq::rewrite(
             "UPDATE import_batch SET source_fingerprint = ? WHERE id = ?",
         ))
@@ -2391,46 +2609,54 @@ async fn commit_import_with_mode(
         .await?;
     }
 
-    /* 2026-11-14 用户口径：同一业务日后一次导入覆盖前一次导入，不再走 048 的
-    daily_import_contrib 求和重算。保留旧贡献表数据仅供审计，导入/删除不再读取它；
-    同一文件重发由 write_daily_row 的 Unchanged 保证数据幂等，首见内容指纹留在审计批次。 */
     let mut ok_count: u32 = 0;
     let mut unchanged: u32 = 0;
     let mut locked: u32 = 0;
-    for r in &ok_rows {
-        // PostgreSQL 一条 SQL 出错后整个事务会进入 aborted 状态，不能“catch 后继续”。
-        // 每行包 savepoint：业务冲突或意外约束失败只回滚这一行，其他主播仍能落库。
-        sqlx::query("SAVEPOINT import_row")
-            .execute(&mut *tx)
-            .await?;
-        match write_daily_row(&mut tx, batch_id, biz_date, date, r, mode).await {
-            Ok(WriteOutcome::Written) => {
-                sqlx::query("RELEASE SAVEPOINT import_row")
-                    .execute(&mut *tx)
-                    .await?;
-                ok_count += 1;
-            }
-            Ok(WriteOutcome::Unchanged) => {
-                sqlx::query("RELEASE SAVEPOINT import_row")
-                    .execute(&mut *tx)
-                    .await?;
-                unchanged += 1;
-            }
-            Ok(WriteOutcome::Locked) => {
-                sqlx::query("RELEASE SAVEPOINT import_row")
-                    .execute(&mut *tx)
-                    .await?;
-                locked += 1;
-            }
-            Err(e) => {
-                sqlx::query("ROLLBACK TO SAVEPOINT import_row")
-                    .execute(&mut *tx)
-                    .await?;
-                sqlx::query("RELEASE SAVEPOINT import_row")
-                    .execute(&mut *tx)
-                    .await?;
-                tracing::error!(name = %r.raw.name, error = %e, "写入 daily_metric 失败");
-                failures.push(json!({ "name": r.raw.name, "reason": e.to_string() }));
+    // QQ 严格 ID 模式按贡献表汇总同一人的多账号；普通管理端保持单批次最新覆盖。
+    let contrib_enabled = if match_mode == ImportMatchMode::AnchorOnly {
+        record_import_contrib(&mut tx, batch_id, biz_date, &ok_rows).await?
+    } else {
+        false
+    };
+    if contrib_enabled {
+        let touched = recompute_daily_from_contrib(&mut tx, biz_date).await?;
+        ok_count = touched as u32;
+    } else {
+        for r in &ok_rows {
+            // PostgreSQL 一条 SQL 出错后整个事务会进入 aborted 状态，不能“catch 后继续”。
+            // 每行包 savepoint：业务冲突或意外约束失败只回滚这一行，其他主播仍能落库。
+            sqlx::query("SAVEPOINT import_row")
+                .execute(&mut *tx)
+                .await?;
+            match write_daily_row(&mut tx, batch_id, biz_date, date, r, mode).await {
+                Ok(WriteOutcome::Written) => {
+                    sqlx::query("RELEASE SAVEPOINT import_row")
+                        .execute(&mut *tx)
+                        .await?;
+                    ok_count += 1;
+                }
+                Ok(WriteOutcome::Unchanged) => {
+                    sqlx::query("RELEASE SAVEPOINT import_row")
+                        .execute(&mut *tx)
+                        .await?;
+                    unchanged += 1;
+                }
+                Ok(WriteOutcome::Locked) => {
+                    sqlx::query("RELEASE SAVEPOINT import_row")
+                        .execute(&mut *tx)
+                        .await?;
+                    locked += 1;
+                }
+                Err(e) => {
+                    sqlx::query("ROLLBACK TO SAVEPOINT import_row")
+                        .execute(&mut *tx)
+                        .await?;
+                    sqlx::query("RELEASE SAVEPOINT import_row")
+                        .execute(&mut *tx)
+                        .await?;
+                    tracing::error!(name = %r.raw.name, error = %e, "写入 daily_metric 失败");
+                    failures.push(json!({ "name": r.raw.name, "reason": e.to_string() }));
+                }
             }
         }
     }
@@ -9066,6 +9292,99 @@ mod master_choice_tests {
     /// P1-4 护栏：reject 模式的 bind 个数必须 == SQL 里的 `?` 个数。
     /// 原来硬编码 bind(biz_date).bind(team) 两个，而 auto 用的 DATE_COUNT_SQL 只有 1 个 `?`
     /// → PG 报 "bind message supplies 2 parameters" → 事务第一条语句就失败、整批回滚。
+    #[tokio::test(flavor = "current_thread")]
+    async fn anchor_only_contributions_sum_accounts_and_reimport_idempotent_real_db() {
+        if std::env::var("DB_WRITER_HOST").is_err() || std::env::var("DB_LOCAL_HOST").is_err() {
+            eprintln!("跳过真库贡献测试：未配置 DB_LOCAL_HOST / DB_WRITER_HOST");
+            return;
+        }
+        let sources = crate::config::load_sources().expect("读取 LOCAL 数据源");
+        let pools = crate::pgrs::build_pools(&sources)
+            .await
+            .expect("建立只读池");
+        let writer = crate::writer::connect(&crate::config::load_writer().expect("读取写池"))
+            .await
+            .expect("建立写池");
+        let st = Arc::new(AppState {
+            auth: std::sync::Arc::new(crate::auth::Auth::from_env()),
+            sources,
+            pools,
+            writer: Some(writer.clone()),
+            redis: None,
+            active: std::sync::Mutex::new("LOCAL".into()),
+            cache: std::sync::Mutex::new(Default::default()),
+            wave_ttl: std::time::Duration::from_secs(60),
+            bots: std::sync::OnceLock::new(),
+        });
+        let biz_date = "2099-01-01";
+        let first_filename = "__test_anchor_contrib_a__";
+        let second_filename = "__test_anchor_contrib_b__";
+        let cleanup = |writer: sqlx::PgPool| async move {
+            let _ =
+                sqlx::query("DELETE FROM daily_import_contrib WHERE biz_date = '2099-01-01'::date")
+                    .execute(&writer)
+                    .await;
+            let _ = sqlx::query(
+                "DELETE FROM import_batch WHERE biz_date = '2099-01-01'::date                  AND filename LIKE '__test_anchor_contrib_%'",
+            )
+            .execute(&writer)
+            .await;
+            let _ = sqlx::query(
+                "DELETE FROM daily_metric WHERE person_id = 26 AND biz_date = '2099-01-01'::date",
+            )
+            .execute(&writer)
+            .await;
+        };
+        cleanup(writer.clone()).await;
+
+        let first = vec![ImportRow {
+            name: "浩启".into(),
+            anchor_id: Some("11441172121795".into()),
+            wave: Some(100.0),
+            minutes: Some(10.0),
+            ..Default::default()
+        }];
+        commit_import_anchor_only(&st, "auto", biz_date, first, "merge", first_filename)
+            .await
+            .expect("第一账号导入");
+        let second = vec![ImportRow {
+            name: "浩启".into(),
+            anchor_id: Some("7499366311505069114".into()),
+            wave: Some(200.0),
+            minutes: Some(20.0),
+            ..Default::default()
+        }];
+        commit_import_anchor_only(
+            &st,
+            "auto",
+            biz_date,
+            second.clone(),
+            "merge",
+            second_filename,
+        )
+        .await
+        .expect("第二账号导入");
+        let row: (i64, i32) = sqlx::query_as(
+            "SELECT wave, minutes FROM daily_metric WHERE person_id = 26 AND biz_date = '2099-01-01'::date",
+        )
+        .fetch_one(&writer)
+        .await
+        .expect("读取合并结果");
+        assert_eq!(row, (300, 30), "同一 person 的两个账号必须合并");
+
+        commit_import_anchor_only(&st, "auto", biz_date, second, "merge", second_filename)
+            .await
+            .expect("重复文件幂等导入");
+        let row: (i64, i32) = sqlx::query_as(
+            "SELECT wave, minutes FROM daily_metric WHERE person_id = 26 AND biz_date = '2099-01-01'::date",
+        )
+        .fetch_one(&writer)
+        .await
+        .expect("读取幂等结果");
+        assert_eq!(row, (300, 30), "重复文件不能重复累计");
+        cleanup(writer).await;
+    }
+
     #[test]
     fn reject_mode_bind_count_matches_placeholders() {
         for (sql, is_auto) in [
