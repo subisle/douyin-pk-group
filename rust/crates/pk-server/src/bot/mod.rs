@@ -1248,68 +1248,56 @@ fn append_import_metric_notice(mut reply: String, notice: Option<&str>) -> Strin
     reply
 }
 
-/// 源文件里常见的“有时长但音浪 0”/“有音浪但时长 0”异常只提示、不改数。
-/// 例如 11.13 的狼艺、浩启源文件本来就是 0 音浪 + 有直播时长；
-/// 如果运营确认是漏导，可再补发对应指标文件，不能用推测值覆盖原始数据。
-fn metric_source_anomaly_notice(rows: &[admin::ImportRow]) -> Option<String> {
-    let mut zero_wave = Vec::new();
-    let mut zero_minutes = Vec::new();
-    for r in rows {
-        let name = if !r.name.trim().is_empty() {
-            r.name.trim()
-        } else if let Some(id) = r.anchor_id.as_deref().filter(|v| !v.trim().is_empty()) {
-            id.trim()
-        } else {
-            continue;
-        };
-        let wave = r.wave.or(r.cumulative_wave);
-        let has_minutes = r.minutes.is_some_and(|v| v > 0.0);
-        let has_wave = wave.is_some_and(|v| v > 0.0);
-        if has_minutes && !has_wave {
-            zero_wave.push(name.to_string());
-        } else if has_wave && !r.minutes.is_some_and(|v| v > 0.0) {
-            zero_minutes.push(name.to_string());
-        }
+/// 按用户口径校验一行导入指标：
+/// - 有时长 → 必须有音浪
+/// - 有音浪 → 必须有时长
+/// - 音浪、时长、开播状态三者全空 → 非法
+/// - 音浪/时长都为 0 是合法的「未开播」行
+fn validate_import_row_metrics(r: &admin::ImportRow) -> Option<String> {
+    let name = if !r.name.trim().is_empty() {
+        r.name.trim()
+    } else if let Some(id) = r.anchor_id.as_deref().filter(|v| !v.trim().is_empty()) {
+        id.trim()
+    } else {
+        "未知主播"
+    };
+    let wave = r.wave.or(r.cumulative_wave).unwrap_or(0.0);
+    let minutes = r.minutes.unwrap_or(0.0);
+    let no_wave = wave <= 0.0;
+    let no_minutes = minutes <= 0.0;
+    if r.wave.is_none() && r.cumulative_wave.is_none() && r.minutes.is_none() && r.is_live.is_none()
+    {
+        return Some(format!("{name}：音浪、时长、开播状态都缺失"));
     }
-    let mut out = String::new();
-    if !zero_wave.is_empty() {
-        out.push_str("\n⚠️ 源文件有直播时长但音浪为 0：");
-        out.push_str(
-            &zero_wave
-                .iter()
-                .take(8)
-                .cloned()
-                .collect::<Vec<_>>()
-                .join("、"),
-        );
-        if zero_wave.len() > 8 {
-            out.push_str(&format!(" 等 {} 人", zero_wave.len()));
-        }
-        out.push_str("。已按源文件导入；如本批应有音浪，请补发音浪文件。");
+    if minutes > 0.0 && no_wave {
+        return Some(format!("{name}：有时长 {minutes:.0} 分钟，但音浪为 0/缺失"));
     }
-    if !zero_minutes.is_empty() {
-        out.push_str("\n⚠️ 源文件有音浪但直播时长为 0：");
-        out.push_str(
-            &zero_minutes
-                .iter()
-                .take(8)
-                .cloned()
-                .collect::<Vec<_>>()
-                .join("、"),
-        );
-        if zero_minutes.len() > 8 {
-            out.push_str(&format!(" 等 {} 人", zero_minutes.len()));
-        }
-        out.push_str("。已按源文件导入；如本批应有时长，请补发时长文件。");
+    if wave > 0.0 && no_minutes {
+        return Some(format!("{name}：有音浪 {wave:.0}，但时长为 0/缺失"));
     }
-    (!out.is_empty()).then_some(out)
+    if r.is_live == Some(true) && no_wave && no_minutes {
+        return Some(format!("{name}：标记开播，但音浪和时长都没有"));
+    }
+    None
 }
 
-fn append_metric_source_anomaly_notice(mut reply: String, notice: Option<&str>) -> String {
-    if let Some(notice) = notice {
-        reply.push_str(notice);
+fn import_validation_errors(rows: &[admin::ImportRow]) -> Vec<String> {
+    rows.iter()
+        .filter_map(validate_import_row_metrics)
+        .collect()
+}
+
+fn format_import_validation_errors(errors: &[String]) -> String {
+    let mut out = String::from("❌ 导入被拒绝：音浪/时长校验不通过，未写入任何数据。");
+    for e in errors.iter().take(10) {
+        out.push_str("\n· ");
+        out.push_str(e);
     }
-    reply
+    if errors.len() > 10 {
+        out.push_str(&format!("\n… 还有 {} 行", errors.len() - 10));
+    }
+    out.push_str("\n请修正源 CSV 后重新发送；音浪和时长都为 0 的行会按未开播导入。");
+    out
 }
 
 fn attachment_names_label(files: &[String]) -> String {
@@ -1710,6 +1698,13 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
             } else {
                 month_files.join(",")
             };
+            let validation_errors = import_validation_errors(&month_rows);
+            if !validation_errors.is_empty() {
+                return Some(Outbound::to(
+                    &inbound.conversation_id,
+                    format_import_validation_errors(&validation_errors),
+                ));
+            }
             let availability = ImportMetrics::from_month_rows(&month_rows);
             let metric_notice = match import_metric_notice(availability) {
                 Ok(notice) => notice,
@@ -1736,7 +1731,6 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
                 metrics = metrics.label(),
                 "机器人按指令月度导入"
             );
-            let source_notice = metric_source_anomaly_notice(&month_rows);
             let reply = match admin::commit_month_metrics_anchor_only(
                 st,
                 &period,
@@ -1764,10 +1758,7 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
                     if r.failures.len() > 10 {
                         s.push_str(&format!("\n… 还有 {} 条失败", r.failures.len() - 10));
                     }
-                    append_metric_source_anomaly_notice(
-                        append_import_metric_notice(s, metric_notice),
-                        source_notice.as_deref(),
-                    )
+                    append_import_metric_notice(s, metric_notice)
                 }
                 Err(e) => format!(
                     "❌ {period} {team_label} 月度{}导入失败：{e}",
@@ -1810,6 +1801,13 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
                 ),
             ));
         }
+        let validation_errors = import_validation_errors(&daily_rows);
+        if !validation_errors.is_empty() {
+            return Some(Outbound::to(
+                &inbound.conversation_id,
+                format_import_validation_errors(&validation_errors),
+            ));
+        }
         let availability = ImportMetrics::from_daily_rows(&daily_rows);
         let metric_notice = match import_metric_notice(availability) {
             Ok(notice) => notice,
@@ -1841,7 +1839,6 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
             rows = daily_rows.len(),
             "机器人按日文件导入"
         );
-        let source_notice = metric_source_anomaly_notice(&daily_rows);
         let report = admin::commit_import_anchor_only(
             st,
             team,
@@ -1854,10 +1851,7 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
         let succeeded = report.is_ok();
         let reply = format_report(&files_label, &biz_date, team, report);
         let reply = if succeeded {
-            append_metric_source_anomaly_notice(
-                append_import_metric_notice(reply, metric_notice),
-                source_notice.as_deref(),
-            )
+            append_import_metric_notice(reply, metric_notice)
         } else {
             reply
         };
@@ -2893,21 +2887,21 @@ async fn cmd_import(st: &Arc<AppState>, inbound: &Inbound, args: &[&str]) -> Str
     if rows.is_empty() {
         return "没有解析到任何数据行。格式示例：\n浩龙 500000 1200000 开播\n（名字 当日音浪 累计 开播状态）".into();
     }
+    let validation_errors = import_validation_errors(&rows);
+    if !validation_errors.is_empty() {
+        return format_import_validation_errors(&validation_errors);
+    }
     let availability = ImportMetrics::from_daily_rows(&rows);
     let metric_notice = match import_metric_notice(availability) {
         Ok(notice) => notice,
         Err(message) => return message.to_string(),
     };
 
-    let source_notice = metric_source_anomaly_notice(&rows);
     let report = admin::commit_import(st, team, &biz_date, rows, "merge", "机器人导入").await;
     let succeeded = report.is_ok();
     let reply = format_report("机器人导入", &biz_date, team, report);
     if succeeded {
-        append_metric_source_anomaly_notice(
-            append_import_metric_notice(reply, metric_notice),
-            source_notice.as_deref(),
-        )
+        append_import_metric_notice(reply, metric_notice)
     } else {
         reply
     }
@@ -4527,7 +4521,7 @@ mod tests {
     }
 
     #[test]
-    fn source_anomaly_notice_flags_duration_without_wave() {
+    fn import_validation_rejects_one_sided_or_empty_metrics() {
         let rows = vec![
             admin::ImportRow {
                 name: "狼艺".into(),
@@ -4541,15 +4535,53 @@ mod tests {
                 minutes: Some(0.0),
                 ..Default::default()
             },
+            admin::ImportRow {
+                name: "空白".into(),
+                ..Default::default()
+            },
         ];
-        let notice = metric_source_anomaly_notice(&rows);
-        let reply = append_metric_source_anomaly_notice("导入完成".into(), notice.as_deref());
-        assert!(reply.contains("有直播时长但音浪为 0"), "{reply}");
-        assert!(reply.contains("狼艺"), "{reply}");
-        assert!(reply.contains("有音浪但直播时长为 0"), "{reply}");
-        assert!(reply.contains("浩启"), "{reply}");
-        assert!(reply.contains("请补发音浪文件"), "{reply}");
-        assert!(reply.contains("请补发时长文件"), "{reply}");
+        let errors = import_validation_errors(&rows);
+        assert_eq!(errors.len(), 3, "{errors:?}");
+        let reply = format_import_validation_errors(&errors);
+        assert!(reply.contains("有时长"), "{reply}");
+        assert!(reply.contains("有音浪"), "{reply}");
+        assert!(reply.contains("都缺失"), "{reply}");
+    }
+
+    #[test]
+    fn real_1114_two_file_mix_rejects_only_haoyue_invalid_pair() {
+        let docs: Vec<AttachmentText> = vec![
+            (
+                "11月14.csv".into(),
+                "主播ID,主播昵称,总音浪,开播有效时长\n\
+                 11441172121795,浩启,1657,2小时38分钟45秒\n\
+                 502897776832788,浩月,0,3小时26分钟25秒\n"
+                    .into(),
+            ),
+            (
+                "11月14日.csv".into(),
+                "主播ID,主播昵称,总音浪,开播有效时长\n\
+                 7499366311505069114,浩启,0,0小时0分钟0秒\n"
+                    .into(),
+            ),
+        ];
+        let batch = parse_attachment_batch(&docs);
+        let errors = import_validation_errors(&batch.daily_rows);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("浩月"), "{errors:?}");
+        assert!(errors[0].contains("有时长"), "{errors:?}");
+        assert!(!errors.iter().any(|e| e.contains("浩启")), "{errors:?}");
+    }
+
+    #[test]
+    fn zero_wave_and_zero_minutes_is_valid_unstreamed() {
+        let row = admin::ImportRow {
+            name: "未开播".into(),
+            wave: Some(0.0),
+            minutes: Some(0.0),
+            ..Default::default()
+        };
+        assert!(validate_import_row_metrics(&row).is_none());
     }
 
     #[test]
