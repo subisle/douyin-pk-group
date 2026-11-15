@@ -2818,6 +2818,25 @@ struct ExistingDayRow {
     minutes_state: i16,
 }
 
+/// 同一主播的副号全零行（QQ 多文件里常见的“账号已休眠”占位）不能清掉主号已经导入的
+/// 当日音浪/时长。只有“账号 ID 不同 + 所有提供的指标都是 0/空 + 不是开播”才保护；
+/// 同一账号的显式 0 仍然允许作为修正覆盖旧值。
+fn is_cross_account_zero_placeholder(existing: &ExistingDayRow, row: &ResolvedRow) -> bool {
+    let incoming_anchor = clean_import_ident(row.raw.anchor_id.as_deref());
+    let existing_anchor = existing.anchor_id.trim();
+    if incoming_anchor.is_empty()
+        || existing_anchor.is_empty()
+        || incoming_anchor == existing_anchor
+    {
+        return false;
+    }
+    let zero = |v: Option<f64>| v.is_none_or(|n| n == 0.0);
+    zero(row.raw.wave)
+        && zero(row.raw.cumulative_wave)
+        && zero(row.raw.minutes)
+        && row.raw.is_live != Some(true)
+}
+
 /// 单个指标字段组的写入计划。状态只作用于对应指标：音浪锁不会连带锁时长。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct MetricWritePlan {
@@ -3088,6 +3107,18 @@ async fn write_daily_row(
 
     // 锁定模式遇到已有行时不再改账号/主号/历史 anchor：锁定的是数据，不应反向触发台账重排。
     let existing_before_identity = existing_day_row(tx, person_id, biz_date).await?;
+    // 跨批次的副号 0/0 行不能把主号正数覆盖掉；把它降级为“本行没有提供指标”。
+    let cross_account_zero = existing_before_identity
+        .as_ref()
+        .is_some_and(|existing| is_cross_account_zero_placeholder(existing, r));
+    let mut effective_row = r.clone();
+    if cross_account_zero {
+        effective_row.raw.wave = None;
+        effective_row.raw.cumulative_wave = None;
+        effective_row.raw.minutes = None;
+        effective_row.raw.is_live = None;
+    }
+    let r = &effective_row;
     let preserve_identity = locked_mode && existing_before_identity.is_some();
     if !preserve_identity {
         apply_import_identity(tx, person_id, r).await?;
@@ -3205,7 +3236,7 @@ async fn write_daily_row(
         if hit_locked {
             return Ok(WriteOutcome::Locked);
         }
-        if !locked_mode {
+        if !locked_mode && !cross_account_zero {
             touch_daily_source_batch(tx, batch_id, person_id, biz_date).await?;
         }
         return Ok(WriteOutcome::Unchanged);
@@ -7853,6 +7884,38 @@ mod tests {
         );
         assert_eq!(strict.person_id, None, "未知主播 ID 必须进暂存");
         assert!(matches!(classify_row(&strict), RowClass::Pending));
+    }
+
+    #[test]
+    fn cross_batch_secondary_zero_does_not_clear_primary_metrics() {
+        let existing = ExistingDayRow {
+            wave: 1657,
+            cumulative_wave: 41387,
+            minutes: 158,
+            is_live: 1,
+            anchor_id: "primary-anchor".into(),
+            source_batch_id: Some(654),
+            wave_state: 1,
+            minutes_state: 1,
+        };
+        let mut secondary = row(Some(49), Some(0.0), Some(0.0), Some(0.0));
+        secondary.raw.anchor_id = Some("secondary-anchor".into());
+        secondary.raw.is_live = Some(false);
+        assert!(is_cross_account_zero_placeholder(&existing, &secondary));
+
+        let mut same_anchor = secondary.clone();
+        same_anchor.raw.anchor_id = Some("primary-anchor".into());
+        assert!(
+            !is_cross_account_zero_placeholder(&existing, &same_anchor),
+            "同一主号的显式 0 是修正，必须允许覆盖"
+        );
+
+        let mut secondary_nonzero = secondary;
+        secondary_nonzero.raw.wave = Some(10.0);
+        assert!(
+            !is_cross_account_zero_placeholder(&existing, &secondary_nonzero),
+            "副号有非零音浪时不能被当作 0/0 占位"
+        );
     }
 
     /// QQ 严格 ID 模式：不同 ID 属于同一人时，当天音浪 / 时长求和；
