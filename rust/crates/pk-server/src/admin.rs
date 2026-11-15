@@ -8493,6 +8493,45 @@ mod tests {
     }
 
     #[test]
+    fn normalize_unstreamed_rows_handles_missing_duration_and_all_empty() {
+        let mut rows = vec![
+            ImportRow {
+                name: "有音浪缺时长".into(),
+                wave: Some(1657.0),
+                cumulative_wave: Some(2000.0),
+                minutes: None,
+                is_live: Some(true),
+                ..Default::default()
+            },
+            ImportRow {
+                name: "有时长零音浪".into(),
+                wave: Some(0.0),
+                minutes: Some(90.0),
+                ..Default::default()
+            },
+            ImportRow {
+                name: "全空".into(),
+                ..Default::default()
+            },
+        ];
+        normalize_unstreamed_import_rows(&mut rows);
+        assert_eq!(rows[0].wave, Some(0.0), "缺失时长也必须按未开播归零");
+        assert_eq!(rows[0].cumulative_wave, None);
+        assert_eq!(rows[0].minutes, Some(0.0));
+        assert_eq!(rows[0].is_live, Some(false));
+        assert_eq!(rows[1].wave, Some(0.0), "0 音浪 + 有时长必须保留");
+        assert_eq!(rows[1].minutes, Some(90.0));
+        assert_eq!(rows[1].is_live, None);
+        assert!(
+            rows[2].wave.is_none()
+                && rows[2].cumulative_wave.is_none()
+                && rows[2].minutes.is_none()
+                && rows[2].is_live.is_none(),
+            "全空行应留给机器人校验拒绝，不能被归一成合法未开播"
+        );
+    }
+
+    #[test]
     fn parses_tab_separated_with_header() {
         let text = "名字\t当日音浪\t累计\t开播\n玖玉\t560000\t1700000\t开播\n";
         let rows = parse_import_text(text);
