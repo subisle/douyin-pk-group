@@ -1271,9 +1271,7 @@ fn validate_import_row_metrics(r: &admin::ImportRow) -> Option<String> {
     if !wave_supplied && minutes > 0.0 {
         return Some(format!("{name}：有时长 {minutes:.0} 分钟，但音浪列缺失"));
     }
-    if wave > 0.0 && minutes <= 0.0 {
-        return Some(format!("{name}：有音浪 {wave:.0}，但时长为 0/缺失"));
-    }
+    // 有音浪但时长为 0/缺失 = 未开播；commit 入口会归一成 0/0，不能拒绝。
     if r.is_live == Some(true) && !wave_supplied && r.minutes.is_none() {
         return Some(format!("{name}：标记开播，但音浪和时长都没有"));
     }
@@ -1671,7 +1669,7 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
 
         if let Some((period, team)) = month_scope {
             let AttachmentBatchParse {
-                month_rows,
+                mut month_rows,
                 month_files,
                 empty_files,
                 metric_errors,
@@ -1697,6 +1695,7 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
             } else {
                 month_files.join(",")
             };
+            admin::normalize_unstreamed_import_rows(&mut month_rows);
             let validation_errors = import_validation_errors(&month_rows);
             if !validation_errors.is_empty() {
                 return Some(Outbound::to(
@@ -1773,7 +1772,7 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
         // 按日：同一条消息里的多个附件按顺序做字段级合并，同 ID 后文件覆盖前文件；
         // 后文件没带音浪或时长时分别保留前面的值，显式 0 仍覆盖。
         let AttachmentBatchParse {
-            daily_rows,
+            mut daily_rows,
             daily_files,
             empty_files,
             metric_errors,
@@ -1800,6 +1799,7 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
                 ),
             ));
         }
+        admin::normalize_unstreamed_import_rows(&mut daily_rows);
         let validation_errors = import_validation_errors(&daily_rows);
         if !validation_errors.is_empty() {
             return Some(Outbound::to(
@@ -2882,10 +2882,11 @@ async fn cmd_import(st: &Arc<AppState>, inbound: &Inbound, args: &[&str]) -> Str
             text = inbound.text[pos + 1..].to_string();
         }
     }
-    let rows = admin::parse_any_text(&text);
+    let mut rows = admin::parse_any_text(&text);
     if rows.is_empty() {
         return "没有解析到任何数据行。格式示例：\n浩龙 500000 1200000 开播\n（名字 当日音浪 累计 开播状态）".into();
     }
+    admin::normalize_unstreamed_import_rows(&mut rows);
     let validation_errors = import_validation_errors(&rows);
     if !validation_errors.is_empty() {
         return format_import_validation_errors(&validation_errors);
@@ -4520,7 +4521,7 @@ mod tests {
     }
 
     #[test]
-    fn import_validation_allows_zero_wave_but_rejects_missing_duration() {
+    fn import_validation_allows_zero_wave_but_rejects_missing_wave_column() {
         let rows = vec![
             admin::ImportRow {
                 name: "显式零音浪".into(),
@@ -4545,15 +4546,32 @@ mod tests {
             },
         ];
         let errors = import_validation_errors(&rows);
-        assert_eq!(errors.len(), 3, "{errors:?}");
+        assert_eq!(errors.len(), 2, "{errors:?}");
         assert!(
             !errors.iter().any(|e| e.contains("显式零音浪")),
             "{errors:?}"
         );
+        assert!(
+            !errors.iter().any(|e| e.contains("有音浪零时长")),
+            "{errors:?}"
+        );
         let reply = format_import_validation_errors(&errors);
         assert!(reply.contains("有时长"), "{reply}");
-        assert!(reply.contains("有音浪"), "{reply}");
         assert!(reply.contains("都缺失"), "{reply}");
+    }
+
+    #[test]
+    fn positive_wave_without_duration_is_normalized_to_unstreamed() {
+        let mut rows = vec![admin::ImportRow {
+            name: "有音浪零时长".into(),
+            wave: Some(1657.0),
+            minutes: Some(0.0),
+            ..Default::default()
+        }];
+        admin::normalize_unstreamed_import_rows(&mut rows);
+        assert_eq!(rows[0].wave, Some(0.0));
+        assert_eq!(rows[0].minutes, Some(0.0));
+        assert_eq!(rows[0].is_live, Some(false));
     }
 
     #[test]

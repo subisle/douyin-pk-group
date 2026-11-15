@@ -977,6 +977,26 @@ pub struct ImportRow {
     pub err: Option<String>,
 }
 
+/// 用户口径（2026-11-15）：时长 0 / 缺失就是未开播，即使源文件音浪列有正数，
+/// 也把这一行归一为 0 音浪 + 0 时长，避免榜单把“有音浪但没播”当成有效数据。
+pub(crate) fn normalize_unstreamed_import_rows(rows: &mut [ImportRow]) {
+    for r in rows {
+        let all_missing = r.wave.is_none()
+            && r.cumulative_wave.is_none()
+            && r.minutes.is_none()
+            && r.is_live.is_none();
+        if all_missing {
+            continue;
+        }
+        if r.minutes.unwrap_or(0.0) <= 0.0 {
+            r.wave = Some(0.0);
+            r.cumulative_wave = None;
+            r.minutes = Some(0.0);
+            r.is_live = Some(false);
+        }
+    }
+}
+
 /// 审计/暂存文本列宽（UTF-8 字符数）。import_batch.note VARCHAR(512)、
 /// filename VARCHAR(255)、import_pending.name VARCHAR(128) / douyin_no VARCHAR(64)。
 /// STRICT_TRANS_TABLES 下超长是 1406 直接炸掉整个导入事务 —— 2026-10-10 覆盖导入踩过，
@@ -2396,7 +2416,7 @@ async fn commit_import_with_mode(
     st: &Arc<AppState>,
     team: &str,
     biz_date: &str,
-    rows: Vec<ImportRow>,
+    mut rows: Vec<ImportRow>,
     mode: &str,
     filename: &str,
     match_mode: ImportMatchMode,
@@ -2421,6 +2441,7 @@ async fn commit_import_with_mode(
     let team_col = if auto_team { "mixed" } else { team };
     validate_import_mode(mode)?;
     anyhow::ensure!(!rows.is_empty(), "没有解析到任何数据行");
+    normalize_unstreamed_import_rows(&mut rows);
 
     /* 异常文件防御（2026-10-13 QQ 机器人导入口径）：
     文件里所有数据行的音浪值完全相同（≥3 行）→ 几乎可以断定是拿错了文件 /
