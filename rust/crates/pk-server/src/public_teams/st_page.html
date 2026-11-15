@@ -5146,7 +5146,10 @@ function lbRowHtml(it) {
   const byDuration = durationSortActive();
   const hideWave = it.wave == null;
   const hasDuration = it.minutes != null;
-  const off = it.hasData === false || (byDuration ? !hasDuration : (!hideWave && it.wave < 2));
+  const hasPositiveDuration = hasDuration && Number(it.minutes) > 0;
+  /* wave<2 只代表音浪很低/为 0，不等于未播；有时长数据时仍要正常显示 0 音浪。 */
+  const off = it.hasData === false
+    || (byDuration ? !hasDuration : (!hideWave && Number(it.wave) < 2 && !hasPositiveDuration));
   const wave = hideWave ? '—' : wan(it.wave);
   /* 2026-10-19 用户口径：月 / 年榜右列「显示数字即可」，去掉「当月音浪 / 年度音浪」四个字；
      日榜保留「当日音浪」小字（用户没让删，且日榜右列只有数字会失去口径提示）。 */
@@ -7797,8 +7800,10 @@ function renderMy(d, series, push, accounts) {
       waveDelta(o.wave, o.prevWave) + '</span>') +
     '</div>' +
     (o.minutes == null ? '' : '<div class="m">' + minText(o.minutes) + '</div>') + '</div>';
-  /* 未播口径与榜单一致：当日音浪 < 2 = 未开播 */
-  const offToday = d.daily && d.daily.wave != null && d.daily.wave < 2;
+  /* 未播口径与榜单一致：音浪 < 2 且没有直播时长才算未开播。
+     有时长但音浪为 0 的主播仍要显示真实 0 音浪。 */
+  const offToday = d.daily && d.daily.wave != null && d.daily.wave < 2
+    && !(d.daily.minutes != null && Number(d.daily.minutes) > 0);
   /* 近 14 个业务日趋势：条形图，未播（<3）置灰 */
   let trend = '';
   const waves = series && series.waves;

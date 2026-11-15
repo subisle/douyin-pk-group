@@ -387,6 +387,20 @@ mod pwa_tests {
     }
 
     #[test]
+    fn zero_wave_with_positive_duration_is_not_marked_offline() {
+        for token in [
+            "const hasPositiveDuration = hasDuration && Number(it.minutes) > 0;",
+            "Number(it.wave) < 2 && !hasPositiveDuration",
+            "d.daily.minutes != null && Number(d.daily.minutes) > 0",
+        ] {
+            assert!(
+                ST_PAGE.contains(token),
+                "零音浪但有时间展示回归缺少：{token}"
+            );
+        }
+    }
+
+    #[test]
     fn overlays_restore_swipe_hints_and_admin_gate_skips_workbuddy_status() {
         assert!(
             ST_PAGE.contains("updateDateSwipeHints();\n    /* 用户口径：三甲通报读完后"),
