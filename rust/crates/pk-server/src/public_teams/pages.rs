@@ -387,6 +387,22 @@ mod pwa_tests {
     }
 
     #[test]
+    fn overlays_restore_swipe_hints_and_admin_gate_skips_workbuddy_status() {
+        assert!(
+            ST_PAGE.contains("updateDateSwipeHints();\n    /* 用户口径：三甲通报读完后"),
+            "通报弹窗关闭后要恢复侧滑提示"
+        );
+        assert!(
+            ST_PAGE.contains("wbBindStartedAt = 0;\n  updateDateSwipeHints();"),
+            "WorkBuddy 弹窗关闭后要恢复侧滑提示"
+        );
+        assert!(
+            ST_PAGE.contains("if (me.admin) return;"),
+            "管理员观看账号不能请求 WorkBuddy 绑定状态"
+        );
+    }
+
+    #[test]
     fn workbuddy_reauth_uses_account_expiry_date_not_credit_expiry() {
         for token in [
             "status.accountDaysLeftCeil",

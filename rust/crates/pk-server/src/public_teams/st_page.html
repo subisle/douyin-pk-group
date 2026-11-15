@@ -3686,6 +3686,7 @@ function wbCancelCurrent(close) {
   wbBindState = '';
   wbBindAuthUrl = '';
   wbBindStartedAt = 0;
+  updateDateSwipeHints();
   if (state) {
     postJson('/api/public/my/workbuddy/oauth/cancel', { state: state }, { auth: true }).catch(() => {});
   }
@@ -3997,7 +3998,9 @@ function maybePromptTencentBind(me, attempt) {
     }
     if (site.settings.workbuddyEnabled !== true) return;
     if (!me || me.needBind || me.needProfile || me.mustChangePass || me.bound === false) return;
-    /* 手机号不是 WorkBuddy 绑定的前置条件；管理员观看账号也要弹。 */
+    /* admin-gate 是「管理员观看账号」，没有可绑定的展示端身份；调用 status 只会 400。 */
+    if (me.admin) return;
+    /* 手机号不是 WorkBuddy 绑定的前置条件；普通展示端账号即使未填手机号也要弹。 */
     if (!myToken()) return;
     if (wbStatusPending()) {
       /* 上次 status 请求可能在刷新时被中断；保留 TTL 自愈重试，不能让 pending 永久卡住。 */
@@ -11685,6 +11688,8 @@ function maybeAnnounceItemsPopup() {
     unlockScroll();
     /* 🎈 通报弹窗关掉 = 挂载闸放开，补挂弹幕（renderDanmaku 幂等，此时多半还没挂） */
     try { renderDanmaku(); } catch (e) {}
+    /* 通报弹窗打开期间侧滑提示会让位；关掉后必须重新挂载，否则首屏看不到左右切换箭头。 */
+    updateDateSwipeHints();
     /* 用户口径：三甲通报读完后，再显示“添加到主屏幕”引导。 */
     setTimeout(() => { try { maybeShowPwaGuide(false); } catch (_) {} }, 180);
   };
