@@ -1263,7 +1263,6 @@ fn validate_import_row_metrics(r: &admin::ImportRow) -> Option<String> {
         "未知主播"
     };
     let wave_supplied = r.wave.is_some() || r.cumulative_wave.is_some();
-    let wave = r.wave.or(r.cumulative_wave).unwrap_or(0.0);
     let minutes = r.minutes.unwrap_or(0.0);
     if !wave_supplied && r.minutes.is_none() && r.is_live.is_none() {
         return Some(format!("{name}：音浪、时长、开播状态都缺失"));
