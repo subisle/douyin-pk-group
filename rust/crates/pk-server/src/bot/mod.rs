@@ -1248,11 +1248,12 @@ fn append_import_metric_notice(mut reply: String, notice: Option<&str>) -> Strin
     reply
 }
 
-/// 按用户口径校验一行导入指标：
-/// - 有时长 → 必须有音浪
-/// - 有音浪 → 必须有时长
-/// - 音浪、时长、开播状态三者全空 → 非法
-/// - 音浪/时长都为 0 是合法的「未开播」行
+/// 按用户最新口径校验一行导入指标：
+/// - 显式 0 音浪允许出现（可能只是没有产生音浪）；
+/// - 有时长但音浪列完全缺失 → 非法；
+/// - 有音浪但时长为 0/缺失 → 非法；
+/// - 音浪、时长、开播状态三者全空 → 非法；
+/// - 音浪/时长都为 0 是合法的「未开播」行。
 fn validate_import_row_metrics(r: &admin::ImportRow) -> Option<String> {
     let name = if !r.name.trim().is_empty() {
         r.name.trim()
@@ -1261,21 +1262,19 @@ fn validate_import_row_metrics(r: &admin::ImportRow) -> Option<String> {
     } else {
         "未知主播"
     };
+    let wave_supplied = r.wave.is_some() || r.cumulative_wave.is_some();
     let wave = r.wave.or(r.cumulative_wave).unwrap_or(0.0);
     let minutes = r.minutes.unwrap_or(0.0);
-    let no_wave = wave <= 0.0;
-    let no_minutes = minutes <= 0.0;
-    if r.wave.is_none() && r.cumulative_wave.is_none() && r.minutes.is_none() && r.is_live.is_none()
-    {
+    if !wave_supplied && r.minutes.is_none() && r.is_live.is_none() {
         return Some(format!("{name}：音浪、时长、开播状态都缺失"));
     }
-    if minutes > 0.0 && no_wave {
-        return Some(format!("{name}：有时长 {minutes:.0} 分钟，但音浪为 0/缺失"));
+    if !wave_supplied && minutes > 0.0 {
+        return Some(format!("{name}：有时长 {minutes:.0} 分钟，但音浪列缺失"));
     }
-    if wave > 0.0 && no_minutes {
+    if wave > 0.0 && minutes <= 0.0 {
         return Some(format!("{name}：有音浪 {wave:.0}，但时长为 0/缺失"));
     }
-    if r.is_live == Some(true) && no_wave && no_minutes {
+    if r.is_live == Some(true) && !wave_supplied && r.minutes.is_none() {
         return Some(format!("{name}：标记开播，但音浪和时长都没有"));
     }
     None
@@ -4521,18 +4520,23 @@ mod tests {
     }
 
     #[test]
-    fn import_validation_rejects_one_sided_or_empty_metrics() {
+    fn import_validation_allows_zero_wave_but_rejects_missing_duration() {
         let rows = vec![
             admin::ImportRow {
-                name: "狼艺".into(),
+                name: "显式零音浪".into(),
                 wave: Some(0.0),
                 minutes: Some(90.0),
                 ..Default::default()
             },
             admin::ImportRow {
-                name: "浩启".into(),
+                name: "有音浪零时长".into(),
                 wave: Some(1657.0),
                 minutes: Some(0.0),
+                ..Default::default()
+            },
+            admin::ImportRow {
+                name: "缺音浪有时长".into(),
+                minutes: Some(120.0),
                 ..Default::default()
             },
             admin::ImportRow {
@@ -4542,6 +4546,10 @@ mod tests {
         ];
         let errors = import_validation_errors(&rows);
         assert_eq!(errors.len(), 3, "{errors:?}");
+        assert!(
+            !errors.iter().any(|e| e.contains("显式零音浪")),
+            "{errors:?}"
+        );
         let reply = format_import_validation_errors(&errors);
         assert!(reply.contains("有时长"), "{reply}");
         assert!(reply.contains("有音浪"), "{reply}");
@@ -4549,7 +4557,7 @@ mod tests {
     }
 
     #[test]
-    fn real_1114_two_file_mix_rejects_only_haoyue_invalid_pair() {
+    fn real_1114_two_file_mix_allows_zero_wave_with_duration() {
         let docs: Vec<AttachmentText> = vec![
             (
                 "11月14.csv".into(),
@@ -4567,10 +4575,7 @@ mod tests {
         ];
         let batch = parse_attachment_batch(&docs);
         let errors = import_validation_errors(&batch.daily_rows);
-        assert_eq!(errors.len(), 1, "{errors:?}");
-        assert!(errors[0].contains("浩月"), "{errors:?}");
-        assert!(errors[0].contains("有时长"), "{errors:?}");
-        assert!(!errors.iter().any(|e| e.contains("浩启")), "{errors:?}");
+        assert!(errors.is_empty(), "0 音浪 + 有时长是合法行：{errors:?}");
     }
 
     #[test]
