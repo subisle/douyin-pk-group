@@ -3,6 +3,7 @@
 use super::*;
 use axum::body::{Body, Bytes};
 use axum::http::{header, HeaderMap, StatusCode};
+use md5::{Digest, Md5};
 use std::io::Write;
 use std::sync::OnceLock;
 
@@ -157,11 +158,16 @@ fn st_page_variants() -> &'static StPageVariants {
         let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
         gz.write_all(&raw).expect("gzip 压缩展示页失败");
         let gzip = gz.finish().expect("gzip 完成展示页失败");
+        // ETag 必须跟实际 HTML 内容走：只改页面脚本、不改 App 版本时，
+        // 旧手机也不能继续命中旧壳。内容一变 ETag 立刻变，下一次协商即拿新页面。
+        let mut digest = Md5::new();
+        digest.update(&raw);
+        let etag = format!("\"web-{:x}\"", digest.finalize());
         StPageVariants {
             identity: Bytes::from(raw),
             brotli: Bytes::from(br),
             gzip: Bytes::from(gzip),
-            etag: format!("\"web-{WEB_APP_VERSION}\""),
+            etag,
         }
     })
 }
