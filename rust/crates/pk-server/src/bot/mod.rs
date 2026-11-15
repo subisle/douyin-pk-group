@@ -153,6 +153,12 @@ impl BotConfig {
 
 /* ------------------------------- 限流 ------------------------------- */
 
+/// QQ 管理员连续发多个导入文件时，不让 10 条/分钟的消息限流误伤附件批次。
+/// 普通用户、普通聊天和微信绑定验证码仍走原限流。
+fn is_qq_admin_import_batch(channel: &str, is_admin: bool, attachment_count: usize) -> bool {
+    channel == "qq" && is_admin && attachment_count > 0
+}
+
 struct RateLimiter {
     hits: Mutex<HashMap<String, Vec<Instant>>>,
     limit: u32,
@@ -1424,10 +1430,20 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
         format!("{} 收到消息", inbound.channel),
     );
     // 限流（P1-1 审计：必须前置到绑定分支之前，否则绑定路径不限速可暴力试码）。
-    // 对所有渠道所有会话生效（含绑定/管理员）。
+    // 普通消息对所有渠道所有会话生效；QQ 管理员附件导入单独放行，避免同一天
+    // 多份 CSV 连续发送时被 10 条/分钟误伤。管理员身份仍按各自白名单复核。
+    let qq_admin_for_import =
+        inbound.channel == "qq" && qq_admin_ok(&cfg.qq_admins, &inbound.conversation_id);
+    let session_admin_for_import = !inbound.attachments.is_empty()
+        && crate::store::session_is_admin(st, inbound.channel, &inbound.conversation_id).await;
+    let admin_attachment_bypass = is_qq_admin_import_batch(
+        inbound.channel,
+        qq_admin_for_import || session_admin_for_import,
+        inbound.attachments.len(),
+    );
     let limiter = LIMITER.get_or_init(|| RateLimiter::new(cfg.rate_limit_per_min));
     let key = format!("{}:{}", inbound.channel, inbound.conversation_id);
-    if !limiter.allow(&key) {
+    if !admin_attachment_bypass && !limiter.allow(&key) {
         /* 文案带上**实际生效**的上限（2026-10-17 修复，审计 6-12b）：
         BOT_RATE_LIMIT 可配，原先写死「10 条/分钟」，改了配置文案就在撒谎。 */
         return Some(Outbound::to(
@@ -1437,6 +1453,13 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
                 cfg.rate_limit_per_min
             ),
         ));
+    }
+    if admin_attachment_bypass {
+        tracing::info!(
+            conversation = %inbound.conversation_id,
+            files = inbound.attachments.len(),
+            "QQ 管理员附件导入已跳过消息限流"
+        );
     }
     // 展示端「我的」页微信绑定（2026-10-16 口径：只发 4 位绑定码即可）。
     // 必须在管理员白名单之前处理——来绑定的都是普通主播，不是管理员；
@@ -1460,11 +1483,12 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
     // 注意这与 docs/09 早期「QQ 收到即可服务」的定稿口径相反，是本轮审计后的安全收紧；
     // 生产上线前必须在 .env.prod 配好白名单（prod compose 已透传该键）。
     // 会话表标记过的管理员（后台勾选 / 微信提权口令）始终算 Admin，与渠道无关。
-    let is_qq_admin =
-        inbound.channel == "qq" && qq_admin_ok(&cfg.qq_admins, &inbound.conversation_id);
+    let is_qq_admin = qq_admin_for_import;
+    let is_session_admin = session_admin_for_import
+        || crate::store::session_is_admin(st, inbound.channel, &inbound.conversation_id).await;
     let role = if is_qq_admin
         || cfg.wechat_admins.contains(&inbound.conversation_id)
-        || crate::store::session_is_admin(st, inbound.channel, &inbound.conversation_id).await
+        || is_session_admin
     {
         Role::Admin
     } else if inbound.channel == "weixin"
@@ -3899,6 +3923,15 @@ mod tests {
         assert_eq!(fmt_num(560000.4), "560,000");
         assert_eq!(fmt_num(0.0), "0");
         assert_eq!(fmt_num(-1234.0), "-1,234");
+    }
+
+    #[test]
+    fn qq_admin_attachment_import_bypasses_rate_limit() {
+        assert!(is_qq_admin_import_batch("qq", true, 1));
+        assert!(is_qq_admin_import_batch("qq", true, 3));
+        assert!(!is_qq_admin_import_batch("qq", false, 3));
+        assert!(!is_qq_admin_import_batch("weixin", true, 3));
+        assert!(!is_qq_admin_import_batch("qq", true, 0));
     }
 
     #[test]
