@@ -6,25 +6,31 @@
 //!
 //! 数据源只剩 LOCAL（唯一 PostgreSQL 业务库），共用同一套只读 SQL。
 
-/// 未播口径（2026-10-09 用户定；2026-10-10 统一三处实现，P1-10）：
-/// 「当日导入音浪 < NOT_LIVE_WAVE_THRESHOLD」= 未开播。此前 report.rs（日报）按
-/// is_live 标记、public_teams.rs（展示端）按 wave<3、push.rs（推送榜）按 wave>=3，
-/// 三套口径同一个人会得出不同的「未播」结论。现在日报 / 展示端 / 推送一律引用这里。
+/// 开播口径（2026-11-15 用户变更）：**有效时长 > 0 才算开播**。
+/// 音浪只负责展示、排序和收入估算；音浪再高，只要时长为 0/缺失，状态仍是未播。
+/// 日报、展示端、个人页、月/年榜、未播预警与机器人播报统一引用本文件。
 ///
-/// ⚠️ 口径边界（2026-10-11 用户确认，别当 bug 修）：**当天没有导入行的，就是「没导入」**，
-/// 不算未播天。所有未播聚合都只扫 `daily_metric` 里**存在**的行：
-/// - 有行且 `wave < 2`  → 未播天 +1
-/// - 有行且 `wave >= 2` → 已播
+/// ⚠️ 口径边界：**当天没有导入行的，就是「没导入」**，不算未播天。所有未播聚合都只扫
+/// `daily_metric` 里**存在**的行：
+/// - 有行且 `minutes <= 0 / NULL` → 未播天 +1
+/// - 有行且 `minutes > 0`         → 已播
 /// - **完全没有行**      → 不参与统计，既不加也不判
 ///
-/// 所以 `absentDays` 的准确语义是「当月**有数据行**且音浪 < 2 的天数」，
+/// 所以 `absentDays` 的准确语义是「当月**有数据行**且有效时长 <=0 的天数」，
 /// 不是「当月日历天里没播的天数」。缺采的日子不算进去，这是有意的：
 /// 漏采集 ≠ 没开播，把两者混在一起会让"运营忘了导"看起来像"主播没播"。
+///
+/// `NOT_LIVE_WAVE_THRESHOLD` 仅保留给“是否进入推送榜”的历史音浪门槛，不再用于开播状态。
 pub const NOT_LIVE_WAVE_THRESHOLD: i64 = 2;
 
-/// 统一的未播判定：当日音浪 < 2 = 未播（report 日报 / public_teams 榜单 / push 推送共用）
+/// 历史音浪门槛：仅用于推送榜是否收录，不参与开播/未播状态。
 pub fn is_live_wave(wave: i64) -> bool {
     wave >= NOT_LIVE_WAVE_THRESHOLD
+}
+
+/// 统一的开播判定：有效时长 > 0 = 开播；0/缺失 = 未播。
+pub fn is_live_minutes(minutes: i64) -> bool {
+    minutes > 0
 }
 
 /// 「当月未播天数」的唯一 SQL 模板：`{month}` 占位为 `YYYY-MM`。
@@ -34,36 +40,26 @@ pub fn is_live_wave(wave: i64) -> bool {
 /// 就不一样了。抽成常量后，口径只有这一处，改哪边都跟着动。
 ///
 /// 语义严格对应上面的口径注释：**只扫存在的行**。所以是
-/// `SUM(CASE WHEN wave < 阈值 THEN 1 ELSE 0 END)`，不按日历天补零。
+/// `SUM(CASE WHEN COALESCE(minutes,0) <= 0 THEN 1 ELSE 0 END)`，不按日历天补零。
 pub const MONTH_ABSENT_SQL: &str =
-    "SELECT person_id, (SUM(CASE WHEN wave < {NOT_LIVE_WAVE_THRESHOLD} THEN 1 ELSE 0 END))::BIGINT AS n \
+    "SELECT person_id, (SUM(CASE WHEN COALESCE(minutes, 0) <= 0 THEN 1 ELSE 0 END))::BIGINT AS n \
      FROM daily_metric WHERE wave_reliable = 1 \
        AND TO_CHAR(biz_date, 'YYYY-MM') = '{month}' GROUP BY person_id";
 
 /// 生成「当月未播天数」的 SQL。month 必须是 `YYYY-MM`（调用方已过 `valid_date_*`），
 /// 这里只做字符串替换，不拼任何外部输入。
 pub fn month_absent_sql(month: &str) -> String {
-    MONTH_ABSENT_SQL
-        .replace(
-            "{NOT_LIVE_WAVE_THRESHOLD}",
-            &NOT_LIVE_WAVE_THRESHOLD.to_string(),
-        )
-        .replace("{month}", month)
+    MONTH_ABSENT_SQL.replace("{month}", month)
 }
 
-/// 「当月直播天数」：只统计有数据行且音浪 >= 阈值的日期，与未播天数互补。
+/// 「当月直播天数」：只统计有数据行且有效时长 > 0 的日期，与未播天数互补。
 pub const MONTH_LIVE_SQL: &str =
-    "SELECT person_id, (SUM(CASE WHEN wave >= {NOT_LIVE_WAVE_THRESHOLD} THEN 1 ELSE 0 END))::BIGINT AS n \
+    "SELECT person_id, (SUM(CASE WHEN COALESCE(minutes, 0) > 0 THEN 1 ELSE 0 END))::BIGINT AS n \
      FROM daily_metric WHERE wave_reliable = 1 \
        AND TO_CHAR(biz_date, 'YYYY-MM') = '{month}' GROUP BY person_id";
 
 pub fn month_live_sql(month: &str) -> String {
-    MONTH_LIVE_SQL
-        .replace(
-            "{NOT_LIVE_WAVE_THRESHOLD}",
-            &NOT_LIVE_WAVE_THRESHOLD.to_string(),
-        )
-        .replace("{month}", month)
+    MONTH_LIVE_SQL.replace("{month}", month)
 }
 
 /// LOCAL：唯一业务库 —— person / account / daily_metric
@@ -91,20 +87,27 @@ const WAVES_A: &str = "SELECT k, (SUM(w))::DOUBLE PRECISION AS w FROM (
       GROUP BY a.person_id
    ) t GROUP BY k";
 
-/// A 库每日序列：展示页每日排名用。返回 k（人员 id）/ d（日期）/ w（当日音浪）/ live（当日是否开播）。
-/// 一人多号：daily_metric 每人每天一行（主号口径），副号音浪从 wave_snapshot（is_primary=0）并进来。
+/// A 库每日序列：展示页每日排名用。返回 k（人员 id）/ d（日期）/ w（当日音浪）/ live（有效时长决定）。
+/// 一人多号：daily_metric 主号 + wave_snapshot / duration_snapshot 副号合并。
 /// wave_snapshot.wave_value 是当日值语义（已验证：主号快照与 daily_metric.wave 962 对中 958 相等）。
 const SERIES_A: &str = "SELECT k, d, (SUM(w))::DOUBLE PRECISION AS w, \
-     CASE WHEN SUM(w) >= 2 THEN 1 ELSE 0 END AS live FROM (
-     SELECT person_id AS k, TO_CHAR(biz_date, 'YYYY-MM-DD') AS d, SUM(wave) AS w, MAX(is_live) AS live
+     CASE WHEN SUM(dm) > 0 THEN 1 ELSE 0 END AS live FROM (
+     SELECT person_id AS k, TO_CHAR(biz_date, 'YYYY-MM-DD') AS d, SUM(wave) AS w,
+            SUM(minutes) AS dm
       FROM daily_metric
       WHERE wave_reliable = 1 AND TO_CHAR(biz_date, 'YYYY-MM-DD') IN (?PLACEHOLDERS?)
       GROUP BY person_id, d
      UNION ALL
      SELECT a.person_id AS k, TO_CHAR(ws.biz_date, 'YYYY-MM-DD') AS d, SUM(ws.wave_value) AS w,
-            CASE WHEN SUM(ws.wave_value) > 0 THEN 1 ELSE 0 END AS live
+            0 AS dm
       FROM wave_snapshot ws JOIN account a ON a.anchor_id = ws.anchor_id AND a.is_primary = 0
       WHERE TO_CHAR(ws.biz_date, 'YYYY-MM-DD') IN (?PLACEHOLDERS?)
+      GROUP BY a.person_id, d
+     UNION ALL
+     SELECT a.person_id AS k, TO_CHAR(ds.biz_date, 'YYYY-MM-DD') AS d, 0 AS w,
+            SUM(ds.minutes) AS dm
+      FROM duration_snapshot ds JOIN account a ON a.anchor_id = ds.anchor_id AND a.is_primary = 0
+      WHERE TO_CHAR(ds.biz_date, 'YYYY-MM-DD') IN (?PLACEHOLDERS?)
       GROUP BY a.person_id, d
    ) t GROUP BY k, d";
 
@@ -293,7 +296,7 @@ pub fn trend_sql(start: &str, end: &str) -> String {
         "SELECT p.id AS person_id, p.name, p.gender, \
          TO_CHAR(d.biz_date, 'YYYY-MM-DD') AS d, \
          (SUM(d.wave))::BIGINT AS w, (SUM(d.minutes))::BIGINT AS m, \
-         CASE WHEN SUM(d.wave) >= 2 THEN 1 ELSE 0 END AS live \
+         CASE WHEN COALESCE(SUM(d.minutes), 0) > 0 THEN 1 ELSE 0 END AS live \
          FROM daily_metric d JOIN person p ON p.id = d.person_id \
          WHERE p.deleted_at IS NULL AND d.wave_reliable = 1 \
            AND d.biz_date BETWEEN '{start}' AND '{end}' \
@@ -313,7 +316,7 @@ pub fn trend_sql(start: &str, end: &str) -> String {
 /// **导入了整月音浪、当月却没有日明细行的月份也要进榜**：t 里补一行占位（w/dm/live/off/days 全 0），
 /// 音浪由 LEFT JOIN 的整月值填上。平台月报本来就常用来补采「没有按日导入」的历史月份，
 /// 只认日明细的话这些人在月榜/年榜上根本不出现，等于导入白做。补齐行只带音浪值，
-/// 开播 / 未播天数一律 0（未播天数继续走日明细口径，见文件头 NOT_LIVE_WAVE_THRESHOLD 注释）。
+/// 开播 / 未播天数一律 0（未播天数继续走日明细的 minutes 口径）。
 /// ⚠️ 时长**不**做同样的补齐（用户口径：时长保持现有逻辑），所以只有月度时长、没有日明细、
 /// 也没有整月音浪的人照旧不进榜。
 ///
@@ -485,8 +488,8 @@ pub fn period_rollup_sql(
         "SELECT {select} FROM ( \
            SELECT x.pid, TO_CHAR(x.biz_date, 'YYYY-MM') AS m, \
              (SUM(x.w))::BIGINT AS w, (SUM(x.dm))::BIGINT AS dm, \
-             (SUM(CASE WHEN x.w >= 2 THEN 1 ELSE 0 END))::BIGINT AS live, \
-             (SUM(CASE WHEN x.w < 2 THEN 1 ELSE 0 END))::BIGINT AS off, \
+             (SUM(CASE WHEN x.dm > 0 THEN 1 ELSE 0 END))::BIGINT AS live, \
+             (SUM(CASE WHEN x.dm <= 0 THEN 1 ELSE 0 END))::BIGINT AS off, \
              (COUNT(DISTINCT x.biz_date))::BIGINT AS days \
            FROM ( \
              SELECT u.pid, u.biz_date, (SUM(u.w))::BIGINT AS w, (SUM(u.dm))::BIGINT AS dm \
@@ -670,14 +673,16 @@ pub const ACCOUNT_ANCHOR_MAP_SQL: &str =
 
 /// 暂存区列表（未认领的导入行）。不进任何榜单/统计，只给管理端处理用。
 pub const PENDING_LIST_SQL: &str = "SELECT id, name, douyin_no, claim_key,
-       TO_CHAR(biz_date, 'YYYY-MM-DD') AS bd, wave, cumulative_wave, minutes, is_live,
+       TO_CHAR(biz_date, 'YYYY-MM-DD') AS bd, wave, cumulative_wave, minutes,
+       CASE WHEN COALESCE(minutes, 0) > 0 THEN 1 ELSE 0 END AS is_live,
        source_batch_id, TO_CHAR(created_at, 'YYYY-MM-DD HH24:MI') AS ts
      FROM import_pending WHERE absorbed_at IS NULL
      ORDER BY biz_date DESC, id DESC LIMIT 300";
 
 /// 某个主播名下（按抖音号或采集 ID 命中）还没认领的暂存行 —— 建档 / 绑号后补账用
 pub const PENDING_FOR_PERSON_SQL: &str = "SELECT id, name, douyin_no,
-       TO_CHAR(biz_date, 'YYYY-MM-DD') AS bd, wave, cumulative_wave, minutes, is_live,
+       TO_CHAR(biz_date, 'YYYY-MM-DD') AS bd, wave, cumulative_wave, minutes,
+       CASE WHEN COALESCE(minutes, 0) > 0 THEN 1 ELSE 0 END AS is_live,
        source_batch_id
      FROM import_pending
      WHERE absorbed_at IS NULL
@@ -904,7 +909,7 @@ mod tests {
         assert!(!PERSON_ROSTER_FOR_ACCOUNTS_SQL_LEGACY.contains("phone"));
     }
 
-    // ---- 未播口径（2026-10-09 用户定：当日音浪 < 2 = 未播）----
+    // ---- 开播口径（2026-11-15 用户定：有效时长 > 0 才算开播）----
     // 这三处曾经各用各的判据，导致同一个人被判出不同结论。测试守住常量和边界，
     // 让任何人想改口径都必须先改这里。
 
@@ -985,25 +990,27 @@ mod tests {
     }
 
     #[test]
-    fn not_live_threshold_is_two() {
-        assert_eq!(NOT_LIVE_WAVE_THRESHOLD, 2, "业务口径：当日音浪 < 2 = 未播");
+    fn wave_threshold_is_kept_for_push_ranking_only() {
+        assert_eq!(
+            NOT_LIVE_WAVE_THRESHOLD, 2,
+            "历史推送榜收录门槛保持不变，但不再决定开播状态"
+        );
     }
 
     #[test]
     fn is_live_wave_boundary() {
-        // 严格小于 2 才算未播：1 未播，2 播了
-        assert!(!is_live_wave(0), "0 未播");
-        assert!(!is_live_wave(1), "1 未播（阈值边界）");
-        assert!(is_live_wave(2), "2 已播（阈值边界）");
-        assert!(is_live_wave(3), "3 已播");
-        assert!(is_live_wave(1_000_000), "大额音浪已播");
+        // 该函数只服务推送榜收录门槛，不用于展示端开播状态。
+        assert!(!is_live_wave(0));
+        assert!(!is_live_wave(1));
+        assert!(is_live_wave(2));
+        assert!(is_live_wave(3));
+        assert!(is_live_wave(1_000_000));
     }
 
     #[test]
     fn is_live_wave_handles_negative() {
-        // 表里 wave 是有符号整型；脏数据（负数）不该被当成「已播」
-        assert!(!is_live_wave(-1), "负数视为未播");
-        assert!(!is_live_wave(i64::MIN), "极小值视为未播");
+        assert!(!is_live_wave(-1), "负数不满足推送榜门槛");
+        assert!(!is_live_wave(i64::MIN), "极小值不满足推送榜门槛");
     }
 
     #[test]
@@ -1013,18 +1020,26 @@ mod tests {
         assert!(is_live_wave(NOT_LIVE_WAVE_THRESHOLD));
     }
 
+    #[test]
+    fn live_status_requires_positive_minutes() {
+        assert!(!is_live_minutes(0), "0 时长 = 未播");
+        assert!(!is_live_minutes(-1), "负时长 = 未播");
+        assert!(is_live_minutes(1), "只要有效时长 > 0 就是开播");
+        assert!(is_live_minutes(1_000_000));
+    }
+
     /// 「当天没导入行 = 没导入，不算未播天」是定稿口径，用测试钉住，
     /// 免得后来人看见「缺采的日子没算进去」当成 bug 好心改掉。
     ///
-    /// 聚合只扫 `daily_metric` 存在的行：有行且 wave<2 → 未播 +1；无行 → 不参与。
-    /// 这里直接断言 SQL 的形状：必须是「按人按月 SUM(CASE WHEN wave < 阈值)」，
+    /// 聚合只扫 `daily_metric` 存在的行：有行且有效时长 <=0 → 未播 +1；无行 → 不参与。
+    /// 这里直接断言 SQL 的形状：必须是「按人按月 SUM(CASE WHEN minutes <= 0)」，
     /// 且不能出现把「无行」折算成天数的写法（比如按日历天补零）。
     #[test]
     fn absent_days_only_counts_existing_rows() {
         let month_sql = month_absent_sql("2999-01");
         assert!(
-            month_sql.contains("SUM(CASE WHEN wave < 2"),
-            "月未播天数必须按「有数据行且音浪低于阈值」累加：{month_sql}"
+            month_sql.contains("SUM(CASE WHEN COALESCE(minutes, 0) <= 0"),
+            "月未播天数必须按「有数据行且有效时长 <= 0」累加：{month_sql}"
         );
         assert!(
             month_sql.contains("wave_reliable = 1"),
@@ -1035,7 +1050,7 @@ mod tests {
             "月份过滤要带年份，否则跨年会串月：{month_sql}"
         );
         // 不允许按日历天补零——那会把「没导入」算成「未播」
-        for bad in ["COALESCE", "GENERATE_SERIES", "calendar"] {
+        for bad in ["GENERATE_SERIES", "calendar"] {
             assert!(
                 !month_sql
                     .to_ascii_lowercase()
@@ -1048,7 +1063,10 @@ mod tests {
     #[test]
     fn live_days_are_complementary_to_absent_days() {
         let sql = month_live_sql("2999-01");
-        assert!(sql.contains("SUM(CASE WHEN wave >= 2"), "{sql}");
+        assert!(
+            sql.contains("SUM(CASE WHEN COALESCE(minutes, 0) > 0"),
+            "{sql}"
+        );
         assert!(sql.contains("wave_reliable = 1"), "{sql}");
         assert!(sql.contains("2999-01"), "{sql}");
     }
@@ -1066,6 +1084,10 @@ mod tests {
                 "副号必须按非主号关联，避免主号快照重复：{sql}"
             );
         }
+        assert!(
+            SERIES_A.contains("FROM duration_snapshot ds"),
+            "开播状态必须合并副号时长：{SERIES_A}"
+        );
         let month = period_rollup_sql(
             "{wave} AS wave, {minutes} AS minutes",
             "2026-10%",

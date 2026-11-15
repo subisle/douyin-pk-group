@@ -260,6 +260,10 @@ pub async fn daily(
     daily_payload(&st, &s, &query_team, q.date.as_deref()).await
 }
 
+/// 日榜开播状态唯一口径：有效时长 > 0。音浪只参与展示、排序和名次。
+const DAILY_LIVE_EXPR: &str =
+    "CASE WHEN COALESCE(SUM(d.minutes), 0) > 0 THEN 1 ELSE 0 END";
+
 /// 每日榜单 payload 的纯组装层：已由 handler / 加密预取完成团别与权限校验。
 pub(super) async fn daily_payload(
     st: &AppState,
@@ -293,8 +297,8 @@ pub(super) async fn daily_payload(
     未开播，前端标记为「未开播」。只在 daily_metric 里捞人的话，某天只录了 1 个人时
     榜单就真只剩 1 行，跟库里的在册人数对不上。
     hide_in_daily_report = 1 的主播（管理端逐人设置）完全不进榜、不占名次。 */
-    // 时长关掉时不把 minutes 列带进 SQL；音浪即使不展示也必须算，因为名次、
-    // 并列名次与 liveCount/isLive 都依赖它。
+    // 时长关掉时不把 minutes 列下发给前端，但 SQL 内部仍必须聚合它：
+    // 开播状态 / liveCount 只看有效时长 > 0，不能再按音浪阈值判断。
     let minutes_select = if s.duration {
         ", (COALESCE(SUM(d.minutes), 0))::BIGINT AS minutes"
     } else {
@@ -303,7 +307,7 @@ pub(super) async fn daily_payload(
     let sql = format!(
         "SELECT p.id AS person_id, p.name, p.gender AS team, \
          (COALESCE(SUM(d.wave), 0))::BIGINT AS wave{minutes_select}, \
-         CASE WHEN COALESCE(SUM(d.wave), 0) >= 2 THEN 1 ELSE 0 END AS live, \
+         {DAILY_LIVE_EXPR} AS live, \
          COUNT(d.id) AS nrow \
          FROM person p \
          LEFT JOIN daily_metric d ON d.person_id = p.id \
@@ -318,13 +322,12 @@ pub(super) async fn daily_payload(
     let rows = pgrs::query(&st.pools, &source, &sql).await?;
 
     // 当月未播天数 + 历史累计总音浪 + 前一日名次（内存 join）
-    // 未播口径（2026-10-09 用户定；2026-10-10 P1-10 统一引用 dialect::NOT_LIVE_WAVE_THRESHOLD）：
-    // 当天导入音浪 < 2 = 未开播；
+    // 未播口径（2026-11-15 用户定）：当天有效时长 0/缺失 = 未开播，音浪仍照常展示。
     // totalWave = 历史累计总音浪（2026-10-11 用户口径，展示页列「累计总音浪」）。
     // P1-7：只聚合可信行（wave_reliable=1），与 WAVES_A / 月年榜口径一致。
     let month = &date[..7];
     // 未播天数关闭时连聚合查询都不发；与日报共用 dialect::month_absent_sql
-    // （唯一口径：有数据行且音浪 < 2 才算未播）。
+    // （唯一口径：有数据行且有效时长 <= 0 才算未播）。
     let mut absent_map: HashMap<u64, i64> = Default::default();
     if s.absent_days {
         let absent_sql = crate::dialect::month_absent_sql(month);
@@ -479,8 +482,7 @@ pub(super) async fn daily_payload(
         "published": true,
         "date": date,
         "teamSize": rows.len(),
-        // P2-13：liveCount 语义对齐为「开播人数」（当日音浪 ≥ 未播阈值），
-        // 原来统计的是「有数据人数」，字段名与口径不符
+        // liveCount = 当日有效时长 > 0 的人数；音浪高但时长为 0 的仍算未播。
         "liveCount": live_count,
         "items": items,
     })))
@@ -1284,6 +1286,13 @@ mod tests {
         );
         assert_eq!(avatar_url(1027, ""), "/api/public/avatars/1027");
         assert_eq!(avatar_url(1027, "   "), "/api/public/avatars/1027");
+    }
+
+    #[test]
+    fn daily_live_status_uses_minutes_not_wave() {
+        assert!(DAILY_LIVE_EXPR.contains("SUM(d.minutes)"));
+        assert!(DAILY_LIVE_EXPR.contains("> 0"));
+        assert!(!DAILY_LIVE_EXPR.contains("wave"));
     }
 
     /// 2026-10-22：只在 monthly_wave / monthly_duration 里有数据、daily_metric

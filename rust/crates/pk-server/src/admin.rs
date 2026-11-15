@@ -977,24 +977,29 @@ pub struct ImportRow {
     pub err: Option<String>,
 }
 
-/// 用户口径（2026-11-15）：时长 0 / 缺失就是未开播，即使源文件音浪列有正数，
-/// 也把这一行归一为 0 音浪 + 0 时长，避免榜单把“有音浪但没播”当成有效数据。
+/// 用户口径（2026-11-15）：时长 0 / 缺失就是未开播，但**音浪仍要原样显示**。
+/// 这里只归一不合法的负数时长，绝不能清零音浪，也不能把“文件没有时长列”
+/// 伪装成“显式 0 时长”；后者会影响合并导入与锁定状态。
 pub(crate) fn normalize_unstreamed_import_rows(rows: &mut [ImportRow]) {
     for r in rows {
-        let all_missing = r.wave.is_none()
-            && r.cumulative_wave.is_none()
-            && r.minutes.is_none()
-            && r.is_live.is_none();
-        if all_missing {
+        let has_metric = r.wave.is_some() || r.cumulative_wave.is_some() || r.minutes.is_some();
+        if !has_metric {
             continue;
         }
-        if r.minutes.unwrap_or(0.0) <= 0.0 {
-            r.wave = Some(0.0);
-            r.cumulative_wave = None;
+        if r.minutes.is_some_and(|minutes| minutes < 0.0) {
             r.minutes = Some(0.0);
-            r.is_live = Some(false);
         }
     }
+}
+
+/// 导入行对外的开播状态：有效时长 > 0 才算开播；时长 0 / 缺失一律未播。
+/// 音浪只负责展示和排名，不参与开播判定。
+pub(crate) fn effective_import_is_live(r: &ImportRow) -> Option<bool> {
+    let has_metric = r.wave.is_some() || r.cumulative_wave.is_some() || r.minutes.is_some();
+    if !has_metric {
+        return r.is_live;
+    }
+    Some(r.minutes.unwrap_or(0.0) > 0.0)
 }
 
 /// 审计/暂存文本列宽（UTF-8 字符数）。import_batch.note VARCHAR(512)、
@@ -1866,8 +1871,10 @@ pub async fn import_preview(State(st): State<ArcState>, Json(body): Json<ImportB
     if !team.is_empty() {
         valid_team(team)?;
     }
-    let (raw_rows, _duration_rows) = body_rows(&body.text, &body.rows).await.map_err(nice_400)?;
+    let (mut raw_rows, _duration_rows) =
+        body_rows(&body.text, &body.rows).await.map_err(nice_400)?;
     ensure(!raw_rows.is_empty(), "没有解析到任何数据行")?;
+    normalize_unstreamed_import_rows(&mut raw_rows);
     let ctx = load_match_ctx(&st).await?;
     let aliases = merged_aliases(&st).await;
     let mut resolved: Vec<ResolvedRow> = raw_rows
@@ -1883,7 +1890,10 @@ pub async fn import_preview(State(st): State<ArcState>, Json(body): Json<ImportB
         .collect();
     mark_duplicate_import_anchor_conflicts(&mut resolved);
     // 预览必须和提交同口径：同一主播同日多行按后行覆盖，否则预览人数 / 时长会翻倍。
-    let merged = merge_rows_by_person_daily_latest(&resolved);
+    let mut merged = merge_rows_by_person_daily_latest(&resolved);
+    for r in &mut merged {
+        r.raw.is_live = effective_import_is_live(&r.raw);
+    }
     let matched = merged.iter().filter(|r| r.matched).count();
     let duration_rows = merged.iter().filter(|r| r.raw.minutes.is_some()).count();
     let minutes_total: i64 = merged
@@ -2172,7 +2182,6 @@ WITH agg AS (
            COALESCE(SUM(minutes) FILTER (WHERE has_minutes = 1), 0)::BIGINT AS minutes,
            BOOL_OR(has_wave = 1) AS has_wave,
            BOOL_OR(has_minutes = 1) AS has_minutes,
-           MAX(is_live)::SMALLINT AS is_live,
            MAX(batch_id)::BIGINT AS source_batch_id
       FROM daily_import_contrib
      WHERE biz_date = ?::date
@@ -2191,7 +2200,6 @@ WITH agg AS (
     SELECT a.person_id,
            a.wave,
            a.minutes,
-           a.is_live,
            a.has_wave,
            a.has_minutes,
            a.source_batch_id,
@@ -2214,7 +2222,11 @@ WITH agg AS (
            1,
            CASE WHEN t.has_minutes THEN t.minutes ELSE COALESCE(d.minutes, 0) END,
            1,
-           CASE WHEN t.wave >= 2 THEN 1 ELSE t.is_live END,
+           CASE
+             WHEN t.has_minutes THEN CASE WHEN t.minutes > 0 THEN 1 ELSE 0 END
+             WHEN COALESCE(d.minutes, 0) > 0 THEN 1
+             ELSE 0
+           END,
            t.source_batch_id,
            CASE WHEN t.has_wave THEN 1 ELSE COALESCE(d.wave_state, 0) END,
            CASE WHEN t.has_minutes THEN 1 ELSE COALESCE(d.minutes_state, 0) END,
@@ -2344,7 +2356,7 @@ async fn record_import_contrib(
             .bind(biz_date)
             .bind(incoming_wave.round() as i64)
             .bind(incoming_minutes.round() as i64)
-            .bind(i16::from(r.raw.is_live.unwrap_or(false)) | i16::from(incoming_wave >= 2.0))
+            .bind(i16::from(r.raw.minutes.unwrap_or(0.0) > 0.0))
             .bind(i16::from(r.raw.minutes.is_some()))
             .bind(i16::from(
                 r.raw.wave.is_some() || r.raw.cumulative_wave.is_some(),
@@ -2466,10 +2478,15 @@ async fn commit_import_with_mode(
     /* QQ 严格 ID 模式：同一个 ID 的重复行已在附件层做「后者覆盖」；这里再按
     person 汇总不同 ID，一人多号当天各自产生的音浪 / 时长必须相加。
     普通管理端导入仍沿用同人同日 latest 覆盖口径。 */
-    let merged = match match_mode {
+    let mut merged = match match_mode {
         ImportMatchMode::Normal => merge_rows_by_person_daily_latest(&resolved),
         ImportMatchMode::AnchorOnly => merge_rows_by_person(&resolved),
     };
+    // 开播状态只由最终合并后的时长决定；音浪正数但时长 0/缺失仍按未播处理。
+    // 在 merge 之后重算，保证“音浪附件 + 时长附件”同批发送时不会被先到的空状态覆盖。
+    for r in &mut merged {
+        r.raw.is_live = effective_import_is_live(&r.raw);
+    }
 
     /* 行分类（2026-10-10 用户口径：只要有抖音号或者 id 都导入，但不进榜单和统计，
     主播在台账建档 / 绑号之后才显示）：
@@ -2698,7 +2715,9 @@ async fn commit_import_with_mode(
             .bind(r.raw.wave.map(|v| v as i64))
             .bind(r.raw.cumulative_wave.map(|v| v as i64))
             .bind(r.raw.minutes.map(|v| v as i64))
-            .bind(r.raw.is_live.map(|b| b as i16))
+            // 暂存区只记录本次文件是否真的带了时长；缺时长时保留旧状态，
+            // 读取接口再按最终 minutes 派生 live，避免 wave-only 文件清掉已有状态。
+            .bind(r.raw.minutes.map(|m| i16::from(m > 0.0)))
             .bind(batch_id as i64)
             .execute(&mut *tx)
             .await?;
@@ -3437,15 +3456,13 @@ async fn write_daily_row(
         .map(|v| v as i64)
         .or_else(|| existing.as_ref().map(|e| e.minutes))
         .unwrap_or(0);
-    let is_live = r
-        .raw
-        .is_live
-        .map(|b| b as i16)
-        .or_else(|| existing.as_ref().map(|e| e.is_live))
-        .unwrap_or(0);
+    // 有效时长决定开播状态；音浪再高，只要最终时长为 0/缺失就是未播。
+    let is_live = i16::from(minutes > 0);
 
     let wave_supplied = r.raw.wave.is_some() || r.raw.cumulative_wave.is_some();
-    let minutes_supplied = r.raw.minutes.is_some() || r.raw.is_live.is_some();
+    // is_live 是派生状态，不等于“本次文件带时长列”。否则 wave-only 导入会把
+    // minutes_state 提前标成已导入，后续 locked 时长文件无法再写入。
+    let minutes_supplied = r.raw.minutes.is_some();
     let current_wave_state = existing.as_ref().map(|e| e.wave_state).unwrap_or(0);
     let current_minutes_state = existing.as_ref().map(|e| e.minutes_state).unwrap_or(0);
     let wave_value_changed = existing
@@ -6724,7 +6741,7 @@ pub async fn merge_person(
             sqlx::query(&crate::pq::rewrite(
                 "UPDATE daily_metric t
                  SET wave = t.wave + s.w, minutes = t.minutes + s.m,
-                     is_live = GREATEST(t.is_live, s.live),
+                     is_live = CASE WHEN t.minutes + s.m > 0 THEN 1 ELSE 0 END,
                      cumulative_wave = GREATEST(t.cumulative_wave, s.cum)
                  FROM (SELECT SUM(wave) AS w, SUM(minutes) AS m, MAX(is_live) AS live,
                               MAX(cumulative_wave) AS cum
@@ -7138,7 +7155,7 @@ mod tests {
         }
     }
 
-    #[test]
+#[test]
     fn all_same_wave_rejected() {
         let rows = vec![
             mk_import_row(Some(100.0)),
@@ -8493,7 +8510,7 @@ mod tests {
     }
 
     #[test]
-    fn normalize_unstreamed_rows_handles_missing_duration_and_all_empty() {
+    fn normalize_unstreamed_rows_keeps_wave_and_marks_missing_duration_offline() {
         let mut rows = vec![
             ImportRow {
                 name: "有音浪缺时长".into(),
@@ -8515,19 +8532,33 @@ mod tests {
             },
         ];
         normalize_unstreamed_import_rows(&mut rows);
-        assert_eq!(rows[0].wave, Some(0.0), "缺失时长也必须按未开播归零");
-        assert_eq!(rows[0].cumulative_wave, None);
-        assert_eq!(rows[0].minutes, Some(0.0));
-        assert_eq!(rows[0].is_live, Some(false));
+        assert_eq!(rows[0].wave, Some(1657.0), "音浪必须保留展示");
+        assert_eq!(rows[0].cumulative_wave, Some(2000.0));
+        assert_eq!(rows[0].minutes, None, "缺时长不能伪装成显式 0");
+        assert_eq!(effective_import_is_live(&rows[0]), Some(false));
         assert_eq!(rows[1].wave, Some(0.0), "0 音浪 + 有时长必须保留");
         assert_eq!(rows[1].minutes, Some(90.0));
-        assert_eq!(rows[1].is_live, None);
+        assert_eq!(effective_import_is_live(&rows[1]), Some(true));
         assert!(
             rows[2].wave.is_none()
                 && rows[2].cumulative_wave.is_none()
                 && rows[2].minutes.is_none()
                 && rows[2].is_live.is_none(),
             "全空行应留给机器人校验拒绝，不能被归一成合法未开播"
+        );
+        assert_eq!(effective_import_is_live(&rows[2]), None);
+    }
+
+    #[test]
+    fn contribution_recompute_derives_live_from_minutes_not_wave() {
+        assert!(
+            DAILY_CONTRIB_RECOMPUTE_SQL
+                .contains("WHEN t.has_minutes THEN CASE WHEN t.minutes > 0 THEN 1 ELSE 0 END"),
+            "多账号重算必须按最终时长决定开播状态：{DAILY_CONTRIB_RECOMPUTE_SQL}"
+        );
+        assert!(
+            !DAILY_CONTRIB_RECOMPUTE_SQL.contains("t.wave >= 2"),
+            "音浪不能再回写 is_live：{DAILY_CONTRIB_RECOMPUTE_SQL}"
         );
     }
 

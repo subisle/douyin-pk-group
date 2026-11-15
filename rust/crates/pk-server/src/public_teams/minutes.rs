@@ -307,18 +307,17 @@ pub async fn my(
     let mut yearly = if s.yearly { Some(zero()) } else { None };
     /* 累计卡与「当月 / 当年未播天数」共用同一遍全历史扫描：SUM(CASE...) 不额外查库。
     未播开关关闭时表达式直接给 NULL，避免无谓计算；对外再统一置 null。 */
-    let not_live = crate::dialect::NOT_LIVE_WAVE_THRESHOLD;
     // 当前月未播只服务日卡/月卡；当年未播只服务年卡。对应周期关闭时不计算。
     let absent_month_expr = if s.absent_days && (s.daily || s.monthly) {
         format!(
-            "COALESCE(SUM(CASE WHEN TO_CHAR(biz_date, 'YYYY-MM') = '{month}' AND wave < {not_live} THEN 1 ELSE 0 END), 0)::BIGINT AS absent_month"
+            "COALESCE(SUM(CASE WHEN TO_CHAR(biz_date, 'YYYY-MM') = '{month}' AND COALESCE(minutes, 0) <= 0 THEN 1 ELSE 0 END), 0)::BIGINT AS absent_month"
         )
     } else {
         "NULL::BIGINT AS absent_month".to_string()
     };
     let absent_year_expr = if s.absent_days && s.yearly {
         format!(
-            "COALESCE(SUM(CASE WHEN TO_CHAR(biz_date, 'YYYY') = '{year}' AND wave < {not_live} THEN 1 ELSE 0 END), 0)::BIGINT AS absent_year"
+            "COALESCE(SUM(CASE WHEN TO_CHAR(biz_date, 'YYYY') = '{year}' AND COALESCE(minutes, 0) <= 0 THEN 1 ELSE 0 END), 0)::BIGINT AS absent_year"
         )
     } else {
         "NULL::BIGINT AS absent_year".to_string()
@@ -378,7 +377,7 @@ pub async fn my(
         v["absentDays"] = json!(absent_year);
     }
     if let Some(v) = daily.as_mut() {
-        // 日榜沿用历史口径：未播天数 = 当前业务月内有数据且音浪 < 2 的天数。
+        // 日/月卡同口径：未播天数 = 当前业务月内有数据且有效时长 <=0 的天数。
         v["absentDays"] = json!(absent_month);
     }
 
@@ -532,6 +531,12 @@ pub async fn my(
     } else {
         super::avatars::avatar_hash(&st, person_id).await
     };
+    let live_today = daily
+        .as_ref()
+        .and_then(|v| v.get("minutes"))
+        .and_then(Value::as_i64)
+        .unwrap_or(0)
+        > 0;
 
     Ok(Json(json!({
         "published": true,
@@ -543,6 +548,7 @@ pub async fn my(
             .unwrap_or_default(),
         "date": today,
         "daily": daily,
+        "liveToday": live_today,
         "monthly": monthly,
         "yearly": yearly,
         "total": total,
@@ -575,11 +581,16 @@ pub async fn my(
 /// `/my/series` 的统一出参：空数据与正常数据都必须走同一套字段闸门，
 /// 否则「库里没数据」分支会绕过 wave/duration 开关把数组形状泄露出去。
 fn my_series_json(dates: Vec<String>, waves: &[i64], minutes: &[i64], s: &PublicSettings) -> Value {
+    let live: Vec<bool> = minutes
+        .iter()
+        .map(|&m| dialect::is_live_minutes(m))
+        .collect();
     json!({
         "published": true,
         "dates": if s.daily { json!(dates) } else { json!([]) },
         "waves": if s.daily && s.wave { json!(waves) } else { Value::Null },
         "minutes": if s.daily && s.duration { json!(minutes) } else { Value::Null },
+        "live": if s.daily && s.duration { json!(live) } else { Value::Null },
         "dailyEnabled": s.daily,
         "durationEnabled": s.duration,
     })
@@ -980,9 +991,8 @@ pub(super) fn my_account_row(r: &sqlx::postgres::PgRow) -> Value {
         "monthly": { "wave": wm, "minutes": mm },
         "yearly": { "wave": wy, "minutes": my },
         "total": { "wave": row_i64(r, "wt"), "minutes": row_i64(r, "mt") },
-        /* 当日是否开播：与全站同口径（dialect::NOT_LIVE_WAVE_THRESHOLD，音浪 >= 2）。
-        注意这是「号」级的开播，副号有音浪就算播了。 */
-        "liveToday": dialect::is_live_wave(row_i64(r, "wd")),
+        /* 当日是否开播：与全站同口径，只有有效时长 > 0 才算开播。 */
+        "liveToday": dialect::is_live_minutes(row_i64(r, "md")),
         "lastDate": last_date,
         "days": row_i64(r, "days"),
     })
@@ -1440,9 +1450,16 @@ mod tests {
     #[test]
     fn series_payload_hides_disabled_metrics_even_when_empty() {
         let s = PublicSettings::default();
-        let on = my_series_json(vec!["2999-01-01".into()], &[123], &[45], &s);
+        let on = my_series_json(
+            vec!["2999-01-01".into(), "2999-01-02".into()],
+            &[123, 77],
+            &[45, 0],
+            &s,
+        );
         assert_eq!(on["waves"][0], 123);
         assert_eq!(on["minutes"][0], 45);
+        assert_eq!(on["live"][0], true, "有效时长 > 0 才是开播");
+        assert_eq!(on["live"][1], false, "0 时长即使有音浪也算未播");
         assert_eq!(on["durationEnabled"], true);
 
         let s = PublicSettings {
@@ -1453,6 +1470,7 @@ mod tests {
         let empty = my_series_json(Vec::new(), &[], &[], &s);
         assert!(empty["waves"].is_null());
         assert!(empty["minutes"].is_null());
+        assert!(empty["live"].is_null());
         assert_eq!(empty["durationEnabled"], false);
         assert_eq!(empty["dailyEnabled"], true);
         assert_eq!(empty["published"], true);

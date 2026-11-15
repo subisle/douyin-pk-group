@@ -234,7 +234,7 @@ pub async fn get_wave_series(
     // 折线图要正序：老 → 新
     dates.reverse();
 
-    let cache_key = format!("{id}:series:v3-merge");
+    let cache_key = format!("{id}:series:v4-live-minutes");
     if !force {
         let cache = st.cache.lock().expect("cache 锁 poisoned");
         if let Some(hit) = cache
@@ -265,8 +265,8 @@ pub async fn get_wave_series(
                 continue;
             };
             let v: f64 = r.try_get::<Option<f64>, _>(2).ok().flatten().unwrap_or(0.0);
-            /* SERIES_A 的 live 列是 `MAX(is_live)`（smallint）与 `CASE ... THEN 1 ELSE 0 END`
-            （integer）的 UNION ALL —— PG 会统一成 **integer**（实库 pg_typeof 已确认），
+            /* SERIES_A 的 live 列由主号/副号有效时长聚合后生成；UNION ALL 的
+            分支类型会统一成 **integer**（实库 pg_typeof 已确认），
             按 i16 读每行都 ColumnDecode 再被吞成 0（折线图开播标记恒 0）。
             2026-10-14 审计 P0-2：按 i32 读，再显式收窄成 0/1 存进 Vec<i16>。 */
             let l: i16 = r.try_get::<Option<i32>, _>(3).ok().flatten().unwrap_or(0) as i16;

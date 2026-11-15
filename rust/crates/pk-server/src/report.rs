@@ -160,11 +160,10 @@ fn approx_text_width(s: &str, size: f64) -> f64 {
 
 /// 拉取日报数据。date/team 已由调用方校验。
 pub async fn build(st: &Arc<AppState>, date: &str, team: &str) -> anyhow::Result<DailyReport> {
-    use crate::dialect::is_live_wave;
     // 当日指标（P1-7：与榜单一致，只聚合可信行 wave_reliable=1）
     let today_sql = format!(
         "SELECT person_id, (SUM(wave))::BIGINT AS wave, \
-         (SUM(minutes))::BIGINT AS m, MAX(is_live) AS live \
+         (SUM(minutes))::BIGINT AS m \
          FROM daily_metric WHERE wave_reliable = 1 \
            AND TO_CHAR(biz_date, 'YYYY-MM-DD') = '{date}' GROUP BY person_id"
     );
@@ -195,12 +194,10 @@ pub async fn build(st: &Arc<AppState>, date: &str, team: &str) -> anyhow::Result
 
     let mut wave_map: HashMap<u64, i64> = Default::default();
     let mut minutes_map: HashMap<u64, i64> = Default::default();
-    let mut live_map: HashMap<u64, bool> = Default::default();
     for r in pgrs::query(&st.pools, "LOCAL", &today_sql).await? {
         let pid = id_of(&r, "person_id");
         wave_map.insert(pid, signed(&r, "wave"));
         minutes_map.insert(pid, signed(&r, "m"));
-        live_map.insert(pid, r.try_get::<i16, _>("live").unwrap_or(0) == 1);
     }
     let mut absent_map: HashMap<u64, i64> = Default::default();
     for r in pgrs::query(&st.pools, "LOCAL", &month_sql).await? {
@@ -225,13 +222,14 @@ pub async fn build(st: &Arc<AppState>, date: &str, team: &str) -> anyhow::Result
         let wave = wave_map.get(&pid).copied().unwrap_or(0);
         let total = total_map.get(&pid).copied().unwrap_or(0);
         let absent = absent_map.get(&pid).copied().unwrap_or(0);
-        // P1-10：未播 = 当日音浪 < 2（与展示端 / 推送榜共用 dialect::is_live_wave），
-        // is_live 标记只作参考，不再单独作为判定依据
-        let is_live = is_live_wave(wave);
+        // 用户口径（2026-11-15）：音浪只展示/排序；有效时长 > 0 才算开播。
+        // 因此“高音浪 + 0/缺失时长”会进入日报但标记为未播。
+        let minutes = minutes_map.get(&pid).copied().unwrap_or(0);
+        let is_live = crate::dialect::is_live_minutes(minutes);
         rows.push(ReportRow {
             name: name.clone(),
             wave,
-            minutes: minutes_map.get(&pid).copied().unwrap_or(0),
+            minutes,
             is_live,
             absent_days: absent,
             total_wave: total,
@@ -341,7 +339,6 @@ pub async fn build_month(
     team: &str,
     daily_star: Option<StarBanner>,
 ) -> anyhow::Result<DailyReport> {
-    use crate::dialect::is_live_wave;
     let month = date.get(..7).unwrap_or(date).to_string();
     // 本月累计（可信行）：整月导入值优先、缺月回落日明细；缺表自动降级（见上面两个函数）
     let month_sql = month_wave_sql(&month);
@@ -350,7 +347,7 @@ pub async fn build_month(
     let roster_sql = format!(
         "SELECT p.id, p.name, m.name AS master_name FROM person p          LEFT JOIN person m ON m.id = p.master_id          WHERE p.deleted_at IS NULL AND p.gender = '{team}'            AND p.hide_in_daily_report = 0 AND p.status <> 'left'"
     );
-    // 当月未播天数（与日报同口径：只有数据行里 <2 的算）
+    // 当月未播天数（与日报同口径：只有数据行里有效时长 <=0 的算）
     let month_absent_sql = crate::dialect::month_absent_sql(&month);
 
     let mut wave_map: HashMap<u64, i64> = Default::default();
@@ -359,6 +356,20 @@ pub async fn build_month(
             .await?
     {
         wave_map.insert(id_of(&r, "person_id"), signed(&r, "wave"));
+    }
+    let minute_rows = crate::dialect::query_period(
+        &st.pools,
+        "LOCAL",
+        "p.id AS person_id, (SUM({minutes}))::BIGINT AS minutes",
+        &format!("{month}%"),
+        team,
+        " AND p.status <> 'left' AND p.hide_in_daily_report = 0",
+        "p.id",
+    )
+    .await?;
+    let mut minute_map: HashMap<u64, i64> = Default::default();
+    for r in &minute_rows {
+        minute_map.insert(id_of(r, "person_id"), signed(r, "minutes"));
     }
     let mut absent_map: HashMap<u64, i64> = Default::default();
     for r in pgrs::query(&st.pools, "LOCAL", &month_absent_sql).await? {
@@ -377,12 +388,13 @@ pub async fn build_month(
             .flatten()
             .unwrap_or_default();
         let wave = wave_map.get(&pid).copied().unwrap_or(0);
+        let minutes = minute_map.get(&pid).copied().unwrap_or(0);
         let absent = absent_map.get(&pid).copied().unwrap_or(0);
-        let is_live = is_live_wave(wave);
+        let is_live = crate::dialect::is_live_minutes(minutes);
         rows.push(ReportRow {
             name: name.clone(),
             wave,
-            minutes: 0,
+            minutes,
             is_live,
             absent_days: absent,
             total_wave: wave, // 月榜的「总音浪」列 = 本月累计（同一数值不重复算口径）
@@ -997,30 +1009,33 @@ fn render_svg_labeled_inner_with_all(
             ));
         }
         if fields.wave {
+            let w = (bar_track_w * r.wave as f64 / max_wave as f64).round();
+            let (track, fill) = if off_air {
+                ("#FEE4E2", "#F04438")
+            } else {
+                ("#EAF3FF", "#007AFF")
+            };
+            s.push_str(&format!(
+                "<rect x=\"312.6\" y=\"{:.0}\" width=\"{bar_track_w}\" height=\"22\" fill=\"{track}\" rx=\"11\"/>",
+                y + 14.0
+            ));
+            if w > 1.0 {
+                s.push_str(&format!(
+                    "<rect x=\"312.6\" y=\"{:.0}\" width=\"{w:.0}\" height=\"22\" fill=\"{fill}\" rx=\"11\"/>",
+                    y + 14.0
+                ));
+            }
+            /* 未播只改变行底色/柱色，不能用「未开播」覆盖真实音浪数值。 */
+            s.push_str(&format!(
+                "<rect x=\"{:.1}\" y=\"{:.0}\" width=\"56\" height=\"16\" fill=\"#FFFFFF\" fill-opacity=\"0.86\" rx=\"8\"/><text x=\"{wave_value_x}\" y=\"{text_y:.0}\" font-size=\"13\" fill=\"{}\" font-weight=\"700\" text-anchor=\"middle\" dominant-baseline=\"central\" font-family=\"{MONO}\">{}</text>",
+                wave_value_x - 28.0,
+                text_y - 8.0,
+                if off_air { "#D92D20" } else { "#344054" },
+                esc(&fmt_wan(r.wave))
+            ));
             if off_air {
                 s.push_str(&format!(
-                    "<rect x=\"312.6\" y=\"{:.0}\" width=\"{bar_track_w}\" height=\"22\" fill=\"#FEE4E2\" rx=\"11\"/><text x=\"433.8\" y=\"{text_y:.0}\" font-size=\"13\" fill=\"#D92D20\" font-weight=\"700\" text-anchor=\"middle\" dominant-baseline=\"central\" font-family=\"{FONT}\">未开播</text>",
-                    y + 14.0
-                ));
-            } else {
-                let w = (bar_track_w * r.wave as f64 / max_wave as f64).round();
-                s.push_str(&format!(
-                    "<rect x=\"312.6\" y=\"{:.0}\" width=\"{bar_track_w}\" height=\"22\" fill=\"#EAF3FF\" rx=\"11\"/>",
-                    y + 14.0
-                ));
-                if w > 1.0 {
-                    s.push_str(&format!(
-                        "<rect x=\"312.6\" y=\"{:.0}\" width=\"{w:.0}\" height=\"22\" fill=\"#007AFF\" rx=\"11\"/>",
-                        y + 14.0
-                    ));
-                }
-                /* 2026-10-20：数字放回粗条中心，与「本月累计音浪」表头同 x。
-                白色半透明胶囊保证浅色底 / 蓝色填充上都清晰，不再把值放到条外。 */
-                s.push_str(&format!(
-                    "<rect x=\"{:.1}\" y=\"{:.0}\" width=\"56\" height=\"16\" fill=\"#FFFFFF\" fill-opacity=\"0.86\" rx=\"8\"/><text x=\"{wave_value_x}\" y=\"{text_y:.0}\" font-size=\"13\" fill=\"#344054\" font-weight=\"700\" text-anchor=\"middle\" dominant-baseline=\"central\" font-family=\"{MONO}\">{}</text>",
-                    wave_value_x - 28.0,
-                    text_y - 8.0,
-                    esc(&fmt_wan(r.wave))
+                    "<text x=\"560\" y=\"{text_y:.0}\" font-size=\"11\" fill=\"#D92D20\" font-weight=\"700\" text-anchor=\"start\" dominant-baseline=\"central\" font-family=\"{FONT}\">未播</text>"
                 ));
             }
         } else if fields.status && off_air {
@@ -1119,13 +1134,14 @@ pub fn render_text(rep: &DailyReport) -> String {
     };
     let mut out = format!("{} {} 日报（{}）\n", team_label, rep.date, rep.rows.len());
     for (i, r) in rep.rows.iter().take(15).enumerate() {
+        let metrics = match r.minutes {
+            0 => fmt_wan(r.wave),
+            m => format!("{} / 时长{}", fmt_wan(r.wave), crate::push::fmt_minutes(m)),
+        };
         let status = if r.is_live {
-            match r.minutes {
-                0 => fmt_wan(r.wave),
-                m => format!("{} / 时长{}", fmt_wan(r.wave), crate::push::fmt_minutes(m)),
-            }
+            metrics
         } else {
-            format!("未开播（当月第 {} 天）", r.absent_days)
+            format!("{metrics} / 未开播（当月第 {} 天）", r.absent_days)
         };
         out.push_str(&format!(
             "{}. {} {} · 累计 {}\n",
@@ -1867,5 +1883,29 @@ mod tests {
         assert!(t.contains("3. 狼霆 3193 / 时长75时29分"), "{t}");
         // 全文不许再出现旧口径的「分钟」长词（未播行、统计行都不带）
         assert!(!t.contains("分钟"), "机器人日报文本不应再用「分钟」：{t}");
+    }
+
+    #[test]
+    fn positive_wave_zero_duration_keeps_wave_and_marks_offline() {
+        let rep = DailyReport {
+            date: "2026-11-03".into(),
+            team: "male".into(),
+            rows: vec![ReportRow {
+                name: "啸燃".into(),
+                wave: 1657,
+                minutes: 0,
+                is_live: false,
+                absent_days: 1,
+                total_wave: 1657,
+            }],
+            master_groups: vec![],
+            no_master: vec![],
+            daily_star: None,
+        };
+        let text = render_text(&rep);
+        assert!(text.contains("啸燃 1657 / 未开播"), "{text}");
+        let svg = render_svg(&rep);
+        assert!(svg.contains(">1657</text>"), "音浪不能被未播状态覆盖：{svg}");
+        assert!(svg.contains(">未播</text>"), "仍要有未播状态：{svg}");
     }
 }

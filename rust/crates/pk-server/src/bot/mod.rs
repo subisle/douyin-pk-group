@@ -1251,7 +1251,7 @@ fn append_import_metric_notice(mut reply: String, notice: Option<&str>) -> Strin
 /// 按用户最新口径校验一行导入指标：
 /// - 显式 0 音浪允许出现（可能只是没有产生音浪）；
 /// - 有时长但音浪列完全缺失 → 非法；
-/// - 有音浪但时长为 0/缺失 → 非法；
+/// - 有音浪但时长为 0/缺失 → 合法，音浪保留展示，但开播状态按未播；
 /// - 音浪、时长、开播状态三者全空 → 非法；
 /// - 音浪/时长都为 0 是合法的「未开播」行。
 fn validate_import_row_metrics(r: &admin::ImportRow) -> Option<String> {
@@ -1270,7 +1270,7 @@ fn validate_import_row_metrics(r: &admin::ImportRow) -> Option<String> {
     if !wave_supplied && minutes > 0.0 {
         return Some(format!("{name}：有时长 {minutes:.0} 分钟，但音浪列缺失"));
     }
-    // 有音浪但时长为 0/缺失 = 未开播；commit 入口会归一成 0/0，不能拒绝。
+    // 有音浪但时长为 0/缺失 = 未开播；音浪仍保留，不能拒绝或清零。
     if r.is_live == Some(true) && !wave_supplied && r.minutes.is_none() {
         return Some(format!("{name}：标记开播，但音浪和时长都没有"));
     }
@@ -2696,7 +2696,7 @@ async fn export_period_rank_csv(st: &Arc<AppState>, team: &str, period: &str) ->
 
     let (date_lo, date_hi) = crate::dialect::like_to_date_range(&like);
     let absent_sql = format!(
-        "SELECT person_id, (SUM(CASE WHEN wave < 2 THEN 1 ELSE 0 END))::BIGINT AS n \
+        "SELECT person_id, (SUM(CASE WHEN COALESCE(minutes, 0) <= 0 THEN 1 ELSE 0 END))::BIGINT AS n \
          FROM daily_metric WHERE wave_reliable = 1 \
            AND biz_date >= '{date_lo}'::date AND biz_date < '{date_hi}'::date \
          GROUP BY person_id"
@@ -4561,16 +4561,27 @@ mod tests {
 
     #[test]
     fn positive_wave_without_duration_is_normalized_to_unstreamed() {
-        let mut rows = vec![admin::ImportRow {
-            name: "有音浪零时长".into(),
-            wave: Some(1657.0),
-            minutes: Some(0.0),
-            ..Default::default()
-        }];
+        let mut rows = vec![
+            admin::ImportRow {
+                name: "有音浪零时长".into(),
+                wave: Some(1657.0),
+                minutes: Some(0.0),
+                ..Default::default()
+            },
+            admin::ImportRow {
+                name: "有音浪缺时长".into(),
+                wave: Some(38.0),
+                minutes: None,
+                ..Default::default()
+            },
+        ];
         admin::normalize_unstreamed_import_rows(&mut rows);
-        assert_eq!(rows[0].wave, Some(0.0));
+        assert_eq!(rows[0].wave, Some(1657.0), "音浪必须保留展示");
         assert_eq!(rows[0].minutes, Some(0.0));
-        assert_eq!(rows[0].is_live, Some(false));
+        assert_eq!(admin::effective_import_is_live(&rows[0]), Some(false));
+        assert_eq!(rows[1].wave, Some(38.0), "缺时长也不能清音浪");
+        assert_eq!(rows[1].minutes, None, "缺时长不能被伪装成显式 0");
+        assert_eq!(admin::effective_import_is_live(&rows[1]), Some(false));
     }
 
     #[test]

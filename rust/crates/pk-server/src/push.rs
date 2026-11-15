@@ -1928,13 +1928,11 @@ pub(crate) async fn month_rank_list(
 }
 
 /// 当日榜（(person_id, 名字, 音浪)），口径与展示端每日榜一致：
-/// 在册 + 未离团 + 不隐藏（hide_in_daily_report=0），当日音浪低于
-/// [`crate::dialect::NOT_LIVE_WAVE_THRESHOLD`]（2）视为未开播（不计入榜）。
+/// 在册 + 未离团 + 不隐藏（hide_in_daily_report=0）。只要音浪或有效时长任一为正
+/// 就保留：音浪正但时长为 0 的行仍展示音浪（状态由日报标为未播），0 音浪但有时长
+/// 的行也必须能被推送看到。
 /// P1-7：只聚合可信行（wave_reliable=1）。P1-6：日期参数化（不再内联 SQL）。
-/// ⚠️ 2026-10-16 修正 `HAVING wave >= ?`（select 别名在 PG 的 HAVING 里不可见，
-/// 会被解析成 daily_metric.wave → 42803 整条报错、当日榜恒为空，本地库实测复现）；
-/// 日口径本身不变，仍是「当日音浪 >= 阈值」，只是改写成聚合表达式本体。
-/// 绑定顺序：date → team → 阈值。
+/// 绑定顺序：date → team。开播/未播状态不在这里过滤。
 const DAILY_RANK_SQL: &str = "SELECT p.id AS person_id, p.name, \
       (COALESCE(SUM(d.wave), 0))::BIGINT AS wave \
      FROM person p \
@@ -1944,7 +1942,7 @@ const DAILY_RANK_SQL: &str = "SELECT p.id AS person_id, p.name, \
      WHERE p.deleted_at IS NULL AND p.gender = ? AND p.status <> 'left' \
        AND p.hide_in_daily_report = 0 \
      GROUP BY p.id, p.name \
-     HAVING (COALESCE(SUM(d.wave), 0)) >= ? \
+     HAVING (COALESCE(SUM(d.wave), 0)) > 0 OR (COALESCE(SUM(d.minutes), 0)) > 0 \
      ORDER BY wave DESC, p.name ASC";
 
 /// 该 (团, 业务日) 当天有没有**可信**音浪数据（2026-10-17 用户口径「没有数据就不要推送」）。
@@ -1979,7 +1977,6 @@ pub(crate) async fn daily_rank(st: &AppState, team: &str, date: &str) -> Vec<(u6
     match pgrs::query_with_binds(&st.pools, &st.active_id(), sql, |q| {
         q.bind(date.to_string())
             .bind(team.to_string())
-            .bind(crate::dialect::NOT_LIVE_WAVE_THRESHOLD)
     })
     .await
     {
@@ -2058,9 +2055,10 @@ pub(crate) async fn direct_disciples(st: &AppState, master_id: u64) -> Vec<(u64,
 
 /// 缓存文件 magic（`PKRP` = PK Report PNG）+ 打包版本；改格式/改渲染尺寸就改版本号，旧文件自然失效。
 const IMG_CACHE_MAGIC: &[u8; 4] = b"PKRP";
+/// v10（2026-11-15）：开播状态改由有效时长决定，旧日报图必须失效重渲。
 /// v9（2026-10-20）：统一所有图片水印口径（每日榜单 / 追分提醒 / 师门日报）；
 /// v8 是两页榜单收件人水印复核。
-const IMG_CACHE_VER: u8 = 9;
+const IMG_CACHE_VER: u8 = 10;
 /// 榜单图渲染缩放比：SVG 逻辑宽 1440 → 1080 px。
 ///
 /// 取舍（2026-10-18 用户口径「每天 100 个占太多了」）：微信显示宽度上限就是 1080，
@@ -2847,7 +2845,7 @@ pub(crate) fn account_waves_section(accounts: &[AccountWave]) -> String {
 ///   - `gap <= 0` = 已达成；`gap == i64::MAX` = 追名次但本月还没进榜（永不达成）
 ///   - `label` 目标名（「本月第 3 名」/「本月目标 50 万」/ 主播名）
 ///   - `detail` 我的当前值（「你第 5 名」/「你 30 万」/「你 30 万 / TA 40 万」）
-///   - `gap_text` 差距的人话（「2 名」/「20 万」/「本月还没开播」）
+///   - `gap_text` 差距的人话（「2 名」/「20 万」/「本月还没进正音浪榜」）
 pub(crate) fn eval_target(
     t: &crate::store::PushTarget,
     my: i64,
@@ -2879,7 +2877,7 @@ pub(crate) fn eval_target(
                     format!("你第 {mine} 名")
                 },
                 if mine == 0 {
-                    "本月还没开播".to_string()
+                    "本月还没进正音浪榜".to_string()
                 } else {
                     format!("{} 名", (mine - want).max(0))
                 },
@@ -3087,7 +3085,7 @@ pub async fn target_push_pngs(text: &str, personal_mark: &str) -> Vec<Vec<u8>> {
 ///
 /// 明细挂在「我：第 N 名 · X」之后：先给人一个总览名次，再看每个号各挣多少。
 /// 2026-10-15 起名次行后按名次补一句：≤3 名给「🏆 上榜 TOP3」肯定行，
-/// >3 名且上一名可算时给「距上一名」差距行（我未开播则两者都不出）。
+/// >3 名且上一名可算时给「距上一名」差距行（我未进音浪榜则两者都不出）。
 /// `accounts` 为空 / 只有 1 个号时 [`account_waves_section`] 返回空串，文案与旧版一致。
 /// 每日报告文本兜底统一追加短入口，保证图片失败时用户仍知道可用命令和设置入口。
 fn daily_report_text_with_footer(text: &str) -> String {
@@ -3108,7 +3106,7 @@ pub(crate) fn daily_report_text_with_accounts(
 ) -> String {
     let label = if team == "female" { "女团" } else { "男团" };
     let mut out = format!(
-        "📊 {} {} 音浪榜（{} 人开播）",
+        "📊 {} {} 音浪榜（{} 人上榜）",
         label,
         date.get(5..).unwrap_or(date),
         items.len()
@@ -3136,7 +3134,7 @@ pub(crate) fn daily_report_text_with_accounts(
             ));
         }
     } else if me > 0 {
-        out.push_str("\n\n我：今天还没开播");
+        out.push_str("\n\n我：今天还没有正音浪数据");
     }
     out.push_str(&account_waves_section(accounts));
     out
@@ -3528,7 +3526,7 @@ mod tests {
         let (gap, _, detail, gap_text) = eval_target(&t, 0, 0, Some(&rank), 1034);
         assert_eq!(gap, i64::MAX, "没进榜用哨兵值，永不达成");
         assert_eq!(detail, "你还没进本月榜");
-        assert_eq!(gap_text, "本月还没开播");
+        assert_eq!(gap_text, "本月还没进正音浪榜");
     }
 
     /// person 目标带自定义分（2026-10-12）：target_value>0 → 按自定义分对比，
@@ -3625,7 +3623,7 @@ mod tests {
         let items = vec![(1u64, "阿甲".to_string(), 100_000)];
         assert_eq!(
             daily_report_text_with_accounts("male", "2026-10-08", &items, 1, &[]),
-            "📊 男团 10-08 音浪榜（1 人开播）\n1. 阿甲 10 万\n\n我：第 1 名 · 10 万\n🏆 上榜 TOP3，继续保持！"
+            "📊 男团 10-08 音浪榜（1 人上榜）\n1. 阿甲 10 万\n\n我：第 1 名 · 10 万\n🏆 上榜 TOP3，继续保持！"
         );
     }
 
@@ -3880,9 +3878,9 @@ mod tests {
 
         // 没开播的人也照常给明细（可能只是当天没播，本月数据是有的）
         let t2 = daily_report_text_with_accounts("male", "2026-10-08", &items, 404, &accs);
-        assert!(t2.contains("我：今天还没开播"), "{t2}");
+        assert!(t2.contains("我：今天还没有正音浪数据"), "{t2}");
         assert!(t2.contains("我的抖音号（2 个）"), "{t2}");
-        let a = t2.find("我：今天还没开播").unwrap();
+        let a = t2.find("我：今天还没有正音浪数据").unwrap();
         let b = t2.find("我的抖音号（2 个）").unwrap();
         assert!(a < b, "明细在最后：{t2}");
     }
@@ -3900,7 +3898,7 @@ mod tests {
         assert!(t.contains("我：第 3 名"), "{t}");
 
         let t2 = daily_report_text_with_accounts("female", "2026-10-08", &items, 9, &[]);
-        assert!(t2.contains("今天还没开播"), "{t2}");
+        assert!(t2.contains("今天还没有正音浪数据"), "{t2}");
     }
 
     /* ---------- 追分提醒文案（2026-10-15 改版，纯函数） ---------- */
@@ -4029,7 +4027,7 @@ mod tests {
 
         // 未开播：两个新增行都不出
         let t404 = daily_report_text_with_accounts("male", "2026-10-15", &items, 404, &[]);
-        assert!(t404.contains("我：今天还没开播"), "{t404}");
+        assert!(t404.contains("我：今天还没有正音浪数据"), "{t404}");
         assert!(
             !t404.contains("TOP3") && !t404.contains("距上一名"),
             "{t404}"
@@ -4243,7 +4241,7 @@ mod tests {
         assert_eq!(placeholder_count(MONTH_WAVE_MAP_SQL_DAILY), 2);
         assert_eq!(placeholder_count(MONTH_RANK_SQL), 3);
         assert_eq!(placeholder_count(MONTH_RANK_SQL_DAILY), 2);
-        assert_eq!(placeholder_count(DAILY_RANK_SQL), 3, "date→team→阈值");
+        assert_eq!(placeholder_count(DAILY_RANK_SQL), 2, "date→team");
     }
 
     /// PG 的 HAVING / WHERE 里**看不到 select 别名**：`HAVING wave > 0` 会被解析成
@@ -4263,8 +4261,9 @@ mod tests {
             );
         }
         assert!(
-            DAILY_RANK_SQL.contains("HAVING (COALESCE(SUM(d.wave), 0)) >= ?"),
-            "日口径不变：当日音浪 >= 阈值（阈值仍走绑定）：{DAILY_RANK_SQL}"
+            DAILY_RANK_SQL.contains("HAVING (COALESCE(SUM(d.wave), 0)) > 0 OR")
+                && DAILY_RANK_SQL.contains("(COALESCE(SUM(d.minutes), 0)) > 0"),
+            "日榜只要音浪或有效时长任一为正就保留：{DAILY_RANK_SQL}"
         );
     }
 

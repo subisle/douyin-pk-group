@@ -416,7 +416,7 @@ async fn load_rank_rows(
     }
     let (lo, hi) = dialect::like_to_date_range(&like);
     let absent_sql = format!(
-        "SELECT person_id, (SUM(CASE WHEN wave < 2 THEN 1 ELSE 0 END))::BIGINT AS n \
+        "SELECT person_id, (SUM(CASE WHEN COALESCE(minutes, 0) <= 0 THEN 1 ELSE 0 END))::BIGINT AS n \
          FROM daily_metric WHERE wave_reliable = 1 \
            AND biz_date >= '{lo}'::date AND biz_date < '{hi}'::date GROUP BY person_id"
     );
@@ -574,7 +574,7 @@ fn row_json(rank: usize, r: &RankRow) -> Value {
         "waveValue": r.wave,
         "minutes": r.minutes,
         "absentDays": r.absent_days,
-        "live": r.wave >= 2
+        "live": r.minutes > 0
     })
 }
 
@@ -631,10 +631,10 @@ async fn get_team_ranking(st: &Arc<AppState>, args: &Value) -> anyhow::Result<Va
                 wave_text(row.wave),
                 speech_minutes(row.minutes),
                 row.absent_days,
-                if row.wave >= 2 {
+                if row.minutes > 0 {
                     "已开播"
                 } else {
-                    "未形成有效开播"
+                    "未开播（音浪仍展示）"
                 }
             ));
         }
@@ -662,7 +662,7 @@ async fn get_team_summary(st: &Arc<AppState>, args: &Value) -> anyhow::Result<Va
     let period = period_arg(args)?;
     let (as_of, rows) = load_rank_rows(st, team, period, args).await?;
     let total_wave: i64 = rows.iter().map(|r| r.wave).sum();
-    let live = rows.iter().filter(|r| r.wave >= 2).count();
+    let live = rows.iter().filter(|r| r.minutes > 0).count();
     let top3_rows = rows.iter().take(3).collect::<Vec<_>>();
     let top3: Vec<Value> = top3_rows
         .iter()
@@ -671,7 +671,7 @@ async fn get_team_summary(st: &Arc<AppState>, args: &Value) -> anyhow::Result<Va
         .collect();
     let offline = rows.len().saturating_sub(live);
     let summary = format!(
-        "{} {} {}共{}人，总音浪{}，开播{}人，未播或暂无有效音浪{}人。",
+        "{} {} {}共{}人，总音浪{}，开播{}人，未播/无有效时长{}人。",
         team_label(team),
         as_of,
         period_label(period),
@@ -815,10 +815,10 @@ async fn get_anchor_rank(st: &Arc<AppState>, args: &Value) -> anyhow::Result<Val
         wave_text(row.wave),
         speech_minutes(row.minutes),
         row.absent_days,
-        if row.wave >= 2 {
+        if row.minutes > 0 {
             "已开播"
         } else {
-            "未形成有效开播"
+            "未开播（音浪仍展示）"
         }
     );
     Ok(json!({
@@ -924,7 +924,7 @@ pub(crate) async fn get_daily_briefing(st: &Arc<AppState>, args: &Value) -> anyh
         .map(|(i, r)| row_json(i + 1, r))
         .collect();
     let total_wave: i64 = rows.iter().map(|r| r.wave).sum();
-    let live = rows.iter().filter(|r| r.wave >= 2).count();
+    let live = rows.iter().filter(|r| r.minutes > 0).count();
     let speech = build_daily_speech(team, &as_of, &rows);
     let summary = format!(
         "{} {} 每日播报已生成，约3分钟，包含前十名和逐名评价。",
@@ -976,7 +976,7 @@ fn absent_text(days: i64) -> String {
 
 fn daily_overview(rows: &[RankRow]) -> String {
     let total_wave: i64 = rows.iter().map(|r| r.wave).sum();
-    let live = rows.iter().filter(|r| r.wave >= 2).count();
+    let live = rows.iter().filter(|r| r.minutes > 0).count();
     let average = if rows.is_empty() {
         0
     } else {
@@ -1031,8 +1031,8 @@ fn daily_gap_line(rows: &[RankRow], idx: usize) -> String {
 fn daily_row_evaluation(rows: &[RankRow], idx: usize) -> String {
     let row = &rows[idx];
     let rank = idx + 1;
-    if row.wave < 2 {
-        return "当日还没有形成有效音浪，需要先确认开播状态和数据是否入库。".into();
+    if row.minutes <= 0 {
+        return "当日未开播（有效时长为 0/缺失）；音浪仍按源数据展示，请核对开播记录与数据是否入库。".into();
     }
     if rank == 1 {
         if rows.len() == 1 {
@@ -1095,10 +1095,10 @@ fn build_daily_speech(team: &str, as_of: &str, rows: &[RankRow]) -> String {
     out.push_str(&daily_overview(rows));
     out.push(' ');
     for (i, row) in rows.iter().take(10).enumerate() {
-        let status = if row.wave >= 2 {
+        let status = if row.minutes > 0 {
             "已开播"
         } else {
-            "未形成有效开播"
+            "未开播（音浪仍展示）"
         };
         out.push_str(&format!(
             "第{}名，{}。当日音浪{}，占全团{}%，{}，直播时长{}，{}。{}。评价：{}",
@@ -1134,8 +1134,8 @@ fn build_daily_speech(team: &str, as_of: &str, rows: &[RankRow]) -> String {
 fn personal_evaluation(rows: &[RankRow], idx: usize) -> String {
     let row = &rows[idx];
     let rank = idx + 1;
-    if row.wave < 2 {
-        return "当日还没有形成有效音浪，先确认是否开播以及数据是否入库。".into();
+    if row.minutes <= 0 {
+        return "当日未开播（有效时长为 0/缺失）；音浪仍按源数据展示，先确认开播记录与数据是否入库。".into();
     }
     if rank == 1 {
         return "当日处在领跑位置，守榜状态不错。".into();
@@ -1203,10 +1203,10 @@ fn build_personal_daily_speech(
         wave_text(day.wave),
         team_label(team),
         day_rank,
-        if day.wave >= 2 {
+            if day.minutes > 0 {
             "已开播"
         } else {
-            "未形成有效开播"
+            "未开播（音浪仍展示）"
         }
     ));
     out.push_str(&format!("{}，{}。", duration, absent_text(month_absent)));
@@ -1386,6 +1386,24 @@ mod tests {
         );
         assert_eq!(data_lag_days("2026-10-24", today), 1);
         assert_eq!(data_lag_days("2026-10-25", today), 0);
+    }
+
+    #[test]
+    fn row_live_status_is_minutes_not_wave() {
+        let high_wave_zero_minutes = RankRow {
+            name: "高音浪未播".into(),
+            wave: 1657,
+            minutes: 0,
+            absent_days: 1,
+        };
+        let zero_wave_with_minutes = RankRow {
+            name: "零音浪开播".into(),
+            wave: 0,
+            minutes: 90,
+            absent_days: 0,
+        };
+        assert_eq!(row_json(1, &high_wave_zero_minutes)["live"], false);
+        assert_eq!(row_json(2, &zero_wave_with_minutes)["live"], true);
     }
 
     #[test]

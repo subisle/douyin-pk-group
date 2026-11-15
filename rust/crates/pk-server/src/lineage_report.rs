@@ -1,7 +1,7 @@
 //! 师门日报：师傅收「名下徒弟音浪图 + 与上日的差距」（docs/23 §3）。
 //!
 //! 由 push.rs 的延迟推送队列触发（`push_bindings.lineage_report` 开关），
-//! 图片口径与全团日报一致（wave_reliable=1 / 未播=当日音浪<2 / 直系徒弟）。
+//! 图片口径与全团日报一致（wave_reliable=1 / 未播=有效时长<=0 / 直系徒弟）。
 //! 渲染产物为分页 SVG（`render_svg_pages`），PNG 转换复用 push.rs::svg_to_png
 //! （由调用方处理，本模块只产出 SVG 字符串）。
 
@@ -37,7 +37,7 @@ pub struct LineageRow {
     pub month_total: i64,
     /// 本月累计时长（分钟）；月度报表的主字段之一。
     pub month_minutes: i64,
-    /// 日榜 = 当日开播；月榜 = 本月音浪 >= 2。
+    /// 日榜 = 当日有效时长 > 0；月报 = 本月累计有效时长 > 0。
     pub live: bool,
     pub is_master: bool,
 }
@@ -355,7 +355,12 @@ pub async fn build(
         yesterday: yday_map.get(&master_person_id).copied(),
         month_total: master_month_wave,
         month_minutes: master_month_minutes,
-        live: crate::dialect::is_live_wave(master_today),
+        live: crate::dialect::is_live_minutes(
+            today_minutes_map
+                .get(&master_person_id)
+                .copied()
+                .unwrap_or(0),
+        ),
         is_master: true,
     });
 
@@ -370,7 +375,9 @@ pub async fn build(
             yesterday: yday_map.get(&pid).copied(),
             month_total: month_wave,
             month_minutes,
-            live: crate::dialect::is_live_wave(today),
+            live: crate::dialect::is_live_minutes(
+                today_minutes_map.get(&pid).copied().unwrap_or(0),
+            ),
             is_master: false,
         });
     }
@@ -426,7 +433,7 @@ pub async fn build_month(
         yesterday: None,
         month_total: master_wave,
         month_minutes: master_minutes,
-        live: master_wave >= 2,
+        live: crate::dialect::is_live_minutes(master_minutes),
         is_master: true,
     }];
     let mut disciples: Vec<LineageRow> = roster
@@ -440,7 +447,7 @@ pub async fn build_month(
                 yesterday: None,
                 month_total: wave,
                 month_minutes: minutes,
-                live: wave >= 2,
+                live: crate::dialect::is_live_minutes(minutes),
                 is_master: false,
             }
         })
@@ -540,7 +547,7 @@ pub async fn build_range(
         yesterday: None,
         month_total: master_wave,
         month_minutes: master_minutes,
-        live: master_wave >= 2,
+        live: crate::dialect::is_live_minutes(master_minutes),
         is_master: true,
     }];
     let mut disciples: Vec<LineageRow> = roster
@@ -554,7 +561,7 @@ pub async fn build_range(
                 yesterday: None,
                 month_total: wave,
                 month_minutes: minutes,
-                live: wave >= 2,
+                live: crate::dialect::is_live_minutes(minutes),
                 is_master: false,
             }
         })
@@ -870,7 +877,9 @@ fn render_page(
             ));
         }
         if fields.status {
-            if has_duration_standard && !r.is_master {
+            if !r.live {
+                s.push_str(&text_cell(696.0, text_y, "end", "未播", COLOR_UP));
+            } else if has_duration_standard && !r.is_master {
                 if severe {
                     s.push_str(&text_cell(696.0, text_y, "end", "严重不足", COLOR_UP));
                 } else if unmet {
@@ -878,10 +887,8 @@ fn render_page(
                 } else {
                     s.push_str(&text_cell(696.0, text_y, "end", "合格", "#168482"));
                 }
-            } else if r.live {
-                s.push_str(&text_cell(696.0, text_y, "end", "开播", COLOR_TEXT));
             } else {
-                s.push_str(&text_cell(696.0, text_y, "end", "未播", COLOR_UP));
+                s.push_str(&text_cell(696.0, text_y, "end", "开播", COLOR_TEXT));
             }
         }
     }
@@ -1263,7 +1270,7 @@ pub fn render_text(rep: &LineageReport) -> String {
         let today = if r.live {
             fmt_wan(r.today)
         } else {
-            "未播".to_string()
+            format!("{}（未播）", fmt_wan(r.today))
         };
         out.push_str(&format!("\n{}{} {}", r.name, tag, today));
         if let Some(yv) = r.yesterday {
@@ -1589,6 +1596,17 @@ mod tests {
         assert!(!t.contains("较昨日"));
         assert!(!t.contains('▲'));
         assert!(!t.contains('▼'));
+    }
+
+    #[test]
+    fn positive_wave_zero_minutes_is_offline_but_keeps_wave_text() {
+        let mut rep = fixture();
+        let row = rep.rows.iter_mut().find(|r| r.name == "小王").unwrap();
+        row.today = 1657;
+        row.today_minutes = 0;
+        row.live = false;
+        let text = render_text(&rep);
+        assert!(text.contains("小王 1657（未播）"), "{text}");
     }
 
     #[test]

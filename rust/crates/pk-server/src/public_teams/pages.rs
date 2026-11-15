@@ -387,11 +387,12 @@ mod pwa_tests {
     }
 
     #[test]
-    fn zero_wave_with_positive_duration_is_not_marked_offline() {
+    fn positive_wave_zero_duration_stays_visible_but_is_marked_offline() {
         for token in [
-            "const hasPositiveDuration = hasDuration && Number(it.minutes) > 0;",
-            "Number(it.wave) < 2 && !hasPositiveDuration",
-            "d.daily.minutes != null && Number(d.daily.minutes) > 0",
+            "const unplayed = !it.periodic && !noData && it.isLive === false;",
+            "const rightMain = byDuration ? (hasDuration ? minFmt(it.minutes) : '—') : wave;",
+            "今日未播",
+            "const offToday = d.daily && d.daily.wave != null && d.liveToday === false;",
         ] {
             assert!(
                 ST_PAGE.contains(token),
