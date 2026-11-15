@@ -1248,6 +1248,70 @@ fn append_import_metric_notice(mut reply: String, notice: Option<&str>) -> Strin
     reply
 }
 
+/// 源文件里常见的“有时长但音浪 0”/“有音浪但时长 0”异常只提示、不改数。
+/// 例如 11.13 的狼艺、浩启源文件本来就是 0 音浪 + 有直播时长；
+/// 如果运营确认是漏导，可再补发对应指标文件，不能用推测值覆盖原始数据。
+fn metric_source_anomaly_notice(rows: &[admin::ImportRow]) -> Option<String> {
+    let mut zero_wave = Vec::new();
+    let mut zero_minutes = Vec::new();
+    for r in rows {
+        let name = if !r.name.trim().is_empty() {
+            r.name.trim()
+        } else if let Some(id) = r.anchor_id.as_deref().filter(|v| !v.trim().is_empty()) {
+            id.trim()
+        } else {
+            continue;
+        };
+        let wave = r.wave.or(r.cumulative_wave);
+        let has_minutes = r.minutes.is_some_and(|v| v > 0.0);
+        let has_wave = wave.is_some_and(|v| v > 0.0);
+        if has_minutes && !has_wave {
+            zero_wave.push(name.to_string());
+        } else if has_wave && !r.minutes.is_some_and(|v| v > 0.0) {
+            zero_minutes.push(name.to_string());
+        }
+    }
+    let mut out = String::new();
+    if !zero_wave.is_empty() {
+        out.push_str("\n⚠️ 源文件有直播时长但音浪为 0：");
+        out.push_str(
+            &zero_wave
+                .iter()
+                .take(8)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("、"),
+        );
+        if zero_wave.len() > 8 {
+            out.push_str(&format!(" 等 {} 人", zero_wave.len()));
+        }
+        out.push_str("。已按源文件导入；如本批应有音浪，请补发音浪文件。");
+    }
+    if !zero_minutes.is_empty() {
+        out.push_str("\n⚠️ 源文件有音浪但直播时长为 0：");
+        out.push_str(
+            &zero_minutes
+                .iter()
+                .take(8)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("、"),
+        );
+        if zero_minutes.len() > 8 {
+            out.push_str(&format!(" 等 {} 人", zero_minutes.len()));
+        }
+        out.push_str("。已按源文件导入；如本批应有时长，请补发时长文件。");
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+fn append_metric_source_anomaly_notice(mut reply: String, notice: Option<&str>) -> String {
+    if let Some(notice) = notice {
+        reply.push_str(notice);
+    }
+    reply
+}
+
 fn attachment_names_label(files: &[String]) -> String {
     if files.is_empty() {
         return "附件".to_string();
@@ -1672,6 +1736,7 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
                 metrics = metrics.label(),
                 "机器人按指令月度导入"
             );
+            let source_notice = metric_source_anomaly_notice(&month_rows);
             let reply = match admin::commit_month_metrics_anchor_only(
                 st,
                 &period,
@@ -1699,7 +1764,10 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
                     if r.failures.len() > 10 {
                         s.push_str(&format!("\n… 还有 {} 条失败", r.failures.len() - 10));
                     }
-                    append_import_metric_notice(s, metric_notice)
+                    append_metric_source_anomaly_notice(
+                        append_import_metric_notice(s, metric_notice),
+                        source_notice.as_deref(),
+                    )
                 }
                 Err(e) => format!(
                     "❌ {period} {team_label} 月度{}导入失败：{e}",
@@ -1773,6 +1841,7 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
             rows = daily_rows.len(),
             "机器人按日文件导入"
         );
+        let source_notice = metric_source_anomaly_notice(&daily_rows);
         let report = admin::commit_import_anchor_only(
             st,
             team,
@@ -1785,7 +1854,10 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
         let succeeded = report.is_ok();
         let reply = format_report(&files_label, &biz_date, team, report);
         let reply = if succeeded {
-            append_import_metric_notice(reply, metric_notice)
+            append_metric_source_anomaly_notice(
+                append_import_metric_notice(reply, metric_notice),
+                source_notice.as_deref(),
+            )
         } else {
             reply
         };
@@ -2827,11 +2899,15 @@ async fn cmd_import(st: &Arc<AppState>, inbound: &Inbound, args: &[&str]) -> Str
         Err(message) => return message.to_string(),
     };
 
+    let source_notice = metric_source_anomaly_notice(&rows);
     let report = admin::commit_import(st, team, &biz_date, rows, "merge", "机器人导入").await;
     let succeeded = report.is_ok();
     let reply = format_report("机器人导入", &biz_date, team, report);
     if succeeded {
-        append_import_metric_notice(reply, metric_notice)
+        append_metric_source_anomaly_notice(
+            append_import_metric_notice(reply, metric_notice),
+            source_notice.as_deref(),
+        )
     } else {
         reply
     }
@@ -4448,6 +4524,32 @@ mod tests {
         .expect_err("两项全缺必须阻止导入");
         assert!(blocked.contains("音浪和时长都没有"), "{blocked}");
         assert!(blocked.contains("无法导入"), "{blocked}");
+    }
+
+    #[test]
+    fn source_anomaly_notice_flags_duration_without_wave() {
+        let rows = vec![
+            admin::ImportRow {
+                name: "狼艺".into(),
+                wave: Some(0.0),
+                minutes: Some(90.0),
+                ..Default::default()
+            },
+            admin::ImportRow {
+                name: "浩启".into(),
+                wave: Some(1657.0),
+                minutes: Some(0.0),
+                ..Default::default()
+            },
+        ];
+        let notice = metric_source_anomaly_notice(&rows);
+        let reply = append_metric_source_anomaly_notice("导入完成".into(), notice.as_deref());
+        assert!(reply.contains("有直播时长但音浪为 0"), "{reply}");
+        assert!(reply.contains("狼艺"), "{reply}");
+        assert!(reply.contains("有音浪但直播时长为 0"), "{reply}");
+        assert!(reply.contains("浩启"), "{reply}");
+        assert!(reply.contains("请补发音浪文件"), "{reply}");
+        assert!(reply.contains("请补发时长文件"), "{reply}");
     }
 
     #[test]
