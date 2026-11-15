@@ -2954,20 +2954,22 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 /* 「我的」页公告条：插在 view 内容顶部（section 内第一个元素） */
 #my-ann { margin:0 0 10px; }
 
-/* 日榜左右滑动提示：纯视觉、无模糊、无持续动画，老机不额外合成。 */
-.date-swipe-hints { position:fixed; z-index:44; left:10px; right:10px; top:47%;
+/* 日 / 月 / 年榜左右滑动提示：大号 ghost 箭头，纯静态 CSS，无滤镜、无持续动画。 */
+.date-swipe-hints { position:fixed; z-index:44; left:2px; right:2px; top:44%;
   display:flex; align-items:center; justify-content:space-between; pointer-events:none;
-  opacity:.2; transition:opacity .28s ease; }
+  opacity:.16; transition:opacity .24s ease; }
 .date-swipe-hints.hidden { display:none; }
-.date-swipe-hints.intro { opacity:.72; }
-.date-swipe-hints .dsh { display:inline-flex; align-items:center; gap:2px;
-  padding:7px 8px; border-radius:999px; color:rgba(15,23,42,.68);
-  background:rgba(255,255,255,.42); border:1px solid rgba(255,255,255,.58);
-  box-shadow:0 4px 16px rgba(15,23,42,.08); font-size:11px; line-height:1; }
-.date-swipe-hints .dsh svg { width:18px; height:18px; fill:none; stroke:currentColor;
-  stroke-width:2.2; stroke-linecap:round; stroke-linejoin:round; }
-.date-swipe-hints .dsh em { font-style:normal; }
-@media (max-width:360px) { .date-swipe-hints .dsh em { display:none; } }
+.date-swipe-hints.intro { opacity:.55; }
+.date-swipe-hints .dsh { display:inline-flex; flex-direction:column; align-items:center; gap:1px;
+  min-width:48px; color:rgba(15,23,42,.68); font-size:10px; line-height:1.1;
+  text-shadow:0 1px 5px rgba(255,255,255,.9); }
+.date-swipe-hints .dsh svg { width:58px; height:58px; fill:none; stroke:currentColor;
+  stroke-width:1.55; stroke-linecap:round; stroke-linejoin:round; }
+.date-swipe-hints .dsh em { font-style:normal; letter-spacing:.04em; }
+@media (max-width:360px) {
+  .date-swipe-hints .dsh { min-width:38px; font-size:9px; }
+  .date-swipe-hints .dsh svg { width:50px; height:50px; }
+}
 @media (prefers-reduced-motion:reduce) { .date-swipe-hints { transition:none; } }
 </style>
 </head>
@@ -3070,8 +3072,8 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
   <div class="err hidden" id="err"></div>
   <div id="view"></div>
   <div class="date-swipe-hints hidden" id="dateSwipeHints" aria-hidden="true">
-    <span class="dsh dsh-older"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg><em>更早</em></span>
-    <span class="dsh dsh-newer"><em>更新</em><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg></span>
+    <span class="dsh dsh-older"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg><em id="swipeOlderText">更早</em></span>
+    <span class="dsh dsh-newer"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg><em id="swipeNewerText">更新</em></span>
   </div>
   <div class="note" id="foot">数据每晚 24:00 后更新前一天 · 仅供内部参考 · 请勿外传</div>
 </main>
@@ -5922,17 +5924,32 @@ function pickDate(d) {
   go();
 }
 
-/* ==================== 日榜左右滑动切日期 ====================
-   只在「数据看板 + 日榜」生效；手指从屏幕边缘开始、日期条、表单控件和任何弹层内都不接管。
-   左滑看更早一天，右滑看更新一天；日期完全复用 site.dates 与 pickDate()。 */
+/* ==================== 数据看板左右滑动切周期 ====================
+   日 / 月 / 年榜共用一套手势。手指从屏幕边缘开始、日期条、表单控件和任何弹层内都不接管。
+   左滑看更早周期，右滑看更新周期；分别复用 pickDate() / pickPeriod()。 */
 const DATE_SWIPE_HINT_KEY = 'dateSwipeHintShownV1';
 let dateSwipeBound = false;
 let dateSwipeStart = null;
 let dateSwipeSuppressClickUntil = 0;
 let dateSwipeIntroTimer = null;
 
+function dateSwipeItems() {
+  if (!site) return [];
+  return period === 'daily'
+    ? (Array.isArray(site.dates) ? site.dates : [])
+    : dataPeriods(period);
+}
+function dateSwipeCurrent() {
+  return period === 'daily' ? curDate : curPeriod;
+}
 function dateSwipeUsable() {
-  return view === 'data' && period === 'daily' && !!(site && Array.isArray(site.dates) && site.dates.length > 1);
+  const list = dateSwipeItems();
+  return view === 'data' && list.length > 1 && list.includes(dateSwipeCurrent());
+}
+function dateSwipeLabels() {
+  if (period === 'monthly') return ['上月', '下月'];
+  if (period === 'yearly') return ['上一年', '下一年'];
+  return ['更早', '更新'];
 }
 
 function updateDateSwipeHints() {
@@ -5943,6 +5960,11 @@ function updateDateSwipeHints() {
     box.classList.remove('intro');
     return;
   }
+  const labels = dateSwipeLabels();
+  const olderText = $('swipeOlderText');
+  const newerText = $('swipeNewerText');
+  if (olderText) olderText.textContent = labels[0];
+  if (newerText) newerText.textContent = labels[1];
   box.classList.remove('hidden');
   let seen = false;
   try { seen = sessionStorage.getItem(DATE_SWIPE_HINT_KEY) === '1'; } catch (_) {}
@@ -5991,14 +6013,15 @@ function initDateSwipe() {
     const dx = t.clientX - start.x;
     const dy = t.clientY - start.y;
     if (Math.abs(dx) < 56 || Math.abs(dx) < Math.abs(dy) * 1.3) return;
-    const dates = (site && site.dates) || [];
-    const i = dates.indexOf(curDate);
+    const list = dateSwipeItems();
+    const i = list.indexOf(dateSwipeCurrent());
     if (i < 0) return;
-    const next = dates[i + (dx < 0 ? 1 : -1)];
+    const next = list[i + (dx < 0 ? 1 : -1)];
     if (!next) return;
     dateSwipeSuppressClickUntil = performance.now() + 520;
     updateDateSwipeHints();
-    pickDate(next);
+    if (period === 'daily') pickDate(next);
+    else pickPeriod(next);
   }, { passive: true });
 
   el.addEventListener('touchcancel', () => { dateSwipeStart = null; }, { passive: true });
@@ -6014,6 +6037,7 @@ function pickPeriod(p) {
   if (!p || p === curPeriod) return;
   curPeriod = p;
   renderDates();
+  updateDateSwipeHints();
   go();
 }
 

@@ -387,6 +387,22 @@ mod pwa_tests {
     }
 
     #[test]
+    fn data_swipe_supports_daily_monthly_yearly_with_ghost_arrows() {
+        for token in [
+            "function dateSwipeItems()",
+            "? (Array.isArray(site.dates) ? site.dates : [])",
+            ": dataPeriods(period);",
+            "if (period === 'daily') pickDate(next);",
+            "else pickPeriod(next);",
+            "if (period === 'monthly') return ['上月', '下月'];",
+            "if (period === 'yearly') return ['上一年', '下一年'];",
+            "width:58px; height:58px;",
+        ] {
+            assert!(ST_PAGE.contains(token), "月/年侧滑实现缺少：{token}");
+        }
+    }
+
+    #[test]
     fn deleted_daily_date_moves_display_to_latest_and_resume_refreshes() {
         assert!(
             ST_PAGE.contains("dates.length && !dates.includes(curDate)"),
