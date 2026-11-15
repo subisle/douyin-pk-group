@@ -1193,6 +1193,55 @@ struct AttachmentBatchParse {
     metric_errors: Vec<String>,
 }
 
+/// 本批实际携带的指标。只用“非空值”判断，显式 0 也算已提供。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ImportMetrics {
+    wave: bool,
+    minutes: bool,
+}
+
+impl ImportMetrics {
+    /// 按日预览：累计音浪快照也算音浪数据；is_live 单独出现不算时长分钟。
+    fn from_daily_rows(rows: &[admin::ImportRow]) -> Self {
+        Self {
+            wave: rows
+                .iter()
+                .any(|r| r.wave.is_some() || r.cumulative_wave.is_some()),
+            minutes: rows.iter().any(|r| r.minutes.is_some()),
+        }
+    }
+
+    /// 月度预览：整月口径只认 wave / minutes，cumulative_wave 不参与月度导入。
+    fn from_month_rows(rows: &[admin::ImportRow]) -> Self {
+        Self {
+            wave: rows.iter().any(|r| r.wave.is_some()),
+            minutes: rows.iter().any(|r| r.minutes.is_some()),
+        }
+    }
+}
+
+/// 返回可继续导入时的提醒；两项全缺返回 Err 并阻止提交。
+fn import_metric_notice(metrics: ImportMetrics) -> Result<Option<&'static str>, &'static str> {
+    match (metrics.wave, metrics.minutes) {
+        (true, true) => Ok(None),
+        (true, false) => Ok(Some(
+            "⚠️ 本批没有时长分钟数据，本次只导入音浪。缺失的时长会保留库里原值；如本批应有时长，请补发时长文件。",
+        )),
+        (false, true) => Ok(Some(
+            "⚠️ 本批没有音浪数据，本次只导入时长。缺失的音浪会保留库里原值；如本批应有音浪，请补发音浪文件。",
+        )),
+        (false, false) => Err("❌ 本批音浪和时长都没有，无法导入。请检查 CSV 表头或数据内容。"),
+    }
+}
+
+fn append_import_metric_notice(mut reply: String, notice: Option<&str>) -> String {
+    if let Some(notice) = notice {
+        reply.push('\n');
+        reply.push_str(notice);
+    }
+    reply
+}
+
 fn attachment_names_label(files: &[String]) -> String {
     if files.is_empty() {
         return "附件".to_string();
@@ -1573,16 +1622,17 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
             } else {
                 month_files.join(",")
             };
-            let metrics = admin::MonthMetrics {
-                minutes: month_rows.iter().any(|r| r.minutes.is_some()),
-                wave: month_rows.iter().any(|r| r.wave.is_some()),
+            let availability = ImportMetrics::from_month_rows(&month_rows);
+            let metric_notice = match import_metric_notice(availability) {
+                Ok(notice) => notice,
+                Err(message) => {
+                    return Some(Outbound::to(&inbound.conversation_id, message.to_string()));
+                }
             };
-            if !metrics.minutes && !metrics.wave {
-                return Some(Outbound::to(
-                    &inbound.conversation_id,
-                    "附件里没有可导入的月度音浪或时长".to_string(),
-                ));
-            }
+            let metrics = admin::MonthMetrics {
+                minutes: availability.minutes,
+                wave: availability.wave,
+            };
             let team_label = if crate::admin::is_auto_team(&team) {
                 "全部团别"
             } else if team == "female" {
@@ -1625,7 +1675,7 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
                     if r.failures.len() > 10 {
                         s.push_str(&format!("\n… 还有 {} 条失败", r.failures.len() - 10));
                     }
-                    s
+                    append_import_metric_notice(s, metric_notice)
                 }
                 Err(e) => format!(
                     "❌ {period} {team_label} 月度{}导入失败：{e}",
@@ -1668,6 +1718,13 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
                 ),
             ));
         }
+        let availability = ImportMetrics::from_daily_rows(&daily_rows);
+        let metric_notice = match import_metric_notice(availability) {
+            Ok(notice) => notice,
+            Err(message) => {
+                return Some(Outbound::to(&inbound.conversation_id, message.to_string()));
+            }
+        };
 
         // 业务日期只认：本条消息里的日期 > 之前报过的日期（12h 内）> 收到日 − 1。
         // 文件名只是审计信息，绝不参与日期判断。
@@ -1701,7 +1758,13 @@ pub async fn handle(st: &Arc<AppState>, cfg: &BotConfig, inbound: Inbound) -> Op
             &format!("机器人·{files_label}"),
         )
         .await;
+        let succeeded = report.is_ok();
         let reply = format_report(&files_label, &biz_date, team, report);
+        let reply = if succeeded {
+            append_import_metric_notice(reply, metric_notice)
+        } else {
+            reply
+        };
         return Some(Outbound::to(
             &inbound.conversation_id,
             append_empty_attachment_warning(reply, &empty_files),
@@ -2734,9 +2797,20 @@ async fn cmd_import(st: &Arc<AppState>, inbound: &Inbound, args: &[&str]) -> Str
     if rows.is_empty() {
         return "没有解析到任何数据行。格式示例：\n浩龙 500000 1200000 开播\n（名字 当日音浪 累计 开播状态）".into();
     }
+    let availability = ImportMetrics::from_daily_rows(&rows);
+    let metric_notice = match import_metric_notice(availability) {
+        Ok(notice) => notice,
+        Err(message) => return message.to_string(),
+    };
 
     let report = admin::commit_import(st, team, &biz_date, rows, "merge", "机器人导入").await;
-    format_report("机器人导入", &biz_date, team, report)
+    let succeeded = report.is_ok();
+    let reply = format_report("机器人导入", &biz_date, team, report);
+    if succeeded {
+        append_import_metric_notice(reply, metric_notice)
+    } else {
+        reply
+    }
 }
 
 fn tts_file_name(kind: &str, name: &str, date: &str) -> String {
@@ -4292,6 +4366,128 @@ mod tests {
         let (err_reply, changed) = wx_unbind_reply(Err("db down".into()));
         assert!(!changed, "DB 失败不得广播绑定变化");
         assert!(err_reply.contains("解绑失败"));
-        assert!(!err_reply.contains("已解绑"), "失败不能回复成功：{err_reply}");
+        assert!(
+            !err_reply.contains("已解绑"),
+            "失败不能回复成功：{err_reply}"
+        );
+    }
+
+    #[test]
+    fn import_metric_notice_covers_missing_and_blocked_cases() {
+        assert_eq!(
+            import_metric_notice(ImportMetrics {
+                wave: true,
+                minutes: true
+            }),
+            Ok(None)
+        );
+
+        let missing_minutes = import_metric_notice(ImportMetrics {
+            wave: true,
+            minutes: false,
+        })
+        .expect("只缺时长仍可导入")
+        .expect("只缺时长必须提醒");
+        assert!(
+            missing_minutes.contains("没有时长分钟数据"),
+            "{missing_minutes}"
+        );
+        assert!(missing_minutes.contains("只导入音浪"), "{missing_minutes}");
+        assert!(
+            missing_minutes.contains("保留库里原值"),
+            "{missing_minutes}"
+        );
+
+        let missing_wave = import_metric_notice(ImportMetrics {
+            wave: false,
+            minutes: true,
+        })
+        .expect("只缺音浪仍可导入")
+        .expect("只缺音浪必须提醒");
+        assert!(missing_wave.contains("没有音浪数据"), "{missing_wave}");
+        assert!(missing_wave.contains("只导入时长"), "{missing_wave}");
+        assert!(missing_wave.contains("保留库里原值"), "{missing_wave}");
+
+        let blocked = import_metric_notice(ImportMetrics {
+            wave: false,
+            minutes: false,
+        })
+        .expect_err("两项全缺必须阻止导入");
+        assert!(blocked.contains("音浪和时长都没有"), "{blocked}");
+        assert!(blocked.contains("无法导入"), "{blocked}");
+    }
+
+    #[test]
+    fn daily_command_text_missing_minutes_is_flagged() {
+        let rows = admin::parse_any_text("凤九 500000 1200000 开播\n");
+        let metrics = ImportMetrics::from_daily_rows(&rows);
+        assert!(metrics.wave, "累计音浪也算音浪数据");
+        assert!(!metrics.minutes, "只有开播状态不能算时长分钟数据");
+        let notice = import_metric_notice(metrics)
+            .expect("仍可导入")
+            .expect("缺时长必须提醒");
+        assert!(notice.contains("本次只导入音浪"), "{notice}");
+    }
+
+    #[test]
+    fn daily_attachment_wave_only_is_flagged_after_merge() {
+        let batch = parse_attachment_batch(&[(
+            "音浪.csv".into(),
+            "主播ID,主播昵称,总音浪\n1001,玖玉,7717\n".into(),
+        )]);
+        let notice = import_metric_notice(ImportMetrics::from_daily_rows(&batch.daily_rows))
+            .expect("仍可导入")
+            .expect("缺时长必须提醒");
+        assert!(notice.contains("没有时长分钟数据"), "{notice}");
+    }
+
+    #[test]
+    fn daily_complementary_attachments_do_not_false_warn() {
+        let docs: Vec<AttachmentText> = vec![
+            (
+                "音浪.csv".into(),
+                "主播ID,主播昵称,总音浪\n1001,玖玉,7717\n".into(),
+            ),
+            (
+                "时长.csv".into(),
+                "主播ID,主播昵称,开播有效时长\n1001,玖玉,3小时47分钟17秒\n".into(),
+            ),
+        ];
+        let batch = parse_attachment_batch(&docs);
+        assert_eq!(batch.daily_rows.len(), 1, "{:?}", batch.daily_rows);
+        let metrics = ImportMetrics::from_daily_rows(&batch.daily_rows);
+        assert!(metrics.wave && metrics.minutes, "{metrics:?}");
+        assert_eq!(import_metric_notice(metrics), Ok(None));
+    }
+
+    #[test]
+    fn monthly_duration_only_is_flagged_after_merge() {
+        let batch = parse_month_attachment_batch(&[(
+            "2026-10-时长.csv".into(),
+            "主播ID,主播昵称,开播有效时长\n1001,玖玉,10小时\n".into(),
+        )]);
+        let notice = import_metric_notice(ImportMetrics::from_month_rows(&batch.month_rows))
+            .expect("仍可导入")
+            .expect("缺月音浪必须提醒");
+        assert!(notice.contains("没有音浪数据"), "{notice}");
+    }
+
+    #[test]
+    fn monthly_complementary_attachments_do_not_false_warn() {
+        let docs: Vec<AttachmentText> = vec![
+            (
+                "2026-10-音浪.csv".into(),
+                "主播ID,主播昵称,总音浪\n1001,玖玉,214126\n".into(),
+            ),
+            (
+                "2026-10-时长.csv".into(),
+                "主播ID,主播昵称,开播有效时长\n1001,玖玉,10小时\n".into(),
+            ),
+        ];
+        let batch = parse_month_attachment_batch(&docs);
+        assert_eq!(batch.month_rows.len(), 1, "{:?}", batch.month_rows);
+        let metrics = ImportMetrics::from_month_rows(&batch.month_rows);
+        assert!(metrics.wave && metrics.minutes, "{metrics:?}");
+        assert_eq!(import_metric_notice(metrics), Ok(None));
     }
 }
