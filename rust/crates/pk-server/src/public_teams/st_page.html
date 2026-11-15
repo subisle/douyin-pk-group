@@ -3900,27 +3900,43 @@ function wbRenderExpiry(dlg, status) {
   const finiteDays = (value) => typeof value === 'number' && Number.isFinite(value);
   const durationText = (days) => {
     if (!finiteDays(days)) return '即将';
-    if (days >= 1) return days.toFixed(1) + ' 天';
+    if (days >= 1) return Math.ceil(days) + ' 天';
     return Math.max(1, Math.ceil(days * 24)) + ' 小时';
   };
-  const daysA = finiteDays(status && status.daysLeft) ? status.daysLeft : null;
-  const daysB = finiteDays(status && status.earliestExpiringDaysLeft) ? status.earliestExpiringDaysLeft : null;
-  const candidates = [daysA, daysB].filter(finiteDays);
-  const minDays = candidates.length ? Math.min.apply(null, candidates) : null;
+  const accountDays = finiteDays(status && status.accountDaysLeft)
+    ? status.accountDaysLeft
+    : (finiteDays(status && status.daysLeft)
+      ? status.daysLeft
+      : (finiteDays(status && status.effectiveDaysLeft) ? status.effectiveDaysLeft : null));
+  const accountDaysCeil = finiteDays(status && status.accountDaysLeftCeil)
+    ? status.accountDaysLeftCeil : accountDays;
+  const creditDays = finiteDays(status && status.creditDaysLeft)
+    ? status.creditDaysLeft
+    : (finiteDays(status && status.earliestExpiringDaysLeft) ? status.earliestExpiringDaysLeft : null);
+  const expiresText = status && status.expiresAtText ? String(status.expiresAtText) : '';
   const expired = !!(status && (status.expired || status.reason === 'expired' || status.reason === 'missing'));
-  const source = (status && status.expirySource) || '';
-  const creditFirst = !expired && source === 'credits';
-  const when = expired
-    ? (source === 'token' ? '当前绑定的 WorkBuddy 登录凭证已过期' : '当前绑定的 WorkBuddy 账号登录有效期已过期')
-    : creditFirst
-      ? (daysB !== null ? '当前账号内有积分包将在 ' + durationText(daysB) + '后到期' : '当前账号内有积分包即将到期')
-      : (minDays == null ? '当前绑定的 WorkBuddy 账号即将到期' : '当前绑定的 WorkBuddy 账号登录有效期仅剩 ' + durationText(minDays));
-  const title = creditFirst ? 'WorkBuddy 积分包即将到期' : '腾讯账号需要重新登录';
-  const action = '。请使用同一个腾讯账号重新登录；登录完成后请返回本页面，点击下方「返回」继续。';
+  let when;
+  if (expired) {
+    when = expiresText
+      ? '当前绑定的 WorkBuddy 账号登录有效期已于 ' + expiresText + ' 到期。'
+      : '当前绑定的 WorkBuddy 账号登录有效期已过期。';
+  } else if (expiresText) {
+    when = '当前绑定的 WorkBuddy 账号登录有效期至 ' + expiresText +
+      '，约剩 ' + durationText(accountDaysCeil) + '。';
+  } else if (finiteDays(accountDays)) {
+    when = '当前绑定的 WorkBuddy 账号登录有效期约剩 ' + durationText(accountDaysCeil) + '。';
+  } else {
+    when = '当前绑定的 WorkBuddy 账号即将到期。';
+  }
+  const creditHint = !expired && finiteDays(creditDays) && creditDays < 1
+    ? '另：最早积分包将在 ' + durationText(creditDays) + '后到期，不影响本次账号登录。'
+    : '';
+  const action = '请使用同一个腾讯账号重新登录；登录完成后请返回本页面，点击下方「返回」继续。';
   dlg.box.innerHTML =
-    '<h3>' + title + '</h3>' +
+    '<h3>腾讯账号需要重新登录</h3>' +
     '<p class="tip">' + esc(when) + action + '</p>' +
     wbAccountLine(wbBoundAccount) +
+    (creditHint ? '<div class="form-hint" style="margin:10px 0">' + esc(creditHint) + '</div>' : '') +
     '<div class="form-hint" id="wbBindPrep" style="margin:10px 0">正在准备重新登录入口…</div>' +
     '<button class="btn-main" id="wbBindJump" disabled style="margin-bottom:10px">正在准备登录…</button>' +
     '<div class="form-err hidden" id="wbBindErr"></div>';

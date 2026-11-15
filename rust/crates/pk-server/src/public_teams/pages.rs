@@ -387,6 +387,23 @@ mod pwa_tests {
     }
 
     #[test]
+    fn workbuddy_reauth_uses_account_expiry_date_not_credit_expiry() {
+        for token in [
+            "status.accountDaysLeftCeil",
+            "status.expiresAtText",
+            "账号登录有效期至",
+            "不影响本次账号登录",
+            "腾讯账号需要重新登录",
+        ] {
+            assert!(ST_PAGE.contains(token), "WorkBuddy 到期展示缺少：{token}");
+        }
+        assert!(
+            !ST_PAGE.contains("WorkBuddy 积分包即将到期"),
+            "积分包到期不能作为重新登录标题"
+        );
+    }
+
+    #[test]
     fn data_swipe_supports_daily_monthly_yearly_with_ghost_arrows() {
         for token in [
             "function dateSwipeItems()",

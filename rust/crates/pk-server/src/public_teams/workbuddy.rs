@@ -135,15 +135,68 @@ fn sanitize_account(v: &Value) -> Value {
     })
 }
 
-/// WorkBuddy 重新登录提示阈值：只有真实剩余时间严格小于 24 小时才提示。
+/// WorkBuddy 重新登录提示阈值：只有账号登录有效期严格小于 24 小时才提示。
 const REAUTH_PROMPT_THRESHOLD_DAYS: f64 = 1.0;
 
-/// 面板账号的到期判断：token 过期，或账号/有效积分包剩余不足 1 天。
+/// 面板返回的 expiresIn 可能是 `27 days` / `28 days` / `3 hours`。
+/// 正常路径优先使用 expiresAt 精确时间；只有该字段缺失时才用这个字符串兜底。
+fn parse_expires_in_days(raw: &str) -> Option<f64> {
+    let raw = raw.trim().to_ascii_lowercase();
+    let split = raw.find(char::is_alphabetic)?;
+    let number = raw[..split].trim().parse::<f64>().ok()?;
+    if !number.is_finite() || number < 0.0 {
+        return None;
+    }
+    let unit = raw[split..].trim();
+    if unit.starts_with("day") {
+        Some(number)
+    } else if unit.starts_with("hour") {
+        Some(number / 24.0)
+    } else if unit.starts_with("minute") {
+        Some(number / 1440.0)
+    } else {
+        None
+    }
+}
+
+fn expiry_text_cn(epoch: i64) -> String {
+    const OFFSET_SECS: i32 = 8 * 60 * 60;
+    let Some(utc) = chrono::DateTime::from_timestamp(epoch, 0) else {
+        return String::new();
+    };
+    let Some(offset) = chrono::FixedOffset::east_opt(OFFSET_SECS) else {
+        return String::new();
+    };
+    utc.with_timezone(&offset)
+        .format("%Y-%m-%d %H:%M")
+        .to_string()
+}
+
+fn credit_expiry_text(v: &Value) -> String {
+    v.pointer("/credits/earliest_expiring")
+        .and_then(|package| {
+            package
+                .get("expire_time")
+                .or_else(|| package.get("cycle_end_time"))
+                .and_then(Value::as_str)
+        })
+        .map(|raw| raw.chars().take(16).collect())
+        .unwrap_or_default()
+}
+
+/// 面板账号的到期判断：
+/// - token / 账号 `expiresAt` 决定是否需要重新登录；
+/// - 积分包到期只单独展示，绝不触发重新登录。真实面板里账号可能还有 28 天，
+///   但某个已用尽的历史积分包仍返回 `days_left=0.5`，旧逻辑会误报“0.5 天后到期”。
 fn expiry_status_at(v: &Value, now: i64) -> Value {
     let expires_at = v
         .get("expiresAt")
         .and_then(|x| x.as_i64().or_else(|| x.as_f64().map(|f| f as i64)))
         .unwrap_or(0);
+    let expires_in = v
+        .get("expiresIn")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     let token_expired = v
         .get("tokenExpired")
         .and_then(Value::as_bool)
@@ -151,12 +204,13 @@ fn expiry_status_at(v: &Value, now: i64) -> Value {
         || v.get("needRelogin")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-    let account_days_left = (expires_at > 0).then(|| (expires_at - now) as f64 / 86_400.0);
 
-    // 积分包口径统一为「未过期且仍有余额」：面板的 `earliest_expiring` 已经是这类
-    // 包里最早到期的一个，优先信它。只有这个字段缺失或不可用时才回退遍历 packages；
-    // 回退时同样跳过余额为 0、已过期和永久包。真实面板里用尽的旧包仍返回
-    // days_left=0.5，曾因此把 28 天有效期误报成 0.5 天。
+    // expiresAt 是精确时间；只有旧版面板没给该字段时才解析 expiresIn。
+    let account_days_left = (expires_at > 0)
+        .then(|| (expires_at - now) as f64 / 86_400.0)
+        .or_else(|| parse_expires_in_days(expires_in));
+    let account_days_left_ceil = account_days_left.map(|days| days.max(0.0).ceil());
+
     fn usable_credit_days(package: &Value) -> Option<f64> {
         if package.get("no_expiry").and_then(Value::as_bool) == Some(true)
             || package.get("is_expired").and_then(Value::as_bool) == Some(true)
@@ -189,16 +243,9 @@ fn expiry_status_at(v: &Value, now: i64) -> Value {
         }
     }
     let round1 = |days: f64| (days * 10.0).round() / 10.0;
-    // 积分包到期不等于账号登录凭证失效；只把 token / 账号 expiresAt 视为 expired。
     let expired = token_expired || (expires_at > 0 && expires_at <= now);
-    let effective_days_left = match (account_days_left, credit_days) {
-        (Some(account), Some(credit)) => Some(account.min(credit)),
-        (Some(account), None) => Some(account),
-        (None, Some(credit)) => Some(credit),
-        (None, None) => None,
-    };
     let needs_login =
-        expired || effective_days_left.is_some_and(|days| days < REAUTH_PROMPT_THRESHOLD_DAYS);
+        expired || account_days_left.is_some_and(|days| days < REAUTH_PROMPT_THRESHOLD_DAYS);
     let reason = if expired {
         "expired"
     } else if needs_login {
@@ -208,22 +255,28 @@ fn expiry_status_at(v: &Value, now: i64) -> Value {
     };
     let expiry_source = if token_expired {
         "token"
+    } else if account_days_left.is_some() {
+        "account"
     } else {
-        match (account_days_left, credit_days) {
-            (Some(account), Some(credit)) if credit < account => "credits",
-            (Some(_), _) => "account",
-            (None, Some(_)) => "credits",
-            (None, None) => "",
-        }
+        ""
     };
+    let expires_at_text = (expires_at > 0)
+        .then(|| expiry_text_cn(expires_at))
+        .filter(|text| !text.is_empty())
+        .unwrap_or_default();
     json!({
         "checked": true,
         "found": true,
         "expiresAt": expires_at,
-        "expiresIn": v.get("expiresIn").and_then(Value::as_str).unwrap_or_default(),
+        "expiresAtText": expires_at_text,
+        "expiresIn": expires_in,
         "daysLeft": account_days_left.map(round1),
+        "accountDaysLeft": account_days_left.map(round1),
+        "accountDaysLeftCeil": account_days_left_ceil,
         "earliestExpiringDaysLeft": credit_days.map(round1),
-        "effectiveDaysLeft": effective_days_left.map(round1),
+        "creditDaysLeft": credit_days.map(round1),
+        "creditExpiresAtText": credit_expiry_text(v),
+        "effectiveDaysLeft": account_days_left.map(round1),
         "promptThresholdDays": REAUTH_PROMPT_THRESHOLD_DAYS,
         "expirySource": expiry_source,
         "tokenExpired": token_expired,
@@ -635,9 +688,10 @@ mod tests {
             }),
             now,
         );
-        assert_eq!(credit_soon["needsLogin"], true);
+        assert_eq!(credit_soon["needsLogin"], false);
         assert_eq!(credit_soon["earliestExpiringDaysLeft"], 0.9);
-        assert_eq!(credit_soon["expirySource"], "credits");
+        assert_eq!(credit_soon["creditDaysLeft"], 0.9);
+        assert_eq!(credit_soon["expirySource"], "account");
     }
 
     /// 真实面板回归：账号 28 天到期、有效积分包最早 16.9 天；
@@ -673,10 +727,15 @@ mod tests {
             now,
         );
         assert_eq!(status["daysLeft"], 28.0);
+        assert_eq!(status["accountDaysLeft"], 28.0);
+        assert_eq!(status["accountDaysLeftCeil"], 28.0);
+        assert_eq!(status["effectiveDaysLeft"], 28.0);
+        assert!(!status["expiresAtText"].as_str().unwrap_or("").is_empty());
         assert_eq!(status["earliestExpiringDaysLeft"], 16.9);
+        assert_eq!(status["creditDaysLeft"], 16.9);
         assert_eq!(status["needsLogin"], false);
         assert_eq!(status["reason"], "");
-        assert_eq!(status["expirySource"], "credits");
+        assert_eq!(status["expirySource"], "account");
     }
 
     #[test]
@@ -695,8 +754,9 @@ mod tests {
             now,
         );
         assert_eq!(status["earliestExpiringDaysLeft"], 0.9);
-        assert_eq!(status["needsLogin"], true);
-        assert_eq!(status["reason"], "expiring");
+        assert_eq!(status["creditDaysLeft"], 0.9);
+        assert_eq!(status["needsLogin"], false);
+        assert_eq!(status["reason"], "");
     }
 
     #[test]
@@ -755,8 +815,27 @@ mod tests {
             now,
         );
         assert_eq!(mixed["earliestExpiringDaysLeft"], 0.9);
-        assert_eq!(mixed["needsLogin"], true);
-        assert_eq!(mixed["expirySource"], "credits");
+        assert_eq!(mixed["needsLogin"], false);
+        assert_eq!(mixed["expirySource"], "account");
+    }
+
+    #[test]
+    fn expires_in_string_is_only_a_fallback_when_epoch_is_missing() {
+        let now = 1_800_000_000i64;
+        let fallback = expiry_status_at(&json!({ "expiresIn": "28 days" }), now);
+        assert_eq!(fallback["accountDaysLeft"], 28.0);
+        assert_eq!(fallback["accountDaysLeftCeil"], 28.0);
+        assert_eq!(fallback["needsLogin"], false);
+        assert_eq!(fallback["expirySource"], "account");
+
+        let exact = expiry_status_at(
+            &json!({ "expiresAt": now + 20 * 86_400, "expiresIn": "28 days" }),
+            now,
+        );
+        assert_eq!(
+            exact["accountDaysLeft"], 20.0,
+            "有精确 expiresAt 时不使用字符串"
+        );
     }
 
     #[test]
