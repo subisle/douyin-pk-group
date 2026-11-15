@@ -238,7 +238,10 @@ async fn main() -> anyhow::Result<()> {
     });
     /* WorkBuddy 账号绑定：面板密码只在服务端；配置后「我的」页才会出现可用入口。 */
     match wbgateway::init() {
-        Some(wb) => tracing::info!(panel = wb.base(), "WorkBuddy 账号绑定已启用"),
+        Some(wb) => tracing::info!(
+            panel = wb.base(),
+            "WorkBuddy 网关已配置（是否开放以公开站点设置为准）"
+        ),
         None => tracing::info!(
             "WorkBuddy 账号绑定未配置（WORKBUDDY_PANEL_PASSWORD 为空）：绑定入口会提示联系管理员"
         ),

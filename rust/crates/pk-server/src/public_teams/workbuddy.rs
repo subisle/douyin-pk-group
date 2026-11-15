@@ -37,6 +37,11 @@ fn not_configured() -> ApiError {
     )
 }
 
+/// WorkBuddy 绑定总开关：后台公开设置打开，且服务端网关卡已配置。
+async fn workbuddy_binding_enabled(st: &ArcState) -> bool {
+    PublicSettings::load(st).await.workbuddy_enabled && crate::wbgateway::global().is_some()
+}
+
 fn upstream_error() -> ApiError {
     ApiError::with_json(
         StatusCode::BAD_GATEWAY,
@@ -333,38 +338,41 @@ pub async fn my_workbuddy_status(
     Query(query): Query<WbStatusQuery>,
 ) -> ApiResult {
     let (_, account_name) = wb_identity(&st, &headers).await?;
+    let enabled = workbuddy_binding_enabled(&st).await;
     let binding = crate::store::binding_for(&st, &account_name).await;
     let account = binding.as_ref().map(public_account);
     let mut account_status = Value::Null;
-    if let Some(binding) = binding.as_ref().filter(|_| !query.quick) {
-        let uid = binding
-            .get("uid")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-        let realm = binding
-            .get("realm")
-            .and_then(Value::as_str)
-            .unwrap_or("cn")
-            .to_string();
-        if let Some(wb) = crate::wbgateway::global() {
-            match wb.account_view(&uid, &realm).await {
-                Ok(Some(view)) => account_status = expiry_status(&view),
-                Ok(None) => {
-                    /* 本地有绑定、面板池里找不到：视为需要重新登录。 */
-                    account_status = json!({
-                        "checked": true,
-                        "found": false,
-                        "expired": true,
-                        "needsLogin": true,
-                        "reason": "missing",
-                        "shouldPrompt": false,
-                    });
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, uid = %uid, "WorkBuddy 账号到期状态查询失败");
-                    account_status = json!({ "checked": false, "shouldPrompt": false });
+    if enabled {
+        if let Some(binding) = binding.as_ref().filter(|_| !query.quick) {
+            let uid = binding
+                .get("uid")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            let realm = binding
+                .get("realm")
+                .and_then(Value::as_str)
+                .unwrap_or("cn")
+                .to_string();
+            if let Some(wb) = crate::wbgateway::global() {
+                match wb.account_view(&uid, &realm).await {
+                    Ok(Some(view)) => account_status = expiry_status(&view),
+                    Ok(None) => {
+                        /* 本地有绑定、面板池里找不到：视为需要重新登录。 */
+                        account_status = json!({
+                            "checked": true,
+                            "found": false,
+                            "expired": true,
+                            "needsLogin": true,
+                            "reason": "missing",
+                            "shouldPrompt": false,
+                        });
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, uid = %uid, "WorkBuddy 账号到期状态查询失败");
+                        account_status = json!({ "checked": false, "shouldPrompt": false });
+                    }
                 }
             }
         }
@@ -390,7 +398,7 @@ pub async fn my_workbuddy_status(
     account_status = with_should_prompt(account_status, should_prompt);
     Ok(Json(json!({
         "ok": true,
-        "enabled": crate::wbgateway::global().is_some(),
+        "enabled": enabled,
         "bound": account.is_some(),
         "account": account,
         "accountStatus": account_status,
@@ -408,6 +416,9 @@ pub async fn my_workbuddy_oauth_start(
     Json(body): Json<WbStartBody>,
 ) -> ApiResult {
     let (person_id, account_name) = wb_identity(&st, &headers).await?;
+    if !workbuddy_binding_enabled(&st).await {
+        return Err(not_configured());
+    }
     let ip = super::admin::client_ip_for_limit(addr, &headers);
     if !start_allow(&ip) {
         return Err(ApiError::with_status(
@@ -493,6 +504,9 @@ pub async fn my_workbuddy_oauth_poll(
     Json(body): Json<WbStateBody>,
 ) -> ApiResult {
     let (person_id, account_name) = wb_identity(&st, &headers).await?;
+    if !workbuddy_binding_enabled(&st).await {
+        return Err(not_configured());
+    }
     let ip = super::admin::client_ip_for_limit(addr, &headers);
     if !poll_allow(&ip) {
         return Err(ApiError::with_status(

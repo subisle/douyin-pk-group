@@ -750,6 +750,11 @@ function PublicSettingsCard() {
     ['lineageEnabled', '族谱页（男团）'],
   ]
 
+  /** WorkBuddy 绑定总开关（后端 public_settings.workbuddyEnabled，默认关闭） */
+  const WORKBUDDY_FLAGS: [string, string][] = [
+    ['workbuddyEnabled', 'WorkBuddy 账号绑定'],
+  ]
+
   /** 分组子页显隐：key = 赛事类型（与展示端子导航一一对应） */
   const GROUP_TYPE_FLAGS: [string, string][] = [
     ['初级争霸赛小组赛', '初级小组赛'],
@@ -1000,6 +1005,22 @@ function PublicSettingsCard() {
             <p className="hint">
               🏆 争霸赛冠军横幅已挪到独立的公告配置页（展示页公告条，可配多条）——这里不再单独设置，避免两处撞车。
             </p>
+          </div>
+
+          <h3 className="flag-title">WorkBuddy 绑定</h3>
+          <p className="hint" style={{ margin: '0 0 4px' }}>
+            默认关闭。开启后展示端登录会进入 WorkBuddy 绑定/续期流程；关闭时保留已有绑定，
+            但不再提示绑定或重新登录。服务端未配置 WorkBuddy 网关时，开关即使打开也不会生效。
+          </p>
+          <div className="flag-grid flag-grid-compact">
+            {WORKBUDDY_FLAGS.map(([key, label]) => (
+              <FlagRow
+                key={key}
+                label={label}
+                checked={settings.workbuddyEnabled === true}
+                onChange={(v) => toggle(key, v)}
+              />
+            ))}
           </div>
 
           <h3 className="flag-title">分组子页显隐（按赛事类型）</h3>

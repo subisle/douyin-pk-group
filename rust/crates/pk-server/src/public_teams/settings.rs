@@ -58,6 +58,10 @@ pub struct PublicSettings {
     /// 开 = 全站要登录（现状）
     #[serde(default = "default_true")]
     pub login_required: bool,
+    /// WorkBuddy 账号绑定总开关（2026-11-15 用户口径：默认关闭）。
+    /// 只有这里打开且服务端配置了 WorkBuddy 网关，展示端才会弹绑定/续期流程。
+    #[serde(default)]
+    pub workbuddy_enabled: bool,
 }
 
 pub(super) fn default_true() -> bool {
@@ -152,6 +156,13 @@ mod settings_tests {
 
     /// 管理端/展示端共用的 JSON 必须把三个字段开关都下发；关掉时必须明确为 false。
     #[test]
+    pub(super) fn workbuddy_binding_is_off_by_default() {
+        let s = PublicSettings::default();
+        assert!(!s.workbuddy_enabled);
+        assert_eq!(s.to_json()["workbuddyEnabled"], false);
+    }
+
+    #[test]
     pub(super) fn public_settings_json_has_metric_field_switches() {
         let mut s = PublicSettings::default();
         s.duration = false;
@@ -244,6 +255,7 @@ impl Default for PublicSettings {
             share_pct: default_share_pct(),
             fee_pct: 0.0,
             login_required: true,
+            workbuddy_enabled: false,
         }
     }
 }
@@ -352,6 +364,7 @@ impl PublicSettings {
             "sharePct": clamp_pct(self.share_pct, default_share_pct()),
             "feePct": self.fee_pct.clamp(0.0, 100.0),
             "loginRequired": self.login_required,
+            "workbuddyEnabled": self.workbuddy_enabled,
         })
     }
 }
@@ -422,6 +435,7 @@ pub async fn update_settings(State(st): State<ArcState>, Json(body): Json<Value>
     s.group_enabled = flag("groupEnabled", s.group_enabled);
     s.lineage_enabled = flag("lineageEnabled", s.lineage_enabled);
     s.login_required = flag("loginRequired", s.login_required);
+    s.workbuddy_enabled = flag("workbuddyEnabled", s.workbuddy_enabled);
     // 分组子页：传了 groupTypes（对象）就整包替换；没传保持原样。
     // 未知类型直接存下来也没关系 —— group_type_enabled 对没配置的类型按开处理，
     // 存 false 的才关。
