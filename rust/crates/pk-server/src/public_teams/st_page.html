@@ -1474,6 +1474,55 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .st-group-rule { margin-top:.5rem; padding:7px 10px; border-radius:10px;
   background:rgba(255,248,242,.82); border:1px solid rgba(255,217,201,.76);
   color:#92400E; font-size:11px; line-height:1.55; }
+/* 分组开放前：赛事预告 / 倒计时首屏。 */
+.st-group-notice { position:relative; overflow:hidden; isolation:isolate;
+  min-height:430px; padding:30px 20px 24px; border-radius:28px;
+  display:flex; flex-direction:column; align-items:center; justify-content:center;
+  text-align:center; color:#fff;
+  background:linear-gradient(145deg,#0B1220 0%,#111C31 48%,#2B1608 100%);
+  border:1px solid rgba(255,255,255,.12);
+  box-shadow:0 24px 70px rgba(15,23,42,.22), inset 0 1px 0 rgba(255,255,255,.10); }
+.st-group-notice::before { content:""; position:absolute; inset:0; z-index:-1;
+  background:radial-gradient(circle at 50% 30%,rgba(245,158,11,.24),transparent 34%),
+    radial-gradient(circle at 10% 90%,rgba(124,58,237,.24),transparent 35%); }
+.st-gn-orbit { position:absolute; z-index:-1; border:1px solid rgba(255,255,255,.10); border-radius:50%; }
+.st-gn-orbit.o1 { width:310px; height:310px; top:48%; left:50%; transform:translate(-50%,-50%); }
+.st-gn-orbit.o2 { width:440px; height:440px; top:48%; left:50%; transform:translate(-50%,-50%);
+  border-color:rgba(245,158,11,.10); }
+.st-gn-kicker { display:flex; align-items:center; gap:9px; font-size:10px; font-weight:800;
+  letter-spacing:.18em; color:rgba(255,255,255,.62); text-transform:uppercase; }
+.st-gn-kicker i { width:28px; height:1px; background:rgba(245,158,11,.72); }
+.st-gn-title { margin:14px 0 4px; font-size:25px; line-height:1.25; font-weight:900;
+  letter-spacing:.02em; color:#fff; }
+.st-gn-count { display:flex; align-items:baseline; justify-content:center; gap:8px; margin-top:8px; }
+.st-gn-count .num { font-size:88px; line-height:.95; font-weight:900; letter-spacing:-.06em;
+  color:#FBBF24; font-variant-numeric:tabular-nums; text-shadow:0 0 34px rgba(245,158,11,.32); }
+.st-gn-count .num.today { font-size:58px; letter-spacing:-.02em; }
+.st-gn-count .unit { font-size:18px; font-weight:800; color:rgba(255,255,255,.72); }
+.st-gn-count-label { margin-top:2px; font-size:12px; font-weight:700; letter-spacing:.24em;
+  color:rgba(255,255,255,.60); }
+.st-gn-done { margin-top:18px; font-size:34px; font-weight:900; color:#FBBF24; }
+.st-gn-count-label + .st-gn-date { margin-top:18px; }
+.st-gn-date { display:flex; align-items:center; gap:8px; margin-top:16px; padding:8px 14px;
+  border-radius:999px; background:rgba(255,255,255,.07); border:1px solid rgba(255,255,255,.10);
+  font-size:12px; color:rgba(255,255,255,.72); }
+.st-gn-date b { color:#fff; font-size:13px; }
+.st-gn-chips { display:flex; flex-wrap:wrap; justify-content:center; gap:8px; margin-top:14px; }
+.st-gn-chip { display:inline-flex; align-items:center; gap:5px; padding:8px 12px; border-radius:999px;
+  background:rgba(255,255,255,.075); border:1px solid rgba(255,255,255,.11);
+  color:rgba(255,255,255,.86); font-size:11px; font-weight:700; }
+.st-gn-chip .material-symbols-outlined { font-size:15px; color:#FBBF24; }
+.st-gn-foot { margin-top:20px; font-size:11px; color:rgba(255,255,255,.48); }
+@media (max-width:420px) {
+  .st-group-notice { min-height:390px; padding:24px 14px 20px; border-radius:22px; }
+  .st-gn-title { font-size:22px; }
+  .st-gn-count .num { font-size:72px; }
+  .st-gn-orbit.o2 { width:360px; height:360px; }
+}
+@media (prefers-reduced-motion:no-preference) {
+  .st-group-notice .st-gn-count .num { animation:stGroupNoticePulse 2.8s ease-in-out infinite; }
+  @keyframes stGroupNoticePulse { 0%,100%{opacity:1} 50%{opacity:.82} }
+}
 /* 打开分组页时短暂定焦本人所在组，随后自动失焦，不留下常驻描边。 */
 .st-group-focus { position:relative; z-index:2; border-radius:16px;
   animation:stGroupFocus 1.35s ease-out both; }
@@ -3212,6 +3261,7 @@ let curDate = null;      // 每日口径当前日期
 let curPeriod = null;    // 月/年口径当前周期
 let plans = [];          // 已上架分组方案（各类型独立互斥，每类型最多一场）
 let plansReady = false;  // plans 拉取完成后，分组路由只保留当前有已上架方案的赛事
+let groupNotice = null;  // 分组开放前的赛事公告（中旬争霸赛倒计时）
 let planByType = {};     // 分组子页 key → 正在看的方案 id（同类型多个上架时页内切换用）
 let searchOpen = false;
 let q = '';
@@ -6768,6 +6818,7 @@ async function loadPlans() {
   try {
     const d = await api('/api/public/plans');
     plans = d.items || [];
+    groupNotice = d.groupNotice || null;
     loaded = true;
   } catch (_) { plans = []; }
   /* 拉取失败时保留后台开关的完整导航，不能把临时网络故障误判成“没有方案”。 */
@@ -6797,9 +6848,13 @@ async function loadGroup(signal) {
     }
     groupAutoFocusPending = false;
     groupFocusIndex = -1;
-    $('view').innerHTML = '<div class="section tab-content-enter">' +
-      '<div class="empty"><span class="big">📺</span>' + esc(page.label) +
-      '暂未公布<br>上架后这里会自动出现</div></div>';
+    if (groupNotice && groupNotice.enabled !== false) {
+      $('view').innerHTML = groupNoticeHtml(groupNotice, page);
+    } else {
+      $('view').innerHTML = '<div class="section tab-content-enter">' +
+        '<div class="empty"><span class="big">📺</span>' + esc(page.label) +
+        '暂未公布<br>上架后这里会自动出现</div></div>';
+    }
     return;
   }
   if (!list.some(p => p.id === planByType[curGroup])) planByType[curGroup] = list[0].id;
@@ -6818,7 +6873,66 @@ async function loadGroup(signal) {
   }
 }
 
+function groupNoticeDate(v) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(v || '').trim());
+  if (!m) return '';
+  return (+m[2]) + '月' + (+m[3]) + '日';
+}
+
+function groupNoticeLeadText(minutes) {
+  const n = Math.max(0, Number(minutes) || 0);
+  if (n >= 60 && n % 60 === 0) return (n / 60) + '小时';
+  return n + '分钟';
+}
+
+/** 分组开放前的赛事公告：后端已把未到开放窗口的 groups/ranking 清空，
+    这里只负责把倒计时、接龙日期和开赛时间展示成一个稳定首屏。 */
+function groupNoticeHtml(n, page) {
+  n = n || {};
+  groupFocusIndex = -1;
+  const title = n.title || page.label || '中旬争霸赛';
+  const days = Math.max(0, Number(n.daysUntil) || 0);
+  const eventDay = groupNoticeDate(n.eventDate);
+  const signupDay = groupNoticeDate(n.signupDate);
+  const start = String(n.startTime || '08:15');
+  const ended = n.ended === true;
+  const revealLead = groupNoticeLeadText(n.revealLeadMinutes != null ? n.revealLeadMinutes : 120);
+  const signupText = n.signupStarted === true
+    ? '接龙已开始'
+    : (signupDay ? signupDay + '开始接龙' : '接龙即将开始');
+  const countdownMain = ended
+    ? '<div class="st-gn-done">本场已结束</div><div class="st-gn-count-label">等待下一场赛事</div>'
+    : days > 0
+      ? '<div class="st-gn-count"><span class="num">' + days + '</span><span class="unit">天</span></div>' +
+        '<div class="st-gn-count-label">倒计时</div>'
+      : '<div class="st-gn-count"><span class="num today">今天</span></div>' +
+        '<div class="st-gn-count-label">即将开赛</div>';
+  return '<div class="section tab-content-enter">' +
+    '<section class="st-group-notice" aria-label="' + esc(title + '赛事公告') + '">' +
+      '<div class="st-gn-orbit o1"></div><div class="st-gn-orbit o2"></div>' +
+      '<div class="st-gn-kicker"><span>PK GROUP</span><i></i><span>赛事预告</span></div>' +
+      '<h1 class="st-gn-title">' + esc(title) + '</h1>' +
+      countdownMain +
+      '<div class="st-gn-date">' +
+        (eventDay ? '<b>' + esc(eventDay) + '</b><span>' + esc(start) + ' 开赛</span>' : '') +
+      '</div>' +
+      '<div class="st-gn-chips">' +
+        '<span class="st-gn-chip"><span class="material-symbols-outlined">groups</span>' + esc(signupText) + '</span>' +
+        (eventDay ? '<span class="st-gn-chip"><span class="material-symbols-outlined">flag</span>' + esc(eventDay + ' ' + start) + '</span>' : '') +
+      '</div>' +
+      '<div class="st-gn-foot">' +
+        (ended ? '下一场分组公布后会在这里更新' : '分组名单将在开赛前 ' + esc(revealLead) + '开放') +
+      '</div>' +
+    '</section>' +
+  '</div>';
+}
+
 function groupHtml(d, page, list) {
+  const notice = d.groupNotice || groupNotice;
+  if (d.groupReveal === false || (notice && notice.revealed === false) ||
+      (notice && notice.ended === true)) {
+    return groupNoticeHtml(notice || {}, page);
+  }
   const showWave = !d.display || d.display.wave !== false;
   const showGroups = !d.display || d.display.groups !== false;
   const showGap = showWave && showGroups;
@@ -6835,7 +6949,8 @@ function groupHtml(d, page, list) {
   const sched = d.schedule || {};
   const nPlayers = d.counts ? d.counts.players : groups.reduce((s, g) => s + (g.count || 0), 0);
   const nGroups = d.counts ? d.counts.groups : groups.length;
-  const day = d.eventDate || (d.dates && d.dates[0]) || String(d.createdAt || '').slice(0, 10);
+  const day = (notice && notice.eventDate) || d.eventDate ||
+    (d.dates && d.dates[0]) || String(d.createdAt || '').slice(0, 10);
   const meta = [
     sched.start ? sched.start + ' 开赛' : '',
     '每组间隔 ' + (sched.intervalMin || 15) + ' 分钟',
@@ -10311,10 +10426,12 @@ function syncNav() {
      plans 还没回来时先按后台开关占位，回来后立即收口，避免闪一下就消失。 */
   const gt = s.groupTypes || {};
   const plannedTypes = new Set(plans.map(p => p.eventType || ''));
+  const noticeOn = !!(groupNotice && groupNotice.enabled !== false);
   document.querySelectorAll('#subnav button').forEach(b => {
     const page = GROUP_PAGES.find(p => p.key === b.dataset.g);
     const configured = groupOn && (!page || gt[page.type] !== false);
-    const hasPlan = !plansReady || !page || plannedTypes.has(page.type);
+    const hasPlan = !plansReady || !page || plannedTypes.has(page.type) ||
+      (noticeOn && plannedTypes.size === 0);
     const on = configured && hasPlan;
     b.disabled = !on;
     show(b, on);

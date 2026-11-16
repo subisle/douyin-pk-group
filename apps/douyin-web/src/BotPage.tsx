@@ -731,6 +731,20 @@ function PublicSettingsCard() {
     }
   }
 
+  async function saveSettingValue(key: string, value: string | number) {
+    try {
+      const d = await api('/api/admin/public/settings', {
+        method: 'POST',
+        body: JSON.stringify({ [key]: value }),
+      })
+      setSettings(d.settings)
+      setMsg('已保存')
+      setTimeout(() => setMsg(''), 1500)
+    } catch (e: any) {
+      setMsg(e.message ?? String(e))
+    }
+  }
+
   const FLAGS: [string, string][] = [
     ['maleEnabled', '男团链接显示'],
     ['femaleEnabled', '女团链接显示'],
@@ -950,6 +964,83 @@ function PublicSettingsCard() {
                 onChange={(v) => toggle(key, v)}
               />
             ))}
+          </div>
+
+          <h3 className="flag-title">分组赛事公告 / 倒计时</h3>
+          <p className="hint" style={{ margin: '0 0 8px' }}>
+            未到开赛窗口时，分组页不展示名单，只显示赛事公告。分组默认在开赛前 120 分钟开放；
+            赛事结束后自动收起，等待下一场配置。
+          </p>
+          <div className="flag-grid flag-grid-compact" style={{ marginBottom: 10 }}>
+            <FlagRow
+              label="启用分组赛事公告"
+              hint="关闭 = 沿用原分组显示逻辑"
+              checked={settings.groupNoticeEnabled === true}
+              onChange={(v) => toggle('groupNoticeEnabled', v)}
+            />
+          </div>
+          <div className="field-list">
+            <label className="field">
+              公告标题
+              <input
+                defaultValue={settings.groupNoticeTitle ?? ''}
+                placeholder="中旬争霸赛"
+                onBlur={(e) => {
+                  if (e.target.value !== (settings.groupNoticeTitle ?? '')) {
+                    saveSettingValue('groupNoticeTitle', e.target.value)
+                  }
+                }}
+              />
+            </label>
+            <label className="field">
+              开赛日期
+              <input
+                type="date"
+                defaultValue={settings.groupNoticeEventDate ?? ''}
+                onBlur={(e) => {
+                  if (e.target.value !== (settings.groupNoticeEventDate ?? '')) {
+                    saveSettingValue('groupNoticeEventDate', e.target.value)
+                  }
+                }}
+              />
+              <span className="field-hint">倒计时和分组开放窗口都以这个日期为准。</span>
+            </label>
+            <label className="field">
+              接龙开始日期
+              <input
+                type="date"
+                defaultValue={settings.groupNoticeSignupDate ?? ''}
+                onBlur={(e) => {
+                  if (e.target.value !== (settings.groupNoticeSignupDate ?? '')) {
+                    saveSettingValue('groupNoticeSignupDate', e.target.value)
+                  }
+                }}
+              />
+              <span className="field-hint">只用于展示「几月几日开始接龙」。</span>
+            </label>
+            <label className="field">
+              开赛时间
+              <input
+                type="time"
+                defaultValue={settings.groupNoticeStartTime ?? '08:15'}
+                onBlur={(e) => {
+                  if (e.target.value !== (settings.groupNoticeStartTime ?? '08:15')) {
+                    saveSettingValue('groupNoticeStartTime', e.target.value)
+                  }
+                }}
+              />
+            </label>
+            <label className="field">
+              提前开放分组（分钟）
+              <input
+                type="number"
+                min={0}
+                max={1440}
+                defaultValue={settings.groupNoticeRevealLeadMinutes ?? 120}
+                onBlur={(e) => saveSettingValue('groupNoticeRevealLeadMinutes', Number(e.target.value) || 0)}
+              />
+              <span className="field-hint">例如 120 = 开赛前 2 小时才显示真实分组。</span>
+            </label>
           </div>
 
           <h3 className="flag-title">🚩 流动小红旗条（每日推送图头部）</h3>

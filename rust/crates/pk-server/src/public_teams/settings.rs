@@ -62,10 +62,35 @@ pub struct PublicSettings {
     /// 只有这里打开且服务端配置了 WorkBuddy 网关，展示端才会弹绑定/续期流程。
     #[serde(default)]
     pub workbuddy_enabled: bool,
+    /// 分组开放前的赛事公告（2026-11-17 用户口径）：PK 未到开赛窗口时，
+    /// 分组页不展示名单，只展示「中旬争霸赛倒计时 X 天」。
+    #[serde(default)]
+    pub group_notice_enabled: bool,
+    #[serde(default)]
+    pub group_notice_title: String,
+    /// 赛事日期 YYYY-MM-DD；非空且合法才启用倒计时窗口。
+    #[serde(default)]
+    pub group_notice_event_date: String,
+    /// 接龙开始日期 YYYY-MM-DD；仅用于公告展示。
+    #[serde(default)]
+    pub group_notice_signup_date: String,
+    #[serde(default = "default_group_notice_start_time")]
+    pub group_notice_start_time: String,
+    /// 开赛前多少分钟开放分组名单（默认 120 分钟）。
+    #[serde(default = "default_group_notice_reveal_lead_minutes")]
+    pub group_notice_reveal_lead_minutes: i64,
 }
 
 pub(super) fn default_true() -> bool {
     true
+}
+
+pub(super) fn default_group_notice_start_time() -> String {
+    "08:15".to_string()
+}
+
+pub(super) fn default_group_notice_reveal_lead_minutes() -> i64 {
+    120
 }
 
 /// 分成比例缺省 35%（历史硬编码值；老配置没有该键时保持原行为）。
@@ -90,6 +115,23 @@ pub(crate) fn clamp_fee_pct(v: f64, fallback: f64) -> f64 {
     } else {
         fallback
     }
+}
+
+fn valid_notice_date(s: &str) -> bool {
+    chrono::NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d").is_ok()
+}
+
+fn valid_notice_clock(s: &str) -> bool {
+    let b = s.trim().as_bytes();
+    if b.len() != 5 || b[2] != b':' {
+        return false;
+    }
+    if !b[..2].iter().all(u8::is_ascii_digit) || !b[3..].iter().all(u8::is_ascii_digit) {
+        return false;
+    }
+    let hh = (b[0] - b'0') * 10 + (b[1] - b'0');
+    let mm = (b[3] - b'0') * 10 + (b[4] - b'0');
+    hh < 24 && mm < 60
 }
 
 /// 分组页/子页显隐的过滤口径（public::plans 用）：页关 → 全部不发；
@@ -160,6 +202,21 @@ mod settings_tests {
         let s = PublicSettings::default();
         assert!(!s.workbuddy_enabled);
         assert_eq!(s.to_json()["workbuddyEnabled"], false);
+    }
+
+    #[test]
+    pub(super) fn group_notice_defaults_and_validation_are_safe() {
+        let s = PublicSettings::default();
+        assert!(!s.group_notice_enabled);
+        assert_eq!(s.group_notice_start_time, "08:15");
+        assert_eq!(s.group_notice_reveal_lead_minutes, 120);
+        assert_eq!(s.to_json()["groupNoticeEnabled"], false);
+        assert!(valid_notice_date("2026-11-20"));
+        assert!(!valid_notice_date("2026-02-30"));
+        assert!(valid_notice_clock("08:15"));
+        assert!(valid_notice_clock("23:59"));
+        assert!(!valid_notice_clock("24:00"));
+        assert!(!valid_notice_clock("8:15"));
     }
 
     #[test]
@@ -256,6 +313,12 @@ impl Default for PublicSettings {
             fee_pct: 0.0,
             login_required: true,
             workbuddy_enabled: false,
+            group_notice_enabled: false,
+            group_notice_title: String::new(),
+            group_notice_event_date: String::new(),
+            group_notice_signup_date: String::new(),
+            group_notice_start_time: default_group_notice_start_time(),
+            group_notice_reveal_lead_minutes: default_group_notice_reveal_lead_minutes(),
         }
     }
 }
@@ -365,6 +428,12 @@ impl PublicSettings {
             "feePct": self.fee_pct.clamp(0.0, 100.0),
             "loginRequired": self.login_required,
             "workbuddyEnabled": self.workbuddy_enabled,
+            "groupNoticeEnabled": self.group_notice_enabled,
+            "groupNoticeTitle": self.group_notice_title,
+            "groupNoticeEventDate": self.group_notice_event_date,
+            "groupNoticeSignupDate": self.group_notice_signup_date,
+            "groupNoticeStartTime": self.group_notice_start_time,
+            "groupNoticeRevealLeadMinutes": self.group_notice_reveal_lead_minutes,
         })
     }
 }
@@ -436,6 +505,36 @@ pub async fn update_settings(State(st): State<ArcState>, Json(body): Json<Value>
     s.lineage_enabled = flag("lineageEnabled", s.lineage_enabled);
     s.login_required = flag("loginRequired", s.login_required);
     s.workbuddy_enabled = flag("workbuddyEnabled", s.workbuddy_enabled);
+    s.group_notice_enabled = flag("groupNoticeEnabled", s.group_notice_enabled);
+    if let Some(v) = body.get("groupNoticeTitle").and_then(|v| v.as_str()) {
+        s.group_notice_title = v.trim().chars().take(80).collect();
+    }
+    if let Some(v) = body.get("groupNoticeEventDate").and_then(|v| v.as_str()) {
+        let v = v.trim();
+        if !v.is_empty() && !valid_notice_date(v) {
+            return Err(anyhow::anyhow!("groupNoticeEventDate 必须是 YYYY-MM-DD").into());
+        }
+        s.group_notice_event_date = v.to_string();
+    }
+    if let Some(v) = body.get("groupNoticeSignupDate").and_then(|v| v.as_str()) {
+        let v = v.trim();
+        if !v.is_empty() && !valid_notice_date(v) {
+            return Err(anyhow::anyhow!("groupNoticeSignupDate 必须是 YYYY-MM-DD").into());
+        }
+        s.group_notice_signup_date = v.to_string();
+    }
+    if let Some(v) = body.get("groupNoticeStartTime").and_then(|v| v.as_str()) {
+        if !valid_notice_clock(v) {
+            return Err(anyhow::anyhow!("groupNoticeStartTime 必须是 HH:MM").into());
+        }
+        s.group_notice_start_time = v.trim().to_string();
+    }
+    if let Some(v) = body
+        .get("groupNoticeRevealLeadMinutes")
+        .and_then(|v| v.as_i64())
+    {
+        s.group_notice_reveal_lead_minutes = v.clamp(0, 1440);
+    }
     // 分组子页：传了 groupTypes（对象）就整包替换；没传保持原样。
     // 未知类型直接存下来也没关系 —— group_type_enabled 对没配置的类型按开处理，
     // 存 false 的才关。

@@ -145,6 +145,79 @@ struct DisplayConfig {
     groups: bool,
 }
 
+/// 分组开放前的赛事公告状态。时间是固定 +08:00，避免生产容器时区不同导致倒计时错一天。
+struct GroupNoticeView {
+    json: serde_json::Value,
+    revealed: bool,
+}
+
+fn group_notice_view_at(
+    s: &crate::public_teams::PublicSettings,
+    now: chrono::DateTime<chrono::FixedOffset>,
+) -> Option<GroupNoticeView> {
+    if !s.group_notice_enabled {
+        return None;
+    }
+    let event_date = chrono::NaiveDate::parse_from_str(
+        s.group_notice_event_date.trim(),
+        "%Y-%m-%d",
+    )
+    .ok()?;
+    let start_time = chrono::NaiveTime::parse_from_str(
+        s.group_notice_start_time.trim(),
+        "%H:%M",
+    )
+    .unwrap_or_else(|_| chrono::NaiveTime::from_hms_opt(8, 15, 0).unwrap());
+    let event_start = event_date.and_time(start_time);
+    let lead = s.group_notice_reveal_lead_minutes.clamp(0, 1440);
+    let reveal_at = event_start - chrono::Duration::minutes(lead);
+    let event_end = event_date
+        .succ_opt()
+        .and_then(|d| d.and_hms_opt(0, 0, 0))
+        .unwrap_or(event_start);
+    let local_now = now.naive_local();
+    let revealed = local_now >= reveal_at && local_now < event_end;
+    let ended = local_now >= event_end;
+    let days_until = (event_date - now.date_naive()).num_days().max(0);
+    let signup_date = chrono::NaiveDate::parse_from_str(
+        s.group_notice_signup_date.trim(),
+        "%Y-%m-%d",
+    )
+    .ok();
+    let title = if s.group_notice_title.trim().is_empty() {
+        "分组赛事公告".to_string()
+    } else {
+        s.group_notice_title.trim().to_string()
+    };
+    let offset = now.offset().to_string();
+    Some(GroupNoticeView {
+        revealed,
+        json: json!({
+            "enabled": true,
+            "title": title,
+            "eventDate": event_date.format("%Y-%m-%d").to_string(),
+            "signupDate": signup_date.map(|d| d.format("%Y-%m-%d").to_string()),
+            "signupStarted": signup_date.map(|d| now.date_naive() >= d).unwrap_or(false),
+            "startTime": start_time.format("%H:%M").to_string(),
+            "revealLeadMinutes": lead,
+            "revealAt": format!("{}+08:00", reveal_at.format("%Y-%m-%dT%H:%M:%S")),
+            "eventStartAt": format!("{}+08:00", event_start.format("%Y-%m-%dT%H:%M:%S")),
+            "daysUntil": days_until,
+            "revealed": revealed,
+            "ended": ended,
+            "status": if revealed { "revealed" } else if ended { "ended" } else { "countdown" },
+            "timezone": offset,
+        }),
+    })
+}
+
+fn group_notice_view(
+    s: &crate::public_teams::PublicSettings,
+) -> Option<GroupNoticeView> {
+    let offset = chrono::FixedOffset::east_opt(8 * 3600)?;
+    group_notice_view_at(s, chrono::Utc::now().with_timezone(&offset))
+}
+
 impl Default for DisplayConfig {
     fn default() -> Self {
         Self {
@@ -329,7 +402,7 @@ pub async fn plan(
     /* ---- 2b. 每日明细：按日期切换分组明细 ----
     管理端关掉「每日音浪」或「音浪数值」时直接省略（每日明细本质也是音浪数据）。
     取不到就省略，前端退回纯列表展示，不留空壳。 */
-    let (trend, daily) = if display.daily && display.wave && display.groups {
+    let (mut trend, mut daily) = if display.daily && display.wave && display.groups {
         match repos::get_wave_series(&st, false, None).await {
             Ok(series) if !series.dates.is_empty() => {
                 let dates = series.dates;
@@ -451,8 +524,12 @@ pub async fn plan(
         Vec::new()
     };
 
-    let count_groups = groups.len();
-    let count_players = groups.iter().map(|g| g.players.len()).sum::<usize>();
+    // 比赛日 = 最新采集日就是今天（+08:00）。没有赛事公告时沿用旧口径；
+    // 配置了公告后，以「开赛前 N 分钟 ~ 赛事当天结束」作为唯一放榜窗口。
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let match_day = dates.first().map(|d| d == &today).unwrap_or(false);
+    let notice_view = group_notice_view(&settings);
+    let group_reveal = notice_view.as_ref().map(|n| n.revealed).unwrap_or(match_day);
     /* 展示开关必须落在接口层：关闭总排行时连每人的全场 rank 一起抹掉；
     关闭公开名单时连 groups / ranking / 每日明细一起不下发，不能只靠前端隐藏。 */
     if !display.ranking {
@@ -467,11 +544,14 @@ pub async fn plan(
         groups.clear();
         ranking.clear();
     }
-
-    // 比赛日 = 最新采集日就是今天（+08:00）。分组页只在比赛日展示——
-    // 非比赛日没有对局，名单挂出去只会让人困惑；这是「后端支持显示和不显示」的那一刀。
-    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-    let match_day = dates.first().map(|d| d == &today).unwrap_or(false);
+    if !group_reveal {
+        groups.clear();
+        ranking.clear();
+        trend = None;
+        daily = None;
+    }
+    let count_groups = groups.len();
+    let count_players = groups.iter().map(|g| g.players.len()).sum::<usize>();
 
     Json(json!({
         "id": row.id,
@@ -485,6 +565,8 @@ pub async fn plan(
         "schedule": { "start": start, "intervalMin": interval },
         "display": display,
         "matchDay": match_day,
+        "groupReveal": group_reveal,
+        "groupNotice": notice_view.map(|n| n.json),
         "createdAt": row.created_at,
         "dates": dates,
         "stale": stale,
@@ -518,7 +600,7 @@ pub async fn plans(
     };
     let s = crate::public_teams::PublicSettings::load(&st).await;
     if team == "female" || s.group_enabled == false {
-        return Json(json!({ "items": [] })).into_response();
+        return Json(json!({ "items": [], "groupNotice": null })).into_response();
     }
     let items: Vec<_> = store::list_plans(&st)
         .await
@@ -536,12 +618,59 @@ pub async fn plans(
             })
         })
         .collect();
-    Json(json!({ "items": items })).into_response()
+    let group_notice = group_notice_view(&s).map(|n| n.json);
+    Json(json!({ "items": items, "groupNotice": group_notice })).into_response()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn notice_cfg() -> crate::public_teams::PublicSettings {
+        crate::public_teams::PublicSettings {
+            group_notice_enabled: true,
+            group_notice_title: "中旬争霸赛".into(),
+            group_notice_event_date: "2026-11-20".into(),
+            group_notice_signup_date: "2026-11-18".into(),
+            group_notice_start_time: "08:15".into(),
+            group_notice_reveal_lead_minutes: 120,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn group_notice_counts_down_and_opens_two_hours_before_start() {
+        let cfg = notice_cfg();
+        let offset = chrono::FixedOffset::east_opt(8 * 3600).unwrap();
+        let before = chrono::NaiveDate::from_ymd_opt(2026, 11, 17)
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap()
+            .and_local_timezone(offset)
+            .unwrap();
+        let view = group_notice_view_at(&cfg, before).unwrap();
+        assert!(!view.revealed);
+        assert_eq!(view.json["daysUntil"], 3);
+        assert_eq!(view.json["status"], "countdown");
+
+        let reveal = chrono::NaiveDate::from_ymd_opt(2026, 11, 20)
+            .unwrap()
+            .and_hms_opt(6, 15, 0)
+            .unwrap()
+            .and_local_timezone(offset)
+            .unwrap();
+        assert!(group_notice_view_at(&cfg, reveal).unwrap().revealed);
+
+        let ended = chrono::NaiveDate::from_ymd_opt(2026, 11, 21)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_local_timezone(offset)
+            .unwrap();
+        let ended = group_notice_view_at(&cfg, ended).unwrap();
+        assert!(!ended.revealed);
+        assert_eq!(ended.json["status"], "ended");
+    }
 
     fn player(name: &str, wave: f64, order: usize) -> PublicPlayer {
         PublicPlayer {
