@@ -79,7 +79,7 @@ const NOTE_DEREGISTERED: &str = "deregistered";
 const NOTE_NOT_FOUND: &str = "not_found";
 
 pub const USAGE: &str =
-    "用法：pk-server sync-avatars [--dry-run] [--force] [--limit N] [--days N] [--delay-ms N]
+    "用法：pk-server sync-avatars [--dry-run] [--force] [--limit N] [--days N] [--delay-ms N] [--person-id ID]
 
   把在册主播的抖音头像抓下来，图和元数据留在本地 person_avatar 表
   （展示端「主播列表」经 /api/public/avatars/<person_id> 读它）。
@@ -90,6 +90,7 @@ pub const USAGE: &str =
   --dry-run       只探测打印，不写库
   --force         忽略新鲜度，全部重抓一遍
   --limit N       最多处理 N 个候选主播（调试用）
+  --person-id ID  只同步指定 person_id（补单个人头像用）
   --days N        新鲜度天数，默认 7
   --delay-ms N    每次请求之间的间隔，默认 600ms（别打快，接口/CDN 会限流）
   -h, --help      打印本说明";
@@ -107,6 +108,8 @@ pub struct Options {
     pub delay: Duration,
     /// 新鲜度天数：`synced_at` 超过它就重抓
     pub days: i64,
+    /// 只处理指定 person_id（手工补单个人头像）
+    pub person_id: Option<u64>,
 }
 
 impl Default for Options {
@@ -117,6 +120,7 @@ impl Default for Options {
             limit: None,
             delay: Duration::from_millis(600),
             days: 7,
+            person_id: None,
         }
     }
 }
@@ -164,6 +168,16 @@ impl Options {
                         bail!("--days 不能为负，收到 {v}");
                     }
                     o.days = d;
+                }
+                "--person-id" => {
+                    let v = take_value("--person-id")?;
+                    let id: u64 = v
+                        .parse()
+                        .map_err(|_| anyhow::anyhow!("--person-id 需要正整数，收到 {v}"))?;
+                    if id == 0 {
+                        bail!("--person-id 必须大于 0");
+                    }
+                    o.person_id = Some(id);
                 }
                 // 帮助走 `Err` 通道：main.rs 统一打印后退出，和现有子命令口径一致
                 "-h" | "--help" => bail!("{USAGE}"),
@@ -552,6 +566,9 @@ async fn load_scope(pool: &PgPool, opt: &Options) -> anyhow::Result<Scope> {
             )
         })
         .collect();
+    if let Some(person_id) = opt.person_id {
+        people.retain(|(p, _)| p.person_id == person_id);
+    }
 
     /* 一个人的多个号都登记在 account 里（主号 is_primary=1）。这里一次性读全量
     （百来行），按人分组，省得每人再查一次库；排序即探测顺序。 */
@@ -959,6 +976,7 @@ mod tests {
         assert!(!o.dry_run && !o.force && o.limit.is_none());
         assert_eq!(o.days, 7);
         assert_eq!(o.delay, Duration::from_millis(600));
+        assert_eq!(o.person_id, None);
     }
 
     #[test]
@@ -972,6 +990,7 @@ mod tests {
                 "--days",
                 "1",
                 "--force",
+                "--person-id=185",
             ]
             .iter()
             .map(|s| s.to_string()),
@@ -981,6 +1000,7 @@ mod tests {
         assert_eq!(o.limit, Some(3));
         assert_eq!(o.days, 1);
         assert_eq!(o.delay, Duration::from_millis(100));
+        assert_eq!(o.person_id, Some(185));
     }
 
     #[test]
@@ -990,6 +1010,8 @@ mod tests {
         assert!(Options::from_args(["--limit=abc".to_string()]).is_err());
         assert!(Options::from_args(["--days=-1".to_string()]).is_err());
         assert!(Options::from_args(["--days".to_string()]).is_err());
+        assert!(Options::from_args(["--person-id=0".to_string()]).is_err());
+        assert!(Options::from_args(["--person-id=abc".to_string()]).is_err());
     }
 
     // ===== T8（P2-1）：多号结论收敛，纯函数，不碰网络/DB =====

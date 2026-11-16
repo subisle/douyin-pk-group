@@ -337,7 +337,12 @@ pub async fn load_anchors(
                 Some(h) if !h.trim().is_empty() => {
                     Some(format!("/api/public/avatars/{person_id}?v={}", h.trim()))
                 }
-                _ => legacy.filter(|u| !u.trim().is_empty()),
+                _ => legacy.filter(|u| !u.trim().is_empty()).or_else(|| {
+                    Some(crate::public_teams::avatar_url(
+                        person_id.parse().unwrap_or(0),
+                        crate::public_teams::FALLBACK_AVATAR_HASH,
+                    ))
+                }),
             }
         };
         brief.push(AnchorBrief {

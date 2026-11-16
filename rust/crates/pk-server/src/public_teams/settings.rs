@@ -1314,17 +1314,22 @@ pub async fn update_announcement(State(st): State<ArcState>, Json(body): Json<Va
 
 /* ---------------- 三甲席位选人（2026-10-16 用户口径「直接选择主播 x 月成绩」） ---------------- */
 
-/// person_id → 头像 hash 表（seat_options 用）：只读 `person_avatar`（image 非空行），
-/// 与 avatars.rs 的 404 语义同口径 —— 表缺失 / 查询失败一律空 map（头像缺失 =
-/// 前端回落首字色块，绝不把榜单打挂）。
+/// person_id → 头像 hash 表（seat_options 用）：真实图用内容 hash，无图用 fallback 版本。
+/// 表缺失 / 查询失败一律空 map；默认头像端点仍可作为前端最后兜底。
 async fn avatar_hash_map(st: &AppState) -> std::collections::HashMap<u64, String> {
-    let sql = "SELECT person_id, hash FROM person_avatar WHERE image IS NOT NULL";
-    match crate::pgrs::query(&st.pools, "LOCAL", sql).await {
+    let sql = format!(
+        "SELECT p.id AS person_id, COALESCE(NULLIF(pa.hash, ''), '{}') AS hash \
+           FROM person p LEFT JOIN person_avatar pa \
+             ON pa.person_id = p.id AND pa.image IS NOT NULL \
+          WHERE p.deleted_at IS NULL AND (p.status IS NULL OR p.status <> 'left')",
+        super::avatars::FALLBACK_AVATAR_HASH
+    );
+    match crate::pgrs::query(&st.pools, "LOCAL", &sql).await {
         Ok(rows) => rows
             .iter()
             .filter_map(|r| {
                 let pid = r.try_get::<i64, _>("person_id").ok()?.max(0) as u64;
-                let hash = r.try_get::<Option<String>, _>("hash").ok().flatten()?;
+                let hash = r.try_get::<String, _>("hash").ok()?;
                 Some((pid, hash))
             })
             .collect(),
@@ -1347,10 +1352,15 @@ async fn fill_empty_avatars(st: &AppState, items: &mut [AnnounceItem]) {
         return;
     }
     // name → 同源头像地址。只取「有本地留存图」的真人；同名取其一（公告条按姓名认人）。
-    let sql = "SELECT p.name AS name, p.id AS person_id, pa.hash AS hash \
-               FROM person p JOIN person_avatar pa ON pa.person_id = p.id \
-               WHERE pa.image IS NOT NULL AND p.deleted_at IS NULL";
-    let Ok(rows) = crate::pgrs::query(&st.pools, "LOCAL", sql).await else {
+    let sql = format!(
+        "SELECT p.name AS name, p.id AS person_id, \
+                COALESCE(NULLIF(pa.hash, ''), '{}') AS hash \
+           FROM person p LEFT JOIN person_avatar pa \
+             ON pa.person_id = p.id AND pa.image IS NOT NULL \
+          WHERE p.deleted_at IS NULL AND (p.status IS NULL OR p.status <> 'left')",
+        super::avatars::FALLBACK_AVATAR_HASH
+    );
+    let Ok(rows) = crate::pgrs::query(&st.pools, "LOCAL", &sql).await else {
         return;
     };
     let mut by_name: std::collections::HashMap<String, String> = std::collections::HashMap::new();
@@ -1358,14 +1368,10 @@ async fn fill_empty_avatars(st: &AppState, items: &mut [AnnounceItem]) {
         let (Ok(name), Ok(pid), Ok(hash)) = (
             r.try_get::<String, _>("name"),
             r.try_get::<i64, _>("person_id"),
-            r.try_get::<Option<String>, _>("hash"),
+            r.try_get::<String, _>("hash"),
         ) else {
             continue;
         };
-        let Some(hash) = hash else { continue };
-        if hash.trim().is_empty() {
-            continue;
-        }
         by_name
             .entry(name)
             .or_insert_with(|| super::site::avatar_url(pid.max(0) as u64, hash.trim()));

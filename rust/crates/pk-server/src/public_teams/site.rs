@@ -203,14 +203,20 @@ pub async fn public_announcements(State(st): State<ArcState>) -> ApiResult {
 /// 同源下发（跨域抖音 CDN 一旦改策略/封 Referer，页面就有本地兜底），`?v=<hash>` 用来破缓存 ——
 /// 图一变 hash 就变、URL 就变，所以这个端点是 immutable 长缓存（见 avatars.rs 头注释）。
 ///
-/// 只有主播列表里的人有真头像：没同步过 / 账号已注销 / 没登记抖音号的人不入 map，
-/// 前端回落姓名首字色块。`image IS NULL` 的人本就不该出现在这里（下发端也是 404）。
+/// 每个在册主播都会入 map：有真实留存图用真实 hash；没同步过 / 账号已注销 /
+/// 没登记抖音号的人使用 `fallback-v2`，由头像端点生成稳定的品牌默认头像。
 /// hash 为空（历史行 / 同步异常）时退化成不带 `?v=` 的地址：仍然出图，只是失去换图破缓存。
 ///
 /// 装饰性字段：表不存在（迁移没跑）或查询失败只 debug + 空 map，不让榜单整体 500。
 async fn avatar_map(st: &AppState, source: &str) -> HashMap<u64, String> {
-    let sql = "SELECT person_id, hash FROM person_avatar WHERE image IS NOT NULL";
-    match pgrs::query(&st.pools, source, sql).await {
+    let sql = format!(
+        "SELECT p.id AS person_id, COALESCE(NULLIF(pa.hash, ''), '{}') AS hash \
+           FROM person p LEFT JOIN person_avatar pa \
+             ON pa.person_id = p.id AND pa.image IS NOT NULL \
+          WHERE p.deleted_at IS NULL AND (p.status IS NULL OR p.status <> 'left')",
+        super::avatars::FALLBACK_AVATAR_HASH
+    );
+    match pgrs::query(&st.pools, source, &sql).await {
         Ok(rows) => rows.iter().fold(HashMap::new(), |mut m, r| {
             let pid = row_pid(r, "person_id");
             if pid == 0 {

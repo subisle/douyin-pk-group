@@ -28,13 +28,13 @@ function NameBlock({ s }: { s: any }) {
   )
 }
 
-/** 主播头像：hasAvatar=true（person_avatar 表有本地留存图）时请求同源头像端点；
- *  avatarHash 作缓存破除（?v=hash），hash 为空但有图时不带 ?v=。
- *  字段缺失（旧后端）等同无图。404/加载失败时记下失败 URL 落回首字色块 ——
+/** 主播头像：只要有 personId 就请求同源头像端点。后端有真实留存图返回图片，
+ *  没有真实图返回品牌默认 SVG；avatarHash 作缓存破除（?v=hash）。
+ *  加载失败时记下失败 URL 落回首字色块 ——
  *  存 URL 而不是布尔值，hash 变化（头像更新）后能自动再试，不用人为重置。 */
 function StreamerAvatar({ s }: { s: any }) {
   const [failedSrc, setFailedSrc] = useState<string | null>(null)
-  const src = s.hasAvatar
+  const src = Number(s.personId) > 0
     ? `/api/public/avatars/${s.personId}${s.avatarHash ? `?v=${s.avatarHash}` : ''}`
     : null
   const showImg = !!src && src !== failedSrc
@@ -45,7 +45,7 @@ function StreamerAvatar({ s }: { s: any }) {
           className="avatar-img"
           src={src}
           alt={String(s.name ?? '')}
-          title="抖音头像（本地留存）"
+          title="主播头像"
           loading="lazy"
           width={32}
           height={32}
