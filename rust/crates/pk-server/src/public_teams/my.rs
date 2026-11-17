@@ -776,6 +776,69 @@ pub async fn my_profile_bind(
     Ok(Json(v))
 }
 
+/// POST /api/public/my/bind {name}：用户自助绑定主播（按**艺名**，只允许一次）。
+///
+/// 2026-11-15 用户口径：`bound=0` 的账号登录后进入绑定页输入艺名即可绑定；前端
+/// 加「再次确定」二次确认；绑定后**不支持解绑/改绑**，需联系管理员在后端处理。
+/// 身份只认 `X-My-Token`；艺名 → 唯一在职主播（`store::my_account_bind_by_name`），
+/// 成功后吊销旧 token 并换发新身份 token（账号名被改写为主播姓名）。
+pub async fn my_bind(
+    State(st): State<ArcState>,
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
+    axum::Json(body): axum::Json<Value>,
+) -> ApiResult {
+    if !public_write_allow(&client_ip_for_limit(addr, &headers)) {
+        return Err(api_err(
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            "RATE_LIMITED",
+            "尝试太频繁，请稍后再试",
+        ));
+    }
+    let Some(token) = header_my_token(&headers) else {
+        return Err(ApiError::auth("登录已过期，请重新登录"));
+    };
+    let mut ident = my_token_take(&token);
+    if ident.is_none() {
+        ident = super::admin::my_token_restore(&st, &token).await;
+    }
+    let Some((_person_id, _team, account_name)) = ident else {
+        return Err(ApiError::auth("登录已过期，请重新登录"));
+    };
+    let name = body
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    if name.is_empty() {
+        return Err(api_err(
+            axum::http::StatusCode::BAD_REQUEST,
+            "INVALID_INPUT",
+            "请输入艺名",
+        ));
+    }
+    let bound = crate::store::my_account_bind_by_name(&st, &account_name, name)
+        .await
+        .map_err(|e| store_err(e, bind_code))?;
+    // 绑定成功 → 账号名/团别/主播 id 都可能变了，旧 token 全部吊销，换发新身份
+    my_tokens_revoke(&account_name);
+    my_tokens_revoke(&bound.name);
+    let pid = bound.person_id.max(0) as u64;
+    let new_token = my_token_put(pid, bound.team.clone(), bound.name.clone());
+    let view_team = crate::store::my_account_view_team(&st, &bound.name).await;
+    let mut v = login_ok(&st, pid, &bound.name, &bound.team, &new_token).await;
+    v["needBind"] = json!(false);
+    v["bound"] = json!(true);
+    v["switchable"] = json!(view_team.switchable());
+    tracing::info!(
+        account = %account_name,
+        artist = %bound.name,
+        person_id = bound.person_id,
+        "展示端账号自助绑定主播成功（旧 token 已吊销并换发）"
+    );
+    Ok(Json(v))
+}
+
 /// 展示端写接口限流：每 IP 每分钟 5 次。
 ///
 /// 本函数只给**已登录**写口挡脚本刷；verify / my_login 使用 auth.rs 的
@@ -1348,5 +1411,718 @@ mod contract_tests {
         assert_eq!(suppressed["ok"], true);
         assert_eq!(suppressed["emailMask"], "");
         assert!(suppressed.get("tempPass").is_none());
+    }
+}
+
+/* ==================== 微信小程序登录（2026-11-15） ==================== */
+
+/// 微信小程序 AppID（固定为当前小程序；可被环境变量覆盖）。
+const WX_MINI_APP_ID_DEFAULT: &str = "wx18547d0bf8aa8bd7";
+
+/// 待绑定 openid 的短时暂存：wxlogin 拿到 openid 但账号未绑定时发一个 wxToken，
+/// 前端拿 wxToken + 艺名走 wxbind 完成绑定。5 分钟过期。
+static PENDING_WX_OPENID: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, (String, std::time::Instant)>>,
+> = std::sync::OnceLock::new();
+
+fn pending_wx_openid_map(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, (String, std::time::Instant)>> {
+    PENDING_WX_OPENID.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn pending_wx_put(openid: &str) -> String {
+    let token = format!(
+        "wxt{}{}",
+        crate::random::random_code(16, b"0123456789abcdef"),
+        crate::random::random_code(4, b"0123456789")
+    );
+    let mut m = pending_wx_openid_map().lock().unwrap();
+    m.insert(
+        token.clone(),
+        (openid.to_string(), std::time::Instant::now()),
+    );
+    token
+}
+
+/// 只读查看待绑定 openid。密码输错 / 绑定失败时保留 wxToken，
+/// 用户可以直接重试，不必重新走一次 `wx.login`。
+fn pending_wx_get(token: &str) -> Option<String> {
+    let mut m = pending_wx_openid_map().lock().unwrap();
+    m.retain(|_, (_, at)| at.elapsed().as_secs() < 300);
+    m.get(token).map(|(oid, _)| oid.clone())
+}
+
+/// 绑定成功后才消费 wxToken，保证一次性且不会因失败把用户卡在重新扫码。
+fn pending_wx_take(token: &str) -> Option<String> {
+    let mut m = pending_wx_openid_map().lock().unwrap();
+    m.retain(|_, (_, at)| at.elapsed().as_secs() < 300);
+    m.remove(token).map(|(oid, _)| oid)
+}
+
+fn wx_mini_http() -> &'static reqwest::Client {
+    static HTTP: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    HTTP.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(12))
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .build()
+            .expect("微信 jscode2session HTTP client")
+    })
+}
+
+fn wx_mini_app_id() -> String {
+    std::env::var("WX_MINI_APP_ID").unwrap_or_else(|_| WX_MINI_APP_ID_DEFAULT.to_string())
+}
+
+fn wx_mini_app_secret() -> String {
+    std::env::var("WX_MINI_APP_SECRET").unwrap_or_default()
+}
+
+/// code → openid（调用微信 jscode2session）。secret 未配置 → 明确报错。
+pub async fn wx_mini_code2session(code: &str) -> Result<String, ApiError> {
+    let code = code.trim();
+    if code.is_empty() {
+        return Err(ApiError::bad_request("微信登录失败：缺少登录凭证"));
+    }
+    let secret = wx_mini_app_secret();
+    if secret.is_empty() {
+        return Err(ApiError::bad_request(
+            "微信登录尚未配置（请在服务端设置 WX_MINI_APP_SECRET）",
+        ));
+    }
+    // Secret 只放进 query builder，不拼进可被日志/错误串带出的 URL。
+    // 网络错误也对用户和日志统一脱敏，避免任何路径泄露 AppSecret。
+    let resp = wx_mini_http()
+        .get("https://api.weixin.qq.com/sns/jscode2session")
+        .query(&[
+            ("appid", wx_mini_app_id()),
+            ("secret", secret),
+            ("js_code", code.to_string()),
+            ("grant_type", "authorization_code".to_string()),
+        ])
+        .send()
+        .await
+        .map_err(|_| ApiError::from(anyhow::anyhow!("微信登录请求失败，请稍后重试")))?;
+    let body: Value = resp
+        .json()
+        .await
+        .map_err(|_| ApiError::from(anyhow::anyhow!("微信登录响应解析失败，请稍后重试")))?;
+    if let Some(openid) = body.get("openid").and_then(Value::as_str) {
+        if !openid.is_empty() {
+            return Ok(openid.to_string());
+        }
+    }
+    let errmsg = body
+        .get("errmsg")
+        .and_then(Value::as_str)
+        .unwrap_or("微信登录失败");
+    Err(ApiError::bad_request(format!("微信登录失败：{errmsg}")))
+}
+
+/// 给账号发登录态（与 my_login 的「密码校验通过之后」逻辑同形）。
+/// 调用前提：账号已通过密码 / 认领 / 微信 openid 任一方式验明身份。
+async fn account_login_payload(st: &ArcState, account_name: &str) -> Value {
+    let view_team = crate::store::my_account_view_team(st, account_name).await;
+    if let Some(info) = crate::store::my_account_info(st, account_name).await {
+        if !info.bound && !info.is_admin {
+            let token = my_token_put(0, String::new(), account_name.to_string());
+            let x = auth_extra(st, account_name).await;
+            return json!({
+                "ok": true,
+                "personId": 0,
+                "name": account_name,
+                "token": token,
+                "bound": false,
+                "needBind": true,
+                "needProfile": x.need_profile,
+                "needQq": x.need_qq,
+                "mustChangePass": x.must_change_pass,
+                "phone": x.phone,
+                "personPhone": x.person_phone,
+                "contactPhone": x.contact_phone,
+                "emailMask": x.email_mask,
+            });
+        }
+    }
+    let mut found: Option<(u64, String, String)> = None;
+    let sql = "SELECT p.id, p.name, p.gender FROM person p \
+         WHERE p.deleted_at IS NULL AND p.name = ? \
+         ORDER BY CASE WHEN p.status = 'left' THEN 1 ELSE 0 END, p.id \
+         LIMIT 1"
+        .to_string();
+    if let Ok(rows) = pgrs::query_with_binds(&st.pools, &sid(&st), &sql, |q| {
+        q.bind(account_name.to_string())
+    })
+    .await
+    {
+        if let Some(row) = rows.into_iter().next() {
+            let pid = row
+                .try_get::<i64, _>("id")
+                .map(|v| v.max(0) as u64)
+                .unwrap_or(0);
+            let name: String = row.try_get::<String, _>("name").unwrap_or_default();
+            let team: String = row.try_get::<String, _>("gender").unwrap_or_default();
+            found = Some((pid, name, team));
+        }
+    }
+    match found {
+        Some((pid, name, team)) => {
+            let token_team = view_team.token_team(&team);
+            let token = my_token_put(pid, token_team.clone(), name.clone());
+            let mut v = login_ok(st, pid, &name, &token_team, &token).await;
+            v["switchable"] = json!(view_team.switchable());
+            v
+        }
+        None => {
+            let token_team = view_team.token_team("");
+            let token = my_token_put(0, token_team.clone(), account_name.to_string());
+            let mut v = login_ok(st, 0, account_name, &token_team, &token).await;
+            v["switchable"] = json!(view_team.switchable());
+            v
+        }
+    }
+}
+
+/// 微信登录成功响应统一收口。微信身份已经完成，小程序不再要求手机号/QQ/改密，
+/// 否则首次艺名绑定后还会被旧资料状态打断；needBind 仍按账号真实状态保留。
+fn wx_auth_payload(mut payload: Value) -> Value {
+    payload["wxAuthed"] = json!(true);
+    payload["needProfile"] = json!(false);
+    payload["needQq"] = json!(false);
+    payload["mustChangePass"] = json!(false);
+    payload
+}
+
+/// POST /api/public/my/wxlogin {code}：微信一键登录。
+/// - openid 已绑定账号 → 直接发登录态；
+/// - 未绑定 → `{ok:false, code:"WX_UNBOUND", wxToken}`，前端引导绑账号。
+pub async fn my_wxlogin(
+    State(st): State<ArcState>,
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
+    axum::Json(body): axum::Json<Value>,
+) -> ApiResult {
+    if !crate::auth::login_rate_allow(&client_ip_for_limit(addr, &headers)) {
+        return Err(api_err(
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            "RATE_LIMITED",
+            "登录尝试过于频繁，请 1 分钟后再试",
+        ));
+    }
+    let code = body.get("code").and_then(Value::as_str).unwrap_or_default();
+    let openid = wx_mini_code2session(code).await?;
+    if let Some(name) = crate::store::my_account_by_wx_openid(&st, &openid).await {
+        let payload = wx_auth_payload(account_login_payload(&st, &name).await);
+        return Ok(Json(payload));
+    }
+    let wx_token = pending_wx_put(&openid);
+    Ok(Json(
+        json!({ "ok": false, "code": "WX_UNBOUND", "wxToken": wx_token }),
+    ))
+}
+
+/// POST /api/public/my/wxbind {wxToken, name}：首次微信登录只凭艺名完成绑定。
+/// 兼容旧客户端仍可提交 {wxToken, account, pass}，但小程序新流程不再要求密码。
+pub async fn my_wxbind(
+    State(st): State<ArcState>,
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
+    axum::Json(body): axum::Json<Value>,
+) -> ApiResult {
+    if !public_write_allow(&client_ip_for_limit(addr, &headers)) {
+        return Err(api_err(
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            "RATE_LIMITED",
+            "尝试太频繁，请稍后再试",
+        ));
+    }
+    let wx_token = body
+        .get("wxToken")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    // 先 peek，密码错误或账号校验失败时保留 wxToken 供用户直接重试；
+    // 仅在 openid 真正落库后 consume（见本函数末尾）。
+    let openid = pending_wx_get(wx_token).ok_or_else(|| {
+        api_err(
+            axum::http::StatusCode::BAD_REQUEST,
+            "WX_TOKEN_EXPIRED",
+            "微信登录已过期，请重新发起",
+        )
+    })?;
+    let acct = body
+        .get("account")
+        .or_else(|| body.get("name"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_default()
+        .to_string();
+    let pass = body
+        .get("pass")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    if acct.is_empty() {
+        return Err(api_err(
+            axum::http::StatusCode::BAD_REQUEST,
+            "INVALID_INPUT",
+            "请输入艺名",
+        ));
+    }
+    // 新流程：微信 openid 已验明，只凭台账唯一艺名绑定/认领。
+    if pass.is_empty() {
+        let account_name = crate::store::my_account_wx_bind_or_claim(&st, &acct, &openid)
+            .await
+            .map_err(|e| store_err(e, claim_code))?;
+        let _ = pending_wx_take(wx_token);
+        return Ok(Json(wx_auth_payload(
+            account_login_payload(&st, &account_name).await,
+        )));
+    }
+    // 兼容旧客户端：仍支持账号 + 密码绑定。
+    let account_name = match crate::store::my_account_check_login(&st, &acct, &pass).await {
+        Ok(outcome) => outcome.name,
+        Err(why) => {
+            if matches!(why, crate::store::my_account::LoginFail::NoAccount)
+                && crate::store::my_account_can_claim(&st, &acct).await
+            {
+                let claimed = crate::store::my_account_claim(&st, &acct, &pass)
+                    .await
+                    .map_err(|e| store_err(e, claim_code))?;
+                claimed.name
+            } else {
+                return Ok(Json(login_fail_with_claim(&st, why, &acct).await));
+            }
+        }
+    };
+    crate::store::my_account_set_wx_openid(&st, &account_name, &openid)
+        .await
+        .map_err(|e| store_err(e, bind_code))?;
+    let _ = pending_wx_take(wx_token);
+    Ok(Json(wx_auth_payload(
+        account_login_payload(&st, &account_name).await,
+    )))
+}
+
+/// POST /api/public/my/wxlink {code}：已登录用户把当前账号与微信 openid 绑定。
+/// 下次即可「微信一键登录」。
+pub async fn my_wxlink(
+    State(st): State<ArcState>,
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
+    axum::Json(body): axum::Json<Value>,
+) -> ApiResult {
+    if !public_write_allow(&client_ip_for_limit(addr, &headers)) {
+        return Err(api_err(
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            "RATE_LIMITED",
+            "尝试太频繁，请稍后再试",
+        ));
+    }
+    let Some(token) = header_my_token(&headers) else {
+        return Err(ApiError::auth("登录已过期，请重新登录"));
+    };
+    let mut ident = my_token_take(&token);
+    if ident.is_none() {
+        ident = super::admin::my_token_restore(&st, &token).await;
+    }
+    let Some((_pid, _team, account_name)) = ident else {
+        return Err(ApiError::auth("登录已过期，请重新登录"));
+    };
+    let code = body.get("code").and_then(Value::as_str).unwrap_or_default();
+    let openid = wx_mini_code2session(code).await?;
+    crate::store::my_account_set_wx_openid(&st, &account_name, &openid)
+        .await
+        .map_err(|e| store_err(e, bind_code))?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// 小程序推送接口统一的登录身份解析（X-My-Token 优先，内存 token 过期后走 Redis 恢复）。
+async fn wxpush_account_from_headers(
+    st: &ArcState,
+    headers: &HeaderMap,
+) -> Result<String, ApiError> {
+    let Some(token) = header_my_token(headers) else {
+        return Err(ApiError::auth("登录已过期，请重新登录"));
+    };
+    let mut ident = my_token_take(&token);
+    if ident.is_none() {
+        ident = super::admin::my_token_restore(st, &token).await;
+    }
+    ident
+        .map(|(_, _, name)| name)
+        .ok_or_else(|| ApiError::auth("登录已过期，请重新登录"))
+}
+
+/// GET /api/public/my/wxpush/config：小程序推送页读取可用模板、授权状态与
+/// 一键微信对接入口。模板 ID 是公开给客户端的（订阅消息本来就要前端传），
+/// AppSecret / access_token 绝不下发。
+pub async fn my_wxpush_config(
+    State(st): State<ArcState>,
+    headers: HeaderMap,
+) -> ApiResult {
+    let name = wxpush_account_from_headers(&st, &headers).await?;
+    let templates = json!({
+        "daily": wx_mini_template_id("daily"),
+        "target": wx_mini_template_id("target"),
+        "lineage": wx_mini_template_id("lineage"),
+    });
+    let mut tmpl_ids = Vec::new();
+    for kind in ["daily", "target", "lineage"] {
+        let id = wx_mini_template_id(kind);
+        if !id.is_empty() {
+            tmpl_ids.push(id);
+        }
+    }
+    tmpl_ids.sort();
+    tmpl_ids.dedup();
+    Ok(Json(json!({
+        "ok": true,
+        "enabled": !tmpl_ids.is_empty(),
+        "templates": templates,
+        "tmplIds": tmpl_ids,
+        "state": crate::store::push_mini_state(&st, &name).await,
+        "dock": {
+            "appId": WX_LITEAPP_APP_ID,
+            "page": WX_LITEAPP_PAGE,
+        },
+    })))
+}
+
+/// POST /api/public/my/wxpush/subscribe {daily?, target?, lineage?}
+/// 保存 wx.requestSubscribeMessage 的授权结果；只记录用户刚同意的模板。
+pub async fn my_wxpush_subscribe(
+    State(st): State<ArcState>,
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
+    axum::Json(body): axum::Json<Value>,
+) -> ApiResult {
+    if !public_write_allow(&client_ip_for_limit(addr, &headers)) {
+        return Err(api_err(
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            "RATE_LIMITED",
+            "操作太频繁，请稍后再试",
+        ));
+    }
+    let name = wxpush_account_from_headers(&st, &headers).await?;
+    let openid = crate::store::my_account_wx_openid(&st, &name).await;
+    if openid.is_empty() {
+        return Err(ApiError::bad_request("微信身份未绑定，请重新微信一键登录"));
+    }
+    let accepted = body.get("accepted").unwrap_or(&body);
+    let yes = |key: &str| {
+        accepted
+            .get(key)
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    };
+    let daily = yes("daily");
+    let target = yes("target");
+    let lineage = yes("lineage");
+    if !daily && !target && !lineage {
+        return Err(ApiError::bad_request("没有授权任何消息模板"));
+    }
+    let team = crate::store::person_team_of_name(&st, &name)
+        .await
+        .unwrap_or_default();
+    if team.is_empty() {
+        return Err(ApiError::bad_request("账号未绑定主播，不能开启小程序推送"));
+    }
+    crate::store::push_mini_subscribe_save(
+        &st, &name, &team, &openid, daily, target, lineage,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, account = %name, "保存小程序订阅状态失败");
+        ApiError::from(anyhow::anyhow!("保存订阅状态失败，请稍后重试"))
+    })?;
+    Ok(Json(json!({
+        "ok": true,
+        "state": crate::store::push_mini_state(&st, &name).await,
+    })))
+}
+
+/* -------------------- 微信小程序订阅消息（2026-11-17） --------------------
+ *
+ * 小程序不退化成“网页扫码页”：用户点一次按钮走 wx.requestSubscribeMessage，
+ * 后端把授权结果落到 push_bindings.mini_*；推送引擎在机器人通道不可用时回落
+ * 到这里发一次性订阅消息。模板 ID / 字段名必须由小程序后台模板决定，统一走
+ * 环境变量，不在代码里猜模板结构。 */
+
+/// 微信 iLink 扫码内容会落到这个官方轻应用；小程序用 navigateToMiniProgram
+/// 一键拉起它，避免在页面里展示二维码。
+pub(crate) const WX_LITEAPP_APP_ID: &str = "wxalitec8a16f9bf80f65dffb97cdf7760c1142";
+pub(crate) const WX_LITEAPP_PAGE: &str = "pages/exp/main";
+
+fn wx_mini_template_id(kind: &str) -> String {
+    let key = match kind {
+        "daily" => "WX_MINI_SUBSCRIBE_TMPL_DAILY",
+        "target" => "WX_MINI_SUBSCRIBE_TMPL_TARGET",
+        "lineage" => "WX_MINI_SUBSCRIBE_TMPL_LINEAGE",
+        "notice" => "WX_MINI_SUBSCRIBE_TMPL_NOTICE",
+        "live" => "WX_MINI_SUBSCRIBE_TMPL_LIVE",
+        _ => "WX_MINI_SUBSCRIBE_TMPL_ID",
+    };
+    let scoped = std::env::var(key).unwrap_or_default().trim().to_string();
+    if !scoped.is_empty() {
+        return scoped;
+    }
+    std::env::var("WX_MINI_SUBSCRIBE_TMPL_ID")
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
+pub(crate) fn wx_mini_kind_ready(kind: &str) -> bool {
+    !wx_mini_template_id(kind).is_empty()
+}
+
+pub(crate) fn wx_mini_binding_ready(b: &crate::store::PushBinding) -> bool {
+    (b.mini_daily_report && !wx_mini_template_id("daily").is_empty())
+        || (b.mini_notify_target && !wx_mini_template_id("target").is_empty())
+        || (b.mini_lineage_report && !wx_mini_template_id("lineage").is_empty())
+}
+
+fn wx_mini_field(var: &str, default: &str) -> String {
+    let value = std::env::var(var).unwrap_or_default();
+    let value = value.trim();
+    if value.is_empty() {
+        default.to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+fn wx_mini_title(kind: &str) -> &'static str {
+    match kind {
+        "daily" => "每日数据已更新",
+        "target" => "追分提醒",
+        "lineage" => "师门日报",
+        "live" => "直播提醒",
+        _ => "消息通知",
+    }
+}
+
+fn wx_mini_page(kind: &str) -> &'static str {
+    match kind {
+        "daily" | "live" => "pages/home/index",
+        "target" | "lineage" | "notice" => "pages/my/index",
+        _ => "pages/home/index",
+    }
+}
+
+fn truncate_thing(value: &str, max: usize) -> String {
+    let compact = value
+        .lines()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let chars: Vec<char> = compact.chars().collect();
+    if chars.len() > max {
+        format!("{}…", chars.into_iter().take(max.saturating_sub(1)).collect::<String>())
+    } else {
+        compact
+    }
+}
+
+fn wx_mini_state() -> String {
+    match std::env::var("WX_MINI_STATE").unwrap_or_default().as_str() {
+        "develop" => "developer".to_string(),
+        "trial" => "trial".to_string(),
+        _ => "formal".to_string(),
+    }
+}
+
+/// access_token 缓存：微信返回 expires_in 秒，提前 120 秒过期，避免临界点失败。
+fn wx_mini_token_cache()
+-> &'static std::sync::Mutex<Option<(String, std::time::Instant)>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<(String, std::time::Instant)>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+fn wx_mini_clear_token() {
+    if let Ok(mut guard) = wx_mini_token_cache().lock() {
+        *guard = None;
+    }
+}
+
+async fn wx_mini_access_token() -> anyhow::Result<String> {
+    if let Ok(guard) = wx_mini_token_cache().lock() {
+        if let Some((token, expires_at)) = guard.as_ref() {
+            if std::time::Instant::now() < *expires_at && !token.is_empty() {
+                return Ok(token.clone());
+            }
+        }
+    }
+    let secret = wx_mini_app_secret();
+    if secret.is_empty() {
+        anyhow::bail!("微信小程序 AppSecret 未配置");
+    }
+    let appid = wx_mini_app_id();
+    let resp = wx_mini_http()
+        .get("https://api.weixin.qq.com/cgi-bin/token")
+        .query(&[
+            ("grant_type", "client_credential"),
+            ("appid", appid.as_str()),
+            ("secret", secret.as_str()),
+        ])
+        .send()
+        .await
+        .map_err(|_| anyhow::anyhow!("获取微信小程序 access_token 失败"))?;
+    let body: Value = resp
+        .json()
+        .await
+        .map_err(|_| anyhow::anyhow!("微信小程序 access_token 响应解析失败"))?;
+    let token = body
+        .get("access_token")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    if token.is_empty() {
+        let errmsg = body
+            .get("errmsg")
+            .and_then(Value::as_str)
+            .unwrap_or("未知错误");
+        anyhow::bail!("获取微信小程序 access_token 失败：{errmsg}");
+    }
+    let ttl = body
+        .get("expires_in")
+        .and_then(Value::as_u64)
+        .unwrap_or(7200)
+        .saturating_sub(120)
+        .max(60);
+    if let Ok(mut guard) = wx_mini_token_cache().lock() {
+        *guard = Some((
+            token.clone(),
+            std::time::Instant::now() + std::time::Duration::from_secs(ttl),
+        ));
+    }
+    Ok(token)
+}
+
+/// 组装订阅消息 data。独立出来是为了单测钉住字段名，避免把 `field_title`
+/// 这类变量名误当成最终 JSON key。
+fn wx_mini_template_data(kind: &str, text: &str) -> Value {
+    let field_title = wx_mini_field("WX_MINI_SUBSCRIBE_FIELD_TITLE", "thing1");
+    let field_content = wx_mini_field("WX_MINI_SUBSCRIBE_FIELD_CONTENT", "thing2");
+    let field_time = wx_mini_field("WX_MINI_SUBSCRIBE_FIELD_TIME", "time3");
+    let now = chrono::Local::now().format("%Y-%m-%d %H:%M").to_string();
+    json!({
+        (field_title): { "value": wx_mini_title(kind) },
+        (field_content): { "value": truncate_thing(text, 20) },
+        (field_time): { "value": now },
+    })
+}
+
+/// 发一条小程序订阅消息。kind 决定模板与落地页；任何模板缺失都返回错误，
+/// 由推送引擎记日志并保留去重标记，不能假装发送成功。
+pub(crate) async fn wx_mini_send_subscribe(
+    openid: &str,
+    kind: &str,
+    text: &str,
+) -> anyhow::Result<()> {
+    let openid = openid.trim();
+    if openid.is_empty() {
+        anyhow::bail!("小程序订阅消息缺少 openid");
+    }
+    let template_id = wx_mini_template_id(kind);
+    if template_id.is_empty() {
+        anyhow::bail!("小程序订阅消息未配置模板 ID（kind={kind}）");
+    }
+    let data = wx_mini_template_data(kind, text);
+    let payload = json!({
+        "touser": openid,
+        "template_id": template_id,
+        "page": wx_mini_page(kind),
+        "miniprogram_state": wx_mini_state(),
+        "lang": "zh_CN",
+        "data": data,
+    });
+    for attempt in 0..2 {
+        let token = wx_mini_access_token().await?;
+        let resp = wx_mini_http()
+            .post("https://api.weixin.qq.com/cgi-bin/message/subscribe/send")
+            .query(&[("access_token", token.as_str())])
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|_| anyhow::anyhow!("微信小程序订阅消息请求失败"))?;
+        let body: Value = resp
+            .json()
+            .await
+            .map_err(|_| anyhow::anyhow!("微信小程序订阅消息响应解析失败"))?;
+        let errcode = body.get("errcode").and_then(Value::as_i64).unwrap_or(0);
+        if errcode == 0 {
+            return Ok(());
+        }
+        // 40001 / 42001：access_token 失效，清缓存重试一次；其余错误直接上报。
+        if attempt == 0 && matches!(errcode, 40001 | 42001) {
+            wx_mini_clear_token();
+            continue;
+        }
+        let errmsg = body
+            .get("errmsg")
+            .and_then(Value::as_str)
+            .unwrap_or("发送失败");
+        anyhow::bail!("微信小程序订阅消息发送失败：{errmsg}（errcode={errcode}）");
+    }
+    anyhow::bail!("微信小程序订阅消息发送失败")
+}
+
+#[cfg(test)]
+mod wx_pending_tests {
+    use super::{
+        pending_wx_get, pending_wx_put, pending_wx_take, truncate_thing, wx_auth_payload,
+        wx_mini_template_data,
+    };
+    use serde_json::json;
+
+    #[test]
+    fn wx_auth_payload_keeps_identity_flow_minimal() {
+        let v = wx_auth_payload(json!({
+            "ok": true,
+            "needBind": true,
+            "needProfile": true,
+            "needQq": true,
+            "mustChangePass": true,
+        }));
+        assert_eq!(v["wxAuthed"], true);
+        assert_eq!(v["needBind"], true);
+        assert_eq!(v["needProfile"], false);
+        assert_eq!(v["needQq"], false);
+        assert_eq!(v["mustChangePass"], false);
+    }
+
+    #[test]
+    fn wx_mini_template_data_uses_real_field_keys_and_compacts_text() {
+        std::env::remove_var("WX_MINI_SUBSCRIBE_FIELD_TITLE");
+        std::env::remove_var("WX_MINI_SUBSCRIBE_FIELD_CONTENT");
+        std::env::remove_var("WX_MINI_SUBSCRIBE_FIELD_TIME");
+        let data = wx_mini_template_data("daily", "第一行\n第二行");
+        assert_eq!(data["thing1"]["value"], "每日数据已更新");
+        assert_eq!(data["thing2"]["value"], "第一行 第二行");
+        assert!(data["time3"]["value"].as_str().unwrap_or("").contains('-'));
+        assert_eq!(truncate_thing("一二三四五六七八九十一二三四五六七八九十多", 20), "一二三四五六七八九十一二三四五六七八九…");
+    }
+
+    /// wxbind 密码输错后必须还能用同一个 wxToken 重试；真正绑定成功后才消费。
+    #[test]
+    fn pending_wx_token_peek_survives_retry_then_consumes() {
+        let token = pending_wx_put("openid-retry-regression");
+        assert_eq!(
+            pending_wx_get(&token).as_deref(),
+            Some("openid-retry-regression")
+        );
+        assert_eq!(
+            pending_wx_get(&token).as_deref(),
+            Some("openid-retry-regression")
+        );
+        assert_eq!(
+            pending_wx_take(&token).as_deref(),
+            Some("openid-retry-regression")
+        );
+        assert!(pending_wx_get(&token).is_none());
     }
 }

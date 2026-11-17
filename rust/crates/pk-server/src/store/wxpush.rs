@@ -25,6 +25,29 @@ pub struct PushBinding {
     pub lineage_report: bool,
     /// 同业务日去重：师门日报只推一次（对齐 last_report_date）
     pub last_lineage_date: String,
+    /// 微信小程序 openid。非空 = 这个人也能走小程序订阅消息；
+    /// 与 conversation_id 可以同时存在（机器人优先，断了再回落订阅消息）。
+    pub mini_openid: String,
+    pub mini_daily_report: bool,
+    pub mini_notify_target: bool,
+    pub mini_lineage_report: bool,
+}
+
+impl PushBinding {
+    /// 任一通道要日报/追分/师门日报都算“想收”，推送引擎用它决定是否预计算。
+    pub fn wants_daily_report(&self) -> bool {
+        self.daily_report || self.mini_daily_report
+    }
+    pub fn wants_notify_target(&self) -> bool {
+        self.notify_target || self.mini_notify_target
+    }
+    pub fn wants_lineage_report(&self) -> bool {
+        self.lineage_report || self.mini_lineage_report
+    }
+    pub fn has_mini_subscribe(&self) -> bool {
+        !self.mini_openid.trim().is_empty()
+            && (self.mini_daily_report || self.mini_notify_target || self.mini_lineage_report)
+    }
 }
 
 /// 读 push_bindings 里当前记着的会话 id（空串 = 还没接上任何会话 / 未激活）。
@@ -60,7 +83,9 @@ pub async fn push_state(st: &AppState, name: &str) -> serde_json::Value {
     let row = sqlx::query(&crate::pq::rewrite(
         "SELECT conversation_id, nickname, bind_code, code_expires, bound_at,
                 notify_target, daily_report, last_push, last_error,
-                lineage_report, last_lineage_date, paused
+                lineage_report, last_lineage_date, paused,
+                mini_openid, mini_subscribed_at, mini_daily_report,
+                mini_notify_target, mini_lineage_report
          FROM push_bindings WHERE name = ?",
     ))
     .bind(name.trim())
@@ -73,6 +98,7 @@ pub async fn push_state(st: &AppState, name: &str) -> serde_json::Value {
             "bound": false, "code": "", "codeExpires": "",
             "notifyTarget": false, "dailyReport": true,
             "lineageReport": false, "hasDisciples": false, "paused": false,
+            "mini": { "bound": false, "daily": false, "target": false, "lineage": false },
         });
     };
     let conv: String = r
@@ -96,6 +122,13 @@ pub async fn push_state(st: &AppState, name: &str) -> serde_json::Value {
         "lastPush": r.try_get::<String, _>("last_push").unwrap_or_default(),
         "lastError": r.try_get::<String, _>("last_error").unwrap_or_default(),
         "paused": r.try_get::<i16, _>("paused").unwrap_or(0) == 1,
+        "mini": {
+            "bound": !r.try_get::<String, _>("mini_openid").unwrap_or_default().is_empty(),
+            "subscribedAt": r.try_get::<String, _>("mini_subscribed_at").unwrap_or_default(),
+            "daily": r.try_get::<i16, _>("mini_daily_report").unwrap_or(0) == 1,
+            "target": r.try_get::<i16, _>("mini_notify_target").unwrap_or(0) == 1,
+            "lineage": r.try_get::<i16, _>("mini_lineage_report").unwrap_or(0) == 1,
+        },
     })
 }
 
@@ -818,7 +851,8 @@ pub async fn push_binding_by_conversation(
     let pool = w(st).ok()?;
     let row = sqlx::query(&crate::pq::rewrite(
         "SELECT name, team, person_id, conversation_id, notify_target, daily_report,
-                lineage_report, last_lineage_date
+                lineage_report, last_lineage_date, mini_openid, mini_daily_report,
+                mini_notify_target, mini_lineage_report
          FROM push_bindings WHERE conversation_id = ? LIMIT 1",
     ))
     .bind(conversation_id)
@@ -834,7 +868,8 @@ pub async fn push_binding_by_name(st: &AppState, name: &str) -> Option<PushBindi
     let pool = w(st).ok()?;
     let row = sqlx::query(&crate::pq::rewrite(
         "SELECT name, team, person_id, conversation_id, notify_target, daily_report,
-                lineage_report, last_lineage_date
+                lineage_report, last_lineage_date, mini_openid, mini_daily_report,
+                mini_notify_target, mini_lineage_report
          FROM push_bindings WHERE name = ? LIMIT 1",
     ))
     .bind(name.trim())
@@ -865,6 +900,16 @@ fn binding_from_row(r: &sqlx::postgres::PgRow) -> PushBinding {
         last_lineage_date: r
             .try_get::<String, _>("last_lineage_date")
             .unwrap_or_default(),
+        mini_openid: r.try_get::<String, _>("mini_openid").unwrap_or_default(),
+        mini_daily_report: r.try_get::<i16, _>("mini_daily_report").unwrap_or(0) == 1,
+        mini_notify_target: r
+            .try_get::<i16, _>("mini_notify_target")
+            .unwrap_or(0)
+            == 1,
+        mini_lineage_report: r
+            .try_get::<i16, _>("mini_lineage_report")
+            .unwrap_or(0)
+            == 1,
     }
 }
 
@@ -875,9 +920,12 @@ pub async fn push_bindings_for_team(st: &AppState, team: &str) -> Vec<PushBindin
     };
     match sqlx::query(&crate::pq::rewrite(
         "SELECT name, team, person_id, conversation_id, notify_target, daily_report,
-                lineage_report, last_lineage_date
+                lineage_report, last_lineage_date, mini_openid, mini_daily_report,
+                mini_notify_target, mini_lineage_report
          FROM push_bindings
-         WHERE team = ? AND conversation_id <> '' AND (notify_target = 1 OR daily_report = 1 OR lineage_report = 1)",
+         WHERE team = ? AND (conversation_id <> '' OR mini_openid <> '')
+           AND (notify_target = 1 OR daily_report = 1 OR lineage_report = 1
+                OR mini_notify_target = 1 OR mini_daily_report = 1 OR mini_lineage_report = 1)",
     ))
     .bind(team)
     .fetch_all(pool)
@@ -889,6 +937,75 @@ pub async fn push_bindings_for_team(st: &AppState, team: &str) -> Vec<PushBindin
             Vec::new()
         }
     }
+}
+
+/// 小程序订阅消息状态（只读给小程序页面用，不下发 openid）。
+pub async fn push_mini_state(st: &AppState, name: &str) -> serde_json::Value {
+    let Some(pool) = w(st).ok() else {
+        return serde_json::json!({ "bound": false, "daily": false, "target": false, "lineage": false });
+    };
+    let row = sqlx::query(&crate::pq::rewrite(
+        "SELECT mini_openid, mini_subscribed_at, mini_daily_report,
+                mini_notify_target, mini_lineage_report
+         FROM push_bindings WHERE name = ?",
+    ))
+    .bind(name.trim())
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
+    let Some(r) = row else {
+        return serde_json::json!({ "bound": false, "subscribedAt": "", "daily": false, "target": false, "lineage": false });
+    };
+    serde_json::json!({
+        "bound": !r.try_get::<String, _>("mini_openid").unwrap_or_default().is_empty(),
+        "subscribedAt": r.try_get::<String, _>("mini_subscribed_at").unwrap_or_default(),
+        "daily": r.try_get::<i16, _>("mini_daily_report").unwrap_or(0) == 1,
+        "target": r.try_get::<i16, _>("mini_notify_target").unwrap_or(0) == 1,
+        "lineage": r.try_get::<i16, _>("mini_lineage_report").unwrap_or(0) == 1,
+    })
+}
+
+/// 保存小程序订阅授权结果。只写 mini_*，不覆盖网页端机器人开关。
+/// 一次授权不等于永久有效（一次性订阅发完就要再次授权），因此这里保存的是
+/// “用户刚同意了哪些模板”，发送失败时由微信侧返回 43101，页面再引导重授权。
+pub async fn push_mini_subscribe_save(
+    st: &AppState,
+    name: &str,
+    team: &str,
+    openid: &str,
+    daily: bool,
+    target: bool,
+    lineage: bool,
+) -> anyhow::Result<()> {
+    let pool = w(st)?;
+    let team = normalize_push_team(team).unwrap_or("");
+    let at = now_str();
+    sqlx::query(&crate::pq::rewrite(
+        "INSERT INTO push_bindings
+            (name, team, mini_openid, mini_subscribed_at, mini_daily_report,
+             mini_notify_target, mini_lineage_report, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (name) DO UPDATE SET
+            team = CASE WHEN EXCLUDED.team <> '' THEN EXCLUDED.team ELSE push_bindings.team END,
+            mini_openid = EXCLUDED.mini_openid,
+            mini_subscribed_at = EXCLUDED.mini_subscribed_at,
+            mini_daily_report = EXCLUDED.mini_daily_report,
+            mini_notify_target = EXCLUDED.mini_notify_target,
+            mini_lineage_report = EXCLUDED.mini_lineage_report,
+            updated_at = EXCLUDED.updated_at",
+    ))
+    .bind(name.trim())
+    .bind(team)
+    .bind(openid.trim())
+    .bind(&at)
+    .bind(if daily { 1_i16 } else { 0_i16 })
+    .bind(if target { 1_i16 } else { 0_i16 })
+    .bind(if lineage { 1_i16 } else { 0_i16 })
+    .bind(&at)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 /// 记录一次推送结果（成功清错误，失败留原因）

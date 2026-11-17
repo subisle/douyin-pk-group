@@ -269,11 +269,14 @@ pub async fn user_login_qrcode() -> anyhow::Result<Value> {
     .await?;
     WxTransport::check_code(&out)?;
     let content = str_of(&out, &["qrcode_img_content"]);
+    let url = first_of(&out, &["qrcode_url", "qr_code_url", "url"]);
     Ok(json!({
         "qrcode": str_of(&out, &["qrcode"]),
         "imgContent": qr_svg_data_url(&content).unwrap_or_default(),
-        "content": content,
-        "url": first_of(&out, &["qrcode_url", "qr_code_url", "url"]),
+        "content": content.clone(),
+        // 官方目前经常只返回 qrcode_img_content（liteapp 链接），不返回单独的
+        // qrcode_url。把 content 作为 url 兜底，小程序才能一键拉起轻应用而不展示二维码。
+        "url": if url.is_empty() { content } else { url },
     }))
 }
 

@@ -909,6 +909,7 @@ async fn send_binding(
     b: &crate::store::PushBinding,
     wx_global: Option<&Arc<crate::bot::weixin::WxTransport>>,
     text: &str,
+    kind: &str,
 ) -> anyhow::Result<()> {
     /* 测试阶段出网闸门：未开 PUSH_OUT_ENABLED 一律不发（见函数上方的口径说明）。
     2026-10-17 修复（审计 1-P0-2）：原先这里 `return Ok(())` —— 拦截被当成**发送成功**，
@@ -925,19 +926,38 @@ async fn send_binding(
         name_can_receive_text(st, &b.name).await,
         "未对接或连接已断开（跳过发送）"
     );
-    /* 扫码账号：发文本；没有扫码凭证的旧绑定：回落管理员机器人文本通道 */
+    let mini_ready = b.has_mini_subscribe() && crate::public_teams::wx_mini_kind_ready(kind);
+    /* 扫码账号：发文本；没有扫码凭证的旧绑定：回落管理员机器人文本通道。
+       小程序订阅消息作为最后一层兜底：机器人账号还在但发送失败（例如会话过期）
+       时，只要用户刚授权过订阅模板，就改走小程序，不把这条推送整轮丢掉。 */
     if let Some(a) = crate::store::wx_push_account_get(st, &b.name).await {
-        anyhow::ensure!(!a.bot_token.is_empty(), "扫码账号凭证为空，请重新扫码");
-        let (to_user, context_token) = push_ctx(st, b, &a).await?;
-        return crate::bot::weixin::user_send_text(
-            st,
-            &a.base_url,
-            &a.bot_token,
-            &to_user,
-            &context_token,
-            text,
-        )
-        .await;
+        if !a.bot_token.is_empty() {
+            let ctx = push_ctx(st, b, &a).await;
+            let sent = match ctx {
+                Ok((to_user, context_token)) => {
+                    crate::bot::weixin::user_send_text(
+                        st,
+                        &a.base_url,
+                        &a.bot_token,
+                        &to_user,
+                        &context_token,
+                        text,
+                    )
+                    .await
+                }
+                Err(e) => Err(e),
+            };
+            match sent {
+                Ok(()) => return Ok(()),
+                Err(e) if mini_ready => {
+                    tracing::warn!(account = %b.name, error = %e, "微信机器人发送失败，回落小程序订阅消息");
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+    if mini_ready {
+        return crate::public_teams::wx_mini_send_subscribe(&b.mini_openid, kind, text).await;
     }
     wx_proactive(wx_global, &b.conversation_id, text).await
 }
@@ -965,7 +985,7 @@ pub async fn send_live_text(
         .get()
         .and_then(|m| m.wechat.as_ref())
         .map(std::sync::Arc::clone);
-    send_binding(st, b, wx_global.as_ref(), text).await
+    send_binding(st, b, wx_global.as_ref(), text, "live").await
 }
 
 /// 发图片（1..N 张）+ 首张前带说明文字。逐张独立 sendmessage（openclaw 口径）。
@@ -1151,7 +1171,7 @@ async fn run_inner(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result
     let month = date.get(..7).unwrap_or(date).to_string();
     let month_map = month_wave_map(st, team, &month).await;
     // 追名次目标要全团本月排名，只在这类目标存在时才算
-    let month_rank_opt = if bindings.iter().any(|b| b.notify_target && b.person_id > 0) {
+    let month_rank_opt = if bindings.iter().any(|b| b.wants_notify_target() && b.person_id > 0) {
         Some(month_rank_list(st, team, &month).await)
     } else {
         None
@@ -1161,7 +1181,7 @@ async fn run_inner(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result
     // 2026-10-17 口径改版（审计 6-P3-9/11）：caption 已删（有图不发文字），
     // 月榜名次只剩**追分提醒**的 eval_target 用 —— 触发条件与命名都改为
     // notify_target，只开日报不开追分的团不再白跑一次全团月榜聚合。
-    let month_rank_for_targets = if bindings.iter().any(|b| b.notify_target) {
+    let month_rank_for_targets = if bindings.iter().any(|b| b.wants_notify_target()) {
         Some(match month_rank_opt {
             Some(list) => list,
             None => month_rank_list(st, team, &month).await,
@@ -1171,7 +1191,7 @@ async fn run_inner(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result
     };
 
     // 每日报告全团共用一份排名，算一次
-    let rank_items = if bindings.iter().any(|b| b.daily_report) {
+    let rank_items = if bindings.iter().any(|b| b.wants_daily_report()) {
         daily_rank(st, team, date).await
     } else {
         Vec::new()
@@ -1184,7 +1204,7 @@ async fn run_inner(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result
     与 resvg PNG 转换（PNG 必须按人渲染，保留）。构建失败只记一次日志，
     month_rep 保持 None → 循环内 svgs 为空，每个订阅者照旧退回文本推送，
     行为与原先逐人失败一致。 */
-    let star = if bindings.iter().any(|b| b.daily_report) {
+    let star = if bindings.iter().any(|b| b.wants_daily_report()) {
         let ov = crate::store::config_get(st, "star_override").await;
         let auto = rank_items.first().map(|(_, name, w)| (name.clone(), *w));
         let (title, def) = parse_star_override(ov.as_deref(), auto);
@@ -1201,7 +1221,7 @@ async fn run_inner(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result
     } else {
         None
     };
-    let month_rep: Option<crate::report::DailyReport> = if bindings.iter().any(|b| b.daily_report) {
+    let month_rep: Option<crate::report::DailyReport> = if bindings.iter().any(|b| b.wants_daily_report()) {
         match crate::report::build_month(st, date, team, star.clone()).await {
             Ok(rep) => Some(rep),
             Err(e) => {
@@ -1279,7 +1299,7 @@ async fn run_inner(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result
         }
 
         // ① 每日报告（同一业务日只推一次：补数据重排队列时不再重复推）
-        if b.daily_report && !rank_items.is_empty() {
+        if b.wants_daily_report() && !rank_items.is_empty() {
             let last = crate::store::push_last_report_date(st, &b.name).await;
             if last == date {
                 tracing::debug!(account = %b.name, date = %date, "每日报告同日已推过，跳过");
@@ -1322,7 +1342,7 @@ async fn run_inner(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result
                         &accounts,
                     );
                     tracing::info!(account = %b.name, text = %text.replace('\n', " | "), "推送·每日报告(文本)");
-                    match send_binding(st, b, wx_global.as_ref(), &text).await {
+                    match send_binding(st, b, wx_global.as_ref(), &text, "daily").await {
                         Ok(()) => {
                             sent_any = true;
                             finalize_report_claim(st, &b.name).await;
@@ -1366,7 +1386,7 @@ async fn run_inner(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result
                             b.person_id,
                             &accounts,
                         ));
-                        match send_binding(st, b, wx_global.as_ref(), &text).await {
+                        match send_binding(st, b, wx_global.as_ref(), &text, "daily").await {
                             Ok(()) => {
                                 sent_any = true;
                                 finalize_report_claim(st, &b.name).await;
@@ -1413,7 +1433,7 @@ async fn run_inner(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result
                                             &accounts,
                                         ),
                                     );
-                                    match send_binding(st, b, wx_global.as_ref(), &text).await {
+                                    match send_binding(st, b, wx_global.as_ref(), &text, "daily").await {
                                         Ok(()) => {
                                             sent_any = true;
                                             finalize_report_claim(st, &b.name).await;
@@ -1447,7 +1467,7 @@ async fn run_inner(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result
         各自开关与去重标记保持独立：合并发送成功 = 目标状态与师门占位一起推进；
         发送失败 / 被闸拦下 = 两边都不推进（师门占位还原、目标状态不落库），下轮再推。 */
         let mut pending_states: Vec<(i64, bool, i64)> = Vec::new();
-        let mut target_text: Option<String> = if b.notify_target && b.person_id > 0 {
+        let mut target_text: Option<String> = if b.wants_notify_target() && b.person_id > 0 {
             let targets = crate::store::targets_for_push(st, &b.name).await;
             if targets.is_empty() {
                 None
@@ -1521,7 +1541,7 @@ async fn run_inner(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result
         // 师门段（docs/23 §4）：开关开 + 有 person + 当天未推过才参与推送。
         // 2026-10-17 起师门日报与每日报告一样走图片；占位在发送前，失败/无内容还原。
         let mut lineage_rep: Option<crate::lineage_report::LineageReport> = None;
-        if b.lineage_report {
+        if b.wants_lineage_report() {
             if b.person_id == 0 {
                 tracing::debug!(account = %b.name, "师门日报：管理员观看账号（person_id=0），跳过");
             } else if b.last_lineage_date == date {
@@ -1574,7 +1594,7 @@ async fn run_inner(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result
                 pngs.extend(lineage_pngs);
                 if pngs.is_empty() {
                     tracing::warn!(account = %b.name, "追分+师门图全部渲染失败，退回追分文字");
-                    match send_binding(st, b, wx_global.as_ref(), &t).await {
+                    match send_binding(st, b, wx_global.as_ref(), &t, "target").await {
                         Ok(()) => {
                             sent_any = true;
                             for (id, hit, gap) in pending_states.iter() {
@@ -1653,7 +1673,7 @@ async fn run_inner(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result
                 let pngs = target_push_pngs(&t, b.name.trim()).await;
                 if pngs.is_empty() {
                     tracing::warn!(account = %b.name, "追分提醒图渲染失败，退回文字");
-                    match send_binding(st, b, wx_global.as_ref(), &t).await {
+                    match send_binding(st, b, wx_global.as_ref(), &t, "target").await {
                         Ok(()) => {
                             sent_any = true;
                             for (id, hit, gap) in pending_states.iter() {
@@ -1700,8 +1720,30 @@ async fn run_inner(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result
                 let pngs =
                     lineage_report_pngs_marked(l, &report_fields.lineage, b.name.trim()).await;
                 if pngs.is_empty() {
-                    restore_lineage_claim(st, &b.name).await;
-                    tracing::warn!(account = %b.name, "师门日报全部页面转 PNG 失败，本轮跳过");
+                    tracing::warn!(account = %b.name, "师门日报全部页面转 PNG 失败，退回文本");
+                    match send_binding(
+                        st,
+                        b,
+                        wx_global.as_ref(),
+                        "师门日报已更新，请打开小程序查看你的徒弟数据。",
+                        "lineage",
+                    )
+                    .await
+                    {
+                        Ok(()) => {
+                            sent_any = true;
+                            finalize_lineage_claim(st, &b.name).await;
+                        }
+                        Err(e) => {
+                            restore_lineage_claim(st, &b.name).await;
+                            if is_blocked(&e) {
+                                tracing::warn!(account = %b.name, "师门日报：闸门拦截，未发（去重标记不推进）");
+                            } else {
+                                tracing::warn!(account = %b.name, error = %e, "师门日报文本兜底失败");
+                                crate::store::push_touch(st, &b.name, &e.to_string()).await;
+                            }
+                        }
+                    }
                 } else {
                     tracing::info!(account = %b.name, pages = pngs.len(), "推送·师门日报(图片)");
                     match send_binding_images(st, b, "", &pngs).await {
@@ -1722,8 +1764,30 @@ async fn run_inner(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result
                                 if is_blocked(&e) {
                                     tracing::warn!(account = %b.name, "师门日报(图片)：闸门拦截，未发（去重标记不推进）");
                                 } else {
-                                    tracing::warn!(account = %b.name, error = %e, "师门日报(图片)推送失败");
-                                    crate::store::push_touch(st, &b.name, &e.to_string()).await;
+                                    tracing::warn!(account = %b.name, error = %e, "师门日报(图片)推送失败，退回文本");
+                                    match send_binding(
+                                        st,
+                                        b,
+                                        wx_global.as_ref(),
+                                        "师门日报已更新，请打开小程序查看你的徒弟数据。",
+                                        "lineage",
+                                    )
+                                    .await
+                                    {
+                                        Ok(()) => {
+                                            sent_any = true;
+                                            finalize_lineage_claim(st, &b.name).await;
+                                        }
+                                        Err(e2) => {
+                                            restore_lineage_claim(st, &b.name).await;
+                                            if is_blocked(&e2) {
+                                                tracing::warn!(account = %b.name, "师门日报：闸门拦截，未发（去重标记不推进）");
+                                            } else {
+                                                tracing::warn!(account = %b.name, error = %e2, "师门日报文本兜底也失败");
+                                                crate::store::push_touch(st, &b.name, &e2.to_string()).await;
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -2232,13 +2296,23 @@ pub fn render_batch_interval_secs() -> u64 {
 
 /// 现在还能不能给这个人发文本（会话已接上且有上下文）。
 pub(crate) async fn name_can_receive_text(st: &crate::state::AppState, name: &str) -> bool {
-    let conv = crate::store::push_binding_conversation(st, name).await;
-    if conv.trim().is_empty() {
-        return false;
+    let binding = crate::store::push_binding_by_name(st, name).await;
+    let conv = match binding.as_ref() {
+        Some(b) => b.conversation_id.trim().to_string(),
+        None => crate::store::push_binding_conversation(st, name).await,
+    };
+    if !conv.trim().is_empty()
+        && crate::store::wx_session_get(st, &conv)
+            .await
+            .map(|(_, token)| !token.trim().is_empty())
+            .unwrap_or(false)
+    {
+        return true;
     }
-    crate::store::wx_session_get(st, &conv)
-        .await
-        .map(|(_, token)| !token.trim().is_empty())
+    // 会话不在（未扫码 / 断线）时，小程序订阅消息是独立可达通道；
+    // 模板未配置时不把 DB 里的历史授权当成“能发”，交给页面提示重新配置。
+    binding
+        .map(|b| crate::public_teams::wx_mini_binding_ready(&b))
         .unwrap_or(false)
 }
 

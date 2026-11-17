@@ -463,12 +463,19 @@ pub async fn my_push_wechat_start(
     };
     Ok(Json(json!({
         "ok": true,
-        "qrcode": qrcode,
+        "qrcode": qrcode.clone(),
         "imgContent": img_content,
-        "url": url,
+        "url": url.clone(),
         "code": code,
         "codeExpires": code_expires,
         "expiresIn": expires_in,
+        // 小程序不展示二维码：直接 navigateToMiniProgram 拉起官方轻应用。
+        // 兼容旧网页端：原有字段原样保留，忽略 liteapp 即可。
+        "liteapp": {
+            "appId": crate::public_teams::WX_LITEAPP_APP_ID,
+            "path": format!("{}?qrcode={}&bot_type=3", crate::public_teams::WX_LITEAPP_PAGE, qrcode),
+            "url": url,
+        },
     })))
 }
 

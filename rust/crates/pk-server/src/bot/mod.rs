@@ -2043,6 +2043,11 @@ async fn route_command(
         CmdId::MissingData => cmd_missing(st, &args_ref).await,
         CmdId::Import => cmd_import(st, inbound, &args_ref).await,
         CmdId::ImportMonth => "用法：导入月 [男团|女团] 2026-10，然后再发月度 CSV。".to_string(),
+        CmdId::OpenAccount => {
+            let name = args.first().cloned().unwrap_or_default();
+            let phone = args.get(1).cloned().unwrap_or_default();
+            cmd_open_account(st, &name, &phone).await
+        }
     };
     Outbound::to(&inbound.conversation_id, text)
         .with_images(images)
@@ -2461,6 +2466,30 @@ async fn cmd_plan(st: &AppState) -> String {
 }
 
 /// 榜单通用实现：按口径取音浪 + 主播名，排序后组文本
+/// 微信群开号（管理员命令）：开号 <艺名> [手机号]
+/// 艺名 → 唯一在职主播；建号（初始密码=手机号后四位，无手机号随机 8 位）→ 直接绑定。
+/// 绑定后不支持自行解绑，需联系管理员在后端处理。
+async fn cmd_open_account(st: &Arc<AppState>, artist: &str, phone: &str) -> String {
+    let artist = artist.trim();
+    if artist.is_empty() {
+        return "用法：开号 <艺名> [手机号]\n例如：开号 饭团 13800000000".into();
+    }
+    let person_id = match crate::store::my_account_resolve_person_id(st, artist).await {
+        Ok(id) => id,
+        Err(e) => return crate::store::my_account::biz_msg(&e).to_string(),
+    };
+    let pass = crate::store::my_account::initial_password(phone);
+    if let Err(e) = crate::store::my_account_set(st, artist, phone, &pass).await {
+        return crate::store::my_account::biz_msg(&e).to_string();
+    }
+    if let Err(e) = crate::store::my_account_admin_bind(st, artist, person_id).await {
+        return crate::store::my_account::biz_msg(&e).to_string();
+    }
+    // 开号 = 改账号身份，旧 token 全部吊销
+    crate::public_teams::admin::my_tokens_revoke(artist);
+    format!("账号已开通并绑定：{artist}\n初始密码：{pass}\n首次登录后请在「我的 → 重置密码」修改。")
+}
+
 async fn cmd_rank(st: &Arc<AppState>, metric: &str, days: i64, title: &str) -> String {
     let Ok(anchors) = crate::repos::load_anchors(st, Some("LOCAL"), false).await else {
         return "数据库暂时不可用。".into();

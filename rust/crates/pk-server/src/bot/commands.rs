@@ -48,6 +48,8 @@ pub enum CmdId {
     MissingData,
     Import,
     ImportMonth,
+    /// 在微信群里开通主播账号（管理员；用法：开号 <艺名> [手机号]）
+    OpenAccount,
 }
 
 /// 命令注册项
@@ -202,6 +204,13 @@ pub const COMMANDS: &[CmdSpec] = &[
         aliases: &["月导入", "importmonth"],
         role: Role::Admin,
         summary: "月度导入（用法：导入月 [男团|女团] 2026-10，再发月度 CSV）",
+    },
+    CmdSpec {
+        id: CmdId::OpenAccount,
+        name: "开号",
+        aliases: &["开账号", "开通账号", "open"],
+        role: Role::Admin,
+        summary: "开通主播账号（用法：开号 <艺名> [手机号]，初始密码=手机号后四位）",
     },
 ];
 
@@ -368,6 +377,7 @@ mod tests {
         CmdId::MissingData,
         CmdId::Import,
         CmdId::ImportMonth,
+        CmdId::OpenAccount,
     ];
 
     /// 帮助里的「· 命令名 —— …」行 → 命令名

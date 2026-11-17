@@ -1698,6 +1698,10 @@ pub async fn live_round_push_targets(st: &AppState, round_id: i64) -> Vec<PushBi
                 last_lineage_date: r
                     .try_get::<String, _>("last_lineage_date")
                     .unwrap_or_default(),
+                mini_openid: r.try_get::<String, _>("mini_openid").unwrap_or_default(),
+                mini_daily_report: false,
+                mini_notify_target: false,
+                mini_lineage_report: false,
             })
             .collect()
     })

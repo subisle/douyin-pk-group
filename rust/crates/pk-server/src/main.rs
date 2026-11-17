@@ -550,6 +550,21 @@ async fn main() -> anyhow::Result<()> {
         /* 凭艺名认领开号（2026-10-18 用户拍板 / 契约 §3.2）：没有账号的在职主播
         用艺名 + 自设密码认领，认领即建号，之后进首次补全引导。 */
         .route("/api/public/my/claim", post(public_teams::my_claim))
+        // 微信小程序登录（一键登录 / 绑定 / 已登录绑定）
+        .route("/api/public/my/wxlogin", post(public_teams::my_wxlogin))
+        .route("/api/public/my/wxbind", post(public_teams::my_wxbind))
+        .route("/api/public/my/wxlink", post(public_teams::my_wxlink))
+        // 微信小程序订阅消息（不展示二维码；用户点一次授权后由推送引擎回落发送）
+        .route(
+            "/api/public/my/wxpush/config",
+            get(public_teams::my_wxpush_config),
+        )
+        .route(
+            "/api/public/my/wxpush/subscribe",
+            post(public_teams::my_wxpush_subscribe),
+        )
+        // 用户自助绑定主播（按艺名，只允许一次；绑定后不支持自行解绑，联系管理员）
+        .route("/api/public/my/bind", post(public_teams::my_bind))
         /* S1 首次补全（契约 §3.3）：手机号（必填）+ QQ（选填）+ 新密码（选填）。
         只认 X-My-Token；只允许 phone='' 的账号调一次，成功后换发 token。 */
         .route(

@@ -289,6 +289,16 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "052_import_lock_state",
         include_str!("migrations/052_import_lock_state.sql"),
     ),
+    // 053：微信小程序登录（my_accounts.wx_openid 唯一索引）
+    (
+        "053_my_wx_openid",
+        include_str!("migrations/053_my_wx_openid.sql"),
+    ),
+    // 054：微信小程序订阅消息（push_bindings.mini_openid + 三个独立授权开关）
+    (
+        "054_push_mini_subscribe",
+        include_str!("migrations/054_push_mini_subscribe.sql"),
+    ),
 ];
 
 /// 迁移建连（migrator 账号；同样关语句缓存）

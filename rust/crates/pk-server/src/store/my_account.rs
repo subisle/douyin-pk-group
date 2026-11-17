@@ -2766,6 +2766,209 @@ pub async fn my_account_admin_bind(
     bind_inner(st, login_name.trim(), person_id, true).await
 }
 
+/// 按微信 openid 反查账号名（微信小程序登录用）。未绑定返回 None。
+pub async fn my_account_by_wx_openid(st: &AppState, openid: &str) -> Option<String> {
+    let pool = w(st).ok()?;
+    let key = openid.trim();
+    if key.is_empty() {
+        return None;
+    }
+    let row = sqlx::query(&crate::pq::rewrite(
+        "SELECT name FROM my_accounts WHERE wx_openid = ? LIMIT 1",
+    ))
+    .bind(key)
+    .fetch_optional(pool)
+    .await
+    .ok()??;
+    row.try_get::<String, _>("name").ok()
+}
+
+/// 读账号当前绑定的微信 openid（小程序订阅消息用）。未绑定返回空串。
+pub async fn my_account_wx_openid(st: &AppState, name: &str) -> String {
+    let Ok(pool) = w(st) else {
+        return String::new();
+    };
+    sqlx::query(&crate::pq::rewrite(
+        "SELECT wx_openid FROM my_accounts WHERE name = ?",
+    ))
+    .bind(name.trim())
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .and_then(|r| r.try_get::<String, _>("wx_openid").ok())
+    .unwrap_or_default()
+}
+
+/// 绑定 / 改绑账号的微信 openid（微信小程序登录用）。
+/// 一个 openid 只能绑一个账号：已被别的账号占用 → BIZ 文案（400）。
+pub async fn my_account_set_wx_openid(
+    st: &AppState,
+    name: &str,
+    openid: &str,
+) -> std::result::Result<(), String> {
+    let key = name.trim();
+    let oid = openid.trim();
+    if key.is_empty() || oid.is_empty() {
+        return Err(biz("微信登录未完成，请重试"));
+    }
+    let pool = w(st).map_err(|e| e.to_string())?;
+    // 该 openid 是否已被别的账号占用
+    let taken = sqlx::query(&crate::pq::rewrite(
+        "SELECT name FROM my_accounts WHERE wx_openid = ? AND name <> ? LIMIT 1",
+    ))
+    .bind(oid)
+    .bind(key)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("查微信绑定失败：{e}"))?;
+    if taken.is_some() {
+        return Err(biz("该微信已绑定其它账号"));
+    }
+    let affected = sqlx::query(&crate::pq::rewrite(
+        "UPDATE my_accounts SET wx_openid = ? WHERE name = ?",
+    ))
+    .bind(oid)
+    .bind(key)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("绑定微信失败：{e}"))?
+    .affected();
+    if affected == 0 {
+        return Err(biz("账号不存在，请重新登录"));
+    }
+    Ok(())
+}
+
+/// 按艺名解析唯一在职主播 id（自助绑定 / 微信群开号共用）。
+/// 找不到 / 重名 / 已离团 / 性别异常 → BIZ 文案。
+pub async fn my_account_resolve_person_id(
+    st: &AppState,
+    artist_name: &str,
+) -> std::result::Result<i64, String> {
+    let key = artist_name.trim();
+    if key.is_empty() {
+        return Err(biz("请填写艺名"));
+    }
+    let pool = w(st).map_err(|e| e.to_string())?;
+    let rows = sqlx::query(&crate::pq::rewrite(
+        "SELECT id, gender, status FROM person \
+          WHERE name = ? AND name <> '' AND deleted_at IS NULL",
+    ))
+    .bind(key)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("查台账失败：{e}"))?;
+    if rows.is_empty() {
+        return Err(biz("台账里没有这个艺名，请联系管理员开号"));
+    }
+    if rows.len() > 1 {
+        return Err(biz("该艺名在台账里有多个主播，请联系管理员"));
+    }
+    let person_id: i64 = rows[0].try_get("id").unwrap_or(0);
+    let gender: String = rows[0].try_get("gender").unwrap_or_default();
+    let status: String = rows[0].try_get("status").unwrap_or_default();
+    if person_id <= 0 {
+        return Err(biz("台账里没有这个艺名，请联系管理员开号"));
+    }
+    if status == "left" {
+        return Err(biz("该主播已离团，不能开号"));
+    }
+    if !matches!(gender.as_str(), "male" | "female") {
+        return Err(biz("该主播性别信息异常，请联系管理员"));
+    }
+    Ok(person_id)
+}
+
+/// 用户自助绑定主播（按**艺名**，只允许一次）。
+///
+/// 2026-11-15 用户口径：`bound=0` 的账号登录后进入绑定页输入艺名即可完成绑定；
+/// 一旦绑定**不支持解绑/改绑**，需联系管理员在后端处理（复用 `bind_inner` 的
+/// `admin=false` 守卫——已绑定账号再调会回「不能自行更改」）。
+///
+/// 艺名解析与认领同一口径：台账里唯一在职（非离团）主播、性别 male/female；
+/// 找不到 / 重名 / 已离团 / 性别异常 / 该主播已被别的账号绑定 → 一律 BIZ 文案。
+pub async fn my_account_bind_by_name(
+    st: &AppState,
+    login_name: &str,
+    artist_name: &str,
+) -> std::result::Result<MyBindResult, String> {
+    let key = artist_name.trim();
+    if key.is_empty() {
+        return Err(biz("请填写艺名"));
+    }
+    let pool = w(st).map_err(|e| e.to_string())?;
+    let rows = sqlx::query(&crate::pq::rewrite(
+        "SELECT id, gender, status FROM person \
+          WHERE name = ? AND name <> '' AND deleted_at IS NULL",
+    ))
+    .bind(key)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("查台账失败：{e}"))?;
+    if rows.is_empty() {
+        return Err(biz("台账里没有这个艺名，请联系管理员开号"));
+    }
+    if rows.len() > 1 {
+        return Err(biz("该艺名在台账里有多个主播，请联系管理员"));
+    }
+    let person_id: i64 = rows[0].try_get("id").unwrap_or(0);
+    let gender: String = rows[0].try_get("gender").unwrap_or_default();
+    let status: String = rows[0].try_get("status").unwrap_or_default();
+    if person_id <= 0 {
+        return Err(biz("台账里没有这个艺名，请联系管理员开号"));
+    }
+    if status == "left" {
+        return Err(biz("该主播已离团，不能绑定"));
+    }
+    if !matches!(gender.as_str(), "male" | "female") {
+        return Err(biz("该主播性别信息异常，请联系管理员"));
+    }
+    // 复用 my_account_bind：只允许 bound=0 绑定、绑定后不能自行更改；
+    // 并写回 person_id 锚点（uk_my_person_uniq 保证一个主播只被一个账号绑）。
+    my_account_bind(st, login_name, person_id).await
+}
+
+/// 微信小程序首次登录：只凭艺名完成「认领/绑定 + openid 绑定」。
+///
+/// 2026-11-17 用户口径：微信确认身份后只输入艺名，不再让用户输入手机号或密码。
+/// - 已有同名账号：未绑定则绑定到台账，已绑定则直接复用；
+/// - 没有同名账号：用随机不可见密码走既有 claim 事务开号并绑定台账；
+/// - 管理员账号禁止通过艺名被微信认领；
+/// - openid 唯一索引保证一个微信只能绑定一个账号。
+pub async fn my_account_wx_bind_or_claim(
+    st: &AppState,
+    artist_name: &str,
+    openid: &str,
+) -> std::result::Result<String, String> {
+    let key = artist_name.trim();
+    if key.is_empty() {
+        return Err(biz("请输入艺名"));
+    }
+    if openid.trim().is_empty() {
+        return Err(biz("微信登录未完成，请重试"));
+    }
+
+    if let Some(info) = my_account_info(st, key).await {
+        if info.is_admin {
+            return Err(biz("管理员账号不支持通过艺名绑定微信"));
+        }
+        let account_name = if info.bound {
+            info.name
+        } else {
+            my_account_bind_by_name(st, &info.name, key).await?.name
+        };
+        my_account_set_wx_openid(st, &account_name, openid).await?;
+        return Ok(account_name);
+    }
+
+    // 没有账号：沿用 claim 的事务、台账唯一性和占用检查；密码随机且不再对外使用。
+    let hidden_pass = crate::random::random_password();
+    let claimed = my_account_claim(st, key, &hidden_pass).await?;
+    my_account_set_wx_openid(st, &claimed.name, openid).await?;
+    Ok(claimed.name)
+}
+
 async fn bind_inner(
     st: &AppState,
     login_name: &str,
@@ -3528,6 +3731,8 @@ mod tests {
     const IT_NAME_FEMALE: &str = "__t1_verify_flow_女";
     const IT_NAME_CONFLICT: &str = "__t1_verify_flow_冲突";
     const IT_NAME_PHONE_OWNER: &str = "__t1_verify_flow_档案占号";
+    const IT_NAME_WX: &str = "__t1_wx_name_only_艺名";
+    const IT_OPENID_WX: &str = "openid-test-wx-name-only-20261117";
     const IT_PHONE_MALE: &str = "19900000001";
     const IT_PHONE_FEMALE: &str = "19900000002";
     const IT_PHONE_CONFLICT: &str = "13700000003";
@@ -3581,6 +3786,7 @@ mod tests {
             IT_NAME_FEMALE,
             IT_NAME_CONFLICT,
             IT_NAME_PHONE_OWNER,
+            IT_NAME_WX,
         ] {
             let _ = sqlx::query(&crate::pq::rewrite(
                 "DELETE FROM my_accounts WHERE name = ?",
@@ -3602,6 +3808,12 @@ mod tests {
             .execute(pool)
             .await;
         }
+        let _ = sqlx::query(&crate::pq::rewrite(
+            "DELETE FROM my_accounts WHERE wx_openid = ?",
+        ))
+        .bind(IT_OPENID_WX)
+        .execute(pool)
+        .await;
         for q in [IT_QQ_MALE, IT_QQ_FEMALE] {
             let _ = sqlx::query(&crate::pq::rewrite(
                 "DELETE FROM my_accounts WHERE email = ?",
@@ -4062,5 +4274,50 @@ mod tests {
         if let Err(e) = body {
             panic!("真库集成回归失败：{e}");
         }
+    }
+
+    /// 微信首次登录只输入艺名：claim + bind + openid 一次性落库，重复调用幂等。
+    #[ignore = "真库集成：需 PK_IT_DB=1 与 DB_WRITER_* 环境变量"]
+    #[tokio::test]
+    async fn my_account_wx_name_only_flow_real_db() {
+        let Some(st) = it_state().await else {
+            eprintln!("[skip] 未设置 PK_IT_DB=1 / DB_WRITER_*，跳过微信艺名绑定回归");
+            return;
+        };
+        it_cleanup(&st).await;
+        let body: anyhow::Result<()> = async {
+            let person_id = it_add_person(&st, IT_NAME_WX, "female").await;
+            let first = my_account_wx_bind_or_claim(&st, IT_NAME_WX, IT_OPENID_WX)
+                .await
+                .map_err(anyhow::Error::msg)?;
+            assert_eq!(first, IT_NAME_WX);
+
+            let info = my_account_info(&st, IT_NAME_WX)
+                .await
+                .expect("微信认领后账号应存在");
+            assert!(info.bound, "微信认领必须直接绑定台账主播");
+            assert_eq!(
+                my_account_by_wx_openid(&st, IT_OPENID_WX).await.as_deref(),
+                Some(IT_NAME_WX),
+                "openid 必须能反查同一个艺名账号"
+            );
+
+            let row = sqlx::query(&crate::pq::rewrite(
+                "SELECT person_id FROM my_accounts WHERE name = ? LIMIT 1",
+            ))
+            .bind(IT_NAME_WX)
+            .fetch_one(st.writer.as_ref().expect("writer"))
+            .await?;
+            assert_eq!(row.try_get::<i64, _>("person_id").unwrap_or(0), person_id);
+
+            let again = my_account_wx_bind_or_claim(&st, IT_NAME_WX, IT_OPENID_WX)
+                .await
+                .map_err(anyhow::Error::msg)?;
+            assert_eq!(again, IT_NAME_WX, "同一微信重复进入必须复用原账号");
+            Ok(())
+        }
+        .await;
+        it_cleanup(&st).await;
+        body.expect("微信艺名绑定真库回归失败");
     }
 }
