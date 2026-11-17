@@ -393,8 +393,7 @@ mod pwa_tests {
             "st-group-notice",
             "中旬争霸赛",
             "倒计时",
-            "分组开放",
-            "revealAt",
+            "开赛前",
         ] {
             assert!(ST_PAGE.contains(token), "分组倒计时公告缺少：{token}");
         }
