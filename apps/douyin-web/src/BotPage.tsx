@@ -762,6 +762,7 @@ function PublicSettingsCard() {
     ['dataEnabled', '每日报告页'],
     ['groupEnabled', '分组页'],
     ['lineageEnabled', '族谱页（男团）'],
+    ['wechatDockEnabled', '微信对接页'],
   ]
 
   /** WorkBuddy 绑定总开关（后端 public_settings.workbuddyEnabled，默认关闭） */

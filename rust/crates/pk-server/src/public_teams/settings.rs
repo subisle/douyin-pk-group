@@ -62,6 +62,10 @@ pub struct PublicSettings {
     /// 只有这里打开且服务端配置了 WorkBuddy 网关，展示端才会弹绑定/续期流程。
     #[serde(default)]
     pub workbuddy_enabled: bool,
+    /// 微信对接页总开关（2026-11-17 用户口径：默认关闭）。关闭后底栏入口、
+    /// “我的”里的微信推送行与 `/my/wechat` 深链都改道回“我的”首页。
+    #[serde(default)]
+    pub wechat_dock_enabled: bool,
     /// 分组开放前的赛事公告（2026-11-17 用户口径）：PK 未到开赛窗口时，
     /// 分组页不展示名单，只展示「中旬争霸赛倒计时 X 天」。
     #[serde(default)]
@@ -202,6 +206,8 @@ mod settings_tests {
         let s = PublicSettings::default();
         assert!(!s.workbuddy_enabled);
         assert_eq!(s.to_json()["workbuddyEnabled"], false);
+        assert!(!s.wechat_dock_enabled);
+        assert_eq!(s.to_json()["wechatDockEnabled"], false);
     }
 
     #[test]
@@ -313,6 +319,7 @@ impl Default for PublicSettings {
             fee_pct: 0.0,
             login_required: true,
             workbuddy_enabled: false,
+            wechat_dock_enabled: false,
             group_notice_enabled: false,
             group_notice_title: String::new(),
             group_notice_event_date: String::new(),
@@ -428,6 +435,7 @@ impl PublicSettings {
             "feePct": self.fee_pct.clamp(0.0, 100.0),
             "loginRequired": self.login_required,
             "workbuddyEnabled": self.workbuddy_enabled,
+            "wechatDockEnabled": self.wechat_dock_enabled,
             "groupNoticeEnabled": self.group_notice_enabled,
             "groupNoticeTitle": self.group_notice_title,
             "groupNoticeEventDate": self.group_notice_event_date,
@@ -505,6 +513,7 @@ pub async fn update_settings(State(st): State<ArcState>, Json(body): Json<Value>
     s.lineage_enabled = flag("lineageEnabled", s.lineage_enabled);
     s.login_required = flag("loginRequired", s.login_required);
     s.workbuddy_enabled = flag("workbuddyEnabled", s.workbuddy_enabled);
+    s.wechat_dock_enabled = flag("wechatDockEnabled", s.wechat_dock_enabled);
     s.group_notice_enabled = flag("groupNoticeEnabled", s.group_notice_enabled);
     if let Some(v) = body.get("groupNoticeTitle").and_then(|v| v.as_str()) {
         s.group_notice_title = v.trim().chars().take(80).collect();

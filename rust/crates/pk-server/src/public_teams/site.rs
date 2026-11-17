@@ -134,6 +134,8 @@ pub(super) async fn site_payload(st: &AppState, s: &PublicSettings, query_team: 
             "loginRequired": s.login_required,
             // WorkBuddy 绑定必须同时满足：后台开关打开 + 服务端网关已配置。
             "workbuddyEnabled": s.workbuddy_enabled && crate::wbgateway::global().is_some(),
+            // 微信对接页：关闭时后端也下发 false，前端深链必须改道。
+            "wechatDockEnabled": s.wechat_dock_enabled,
         },
     })))
 }
