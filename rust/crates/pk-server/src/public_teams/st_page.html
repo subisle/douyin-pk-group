@@ -1512,6 +1512,7 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
   background:rgba(255,255,255,.075); border:1px solid rgba(255,255,255,.11);
   color:rgba(255,255,255,.86); font-size:11px; font-weight:700; }
 .st-gn-chip .material-symbols-outlined { font-size:15px; color:#FBBF24; }
+.st-gn-reveal-chip { border-color:rgba(251,191,36,.30); background:rgba(251,191,36,.10); color:#FDE68A; }
 .st-gn-foot { margin-top:20px; font-size:11px; color:rgba(255,255,255,.48); }
 @media (max-width:420px) {
   .st-group-notice { min-height:390px; padding:24px 14px 20px; border-radius:22px; }
@@ -6885,6 +6886,12 @@ function groupNoticeLeadText(minutes) {
   return n + '分钟';
 }
 
+function groupNoticeDateTime(v) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(String(v || '').trim());
+  if (!m) return '';
+  return (+m[2]) + '月' + (+m[3]) + '日 ' + m[4] + ':' + m[5];
+}
+
 /** 分组开放前的赛事公告：后端已把未到开放窗口的 groups/ranking 清空，
     这里只负责把倒计时、接龙日期和开赛时间展示成一个稳定首屏。 */
 function groupNoticeHtml(n, page) {
@@ -6894,6 +6901,7 @@ function groupNoticeHtml(n, page) {
   const days = Math.max(0, Number(n.daysUntil) || 0);
   const eventDay = groupNoticeDate(n.eventDate);
   const signupDay = groupNoticeDate(n.signupDate);
+  const revealDayTime = groupNoticeDateTime(n.revealAt);
   const start = String(n.startTime || '08:15');
   const ended = n.ended === true;
   const revealLead = groupNoticeLeadText(n.revealLeadMinutes != null ? n.revealLeadMinutes : 120);
@@ -6919,9 +6927,10 @@ function groupNoticeHtml(n, page) {
       '<div class="st-gn-chips">' +
         '<span class="st-gn-chip"><span class="material-symbols-outlined">groups</span>' + esc(signupText) + '</span>' +
         (eventDay ? '<span class="st-gn-chip"><span class="material-symbols-outlined">flag</span>' + esc(eventDay + ' ' + start) + '</span>' : '') +
+        (revealDayTime ? '<span class="st-gn-chip st-gn-reveal-chip">分组开放 ' + esc(revealDayTime) + '</span>' : '') +
       '</div>' +
       '<div class="st-gn-foot">' +
-        (ended ? '下一场分组公布后会在这里更新' : '分组名单将在开赛前 ' + esc(revealLead) + '开放') +
+        (ended ? '下一场分组公布后会在这里更新' : '开赛前 ' + esc(revealLead) + '自动开放分组名单') +
       '</div>' +
     '</section>' +
   '</div>';
