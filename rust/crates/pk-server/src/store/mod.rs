@@ -322,11 +322,35 @@ pub async fn get_plan(st: &AppState, id: i64) -> Option<PlanRow> {
     }
 }
 
+/// 把发布时选择的赛事日期写进方案 payload；空日期表示立即放榜（移除旧日期）。
+/// 返回 None 表示 payload 不是合法 JSON 对象，调用方应拒绝这次上架。
+fn set_plan_event_date(payload: &str, event_date: &str) -> Option<String> {
+    let mut value: serde_json::Value = serde_json::from_str(payload).ok()?;
+    let obj = value.as_object_mut()?;
+    let event_date = event_date.trim();
+    if event_date.is_empty() {
+        obj.remove("eventDate");
+    } else {
+        obj.insert(
+            "eventDate".to_string(),
+            serde_json::Value::String(event_date.to_string()),
+        );
+    }
+    serde_json::to_string(&value).ok()
+}
+
 /// 发布 / 取消发布。未发布时对外展示页返回 404。
 /// 上架互斥按赛事类型（2026-10-09 起）：展示端每个赛事类型一个独立分组页
 /// （初级小组赛/中级小组赛/月终争霸/两级晋级赛），同类型同一时刻只显示一场，
 /// 新方案上架时自动下架同类型的其它方案；不同类型互不影响。
-pub async fn set_published(st: &AppState, id: i64, published: bool) -> bool {
+/// `event_date = Some(..)` 时同时更新方案 payload 的 `eventDate`，保证公告倒计时与
+/// 实际展示的方案使用同一个日期；None 保持方案原日期不变（兼容老调用）。
+pub async fn set_published(
+    st: &AppState,
+    id: i64,
+    published: bool,
+    event_date: Option<&str>,
+) -> bool {
     let Ok(pool) = w(st) else {
         return false;
     };
@@ -337,13 +361,48 @@ pub async fn set_published(st: &AppState, id: i64, published: bool) -> bool {
             return false;
         }
     };
+    let row = match sqlx::query(&crate::pq::rewrite(
+        "SELECT COALESCE(event_type, '') AS event_type, payload FROM plans WHERE id = ? FOR UPDATE",
+    ))
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await
+    {
+        Ok(Some(r)) => r,
+        Ok(None) => return false,
+        Err(e) => {
+            tracing::error!(error = %e, plan_id = id, "上架前读取方案失败");
+            return false;
+        }
+    };
+    let event_type = row.try_get::<String, _>("event_type").unwrap_or_default();
+    if published {
+        if let Some(event_date) = event_date {
+            let payload = row.try_get::<String, _>("payload").unwrap_or_default();
+            let Some(payload) = set_plan_event_date(&payload, event_date) else {
+                tracing::error!(plan_id = id, "方案 payload 不是合法 JSON 对象，拒绝上架");
+                return false;
+            };
+            if let Err(e) = sqlx::query(&crate::pq::rewrite(
+                "UPDATE plans SET payload = ? WHERE id = ?",
+            ))
+            .bind(payload)
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            {
+                tracing::error!(error = %e, plan_id = id, "写入方案发布日期失败");
+                return false;
+            }
+        }
+    }
     if published {
         if let Err(e) = sqlx::query(&crate::pq::rewrite(
             "UPDATE plans SET published = 0 WHERE published = 1 AND id != ? \
-             AND COALESCE(event_type, '') = COALESCE((SELECT event_type FROM (SELECT event_type FROM plans WHERE id = ?) t), '')",
+             AND COALESCE(event_type, '') = ?",
         ))
         .bind(id)
-        .bind(id)
+        .bind(&event_type)
         .execute(&mut *tx)
         .await
         {
@@ -648,6 +707,31 @@ mod tests {
             cols[6], "published",
             "published 必须是第 7 列（map_plan 按 i16 读）"
         );
+    }
+
+    #[test]
+    fn publish_event_date_is_written_without_losing_plan_payload() {
+        let payload = r#"{"title":"中级争霸赛","buckets":[{"name":"第 1 组"}]}"#;
+        let updated = set_plan_event_date(payload, "2026-11-20").unwrap();
+        let value: serde_json::Value = serde_json::from_str(&updated).unwrap();
+        assert_eq!(value["eventDate"], "2026-11-20");
+        assert_eq!(value["title"], "中级争霸赛");
+        assert_eq!(value["buckets"][0]["name"], "第 1 组");
+    }
+
+    #[test]
+    fn publish_event_date_can_be_cleared_for_immediate_reveal() {
+        let payload = r#"{"title":"中级争霸赛","eventDate":"2026-11-20"}"#;
+        let updated = set_plan_event_date(payload, "").unwrap();
+        let value: serde_json::Value = serde_json::from_str(&updated).unwrap();
+        assert!(value.get("eventDate").is_none());
+        assert_eq!(value["title"], "中级争霸赛");
+    }
+
+    #[test]
+    fn publish_event_date_rejects_non_object_payload() {
+        assert!(set_plan_event_date("[]", "2026-11-20").is_none());
+        assert!(set_plan_event_date("not-json", "2026-11-20").is_none());
     }
 
     /// 密码规则（2026-10-18 用户拍板）：**4~64 个字符，允许中英文 / 特殊字符 /

@@ -170,6 +170,8 @@ export interface SavedPlan {
   /** 分组时用的数据日期（`YYYY-MM-DD` 降序，第一个是「最近有效业务日」）。
    *  2026-10-18 起随方案落库：载入老方案时用来还原导出长图头部日期；缺省 = 老方案没存。 */
   dates?: string[];
+  /** 上线公告的开赛日期；空/缺省 = 立即放榜。 */
+  eventDate?: string;
 }
 
 export interface PlanBrief {

@@ -456,6 +456,9 @@ pub async fn plans(State(st): State<std::sync::Arc<AppState>>) -> ApiResult {
 #[derive(Deserialize)]
 pub struct PublishBody {
     pub published: Option<bool>,
+    /// 上线时同步写入方案的展示日期。空串 = 立即放榜；不传 = 保持方案原日期。
+    #[serde(rename = "eventDate")]
+    pub event_date: Option<String>,
 }
 
 pub async fn set_plan_published(
@@ -465,7 +468,17 @@ pub async fn set_plan_published(
 ) -> ApiResult {
     let id: i64 = id.parse().map_err(|_| anyhow::anyhow!("方案不存在"))?;
     let published = body.published.unwrap_or(true);
-    if !store::set_published(&st, id, published).await {
+    let event_date = if published {
+        body.event_date.as_deref().map(str::trim)
+    } else {
+        None
+    };
+    if let Some(date) = event_date.filter(|date| !date.is_empty()) {
+        if date.len() != 10 || chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").is_err() {
+            return Err(anyhow::anyhow!("eventDate 必须是 YYYY-MM-DD").into());
+        }
+    }
+    if !store::set_published(&st, id, published, event_date).await {
         return Err(anyhow::anyhow!("方案不存在").into());
     }
     crate::events::emit(
@@ -477,7 +490,7 @@ pub async fn set_plan_published(
         },
     );
     Ok(Json(
-        json!({ "ok": true, "id": id, "published": published }),
+        json!({ "ok": true, "id": id, "published": published, "eventDate": event_date }),
     ))
 }
 

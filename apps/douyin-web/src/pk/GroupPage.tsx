@@ -12,6 +12,7 @@ import {
   pk,
   type BoardConfig,
   type EventType,
+  type GroupNoticeSettings,
 } from './api';
 import {
   BREAK_AFTER_GROUP,
@@ -71,6 +72,27 @@ const wan = (n: number) => {
 };
 
 const clone = <T,>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
+
+const DEFAULT_GROUP_NOTICE: GroupNoticeSettings = {
+  groupNoticeEnabled: false,
+  groupNoticeTitle: '中旬争霸赛',
+  groupNoticeEventDate: '',
+  groupNoticeSignupDate: '',
+  groupNoticeStartTime: '08:15',
+  groupNoticeRevealLeadMinutes: 120,
+};
+
+const groupNoticeSettings = (s: Partial<GroupNoticeSettings>): GroupNoticeSettings => ({
+  groupNoticeEnabled: s.groupNoticeEnabled ?? DEFAULT_GROUP_NOTICE.groupNoticeEnabled,
+  groupNoticeTitle: s.groupNoticeTitle ?? DEFAULT_GROUP_NOTICE.groupNoticeTitle,
+  groupNoticeEventDate: s.groupNoticeEventDate ?? DEFAULT_GROUP_NOTICE.groupNoticeEventDate,
+  groupNoticeSignupDate: s.groupNoticeSignupDate ?? DEFAULT_GROUP_NOTICE.groupNoticeSignupDate,
+  groupNoticeStartTime: s.groupNoticeStartTime ?? DEFAULT_GROUP_NOTICE.groupNoticeStartTime,
+  groupNoticeRevealLeadMinutes:
+    Number.isFinite(Number(s.groupNoticeRevealLeadMinutes))
+      ? Number(s.groupNoticeRevealLeadMinutes)
+      : DEFAULT_GROUP_NOTICE.groupNoticeRevealLeadMinutes,
+});
 
 /* BREAK_AFTER_GROUP / REVIVAL_EVENTS 原先在这里各写了一份，与 BoardPage 重复
    （2026-10-17，审计 4-8）→ 统一从 './rules' 导入，见下面 import。 */
@@ -234,6 +256,12 @@ export default function GroupPage() {
   const [plans, setPlans] = useState<PlanBrief[]>([]);
   const [planId, setPlanId] = useState<number | null>(null);
   const [display, setDisplay] = useState<DisplayConfig>(DEFAULT_DISPLAY);
+  /** 分组页上线公告：与公开站点设置共用一份配置；上架方案时把日期同步写进方案。 */
+  const [groupNotice, setGroupNotice] = useState<GroupNoticeSettings | null>(null);
+  const [groupNoticeLoaded, setGroupNoticeLoaded] = useState(false);
+  const [groupNoticeSaving, setGroupNoticeSaving] = useState(false);
+  const [groupNoticeError, setGroupNoticeError] = useState('');
+  const [selectedPublishId, setSelectedPublishId] = useState<number | null>(null);
   /** 当前弹出「⋯」操作菜单的玩家 key（参照原版 PlayerCard 的单按钮菜单） */
   const [menuFor, setMenuFor] = useState<string | null>(null);
   /** 强度位次形态：默认「每组一个最强」（第 3 组头牌最强、第 4 组次之、第 1 组最弱）；
@@ -499,12 +527,64 @@ export default function GroupPage() {
       const r = await pk.listPlans();
       // P1-14：方案列表按当前赛事类型过滤（后端 /api/plans 无 type 参数，前端过滤；
       // eventType 为空的老方案不归类，不在任何赛事页出现，避免跨赛事载入/上架）
-      setPlans((r.items || []).filter((p) => p.eventType === eventType));
+      const items = (r.items || []).filter((p) => p.eventType === eventType);
+      setPlans(items);
+      setSelectedPublishId((prev) => {
+        if (prev && items.some((p) => p.id === prev)) return prev;
+        return items.find((p) => p.published)?.id ?? items[0]?.id ?? null;
+      });
     } catch (e) {
       // P2-5：方案列表加载失败不再静默 —— 显示出来（载入/上架按钮全会没数据）
       console.error('方案列表加载失败', e);
       setError((e as Error).message);
       setPlans([]);
+      setSelectedPublishId(null);
+    }
+  }
+
+  const loadGroupNotice = useCallback(async () => {
+    setGroupNoticeError('');
+    try {
+      const s = await pk.getPublicSettings();
+      setGroupNotice(groupNoticeSettings(s));
+      setGroupNoticeLoaded(true);
+    } catch (e) {
+      setGroupNoticeLoaded(false);
+      setGroupNoticeError((e as Error).message);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadGroupNotice();
+  }, [loadGroupNotice]);
+
+  async function persistGroupNotice(): Promise<GroupNoticeSettings> {
+    const next = groupNoticeSettings(groupNotice ?? DEFAULT_GROUP_NOTICE);
+    if (next.groupNoticeEnabled && !/^\d{4}-\d{2}-\d{2}$/.test(next.groupNoticeEventDate)) {
+      throw new Error('启用倒计时时，请先选择倒计时日期');
+    }
+    const d = await pk.savePublicSettings(next);
+    const saved = groupNoticeSettings(d.settings);
+    setGroupNotice(saved);
+    setGroupNoticeLoaded(true);
+    setGroupNoticeError('');
+    return saved;
+  }
+
+  function updateGroupNotice(patch: Partial<GroupNoticeSettings>) {
+    setGroupNotice((prev) => ({ ...groupNoticeSettings(prev ?? DEFAULT_GROUP_NOTICE), ...patch }));
+  }
+
+  async function saveGroupNoticeOnly() {
+    setGroupNoticeSaving(true);
+    setError('');
+    try {
+      await persistGroupNotice();
+      setMsg('倒计时文案和日期已保存');
+    } catch (e) {
+      setGroupNoticeError((e as Error).message);
+    } finally {
+      setGroupNoticeSaving(false);
     }
   }
 
@@ -779,6 +859,7 @@ export default function GroupPage() {
           buckets: buckets.map((b) => ({ name: b.name, players: b.players })),
           schedule: { start: startTime, intervalMin, breaks },
           display,
+          eventDate: groupNotice?.groupNoticeEnabled ? groupNotice.groupNoticeEventDate : undefined,
           /* 数据日期也存进方案（2026-10-18）：载入方案后 `dates` 是空的，
            * 导出长图头部只能退回 `isoLocal()`，历史方案会被印成「导出当天」的日期。 */
           dates,
@@ -856,8 +937,16 @@ export default function GroupPage() {
   }
 
   async function publish(id: number, published: boolean) {
+    setError('');
+    if (published) setGroupNoticeSaving(true);
     try {
-      await pk.setPublished(id, published);
+      let eventDate: string | undefined;
+      if (published) {
+        // 上架时把当前倒计时配置一起保存，并把日期写进方案 payload；关闭公告时清空旧日期，避免下次误倒计时。
+        const saved = await persistGroupNotice();
+        eventDate = saved.groupNoticeEnabled ? saved.groupNoticeEventDate : '';
+      }
+      await pk.setPublished(id, published, eventDate);
       await loadPlans();
       setMsg(
         published
@@ -866,7 +955,17 @@ export default function GroupPage() {
       );
     } catch (e) {
       setError((e as Error).message);
+    } finally {
+      if (published) setGroupNoticeSaving(false);
     }
+  }
+
+  async function publishSelectedPlan() {
+    if (!selectedPublishId) {
+      setGroupNoticeError('请先选择一个方案');
+      return;
+    }
+    await publish(selectedPublishId, true);
   }
 
   async function removePlan(id: number) {
@@ -1020,6 +1119,14 @@ export default function GroupPage() {
   /** 名单自带分数（晋级赛名单）时口径不再是库里音浪，文案整体换掉 */
   const byScore = scoredCount > 0;
   const waveLabel = byScore ? SCORE_LABEL : `${metricLabel(metric, days)}音浪`;
+  const publishedPlan = plans.find((p) => p.published) ?? null;
+  const selectedPublishPlan = plans.find((p) => p.id === selectedPublishId) ?? null;
+  const noticeDate = groupNotice?.groupNoticeEventDate?.trim() ?? '';
+  const noticeEnabled = groupNotice?.groupNoticeEnabled === true;
+  const noticePreview =
+    noticeEnabled && noticeDate
+      ? `${groupNotice?.groupNoticeTitle?.trim() || '分组赛事公告'} · ${noticeDate} ${groupNotice?.groupNoticeStartTime || '08:15'} 开赛`
+      : '立即展示分组（不等待倒计时日期）';
   const violationNames = useMemo(() => {
     const set = new Set<string>();
     for (const v of violations) for (const n of v.names) set.add(n);
@@ -1131,6 +1238,139 @@ export default function GroupPage() {
 
   return (
     <div className="page pk">
+      <section className="card pk-publish-card">
+        <div className="pk-publish-head">
+          <div>
+            <h2>上线展示与倒计时</h2>
+            <p className="hint" style={{ margin: '4px 0 0' }}>
+              这里保存的文案和日期会同步到展示端。上架时把日期写进所选方案，未到日期先显示倒计时，
+              到开赛前设定分钟数再自动展示分组名单。
+            </p>
+          </div>
+          <span className={'pk-publish-status ' + (publishedPlan ? 'live' : 'off')}>
+            {publishedPlan ? `当前上线 #${publishedPlan.id}` : '当前未上线'}
+          </span>
+        </div>
+
+        {!groupNoticeLoaded ? (
+          <div className="pk-publish-loading">
+            <span>{groupNoticeError || '正在读取倒计时设置…'}</span>
+            <button onClick={() => void loadGroupNotice()} disabled={groupNoticeSaving}>重试</button>
+          </div>
+        ) : (
+          <div className="pk-publish-grid">
+            <div className="pk-publish-block">
+              <h3>倒计时公告</h3>
+              <label className="pk-publish-switch">
+                <input
+                  type="checkbox"
+                  checked={groupNotice?.groupNoticeEnabled === true}
+                  onChange={(e) => updateGroupNotice({ groupNoticeEnabled: e.target.checked })}
+                />
+                <span>启用分组倒计时公告</span>
+              </label>
+              <div className="field-list">
+                <label className="field">
+                  倒计时文案
+                  <input
+                    value={groupNotice?.groupNoticeTitle ?? ''}
+                    placeholder="例如：中旬争霸赛"
+                    maxLength={80}
+                    onChange={(e) => updateGroupNotice({ groupNoticeTitle: e.target.value })}
+                  />
+                  <span className="field-hint">展示在倒计时首屏的大标题。</span>
+                </label>
+                <label className="field">
+                  倒计时日期
+                  <input
+                    type="date"
+                    min={isoLocal()}
+                    value={groupNotice?.groupNoticeEventDate ?? ''}
+                    onChange={(e) => updateGroupNotice({ groupNoticeEventDate: e.target.value })}
+                  />
+                  <span className="field-hint">留空 = 立即展示分组；填写未来日期 = 先显示倒计时。</span>
+                </label>
+                <div className="pk-publish-inline">
+                  <label className="field">
+                    开赛时间
+                    <input
+                      type="time"
+                      value={groupNotice?.groupNoticeStartTime ?? '08:15'}
+                      onChange={(e) => updateGroupNotice({ groupNoticeStartTime: e.target.value })}
+                    />
+                  </label>
+                  <label className="field">
+                    接龙日期（可选）
+                    <input
+                      type="date"
+                      value={groupNotice?.groupNoticeSignupDate ?? ''}
+                      onChange={(e) => updateGroupNotice({ groupNoticeSignupDate: e.target.value })}
+                    />
+                  </label>
+                </div>
+                <label className="field">
+                  提前开放分组（分钟）
+                  <input
+                    type="number"
+                    min={0}
+                    max={1440}
+                    value={groupNotice?.groupNoticeRevealLeadMinutes ?? 120}
+                    onChange={(e) => updateGroupNotice({ groupNoticeRevealLeadMinutes: Number(e.target.value) || 0 })}
+                  />
+                  <span className="field-hint">默认 120 = 开赛前 2 小时开放名单。</span>
+                </label>
+              </div>
+            </div>
+
+            <div className="pk-publish-block pk-publish-plan-block">
+              <h3>上线方案</h3>
+              <p className="hint" style={{ margin: '0 0 8px' }}>
+                先保存分组方案，再在这里选择要展示的那一个。上架后同赛事类型只会显示所选方案，
+                其它同类型方案会自动下架；不同赛事类型互不影响。
+              </p>
+              <label className="field">
+                选择要上线的方案
+                <select
+                  value={selectedPublishId ?? ''}
+                  onChange={(e) => setSelectedPublishId(e.target.value ? Number(e.target.value) : null)}
+                  disabled={!plans.length}
+                >
+                  <option value="">{plans.length ? '请选择方案' : '还没有可上线的方案'}</option>
+                  {plans.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      #{p.id} · {p.title}{p.published ? '（当前上线）' : ''}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <div className="pk-publish-actions">
+                <button
+                  className="primary"
+                  disabled={!selectedPublishId || groupNoticeSaving || !groupNoticeLoaded}
+                  onClick={() => void publishSelectedPlan()}
+                >
+                  {groupNoticeSaving ? '保存并上线中…' : '保存设置并上线所选方案'}
+                </button>
+                <button disabled={groupNoticeSaving || !groupNoticeLoaded} onClick={() => void saveGroupNoticeOnly()}>
+                  {groupNoticeSaving ? '保存中…' : '只保存倒计时设置'}
+                </button>
+                {publishedPlan && (
+                  <button disabled={groupNoticeSaving} onClick={() => void publish(publishedPlan.id, false)}>
+                    下线当前方案
+                  </button>
+                )}
+              </div>
+              <div className="pk-publish-preview">
+                <div>展示端当前预览：<b>{noticePreview}</b></div>
+                {selectedPublishPlan && <div>待上线方案：<b>#{selectedPublishPlan.id} {selectedPublishPlan.title}</b></div>}
+                {publishedPlan && <div>当前展示方案：<b>#{publishedPlan.id} {publishedPlan.title}</b></div>}
+              </div>
+            </div>
+          </div>
+        )}
+        {groupNoticeError && <div className="alert bad" style={{ marginTop: 10 }}>{groupNoticeError}</div>}
+      </section>
+
       <section className="card">
         <h2>名单与配置</h2>
         <textarea

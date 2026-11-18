@@ -98,6 +98,16 @@ export function defaultStrengthOrder(groupCount: number): number[] {
 
 export const DEFAULT_DISPLAY = { wave: true, ranking: true, daily: true, groups: true };
 
+/** 分组页上线倒计时配置（管理端公开站点设置里的同名字段）。 */
+export interface GroupNoticeSettings {
+  groupNoticeEnabled: boolean;
+  groupNoticeTitle: string;
+  groupNoticeEventDate: string;
+  groupNoticeSignupDate: string;
+  groupNoticeStartTime: string;
+  groupNoticeRevealLeadMinutes: number;
+}
+
 export const pk = {
   parse: (body: { text: string; metric: WaveMetric; days: number; force?: boolean }) =>
     api<ParseResponse>('/api/roster/parse', { method: 'POST', body: JSON.stringify(body) }),
@@ -149,6 +159,12 @@ export const pk = {
 
   listPlans: () => api< { items: PlanBrief[] } >('/api/plans'),
   getPlan: (id: number) => api<PlanDetail>(`/api/plans/${id}`),
+  getPublicSettings: () => api<GroupNoticeSettings & Record<string, unknown>>('/api/admin/public/settings'),
+  savePublicSettings: (body: Partial<GroupNoticeSettings>) =>
+    api<{ ok: boolean; settings: GroupNoticeSettings & Record<string, unknown> }>(
+      '/api/admin/public/settings',
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
   savePlan: (body: {
     title: string;
     metric: WaveMetric;
@@ -157,10 +173,10 @@ export const pk = {
     payload: SavedPlan;
   }) => api< { id: number } >('/api/plans', { method: 'POST', body: JSON.stringify(body) }),
   deletePlan: (id: number) => api< { ok: boolean } >(`/api/plans/${id}`, { method: 'DELETE' }),
-  setPublished: (id: number, published: boolean) =>
+  setPublished: (id: number, published: boolean, eventDate?: string) =>
     api< { ok: boolean; id: number; published: boolean } >(`/api/plans/${id}/publish`, {
       method: 'POST',
-      body: JSON.stringify({ published }),
+      body: JSON.stringify({ published, ...(eventDate === undefined ? {} : { eventDate }) }),
     }),
 
   /** 在册主播（用来一键生成名单） */

@@ -32,6 +32,130 @@
   padding: 0 6px;
 }
 
+/* 上线展示：把「倒计时设置」和「选择方案上线」放在同一张卡里，避免运营在
+   机器人设置和分组页之间来回找。窄屏单列，按钮不挤压输入框。 */
+.pk .pk-publish-card {
+  border-color: color-mix(in srgb, var(--brand) 18%, var(--line));
+}
+.pk .pk-publish-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+.pk .pk-publish-head h2 {
+  margin: 0;
+}
+.pk .pk-publish-status {
+  flex: none;
+  padding: 4px 9px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink3);
+  background: #f1f2f5;
+}
+.pk .pk-publish-status.live {
+  color: var(--brand);
+  background: color-mix(in srgb, var(--brand) 10%, #fff);
+}
+.pk .pk-publish-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 14px;
+}
+.pk .pk-publish-block {
+  min-width: 0;
+  padding: 13px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fcfcfd;
+}
+.pk .pk-publish-block h3 {
+  margin: 0 0 10px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--ink);
+}
+.pk .pk-publish-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+}
+.pk .pk-publish-switch input {
+  margin: 0;
+  cursor: pointer;
+}
+.pk .pk-publish-inline {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.pk .pk-publish-plan-block .field {
+  margin-top: 4px;
+}
+.pk .pk-publish-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 13px;
+}
+.pk .pk-publish-actions button {
+  flex: 1 1 150px;
+}
+.pk .pk-publish-preview {
+  display: grid;
+  gap: 4px;
+  margin-top: 12px;
+  padding: 9px 10px;
+  border: 1px dashed color-mix(in srgb, var(--brand) 28%, var(--line));
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--ink3);
+  overflow-wrap: anywhere;
+}
+.pk .pk-publish-preview b {
+  color: var(--ink2);
+}
+.pk .pk-publish-loading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  font-size: 12.5px;
+  color: var(--ink3);
+}
+.pk .pk-publish-loading span {
+  flex: 1;
+}
+@media (max-width: 760px) {
+  .pk .pk-publish-head {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .pk .pk-publish-grid {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+  .pk .pk-publish-inline {
+    grid-template-columns: 1fr;
+  }
+  .pk .pk-publish-actions button {
+    flex-basis: 100%;
+  }
+}
+
 .pk .pk-meta {
   margin-top: 10px;
   font-size: 12.5px;

@@ -193,6 +193,10 @@ async fn cmd3_disciple_rank_returns_png() {
         daily_report: true,
         lineage_report: true,
         last_lineage_date: String::new(),
+        mini_openid: String::new(),
+        mini_daily_report: false,
+        mini_notify_target: false,
+        mini_lineage_report: false,
     };
     let (text, pngs) = pk_server::bot::cmd_disciple_rank_user(&st, &b).await;
     assert!(
@@ -255,6 +259,10 @@ async fn cmd2_my_report_has_income() {
         daily_report: true,
         lineage_report: false,
         last_lineage_date: String::new(),
+        mini_openid: String::new(),
+        mini_daily_report: false,
+        mini_notify_target: false,
+        mini_lineage_report: false,
     };
     let text = pk_server::bot::cmd_my_report_user(&st, &b).await;
     assert!(text.contains("我的报告"), "{text}");
