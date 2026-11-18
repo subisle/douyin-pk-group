@@ -30,6 +30,7 @@ import type {
   Bucket,
   ConstraintsMeta,
   DisplayConfig,
+  FullConstraints,
   InspectResponse,
   PlanBrief,
   Player,
@@ -379,6 +380,27 @@ export default function GroupPage() {
     ],
   );
 
+  /** 把看板上每个人当前所在组变成“固定位”，让重新解析时只补新增/变化的人。 */
+  function memoryConstraints(groupCount: number): FullConstraints {
+    const pins = new Map<string, number | 'last'>();
+    for (const p of meta?.pinned ?? []) pins.set(p.name, p.group);
+    buckets.forEach((bucket, gi) => {
+      for (const p of bucket.players) pins.set(p.name, gi + 1);
+    });
+    const schedule = scheduleInputFor(groupCount).schedule;
+    return {
+      excludeTogether: meta?.excludeTogether ?? [],
+      pinned: [...pins.entries()].map(([name, group]) => ({ name, group })),
+      schedule: { ...schedule, breaks: schedule.breaks ?? [] },
+      minGap: meta?.minGap ?? [],
+      pairGap: meta?.pairGap ?? [],
+      minGroup: meta?.minGroup ?? [],
+      strengthOrder: strengthOn
+        ? { enabled: true, mode: strengthMode as StrengthMode }
+        : { enabled: false },
+    };
+  }
+
   /** 分组/体检都带上的约束：赛程（含加长休息）+ 强度位次形态 */
   const scheduleInput = useCallback(
     () => scheduleInputFor(),
@@ -624,8 +646,8 @@ export default function GroupPage() {
     }
   }
 
-  /** 解析名单 → 直接按当前策略分组 */
-  async function parseAndGroup(force = false) {
+  /** 解析名单 → 默认保留已有分组，只补新增/变化的人；explicitFull 才整体重排。 */
+  async function parseAndGroup(force = false, preserveExisting = true) {
     if (!text.trim()) {
       setError('先粘贴或填入名单');
       return;
@@ -652,11 +674,13 @@ export default function GroupPage() {
       这里按「人数 ÷ 每组人数」先估个组数把 breaks 算对，与展板页同款口径；
       分完组后的 inspect 会带真实组数再算一遍。 */
       const estimated = Math.ceil(active.length / Math.max(1, groupSize));
+      // 组数变少时旧组号会越界；这种情况让运营明确选择全部重排。
+      const preserve = preserveExisting && buckets.length > 0 && estimated >= buckets.length;
       const arranged = await pk.arrange({
         players: res.players,
         groupSize,
         strategy,
-        constraints: scheduleInputFor(estimated),
+        constraints: preserve ? { full: memoryConstraints(estimated) } : scheduleInputFor(estimated),
       });
       const next = toBuckets(arranged.groups);
       setPast([]);
@@ -668,7 +692,8 @@ export default function GroupPage() {
       setViolations(arranged.violations || []);
       setSlots(arranged.slots || []);
       setMsg(
-        `已解析 ${active.length} 人，分成 ${arranged.groups.length} 组` +
+        (preserve ? '已保留原分组，只补齐新增/变化人员：' : '') +
+          `已解析 ${active.length} 人，分成 ${arranged.groups.length} 组` +
           (res.unmatched.length ? ` · ${res.unmatched.length} 行识别不到（见下面红框）` : ''),
       );
       if (!title) setTitle(`${eventType} · PK 分组 ${(res.dates?.[0]) || isoLocal()}`);
@@ -679,8 +704,8 @@ export default function GroupPage() {
     }
   }
 
-  /** 重新分组：名单不变，只换策略/组人数/赛程 */
-  async function regroup() {
+  /** 重新分组：默认钉住现有成员，只让新增/未分组的人补位。 */
+  async function regroup(preserveExisting = true) {
     if (!players.length) {
       setError('先解析名单');
       return;
@@ -688,18 +713,23 @@ export default function GroupPage() {
     setLoading(true);
     try {
       const lockedPlayers = players.filter((p) => locked.includes(p.key));
+      const estimated = Math.ceil(players.filter((p) => !p.excluded).length / Math.max(1, groupSize));
+      const preserve = preserveExisting && buckets.length > 0 && estimated >= buckets.length;
       const arranged = await pk.arrange({
         players,
         groupSize,
         strategy,
-        constraints: scheduleInput(),
+        constraints: preserve ? { full: memoryConstraints(estimated) } : scheduleInputFor(estimated),
       });
-      let groups = arranged.groups.map((g) => g.filter((p) => !locked.includes(p.key)));
-      // 锁定的人按原组号插回；原组越界就放第 1 组
-      for (const lp of lockedPlayers) {
-        const gi = buckets.findIndex((b) => b.players.some((p) => p.key === lp.key));
-        const target = gi >= 0 && gi < groups.length ? gi : 0;
-        groups[target].push(lp);
+      let groups = arranged.groups;
+      if (!preserve) {
+        groups = groups.map((g) => g.filter((p) => !locked.includes(p.key)));
+        // 全部重排时用户手动锁定的人仍按原组插回；原组越界就放第 1 组。
+        for (const lp of lockedPlayers) {
+          const gi = buckets.findIndex((b) => b.players.some((p) => p.key === lp.key));
+          const target = gi >= 0 && gi < groups.length ? gi : 0;
+          groups[target].push(lp);
+        }
       }
       const next = groups.map((playersInGroup, i) => ({
         id: buckets[i]?.id ?? newId(),
@@ -707,12 +737,18 @@ export default function GroupPage() {
         players: playersInGroup,
       }));
       applyGroups(next);
-      setMsg('已重新分组');
+      setMsg(preserve ? '已保留现有分组，只调整新增/变化人员' : '已全部重新分组');
     } catch (e) {
       setError((e as Error).message);
     } finally {
       setLoading(false);
     }
+  }
+
+  async function regroupAll() {
+    if (!buckets.length) return;
+    if (!confirm('全部重新分组会按当前策略重新排列所有人员，现有组别可能大改，继续？')) return;
+    await regroup(false);
   }
 
   /* ---------------- 看板操作 ---------------- */
@@ -816,8 +852,10 @@ export default function GroupPage() {
     }
   }
 
-  /** 自动修正：重新分组（锁定的人保持在原组） */
-  const autoFix = regroup;
+  /** 自动修正：必须允许移动现有人员，否则约束冲突修不开。 */
+  const autoFix = () => {
+    void regroup(false);
+  };
 
   function undo() {
     const prev = past[past.length - 1];
@@ -1433,16 +1471,19 @@ export default function GroupPage() {
           }}
         />
         <div className="row">
-          <button className="primary" disabled={loading} onClick={() => parseAndGroup(false)}>
-            {loading ? '分组中…' : '解析并分组'}
+          <button className="primary" disabled={loading} onClick={() => parseAndGroup(false, true)}>
+            {loading ? '分组中…' : '解析并保留分组'}
           </button>
-          <button disabled={loading} onClick={() => parseAndGroup(true)}>
-            刷新音浪后分组
+          <button disabled={loading} onClick={() => parseAndGroup(true, true)}>
+            刷新音浪并保留分组
+          </button>
+          <button disabled={loading} onClick={() => parseAndGroup(true, false)}>
+            全部重新排
           </button>
           <button disabled={!text.trim() || busy === 'roster'} onClick={saveRoster}>
             保存名单
           </button>
-          <span className="hint">名单每次都是现贴现解析（一行一个主播）</span>
+          <span className="hint">默认记住现有组别，只给新增/变化人员补位；「全部重新排」才会大改</span>
         </div>
         <div className="row">
           <label>
@@ -1667,8 +1708,11 @@ export default function GroupPage() {
           )}
         </h2>
         <div className="row">
-          <button disabled={!players.length || loading} onClick={regroup}>
-            重新分组
+          <button disabled={!players.length || loading} onClick={() => regroup(true)}>
+            保持分组补位
+          </button>
+          <button disabled={!buckets.length || loading} onClick={() => void regroupAll()}>
+            全部重排
           </button>
           <button disabled={!buckets.length || busy === 'polish'} onClick={polish}>
             {busy === 'polish' ? '微调中…' : '均衡微调'}

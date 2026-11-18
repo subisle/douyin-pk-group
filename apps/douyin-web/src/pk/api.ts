@@ -2,6 +2,7 @@ import { api } from '../api';
 import type {
   ArrangeResponse,
   ConstraintsMeta,
+  FullConstraints,
   InspectResponse,
   ParseResponse,
   PlanBrief,
@@ -126,13 +127,13 @@ export const pk = {
     players: Player[];
     groupSize: number;
     strategy: Strategy;
-    constraints?: { schedule?: ScheduleInput; strengthOrder?: StrengthOrder };
+    constraints?: { full?: FullConstraints; schedule?: ScheduleInput; strengthOrder?: StrengthOrder };
   }) => api<ArrangeResponse>('/api/group/arrange', { method: 'POST', body: JSON.stringify(body) }),
 
   /** 拖拽后体检：重算均衡度与约束冲突 */
   inspect: (body: {
     groups: Player[][];
-    constraints?: { schedule?: ScheduleInput; strengthOrder?: StrengthOrder };
+    constraints?: { full?: FullConstraints; schedule?: ScheduleInput; strengthOrder?: StrengthOrder };
   }) =>
     api<InspectResponse>('/api/group/inspect', { method: 'POST', body: JSON.stringify(body) }),
 

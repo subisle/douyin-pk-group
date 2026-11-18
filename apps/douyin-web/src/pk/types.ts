@@ -135,6 +135,17 @@ export interface ConstraintsMeta {
   minGroup: Array< { name: string; group: number } >;
 }
 
+/** 传给后端 arrange 的完整约束集（用于“记住现有分组”）。 */
+export interface FullConstraints {
+  excludeTogether: string[][];
+  pinned: Array< { name: string; group: number | 'last' } >;
+  schedule: { start: string; intervalMin: number; breaks?: BreakRule[] };
+  minGap: Array< { a: string; b: string; gap: number } >;
+  pairGap: Array< { names: string[]; gap: number } >;
+  minGroup: Array< { name: string; group: number } >;
+  strengthOrder?: StrengthOrder;
+}
+
 /** 看板上的一组：id 稳定，拖拽与渲染都靠它定位 */
 export interface Bucket {
   id: string;
