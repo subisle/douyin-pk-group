@@ -969,13 +969,13 @@ function PublicSettingsCard() {
 
           <h3 className="flag-title">分组赛事公告 / 倒计时</h3>
           <p className="hint" style={{ margin: '0 0 8px' }}>
-            未到开赛窗口时，分组页不展示名单，只显示赛事公告。分组默认在开赛前 120 分钟开放；
-            赛事结束后自动收起，等待下一场配置。
+            倒计时和分组互斥：开启公告时只显示倒计时，到开赛前设定时间才切换为分组；
+            关闭公告后直接显示已上架分组，不再等待「当天有数据」。
           </p>
           <div className="flag-grid flag-grid-compact" style={{ marginBottom: 10 }}>
             <FlagRow
               label="启用分组赛事公告"
-              hint="关闭 = 沿用原分组显示逻辑"
+              hint="开 = 只显示倒计时；关 = 直接显示分组"
               checked={settings.groupNoticeEnabled === true}
               onChange={(v) => toggle('groupNoticeEnabled', v)}
             />
@@ -1004,7 +1004,7 @@ function PublicSettingsCard() {
                   }
                 }}
               />
-              <span className="field-hint">倒计时和分组开放窗口都以这个日期为准。</span>
+              <span className="field-hint">倒计时模式下必填；关闭公告后此日期不参与分组展示。</span>
             </label>
             <label className="field">
               接龙开始日期

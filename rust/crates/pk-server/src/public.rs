@@ -214,21 +214,26 @@ fn group_notice_view(s: &crate::public_teams::PublicSettings) -> Option<GroupNot
     group_notice_view_at(s, chrono::Utc::now().with_timezone(&offset))
 }
 
-/// 公开详情页按当前已上架方案判断是否放榜。
+/// 公开详情页的展示模式：倒计时和分组互斥。
 ///
-/// 有 `eventDate` 时才跟随公告的开赛前窗口；没有日期表示这版方案是即时上架，
-/// 不能继续被全站公告的倒计时拦住。公告关闭时仍沿用旧的「当天有数据」口径。
+/// - 公告开启：显示倒计时，只有在开赛前 N 分钟到赛事当天结束之间才放榜；
+/// - 公告关闭：直接放榜，不再要求“今天必须有数据”。
+///
+/// 方案自带 `eventDate` 时以方案日期为准；老方案没有日期时回落到全局公告日期。
 fn plan_group_visibility_at(
     s: &crate::public_teams::PublicSettings,
     event_date: &str,
-    match_day: bool,
     now: chrono::DateTime<chrono::FixedOffset>,
 ) -> (bool, Option<GroupNoticeView>) {
     if !s.group_notice_enabled {
-        return (match_day, None);
+        return (true, None);
     }
-    let notice = group_notice_view_for_date_at(s, event_date, now);
-    // 空日期、非法日期都视为管理员选择了即时放榜；有效日期才进入公告倒计时。
+    let notice = if event_date.trim().is_empty() {
+        group_notice_view_at(s, now)
+    } else {
+        group_notice_view_for_date_at(s, event_date, now)
+    };
+    // 配置损坏（开了公告却没有有效日期）时退回分组，避免整页只剩空公告。
     let revealed = notice.as_ref().map(|n| n.revealed).unwrap_or(true);
     (revealed, notice)
 }
@@ -236,15 +241,9 @@ fn plan_group_visibility_at(
 fn plan_group_visibility(
     s: &crate::public_teams::PublicSettings,
     event_date: &str,
-    match_day: bool,
 ) -> (bool, Option<GroupNoticeView>) {
     let offset = chrono::FixedOffset::east_opt(8 * 3600).expect("valid +08:00 offset");
-    plan_group_visibility_at(
-        s,
-        event_date,
-        match_day,
-        chrono::Utc::now().with_timezone(&offset),
-    )
+    plan_group_visibility_at(s, event_date, chrono::Utc::now().with_timezone(&offset))
 }
 
 impl Default for DisplayConfig {
@@ -553,11 +552,10 @@ pub async fn plan(
         Vec::new()
     };
 
-    // 比赛日 = 最新采集日就是今天（+08:00）。没有赛事公告时沿用旧口径；
-    // 配置了公告后，以「开赛前 N 分钟 ~ 赛事当天结束」作为唯一放榜窗口。
+    // 比赛日仅作为页面元信息保留；是否放榜由上面的“倒计时 / 分组”互斥模式决定。
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
     let match_day = dates.first().map(|d| d == &today).unwrap_or(false);
-    let (group_reveal, notice_view) = plan_group_visibility(&settings, event_date, match_day);
+    let (group_reveal, notice_view) = plan_group_visibility(&settings, event_date);
     /* 展示开关必须落在接口层：关闭总排行时连每人的全场 rank 一起抹掉；
     关闭公开名单时连 groups / ranking / 每日明细一起不下发，不能只靠前端隐藏。 */
     if !display.ranking {
@@ -701,7 +699,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_without_event_date_is_visible_immediately() {
+    fn plan_without_event_date_uses_global_countdown_in_notice_mode() {
         let cfg = notice_cfg();
         let now = chrono::NaiveDate::from_ymd_opt(2026, 11, 19)
             .unwrap()
@@ -710,7 +708,24 @@ mod tests {
             .and_local_timezone(chrono::FixedOffset::east_opt(8 * 3600).unwrap())
             .unwrap();
 
-        let (revealed, notice) = plan_group_visibility_at(&cfg, "", false, now);
+        let (revealed, notice) = plan_group_visibility_at(&cfg, "", now);
+
+        assert!(!revealed);
+        assert_eq!(notice.unwrap().json["eventDate"], "2026-11-20");
+    }
+
+    #[test]
+    fn notice_disabled_reveals_groups_without_waiting_for_match_day() {
+        let mut cfg = notice_cfg();
+        cfg.group_notice_enabled = false;
+        let now = chrono::NaiveDate::from_ymd_opt(2026, 11, 19)
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap()
+            .and_local_timezone(chrono::FixedOffset::east_opt(8 * 3600).unwrap())
+            .unwrap();
+
+        let (revealed, notice) = plan_group_visibility_at(&cfg, "", now);
 
         assert!(revealed);
         assert!(notice.is_none());
@@ -728,7 +743,7 @@ mod tests {
             .and_local_timezone(offset)
             .unwrap();
 
-        let (revealed, notice) = plan_group_visibility_at(&cfg, "2026-11-20", false, before);
+        let (revealed, notice) = plan_group_visibility_at(&cfg, "2026-11-20", before);
 
         assert!(!revealed);
         assert_eq!(notice.unwrap().json["eventDate"], "2026-11-20");
@@ -739,7 +754,7 @@ mod tests {
             .unwrap()
             .and_local_timezone(offset)
             .unwrap();
-        let (revealed, _) = plan_group_visibility_at(&cfg, "2026-11-20", false, reveal_at);
+        let (revealed, _) = plan_group_visibility_at(&cfg, "2026-11-20", reveal_at);
         assert!(revealed);
     }
 

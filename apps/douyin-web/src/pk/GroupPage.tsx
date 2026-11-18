@@ -80,6 +80,7 @@ const DEFAULT_GROUP_NOTICE: GroupNoticeSettings = {
   groupNoticeSignupDate: '',
   groupNoticeStartTime: '08:15',
   groupNoticeRevealLeadMinutes: 120,
+  groupTypes: {},
 };
 
 const groupNoticeSettings = (s: Partial<GroupNoticeSettings>): GroupNoticeSettings => ({
@@ -92,6 +93,7 @@ const groupNoticeSettings = (s: Partial<GroupNoticeSettings>): GroupNoticeSettin
     Number.isFinite(Number(s.groupNoticeRevealLeadMinutes))
       ? Number(s.groupNoticeRevealLeadMinutes)
       : DEFAULT_GROUP_NOTICE.groupNoticeRevealLeadMinutes,
+  groupTypes: s.groupTypes ?? {},
 });
 
 /* BREAK_AFTER_GROUP / REVIVAL_EVENTS 原先在这里各写了一份，与 BoardPage 重复
@@ -558,12 +560,16 @@ export default function GroupPage() {
     void loadGroupNotice();
   }, [loadGroupNotice]);
 
-  async function persistGroupNotice(): Promise<GroupNoticeSettings> {
+  async function persistGroupNotice(enableEventType?: string): Promise<GroupNoticeSettings> {
     const next = groupNoticeSettings(groupNotice ?? DEFAULT_GROUP_NOTICE);
     if (next.groupNoticeEnabled && !/^\d{4}-\d{2}-\d{2}$/.test(next.groupNoticeEventDate)) {
-      throw new Error('启用倒计时时，请先选择倒计时日期');
+      throw new Error('倒计时模式下，请先选择倒计时日期');
     }
-    const d = await pk.savePublicSettings(next);
+    const body: Partial<GroupNoticeSettings> = { ...next };
+    if (enableEventType) {
+      body.groupTypes = { ...(next.groupTypes ?? {}), [enableEventType]: true };
+    }
+    const d = await pk.savePublicSettings(body);
     const saved = groupNoticeSettings(d.settings);
     setGroupNotice(saved);
     setGroupNoticeLoaded(true);
@@ -580,7 +586,7 @@ export default function GroupPage() {
     setError('');
     try {
       await persistGroupNotice();
-      setMsg('倒计时文案和日期已保存');
+      setMsg(groupNotice?.groupNoticeEnabled ? '倒计时设置已保存' : '已切换为分组展示模式');
     } catch (e) {
       setGroupNoticeError((e as Error).message);
     } finally {
@@ -941,16 +947,21 @@ export default function GroupPage() {
     if (published) setGroupNoticeSaving(true);
     try {
       let eventDate: string | undefined;
+      let savedMode: 'notice' | 'groups' | null = null;
       if (published) {
         // 上架时把当前倒计时配置一起保存，并把日期写进方案 payload；关闭公告时清空旧日期，避免下次误倒计时。
-        const saved = await persistGroupNotice();
+        const plan = plans.find((p) => p.id === id);
+        const saved = await persistGroupNotice(plan?.eventType);
+        savedMode = saved.groupNoticeEnabled ? 'notice' : 'groups';
         eventDate = saved.groupNoticeEnabled ? saved.groupNoticeEventDate : '';
       }
       await pk.setPublished(id, published, eventDate);
       await loadPlans();
       setMsg(
         published
-          ? `方案 #${id} 已上架；展示端同类型只显示一场，其它同类型方案已自动下架（不同类型互不影响）`
+          ? savedMode === 'notice'
+            ? `方案 #${id} 已上架，展示端先显示倒计时；到开放时间后自动切换为分组`
+            : `方案 #${id} 已上架，倒计时已关闭，展示端直接显示分组`
           : `方案 #${id} 已下架`,
       );
     } catch (e) {
@@ -1121,12 +1132,16 @@ export default function GroupPage() {
   const waveLabel = byScore ? SCORE_LABEL : `${metricLabel(metric, days)}音浪`;
   const publishedPlan = plans.find((p) => p.published) ?? null;
   const selectedPublishPlan = plans.find((p) => p.id === selectedPublishId) ?? null;
+  const selectedTypeHidden = !!selectedPublishPlan?.eventType &&
+    groupNotice?.groupTypes?.[selectedPublishPlan.eventType] === false;
   const noticeDate = groupNotice?.groupNoticeEventDate?.trim() ?? '';
   const noticeEnabled = groupNotice?.groupNoticeEnabled === true;
   const noticePreview =
-    noticeEnabled && noticeDate
-      ? `${groupNotice?.groupNoticeTitle?.trim() || '分组赛事公告'} · ${noticeDate} ${groupNotice?.groupNoticeStartTime || '08:15'} 开赛`
-      : '立即展示分组（不等待倒计时日期）';
+    noticeEnabled
+      ? noticeDate
+        ? `倒计时模式 · ${groupNotice?.groupNoticeTitle?.trim() || '分组赛事公告'} · ${noticeDate} ${groupNotice?.groupNoticeStartTime || '08:15'} 开赛`
+        : '倒计时模式 · 请选择倒计时日期'
+      : '分组模式 · 已上架方案会直接显示';
   const violationNames = useMemo(() => {
     const set = new Set<string>();
     for (const v of violations) for (const n of v.names) set.add(n);
@@ -1243,12 +1258,14 @@ export default function GroupPage() {
           <div>
             <h2>上线展示与倒计时</h2>
             <p className="hint" style={{ margin: '4px 0 0' }}>
-              这里保存的文案和日期会同步到展示端。上架时把日期写进所选方案，未到日期先显示倒计时，
-              到开赛前设定分钟数再自动展示分组名单。
+              倒计时和分组只能显示一个。倒计时模式只显示倒计时；关闭倒计时后，
+              展示端直接显示已上架分组。上架时会把当前选择同步到所选方案和赛事子页。
             </p>
           </div>
           <span className={'pk-publish-status ' + (publishedPlan ? 'live' : 'off')}>
-            {publishedPlan ? `当前上线 #${publishedPlan.id}` : '当前未上线'}
+            {publishedPlan
+              ? `当前上线 #${publishedPlan.id} · ${noticeEnabled ? '倒计时' : '分组'}`
+              : '当前未上线'}
           </span>
         </div>
 
@@ -1261,15 +1278,34 @@ export default function GroupPage() {
           <div className="pk-publish-grid">
             <div className="pk-publish-block">
               <h3>倒计时公告</h3>
-              <label className="pk-publish-switch">
-                <input
-                  type="checkbox"
-                  checked={groupNotice?.groupNoticeEnabled === true}
-                  onChange={(e) => updateGroupNotice({ groupNoticeEnabled: e.target.checked })}
-                />
-                <span>启用分组倒计时公告</span>
-              </label>
-              <div className="field-list">
+              <div className="pk-publish-mode" role="radiogroup" aria-label="展示模式">
+                <button
+                  type="button"
+                  className={noticeEnabled ? 'on' : ''}
+                  role="radio"
+                  aria-checked={noticeEnabled}
+                  onClick={() => updateGroupNotice({ groupNoticeEnabled: true })}
+                >
+                  倒计时模式
+                  <span>只显示赛事公告</span>
+                </button>
+                <button
+                  type="button"
+                  className={!noticeEnabled ? 'on' : ''}
+                  role="radio"
+                  aria-checked={!noticeEnabled}
+                  onClick={() => updateGroupNotice({ groupNoticeEnabled: false })}
+                >
+                  分组模式
+                  <span>关闭倒计时，直接放榜</span>
+                </button>
+              </div>
+              {!noticeEnabled && (
+                <div className="pk-publish-mode-note">
+                  当前是分组模式：保存并上线后，展示端会直接显示所选分组，不再显示倒计时。
+                </div>
+              )}
+              {noticeEnabled && <div className="field-list">
                 <label className="field">
                   倒计时文案
                   <input
@@ -1288,7 +1324,7 @@ export default function GroupPage() {
                     value={groupNotice?.groupNoticeEventDate ?? ''}
                     onChange={(e) => updateGroupNotice({ groupNoticeEventDate: e.target.value })}
                   />
-                  <span className="field-hint">留空 = 立即展示分组；填写未来日期 = 先显示倒计时。</span>
+                  <span className="field-hint">倒计时模式下必填；关闭倒计时即可切换为分组展示。</span>
                 </label>
                 <div className="pk-publish-inline">
                   <label className="field">
@@ -1319,7 +1355,7 @@ export default function GroupPage() {
                   />
                   <span className="field-hint">默认 120 = 开赛前 2 小时开放名单。</span>
                 </label>
-              </div>
+              </div>}
             </div>
 
             <div className="pk-publish-block pk-publish-plan-block">
@@ -1343,16 +1379,26 @@ export default function GroupPage() {
                   ))}
                 </select>
               </label>
+              {selectedTypeHidden && (
+                <div className="pk-publish-warning">
+                  该方案所属的「{selectedPublishPlan?.eventType}」分组子页当前是关闭状态。
+                  点击上线会自动开启该子页；如果只想保留其它分组页，请到「机器人 → 公开站点设置」恢复开关。
+                </div>
+              )}
               <div className="pk-publish-actions">
                 <button
                   className="primary"
                   disabled={!selectedPublishId || groupNoticeSaving || !groupNoticeLoaded}
                   onClick={() => void publishSelectedPlan()}
                 >
-                  {groupNoticeSaving ? '保存并上线中…' : '保存设置并上线所选方案'}
+                  {groupNoticeSaving
+                    ? '保存并上线中…'
+                    : noticeEnabled
+                      ? '保存倒计时并上线所选方案'
+                      : '关闭倒计时并上线分组'}
                 </button>
                 <button disabled={groupNoticeSaving || !groupNoticeLoaded} onClick={() => void saveGroupNoticeOnly()}>
-                  {groupNoticeSaving ? '保存中…' : '只保存倒计时设置'}
+                  {groupNoticeSaving ? '保存中…' : '只保存当前展示模式'}
                 </button>
                 {publishedPlan && (
                   <button disabled={groupNoticeSaving} onClick={() => void publish(publishedPlan.id, false)}>

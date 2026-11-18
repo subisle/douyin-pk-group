@@ -92,6 +92,43 @@
   margin: 0;
   cursor: pointer;
 }
+.pk .pk-publish-mode {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 11px;
+}
+.pk .pk-publish-mode button {
+  display: grid;
+  gap: 2px;
+  min-height: 54px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--ink3);
+  text-align: left;
+  cursor: pointer;
+}
+.pk .pk-publish-mode button span {
+  font-size: 11.5px;
+  color: var(--ink3);
+}
+.pk .pk-publish-mode button.on {
+  border-color: color-mix(in srgb, var(--brand) 46%, var(--line));
+  background: color-mix(in srgb, var(--brand) 7%, #fff);
+  color: var(--brand);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--brand) 10%, transparent);
+}
+.pk .pk-publish-mode-note {
+  padding: 10px;
+  border: 1px dashed color-mix(in srgb, var(--brand) 24%, var(--line));
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--ink3);
+  background: #fff;
+}
 .pk .pk-publish-inline {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -120,6 +157,16 @@
   line-height: 1.55;
   color: var(--ink3);
   overflow-wrap: anywhere;
+}
+.pk .pk-publish-warning {
+  margin-top: 10px;
+  padding: 9px 10px;
+  border: 1px solid color-mix(in srgb, #d97706 32%, var(--line));
+  border-radius: 8px;
+  background: color-mix(in srgb, #f59e0b 8%, #fff);
+  color: #92400e;
+  font-size: 12px;
+  line-height: 1.55;
 }
 .pk .pk-publish-preview b {
   color: var(--ink2);
