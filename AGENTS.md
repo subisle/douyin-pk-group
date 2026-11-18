@@ -100,3 +100,5 @@
 - 一键重跑：`scripts/render-lineage-images.sh`
   默认取本地最新业务日，输出到 `design-previews/wxbot-lineage-YYYY-MM/`；
   月报输出到 `design-previews/wxbot-lineage-month-YYYY-MM/`。
+- 2026-11-18 用户口径：批量生成的师徒图按师傅首字分文件夹保存；
+  `狼*` 放 `狼/`，`浩*` 放 `浩/`，其余放 `其他/`，清单中的文件路径同步更新。
