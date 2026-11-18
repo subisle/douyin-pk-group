@@ -174,6 +174,8 @@ impl Default for ConstraintSet {
             exclude_together: vec![
                 vec!["玖玉".into(), "玖妹".into(), "玖玥".into()],
                 vec!["狼影".into(), "浩冬".into()],
+                // 2026-11-19 用户口径：从「至少隔 4 组」放宽为「不同组即可」
+                vec!["啸昭".into(), "啸寻".into()],
             ],
             pinned: vec![
                 // 2026-10-07 深夜改：啸泽从「第 1 组」改成「最后一组」
@@ -218,11 +220,6 @@ impl Default for ConstraintSet {
                 breaks: Vec::new(),
             },
             min_gap: vec![
-                MinGapRule {
-                    a: "啸昭".into(),
-                    b: "啸寻".into(),
-                    gap: 4,
-                },
                 // 2026-10-07 补：浩泽固定在最后一组，浩森与浩泽至少相隔 3 组
                 MinGapRule {
                     a: "浩森".into(),
@@ -2014,6 +2011,14 @@ mod tests {
         assert!(cs.min_gap.iter().any(|r| {
             (r.a == "浩哲" && r.b == "玖俏" || r.a == "玖俏" && r.b == "浩哲") && r.gap == 4
         }));
+        assert!(cs
+            .exclude_together
+            .iter()
+            .any(|set| { set.iter().any(|n| n == "啸昭") && set.iter().any(|n| n == "啸寻") }));
+        assert!(!cs
+            .min_gap
+            .iter()
+            .any(|r| { r.a == "啸昭" && r.b == "啸寻" || r.a == "啸寻" && r.b == "啸昭" }));
         assert!(cs.pair_gap.iter().any(|r| {
             r.gap == 4
                 && ["凤夏", "凤瑶", "凤九"]

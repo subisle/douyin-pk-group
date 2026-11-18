@@ -310,7 +310,7 @@ pub fn auto_group(players: &[Player], options: &GroupOptions) -> Vec<Vec<Player>
     /* 4. 互斥修复 */
     groups = resolve_exclusions(&groups, &cs.exclude_together, &pinned_keys, 300);
 
-    /* 4.5 最小间隔修复（啸昭/啸寻这类「至少相隔 N 组」） */
+    /* 4.5 最小间隔修复（浩森/浩泽这类「至少相隔 N 组」） */
     let min_gap_rules = cs.min_gap.clone();
     if !min_gap_rules.is_empty() {
         groups = resolve_min_gaps(
@@ -786,8 +786,8 @@ mod tests {
     }
 
     #[test]
-    fn auto_group_respects_min_gap_when_enough_groups() {
-        // 组数 >= gap+1 时才可能满足间隔：32 人每组 4 人 → 8 组
+    fn auto_group_separates_xiaozhao_and_xiaoxun() {
+        // 2026-11-19：两人只要求不同组，不再要求至少隔 4 组。
         let mut items: Vec<(&str, f64)> = vec![
             ("啸泽", 900.0),
             ("啸帆", 100.0),
@@ -809,9 +809,10 @@ mod tests {
                 .position(|g| g.iter().any(|p| p.name == n))
                 .unwrap()
         };
-        assert!(
-            at("啸昭").abs_diff(at("啸寻")) >= 4,
-            "啸昭={} 啸寻={}",
+        assert_ne!(
+            at("啸昭"),
+            at("啸寻"),
+            "啸昭={} 啸寻={} 必须在不同组",
             at("啸昭"),
             at("啸寻")
         );
