@@ -489,6 +489,14 @@ mod pwa_tests {
             ST_PAGE.contains("if (ev && ev.persisted) importedRefreshAt = 0;"),
             "BFCache 恢复要绕过节流补刷"
         );
+        for token in [
+            "d.scope === 'plans' || d.scope === 'settings'",
+            "function scheduleGroupRefresh()",
+            "loadPlans(true).catch(() => {})",
+            "loadGroup(undefined, silent === true)",
+        ] {
+            assert!(ST_PAGE.contains(token), "分组动态刷新缺少：{token}");
+        }
     }
 
     fn guide_source() -> &'static str {

@@ -5384,9 +5384,9 @@ function scheduleDashboardPrefetch() {
   setTimeout(kick, 1500);
   if (window.requestIdleCallback) requestIdleCallback(kick, { timeout: 4000 });
 }
-/* ==================== 数据导入后自动刷新（2026-10-22） ====================
-   公开 SSE 只通知「数据已导入」，不携带后台明细；收到后清掉榜单缓存并重拉当前
-   团别 / 口径。每日最高弹幕由新的 listAll 重新计算，所以数据导入完成后无需刷新页面。 */
+/* ==================== 数据导入 / 分组发布后自动刷新（2026-10-22） ====================
+   公开 SSE 只通知变更域，不携带后台明细；导入后重拉榜单，方案/设置变化后静默重拉
+   方案列表和当前分组。断线恢复也补刷，页面不需要用户手动刷新。 */
 let publicDataEvents = null;
 let publicDataEventsWasOpen = false;
 let importedRefreshTimer = null;
@@ -5394,6 +5394,8 @@ let importedRefreshBusy = false;
 let importedRefreshSeq = 0;
 let importedRefreshAt = 0;
 let wxBindingRefreshTimer = null;
+let groupRefreshTimer = null;
+let planLoadSeq = 0;
 
 function initPublicDataEvents() {
   if (publicDataEvents || typeof window.EventSource === 'undefined') return;
@@ -5401,16 +5403,23 @@ function initPublicDataEvents() {
   /* 首次连接不重复拉数据；断线恢复后补一次站点+当前日刷新，避免断线期间
      后台删除当前日、SSE 没收到事件而一直保留旧日期。 */
   publicDataEvents.addEventListener('open', () => {
-    if (publicDataEventsWasOpen) scheduleImportedDataRefresh();
+    if (publicDataEventsWasOpen) {
+      scheduleImportedDataRefresh();
+      scheduleGroupRefresh();
+    }
     publicDataEventsWasOpen = true;
   });
   publicDataEvents.addEventListener('error', () => {
-    if (publicDataEventsWasOpen) scheduleImportedDataRefresh();
+    if (publicDataEventsWasOpen) {
+      scheduleImportedDataRefresh();
+      scheduleGroupRefresh();
+    }
   });
   publicDataEvents.addEventListener('change', (ev) => {
     try {
       const d = JSON.parse(ev.data || '{}');
       if (d.scope === 'import') scheduleImportedDataRefresh();
+      else if (d.scope === 'plans' || d.scope === 'settings') scheduleGroupRefresh();
       else if (d.scope === 'notice') {
         /* 新通知到达：允许弹窗再次出现，并先更新角标。 */
         msgModalAutoShown = false;
@@ -5444,6 +5453,14 @@ function scheduleImportedDataRefresh() {
   importedRefreshTimer = setTimeout(() => {
     refreshDataAfterImport().catch(() => {});
   }, 800);
+}
+
+/** 方案上架/下架、分组子页开关或倒计时设置变化后，静默重拉方案列表并重绘当前分组。 */
+function scheduleGroupRefresh() {
+  clearTimeout(groupRefreshTimer);
+  groupRefreshTimer = setTimeout(() => {
+    loadPlans(true).catch(() => {});
+  }, 240);
 }
 
 async function refreshDataAfterImport(silent) {
@@ -6813,14 +6830,20 @@ function bindLineage(t, keepView) {
 
 
 /* ==================== 分组（按赛事类型拆页：初级/中级小组赛、月终争霸赛、两级晋级赛） ==================== */
-async function loadPlans() {
+async function loadPlans(silent) {
+  const seq = ++planLoadSeq;
   let loaded = false;
   try {
     const d = await api('/api/public/plans');
+    if (seq !== planLoadSeq) return;
     plans = d.items || [];
     groupNotice = d.groupNotice || null;
     loaded = true;
-  } catch (_) { plans = []; }
+  } catch (_) {
+    if (seq !== planLoadSeq) return;
+    plans = [];
+  }
+  if (seq !== planLoadSeq) return;
   /* 拉取失败时保留后台开关的完整导航，不能把临时网络故障误判成“没有方案”。 */
   plansReady = loaded;
   /* 成功拉取后按「有已上架方案」收口：只留下当前真正可打开的赛事类型。 */
@@ -6829,11 +6852,11 @@ async function loadPlans() {
   if (loaded && view === 'group') {
     const enabled = [...document.querySelectorAll('#subnav button:not([disabled])')];
     if (enabled.length && !enabled.some(b => b.dataset.g === curGroup)) curGroup = enabled[0].dataset.g;
-    if (enabled.length) loadGroup().catch(() => {});
+    if (enabled.length) loadGroup(undefined, silent === true).catch(() => {});
   }
 }
 
-async function loadGroup(signal) {
+async function loadGroup(signal, silent) {
   const seq = ++groupLoadSeq;
   const page = GROUP_PAGES.find(p => p.key === curGroup) || GROUP_PAGES[0];
   curGroup = page.key;
@@ -6859,7 +6882,7 @@ async function loadGroup(signal) {
   }
   if (!list.some(p => p.id === planByType[curGroup])) planByType[curGroup] = list[0].id;
   const pid = planByType[curGroup];
-  $('view').innerHTML = '<div class="section">' + shimmerList() + '</div>';
+  if (!silent) $('view').innerHTML = '<div class="section">' + shimmerList() + '</div>';
   try {
     const d = await api('/api/public/plans/' + pid, { signal });
     if (seq !== groupLoadSeq || (signal && signal.aborted) ||

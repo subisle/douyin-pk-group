@@ -123,6 +123,8 @@ pub async fn sse(
 fn public_scope_allowed(scope: &str) -> Option<&'static str> {
     match scope {
         SCOPE_IMPORT => Some(SCOPE_IMPORT),
+        SCOPE_PLANS => Some(SCOPE_PLANS),
+        SCOPE_SETTINGS => Some(SCOPE_SETTINGS),
         SCOPE_NOTICE => Some(SCOPE_NOTICE),
         SCOPE_WX_BINDING => Some(SCOPE_WX_BINDING),
         _ => None,
@@ -141,7 +143,7 @@ fn public_change_payload(scope: &str, at: &str, resync: bool) -> Option<String> 
 
 /// `GET /api/public/events`：展示端轻量 SSE。
 ///
-/// 白名单转发导入、管理员通知、微信绑定变化；其他后台 scope 全部丢弃。
+/// 白名单转发导入、方案变更、站点设置、管理员通知、微信绑定变化；其他后台 scope 全部丢弃。
 /// 所有公开事件都不携带后台 detail / 操作者 / 账号名 / 会话 / 业务数字。
 pub async fn public_sse(
     State(_st): State<Arc<AppState>>,
@@ -229,8 +231,6 @@ mod tests {
     fn public_sse_whitelist_excludes_private_scopes() {
         for scope in [
             SCOPE_ROSTER,
-            SCOPE_PLANS,
-            SCOPE_SETTINGS,
             SCOPE_SOURCE,
             SCOPE_BOT,
             SCOPE_LIVE,
@@ -246,14 +246,26 @@ mod tests {
                 None
             );
         }
-        for scope in [SCOPE_IMPORT, SCOPE_NOTICE, SCOPE_WX_BINDING] {
+        for scope in [
+            SCOPE_IMPORT,
+            SCOPE_PLANS,
+            SCOPE_SETTINGS,
+            SCOPE_NOTICE,
+            SCOPE_WX_BINDING,
+        ] {
             assert_eq!(public_scope_allowed(scope), Some(scope));
         }
     }
 
     #[test]
     fn public_payload_never_contains_detail() {
-        for scope in [SCOPE_IMPORT, SCOPE_NOTICE, SCOPE_WX_BINDING] {
+        for scope in [
+            SCOPE_IMPORT,
+            SCOPE_PLANS,
+            SCOPE_SETTINGS,
+            SCOPE_NOTICE,
+            SCOPE_WX_BINDING,
+        ] {
             let raw = public_change_payload(scope, "2026-11-15T01:00:00+08:00", false)
                 .expect("白名单事件应生成 payload");
             let v: serde_json::Value = serde_json::from_str(&raw).expect("payload 必须是 JSON");
