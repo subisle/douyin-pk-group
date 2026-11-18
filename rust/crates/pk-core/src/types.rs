@@ -130,7 +130,7 @@ pub enum Strategy {
 pub struct GroupOptions {
     pub group_size: usize,
     pub strategy: Strategy,
-    /// 内置条件：互斥 / 固定位 / 开赛时间。缺省用 DEFAULT_CONSTRAINTS
+    /// 内置条件：固定位 / 互斥 / 最小间隔 / 双人同组间隔 / 最低组号 / 赛程
     #[serde(default)]
     pub constraints: Option<ConstraintSet>,
 }

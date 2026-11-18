@@ -107,6 +107,7 @@ fn main() {
             exclude_sets: cs.exclude_together.clone(),
             avoid_master: false,
             min_gap_rules: cs.min_gap.clone(),
+            pair_gap_rules: cs.pair_gap.clone(),
             max_iter: 400,
         },
     );
@@ -134,6 +135,7 @@ fn main() {
             protected_keys: pinned_keys.clone(),
             exclude_sets: cs.exclude_together.clone(),
             min_gap_rules: cs.min_gap.clone(),
+            pair_gap_rules: cs.pair_gap.clone(),
         },
     );
     println!(
@@ -156,6 +158,7 @@ fn main() {
             exclude_sets: cs.exclude_together.clone(),
             avoid_master: false,
             min_gap_rules: cs.min_gap.clone(),
+            pair_gap_rules: cs.pair_gap.clone(),
             max_iter: 400,
         },
     );
@@ -174,6 +177,7 @@ fn main() {
             protected_keys: pinned_keys.clone(),
             exclude_sets: cs.exclude_together.clone(),
             min_gap_rules: cs.min_gap.clone(),
+            pair_gap_rules: cs.pair_gap.clone(),
             avoid_master: false,
             max_iter: 200,
         },

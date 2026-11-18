@@ -1318,6 +1318,14 @@ export default function GroupPage() {
               {meta.minGap?.length > 0 && (
                 <div>最少间隔：{meta.minGap.map((g) => `${g.a} ↔ ${g.b} 隔 ${g.gap} 组`).join('；')}</div>
               )}
+              {meta.pairGap?.length > 0 && (
+                <div>
+                  双人同组间隔：
+                  {meta.pairGap
+                    .map((g) => `${g.names.join(' / ')} → 两人同组，另一人隔 ${g.gap} 组`)
+                    .join('；')}
+                </div>
+              )}
               {meta.minGroup?.length > 0 && (
                 <div>起始组：{meta.minGroup.map((g) => `${g.name} 从第 ${g.group} 组起`).join('；')}</div>
               )}

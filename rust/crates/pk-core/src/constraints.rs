@@ -73,6 +73,15 @@ pub struct MinGapRule {
     pub gap: usize,
 }
 
+/// 双人同组间隔：三人中任意两人同组，剩下的一人与该组至少相隔 `gap` 组。
+/// 例：凤夏 / 凤瑶 / 凤九共用两个直播间 → 两人同组，另一人隔 4 组以上。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairGapRule {
+    pub names: Vec<String>,
+    pub gap: usize,
+}
+
 /// 最低组号：该人必须分到指定组号（1 起）或更后面的组
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -148,6 +157,9 @@ pub struct ConstraintSet {
     /// 最小间隔（可选，向后兼容旧数据）
     #[serde(default)]
     pub min_gap: Vec<MinGapRule>,
+    /// 双人同组间隔（可选）：三人中两人同组，另一人至少隔 N 组
+    #[serde(default)]
+    pub pair_gap: Vec<PairGapRule>,
     /// 最低组号（可选，向后兼容旧数据）
     #[serde(default)]
     pub min_group: Vec<MinGroupRule>,
@@ -223,7 +235,19 @@ impl Default for ConstraintSet {
                     b: "玖安".into(),
                     gap: 3,
                 },
+                // 2026-11-19 用户口径：浩哲与玖俏至少相隔 4 组
+                MinGapRule {
+                    a: "浩哲".into(),
+                    b: "玖俏".into(),
+                    gap: 4,
+                },
             ],
+            pair_gap: vec![PairGapRule {
+                // 2026-11-19 用户口径：三人用两个直播间 → 两人同组，另一人隔 4 组以上；
+                // 有复活赛，所以落单的一人允许靠后。
+                names: vec!["凤夏".into(), "凤瑶".into(), "凤九".into()],
+                gap: 4,
+            }],
             min_group: vec![MinGroupRule {
                 name: "浩阳".into(),
                 group: 6,
@@ -473,6 +497,266 @@ pub fn min_group_conflicts(groups: &[Vec<Player>], rules: &[MinGroupRule]) -> us
         .count()
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PairGapState {
+    Skip,
+    AllSame {
+        group: usize,
+    },
+    AllSplit {
+        groups: [usize; 3],
+    },
+    PairSplit {
+        pair_group: usize,
+        single_group: usize,
+        distance: usize,
+    },
+}
+
+impl PairGapState {
+    fn is_conflict(&self, gap: usize) -> bool {
+        match self {
+            Self::Skip => false,
+            Self::AllSame { .. } | Self::AllSplit { .. } => true,
+            Self::PairSplit { distance, .. } => *distance < gap,
+        }
+    }
+
+    fn penalty(&self, gap: usize) -> usize {
+        match self {
+            Self::Skip => 0,
+            Self::AllSame { .. } => gap + 2,
+            Self::AllSplit { .. } => gap + 1,
+            Self::PairSplit { distance, .. } => gap.saturating_sub(*distance),
+        }
+    }
+
+    fn indices(&self) -> Vec<usize> {
+        match self {
+            Self::Skip => Vec::new(),
+            Self::AllSame { group } => vec![*group],
+            Self::AllSplit { groups } => groups.to_vec(),
+            Self::PairSplit {
+                pair_group,
+                single_group,
+                ..
+            } => vec![*pair_group, *single_group],
+        }
+    }
+}
+
+fn pair_gap_state(groups: &[Vec<Player>], names: &[String]) -> PairGapState {
+    let mut seen = HashSet::new();
+    let names: Vec<&str> = names
+        .iter()
+        .map(|n| norm_name(n))
+        .filter(|n| !n.is_empty() && seen.insert(*n))
+        .collect();
+    if names.len() != 3 {
+        return PairGapState::Skip;
+    }
+    let Some(a) = group_index_of_name(groups, names[0]) else {
+        return PairGapState::Skip;
+    };
+    let Some(b) = group_index_of_name(groups, names[1]) else {
+        return PairGapState::Skip;
+    };
+    let Some(c) = group_index_of_name(groups, names[2]) else {
+        return PairGapState::Skip;
+    };
+    if a == b && b == c {
+        return PairGapState::AllSame { group: a };
+    }
+    if a != b && b != c && a != c {
+        return PairGapState::AllSplit { groups: [a, b, c] };
+    }
+    let (pair_group, single_group) = if a == b {
+        (a, c)
+    } else if a == c {
+        (a, b)
+    } else {
+        (b, c)
+    };
+    PairGapState::PairSplit {
+        pair_group,
+        single_group,
+        distance: pair_group.abs_diff(single_group),
+    }
+}
+
+fn normalize_pair_rules(rules: &[PairGapRule]) -> Vec<([String; 3], usize)> {
+    rules
+        .iter()
+        .filter_map(|r| {
+            let mut seen = HashSet::new();
+            let names: Vec<String> = r
+                .names
+                .iter()
+                .map(|n| norm_name(n).to_string())
+                .filter(|n| !n.is_empty() && seen.insert(n.clone()))
+                .collect();
+            if names.len() != 3 {
+                return None;
+            }
+            Some((
+                [names[0].clone(), names[1].clone(), names[2].clone()],
+                r.gap,
+            ))
+        })
+        .collect()
+}
+
+fn pair_gap_penalty_named(groups: &[Vec<Player>], rules: &[([String; 3], usize)]) -> usize {
+    rules
+        .iter()
+        .map(|(names, gap)| pair_gap_state(groups, names).penalty(*gap))
+        .sum()
+}
+
+/// 统计双人同组间隔规则违约数（三人不全在名单里时跳过）
+pub fn pair_gap_conflicts(groups: &[Vec<Player>], rules: &[PairGapRule]) -> usize {
+    normalize_pair_rules(rules)
+        .iter()
+        .filter(|(names, gap)| pair_gap_state(groups, names).is_conflict(*gap))
+        .count()
+}
+
+fn pair_gap_penalty_at(pos: &[usize], rules: &[([usize; 3], usize)]) -> usize {
+    rules
+        .iter()
+        .map(|([a, b, c], gap)| {
+            let (ga, gb, gc) = (pos[*a], pos[*b], pos[*c]);
+            let state = if ga == gb && gb == gc {
+                PairGapState::AllSame { group: ga }
+            } else if ga != gb && gb != gc && ga != gc {
+                PairGapState::AllSplit {
+                    groups: [ga, gb, gc],
+                }
+            } else {
+                let (pair_group, single_group) = if ga == gb {
+                    (ga, gc)
+                } else if ga == gc {
+                    (ga, gb)
+                } else {
+                    (gb, gc)
+                };
+                PairGapState::PairSplit {
+                    pair_group,
+                    single_group,
+                    distance: pair_group.abs_diff(single_group),
+                }
+            };
+            state.penalty(*gap)
+        })
+        .sum()
+}
+
+fn exclusion_conflicts(groups: &[Vec<Player>], sets: &[HashSet<String>]) -> usize {
+    groups
+        .iter()
+        .map(|g| {
+            sets.iter()
+                .map(|s| count_in(g, s).saturating_sub(1))
+                .sum::<usize>()
+        })
+        .sum()
+}
+
+fn balance_spread(groups: &[Vec<Player>]) -> f64 {
+    let mut totals = groups.iter().map(|g| sum_wave(g));
+    let Some(first) = totals.next() else {
+        return 0.0;
+    };
+    let (mut min, mut max) = (first, first);
+    for total in totals {
+        min = min.min(total);
+        max = max.max(total);
+    }
+    max - min
+}
+
+/// 双人同组间隔修复：三人中两人同组，第三人换到至少相隔 `gap` 组的位置。
+/// 只做跨组两人对调，绝不移动固定位，也不新增互斥 / 最小间隔冲突。
+pub fn resolve_pair_gaps(
+    groups: &[Vec<Player>],
+    rules: &[PairGapRule],
+    protected_keys: &HashSet<String>,
+    exclude_sets: &[Vec<String>],
+    min_gap_rules: &[MinGapRule],
+    max_iter: usize,
+) -> Vec<Vec<Player>> {
+    let normalized = normalize_pair_rules(rules);
+    let mut result: Vec<Vec<Player>> = groups.to_vec();
+    if normalized.is_empty() || result.len() < 2 {
+        return result;
+    }
+    let set_list = norm_set(exclude_sets);
+    let members: HashSet<String> = normalized
+        .iter()
+        .flat_map(|(names, _)| names.iter().cloned())
+        .collect();
+
+    for _ in 0..max_iter {
+        let base_pair = pair_gap_penalty_named(&result, &normalized);
+        if base_pair == 0 {
+            break;
+        }
+        let base_other =
+            exclusion_conflicts(&result, &set_list) + gap_conflicts(&result, min_gap_rules);
+        let mut best: Option<(usize, usize, f64, usize, usize, usize, usize)> = None;
+
+        for ai in 0..result.len() {
+            for pi in 0..result[ai].len() {
+                let p = &result[ai][pi];
+                if protected_keys.contains(&p.key) || !members.contains(norm_name(&p.name)) {
+                    continue;
+                }
+                for bi in 0..result.len() {
+                    if ai == bi {
+                        continue;
+                    }
+                    for qi in 0..result[bi].len() {
+                        let q = &result[bi][qi];
+                        if protected_keys.contains(&q.key) {
+                            continue;
+                        }
+                        let tmp = result[ai][pi].clone();
+                        result[ai][pi] = result[bi][qi].clone();
+                        result[bi][qi] = tmp;
+
+                        let pair = pair_gap_penalty_named(&result, &normalized);
+                        let other = exclusion_conflicts(&result, &set_list)
+                            + gap_conflicts(&result, min_gap_rules);
+                        let spread = balance_spread(&result);
+                        if pair < base_pair && other <= base_other {
+                            let better = best.as_ref().is_none_or(|(bp, bo, bs, ..)| {
+                                pair < *bp
+                                    || (pair == *bp
+                                        && (other < *bo || (other == *bo && spread < *bs - 1e-9)))
+                            });
+                            if better {
+                                best = Some((pair, other, spread, ai, pi, bi, qi));
+                            }
+                        }
+
+                        let tmp = result[ai][pi].clone();
+                        result[ai][pi] = result[bi][qi].clone();
+                        result[bi][qi] = tmp;
+                    }
+                }
+            }
+        }
+
+        let Some((_, _, _, ai, pi, bi, qi)) = best else {
+            break;
+        };
+        let tmp = result[ai][pi].clone();
+        result[ai][pi] = result[bi][qi].clone();
+        result[bi][qi] = tmp;
+    }
+    result
+}
+
 /// 最小间隔修复：对违约的两人，把其中非固定位的一人换到满足间隔的组，
 /// 换入者选择对音浪均衡损伤最小、且不制造互斥冲突的对象。
 /// 若单次交换无法直接满足（例如两人都被挤在中间组、够不着任何「距离 ≥ gap」的组），
@@ -613,6 +897,8 @@ pub struct PolishOptions {
     pub avoid_master: bool,
     /// 最小间隔规则：交换后违约数不许增加
     pub min_gap_rules: Vec<MinGapRule>,
+    /// 双人同组间隔：交换后违约程度不许增加
+    pub pair_gap_rules: Vec<PairGapRule>,
     pub max_iter: usize,
 }
 
@@ -671,6 +957,22 @@ pub fn polish_balance(groups: &[Vec<Player>], options: &PolishOptions) -> Vec<Ve
             ))
         })
         .collect();
+    // pair_gap 规则预解析成三个全局下标；缺人的规则跳过
+    let normalized_pair = normalize_pair_rules(&options.pair_gap_rules);
+    let pair_rules: Vec<([usize; 3], usize)> = normalized_pair
+        .iter()
+        .filter_map(|(names, gap)| {
+            Some((
+                [
+                    *idx_of.get(&names[0])?,
+                    *idx_of.get(&names[1])?,
+                    *idx_of.get(&names[2])?,
+                ],
+                *gap,
+            ))
+        })
+        .collect();
+    let base_pair_conflicts = pair_gap_penalty_at(&pos_arr, &pair_rules);
 
     // 组 × 互斥组 计数表（交换时差量维护，试算 O(|sets|)）
     let mut set_cnt: Vec<Vec<usize>> = vec![vec![0; set_list.len()]; result.len()];
@@ -785,6 +1087,22 @@ pub fn polish_balance(groups: &[Vec<Player>], options: &PolishOptions) -> Vec<Ve
                             continue;
                         }
 
+                        // 双人同组间隔试算：同样原地改位置再还原
+                        let pair_ok = if pair_rules.is_empty() {
+                            true
+                        } else {
+                            pos_arr[ip] = bi;
+                            pos_arr[iq] = ai;
+                            let ok =
+                                base_pair_conflicts >= pair_gap_penalty_at(&pos_arr, &pair_rules);
+                            pos_arr[ip] = ai;
+                            pos_arr[iq] = bi;
+                            ok
+                        };
+                        if !pair_ok {
+                            continue;
+                        }
+
                         // 极差（O(g)，避免每候选重算全量）
                         let a = totals[ai] - p.wave + q.wave;
                         let b = totals[bi] - q.wave + p.wave;
@@ -885,6 +1203,7 @@ pub struct StrengthOptions {
     pub protected_keys: HashSet<String>,
     pub exclude_sets: Vec<Vec<String>>,
     pub min_gap_rules: Vec<MinGapRule>,
+    pub pair_gap_rules: Vec<PairGapRule>,
     /// 是否同时避免同门扎堆（蛇形 + 同门回避策略用）
     pub avoid_master: bool,
     pub max_iter: usize,
@@ -915,17 +1234,19 @@ pub struct SeedOptions {
     pub protected_keys: HashSet<String>,
     pub exclude_sets: Vec<Vec<String>>,
     pub min_gap_rules: Vec<MinGapRule>,
+    pub pair_gap_rules: Vec<PairGapRule>,
 }
 
-fn total_conflicts(groups: &[Vec<Player>], sets: &[Vec<String>], rules: &[MinGapRule]) -> usize {
+fn total_conflicts(
+    groups: &[Vec<Player>],
+    sets: &[Vec<String>],
+    min_gap_rules: &[MinGapRule],
+    pair_gap_rules: &[PairGapRule],
+) -> usize {
     let list = norm_set(sets);
-    let mut n = 0usize;
-    for g in groups {
-        for s in &list {
-            n += count_in(g, s).saturating_sub(1);
-        }
-    }
-    n + gap_conflicts(groups, rules)
+    exclusion_conflicts(groups, &list)
+        + gap_conflicts(groups, min_gap_rules)
+        + pair_gap_conflicts(groups, pair_gap_rules)
 }
 
 pub fn place_top_seeds(groups: &[Vec<Player>], options: &SeedOptions) -> Vec<Vec<Player>> {
@@ -964,7 +1285,12 @@ pub fn place_top_seeds(groups: &[Vec<Player>], options: &SeedOptions) -> Vec<Vec
         }
         None
     };
-    let base_conf = total_conflicts(&result, &options.exclude_sets, &options.min_gap_rules);
+    let base_conf = total_conflicts(
+        &result,
+        &options.exclude_sets,
+        &options.min_gap_rules,
+        &options.pair_gap_rules,
+    );
 
     for (rank, seed_key) in seeds.iter().enumerate() {
         let target = order[rank];
@@ -997,8 +1323,12 @@ pub fn place_top_seeds(groups: &[Vec<Player>], options: &SeedOptions) -> Vec<Vec
             let tmp = result[at_g][at_p].clone();
             result[at_g][at_p] = result[target][qi].clone();
             result[target][qi] = tmp;
-            let ok = total_conflicts(&result, &options.exclude_sets, &options.min_gap_rules)
-                <= base_conf;
+            let ok = total_conflicts(
+                &result,
+                &options.exclude_sets,
+                &options.min_gap_rules,
+                &options.pair_gap_rules,
+            ) <= base_conf;
             if ok {
                 let totals: Vec<f64> = result.iter().map(|g| sum_wave(g)).collect();
                 let mx = totals.iter().cloned().fold(f64::MIN, f64::max);
@@ -1186,6 +1516,21 @@ pub fn order_by_strength(groups: &[Vec<Player>], options: &StrengthOptions) -> V
         })
         .collect();
     let base_gap = gap_conflicts(&result, &options.min_gap_rules);
+    let normalized_pair = normalize_pair_rules(&options.pair_gap_rules);
+    let pair_rules: Vec<([usize; 3], usize)> = normalized_pair
+        .iter()
+        .filter_map(|(names, gap)| {
+            Some((
+                [
+                    *idx_of.get(&names[0])?,
+                    *idx_of.get(&names[1])?,
+                    *idx_of.get(&names[2])?,
+                ],
+                *gap,
+            ))
+        })
+        .collect();
+    let base_pair = pair_gap_penalty_at(&pos, &pair_rules);
 
     let mut totals: Vec<f64> = result
         .iter()
@@ -1290,6 +1635,17 @@ pub fn order_by_strength(groups: &[Vec<Player>], options: &StrengthOptions) -> V
                                 }
                             }
                             if v > base_gap {
+                                continue;
+                            }
+                        }
+                        // 双人同组间隔：违约程度不许增加
+                        if !pair_rules.is_empty() {
+                            pos[p] = bi;
+                            pos[q] = ai;
+                            let pv = pair_gap_penalty_at(&pos, &pair_rules);
+                            pos[p] = ai;
+                            pos[q] = bi;
+                            if pv > base_pair {
                                 continue;
                             }
                         }
@@ -1469,6 +1825,31 @@ pub fn find_violations(groups: &[Vec<Player>], cs: &ConstraintSet) -> Vec<Violat
         });
     }
 
+    for rule in &cs.pair_gap {
+        let state = pair_gap_state(groups, &rule.names);
+        if !state.is_conflict(rule.gap) {
+            continue;
+        }
+        let at = state.indices().into_iter().min().unwrap_or(0);
+        let places = state
+            .indices()
+            .into_iter()
+            .map(|i| format!("第 {} 组", i + 1))
+            .collect::<Vec<_>>()
+            .join(" / ");
+        out.push(Violation {
+            kind: "gap".into(),
+            group_index: at,
+            message: format!(
+                "{} 需两人同组，另一人至少间隔 {} 组（当前 {}）",
+                rule.names.join("、"),
+                rule.gap,
+                places
+            ),
+            names: rule.names.clone(),
+        });
+    }
+
     for rule in &cs.min_group {
         let Some(at) = group_index_of_name(groups, &rule.name) else {
             // 名单里没有此人 → 约束自动跳过
@@ -1625,6 +2006,114 @@ mod tests {
         }];
         let fixed = resolve_min_gaps(&groups, &rules, &HashSet::new(), &[], 200);
         assert_eq!(gap_conflicts(&fixed, &rules), 0, "拉远兜底后必须清零违约");
+    }
+
+    #[test]
+    fn default_includes_new_pair_constraints() {
+        let cs = ConstraintSet::default();
+        assert!(cs.min_gap.iter().any(|r| {
+            (r.a == "浩哲" && r.b == "玖俏" || r.a == "玖俏" && r.b == "浩哲") && r.gap == 4
+        }));
+        assert!(cs.pair_gap.iter().any(|r| {
+            r.gap == 4
+                && ["凤夏", "凤瑶", "凤九"]
+                    .iter()
+                    .all(|n| r.names.iter().any(|x| x == n))
+        }));
+    }
+
+    #[test]
+    fn pair_gap_requires_two_together_and_four_groups_apart() {
+        let rule = PairGapRule {
+            names: vec!["凤夏".into(), "凤瑶".into(), "凤九".into()],
+            gap: 4,
+        };
+        let p = |name: &str| Player::new(name, name, 10.0);
+
+        let all_split = vec![
+            vec![p("凤夏")],
+            vec![p("凤瑶")],
+            vec![p("凤九")],
+            vec![],
+            vec![],
+            vec![],
+        ];
+        assert_eq!(pair_gap_conflicts(&all_split, &[rule.clone()]), 1);
+
+        let pair_too_close = vec![
+            vec![p("凤夏"), p("凤瑶")],
+            vec![],
+            vec![],
+            vec![p("凤九")],
+            vec![],
+            vec![],
+        ];
+        assert_eq!(
+            pair_gap_conflicts(&pair_too_close, &[rule.clone()]),
+            1,
+            "两人同组但与第三人只隔 3 组，仍应违约"
+        );
+
+        let valid = vec![
+            vec![p("凤夏"), p("凤瑶")],
+            vec![],
+            vec![],
+            vec![],
+            vec![p("凤九")],
+            vec![],
+        ];
+        assert_eq!(pair_gap_conflicts(&valid, &[rule]), 0);
+    }
+
+    #[test]
+    fn pair_gap_is_repaired_by_swaps() {
+        let rules = vec![PairGapRule {
+            names: vec!["凤夏".into(), "凤瑶".into(), "凤九".into()],
+            gap: 4,
+        }];
+        let base = || -> Vec<Vec<Player>> {
+            (0..6)
+                .map(|i| vec![Player::new(format!("填充{i}"), format!("填充{i}"), 10.0)])
+                .collect()
+        };
+        let mut cases = Vec::new();
+
+        // 三人全挤第 1 组：需要拆成 2+1。
+        let mut all_same = base();
+        for name in ["凤夏", "凤瑶", "凤九"] {
+            all_same[0].push(Player::new(name, name, 80.0));
+        }
+        cases.push(all_same);
+
+        // 三人分散在 1/3/5 组：需要先凑成一对，再拉开 4 组。
+        let mut all_split = base();
+        all_split[0].push(Player::new("凤夏", "凤夏", 80.0));
+        all_split[2].push(Player::new("凤瑶", "凤瑶", 70.0));
+        all_split[4].push(Player::new("凤九", "凤九", 60.0));
+        cases.push(all_split);
+
+        // 已经 2+1，但只隔 3 组：需要把第三人再拉远一组。
+        let mut too_close = base();
+        too_close[0].push(Player::new("凤夏", "凤夏", 80.0));
+        too_close[0].push(Player::new("凤瑶", "凤瑶", 70.0));
+        too_close[3].push(Player::new("凤九", "凤九", 60.0));
+        cases.push(too_close);
+
+        for groups in cases {
+            let fixed = resolve_pair_gaps(&groups, &rules, &HashSet::new(), &[], &[], 100);
+            assert_eq!(pair_gap_conflicts(&fixed, &rules), 0, "{fixed:?}");
+            let at = |n: &str| group_index_of_name(&fixed, n).unwrap();
+            let (a, b, c) = (at("凤夏"), at("凤瑶"), at("凤九"));
+            let mut counts = HashMap::new();
+            for g in [a, b, c] {
+                *counts.entry(g).or_insert(0usize) += 1;
+            }
+            let mut counts: Vec<usize> = counts.into_values().collect();
+            counts.sort_unstable();
+            assert_eq!(counts, vec![1, 2], "必须是 2+1 两个组");
+            let flat: Vec<&str> = fixed.iter().flatten().map(|p| p.name.as_str()).collect();
+            assert_eq!(flat.len(), groups.iter().flatten().count(), "人数不能变");
+        }
     }
 
     #[test]

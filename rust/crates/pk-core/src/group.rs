@@ -4,8 +4,9 @@ use std::collections::HashSet;
 
 use crate::constraints::{
     default_strength_order, gap_conflicts, norm_name, order_by_strength, place_pinned,
-    place_top_seeds, polish_balance, resolve_exclusions, resolve_min_gaps, resolve_pinned_index,
-    sum_wave, ConstraintSet, PolishOptions, SeedOptions, StrengthMode, StrengthOptions,
+    place_top_seeds, polish_balance, resolve_exclusions, resolve_min_gaps, resolve_pair_gaps,
+    resolve_pinned_index, sum_wave, ConstraintSet, PolishOptions, SeedOptions, StrengthMode,
+    StrengthOptions,
 };
 use crate::types::{BalanceStat, GroupOptions, GroupStat, Player, Strategy};
 
@@ -231,9 +232,10 @@ fn fix_overflow(
 
 /// 自动分组 + 内置条件。
 /// **内置条件永远优先**（2026-10-07 用户拍板：无论选哪种策略、哪种强度位次，
-/// 固定位 / 互斥 / 最小间隔 / 至少第 N 组起 都必须先满足）。
+/// 固定位 / 互斥 / 最小间隔 / 双人同组间隔 / 至少第 N 组起 都必须先满足）。
 /// 顺序：固定位的人先抽出来 → 其余人按策略分 → 固定位插回指定组
-/// → 互斥修复 → 最小间隔修复 → 均衡微调（梯队式跳过）→ 强度位次（梯队式跳过）。
+/// → 互斥修复 → 最小间隔修复 → 双人同组间隔修复
+/// → 均衡微调（梯队式跳过）→ 强度位次（梯队式跳过）。
 pub fn auto_group(players: &[Player], options: &GroupOptions) -> Vec<Vec<Player>> {
     let active: Vec<Player> = players.iter().filter(|p| !p.excluded).cloned().collect();
     if active.is_empty() {
@@ -320,6 +322,19 @@ pub fn auto_group(players: &[Player], options: &GroupOptions) -> Vec<Vec<Player>
         );
     }
 
+    /* 4.6 双人同组间隔：三人中两人同组，另一人至少隔 N 组 */
+    let pair_gap_rules = cs.pair_gap.clone();
+    if !pair_gap_rules.is_empty() {
+        groups = resolve_pair_gaps(
+            &groups,
+            &pair_gap_rules,
+            &pinned_keys,
+            &cs.exclude_together,
+            &min_gap_rules,
+            200,
+        );
+    }
+
     /* 5. 均衡微调：只接受让极差变小的交换，绝不移动固定位、绝不制造新的互斥/间隔冲突。
     梯队式跳过——微调会把「第 1 组最强」的阶梯抹平。 */
     if !ladder {
@@ -330,6 +345,7 @@ pub fn auto_group(players: &[Player], options: &GroupOptions) -> Vec<Vec<Player>
                 exclude_sets: cs.exclude_together.clone(),
                 avoid_master: options.strategy == Strategy::SnakeNoMaster,
                 min_gap_rules: min_gap_rules.clone(),
+                pair_gap_rules: pair_gap_rules.clone(),
                 max_iter: 400,
             },
         );
@@ -356,6 +372,7 @@ pub fn auto_group(players: &[Player], options: &GroupOptions) -> Vec<Vec<Player>
                         protected_keys: pinned_keys.clone(),
                         exclude_sets: cs.exclude_together.clone(),
                         min_gap_rules: min_gap_rules.clone(),
+                        pair_gap_rules: pair_gap_rules.clone(),
                     },
                 );
                 // 头牌不能被后来的微调挪走，否则位次白排
@@ -376,6 +393,7 @@ pub fn auto_group(players: &[Player], options: &GroupOptions) -> Vec<Vec<Player>
                         exclude_sets: cs.exclude_together.clone(),
                         avoid_master: options.strategy == Strategy::SnakeNoMaster,
                         min_gap_rules: min_gap_rules.clone(),
+                        pair_gap_rules: pair_gap_rules.clone(),
                         max_iter: 400,
                     },
                 );
@@ -387,6 +405,7 @@ pub fn auto_group(players: &[Player], options: &GroupOptions) -> Vec<Vec<Player>
                         protected_keys: pinned_keys.clone(),
                         exclude_sets: cs.exclude_together.clone(),
                         min_gap_rules: min_gap_rules.clone(),
+                        pair_gap_rules: pair_gap_rules.clone(),
                         avoid_master: options.strategy == Strategy::SnakeNoMaster,
                         max_iter: 200,
                     },
@@ -402,6 +421,7 @@ pub fn auto_group(players: &[Player], options: &GroupOptions) -> Vec<Vec<Player>
                         protected_keys: pinned_keys.clone(),
                         exclude_sets: cs.exclude_together.clone(),
                         min_gap_rules: min_gap_rules.clone(),
+                        pair_gap_rules: pair_gap_rules.clone(),
                         avoid_master: options.strategy == Strategy::SnakeNoMaster,
                         max_iter: 400,
                     },
@@ -415,7 +435,8 @@ pub fn auto_group(players: &[Player], options: &GroupOptions) -> Vec<Vec<Player>
     /* 6. 组内按音浪降序。
     蛇形/均衡只保证「谁在哪组」，不管组内顺序，直接返回的话看板上会出现
     「序号 6 的音浪比序号 8 还大」这种刺眼场面（分享页的组内名次就是这么算的）。
-    放在最后做：前面的固定位、互斥、最小间隔、微调都只关心成员归属，不关心顺序。 */
+    放在最后做：前面的固定位、互斥、最小间隔、双人同组间隔、微调都只关心成员归属，
+    不关心组内顺序。 */
     for g in groups.iter_mut() {
         g.sort_by(|a, b| {
             b.wave
@@ -794,6 +815,75 @@ mod tests {
             at("啸昭"),
             at("啸寻")
         );
+    }
+
+    #[test]
+    fn auto_group_respects_pair_gap_and_new_min_gap() {
+        // 64 人 / 每组 8 人 → 8 组，够放下间隔 4 组的所有新条件。
+        let mut items: Vec<(String, f64)> = vec![
+            ("浩哲".into(), 900.0),
+            ("玖俏".into(), 890.0),
+            ("凤夏".into(), 880.0),
+            ("凤瑶".into(), 870.0),
+            ("凤九".into(), 860.0),
+        ];
+        for i in 0..59 {
+            items.push((format!("填充{i:02}"), 700.0 - i as f64));
+        }
+        let list: Vec<Player> = items.iter().map(|(n, w)| Player::new(n, n, *w)).collect();
+        let cs = ConstraintSet::default();
+        let rule = crate::constraints::PairGapRule {
+            names: vec!["凤夏".into(), "凤瑶".into(), "凤九".into()],
+            gap: 4,
+        };
+        for strategy in [
+            Strategy::Snake,
+            Strategy::SnakeNoMaster,
+            Strategy::Sequential,
+            Strategy::SequentialLastN,
+            Strategy::Random,
+        ] {
+            for mode in [None, Some(StrengthMode::Top), Some(StrengthMode::Total)] {
+                let mut c = cs.clone();
+                c.strength_order = mode.map(|m| crate::constraints::StrengthOrder {
+                    enabled: true,
+                    mode: m,
+                    order: Vec::new(),
+                });
+                let groups = auto_group(
+                    &list,
+                    &GroupOptions {
+                        group_size: 8,
+                        strategy,
+                        constraints: Some(c),
+                    },
+                );
+                assert_eq!(groups.len(), 8);
+                let at = |n: &str| group_at(&groups, n);
+                assert!(
+                    at("浩哲").abs_diff(at("玖俏")) >= 4,
+                    "{strategy:?}/{mode:?}: 浩哲={} 玖俏={} 需间隔 ≥ 4 组",
+                    at("浩哲"),
+                    at("玖俏")
+                );
+                assert_eq!(
+                    crate::constraints::pair_gap_conflicts(&groups, &[rule.clone()]),
+                    0,
+                    "{strategy:?}/{mode:?}: 凤夏/凤瑶/凤九必须两人同组、另一人隔 4 组：{:?}",
+                    groups
+                        .iter()
+                        .map(|g| g.iter().map(|p| p.name.clone()).collect::<Vec<_>>())
+                        .collect::<Vec<_>>()
+                );
+                let mut counts = std::collections::HashMap::new();
+                for n in ["凤夏", "凤瑶", "凤九"] {
+                    *counts.entry(at(n)).or_insert(0usize) += 1;
+                }
+                let mut counts: Vec<usize> = counts.into_values().collect();
+                counts.sort_unstable();
+                assert_eq!(counts, vec![1, 2], "{strategy:?}/{mode:?}: 必须是 2+1");
+            }
+        }
     }
 
     #[test]

@@ -162,6 +162,7 @@ pub async fn constraints_meta() -> GroupResult<serde_json::Value> {
         "pinned": pinned,
         "schedule": { "start": cs.schedule.start, "intervalMin": cs.schedule.interval_min },
         "minGap": cs.min_gap,
+        "pairGap": cs.pair_gap,
         "minGroup": cs.min_group,
     })))
 }
@@ -198,6 +199,7 @@ pub async fn polish(
             exclude_sets: constraints.exclude_together.clone(),
             avoid_master: false,
             min_gap_rules: constraints.min_gap.clone(),
+            pair_gap_rules: constraints.pair_gap.clone(),
             max_iter: 400,
         },
     );

@@ -9,10 +9,10 @@ pub mod types;
 
 pub use constraints::{
     default_strength_order, find_by_name, find_violations, gap_after, gap_conflicts,
-    group_strength, is_pinned_name, min_group_conflicts, order_by_strength, place_top_seeds,
-    slot_time, BreakRule, ConstraintSet, MinGapRule, MinGroupRule, PinnedGroup, PinnedRule,
-    PolishOptions, ScheduleRule, SeedOptions, StrengthMode, StrengthOptions, StrengthOrder,
-    Violation,
+    group_strength, is_pinned_name, min_group_conflicts, order_by_strength, pair_gap_conflicts,
+    place_top_seeds, resolve_pair_gaps, slot_time, BreakRule, ConstraintSet, MinGapRule,
+    MinGroupRule, PairGapRule, PinnedGroup, PinnedRule, PolishOptions, ScheduleRule, SeedOptions,
+    StrengthMode, StrengthOptions, StrengthOrder, Violation,
 };
 pub use group::{
     auto_group, compute_balance, group_count, is_valid, move_player, random_group,
@@ -24,8 +24,8 @@ pub use roster::{
 };
 pub use types::{BalanceStat, GroupOptions, GroupStat, ParsedRow, Player, Strategy, WaveMetric};
 
-/// 内置条件（用户拍板的那一套）：玖玉/玖妹/玖玥 互斥、啸泽第一组、啸帆最后一组、
-/// 啸昭与啸寻至少隔 4 组、08:15 起每 15 分钟一组
+/// 内置条件：固定位、互斥、最小间隔、双人同组间隔、最低起始组与默认赛程。
+/// 具体条目以 [`ConstraintSet::default`] 为准。
 pub fn default_constraints() -> ConstraintSet {
     ConstraintSet::default()
 }
