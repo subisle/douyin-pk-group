@@ -151,23 +151,17 @@ struct GroupNoticeView {
     revealed: bool,
 }
 
-fn group_notice_view_at(
+fn group_notice_view_for_date_at(
     s: &crate::public_teams::PublicSettings,
+    event_date: &str,
     now: chrono::DateTime<chrono::FixedOffset>,
 ) -> Option<GroupNoticeView> {
     if !s.group_notice_enabled {
         return None;
     }
-    let event_date = chrono::NaiveDate::parse_from_str(
-        s.group_notice_event_date.trim(),
-        "%Y-%m-%d",
-    )
-    .ok()?;
-    let start_time = chrono::NaiveTime::parse_from_str(
-        s.group_notice_start_time.trim(),
-        "%H:%M",
-    )
-    .unwrap_or_else(|_| chrono::NaiveTime::from_hms_opt(8, 15, 0).unwrap());
+    let event_date = chrono::NaiveDate::parse_from_str(event_date.trim(), "%Y-%m-%d").ok()?;
+    let start_time = chrono::NaiveTime::parse_from_str(s.group_notice_start_time.trim(), "%H:%M")
+        .unwrap_or_else(|_| chrono::NaiveTime::from_hms_opt(8, 15, 0).unwrap());
     let event_start = event_date.and_time(start_time);
     let lead = s.group_notice_reveal_lead_minutes.clamp(0, 1440);
     let reveal_at = event_start - chrono::Duration::minutes(lead);
@@ -179,11 +173,8 @@ fn group_notice_view_at(
     let revealed = local_now >= reveal_at && local_now < event_end;
     let ended = local_now >= event_end;
     let days_until = (event_date - now.date_naive()).num_days().max(0);
-    let signup_date = chrono::NaiveDate::parse_from_str(
-        s.group_notice_signup_date.trim(),
-        "%Y-%m-%d",
-    )
-    .ok();
+    let signup_date =
+        chrono::NaiveDate::parse_from_str(s.group_notice_signup_date.trim(), "%Y-%m-%d").ok();
     let title = if s.group_notice_title.trim().is_empty() {
         "分组赛事公告".to_string()
     } else {
@@ -211,11 +202,49 @@ fn group_notice_view_at(
     })
 }
 
-fn group_notice_view(
+fn group_notice_view_at(
     s: &crate::public_teams::PublicSettings,
+    now: chrono::DateTime<chrono::FixedOffset>,
 ) -> Option<GroupNoticeView> {
+    group_notice_view_for_date_at(s, &s.group_notice_event_date, now)
+}
+
+fn group_notice_view(s: &crate::public_teams::PublicSettings) -> Option<GroupNoticeView> {
     let offset = chrono::FixedOffset::east_opt(8 * 3600)?;
     group_notice_view_at(s, chrono::Utc::now().with_timezone(&offset))
+}
+
+/// 公开详情页按当前已上架方案判断是否放榜。
+///
+/// 有 `eventDate` 时才跟随公告的开赛前窗口；没有日期表示这版方案是即时上架，
+/// 不能继续被全站公告的倒计时拦住。公告关闭时仍沿用旧的「当天有数据」口径。
+fn plan_group_visibility_at(
+    s: &crate::public_teams::PublicSettings,
+    event_date: &str,
+    match_day: bool,
+    now: chrono::DateTime<chrono::FixedOffset>,
+) -> (bool, Option<GroupNoticeView>) {
+    if !s.group_notice_enabled {
+        return (match_day, None);
+    }
+    let notice = group_notice_view_for_date_at(s, event_date, now);
+    // 空日期、非法日期都视为管理员选择了即时放榜；有效日期才进入公告倒计时。
+    let revealed = notice.as_ref().map(|n| n.revealed).unwrap_or(true);
+    (revealed, notice)
+}
+
+fn plan_group_visibility(
+    s: &crate::public_teams::PublicSettings,
+    event_date: &str,
+    match_day: bool,
+) -> (bool, Option<GroupNoticeView>) {
+    let offset = chrono::FixedOffset::east_opt(8 * 3600).expect("valid +08:00 offset");
+    plan_group_visibility_at(
+        s,
+        event_date,
+        match_day,
+        chrono::Utc::now().with_timezone(&offset),
+    )
 }
 
 impl Default for DisplayConfig {
@@ -528,8 +557,7 @@ pub async fn plan(
     // 配置了公告后，以「开赛前 N 分钟 ~ 赛事当天结束」作为唯一放榜窗口。
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
     let match_day = dates.first().map(|d| d == &today).unwrap_or(false);
-    let notice_view = group_notice_view(&settings);
-    let group_reveal = notice_view.as_ref().map(|n| n.revealed).unwrap_or(match_day);
+    let (group_reveal, notice_view) = plan_group_visibility(&settings, event_date, match_day);
     /* 展示开关必须落在接口层：关闭总排行时连每人的全场 rank 一起抹掉；
     关闭公开名单时连 groups / ranking / 每日明细一起不下发，不能只靠前端隐藏。 */
     if !display.ranking {
@@ -670,6 +698,49 @@ mod tests {
         let ended = group_notice_view_at(&cfg, ended).unwrap();
         assert!(!ended.revealed);
         assert_eq!(ended.json["status"], "ended");
+    }
+
+    #[test]
+    fn plan_without_event_date_is_visible_immediately() {
+        let cfg = notice_cfg();
+        let now = chrono::NaiveDate::from_ymd_opt(2026, 11, 19)
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap()
+            .and_local_timezone(chrono::FixedOffset::east_opt(8 * 3600).unwrap())
+            .unwrap();
+
+        let (revealed, notice) = plan_group_visibility_at(&cfg, "", false, now);
+
+        assert!(revealed);
+        assert!(notice.is_none());
+    }
+
+    #[test]
+    fn plan_event_date_controls_reveal_instead_of_global_notice_date() {
+        let mut cfg = notice_cfg();
+        cfg.group_notice_event_date = "2026-11-25".into();
+        let offset = chrono::FixedOffset::east_opt(8 * 3600).unwrap();
+        let before = chrono::NaiveDate::from_ymd_opt(2026, 11, 20)
+            .unwrap()
+            .and_hms_opt(6, 14, 59)
+            .unwrap()
+            .and_local_timezone(offset)
+            .unwrap();
+
+        let (revealed, notice) = plan_group_visibility_at(&cfg, "2026-11-20", false, before);
+
+        assert!(!revealed);
+        assert_eq!(notice.unwrap().json["eventDate"], "2026-11-20");
+
+        let reveal_at = chrono::NaiveDate::from_ymd_opt(2026, 11, 20)
+            .unwrap()
+            .and_hms_opt(6, 15, 0)
+            .unwrap()
+            .and_local_timezone(offset)
+            .unwrap();
+        let (revealed, _) = plan_group_visibility_at(&cfg, "2026-11-20", false, reveal_at);
+        assert!(revealed);
     }
 
     fn player(name: &str, wave: f64, order: usize) -> PublicPlayer {

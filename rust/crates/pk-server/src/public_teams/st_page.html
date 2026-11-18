@@ -6928,7 +6928,11 @@ function groupNoticeHtml(n, page) {
 }
 
 function groupHtml(d, page, list) {
-  const notice = d.groupNotice || groupNotice;
+  /* 详情接口显式返回 null 表示这份方案即时放榜，不能回退到列表接口的
+     全局倒计时公告；只有字段缺失时才使用列表缓存。 */
+  const notice = Object.prototype.hasOwnProperty.call(d, 'groupNotice')
+    ? d.groupNotice
+    : groupNotice;
   if (d.groupReveal === false || (notice && notice.revealed === false) ||
       (notice && notice.ended === true)) {
     return groupNoticeHtml(notice || {}, page);
