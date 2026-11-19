@@ -906,6 +906,8 @@ export default function GroupPage() {
           schedule: { start: startTime, intervalMin, breaks },
           display,
           eventDate: groupNotice?.groupNoticeEnabled ? groupNotice.groupNoticeEventDate : undefined,
+          // 展示端「比赛机制」：保存方案时自动带上当前赛事规则，避免漏配。
+          publicRules: rulesOf(eventType)?.items.join('；'),
           /* 数据日期也存进方案（2026-10-18）：载入方案后 `dates` 是空的，
            * 导出长图头部只能退回 `isoLocal()`，历史方案会被印成「导出当天」的日期。 */
           dates,

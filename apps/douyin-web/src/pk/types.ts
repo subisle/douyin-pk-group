@@ -183,6 +183,8 @@ export interface SavedPlan {
   dates?: string[];
   /** 上线公告的开赛日期；空/缺省 = 立即放榜。 */
   eventDate?: string;
+  /** 对外展示页「比赛机制」文案；保存方案时按赛事类型自动写入。 */
+  publicRules?: string;
 }
 
 export interface PlanBrief {
