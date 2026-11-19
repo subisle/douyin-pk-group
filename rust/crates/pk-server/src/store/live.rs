@@ -846,11 +846,14 @@ pub async fn live_seat_list(
     round_id: i64,
 ) -> anyhow::Result<Vec<serde_json::Value>> {
     let rows = sqlx::query(
-        "SELECT person_id, douyin_uid, nickname, team_id, final_score, final_rank,
-                score_version, qualified
-         FROM live_round_seat WHERE round_id = $1
-         ORDER BY CASE WHEN final_rank > 0 THEN 0 ELSE 1 END,
-                  final_rank, final_score DESC, douyin_uid",
+        "SELECT s.person_id, s.douyin_uid, s.nickname, s.team_id, s.final_score,
+                s.final_rank, s.score_version, s.qualified,
+                COALESCE(p.name, '') AS person_name
+         FROM live_round_seat s
+         LEFT JOIN person p ON p.id = s.person_id
+         WHERE s.round_id = $1
+         ORDER BY CASE WHEN s.final_rank > 0 THEN 0 ELSE 1 END,
+                  s.final_rank, s.final_score DESC, s.douyin_uid",
     )
     .bind(round_id)
     .fetch_all(w(st)?)
@@ -862,6 +865,7 @@ pub async fn live_seat_list(
                 "personId": r.try_get::<i64, _>("person_id").unwrap_or(0),
                 "douyinUid": r.try_get::<String, _>("douyin_uid").unwrap_or_default(),
                 "nickname": r.try_get::<String, _>("nickname").unwrap_or_default(),
+                "personName": r.try_get::<String, _>("person_name").unwrap_or_default(),
                 "teamId": r.try_get::<String, _>("team_id").unwrap_or_default(),
                 "score": r.try_get::<i64, _>("final_score").unwrap_or(0),
                 "rank": r.try_get::<i32, _>("final_rank").unwrap_or(0),
@@ -1140,9 +1144,13 @@ pub async fn live_room_latest_scores(
         return Vec::new();
     }
     sqlx::query(
-        "SELECT douyin_uid, nickname, score, rank, team_id, team_score, team_rank,
-                score_version_num, bonus_multiple, bonus_score, bonus_active,
-                bonus_end_ms, current_bonus, observed_at
+        "SELECT latest.douyin_uid, latest.nickname, latest.score, latest.rank,
+                latest.team_id, latest.team_score, latest.team_rank,
+                latest.score_version_num, latest.bonus_multiple, latest.bonus_score,
+                latest.bonus_active, latest.bonus_end_ms, latest.current_bonus,
+                latest.observed_at, COALESCE(a.person_id, 0) AS person_id,
+                COALESCE(a.anchor_name, '') AS anchor_name,
+                COALESCE(p.name, '') AS person_name
          FROM (
            SELECT DISTINCT ON (douyin_uid) douyin_uid, nickname, score, rank, team_id,
                   team_score, team_rank, score_version_num, bonus_multiple,
@@ -1151,7 +1159,9 @@ pub async fn live_room_latest_scores(
            WHERE web_rid = $1 AND battle_id = $2
            ORDER BY douyin_uid, score_version_num DESC, observed_at DESC, id DESC
          ) latest
-         ORDER BY rank, score DESC, douyin_uid",
+         LEFT JOIN account a ON a.anchor_id = latest.douyin_uid
+         LEFT JOIN person p ON p.id = a.person_id
+         ORDER BY latest.rank, latest.score DESC, latest.douyin_uid",
     )
     .bind(web_rid)
     .bind(battle_id)
@@ -1163,6 +1173,10 @@ pub async fn live_room_latest_scores(
                 serde_json::json!({
                     "douyinUid": r.try_get::<String, _>("douyin_uid").unwrap_or_default(),
                     "nickname": r.try_get::<String, _>("nickname").unwrap_or_default(),
+                    "anchorName": r.try_get::<String, _>("anchor_name").unwrap_or_default(),
+                    "personId": r.try_get::<i64, _>("person_id").unwrap_or(0),
+                    "personName": r.try_get::<String, _>("person_name").unwrap_or_default(),
+                    "mapped": r.try_get::<i64, _>("person_id").unwrap_or(0) > 0,
                     "score": r.try_get::<i64, _>("score").unwrap_or(0),
                     "rank": r.try_get::<i32, _>("rank").unwrap_or(0),
                     "teamId": r.try_get::<String, _>("team_id").unwrap_or_default(),
@@ -2120,13 +2134,15 @@ pub async fn live_public_groups(st: &AppState, event_id: i64) -> Vec<serde_json:
         std::collections::HashMap::new();
     if !round_ids.is_empty() {
         let rows = sqlx::query(
-            "SELECT round_id, person_id, douyin_uid, nickname, team_id,
-                    final_score, final_rank, qualified
-               FROM live_round_seat
-              WHERE round_id = ANY($1)
-              ORDER BY round_id,
-                       CASE WHEN final_rank > 0 THEN 0 ELSE 1 END,
-                       final_rank, final_score DESC, douyin_uid",
+            "SELECT s.round_id, s.person_id, s.douyin_uid, s.nickname, s.team_id,
+                    s.final_score, s.final_rank, s.qualified,
+                    COALESCE(p.name, '') AS person_name
+               FROM live_round_seat s
+               LEFT JOIN person p ON p.id = s.person_id
+              WHERE s.round_id = ANY($1)
+              ORDER BY s.round_id,
+                       CASE WHEN s.final_rank > 0 THEN 0 ELSE 1 END,
+                       s.final_rank, s.final_score DESC, s.douyin_uid",
         )
         .bind(&round_ids)
         .fetch_all(pool)
@@ -2141,6 +2157,7 @@ pub async fn live_public_groups(st: &AppState, event_id: i64) -> Vec<serde_json:
                     "personId": row.try_get::<i64, _>("person_id").unwrap_or(0),
                     "douyinUid": row.try_get::<String, _>("douyin_uid").unwrap_or_default(),
                     "nickname": row.try_get::<String, _>("nickname").unwrap_or_default(),
+                    "personName": row.try_get::<String, _>("person_name").unwrap_or_default(),
                     "teamId": row.try_get::<String, _>("team_id").unwrap_or_default(),
                     "score": row.try_get::<i64, _>("final_score").unwrap_or(0),
                     "rank": row.try_get::<i32, _>("final_rank").unwrap_or(0),

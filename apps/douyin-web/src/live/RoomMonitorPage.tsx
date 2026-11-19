@@ -133,6 +133,7 @@ export default function RoomMonitorPage() {
   const maxScore = Math.max(1, ...scores.map(s => Number(s.score) || 0))
   const activeBonusCount = scores.filter(s => s.bonusActive).length
   const hasBonusScore = scores.some(s => (s.bonusScore ?? 0) > 0)
+  const mappedCount = scores.filter(s => s.mapped).length
 
   return (
     <div className="page">
@@ -149,7 +150,7 @@ export default function RoomMonitorPage() {
         </form>
         <p className="hint">
           当前只抓取直播间实时采样，<b>不关联赛事、小组或晋级</b>；采集器用
-          <code>scripts/live/run-room.sh {room || '房间号'}</code> 启动。
+          <code>scripts/live/run-room-ws.sh {room || '房间号'}</code> 启动。
         </p>
       </div>
 
@@ -171,6 +172,7 @@ export default function RoomMonitorPage() {
             <div className="lm-live-summary">
               <div><span>直播间</span><b>{data.webRid}</b></div>
               <div><span>在榜人数</span><b>{scores.length}</b></div>
+              <div><span>台账匹配</span><b>{mappedCount}/{scores.length}</b></div>
               <div><span>组内显示分</span><b>{scores.reduce((n, s) => n + (Number(s.score) || 0), 0).toLocaleString('zh-CN')}</b></div>
               <div><span>加成状态</span><b className={activeBonusCount > 0 ? 'lm-bonus-live-text' : ''}>
                 {activeBonusCount > 0 ? `${activeBonusCount} 人加成中` : hasBonusScore ? '加成已结束' : '加成待触发'}
@@ -188,12 +190,19 @@ export default function RoomMonitorPage() {
                     <div className={`lm-live-rank rank-${Math.min(Math.max(s.rank, 1), 4)}`}>#{s.rank}</div>
                     <div className="lm-live-player">
                       <div className="lm-live-name-line">
-                        <b className="lm-live-name">{s.nickname || s.douyinUid}</b>
+                        <b className="lm-live-name">{s.personName || s.nickname || s.douyinUid}</b>
+                        {s.mapped
+                          ? <span className="lm-map-tag ok">已对应 #{s.personId}</span>
+                          : <span className="lm-map-tag bad">未匹配主播</span>}
                         {bonusMultiple > 100 && (
                           <span className={`lm-bonus-badge${s.bonusActive ? ' is-active' : ''}`}>
                             {s.bonusActive ? '加成中' : '加成'} {formatMultiplier(bonusMultiple)}
                           </span>
                         )}
+                      </div>
+                      <div className="lm-live-subline">
+                        <span>直播名 {s.nickname || '—'}</span>
+                        <span className="mono">{s.douyinUid}</span>
                       </div>
                       <div className="lm-live-bar"><span style={{ width: `${pct}%` }} /></div>
                     </div>
@@ -219,10 +228,17 @@ export default function RoomMonitorPage() {
               <div><dt>房间号</dt><dd>{data.webRid}</dd></div>
               <div><dt>对局 ID</dt><dd className="mono">{roomState?.battleId || '—'}</dd></div>
               <div><dt>最后采样</dt><dd>{formatTime(roomState?.lastSeenAt ?? null)}</dd></div>
+              <div><dt>台账匹配</dt><dd>{mappedCount}/{scores.length}</dd></div>
               <div><dt>显示分</dt><dd>直播画面上的带加成分数</dd></div>
               <div><dt>真实分</dt><dd>显示分 − 累计加成增量</dd></div>
             </dl>
             {roomState?.lastError && <div className="alert bad">{roomState.lastError}</div>}
+            {scores.length > mappedCount && (
+              <div className="alert warn">
+                有 {scores.length - mappedCount} 个 UID 未绑定主播台账；请到主播管理把对应抖音 UID 加到主播账号。
+              </div>
+            )}
+            <p className="hint">分数按抖音 UID 对应 <code>account.anchor_id</code> → 主播；昵称只做展示，不参与匹配。</p>
             <p className="hint">加成倍数来自 <code>battle_easter_egg_info</code>；原分不会覆盖直播显示分。</p>
           </aside>
         </div>

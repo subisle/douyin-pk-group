@@ -76,7 +76,7 @@ function groupClock(group: PublicLiveGroup, nowMs: number) {
 }
 
 function playerName(player: PublicLivePlayer) {
-  return player.nickname || player.douyinUid || '未登记'
+  return player.personName || player.nickname || player.douyinUid || '未登记'
 }
 
 function GroupCard({ group, nowMs, qualify }: { group: PublicLiveGroup; nowMs: number; qualify: number }) {

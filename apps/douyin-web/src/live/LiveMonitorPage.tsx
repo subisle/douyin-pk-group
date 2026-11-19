@@ -700,7 +700,10 @@ export default function LiveMonitorPage() {
                       <div className={`lm-live-rank rank-${Math.min(i + 1, 4)}`}>#{i + 1}</div>
                       <div className="lm-live-player">
                         <div className="lm-live-name-line">
-                          <b className="lm-live-name">{s.nickname || s.douyinUid}</b>
+                          <b className="lm-live-name">{s.personName || s.nickname || s.douyinUid}</b>
+                          {s.personId > 0
+                            ? <span className="lm-tag lm-ok">台账</span>
+                            : <span className="lm-tag lm-bad">未匹配</span>}
                           {rankDelta !== 0 && (
                             <span className={`lm-rank-move ${rankDelta > 0 ? 'up' : 'down'}`}>
                               {rankDelta > 0 ? '↑' : '↓'}{Math.abs(rankDelta)}

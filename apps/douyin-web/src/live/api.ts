@@ -129,6 +129,7 @@ export interface LiveSeat {
   personId: number
   douyinUid: string
   nickname: string
+  personName: string
   teamId: string
   score: number
   rank: number
@@ -165,6 +166,10 @@ export interface LiveScores {
 export interface StandaloneRoomScore {
   douyinUid: string
   nickname: string
+  anchorName: string
+  personId: number
+  personName: string
+  mapped: boolean
   score: number
   rank: number
   teamId: string
@@ -199,6 +204,7 @@ export interface PublicLivePlayer {
   personId: number
   douyinUid: string
   nickname: string
+  personName: string
   teamId: string
   score: number
   rank: number

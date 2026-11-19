@@ -35,3 +35,24 @@
 @media (max-width: 900px) {
   .lm-room-board { grid-template-columns: 1fr; }
 }
+
+/* 独立房间页的“直播昵称 → 台账主播”映射，避免把改名当成换人。 */
+.lm-live-subline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 3px;
+  color: var(--ink3);
+  font-size: 10px;
+}
+.lm-live-subline .mono { color: var(--ink3); }
+.lm-map-tag {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  padding: 1px 6px;
+  font-size: 9px;
+  font-weight: 700;
+}
+.lm-map-tag.ok { color: var(--good); background: var(--good-bg); }
+.lm-map-tag.bad { color: var(--warn); background: var(--warn-bg); }
