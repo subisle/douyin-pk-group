@@ -7121,9 +7121,15 @@ function groupRulesHtml(raw) {
   if (lines.length === 1) {
     lines = lines[0].split(/[；;]/).map(s => s.trim()).filter(Boolean);
   }
+  /* 已上架方案里保存的是生成时的规则快照。旧快照写的是 21:15 第一组，
+     这里做展示兜底，避免每次改口径都要重存所有历史方案。 */
+  lines = lines.map(s => s
+    .replace(/^\s*\d+[.、)]\s*/, '')
+    .replace(/^晚上晋级赛\s*21[:：]15\s*开始第一组/, '晚上晋级赛 20:15 开始第一场')
+    .replace(/^晚上\s*21[:：]15\s*开始第一组/, '晚上 20:15 开始第一场'));
   return '<div class="st-group-rule">' +
     '<div class="st-group-rule-head">比赛机制</div><ol>' +
-    lines.map(s => '<li>' + esc(s.replace(/^\s*\d+[.、)]\s*/, '')) + '</li>').join('') +
+    lines.map(s => '<li>' + esc(s) + '</li>').join('') +
     '</ol></div>';
 }
 
