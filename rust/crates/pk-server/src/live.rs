@@ -766,7 +766,7 @@ pub async fn ingest_observation(
         )
         .await?;
         out.phase = "unassigned".into();
-        out.note = "当前没有可接这一局的小组（阶段未开始或都已定稿）".into();
+        out.note = "当前没有可接这一局的小组（名单未齐、阶段未开放或都已定稿），原始采样已保留".into();
         return Ok(out);
     }
     out.group_id = group_id;
@@ -1019,8 +1019,10 @@ async fn resolve_group(
     // 有赛前名单时优先按 UID 集合精确认组，避免多直播间或乱序上报把局挂错。
     let current: std::collections::HashSet<&str> =
         snap.scores.iter().map(|s| s.user_id.as_str()).collect();
-    for (group_id, uids) in crate::store::live_open_group_rosters(st, event_id).await {
-        if uids.is_empty() {
+    let rosters = crate::store::live_open_group_rosters(st, event_id).await;
+    let has_seeded_roster = rosters.iter().any(|(_, uids, seats)| !uids.is_empty() || *seats > 0);
+    for (group_id, uids, seats) in rosters {
+        if uids.is_empty() || seats != current.len() as i64 {
             continue;
         }
         let seeded: std::collections::HashSet<&str> = uids.iter().map(String::as_str).collect();
@@ -1029,8 +1031,17 @@ async fn resolve_group(
         }
     }
 
+    /* 有赛前名单时不再按“第一组”兜底：准备阶段人数没齐、或者多上报了
+     * 其他人，都不能开始计分并写进小组。等名单完整匹配后再接收。 */
+    if has_seeded_roster {
+        return Ok((0, None));
+    }
+
     // 兼容没有登记采集号的旧方案：名单无法精确匹配时按赛程顺序接第一组。
-    Ok((crate::store::live_next_open_group(st, event_id).await?, None))
+    Ok((
+        crate::store::live_next_open_group(st, event_id).await?,
+        None,
+    ))
 }
 
 /// 定稿一局：判断正常 / 异常，只有正常且唯一才设正式局。

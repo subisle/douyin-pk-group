@@ -2207,6 +2207,7 @@ pub async fn live_public_groups(st: &AppState, event_id: i64) -> Vec<serde_json:
                 "personId": person_id,
                 "douyinUid": uid,
                 "nickname": nickname,
+                "personName": seed.get("personName").and_then(Value::as_str).unwrap_or(""),
                 "teamId": "",
                 "score": 0,
                 "rank": 0,
@@ -2255,17 +2256,24 @@ pub async fn live_public_groups(st: &AppState, event_id: i64) -> Vec<serde_json:
     groups
 }
 
-/// 所有未定稿小组及其非空 UID 名单，用于按参赛者精确认组。
-pub async fn live_open_group_rosters(st: &AppState, event_id: i64) -> Vec<(i64, Vec<String>)> {
+/// 所有未定稿小组及其非空 UID 名单、赛前名单总人数。
+///
+/// 总人数用于阻止“7 人名单只来了 4 人”的对局被当成整组开打：
+/// 即使 UID 子集能撞上，人数不一致也不会认组。
+pub async fn live_open_group_rosters(
+    st: &AppState,
+    event_id: i64,
+) -> Vec<(i64, Vec<String>, i64)> {
     let Ok(pool) = w(st) else {
         return Vec::new();
     };
     let rows = sqlx::query(
-        "SELECT g.id, s.douyin_uid
+        "SELECT g.id, s.douyin_uid,
+                COUNT(s.id) OVER (PARTITION BY g.id)::BIGINT AS seat_count
          FROM live_group g
          JOIN live_stage st ON st.id = g.stage_id
          LEFT JOIN live_group_seat s
-           ON s.group_id = g.id AND s.douyin_uid <> ''
+           ON s.group_id = g.id
          WHERE g.event_id = $1
            AND st.status <> 'finalized'
            AND g.status NOT IN ('finalized')
@@ -2275,12 +2283,14 @@ pub async fn live_open_group_rosters(st: &AppState, event_id: i64) -> Vec<(i64, 
     .fetch_all(pool)
     .await
     .unwrap_or_default();
-    let mut out: Vec<(i64, Vec<String>)> = Vec::new();
+    let mut out: Vec<(i64, Vec<String>, i64)> = Vec::new();
     for row in rows {
         let group_id = row.try_get::<i64, _>("id").unwrap_or(0);
         if out.last().map(|v| v.0) != Some(group_id) {
-            out.push((group_id, Vec::new()));
+            out.push((group_id, Vec::new(), 0));
         }
+        let seat_count = row.try_get::<i64, _>("seat_count").unwrap_or(0);
+        out.last_mut().expect("just pushed").2 = seat_count;
         if let Ok(Some(uid)) = row.try_get::<Option<String>, _>("douyin_uid") {
             if !uid.is_empty() {
                 out.last_mut().expect("just pushed").1.push(uid);

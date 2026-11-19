@@ -22,6 +22,7 @@ const STAGE_META: Record<string, { short: string; title: string; hint: string }>
 }
 
 const LIVE_STATUSES = new Set(['running', 'settling', 'pending_review', 'waiting_restart'])
+const FINISH_HOLD_MS = 8000
 
 function stageIndex(kind: string) {
   const index = STAGE_ORDER.indexOf(kind as (typeof STAGE_ORDER)[number])
@@ -33,12 +34,12 @@ function stageLabel(kind: string) {
 }
 
 function groupStatus(group: PublicLiveGroup) {
-  if (group.status === 'finalized') return { text: '已结束', tone: 'done' }
-  if (group.status === 'running') return { text: '比分直播中', tone: 'live' }
-  if (group.status === 'settling') return { text: '最终结算', tone: 'warn' }
+  if (group.status === 'finalized') return { text: '结束阶段', tone: 'done' }
+  if (group.status === 'running') return { text: 'PK 进行中', tone: 'live' }
+  if (group.status === 'settling') return { text: '结束结算中', tone: 'warn' }
   if (group.status === 'pending_review') return { text: '等待确认', tone: 'warn' }
   if (group.status === 'waiting_restart') return { text: '等待重开', tone: 'warn' }
-  return { text: '等待开赛', tone: 'idle' }
+  return { text: '准备阶段', tone: 'idle' }
 }
 
 function stageStatusLabel(stage: LiveStage | undefined) {
@@ -72,11 +73,12 @@ function groupClock(group: PublicLiveGroup, nowMs: number) {
     const remaining = group.durationSecs - Math.max(0, (nowMs - start) / 1000)
     return { text: remaining > 0 ? clockText(remaining) : '等待结算', urgent: remaining <= 60 }
   }
-  return { text: clockText(group.durationSecs), urgent: false }
+  return { text: '准备中', urgent: false }
 }
 
 function playerName(player: PublicLivePlayer) {
-  return player.personName || player.nickname || player.douyinUid || '未登记'
+  // 对外展示只使用台账姓名；直播昵称会随活动文案和改名变化，不能作为身份字段。
+  return player.personName || player.douyinUid || '未登记'
 }
 
 function GroupCard({ group, nowMs, qualify }: { group: PublicLiveGroup; nowMs: number; qualify: number }) {
@@ -133,7 +135,13 @@ function GroupCard({ group, nowMs, qualify }: { group: PublicLiveGroup; nowMs: n
       </div>
 
       <footer className="plm-group-foot">
-        <span>{group.round?.startAt ? `开赛 ${timeText(group.round.startAt)}` : '等待采集到 PK 对局'}</span>
+        <span>
+          {group.status === 'pending'
+            ? '准备阶段：整组人齐后开始 PK'
+            : group.round?.startAt
+              ? `开赛 ${timeText(group.round.startAt)}`
+              : '等待采集到 PK 对局'}
+        </span>
         {group.round?.observedAt && <span>更新 {timeText(group.round.observedAt)}</span>}
       </footer>
     </article>
@@ -220,7 +228,7 @@ export default function PublicLiveMonitorPage({ token }: { token?: string }) {
     connect()
     const fallback = window.setInterval(() => {
       if (document.visibilityState !== 'hidden' && navigator.onLine !== false) void load()
-    }, 10000)
+    }, 3000)
     const ticker = window.setInterval(() => setNowMs(Date.now()), 1000)
     document.addEventListener('visibilitychange', onVisibility)
     window.addEventListener('online', onOnline)
@@ -248,12 +256,23 @@ export default function PublicLiveMonitorPage({ token }: { token?: string }) {
     () => [...(snapshot?.stages ?? [])].sort((a, b) => a.seq - b.seq),
     [snapshot?.stages],
   )
+  const serverNow = nowMs + offsetMs
   const currentGroup = useMemo(() => {
-    return groups.find((g) => LIVE_STATUSES.has(g.status) && g.status !== 'pending_review')
+    const active = groups.find((g) => LIVE_STATUSES.has(g.status) && g.status !== 'pending_review')
       ?? groups.find((g) => LIVE_STATUSES.has(g.status))
-      ?? groups.find((g) => g.stageStatus !== 'finalized')
+    if (active) return active
+
+    // 刚结束的一组先保留 8 秒结果，避免结算分数一出现就立刻切走。
+    const recentlyFinished = groups
+      .filter((g) => g.status === 'finalized' && g.finalizedAt)
+      .sort((a, b) => Date.parse(b.finalizedAt || '') - Date.parse(a.finalizedAt || ''))
+      .find((g) => serverNow - Date.parse(g.finalizedAt || '') < FINISH_HOLD_MS)
+    if (recentlyFinished) return recentlyFinished
+
+    return groups.find((g) => g.stageStatus !== 'finalized')
+      ?? groups.filter((g) => g.status === 'finalized').at(-1)
       ?? null
-  }, [groups])
+  }, [groups, serverNow])
   const currentStage = currentGroup?.stageKind ?? ''
   const stageGroups = useMemo(
     () => groups.filter((g) => g.stageKind === selectedStage),
@@ -263,7 +282,6 @@ export default function PublicLiveMonitorPage({ token }: { token?: string }) {
   const selectedStageInfo = stages.find((s) => s.kind === selectedStage)
   const event = snapshot?.event
   const qualifyDefault = event?.rules.directQualifyPerGroup || 4
-  const serverNow = nowMs + offsetMs
   const activeClock = currentGroup ? groupClock(currentGroup, serverNow) : null
 
   useEffect(() => {

@@ -190,7 +190,7 @@ export default function RoomMonitorPage() {
                     <div className={`lm-live-rank rank-${Math.min(Math.max(s.rank, 1), 4)}`}>#{s.rank}</div>
                     <div className="lm-live-player">
                       <div className="lm-live-name-line">
-                        <b className="lm-live-name">{s.personName || s.nickname || s.douyinUid}</b>
+                        <b className="lm-live-name">{s.personName || s.douyinUid}</b>
                         {s.mapped
                           ? <span className="lm-map-tag ok">已对应 #{s.personId}</span>
                           : <span className="lm-map-tag bad">未匹配主播</span>}
@@ -201,7 +201,6 @@ export default function RoomMonitorPage() {
                         )}
                       </div>
                       <div className="lm-live-subline">
-                        <span>直播名 {s.nickname || '—'}</span>
                         <span className="mono">{s.douyinUid}</span>
                       </div>
                       <div className="lm-live-bar"><span style={{ width: `${pct}%` }} /></div>

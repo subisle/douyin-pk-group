@@ -33,7 +33,7 @@ function formatMultiplier(multiple: number) {
 }
 
 const GROUP_STATUS: Record<string, { label: string; cls: string }> = {
-  pending: { label: '未开始', cls: 'idle' },
+  pending: { label: '准备阶段', cls: 'idle' },
   running: { label: '进行中', cls: 'live' },
   settling: { label: '结算中', cls: 'warn' },
   pending_review: { label: '待确认', cls: 'warn' },
@@ -207,8 +207,11 @@ export default function LiveMonitorPage() {
     try {
       const o = await live.overview(eventId)
       setOv(o)
-      const running = o.groups.find(g => g.status === 'running') ?? o.groups[0]
-      if (running && (!groupId || !o.groups.some(g => g.id === groupId))) setGroupId(running.id)
+      const running = o.groups.find(g => g.status === 'running')
+        ?? o.groups.find(g => g.status !== 'finalized')
+        ?? o.groups[0]
+      const selected = o.groups.find(g => g.id === groupId)
+      if (running && (!selected || selected.status === 'finalized')) setGroupId(running.id)
       setErr('')
     } catch (e: any) { setErr(e?.message ?? String(e)) }
   }
@@ -700,7 +703,7 @@ export default function LiveMonitorPage() {
                       <div className={`lm-live-rank rank-${Math.min(i + 1, 4)}`}>#{i + 1}</div>
                       <div className="lm-live-player">
                         <div className="lm-live-name-line">
-                          <b className="lm-live-name">{s.personName || s.nickname || s.douyinUid}</b>
+                          <b className="lm-live-name">{s.personName || s.douyinUid}</b>
                           {s.personId > 0
                             ? <span className="lm-tag lm-ok">台账</span>
                             : <span className="lm-tag lm-bad">未匹配</span>}
