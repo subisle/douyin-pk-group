@@ -299,6 +299,12 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "054_push_mini_subscribe",
         include_str!("migrations/054_push_mini_subscribe.sql"),
     ),
+    // 055：直播公开分享链接 + 小组 10 分钟 / 复活赛 5 分钟展示口径。
+    // public_token 每次启动赛事生成，公开页只按 token 读取，不暴露后台 id。
+    (
+        "055_live_public_monitor",
+        include_str!("migrations/055_live_public_monitor.sql"),
+    ),
 ];
 
 /// 迁移建连（migrator 账号；同样关语句缓存）

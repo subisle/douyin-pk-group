@@ -64,7 +64,7 @@ const DEFAULT_BOARD_CONFIG: BoardConfig = {
   strengthMode: 'top',
   groupSize: 8,
   startTime: '12:15',
-  intervalMin: 15,
+  intervalMin: 10,
   longBreak: 20,
 };
 
@@ -158,12 +158,12 @@ export default function BoardPage() {
   }, [buckets.length]);
 
   /* ---------------- 配置派生 ---------------- */
-  /** 本赛事有没有复活赛（初级/中级争霸赛小组赛）：有则加长休息就是固定的 20 分钟复活赛 */
+  /** 本赛事有没有复活赛（初级/中级争霸赛小组赛）：有则加长休息就是固定的 5 分钟复活赛 */
   const revivalEvent = REVIVAL_EVENTS.includes(config.eventType);
   const sequential = config.strategy === 'sequential' || config.strategy === 'sequential-last-n';
 
   /** 赛程里的加长休息点。groupCount 是分组数：
-   *  - 小组赛的复活赛落点随组数走（ceil(组数/2)），20 分钟固定；
+   *  - 小组赛的复活赛落点随组数走（ceil(组数/2)），5 分钟固定；
    *  - 其余赛事固定第 3 组后，分钟数用配置里的 longBreak（0 = 不插）。 */
   const breaksFor = useCallback(
     (groupCount: number): BreakRule[] => {

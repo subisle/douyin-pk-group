@@ -17,8 +17,13 @@ const BotPage = lazy(() => import('./BotPage'))
 const SendPage = lazy(() => import('./SendPage'))
 const LiveMonitorPage = lazy(() => import('./live/LiveMonitorPage'))
 const RoomMonitorPage = lazy(() => import('./live/RoomMonitorPage'))
+const PublicLiveMonitorPage = lazy(() => import('./live/PublicLiveMonitorPage'))
 const GroupPage = lazy(() => import('./pk/GroupPage'))
 const BoardPage = lazy(() => import('./pk/BoardPage'))
+
+function publicLiveToken() {
+  return window.location.pathname.match(/^\/live\/([0-9a-f]{24,40})\/?$/i)?.[1] ?? ''
+}
 
 /** 移动端导航断点：与 styles.css 的移动外壳保持一致。 */
 const MOBILE_NAV_QUERY = '(max-width: 760px)'
@@ -41,6 +46,18 @@ const NAV_ICONS: Record<RouteKey, string> = {
 }
 
 export default function App() {
+  const token = publicLiveToken()
+  if (token) {
+    return (
+      <Suspense fallback={<div className="route-loading">正在连接直播比分…</div>}>
+        <PublicLiveMonitorPage token={token} />
+      </Suspense>
+    )
+  }
+  return <AdminApp />
+}
+
+function AdminApp() {
   const [authed, setAuthed] = useState(hasToken())
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')

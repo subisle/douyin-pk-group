@@ -397,6 +397,28 @@ export default function LiveMonitorPage() {
 
   const cur = events.find(e => e.id === eventId) ?? null
 
+  async function startLive() {
+    if (!eventId || busy) return
+    setBusy('start-live')
+    try {
+      const r = await live.startEvent(eventId)
+      setEvents(items => items.map(e => e.id === eventId ? r.event : e))
+      await loadOverview()
+      window.open(r.path, '_blank', 'noopener')
+    } catch (e: any) { alert(e?.message ?? String(e)) }
+    finally { setBusy('') }
+  }
+
+  async function copyPublicLink(token: string) {
+    const url = `${window.location.origin}/live/${token}`
+    try {
+      await navigator.clipboard.writeText(url)
+      alert('公开直播链接已复制')
+    } catch {
+      window.prompt('复制公开直播链接', url)
+    }
+  }
+
   useEffect(() => {
     if (cur) setPushSecs(cur.pushIntervalSecs)
   }, [cur?.id, cur?.pushIntervalSecs])
@@ -439,6 +461,7 @@ export default function LiveMonitorPage() {
     try {
       await live.bindPlans(eventId, bindDay || undefined, bindNight || undefined)
       await loadOverview()
+      await load()
     } catch (e: any) { alert(e?.message ?? String(e)) }
     finally { setBusy('') }
   }
@@ -553,6 +576,29 @@ export default function LiveMonitorPage() {
           </div>
         )}
       </div>
+
+      {cur && (
+        <div className="lm-public-share">
+          <div className="lm-public-share-copy">
+            <span className="lm-public-kicker">对外直播监控</span>
+            <h3>小组赛每组 10 分钟 · 复活赛 5 分钟</h3>
+            <p>前四组全部结束后，自动生成前四组淘汰者的复活赛分组，并同步刷新公开页。</p>
+          </div>
+          {cur.publicToken ? (
+            <div className="lm-public-actions">
+              <a href={`/live/${cur.publicToken}`} target="_blank" rel="noreferrer">
+                /live/{cur.publicToken.slice(0, 8)}…
+              </a>
+              <button type="button" onClick={() => copyPublicLink(cur.publicToken)}>复制链接</button>
+              <button type="button" onClick={() => window.open(`/live/${cur.publicToken}`, '_blank', 'noopener')}>打开公开页</button>
+            </div>
+          ) : (
+            <button className="primary" type="button" onClick={startLive} disabled={!!busy || !cur.dayPlanId}>
+              {busy === 'start-live' ? '正在启动…' : '启动直播并生成链接'}
+            </button>
+          )}
+        </div>
+      )}
 
       {!eventId && <p className="hint">先创建一个赛事，或从上方选择已有赛事。</p>}
 
@@ -711,8 +757,8 @@ export default function LiveMonitorPage() {
             <button disabled={!!busy || !eventId} onClick={() => step('冻结第一波晋级结果？', () => live.freezeStage(eventId, 'first', 'direct'))}>
               冻结第一波晋级
             </button>
-            <button disabled={!!busy || !eventId} onClick={() => step('生成第一波复活赛？', () => live.buildRevival(eventId, 'first'))}>
-              生成第一波复活赛
+            <button disabled={!!busy || !eventId} onClick={() => step('补生成第一波复活赛？（前四组定稿后会自动生成）', () => live.buildRevival(eventId, 'first'))}>
+              补生成第一波复活赛
             </button>
             <button disabled={!!busy || !eventId} onClick={() => step('生成晚上晋级赛？', () => live.buildPromotion(eventId))}>
               生成晋级赛

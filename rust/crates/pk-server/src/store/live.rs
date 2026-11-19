@@ -59,7 +59,8 @@ pub async fn live_event_list(st: &AppState, limit: i64) -> Vec<serde_json::Value
                 first_wave_group_count, group_rounds_per_group, direct_qualify_per_group,
                 revival_room_capacity, revival_qualify_per_room, promotion_group_count,
                 promotion_group_size, promotion_qualify_per_group, final_room_capacity,
-                settle_grace_secs, push_enabled, push_interval_secs, updated_at
+                settle_grace_secs, push_enabled, push_interval_secs, public_token, started_at,
+                group_duration_secs, revival_duration_secs, updated_at
          FROM live_event ORDER BY id DESC LIMIT $1",
     )
     .bind(limit)
@@ -80,7 +81,8 @@ pub async fn live_event_get(st: &AppState, event_id: i64) -> Option<serde_json::
                 first_wave_group_count, group_rounds_per_group, direct_qualify_per_group,
                 revival_room_capacity, revival_qualify_per_room, promotion_group_count,
                 promotion_group_size, promotion_qualify_per_group, final_room_capacity,
-                settle_grace_secs, push_enabled, push_interval_secs, updated_at
+                settle_grace_secs, push_enabled, push_interval_secs, public_token, started_at,
+                group_duration_secs, revival_duration_secs, updated_at
            FROM live_event WHERE id = $1",
     )
     .bind(event_id)
@@ -89,6 +91,85 @@ pub async fn live_event_get(st: &AppState, event_id: i64) -> Option<serde_json::
     .ok()
     .flatten()
     .map(|row| live_event_json(&row))
+}
+
+/// 启动赛事：状态切到 running、生成公开 token，并记录本场开始时间。
+///
+/// 小组 / 复活赛时长固定写 10 分钟 / 5 分钟，供公开页倒计时；真实判定仍看
+/// 抖音 battle 时长，不用前端倒计时代替结果。
+pub async fn live_event_start(
+    st: &AppState,
+    event_id: i64,
+    public_token: &str,
+) -> anyhow::Result<Option<serde_json::Value>> {
+    let row = sqlx::query(
+        "UPDATE live_event SET
+           status = 'running', public_token = $1, started_at = now(),
+           group_duration_secs = 600, revival_duration_secs = 300, updated_at = now()
+         WHERE id = $2
+         RETURNING id, title, event_date, status, day_plan_id, night_plan_id, rule_version,
+                   first_wave_group_count, group_rounds_per_group, direct_qualify_per_group,
+                   revival_room_capacity, revival_qualify_per_room, promotion_group_count,
+                   promotion_group_size, promotion_qualify_per_group, final_room_capacity,
+                   settle_grace_secs, push_enabled, push_interval_secs, public_token, started_at,
+                   group_duration_secs, revival_duration_secs, updated_at",
+    )
+    .bind(public_token)
+    .bind(event_id)
+    .fetch_optional(w(st)?)
+    .await?;
+    Ok(row.as_ref().map(live_event_json))
+}
+
+/// 用公开 token 找赛事。只用于匿名只读页面，不返回后台方案 / 房间 / 推送配置。
+pub async fn live_event_by_public_token(
+    st: &AppState,
+    public_token: &str,
+) -> Option<serde_json::Value> {
+    if public_token.is_empty() || public_token.len() > 40 {
+        return None;
+    }
+    let pool = w(st).ok()?;
+    let row = sqlx::query(
+        "SELECT id, title, event_date, status, rule_version,
+                first_wave_group_count, group_rounds_per_group, direct_qualify_per_group,
+                revival_room_capacity, revival_qualify_per_room, promotion_group_count,
+                promotion_group_size, promotion_qualify_per_group, final_room_capacity,
+                settle_grace_secs, public_token, started_at, group_duration_secs,
+                revival_duration_secs, updated_at
+           FROM live_event WHERE public_token = $1 LIMIT 1",
+    )
+    .bind(public_token)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()?;
+    let g = |c: &str| row.try_get::<i32, _>(c).unwrap_or(0);
+    let s = |c: &str| row.try_get::<String, _>(c).unwrap_or_default();
+    Some(serde_json::json!({
+        "id": row.try_get::<i64, _>("id").unwrap_or(0),
+        "title": s("title"),
+        "eventDate": s("event_date"),
+        "status": s("status"),
+        "startedAt": row.try_get::<chrono::DateTime<chrono::Utc>, _>("started_at")
+            .map(|t| t.to_rfc3339()).ok(),
+        "groupDurationSecs": g("group_duration_secs"),
+        "revivalDurationSecs": g("revival_duration_secs"),
+        "updatedAt": row.try_get::<chrono::DateTime<chrono::Utc>, _>("updated_at")
+            .map(|t| t.to_rfc3339()).unwrap_or_default(),
+        "rules": {
+            "firstWaveGroupCount": g("first_wave_group_count"),
+            "groupRoundsPerGroup": g("group_rounds_per_group"),
+            "directQualifyPerGroup": g("direct_qualify_per_group"),
+            "revivalRoomCapacity": g("revival_room_capacity"),
+            "revivalQualifyPerRoom": g("revival_qualify_per_room"),
+            "promotionGroupCount": g("promotion_group_count"),
+            "promotionGroupSize": g("promotion_group_size"),
+            "promotionQualifyPerGroup": g("promotion_qualify_per_group"),
+            "finalRoomCapacity": g("final_room_capacity"),
+            "settleGraceSecs": g("settle_grace_secs"),
+        },
+    }))
 }
 
 fn live_event_json(r: &sqlx::postgres::PgRow) -> serde_json::Value {
@@ -116,6 +197,11 @@ fn live_event_json(r: &sqlx::postgres::PgRow) -> serde_json::Value {
         },
         "pushEnabled": r.try_get::<i16, _>("push_enabled").unwrap_or(0) == 1,
         "pushIntervalSecs": g("push_interval_secs"),
+        "publicToken": s("public_token"),
+        "startedAt": r.try_get::<chrono::DateTime<chrono::Utc>, _>("started_at")
+            .map(|t| t.to_rfc3339()).ok(),
+        "groupDurationSecs": g("group_duration_secs"),
+        "revivalDurationSecs": g("revival_duration_secs"),
         "updatedAt": r.try_get::<chrono::DateTime<chrono::Utc>, _>("updated_at")
             .map(|t| t.to_rfc3339())
             .unwrap_or_default(),
@@ -1949,6 +2035,173 @@ pub async fn live_group_seats_for_event(
         }));
     }
     out
+}
+
+/// 公开直播页的小组快照。
+///
+/// 不是管理端 `overview` 的裁剪版：这里一次批量取完小组、赛前名单、每组最近
+/// 对局和最新席位，避免公开页每个观众按小组 N+1 查询。输出刻意不含直播间
+/// web_rid、采集器健康度、分组方案 id、推送配置等后台信息。
+pub async fn live_public_groups(st: &AppState, event_id: i64) -> Vec<serde_json::Value> {
+    let mut groups = live_group_list(st, event_id).await;
+    if groups.is_empty() {
+        return groups;
+    }
+    let mut roster_by_group = live_group_seats_for_event(st, event_id).await;
+    let Ok(pool) = w(st) else {
+        return groups;
+    };
+
+    let round_rows = sqlx::query(
+        "SELECT DISTINCT ON (r.group_id)
+                r.group_id, r.id, r.status, r.start_at, r.actual_end_at,
+                (SELECT MAX(s.observed_at) FROM live_score_sample s WHERE s.round_id = r.id)
+                    AS observed_at
+           FROM live_round r
+          WHERE r.event_id = $1 AND r.status <> 'void'
+          ORDER BY r.group_id, r.is_official DESC, r.id DESC",
+    )
+    .bind(event_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+    let mut round_by_group = std::collections::HashMap::new();
+    for row in &round_rows {
+        let group_id = row.try_get::<i64, _>("group_id").unwrap_or(0);
+        round_by_group.insert(
+            group_id,
+            serde_json::json!({
+                "id": row.try_get::<i64, _>("id").unwrap_or(0),
+                "status": row.try_get::<String, _>("status").unwrap_or_default(),
+                "startAt": row.try_get::<chrono::DateTime<chrono::Utc>, _>("start_at")
+                    .map(|t| t.to_rfc3339()).ok(),
+                "actualEndAt": row.try_get::<chrono::DateTime<chrono::Utc>, _>("actual_end_at")
+                    .map(|t| t.to_rfc3339()).ok(),
+                "observedAt": row.try_get::<chrono::DateTime<chrono::Utc>, _>("observed_at")
+                    .map(|t| t.to_rfc3339()).ok(),
+            }),
+        );
+    }
+    let round_ids: Vec<i64> = round_by_group
+        .values()
+        .filter_map(|r| r.get("id").and_then(Value::as_i64))
+        .filter(|id| *id > 0)
+        .collect();
+    let mut seats_by_round: std::collections::HashMap<i64, Vec<serde_json::Value>> =
+        std::collections::HashMap::new();
+    if !round_ids.is_empty() {
+        let rows = sqlx::query(
+            "SELECT round_id, person_id, douyin_uid, nickname, team_id,
+                    final_score, final_rank, qualified
+               FROM live_round_seat
+              WHERE round_id = ANY($1)
+              ORDER BY round_id,
+                       CASE WHEN final_rank > 0 THEN 0 ELSE 1 END,
+                       final_rank, final_score DESC, douyin_uid",
+        )
+        .bind(&round_ids)
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
+        for row in rows {
+            let round_id = row.try_get::<i64, _>("round_id").unwrap_or(0);
+            seats_by_round
+                .entry(round_id)
+                .or_default()
+                .push(serde_json::json!({
+                    "personId": row.try_get::<i64, _>("person_id").unwrap_or(0),
+                    "douyinUid": row.try_get::<String, _>("douyin_uid").unwrap_or_default(),
+                    "nickname": row.try_get::<String, _>("nickname").unwrap_or_default(),
+                    "teamId": row.try_get::<String, _>("team_id").unwrap_or_default(),
+                    "score": row.try_get::<i64, _>("final_score").unwrap_or(0),
+                    "rank": row.try_get::<i32, _>("final_rank").unwrap_or(0),
+                    "qualified": row.try_get::<i16, _>("qualified").unwrap_or(0) == 1,
+                }));
+        }
+    }
+
+    for group in &mut groups {
+        let group_id = group.get("id").and_then(Value::as_i64).unwrap_or(0);
+        let round = round_by_group.get(&group_id).cloned();
+        let round_id = round
+            .as_ref()
+            .and_then(|r| r.get("id"))
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let roster = roster_by_group.remove(&group_id).unwrap_or_default();
+        let mut players = seats_by_round.remove(&round_id).unwrap_or_default();
+
+        let seen_uid: std::collections::HashSet<String> = players
+            .iter()
+            .filter_map(|p| p.get("douyinUid").and_then(Value::as_str))
+            .filter(|uid| !uid.is_empty())
+            .map(str::to_string)
+            .collect();
+        let seen_person: std::collections::HashSet<i64> = players
+            .iter()
+            .filter_map(|p| p.get("personId").and_then(Value::as_i64))
+            .filter(|id| *id > 0)
+            .collect();
+        for seed in roster {
+            let uid = seed.get("douyinUid").and_then(Value::as_str).unwrap_or("");
+            let person_id = seed.get("personId").and_then(Value::as_i64).unwrap_or(0);
+            if (!uid.is_empty() && seen_uid.contains(uid))
+                || (person_id > 0 && seen_person.contains(&person_id))
+            {
+                continue;
+            }
+            let nickname = seed
+                .get("personName")
+                .and_then(Value::as_str)
+                .filter(|v| !v.is_empty())
+                .or_else(|| seed.get("nickname").and_then(Value::as_str))
+                .unwrap_or("")
+                .to_string();
+            players.push(serde_json::json!({
+                "personId": person_id,
+                "douyinUid": uid,
+                "nickname": nickname,
+                "teamId": "",
+                "score": 0,
+                "rank": 0,
+                "qualified": false,
+            }));
+        }
+        players.sort_by(|a, b| {
+            let ar = a.get("rank").and_then(Value::as_i64).unwrap_or(0);
+            let br = b.get("rank").and_then(Value::as_i64).unwrap_or(0);
+            let rank_order = match (ar > 0, br > 0) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => ar.cmp(&br),
+            };
+            rank_order.then_with(|| {
+                b.get("score")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0)
+                    .cmp(&a.get("score").and_then(Value::as_i64).unwrap_or(0))
+            })
+        });
+
+        let stage_kind = group
+            .get("stageKind")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if let Some(obj) = group.as_object_mut() {
+            obj.insert("round".into(), round.unwrap_or(Value::Null));
+            obj.insert("players".into(), serde_json::json!(players));
+            obj.insert(
+                "durationSecs".into(),
+                serde_json::json!(if stage_kind.contains("revival") {
+                    300
+                } else {
+                    600
+                }),
+            );
+        }
+    }
+    groups
 }
 
 /// 所有未定稿小组及其非空 UID 名单，用于按参赛者精确认组。

@@ -143,7 +143,7 @@ export default function GroupPage() {
   const [strategy, setStrategy] = useState<Strategy>('snake');
   const [groupSize, setGroupSize] = useState(8);
   const [startTime, setStartTime] = useState('12:15');
-  const [intervalMin, setIntervalMin] = useState(15);
+  const [intervalMin, setIntervalMin] = useState(10);
   const [strengthMode, setStrengthMode] = useState<StrengthMode | 'off'>('top');
 
   /* ---------------- 展板配置（2026-10-16 用户口径「这个配置是后端进行设置」） ----------------
@@ -155,7 +155,7 @@ export default function GroupPage() {
   const [boardCfgLoaded, setBoardCfgLoaded] = useState(false);
   const [boardSaving, setBoardSaving] = useState(false);
   /** 第 3 组打完到下组开赛的间隔（加长休息），与常规间隔分开配。
-   *  只在**没有复活赛**的赛事生效（月终争霸赛、两级晋级赛）；小组赛的 20 分钟由复活赛占。
+   *  只在**没有复活赛**的赛事生效（月终争霸赛、两级晋级赛）；小组赛的 5 分钟由复活赛占。
    *  声明提前到 boardDirty 之前：差异统计与保存都要读它（2026-10-17，审计 4-1）。 */
   const [longBreak, setLongBreak] = useState(20);
   /** 展板配置与本页「名单与配置」的差异条数（保存按钮提示用） */
@@ -339,7 +339,7 @@ export default function GroupPage() {
     return () => window.removeEventListener('beforeunload', onBeforeUnload);
   }, [buckets.length]);
 
-  /* 加长停留点：小组赛是复活赛（20 分钟，位置随组数走），其余赛事是第 3 组后的可调休息。 */
+  /* 加长停留点：小组赛是复活赛（5 分钟，位置随组数走），其余赛事是第 3 组后的可调休息。 */
   /** 本赛事有没有复活赛（初级/中级争霸赛小组赛），跟有没有分组无关 */
   const revivalEvent = REVIVAL_EVENTS.includes(eventType);
   /** 已分好组，复活赛位置能算出来了 */
@@ -488,7 +488,7 @@ export default function GroupPage() {
         现在只在**后端没存过展板配置**时才用内置默认值初始化（那时确实没有别的真值源）。 */
         if (boardCfgLoaded && boardCfg) return;
         setStartTime(m.schedule?.start || '12:15');
-        setIntervalMin(m.schedule?.intervalMin || 15);
+        setIntervalMin(m.schedule?.intervalMin || 10);
       })
       .catch(() => {});
     // 方案列表由下面的 [eventType] effect 拉（P1-14 过滤需要跟着赛事类型走）
@@ -678,7 +678,7 @@ export default function GroupPage() {
       setExcluded(res.excluded.map((e) => e.name));
       setDates(res.dates || []);
       /* 首次分组时 `buckets` 还是空的 → 复活赛落点算不出来 → breaks 为空 →
-      arrange 返回的 slots **少算**那段加长休息（第 4 组及以后全部提前 20 分钟），
+      arrange 返回的 slots **少算**那段加长休息（第 4 组及以后全部提前 5 分钟），
       只有随后 inspect 回来才纠正（2026-10-17 修复，审计 4-7）。
       这里按「人数 ÷ 每组人数」先估个组数把 breaks 算对，与展板页同款口径；
       分完组后的 inspect 会带真实组数再算一遍。 */
@@ -965,7 +965,7 @@ export default function GroupPage() {
       setPlayers((p.buckets || []).flatMap((b: { players: Player[] }) => b.players || []));
       setMsg(`已载入方案 #${id}`);
       /* 体检必须用**方案自带的赛程**：此刻 buckets 仍是旧值，`scheduleInput()`
-       * 会按 0 组算成「没有复活赛」，组头开赛时间会少一段（13:20 显示成 13:15）。 */
+       * 会按 0 组算成「没有复活赛」，组头开赛时间会少一段（13:00 显示成 12:55）。 */
       const loaded = p.buckets || [];
       void inspectNow(
         loaded.map((b: { name: string; players: Player[] }, i: number) => ({
@@ -1166,7 +1166,7 @@ export default function GroupPage() {
     const [h, m] = startTime.split(':').map((x) => Number(x) || 0);
     let t = h * 60 + m;
     /* 与后端 pk-core::gap_after 同口径：命中加长休息的那一段，间隔**被 restMin 替换**
-     * 而不是叠加（第 4 组后复活赛 20 分钟 → 第 5 组是 13:20，不是 13:35）。 */
+     * 而不是叠加（第 4 组后复活赛 5 分钟 → 第 5 组是 13:05，不是 13:10）。 */
     for (let k = 0; k < i; k += 1) {
       t += restOn && k + 1 === restAfterGroup ? restMin : intervalMin;
     }
@@ -1598,7 +1598,7 @@ export default function GroupPage() {
               max={120}
               style={{ width: 64 }}
               value={intervalMin}
-              onChange={(e) => setIntervalMin(Math.max(1, Number(e.target.value) || 15))}
+              onChange={(e) => setIntervalMin(Math.max(1, Number(e.target.value) || 10))}
             />
           </label>
         </div>
@@ -1781,7 +1781,7 @@ export default function GroupPage() {
               disabled={revivalEvent}
               title={
                 revivalEvent
-                  ? `复活赛固定 20 分钟${
+                  ? `复活赛固定 ${restMin} 分钟${
                       revivalOn
                         ? `，位置由组数决定（${buckets.length} 组 → 第 ${restAfterGroup} 组后）`
                         : '，位置分完组后自动定（8 组 / 7 组 → 第 4 组后，6 组 → 第 3 组后）'

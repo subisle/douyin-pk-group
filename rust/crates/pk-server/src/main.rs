@@ -430,6 +430,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/resources/query.json", get(public_teams::resources))
         // 展示端轻量 SSE：只广播「数据已导入」，用于每日最高弹幕自动刷新。
         .route("/api/public/events", get(events::public_sse))
+        // 直播公开页：只认启动赛事时签发的随机 token，不暴露后台 id / 房间配置。
+        .route("/api/public/live/{token}", get(live_api::public_event))
         // 登录前加密预取首屏 site + daily；登录后按团别释放一次性 AES-GCM 密钥。
         .route(
             "/api/public/prefetch",
@@ -851,6 +853,7 @@ async fn main() -> anyhow::Result<()> {
             post(live_api::add_monitor),
         )
         .route("/api/live/events/{id}/plans", post(live_api::bind_plans))
+        .route("/api/live/events/{id}/start", post(live_api::start_event))
         .route("/api/live/events/{id}/overview", get(live_api::overview))
         .route("/api/live/events/{id}/scores", get(live_api::live_scores))
         .route(

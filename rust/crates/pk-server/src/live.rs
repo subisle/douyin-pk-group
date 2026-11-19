@@ -87,7 +87,7 @@ impl Default for LiveRules {
             group_rounds_per_group: 1,
             direct_qualify_per_group: 4,
             revival_room_capacity: 8,
-            revival_qualify_per_room: 3,
+            revival_qualify_per_room: 4,
             promotion_group_count: 0,
             promotion_group_size: 8,
             promotion_qualify_per_group: 1,
@@ -1039,7 +1039,15 @@ async fn finalize_round(
 ) -> anyhow::Result<()> {
     // 幂等：已定稿的局不动状态（定稿后仍在收最终分，这里会被反复调用）
     let cur = crate::store::live_round_status(st, round_id).await?;
-    if cur == Some(RoundStatus::Completed) || cur == Some(RoundStatus::Aborted) {
+    if cur == Some(RoundStatus::Completed) {
+        // 自动生成复活赛可能因瞬时写库失败没有成功；已定稿局的后续采样继续
+        // 幂等重试一次，避免一次抖动后永远漏掉复活分组。
+        if let Err(e) = auto_advance_revival(st, event_id).await {
+            tracing::warn!(event_id, group_id, error = %e, "重试自动生成复活赛失败");
+        }
+        return Ok(());
+    }
+    if cur == Some(RoundStatus::Aborted) {
         return Ok(());
     }
 
@@ -1099,6 +1107,9 @@ async fn finalize_round(
     crate::store::live_round_set_official(st, round_id).await?;
     crate::store::live_round_event_add(st, round_id, "finalized", "正常结束并设为正式局", "system")
         .await?;
+    if let Err(e) = auto_advance_revival(st, event_id).await {
+        tracing::warn!(event_id, group_id, error = %e, "自动生成复活赛失败，等待下一拍重试");
+    }
     Ok(())
 }
 
@@ -1422,6 +1433,78 @@ pub async fn build_revival_rooms(
         );
     }
     Ok(rooms.len())
+}
+
+/// 某一波小组全部定稿后，自动冻结晋级者并生成该波复活赛。
+///
+/// 用户口径（2026-11-19）：前四组比完马上打前四组淘汰者的复活赛，公开监控页
+/// 自动出现复活分组，不再依赖运营再点一次按钮。函数可重复调用：复活阶段已经
+/// 有小组时直接返回，不会反复生成或改赛前名单。
+pub async fn auto_advance_revival(
+    st: &Arc<AppState>,
+    event_id: i64,
+) -> anyhow::Result<Vec<String>> {
+    let groups = crate::store::live_group_list(st, event_id).await;
+    let mut generated = Vec::new();
+    for (group_kind, revival_kind, label) in [
+        (
+            StageKind::FirstWaveGroup,
+            StageKind::FirstWaveRevival,
+            "第一波复活赛",
+        ),
+        (
+            StageKind::RestGroup,
+            StageKind::RestRevival,
+            "剩余小组复活赛",
+        ),
+    ] {
+        let source: Vec<&serde_json::Value> = groups
+            .iter()
+            .filter(|g| g.get("stageKind").and_then(|v| v.as_str()) == Some(group_kind.as_str()))
+            .collect();
+        if source.is_empty()
+            || source
+                .iter()
+                .any(|g| g.get("status").and_then(|v| v.as_str()) != Some("finalized"))
+        {
+            continue;
+        }
+        if groups
+            .iter()
+            .any(|g| g.get("stageKind").and_then(|v| v.as_str()) == Some(revival_kind.as_str()))
+        {
+            continue;
+        }
+
+        for group in &source {
+            let group_id = group.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
+            if group_id > 0 {
+                freeze_group_qualifiers(st, event_id, group_id, "direct").await?;
+            }
+        }
+        let source_stage_id = source
+            .first()
+            .and_then(|g| g.get("stageId"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        if source_stage_id > 0
+            && crate::store::live_stage_eliminated(st, source_stage_id)
+                .await
+                .is_empty()
+        {
+            tracing::info!(event_id, stage_id = source_stage_id, "该波没有淘汰者，跳过复活赛");
+            continue;
+        }
+        let rooms = build_revival_rooms(st, event_id, revival_kind).await?;
+        if rooms > 0 {
+            generated.push(format!("{label} {rooms} 组"));
+            crate::events::emit(
+                crate::events::SCOPE_LIVE,
+                format!("赛事 {event_id} 已自动生成{label} {rooms} 组"),
+            );
+        }
+    }
+    Ok(generated)
 }
 
 /// 生成晚上晋级赛：白天直接晋级 + 复活晋级，蛇形分组，每组第 1 进决赛。

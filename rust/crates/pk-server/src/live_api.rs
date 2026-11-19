@@ -9,13 +9,38 @@ use axum::response::IntoResponse;
 use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use crate::live::{self, LiveRules, Observation, RoundStatus, StageKind};
 use crate::state::AppState;
 use crate::store;
 
 type ApiResult = Result<Json<Value>, crate::routes::ApiError>;
+
+/// 公开页快照的 1 秒共享缓存。采集器每拍都会广播 live，若几十个观众同时刷新，
+/// 每个请求都做 5 次查询会把数据库变成广播放大器；同一秒内所有观众共用一份结果。
+/// 只缓存匿名只读快照，不缓存管理端响应；进程内缓存，服务重启自动清空。
+static PUBLIC_LIVE_CACHE: OnceLock<Mutex<std::collections::HashMap<String, (Instant, Value)>>> =
+    OnceLock::new();
+
+fn public_live_cache_get(token: &str) -> Option<Value> {
+    let cache = PUBLIC_LIVE_CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    let guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+    guard
+        .get(token)
+        .filter(|(at, _)| at.elapsed() < Duration::from_secs(1))
+        .map(|(_, value)| value.clone())
+}
+
+fn public_live_cache_put(token: &str, value: &Value) {
+    let cache = PUBLIC_LIVE_CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+    if guard.len() >= 64 {
+        guard.retain(|_, (at, _)| at.elapsed() < Duration::from_secs(10));
+    }
+    guard.insert(token.to_string(), (Instant::now(), value.clone()));
+}
 
 /* ------------------------------ 采集端鉴权 ------------------------------ */
 
@@ -109,6 +134,98 @@ pub async fn create_event(
     .await?;
     crate::events::emit(crate::events::SCOPE_LIVE, format!("直播赛事 {id} 已创建"));
     Ok(Json(json!({ "id": id })))
+}
+
+fn new_public_token() -> Result<String, crate::routes::ApiError> {
+    let mut bytes = [0u8; 18];
+    getrandom::getrandom(&mut bytes).map_err(|e| {
+        tracing::error!(error = %e, "生成直播公开链接 token 失败");
+        crate::routes::ApiError::with_status(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "生成公开链接失败，请重试",
+        )
+    })?;
+    let mut token = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(&mut token, "{byte:02x}");
+    }
+    Ok(token)
+}
+
+/// 启动赛事并生成对外链接。
+///
+/// 一次点击完成三件事：按绑定方案生成白天小组（幂等）、切换 running、签发随机
+/// public_token。已经开始过的赛事重复点击不会换链接，避免运营手滑把已发布地址换掉。
+pub async fn start_event(State(st): State<Arc<AppState>>, Path(id): Path<i64>) -> ApiResult {
+    let event = store::live_event_get(&st, id)
+        .await
+        .ok_or_else(|| crate::routes::ApiError::bad_request("赛事不存在"))?;
+    let status = event.get("status").and_then(Value::as_str).unwrap_or("");
+    let existing = event
+        .get("publicToken")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if status == "running" && !existing.is_empty() {
+        return Ok(Json(json!({
+            "ok": true,
+            "alreadyRunning": true,
+            "publicToken": existing,
+            "path": format!("/live/{existing}"),
+            "event": event,
+        })));
+    }
+
+    let rules = store::live_event_rules(&st, id)
+        .await
+        .ok_or_else(|| crate::routes::ApiError::bad_request("赛事不存在"))?;
+    let plan_id = store::live_event_day_plan(&st, id).await.unwrap_or(0);
+    if plan_id <= 0 {
+        return Err(crate::routes::ApiError::bad_request(
+            "赛事还没绑定白天分组方案",
+        ));
+    }
+    let buckets = store::plan_buckets(&st, plan_id).await?;
+    if buckets.is_empty() {
+        return Err(crate::routes::ApiError::bad_request(
+            "白天分组方案里没有可比赛的小组",
+        ));
+    }
+    let first_wave_count = rules.first_wave_group_count.max(1) as usize;
+    live::build_stage_groups(
+        &st,
+        id,
+        StageKind::FirstWaveGroup,
+        &buckets[..buckets.len().min(first_wave_count)],
+        rules.direct_qualify_per_group,
+    )
+    .await?;
+    if buckets.len() > first_wave_count {
+        live::build_stage_groups(
+            &st,
+            id,
+            StageKind::RestGroup,
+            &buckets[first_wave_count..],
+            rules.direct_qualify_per_group,
+        )
+        .await?;
+    }
+
+    let token = new_public_token()?;
+    let event = store::live_event_start(&st, id, &token)
+        .await?
+        .ok_or_else(|| crate::routes::ApiError::bad_request("赛事不存在"))?;
+    crate::events::emit(
+        crate::events::SCOPE_LIVE,
+        format!("赛事 {id} 已启动并生成公开链接"),
+    );
+    Ok(Json(json!({
+        "ok": true,
+        "alreadyRunning": false,
+        "publicToken": token,
+        "path": format!("/live/{token}"),
+        "event": event,
+    })))
 }
 
 /// 绑定分组方案（白天小组赛 / 晚上晋级赛）。
@@ -339,6 +456,9 @@ pub async fn choose_official(
     .await?;
     let event_id = store::live_event_of_group(&st, group_id).await.unwrap_or(0);
     if event_id > 0 {
+        if let Err(e) = live::auto_advance_revival(&st, event_id).await {
+            tracing::warn!(event_id, group_id, error = %e, "选择正式局后自动生成复活赛失败");
+        }
         crate::events::emit(
             crate::events::SCOPE_LIVE,
             format!("小组 {group_id} 已选定正式局"),
@@ -367,6 +487,12 @@ pub async fn finalize_group(
     store::live_round_set_official(&st, round_id).await?;
     store::live_round_event_add(&st, round_id, "force_finalized", "管理员强制定稿", "admin")
         .await?;
+    let event_id = store::live_event_of_group(&st, group_id).await.unwrap_or(0);
+    if event_id > 0 {
+        if let Err(e) = live::auto_advance_revival(&st, event_id).await {
+            tracing::warn!(event_id, group_id, error = %e, "强制定稿后自动生成复活赛失败");
+        }
+    }
     Ok(Json(json!({ "ok": true, "roundId": round_id })))
 }
 
@@ -509,6 +635,7 @@ pub async fn freeze_stage(
         total += live::freeze_group_qualifiers(&st, event_id, gid, &source).await?;
         done += 1;
     }
+    let auto = live::auto_advance_revival(&st, event_id).await?;
     crate::events::emit(
         crate::events::SCOPE_LIVE,
         format!(
@@ -517,7 +644,7 @@ pub async fn freeze_stage(
         ),
     );
     Ok(Json(
-        json!({ "ok": true, "groups": done, "qualified": total }),
+        json!({ "ok": true, "groups": done, "qualified": total, "autoRevival": auto }),
     ))
 }
 
@@ -781,6 +908,67 @@ pub async fn room_scores(
     })))
 }
 
+/// 对外公开的赛事直播快照（不鉴权，只认启动时生成的随机 token）。
+///
+/// 返回当前全部阶段与小组，包括赛前名单、每组最新分数、正式局状态。复活赛
+/// 自动生成后下一次请求就会出现，不需要运营再手工发布一次链接。
+pub async fn public_event(State(st): State<Arc<AppState>>, Path(token): Path<String>) -> ApiResult {
+    let token = token.trim();
+    if token.len() < 24 || token.len() > 40 || !token.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(crate::routes::ApiError::with_status(
+            axum::http::StatusCode::NOT_FOUND,
+            "直播链接不存在",
+        ));
+    }
+    if let Some(cached) = public_live_cache_get(token) {
+        return Ok(Json(cached));
+    }
+    let event = store::live_event_by_public_token(&st, token)
+        .await
+        .ok_or_else(|| {
+            crate::routes::ApiError::with_status(
+                axum::http::StatusCode::NOT_FOUND,
+                "直播链接不存在或已失效",
+            )
+        })?;
+    let event_id = event.get("id").and_then(Value::as_i64).unwrap_or(0);
+    let group_duration = event
+        .get("groupDurationSecs")
+        .and_then(Value::as_i64)
+        .unwrap_or(600);
+    let revival_duration = event
+        .get("revivalDurationSecs")
+        .and_then(Value::as_i64)
+        .unwrap_or(300);
+    let mut groups = store::live_public_groups(&st, event_id).await;
+    for group in &mut groups {
+        let kind = group
+            .get("stageKind")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if let Some(obj) = group.as_object_mut() {
+            obj.insert(
+                "durationSecs".into(),
+                json!(if kind.contains("revival") {
+                    revival_duration
+                } else {
+                    group_duration
+                }),
+            );
+        }
+    }
+    let stages = store::live_stage_list(&st, event_id).await;
+    let snapshot = json!({
+        "event": event,
+        "stages": stages,
+        "groups": groups,
+        "serverNow": chrono::Utc::now().to_rfc3339(),
+    });
+    public_live_cache_put(token, &snapshot);
+    Ok(Json(snapshot))
+}
+
 /// 采集进程心跳（排查「采集器还活着吗」用）
 #[derive(Deserialize)]
 pub struct HeartbeatBody {
@@ -843,5 +1031,20 @@ mod tests {
         assert_eq!(extract_web_rid(""), None);
         // 非法字符（含斜杠以外的符号）不认，避免把整段路径当房间 id
         assert_eq!(extract_web_rid("https://live.douyin.com/abc-def!"), None);
+    }
+
+    #[test]
+    fn public_tokens_are_long_random_hex() {
+        let a = match new_public_token() {
+            Ok(v) => v,
+            Err(_) => panic!("系统随机源应可用"),
+        };
+        let b = match new_public_token() {
+            Ok(v) => v,
+            Err(_) => panic!("系统随机源应可用"),
+        };
+        assert_eq!(a.len(), 36);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(a, b);
     }
 }

@@ -27,6 +27,10 @@ export interface LiveEvent {
   rules: LiveRules
   pushEnabled: boolean
   pushIntervalSecs: number
+  publicToken: string
+  startedAt: string | null
+  groupDurationSecs: number
+  revivalDurationSecs: number
   updatedAt: string
 }
 
@@ -189,6 +193,35 @@ export interface StandaloneRoomScores {
   scores: StandaloneRoomScore[]
 }
 
+export interface PublicLivePlayer {
+  personId: number
+  douyinUid: string
+  nickname: string
+  teamId: string
+  score: number
+  rank: number
+  qualified: boolean
+}
+
+export interface PublicLiveGroup extends LiveGroup {
+  players: PublicLivePlayer[]
+  durationSecs: number
+  round: {
+    id: number
+    status: string
+    startAt: string | null
+    actualEndAt: string | null
+    observedAt: string | null
+  } | null
+}
+
+export interface PublicLiveSnapshot {
+  event: Omit<LiveEvent, 'dayPlanId' | 'nightPlanId' | 'pushEnabled' | 'pushIntervalSecs' | 'publicToken' | 'ruleVersion'>
+  stages: LiveStage[]
+  groups: PublicLiveGroup[]
+  serverNow: string
+}
+
 export const live = {
   events: () => api<{ items: LiveEvent[] }>('/api/live/events'),
 
@@ -198,6 +231,14 @@ export const live = {
     dayPlanId?: number
     rules?: Partial<LiveRules>
   }) => api<{ id: number }>('/api/live/events', { method: 'POST', body: JSON.stringify(body) }),
+
+  startEvent: (id: number) => api<{
+    ok: boolean
+    alreadyRunning: boolean
+    publicToken: string
+    path: string
+    event: LiveEvent
+  }>(`/api/live/events/${id}/start`, { method: 'POST' }),
 
   updateRules: (id: number, rules: Partial<LiveRules>, reason?: string) =>
     api<{ ok: boolean }>(`/api/live/events/${id}/rules`, {
@@ -225,6 +266,8 @@ export const live = {
 
   /** 独立房间监控：不关联 event / group，只按 web_rid 取最新一局。 */
   roomScores: (webRid: string) => api<StandaloneRoomScores>(`/api/live/rooms/${webRid}`),
+
+  publicEvent: (token: string) => api<PublicLiveSnapshot>(`/api/public/live/${encodeURIComponent(token)}`),
 
   bindPlans: (id: number, dayPlanId?: number, nightPlanId?: number) =>
     api<{ ok: boolean }>(`/api/live/events/${id}/plans`, {

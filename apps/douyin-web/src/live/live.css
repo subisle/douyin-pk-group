@@ -495,3 +495,48 @@
 .lm-actions { margin-top: 14px; }
 .lm-actions button { margin-right: 8px; margin-bottom: 6px; }
 .lm-qualifiers { margin-top: 14px; }
+
+/* 对外公开直播页的启动入口：链接只在启动赛事时生成，一旦生成保持不变。 */
+.lm-public-share {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+  padding: 14px 16px;
+  border: 1px solid color-mix(in srgb, var(--good) 38%, var(--line));
+  border-radius: var(--radius);
+  background:
+    radial-gradient(circle at 100% 0, color-mix(in srgb, var(--good) 12%, transparent), transparent 45%),
+    var(--card);
+}
+.lm-public-share-copy { min-width: min(100%, 420px); }
+.lm-public-kicker {
+  color: var(--good);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .12em;
+}
+.lm-public-share h3 { margin: 5px 0 4px; font-size: 15px; }
+.lm-public-share p { margin: 0; color: var(--ink2); font-size: 12px; line-height: 1.55; }
+.lm-public-actions { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.lm-public-actions a {
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 7px 10px;
+  color: var(--good);
+  font: 12px ui-monospace, SFMono-Regular, Menlo, monospace;
+  text-decoration: none;
+  background: var(--canvas);
+}
+@media (max-width: 680px) {
+  .lm-public-share { align-items: stretch; }
+  .lm-public-actions { width: 100%; }
+  .lm-public-actions a { flex: 1 1 100%; max-width: none; }
+  .lm-public-actions button { flex: 1 1 auto; }
+}
