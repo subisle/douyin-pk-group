@@ -63,17 +63,26 @@ function clockText(seconds: number) {
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
 }
 
-function groupClock(group: PublicLiveGroup, nowMs: number) {
-  if (group.status === 'finalized') return { text: '已结束', urgent: false }
-  if (group.status === 'settling') return { text: '结算中', urgent: true }
-  if (group.status === 'pending_review') return { text: '待确认', urgent: true }
-  if (group.status === 'waiting_restart') return { text: '待重开', urgent: true }
-  const start = group.round?.startAt ? Date.parse(group.round.startAt) : NaN
-  if (group.status === 'running' && !Number.isNaN(start)) {
-    const remaining = group.durationSecs - Math.max(0, (nowMs - start) / 1000)
-    return { text: remaining > 0 ? clockText(remaining) : '等待结算', urgent: remaining <= 60 }
+/** 只描述直播间上报的真实状态；本页计时永远不能推进比赛。 */
+function groupPhase(group: PublicLiveGroup, nowMs: number) {
+  if (group.status === 'finalized') {
+    return { text: '已结束', detail: '结果已按直播间 PK 结束信号确认', urgent: false }
   }
-  return { text: '准备中', urgent: false }
+  if (group.status === 'settling') {
+    return { text: '等待结束', detail: '直播间 PK 已结束，等待最终分数', urgent: true }
+  }
+  if (group.status === 'pending_review') {
+    return { text: '待确认', detail: '等待核对直播对局', urgent: true }
+  }
+  if (group.status === 'waiting_restart') {
+    return { text: '待重开', detail: '直播间异常结束，等待下一场', urgent: true }
+  }
+  if (group.status === 'running') {
+    const start = group.round?.startAt ? Date.parse(group.round.startAt) : NaN
+    const elapsed = Number.isNaN(start) ? '' : ` · 实际已进行 ${clockText(Math.max(0, (nowMs - start) / 1000))}`
+    return { text: 'PK 进行中', detail: `跟随直播间实际对局${elapsed}`, urgent: false }
+  }
+  return { text: '准备中', detail: '整组人齐后开始 PK', urgent: false }
 }
 
 function playerName(player: PublicLivePlayer) {
@@ -83,7 +92,7 @@ function playerName(player: PublicLivePlayer) {
 
 function GroupCard({ group, nowMs, qualify }: { group: PublicLiveGroup; nowMs: number; qualify: number }) {
   const status = groupStatus(group)
-  const clock = groupClock(group, nowMs)
+  const phase = groupPhase(group, nowMs)
   const maxScore = Math.max(1, ...group.players.map((p) => Number(p.score) || 0))
   const revival = group.stageKind.includes('revival')
   const live = LIVE_STATUSES.has(group.status)
@@ -102,14 +111,14 @@ function GroupCard({ group, nowMs, qualify }: { group: PublicLiveGroup; nowMs: n
       </header>
 
       <div className="plm-group-meta">
-        <span>每组 {Math.round(group.durationSecs / 60)} 分钟</span>
+        <span>规则时长 {Math.round(group.durationSecs / 60)} 分钟 · 实际以直播间为准</span>
         <span>
           {revival
             ? `前 ${qualify} 名复活 · 后 ${Math.max(group.players.length - qualify, 0)} 名淘汰`
             : `前 ${qualify} 名晋级 · 后 ${Math.max(group.players.length - qualify, 0)} 名进复活池`}
         </span>
         <span>{scored}/{group.players.length} 人已出分</span>
-        <strong className={clock.urgent ? 'is-urgent' : ''}>{clock.text}</strong>
+        <strong className={phase.urgent ? 'is-urgent' : ''}>{phase.text}</strong>
       </div>
 
       <div className="plm-player-list">
@@ -282,7 +291,7 @@ export default function PublicLiveMonitorPage({ token }: { token?: string }) {
   const selectedStageInfo = stages.find((s) => s.kind === selectedStage)
   const event = snapshot?.event
   const qualifyDefault = event?.rules.directQualifyPerGroup || 4
-  const activeClock = currentGroup ? groupClock(currentGroup, serverNow) : null
+  const activePhase = currentGroup ? groupPhase(currentGroup, serverNow) : null
 
   useEffect(() => {
     if (!currentStage) return
@@ -335,8 +344,8 @@ export default function PublicLiveMonitorPage({ token }: { token?: string }) {
           <p>{currentGroup ? `${currentGroup.name} · ${groupStatus(currentGroup).text}` : '等待下一阶段自动开始'}</p>
         </div>
         <div className="plm-hero-clock">
-          <span>{activeClock?.text ?? '--:--'}</span>
-          <small>{currentGroup?.stageKind.includes('revival') ? '复活赛倒计时' : '小组计时'}</small>
+          <span className={`plm-phase-state${activePhase?.urgent ? ' is-urgent' : ''}`}>{activePhase?.text ?? '等待中'}</span>
+          <small>{activePhase?.detail ?? '以直播间实际 PK 状态为准'}</small>
         </div>
         <div className="plm-summary">
           <div><b>{groups.filter((g) => g.status === 'finalized').length}</b><span>已结束</span></div>
