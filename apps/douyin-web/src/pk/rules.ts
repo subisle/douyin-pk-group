@@ -6,9 +6,9 @@ import type { EventType } from './api';
  *  时间点（2026-10-09 用户口述拍板；2026-10-09 晚更新复活赛口径）：
  *  小组赛中午 12:15 开始（第 1 组），晚上晋级赛 20:15 开始第一场。
  *
- *  复活赛口径（2026-10-09 用户确认，初级/中级小组赛一致）：
- *  **只打一场**，20 分钟，落在「上半程最后一组」之后 —— 8 个组 / 7 个组在第 4 组比完打，
- *  6 个组在第 3 组比完打，即第 ceil(组数/2) 组之后。复活赛不需要程序分组，运营手动排。 */
+ *  复活赛口径（2026-11-19 用户确认，初级/中级小组赛一致）：
+ *  **共两场，每场 5 分钟**：前四组小组赛结束后一场，后续小组赛结束后一场。
+ *  直播监控页在对应小组全部定稿后自动生成该波复活分组。 */
 export interface EventRule {
   title: string;
   items: string[];
@@ -16,7 +16,7 @@ export interface EventRule {
 
 /** 复活赛时长（分钟）与落点算法：`ceil(组数 / 2)` = 上半程最后一组。
  *  GroupPage 排期用同一套口径，改这里记得同步。 */
-export const REVIVAL_MINUTES = 20;
+export const REVIVAL_MINUTES = 5;
 export const revivalAfterGroup = (groupCount: number) =>
   groupCount > 0 ? Math.ceil(groupCount / 2) : 0;
 
@@ -26,8 +26,8 @@ export const revivalAfterGroup = (groupCount: number) =>
 export const BREAK_AFTER_GROUP = 3;
 
 /** 有复活赛的赛事：初级 / 中级争霸赛小组赛。
- *  复活赛是**一场 20 分钟的比赛**（不是休息），只打一场，落在第 ceil(组数/2) 组之后；
- *  位置和时长都不可改，longBreak 配置对这类赛事不生效。
+ *  复活赛是**两场各 5 分钟的比赛**（不是休息）：前四组结束后一场，后续小组结束后一场；
+ *  时长不可改，longBreak 配置对这类赛事不生效。
  *  同上：原为两份拷贝，现统一由这里导出。 */
 export const REVIVAL_EVENTS: readonly EventType[] = [
   '初级争霸赛小组赛',
@@ -36,10 +36,10 @@ export const REVIVAL_EVENTS: readonly EventType[] = [
 
 /** 初级争霸赛小组赛 / 中级争霸赛小组赛赛制完全一样（2026-10-09 用户确认），只有参赛名单不同 */
 const 争霸赛小组赛制 = (name: string): EventRule => ({
-  title: `${name} · 赛制（共四轮）`,
+  title: `${name} · 赛制（共五轮）`,
   items: [
     '小组赛中午 12:15 开始（第 1 组），之后每组顺延 15 分钟：8 人组前 4 名晋级、7 人组前 4 名晋级',
-    '复活赛只打一场，20 分钟：落在上半程最后一组之后——8 个组 / 7 个组在第 4 组比完打，6 个组在第 3 组比完打；被淘汰的人参赛，取前 4 名复活进入晋级赛（复活赛手动安排，不在这里分组）',
+    '复活赛共两场，每场 5 分钟：前四组小组赛结束后一场，后续小组赛结束后一场；每场前 4 名复活进入晋级赛，剩余人员直接淘汰（监控页在对应小组全部定稿后自动生成复活分组）',
     '晚上晋级赛 20:15 开始第一场：小组赛晋级者 + 复活者同台，每组第一名进入决赛',
     '决赛：决出第 1、2、3 名',
   ],

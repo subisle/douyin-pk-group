@@ -1796,10 +1796,10 @@ export default function GroupPage() {
           <span className="hint">
             {revivalEvent
               ? revivalOn
-                ? `复活赛只打一场、20 分钟：共 ${buckets.length} 组 → 第 ${restAfterGroup} 组 ${slotAt(
+                ? `复活赛共两场、每场 ${restMin} 分钟：第 ${restAfterGroup} 组 ${slotAt(
                     restAfterGroup - 1,
-                  )} 开赛，紧接着打复活赛，第 ${restAfterGroup + 1} 组顺延到 ${slotAt(restAfterGroup)}`
-                : '复活赛只打一场、20 分钟，落在「上半程最后一组」之后：8 组 / 7 组 → 第 4 组后，6 组 → 第 3 组后；分完组这里会自动定位'
+                  )} 开赛，结束后打第一场复活赛，第 ${restAfterGroup + 1} 组顺延到 ${slotAt(restAfterGroup)}；后续小组全部结束后打第二场，每场前 4 名复活、其余直接淘汰`
+                : `复活赛共两场、每场 ${restMin} 分钟：上半程最后一组后打第一场，后续小组全部结束后打第二场；分完组这里会自动定位；每场前 4 名复活、其余直接淘汰`
               : restMin > 0
                 ? `第 1 组 ${slotAt(0)}、第 2 组 ${slotAt(1)}、第 3 组 ${slotAt(2)}，之后休息 ${restMin} 分钟，第 4 组 ${slotAt(3)}`
                 : `每组间隔统一 ${intervalMin} 分钟（不插加长休息）`}
