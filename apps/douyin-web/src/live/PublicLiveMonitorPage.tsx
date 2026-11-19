@@ -101,7 +101,11 @@ function GroupCard({ group, nowMs, qualify }: { group: PublicLiveGroup; nowMs: n
 
       <div className="plm-group-meta">
         <span>每组 {Math.round(group.durationSecs / 60)} 分钟</span>
-        <span>前 {qualify} 名晋级</span>
+        <span>
+          {revival
+            ? `前 ${qualify} 名复活 · 后 ${Math.max(group.players.length - qualify, 0)} 名淘汰`
+            : `前 ${qualify} 名晋级 · 后 ${Math.max(group.players.length - qualify, 0)} 名进复活池`}
+        </span>
         <span>{scored}/{group.players.length} 人已出分</span>
         <strong className={clock.urgent ? 'is-urgent' : ''}>{clock.text}</strong>
       </div>
@@ -109,16 +113,16 @@ function GroupCard({ group, nowMs, qualify }: { group: PublicLiveGroup; nowMs: n
       <div className="plm-player-list">
         {group.players.length === 0 && <div className="plm-empty">分组等待生成…</div>}
         {group.players.map((player, index) => {
-          const rank = player.rank > 0 ? player.rank : index + 1
-          const qualified = player.rank > 0 && player.rank <= qualify
+          const position = player.position || index + 1
+          const qualified = player.rank > 0 && position <= qualify
           const pct = Math.max(2, Math.round(((Number(player.score) || 0) / maxScore) * 100))
           return (
             <div key={`${player.douyinUid || player.personId || 'p'}-${index}`} className={`plm-player${qualified ? ' is-qualified' : ''}`}>
-              <span className="plm-rank">{player.rank > 0 ? `#${player.rank}` : '—'}</span>
+              <span className="plm-rank">{player.rank > 0 ? `#${position}` : '—'}</span>
               <div className="plm-player-main">
                 <div className="plm-player-name">
                   <b>{playerName(player)}</b>
-                  {qualified && <span className="plm-qualified">晋级线内</span>}
+                  {qualified && <span className="plm-qualified">{revival ? '复活区' : '晋级区'}</span>}
                 </div>
                 <div className="plm-score-track"><i style={{ width: `${pct}%` }} /></div>
               </div>
@@ -370,7 +374,7 @@ export default function PublicLiveMonitorPage({ token }: { token: string }) {
 
       <footer className="plm-footer">
         <span>比分来自抖音 PK 实时采样</span>
-        <span>小组 10 分钟 · 复活赛 5 分钟 · 前 4 名晋级</span>
+        <span>小组前 4 名晋级，其余进复活池；复活赛前 4 名复活</span>
       </footer>
       {error && <div className="plm-toast">{error}</div>}
     </div>

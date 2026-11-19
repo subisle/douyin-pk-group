@@ -682,6 +682,12 @@ pub fn group_is_done(status: GroupStatus) -> bool {
     status == GroupStatus::Finalized
 }
 
+/// 晋级名额按**排序位置**截断，不按并列 rank 截断。
+/// 这样 7/8 人组永远只有前 4 个晋级，且 7 人复活赛也固定前 4 复活。
+fn within_qualify_slots(position: usize, rank: i32, qualify: i32) -> bool {
+    rank > 0 && qualify > 0 && position <= qualify as usize
+}
+
 /* ------------------------------ 观测处理 ------------------------------ */
 
 /// 观测处理的结果（给采集器回执用，也写日志）
@@ -1134,8 +1140,8 @@ pub async fn freeze_group_qualifiers(
     /* 席位要**显式标记**谁晋级、谁淘汰：复活池（`live_stage_eliminated`）查的是
     `qualified = 0` 的席位。只写 live_qualifier 不标记席位的话，淘汰者集合
     永远是空的 —— 复活赛生成时会直接报「没有淘汰者」。 */
-    let mut n = 0;
-    for seat in &seats {
+    let mut n = 0usize;
+    for (position, seat) in seats.iter().enumerate() {
         let uid = seat
             .get("douyinUid")
             .and_then(|v| v.as_str())
@@ -1143,17 +1149,18 @@ pub async fn freeze_group_qualifiers(
         let rank = seat.get("rank").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
         let score = seat.get("score").and_then(|v| v.as_i64()).unwrap_or(0);
         let person_id = seat.get("personId").and_then(|v| v.as_i64()).unwrap_or(0);
-        // 取前 qualify 名（含并列：名次 <= qualify 的都算晋级）
-        let qualified = rank > 0 && rank <= qualify.max(0);
+        // 严格按排序取前 N 个名额：7 人组 4 晋 3 入复活池，8 人组 4 晋 4 入复活池。
+        // 同分时仍复用排名展示，但名额不能随并列扩张，否则会把第 5/6 名也送进晋级。
+        let qualified = within_qualify_slots(position + 1, rank, qualify);
         crate::store::live_seat_mark_qualified(st, round_id, uid, qualified).await?;
         if !qualified {
             continue;
         }
+        n += 1;
         crate::store::live_qualifier_add(
             st, event_id, stage_id, group_id, round_id, person_id, uid, source, rank, score,
         )
         .await?;
-        n += 1;
     }
     Ok(n)
 }
@@ -1200,22 +1207,23 @@ pub async fn push_round_scores(st: &Arc<AppState>, round_id: i64) -> anyhow::Res
         .await?
         .unwrap_or(0);
     let group_name = crate::store::live_group_name(st, group_id).await?;
-    // 晋级线：第 qualify 名的分数（同名次并列时取该名次的分）
-    let cutoff = seats
-        .iter()
-        .filter(|s| s.get("rank").and_then(|v| v.as_i64()).unwrap_or(0) as i32 == qualify)
-        .filter_map(|s| s.get("score").and_then(|v| v.as_i64()))
-        .min();
+    // 晋级线 = 排序后第 qualify 个席位的分数。不能按并列 rank 过滤，
+    // 否则 7/8 人组同分时会出现「前 4 名」变成 5、6 人都晋级。
+    let cutoff = (qualify > 0)
+        .then(|| seats.get(qualify as usize - 1))
+        .flatten()
+        .and_then(|s| s.get("score").and_then(|v| v.as_i64()));
 
     let mut sent = 0usize;
     for b in &targets {
-        let mine = seats.iter().find(|s| {
+        let mine = seats.iter().enumerate().find(|(_, s)| {
             s.get("personId").and_then(|v| v.as_i64()).unwrap_or(0) as u64 == b.person_id
         });
-        let Some(mine) = mine else {
+        let Some((position, mine)) = mine else {
             continue;
         };
         let rank = mine.get("rank").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+        let position = position as i32 + 1;
         let score = mine.get("score").and_then(|v| v.as_i64()).unwrap_or(0);
 
         /* 冷却：时间桶 = 当前时间 / 间隔。同一桶内 dedup_key 相同，
@@ -1235,9 +1243,9 @@ pub async fn push_round_scores(st: &Arc<AppState>, round_id: i64) -> anyhow::Res
             continue; // 这一轮已经推过 / 正在推
         }
 
-        let mut text = format!("【PK 实时分】{group_name}\n你当前第 {rank} 名 · {score} 分",);
+        let mut text = format!("【PK 实时分】{group_name}\n你当前第 {position} 名 · {score} 分",);
         if qualify > 0 {
-            if rank > 0 && rank <= qualify {
+            if within_qualify_slots(position as usize, rank, qualify) {
                 text.push_str(&format!("\n✅ 在晋级线内（前 {qualify} 名）"));
             } else {
                 let gap = match cutoff {
@@ -1885,6 +1893,20 @@ mod tests {
         assert_eq!(r[1].rank, 1, "同分同名次");
         assert_eq!(r[2].rank, 3, "跳过并列占用的名次");
         assert_eq!(r[3].rank, 4);
+    }
+
+    #[test]
+    fn qualify_slots_are_exactly_top_four_even_with_ties() {
+        let seven = (1..=7)
+            .filter(|position| within_qualify_slots(*position, 4, 4))
+            .count();
+        let eight = (1..=8)
+            .filter(|position| within_qualify_slots(*position, 4, 4))
+            .count();
+        assert_eq!(seven, 4, "7 人组严格 4 人晋级/复活");
+        assert_eq!(eight, 4, "8 人组严格 4 人晋级/复活");
+        assert!(!within_qualify_slots(1, 0, 4), "没有有效名次不能晋级");
+        assert!(!within_qualify_slots(1, 1, 0), "名额为 0 时不能晋级");
     }
 
     #[test]

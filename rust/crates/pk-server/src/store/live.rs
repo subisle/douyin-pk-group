@@ -95,7 +95,7 @@ pub async fn live_event_get(st: &AppState, event_id: i64) -> Option<serde_json::
 
 /// 启动赛事：状态切到 running、生成公开 token，并记录本场开始时间。
 ///
-/// 小组 / 复活赛时长固定写 10 分钟 / 5 分钟，供公开页倒计时；真实判定仍看
+/// 小组 / 复活赛时长固定写 10 分钟 / 5 分钟，晋级名额固定每组前 4；真实判定仍看
 /// 抖音 battle 时长，不用前端倒计时代替结果。
 pub async fn live_event_start(
     st: &AppState,
@@ -105,7 +105,8 @@ pub async fn live_event_start(
     let row = sqlx::query(
         "UPDATE live_event SET
            status = 'running', public_token = $1, started_at = now(),
-           group_duration_secs = 600, revival_duration_secs = 300, updated_at = now()
+           group_duration_secs = 600, revival_duration_secs = 300,
+           direct_qualify_per_group = 4, revival_qualify_per_room = 4, updated_at = now()
          WHERE id = $2
          RETURNING id, title, event_date, status, day_plan_id, night_plan_id, rule_version,
                    first_wave_group_count, group_rounds_per_group, direct_qualify_per_group,
@@ -821,7 +822,9 @@ pub async fn live_seat_list(
     let rows = sqlx::query(
         "SELECT person_id, douyin_uid, nickname, team_id, final_score, final_rank,
                 score_version, qualified
-         FROM live_round_seat WHERE round_id = $1 ORDER BY final_rank, douyin_uid",
+         FROM live_round_seat WHERE round_id = $1
+         ORDER BY CASE WHEN final_rank > 0 THEN 0 ELSE 1 END,
+                  final_rank, final_score DESC, douyin_uid",
     )
     .bind(round_id)
     .fetch_all(w(st)?)
@@ -2182,6 +2185,11 @@ pub async fn live_public_groups(st: &AppState, event_id: i64) -> Vec<serde_json:
                     .cmp(&a.get("score").and_then(Value::as_i64).unwrap_or(0))
             })
         });
+        for (index, player) in players.iter_mut().enumerate() {
+            if let Some(obj) = player.as_object_mut() {
+                obj.insert("position".into(), serde_json::json!(index as i32 + 1));
+            }
+        }
 
         let stage_kind = group
             .get("stageKind")

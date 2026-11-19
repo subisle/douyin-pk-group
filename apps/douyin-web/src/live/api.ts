@@ -194,6 +194,8 @@ export interface StandaloneRoomScores {
 }
 
 export interface PublicLivePlayer {
+  /** 服务端排序后的固定位次，同分时也只有一个第 4 位，避免晋级名额被并列放大。 */
+  position: number
   personId: number
   douyinUid: string
   nickname: string

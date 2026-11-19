@@ -89,7 +89,11 @@ function GroupCard({
         <Dot kind={st.cls} />
         <b>{g.name}</b>
         <span className="lm-tag">{st.label}</span>
-        {g.qualifySlots > 0 && <span className="lm-tag">前 {g.qualifySlots} 名晋级</span>}
+        {g.qualifySlots > 0 && (
+          <span className="lm-tag">
+            {g.stageKind.includes('revival') ? `前 ${g.qualifySlots} 名复活` : `前 ${g.qualifySlots} 名晋级`}
+          </span>
+        )}
         <button className="linkish" onClick={() => setOpen(o => !o)}>
           {open ? '收起' : `${g.officialRoundId ? '对局' : '详情'} ▾`}
         </button>
@@ -680,7 +684,7 @@ export default function LiveMonitorPage() {
                   </div>
                 )}
                 {currentGroup && currentGroup.qualifySlots > 0 && (
-                  <div><span>晋级名额</span><b>前 {currentGroup.qualifySlots}</b></div>
+                  <div><span>{currentGroup.stageKind.includes('revival') ? '复活名额' : '晋级名额'}</span><b>前 {currentGroup.qualifySlots}</b></div>
                 )}
               </div>
               {seats.length === 0 && <p className="lm-live-empty">这一组正在等待分数…</p>}
@@ -695,7 +699,7 @@ export default function LiveMonitorPage() {
                   const realScore = Math.max(0, (Number(s.score) || 0) - bonusScore)
                   return (
                     <div key={s.douyinUid} className={`lm-live-row${qualified ? ' is-qualified' : ''}`}>
-                      <div className={`lm-live-rank rank-${Math.min(s.rank, 4)}`}>#{s.rank}</div>
+                      <div className={`lm-live-rank rank-${Math.min(i + 1, 4)}`}>#{i + 1}</div>
                       <div className="lm-live-player">
                         <div className="lm-live-name-line">
                           <b className="lm-live-name">{s.nickname || s.douyinUid}</b>
