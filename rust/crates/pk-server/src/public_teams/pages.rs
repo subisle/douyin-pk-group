@@ -405,7 +405,7 @@ mod pwa_tests {
             "function groupRulesHtml(raw)",
             "split(/\\r?\\n/)",
             "</div><ol>",
-            "'<li>' + esc(s.replace(",
+            "lines.map(s => '<li>' + esc(s) + '</li>')",
         ] {
             assert!(ST_PAGE.contains(token), "分组规则序号列表缺少：{token}");
         }
