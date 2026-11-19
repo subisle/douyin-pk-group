@@ -8250,7 +8250,10 @@ function renderMy(d, series, push, accounts) {
     try { await checkSoftwareUpdate(true); }
     finally { if (state) state.textContent = '检查'; }
   };
-  $('myPushRow').onclick = () => { mySub = 'wechat'; pushRoute(); renderMySub(); };
+  /* 微信对接页关闭时 this row 不渲染；不能无条件解引用，否则 renderMy 抛错后
+     loadMy 会把整张个人数据页替换成「取不到个人数据」。 */
+  const myPushRow = $('myPushRow');
+  if (myPushRow) myPushRow.onclick = () => { mySub = 'wechat'; pushRoute(); renderMySub(); };
   $('myChaseRow').onclick = () => { mySub = 'chase'; pushRoute(); renderMySub(); };
   renderPushBox(push);
   /* 「追分设置」独立卡（2026-10-13）：**这里绝不能再补一次 renderChaseBox**（2026-10-15 task-7）。

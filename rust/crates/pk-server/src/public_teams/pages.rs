@@ -412,6 +412,18 @@ mod pwa_tests {
     }
 
     #[test]
+    fn my_page_does_not_bind_a_hidden_push_row() {
+        assert!(
+            ST_PAGE.contains("const myPushRow = $('myPushRow');"),
+            "个人页必须先判断微信推送行是否渲染"
+        );
+        assert!(
+            !ST_PAGE.contains("$('myPushRow').onclick"),
+            "微信对接关闭时 myPushRow 不存在，不能无条件绑点击"
+        );
+    }
+
+    #[test]
     fn positive_wave_zero_duration_stays_visible_but_is_marked_offline() {
         for token in [
             "const unplayed = !it.periodic && !noData && it.isLive === false;",
