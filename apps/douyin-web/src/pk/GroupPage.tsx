@@ -951,6 +951,7 @@ export default function GroupPage() {
             ...player,
             // 老方案可能没有 key；/api/group/inspect 会拒绝缺 key 的 Player。
             key: player.key || `saved-${id}-${gi}-${pi}-${player.personId || player.name}`,
+            matched: player.matched ?? Boolean(player.personId),
             wave: Number(player.wave) || 0,
           })),
         }),
