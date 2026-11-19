@@ -1042,6 +1042,19 @@ function PublicSettingsCard() {
               />
               <span className="field-hint">例如 120 = 开赛前 2 小时才显示真实分组。</span>
             </label>
+            <label className="field">
+              分组冻结时间（可选）
+              <input
+                type="datetime-local"
+                defaultValue={settings.groupFreezeAt ?? ''}
+                onBlur={(e) => {
+                  if (e.target.value !== (settings.groupFreezeAt ?? '')) {
+                    saveSettingValue('groupFreezeAt', e.target.value)
+                  }
+                }}
+              />
+              <span className="field-hint">到点后展示端分组固定；留空 = 不冻结。</span>
+            </label>
           </div>
 
           <h3 className="flag-title">🚩 流动小红旗条（每日推送图头部）</h3>

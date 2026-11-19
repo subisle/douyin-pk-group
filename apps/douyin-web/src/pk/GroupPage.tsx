@@ -81,6 +81,7 @@ const DEFAULT_GROUP_NOTICE: GroupNoticeSettings = {
   groupNoticeSignupDate: '',
   groupNoticeStartTime: '08:15',
   groupNoticeRevealLeadMinutes: 120,
+  groupFreezeAt: '',
   groupTypes: {},
 };
 
@@ -94,6 +95,7 @@ const groupNoticeSettings = (s: Partial<GroupNoticeSettings>): GroupNoticeSettin
     Number.isFinite(Number(s.groupNoticeRevealLeadMinutes))
       ? Number(s.groupNoticeRevealLeadMinutes)
       : DEFAULT_GROUP_NOTICE.groupNoticeRevealLeadMinutes,
+  groupFreezeAt: s.groupFreezeAt ?? DEFAULT_GROUP_NOTICE.groupFreezeAt,
   groupTypes: s.groupTypes ?? {},
 });
 
@@ -1343,6 +1345,15 @@ export default function GroupPage() {
                   当前是分组模式：保存并上线后，展示端会直接显示所选分组，不再显示倒计时。
                 </div>
               )}
+              <label className="field" style={{ marginTop: 10 }}>
+                分组冻结时间（可选）
+                <input
+                  type="datetime-local"
+                  value={groupNotice?.groupFreezeAt ?? ''}
+                  onChange={(e) => updateGroupNotice({ groupFreezeAt: e.target.value })}
+                />
+                <span className="field-hint">到点后当前分组固定不再调整；留空 = 不冻结。</span>
+              </label>
               {noticeEnabled && <div className="field-list">
                 <label className="field">
                   倒计时文案

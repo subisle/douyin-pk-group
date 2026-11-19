@@ -107,6 +107,8 @@ export interface GroupNoticeSettings {
   groupNoticeSignupDate: string;
   groupNoticeStartTime: string;
   groupNoticeRevealLeadMinutes: number;
+  /** 分组冻结时间（本地时间 YYYY-MM-DDTHH:MM）；留空 = 不冻结。 */
+  groupFreezeAt: string;
   /** 分组子页显隐；上线所选方案时会把对应的赛事类型打开。 */
   groupTypes?: Record<string, boolean>;
 }

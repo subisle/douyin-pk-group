@@ -83,6 +83,9 @@ pub struct PublicSettings {
     /// 开赛前多少分钟开放分组名单（默认 120 分钟）。
     #[serde(default = "default_group_notice_reveal_lead_minutes")]
     pub group_notice_reveal_lead_minutes: i64,
+    /// 分组冻结时间（本地时间 `YYYY-MM-DDTHH:MM`）；到点后展示端分组保持不变。
+    #[serde(default)]
+    pub group_freeze_at: String,
 }
 
 pub(super) fn default_true() -> bool {
@@ -136,6 +139,10 @@ fn valid_notice_clock(s: &str) -> bool {
     let hh = (b[0] - b'0') * 10 + (b[1] - b'0');
     let mm = (b[3] - b'0') * 10 + (b[4] - b'0');
     hh < 24 && mm < 60
+}
+
+fn valid_notice_datetime(s: &str) -> bool {
+    chrono::NaiveDateTime::parse_from_str(s.trim(), "%Y-%m-%dT%H:%M").is_ok()
 }
 
 /// 分组页/子页显隐的过滤口径（public::plans 用）：页关 → 全部不发；
@@ -326,6 +333,7 @@ impl Default for PublicSettings {
             group_notice_signup_date: String::new(),
             group_notice_start_time: default_group_notice_start_time(),
             group_notice_reveal_lead_minutes: default_group_notice_reveal_lead_minutes(),
+            group_freeze_at: String::new(),
         }
     }
 }
@@ -442,6 +450,7 @@ impl PublicSettings {
             "groupNoticeSignupDate": self.group_notice_signup_date,
             "groupNoticeStartTime": self.group_notice_start_time,
             "groupNoticeRevealLeadMinutes": self.group_notice_reveal_lead_minutes,
+            "groupFreezeAt": self.group_freeze_at,
         })
     }
 }
@@ -543,6 +552,13 @@ pub async fn update_settings(State(st): State<ArcState>, Json(body): Json<Value>
         .and_then(|v| v.as_i64())
     {
         s.group_notice_reveal_lead_minutes = v.clamp(0, 1440);
+    }
+    if let Some(v) = body.get("groupFreezeAt").and_then(|v| v.as_str()) {
+        let v = v.trim();
+        if !v.is_empty() && !valid_notice_datetime(v) {
+            return Err(anyhow::anyhow!("groupFreezeAt 必须是 YYYY-MM-DDTHH:MM").into());
+        }
+        s.group_freeze_at = v.to_string();
     }
     // 分组子页：传了 groupTypes（对象）就整包替换；没传保持原样。
     // 未知类型直接存下来也没关系 —— group_type_enabled 对没配置的类型按开处理，

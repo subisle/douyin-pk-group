@@ -461,12 +461,27 @@ pub struct PublishBody {
     pub event_date: Option<String>,
 }
 
+async fn group_freeze_active(st: &std::sync::Arc<crate::state::AppState>) -> bool {
+    let s = crate::public_teams::PublicSettings::load(st).await;
+    let Ok(at) = chrono::NaiveDateTime::parse_from_str(s.group_freeze_at.trim(), "%Y-%m-%dT%H:%M")
+    else {
+        return false;
+    };
+    let offset = chrono::FixedOffset::east_opt(8 * 3600).unwrap();
+    let at = at.and_local_timezone(offset).single();
+    at.map(|t| chrono::Utc::now().with_timezone(&offset) >= t)
+        .unwrap_or(false)
+}
+
 pub async fn set_plan_published(
     State(st): State<std::sync::Arc<AppState>>,
     Path(id): Path<String>,
     Json(body): Json<PublishBody>,
 ) -> ApiResult {
     let id: i64 = id.parse().map_err(|_| anyhow::anyhow!("方案不存在"))?;
+    if group_freeze_active(&st).await {
+        return Err(anyhow::anyhow!("分组已冻结，如需调整请先修改分组冻结时间").into());
+    }
     let published = body.published.unwrap_or(true);
     let event_date = if published {
         body.event_date.as_deref().map(str::trim)
@@ -545,6 +560,14 @@ pub async fn delete_plan(
     Path(id): Path<String>,
 ) -> ApiResult {
     if let Ok(id) = id.parse::<i64>() {
+        if group_freeze_active(&st).await
+            && store::get_plan(&st, id)
+                .await
+                .map(|p| p.published)
+                .unwrap_or(false)
+        {
+            return Err(anyhow::anyhow!("分组已冻结，不能删除当前展示方案").into());
+        }
         store::delete_plan(&st, id).await?;
         crate::events::emit(crate::events::SCOPE_PLANS, format!("方案 {id} 已删除"));
     }

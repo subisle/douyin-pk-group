@@ -151,6 +151,38 @@ struct GroupNoticeView {
     revealed: bool,
 }
 
+struct GroupFreezeView {
+    json: serde_json::Value,
+    frozen: bool,
+}
+
+fn group_freeze_view_at(
+    s: &crate::public_teams::PublicSettings,
+    now: chrono::DateTime<chrono::FixedOffset>,
+) -> Option<GroupFreezeView> {
+    let naive =
+        chrono::NaiveDateTime::parse_from_str(s.group_freeze_at.trim(), "%Y-%m-%dT%H:%M").ok()?;
+    let at = naive.and_local_timezone(now.offset().clone()).single()?;
+    let frozen = now >= at;
+    let seconds_until = (at - now).num_seconds().max(0);
+    Some(GroupFreezeView {
+        frozen,
+        json: json!({
+            "enabled": true,
+            "freezeAt": format!("{}+08:00", at.format("%Y-%m-%dT%H:%M:%S")),
+            "label": at.format("%m月%d日 %H:%M").to_string(),
+            "frozen": frozen,
+            "secondsUntil": seconds_until,
+            "status": if frozen { "frozen" } else { "countdown" },
+        }),
+    })
+}
+
+fn group_freeze_view(s: &crate::public_teams::PublicSettings) -> Option<GroupFreezeView> {
+    let offset = chrono::FixedOffset::east_opt(8 * 3600)?;
+    group_freeze_view_at(s, chrono::Utc::now().with_timezone(&offset))
+}
+
 fn group_notice_view_for_date_at(
     s: &crate::public_teams::PublicSettings,
     event_date: &str,
@@ -293,8 +325,12 @@ pub async fn plan(
     /* 路由导航隐藏分组 / 某个赛事类型时，详情接口也必须同口径拒绝，
     否则知道方案 id 就能绕过列表开关直接拿到名单和音浪。 */
     let settings = crate::public_teams::PublicSettings::load(&st).await;
-    if settings.group_enabled == false
-        || !crate::public_teams::plan_visible_by_settings(&settings, &row.event_type)
+    let freeze_active = group_freeze_view(&settings)
+        .map(|f| f.frozen)
+        .unwrap_or(false);
+    if !freeze_active
+        && (settings.group_enabled == false
+            || !crate::public_teams::plan_visible_by_settings(&settings, &row.event_type))
     {
         return not_found();
     }
@@ -555,7 +591,13 @@ pub async fn plan(
     // 比赛日仅作为页面元信息保留；是否放榜由上面的“倒计时 / 分组”互斥模式决定。
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
     let match_day = dates.first().map(|d| d == &today).unwrap_or(false);
-    let (group_reveal, notice_view) = plan_group_visibility(&settings, event_date);
+    let (mut group_reveal, mut notice_view) = plan_group_visibility(&settings, event_date);
+    let freeze_view = group_freeze_view(&settings);
+    // 到点后锁死名单展示：即使倒计时配置仍开着，也直接显示当前分组。
+    if freeze_view.as_ref().map(|f| f.frozen).unwrap_or(false) {
+        group_reveal = true;
+        notice_view = None;
+    }
     /* 展示开关必须落在接口层：关闭总排行时连每人的全场 rank 一起抹掉；
     关闭公开名单时连 groups / ranking / 每日明细一起不下发，不能只靠前端隐藏。 */
     if !display.ranking {
@@ -593,6 +635,7 @@ pub async fn plan(
         "matchDay": match_day,
         "groupReveal": group_reveal,
         "groupNotice": notice_view.map(|n| n.json),
+        "groupFreeze": freeze_view.map(|f| f.json),
         "createdAt": row.created_at,
         "dates": dates,
         "stale": stale,
@@ -625,14 +668,17 @@ pub async fn plans(
         Err(e) => return e.into_response(),
     };
     let s = crate::public_teams::PublicSettings::load(&st).await;
-    if team == "female" || s.group_enabled == false {
+    let freeze_active = group_freeze_view(&s).map(|f| f.frozen).unwrap_or(false);
+    if team == "female" || (!freeze_active && s.group_enabled == false) {
         return Json(json!({ "items": [], "groupNotice": null })).into_response();
     }
     let items: Vec<_> = store::list_plans(&st)
         .await
         .into_iter()
         .filter(|p| p.published)
-        .filter(|p| crate::public_teams::plan_visible_by_settings(&s, &p.event_type))
+        .filter(|p| {
+            freeze_active || crate::public_teams::plan_visible_by_settings(&s, &p.event_type)
+        })
         .map(|p| {
             json!({
                 "id": p.id,
@@ -645,7 +691,9 @@ pub async fn plans(
         })
         .collect();
     let group_notice = group_notice_view(&s).map(|n| n.json);
-    Json(json!({ "items": items, "groupNotice": group_notice })).into_response()
+    let group_freeze = group_freeze_view(&s).map(|f| f.json);
+    Json(json!({ "items": items, "groupNotice": group_notice, "groupFreeze": group_freeze }))
+        .into_response()
 }
 
 #[cfg(test)]
@@ -729,6 +777,33 @@ mod tests {
 
         assert!(revealed);
         assert!(notice.is_none());
+    }
+
+    #[test]
+    fn group_freeze_counts_down_then_locks_at_configured_time() {
+        let mut cfg = notice_cfg();
+        cfg.group_freeze_at = "2026-11-20T16:00".into();
+        let offset = chrono::FixedOffset::east_opt(8 * 3600).unwrap();
+        let before = chrono::NaiveDate::from_ymd_opt(2026, 11, 20)
+            .unwrap()
+            .and_hms_opt(15, 59, 0)
+            .unwrap()
+            .and_local_timezone(offset)
+            .unwrap();
+        let view = group_freeze_view_at(&cfg, before).unwrap();
+        assert!(!view.frozen);
+        assert_eq!(view.json["secondsUntil"], 60);
+        assert_eq!(view.json["status"], "countdown");
+
+        let at = chrono::NaiveDate::from_ymd_opt(2026, 11, 20)
+            .unwrap()
+            .and_hms_opt(16, 0, 0)
+            .unwrap()
+            .and_local_timezone(offset)
+            .unwrap();
+        let view = group_freeze_view_at(&cfg, at).unwrap();
+        assert!(view.frozen);
+        assert_eq!(view.json["status"], "frozen");
     }
 
     #[test]

@@ -1550,6 +1550,13 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
   overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 
 /* ===== 分组展示 / 分组差距：同一页两种阅读任务 ===== */
+.st-group-freeze { display:flex; align-items:center; gap:6px; margin:0 0 .65rem;
+  padding:8px 11px; border-radius:12px; border:1px solid rgba(251,191,36,.35);
+  background:rgba(255,251,235,.82); color:#92400E; font-size:11.5px; line-height:1.4;
+  -webkit-backdrop-filter:blur(12px); backdrop-filter:blur(12px); }
+.st-group-freeze .material-symbols-outlined { font-size:17px; flex:none; color:#D97706; }
+.st-group-freeze.frozen { border-color:rgba(148,163,184,.32); background:rgba(248,250,252,.86); color:#475569; }
+.st-group-freeze.frozen .material-symbols-outlined { color:#64748B; }
 .st-group-mode { display:flex; gap:4px; padding:4px; margin:.25rem 0 .75rem;
   border-radius:14px; background:rgba(241,245,249,.86);
   border:1px solid rgba(226,232,240,.78); }
@@ -3224,6 +3231,8 @@ let curGroup = GROUP_PAGES[0].key;  // 分组子页当前 key
 let groupMode = 'groups'; // groups | gap：展示端分组页的两个阅读视图
 let groupAutoFocusPending = false; // 用户每次进入分组页时，自动选到本人所在组
 let groupFocusIndex = -1;          // 本轮渲染完成后需要短暂定焦的组序号
+let groupFrozen = false;           // 到分组冻结时间后停止分组重绘
+let groupFreezeTimer = null;
 let groupLoadSeq = 0;              // 分组请求序号：旧请求不得覆盖新页面
 let groupRenderSeq = 0;            // 分组渲染序号：旧定焦回调不得作用于新页面
 /* 「我的」子页（2026-10-13）：bind/push/chase/privacy/about。/my 是列表首页，
@@ -5457,6 +5466,7 @@ function scheduleImportedDataRefresh() {
 
 /** 方案上架/下架、分组子页开关或倒计时设置变化后，静默重拉方案列表并重绘当前分组。 */
 function scheduleGroupRefresh() {
+  if (groupFrozen && view === 'group') return;
   clearTimeout(groupRefreshTimer);
   groupRefreshTimer = setTimeout(() => {
     loadPlans(true).catch(() => {});
@@ -6908,6 +6918,52 @@ function groupNoticeLeadText(minutes) {
   return n + '分钟';
 }
 
+function groupFreezeText(at, label, frozen) {
+  if (frozen) return '分组已冻结 · 不再变动';
+  const ms = Number(at) - Date.now();
+  if (!Number.isFinite(ms) || ms <= 0) return '分组已冻结 · 不再变动';
+  const total = Math.ceil(ms / 1000);
+  const d = Math.floor(total / 86400);
+  const h = Math.floor((total % 86400) / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const remain = d > 0 ? d + '天' + h + '小时' : h > 0 ? h + '小时' + m + '分' : m > 0 ? m + '分' + s + '秒' : s + '秒';
+  return '分组冻结倒计时 · ' + (label || '') + ' · 剩余 ' + remain;
+}
+
+function groupFreezeHtml(f) {
+  if (!f || f.enabled === false || !f.freezeAt) return '';
+  const at = Date.parse(f.freezeAt);
+  if (!Number.isFinite(at)) return '';
+  const frozen = f.frozen === true || Date.now() >= at;
+  return '<div class="st-group-freeze' + (frozen ? ' frozen' : '') + '" role="status">' +
+    '<span class="material-symbols-outlined">' + (frozen ? 'lock' : 'timer') + '</span>' +
+    '<span id="stGroupFreezeText" data-at="' + esc(f.freezeAt) + '" data-label="' + esc(f.label || '') + '">' +
+      esc(groupFreezeText(at, f.label || '', frozen)) + '</span></div>';
+}
+
+function startGroupFreezeTicker(f) {
+  clearInterval(groupFreezeTimer);
+  groupFreezeTimer = null;
+  const el = $('stGroupFreezeText');
+  groupFrozen = !!(f && (f.frozen === true || (f.freezeAt && Date.now() >= Date.parse(f.freezeAt))));
+  if (!el) return;
+  const at = Date.parse(el.dataset.at || '');
+  if (!Number.isFinite(at)) return;
+  const tick = () => {
+    const frozen = Date.now() >= at;
+    groupFrozen = frozen;
+    el.textContent = groupFreezeText(at, el.dataset.label || '', frozen);
+    el.parentElement.classList.toggle('frozen', frozen);
+    if (frozen) {
+      clearInterval(groupFreezeTimer);
+      groupFreezeTimer = null;
+    }
+  };
+  tick();
+  if (!groupFrozen) groupFreezeTimer = setInterval(tick, 1000);
+}
+
 /** 分组开放前的赛事公告：后端已把未到开放窗口的 groups/ranking 清空，
     这里只负责把倒计时、接龙日期和开赛时间展示成一个稳定首屏。 */
 function groupNoticeHtml(n, page) {
@@ -6985,6 +7041,7 @@ function groupHtml(d, page, list) {
 
   let html = '<div class="section tab-content-enter">';
   if (d.stale) html += '<div class="stale">分组用的是快照数据，可能不是最新</div>';
+  html += groupFreezeHtml(d.groupFreeze);
 
   /* 场次信息卡 + 分组/差距切换 */
   html +=
@@ -7143,6 +7200,7 @@ function renderGroupView(d, page, list) {
   groupRenderSeq++;
   $('view').innerHTML = groupHtml(d, page, list);
   bindGroupView(d, page, list);
+  startGroupFreezeTicker(d.groupFreeze);
 }
 
 function bindGroupView(d, page, list) {
@@ -10440,7 +10498,8 @@ function scheduleRefresh() {
     /* lineage / my 不参与静默刷新：lineage 重建画布会丢缩放位置；
        my 是个人数据页，低频变化，且重建会打断用户正在输入的表单 */
     Promise.resolve(view === 'data' ? loadData(undefined, true)
-      : (view === 'lineage' || view === 'my' || view === 'resources') ? null : loadGroup())
+      : (view === 'lineage' || view === 'my' || view === 'resources') ? null
+      : (view === 'group' && groupFrozen) ? null : loadGroup())
       .then(() => { consecutiveFail = 0; show('stale', false); })
       .catch(() => { consecutiveFail++; if (consecutiveFail >= 2) show('stale', true); })
       .finally(scheduleRefresh);
