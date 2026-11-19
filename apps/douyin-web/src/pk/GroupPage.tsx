@@ -304,6 +304,9 @@ export default function GroupPage() {
   } | null>(null);
   const rafRef = useRef(0);
   const scrollRef = useRef(0);
+  const planListSeqRef = useRef(0);
+  const initialPlanRestoredRef = useRef(false);
+  const [exportFallback, setExportFallback] = useState<{ url: string; filename: string } | null>(null);
   const [past, setPast] = useState<Snapshot[]>([]);
   const [future, setFuture] = useState<Snapshot[]>([]);
   const [addName, setAddName] = useState('');
@@ -556,17 +559,22 @@ export default function GroupPage() {
   }
 
   async function loadPlans() {
+    const seq = ++planListSeqRef.current;
+    const wantedType = eventType;
     try {
       const r = await pk.listPlans();
+      // 配置加载会把赛事从初版默认值切到后台保存值；先发后到的旧请求不能覆盖新列表。
+      if (seq !== planListSeqRef.current) return;
       // P1-14：方案列表按当前赛事类型过滤（后端 /api/plans 无 type 参数，前端过滤；
       // eventType 为空的老方案不归类，不在任何赛事页出现，避免跨赛事载入/上架）
-      const items = (r.items || []).filter((p) => p.eventType === eventType);
+      const items = (r.items || []).filter((p) => p.eventType === wantedType);
       setPlans(items);
       setSelectedPublishId((prev) => {
         if (prev && items.some((p) => p.id === prev)) return prev;
         return items.find((p) => p.published)?.id ?? items[0]?.id ?? null;
       });
     } catch (e) {
+      if (seq !== planListSeqRef.current) return;
       // P2-5：方案列表加载失败不再静默 —— 显示出来（载入/上架按钮全会没数据）
       console.error('方案列表加载失败', e);
       setError((e as Error).message);
@@ -935,11 +943,19 @@ export default function GroupPage() {
     try {
       const d = await pk.getPlan(id);
       const p = d.payload || ({} as never);
-      setBuckets((p.buckets || []).map((b: { name: string; players: Player[] }, i: number) => ({
-        id: newId(),
-        name: b.name || `第 ${i + 1} 组`,
-        players: b.players || [],
-      })));
+      const loadedBuckets: Bucket[] = (p.buckets || []).map(
+        (b: { name: string; players: Player[] }, gi: number) => ({
+          id: newId(),
+          name: b.name || `第 ${gi + 1} 组`,
+          players: (b.players || []).map((player, pi) => ({
+            ...player,
+            // 老方案可能没有 key；/api/group/inspect 会拒绝缺 key 的 Player。
+            key: player.key || `saved-${id}-${gi}-${pi}-${player.personId || player.name}`,
+            wave: Number(player.wave) || 0,
+          })),
+        }),
+      );
+      setBuckets(loadedBuckets);
       setUnassigned([]);
       setPast([]);
       setFuture([]);
@@ -954,30 +970,34 @@ export default function GroupPage() {
           p.strengthOrder.enabled === false ? 'off' : (p.strengthOrder.mode ?? 'total'),
         );
       }
-      // 落点由组数决定（复活赛）或固定第 3 组（其余赛事），这里只把分钟数读回来
-      const b0 = (p.schedule?.breaks || [])[0] as BreakRule | undefined;
+      // 落点由组数决定（复活赛）或固定第 3 组（其余赛事）。
+      const loadedEventType = (d.eventType || eventType) as EventType;
+      const loadedRevival = REVIVAL_EVENTS.includes(loadedEventType);
+      const rawBreaks = (p.schedule?.breaks || []) as BreakRule[];
+      const normalizedBreaks: BreakRule[] = loadedRevival && loadedBuckets.length
+        ? [{
+            afterGroup: rawBreaks[0]?.afterGroup || revivalAfterGroup(loadedBuckets.length),
+            minutes: REVIVAL_MINUTES,
+          }]
+        : rawBreaks;
+      const b0 = normalizedBreaks[0];
       if (b0) setLongBreak(b0.minutes);
       if (p.schedule?.start) setStartTime(p.schedule.start);
       if (p.schedule?.intervalMin) setIntervalMin(p.schedule.intervalMin);
       if (p.display) setDisplay({ ...DEFAULT_DISPLAY, ...p.display });
       /* 恢复数据日期（老方案没存过就保持空，导出退回今天） */
       if (p.dates?.length) setDates(p.dates);
-      setPlayers((p.buckets || []).flatMap((b: { players: Player[] }) => b.players || []));
+      setPlayers(loadedBuckets.flatMap((b) => b.players));
       setMsg(`已载入方案 #${id}`);
       /* 体检必须用**方案自带的赛程**：此刻 buckets 仍是旧值，`scheduleInput()`
        * 会按 0 组算成「没有复活赛」，组头开赛时间会少一段（13:00 显示成 12:55）。 */
-      const loaded = p.buckets || [];
       void inspectNow(
-        loaded.map((b: { name: string; players: Player[] }, i: number) => ({
-          id: `tmp${i}`,
-          name: b.name,
-          players: b.players || [],
-        })),
+        loadedBuckets,
         {
           schedule: {
             start: p.schedule?.start || startTime,
             intervalMin: p.schedule?.intervalMin ?? intervalMin,
-            breaks: (p.schedule?.breaks || []) as BreakRule[],
+            breaks: normalizedBreaks,
           },
           strengthOrder: p.strengthOrder
             ? { enabled: p.strengthOrder.enabled !== false, mode: p.strengthOrder.mode }
@@ -1039,7 +1059,28 @@ export default function GroupPage() {
     }
   }
 
+  /* 首次进入分组页时自动载入当前已上架方案；否则看板为空，用户点“导出”只会得到空看板。 */
+  useEffect(() => {
+    if (initialPlanRestoredRef.current || planId != null || buckets.length > 0 || plans.length === 0) return;
+    const published = plans.find((p) => p.published);
+    if (!published) {
+      initialPlanRestoredRef.current = true;
+      return;
+    }
+    initialPlanRestoredRef.current = true;
+    void loadPlan(published.id);
+  }, [plans, planId, buckets.length]);
+
   /* ---------------- 导出分组图 ---------------- */
+  async function waitForInspectBeforeExport() {
+    const pending = inspectInflightRef.current;
+    if (!pending) return;
+    await Promise.race([
+      pending.catch(() => null),
+      new Promise<void>((resolve) => window.setTimeout(resolve, 3000)),
+    ]);
+  }
+
   async function exportImage() {
     if (!buckets.length) {
       setError('看板是空的');
@@ -1051,9 +1092,7 @@ export default function GroupPage() {
         await loadGroupExportModule();
       // P1-13：导出前强制等最新的 inspect 落地 —— 拖完立刻点导出时，
       // slots 可能还是上一次分组的开赛时间，错的时间会被印进长图发到群里。
-      if (inspectInflightRef.current) {
-        await inspectInflightRef.current;
-      }
+      await waitForInspectBeforeExport();
       const node = buildExportNode({
         title: title.trim() || 'PK 分组',
         brandLine: `PK GROUP · 分组名单 · ${dates[0] || isoLocal()}`,
@@ -1070,8 +1109,13 @@ export default function GroupPage() {
       });
       try {
         const blob = await nodeToPngBlob(node, { scale: 2 });
-        downloadBlob(blob, `${title.trim() || 'pk'}-${dates[0] || 'plan'}.png`);
-        setMsg('分组图已导出');
+        const filename = `${title.trim() || 'pk'}-${dates[0] || 'plan'}.png`;
+        const url = downloadBlob(blob, filename);
+        setExportFallback({ url, filename });
+        window.setTimeout(() => {
+          setExportFallback((cur) => (cur?.url === url ? null : cur));
+        }, 120_000);
+        setMsg(`分组图已导出（${Math.max(1, Math.round(blob.size / 1024))} KB）`);
       } finally {
         disposeExportNode(node);
       }
@@ -1098,9 +1142,7 @@ export default function GroupPage() {
       const { buildGapExportNode, disposeExportNode, downloadBlob, nodeToPngBlob } =
         await loadGroupExportModule();
       // 与长图同一口径：等最新一次 inspect 落地，避免拖完立刻导出拿到旧数据
-      if (inspectInflightRef.current) {
-        await inspectInflightRef.current;
-      }
+      await waitForInspectBeforeExport();
       const total = buckets.reduce((s, b) => s + b.players.length, 0);
       const node = buildGapExportNode({
         title: title.trim() || 'PK 分组',
@@ -1119,8 +1161,13 @@ export default function GroupPage() {
       });
       try {
         const blob = await nodeToPngBlob(node, { scale: 2 });
-        downloadBlob(blob, `${title.trim() || 'pk'}-名次差距-${dates[0] || 'plan'}.png`);
-        setMsg('差距图已导出');
+        const filename = `${title.trim() || 'pk'}-名次差距-${dates[0] || 'plan'}.png`;
+        const url = downloadBlob(blob, filename);
+        setExportFallback({ url, filename });
+        window.setTimeout(() => {
+          setExportFallback((cur) => (cur?.url === url ? null : cur));
+        }, 120_000);
+        setMsg(`差距图已导出（${Math.max(1, Math.round(blob.size / 1024))} KB）`);
       } finally {
         disposeExportNode(node);
       }
@@ -2001,6 +2048,12 @@ export default function GroupPage() {
             打开展板 ↗
           </button>
         </div>
+        {exportFallback && (
+          <div className="alert good">
+            图片已生成。若浏览器没有自动下载，
+            <a href={exportFallback.url} download={exportFallback.filename}>点此保存 PNG</a>
+          </div>
+        )}
         <div className="row">
           <label className="pk-check">
             <input

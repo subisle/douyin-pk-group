@@ -48,12 +48,11 @@ export async function nodeToPngBlob(node: HTMLElement, options: ExportOptions = 
   const encoded = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
   try {
     const img = new Image();
-    img.src = encoded;
-    try {
-      await img.decode();
-    } catch (e) {
-      throw new Error(`SVG 无法解码（${width}×${height}）：${(e as Error).message}`);
-    }
+    await new Promise<void>((resolve, reject) => {
+      img.onload = () => resolve();
+      img.onerror = () => reject(new Error(`SVG 无法解码（${width}×${height}）`));
+      img.src = encoded;
+    });
 
     const canvas = document.createElement('canvas');
     canvas.width = Math.round(width * scale);
@@ -75,15 +74,18 @@ export async function nodeToPngBlob(node: HTMLElement, options: ExportOptions = 
   }
 }
 
-export function downloadBlob(blob: Blob, filename: string): void {
+export function downloadBlob(blob: Blob, filename: string): string {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
   a.download = filename;
+  a.rel = 'noopener';
   document.body.appendChild(a);
   a.click();
   a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 10_000);
+  // 页面同时保留一个手动下载链接：浏览器拦截自动下载时仍可落盘。
+  setTimeout(() => URL.revokeObjectURL(url), 120_000);
+  return url;
 }
 
 /* ------------------------------ 长图内容 ------------------------------ */
