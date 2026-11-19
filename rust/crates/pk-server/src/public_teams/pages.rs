@@ -400,6 +400,18 @@ mod pwa_tests {
     }
 
     #[test]
+    fn group_page_renders_rules_as_numbered_multiline_list() {
+        for token in [
+            "function groupRulesHtml(raw)",
+            "split(/\\r?\\n/)",
+            "</div><ol>",
+            "'<li>' + esc(s.replace(",
+        ] {
+            assert!(ST_PAGE.contains(token), "分组规则序号列表缺少：{token}");
+        }
+    }
+
+    #[test]
     fn positive_wave_zero_duration_stays_visible_but_is_marked_offline() {
         for token in [
             "const unplayed = !it.periodic && !noData && it.isLive === false;",

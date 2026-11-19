@@ -99,6 +99,13 @@ const groupNoticeSettings = (s: Partial<GroupNoticeSettings>): GroupNoticeSettin
   groupTypes: s.groupTypes ?? {},
 });
 
+function publicRulesFor(eventType: EventType, eventDate?: string): string {
+  const date = String(eventDate || '').trim();
+  const lines = date ? [`比赛日期：${date} 中午开始`] : [];
+  lines.push(...(rulesOf(eventType)?.items ?? []));
+  return lines.join('\n');
+}
+
 /* BREAK_AFTER_GROUP / REVIVAL_EVENTS 原先在这里各写了一份，与 BoardPage 重复
    （2026-10-17，审计 4-8）→ 统一从 './rules' 导入，见下面 import。 */
 
@@ -906,8 +913,8 @@ export default function GroupPage() {
           schedule: { start: startTime, intervalMin, breaks },
           display,
           eventDate: groupNotice?.groupNoticeEnabled ? groupNotice.groupNoticeEventDate : undefined,
-          // 展示端「比赛机制」：保存方案时自动带上当前赛事规则，避免漏配。
-          publicRules: rulesOf(eventType)?.items.join('；'),
+          // 展示端「比赛机制」：保存方案时自动带上比赛日期和当前赛事规则，展示端按行序号化。
+          publicRules: publicRulesFor(eventType, groupNotice?.groupNoticeEventDate),
           /* 数据日期也存进方案（2026-10-18）：载入方案后 `dates` 是空的，
            * 导出长图头部只能退回 `isoLocal()`，历史方案会被印成「导出当天」的日期。 */
           dates,

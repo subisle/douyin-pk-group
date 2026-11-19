@@ -1474,6 +1474,10 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .st-group-rule { margin-top:.5rem; padding:7px 10px; border-radius:10px;
   background:rgba(255,248,242,.82); border:1px solid rgba(255,217,201,.76);
   color:#92400E; font-size:11px; line-height:1.55; }
+.st-group-rule-head { margin-bottom:4px; color:#7C2D12; font-weight:800; }
+.st-group-rule ol { margin:0; padding-left:1.35rem; display:grid; gap:3px; }
+.st-group-rule li { padding-left:1px; }
+.st-group-rule li::marker { font-weight:700; color:#B45309; }
 /* 分组开放前：赛事预告 / 倒计时首屏。 */
 .st-group-notice { position:relative; overflow:hidden; isolation:isolate;
   min-height:430px; padding:30px 20px 24px; border-radius:28px;
@@ -7050,7 +7054,7 @@ function groupHtml(d, page, list) {
       '<span class="chip">' + nGroups + '组 · ' + nPlayers + '人</span></div>' +
       (meta ? '<div style="margin-top:.375rem;font-size:12px;color:var(--on-surface-variant)">' +
         esc(meta) + '</div>' : '') +
-      (d.rules ? '<div class="st-group-rule">比赛机制：' + esc(d.rules) + '</div>' : '') +
+      groupRulesHtml(d.rules) +
     '</div>' +
     (showGap ? '<div class="st-group-mode" role="tablist" aria-label="分组展示方式">' +
       '<button type="button" role="tab" data-gmode="groups" aria-selected="' + (mode !== 'gap') + '"' +
@@ -7107,6 +7111,20 @@ function groupHtml(d, page, list) {
     }), 0);
   }
   return html + '</div>';
+}
+
+function groupRulesHtml(raw) {
+  const text = String(raw || '').trim();
+  if (!text) return '';
+  let lines = text.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  // 兼容老方案的单行「规则1；规则2」格式，同时新方案使用逐行格式。
+  if (lines.length === 1) {
+    lines = lines[0].split(/[；;]/).map(s => s.trim()).filter(Boolean);
+  }
+  return '<div class="st-group-rule">' +
+    '<div class="st-group-rule-head">比赛机制</div><ol>' +
+    lines.map(s => '<li>' + esc(s.replace(/^\s*\d+[.、)]\s*/, '')) + '</li>').join('') +
+    '</ol></div>';
 }
 
 function groupGapHtml(d, groups) {
