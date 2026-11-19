@@ -153,10 +153,10 @@ fn new_public_token() -> Result<String, crate::routes::ApiError> {
     Ok(token)
 }
 
-/// 启动赛事并生成对外链接。
+/// 启动赛事并开放固定公开入口。
 ///
 /// 一次点击完成三件事：按绑定方案生成白天小组（幂等）、切换 running、签发随机
-/// public_token。已经开始过的赛事重复点击不会换链接，避免运营手滑把已发布地址换掉。
+/// public_token。`/live/` 始终展示最新进行中的赛事；token 路径仅保留兼容旧链接。
 pub async fn start_event(State(st): State<Arc<AppState>>, Path(id): Path<i64>) -> ApiResult {
     let event = store::live_event_get(&st, id)
         .await
@@ -171,14 +171,20 @@ pub async fn start_event(State(st): State<Arc<AppState>>, Path(id): Path<i64>) -
             "ok": true,
             "alreadyRunning": true,
             "publicToken": existing,
-            "path": format!("/live/{existing}"),
+            "path": "/live/",
+            "legacyPath": format!("/live/{existing}"),
             "event": event,
         })));
     }
 
-    let rules = store::live_event_rules(&st, id)
+    let mut rules = store::live_event_rules(&st, id)
         .await
         .ok_or_else(|| crate::routes::ApiError::bad_request("赛事不存在"))?;
+    // 赛事启动时固定本次口径：小组前 4 晋级、复活赛前 4 复活。
+    // 这里先生成小组再落 running，必须同时修正内存里的 rules，避免旧赛事
+    // 还带着 3 个晋级名额建出一批错误的 live_group。
+    rules.direct_qualify_per_group = 4;
+    rules.revival_qualify_per_room = 4;
     let plan_id = store::live_event_day_plan(&st, id).await.unwrap_or(0);
     if plan_id <= 0 {
         return Err(crate::routes::ApiError::bad_request(
@@ -223,7 +229,8 @@ pub async fn start_event(State(st): State<Arc<AppState>>, Path(id): Path<i64>) -
         "ok": true,
         "alreadyRunning": false,
         "publicToken": token,
-        "path": format!("/live/{token}"),
+        "path": "/live/",
+        "legacyPath": format!("/live/{token}"),
         "event": event,
     })))
 }
@@ -908,6 +915,44 @@ pub async fn room_scores(
     })))
 }
 
+/// 组装公开页快照。token 链接与固定的 `/live/` 入口共用同一份数据口径。
+async fn public_live_snapshot(st: &Arc<AppState>, event: Value) -> Value {
+    let event_id = event.get("id").and_then(Value::as_i64).unwrap_or(0);
+    let group_duration = event
+        .get("groupDurationSecs")
+        .and_then(Value::as_i64)
+        .unwrap_or(600);
+    let revival_duration = event
+        .get("revivalDurationSecs")
+        .and_then(Value::as_i64)
+        .unwrap_or(300);
+    let mut groups = store::live_public_groups(st, event_id).await;
+    for group in &mut groups {
+        let kind = group
+            .get("stageKind")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if let Some(obj) = group.as_object_mut() {
+            obj.insert(
+                "durationSecs".into(),
+                json!(if kind.contains("revival") {
+                    revival_duration
+                } else {
+                    group_duration
+                }),
+            );
+        }
+    }
+    let stages = store::live_stage_list(st, event_id).await;
+    json!({
+        "event": event,
+        "stages": stages,
+        "groups": groups,
+        "serverNow": chrono::Utc::now().to_rfc3339(),
+    })
+}
+
 /// 对外公开的赛事直播快照（不鉴权，只认启动时生成的随机 token）。
 ///
 /// 返回当前全部阶段与小组，包括赛前名单、每组最新分数、正式局状态。复活赛
@@ -931,41 +976,28 @@ pub async fn public_event(State(st): State<Arc<AppState>>, Path(token): Path<Str
                 "直播链接不存在或已失效",
             )
         })?;
-    let event_id = event.get("id").and_then(Value::as_i64).unwrap_or(0);
-    let group_duration = event
-        .get("groupDurationSecs")
-        .and_then(Value::as_i64)
-        .unwrap_or(600);
-    let revival_duration = event
-        .get("revivalDurationSecs")
-        .and_then(Value::as_i64)
-        .unwrap_or(300);
-    let mut groups = store::live_public_groups(&st, event_id).await;
-    for group in &mut groups {
-        let kind = group
-            .get("stageKind")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        if let Some(obj) = group.as_object_mut() {
-            obj.insert(
-                "durationSecs".into(),
-                json!(if kind.contains("revival") {
-                    revival_duration
-                } else {
-                    group_duration
-                }),
-            );
-        }
-    }
-    let stages = store::live_stage_list(&st, event_id).await;
-    let snapshot = json!({
-        "event": event,
-        "stages": stages,
-        "groups": groups,
-        "serverNow": chrono::Utc::now().to_rfc3339(),
-    });
+    let snapshot = public_live_snapshot(&st, event).await;
     public_live_cache_put(token, &snapshot);
+    Ok(Json(snapshot))
+}
+
+/// 固定公开入口 `/live/` 的数据：自动选择最近启动且仍在进行的赛事。
+/// 成功后与 token 快照完全同构；开赛前返回 404，前端保持轮询即可自动接上。
+pub async fn current_public_event(State(st): State<Arc<AppState>>) -> ApiResult {
+    const CACHE_KEY: &str = "@current";
+    if let Some(cached) = public_live_cache_get(CACHE_KEY) {
+        return Ok(Json(cached));
+    }
+    let event = store::live_event_current_public(&st)
+        .await
+        .ok_or_else(|| {
+            crate::routes::ApiError::with_status(
+                axum::http::StatusCode::NOT_FOUND,
+                "当前没有进行中的直播赛事",
+            )
+        })?;
+    let snapshot = public_live_snapshot(&st, event).await;
+    public_live_cache_put(CACHE_KEY, &snapshot);
     Ok(Json(snapshot))
 }
 

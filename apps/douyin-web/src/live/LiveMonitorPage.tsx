@@ -408,13 +408,13 @@ export default function LiveMonitorPage() {
       const r = await live.startEvent(eventId)
       setEvents(items => items.map(e => e.id === eventId ? r.event : e))
       await loadOverview()
-      window.open(r.path, '_blank', 'noopener')
+      window.open('/live/', '_blank', 'noopener')
     } catch (e: any) { alert(e?.message ?? String(e)) }
     finally { setBusy('') }
   }
 
-  async function copyPublicLink(token: string) {
-    const url = `${window.location.origin}/live/${token}`
+  async function copyPublicLink() {
+    const url = `${window.location.origin}/live/`
     try {
       await navigator.clipboard.writeText(url)
       alert('公开直播链接已复制')
@@ -590,15 +590,13 @@ export default function LiveMonitorPage() {
           </div>
           {cur.publicToken ? (
             <div className="lm-public-actions">
-              <a href={`/live/${cur.publicToken}`} target="_blank" rel="noreferrer">
-                /live/{cur.publicToken.slice(0, 8)}…
-              </a>
-              <button type="button" onClick={() => copyPublicLink(cur.publicToken)}>复制链接</button>
-              <button type="button" onClick={() => window.open(`/live/${cur.publicToken}`, '_blank', 'noopener')}>打开公开页</button>
+              <a href="/live/" target="_blank" rel="noreferrer">/live/</a>
+              <button type="button" onClick={copyPublicLink}>复制链接</button>
+              <button type="button" onClick={() => window.open('/live/', '_blank', 'noopener')}>打开公开页</button>
             </div>
           ) : (
             <button className="primary" type="button" onClick={startLive} disabled={!!busy || !cur.dayPlanId}>
-              {busy === 'start-live' ? '正在启动…' : '启动直播并生成链接'}
+              {busy === 'start-live' ? '正在启动…' : '启动直播并开放公开页'}
             </button>
           )}
         </div>

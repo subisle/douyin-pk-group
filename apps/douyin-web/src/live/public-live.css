@@ -12,8 +12,9 @@
   --plm-coral: #ff806b;
   position: relative;
   min-height: 100vh;
+  min-height: 100dvh;
   overflow: hidden;
-  padding: 22px clamp(16px, 4vw, 64px) 34px;
+  padding: max(22px, env(safe-area-inset-top)) clamp(16px, 4vw, 64px) max(34px, env(safe-area-inset-bottom));
   color: var(--plm-ink);
   background:
     radial-gradient(900px 520px at 8% -8%, rgba(111, 255, 194, .15), transparent 68%),
@@ -108,7 +109,7 @@
   .plm-hero-clock { border-right: 0; padding-right: 0; }
 }
 @media (max-width: 680px) {
-  .plm-shell { padding: 14px 11px 24px; }
+  .plm-shell { padding: max(14px, env(safe-area-inset-top)) 11px max(24px, env(safe-area-inset-bottom)); }
   .plm-header { display: block; padding-bottom: 17px; }
   .plm-header h1 { margin-top: 10px; font-size: 25px; }
   .plm-header-side { margin-top: 13px; }

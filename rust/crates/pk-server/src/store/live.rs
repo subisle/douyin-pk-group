@@ -145,9 +145,35 @@ pub async fn live_event_by_public_token(
     .await
     .ok()
     .flatten()?;
+    Some(public_live_event_json(&row))
+}
+
+/// 最新一场已启动的赛事。供固定的 `/live/` 公开入口使用，不需要运营在链接里带 token。
+pub async fn live_event_current_public(st: &AppState) -> Option<serde_json::Value> {
+    let pool = w(st).ok()?;
+    let row = sqlx::query(
+        "SELECT id, title, event_date, status, rule_version,
+                first_wave_group_count, group_rounds_per_group, direct_qualify_per_group,
+                revival_room_capacity, revival_qualify_per_room, promotion_group_count,
+                promotion_group_size, promotion_qualify_per_group, final_room_capacity,
+                settle_grace_secs, public_token, started_at, group_duration_secs,
+                revival_duration_secs, updated_at
+           FROM live_event
+          WHERE status = 'running' AND public_token <> ''
+          ORDER BY started_at DESC NULLS LAST, id DESC
+          LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()?;
+    Some(public_live_event_json(&row))
+}
+
+fn public_live_event_json(row: &sqlx::postgres::PgRow) -> serde_json::Value {
     let g = |c: &str| row.try_get::<i32, _>(c).unwrap_or(0);
     let s = |c: &str| row.try_get::<String, _>(c).unwrap_or_default();
-    Some(serde_json::json!({
+    serde_json::json!({
         "id": row.try_get::<i64, _>("id").unwrap_or(0),
         "title": s("title"),
         "eventDate": s("event_date"),
@@ -170,7 +196,7 @@ pub async fn live_event_by_public_token(
             "finalRoomCapacity": g("final_room_capacity"),
             "settleGraceSecs": g("settle_grace_secs"),
         },
-    }))
+    })
 }
 
 fn live_event_json(r: &sqlx::postgres::PgRow) -> serde_json::Value {

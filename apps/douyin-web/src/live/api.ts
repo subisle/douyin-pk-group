@@ -239,6 +239,7 @@ export const live = {
     alreadyRunning: boolean
     publicToken: string
     path: string
+    legacyPath?: string
     event: LiveEvent
   }>(`/api/live/events/${id}/start`, { method: 'POST' }),
 
@@ -269,6 +270,9 @@ export const live = {
   /** 独立房间监控：不关联 event / group，只按 web_rid 取最新一局。 */
   roomScores: (webRid: string) => api<StandaloneRoomScores>(`/api/live/rooms/${webRid}`),
 
+  /** 固定公开入口：自动展示最近启动且仍在进行的赛事。 */
+  publicCurrent: () => api<PublicLiveSnapshot>('/api/public/live'),
+  /** 旧 token 链接兼容入口。 */
   publicEvent: (token: string) => api<PublicLiveSnapshot>(`/api/public/live/${encodeURIComponent(token)}`),
 
   bindPlans: (id: number, dayPlanId?: number, nightPlanId?: number) =>

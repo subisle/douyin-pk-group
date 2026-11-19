@@ -144,7 +144,7 @@ function sortGroups<T extends LiveGroup>(groups: T[]): T[] {
   return [...groups].sort((a, b) => stageIndex(a.stageKind) - stageIndex(b.stageKind) || a.seq - b.seq)
 }
 
-export default function PublicLiveMonitorPage({ token }: { token: string }) {
+export default function PublicLiveMonitorPage({ token }: { token?: string }) {
   const [snapshot, setSnapshot] = useState<PublicLiveSnapshot | null>(null)
   const [error, setError] = useState('')
   const [selectedStage, setSelectedStage] = useState('')
@@ -156,7 +156,7 @@ export default function PublicLiveMonitorPage({ token }: { token: string }) {
   const load = useCallback(async () => {
     const seq = ++requestSeq.current
     try {
-      const next = await live.publicEvent(token)
+      const next = token ? await live.publicEvent(token) : await live.publicCurrent()
       if (seq !== requestSeq.current) return
       setSnapshot(next)
       const server = Date.parse(next.serverNow)
@@ -286,9 +286,9 @@ export default function PublicLiveMonitorPage({ token }: { token: string }) {
     return (
       <div className="plm-shell plm-centered">
         <div className="plm-error-card">
-          <span>直播链接不可用</span>
+          <span>{token ? '直播链接不可用' : '直播尚未开始'}</span>
           <h1>{error}</h1>
-          <p>请向运营确认最新公开链接。</p>
+          <p>{token ? '请向运营确认最新公开链接。' : '当前没有进行中的赛事，开赛后页面会自动刷新。'}</p>
         </div>
       </div>
     )
