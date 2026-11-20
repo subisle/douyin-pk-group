@@ -794,7 +794,7 @@ pub async fn push_round_now(
     Ok(Json(json!({ "ok": true, "sent": n })))
 }
 
-/// 生成某一波的复活赛分组：把该波淘汰者**平均**分进若干房间，每房前 N 晋级。
+/// 开放某一波的空复活赛位置；实际名单由直播采集连麦人员决定。
 #[derive(Deserialize)]
 pub struct RevivalQuery {
     pub wave: Option<String>, // first | rest
@@ -811,10 +811,10 @@ pub async fn build_revival(
     } else {
         StageKind::FirstWaveRevival
     };
-    let rooms = live::build_revival_rooms(&st, id, kind).await?;
+    let rooms = live::open_empty_revival_groups(&st, id, kind).await?;
     crate::events::emit(
         crate::events::SCOPE_LIVE,
-        format!("赛事 {id} 复活赛已生成 {} 个房间", rooms),
+        format!("赛事 {id} 已开放 {} 个复活赛位置", rooms),
     );
     Ok(Json(json!({ "rooms": rooms })))
 }
