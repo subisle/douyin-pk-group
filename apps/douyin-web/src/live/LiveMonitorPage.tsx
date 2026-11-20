@@ -486,15 +486,6 @@ export default function LiveMonitorPage() {
     finally { setBusy('') }
   }
 
-  async function step(label: string, fn: () => Promise<unknown>) {
-    if (busy) return
-    if (!confirm(label)) return
-    setBusy(label)
-    try { await fn(); await loadOverview() }
-    catch (e: any) { alert(e?.message ?? String(e)) }
-    finally { setBusy('') }
-  }
-
   const currentGroup = ov?.groups.find(g => g.id === groupId)
   const maxScore = Math.max(1, ...seats.map(s => Number(s.score) || 0))
   const groupWave = seats.reduce((sum, s) => sum + (Number(s.score) || 0), 0)
@@ -755,25 +746,6 @@ export default function LiveMonitorPage() {
                 </div>
               ))}
             </div>
-          </div>
-
-          <div className="lm-actions">
-            <h3>赛程推进</h3>
-            <button disabled={!!busy || !eventId} onClick={() => step('生成白天小组？', () => live.buildDayGroups(eventId))}>
-              生成白天小组
-            </button>
-            <button disabled={!!busy || !eventId} onClick={() => step('冻结第一波晋级结果？', () => live.freezeStage(eventId, 'first', 'direct'))}>
-              冻结第一波晋级
-            </button>
-            <button disabled={!!busy || !eventId} onClick={() => step('补生成第一波复活赛？（前四组定稿后会自动生成）', () => live.buildRevival(eventId, 'first'))}>
-              补生成第一波复活赛
-            </button>
-            <button disabled={!!busy || !eventId} onClick={() => step('生成晚上晋级赛？', () => live.buildPromotion(eventId))}>
-              生成晋级赛
-            </button>
-            <button disabled={!!busy || !eventId} onClick={() => step('晋级赛全部定稿后生成决赛？', () => live.buildFinal(eventId))}>
-              生成决赛
-            </button>
           </div>
 
           {ov.qualifiers.length > 0 && (

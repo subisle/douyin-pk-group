@@ -1,4 +1,4 @@
-/* 消息下发页（/admin/send，docs/23 §5/§6）：
+/* 消息通知页（/admin/send，docs/23 §5/§6）：
  * - 编辑卡片 + 收件人三种圈人（多选 / 按师傅 / 批量）；
  * - 发送确认（N>100 二次确认）→ 跳转发送详情（3s 轮询直到无 pending）；
  * - 发送历史列表。
@@ -435,7 +435,7 @@ export default function SendPage() {
       <section className="card">
         <div className="row" style={{ margin: 0 }}>
           <span className="send-intro">
-            <b>消息下发</b>
+            <b>消息通知</b>
             <span className="hint" style={{ marginLeft: 8 }}>
               管理员手动给主播发文字 / 师门日报图（微信机器人私聊 + 展示端「我的」页弹窗），
               与每日自动推送互不相干，不会顶掉自动推送的去重。

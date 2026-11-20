@@ -5,7 +5,7 @@ import { subscribeChanges } from './useAutoRefresh'
 import { FULLSCREEN_ROUTES, ROUTES, routeHref, useRoute, type RouteKey } from './lib/router'
 
 /* 路由级代码分割（2026-10-17）：各页面懒加载，首屏只拉后台壳 + 数据概况页，
- * 其余页（主播管理 / 导入 / 族谱 / 公告 / 机器人 / 下发 / PK）切到才加载。
+ * 其余页（主播管理 / 导入 / 族谱 / 公告 / 机器人 / 消息通知 / PK）切到才加载。
  * pk.css 也从 App 移到 GroupPage/BoardPage，只有进 PK 页才拉。
  * 之前 10 个页面全打进一个 449KB 的 bundle，首屏一次全下载。 */
 const ImportPage = lazy(() => import('./ImportPage'))
@@ -16,7 +16,6 @@ const AnnouncePage = lazy(() => import('./AnnouncePage'))
 const BotPage = lazy(() => import('./BotPage'))
 const SendPage = lazy(() => import('./SendPage'))
 const LiveMonitorPage = lazy(() => import('./live/LiveMonitorPage'))
-const RoomMonitorPage = lazy(() => import('./live/RoomMonitorPage'))
 const GroupPage = lazy(() => import('./pk/GroupPage'))
 const BoardPage = lazy(() => import('./pk/BoardPage'))
 
@@ -37,7 +36,6 @@ const NAV_ICONS: Record<RouteKey, string> = {
   bots: '🤖',
   send: '📢',
   live: '📡',
-  'live-room': '🎯',
 }
 
 export default function App() {
@@ -276,7 +274,6 @@ function AdminApp() {
           {route === 'bots' && <BotPage />}
           {route === 'send' && <SendPage />}
           {route === 'live' && <LiveMonitorPage />}
-          {route === 'live-room' && <RoomMonitorPage />}
         </Suspense>
       </main>
       {toast && (

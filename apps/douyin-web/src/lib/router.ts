@@ -6,7 +6,7 @@
  *   history 路由。
  * - 开发：vite dev 直接挂在根（`/group`），base 自动识别为空串。
  *
- * 不引第三方路由库：页面就 9 个常量路径，手写一份够用也好读。
+ * 不引第三方路由库：页面路由集中在一处，手写一份够用也好读。
  */
 import { useCallback, useEffect, useState } from 'react'
 
@@ -25,7 +25,6 @@ export type RouteKey =
   | 'bots'
   | 'send'
   | 'live'
-  | 'live-room'
 
 export const DEFAULT_ROUTE: RouteKey = 'data'
 
@@ -41,9 +40,8 @@ export const ROUTES: { key: RouteKey; path: string; label: string }[] = [
   { key: 'group', path: '/group', label: 'PK 分组' },
   { key: 'announce', path: '/announcements', label: '公告' },
   { key: 'bots', path: '/bots', label: '机器人' },
-  { key: 'send', path: '/send', label: '消息下发' },
+  { key: 'send', path: '/send', label: '消息通知' },
   { key: 'live', path: '/live', label: '直播分数监控' },
-  { key: 'live-room', path: '/live-room', label: '独立直播监控' },
 ]
 
 /** 全屏独立路由：有地址（可收藏/刷新不丢）但不进侧边栏，App 对它整屏渲染无壳。 */

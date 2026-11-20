@@ -39,7 +39,7 @@ DIST="$APP/dist"
 KEY_DIR="$APP/keystore"
 KEYSTORE="$KEY_DIR/daily-release.jks"
 KEY_ENV="$KEY_DIR/keystore.env"
-OUT_APK="$DIST/每日数据-v1.3-release.apk"
+OUT_APK="$DIST/每日数据-v1.4-release.apk"
 
 die() { printf '错误: %s\n' "$*" >&2; exit 1; }
 require_cmd() { command -v "$1" >/dev/null 2>&1 || die "缺少命令 $1"; }
@@ -66,7 +66,7 @@ code = re.search(r'android:versionCode="(\d+)"', manifest)
 name = re.search(r'android:versionName="([^"]+)"', manifest)
 if not code or not name:
     raise SystemExit('Manifest 缺少 versionCode/versionName')
-if code.group(1) != '4' or name.group(1) != '1.3':
+if code.group(1) != '5' or name.group(1) != '1.4':
     raise SystemExit(f'版本与构建脚本不一致: {name.group(1)} ({code.group(1)})')
 print(f'Android version: {name.group(1)} ({code.group(1)})')
 PY
@@ -196,8 +196,8 @@ PY
   --java "$BUILD/gen" \
   --min-sdk-version 26 \
   --target-sdk-version 35 \
-  --version-code 4 \
-  --version-name 1.3 \
+  --version-code 5 \
+  --version-name 1.4 \
   $(find "$BUILD/res-flat" -name '*.flat' | sort)
 
 javac \
@@ -240,9 +240,9 @@ import sys
 text = Path(sys.argv[1]).read_text()
 code = re.search(r"versionCode='([^']+)'", text)
 name = re.search(r"versionName='([^']+)'", text)
-if not code or code.group(1) != '4':
+if not code or code.group(1) != '5':
     raise SystemExit(f'aapt versionCode 校验失败: {code.group(1) if code else "missing"}')
-if not name or name.group(1) != '1.3':
+if not name or name.group(1) != '1.4':
     raise SystemExit(f'aapt versionName 校验失败: {name.group(1) if name else "missing"}')
 print(f'aapt verified: versionCode={code.group(1)} versionName={name.group(1)}')
 PY

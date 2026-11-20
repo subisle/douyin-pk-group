@@ -24,7 +24,7 @@ def exercise(page, latest: str):
         if url == "http://app.test/":
             return request.fulfill(status=200, content_type="text/html", body=HTML)
         if "/api/public/app-version" in url:
-            body = f'{{"webVersion":"{latest}","android":{{"versionCode":4,"versionName":"1.3"}}}}'
+            body = f'{{"webVersion":"{latest}","android":{{"versionCode":5,"versionName":"1.4"}}}}'
             return request.fulfill(status=200, content_type="application/json", body=body)
         if "/api/public/announcements" in url:
             return request.fulfill(status=200, content_type="application/json",

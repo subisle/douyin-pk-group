@@ -74,7 +74,7 @@ export function logout() {
   setToken(null)
 }
 
-/* ---------------- 管理员消息下发（docs/23 §5.5，/api/admin/send/*） ----------------
+/* ---------------- 管理员消息通知（docs/23 §5.5，/api/admin/send/*） ----------------
  * 鉴权与现有 admin api 相同：api() 自动带 Authorization: Bearer token。
  * 圈人只传「意图」（docs/23 §5.2），展开与校验都在服务端做，前端不给全量 id 兜底。 */
 

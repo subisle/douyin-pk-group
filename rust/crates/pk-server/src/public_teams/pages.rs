@@ -26,9 +26,9 @@ const ANDROID_APK: &[u8] = include_bytes!("assets/pwa/daily-release.apk");
 const ANDROID_APK_SHA256: &[u8] = include_bytes!("assets/pwa/daily-release.apk.sha256");
 
 /// 展示页与 Android 安装包的公开版本契约。发布时与 APK Manifest / 构建脚本同步递增。
-const WEB_APP_VERSION: &str = "2026.11.15.1";
-const ANDROID_VERSION_CODE: u64 = 4;
-const ANDROID_VERSION_NAME: &str = "1.3";
+const WEB_APP_VERSION: &str = "2026.11.20.1";
+const ANDROID_VERSION_CODE: u64 = 5;
+const ANDROID_VERSION_NAME: &str = "1.4";
 
 fn app_version_payload() -> serde_json::Value {
     serde_json::json!({

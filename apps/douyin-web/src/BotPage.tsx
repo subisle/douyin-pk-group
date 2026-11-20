@@ -848,7 +848,7 @@ function PublicSettingsCard() {
 
   /* 推送图字段显隐（2026-10-17 用户口径「字段后端支持显示和不显示」）：
      config `push_report_fields` 一份配置同时作用于日报图（月榜图）、师门日报图，
-     以及「消息下发」里发的师门日报图；缺字段 = 显示（不会误伤没动过的列）。 */
+     以及「消息通知」里发的师门日报图；缺字段 = 显示（不会误伤没动过的列）。 */
   const PUSH_FIELD_GROUPS: {
     key: 'daily' | 'lineage'
     title: string
@@ -1143,7 +1143,7 @@ function PublicSettingsCard() {
           <h3 className="flag-title">推送图字段（显示 / 隐藏）</h3>
           <p className="hint" style={{ margin: '0 0 4px' }}>
             字段显隐由<b>后端配置</b>（config <code>push_report_fields</code>）：微信推送、
-            「消息下发」里的师门日报图都按这里的勾选渲染。关掉的列 = 图里表头与数值一起不渲染，
+            「消息通知」里的师门日报图都按这里的勾选渲染。关掉的列 = 图里表头与数值一起不渲染，
             不会因为列少了而错位；<b>每日之星</b>默认显示在日报图头部（与日期同一行），
             关掉后头部只留日期。
           </p>

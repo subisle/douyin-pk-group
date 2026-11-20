@@ -344,8 +344,6 @@ pub async fn board_config_put(
 mod tests {
     use super::*;
 
-    /// 合法配置原样通过（eventType 老叫法顺带被归一到新白名单值）
-    #[test]
     /// 策略白名单必须与 `pk_core::Strategy` 的**全部变体**一致（2026-10-17，审计 4-2）。
     /// 两侧原来各写一份字符串，pk-core 新增变体时后端会静默拒绝、前端 Types 却能列出。
     /// 这里逐个变体做「序列化 → 反序列化」往返：枚举里有的必须能通过后端校验，

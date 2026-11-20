@@ -190,7 +190,7 @@ export default function VisitPage() {
       <p className="hint">
         展示端只对安徽 / 河南 / 江苏开放（后端按 IP 归属地判定，多数据源投票），
         白名单是地区之外的额外放行 IP；其余 IP 一律提示「您的 ip 不在授权范围内」。
-        这里只记 IP 访问日志（登录了带账号，没登录只记 IP），不再记录路径。
+        每行显示访问 IP 和登录账号；未登录账号显示「未登录」，不再记录路径。
       </p>
 
       {stats && (
@@ -420,12 +420,12 @@ export default function VisitPage() {
                 <thead>
                   <tr>
                     <th>时间</th>
-                    <th>类型</th>
                     <th>IP</th>
+                    <th>账号</th>
+                    <th>类型</th>
                     <th>归属地</th>
                     <th>运营商</th>
                     <th>结果</th>
-                    <th>账号</th>
                     <th>团别</th>
                   </tr>
                 </thead>
@@ -433,7 +433,6 @@ export default function VisitPage() {
                   {pager.slice(items).map((v) => (
                     <tr key={v.id}>
                       <td>{v.createdAt}</td>
-                      <td>{KIND_LABEL[v.kind] ?? v.kind}</td>
                       <td
                         title={v.ip ? `${v.ip} · 点击查询该 IP` : undefined}
                         style={{ cursor: v.ip ? 'pointer' : undefined }}
@@ -445,6 +444,10 @@ export default function VisitPage() {
                       >
                         <span className="cell-clip">{v.ip || '—'}</span>
                       </td>
+                      <td title={v.account || undefined}>
+                        <span className="cell-clip">{v.account || '未登录'}</span>
+                      </td>
+                      <td>{KIND_LABEL[v.kind] ?? v.kind}</td>
                       <td title={v.source ? `来源：${v.source}` : undefined}>{place(v)}</td>
                       <td>{v.isp || '—'}</td>
                       <td>
@@ -458,9 +461,6 @@ export default function VisitPage() {
                             {v.loginOk ? '成功' : '失败'}
                           </span>
                         )}
-                      </td>
-                      <td title={v.account || undefined}>
-                        <span className="cell-clip">{v.account || '—'}</span>
                       </td>
                       <td>{TEAM_LABEL[v.team] ?? (v.team || '—')}</td>
                     </tr>

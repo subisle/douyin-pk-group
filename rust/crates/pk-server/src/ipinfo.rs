@@ -355,7 +355,7 @@ pub async fn ip_gate_mw(
     }
     let query = req.uri().query().unwrap_or_default().to_string();
     let team = team_from_path(&path);
-    let account = account_from_query(&query);
+    let account = account_from_request(&st, req.headers(), &query).await;
     let geo = geo_for_ip(&st, &ip).await.unwrap_or_default();
     // 访问授权（2026-10-11）：只放行安徽 / 河南，以及白名单（环境变量
     // IP_GATE_ALLOWLIST + 数据库 ip_allowlist 表）里的例外 IP；其余一律 403。
@@ -439,7 +439,25 @@ fn team_from_path(path: &str) -> String {
     segs.next().unwrap_or_default().to_string()
 }
 
-/// my token 是登录态唯一的凭据：能从 query 里认出来就把账号带进访问日志
+/// 先从 `X-My-Token` 认登录账号（当前前端唯一发送方式），再兼容旧 query。
+async fn account_from_request(st: &AppState, headers: &HeaderMap, query: &str) -> String {
+    let token = headers
+        .get("x-my-token")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if let Some(token) = token {
+        if let Some((_, _, name)) = crate::public_teams::admin::my_token_peek(token) {
+            return name;
+        }
+        if let Some((_, _, name)) = crate::public_teams::admin::my_token_restore(st, token).await {
+            return name;
+        }
+    }
+    account_from_query(query)
+}
+
+/// 旧 query token 兼容：只用于日志账号回显，不参与鉴权。
 fn account_from_query(query: &str) -> String {
     for pair in query.split('&') {
         let Some((k, v)) = pair.split_once('=') else {
@@ -1176,14 +1194,13 @@ pub async fn log_access(st: &ArcState, e: AccessLog<'_>) {
         .execute(pool)
         .await
     } else {
-        /* 去重：dedup_key = ip|5 分钟桶，靠唯一键 + ON CONFLICT 精确挡住并发
-        重复请求（先 SELECT 再 INSERT 在并发下会放过一批，INSERT..SELECT 自查同表
-        还会在多实例场景产生锁等待）。窗口按 5 分钟桶对齐，不做滑动窗口。 */
+        /* 去重：dedup_key = ip|账号|5 分钟桶。账号也入 key，避免同一 IP 下
+        不同登录用户的访问互相吞掉；同账号重复接口请求仍只记一行。 */
         let bucket = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() / (ACCESS_DEDUP_MINUTES as u64 * 60))
             .unwrap_or(0);
-        let dedup_key = format!("{ip}|{bucket}");
+        let dedup_key = format!("{ip}|{account}|{bucket}");
         sqlx::query(&crate::pq::rewrite(
             "INSERT INTO access_logs \
              (kind, ip, province, city, isp, geo_source, team, path, account_name, allowed, login_ok, dedup_key) \
