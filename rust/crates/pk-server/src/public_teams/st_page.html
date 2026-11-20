@@ -3111,6 +3111,7 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .plm-linkmic-state b { font-weight: 700; }
 
 /* 阶段切换：白玻璃胶囊，当前阶段用展示端紫蓝主色。 */
+.plm-stage-nav { position: relative; }
 .plm-stage-tabs {
   display: flex;
   gap: 8px;
@@ -3143,6 +3144,43 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 }
 .plm-stage-tabs span { display: block; font-size: 12px; font-weight: 800; }
 .plm-stage-tabs small { display: block; margin-top: 2px; font-size: 8px; opacity: .72; white-space: nowrap; }
+.plm-stage-arrow {
+  position: absolute;
+  z-index: 3;
+  top: calc(50% - 2px);
+  width: 34px;
+  height: 34px;
+  transform: translateY(-50%);
+  border: 1px solid rgba(76,74,202,.18);
+  border-radius: 50%;
+  color: var(--plm-primary);
+  background: rgba(255,255,255,.94);
+  box-shadow: 0 5px 16px rgba(76,74,202,.18);
+  font-size: 24px;
+  font-weight: 800;
+  line-height: 30px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .16s ease, transform .16s ease;
+}
+.plm-stage-arrow.is-left { left: -4px; }
+.plm-stage-arrow.is-right { right: -4px; }
+.plm-stage-arrow.is-visible { opacity: 1; pointer-events: auto; }
+.plm-stage-arrow:active { transform: translateY(-50%) scale(.92); }
+.plm-stage-swipe-hint {
+  position: absolute;
+  right: 2px;
+  bottom: -5px;
+  color: var(--plm-muted);
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: .05em;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .16s ease;
+}
+.plm-stage-nav.is-overflow { padding-bottom: 12px; }
+.plm-stage-nav.is-overflow .plm-stage-swipe-hint { opacity: 1; }
 
 .plm-content { padding-top: 4px; }
 .plm-section-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; margin: 5px 0 10px; }
@@ -10337,6 +10375,43 @@ function liveStageShortLabel(kind) {
   const meta = LIVE_STAGE_META[kind];
   return meta ? (meta.session ? meta.session + ' · ' : '') + meta.short : (kind || '比赛');
 }
+function liveStageNavHtml(tabsHtml, ariaLabel) {
+  return '<div class="plm-stage-nav">' +
+    '<button type="button" class="plm-stage-arrow is-left" data-stage-scroll="-1" aria-label="向左查看更多比赛阶段">‹</button>' +
+    '<nav class="plm-stage-tabs" aria-label="' + esc(ariaLabel) + '">' + tabsHtml + '</nav>' +
+    '<button type="button" class="plm-stage-arrow is-right" data-stage-scroll="1" aria-label="向右查看更多比赛阶段">›</button>' +
+    '<span class="plm-stage-swipe-hint">左右滑动查看更多</span></div>';
+}
+function bindLiveStageNav(root) {
+  (root || document).querySelectorAll('.plm-stage-nav').forEach((wrap) => {
+    const nav = wrap.querySelector('.plm-stage-tabs');
+    const left = wrap.querySelector('[data-stage-scroll="-1"]');
+    const right = wrap.querySelector('[data-stage-scroll="1"]');
+    if (!nav || !left || !right) return;
+    const update = () => {
+      const max = Math.max(0, nav.scrollWidth - nav.clientWidth);
+      const overflow = max > 8;
+      wrap.classList.toggle('is-overflow', overflow);
+      left.classList.toggle('is-visible', overflow && nav.scrollLeft > 4);
+      right.classList.toggle('is-visible', overflow && nav.scrollLeft < max - 4);
+    };
+    const step = (dir) => {
+      nav.scrollBy({
+        left: dir * Math.max(150, Math.round(nav.clientWidth * .72)),
+        behavior: 'smooth',
+      });
+    };
+    left.onclick = () => step(-1);
+    right.onclick = () => step(1);
+    nav.addEventListener('scroll', update, { passive: true });
+    requestAnimationFrame(() => {
+      const active = nav.querySelector('button.is-active');
+      if (active) active.scrollIntoView({ inline: 'center', block: 'nearest' });
+      update();
+    });
+    setTimeout(update, 80);
+  });
+}
 function liveGroupResultTag(kind, qualified, position) {
   if (String(kind || '').includes('revival')) return qualified ? '复活区' : '淘汰区';
   if (kind === 'promotion') return position === 1 ? '进决赛' : '止步';
@@ -10607,7 +10682,7 @@ function liveRenderView() {
     esc(activePhase ? activePhase.countdown : '--:--') + '</b>' +
     '<span class="plm-linkmic-state is-' + (activePhase ? activePhase.tone : 'idle') + '"><i></i><b>' +
     esc(activePhase ? activePhase.linkmic : '等待连麦') + '</b><small class="plm-score-mode">' + esc(liveScoreMode(currentGroup)) + '</small></span></div></section>' +
-    '<nav class="plm-stage-tabs" aria-label="比赛阶段">' + stageTabs + '</nav>' +
+    liveStageNavHtml(stageTabs, '比赛阶段') +
     '<main class="plm-content">' + finalPodium + '<div class="plm-section-head"><div><span class="plm-kicker">分组与实时分数</span>' +
     '<h2>' + esc(selectedMeta.title) + '</h2></div><div class="plm-section-hint"><span>' + esc(selectedMeta.hint) + '</span><span>' +
     esc(liveStageStatusLabel(selectedStageInfo)) + '</span></div></div>' + cards + '</main>' +
@@ -10623,6 +10698,7 @@ function liveRenderView() {
     };
   });
   bindLiveModeSwitch(box);
+  bindLiveStageNav(box);
   $('mhTitle').textContent = '比赛监控';
   const eventTitle = liveEventDisplayTitle(event);
   $('mhSub').textContent = 'LIVE · ' + eventTitle;
@@ -10889,10 +10965,11 @@ function liveHistoryDetailHtml(snapshot) {
     '<button type="button" class="phm-back" id="phmBack"><span class="material-symbols-outlined">arrow_back</span>返回赛事列表</button>' +
     '<section class="phm-event-hero"><span class="plm-kicker">正式比赛成绩</span><h2>' + esc(liveEventDisplayTitle(event)) + '</h2>' +
     '<p>' + esc(event.eventDate || '') + ' · 比赛分不计入音浪、时长和收益</p></section>' +
-    '<nav class="plm-stage-tabs" aria-label="历史阶段">' + tabs + '</nav>' + content + '</div>';
+    liveStageNavHtml(tabs, '历史阶段') + content + '</div>';
 }
 
 function bindLiveHistoryView() {
+  bindLiveStageNav($('view'));
   bindLiveModeSwitch($('view'));
   document.querySelectorAll('[data-history-month]').forEach((btn) => {
     btn.onclick = () => {
