@@ -388,6 +388,9 @@ const OPEN_PREFIXES: &[&str] = &[
     "/lineage/",
     "/resources",
     "/resource",
+    /* 比赛监控已融入展示端主壳，和 /st/m 一样属于公开页面；
+       token 历史深链 /live/{token} 也一起放行。 */
+    "/live/",
     "/my/",
     "/group/",
     /* 「微信对接」独立短路径（2026-10-17 修复，审计 5-P0）：
@@ -869,6 +872,8 @@ mod tests {
             "/reports",
             "/groups",
             "/lineage2",
+            "/livex",
+            "/live-page",
         ] {
             assert!(!is_open(p), "{p} 不该被白名单放过");
         }
@@ -897,6 +902,9 @@ mod tests {
             "/group",
             "/report",
             "/lineage",
+            "/live",
+            "/live/",
+            "/live/0123456789abcdef0123456789abcdef",
             "/resources",
             "/resource",
         ] {

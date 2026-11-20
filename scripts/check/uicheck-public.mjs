@@ -389,10 +389,28 @@ try {
     await shot(ws, '06-my.png')
   })
 
-  /* 6. 深链（等价刷新）：关掉的页要落到还开着的第一页，这也是正确行为 */
-  await section('6. 深链直达 / 刷新不丢页', async () => {
+  /* 6. 比赛监控：必须融入主站壳层，不能跳成独立页面 */
+  await section('6. 比赛监控融入主站', async () => {
+    await navTo(ws, 'data')
+    await evaluate(ws, `window.__liveIntegratedMarker = 'yes'`)
+    await navTo(ws, 'live')
+    await sleep(1200)
+    expect('比赛监控地址', await evaluate(ws, 'location.pathname'), '/live/')
+    truthy('比赛监控保持同一页面实例', await evaluate(ws, `window.__liveIntegratedMarker === 'yes'`))
+    truthy('主站底部导航仍在', await evaluate(ws, `!!document.getElementById('navRow') && getComputedStyle(document.getElementById('navRow')).display !== 'none'`))
+    truthy('主站比赛监控按钮选中', await evaluate(ws, `document.getElementById('navLive')?.classList.contains('on') === true`))
+    truthy('直播内容已渲染到主站 #view', await evaluate(ws, `!!document.querySelector('#view .plm-shell.is-integrated')`))
+    await assertViewHealthy(ws, '比赛监控')
+    const stageCount = await evaluate(ws, `document.querySelectorAll('[data-live-stage]').length`)
+    truthy(`比赛阶段可切换（${stageCount} 个）`, stageCount > 0)
+    await shot(ws, '06-live-integrated.png')
+  })
+
+  /* 7. 深链（等价刷新）：关掉的页要落到还开着的第一页，这也是正确行为 */
+  await section('7. 深链直达 / 刷新不丢页', async () => {
     const wantOf = {
       '/report': 'data',
+      '/live/': 'live',
       '/group/mid': settings.groupEnabled === false ? 'data' : 'group',
       '/lineage': settings.lineageEnabled === false ? 'data' : 'lineage',
       '/my': settings.loginRequired === false ? 'data' : 'my',
