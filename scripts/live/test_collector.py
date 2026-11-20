@@ -1,6 +1,7 @@
 import time
 import unittest
 import json
+from unittest import mock
 
 from collector import build_ingest_payload, parse_linkmic, to_observation
 
@@ -48,6 +49,7 @@ class SnapshotFreshnessTests(unittest.TestCase):
         self.assertFalse(fresh)
         self.assertEqual(obs["health"], "error")
         self.assertNotIn("battle", obs)
+
 
     def test_fresh_snapshot_keeps_battle_scores(self):
         now = time.time()
@@ -374,6 +376,26 @@ class PureWebsocketCollectorTests(unittest.TestCase):
                                         40000, state.battle_updated_mono, 50.0, 4.0)
         self.assertFalse(fresh)
         self.assertNotIn("battle", obs)
+
+
+class RuntimeLimitTests(unittest.TestCase):
+    def test_invalid_live_max_minutes_falls_back_to_six_hours(self):
+        import collector_ws as c
+
+        with mock.patch.dict("os.environ", {"LIVE_MAX_MINUTES": "invalid"}):
+            self.assertEqual(c._env_float("LIVE_MAX_MINUTES", c.DEFAULT_MAX_MINUTES), 360.0)
+        with mock.patch.dict("os.environ", {"LIVE_MAX_MINUTES": "90"}):
+            self.assertEqual(c._env_float("LIVE_MAX_MINUTES", c.DEFAULT_MAX_MINUTES), 90.0)
+
+
+class RuntimeLimitAsyncTests(unittest.IsolatedAsyncioTestCase):
+    async def test_max_runtime_sets_stop_event(self):
+        import asyncio
+        import collector_ws as c
+
+        stop = asyncio.Event()
+        await c._stop_after_minutes(stop, 0.001)
+        self.assertTrue(stop.is_set())
 
 
 if __name__ == "__main__":

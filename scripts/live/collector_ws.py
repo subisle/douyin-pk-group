@@ -59,6 +59,7 @@ from collector import (  # noqa: E402
 
 DEFAULT_API = "http://127.0.0.1:8787"
 DEFAULT_INTERVAL = 0.25
+DEFAULT_MAX_MINUTES = 360.0
 DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -958,6 +959,9 @@ async def run_room(
                     else await asyncio.to_thread(api.ingest_room, web_rid, obs)
                 )
                 ok = result is not None
+                if result and result.get("phase") == "event_finished":
+                    print(f"[stop] {web_rid} 赛事已结束，停止直播采集", file=sys.stderr)
+                    stop.set()
                 print(
                     f"[poll] {web_rid} battle={state.battle_id or '-'} "
                     f"phase={(result or {}).get('phase', '?')} users={len(state.scores)}",
@@ -1131,6 +1135,17 @@ async def _sleep_or_stop(stop: asyncio.Event, seconds: float) -> None:
         pass
 
 
+async def _stop_after_minutes(stop: asyncio.Event, minutes: float) -> None:
+    seconds = max(0.0, float(minutes)) * 60.0
+    if seconds <= 0:
+        await stop.wait()
+        return
+    await _sleep_or_stop(stop, seconds)
+    if not stop.is_set():
+        print(f"[stop] 达到最大运行时间 {minutes:g} 分钟，停止直播采集", file=sys.stderr)
+        stop.set()
+
+
 async def async_main(args: argparse.Namespace) -> int:
     if not args.dry_run and not args.token:
         print("缺少 LIVE_COLLECTOR_TOKEN / --token；本地验证可加 --dry-run", file=sys.stderr)
@@ -1149,13 +1164,30 @@ async def async_main(args: argparse.Namespace) -> int:
         except (NotImplementedError, RuntimeError):
             pass
 
-    tasks = [
+    room_tasks = [
         asyncio.create_task(run_room(args, api, rid, user_unique_id, worker_id, stop))
         for rid in args.room
     ]
+    stop_task = asyncio.create_task(stop.wait())
+    max_task = asyncio.create_task(_stop_after_minutes(stop, args.max_minutes))
+    tasks = [*room_tasks, stop_task, max_task]
     if tasks:
-        await asyncio.gather(*tasks, return_exceptions=False)
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        stop.set()
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        for task in room_tasks:
+            if task in done and not task.cancelled():
+                task.result()
     return 0
+
+
+def _env_float(name: str, fallback: float) -> float:
+    try:
+        return float(os.environ.get(name, fallback))
+    except (TypeError, ValueError):
+        return fallback
 
 
 def main() -> int:
@@ -1173,6 +1205,12 @@ def main() -> int:
     )
     ap.add_argument("--once", action="store_true")
     ap.add_argument("--wait", type=float, default=60.0)
+    ap.add_argument(
+        "--max-minutes",
+        type=float,
+        default=_env_float("LIVE_MAX_MINUTES", DEFAULT_MAX_MINUTES),
+        help="最长运行分钟数；0 = 不按时间限制（默认 360）",
+    )
     ap.add_argument("--dry-run", action="store_true", help="只打印，不回传后端")
     ap.add_argument("--print-json", action="store_true", help="dry-run 时把完整 Observation 打印到 stdout")
     args = ap.parse_args()
@@ -1182,6 +1220,8 @@ def main() -> int:
         ap.error("--interval 不能小于 0.1 秒")
     if args.http_seconds < 5:
         ap.error("--http-seconds 不能小于 5 秒")
+    if args.max_minutes < 0:
+        ap.error("--max-minutes 不能为负数")
     return asyncio.run(async_main(args))
 
 
