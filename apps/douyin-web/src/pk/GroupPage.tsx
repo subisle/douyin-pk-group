@@ -16,6 +16,7 @@ import {
 } from './api';
 import {
   BREAK_AFTER_GROUP,
+  GROUP4_TO5_GAP_MINUTES,
   REVIVAL_EVENTS,
   REVIVAL_MINUTES,
   revivalAfterGroup,
@@ -353,13 +354,15 @@ export default function GroupPage() {
   const restAfterGroup = revivalOn ? revivalAfter : BREAK_AFTER_GROUP;
   /** 加长停留的分钟数 */
   const restMin = revivalEvent ? REVIVAL_MINUTES : longBreak;
+  /** 赛程排期用的第 4/5 组间隔；实际复活赛仍是 5 分钟，20 分钟是整段间隔。 */
+  const scheduleRestMin = revivalEvent ? GROUP4_TO5_GAP_MINUTES : longBreak;
   /** 本轮赛程是否真的有加长停留（没分组的复活赛不算，那时还没有赛程） */
   const restOn = restAfterGroup > 0 && (revivalOn || (!revivalEvent && longBreak > 0));
 
   /** 赛程里的加长停留点（与 intervalMin 不同走这条） */
   const breaks = useMemo<BreakRule[]>(
-    () => (restOn ? [{ afterGroup: restAfterGroup, minutes: restMin }] : []),
-    [restOn, restAfterGroup, restMin],
+    () => (restOn ? [{ afterGroup: restAfterGroup, minutes: scheduleRestMin }] : []),
+    [restOn, restAfterGroup, scheduleRestMin],
   );
 
   /** 分组/体检都带上的约束：赛程（含加长休息）+ 强度位次形态。
@@ -371,7 +374,7 @@ export default function GroupPage() {
       const revivalOnN = revivalEvent && n > 0;
       const afterN = revivalOnN ? revivalAfterGroup(n) : BREAK_AFTER_GROUP;
       const onN = afterN > 0 && (revivalOnN || (!revivalEvent && longBreak > 0));
-      const breaksN: BreakRule[] = onN ? [{ afterGroup: afterN, minutes: restMin }] : [];
+      const breaksN: BreakRule[] = onN ? [{ afterGroup: afterN, minutes: scheduleRestMin }] : [];
       return {
         schedule: { start: startTime, intervalMin, breaks: breaksN },
         strengthOrder: strengthOn
@@ -385,6 +388,7 @@ export default function GroupPage() {
       revivalAfterGroup,
       longBreak,
       restMin,
+      scheduleRestMin,
       startTime,
       intervalMin,
       strengthOn,
@@ -1097,7 +1101,7 @@ export default function GroupPage() {
       const node = buildExportNode({
         title: title.trim() || 'PK 分组',
         brandLine: `PK GROUP · 分组名单 · ${dates[0] || isoLocal()}`,
-        metaLine: `${eventType} · 共 ${buckets.reduce((s, b) => s + b.players.length, 0)} 人 · ${startTime} 后 / 间隔 ${intervalMin} 分${restOn ? ` · 第 ${restAfterGroup} 组后${revivalEvent ? '复活赛' : '休息'} ${restMin} 分` : ''}`,
+        metaLine: `${eventType} · 共 ${buckets.reduce((s, b) => s + b.players.length, 0)} 人 · ${startTime} 后 / 间隔 ${intervalMin} 分${restOn ? revivalEvent ? ` · 第 ${restAfterGroup} 组后复活赛 ${restMin} 分，第 ${restAfterGroup + 1} 组间隔 ${scheduleRestMin} 分` : ` · 第 ${restAfterGroup} 组后休息 ${restMin} 分` : ''}`,
         groups: buckets.map((b, i) => ({
           name: b.name,
           slot: slots[i] || '',
@@ -1216,7 +1220,7 @@ export default function GroupPage() {
     /* 与后端 pk-core::gap_after 同口径：命中加长休息的那一段，间隔**被 restMin 替换**
      * 而不是叠加（第 4 组后复活赛 5 分钟 → 第 5 组是 13:05，不是 13:10）。 */
     for (let k = 0; k < i; k += 1) {
-      t += restOn && k + 1 === restAfterGroup ? restMin : intervalMin;
+      t += restOn && k + 1 === restAfterGroup ? scheduleRestMin : intervalMin;
     }
     const hh = Math.floor(t / 60) % 24;
     return `${String(hh).padStart(2, '0')}:${String(t % 60).padStart(2, '0')}`;
@@ -1846,8 +1850,8 @@ export default function GroupPage() {
               ? revivalOn
                 ? `复活赛共两场、每场 ${restMin} 分钟：第 ${restAfterGroup} 组 ${slotAt(
                     restAfterGroup - 1,
-                  )} 开赛，结束后打第一场复活赛，第 ${restAfterGroup + 1} 组顺延到 ${slotAt(restAfterGroup)}；后续小组全部结束后打第二场，每场前 4 名复活、其余直接淘汰`
-                : `复活赛共两场、每场 ${restMin} 分钟：上半程最后一组后打第一场，后续小组全部结束后打第二场；分完组这里会自动定位；每场前 4 名复活、其余直接淘汰`
+                  )} 开赛，结束后打第一场复活赛；第 ${restAfterGroup} 组与第 ${restAfterGroup + 1} 组间隔 ${scheduleRestMin} 分钟，第 ${restAfterGroup + 1} 组 ${slotAt(restAfterGroup)} 开赛；后续小组全部结束后打第二场，每场前 4 名复活、其余直接淘汰`
+                : `复活赛共两场、每场 ${restMin} 分钟；第 ${restAfterGroup} 组与第 ${restAfterGroup + 1} 组间隔 ${scheduleRestMin} 分钟，后续小组全部结束后打第二场；分完组这里会自动定位；每场前 4 名复活、其余直接淘汰`
               : restMin > 0
                 ? `第 1 组 ${slotAt(0)}、第 2 组 ${slotAt(1)}、第 3 组 ${slotAt(2)}，之后休息 ${restMin} 分钟，第 4 组 ${slotAt(3)}`
                 : `每组间隔统一 ${intervalMin} 分钟（不插加长休息）`}
