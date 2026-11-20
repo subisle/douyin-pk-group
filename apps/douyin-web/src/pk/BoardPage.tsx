@@ -159,12 +159,12 @@ export default function BoardPage() {
   }, [buckets.length]);
 
   /* ---------------- 配置派生 ---------------- */
-  /** 本赛事有没有复活赛（初级/中级争霸赛小组赛）：有则第 4/5 组按 20 分钟排程（含第一场复活赛） */
+  /** 本赛事有没有复活赛（初级/中级争霸赛小组赛）：有则第 4/5 组按 20 分钟排程（含第一波两组复活赛） */
   const revivalEvent = REVIVAL_EVENTS.includes(config.eventType);
   const sequential = config.strategy === 'sequential' || config.strategy === 'sequential-last-n';
 
   /** 赛程里的加长休息点。groupCount 是分组数：
-   *  - 小组赛第 4/5 组间隔 20 分钟，复活赛前 4 复活；
+   *  - 小组赛第 4/5 组间隔 20 分钟，里面完成第一波两组每场 5 分钟的复活赛，每组前 4 复活；
    *  - 其余赛事固定第 3 组后，分钟数用配置里的 longBreak（0 = 不插）。 */
   const breaksFor = useCallback(
     (groupCount: number): BreakRule[] => {
