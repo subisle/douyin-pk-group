@@ -457,6 +457,28 @@
   cursor: pointer;
 }
 
+/* 导出分组选择：默认全选；每组一个可快速点按的胶囊，手机上自动换行不挤按钮。 */
+.pk .pk-export-picker {
+  align-items: center;
+  row-gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #f8f9fb;
+}
+.pk .pk-export-picker .pk-check {
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #fff;
+  font-size: 12px;
+  font-weight: 500;
+}
+.pk .pk-export-picker > button {
+  padding: 4px 9px;
+  font-size: 12px;
+}
+
 .pk .pk-unassigned {
   margin-top: 12px;
   padding: 10px 12px;

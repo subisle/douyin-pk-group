@@ -261,7 +261,6 @@ export default function GroupPage() {
   const [dates, setDates] = useState<string[]>([]);
   const [balance, setBalance] = useState<BalanceStat | null>(null);
   const [violations, setViolations] = useState<Violation[]>([]);
-  const [slots, setSlots] = useState<string[]>([]);
   const [meta, setMeta] = useState<ConstraintsMeta | null>(null);
 
   /* ---------------- 方案 ---------------- */
@@ -305,10 +304,22 @@ export default function GroupPage() {
   } | null>(null);
   const rafRef = useRef(0);
   const scrollRef = useRef(0);
+  const [exportFallback, setExportFallback] = useState<{ url: string; filename: string } | null>(null);
   const [past, setPast] = useState<Snapshot[]>([]);
   const [future, setFuture] = useState<Snapshot[]>([]);
   const [addName, setAddName] = useState('');
   const [addTo, setAddTo] = useState('');
+  /** 导出时可选分组；空数组表示当前没有勾选。 */
+  const [exportGroupIndexes, setExportGroupIndexes] = useState<number[]>([]);
+
+  useEffect(() => {
+    setExportGroupIndexes((prev) => {
+      const valid = prev.filter((i) => i >= 0 && i < buckets.length);
+      return valid.length === prev.length && prev.length > 0
+        ? valid
+        : buckets.map((_, i) => i);
+    });
+  }, [buckets.length]);
 
   /* 点击卡片外任意处关闭 ⋯ 菜单（菜单内部点击已 stopPropagation） */
   useEffect(() => {
@@ -439,7 +450,6 @@ export default function GroupPage() {
       inspectInflightRef.current = null;
       setBalance(null);
       setViolations([]);
-      setSlots([]);
       return;
     }
     const seqAtRequest = ++inspectSeqRef.current;
@@ -459,7 +469,6 @@ export default function GroupPage() {
     if (r == null || seqAtRequest !== inspectSeqRef.current) return; // 过期响应：丢弃
     setBalance(r.balance);
     setViolations(r.violations || []);
-    setSlots(r.slots || []);
   }
 
   const pushHistory = useCallback((snap?: Snapshot) => {
@@ -549,7 +558,6 @@ export default function GroupPage() {
     setDates([]);
     setBalance(null);
     setViolations([]);
-    setSlots([]);
     setPlanId(null);
     setPast([]);
     setFuture([]);
@@ -703,7 +711,6 @@ export default function GroupPage() {
       setBuckets(next);
       setBalance(arranged.balance);
       setViolations(arranged.violations || []);
-      setSlots(arranged.slots || []);
       setMsg(
         (preserve ? '已保留原分组，只补齐新增/变化人员：' : '') +
           `已解析 ${active.length} 人，分成 ${arranged.groups.length} 组` +
@@ -756,12 +763,6 @@ export default function GroupPage() {
     } finally {
       setLoading(false);
     }
-  }
-
-  async function regroupAll() {
-    if (!buckets.length) return;
-    if (!confirm('全部重新分组会按当前策略重新排列所有人员，现有组别可能大改，继续？')) return;
-    await regroup(false);
   }
 
   /* ---------------- 看板操作 ---------------- */
@@ -835,29 +836,6 @@ export default function GroupPage() {
       applyGroups(next);
       setAddName('');
       setMsg(`已把 ${p.name} 加入${to.name}`);
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy('');
-    }
-  }
-
-  async function polish() {
-    if (!buckets.length) return;
-    setBusy('polish');
-    try {
-      const r = await pk.polish({
-        groups: buckets.map((b) => b.players),
-        protected: locked,
-        constraints: scheduleInput(),
-      });
-      const next = r.groups.map((playersInGroup, i) => ({
-        id: buckets[i]?.id ?? newId(),
-        name: buckets[i]?.name ?? `第 ${i + 1} 组`,
-        players: playersInGroup,
-      }));
-      applyGroups(next);
-      setMsg('已做一轮均衡微调');
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -939,11 +917,20 @@ export default function GroupPage() {
     try {
       const d = await pk.getPlan(id);
       const p = d.payload || ({} as never);
-      setBuckets((p.buckets || []).map((b: { name: string; players: Player[] }, i: number) => ({
-        id: newId(),
-        name: b.name || `第 ${i + 1} 组`,
-        players: b.players || [],
-      })));
+      const loadedBuckets: Bucket[] = (p.buckets || []).map(
+        (b: { name: string; players: Player[] }, gi: number) => ({
+          id: newId(),
+          name: b.name || `第 ${gi + 1} 组`,
+          players: (b.players || []).map((player, pi) => ({
+            ...player,
+            // 老方案可能没有 key；/api/group/inspect 会拒绝缺 key 的 Player。
+            key: player.key || `saved-${id}-${gi}-${pi}-${player.personId || player.name}`,
+            matched: player.matched ?? Boolean(player.personId),
+            wave: Number(player.wave) || 0,
+          })),
+        }),
+      );
+      setBuckets(loadedBuckets);
       setUnassigned([]);
       setPast([]);
       setFuture([]);
@@ -958,30 +945,34 @@ export default function GroupPage() {
           p.strengthOrder.enabled === false ? 'off' : (p.strengthOrder.mode ?? 'total'),
         );
       }
-      // 落点由组数决定（复活赛）或固定第 3 组（其余赛事），这里只把分钟数读回来
-      const b0 = (p.schedule?.breaks || [])[0] as BreakRule | undefined;
+      // 落点由组数决定（复活赛）或固定第 3 组（其余赛事）。
+      const loadedEventType = (d.eventType || eventType) as EventType;
+      const loadedRevival = REVIVAL_EVENTS.includes(loadedEventType);
+      const rawBreaks = (p.schedule?.breaks || []) as BreakRule[];
+      const normalizedBreaks: BreakRule[] = loadedRevival && loadedBuckets.length
+        ? [{
+            afterGroup: revivalAfterGroup(loadedBuckets.length),
+            minutes: GROUP4_TO5_GAP_MINUTES,
+          }]
+        : rawBreaks;
+      const b0 = normalizedBreaks[0];
       if (b0) setLongBreak(b0.minutes);
       if (p.schedule?.start) setStartTime(p.schedule.start);
       if (p.schedule?.intervalMin) setIntervalMin(p.schedule.intervalMin);
       if (p.display) setDisplay({ ...DEFAULT_DISPLAY, ...p.display });
       /* 恢复数据日期（老方案没存过就保持空，导出退回今天） */
       if (p.dates?.length) setDates(p.dates);
-      setPlayers((p.buckets || []).flatMap((b: { players: Player[] }) => b.players || []));
+      setPlayers(loadedBuckets.flatMap((b) => b.players));
       setMsg(`已载入方案 #${id}`);
       /* 体检必须用**方案自带的赛程**：此刻 buckets 仍是旧值，`scheduleInput()`
        * 会按 0 组算成「没有复活赛」，组头开赛时间会少一段（13:00 显示成 12:55）。 */
-      const loaded = p.buckets || [];
       void inspectNow(
-        loaded.map((b: { name: string; players: Player[] }, i: number) => ({
-          id: `tmp${i}`,
-          name: b.name,
-          players: b.players || [],
-        })),
+        loadedBuckets,
         {
           schedule: {
             start: p.schedule?.start || startTime,
             intervalMin: p.schedule?.intervalMin ?? intervalMin,
-            breaks: (p.schedule?.breaks || []) as BreakRule[],
+            breaks: normalizedBreaks,
           },
           strengthOrder: p.strengthOrder
             ? { enabled: p.strengthOrder.enabled !== false, mode: p.strengthOrder.mode }
@@ -1044,9 +1035,23 @@ export default function GroupPage() {
   }
 
   /* ---------------- 导出分组图 ---------------- */
+  async function waitForInspectBeforeExport() {
+    const pending = inspectInflightRef.current;
+    if (!pending) return;
+    await Promise.race([
+      pending.catch(() => null),
+      new Promise<void>((resolve) => window.setTimeout(resolve, 3000)),
+    ]);
+  }
+
   async function exportImage() {
     if (!buckets.length) {
       setError('看板是空的');
+      return;
+    }
+    const selected = exportGroupIndexes.filter((i) => i >= 0 && i < buckets.length);
+    if (!selected.length) {
+      setError('请至少勾选一个要导出的分组');
       return;
     }
     setBusy('export');
@@ -1055,17 +1060,15 @@ export default function GroupPage() {
         await loadGroupExportModule();
       // P1-13：导出前强制等最新的 inspect 落地 —— 拖完立刻点导出时，
       // slots 可能还是上一次分组的开赛时间，错的时间会被印进长图发到群里。
-      if (inspectInflightRef.current) {
-        await inspectInflightRef.current;
-      }
+      await waitForInspectBeforeExport();
       const node = buildExportNode({
         title: title.trim() || 'PK 分组',
         brandLine: `PK GROUP · 分组名单 · ${dates[0] || isoLocal()}`,
-        metaLine: `${eventType} · 共 ${buckets.reduce((s, b) => s + b.players.length, 0)} 人 · ${startTime} 后 / 间隔 ${intervalMin} 分${restOn ? revivalEvent ? ` · 第 ${restAfterGroup} 组后复活赛 ${restMin} 分，第 ${restAfterGroup + 1} 组间隔 ${scheduleRestMin} 分` : ` · 第 ${restAfterGroup} 组后休息 ${restMin} 分` : ''}`,
-        groups: buckets.map((b, i) => ({
-          name: b.name,
-          slot: slots[i] || '',
-          players: b.players.map((p) => ({ name: p.name, leader: p.leader, wave: p.wave || 0 })),
+        metaLine: `${eventType} · 导出 ${selected.length} 组 / 共 ${buckets.reduce((s, b) => s + b.players.length, 0)} 人 · ${startTime} 后 / 间隔 ${intervalMin} 分${restOn ? revivalEvent ? ` · 第 ${restAfterGroup} 组后复活赛 ${restMin} 分，第 ${restAfterGroup + 1} 组间隔 ${scheduleRestMin} 分` : ` · 第 ${restAfterGroup} 组后休息 ${restMin} 分` : ''}`,
+        groups: selected.map((i) => ({
+          name: buckets[i].name,
+          slot: slotAt(i),
+          players: buckets[i].players.map((p) => ({ name: p.name, leader: p.leader, wave: p.wave || 0 })),
         })),
         hideWave: !display.wave,
         metricLabel: waveLabel,
@@ -1074,8 +1077,13 @@ export default function GroupPage() {
       });
       try {
         const blob = await nodeToPngBlob(node, { scale: 2 });
-        downloadBlob(blob, `${title.trim() || 'pk'}-${dates[0] || 'plan'}.png`);
-        setMsg('分组图已导出');
+        const filename = `${title.trim() || 'pk'}-${dates[0] || 'plan'}.png`;
+        const url = downloadBlob(blob, filename);
+        setExportFallback({ url, filename });
+        window.setTimeout(() => {
+          setExportFallback((cur) => (cur?.url === url ? null : cur));
+        }, 120_000);
+        setMsg(`分组图已导出（${Math.max(1, Math.round(blob.size / 1024))} KB）`);
       } finally {
         disposeExportNode(node);
       }
@@ -1093,6 +1101,11 @@ export default function GroupPage() {
       setError('看板是空的');
       return;
     }
+    const selected = exportGroupIndexes.filter((i) => i >= 0 && i < buckets.length);
+    if (!selected.length) {
+      setError('请至少勾选一个要导出的分组');
+      return;
+    }
     if (!display.wave) {
       setError('「展示音浪数值」已关闭，差距图需要音浪数据：勾上再导出');
       return;
@@ -1102,18 +1115,16 @@ export default function GroupPage() {
       const { buildGapExportNode, disposeExportNode, downloadBlob, nodeToPngBlob } =
         await loadGroupExportModule();
       // 与长图同一口径：等最新一次 inspect 落地，避免拖完立刻导出拿到旧数据
-      if (inspectInflightRef.current) {
-        await inspectInflightRef.current;
-      }
-      const total = buckets.reduce((s, b) => s + b.players.length, 0);
+      await waitForInspectBeforeExport();
+      const total = selected.reduce((s, i) => s + buckets[i].players.length, 0);
       const node = buildGapExportNode({
         title: title.trim() || 'PK 分组',
         brandLine: `PK GROUP · 名次差距 · ${dates[0] || isoLocal()}`,
-        metaLine: `${eventType} · 口径 ${waveLabel} · 共 ${buckets.length} 组 ${total} 人`,
-        players: buckets.flatMap((b, gi) =>
-          b.players.map((p) => ({
+        metaLine: `${eventType} · 口径 ${waveLabel} · 导出 ${selected.length} 组 ${total} 人`,
+        players: selected.flatMap((gi) =>
+          buckets[gi].players.map((p) => ({
             name: p.name,
-            groupName: b.name,
+            groupName: buckets[gi].name,
             groupIndex: gi,
             wave: p.wave || 0,
           })),
@@ -1123,8 +1134,13 @@ export default function GroupPage() {
       });
       try {
         const blob = await nodeToPngBlob(node, { scale: 2 });
-        downloadBlob(blob, `${title.trim() || 'pk'}-名次差距-${dates[0] || 'plan'}.png`);
-        setMsg('差距图已导出');
+        const filename = `${title.trim() || 'pk'}-名次差距-${dates[0] || 'plan'}.png`;
+        const url = downloadBlob(blob, filename);
+        setExportFallback({ url, filename });
+        window.setTimeout(() => {
+          setExportFallback((cur) => (cur?.url === url ? null : cur));
+        }, 120_000);
+        setMsg(`差距图已导出（${Math.max(1, Math.round(blob.size / 1024))} KB）`);
       } finally {
         disposeExportNode(node);
       }
@@ -1732,15 +1748,6 @@ export default function GroupPage() {
           )}
         </h2>
         <div className="row">
-          <button disabled={!players.length || loading} onClick={() => regroup(true)}>
-            保持分组补位
-          </button>
-          <button disabled={!buckets.length || loading} onClick={() => void regroupAll()}>
-            全部重排
-          </button>
-          <button disabled={!buckets.length || busy === 'polish'} onClick={polish}>
-            {busy === 'polish' ? '微调中…' : '均衡微调'}
-          </button>
           <button disabled={!past.length} onClick={undo}>
             撤销
           </button>
@@ -1829,7 +1836,7 @@ export default function GroupPage() {
                 >
                   <div className="pk-group-head">
                     <b>{b.name}</b>
-                    <span className="pk-slot">{slots[gi] || '—'}</span>
+                    <span className="pk-slot">{slotAt(gi)}</span>
                     <span className="pk-total">
                       {b.players.length} 人 · {wan(total)}
                     </span>
@@ -2005,6 +2012,51 @@ export default function GroupPage() {
             打开展板 ↗
           </button>
         </div>
+        {buckets.length > 0 && (
+          <div className="row pk-export-picker" aria-label="选择要导出的分组">
+            <span className="hint">导出分组：</span>
+            {buckets.map((bucket, index) => (
+              <label className="pk-check" key={bucket.id}>
+                <input
+                  type="checkbox"
+                  checked={exportGroupIndexes.includes(index)}
+                  onChange={(e) => {
+                    setExportGroupIndexes((prev) => {
+                      if (e.target.checked) {
+                        return [...prev.filter((i) => i !== index), index].sort((a, b) => a - b);
+                      }
+                      return prev.filter((i) => i !== index);
+                    });
+                  }}
+                />
+                {bucket.name}
+              </label>
+            ))}
+            <button
+              type="button"
+              disabled={exportGroupIndexes.length === buckets.length}
+              onClick={() => setExportGroupIndexes(buckets.map((_, index) => index))}
+            >
+              全选
+            </button>
+            <button
+              type="button"
+              disabled={exportGroupIndexes.length === 0}
+              onClick={() => setExportGroupIndexes([])}
+            >
+              清空
+            </button>
+            <span className="hint">
+              已选 {exportGroupIndexes.length}/{buckets.length} 组
+            </span>
+          </div>
+        )}
+        {exportFallback && (
+          <div className="alert good">
+            图片已生成。若浏览器没有自动下载，
+            <a href={exportFallback.url} download={exportFallback.filename}>点此保存 PNG</a>
+          </div>
+        )}
         <div className="row">
           <label className="pk-check">
             <input
