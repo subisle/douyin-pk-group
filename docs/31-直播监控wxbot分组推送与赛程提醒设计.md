@@ -361,8 +361,8 @@ actual   = battle.scores[].userId
 |---|---|---|
 | `full` | expected 与 actual 集合完全一致 | 自动开始正式记录 |
 | `partial` | actual 是 expected 的真子集 | 暂存采样，标记“缺人”，不自动占用正式局 |
-| `extra` | actual 包含 expected 之外的人 | 需要管理员确认，避免拉错人 |
-| `none` | 无匹配 UID / 无法识别 | 回退到“赛程顺序第一组”，但标记自动匹配失败 |
+| `extra` | actual 包含 expected 之外的人 | 赛前名单仅作优先匹配；人数 > 6 时按采集名单正式计分 |
+| `none` | 无匹配 UID / 无法识别 | 回退到“赛程顺序第一个未定稿组”，以采集名单为准 |
 
 ### 8.2 自动开始规则
 
@@ -370,7 +370,7 @@ actual   = battle.scores[].userId
 
 1. `battleStatus >= 1`（已开始；结束时仍需接收最终分）
 2. 当前参与者 **> 6 人**（至少 7 人）
-3. `actual == expected`（`full`，名单精确到齐）
+3. 优先使用与 `actual == expected` 精确匹配的小组；找不到时按赛程顺序接第一个未定稿组
 4. 该组尚未开始或仍未定稿
 5. 当前 battleId 未被其它组占用
 
@@ -390,7 +390,7 @@ actual   = battle.scores[].userId
 ### 8.3 异常兜底
 
 - 缺人 / 只有 1 人自动起 PK：只写直播间原始采样，状态 `waiting_roster`；不创建正式轮次、不推进晋级。
-- 多出来的人：记录但 `pending_review`，管理员选择是否作废/重开。
+- 采集名单与赛前名单不同：不阻止计分，以**实际采集名单**为准；多出来的人也进入本场席位记录。
 - 采集器断线：暂停推送，不把 stale 快照当结束。
 - 重复 battleId：只落一局，不重复入队。
 

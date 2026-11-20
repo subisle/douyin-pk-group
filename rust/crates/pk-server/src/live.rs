@@ -714,6 +714,24 @@ fn within_qualify_slots(position: usize, rank: i32, qualify: i32) -> bool {
     rank > 0 && qualify > 0 && position <= qualify as usize
 }
 
+/// 在已开启的小组里找与当前采集 UID 集合完全一致的一个。
+/// 找不到时调用方按“采集为准”回落到当前赛程的第一个未定稿小组。
+fn exact_seeded_group(
+    current: &std::collections::HashSet<&str>,
+    rosters: &[(i64, Vec<String>, i64)],
+) -> Option<i64> {
+    for (group_id, uids, seats) in rosters {
+        if uids.is_empty() || *seats != current.len() as i64 {
+            continue;
+        }
+        let seeded: std::collections::HashSet<&str> = uids.iter().map(String::as_str).collect();
+        if seeded == *current {
+            return Some(*group_id);
+        }
+    }
+    None
+}
+
 /* ------------------------------ 观测处理 ------------------------------ */
 
 /// 观测处理的结果（给采集器回执用，也写日志）
@@ -1066,28 +1084,16 @@ async fn resolve_group(
         return Ok((g, None));
     }
 
-    // 有赛前名单时优先按 UID 集合精确认组，避免多直播间或乱序上报把局挂错。
+    // 赛前名单只用于“优先精确认组”，不是计分前提：用户口径是采集为准。
     let current: std::collections::HashSet<&str> =
         snap.scores.iter().map(|s| s.user_id.as_str()).collect();
     let rosters = crate::store::live_open_group_rosters(st, event_id).await;
-    let has_seeded_roster = rosters.iter().any(|(_, uids, seats)| !uids.is_empty() || *seats > 0);
-    for (group_id, uids, seats) in rosters {
-        if uids.is_empty() || seats != current.len() as i64 {
-            continue;
-        }
-        let seeded: std::collections::HashSet<&str> = uids.iter().map(String::as_str).collect();
-        if seeded == current {
-            return Ok((group_id, None));
-        }
+    if let Some(group_id) = exact_seeded_group(&current, &rosters) {
+        return Ok((group_id, None));
     }
 
-    /* 有赛前名单时不再按“第一组”兜底：准备阶段人数没齐、或者多上报了
-     * 其他人，都不能开始计分并写进小组。等名单完整匹配后再接收。 */
-    if has_seeded_roster {
-        return Ok((0, None));
-    }
-
-    // 兼容没有登记采集号的旧方案：名单无法精确匹配时按赛程顺序接第一组。
+    // 采集人数 > 6 且 PK 已开始时，按赛程顺序接到第一个未定稿小组。
+    // 这样临时换人、主播自用账号入镜或赛前名单轻微不一致都不会丢掉正式分数。
     Ok((
         crate::store::live_next_open_group(st, event_id).await?,
         None,
@@ -1984,6 +1990,24 @@ mod tests {
         assert_eq!(
             classify_duplicate("a,b,c", "a,b,c,d", true, true),
             DuplicateVerdict::DifferentRoster
+        );
+    }
+
+    #[test]
+    fn exact_seeded_group_prefers_roster_match_but_does_not_block_fallback() {
+        use std::collections::HashSet;
+        let rosters = vec![
+            (7, vec!["a".into(), "b".into(), "c".into()], 3),
+            (8, vec!["d".into(), "e".into(), "f".into()], 3),
+        ];
+        let exact: HashSet<&str> = ["d", "e", "f"].into_iter().collect();
+        assert_eq!(exact_seeded_group(&exact, &rosters), Some(8));
+
+        let changed: HashSet<&str> = ["d", "e", "x"].into_iter().collect();
+        assert_eq!(
+            exact_seeded_group(&changed, &rosters),
+            None,
+            "采集名单变化时不做硬拒绝，由调用方回落到当前顺序小组"
         );
     }
 
