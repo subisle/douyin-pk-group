@@ -1985,6 +1985,90 @@ pub async fn live_group_seed_replace(
     Ok(())
 }
 
+/// 把直播监控当前看到的连麦顺序同步到第一个尚未开打的复活赛空位。
+///
+/// 只碰 `pending` 且还没有任何 `live_round` 的复活组：一旦 PK 开始，正式名单和
+/// 分数就由 `live_round_seat` 接管，这里不会覆盖比赛结果。第一个复活组定稿后，
+/// 下一个连麦名单会自然落到第二个空位，所以两场手动连麦也能按监控顺序接组。
+pub async fn live_sync_revival_roster(
+    st: &AppState,
+    event_id: i64,
+    members: &[(String, String)],
+) -> anyhow::Result<i64> {
+    if members.is_empty() {
+        return Ok(0);
+    }
+    let row = sqlx::query(
+        "SELECT g.id
+           FROM live_group g
+           JOIN live_stage s ON s.id = g.stage_id
+          WHERE g.event_id = $1
+            AND g.kind IN ('first_wave_revival', 'rest_revival')
+            AND g.status = 'pending'
+            AND s.status <> 'finalized'
+            AND NOT EXISTS (SELECT 1 FROM live_round r WHERE r.group_id = g.id)
+          ORDER BY s.seq, g.seq
+          LIMIT 1",
+    )
+    .bind(event_id)
+    .fetch_optional(w(st)?)
+    .await?;
+    let Some(row) = row else {
+        return Ok(0);
+    };
+    let group_id = row.try_get::<i64, _>("id").unwrap_or(0);
+    if group_id <= 0 {
+        return Ok(0);
+    }
+
+    let existing = sqlx::query(
+        "SELECT douyin_uid FROM live_group_seat
+          WHERE group_id = $1 ORDER BY seed_order, id",
+    )
+    .bind(group_id)
+    .fetch_all(w(st)?)
+    .await?
+    .into_iter()
+    .filter_map(|r| r.try_get::<String, _>("douyin_uid").ok())
+    .filter(|uid| !uid.is_empty())
+    .collect::<Vec<_>>();
+    let mut seen_uid = std::collections::HashSet::new();
+    let mut normalized: Vec<(String, String)> = Vec::new();
+    for (uid, nickname) in members {
+        let uid = uid.trim();
+        if uid.is_empty() || !seen_uid.insert(uid.to_string()) {
+            continue;
+        }
+        normalized.push((uid.to_string(), nickname.trim().to_string()));
+    }
+    if existing
+        == normalized
+            .iter()
+            .map(|(uid, _)| uid.clone())
+            .collect::<Vec<_>>()
+    {
+        return Ok(0);
+    }
+
+    let uids = normalized
+        .iter()
+        .map(|(uid, _)| uid.clone())
+        .collect::<Vec<_>>();
+    let person_ids = live_person_ids_by_uids(st, &uids).await;
+    let seats = normalized
+        .iter()
+        .enumerate()
+        .map(|(order, (uid, nickname))| GroupSeedSeat {
+            person_id: person_ids.get(uid).copied().unwrap_or(0),
+            douyin_uid: uid.clone(),
+            nickname: nickname.clone(),
+            seed_order: order as i32,
+        })
+        .collect::<Vec<_>>();
+    live_group_seed_replace(st, group_id, &seats).await?;
+    Ok(group_id)
+}
+
 /// 主播当前主号的抖音 UID 与展示昵称。没有主号时回落到任一有 UID 的账号。
 pub async fn live_anchor_for_person(st: &AppState, person_id: i64) -> Option<(String, String)> {
     if person_id <= 0 {

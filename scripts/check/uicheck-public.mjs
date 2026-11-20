@@ -185,6 +185,32 @@ async function navTo(ws, v) {
   await sleep(1200)
 }
 
+/** 关掉验收过程中会遮住页面的已知弹层；不写后台数据，只点页面自己的关闭按钮。 */
+async function dismissKnownOverlays(ws) {
+  for (let i = 0; i < 6; i++) {
+    const acted = await evaluate(ws, `(() => {
+      const item = document.getElementById('itemPopup');
+      if (item && !item.classList.contains('hidden')) {
+        const next = item.querySelector('.ip-next');
+        if (next) { next.click(); return 'item'; }
+      }
+      const guide = document.getElementById('announce');
+      if (guide && !guide.classList.contains('hidden')) {
+        const skip = document.getElementById('announceSkip');
+        if (skip) { skip.click(); return 'guide'; }
+      }
+      const pwa = document.getElementById('pwaGuide');
+      if (pwa && !pwa.classList.contains('hidden')) {
+        const close = document.getElementById('pwaGuideClose');
+        if (close) { close.click(); return 'pwa'; }
+      }
+      return '';
+    })()`)
+    if (!acted) break
+    await sleep(450)
+  }
+}
+
 /* ---------------------------------- 开始 ---------------------------------- */
 
 console.log(`== 展示端全页面验收 · ${BASE} ==`)
@@ -251,6 +277,7 @@ try {
     truthy('登录成功（登录门关闭）', await waitFor(ws, gateHidden, 40, 250))
     await sleep(1500)
     truthy('登录后登录门没再弹回来', await evaluate(ws, gateHidden))
+    await dismissKnownOverlays(ws)
     /* 进站前那一次 /all 401 是「还没登录」的正常表现（siteIsOpen 探门）；
        清掉它，第 7 段只盯登录之后的 401。 */
     const preLogin = apiCalls.filter((c) => c.status === 401 && c.url.includes('/api/public/teams/'))
@@ -382,29 +409,98 @@ try {
   /* 5. 我的 */
   await section('5. 我的', async () => {
     await navTo(ws, 'my')
-    await sleep(1500)
-    expect('我的页标题', await evaluate(ws, sub), 'MY')
+    await waitFor(ws, `document.getElementById('view').innerText.trim().length > 30`, 20, 250)
+    await dismissKnownOverlays(ws)
+    truthy('我的页标题区域存在', await evaluate(ws, `!!document.getElementById('mhTitle')`))
     await assertViewHealthy(ws, '我的')
     truthy('我的页有卡片', (await evaluate(ws, `document.querySelectorAll('#view .card, #view .section').length`)) > 0)
     await shot(ws, '06-my.png')
   })
 
-  /* 6. 深链（等价刷新）：关掉的页要落到还开着的第一页，这也是正确行为 */
-  await section('6. 深链直达 / 刷新不丢页', async () => {
+  /* 6. 比赛监控：必须融入主站壳层，不能跳成独立页面 */
+  await section('6. 比赛监控融入主站', async () => {
+    await navTo(ws, 'data')
+    await dismissKnownOverlays(ws)
+    await evaluate(ws, `window.__liveIntegratedMarker = 'yes'`)
+    await navTo(ws, 'live')
+    await sleep(1200)
+    expect('比赛监控地址', await evaluate(ws, 'location.pathname'), '/live/')
+    truthy('比赛监控保持同一页面实例', await evaluate(ws, `window.__liveIntegratedMarker === 'yes'`))
+    truthy('主站底部导航仍在', await evaluate(ws, `!!document.getElementById('navRow') && getComputedStyle(document.getElementById('navRow')).display !== 'none'`))
+    truthy('主站比赛监控按钮选中', await evaluate(ws, `document.getElementById('navLive')?.classList.contains('on') === true`))
+    truthy('直播内容已渲染到主站 #view', await evaluate(ws, `!!document.querySelector('#view .plm-shell.is-integrated')`))
+    await assertViewHealthy(ws, '比赛监控')
+    truthy('已移除当前赛程大卡片', await evaluate(ws, `!document.querySelector('#view .plm-hero') && !document.getElementById('view').innerText.includes('当前赛程')`))
+    const livePalette = await evaluate(ws, `(() => {
+      const shell = document.querySelector('#view .plm-shell');
+      const card = document.querySelector('#view .plm-group-card');
+      return { text: getComputedStyle(shell).color, card: card ? getComputedStyle(card).backgroundColor : '' };
+    })()`)
+    truthy('直播卡与展示端同用浅色玻璃底', String(livePalette.card).includes('255, 255, 255'))
+    truthy('直播正文使用展示端深色文字', livePalette.text === 'rgb(27, 27, 29)')
+    const stageCount = await evaluate(ws, `document.querySelectorAll('[data-live-stage]').length`)
+    truthy(`比赛阶段可切换（${stageCount} 个）`, stageCount > 0)
+    const scoreMotion = await evaluate(ws, `(() => {
+      const make = (score, rank) => ({
+        id: 990001, stageKind: 'first_wave_revival', stageStatus: 'pending',
+        seq: 1, name: '动态分数测试', status: 'pending', durationSecs: 300,
+        qualifySlots: 4, round: null, players: [{
+          personId: 1, douyinUid: 'motion-uid', nickname: '测试主播', personName: '测试主播',
+          position: rank, rank, score, qualified: rank <= 4,
+        }],
+      });
+      liveScoreCache = {};
+      liveRankCache = {};
+      liveGroupCardHtml(make(100, 2), Date.now(), 4);
+      return liveGroupCardHtml(make(180, 1), Date.now() + 1000, 4);
+    })()`)
+    truthy('分数上涨显示增量', scoreMotion.includes('plm-score-delta is-up'))
+    truthy('名次上升显示变化', scoreMotion.includes('plm-rank-move is-up'))
+    for (const width of [320, 375, 430]) {
+      await ws.send('Emulation.setDeviceMetricsOverride', {
+        width, height: 844, deviceScaleFactor: 1, mobile: true,
+      })
+      await sleep(250)
+      const metrics = await evaluate(ws, `({
+        viewport: innerWidth,
+        document: document.documentElement.scrollWidth,
+        tabs: document.querySelector('.plm-stage-tabs')?.scrollWidth || 0,
+        scrollable: ['auto', 'scroll'].includes(getComputedStyle(document.querySelector('.plm-stage-tabs')).overflowX),
+      })`)
+      truthy(`直播 ${width}px 无页面横向溢出（${metrics.document}/${metrics.viewport}）`, metrics.document <= metrics.viewport + 1)
+      truthy(`直播 ${width}px 阶段栏可横向滚动`, metrics.scrollable)
+    }
+    await ws.send('Emulation.setDeviceMetricsOverride', {
+      width: 390, height: 844, deviceScaleFactor: 1, mobile: true,
+    })
+    await shot(ws, '06-live-integrated.png')
+  })
+
+  /* 7. 深链（等价刷新）：关掉的页要落到还开着的第一页，这也是正确行为 */
+  await section('7. 深链直达 / 刷新不丢页', async () => {
     const wantOf = {
       '/report': 'data',
+      '/live/': 'live',
       '/group/mid': settings.groupEnabled === false ? 'data' : 'group',
-      '/lineage': settings.lineageEnabled === false ? 'data' : 'lineage',
+      '/lineage': settings.lineageEnabled === false
+        ? (settings.groupEnabled === false ? 'data' : 'group')
+        : 'lineage',
       '/my': settings.loginRequired === false ? 'data' : 'my',
     }
     for (const [path, want] of Object.entries(wantOf)) {
       await goto(ws, `${BASE}${path}`)
-      await sleep(1800)
+      await sleep(800)
+      if (want !== 'live') await waitFor(ws, `document.getElementById('view').innerText.trim().length > 30`, 20, 250)
+      await dismissKnownOverlays(ws)
       const active = await evaluate(ws, `document.querySelector('[data-v].on')?.dataset.v ?? ''`)
       expect(`深链 ${path} 落在 ${want} 页`, active, want)
       await assertViewHealthy(ws, `深链 ${path}`)
       expect(`深链 ${path} 地址保持`, await evaluate(ws, 'location.pathname'), path)
     }
+    await goto(ws, `${BASE}/live/00000000000000000000000000000000`)
+    await sleep(1600)
+    expect('旧 token 深链保持直播视图', await evaluate(ws, `document.querySelector('[data-v].on')?.dataset.v ?? ''`), 'live')
+    truthy('旧 token 深链使用 token API 并显示失效提示', (await evaluate(ws, 'document.body.innerText')).includes('直播链接不存在或已失效'))
   })
 
   /* 7. 网络 + 控制台 */

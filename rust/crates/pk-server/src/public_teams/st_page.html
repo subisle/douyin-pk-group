@@ -3031,6 +3031,221 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
   .date-swipe-hints .dsh svg { width:50px; height:50px; }
 }
 @media (prefers-reduced-motion:reduce) { .date-swipe-hints { transition:none; } }
+/* 直播监控：沿用展示端浅色玻璃、紫色主色与白色卡片，不再使用独立深色皮肤。
+   手机端优先压缩首屏：不放大号赛程头图，进入页面先看阶段和实时分数。 */
+.plm-shell {
+  --plm-panel: rgba(255, 255, 255, .9);
+  --plm-panel-2: #f6f3f5;
+  --plm-line: rgba(193, 198, 215, .68);
+  --plm-line-strong: rgba(76, 74, 202, .24);
+  --plm-ink: #1b1b1d;
+  --plm-muted: #717786;
+  --plm-primary: #4c4aca;
+  --plm-blue: #0058bc;
+  --plm-lime: #4c4aca;
+  --plm-mint: #0058bc;
+  --plm-coral: #9e3d00;
+  --plm-green: #0b7a3e;
+  --plm-orange-soft: #ffdbcc;
+  position: relative;
+  min-height: calc(100dvh - var(--mh-h, 80px) - 104px);
+  padding: 2px 0 max(22px, env(safe-area-inset-bottom));
+  color: var(--plm-ink);
+}
+.plm-shell * { box-sizing: border-box; }
+
+/* 紧凑状态条：替代旧版“当前赛程”大卡片，只保留当前阶段、组名、倒计时和连麦状态。 */
+.plm-livebar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 13px 14px;
+  border: 1px solid var(--plm-line-strong);
+  border-radius: 19px;
+  background: linear-gradient(135deg, rgba(255,255,255,.94), rgba(226,223,255,.72));
+  box-shadow: 0 8px 24px rgba(76, 74, 202, .09);
+}
+.plm-livebar-main { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.plm-live-dot {
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #f59e0b;
+  box-shadow: 0 0 0 5px rgba(245,158,11,.12), 0 0 14px rgba(245,158,11,.42);
+}
+.plm-livebar-copy { min-width: 0; }
+.plm-livebar-kicker { display: block; color: var(--plm-primary); font-size: 10px; font-weight: 800; letter-spacing: .1em; }
+.plm-livebar-title { display: block; margin-top: 2px; overflow: hidden; color: var(--plm-ink); font-size: 16px; font-weight: 800; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+.plm-livebar-group { display: block; margin-top: 2px; overflow: hidden; color: var(--plm-muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.plm-livebar-clock { min-width: 104px; text-align: right; }
+.plm-countdown {
+  display: block;
+  color: var(--plm-primary);
+  font: 800 28px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -.06em;
+  white-space: nowrap;
+}
+.plm-countdown.is-urgent { color: var(--plm-coral); }
+.plm-linkmic-state { display: inline-flex; align-items: center; justify-content: flex-end; gap: 5px; margin-top: 6px; color: var(--plm-muted); font-size: 9px; white-space: nowrap; }
+.plm-linkmic-state i, .plm-group-linkmic i { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.plm-linkmic-state.is-live, .plm-group-linkmic.is-live { color: var(--plm-green); }
+.plm-linkmic-state.is-warn, .plm-group-linkmic.is-warn { color: var(--plm-coral); }
+.plm-linkmic-state.is-done { color: var(--plm-primary); }
+.plm-linkmic-state b { font-weight: 700; }
+
+/* 阶段切换：白玻璃胶囊，当前阶段用展示端紫蓝主色。 */
+.plm-stage-tabs {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 12px 1px 10px;
+  scroll-snap-type: x proximity;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+.plm-stage-tabs::-webkit-scrollbar { display: none; }
+.plm-stage-tabs button {
+  flex: 0 0 auto;
+  min-width: 102px;
+  scroll-snap-align: start;
+  border: 1px solid var(--plm-line);
+  border-radius: 15px;
+  padding: 9px 11px;
+  color: var(--plm-muted);
+  text-align: left;
+  background: rgba(255,255,255,.78);
+  box-shadow: 0 3px 10px rgba(76,74,202,.04);
+  transition: color .16s ease, background .16s ease, border-color .16s ease, transform .16s ease;
+}
+.plm-stage-tabs button:active { transform: scale(.97); }
+.plm-stage-tabs button.is-active {
+  color: #fff;
+  border-color: transparent;
+  background: linear-gradient(135deg, #4c4aca, #0058bc);
+  box-shadow: 0 8px 18px rgba(76,74,202,.22);
+}
+.plm-stage-tabs span { display: block; font-size: 12px; font-weight: 800; }
+.plm-stage-tabs small { display: block; margin-top: 2px; font-size: 8px; opacity: .72; white-space: nowrap; }
+
+.plm-content { padding-top: 4px; }
+.plm-section-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; margin: 5px 0 10px; }
+.plm-section-head h2 { margin: 3px 0 0; color: var(--plm-ink); font-size: 22px; line-height: 1.2; letter-spacing: -.025em; }
+.plm-kicker { color: var(--plm-primary); font-size: 10px; font-weight: 800; letter-spacing: .1em; }
+.plm-section-hint { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 5px; color: var(--plm-muted); font-size: 9px; }
+.plm-section-hint span { border-radius: 999px; padding: 4px 7px; background: rgba(255,255,255,.72); border: 1px solid var(--plm-line); }
+.plm-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 11px; }
+
+.plm-group-card {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid var(--plm-line);
+  border-radius: 20px;
+  padding: 14px;
+  background: var(--plm-panel);
+  box-shadow: 0 8px 26px rgba(76,74,202,.075);
+}
+.plm-group-card::before { content: ''; position: absolute; inset: 0 auto 0 0; width: 3px; background: linear-gradient(180deg, #4c4aca, #adc6ff); }
+.plm-group-card.is-live { border-color: rgba(76,74,202,.34); box-shadow: 0 10px 30px rgba(76,74,202,.16); }
+.plm-group-card.is-live::before { background: linear-gradient(180deg, #0058bc, #4c4aca); box-shadow: 0 0 14px rgba(76,74,202,.34); }
+.plm-group-card.is-revival::before { background: linear-gradient(180deg, #f59e0b, #9e3d00); }
+.plm-group-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.plm-group-kicker { color: var(--plm-muted); font-size: 9px; font-weight: 800; letter-spacing: .08em; }
+.plm-group-head h3 { margin: 3px 0 0; color: var(--plm-ink); font-size: 19px; line-height: 1.25; }
+.plm-status { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; border-radius: 999px; padding: 5px 8px; color: var(--plm-muted); font-size: 9px; font-weight: 700; background: var(--plm-panel-2); }
+.plm-status i { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.plm-status.plm-live { color: var(--plm-green); background: rgba(11,122,62,.09); }
+.plm-status.plm-warn { color: var(--plm-coral); background: var(--plm-orange-soft); }
+.plm-status.plm-done { color: var(--plm-primary); background: rgba(76,74,202,.09); }
+.plm-group-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 5px 9px; margin: 10px 0 5px; color: var(--plm-muted); font-size: 9px; }
+.plm-group-meta strong { margin-left: auto; color: var(--plm-primary); font: 800 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.plm-group-meta strong.is-urgent { color: var(--plm-coral); }
+.plm-group-linkmic { display: inline-flex; align-items: center; gap: 4px; }
+.plm-player-list { display: grid; gap: 0; margin: 4px -3px 0; }
+.plm-player { display: grid; grid-template-columns: 31px minmax(0, 1fr) 88px; align-items: center; gap: 7px; padding: 8px 3px; border-top: 1px solid rgba(193,198,215,.45); }
+.plm-player:first-child { border-top: 0; }
+.plm-player.is-qualified .plm-rank { color: var(--plm-primary); }
+.plm-player.is-revival-zone .plm-rank { color: var(--plm-coral); }
+.plm-player.is-eliminated-zone { opacity: .62; }
+.plm-player.is-eliminated-zone .plm-rank { color: var(--plm-muted); }
+.plm-rank { color: var(--plm-muted); font: 800 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.plm-player-main { min-width: 0; }
+.plm-player-name { display: flex; align-items: center; gap: 5px; min-width: 0; }
+.plm-player-name b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--plm-ink); font-size: 13px; font-weight: 700; }
+.plm-zone { flex: 0 0 auto; border-radius: 999px; padding: 2px 5px; font-size: 7px; font-weight: 800; }
+.plm-zone.is-promoted { color: #fff; background: var(--plm-primary); }
+.plm-zone.is-revival-zone { color: #5b2500; background: #ffd7a8; }
+.plm-zone.is-eliminated-zone { color: var(--plm-muted); background: var(--plm-panel-2); border: 1px solid var(--plm-line); }
+.plm-score-track { height: 3px; margin-top: 5px; overflow: hidden; border-radius: 999px; background: #e4e2e4; }
+.plm-score-track i { display: block; height: 100%; min-width: 2px; border-radius: inherit; background: linear-gradient(90deg, #adc6ff, #4c4aca); transition: width .25s ease; }
+.plm-score-stack { min-width: 0; text-align: right; }
+.plm-score { color: var(--plm-ink); font: 800 13px ui-monospace, SFMono-Regular, Menlo, monospace; font-variant-numeric: tabular-nums; text-align: right; transform-origin: right center; transition: color .2s ease; }
+.plm-score.is-updating { color: var(--plm-primary); text-shadow: 0 0 12px rgba(76,74,202,.28); animation: plm-score-pop .36s ease-out; }
+.plm-score-meta { display: flex; align-items: center; justify-content: flex-end; gap: 4px; margin-top: 2px; font: 800 8px ui-monospace, SFMono-Regular, Menlo, monospace; white-space: nowrap; }
+.plm-score-delta { color: var(--plm-green); animation: plm-live-meta 1.25s ease-out both; }
+.plm-score-delta.is-down { color: var(--plm-coral); }
+.plm-rank-move { border-radius: 999px; padding: 1px 4px; background: var(--plm-panel-2); }
+.plm-rank-move.is-up { color: var(--plm-green); }
+.plm-rank-move.is-down { color: var(--plm-coral); }
+.plm-group-foot { display: flex; justify-content: space-between; gap: 8px; margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(193,198,215,.45); color: var(--plm-muted); font-size: 8px; }
+.plm-empty, .plm-waiting { color: var(--plm-muted); text-align: center; }
+.plm-empty { padding: 18px 8px; font-size: 11px; }
+.plm-waiting { display: grid; place-items: center; min-height: 220px; border: 1px dashed var(--plm-line-strong); border-radius: 20px; padding: 24px; background: rgba(255,255,255,.62); }
+.plm-waiting h3 { margin: 11px 0 5px; color: var(--plm-ink); font-size: 16px; text-align: center; }
+.plm-waiting p { margin: 0; font-size: 11px; }
+.plm-waiting-dot { width: 10px; height: 10px; border-radius: 50%; background: #f59e0b; box-shadow: 0 0 0 7px rgba(245,158,11,.12); animation: plm-pulse 1.5s infinite; }
+.plm-footer { display: flex; justify-content: space-between; gap: 12px; margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--plm-line); color: var(--plm-muted); font-size: 9px; }
+.plm-toast { position: fixed; right: 14px; bottom: 92px; max-width: min(340px, calc(100vw - 28px)); border: 1px solid rgba(158,61,0,.22); border-radius: 12px; padding: 9px 12px; color: #5b2500; background: rgba(255,219,204,.96); box-shadow: 0 8px 24px rgba(91,37,0,.12); font-size: 10px; }
+.plm-centered { display: grid; place-items: center; min-height: 50vh; text-align: center; }
+.plm-loader { width: 28px; height: 28px; margin-bottom: 12px; border: 3px solid rgba(76,74,202,.16); border-top-color: var(--plm-primary); border-radius: 50%; animation: plm-spin .8s linear infinite; }
+.plm-error-card { max-width: 560px; padding: 24px; border: 1px solid var(--plm-line); border-radius: 20px; background: rgba(255,255,255,.9); box-shadow: 0 8px 26px rgba(76,74,202,.08); }
+.plm-error-card span { color: var(--plm-coral); font-size: 11px; font-weight: 800; }
+.plm-error-card h1 { margin: 9px 0 7px; color: var(--plm-ink); font-size: 21px; }
+.plm-error-card p { margin: 0; color: var(--plm-muted); font-size: 11px; }
+@keyframes plm-score-pop { 0% { transform: scale(1); } 28% { transform: scale(1.07); } 100% { transform: scale(1); } }
+@keyframes plm-live-meta { 0% { opacity: 0; transform: translateY(3px); } 18%, 72% { opacity: 1; transform: none; } 100% { opacity: .55; transform: none; } }
+@keyframes plm-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
+@keyframes plm-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .plm-live-dot, .plm-score.is-updating, .plm-score-delta, .plm-waiting-dot, .plm-loader { animation: none; }
+  .plm-score-track i, .plm-stage-tabs button { transition: none; }
+}
+@media (max-width: 680px) {
+  .plm-shell { padding-bottom: max(18px, env(safe-area-inset-bottom)); }
+  .plm-livebar { border-radius: 17px; padding: 12px; }
+  .plm-livebar-title { font-size: 15px; }
+  .plm-countdown { font-size: 26px; }
+  .plm-stage-tabs button { min-width: 80px; padding: 8px 9px; }
+  .plm-stage-tabs span { font-size: 11px; }
+  .plm-stage-tabs { margin-right: -17px; padding-right: 17px; }
+  .plm-section-head h2 { font-size: 20px; }
+  .plm-grid { grid-template-columns: 1fr; gap: 9px; }
+  .plm-group-card { border-radius: 17px; padding: 12px; }
+  .plm-group-head h3 { font-size: 18px; }
+  .plm-player { grid-template-columns: 29px minmax(0, 1fr) 82px; padding: 8px 3px; }
+  .plm-player-name b { font-size: 13px; }
+  .plm-footer { display: block; line-height: 1.7; }
+  .plm-footer span { display: block; }
+}
+@media (max-width: 380px) {
+  .plm-livebar { grid-template-columns: 1fr; }
+  .plm-livebar-clock { display: flex; align-items: center; justify-content: space-between; min-width: 0; padding-top: 8px; border-top: 1px solid rgba(76,74,202,.12); text-align: left; }
+  .plm-countdown { font-size: 24px; }
+  .plm-linkmic-state { margin-top: 0; }
+  .plm-section-head { display: block; }
+  .plm-section-hint { justify-content: flex-start; margin-top: 7px; }
+}
+/* 融入展示端主壳：手机完全沿用主站的 430px 宽度与 17px 内边距；
+   平板/桌面才适度放宽，不再让直播页越过主站边界。 */
+body.live-view-open #foot { display: none; }
+body.live-view-open .plm-content { padding-bottom: 8px; }
+@media (min-width: 761px) {
+  body.live-view-open .wrap { max-width: 1080px; padding-left: 24px; padding-right: 24px; }
+  body.live-view-open .masthead { margin-left: -24px; margin-right: -24px; padding-left: 24px; padding-right: 24px; }
+}
+
 </style>
 </head>
 <body>
@@ -3143,7 +3358,7 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 <nav class="tabbar" id="navRow" aria-label="主导航">
   <!-- Stitch 1:1：9879920671738170074 / 2f32c73c9eb745c99ad617e812c6189f
        「主播数据榜-水滴仅边缘色散质感导航栏」
-       固定顺序：看板 / 分组 / 族谱 / 资源分享 / 微信对接 / 我的；族谱按后台开关与团别显隐。 -->
+       固定顺序：看板 / 分组 / 比赛监控 / 族谱 / 资源分享 / 微信对接 / 我的；族谱按后台开关与团别显隐。 -->
   <div class="nav-wall nav-wall-l" id="navWallL" aria-hidden="true"></div>
   <div class="nav-wall nav-wall-r" id="navWallR" aria-hidden="true"></div>
   <div id="navDrop" class="is-idle" aria-hidden="true">
@@ -3157,6 +3372,8 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
     <span class="ic"><svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path d="M2 11a1 1 0 011-1h2a1 1 0 011 1v5a1 1 0 01-1 1H3a1 1 0 01-1-1v-5zM8 7a1 1 0 011-1h2a1 1 0 011 1v9a1 1 0 01-1 1H9a1 1 0 01-1-1V7zM14 4a1 1 0 011-1h2a1 1 0 011 1v12a1 1 0 01-1 1h-2a1 1 0 01-1-1V4z"/></svg></span><span class="tab-label">看板</span></button>
   <button data-v="group" id="navGroup">
     <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span class="tab-label">分组</span></button>
+  <button data-v="live" id="navLive" aria-label="比赛监控">
+    <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2.5"/><path d="M8 21h8M12 17v4"/><path d="M7 10h2l1.5-3 3 6 1.5-3h2"/></svg></span><span class="tab-label">比赛监控</span></button>
   <button data-v="lineage" id="navLineage">
     <span class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><path d="M6 9v6a3 3 0 0 0 3 3h6"/><path d="M6 12h6a3 3 0 0 0 3-3"/></svg></span><span class="tab-label">族谱</span></button>
   <button data-v="resources" id="navResources">
@@ -3230,7 +3447,7 @@ let numberAnimationPending = false;
 let dashboardRevealTimer = null;
 let dashboardRevealNotBefore = 0;
 let period = 'daily';    // daily | monthly | yearly
-let view = 'data';       // data | group | lineage | resources | my
+let view = 'data';       // data | group | live | lineage | resources | my
 let curGroup = GROUP_PAGES[0].key;  // 分组子页当前 key
 let groupMode = 'groups'; // groups | gap：展示端分组页的两个阅读视图
 let groupAutoFocusPending = false; // 用户每次进入分组页时，自动选到本人所在组
@@ -3296,6 +3513,7 @@ function parseRoute() {
     .replace(/^\/(?:st\/)?(?:m|f|1|0|all)(?=\/|$)/, '')
     .replace(/^\/+|\/+$/g, '');
   if (rest === '' || rest === 'report') return { view: 'data' };
+  if (rest === 'live' || /^live\//.test(rest)) return { view: 'live' };
   if (rest === 'lineage') return { view: 'lineage' };
   if (rest === 'resources' || rest === 'resource') return { view: 'resources' };
   if (rest === 'my') return { view: 'my' };
@@ -3312,6 +3530,7 @@ function parseRoute() {
 }
 /** 当前视图对应的规范路径（根路径 + 子页路径；男女共用一个网址，团别不进 URL） */
 function routePath() {
+  if (view === 'live') return '/live/';
   if (view === 'lineage') return '/lineage';
   if (view === 'resources') return '/resources';
   if (view === 'my') return mySub ? '/my/' + mySub : '/my';
@@ -5441,10 +5660,30 @@ function initPublicDataEvents() {
         scheduleMyMessageProbe(350, true);
       } else if (d.scope === 'wx_binding') {
         scheduleWxBindingRefresh();
+      } else if (d.scope === 'live' && view === 'live' && liveRuntime) {
+        liveScheduleReload(liveRuntime);
       }
     } catch (_) {}
   });
 }
+
+/** 页面进 BFCache / 整页跳转时主动释放长连接。
+    旧打开方式只在逻辑上忽略事件，EventSource 仍可能占住同源连接槽；连续切几个
+    深链后会把首屏 API 堵到几十秒。恢复 BFCache 时 initPublicDataEvents 会重连。 */
+function closePublicDataEvents() {
+  if (!publicDataEvents) return;
+  try { publicDataEvents.close(); } catch (_) {}
+  publicDataEvents = null;
+}
+window.addEventListener('pagehide', () => {
+  closePublicDataEvents();
+  try { liveStopRuntime(); } catch (_) {}
+});
+window.addEventListener('pageshow', (event) => {
+  if (event.persisted) {
+    try { initPublicDataEvents(); } catch (_) {}
+  }
+});
 
 function scheduleWxBindingRefresh() {
   clearTimeout(wxBindingRefreshTimer);
@@ -9689,6 +9928,399 @@ function bindPushBox(p) {
 }
 
 
+/* ==================== 公开直播比赛监控（融入主站） ====================
+   2026-11-20 用户口径：/live/ 不再作为独立页面展示，而是主站内的
+   「比赛监控」视图。数据仍走 /api/public/live + /api/public/events(SSE)，
+   切换页面时只停直播刷新节拍；主站公共 SSE 继续给公告/消息等其它功能使用。 */
+const LIVE_STAGE_ORDER = [
+  'first_wave_group',
+  'first_wave_revival',
+  'rest_group',
+  'rest_revival',
+  'promotion',
+  'final',
+];
+const LIVE_STAGE_META = {
+  first_wave_group: { short: '前四组', title: '前四组 · 小组赛', hint: '每组 10 分钟 · 前 4 名晋级' },
+  first_wave_revival: { short: '复活赛', title: '前四组 · 复活赛', hint: '淘汰者复活 · 每组 5 分钟' },
+  rest_group: { short: '后续小组', title: '后续小组赛', hint: '每组 10 分钟 · 前 4 名晋级' },
+  rest_revival: { short: '后续复活', title: '后续小组 · 复活赛', hint: '淘汰者复活 · 每组 5 分钟' },
+  promotion: { short: '晋级赛', title: '晋级赛', hint: '小组第一进入决赛' },
+  final: { short: '决赛', title: '总决赛', hint: '决出冠亚季军' },
+};
+const LIVE_ACTIVE_STATUSES = new Set(['running', 'settling', 'pending_review', 'waiting_restart']);
+const LIVE_FINISH_HOLD_MS = 8000;
+
+let liveSnapshot = null;
+let liveSelectedStage = '';
+let liveAutoStage = '';
+let liveServerOffsetMs = 0;
+let liveLastError = '';
+let liveRuntime = null;
+let liveScoreCache = {};
+let liveRankCache = {};
+let liveSnapshotKey = '';
+
+/** 固定 /live/ 自动接当前赛事；历史 /live/{token} 仍按 token 拉同一份快照。 */
+function liveRouteToken() {
+  const match = location.pathname.match(/^\/live\/([0-9a-f]{24,40})\/?$/i);
+  return match ? match[1] : '';
+}
+function liveApiUrl() {
+  const token = liveRouteToken();
+  return token ? '/api/public/live/' + encodeURIComponent(token) : '/api/public/live';
+}
+
+function liveStageIndex(kind) {
+  const i = LIVE_STAGE_ORDER.indexOf(kind);
+  return i < 0 ? 99 : i;
+}
+function liveStageLabel(kind) {
+  return (LIVE_STAGE_META[kind] && LIVE_STAGE_META[kind].title) || kind || '实时比分';
+}
+function liveStageStatusLabel(stage) {
+  if (!stage) return '未生成';
+  if (stage.status === 'running') return '进行中';
+  if (stage.status === 'finalized') return '已结束';
+  return '待开始';
+}
+function liveGroupStatus(group) {
+  if (group.status === 'finalized') return { text: '结束阶段', tone: 'done' };
+  if (group.status === 'running') return { text: 'PK 进行中', tone: 'live' };
+  if (group.status === 'settling') return { text: '结束结算中', tone: 'warn' };
+  if (group.status === 'pending_review') return { text: '等待确认', tone: 'warn' };
+  if (group.status === 'waiting_restart') return { text: '等待重开', tone: 'warn' };
+  return { text: '准备阶段', tone: 'idle' };
+}
+function liveClockText(seconds) {
+  const safe = Math.max(0, Math.ceil(Number(seconds) || 0));
+  return pad2(Math.floor(safe / 60)) + ':' + pad2(safe % 60);
+}
+function liveTimeText(value) {
+  if (!value) return '—';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return '—';
+  return d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+function liveGroupPhase(group, nowMs) {
+  const people = Array.isArray(group.players) ? group.players.length : 0;
+  if (group.status === 'finalized') {
+    return { text: '已结束', detail: '结果已按直播间 PK 结束信号确认', countdown: '已结束', linkmic: '连麦结束 · ' + people + ' 人', tone: 'done', urgent: false };
+  }
+  if (group.status === 'settling') {
+    return { text: '等待结束', detail: '直播间 PK 已结束，等待最终分数', countdown: '结算中', linkmic: '连麦结束 · ' + people + ' 人', tone: 'warn', urgent: true };
+  }
+  if (group.status === 'pending_review') {
+    return { text: '待确认', detail: '等待核对直播对局', countdown: '待确认', linkmic: '连麦已结束 · ' + people + ' 人', tone: 'warn', urgent: true };
+  }
+  if (group.status === 'waiting_restart') {
+    return { text: '待重开', detail: '直播间异常结束，等待下一场', countdown: '待重开', linkmic: '连麦异常', tone: 'warn', urgent: true };
+  }
+  if (group.status === 'running') {
+    const start = group.round && group.round.startAt ? Date.parse(group.round.startAt) : NaN;
+    const duration = Number(group.durationSecs) || 600;
+    const remaining = Number.isNaN(start) ? duration : Math.max(0, duration - (nowMs - start) / 1000);
+    return {
+      text: 'PK 进行中',
+      detail: Number.isNaN(start) ? '跟随直播间实际对局' : '剩余 ' + liveClockText(remaining) + '，实际结束以直播间为准',
+      countdown: liveClockText(remaining),
+      linkmic: 'PK 连麦中 · ' + people + ' 人',
+      tone: 'live',
+      urgent: remaining <= 60,
+    };
+  }
+  const duration = Number(group.durationSecs) || 600;
+  return {
+    text: '准备中',
+    detail: '整组人齐后开始 PK',
+    countdown: liveClockText(duration),
+    linkmic: people > 0 ? '准备连麦 · ' + people + ' 人' : '等待连麦',
+    tone: 'idle',
+    urgent: false,
+  };
+}
+function livePlayerName(player) {
+  return player.personName || player.douyinUid || '未登记';
+}
+function liveSortGroups(groups) {
+  return (groups || []).slice().sort((a, b) => liveStageIndex(a.stageKind) - liveStageIndex(b.stageKind) || (a.seq || 0) - (b.seq || 0));
+}
+function liveCurrentGroup(groups, nowMs) {
+  const active = groups.find(g => LIVE_ACTIVE_STATUSES.has(g.status) && g.status !== 'pending_review')
+    || groups.find(g => LIVE_ACTIVE_STATUSES.has(g.status));
+  if (active) return active;
+  const recentlyFinished = groups
+    .filter(g => g.status === 'finalized' && g.finalizedAt)
+    .sort((a, b) => Date.parse(b.finalizedAt || '') - Date.parse(a.finalizedAt || ''))
+    .find(g => nowMs - Date.parse(g.finalizedAt || '') < LIVE_FINISH_HOLD_MS);
+  if (recentlyFinished) return recentlyFinished;
+  const pending = groups.find(g => g.stageStatus !== 'finalized');
+  if (pending) return pending;
+  const done = groups.filter(g => g.status === 'finalized');
+  return done.length ? done[done.length - 1] : null;
+}
+function liveGroupCardHtml(group, nowMs, qualifyDefault) {
+  const status = liveGroupStatus(group);
+  const phase = liveGroupPhase(group, nowMs);
+  const players = Array.isArray(group.players) ? group.players : [];
+  const maxScore = Math.max(1, ...players.map(p => Number(p.score) || 0));
+  const revival = String(group.stageKind || '').includes('revival');
+  const isLive = LIVE_ACTIVE_STATUSES.has(group.status);
+  const qualify = Number(group.qualifySlots) || qualifyDefault;
+  const scored = players.filter(p => Number(p.rank) > 0).length;
+  const playerRows = players.length ? players.map((player, index) => {
+    const position = Number(player.position) || index + 1;
+    const hasScore = Number(player.rank) > 0;
+    const qualified = hasScore && position <= qualify;
+    const zone = !hasScore ? '' : (qualified ? (revival ? '复活区' : '晋级区') : (revival ? '淘汰区' : '复活区'));
+    const zoneClass = zone === '晋级区' ? 'is-promoted' : zone === '复活区' ? 'is-revival-zone' : zone === '淘汰区' ? 'is-eliminated-zone' : '';
+    const score = Number(player.score) || 0;
+    const pct = Math.max(2, Math.round((score / maxScore) * 100));
+    const key = String(group.id) + ':' + String(player.douyinUid || player.personId || index);
+    const hasPrevScore = Object.prototype.hasOwnProperty.call(liveScoreCache, key);
+    const prevScore = hasPrevScore ? Number(liveScoreCache[key]) || 0 : 0;
+    const changed = hasPrevScore && prevScore !== score;
+    const delta = changed ? score - prevScore : 0;
+    const prevPosition = Number(liveRankCache[key]) || 0;
+    const rankMove = hasScore && prevPosition > 0 ? prevPosition - position : 0;
+    liveScoreCache[key] = score;
+    liveRankCache[key] = hasScore ? position : 0;
+    const scoreMeta = (delta > 0 ? '<span class="plm-score-delta is-up">+' + delta.toLocaleString('zh-CN') + '</span>' : delta < 0 ? '<span class="plm-score-delta is-down">' + delta.toLocaleString('zh-CN') + '</span>' : '') +
+      (rankMove !== 0 ? '<span class="plm-rank-move ' + (rankMove > 0 ? 'is-up' : 'is-down') + '">' + (rankMove > 0 ? '↑' : '↓') + Math.abs(rankMove) + '</span>' : '');
+    return '<div class="plm-player' + (qualified ? ' is-qualified' : '') + (zoneClass ? ' ' + zoneClass : '') + '">' +
+      '<span class="plm-rank">' + (hasScore ? '#' + esc(position) : '—') + '</span>' +
+      '<div class="plm-player-main"><div class="plm-player-name"><b>' + esc(livePlayerName(player)) + '</b>' +
+      (zone ? '<span class="plm-zone ' + zoneClass + '">' + esc(zone) + '</span>' : '') + '</div>' +
+      '<div class="plm-score-track"><i style="width:' + pct + '%"></i></div></div>' +
+      '<div class="plm-score-stack"><span class="plm-score' + (changed ? ' is-updating' : '') + '">' + score.toLocaleString('zh-CN') + '</span>' +
+      (scoreMeta ? '<span class="plm-score-meta">' + scoreMeta + '</span>' : '') + '</div></div>';
+  }).join('') : '<div class="plm-empty">' + (revival ? '等待直播连麦名单…' : '分组等待生成…') + '</div>';
+  const ruleLine = revival
+    ? '前 ' + qualify + ' 名复活 · 后 ' + Math.max(players.length - qualify, 0) + ' 名淘汰'
+    : '前 ' + qualify + ' 名晋级 · 后 ' + Math.max(players.length - qualify, 0) + ' 名进复活池';
+  const footLeft = group.status === 'pending'
+    ? '准备阶段：整组人齐后开始 PK'
+    : (group.round && group.round.startAt ? '开赛 ' + liveTimeText(group.round.startAt)
+      : group.status === 'finalized' ? '成绩已核对并冻结' : '等待采集到 PK 对局');
+  const footRight = group.round && group.round.observedAt ? '<span>更新 ' + liveTimeText(group.round.observedAt) + '</span>' : '';
+  return '<article class="plm-group-card' + (revival ? ' is-revival' : '') + (isLive ? ' is-live' : '') + '">' +
+    '<header class="plm-group-head"><div><div class="plm-group-kicker">' + (revival ? '复活赛' : '小组赛') + ' · 第 ' + esc(group.seq || 0) + ' 组</div>' +
+    '<h3>' + esc(group.name || ('第 ' + (group.seq || 0) + ' 组')) + '</h3></div>' +
+    '<span class="plm-status plm-' + status.tone + '"><i></i>' + esc(status.text) + '</span></header>' +
+    '<div class="plm-group-meta"><span>规则时长 ' + Math.round((Number(group.durationSecs) || 600) / 60) + ' 分钟 · 实际以直播间为准</span>' +
+    '<span>' + esc(ruleLine) + '</span><span>' + scored + '/' + players.length + ' 人已出分</span>' +
+    '<span class="plm-group-linkmic is-' + phase.tone + '"><i></i>' + esc(phase.linkmic) + '</span>' +
+    '<strong data-live-countdown-group="' + esc(group.id) + '" class="' + (phase.urgent ? 'is-urgent' : '') + '">' + esc(phase.countdown) + '</strong></div>' +
+    '<div class="plm-player-list">' + playerRows + '</div>' +
+    '<footer class="plm-group-foot"><span>' + esc(footLeft) + '</span>' + footRight + '</footer></article>';
+}
+function liveLoadingHtml() {
+  if (!liveSnapshot && liveLastError) {
+    return '<div class="plm-shell is-integrated plm-centered"><div class="plm-error-card">' +
+      '<span>直播比分</span><h1>' + esc(liveLastError) + '</h1>' +
+      '<p>' + (liveRouteToken() ? '请向运营确认最新公开链接。' : '当前没有进行中的赛事，开赛后这里会自动刷新。') + '</p></div></div>';
+  }
+  if (!liveSnapshot) {
+    return '<div class="plm-shell is-integrated plm-centered"><div class="plm-loader"></div><p>正在连接实时比分…</p></div>';
+  }
+  return '';
+}
+function liveRenderView() {
+  if (view !== 'live') return;
+  const box = $('view');
+  if (!box) return;
+  const shell = liveLoadingHtml();
+  if (shell) {
+    box.innerHTML = shell;
+    $('mhTitle').textContent = '比赛监控';
+    $('mhSub').textContent = liveLastError ? 'LIVE · 等待赛事' : 'LIVE · 实时比分';
+    document.title = '比赛监控 · ' + LABEL() + '数据榜';
+    syncHeaderOffset();
+    return;
+  }
+
+  const event = liveSnapshot.event || {};
+  const groups = liveSortGroups(liveSnapshot.groups);
+  const stages = (liveSnapshot.stages || []).slice().sort((a, b) => (a.seq || 0) - (b.seq || 0));
+  const nowMs = Date.now() + liveServerOffsetMs;
+  const currentGroup = liveCurrentGroup(groups, nowMs);
+  const currentStage = currentGroup ? currentGroup.stageKind : '';
+  if (currentStage && (!liveSelectedStage || currentStage !== liveAutoStage)) {
+    liveSelectedStage = currentStage;
+    liveAutoStage = currentStage;
+  }
+  const visibleStages = LIVE_STAGE_ORDER.filter(kind =>
+    groups.some(g => g.stageKind === kind) || stages.some(s => s.kind === kind) || kind === 'first_wave_group');
+  if (!liveSelectedStage || !visibleStages.includes(liveSelectedStage)) liveSelectedStage = visibleStages[0] || 'first_wave_group';
+  const selectedMeta = LIVE_STAGE_META[liveSelectedStage] || LIVE_STAGE_META.first_wave_group;
+  const selectedStageInfo = stages.find(s => s.kind === liveSelectedStage);
+  const stageGroups = groups.filter(g => g.stageKind === liveSelectedStage);
+  const qualifyDefault = Number(event.rules && event.rules.directQualifyPerGroup) || 4;
+  const stageQualify = Number(stageGroups.find(g => Number(g.qualifySlots) > 0)?.qualifySlots) || qualifyDefault;
+  const footerRule = liveSelectedStage.includes('revival')
+    ? '复活赛每组前 ' + stageQualify + ' 名复活'
+    : liveSelectedStage === 'promotion'
+      ? '晋级赛每组第 1 名进入决赛'
+      : liveSelectedStage === 'final'
+        ? '决赛决出冠亚季军'
+        : '小组前 ' + stageQualify + ' 名晋级，其余进复活池';
+  const activePhase = currentGroup ? liveGroupPhase(currentGroup, nowMs) : null;
+  const stageTabs = visibleStages.map(kind => {
+    const stage = stages.find(s => s.kind === kind);
+    const count = groups.filter(g => g.stageKind === kind).length;
+    return '<button type="button" data-live-stage="' + esc(kind) + '" class="' + (liveSelectedStage === kind ? 'is-active' : '') + '" aria-pressed="' + (liveSelectedStage === kind ? 'true' : 'false') + '">' +
+      '<span>' + esc((LIVE_STAGE_META[kind] && LIVE_STAGE_META[kind].short) || kind) + '</span>' +
+      '<small>' + (count ? count + ' 组 · ' + esc(liveStageStatusLabel(stage)) : esc(liveStageStatusLabel(stage))) + '</small></button>';
+  }).join('');
+  const cards = stageGroups.length
+    ? '<div class="plm-grid">' + stageGroups.map(group => liveGroupCardHtml(group, nowMs, qualifyDefault)).join('') + '</div>'
+    : '<div class="plm-waiting"><span class="plm-waiting-dot"></span><h3>' +
+      (liveSelectedStage === 'first_wave_revival' || liveSelectedStage === 'rest_revival' ? '等待直播连麦名单自动接入复活组' : '等待运营启动这一阶段') +
+      '</h3><p>页面会自动刷新，无需手动重开链接。</p></div>';
+
+  box.innerHTML = '<div class="plm-shell is-integrated">' +
+    '<section class="plm-livebar"><div class="plm-livebar-main"><span class="plm-live-dot"></span>' +
+    '<div class="plm-livebar-copy"><span class="plm-livebar-kicker">LIVE · 自动更新</span>' +
+    '<b class="plm-livebar-title">' + esc(liveStageLabel(currentStage || liveSelectedStage)) + '</b>' +
+    '<span class="plm-livebar-group">' + (currentGroup ? esc(currentGroup.name + ' · ' + liveGroupStatus(currentGroup).text) : '等待下一阶段自动开始') + '</span></div></div>' +
+    '<div class="plm-livebar-clock"><b class="plm-countdown' + (activePhase && activePhase.urgent ? ' is-urgent' : '') + '" id="plmLiveCountdown">' +
+    esc(activePhase ? activePhase.countdown : '--:--') + '</b>' +
+    '<span class="plm-linkmic-state is-' + (activePhase ? activePhase.tone : 'idle') + '"><i></i><b>' +
+    esc(activePhase ? activePhase.linkmic : '等待连麦') + '</b></span></div></section>' +
+    '<nav class="plm-stage-tabs" aria-label="比赛阶段">' + stageTabs + '</nav>' +
+    '<main class="plm-content"><div class="plm-section-head"><div><span class="plm-kicker">分组与实时分数</span>' +
+    '<h2>' + esc(selectedMeta.title) + '</h2></div><div class="plm-section-hint"><span>' + esc(selectedMeta.hint) + '</span><span>' +
+    esc(liveStageStatusLabel(selectedStageInfo)) + '</span></div></div>' + cards + '</main>' +
+    '<footer class="plm-footer"><span>比分来自抖音 PK 实时采样</span><span>' + esc(footerRule) + '</span></footer>' +
+    (liveLastError ? '<div class="plm-toast">' + esc(liveLastError) + '</div>' : '') + '</div>';
+
+  box.querySelectorAll('[data-live-stage]').forEach(btn => {
+    btn.onclick = () => {
+      const stage = btn.dataset.liveStage || '';
+      if (!stage || stage === liveSelectedStage) return;
+      liveSelectedStage = stage;
+      liveRenderView();
+    };
+  });
+  $('mhTitle').textContent = '比赛监控';
+  $('mhSub').textContent = 'LIVE · ' + (event.title || '实时比分');
+  document.title = (event.title || '实时比分') + ' · 实时比分';
+  syncHeaderOffset();
+  try { navDropMove(true); } catch (_) {}
+}
+function liveUpdateClocks() {
+  if (view !== 'live' || !liveSnapshot) return;
+  const groups = liveSortGroups(liveSnapshot.groups);
+  const nowMs = Date.now() + liveServerOffsetMs;
+  const current = liveCurrentGroup(groups, nowMs);
+  const phase = current ? liveGroupPhase(current, nowMs) : null;
+  const hero = $('plmLiveCountdown');
+  if (hero && phase) {
+    hero.textContent = phase.countdown;
+    hero.classList.toggle('is-urgent', !!phase.urgent);
+  }
+  document.querySelectorAll('[data-live-countdown-group]').forEach(el => {
+    const group = groups.find(g => String(g.id) === String(el.dataset.liveCountdownGroup));
+    if (!group) return;
+    const p = liveGroupPhase(group, nowMs);
+    el.textContent = p.countdown;
+    el.classList.toggle('is-urgent', !!p.urgent);
+  });
+}
+function liveScheduleReload(rt) {
+  if (rt.stopped || rt.refreshTimer) return;
+  rt.refreshTimer = setTimeout(() => {
+    rt.refreshTimer = null;
+    if (!rt.stopped && view === 'live' && document.visibilityState !== 'hidden' && navigator.onLine !== false) {
+      liveLoadOnce(rt);
+    }
+  }, 50);
+}
+async function liveLoadOnce(rt) {
+  if (rt.stopped || view !== 'live') return;
+  if (rt.loading) {
+    rt.pending = true;
+    return;
+  }
+  rt.loading = true;
+  const seq = ++rt.seq;
+  try {
+    const response = await fetch(liveApiUrl(), {
+      cache: 'no-store',
+      headers: { accept: 'application/json' },
+      signal: rt.signal || undefined,
+    });
+    if (!response.ok) throw new Error(response.status === 404
+      ? (liveRouteToken() ? '直播链接不存在或已失效' : '当前没有进行中的赛事')
+      : '直播数据加载失败（' + response.status + '）');
+    const next = await response.json();
+    if (rt.stopped || view !== 'live' || seq !== rt.seq) return;
+    const renderKey = JSON.stringify([next.event, next.stages, next.groups]);
+    const changed = renderKey !== liveSnapshotKey;
+    const hadError = !!liveLastError;
+    liveSnapshot = next;
+    liveSnapshotKey = renderKey;
+    liveLastError = '';
+    const server = Date.parse(next.serverNow || '');
+    liveServerOffsetMs = Number.isNaN(server) ? 0 : server - Date.now();
+    if (changed || hadError) liveRenderView();
+  } catch (e) {
+    if (rt.stopped || view !== 'live' || seq !== rt.seq) return;
+    liveLastError = (e && e.message) || String(e);
+    liveRenderView();
+  } finally {
+    rt.loading = false;
+    if (rt.pending && !rt.stopped && view === 'live') {
+      rt.pending = false;
+      liveScheduleReload(rt);
+    }
+  }
+}
+function liveStopRuntime() {
+  const rt = liveRuntime;
+  if (!rt) return;
+  liveRuntime = null;
+  rt.stopped = true;
+  if (rt.source) {
+    try { rt.source.close(); } catch (_) {}
+    rt.source = null;
+  }
+  if (rt.refreshTimer) clearTimeout(rt.refreshTimer);
+  if (rt.fallbackTimer) clearInterval(rt.fallbackTimer);
+  if (rt.tickerTimer) clearInterval(rt.tickerTimer);
+  if (rt.signal && rt.abortHandler) {
+    try { rt.signal.removeEventListener('abort', rt.abortHandler); } catch (_) {}
+  }
+}
+function liveLoad(signal) {
+  liveStopRuntime();
+  const rt = {
+    stopped: false,
+    seq: 0,
+    source: null,
+    refreshTimer: null,
+    fallbackTimer: null,
+    tickerTimer: null,
+    loading: false,
+    pending: false,
+    signal: signal || null,
+    abortHandler: null,
+  };
+  liveRuntime = rt;
+  rt.abortHandler = () => liveStopRuntime();
+  if (signal) {
+    if (signal.aborted) return Promise.resolve();
+    signal.addEventListener('abort', rt.abortHandler, { once: true });
+  }
+  if (!liveSnapshot) liveRenderView();
+  rt.fallbackTimer = setInterval(() => {
+    if (document.visibilityState !== 'hidden' && navigator.onLine !== false) liveLoadOnce(rt);
+  }, 3000);
+  rt.tickerTimer = setInterval(liveUpdateClocks, 1000);
+  return liveLoadOnce(rt);
+}
+
+
 /* ==================== 视图切换 ==================== */
 /* 顶部导航 sticky 后，工具条吸顶位置要跟头部实际高度走（分组页多一条子导航）。
    2026-10-17 口径：公告行 #mhAnn 在 masthead **内部**，随头部一起吸顶、高度天然计入
@@ -10401,6 +11033,14 @@ function switchView(v, opts) {
   }
   if (v === 'lineage' && (s.lineageEnabled === false || TEAM === 'female')) v = 'data';
   if (v === 'my' && s.loginRequired === false) v = 'data';
+  /* 比赛监控是主站内视图：进入时放宽内容宽度，离开时停止直播刷新并恢复主站标题。 */
+  const wasLive = view === 'live';
+  if (v !== 'live') liveStopRuntime();
+  document.body.classList.toggle('live-view-open', v === 'live');
+  if (wasLive && v !== 'live') {
+    $('mhTitle').textContent = LABEL() + '数据榜';
+    document.title = LABEL() + '每日报告';
+  }
   /* ===== 页面横滑方向（2026-10-18 v6，提示词第 7 条）=====
      序号差定方向：新 Tab 在右边（newIdx > oldIdx）= 向右翻页，新页从右滑入
      （--slide-from:40px）；在左边则从左（-40px）。同页（序号相同）不播动画。
@@ -10443,7 +11083,7 @@ function switchView(v, opts) {
   /* 弹幕条随 renderList 一起输出/移除，切视图无需额外收口（2026-10-19 第三轮） */
   show('subnav', v === 'group');
   if (v === 'group') requestAnimationFrame(() => { try { groupSegMove(true); } catch (e) {} });
-  show('foot', v !== 'lineage');
+  show('foot', v !== 'lineage' && v !== 'live');
   syncHeaderOffset();
   /* 离开「我的」页就停页内计时器（激活轮询 / 目标人搜索防抖）：
      不停的话切回来会变成双份轮询，白耗请求 */
@@ -10493,6 +11133,7 @@ async function go() {
   optimistic();
   try {
     if (view === 'data') await loadData(signal);
+    else if (view === 'live') await liveLoad(signal);
     else if (view === 'lineage') await loadLineage(null, signal);
     else if (view === 'my') await loadMy(signal);
     else if (view === 'resources') await renderResources(signal);
@@ -10529,7 +11170,7 @@ function scheduleRefresh() {
     /* lineage / my 不参与静默刷新：lineage 重建画布会丢缩放位置；
        my 是个人数据页，低频变化，且重建会打断用户正在输入的表单 */
     Promise.resolve(view === 'data' ? loadData(undefined, true)
-      : (view === 'lineage' || view === 'my' || view === 'resources') ? null
+      : (view === 'lineage' || view === 'my' || view === 'resources' || view === 'live') ? null
       : (view === 'group' && groupFrozen) ? null : loadGroup())
       .then(() => { consecutiveFail = 0; show('stale', false); })
       .catch(() => { consecutiveFail++; if (consecutiveFail >= 2) show('stale', true); })
@@ -10565,6 +11206,7 @@ function syncNav() {
   const anySub = [...document.querySelectorAll('#subnav button')].some(b => !b.disabled);
   show('navGroup', groupOn && anySub && TEAM !== 'female');
   show('navData', dataOn);
+  show('navLive', true);
   show('navLineage', linOn);
   show('navResources', true);
   show('navMy', s.loginRequired !== false);   // 关登录 = 全面开放，没有「我的」页

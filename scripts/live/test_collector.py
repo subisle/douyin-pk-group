@@ -128,6 +128,32 @@ class SnapshotFreshnessTests(unittest.TestCase):
         self.assertEqual(score["currentBonus"], 7)
         self.assertEqual(score["score"] - score["bonusScore"], 896)
 
+    def test_parse_linkmic_keeps_monitor_order_and_drops_referee(self):
+        raw = {
+            "extra": {"now": 1_100_000},
+            "data": {
+                "has_room": True,
+                "room_id": "room-1",
+                "user": [
+                    {"user": {"id_str": "uid-b", "nick_name": "主播B"}},
+                    {"user": {"id_str": "3358343524517819", "nick_name": "裁判"}},
+                    {"user": {"id_str": "uid-a", "nick_name": "主播A"}},
+                    {"user": {"id_str": "uid-b", "nick_name": "重复B"}},
+                ],
+            },
+        }
+
+        parsed = parse_linkmic(raw)
+        self.assertEqual(
+            [row["userId"] for row in parsed["linkmicUsers"]],
+            ["uid-b", "uid-a"],
+        )
+        obs = to_observation("room-1", parsed, 1_100_000)
+        self.assertEqual(
+            [row["userId"] for row in obs["linkmicUsers"]],
+            ["uid-b", "uid-a"],
+        )
+
 
 class PureWebsocketCollectorTests(unittest.TestCase):
     def test_wss_signature_is_pure_python_and_stable_length(self):
@@ -264,6 +290,48 @@ class PureWebsocketCollectorTests(unittest.TestCase):
                       "msg_id": 1, "timestamp_ms": 1000})
         self.assertEqual(state.scores["999"]["score"], 200)
         self.assertEqual(state.last_message_ms, 2000)
+
+    def test_prepare_roster_is_kept_before_battle_starts(self):
+        import collector_ws as c
+
+        state = c.BattleState()
+        changed = state.apply_http({
+            "roomId": "room-1",
+            "online": True,
+            "nowMs": 2000,
+            "linkmicUsers": [
+                {"userId": "uid-b", "nickname": "主播B"},
+                {"userId": "uid-a", "nickname": "主播A"},
+            ],
+        })
+        raw = state.raw("room-1", True)
+
+        self.assertTrue(changed)
+        self.assertNotIn("battle", raw)
+        self.assertEqual(
+            [row["userId"] for row in raw["linkmicUsers"]],
+            ["uid-b", "uid-a"],
+        )
+
+    def test_websocket_linkmic_users_are_kept_without_battle_id(self):
+        import collector_ws as c
+
+        state = c.BattleState()
+        first = c.encode_field(21, 2, b"uid-a") + c.encode_field(1, 0, 0)
+        second = c.encode_field(21, 2, b"uid-b") + c.encode_field(1, 0, 0)
+        payload = c.encode_field(17, 2, first) + c.encode_field(17, 2, second)
+        state.handle({
+            "method": "LinkMicMethod",
+            "payload": payload,
+            "msg_id": 1,
+            "timestamp_ms": 1000,
+        })
+
+        self.assertEqual(
+            [row["userId"] for row in state.linkmic_users],
+            ["uid-a", "uid-b"],
+        )
+        self.assertEqual(state.battle_id, "")
 
     def test_ended_status_cannot_be_reopened_before_delivery(self):
         import collector_ws as c

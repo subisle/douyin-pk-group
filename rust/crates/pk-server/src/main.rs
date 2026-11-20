@@ -631,6 +631,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/group/{key}", get(public_teams::st_root))
         .route("/1", get(public_teams::st_m))
         .route("/0", get(public_teams::st_0))
+        /* 公开比赛监控融入展示端主壳：/live/ 与旧 token 深链都由 st_page 接管，
+           页面内切换到 live 视图，不再进入独立 React 公开展示页。 */
+        .route("/live", get(public_teams::st_root))
+        .route("/live/", get(public_teams::st_root))
+        .route("/live/{*rest}", get(public_teams::st_root))
         .route("/st/{team}", get(public_teams::st_page))
         .route("/st/{team}/{*rest}", get(public_teams::st_page_sub))
         .layer(axum::middleware::from_fn_with_state(

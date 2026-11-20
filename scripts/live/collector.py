@@ -118,6 +118,7 @@ def parse_linkmic(j: dict) -> dict:
         "online": bool(data.get("has_room", True)),
         "nowMs": int((j.get("extra") or {}).get("now") or 0),
         "userCount": len(users),
+        "linkmicUsers": _linkmic_users(users),
         "battle": None,
     }
     if not bs:
@@ -180,6 +181,32 @@ def parse_linkmic(j: dict) -> dict:
         "scores": scores,
         "teamScores": team_list,
     }
+    return out
+
+
+def _linkmic_users(users: Any) -> list[dict[str, str]]:
+    """连麦列表按接口原始顺序归一化；这个顺序就是复活赛自动接组的顺序。
+
+    `linkmic/list` 在 PK 开始前也会返回当前连麦成员，顶层 `user` 里既可能是
+    用户对象，也可能包一层 `user`。这里不猜昵称含义，只保留 UID + 当时昵称，
+    后端再用台账 UID/姓名覆盖展示名。
+    """
+    if not isinstance(users, list):
+        return []
+    ignored_uids = referee_uids()
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in users:
+        if not isinstance(item, dict):
+            continue
+        wrapped = item.get("user")
+        user = wrapped if isinstance(wrapped, dict) else item
+        uid = str(user.get("id_str") or user.get("id") or "").strip()
+        if not uid or uid in ignored_uids or uid in seen:
+            continue
+        seen.add(uid)
+        nickname = str(user.get("nick_name") or user.get("nickname") or "").strip()
+        out.append({"userId": uid, "nickname": nickname})
     return out
 
 
@@ -283,6 +310,19 @@ def to_observation(web_rid: str, raw: dict, now_ms: int) -> dict:
         "health": "ok",
         "error": "",
     }
+    linkmic_users = raw.get("linkmicUsers")
+    if isinstance(linkmic_users, list):
+        ignored_uids = referee_uids()
+        obs["linkmicUsers"] = [
+            {
+                "userId": str(row.get("userId") or "").strip(),
+                "nickname": str(row.get("nickname") or "").strip(),
+            }
+            for row in linkmic_users
+            if isinstance(row, dict)
+            and str(row.get("userId") or "").strip()
+            and str(row.get("userId") or "").strip() not in ignored_uids
+        ]
     b = raw.get("battle")
     if isinstance(b, dict) and b.get("battleId"):
         # 后端 Observation 用 camelCase（与前端其它接口一致），这里直接拼好。

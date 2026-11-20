@@ -150,11 +150,23 @@ pub struct Observation {
     /// 当前 battle 快照；没有 PK 时为空
     #[serde(default)]
     pub battle: Option<BattleSnapshot>,
+    /// 当前连麦成员，数组顺序就是直播监控看到的进场顺序。
+    /// PK 开始前也要上报：复活赛用它把空位自动接成实际连麦分组。
+    #[serde(default, rename = "linkmicUsers")]
+    pub linkmic_users: Vec<LinkMicMember>,
     /// 采集健康度（ok / degraded / error），error 时后端暂停自动推送
     #[serde(default = "default_health")]
     pub health: String,
     #[serde(default)]
     pub error: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LinkMicMember {
+    #[serde(rename = "userId")]
+    pub user_id: String,
+    #[serde(default)]
+    pub nickname: String,
 }
 
 fn default_health() -> String {
@@ -275,6 +287,23 @@ pub fn validate_observation(obs: &Observation) -> Result<(), String> {
     check_len("health", &obs.health, 32)?;
     if obs.now_ms < 0 {
         return Err("nowMs 不能为负数".into());
+    }
+    if obs.linkmic_users.len() > MAX_OBSERVATION_PARTICIPANTS {
+        return Err(format!(
+            "linkmicUsers 最多 {MAX_OBSERVATION_PARTICIPANTS} 人，当前 {}",
+            obs.linkmic_users.len()
+        ));
+    }
+    let mut linkmic_uids = HashSet::new();
+    for member in &obs.linkmic_users {
+        check_len("linkmicUsers.userId", &member.user_id, 40)?;
+        check_len("linkmicUsers.nickname", &member.nickname, 128)?;
+        if member.user_id.is_empty() {
+            return Err("linkmicUsers.userId 不能为空".into());
+        }
+        if !linkmic_uids.insert(member.user_id.as_str()) {
+            return Err("linkmicUsers.userId 不能重复".into());
+        }
     }
     let Some(snap) = &obs.battle else {
         return Ok(());
@@ -764,6 +793,28 @@ pub async fn ingest_observation(
         out.phase = "degraded".into();
         out.note = obs.error.clone();
         return Ok(out);
+    }
+    if !obs.linkmic_users.is_empty() {
+        let capacity = crate::store::live_event_rules(st, event_id)
+            .await
+            .map(|rules| rules.revival_room_capacity.max(1) as usize)
+            .unwrap_or(8);
+        let members = obs
+            .linkmic_users
+            .iter()
+            .take(capacity)
+            .map(|member| (member.user_id.clone(), member.nickname.clone()))
+            .collect::<Vec<_>>();
+        match crate::store::live_sync_revival_roster(st, event_id, &members).await {
+            Ok(group_id) if group_id > 0 => {
+                crate::events::emit(
+                    crate::events::SCOPE_LIVE,
+                    format!("直播连麦名单已按监控顺序接入复活组 {group_id}"),
+                );
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(event_id, error = %e, "同步复活赛连麦名单失败"),
+        }
     }
     let Some(snap) = &obs.battle else {
         out.phase = "idle".into();
@@ -1927,6 +1978,7 @@ mod tests {
             room_online: true,
             now_ms: 1_700_000_000_000,
             battle: Some(snap(&["a"], &[10], 1, 1_000, 300)),
+            linkmic_users: Vec::new(),
             health: "ok".into(),
             error: String::new(),
         };
@@ -1945,6 +1997,19 @@ mod tests {
 
         obs.battle.as_mut().unwrap().duration_secs = 300;
         obs.web_rid = "x".repeat(41);
+        assert!(validate_observation(&obs).is_err());
+
+        obs.web_rid = "505899768449".into();
+        obs.linkmic_users = vec![
+            LinkMicMember {
+                user_id: "same-uid".into(),
+                nickname: "A".into(),
+            },
+            LinkMicMember {
+                user_id: "same-uid".into(),
+                nickname: "B".into(),
+            },
+        ];
         assert!(validate_observation(&obs).is_err());
     }
 

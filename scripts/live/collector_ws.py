@@ -48,7 +48,14 @@ except ImportError:  # websockets 13.x
     _NEW_WEBSOCKETS = False
 
 sys.path.insert(0, os.path.dirname(__file__))
-from collector import Api, _bonus_map, _empty_bonus, parse_linkmic, to_observation  # noqa: E402
+from collector import (  # noqa: E402
+    Api,
+    _bonus_map,
+    _empty_bonus,
+    parse_linkmic,
+    referee_uids,
+    to_observation,
+)
 
 DEFAULT_API = "http://127.0.0.1:8787"
 DEFAULT_INTERVAL = 0.25
@@ -378,6 +385,7 @@ class BattleState:
     status: int = 1
     scores: dict[str, dict[str, Any]] = field(default_factory=dict)
     team_scores: list[dict[str, Any]] = field(default_factory=list)
+    linkmic_users: list[dict[str, str]] = field(default_factory=list)
     names: dict[str, str] = field(default_factory=dict)
     bonus: dict[str, dict[str, Any]] = field(default_factory=dict)
     battle_updated_mono: float = 0.0
@@ -493,7 +501,40 @@ class BattleState:
         battle_num = _first(fields, 104, 0)
         battle_text = _first(fields, 114, 2)
         battle_id = _text(battle_text).strip() if battle_text else str(battle_num or "")
-        if not battle_id or not self.reset_battle(battle_id, now_ms):
+        ignored_uids = referee_uids()
+        roster_rows: list[dict[str, str]] = []
+        seen_uids: set[str] = set()
+        scored_rows: list[tuple[str, int, int]] = []
+        for number, wire, entry in iter_fields(payload):
+            if number != 17 or wire != 2:
+                continue
+            item = list(iter_fields(entry))
+            uid_text = _first(item, 21, 2)
+            uid_num = _first(item, 2, 0)
+            uid = _text(uid_text).strip() if uid_text else str(uid_num or "")
+            if not uid or uid in ignored_uids:
+                continue
+            if uid not in seen_uids:
+                seen_uids.add(uid)
+                roster_rows.append({
+                    "userId": uid,
+                    "nickname": self.names.get(uid, ""),
+                })
+            score = int(_first(item, 1, 0) or 0)
+            rank = int(_first(item, 8, 0) or 0)
+            if score <= 0:
+                score = _int_text(_first(item, 7, 2))
+            scored_rows.append((uid, score, rank))
+
+        roster_changed = False
+        if roster_rows and roster_rows != self.linkmic_users:
+            self.linkmic_users = roster_rows
+            self.last_message_ms = max(self.last_message_ms, now_ms)
+            roster_changed = True
+
+        if not battle_id:
+            return roster_changed
+        if not self.reset_battle(battle_id, now_ms):
             return False
         if self.status >= 2:
             return False
@@ -505,19 +546,7 @@ class BattleState:
             return False
 
         scores: dict[str, dict[str, Any]] = {}
-        for number, wire, entry in iter_fields(payload):
-            if number != 17 or wire != 2:
-                continue
-            item = list(iter_fields(entry))
-            uid_text = _first(item, 21, 2)
-            uid_num = _first(item, 2, 0)
-            uid = _text(uid_text).strip() if uid_text else str(uid_num or "")
-            if not uid:
-                continue
-            score = int(_first(item, 1, 0) or 0)
-            rank = int(_first(item, 8, 0) or 0)
-            if score <= 0:
-                score = _int_text(_first(item, 7, 2))
+        for uid, score, rank in scored_rows:
             scores[uid] = {
                 "userId": uid,
                 "nickname": self.names.get(uid, ""),
@@ -569,28 +598,51 @@ class BattleState:
                 self.bonus.update(bonus)
             return
 
-    def apply_http(self, raw: dict[str, Any]) -> None:
+    def apply_http(self, raw: dict[str, Any]) -> bool:
         """合并一次 HTTP 快照。
 
         该接口当前在携带 ttwid/msToken Cookie 与完整参数时可直接成功，
         因此作为 WSS 的补充：补齐昵称、加成、队伍分，并在 WSS 不可用时兜底。
+
+        返回连麦名单是否发生变化；HTTP 每几秒才拉一次，调用方只在变化时额外
+        上报准备阶段名单，避免复活赛空位被反复删写。
         """
         self.http_ok = True
         self.frame_updated_mono = time.monotonic()
         now_ms = int(raw.get("nowMs") or 0) or int(time.time() * 1000)
+        roster_changed = False
+        raw_users = raw.get("linkmicUsers")
+        if isinstance(raw_users, list):
+            next_users: list[dict[str, str]] = []
+            seen: set[str] = set()
+            for row in raw_users:
+                if not isinstance(row, dict):
+                    continue
+                uid = str(row.get("userId") or "").strip()
+                if not uid or uid in seen:
+                    continue
+                seen.add(uid)
+                next_users.append({
+                    "userId": uid,
+                    "nickname": str(row.get("nickname") or "").strip(),
+                })
+            if next_users != self.linkmic_users:
+                self.linkmic_users = next_users
+                self.last_message_ms = max(self.last_message_ms, now_ms)
+                roster_changed = True
         battle = raw.get("battle")
         if not isinstance(battle, dict) or not battle.get("battleId"):
             if not self.battle_id:
                 self.last_message_ms = max(self.last_message_ms, now_ms)
-            return
+            return roster_changed
         battle_id = str(battle.get("battleId") or "")
         if not self.reset_battle(battle_id, now_ms):
-            return
+            return roster_changed
         if now_ms < max(self.last_status_time_ms, self.last_score_time_ms):
-            return
+            return roster_changed
         status = int(battle.get("battleStatus") or self.status or 1)
         if self.status >= 2 and status < 2:
-            return
+            return roster_changed
         if battle.get("channelId"):
             self.channel_id = str(battle.get("channelId") or "")
         self.start_time_ms = int(battle.get("startTimeMs") or self.start_time_ms or 0)
@@ -628,16 +680,31 @@ class BattleState:
                 self.scores = merged_scores
                 self.last_score_time_ms = now_ms
                 self.battle_updated_mono = time.monotonic()
+        return roster_changed
 
     def raw(self, room_id: str, connected: bool) -> dict[str, Any]:
         if not connected:
             return {"roomId": room_id, "online": False, "nowMs": 0}
+        linkmic_users = list(self.linkmic_users)
+        if not linkmic_users and self.scores:
+            linkmic_users = [
+                {"userId": uid, "nickname": str(score.get("nickname") or "")}
+                for uid, score in sorted(
+                    self.scores.items(),
+                    key=lambda item: (
+                        int(item[1].get("rank") or 9999),
+                        -int(item[1].get("score") or 0),
+                        item[0],
+                    ),
+                )
+            ]
         if not self.battle_id:
             return {
                 "roomId": room_id,
                 "online": True,
                 "nowMs": self.last_message_ms,
-                "userCount": 0,
+                "userCount": len(linkmic_users),
+                "linkmicUsers": linkmic_users,
             }
         scores = []
         for uid, score in self.scores.items():
@@ -656,7 +723,8 @@ class BattleState:
             "roomId": room_id,
             "online": True,
             "nowMs": self.last_message_ms,
-            "userCount": len(scores),
+            "userCount": len(linkmic_users),
+            "linkmicUsers": linkmic_users,
             "battle": {
                 "battleId": self.battle_id,
                 "channelId": self.channel_id,
@@ -912,10 +980,10 @@ async def run_room(
                 raw = await asyncio.to_thread(
                     fetch_linkmic_http, cred, http, state.channel_id, anchor_id
                 )
-                state.apply_http(raw)
+                roster_changed = state.apply_http(raw)
                 if state.scores and first_score_at <= 0:
                     first_score_at = time.monotonic()
-                if not state.wss_connected or raw.get("battle"):
+                if not state.wss_connected or raw.get("battle") or roster_changed:
                     await emit(False)
             except Exception as exc:
                 state.http_ok = False
