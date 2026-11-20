@@ -67,6 +67,23 @@ fn score(uid: &str, value: i64, version: i64, rank: i32) -> BattleScore {
     }
 }
 
+async fn cleanup_live_event(pool: &sqlx::PgPool, event_id: i64) {
+    for sql in [
+        "DELETE FROM live_group_result WHERE event_id = $1",
+        "DELETE FROM live_qualifier WHERE event_id = $1",
+        "DELETE FROM live_round_event WHERE round_id IN (SELECT id FROM live_round WHERE event_id = $1)",
+        "DELETE FROM live_score_sample WHERE round_id IN (SELECT id FROM live_round WHERE event_id = $1)",
+        "DELETE FROM live_round_seat WHERE round_id IN (SELECT id FROM live_round WHERE event_id = $1)",
+        "DELETE FROM live_round WHERE event_id = $1",
+        "DELETE FROM live_group_seat WHERE group_id IN (SELECT id FROM live_group WHERE event_id = $1)",
+        "DELETE FROM live_group WHERE event_id = $1",
+        "DELETE FROM live_stage WHERE event_id = $1",
+        "DELETE FROM live_event WHERE id = $1",
+    ] {
+        let _ = sqlx::query(sql).bind(event_id).execute(pool).await;
+    }
+}
+
 #[tokio::test]
 #[ignore = "需要真实 PostgreSQL（DB_LOCAL_* + DB_WRITER_*）；加 -- --ignored 运行"]
 async fn batch_writes_and_score_versions_are_monotonic() {
@@ -343,6 +360,185 @@ async fn time_only_import_preserves_existing_wave_contribution() {
         .bind(person_id)
         .execute(pool)
         .await;
+}
+
+#[tokio::test]
+#[ignore = "需要真实 PostgreSQL（DB_LOCAL_* + DB_WRITER_*）；加 -- --ignored 运行"]
+async fn promotion_winners_auto_create_final_and_final_finishes_event() {
+    let Some(st) = setup().await else { return };
+    if st.writer.is_none() {
+        eprintln!("跳过：douyin_writer 未配置");
+        return;
+    }
+    let st = std::sync::Arc::new(st);
+    let stamp = chrono::Utc::now().timestamp_millis();
+    let pool = st.writer.as_ref().expect("writer");
+    let stale_ids: Vec<i64> =
+        sqlx::query_scalar("SELECT id FROM live_event WHERE title LIKE '__e2e_stage_%'")
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default();
+    for stale_id in stale_ids {
+        cleanup_live_event(pool, stale_id).await;
+    }
+    let event_id = store::live_event_create(
+        &st,
+        &format!("__e2e_stage_{stamp}"),
+        "2999-01-03",
+        &LiveRules::default(),
+        0,
+    )
+    .await
+    .expect("创建测试赛事");
+    let token = format!("{stamp:032x}");
+    store::live_event_start(&st, event_id, &token)
+        .await
+        .expect("启动测试赛事")
+        .expect("赛事存在");
+    let promotion_stage = store::live_stage_ensure(&st, event_id, StageKind::Promotion)
+        .await
+        .expect("晋级阶段");
+    let mut winner_uids = Vec::new();
+    for seq in 1..=2 {
+        let group_id = store::live_group_create(
+            &st,
+            event_id,
+            promotion_stage,
+            StageKind::Promotion,
+            seq,
+            &format!("__e2e晋级{seq}"),
+            2,
+            0,
+        )
+        .await
+        .expect("晋级小组");
+        let round_id: i64 = sqlx::query(
+            "INSERT INTO live_round (event_id, group_id, battle_id, status, actual_end_at)
+             VALUES ($1, $2, $3, 'completed', now()) RETURNING id",
+        )
+        .bind(event_id)
+        .bind(group_id)
+        .bind(format!("__e2e_promo_{stamp}_{seq}"))
+        .fetch_one(pool)
+        .await
+        .expect("晋级对局")
+        .try_get("id")
+        .expect("round id");
+        for position in 1..=4 {
+            let uid = format!("__e2e_promo_{stamp}_{seq}_{position}");
+            sqlx::query(
+                "INSERT INTO live_round_seat
+                   (round_id, douyin_uid, nickname, final_score, final_rank)
+                 VALUES ($1, $2, $3, $4, $5)",
+            )
+            .bind(round_id)
+            .bind(&uid)
+            .bind(format!("晋级{seq}-{position}"))
+            .bind((100 - position * 10) as i64)
+            .bind(position)
+            .execute(pool)
+            .await
+            .expect("晋级席位");
+            if position == 1 {
+                winner_uids.push(uid);
+            }
+        }
+        if seq == 1 {
+            assert!(store::live_round_ensure_official(&st, round_id)
+                .await
+                .expect("completed 对局自愈正式局"));
+        } else {
+            store::live_round_set_official(&st, round_id)
+                .await
+                .expect("晋级正式局");
+        }
+    }
+
+    pk_server::live::auto_advance_stages(&st, event_id)
+        .await
+        .expect("自动生成决赛");
+    let final_group_id: i64 = sqlx::query_scalar(
+        "SELECT g.id FROM live_group g JOIN live_stage s ON s.id = g.stage_id
+          WHERE g.event_id = $1 AND s.kind = 'final' LIMIT 1",
+    )
+    .bind(event_id)
+    .fetch_one(pool)
+    .await
+    .expect("决赛小组");
+    let seeds: Vec<String> = sqlx::query_scalar(
+        "SELECT douyin_uid FROM live_group_seat WHERE group_id = $1 ORDER BY seed_order",
+    )
+    .bind(final_group_id)
+    .fetch_all(pool)
+    .await
+    .expect("决赛名单");
+    assert_eq!(seeds, winner_uids, "每组只允许第 1 名进入决赛");
+
+    // 重复推进不能重写已经准备好的决赛名单。
+    pk_server::live::auto_advance_stages(&st, event_id)
+        .await
+        .expect("重复推进");
+    let seed_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*)::BIGINT FROM live_group_seat WHERE group_id = $1")
+            .bind(final_group_id)
+            .fetch_one(pool)
+            .await
+            .expect("决赛名单数量");
+    assert_eq!(seed_count, 2);
+
+    let final_round_id: i64 = sqlx::query(
+        "INSERT INTO live_round (event_id, group_id, battle_id, status, actual_end_at)
+         VALUES ($1, $2, $3, 'completed', now()) RETURNING id",
+    )
+    .bind(event_id)
+    .bind(final_group_id)
+    .bind(format!("__e2e_final_{stamp}"))
+    .fetch_one(pool)
+    .await
+    .expect("决赛对局")
+    .try_get("id")
+    .expect("final round id");
+    for position in 1..=4 {
+        sqlx::query(
+            "INSERT INTO live_round_seat
+               (round_id, douyin_uid, nickname, final_score, final_rank)
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(final_round_id)
+        .bind(format!("__e2e_final_{stamp}_{position}"))
+        .bind(format!("决赛-{position}"))
+        .bind((500 - position * 50) as i64)
+        .bind(position)
+        .execute(pool)
+        .await
+        .expect("决赛席位");
+    }
+    store::live_round_set_official(&st, final_round_id)
+        .await
+        .expect("决赛正式局");
+    pk_server::live::auto_advance_stages(&st, event_id)
+        .await
+        .expect("决赛收口");
+
+    let (status, finished): (String, Option<chrono::DateTime<chrono::Utc>>) =
+        sqlx::query_as("SELECT status, finished_at FROM live_event WHERE id = $1")
+            .bind(event_id)
+            .fetch_one(pool)
+            .await
+            .expect("赛事终态");
+    assert_eq!(status, "finished");
+    assert!(finished.is_some(), "决赛后必须写 finished_at");
+    let podium: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::BIGINT FROM live_qualifier
+          WHERE event_id = $1 AND source = 'final'",
+    )
+    .bind(event_id)
+    .fetch_one(pool)
+    .await
+    .expect("决赛榜单");
+    assert_eq!(podium, 3, "决赛只记录冠亚季军三个晋级位");
+
+    cleanup_live_event(pool, event_id).await;
 }
 
 #[tokio::test]

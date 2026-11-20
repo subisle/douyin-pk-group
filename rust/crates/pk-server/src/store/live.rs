@@ -60,7 +60,7 @@ pub async fn live_event_list(st: &AppState, limit: i64) -> Vec<serde_json::Value
                 revival_room_capacity, revival_qualify_per_room, promotion_group_count,
                 promotion_group_size, promotion_qualify_per_group, final_room_capacity,
                 settle_grace_secs, push_enabled, push_interval_secs, public_token, started_at,
-                group_duration_secs, revival_duration_secs, updated_at
+                group_duration_secs, revival_duration_secs, finished_at, updated_at
          FROM live_event ORDER BY id DESC LIMIT $1",
     )
     .bind(limit)
@@ -82,7 +82,7 @@ pub async fn live_event_get(st: &AppState, event_id: i64) -> Option<serde_json::
                 revival_room_capacity, revival_qualify_per_room, promotion_group_count,
                 promotion_group_size, promotion_qualify_per_group, final_room_capacity,
                 settle_grace_secs, push_enabled, push_interval_secs, public_token, started_at,
-                group_duration_secs, revival_duration_secs, updated_at
+                group_duration_secs, revival_duration_secs, finished_at, updated_at
            FROM live_event WHERE id = $1",
     )
     .bind(event_id)
@@ -104,7 +104,7 @@ pub async fn live_event_start(
 ) -> anyhow::Result<Option<serde_json::Value>> {
     let row = sqlx::query(
         "UPDATE live_event SET
-           status = 'running', public_token = $1, started_at = now(),
+           status = 'running', public_token = $1, started_at = now(), finished_at = NULL,
            group_duration_secs = 600, revival_duration_secs = 300,
            direct_qualify_per_group = 4, revival_qualify_per_room = 4, updated_at = now()
          WHERE id = $2
@@ -113,13 +113,37 @@ pub async fn live_event_start(
                    revival_room_capacity, revival_qualify_per_room, promotion_group_count,
                    promotion_group_size, promotion_qualify_per_group, final_room_capacity,
                    settle_grace_secs, push_enabled, push_interval_secs, public_token, started_at,
-                   group_duration_secs, revival_duration_secs, updated_at",
+                   group_duration_secs, revival_duration_secs, finished_at, updated_at",
     )
     .bind(public_token)
     .bind(event_id)
     .fetch_optional(w(st)?)
     .await?;
     Ok(row.as_ref().map(live_event_json))
+}
+
+/// 当前赛事状态。阶段自动推进用它做终态短路，避免决赛后每个采样拍重复写结果。
+pub async fn live_event_status(st: &AppState, event_id: i64) -> anyhow::Result<Option<String>> {
+    Ok(
+        sqlx::query_scalar::<_, String>("SELECT status FROM live_event WHERE id = $1")
+            .bind(event_id)
+            .fetch_optional(w(st)?)
+            .await?,
+    )
+}
+
+/// 决赛成绩冻结后收口赛事。幂等；返回本次是否真正从非 finished 切到 finished。
+pub async fn live_event_finish(st: &AppState, event_id: i64) -> anyhow::Result<bool> {
+    let row = sqlx::query(
+        "UPDATE live_event
+            SET status = 'finished', finished_at = COALESCE(finished_at, now()), updated_at = now()
+          WHERE id = $1 AND status = 'running'
+          RETURNING id",
+    )
+    .bind(event_id)
+    .fetch_optional(w(st)?)
+    .await?;
+    Ok(row.is_some())
 }
 
 /// 用公开 token 找赛事。只用于匿名只读页面，不返回后台方案 / 房间 / 推送配置。
@@ -137,7 +161,7 @@ pub async fn live_event_by_public_token(
                 revival_room_capacity, revival_qualify_per_room, promotion_group_count,
                 promotion_group_size, promotion_qualify_per_group, final_room_capacity,
                 settle_grace_secs, public_token, started_at, group_duration_secs,
-                revival_duration_secs, updated_at
+                revival_duration_secs, finished_at, updated_at
            FROM live_event WHERE public_token = $1 LIMIT 1",
     )
     .bind(public_token)
@@ -157,7 +181,7 @@ pub async fn live_event_current_public(st: &AppState) -> Option<serde_json::Valu
                 revival_room_capacity, revival_qualify_per_room, promotion_group_count,
                 promotion_group_size, promotion_qualify_per_group, final_room_capacity,
                 settle_grace_secs, public_token, started_at, group_duration_secs,
-                revival_duration_secs, updated_at
+                revival_duration_secs, finished_at, updated_at
            FROM live_event
           WHERE status = 'running' AND public_token <> ''
           ORDER BY started_at DESC NULLS LAST, id DESC
@@ -179,6 +203,8 @@ fn public_live_event_json(row: &sqlx::postgres::PgRow) -> serde_json::Value {
         "eventDate": s("event_date"),
         "status": s("status"),
         "startedAt": row.try_get::<chrono::DateTime<chrono::Utc>, _>("started_at")
+            .map(|t| t.to_rfc3339()).ok(),
+        "finishedAt": row.try_get::<chrono::DateTime<chrono::Utc>, _>("finished_at")
             .map(|t| t.to_rfc3339()).ok(),
         "groupDurationSecs": g("group_duration_secs"),
         "revivalDurationSecs": g("revival_duration_secs"),
@@ -226,6 +252,8 @@ fn live_event_json(r: &sqlx::postgres::PgRow) -> serde_json::Value {
         "pushIntervalSecs": g("push_interval_secs"),
         "publicToken": s("public_token"),
         "startedAt": r.try_get::<chrono::DateTime<chrono::Utc>, _>("started_at")
+            .map(|t| t.to_rfc3339()).ok(),
+        "finishedAt": r.try_get::<chrono::DateTime<chrono::Utc>, _>("finished_at")
             .map(|t| t.to_rfc3339()).ok(),
         "groupDurationSecs": g("group_duration_secs"),
         "revivalDurationSecs": g("revival_duration_secs"),
@@ -440,6 +468,45 @@ pub async fn live_group_create(
     .fetch_one(w(st)?)
     .await?;
     Ok(row.try_get::<i64, _>("id").unwrap_or(0))
+}
+
+/// create-once 建组：已存在时不改写名称 / 名额 / 状态。返回 `(id, 本次是否新建)`。
+/// 决赛名单只能由创建者写入，自动推进的重复调用不能重新覆盖已准备的席位。
+pub async fn live_group_create_once(
+    st: &AppState,
+    event_id: i64,
+    stage_id: i64,
+    kind: StageKind,
+    seq: i32,
+    name: &str,
+    qualify_slots: i32,
+    source_group_id: i64,
+) -> anyhow::Result<(i64, bool)> {
+    let pool = w(st)?;
+    let inserted = sqlx::query(&crate::pq::rewrite(
+        "INSERT INTO live_group (event_id, stage_id, kind, seq, name, status, qualify_slots, source_group_id)
+         VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
+         ON CONFLICT (stage_id, seq) DO NOTHING
+         RETURNING id",
+    ))
+    .bind(event_id)
+    .bind(stage_id)
+    .bind(kind.as_str())
+    .bind(seq)
+    .bind(name)
+    .bind(qualify_slots)
+    .bind(source_group_id)
+    .fetch_optional(pool)
+    .await?;
+    if let Some(row) = inserted {
+        return Ok((row.try_get::<i64, _>("id").unwrap_or(0), true));
+    }
+    let row = sqlx::query("SELECT id FROM live_group WHERE stage_id = $1 AND seq = $2")
+        .bind(stage_id)
+        .bind(seq)
+        .fetch_one(pool)
+        .await?;
+    Ok((row.try_get::<i64, _>("id").unwrap_or(0), false))
 }
 
 /// 阶段下的小组（含官方局摘要），管理端监控页数据源
@@ -745,22 +812,31 @@ pub async fn live_round_set_status(
     Ok(())
 }
 
-/// 设正式局。`uk_live_round_official` 保证一个小组只有一场——并发下第二个调用会失败，
-/// 调用方要把这个错误当成「已有正式局」而不是崩溃。
-pub async fn live_round_set_official(st: &AppState, round_id: i64) -> anyhow::Result<()> {
-    let pool = w(st)?;
-    let mut tx = pool.begin().await?;
+async fn set_official_in_tx(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    round_id: i64,
+    force: bool,
+) -> anyhow::Result<bool> {
     let group_id: i64 = sqlx::query("SELECT group_id FROM live_round WHERE id = $1")
         .bind(round_id)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut **tx)
         .await?
         .ok_or_else(|| anyhow::anyhow!("对局不存在"))?
         .try_get("group_id")?;
+    let existing: i64 =
+        sqlx::query("SELECT official_round_id FROM live_group WHERE id = $1 FOR UPDATE")
+            .bind(group_id)
+            .fetch_one(&mut **tx)
+            .await?
+            .try_get("official_round_id")?;
+    if !force && existing > 0 {
+        return Ok(existing == round_id);
+    }
     // 先清掉同组其它正式局标记（换正式局场景），再给自己打标
     sqlx::query("UPDATE live_round SET is_official = 0 WHERE group_id = $1 AND id <> $2")
         .bind(group_id)
         .bind(round_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     /* 争议局（pending_review）被管理员选为正式局后要转成 completed：
     pending_review 的语义是「这一局是否有效还没定」，既然已确认有效，
@@ -773,15 +849,17 @@ pub async fn live_round_set_official(st: &AppState, round_id: i64) -> anyhow::Re
          WHERE id = $1",
     )
     .bind(round_id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
     sqlx::query(
         "UPDATE live_group SET official_round_id = $1, status = 'finalized',
-                finalized_at = now() WHERE id = $2",
+                finalized_at = CASE WHEN official_round_id = $1 AND status = 'finalized'
+                                    THEN COALESCE(finalized_at, now()) ELSE now() END
+          WHERE id = $2",
     )
     .bind(round_id)
     .bind(group_id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
     sqlx::query(
         "UPDATE live_stage s SET status = 'finalized', finished_at = COALESCE(finished_at, now())
@@ -792,10 +870,29 @@ pub async fn live_round_set_official(st: &AppState, round_id: i64) -> anyhow::Re
            )",
     )
     .bind(group_id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
+    Ok(true)
+}
+
+/// 设正式局。`uk_live_round_official` 保证一个小组只有一场——并发下第二个调用会失败，
+/// 调用方要把这个错误当成「已有正式局」而不是崩溃。
+pub async fn live_round_set_official(st: &AppState, round_id: i64) -> anyhow::Result<()> {
+    let pool = w(st)?;
+    let mut tx = pool.begin().await?;
+    set_official_in_tx(&mut tx, round_id, true).await?;
     tx.commit().await?;
     Ok(())
+}
+
+/// 幂等修复「对局已经 completed，但正式局/小组定稿没落库」。
+/// 已有另一场管理员选定的正式局时返回 false，绝不把选择抢回来。
+pub async fn live_round_ensure_official(st: &AppState, round_id: i64) -> anyhow::Result<bool> {
+    let pool = w(st)?;
+    let mut tx = pool.begin().await?;
+    let set = set_official_in_tx(&mut tx, round_id, false).await?;
+    tx.commit().await?;
+    Ok(set)
 }
 
 /// 对局详情（含席位），争议局对比用
@@ -1323,15 +1420,57 @@ pub async fn live_qualifier_add(
     Ok(())
 }
 
+/// 重新冻结某组时删除已经不在当前晋级线的旧记录。
+/// 典型场景：晋级赛历史上误配成“前 2 进决赛”，现口径固定为每组只取第 1。
+pub async fn live_qualifier_prune_group(
+    st: &AppState,
+    event_id: i64,
+    stage_id: i64,
+    group_id: i64,
+    source: &str,
+    keep_uids: &[String],
+) -> anyhow::Result<()> {
+    if keep_uids.is_empty() {
+        sqlx::query(
+            "DELETE FROM live_qualifier
+              WHERE event_id = $1 AND stage_id = $2 AND group_id = $3 AND source = $4",
+        )
+        .bind(event_id)
+        .bind(stage_id)
+        .bind(group_id)
+        .bind(source)
+        .execute(w(st)?)
+        .await?;
+        return Ok(());
+    }
+    sqlx::query(
+        "DELETE FROM live_qualifier
+          WHERE event_id = $1 AND stage_id = $2 AND group_id = $3 AND source = $4
+            AND NOT (douyin_uid = ANY($5))",
+    )
+    .bind(event_id)
+    .bind(stage_id)
+    .bind(group_id)
+    .bind(source)
+    .bind(keep_uids)
+    .execute(w(st)?)
+    .await?;
+    Ok(())
+}
+
 pub async fn live_qualifier_list(st: &AppState, event_id: i64) -> Vec<serde_json::Value> {
     let Ok(pool) = w(st) else {
         return Vec::new();
     };
     sqlx::query(
         "SELECT q.stage_id, q.group_id, q.round_id, q.person_id, q.douyin_uid, q.source,
-                q.rank, q.score, COALESCE(p.name, '') AS person_name, s.kind AS stage_kind
+                q.rank, q.score,
+                COALESCE(NULLIF(p.name, ''), NULLIF(rs.nickname, ''), '') AS person_name,
+                COALESCE(rs.nickname, '') AS nickname, s.kind AS stage_kind
          FROM live_qualifier q
          LEFT JOIN person p ON p.id = q.person_id
+         LEFT JOIN live_round_seat rs
+           ON rs.round_id = q.round_id AND rs.douyin_uid = q.douyin_uid
          LEFT JOIN live_stage s ON s.id = q.stage_id
          WHERE q.event_id = $1
          ORDER BY s.seq, q.group_id, q.rank, q.score DESC",
@@ -1349,6 +1488,7 @@ pub async fn live_qualifier_list(st: &AppState, event_id: i64) -> Vec<serde_json
                     "roundId": r.try_get::<i64, _>("round_id").unwrap_or(0),
                     "personId": r.try_get::<i64, _>("person_id").unwrap_or(0),
                     "personName": r.try_get::<String, _>("person_name").unwrap_or_default(),
+                    "nickname": r.try_get::<String, _>("nickname").unwrap_or_default(),
                     "douyinUid": r.try_get::<String, _>("douyin_uid").unwrap_or_default(),
                     "source": r.try_get::<String, _>("source").unwrap_or_default(),
                     "rank": r.try_get::<i32, _>("rank").unwrap_or(0),
@@ -1578,6 +1718,20 @@ pub async fn live_group_qualify_slots(st: &AppState, group_id: i64) -> anyhow::R
         .fetch_optional(w(st)?)
         .await?;
     Ok(row.and_then(|r| r.try_get::<i32, _>("qualify_slots").ok()))
+}
+
+/// 自动推进阶段时校正历史遗留名额，保证展示端与冻结逻辑使用同一晋级线。
+pub async fn live_group_set_qualify_slots(
+    st: &AppState,
+    group_id: i64,
+    slots: i32,
+) -> anyhow::Result<()> {
+    sqlx::query("UPDATE live_group SET qualify_slots = $1 WHERE id = $2")
+        .bind(slots.max(0))
+        .bind(group_id)
+        .execute(w(st)?)
+        .await?;
+    Ok(())
 }
 
 pub async fn live_group_stage(st: &AppState, group_id: i64) -> anyhow::Result<i64> {
@@ -1980,6 +2134,15 @@ pub async fn live_group_seed_replace(
     }
     tx.commit().await?;
     Ok(())
+}
+
+pub async fn live_group_seed_count(st: &AppState, group_id: i64) -> anyhow::Result<i64> {
+    Ok(sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::BIGINT FROM live_group_seat WHERE group_id = $1",
+    )
+    .bind(group_id)
+    .fetch_one(w(st)?)
+    .await?)
 }
 
 /// 把直播监控当前看到的连麦顺序同步到第一个尚未开打的复活赛空位。

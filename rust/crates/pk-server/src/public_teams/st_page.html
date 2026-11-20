@@ -3244,6 +3244,15 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .plm-medal.gold { color: #5b3b00; background: #ffe49a; }
 .plm-medal.silver { color: #3f4654; background: #e4e7ec; }
 .plm-medal.bronze { color: #5b2500; background: #ffd1ac; }
+.plm-podium { margin: 0 0 12px; border: 1px solid rgba(76,74,202,.18); border-radius: 18px; padding: 13px; background: linear-gradient(135deg, rgba(255,255,255,.96), rgba(231,228,255,.72)); box-shadow: 0 8px 24px rgba(76,74,202,.08); }
+.plm-podium-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 9px; }
+.plm-podium-head b { font-size: 13px; }
+.plm-podium-head span { color: var(--plm-muted); font-size: 9px; }
+.plm-podium-grid { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 7px; }
+.plm-podium-card { min-width: 0; border-radius: 14px; padding: 10px 6px; background: rgba(255,255,255,.8); text-align: center; }
+.plm-podium-card.is-champion { background: linear-gradient(145deg, #fff7d9, #fff); }
+.plm-podium-name { display: block; margin-top: 5px; overflow: hidden; color: var(--plm-ink); font-size: 11px; font-weight: 800; text-overflow: ellipsis; white-space: nowrap; }
+.plm-podium-score { display: block; margin-top: 3px; color: var(--plm-muted); font: 700 9px ui-monospace, SFMono-Regular, Menlo, monospace; }
 
 /* 我的 → 历史比赛成绩卡。 */
 .my-match-summary { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 7px; margin-bottom: 10px; }
@@ -3900,6 +3909,8 @@ async function api(p, opts) {
 /* ==================== 登录门 + 全屏水印 ==================== */
 let gateResolve = null;   // 登录成功后 resolve({name,...})
 let meState = null;       // 当前登录身份（who 的结果，带 bound / needBind）
+/** 登录流程是否已完成。false 时页面只允许登录界面和公开公告，不跑版本检查/业务请求。 */
+let loginFlowReady = false;
 /* 2026-10-14 注册功能已下线：原有 4 个注册状态变量及相关页面逻辑一并删除，
    登录门只剩「登录」+「忘记密码」。 */
 
@@ -5202,6 +5213,7 @@ async function refreshWho() {
 /* 会话失效（接口 401）：清 token 回登录门；登录门已开着就不动 */
 function sessionExpired() {
   myLogout();
+  loginFlowReady = false;
   removeWatermark();
   dismissMsgModal();                  // 消息弹窗同样让位给登录门
   if (gateResolve) return;            // 登录门已在
@@ -5834,18 +5846,9 @@ function refreshDataOnResume() {
   refreshDataAfterImport(true).catch(() => {});
 }
 
-/* ==================== 登录前加密预取（2026-10-22） ====================
-   登录前并发请求 AES-GCM 加密的 site + daily；密钥只在服务端内存，登录成功后
-   才按账号团别释放。前端用 Web Crypto 解密并在浏览器本地渲染，服务器不返回明文。 */
-function prefetchTeamHint() {
-  try {
-    const last = localStorage.getItem('pkLastTeam');
-    if (last === 'all' || last === 'male' || last === 'female') return last;
-  } catch (_) {}
-  const saved = savedViewTeam();
-  return saved || '';
-}
-
+/* ==================== 登录后首屏加密预取（2026-11-20） ====================
+   登录界面先出现；用户点击登录成功、团别确定后才请求 AES-GCM 加密的 site + daily。
+   密钥只在服务端内存，按已登录账号的团别释放；前端用 Web Crypto 解密并在本地渲染。 */
 function randomHex(bytes) {
   const a = new Uint8Array(bytes);
   crypto.getRandomValues(a);
@@ -10116,7 +10119,7 @@ const LIVE_STAGE_META = {
   rest_group: { short: '后三组', title: '后三组 · 小组赛', hint: '每组 10 分钟 · 前 4 名晋级' },
   rest_revival: { short: '后三组复活', title: '后三组 · 复活赛', hint: '淘汰者复活 · 每组 5 分钟' },
   promotion: { short: '晋级赛', title: '晋级赛', hint: '小组第一进入决赛' },
-  final: { short: '决赛', title: '总决赛', hint: '决出冠亚季军' },
+  final: { short: '决赛', title: '决赛', hint: '决出冠亚季军' },
 };
 const LIVE_ACTIVE_STATUSES = new Set(['running', 'settling', 'pending_review', 'waiting_restart']);
 const LIVE_FINISH_HOLD_MS = 8000;
@@ -10155,11 +10158,21 @@ function liveStageLabel(kind) {
 function liveStageStatusLabel(stage) {
   if (!stage) return '未生成';
   if (stage.status === 'running') return '进行中';
-  if (stage.status === 'finalized') return '已结束';
+  if (stage.status === 'finalized') return stage.kind === 'final' ? '赛事结束' : '已结束';
   return '待开始';
 }
+function liveStageGroupLabel(kind) {
+  const meta = LIVE_STAGE_META[kind];
+  return meta ? meta.short : (kind || '小组赛');
+}
+function liveGroupResultTag(kind, qualified, position) {
+  if (String(kind || '').includes('revival')) return qualified ? '复活区' : '淘汰区';
+  if (kind === 'promotion') return position === 1 ? '进决赛' : '止步';
+  if (kind === 'final') return position === 1 ? '冠军' : position === 2 ? '亚军' : position === 3 ? '季军' : '完赛';
+  return qualified ? '晋级区' : '复活区';
+}
 function liveGroupStatus(group) {
-  if (group.status === 'finalized') return { text: '结束阶段', tone: 'done' };
+  if (group.status === 'finalized') return { text: group.stageKind === 'final' ? '比赛结束' : '成绩冻结', tone: 'done' };
   if (group.status === 'running') return { text: 'PK 进行中', tone: 'live' };
   if (group.status === 'settling') return { text: '结束结算中', tone: 'warn' };
   if (group.status === 'pending_review') return { text: '等待确认', tone: 'warn' };
@@ -10179,6 +10192,9 @@ function liveTimeText(value) {
 function liveGroupPhase(group, nowMs) {
   const people = Array.isArray(group.players) ? group.players.length : 0;
   if (group.status === 'finalized') {
+    if (group.stageKind === 'final') {
+      return { text: '赛事结束', detail: '决赛已完成，冠亚季军已确认', countdown: '赛事结束', linkmic: '比赛结束 · ' + people + ' 人', tone: 'done', urgent: false };
+    }
     return { text: '已结束', detail: '结果已按直播间 PK 结束信号确认', countdown: '已结束', linkmic: '连麦结束 · ' + people + ' 人', tone: 'done', urgent: false };
   }
   if (group.status === 'settling') {
@@ -10238,16 +10254,24 @@ function liveGroupCardHtml(group, nowMs, qualifyDefault) {
   const phase = liveGroupPhase(group, nowMs);
   const players = Array.isArray(group.players) ? group.players : [];
   const maxScore = Math.max(1, ...players.map(p => Number(p.score) || 0));
-  const revival = String(group.stageKind || '').includes('revival');
+  const stageKind = String(group.stageKind || '');
+  const revival = stageKind.includes('revival');
+  const promotion = stageKind === 'promotion';
+  const finalStage = stageKind === 'final';
   const isLive = LIVE_ACTIVE_STATUSES.has(group.status);
   const qualify = Number(group.qualifySlots) || qualifyDefault;
   const scored = players.filter(p => Number(p.rank) > 0).length;
   const playerRows = players.length ? players.map((player, index) => {
     const position = Number(player.position) || index + 1;
     const hasScore = Number(player.rank) > 0;
-    const qualified = hasScore && position <= qualify;
-    const zone = !hasScore ? '' : (qualified ? (revival ? '复活区' : '晋级区') : (revival ? '淘汰区' : '复活区'));
-    const zoneClass = zone === '晋级区' ? 'is-promoted' : zone === '复活区' ? 'is-revival-zone' : zone === '淘汰区' ? 'is-eliminated-zone' : '';
+    const qualified = hasScore && (promotion ? position === 1 : finalStage ? position <= 3 : position <= qualify);
+    const zone = !hasScore ? '' : liveGroupResultTag(stageKind, qualified, position);
+    const zoneClass = !hasScore ? '' : finalStage
+      ? (position <= 3 ? 'is-promoted' : '')
+      : zone === '复活区' ? 'is-revival-zone'
+        : (zone === '淘汰区' || zone === '止步') ? 'is-eliminated-zone'
+          : 'is-promoted';
+    const medal = finalStage && position === 1 ? 'gold' : finalStage && position === 2 ? 'silver' : finalStage && position === 3 ? 'bronze' : '';
     const score = Number(player.score) || 0;
     const pct = Math.max(2, Math.round((score / maxScore) * 100));
     const key = String(group.id) + ':' + String(player.douyinUid || player.personId || index);
@@ -10264,21 +10288,25 @@ function liveGroupCardHtml(group, nowMs, qualifyDefault) {
     return '<div class="plm-player' + (qualified ? ' is-qualified' : '') + (zoneClass ? ' ' + zoneClass : '') + '">' +
       '<span class="plm-rank">' + (hasScore ? '#' + esc(position) : '—') + '</span>' +
       '<div class="plm-player-main"><div class="plm-player-name"><b>' + esc(livePlayerName(player)) + '</b>' +
-      (zone ? '<span class="plm-zone ' + zoneClass + '">' + esc(zone) + '</span>' : '') + '</div>' +
+      (zone ? '<span class="' + (medal ? 'plm-medal ' + medal : 'plm-zone ' + zoneClass) + '">' + esc(zone) + '</span>' : '') + '</div>' +
       '<div class="plm-score-track"><i style="width:' + pct + '%"></i></div></div>' +
       '<div class="plm-score-stack"><span class="plm-score' + (changed ? ' is-updating' : '') + '">' + score.toLocaleString('zh-CN') + '</span>' +
       (scoreMeta ? '<span class="plm-score-meta">' + scoreMeta + '</span>' : '') + '</div></div>';
-  }).join('') : '<div class="plm-empty">' + (revival ? '等待直播连麦名单…' : '分组等待生成…') + '</div>';
+  }).join('') : '<div class="plm-empty">' + (revival ? '等待直播连麦名单…' : (promotion || finalStage ? '等待比赛连麦名单…' : '分组等待生成…')) + '</div>';
   const ruleLine = revival
     ? '前 ' + qualify + ' 名复活 · 后 ' + Math.max(players.length - qualify, 0) + ' 名淘汰'
-    : '前 ' + qualify + ' 名晋级 · 后 ' + Math.max(players.length - qualify, 0) + ' 名进复活池';
+    : promotion
+      ? '第 1 名进入决赛 · 其余止步晋级赛'
+      : finalStage
+        ? '决出冠亚季军 · 完赛即结束本场赛事'
+        : '前 ' + qualify + ' 名晋级 · 后 ' + Math.max(players.length - qualify, 0) + ' 名进复活池';
   const footLeft = group.status === 'pending'
     ? '准备阶段：整组人齐后开始 PK'
     : (group.round && group.round.startAt ? '开赛 ' + liveTimeText(group.round.startAt)
-      : group.status === 'finalized' ? '成绩已核对并冻结' : '等待采集到 PK 对局');
+      : group.status === 'finalized' ? (finalStage ? '决赛结束 · 赛事已收官' : '成绩已核对并冻结') : '等待采集到 PK 对局');
   const footRight = group.round && group.round.observedAt ? '<span>更新 ' + liveTimeText(group.round.observedAt) + '</span>' : '';
-  return '<article class="plm-group-card' + (revival ? ' is-revival' : '') + (isLive ? ' is-live' : '') + '">' +
-    '<header class="plm-group-head"><div><div class="plm-group-kicker">' + (revival ? '复活赛' : '小组赛') + ' · 第 ' + esc(group.seq || 0) + ' 组</div>' +
+  return '<article class="plm-group-card' + (revival ? ' is-revival' : '') + (finalStage ? ' is-final' : '') + (isLive ? ' is-live' : '') + '">' +
+    '<header class="plm-group-head"><div><div class="plm-group-kicker">' + esc(liveStageGroupLabel(stageKind)) + ' · 第 ' + esc(group.seq || 0) + ' 组</div>' +
     '<h3>' + esc(group.name || ('第 ' + (group.seq || 0) + ' 组')) + '</h3></div>' +
     '<span class="plm-status plm-' + status.tone + '"><i></i>' + esc(status.text) + '</span></header>' +
     '<div class="plm-group-meta"><span>规则时长 ' + Math.round((Number(group.durationSecs) || 600) / 60) + ' 分钟 · 实际以直播间为准</span>' +
@@ -10299,6 +10327,24 @@ function liveLoadingHtml() {
   }
   return '';
 }
+function liveFinalPodiumHtml(groups) {
+  const finalGroup = (groups || []).find((group) => group.stageKind === 'final' && group.status === 'finalized');
+  if (!finalGroup) return '';
+  const players = Array.isArray(finalGroup.players) ? finalGroup.players : [];
+  const cards = [1, 2, 3].map((position) => {
+    const player = players.find((item) => Number(item.position) === position);
+    if (!player) return '';
+    const medalClass = position === 1 ? 'gold' : position === 2 ? 'silver' : 'bronze';
+    const medalLabel = position === 1 ? '冠军' : position === 2 ? '亚军' : '季军';
+    return '<div class="plm-podium-card' + (position === 1 ? ' is-champion' : '') + '">' +
+      '<span class="plm-medal ' + medalClass + '">' + medalLabel + '</span>' +
+      '<b class="plm-podium-name">' + esc(livePlayerName(player)) + '</b>' +
+      '<span class="plm-podium-score">' + (Number(player.score) || 0).toLocaleString('zh-CN') + ' 分</span></div>';
+  }).join('');
+  if (!cards) return '';
+  return '<section class="plm-podium"><div class="plm-podium-head"><b>决赛最终榜单</b><span>赛事已结束 · 比赛分不计入音浪</span></div>' +
+    '<div class="plm-podium-grid">' + cards + '</div></section>';
+}
 function liveRenderView() {
   if (view !== 'live') return;
   const box = $('view');
@@ -10314,6 +10360,7 @@ function liveRenderView() {
   }
 
   const event = liveSnapshot.event || {};
+  const eventFinished = event.status === 'finished';
   const groups = liveSortGroups(liveSnapshot.groups);
   const stages = (liveSnapshot.stages || []).slice().sort((a, b) => (a.seq || 0) - (b.seq || 0));
   const nowMs = Date.now() + liveServerOffsetMs;
@@ -10351,10 +10398,11 @@ function liveRenderView() {
     : '<div class="plm-waiting"><span class="plm-waiting-dot"></span><h3>' +
       (liveSelectedStage === 'first_wave_revival' || liveSelectedStage === 'rest_revival' ? '等待直播连麦名单自动接入复活组' : '等待运营启动这一阶段') +
       '</h3><p>页面会自动刷新，无需手动重开链接。</p></div>';
+  const finalPodium = liveFinalPodiumHtml(groups);
 
   box.innerHTML = '<div class="plm-shell is-integrated">' + liveModeSwitchHtml('current') +
     '<section class="plm-livebar"><div class="plm-livebar-main"><span class="plm-live-dot"></span>' +
-    '<div class="plm-livebar-copy"><span class="plm-livebar-kicker">LIVE · 自动更新</span>' +
+    '<div class="plm-livebar-copy"><span class="plm-livebar-kicker">' + (eventFinished ? 'FINAL · 赛事已结束' : 'LIVE · 自动更新') + '</span>' +
     '<b class="plm-livebar-title">' + esc(liveStageLabel(currentStage || liveSelectedStage)) + '</b>' +
     '<span class="plm-livebar-group">' + (currentGroup ? esc(currentGroup.name + ' · ' + liveGroupStatus(currentGroup).text) : '等待下一阶段自动开始') + '</span></div></div>' +
     '<div class="plm-livebar-clock"><b class="plm-countdown' + (activePhase && activePhase.urgent ? ' is-urgent' : '') + '" id="plmLiveCountdown">' +
@@ -10362,7 +10410,7 @@ function liveRenderView() {
     '<span class="plm-linkmic-state is-' + (activePhase ? activePhase.tone : 'idle') + '"><i></i><b>' +
     esc(activePhase ? activePhase.linkmic : '等待连麦') + '</b></span></div></section>' +
     '<nav class="plm-stage-tabs" aria-label="比赛阶段">' + stageTabs + '</nav>' +
-    '<main class="plm-content"><div class="plm-section-head"><div><span class="plm-kicker">分组与实时分数</span>' +
+    '<main class="plm-content">' + finalPodium + '<div class="plm-section-head"><div><span class="plm-kicker">分组与实时分数</span>' +
     '<h2>' + esc(selectedMeta.title) + '</h2></div><div class="plm-section-hint"><span>' + esc(selectedMeta.hint) + '</span><span>' +
     esc(liveStageStatusLabel(selectedStageInfo)) + '</span></div></div>' + cards + '</main>' +
     '<footer class="plm-footer"><span>比分来自抖音 PK 实时采样</span><span>' + esc(footerRule) + '</span></footer>' +
@@ -10542,7 +10590,7 @@ function liveHistoryEventListHtml(data) {
     return '<button type="button" class="phm-event-card" data-history-event="' + esc(item.key || '') + '">' +
       '<div class="phm-event-top"><div><h3 class="phm-event-title">' + esc(item.title || '未命名赛事') + '</h3>' +
       '<div class="phm-event-date">' + esc(item.eventDate || '比赛日期待定') + '</div></div>' +
-      '<span class="phm-status">正式成绩</span></div>' +
+      '<span class="phm-status">' + (item.status === 'finished' ? '赛事已结束' : '正式成绩') + '</span></div>' +
       '<div class="phm-chips">' + labels.map((label) => '<span class="phm-chip">' + esc(label) + '</span>').join('') + '</div>' +
       '<div class="phm-event-foot"><span>' + Number(item.groupCount || 0) + ' 个比赛组 · ' + Number(item.resultCount || 0) + ' 条成绩</span>' +
       '<span>查看成绩 ›</span></div></button>';
@@ -10554,11 +10602,11 @@ function liveHistoryEventListHtml(data) {
     '<div class="phm-event-list">' + cards + '</div></div>';
 }
 
-function liveHistoryResultTag(kind, qualified, rank) {
+function liveHistoryResultTag(kind, qualified, position) {
   if (kind === 'first_wave_group' || kind === 'rest_group') return qualified ? '晋级' : '复活池';
   if (kind === 'first_wave_revival' || kind === 'rest_revival') return qualified ? '复活' : '淘汰';
-  if (kind === 'promotion') return qualified ? '进决赛' : '止步';
-  if (kind === 'final') return rank === 1 ? '冠军' : rank === 2 ? '亚军' : rank === 3 ? '季军' : '完赛';
+  if (kind === 'promotion') return position === 1 ? '进决赛' : '止步';
+  if (kind === 'final') return position === 1 ? '冠军' : position === 2 ? '亚军' : position === 3 ? '季军' : '完赛';
   return qualified ? '晋级' : '完赛';
 }
 
@@ -10569,12 +10617,11 @@ function liveHistoryGroupCard(group) {
   const maxScore = Math.max(1, ...players.map((p) => Number(p.matchScore) || 0));
   const rows = players.length ? players.map((p) => {
     const position = Number(p.position) || 0;
-    const rank = Number(p.rank) || 0;
     const qualified = !!p.qualified;
-    const result = liveHistoryResultTag(kind, qualified, rank);
+    const result = liveHistoryResultTag(kind, qualified, position);
     const score = Number(p.matchScore) || 0;
     const pct = Math.max(2, Math.round(score / maxScore * 100));
-    const medal = kind === 'final' && rank >= 1 && rank <= 3 ? (rank === 1 ? 'gold' : rank === 2 ? 'silver' : 'bronze') : '';
+    const medal = kind === 'final' && position >= 1 && position <= 3 ? (position === 1 ? 'gold' : position === 2 ? 'silver' : 'bronze') : '';
     const name = p.personName || p.nickname || '未登记';
     return '<div class="plm-player' + (qualified ? ' is-qualified' : '') + '">' +
       '<span class="plm-rank">#' + position + '</span>' +
@@ -10584,7 +10631,7 @@ function liveHistoryGroupCard(group) {
       '</div><div class="plm-score-track"><i style="width:' + pct + '%"></i></div></div>' +
       '<div class="plm-history-score">' + score.toLocaleString('zh-CN') + '<small>比赛分</small></div></div>';
   }).join('') : '<div class="plm-empty">本组暂无已冻结成绩</div>';
-  const rule = kind === 'final' ? '决赛最终排名' : qualify > 0 ? '取前 ' + qualify + ' 个位置' : '正式成绩';
+  const rule = kind === 'final' ? '决赛最终排名' : kind === 'promotion' ? '每组第 1 名进入决赛 · 其余止步' : qualify > 0 ? '取前 ' + qualify + ' 个位置' : '正式成绩';
   return '<article class="plm-group-card is-history">' +
     '<header class="plm-group-head"><div><div class="plm-group-kicker">' + esc(liveStageLabel(kind)) + ' · 第 ' + esc(group.seq || 0) + ' 组</div>' +
     '<h3>' + esc(group.name || ('第 ' + (group.seq || 0) + ' 组')) + '</h3></div><span class="plm-status plm-done"><i></i>正式成绩</span></header>' +
@@ -13712,38 +13759,28 @@ function hideBootGate() {
   const updateClose = $('appUpdateClose');
   if (updateGo) updateGo.onclick = () => window.location.reload();
   if (updateClose) updateClose.onclick = () => updateBar && updateBar.classList.add('hidden');
+
   window.addEventListener('pageshow', (ev) => {
     settleInstalledWebApp();
-    if (Date.now() - appUpdateCheckedAt > APP_UPDATE_CHECK_MS) checkSoftwareUpdate(false);
+    if (loginFlowReady && Date.now() - appUpdateCheckedAt > APP_UPDATE_CHECK_MS) checkSoftwareUpdate(false);
     /* BFCache 恢复的页面可能带着部署前脚本，强制补一次刷新，不吃 15 秒节流。 */
     if (ev && ev.persisted) importedRefreshAt = 0;
     refreshDataOnResume();
   });
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) return;
-    if (Date.now() - appUpdateCheckedAt > APP_UPDATE_CHECK_MS) checkSoftwareUpdate(false);
+    if (loginFlowReady && Date.now() - appUpdateCheckedAt > APP_UPDATE_CHECK_MS) checkSoftwareUpdate(false);
     refreshDataOnResume();
-    if (myToken()) {
+    if (loginFlowReady && myToken()) {
       msgModalAutoShown = false;
       msgProbeAttempts = 0;
       scheduleMyMessageProbe(500, true);
       scheduleWxBindingRefresh();
     }
   });
-  setTimeout(() => {
-    if (Date.now() - appUpdateCheckedAt > APP_UPDATE_CHECK_MS) checkSoftwareUpdate(false);
-  }, 2500);
-  /* 与登录门并行：先拉密文，登录后只取一次性密钥并本地解密。
-     有历史团别时只预取一个；首次访问并行预取 all/male/female，登录后选命中的那份。 */
-  const prefetchHint = prefetchTeamHint();
-  const prefetchTeams = prefetchHint ? [prefetchHint] : ['all', 'male', 'female'];
-  const encryptedPrefetchTasks = {};
-  prefetchTeams.forEach((team) => {
-    encryptedPrefetchTasks[team] = startEncryptedPrefetch(team).catch(() => null);
-  });
-  /* 登录优先 + 登录卡公告并行（2026-10-22）：没有 token 时先同步渲染登录门，
-     同时只拉公开的登录配置；绝不先请求 /teams/all 或任何榜单数据。
-     登录与公告谁先回谁先推进：用户已登录时不再被慢公告请求卡住。 */
+  /* 登录界面优先（2026-11-20）：ensureLogin() 在没有有效 token 时会同步渲染登录门。
+     登录前只拉公开的登录页公告；加密 site/daily、方案和看板数据必须等用户登录成功后
+     才发起，避免登录页背后提前跑业务请求。 */
   const earlyLogin = ensureLogin();
   const annTask = fetchAnnouncements().catch(() => ({}));
   const first = await Promise.race([
@@ -13766,7 +13803,12 @@ function hideBootGate() {
     if (siteAnnouncements.loginRequired === false) {
       gateResolve = null;
       hideBootGate();
-      const prefetched = await consumeEncryptedPrefetch(encryptedPrefetchTasks[TEAM], TEAM);
+      loginFlowReady = true;
+      const prefetchedTask = startEncryptedPrefetch(TEAM).catch(() => null);
+      const prefetched = await consumeEncryptedPrefetch(prefetchedTask, TEAM);
+      setTimeout(() => {
+        if (Date.now() - appUpdateCheckedAt > APP_UPDATE_CHECK_MS) checkSoftwareUpdate(false);
+      }, 2500);
       bootRest({ authed: false, prefetchedSite: prefetched && prefetched.site });
       return;
     }
@@ -13775,10 +13817,13 @@ function hideBootGate() {
 
   applyLoginState(me);   // 登录后立刻按账号团别设置 TEAM
   try { localStorage.setItem('pkLastTeam', TEAM); } catch (_) {}
-  if (!encryptedPrefetchTasks[TEAM]) {
-    encryptedPrefetchTasks[TEAM] = startEncryptedPrefetch(TEAM).catch(() => null);
-  }
-  const prefetched = await consumeEncryptedPrefetch(encryptedPrefetchTasks[TEAM], TEAM);
+  loginFlowReady = true;
+  /* 到这一步用户已登录（或 token 校验通过）；现在才允许发起首屏业务预取。 */
+  const prefetchedTask = startEncryptedPrefetch(TEAM).catch(() => null);
+  const prefetched = await consumeEncryptedPrefetch(prefetchedTask, TEAM);
+  setTimeout(() => {
+    if (Date.now() - appUpdateCheckedAt > APP_UPDATE_CHECK_MS) checkSoftwareUpdate(false);
+  }, 2500);
   /* 2026-10-18 契约 v2 §4.3/§4.6：刷新页面恢复登录态时也要接住两个状态 ——
      needProfile → 复用 #gate 渲染不可关闭的补全卡（阻断逻辑自愈）；
      mustChangePass → 延迟弹「请修改密码」提示层（临时密码登录过、还没改密）。

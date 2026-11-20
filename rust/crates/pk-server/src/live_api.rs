@@ -464,7 +464,7 @@ pub async fn choose_official(
     .await?;
     let event_id = store::live_event_of_group(&st, group_id).await.unwrap_or(0);
     if event_id > 0 {
-        if let Err(e) = live::auto_advance_revival(&st, event_id).await {
+        if let Err(e) = live::auto_advance_stages(&st, event_id).await {
             tracing::warn!(event_id, group_id, error = %e, "选择正式局后自动生成复活赛失败");
         }
         crate::events::emit(
@@ -492,12 +492,21 @@ pub async fn finalize_group(
         .or(store::live_latest_round_id(&st, group_id).await.ok())
         .filter(|v| *v > 0)
         .ok_or_else(|| crate::routes::ApiError::bad_request("这个小组还没有对局"))?;
+    // 强制定稿是一个明确的运营动作：先把仍在进行/异常的局标记为 completed，
+    // 再设正式局，避免决赛用中途分数冻结后直接结束赛事。
+    store::live_round_set_status(
+        &st,
+        round_id,
+        RoundStatus::Completed,
+        Some("manual_finalize"),
+    )
+    .await?;
     store::live_round_set_official(&st, round_id).await?;
     store::live_round_event_add(&st, round_id, "force_finalized", "管理员强制定稿", "admin")
         .await?;
     let event_id = store::live_event_of_group(&st, group_id).await.unwrap_or(0);
     if event_id > 0 {
-        if let Err(e) = live::auto_advance_revival(&st, event_id).await {
+        if let Err(e) = live::auto_advance_stages(&st, event_id).await {
             tracing::warn!(event_id, group_id, error = %e, "强制定稿后自动生成复活赛失败");
         }
     }
@@ -643,7 +652,7 @@ pub async fn freeze_stage(
         total += live::freeze_group_qualifiers(&st, event_id, gid, &source).await?;
         done += 1;
     }
-    let auto = live::auto_advance_revival(&st, event_id).await?;
+    let auto = live::auto_advance_stages(&st, event_id).await?;
     crate::events::emit(
         crate::events::SCOPE_LIVE,
         format!(

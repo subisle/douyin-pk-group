@@ -674,6 +674,17 @@ pub fn revival_qualify_slots(rules: &LiveRules, kind: StageKind) -> i32 {
     }
 }
 
+/// 用户口径（2026-11-20）：晋级赛每组只取第 1 名进入决赛，不设复活池。
+pub const PROMOTION_QUALIFY_PER_GROUP: i32 = 1;
+
+/// 决赛最终榜单保留冠亚季军三个名次。
+pub const FINAL_PODIUM_SLOTS: i32 = 3;
+
+/// 自动推进是“读快照 → 多次写库”的组合操作。单实例生产部署下用进程锁串行化，
+/// 防止最后一组完成时多个采样请求同时生成决赛或重复收口。远程扩容成多实例时，
+/// 应把它替换为 PostgreSQL advisory lock。
+static LIVE_ADVANCE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 impl StageKind {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -855,6 +866,15 @@ pub async fn ingest_observation(
     if obs.health == "error" {
         out.phase = "degraded".into();
         out.note = obs.error.clone();
+        return Ok(out);
+    }
+    if crate::store::live_event_status(st, event_id)
+        .await?
+        .as_deref()
+        == Some("finished")
+    {
+        out.phase = "event_finished".into();
+        out.note = "赛事已结束，忽略赛后的残留 battle 采样".into();
         return Ok(out);
     }
     if !obs.linkmic_users.is_empty() {
@@ -1230,10 +1250,11 @@ async fn finalize_round(
     // 幂等：已定稿的局不动状态（定稿后仍在收最终分，这里会被反复调用）
     let cur = crate::store::live_round_status(st, round_id).await?;
     if cur == Some(RoundStatus::Completed) {
-        // 自动生成复活赛可能因瞬时写库失败没有成功；已定稿局的后续采样继续
-        // 幂等重试一次，避免一次抖动后永远漏掉复活分组。
-        if let Err(e) = auto_advance_revival(st, event_id).await {
-            tracing::warn!(event_id, group_id, error = %e, "重试自动生成复活赛失败");
+        // completed 与 official/group finalized 原本是两次写库。若第二步瞬时失败，
+        // 后续采样会一直进这个分支；这里补一次 ensure 才能自愈，而不是永久卡死。
+        crate::store::live_round_ensure_official(st, round_id).await?;
+        if let Err(e) = auto_advance_stages(st, event_id).await {
+            tracing::warn!(event_id, group_id, error = %e, "重试自动推进赛程失败");
         }
         return Ok(());
     }
@@ -1297,7 +1318,7 @@ async fn finalize_round(
     crate::store::live_round_set_official(st, round_id).await?;
     crate::store::live_round_event_add(st, round_id, "finalized", "正常结束并设为正式局", "system")
         .await?;
-    if let Err(e) = auto_advance_revival(st, event_id).await {
+    if let Err(e) = auto_advance_stages(st, event_id).await {
         tracing::warn!(event_id, group_id, error = %e, "自动生成复活赛失败，等待下一拍重试");
     }
     Ok(())
@@ -1313,18 +1334,37 @@ pub async fn freeze_group_qualifiers(
     group_id: i64,
     source: &str,
 ) -> anyhow::Result<usize> {
+    freeze_group_qualifiers_limited(st, event_id, group_id, source, None).await
+}
+
+/// 冻结晋级结果，并可由赛程推进覆盖晋级线。
+///
+/// 晋级赛自动收口固定传 `Some(PROMOTION_QUALIFY_PER_GROUP)`，避免历史方案里
+/// 误存成“前 2 名”后把第二名也带进决赛。
+async fn freeze_group_qualifiers_limited(
+    st: &Arc<AppState>,
+    event_id: i64,
+    group_id: i64,
+    source: &str,
+    qualify_override: Option<i32>,
+) -> anyhow::Result<usize> {
     let round_id = crate::store::live_group_official_round(st, group_id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("小组还没有正式局，不能冻结结果"))?;
     let seats = crate::store::live_group_cumulative_seats(st, group_id).await?;
-    let qualify = crate::store::live_group_qualify_slots(st, group_id)
+    let mut qualify = crate::store::live_group_qualify_slots(st, group_id)
         .await?
         .unwrap_or(0);
+    if let Some(slots) = qualify_override {
+        qualify = slots.max(0);
+        crate::store::live_group_set_qualify_slots(st, group_id, qualify).await?;
+    }
     let stage_id = crate::store::live_group_stage(st, group_id).await?;
     /* 席位要**显式标记**谁晋级、谁淘汰：复活池（`live_stage_eliminated`）查的是
     `qualified = 0` 的席位。只写 live_qualifier 不标记席位的话，淘汰者集合
     永远是空的 —— 复活赛生成时会直接报「没有淘汰者」。 */
     let mut n = 0usize;
+    let mut qualified_uids = Vec::new();
     for (position, seat) in seats.iter().enumerate() {
         let uid = seat
             .get("douyinUid")
@@ -1341,11 +1381,21 @@ pub async fn freeze_group_qualifiers(
             continue;
         }
         n += 1;
+        qualified_uids.push(uid.to_string());
         crate::store::live_qualifier_add(
             st, event_id, stage_id, group_id, round_id, person_id, uid, source, rank, score,
         )
         .await?;
     }
+    crate::store::live_qualifier_prune_group(
+        st,
+        event_id,
+        stage_id,
+        group_id,
+        source,
+        &qualified_uids,
+    )
+    .await?;
     crate::store::live_group_result_refresh(st, event_id, group_id, round_id, source).await?;
     Ok(n)
 }
@@ -1686,14 +1736,22 @@ pub async fn build_revival_rooms(
     Ok(rooms.len())
 }
 
-/// 某一波小组全部定稿后，自动冻结晋级者并开放两个空的复活赛位置。
+/// 根据已经定稿的小组自动推进整条赛程。
 ///
-/// 用户口径（2026-11-20）：复活赛不按淘汰者自动分房，实际连麦名单由采集决定。
-/// 本函数只准备空位置；第一场、第二场 PK 开始后自然写入对应组。
-pub async fn auto_advance_revival(
-    st: &Arc<AppState>,
-    event_id: i64,
-) -> anyhow::Result<Vec<String>> {
+/// - 小组赛收口：冻结直接晋级者，开放复活赛空位；
+/// - 晋级赛收口：每组只冻结第 1 名，所有组完成后自动生成并启动决赛；
+/// - 决赛收口：冻结冠亚季军及完赛成绩，赛事切到 finished。
+///
+/// 该函数会被每个已完成对局的后续采样反复调用，因此每一步都必须幂等；赛事进入
+/// finished 后直接短路，避免采集器持续上报时重复刷新历史快照。
+pub async fn auto_advance_stages(st: &Arc<AppState>, event_id: i64) -> anyhow::Result<Vec<String>> {
+    let _advance_guard = LIVE_ADVANCE_LOCK.lock().await;
+    let status = crate::store::live_event_status(st, event_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("赛事不存在"))?;
+    if status == "finished" {
+        return Ok(Vec::new());
+    }
     let groups = crate::store::live_group_list(st, event_id).await;
     let mut generated = Vec::new();
     for (group_kind, revival_kind, label) in [
@@ -1741,6 +1799,80 @@ pub async fn auto_advance_revival(
             );
         }
     }
+
+    // 晋级赛：每组定稿后立即冻结第 1 名；全部组定稿后只生成一个决赛房。
+    // 已经存在决赛时不再碰晋级赛席位，防止最后一场的后续采样反复覆盖决赛。
+    let promotion_groups: Vec<&serde_json::Value> = groups
+        .iter()
+        .filter(|g| g.get("stageKind").and_then(Value::as_str) == Some("promotion"))
+        .collect();
+    let final_groups: Vec<&serde_json::Value> = groups
+        .iter()
+        .filter(|g| g.get("stageKind").and_then(Value::as_str) == Some("final"))
+        .collect();
+    let final_active = final_groups
+        .iter()
+        .any(|g| g.get("status").and_then(Value::as_str) != Some("pending"));
+    if !promotion_groups.is_empty() && !final_active {
+        for group in &promotion_groups {
+            if group.get("status").and_then(Value::as_str) != Some("finalized") {
+                continue;
+            }
+            let group_id = group.get("id").and_then(Value::as_i64).unwrap_or(0);
+            if group_id > 0 {
+                freeze_group_qualifiers_limited(
+                    st,
+                    event_id,
+                    group_id,
+                    "promotion",
+                    Some(PROMOTION_QUALIFY_PER_GROUP),
+                )
+                .await?;
+            }
+        }
+        let all_finalized = promotion_groups
+            .iter()
+            .all(|g| g.get("status").and_then(Value::as_str) == Some("finalized"));
+        if all_finalized {
+            let created = build_final_group(st, event_id).await?;
+            if created > 0 {
+                generated.push("决赛已自动生成".to_string());
+                crate::events::emit(
+                    crate::events::SCOPE_LIVE,
+                    format!("赛事 {event_id} 晋级赛已收口，决赛自动生成并开始"),
+                );
+            }
+        }
+    }
+
+    // 决赛：冻结最终榜单后立即结束整场赛事；不存在复活赛或下一阶段。
+    if !final_groups.is_empty()
+        && final_groups
+            .iter()
+            .all(|g| g.get("status").and_then(Value::as_str) == Some("finalized"))
+    {
+        let mut podium_count = 0usize;
+        for group in &final_groups {
+            let group_id = group.get("id").and_then(Value::as_i64).unwrap_or(0);
+            if group_id > 0 {
+                podium_count += freeze_group_qualifiers_limited(
+                    st,
+                    event_id,
+                    group_id,
+                    "final",
+                    Some(FINAL_PODIUM_SLOTS),
+                )
+                .await?;
+            }
+        }
+        if podium_count > 0 && crate::store::live_event_finish(st, event_id).await? {
+            generated.push("赛事已收官".to_string());
+            crate::events::emit(
+                crate::events::SCOPE_LIVE,
+                format!("赛事 {event_id} 决赛成绩已冻结，赛事结束"),
+            );
+        }
+    }
     Ok(generated)
 }
 
@@ -1760,7 +1892,7 @@ pub async fn build_promotion_groups(st: &Arc<AppState>, event_id: i64) -> anyhow
                 event_id,
                 StageKind::Promotion,
                 &buckets,
-                rules.promotion_qualify_per_group,
+                PROMOTION_QUALIFY_PER_GROUP,
             )
             .await;
         }
@@ -1790,7 +1922,7 @@ pub async fn build_promotion_groups(st: &Arc<AppState>, event_id: i64) -> anyhow
             StageKind::Promotion,
             i as i32 + 1,
             &format!("晋级{}组", i + 1),
-            rules.promotion_qualify_per_group,
+            PROMOTION_QUALIFY_PER_GROUP,
             0,
         )
         .await?;
@@ -1831,6 +1963,15 @@ pub async fn build_final_group(st: &Arc<AppState>, event_id: i64) -> anyhow::Res
     if promotion_groups.is_empty() {
         anyhow::bail!("还没有晋级赛小组");
     }
+    let existing_final = groups
+        .iter()
+        .find(|g| g.get("stageKind").and_then(Value::as_str) == Some("final"));
+    if let Some(group) = existing_final {
+        // running / finalized 说明决赛已经占用房间并开始接采集；重复调用绝不改席位。
+        if group.get("status").and_then(Value::as_str) != Some("pending") {
+            return Ok(0);
+        }
+    }
     let pending = promotion_groups
         .iter()
         .filter(|g| g.get("status").and_then(|v| v.as_str()) != Some("finalized"))
@@ -1840,9 +1981,16 @@ pub async fn build_final_group(st: &Arc<AppState>, event_id: i64) -> anyhow::Res
     }
 
     let qualifiers = crate::store::live_qualifier_list(st, event_id).await;
+    let mut seen_groups = HashSet::new();
     let people: Vec<serde_json::Value> = qualifiers
         .into_iter()
-        .filter(|q| q.get("source").and_then(|v| v.as_str()) == Some("promotion"))
+        .filter(|q| {
+            q.get("source").and_then(|v| v.as_str()) == Some("promotion")
+                && q.get("rank").and_then(|v| v.as_i64()) == Some(1)
+                && q.get("groupId")
+                    .and_then(|v| v.as_i64())
+                    .is_some_and(|group_id| seen_groups.insert(group_id))
+        })
         .collect();
     if people.is_empty() {
         anyhow::bail!("还没有晋级赛出线名单，请先逐组冻结晋级结果");
@@ -1856,9 +2004,35 @@ pub async fn build_final_group(st: &Arc<AppState>, event_id: i64) -> anyhow::Res
     }
 
     let stage_id = crate::store::live_stage_ensure(st, event_id, StageKind::Final).await?;
-    let gid =
-        crate::store::live_group_create(st, event_id, stage_id, StageKind::Final, 1, "决赛", 3, 0)
-            .await?;
+    let (gid, created) = crate::store::live_group_create_once(
+        st,
+        event_id,
+        stage_id,
+        StageKind::Final,
+        1,
+        "决赛",
+        FINAL_PODIUM_SLOTS,
+        0,
+    )
+    .await?;
+    if gid <= 0 {
+        anyhow::bail!("决赛房创建失败");
+    }
+
+    // 重复调用只允许修复“建组后、写席位前崩溃”的空房；已有席位或已有对局时
+    // 一律保持原样，不能让最后一组的后续采样重写决赛名单。
+    let seed_count = crate::store::live_group_seed_count(st, gid).await?;
+    let round_count = crate::store::live_round_count(st, gid).await?;
+    if !created && (seed_count > 0 || round_count > 0) {
+        if existing_final
+            .and_then(|g| g.get("stageStatus"))
+            .and_then(Value::as_str)
+            != Some("finalized")
+        {
+            crate::store::live_stage_set_status(st, stage_id, StageStatus::Running).await?;
+        }
+        return Ok(0);
+    }
 
     let mut seen = HashSet::new();
     let mut seeds = Vec::with_capacity(people.len());
@@ -1871,6 +2045,12 @@ pub async fn build_final_group(st: &Arc<AppState>, event_id: i64) -> anyhow::Res
             .to_string();
         let plan_name = seat
             .get("personName")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let seat_nickname = seat
+            .get("nickname")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .trim()
@@ -1900,6 +2080,8 @@ pub async fn build_final_group(st: &Arc<AppState>, event_id: i64) -> anyhow::Res
             plan_name
         } else if !anchor_name.is_empty() {
             anchor_name
+        } else if !seat_nickname.is_empty() {
+            seat_nickname
         } else if person_id > 0 {
             format!("#{person_id}")
         } else {
@@ -1916,7 +2098,8 @@ pub async fn build_final_group(st: &Arc<AppState>, event_id: i64) -> anyhow::Res
         anyhow::bail!("晋级赛出线名单缺少可用主播");
     }
     crate::store::live_group_seed_replace(st, gid, &seeds).await?;
-    Ok(1)
+    crate::store::live_stage_set_status(st, stage_id, StageStatus::Running).await?;
+    Ok(usize::from(created))
 }
 
 #[cfg(test)]
@@ -1999,7 +2182,11 @@ mod tests {
 
     #[test]
     fn rules_default_is_valid() {
-        assert!(validate_rules(&LiveRules::default()).is_ok());
+        let rules = LiveRules::default();
+        assert!(validate_rules(&rules).is_ok());
+        assert_eq!(rules.promotion_qualify_per_group, 1);
+        assert_eq!(PROMOTION_QUALIFY_PER_GROUP, 1);
+        assert_eq!(FINAL_PODIUM_SLOTS, 3);
     }
 
     #[test]
@@ -2287,8 +2474,12 @@ mod tests {
         assert_eq!(stage_label("final"), "决赛");
         assert_eq!(match_result_label("rest_group", 5, false), "进入复活赛");
         assert_eq!(match_result_label("rest_revival", 3, true), "复活晋级");
-        assert_eq!(match_result_label("promotion", 2, true), "进入决赛");
+        assert_eq!(match_result_label("promotion", 1, true), "进入决赛");
+        assert_eq!(match_result_label("promotion", 2, false), "止步晋级赛");
+        assert!(!match_result_label("promotion", 2, false).contains("复活"));
         assert_eq!(match_result_label("final", 1, true), "冠军");
+        assert_eq!(match_result_label("final", 2, true), "亚军");
+        assert_eq!(match_result_label("final", 3, true), "季军");
         assert_eq!(match_result_label("final", 4, false), "完赛");
     }
 

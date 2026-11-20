@@ -109,7 +109,7 @@ pub async fn live_history_events(
     };
     sqlx::query(
         "SELECT e.id, e.public_token, e.title, e.event_date, e.status,
-                e.started_at, max(r.frozen_at) AS last_result_at,
+                e.started_at, e.finished_at, max(r.frozen_at) AS last_result_at,
                 count(DISTINCT r.group_id)::BIGINT AS group_count,
                 count(r.douyin_uid)::BIGINT AS result_count,
                 string_agg(DISTINCT st.kind, ',') AS stage_kinds
@@ -119,7 +119,7 @@ pub async fn live_history_events(
           WHERE e.public_token <> ''
             AND e.event_date >= $1
             AND e.event_date < $2
-          GROUP BY e.id, e.public_token, e.title, e.event_date, e.status, e.started_at
+          GROUP BY e.id, e.public_token, e.title, e.event_date, e.status, e.started_at, e.finished_at
           ORDER BY e.event_date DESC, e.started_at DESC NULLS LAST, e.id DESC
           LIMIT $3",
     )
@@ -141,6 +141,7 @@ pub async fn live_history_events(
                     "month": r.try_get::<String, _>("event_date").unwrap_or_default().chars().take(7).collect::<String>(),
                     "status": r.try_get::<String, _>("status").unwrap_or_default(),
                     "startedAt": r.try_get::<chrono::DateTime<chrono::Utc>, _>("started_at").map(|t| t.to_rfc3339()).ok(),
+                    "finishedAt": r.try_get::<chrono::DateTime<chrono::Utc>, _>("finished_at").map(|t| t.to_rfc3339()).ok(),
                     "lastResultAt": r.try_get::<chrono::DateTime<chrono::Utc>, _>("last_result_at").map(|t| t.to_rfc3339()).ok(),
                     "groupCount": r.try_get::<i64, _>("group_count").unwrap_or(0),
                     "resultCount": r.try_get::<i64, _>("result_count").unwrap_or(0),

@@ -311,6 +311,11 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "056_live_group_result",
         include_str!("migrations/056_live_group_result.sql"),
     ),
+    // 057：赛事终态。决赛成绩冻结后写 finished_at，/live/ 不再展示已结束赛事。
+    (
+        "057_live_event_finish",
+        include_str!("migrations/057_live_event_finish.sql"),
+    ),
 ];
 
 /// 迁移建连（migrator 账号；同样关语句缓存）
