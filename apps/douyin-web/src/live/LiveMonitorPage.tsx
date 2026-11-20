@@ -42,8 +42,8 @@ const GROUP_STATUS: Record<string, { label: string; cls: string }> = {
 }
 
 /** SSE 是分数主路径；页面可见时只保留低频轮询兜底，断线也能在一拍内恢复。 */
-const SCORE_FALLBACK_MS = 10000
-const OVERVIEW_FALLBACK_MS = 15000
+const SCORE_FALLBACK_MS = 2000
+const OVERVIEW_FALLBACK_MS = 5000
 
 /** 状态点：颜色即语义，运营扫一眼就知道哪一卡住了 */
 function Dot({ kind }: { kind: string }) {

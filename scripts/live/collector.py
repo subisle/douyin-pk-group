@@ -27,7 +27,7 @@ import urllib.request
 from typing import Any
 
 DEFAULT_API = "http://127.0.0.1:8787"
-DEFAULT_INTERVAL = 4.0
+DEFAULT_INTERVAL = 2.0
 
 # 裁判/主持等账号会出现在连麦分数列表里，但不属于参赛者。
 # 默认排除当前赛事的裁判号；可用 LIVE_REFEREE_UIDS 追加更多 UID（逗号分隔）。
