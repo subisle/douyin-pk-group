@@ -209,6 +209,13 @@ export interface PublicLivePlayer {
   score: number
   rank: number
   qualified: boolean
+  /** 本场抖音加成倍数：100 = 无加成，150 = 1.5 倍。 */
+  bonusMultiple?: number
+  /** 已计入显示分的累计加成增量。 */
+  bonusScore?: number
+  bonusActive?: boolean
+  bonusEndMs?: number
+  currentBonus?: number
 }
 
 export interface PublicLiveGroup extends LiveGroup {

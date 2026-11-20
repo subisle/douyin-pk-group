@@ -543,6 +543,105 @@ async fn promotion_winners_auto_create_final_and_final_finishes_event() {
 
 #[tokio::test]
 #[ignore = "需要真实 PostgreSQL（DB_LOCAL_* + DB_WRITER_*）；加 -- --ignored 运行"]
+async fn expired_live_round_is_closed_and_promotion_winner_reaches_final() {
+    let Some(st) = setup().await else { return };
+    if st.writer.is_none() {
+        eprintln!("跳过：douyin_writer 未配置");
+        return;
+    }
+    let st = std::sync::Arc::new(st);
+    let stamp = chrono::Utc::now().timestamp_millis();
+    let pool = st.writer.as_ref().expect("writer");
+    let event_id = store::live_event_create(
+        &st,
+        &format!("__e2e_timeout_{stamp}"),
+        "2999-01-04",
+        &LiveRules::default(),
+        0,
+    )
+    .await
+    .expect("创建测试赛事");
+    let token = format!("{stamp:032x}");
+    store::live_event_start(&st, event_id, &token)
+        .await
+        .expect("启动测试赛事")
+        .expect("赛事存在");
+    let stage_id = store::live_stage_ensure(&st, event_id, StageKind::Promotion)
+        .await
+        .expect("晋级阶段");
+    let group_id = store::live_group_create(
+        &st,
+        event_id,
+        stage_id,
+        StageKind::Promotion,
+        1,
+        "__e2e超时晋级组",
+        1,
+        0,
+    )
+    .await
+    .expect("晋级小组");
+    let round_id: i64 = sqlx::query(
+        "INSERT INTO live_round
+           (event_id, group_id, battle_id, status, start_at, expected_end_at)
+         VALUES ($1, $2, $3, 'live', now() - interval '12 minutes', now() - interval '2 minutes')
+         RETURNING id",
+    )
+    .bind(event_id)
+    .bind(group_id)
+    .bind(format!("__e2e_timeout_{stamp}"))
+    .fetch_one(pool)
+    .await
+    .expect("超时对局")
+    .try_get("id")
+    .expect("round id");
+    for position in 1..=7 {
+        sqlx::query(
+            "INSERT INTO live_round_seat
+               (round_id, douyin_uid, nickname, final_score, final_rank)
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(round_id)
+        .bind(format!("__e2e_timeout_{stamp}_{position}"))
+        .bind(format!("超时-{position}"))
+        .bind((100 - position * 10) as i64)
+        .bind(position)
+        .execute(pool)
+        .await
+        .expect("超时席位");
+    }
+    let closed = pk_server::live::auto_close_expired_rounds(
+        &st,
+        event_id,
+        chrono::Utc::now().timestamp_millis(),
+        "",
+        &LiveRules::default(),
+    )
+    .await
+    .expect("自动收口超时局");
+    assert_eq!(closed, 1);
+    let status: String = sqlx::query_scalar("SELECT status FROM live_round WHERE id = $1")
+        .bind(round_id)
+        .fetch_one(pool)
+        .await
+        .expect("对局状态");
+    assert_eq!(status, "completed");
+    let final_seeds: Vec<String> = sqlx::query_scalar(
+        "SELECT gs.douyin_uid FROM live_group_seat gs
+           JOIN live_group g ON g.id = gs.group_id
+           JOIN live_stage s ON s.id = g.stage_id
+          WHERE g.event_id = $1 AND s.kind = 'final' ORDER BY gs.seed_order",
+    )
+    .bind(event_id)
+    .fetch_all(pool)
+    .await
+    .expect("决赛名单");
+    assert_eq!(final_seeds, vec![format!("__e2e_timeout_{stamp}_1")]);
+    cleanup_live_event(pool, event_id).await;
+}
+
+#[tokio::test]
+#[ignore = "需要真实 PostgreSQL（DB_LOCAL_* + DB_WRITER_*）；加 -- --ignored 运行"]
 async fn monthly_import_bulk_upsert_preserves_unchanged_contract() {
     let Some(st) = setup().await else { return };
     let st = std::sync::Arc::new(st);

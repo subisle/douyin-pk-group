@@ -1622,6 +1622,53 @@ pub async fn live_round_count(st: &AppState, group_id: i64) -> anyhow::Result<i6
     Ok(row.try_get::<i64, _>("n").unwrap_or(0))
 }
 
+/// 已超过预计结束时间、但采集器切换下一场后没有补发结束信号的非终态局。
+/// 每个小组只取最新一局，防止历史残留局反复被收口。
+pub async fn live_expired_open_rounds(
+    st: &AppState,
+    event_id: i64,
+    cutoff: chrono::DateTime<chrono::Utc>,
+    current_battle_id: &str,
+) -> anyhow::Result<Vec<(i64, i64)>> {
+    let rows = sqlx::query(
+        "WITH open_rounds AS (
+           SELECT r.id, r.group_id,
+                  row_number() OVER (PARTITION BY r.group_id ORDER BY r.id DESC) AS latest_rank
+             FROM live_round r
+             JOIN live_group g ON g.id = r.group_id
+             JOIN live_stage st ON st.id = g.stage_id
+            WHERE r.event_id = $1
+              AND r.status IN ('detected', 'live', 'settling')
+              AND g.status NOT IN ('finalized', 'pending_review')
+              AND st.status <> 'finalized'
+              AND COALESCE(r.expected_end_at, r.start_at + interval '10 minutes') < $2
+              AND ($3 = '' OR r.battle_id <> $3)
+              AND NOT EXISTS (
+                    SELECT 1 FROM live_round done
+                     WHERE done.group_id = r.group_id
+                       AND done.is_official = 1
+              )
+         )
+         SELECT id, group_id FROM open_rounds
+          WHERE latest_rank = 1 ORDER BY id LIMIT 20",
+    )
+    .bind(event_id)
+    .bind(cutoff)
+    .bind(current_battle_id)
+    .fetch_all(w(st)?)
+    .await?;
+    Ok(rows
+        .iter()
+        .map(|r| {
+            (
+                r.try_get::<i64, _>("id").unwrap_or(0),
+                r.try_get::<i64, _>("group_id").unwrap_or(0),
+            )
+        })
+        .filter(|(round_id, group_id)| *round_id > 0 && *group_id > 0)
+        .collect())
+}
+
 /// 该组最近一局 id
 pub async fn live_latest_round_id(st: &AppState, group_id: i64) -> anyhow::Result<i64> {
     let row = sqlx::query("SELECT id FROM live_round WHERE group_id = $1 ORDER BY id DESC LIMIT 1")
@@ -2366,9 +2413,25 @@ pub async fn live_group_cumulative_maps(
                   rank() OVER (PARTITION BY group_id ORDER BY score DESC) AS match_rank
              FROM totals
          )
-         SELECT group_id, person_id, douyin_uid, nickname, person_name,
-                score, match_rank, position
-           FROM ranked ORDER BY group_id, position",
+         SELECT ranked.group_id, ranked.person_id, ranked.douyin_uid,
+                ranked.nickname, ranked.person_name, ranked.score,
+                ranked.match_rank, ranked.position,
+                latest_bonus.bonus_multiple, latest_bonus.bonus_score,
+                latest_bonus.bonus_active, latest_bonus.bonus_end_ms,
+                latest_bonus.current_bonus
+           FROM ranked
+           LEFT JOIN LATERAL (
+             SELECT s.bonus_multiple, s.bonus_score, s.bonus_active,
+                    s.bonus_end_ms, s.current_bonus
+               FROM eligible e
+               JOIN live_score_sample s ON s.round_id = e.id
+              WHERE e.group_id = ranked.group_id
+                AND s.douyin_uid = ranked.douyin_uid
+              ORDER BY e.id DESC, s.score_version_num DESC,
+                       s.observed_at DESC, s.id DESC
+              LIMIT 1
+           ) latest_bonus ON true
+          ORDER BY ranked.group_id, ranked.position",
     )
     .bind(event_id)
     .fetch_all(pool)
@@ -2388,6 +2451,11 @@ pub async fn live_group_cumulative_maps(
                 "rank": r.try_get::<i64, _>("match_rank").unwrap_or(0) as i32,
                 "position": r.try_get::<i64, _>("position").unwrap_or(0) as i32,
                 "qualified": false,
+                "bonusMultiple": r.try_get::<i32, _>("bonus_multiple").unwrap_or(100),
+                "bonusScore": r.try_get::<i64, _>("bonus_score").unwrap_or(0),
+                "bonusActive": r.try_get::<i16, _>("bonus_active").unwrap_or(0) == 1,
+                "bonusEndMs": r.try_get::<i64, _>("bonus_end_ms").unwrap_or(0),
+                "currentBonus": r.try_get::<i64, _>("current_bonus").unwrap_or(0),
             }));
     }
     out

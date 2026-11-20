@@ -29,7 +29,17 @@ function todayLocal() {
 
 function formatMultiplier(multiple: number) {
   const value = Math.max(1, multiple / 100)
-  return `${Number.isInteger(value) ? value : value.toFixed(2).replace(/0+$/, '')}x`
+  return `×${Number.isInteger(value) ? value : value.toFixed(2).replace(/0+$/, '')}`
+}
+
+/** 实时分标题只回答当前阶段：PK 就是 PK，没开 PK 但已连麦就是连麦中。 */
+function livePhaseLabel(group: LiveGroup | undefined, seatCount: number) {
+  if (!group) return '等待连麦'
+  if (group.status === 'running') return 'PK'
+  if (group.status === 'pending') return seatCount > 0 ? '连麦中' : '等待连麦'
+  if (group.status === 'settling') return '结算中'
+  if (group.status === 'finalized') return '已结束'
+  return '连麦中'
 }
 
 const GROUP_STATUS: Record<string, { label: string; cls: string }> = {
@@ -492,6 +502,9 @@ export default function LiveMonitorPage() {
   const activeBonusCount = seats.filter(s => s.bonusActive).length
   const hasBonusScore = seats.some(s => (s.bonusScore ?? 0) > 0)
   const hasBonusData = seats.some(s => (s.bonusMultiple ?? 100) > 100 || (s.bonusScore ?? 0) > 0)
+  const maxBonusMultiple = seats.reduce((max, s) => Math.max(max, Number(s.bonusMultiple) || 100), 100)
+  const phaseLabel = livePhaseLabel(currentGroup, seats.length)
+  const scoreUnit = phaseLabel === '连麦中' || phaseLabel === '等待连麦' ? phaseLabel : '音浪'
 
   const groupsByStage = useMemo(() => {
     const m = new Map<string, LiveGroup[]>()
@@ -647,7 +660,7 @@ export default function LiveMonitorPage() {
           <div className="lm-board">
             <div className="lm-scores lm-live-scores">
               <h3>
-                <span className="lm-live-title"><span className="lm-live-dot" />实时分</span>
+                <span className="lm-live-title"><span className="lm-live-dot" />实时分 <em className="lm-live-phase">{phaseLabel}</em></span>
                 {groupId > 0 && (
                   <select value={groupId} onChange={e => setGroupId(Number(e.target.value))}>
                     {(ov.groups ?? []).map(g => (
@@ -663,17 +676,19 @@ export default function LiveMonitorPage() {
               </div>
               <div className="lm-live-summary">
                 <div><span>当前组</span><b>{currentGroup?.name || '—'}</b></div>
-                <div><span>组内音浪</span><b>{groupWave.toLocaleString('zh-CN')}</b></div>
+                <div><span>{phaseLabel === 'PK' ? '组内音浪' : '当前音浪'}</span><b>{groupWave.toLocaleString('zh-CN')}</b></div>
                 <div><span>在榜人数</span><b>{seats.length}</b></div>
-                {hasBonusData && (
+                {hasBonusData || maxBonusMultiple > 100 ? (
                   <div>
-                    <span>加成状态</span>
+                    <span>加成倍数</span>
                     <b className={activeBonusCount > 0 ? 'lm-bonus-live-text' : ''}>
-                      {activeBonusCount > 0
-                        ? `${activeBonusCount} 人加成中`
-                        : hasBonusScore ? '加成已结束' : '加成待触发'}
+                      {maxBonusMultiple > 100
+                        ? `${formatMultiplier(maxBonusMultiple)}${activeBonusCount > 0 ? ' · 生效中' : hasBonusScore ? ' · 已结束' : ' · 待触发'}`
+                        : '未触发'}
                     </b>
                   </div>
+                ) : (
+                  <div><span>加成倍数</span><b>未触发</b></div>
                 )}
                 {currentGroup && currentGroup.qualifySlots > 0 && (
                   <div><span>{currentGroup.stageKind.includes('revival') ? '复活名额' : '晋级名额'}</span><b>前 {currentGroup.qualifySlots}</b></div>
@@ -712,7 +727,7 @@ export default function LiveMonitorPage() {
                             </span>
                           )}
                         </div>
-                        <div className="lm-live-bar"><span style={{ width: `${pct}%` }} /></div>
+                        <div className="lm-live-bar"><span style={{ transform: `scaleX(${pct / 100})` }} /></div>
                       </div>
                       <div
                         className="lm-live-value"
@@ -721,6 +736,7 @@ export default function LiveMonitorPage() {
                         <b key={`${s.douyinUid}-${s.score}`} className={delta ? 'score-bump' : ''}>
                           {(Number(s.score) || 0).toLocaleString('zh-CN')}
                         </b>
+                        <span className="lm-score-unit">{scoreUnit}</span>
                         {delta > 0 && <span className="lm-score-delta">+{delta.toLocaleString('zh-CN')}</span>}
                         {bonusScore > 0 && (
                           <span className="lm-real-score">去加成 {realScore.toLocaleString('zh-CN')}</span>

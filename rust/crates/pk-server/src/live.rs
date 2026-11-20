@@ -877,11 +877,25 @@ pub async fn ingest_observation(
         out.note = "赛事已结束，忽略赛后的残留 battle 采样".into();
         return Ok(out);
     }
+    let rules = crate::store::live_event_rules(st, event_id)
+        .await
+        .unwrap_or_default();
+    let now_ms = if obs.now_ms > 0 {
+        obs.now_ms
+    } else {
+        chrono::Utc::now().timestamp_millis()
+    };
+    let current_battle_id = obs
+        .battle
+        .as_ref()
+        .map(|battle| battle.battle_id.as_str())
+        .unwrap_or("");
+    if let Err(e) = auto_close_expired_rounds(st, event_id, now_ms, current_battle_id, &rules).await
+    {
+        tracing::warn!(event_id, error = %e, "自动收口超时直播对局失败，等待下一拍重试");
+    }
     if !obs.linkmic_users.is_empty() {
-        let capacity = crate::store::live_event_rules(st, event_id)
-            .await
-            .map(|rules| rules.revival_room_capacity.max(1) as usize)
-            .unwrap_or(8);
+        let capacity = rules.revival_room_capacity.max(1) as usize;
         let members = obs
             .linkmic_users
             .iter()
@@ -910,15 +924,6 @@ pub async fn ingest_observation(
         out.phase = "idle".into();
         return Ok(out);
     }
-
-    let rules = crate::store::live_event_rules(st, event_id)
-        .await
-        .unwrap_or_default();
-    let now_ms = if obs.now_ms > 0 {
-        obs.now_ms
-    } else {
-        chrono::Utc::now().timestamp_millis()
-    };
 
     // 1) 定位小组：优先按当前正在进行的阶段找「已认领本 battle」的小组，
     //    否则找该阶段里第一个还没定稿的小组（运营按赛程顺序开打）。
@@ -1322,6 +1327,71 @@ async fn finalize_round(
         tracing::warn!(event_id, group_id, error = %e, "自动生成复活赛失败，等待下一拍重试");
     }
     Ok(())
+}
+
+/// 收口“预计结束时间已过，但采集器已经切到下一场/空闲、没补发结束信号”的对局。
+///
+/// 抖音页面切下一场时可能直接清空 battle_stats；若只依赖 ended 快照，上一局会永久
+/// 停在 live，后续晋级/决赛也就永远不会出现。这里只在预计结束时间 + 结算宽限之后
+/// 收口，正在进行或仍在结算窗口内的局不会被提前结束。
+pub async fn auto_close_expired_rounds(
+    st: &Arc<AppState>,
+    event_id: i64,
+    now_ms: i64,
+    current_battle_id: &str,
+    rules: &LiveRules,
+) -> anyhow::Result<usize> {
+    let effective_ms = if now_ms > 0 {
+        now_ms
+    } else {
+        chrono::Utc::now().timestamp_millis()
+    };
+    let grace_ms = rules.settle_grace_secs.max(30) as i64 * 1000;
+    let cutoff = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(
+        effective_ms.saturating_sub(grace_ms),
+    )
+    .unwrap_or_else(chrono::Utc::now);
+    let rows =
+        crate::store::live_expired_open_rounds(st, event_id, cutoff, current_battle_id).await?;
+    let mut closed = 0usize;
+    for (round_id, group_id) in rows {
+        let status = crate::store::live_round_status(st, round_id).await?;
+        if matches!(
+            status,
+            Some(RoundStatus::Completed | RoundStatus::Aborted | RoundStatus::Void)
+        ) {
+            continue;
+        }
+        crate::store::live_round_set_status(
+            st,
+            round_id,
+            RoundStatus::Completed,
+            Some("expected_end_elapsed"),
+        )
+        .await?;
+        if !crate::store::live_round_ensure_official(st, round_id).await? {
+            tracing::warn!(
+                event_id,
+                group_id,
+                round_id,
+                "超时局已有其它正式局，跳过收口推进"
+            );
+            continue;
+        }
+        crate::store::live_round_event_add(
+            st,
+            round_id,
+            "auto_closed_by_timeout",
+            "已超过预计结束时间且采集切换到下一场，系统自动收口",
+            "system",
+        )
+        .await?;
+        closed += 1;
+    }
+    if closed > 0 {
+        auto_advance_stages(st, event_id).await?;
+    }
+    Ok(closed)
 }
 
 /* ------------------------------ 阶段推进 ------------------------------ */
