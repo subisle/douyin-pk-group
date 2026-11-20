@@ -16,6 +16,7 @@ import {
 } from './api';
 import {
   BREAK_AFTER_GROUP,
+  FIRST_WAVE_REVIVAL_ROOMS,
   GROUP4_TO5_GAP_MINUTES,
   REVIVAL_EVENTS,
   REVIVAL_MINUTES,
@@ -351,19 +352,21 @@ export default function GroupPage() {
     return () => window.removeEventListener('beforeunload', onBeforeUnload);
   }, [buckets.length]);
 
-  /* 加长停留点：小组赛是复活赛（5 分钟，位置随组数走），其余赛事是第 3 组后的可调休息。 */
+  /* 加长停留点：小组赛第 4/5 组之间排 20 分钟，内含第一波两组复活赛；其余赛事是第 3 组后的可调休息。 */
   /** 本赛事有没有复活赛（初级/中级争霸赛小组赛），跟有没有分组无关 */
   const revivalEvent = REVIVAL_EVENTS.includes(eventType);
   /** 已分好组，复活赛位置能算出来了 */
   const revivalOn = revivalEvent && buckets.length > 0;
-  /** 复活赛落点：第 N 组（1 起）比完就打 */
+  /** 第一波复活赛落点：第 N 组（1 起）比完就打 */
   const revivalAfter = revivalAfterGroup(buckets.length);
   /** 加长停留发生在第几组之后（1 起）；没分组时先按老位置占位，分完组立刻纠正 */
   const restAfterGroup = revivalOn ? revivalAfter : BREAK_AFTER_GROUP;
   /** 加长停留的分钟数 */
   const restMin = revivalEvent ? REVIVAL_MINUTES : longBreak;
-  /** 赛程排期用的第 4/5 组间隔；实际复活赛仍是 5 分钟，20 分钟是整段间隔。 */
+  /** 赛程排期用的第 4/5 组总间隔：包含第 4 组和第 4 组后的两组复活赛。 */
   const scheduleRestMin = revivalEvent ? GROUP4_TO5_GAP_MINUTES : longBreak;
+  /** 第一波复活赛总比赛时长：两组各 5 分钟。 */
+  const firstWaveRevivalSpanMin = FIRST_WAVE_REVIVAL_ROOMS * restMin;
   /** 本轮赛程是否真的有加长停留（没分组的复活赛不算，那时还没有赛程） */
   const restOn = restAfterGroup > 0 && (revivalOn || (!revivalEvent && longBreak > 0));
 
@@ -1064,7 +1067,7 @@ export default function GroupPage() {
       const node = buildExportNode({
         title: title.trim() || 'PK 分组',
         brandLine: `PK GROUP · 分组名单 · ${dates[0] || isoLocal()}`,
-        metaLine: `${eventType} · 导出 ${selected.length} 组 / 共 ${buckets.reduce((s, b) => s + b.players.length, 0)} 人 · ${startTime} 后 / 间隔 ${intervalMin} 分${restOn ? revivalEvent ? ` · 第 ${restAfterGroup} 组后复活赛 ${restMin} 分，第 ${restAfterGroup + 1} 组间隔 ${scheduleRestMin} 分` : ` · 第 ${restAfterGroup} 组后休息 ${restMin} 分` : ''}`,
+        metaLine: `${eventType} · 导出 ${selected.length} 组 / 共 ${buckets.reduce((s, b) => s + b.players.length, 0)} 人 · ${startTime} 后 / 常规间隔 ${intervalMin} 分${restOn ? revivalEvent ? ` · 第 ${restAfterGroup} 组与第 ${restAfterGroup + 1} 组间隔 ${scheduleRestMin} 分，含第一波 ${FIRST_WAVE_REVIVAL_ROOMS} 组复活赛（每组 ${restMin} 分，共 ${firstWaveRevivalSpanMin} 分）` : ` · 第 ${restAfterGroup} 组后休息 ${restMin} 分` : ''}`,
         groups: selected.map((i) => ({
           name: buckets[i].name,
           slot: slotAt(i),
@@ -1185,8 +1188,8 @@ export default function GroupPage() {
   const slotAt = (i: number) => {
     const [h, m] = startTime.split(':').map((x) => Number(x) || 0);
     let t = h * 60 + m;
-    /* 与后端 pk-core::gap_after 同口径：命中加长休息的那一段，间隔**被 restMin 替换**
-     * 而不是叠加（第 4 组后复活赛 5 分钟 → 第 5 组是 13:05，不是 13:10）。 */
+    /* 与后端 pk-core::gap_after 同口径：命中第 4 组后的排期时，常规间隔被 20 分钟替换；
+     * 这 20 分钟包含第 4 组和第一波两组复活赛，不是再额外叠加 20 分钟。 */
     for (let k = 0; k < i; k += 1) {
       t += restOn && k + 1 === restAfterGroup ? scheduleRestMin : intervalMin;
     }
@@ -1780,8 +1783,8 @@ export default function GroupPage() {
           <label>
             {revivalEvent
               ? revivalOn
-                ? `第 ${restAfterGroup} 组后复活赛`
-                : '复活赛'
+                ? `第 ${restAfterGroup} 组后第一波复活赛`
+                : '第一波复活赛'
               : `第 ${BREAK_AFTER_GROUP} 组后休息`}{' '}
             <input
               type="number"
@@ -1792,25 +1795,19 @@ export default function GroupPage() {
               disabled={revivalEvent}
               title={
                 revivalEvent
-                  ? `复活赛固定 ${restMin} 分钟${
-                      revivalOn
-                        ? `，位置由组数决定（${buckets.length} 组 → 第 ${restAfterGroup} 组后）`
-                        : '，位置分完组后自动定（8 组 / 7 组 → 第 4 组后，6 组 → 第 3 组后）'
-                    }，不可改`
+                  ? `第一波复活赛每组固定 ${restMin} 分钟，共 ${FIRST_WAVE_REVIVAL_ROOMS} 组；两组都包含在第 ${restAfterGroup} 组与第 ${restAfterGroup + 1} 组之间的 ${scheduleRestMin} 分钟内，不可改`
                   : '月终争霸赛 / 晋级赛可自己填，填 0 = 不插加长休息'
               }
               onChange={(e) => setLongBreak(Math.max(0, Number(e.target.value) || 0))}
             />
-            分钟
-            {revivalEvent && <span className="pk-tag">固定</span>}
+            分钟/组
+            {revivalEvent && <span className="pk-tag">{FIRST_WAVE_REVIVAL_ROOMS} 组</span>}
           </label>
           <span className="hint">
             {revivalEvent
               ? revivalOn
-                ? `复活赛共两场、每场 ${restMin} 分钟：第 ${restAfterGroup} 组 ${slotAt(
-                    restAfterGroup - 1,
-                  )} 开赛，结束后打第一场复活赛；第 ${restAfterGroup} 组与第 ${restAfterGroup + 1} 组间隔 ${scheduleRestMin} 分钟，第 ${restAfterGroup + 1} 组 ${slotAt(restAfterGroup)} 开赛；后续小组全部结束后打第二场，每场前 4 名复活、其余直接淘汰`
-                : `复活赛共两场、每场 ${restMin} 分钟；第 ${restAfterGroup} 组与第 ${restAfterGroup + 1} 组间隔 ${scheduleRestMin} 分钟，后续小组全部结束后打第二场；分完组这里会自动定位；每场前 4 名复活、其余直接淘汰`
+                ? `第 ${restAfterGroup} 组 ${slotAt(restAfterGroup - 1)} 开赛；随后在第 ${restAfterGroup} 组与第 ${restAfterGroup + 1} 组之间的 ${scheduleRestMin} 分钟内完成第一波 ${FIRST_WAVE_REVIVAL_ROOMS} 组复活赛（每组 ${restMin} 分钟，共 ${firstWaveRevivalSpanMin} 分钟），第 ${restAfterGroup + 1} 组 ${slotAt(restAfterGroup)} 开赛；后续小组全部结束后，剩余小组淘汰者按同样规则打第二波复活赛，每组前 4 名复活、其余直接淘汰`
+                : `第一波复活赛共 ${FIRST_WAVE_REVIVAL_ROOMS} 组、每组 ${restMin} 分钟，两组都包含在第 ${restAfterGroup} 组与第 ${restAfterGroup + 1} 组之间的 ${scheduleRestMin} 分钟间隔内；分完组这里会自动定位；每组前 4 名复活、其余直接淘汰`
               : restMin > 0
                 ? `第 1 组 ${slotAt(0)}、第 2 组 ${slotAt(1)}、第 3 组 ${slotAt(2)}，之后休息 ${restMin} 分钟，第 4 组 ${slotAt(3)}`
                 : `每组间隔统一 ${intervalMin} 分钟（不插加长休息）`}
