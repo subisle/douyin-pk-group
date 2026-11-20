@@ -698,6 +698,57 @@ impl StageKind {
     }
 }
 
+/// 对外历史成绩的中文阶段名。实时页和比赛历史页共用同一套口径。
+pub fn stage_label(kind: &str) -> &'static str {
+    match kind {
+        "first_wave_group" | "rest_group" => "小组赛",
+        "first_wave_revival" | "rest_revival" => "复活赛",
+        "promotion" => "晋级赛",
+        "final" => "决赛",
+        _ => "比赛",
+    }
+}
+
+/// 个人历史成绩里的结果文案。冠亚季军只用于决赛，避免普通小组前三被误称冠军。
+pub fn match_result_label(kind: &str, rank: i32, qualified: bool) -> &'static str {
+    match kind {
+        "first_wave_group" | "rest_group" => {
+            if qualified {
+                "晋级"
+            } else {
+                "进入复活赛"
+            }
+        }
+        "first_wave_revival" | "rest_revival" => {
+            if qualified {
+                "复活晋级"
+            } else {
+                "淘汰"
+            }
+        }
+        "promotion" => {
+            if qualified {
+                "进入决赛"
+            } else {
+                "止步晋级赛"
+            }
+        }
+        "final" => match rank {
+            1 => "冠军",
+            2 => "亚军",
+            3 => "季军",
+            _ => "完赛",
+        },
+        _ => {
+            if qualified {
+                "晋级"
+            } else {
+                "完赛"
+            }
+        }
+    }
+}
+
 /// 阶段状态
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum StageStatus {
@@ -1295,6 +1346,7 @@ pub async fn freeze_group_qualifiers(
         )
         .await?;
     }
+    crate::store::live_group_result_refresh(st, event_id, group_id, round_id, source).await?;
     Ok(n)
 }
 
@@ -2225,6 +2277,19 @@ mod tests {
         assert!(StageKind::FirstWaveRevival.order() < StageKind::RestGroup.order());
         assert!(StageKind::RestRevival.order() < StageKind::Promotion.order());
         assert!(StageKind::Promotion.order() < StageKind::Final.order());
+    }
+
+    #[test]
+    fn history_labels_keep_scores_and_results_separate() {
+        assert_eq!(stage_label("first_wave_group"), "小组赛");
+        assert_eq!(stage_label("rest_revival"), "复活赛");
+        assert_eq!(stage_label("promotion"), "晋级赛");
+        assert_eq!(stage_label("final"), "决赛");
+        assert_eq!(match_result_label("rest_group", 5, false), "进入复活赛");
+        assert_eq!(match_result_label("rest_revival", 3, true), "复活晋级");
+        assert_eq!(match_result_label("promotion", 2, true), "进入决赛");
+        assert_eq!(match_result_label("final", 1, true), "冠军");
+        assert_eq!(match_result_label("final", 4, false), "完赛");
     }
 
     #[test]

@@ -414,6 +414,16 @@ try {
     truthy('我的页标题区域存在', await evaluate(ws, `!!document.getElementById('mhTitle')`))
     await assertViewHealthy(ws, '我的')
     truthy('我的页有卡片', (await evaluate(ws, `document.querySelectorAll('#view .card, #view .section').length`)) > 0)
+    const myMatchSample = await evaluate(ws, `myMatchesHtml({
+      bound: true, months: ['2026-11'], month: '',
+      summary: { appearanceCount: 2, qualifiedCount: 1, bestPosition: 1 },
+      items: [
+        { eventId: 25, eventTitle: '2026-11-20 中级争霸赛', eventDate: '2026-11-20', stageLabel: '小组赛', groupName: '第 3 组', rank: 2, position: 2, participantCount: 8, matchScore: 13169, qualified: true, resultLabel: '晋级' },
+        { eventId: 25, eventTitle: '2026-11-20 中级争霸赛', eventDate: '2026-11-20', stageLabel: '复活赛', groupName: '复活1组', rank: 1, position: 1, participantCount: 7, matchScore: 21203, qualified: true, resultLabel: '复活晋级' },
+      ],
+    })`)
+    truthy('个人历史成绩显示比赛分', myMatchSample.includes('13,169') && myMatchSample.includes('比赛分'))
+    truthy('个人历史成绩显示比赛结果', myMatchSample.includes('晋级') && myMatchSample.includes('复活晋级'))
     await shot(ws, '06-my.png')
   })
 
@@ -474,6 +484,26 @@ try {
       width: 390, height: 844, deviceScaleFactor: 1, mobile: true,
     })
     await shot(ws, '06-live-integrated.png')
+    await evaluate(ws, `document.querySelector('[data-live-mode="history"]').click()`)
+    truthy('比赛监控切到历史模式', await waitFor(ws, `location.pathname === '/live/history' && !!document.querySelector('.phm-event-card')`, 30, 250))
+    truthy('历史页说明比赛分不入音浪', (await evaluate(ws, 'document.getElementById("view").innerText')).includes('不计入音浪'))
+    truthy('底部比赛监控仍选中', await evaluate(ws, `document.getElementById('navLive')?.classList.contains('on') === true`))
+    await evaluate(ws, `document.querySelector('.phm-event-card').click()`)
+    truthy('历史赛事详情已加载', await waitFor(ws, `location.pathname.startsWith('/live/history/') && document.querySelectorAll('#view .plm-group-card.is-history').length > 0`, 30, 250))
+    truthy('历史成绩使用比赛分字段样式', await evaluate(ws, `document.querySelectorAll('#view .plm-history-score').length > 0`))
+    truthy('历史成绩没有实时跳动分数节点', await evaluate(ws, `document.querySelectorAll('#view .plm-score').length === 0`))
+    for (const width of [320, 375, 430]) {
+      await ws.send('Emulation.setDeviceMetricsOverride', { width, height: 844, deviceScaleFactor: 1, mobile: true })
+      await sleep(200)
+      const docWidth = await evaluate(ws, 'document.documentElement.scrollWidth')
+      truthy(`比赛历史 ${width}px 无横向溢出（${docWidth}/${width}）`, docWidth <= width + 1)
+    }
+    await ws.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true })
+    await shot(ws, '07-live-history.png')
+    await evaluate(ws, `document.getElementById('phmBack').click()`)
+    await waitFor(ws, `location.pathname === '/live/history' && !!document.querySelector('.phm-event-card')`, 30, 250)
+    await evaluate(ws, `document.querySelector('[data-live-mode="current"]').click()`)
+    await waitFor(ws, `location.pathname === '/live/' && !!document.querySelector('#view .plm-shell')`, 30, 250)
   })
 
   /* 7. 深链（等价刷新）：关掉的页要落到还开着的第一页，这也是正确行为 */
@@ -481,21 +511,25 @@ try {
     const wantOf = {
       '/report': 'data',
       '/live/': 'live',
+      '/live/history': 'live',
       '/group/mid': settings.groupEnabled === false ? 'data' : 'group',
       '/lineage': settings.lineageEnabled === false
         ? (settings.groupEnabled === false ? 'data' : 'group')
         : 'lineage',
       '/my': settings.loginRequired === false ? 'data' : 'my',
+      '/my/matches': settings.loginRequired === false ? 'data' : 'my',
     }
     for (const [path, want] of Object.entries(wantOf)) {
       await goto(ws, `${BASE}${path}`)
       await sleep(800)
-      if (want !== 'live') await waitFor(ws, `document.getElementById('view').innerText.trim().length > 30`, 20, 250)
+      if (path === '/live/history') await waitFor(ws, `!!document.querySelector('.phm-event-card, .phm-empty')`, 30, 250)
+      else if (want !== 'live') await waitFor(ws, `document.getElementById('view').innerText.trim().length > 30`, 20, 250)
       await dismissKnownOverlays(ws)
       const active = await evaluate(ws, `document.querySelector('[data-v].on')?.dataset.v ?? ''`)
       expect(`深链 ${path} 落在 ${want} 页`, active, want)
       await assertViewHealthy(ws, `深链 ${path}`)
       expect(`深链 ${path} 地址保持`, await evaluate(ws, 'location.pathname'), path)
+      if (path === '/my/matches') await shot(ws, '07-my-matches.png')
     }
     await goto(ws, `${BASE}/live/00000000000000000000000000000000`)
     await sleep(1600)

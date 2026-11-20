@@ -59,6 +59,7 @@ pub(crate) async fn public_identity_team(
 pub mod admin;
 mod avatars;
 mod binds;
+mod live_history;
 mod minutes;
 mod my;
 mod pages;
@@ -72,6 +73,7 @@ mod wx;
 pub use admin::*;
 pub use avatars::*;
 pub use binds::*;
+pub use live_history::*;
 pub use minutes::*;
 pub use my::*;
 pub use pages::*;

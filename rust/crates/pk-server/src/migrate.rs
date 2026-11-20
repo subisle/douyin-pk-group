@@ -305,6 +305,12 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "055_live_public_monitor",
         include_str!("migrations/055_live_public_monitor.sql"),
     ),
+    // 056：比赛成绩冻结表。历史成绩只读这份快照，不复用会继续变化的实时席位，
+    // 也不进入任何音浪 / 时长 / 月榜 / 年榜口径。
+    (
+        "056_live_group_result",
+        include_str!("migrations/056_live_group_result.sql"),
+    ),
 ];
 
 /// 迁移建连（migrator 账号；同样关语句缓存）

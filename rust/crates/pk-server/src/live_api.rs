@@ -7,6 +7,7 @@
 use axum::extract::{Path, Query, State};
 use axum::response::IntoResponse;
 use axum::Json;
+use chrono::{Datelike, NaiveDate};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -953,6 +954,78 @@ async fn public_live_snapshot(st: &Arc<AppState>, event: Value) -> Value {
     })
 }
 
+pub(crate) fn month_bounds(month: &str) -> Result<(String, String), crate::routes::ApiError> {
+    let start = NaiveDate::parse_from_str(&format!("{month}-01"), "%Y-%m-%d")
+        .map_err(|_| crate::routes::ApiError::bad_request("month 必须是 YYYY-MM"))?;
+    let (year, next_month) = if start.month() == 12 {
+        (start.year() + 1, 1)
+    } else {
+        (start.year(), start.month() + 1)
+    };
+    Ok((
+        start.format("%Y-%m-%d").to_string(),
+        format!("{year:04}-{next_month:02}-01"),
+    ))
+}
+
+#[derive(Deserialize)]
+pub struct HistoryQuery {
+    pub month: Option<String>,
+    pub limit: Option<i64>,
+}
+
+/// 公开比赛历史列表：只列已有冻结比赛结果的赛事，可按 YYYY-MM 过滤。
+pub async fn public_history(
+    State(st): State<Arc<AppState>>,
+    Query(q): Query<HistoryQuery>,
+) -> ApiResult {
+    let months = store::live_history_months(&st).await;
+    let month = q
+        .month
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(ToString::to_string)
+        .or_else(|| months.first().cloned())
+        .unwrap_or_else(|| chrono::Local::now().format("%Y-%m").to_string());
+    let (from_date, to_date) = month_bounds(&month)?;
+    let items = store::live_history_events(
+        &st,
+        &from_date,
+        &to_date,
+        q.limit.unwrap_or(50).clamp(1, 100),
+    )
+    .await;
+    Ok(Json(json!({
+        "months": months,
+        "month": month,
+        "items": items,
+    })))
+}
+
+/// 单个历史赛事详情：只含已冻结小组与正式比赛分。
+pub async fn public_history_event(
+    State(st): State<Arc<AppState>>,
+    Path(token): Path<String>,
+) -> ApiResult {
+    let token = token.trim();
+    if token.len() < 24 || token.len() > 40 || !token.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(crate::routes::ApiError::with_status(
+            axum::http::StatusCode::NOT_FOUND,
+            "比赛历史不存在",
+        ));
+    }
+    let event = store::live_event_by_public_token(&st, token)
+        .await
+        .ok_or_else(|| {
+            crate::routes::ApiError::with_status(
+                axum::http::StatusCode::NOT_FOUND,
+                "比赛历史不存在或已失效",
+            )
+        })?;
+    Ok(Json(store::live_history_snapshot(&st, event).await))
+}
+
 /// 对外公开的赛事直播快照（不鉴权，只认启动时生成的随机 token）。
 ///
 /// 返回当前全部阶段与小组，包括赛前名单、每组最新分数、正式局状态。复活赛
@@ -1074,5 +1147,19 @@ mod tests {
         assert_eq!(a.len(), 36);
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn history_month_bounds_cross_year_and_reject_bad_input() {
+        assert_eq!(
+            month_bounds("2026-11").ok().unwrap(),
+            ("2026-11-01".into(), "2026-12-01".into())
+        );
+        assert_eq!(
+            month_bounds("2026-12").ok().unwrap(),
+            ("2026-12-01".into(), "2027-01-01".into())
+        );
+        assert!(month_bounds("2026-13").is_err());
+        assert!(month_bounds("2026/11").is_err());
     }
 }

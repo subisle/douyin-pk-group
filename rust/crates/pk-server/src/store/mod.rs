@@ -33,6 +33,7 @@ pub mod import_pending;
 mod legacy;
 /// 直播 PK 赛事运行态（live_* 表）：分数采样 / 对局 / 晋级，实时数据不进 plans.payload
 mod live;
+mod live_history;
 pub mod my_account;
 mod push_jobs;
 mod workbuddy;
@@ -46,6 +47,7 @@ pub use admin_messages::*;
 pub use import_pending::import_pending_prune;
 pub use legacy::*;
 pub use live::*;
+pub use live_history::*;
 pub use my_account::*;
 pub use push_jobs::*;
 pub use workbuddy::*;

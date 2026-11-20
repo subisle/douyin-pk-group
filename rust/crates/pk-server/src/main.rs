@@ -431,6 +431,11 @@ async fn main() -> anyhow::Result<()> {
         // 展示端轻量 SSE：只广播「数据已导入」，用于每日最高弹幕自动刷新。
         .route("/api/public/events", get(events::public_sse))
         // 直播公开页：/live/ 自动取最新进行中的赛事；token 路径继续兼容旧链接。
+        .route("/api/public/live/history", get(live_api::public_history))
+        .route(
+            "/api/public/live/history/{token}",
+            get(live_api::public_history_event),
+        )
         .route("/api/public/live", get(live_api::current_public_event))
         .route("/api/public/live/{token}", get(live_api::public_event))
         // 登录前加密预取首屏 site + daily；登录后按团别释放一次性 AES-GCM 密钥。
@@ -464,6 +469,11 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/public/teams/{team}/my/series",
             get(public_teams::my_series),
+        )
+        // 我的 · 历史比赛成绩：只读 live_group_result，与音浪/时长完全分离
+        .route(
+            "/api/public/teams/{team}/my/matches",
+            get(public_teams::my_matches),
         )
         // 我的抖音号：每个号的日/月/年/累计音浪（2026-10-12，一人多号时看出哪个号在跑）
         .route(
