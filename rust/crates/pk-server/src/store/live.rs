@@ -183,8 +183,16 @@ pub async fn live_event_current_public(st: &AppState) -> Option<serde_json::Valu
                 settle_grace_secs, public_token, started_at, group_duration_secs,
                 revival_duration_secs, finished_at, updated_at
            FROM live_event
-          WHERE status = 'running' AND public_token <> ''
-          ORDER BY started_at DESC NULLS LAST, id DESC
+          WHERE public_token <> ''
+            AND (
+              status = 'running'
+              OR (
+                status = 'finished'
+                AND event_date = to_char((now() AT TIME ZONE 'Asia/Shanghai')::date, 'YYYY-MM-DD')
+              )
+            )
+          ORDER BY CASE WHEN status = 'running' THEN 0 ELSE 1 END,
+                   started_at DESC NULLS LAST, id DESC
           LIMIT 1",
     )
     .fetch_optional(pool)

@@ -10119,10 +10119,10 @@ const LIVE_STAGE_ORDER = [
   'final',
 ];
 const LIVE_STAGE_META = {
-  first_wave_group: { short: '前四组', title: '前四组 · 小组赛', hint: '每组 10 分钟 · 前 4 名晋级' },
-  first_wave_revival: { short: '复活赛', title: '前四组 · 复活赛', hint: '淘汰者复活 · 每组 5 分钟' },
-  rest_group: { short: '后三组', title: '后三组 · 小组赛', hint: '每组 10 分钟 · 前 4 名晋级' },
-  rest_revival: { short: '后三组复活', title: '后三组 · 复活赛', hint: '淘汰者复活 · 每组 5 分钟' },
+  first_wave_group: { short: '小组赛', title: '小组赛', hint: '第 1-4 组 · 每组前 4 名晋级' },
+  first_wave_revival: { short: '复活赛1/2', title: '复活赛1/2', hint: '第 1、2 复活房 · 每组 5 分钟' },
+  rest_group: { short: '小组赛', title: '小组赛', hint: '第 5-7 组 · 每组前 4 名晋级' },
+  rest_revival: { short: '复活赛3/4', title: '复活赛3/4', hint: '第 3、4 复活房 · 每组 5 分钟' },
   promotion: { short: '晋级赛', title: '晋级赛', hint: '小组第一进入决赛' },
   final: { short: '决赛', title: '决赛', hint: '决出冠亚季军' },
 };
@@ -10147,6 +10147,20 @@ let liveHistoryRequestSeq = 0;
 function liveRouteToken() {
   const match = location.pathname.match(/^\/live\/([0-9a-f]{24,40})\/?$/i);
   return match ? match[1] : '';
+}
+function liveEventDisplayTitle(event) {
+  const raw = String((event && event.title) || '比赛成绩').trim();
+  const date = String((event && event.eventDate) || '');
+  const monthMatch = date.match(/^(\d{4})-(\d{2})/);
+  const month = monthMatch ? monthMatch[1] + '年' + Number(monthMatch[2]) + '月' : '';
+  let name = raw
+    .replace(/^\d{4}-\d{2}-\d{2}\s*/, '')
+    .replace(/^\d{4}年\d{1,2}月\s*/, '')
+    .replace(/\s*·\s*(实时比分|成绩历史)$/, '')
+    .replace(/中级争霸赛/g, '中旬争霸赛')
+    .trim();
+  if (!name) name = '争霸赛';
+  return (month ? month + ' ' : '') + name;
 }
 function liveApiUrl() {
   const token = liveRouteToken();
@@ -10457,8 +10471,9 @@ function liveRenderView() {
   });
   bindLiveModeSwitch(box);
   $('mhTitle').textContent = '比赛监控';
-  $('mhSub').textContent = 'LIVE · ' + (event.title || '实时比分');
-  document.title = (event.title || '实时比分') + ' · 实时比分';
+  const eventTitle = liveEventDisplayTitle(event);
+  $('mhSub').textContent = 'LIVE · ' + eventTitle;
+  document.title = eventTitle + ' · 实时比分';
   syncHeaderOffset();
   try { navDropMove(true); } catch (_) {}
 }
@@ -10504,6 +10519,17 @@ async function liveLoadOnce(rt) {
       headers: { accept: 'application/json' },
       signal: rt.signal || undefined,
     });
+    /* 固定 /live/ 只在赛事当天有实时快照。其余日期直接落到历史成绩，
+       不再让用户停在一个“当前没有赛事”的空页面。 */
+    if (response.status === 404 && !liveRouteToken()) {
+      liveSub = 'history';
+      liveHistoryKey = '';
+      liveHistorySelectedStage = 'all';
+      pushRoute(true);
+      liveStopRuntime();
+      await loadLiveHistory(rt.signal);
+      return;
+    }
     if (!response.ok) throw new Error(response.status === 404
       ? (liveRouteToken() ? '直播链接不存在或已失效' : '当前没有进行中的赛事')
       : '直播数据加载失败（' + response.status + '）');
@@ -10619,7 +10645,7 @@ function liveHistoryEventListHtml(data) {
     const kinds = Array.isArray(item.stageKinds) ? item.stageKinds : [];
     const labels = kinds.map((kind) => LIVE_STAGE_META[kind]?.short || kind).filter(Boolean);
     return '<button type="button" class="phm-event-card" data-history-event="' + esc(item.key || '') + '">' +
-      '<div class="phm-event-top"><div><h3 class="phm-event-title">' + esc(item.title || '未命名赛事') + '</h3>' +
+      '<div class="phm-event-top"><div><h3 class="phm-event-title">' + esc(liveEventDisplayTitle(item)) + '</h3>' +
       '<div class="phm-event-date">' + esc(item.eventDate || '比赛日期待定') + '</div></div>' +
       '<span class="phm-status">' + (item.status === 'finished' ? '赛事已结束' : '正式成绩') + '</span></div>' +
       '<div class="phm-chips">' + labels.map((label) => '<span class="phm-chip">' + esc(label) + '</span>').join('') + '</div>' +
@@ -10708,7 +10734,7 @@ function liveHistoryDetailHtml(snapshot) {
   }
   return '<div class="plm-shell is-integrated">' + liveModeSwitchHtml('history') +
     '<button type="button" class="phm-back" id="phmBack"><span class="material-symbols-outlined">arrow_back</span>返回赛事列表</button>' +
-    '<section class="phm-event-hero"><span class="plm-kicker">正式比赛成绩</span><h2>' + esc(event.title || '比赛成绩') + '</h2>' +
+    '<section class="phm-event-hero"><span class="plm-kicker">正式比赛成绩</span><h2>' + esc(liveEventDisplayTitle(event)) + '</h2>' +
     '<p>' + esc(event.eventDate || '') + ' · 比赛分不计入音浪、时长和收益</p></section>' +
     '<nav class="plm-stage-tabs" aria-label="历史阶段">' + tabs + '</nav>' + content + '</div>';
 }
@@ -10765,8 +10791,9 @@ function renderLiveHistoryDetail() {
   if (!box || !liveHistoryDetail) return;
   box.innerHTML = liveHistoryDetailHtml(liveHistoryDetail);
   $('mhTitle').textContent = '比赛监控';
-  $('mhSub').textContent = 'HISTORY · ' + (liveHistoryDetail.event?.title || '比赛成绩');
-  document.title = (liveHistoryDetail.event?.title || '比赛成绩') + ' · 成绩历史';
+  const eventTitle = liveEventDisplayTitle(liveHistoryDetail.event);
+  $('mhSub').textContent = 'HISTORY · ' + eventTitle;
+  document.title = eventTitle + ' · 成绩历史';
   bindLiveHistoryView();
   syncHeaderOffset();
 }
