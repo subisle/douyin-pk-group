@@ -368,10 +368,13 @@ actual   = battle.scores[].userId
 
 当以下条件同时满足：
 
-1. `battleStatus = 1`
-2. `actual == expected`（`full`）
-3. 该组尚未开始或仍未定稿
-4. 当前 battleId 未被其它组占用
+1. `battleStatus >= 1`（已开始；结束时仍需接收最终分）
+2. 当前参与者 **> 6 人**（至少 7 人）
+3. `actual == expected`（`full`，名单精确到齐）
+4. 该组尚未开始或仍未定稿
+5. 当前 battleId 未被其它组占用
+
+已登记过的 battle **不再重复过门禁**：开局后即使短暂掉到 7 人以下也继续采样，避免丢分。
 
 立即：
 
@@ -386,7 +389,7 @@ actual   = battle.scores[].userId
 
 ### 8.3 异常兜底
 
-- 缺人：继续记录样本，但状态 `waiting_roster`；不推进正式晋级。
+- 缺人 / 只有 1 人自动起 PK：只写直播间原始采样，状态 `waiting_roster`；不创建正式轮次、不推进晋级。
 - 多出来的人：记录但 `pending_review`，管理员选择是否作废/重开。
 - 采集器断线：暂停推送，不把 stale 快照当结束。
 - 重复 battleId：只落一局，不重复入队。
