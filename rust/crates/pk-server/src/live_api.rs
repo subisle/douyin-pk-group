@@ -29,7 +29,7 @@ fn public_live_cache_get(token: &str) -> Option<Value> {
     let guard = cache.lock().unwrap_or_else(|e| e.into_inner());
     guard
         .get(token)
-        .filter(|(at, _)| at.elapsed() < Duration::from_secs(1))
+        .filter(|(at, _)| at.elapsed() < Duration::from_millis(100))
         .map(|(_, value)| value.clone())
 }
 

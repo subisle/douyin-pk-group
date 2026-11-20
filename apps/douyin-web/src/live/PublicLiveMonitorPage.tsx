@@ -90,43 +90,23 @@ function playerName(player: PublicLivePlayer) {
   return player.personName || player.douyinUid || '未登记'
 }
 
-/** 分数按 600ms 平滑滚动到新值，避免每次轮询直接跳成新数字。 */
+/** 数值立即更新（不做数字追赶），更新后用短暂发光/跳动动画提示。 */
 function AnimatedScore({ value }: { value: number }) {
   const target = Math.max(0, Number(value) || 0)
-  const [shown, setShown] = useState(target)
+  const prevRef = useRef(target)
   const [updating, setUpdating] = useState(false)
-  const shownRef = useRef(target)
 
   useEffect(() => {
-    const from = shownRef.current
-    if (from === target) {
-      setShown(target)
-      return
-    }
+    if (prevRef.current === target) return
+    prevRef.current = target
     setUpdating(true)
-    const started = performance.now()
-    let raf = 0
-    const tick = (now: number) => {
-      const progress = Math.min(1, (now - started) / 600)
-      const eased = 1 - Math.pow(1 - progress, 3)
-      const next = Math.round(from + (target - from) * eased)
-      shownRef.current = next
-      setShown(next)
-      if (progress < 1) {
-        raf = requestAnimationFrame(tick)
-      } else {
-        shownRef.current = target
-        setShown(target)
-        setUpdating(false)
-      }
-    }
-    raf = requestAnimationFrame(tick)
-    return () => cancelAnimationFrame(raf)
+    const timer = window.setTimeout(() => setUpdating(false), 360)
+    return () => window.clearTimeout(timer)
   }, [target])
 
   return (
     <strong className={`plm-score${updating ? ' is-updating' : ''}`}>
-      {shown.toLocaleString('zh-CN')}
+      {target.toLocaleString('zh-CN')}
     </strong>
   )
 }
@@ -251,7 +231,7 @@ export default function PublicLiveMonitorPage({ token }: { token?: string }) {
         if (!stopped && document.visibilityState !== 'hidden' && navigator.onLine !== false) {
           void load()
         }
-      }, 350)
+      }, 50)
     }
     const connect = () => {
       source?.close()
