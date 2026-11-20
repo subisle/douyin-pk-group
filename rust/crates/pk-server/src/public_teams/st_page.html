@@ -131,6 +131,14 @@ button { font:inherit; cursor:pointer; }
 .mh-title { min-width:0; text-align:left; }
 .mh-title .t { font-weight:800; font-size:20px; line-height:28px; letter-spacing:-.5px;
   color:#0F172A; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.mh-online { flex:none; display:inline-flex; align-items:center; gap:4px; min-height:28px;
+  padding:0 9px; border:1px solid rgba(34,197,94,.2); border-radius:999px;
+  color:#166534; background:rgba(240,253,244,.82); font-size:10px; font-weight:700;
+  white-space:nowrap; }
+.mh-online i { width:6px; height:6px; border-radius:50%; background:#22C55E;
+  box-shadow:0 0 0 3px rgba(34,197,94,.12); }
+.mh-online b { color:#15803D; font:800 11px/1 ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-variant-numeric:tabular-nums; }
 /* 副标题行（设计稿 text-[11px] font-medium text-slate-500 mt-1.5 tracking-wide）：
     左对齐跟主标题同栏（设计稿数据行就在标题下方左侧） */
 .mh-sub { margin-top:6px; font-size:11px; line-height:16.5px; font-weight:500; color:#64748B;
@@ -211,6 +219,10 @@ button { font:inherit; cursor:pointer; }
 @media (max-width:370px) {
   .team-switch { font-size:11px; }
   .team-switch button { padding:4px 8px; font-size:11px; }
+}
+@media (max-width:370px) {
+  .mh-online { padding:0 7px; }
+  .mh-online span:last-child { display:none; }
 }
 /* 分组赛事切换（2026-10-19 用户口径）：只保留这一套，苹果白玻分段控件。
    与底部水滴导航明确区分：这里是等宽分段 + 白色玻璃滑块，支持长按后拖动。 */
@@ -1505,6 +1517,8 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .st-gn-count .unit { font-size:18px; font-weight:800; color:rgba(255,255,255,.72); }
 .st-gn-count-label { margin-top:2px; font-size:12px; font-weight:700; letter-spacing:.24em;
   color:rgba(255,255,255,.60); }
+.st-gn-clock { min-height:17px; margin-top:7px; color:rgba(255,255,255,.82);
+  font:800 12px/17px ui-monospace,SFMono-Regular,Menlo,monospace; letter-spacing:.12em; }
 .st-gn-done { margin-top:18px; font-size:34px; font-weight:900; color:#FBBF24; }
 .st-gn-count-label + .st-gn-date { margin-top:18px; }
 .st-gn-date { display:flex; align-items:center; gap:8px; margin-top:16px; padding:8px 14px;
@@ -3225,6 +3239,7 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
 .phm-event-card:active { transform: scale(.985); }
 .phm-event-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
 .phm-event-title { margin: 0; font-size: 16px; line-height: 1.35; }
+.phm-event-title, .phm-event-hero h2, .plm-group-head h3 { overflow-wrap:anywhere; }
 .phm-event-date { margin-top: 4px; color: var(--plm-muted); font-size: 10px; }
 .phm-status { flex: 0 0 auto; border-radius: 999px; padding: 4px 8px; color: var(--plm-green); background: rgba(11,122,62,.09); font-size: 9px; font-weight: 800; }
 .phm-chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 10px; }
@@ -3316,6 +3331,32 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
   .plm-section-head { display: block; }
   .plm-section-hint { justify-content: flex-start; margin-top: 7px; }
 }
+@media (max-width: 360px) {
+  .phm-mode-switch button { padding: 7px 6px; font-size: 11px; }
+  .phm-event-top { gap: 6px; }
+  .phm-event-title { font-size: 14px; }
+  .phm-status { padding: 3px 6px; font-size: 8px; }
+  .phm-event-foot { flex-wrap: wrap; }
+  .phm-event-hero h2 { font-size: 18px; }
+  .plm-player { grid-template-columns: 26px minmax(0, 1fr) 72px; gap: 5px; }
+  .plm-rank { font-size: 9px; }
+  .plm-player-name b { font-size: 12px; }
+  .plm-zone, .plm-medal, .plm-bonus { font-size: 6.5px; }
+  .plm-history-score, .plm-score { font-size: 12px; }
+  .plm-stage-tabs { margin-right: -12px; padding-right: 12px; }
+  .plm-stage-tabs button { min-width: 72px; }
+  .my-match-event { margin: 8px 10px; }
+  .my-match-row-top { align-items:flex-start; flex-wrap:wrap; }
+  .my-match-name { flex:1 1 calc(100% - 76px); white-space:normal; line-height:1.35;
+    display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; }
+  .my-match-row-bottom { flex-wrap:wrap; }
+}
+@media (max-width: 330px) {
+  .plm-podium-grid { grid-template-columns: 1fr; }
+  .phm-months, .plm-stage-tabs { margin-right: -8px; padding-right: 8px; }
+  .phm-event-card, .phm-event-hero, .plm-group-card { padding: 10px; }
+  .plm-player { grid-template-columns: 24px minmax(0, 1fr) 68px; }
+}
 /* 融入展示端主壳：手机完全沿用主站的 430px 宽度与 17px 内边距；
    平板/桌面才适度放宽，不再让直播页越过主站边界。 */
 body.live-view-open #foot { display: none; }
@@ -3369,6 +3410,9 @@ body.live-view-open .plm-content { padding-bottom: 8px; }
       <button data-t="male">男团</button>
       <button data-t="female">女团</button>
     </div>
+    <span class="mh-online" id="mhOnline" title="当前系统在线人数">
+      <i aria-hidden="true"></i><b id="mhOnlineNum">—</b><span>在线</span>
+    </span>
   </div>
   <!-- 副标题（2026-10-18）：跟主标题同栏左对齐，不再整行居中 -->
   <div class="mh-sub"><span id="mhSub">LOADING</span><span id="mhSpin" aria-hidden="true"></span></div>
@@ -3379,11 +3423,11 @@ body.live-view-open .plm-content { padding-bottom: 8px; }
   <div class="mh-ann" id="mhAnn" hidden></div>
   <div class="seg st-seg battle-seg hidden" id="subnav">
     <div class="st-seg-pill" id="groupSegPill" aria-hidden="true"></div>
-    <button data-g="junior">初级小组赛</button>
-    <button data-g="mid">中级小组赛</button>
-    <button data-g="final">月终争霸赛</button>
-    <button data-g="junior-promo">初级晋级赛</button>
-    <button data-g="mid-promo">中级晋级赛</button>
+    <button data-g="junior">初级·中午</button>
+    <button data-g="mid">中旬·中午</button>
+    <button data-g="final">月底PK</button>
+    <button data-g="junior-promo">初级·晚上</button>
+    <button data-g="mid-promo">中旬·晚上</button>
   </div>
 </header>
 
@@ -3510,11 +3554,11 @@ const $ = (id) => document.getElementById(id);
 
 /* 分组子页：key 进 URL，type 对应方案 eventType（与后端 EVENT_TYPES 一致），label 是页面标题 */
 const GROUP_PAGES = [
-  { key: 'junior',       type: '初级争霸赛小组赛', label: '初级争霸赛小组赛' },
-  { key: 'mid',          type: '中级争霸赛小组赛', label: '中级争霸赛小组赛' },
-  { key: 'final',        type: '月终争霸赛',       label: '月终争霸赛' },
-  { key: 'junior-promo', type: '初级争霸赛晋级赛', label: '初级争霸赛晋级赛' },
-  { key: 'mid-promo',    type: '中级争霸赛晋级赛', label: '中级争霸赛晋级赛' },
+  { key: 'junior',       type: '初级争霸赛小组赛', label: '初级争霸赛 · 中午' },
+  { key: 'mid',          type: '中级争霸赛小组赛', label: '中旬争霸赛 · 中午' },
+  { key: 'final',        type: '月终争霸赛',       label: '月底PK争霸赛' },
+  { key: 'junior-promo', type: '初级争霸赛晋级赛', label: '初级争霸赛 · 晚上' },
+  { key: 'mid-promo',    type: '中级争霸赛晋级赛', label: '中旬争霸赛 · 晚上' },
 ];
 
 let site = null;         // 站点配置（含后台级显隐开关）
@@ -3533,6 +3577,7 @@ let groupAutoFocusPending = false; // 用户每次进入分组页时，自动选
 let groupFocusIndex = -1;          // 本轮渲染完成后需要短暂定焦的组序号
 let groupFrozen = false;           // 到分组冻结时间后停止分组重绘
 let groupFreezeTimer = null;
+let groupNoticeTimer = null;
 let groupLoadSeq = 0;              // 分组请求序号：旧请求不得覆盖新页面
 let groupRenderSeq = 0;            // 分组渲染序号：旧定焦回调不得作用于新页面
 /* 「我的」子页（2026-10-13）：bind/push/chase/privacy/about。/my 是列表首页，
@@ -3579,8 +3624,38 @@ let searchOpen = false;
 let q = '';
 let consecutiveFail = 0;
 let timer = null;
+let onlinePollTimer = null;
+let onlinePollingInFlight = false;
 let loadSeq = 0;         // 请求序号：RTT≈260ms，快速连点时只认最后一次的结果
 let viewAbort = null;    // 当前视图请求的 AbortController：切页/换日期时取消旧请求
+
+async function loadOnlineCount() {
+  if (onlinePollingInFlight || document.visibilityState === 'hidden' || navigator.onLine === false) return;
+  onlinePollingInFlight = true;
+  try {
+    const r = await fetch('/api/public/online', {
+      cache: 'no-store',
+      headers: { accept: 'application/json' },
+    });
+    if (!r.ok) return;
+    const d = await r.json();
+    const n = Math.max(0, Number(d.online) || 0);
+    const num = $('mhOnlineNum');
+    const box = $('mhOnline');
+    if (num) num.textContent = String(n);
+    if (box) box.title = '当前系统在线人数：' + n;
+  } catch (_) {
+  } finally {
+    onlinePollingInFlight = false;
+  }
+}
+
+function startOnlinePolling() {
+  if (onlinePollTimer) return;
+  void loadOnlineCount();
+  setTimeout(() => { void loadOnlineCount(); }, 1500);
+  onlinePollTimer = setInterval(() => { void loadOnlineCount(); }, 15000);
+}
 
 /* 请求在途的即时反馈：标题旁小菊花 + 内容轻微压暗。
    在 go() 里开、请求落地后关；静默刷新不经过这里，不打扰正常浏览。 */
@@ -4513,7 +4588,12 @@ async function switchTeam(t) {
   syncNav();
   if (t !== 'female' && !plans.length) loadPlans().catch(() => {});
   /* 分组/族谱都是男团专属：切到女团时不要继续请求旧页数据。 */
-  if (t === 'female' && (view === 'lineage' || view === 'group')) {
+  if (t === 'female' && (view === 'lineage' || view === 'group' || view === 'live')) {
+    if (view === 'live') {
+      liveStopRuntime();
+      liveSub = null;
+      liveHistoryKey = '';
+    }
     switchView('data');
   } else {
     go();
@@ -5726,6 +5806,8 @@ function initPublicDataEvents() {
   /* 首次连接不重复拉数据；断线恢复后补一次站点+当前日刷新，避免断线期间
      后台删除当前日、SSE 没收到事件而一直保留旧日期。 */
   publicDataEvents.addEventListener('open', () => {
+    /* 在线数按公开 SSE 连接统计；open 后再取一次，避免首屏先拿到旧的 0。 */
+    void loadOnlineCount();
     if (publicDataEventsWasOpen) {
       scheduleImportedDataRefresh();
       scheduleGroupRefresh();
@@ -5767,12 +5849,15 @@ function closePublicDataEvents() {
   publicDataEvents = null;
 }
 window.addEventListener('pagehide', () => {
+  if (onlinePollTimer) clearInterval(onlinePollTimer);
+  onlinePollTimer = null;
   closePublicDataEvents();
   try { liveStopRuntime(); } catch (_) {}
 });
 window.addEventListener('pageshow', (event) => {
   if (event.persisted) {
     try { initPublicDataEvents(); } catch (_) {}
+    startOnlinePolling();
   }
 });
 
@@ -6152,8 +6237,24 @@ function renderDanmaku() {
 }
 
 function copyText(t) {
-  if (navigator.clipboard) navigator.clipboard.writeText(t).catch(() => {});
-  toast('已复制 ' + t);
+  const fallback = () => {
+    try {
+      const area = document.createElement('textarea');
+      area.value = t;
+      area.setAttribute('readonly', '');
+      area.style.position = 'fixed';
+      area.style.opacity = '0';
+      document.body.appendChild(area);
+      area.select();
+      const ok = document.execCommand('copy');
+      area.remove();
+      return ok;
+    } catch (_) { return false; }
+  };
+  const copied = navigator.clipboard && window.isSecureContext
+    ? navigator.clipboard.writeText(t).then(() => true).catch(fallback)
+    : Promise.resolve(fallback());
+  copied.then((ok) => toast(ok ? '已复制 ' + t : '复制失败，请长按手动复制'));
 }
 
 /* 点人 = 展开 / 收回详情；长按 / 右键 = 复制「名字 · 音浪」（音浪隐藏时只复制名字） */
@@ -7208,6 +7309,7 @@ async function loadGroup(signal, silent) {
     groupFocusIndex = -1;
     if (groupNotice && groupNotice.enabled !== false) {
       $('view').innerHTML = groupNoticeHtml(groupNotice, page);
+      startGroupNoticeTicker();
     } else {
       $('view').innerHTML = '<div class="section tab-content-enter">' +
         '<div class="empty"><span class="big">📺</span>' + esc(page.label) +
@@ -7241,6 +7343,50 @@ function groupNoticeLeadText(minutes) {
   const n = Math.max(0, Number(minutes) || 0);
   if (n >= 60 && n % 60 === 0) return (n / 60) + '小时';
   return n + '分钟';
+}
+
+function groupNoticeTick() {
+  const box = $('groupNoticeCountdown');
+  if (!box || !box.isConnected) {
+    if (groupNoticeTimer) clearInterval(groupNoticeTimer);
+    groupNoticeTimer = null;
+    return;
+  }
+  if (box.dataset.ended === '1') return;
+  const at = Date.parse(box.dataset.start || '');
+  if (Number.isNaN(at)) return;
+  const main = $('groupNoticeCountdownMain');
+  const label = $('groupNoticeCountdownLabel');
+  const clock = $('groupNoticeClock');
+  const diff = at - Date.now();
+  if (diff <= 0) {
+    if (main) main.textContent = '今天';
+    if (label) label.textContent = '即将开赛';
+    if (clock) clock.textContent = '';
+    return;
+  }
+  const total = Math.floor(diff / 1000);
+  const days = Math.floor(total / 86400);
+  const hh = String(Math.floor(total % 86400 / 3600)).padStart(2, '0');
+  const mm = String(Math.floor(total % 3600 / 60)).padStart(2, '0');
+  const ss = String(total % 60).padStart(2, '0');
+  if (days > 0) {
+    if (main) main.textContent = days + '天';
+    if (label) label.textContent = '倒计时';
+    if (clock) clock.textContent = hh + ':' + mm + ':' + ss;
+  } else {
+    if (main) main.textContent = hh + ':' + mm + ':' + ss;
+    if (label) label.textContent = '今天开赛倒计时';
+    if (clock) clock.textContent = '';
+  }
+}
+
+function startGroupNoticeTicker() {
+  if (groupNoticeTimer) clearInterval(groupNoticeTimer);
+  groupNoticeTimer = null;
+  if (!$('groupNoticeCountdown')) return;
+  groupNoticeTick();
+  groupNoticeTimer = setInterval(groupNoticeTick, 1000);
 }
 
 function groupFreezeText(at, label, frozen) {
@@ -7306,11 +7452,13 @@ function groupNoticeHtml(n, page) {
     : (signupDay ? signupDay + '开始接龙' : '接龙即将开始');
   const countdownMain = ended
     ? '<div class="st-gn-done">本场已结束</div><div class="st-gn-count-label">等待下一场赛事</div>'
-    : days > 0
-      ? '<div class="st-gn-count"><span class="num">' + days + '</span><span class="unit">天</span></div>' +
-        '<div class="st-gn-count-label">倒计时</div>'
-      : '<div class="st-gn-count"><span class="num today">今天</span></div>' +
-        '<div class="st-gn-count-label">即将开赛</div>';
+    : '<div class="st-gn-count" id="groupNoticeCountdown" data-start="' + esc(n.eventStartAt || '') + '" data-ended="0">' +
+        '<span class="num" id="groupNoticeCountdownMain">' + (days > 0 ? days + '天' : '今天') + '</span></div>' +
+      '<div class="st-gn-count-label" id="groupNoticeCountdownLabel">' + (days > 0 ? '倒计时' : '即将开赛') + '</div>' +
+      '<div class="st-gn-clock" id="groupNoticeClock"></div>';
+  const signupChip = signupDay || n.signupStarted === true
+    ? '<span class="st-gn-chip"><span class="material-symbols-outlined">groups</span>' + esc(signupText) + '</span>'
+    : '';
   return '<div class="section tab-content-enter">' +
     '<section class="st-group-notice" aria-label="' + esc(title + '赛事公告') + '">' +
       '<div class="st-gn-orbit o1"></div><div class="st-gn-orbit o2"></div>' +
@@ -7321,7 +7469,7 @@ function groupNoticeHtml(n, page) {
         (eventDay ? '<b>' + esc(eventDay) + '</b><span>' + esc(start) + ' 开赛</span>' : '') +
       '</div>' +
       '<div class="st-gn-chips">' +
-        '<span class="st-gn-chip"><span class="material-symbols-outlined">groups</span>' + esc(signupText) + '</span>' +
+        signupChip +
         (eventDay ? '<span class="st-gn-chip"><span class="material-symbols-outlined">flag</span>' + esc(eventDay + ' ' + start) + '</span>' : '') +
       '</div>' +
       '<div class="st-gn-foot">' +
@@ -7550,6 +7698,7 @@ function renderGroupView(d, page, list) {
   $('view').innerHTML = groupHtml(d, page, list);
   bindGroupView(d, page, list);
   startGroupFreezeTicker(d.groupFreeze);
+  startGroupNoticeTicker();
 }
 
 function bindGroupView(d, page, list) {
@@ -10119,12 +10268,12 @@ const LIVE_STAGE_ORDER = [
   'final',
 ];
 const LIVE_STAGE_META = {
-  first_wave_group: { short: '小组赛', title: '小组赛', hint: '第 1-4 组 · 每组前 4 名晋级' },
-  first_wave_revival: { short: '复活赛1/2', title: '复活赛1/2', hint: '第 1、2 复活房 · 每组 5 分钟' },
-  rest_group: { short: '小组赛', title: '小组赛', hint: '第 5-7 组 · 每组前 4 名晋级' },
-  rest_revival: { short: '复活赛3/4', title: '复活赛3/4', hint: '第 3、4 复活房 · 每组 5 分钟' },
-  promotion: { short: '晋级赛', title: '晋级赛', hint: '小组第一进入决赛' },
-  final: { short: '决赛', title: '决赛', hint: '决出冠亚季军' },
+  first_wave_group: { session: '中午', short: '小组赛', title: '中午 · 小组赛', hint: '第 1-4 组 · 每组前 4 名晋级' },
+  first_wave_revival: { session: '中午', short: '复活赛1/2', title: '中午 · 复活赛1/2', hint: '第 1、2 复活房 · 每组 5 分钟' },
+  rest_group: { session: '中午', short: '小组赛', title: '中午 · 小组赛', hint: '第 5-7 组 · 每组前 4 名晋级' },
+  rest_revival: { session: '中午', short: '复活赛3/4', title: '中午 · 复活赛3/4', hint: '第 3、4 复活房 · 每组 5 分钟' },
+  promotion: { session: '晚上', short: '晋级赛', title: '晚上 · 晋级赛', hint: '小组第一进入决赛' },
+  final: { session: '晚上', short: '决赛', title: '晚上 · 决赛', hint: '决出冠亚季军' },
 };
 const LIVE_ACTIVE_STATUSES = new Set(['running', 'settling', 'pending_review', 'waiting_restart']);
 const LIVE_FINISH_HOLD_MS = 8000;
@@ -10182,7 +10331,11 @@ function liveStageStatusLabel(stage) {
 }
 function liveStageGroupLabel(kind) {
   const meta = LIVE_STAGE_META[kind];
-  return meta ? meta.short : (kind || '小组赛');
+  return meta ? (meta.session ? meta.session + ' · ' : '') + meta.short : (kind || '小组赛');
+}
+function liveStageShortLabel(kind) {
+  const meta = LIVE_STAGE_META[kind];
+  return meta ? (meta.session ? meta.session + ' · ' : '') + meta.short : (kind || '比赛');
 }
 function liveGroupResultTag(kind, qualified, position) {
   if (String(kind || '').includes('revival')) return qualified ? '复活区' : '淘汰区';
@@ -10435,7 +10588,7 @@ function liveRenderView() {
     const stage = stages.find(s => s.kind === kind);
     const count = groups.filter(g => g.stageKind === kind).length;
     return '<button type="button" data-live-stage="' + esc(kind) + '" class="' + (liveSelectedStage === kind ? 'is-active' : '') + '" aria-pressed="' + (liveSelectedStage === kind ? 'true' : 'false') + '">' +
-      '<span>' + esc((LIVE_STAGE_META[kind] && LIVE_STAGE_META[kind].short) || kind) + '</span>' +
+      '<span>' + esc(liveStageShortLabel(kind)) + '</span>' +
       '<small>' + (count ? count + ' 组 · ' + esc(liveStageStatusLabel(stage)) : esc(liveStageStatusLabel(stage))) + '</small></button>';
   }).join('');
   const cards = stageGroups.length
@@ -10643,7 +10796,7 @@ function liveHistoryEventListHtml(data) {
   const items = Array.isArray(data.items) ? data.items : [];
   const cards = items.length ? items.map((item) => {
     const kinds = Array.isArray(item.stageKinds) ? item.stageKinds : [];
-    const labels = kinds.map((kind) => LIVE_STAGE_META[kind]?.short || kind).filter(Boolean);
+    const labels = kinds.map((kind) => liveStageShortLabel(kind)).filter(Boolean);
     return '<button type="button" class="phm-event-card" data-history-event="' + esc(item.key || '') + '">' +
       '<div class="phm-event-top"><div><h3 class="phm-event-title">' + esc(liveEventDisplayTitle(item)) + '</h3>' +
       '<div class="phm-event-date">' + esc(item.eventDate || '比赛日期待定') + '</div></div>' +
@@ -10706,7 +10859,7 @@ function liveHistoryDetailHtml(snapshot) {
     liveHistorySelectedStage = 'all';
   }
   const tabs = ['all'].concat(visible).map((kind) => {
-    const label = kind === 'all' ? '全部' : (LIVE_STAGE_META[kind]?.short || kind);
+    const label = kind === 'all' ? '全部' : liveStageShortLabel(kind);
     const count = kind === 'all' ? groups.length : groups.filter((g) => g.stageKind === kind).length;
     return '<button type="button" data-live-stage="' + esc(kind) + '" class="' + (liveHistorySelectedStage === kind ? 'is-active' : '') + '">' +
       '<span>' + esc(label) + '</span><small>' + count + ' 组成绩</small></button>';
@@ -11536,6 +11689,11 @@ function switchView(v, opts) {
   /* 2026-10-15 task-11：底栏「微信对接」一级入口不新增视图 —— 折算成
      my + mySub='wechat'，复用「我的 → 消息设置」那张 #myPushCard（不出现第二份渲染）。 */
   if (v === 'wechat') { mySub = 'wechat'; v = 'my'; }
+  /* 比赛监控为男团专属：女团深链/历史恢复/导航切回统一改道。 */
+  if (v === 'live' && TEAM === 'female') {
+    v = 'data';
+    try { history.replaceState(null, '', '/report'); } catch (_) {}
+  }
   /* 后台关掉的页面不许进（popstate / 深链兜底）：改道到还开着的第一个页 */
   const s = (site && site.settings) || {};
   /* 微信对接页关闭：底栏深链 / /my/wechat 一律改道“我的”首页。 */
@@ -11547,7 +11705,7 @@ function switchView(v, opts) {
   if (v === 'group') {
     /* 还开着的子页（后台按赛事类型逐个关） */
     const enabled = [...document.querySelectorAll('#subnav button:not([disabled])')];
-    if (s.groupEnabled === false || !enabled.length) v = 'lineage';
+    if (s.groupEnabled === false || TEAM === 'female' || !enabled.length) v = 'data';
     /* 2026-10-13 修「点子页被改道回首个子页」：原来拿"第一个按钮有没有 .on"当
        "当前有没有选中子页"，可子导航点击早已把 curGroup 设成目标页，而 .on 还停在
        上一次选中项 —— 于是只要第一个子页当前不是选中态，点第二个起的所有子页都会被
@@ -11562,6 +11720,10 @@ function switchView(v, opts) {
   if (v === 'my' && s.loginRequired === false) v = 'data';
   /* 比赛监控是主站内视图：进入时放宽内容宽度，离开时停止直播刷新并恢复主站标题。 */
   const wasLive = view === 'live';
+  if (v !== 'group' && groupNoticeTimer) {
+    clearInterval(groupNoticeTimer);
+    groupNoticeTimer = null;
+  }
   if (v !== 'live' || liveSub === 'history') liveStopRuntime();
   document.body.classList.toggle('live-view-open', v === 'live');
   if (wasLive && v !== 'live') {
@@ -11736,7 +11898,7 @@ function syncNav() {
   const anySub = [...document.querySelectorAll('#subnav button')].some(b => !b.disabled);
   show('navGroup', groupOn && anySub && TEAM !== 'female');
   show('navData', dataOn);
-  show('navLive', true);
+  show('navLive', TEAM !== 'female');
   show('navLineage', linOn);
   show('navResources', true);
   show('navMy', s.loginRequired !== false);   // 关登录 = 全面开放，没有「我的」页
@@ -13827,6 +13989,7 @@ function hideBootGate() {
   });
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) return;
+    void loadOnlineCount();
     if (loginFlowReady && Date.now() - appUpdateCheckedAt > APP_UPDATE_CHECK_MS) checkSoftwareUpdate(false);
     refreshDataOnResume();
     if (loginFlowReady && myToken()) {
@@ -14048,10 +14211,14 @@ async function bootRest(opts) {
     if (v === 'group' && (TEAM === 'female' || s.groupEnabled === false ||
         !document.querySelector('#subnav button:not([disabled])'))) return fb;
     if (v === 'lineage' && (s.lineageEnabled === false || TEAM === 'female')) return fb;
+    if (v === 'live' && TEAM === 'female') {
+      try { history.replaceState(null, '', '/report'); } catch (_) {}
+      return fb;
+    }
     if (v === 'my' && s.loginRequired === false) return fb;
     return v;
   };
-  const fallbackView = s.groupEnabled !== false &&
+  const fallbackView = s.groupEnabled !== false && TEAM !== 'female' &&
     document.querySelector('#subnav button:not([disabled])') ? 'group'
     : (s.dataEnabled !== false ? 'data' : 'lineage');
   view = firstOn(view, fallbackView);
@@ -14092,12 +14259,16 @@ async function bootRest(opts) {
   if (view === 'group') await plansTask;
   switchView(view, { push: false });
   scheduleRefresh();
+  startOnlinePolling();
   /* 引导放最后：它依赖 site.settings / site.announcement，且必须让位给登录门。
      登录成功后 gateResolve 会 reload，二次进来时 localStorage 已记住版本就不弹了。 */
-  if (view !== 'live') maybeAnnounce();
+  const quietFirstScreen = view === 'live' ||
+    (view === 'group' && groupNotice && groupNotice.enabled !== false &&
+      groupNotice.revealed === false && groupNotice.ended !== true);
+  if (!quietFirstScreen) maybeAnnounce();
   /* 2026-10-16 三甲通报改版：公告弹窗（items 里全部 enabled && popup 条目翻页）。
      引导弹开了就让位，本次不弹（announceCtx 非空时 maybeAnnounceItemsPopup 直接返回）。 */
-  if (view !== 'live' && !announceCtx) maybeAnnounceItemsPopup();
+  if (!quietFirstScreen && !announceCtx) maybeAnnounceItemsPopup();
   /* 🎈 弹幕兜底挂载：renderList 首帧若被弹窗闸（登录门/通报/引导）按住，这里在
      弹窗编排都放完后补一次（没有弹窗的访客第一次加载也能挂上；闸仍开着时
      renderDanmaku 自己保持 hidden，通报 close / applyLoginSuccess 再补挂）。 */

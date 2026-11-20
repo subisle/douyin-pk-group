@@ -336,12 +336,8 @@ pub async fn plan(
     /* 路由导航隐藏分组 / 某个赛事类型时，详情接口也必须同口径拒绝，
     否则知道方案 id 就能绕过列表开关直接拿到名单和音浪。 */
     let settings = crate::public_teams::PublicSettings::load(&st).await;
-    let freeze_active = group_freeze_view(&settings)
-        .map(|f| f.frozen)
-        .unwrap_or(false);
-    if !freeze_active
-        && (settings.group_enabled == false
-            || !crate::public_teams::plan_visible_by_settings(&settings, &row.event_type))
+    if !settings.group_enabled
+        || !crate::public_teams::plan_visible_by_settings(&settings, &row.event_type)
     {
         return not_found();
     }
@@ -689,17 +685,14 @@ pub async fn plans(
         Err(e) => return e.into_response(),
     };
     let s = crate::public_teams::PublicSettings::load(&st).await;
-    let freeze_active = group_freeze_view(&s).map(|f| f.frozen).unwrap_or(false);
-    if team == "female" || (!freeze_active && s.group_enabled == false) {
+    if team == "female" || !s.group_enabled {
         return Json(json!({ "items": [], "groupNotice": null })).into_response();
     }
     let items: Vec<_> = store::list_plans(&st)
         .await
         .into_iter()
         .filter(|p| p.published)
-        .filter(|p| {
-            freeze_active || crate::public_teams::plan_visible_by_settings(&s, &p.event_type)
-        })
+        .filter(|p| crate::public_teams::plan_visible_by_settings(&s, &p.event_type))
         .map(|p| {
             json!({
                 "id": p.id,

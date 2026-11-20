@@ -430,6 +430,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/resources/query.json", get(public_teams::resources))
         // 展示端轻量 SSE：只广播「数据已导入」，用于每日最高弹幕自动刷新。
         .route("/api/public/events", get(events::public_sse))
+        .route("/api/public/online", get(events::public_online))
         // 直播公开页：/live/ 自动取最新进行中的赛事；token 路径继续兼容旧链接。
         .route("/api/public/live/history", get(live_api::public_history))
         .route(

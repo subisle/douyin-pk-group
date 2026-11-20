@@ -51,6 +51,19 @@ export const EVENT_TYPES = [
 ] as const;
 export type EventType = (typeof EVENT_TYPES)[number];
 
+/** 展示文案与后台存储值解耦：中午/晚上是用户口径，eventType 仍保持历史兼容值。 */
+export const EVENT_TYPE_LABELS: Record<EventType, string> = {
+  初级争霸赛小组赛: '初级争霸赛 · 中午',
+  中级争霸赛小组赛: '中旬争霸赛 · 中午',
+  月终争霸赛: '月底PK争霸赛',
+  初级争霸赛晋级赛: '初级争霸赛 · 晚上',
+  中级争霸赛晋级赛: '中旬争霸赛 · 晚上',
+};
+
+export function eventTypeLabel(eventType: string): string {
+  return EVENT_TYPE_LABELS[eventType as EventType] || eventType || '—';
+}
+
 /** 名单自带分数时的口径文案（此时口径/天数是无效的，音浪就是名单里的分数） */
 export const SCORE_LABEL = '名单自带分数';
 

@@ -5,6 +5,7 @@ import android.app.Activity;
 import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.graphics.Color;
+import android.graphics.Insets;
 import android.net.Uri;
 import android.net.http.SslError;
 import android.os.Build;
@@ -14,6 +15,7 @@ import android.os.Looper;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.WindowInsets;
 import android.webkit.CookieManager;
 import android.webkit.RenderProcessGoneDetail;
 import android.webkit.SslErrorHandler;
@@ -42,8 +44,8 @@ import android.widget.Toast;
  * - 仅保留登录态所需的 DOM storage / Cookies。
  */
 public final class MainActivity extends Activity {
-    private static final String APK_UA_TOKEN = "DailyDataAndroid/1.4";
-    private static final int SPLASH_TIMEOUT_MS = 12_000;
+    private static final String APK_UA_TOKEN = "DailyDataAndroid/1.5";
+    private static final int SPLASH_TIMEOUT_MS = 18_000;
     private static final int RENDERER_RECOVERY_WINDOW_MS = 60_000;
     private static final int MAX_RENDERER_RECOVERIES = 3;
 
@@ -86,6 +88,7 @@ public final class MainActivity extends Activity {
         root = new FrameLayout(this);
         root.setBackgroundColor(getResources().getColor(R.color.background, getTheme()));
         setContentView(root);
+        applySystemBarInsets();
 
         installWebView();
         createErrorView();
@@ -110,6 +113,7 @@ public final class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT));
         view.setBackgroundColor(getResources().getColor(R.color.background, getTheme()));
+        view.setOverScrollMode(View.OVER_SCROLL_NEVER);
 
         WebSettings settings = view.getSettings();
         settings.setJavaScriptEnabled(true);
@@ -224,6 +228,25 @@ public final class MainActivity extends Activity {
 
         root.addView(view, 0);
         web = view;
+    }
+
+    /** Android 15 target 35 会强制 edge-to-edge；原生壳层统一避让状态栏、刘海、
+     *  三键/手势导航条和输入法，WebView 内所有页面不再依赖机型是否识别 CSS safe-area。 */
+    private void applySystemBarInsets() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return;
+        getWindow().setDecorFitsSystemWindows(false);
+        root.setOnApplyWindowInsetsListener(new View.OnApplyWindowInsetsListener() {
+            @Override
+            public WindowInsets onApplyWindowInsets(View view, WindowInsets insets) {
+                Insets bars = insets.getInsets(
+                        WindowInsets.Type.systemBars()
+                                | WindowInsets.Type.displayCutout()
+                                | WindowInsets.Type.ime());
+                view.setPadding(bars.left, bars.top, bars.right, bars.bottom);
+                return insets;
+            }
+        });
+        root.requestApplyInsets();
     }
 
     private void createErrorView() {

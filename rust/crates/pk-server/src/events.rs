@@ -7,6 +7,7 @@
 //! 进程内广播（tokio broadcast），不跨进程、不持久化——丢事件不影响正确性，
 //! 因为前端每次收到任何事件都会重新拉一次全量数据（幂等）。
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
 
 use serde::Serialize;
@@ -84,6 +85,30 @@ use futures_util::Stream;
 
 use crate::state::AppState;
 
+/// 当前展示端公开 SSE 连接数。每个已登录展示页最多一条连接，因此它比访问日志
+/// 更接近“当前在线人数”，且不需要额外心跳表或写库。进程重启后从 0 重新统计。
+static PUBLIC_ONLINE: AtomicUsize = AtomicUsize::new(0);
+
+struct PublicOnlineGuard;
+
+impl PublicOnlineGuard {
+    fn enter() -> Self {
+        PUBLIC_ONLINE.fetch_add(1, Ordering::Relaxed);
+        Self
+    }
+}
+
+impl Drop for PublicOnlineGuard {
+    fn drop(&mut self) {
+        PUBLIC_ONLINE.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// 当前展示端在线连接数。只读原子变量，可在任意公开接口上零查询读取。
+pub fn public_online_count() -> usize {
+    PUBLIC_ONLINE.load(Ordering::Relaxed)
+}
+
 /// `GET /api/admin/events`：SSE 长连接，有数据变更就推一条 `change` 事件。
 ///
 /// 鉴权走全局中间件（`?access_token=` 已在白名单逻辑里支持，因为 EventSource
@@ -150,19 +175,23 @@ pub async fn public_sse(
     State(_st): State<Arc<AppState>>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let rx = subscribe();
-    let stream = futures_util::stream::unfold(rx, |mut rx| async move {
+    let guard = PublicOnlineGuard::enter();
+    let stream = futures_util::stream::unfold((rx, guard), |(mut rx, guard)| async move {
         loop {
             match rx.recv().await {
                 Ok(c) => {
                     if let Some(data) = public_change_payload(c.scope, &c.at, false) {
-                        return Some((Ok(Event::default().event("change").data(data)), rx));
+                        return Some((
+                            Ok(Event::default().event("change").data(data)),
+                            (rx, guard),
+                        ));
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => {
                     let at = chrono::Local::now().to_rfc3339();
                     let data = public_change_payload(SCOPE_IMPORT, &at, true)
                         .expect("import 必须在公开 SSE 白名单内");
-                    return Some((Ok(Event::default().event("change").data(data)), rx));
+                    return Some((Ok(Event::default().event("change").data(data)), (rx, guard)));
                 }
                 Err(broadcast::error::RecvError::Closed) => return None,
             }
@@ -173,6 +202,14 @@ pub async fn public_sse(
             .interval(Duration::from_secs(20))
             .text("keep-alive"),
     )
+}
+
+/// `GET /api/public/online`：展示端顶部在线人数。原子读取，不查数据库。
+pub async fn public_online() -> axum::Json<serde_json::Value> {
+    axum::Json(serde_json::json!({
+        "online": public_online_count(),
+        "serverNow": chrono::Utc::now().to_rfc3339(),
+    }))
 }
 
 #[cfg(test)]
@@ -217,6 +254,16 @@ mod tests {
     async fn emit_without_subscribers_does_not_panic() {
         // 没有任何 SSE 连接时导入照样要能跑通
         emit(SCOPE_ROSTER, "无订阅者用例");
+    }
+
+    #[test]
+    fn public_online_guard_increments_and_releases_connection() {
+        let before = public_online_count();
+        {
+            let _guard = PublicOnlineGuard::enter();
+            assert_eq!(public_online_count(), before + 1);
+        }
+        assert_eq!(public_online_count(), before);
     }
 
     #[tokio::test]

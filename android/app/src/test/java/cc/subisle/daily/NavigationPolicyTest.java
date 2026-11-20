@@ -10,6 +10,22 @@ public final class NavigationPolicyTest {
                 "http://43.142.30.113:81/", true, "app entry");
         expect(NavigationPolicy.Action.LOAD_IN_WEB_VIEW,
                 "https://43.142.30.113/teams/st", false, "app HTTPS entry");
+        expect(NavigationPolicy.Action.LOAD_IN_WEB_VIEW,
+                "http://43.142.30.113:81/report", false, "daily report route");
+        expect(NavigationPolicy.Action.LOAD_IN_WEB_VIEW,
+                "http://43.142.30.113:81/group/mid", false, "noon group route");
+        expect(NavigationPolicy.Action.LOAD_IN_WEB_VIEW,
+                "http://43.142.30.113:81/group/junior-promo", false, "evening group route");
+        expect(NavigationPolicy.Action.LOAD_IN_WEB_VIEW,
+                "http://43.142.30.113:81/live/", false, "live monitor route");
+        expect(NavigationPolicy.Action.LOAD_IN_WEB_VIEW,
+                "http://43.142.30.113:81/live/history", false, "live history route");
+        expect(NavigationPolicy.Action.LOAD_IN_WEB_VIEW,
+                "http://43.142.30.113:81/my/matches", false, "personal match history route");
+        expect(NavigationPolicy.Action.LOAD_IN_WEB_VIEW,
+                "http://43.142.30.113:81/lineage", false, "lineage route");
+        expect(NavigationPolicy.Action.LOAD_IN_WEB_VIEW,
+                "http://43.142.30.113:81/resources", false, "resources route");
         expect(NavigationPolicy.Action.OPEN_EXTERNAL_BROWSER,
                 "https://drive.uc.cn/s/abc123", true, "clicked UC netdisk link");
         expect(NavigationPolicy.Action.OPEN_EXTERNAL_BROWSER,

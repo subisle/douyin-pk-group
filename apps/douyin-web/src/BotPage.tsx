@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from './api'
+import { eventTypeLabel } from './pk/api'
 import { useAutoRefresh } from './useAutoRefresh'
 
 const PHASE_LABEL: Record<string, string> = {
@@ -772,11 +773,11 @@ function PublicSettingsCard() {
 
   /** 分组子页显隐：key = 赛事类型（与展示端子导航一一对应） */
   const GROUP_TYPE_FLAGS: [string, string][] = [
-    ['初级争霸赛小组赛', '初级小组赛'],
-    ['中级争霸赛小组赛', '中级小组赛'],
-    ['月终争霸赛', '月终争霸赛'],
-    ['初级争霸赛晋级赛', '初级晋级赛'],
-    ['中级争霸赛晋级赛', '中级晋级赛'],
+    ['初级争霸赛小组赛', eventTypeLabel('初级争霸赛小组赛')],
+    ['中级争霸赛小组赛', eventTypeLabel('中级争霸赛小组赛')],
+    ['月终争霸赛', eventTypeLabel('月终争霸赛')],
+    ['初级争霸赛晋级赛', eventTypeLabel('初级争霸赛晋级赛')],
+    ['中级争霸赛晋级赛', eventTypeLabel('中级争霸赛晋级赛')],
   ]
 
   /** 🚩 小红旗条文本/图标字段：blur 时保存（空串 = 清除恢复默认）。

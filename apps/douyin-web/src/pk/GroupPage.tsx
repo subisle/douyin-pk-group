@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   DEFAULT_DISPLAY,
   EVENT_TYPES,
+  eventTypeLabel,
   METRICS,
   SCORE_LABEL,
   STRATEGIES,
@@ -77,7 +78,7 @@ const clone = <T,>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
 
 const DEFAULT_GROUP_NOTICE: GroupNoticeSettings = {
   groupNoticeEnabled: false,
-  groupNoticeTitle: '中旬争霸赛',
+  groupNoticeTitle: '月底PK争霸赛',
   groupNoticeEventDate: '',
   groupNoticeSignupDate: '',
   groupNoticeStartTime: '08:15',
@@ -102,7 +103,8 @@ const groupNoticeSettings = (s: Partial<GroupNoticeSettings>): GroupNoticeSettin
 
 function publicRulesFor(eventType: EventType, eventDate?: string): string {
   const date = String(eventDate || '').trim();
-  const lines = date ? [`比赛日期：${date} 中午开始`] : [];
+  const session = eventType.includes('晋级赛') ? '晚上' : '中午';
+  const lines = date ? [`比赛日期：${date} ${session}开始`] : [];
   lines.push(...(rulesOf(eventType)?.items ?? []));
   return lines.join('\n');
 }
@@ -1443,7 +1445,7 @@ export default function GroupPage() {
             <select value={eventType} onChange={(e) => switchEvent(e.target.value as EventType)}>
               {EVENT_TYPES.map((t) => (
                 <option key={t} value={t}>
-                  {t}
+                  {eventTypeLabel(t)}
                 </option>
               ))}
             </select>
@@ -2004,7 +2006,7 @@ export default function GroupPage() {
                     {p.title}
                     {planId === p.id && <span className="pk-tag">当前</span>}
                   </td>
-                  <td>{p.eventType || '—'}</td>
+                  <td>{eventTypeLabel(p.eventType || '')}</td>
                   <td>{metricLabel(p.metric, p.days)}</td>
                   <td className="hint">
                     {String(p.createdAt ?? p.created_at ?? '').slice(0, 16).replace('T', ' ')}
