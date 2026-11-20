@@ -2177,42 +2177,39 @@ pub async fn live_public_groups(st: &AppState, event_id: i64) -> Vec<serde_json:
         let roster = roster_by_group.remove(&group_id).unwrap_or_default();
         let mut players = seats_by_round.remove(&round_id).unwrap_or_default();
 
-        let seen_uid: std::collections::HashSet<String> = players
-            .iter()
-            .filter_map(|p| p.get("douyinUid").and_then(Value::as_str))
-            .filter(|uid| !uid.is_empty())
-            .map(str::to_string)
-            .collect();
-        let seen_person: std::collections::HashSet<i64> = players
-            .iter()
-            .filter_map(|p| p.get("personId").and_then(Value::as_i64))
-            .filter(|id| *id > 0)
-            .collect();
-        for seed in roster {
-            let uid = seed.get("douyinUid").and_then(Value::as_str).unwrap_or("");
-            let person_id = seed.get("personId").and_then(Value::as_i64).unwrap_or(0);
-            if (!uid.is_empty() && seen_uid.contains(uid))
-                || (person_id > 0 && seen_person.contains(&person_id))
-            {
-                continue;
+        /* 一旦正式对局已有采集席位，就以实际采集名单为准，不再把赛前名单
+           追加到同一组里。赛前名单只用于开赛前占位和优先匹配。 */
+        if players.is_empty() {
+            let mut seen_uid: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            let mut seen_person: std::collections::HashSet<i64> =
+                std::collections::HashSet::new();
+            for seed in roster {
+                let uid = seed.get("douyinUid").and_then(Value::as_str).unwrap_or("");
+                let person_id = seed.get("personId").and_then(Value::as_i64).unwrap_or(0);
+                if (!uid.is_empty() && !seen_uid.insert(uid.to_string()))
+                    || (person_id > 0 && !seen_person.insert(person_id))
+                {
+                    continue;
+                }
+                let nickname = seed
+                    .get("personName")
+                    .and_then(Value::as_str)
+                    .filter(|v| !v.is_empty())
+                    .or_else(|| seed.get("nickname").and_then(Value::as_str))
+                    .unwrap_or("")
+                    .to_string();
+                players.push(serde_json::json!({
+                    "personId": person_id,
+                    "douyinUid": uid,
+                    "nickname": nickname,
+                    "personName": seed.get("personName").and_then(Value::as_str).unwrap_or(""),
+                    "teamId": "",
+                    "score": 0,
+                    "rank": 0,
+                    "qualified": false,
+                }));
             }
-            let nickname = seed
-                .get("personName")
-                .and_then(Value::as_str)
-                .filter(|v| !v.is_empty())
-                .or_else(|| seed.get("nickname").and_then(Value::as_str))
-                .unwrap_or("")
-                .to_string();
-            players.push(serde_json::json!({
-                "personId": person_id,
-                "douyinUid": uid,
-                "nickname": nickname,
-                "personName": seed.get("personName").and_then(Value::as_str).unwrap_or(""),
-                "teamId": "",
-                "score": 0,
-                "rank": 0,
-                "qualified": false,
-            }));
         }
         players.sort_by(|a, b| {
             let ar = a.get("rank").and_then(Value::as_i64).unwrap_or(0);
