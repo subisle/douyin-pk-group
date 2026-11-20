@@ -225,7 +225,9 @@ async fn main() -> anyhow::Result<()> {
                 )
                 .await
             }
-            ("师门月报", _) => lineage_report::build_month(&st, &business_label, master_id).await,
+            ("师门月报", _) => {
+                lineage_report::build_month(&st, &business_label, master_id).await
+            }
             _ => lineage_report::build(&st, &business_label, master_id).await,
         };
         let mut report = match built {

@@ -1203,7 +1203,7 @@ fn build_personal_daily_speech(
         wave_text(day.wave),
         team_label(team),
         day_rank,
-            if day.minutes > 0 {
+        if day.minutes > 0 {
             "已开播"
         } else {
             "未开播（音浪仍展示）"

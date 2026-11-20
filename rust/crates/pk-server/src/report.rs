@@ -1905,7 +1905,10 @@ mod tests {
         let text = render_text(&rep);
         assert!(text.contains("啸燃 1657 / 未开播"), "{text}");
         let svg = render_svg(&rep);
-        assert!(svg.contains(">1657</text>"), "音浪不能被未播状态覆盖：{svg}");
+        assert!(
+            svg.contains(">1657</text>"),
+            "音浪不能被未播状态覆盖：{svg}"
+        );
         assert!(svg.contains(">未播</text>"), "仍要有未播状态：{svg}");
     }
 }

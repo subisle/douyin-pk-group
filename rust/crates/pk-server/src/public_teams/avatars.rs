@@ -81,7 +81,11 @@ fn fallback_avatar_svg(person_id: u64, name: &str) -> String {
         .filter(|c| !c.is_whitespace())
         .take(2)
         .collect();
-    let label = if label.is_empty() { "?" } else { label.as_str() };
+    let label = if label.is_empty() {
+        "?"
+    } else {
+        label.as_str()
+    };
     let font_size = if label.chars().count() > 1 { 70 } else { 92 };
     let label = xml_escape(label);
     format!(
@@ -212,7 +216,10 @@ mod tests {
         let svg = fallback_avatar_svg(185, "<&啸");
         assert!(svg.starts_with("<svg"), "{svg}");
         assert!(svg.contains("viewBox=\"0 0 200 200\""), "{svg}");
-        assert!(svg.contains(">&lt;&amp;</text>"), "姓名必须 XML 转义：{svg}");
+        assert!(
+            svg.contains(">&lt;&amp;</text>"),
+            "姓名必须 XML 转义：{svg}"
+        );
         assert!(svg.contains(">PK</text>"), "{svg}");
         assert_eq!(FALLBACK_AVATAR_HASH, "fallback-v2");
     }

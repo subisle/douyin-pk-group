@@ -1045,10 +1045,7 @@ const LIVE_SAMPLE_PRUNE_BATCH: u64 = 5_000;
 /// 分批清理过期直播原始采样。只删已结束（completed/aborted/void）且
 /// observed_at 早于保留期的对局采样；正在打、待复核或官方局未定稿的数据永不在此删除。
 /// 独立房间采样没有晋级语义，同样只按时间保留。
-pub async fn live_samples_prune(
-    st: &AppState,
-    retention_days: i32,
-) -> anyhow::Result<(u64, u64)> {
+pub async fn live_samples_prune(st: &AppState, retention_days: i32) -> anyhow::Result<(u64, u64)> {
     if retention_days <= 0 {
         return Ok((0, 0));
     }
@@ -2262,12 +2259,10 @@ pub async fn live_public_groups(st: &AppState, event_id: i64) -> Vec<serde_json:
         let mut players = seats_by_round.remove(&round_id).unwrap_or_default();
 
         /* 一旦正式对局已有采集席位，就以实际采集名单为准，不再把赛前名单
-           追加到同一组里。赛前名单只用于开赛前占位和优先匹配。 */
+        追加到同一组里。赛前名单只用于开赛前占位和优先匹配。 */
         if players.is_empty() {
-            let mut seen_uid: std::collections::HashSet<String> =
-                std::collections::HashSet::new();
-            let mut seen_person: std::collections::HashSet<i64> =
-                std::collections::HashSet::new();
+            let mut seen_uid: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut seen_person: std::collections::HashSet<i64> = std::collections::HashSet::new();
             for seed in roster {
                 let uid = seed.get("douyinUid").and_then(Value::as_str).unwrap_or("");
                 let person_id = seed.get("personId").and_then(Value::as_i64).unwrap_or(0);
@@ -2341,10 +2336,7 @@ pub async fn live_public_groups(st: &AppState, event_id: i64) -> Vec<serde_json:
 ///
 /// 总人数用于阻止“7 人名单只来了 4 人”的对局被当成整组开打：
 /// 即使 UID 子集能撞上，人数不一致也不会认组。
-pub async fn live_open_group_rosters(
-    st: &AppState,
-    event_id: i64,
-) -> Vec<(i64, Vec<String>, i64)> {
+pub async fn live_open_group_rosters(st: &AppState, event_id: i64) -> Vec<(i64, Vec<String>, i64)> {
     let Ok(pool) = w(st) else {
         return Vec::new();
     };

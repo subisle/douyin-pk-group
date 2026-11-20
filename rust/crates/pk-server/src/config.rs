@@ -215,9 +215,7 @@ pub fn redis_pool_limit() -> usize {
 /// 直播原始分数采样保留天数：默认 90 天（与 044 迁移注释一致），
 /// 0 = 关闭自动清理。只清理已结束超过保留期的对局，不动进行中/待复核数据。
 pub fn live_sample_retention_days() -> i32 {
-    match env("LIVE_SAMPLE_RETENTION_DAYS")
-        .and_then(|v| v.parse::<i32>().ok())
-    {
+    match env("LIVE_SAMPLE_RETENTION_DAYS").and_then(|v| v.parse::<i32>().ok()) {
         Some(0) => 0,
         Some(v) if (1..=3650).contains(&v) => v,
         _ => 90,

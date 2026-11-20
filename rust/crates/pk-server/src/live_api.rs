@@ -988,14 +988,12 @@ pub async fn current_public_event(State(st): State<Arc<AppState>>) -> ApiResult 
     if let Some(cached) = public_live_cache_get(CACHE_KEY) {
         return Ok(Json(cached));
     }
-    let event = store::live_event_current_public(&st)
-        .await
-        .ok_or_else(|| {
-            crate::routes::ApiError::with_status(
-                axum::http::StatusCode::NOT_FOUND,
-                "当前没有进行中的直播赛事",
-            )
-        })?;
+    let event = store::live_event_current_public(&st).await.ok_or_else(|| {
+        crate::routes::ApiError::with_status(
+            axum::http::StatusCode::NOT_FOUND,
+            "当前没有进行中的直播赛事",
+        )
+    })?;
     let snapshot = public_live_snapshot(&st, event).await;
     public_live_cache_put(CACHE_KEY, &snapshot);
     Ok(Json(snapshot))
@@ -1030,9 +1028,7 @@ pub async fn heartbeat(
     }
     let version = body.version.as_deref().unwrap_or("").trim();
     if version.chars().count() > 32 {
-        return Err(crate::routes::ApiError::bad_request(
-            "version 最多 32 字符",
-        ));
+        return Err(crate::routes::ApiError::bad_request("version 最多 32 字符"));
     }
     store::live_worker_heartbeat(
         &st,

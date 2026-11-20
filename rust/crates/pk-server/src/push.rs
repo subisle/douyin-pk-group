@@ -928,8 +928,8 @@ async fn send_binding(
     );
     let mini_ready = b.has_mini_subscribe() && crate::public_teams::wx_mini_kind_ready(kind);
     /* 扫码账号：发文本；没有扫码凭证的旧绑定：回落管理员机器人文本通道。
-       小程序订阅消息作为最后一层兜底：机器人账号还在但发送失败（例如会话过期）
-       时，只要用户刚授权过订阅模板，就改走小程序，不把这条推送整轮丢掉。 */
+    小程序订阅消息作为最后一层兜底：机器人账号还在但发送失败（例如会话过期）
+    时，只要用户刚授权过订阅模板，就改走小程序，不把这条推送整轮丢掉。 */
     if let Some(a) = crate::store::wx_push_account_get(st, &b.name).await {
         if !a.bot_token.is_empty() {
             let ctx = push_ctx(st, b, &a).await;
@@ -1171,7 +1171,10 @@ async fn run_inner(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result
     let month = date.get(..7).unwrap_or(date).to_string();
     let month_map = month_wave_map(st, team, &month).await;
     // 追名次目标要全团本月排名，只在这类目标存在时才算
-    let month_rank_opt = if bindings.iter().any(|b| b.wants_notify_target() && b.person_id > 0) {
+    let month_rank_opt = if bindings
+        .iter()
+        .any(|b| b.wants_notify_target() && b.person_id > 0)
+    {
         Some(month_rank_list(st, team, &month).await)
     } else {
         None
@@ -1221,17 +1224,18 @@ async fn run_inner(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result
     } else {
         None
     };
-    let month_rep: Option<crate::report::DailyReport> = if bindings.iter().any(|b| b.wants_daily_report()) {
-        match crate::report::build_month(st, date, team, star.clone()).await {
-            Ok(rep) => Some(rep),
-            Err(e) => {
-                tracing::warn!(error = %e, "月榜数据构建失败，全部订阅者退回文本推送");
-                None
+    let month_rep: Option<crate::report::DailyReport> =
+        if bindings.iter().any(|b| b.wants_daily_report()) {
+            match crate::report::build_month(st, date, team, star.clone()).await {
+                Ok(rep) => Some(rep),
+                Err(e) => {
+                    tracing::warn!(error = %e, "月榜数据构建失败，全部订阅者退回文本推送");
+                    None
+                }
             }
-        }
-    } else {
-        None
-    };
+        } else {
+            None
+        };
 
     /* 1.0.2：发送前算好**本次实际采用的节拍**（分批 + 批间隔），保证 3 分钟总时长上限。
     这里只算一次：既避免循环里反复读 env，也让「待发人数/批大小/间隔/预计耗时」能打一条
@@ -1433,7 +1437,9 @@ async fn run_inner(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result
                                             &accounts,
                                         ),
                                     );
-                                    match send_binding(st, b, wx_global.as_ref(), &text, "daily").await {
+                                    match send_binding(st, b, wx_global.as_ref(), &text, "daily")
+                                        .await
+                                    {
                                         Ok(()) => {
                                             sent_any = true;
                                             finalize_report_claim(st, &b.name).await;
@@ -1784,7 +1790,12 @@ async fn run_inner(st: &Arc<AppState>, team: &str, date: &str) -> anyhow::Result
                                                 tracing::warn!(account = %b.name, "师门日报：闸门拦截，未发（去重标记不推进）");
                                             } else {
                                                 tracing::warn!(account = %b.name, error = %e2, "师门日报文本兜底也失败");
-                                                crate::store::push_touch(st, &b.name, &e2.to_string()).await;
+                                                crate::store::push_touch(
+                                                    st,
+                                                    &b.name,
+                                                    &e2.to_string(),
+                                                )
+                                                .await;
                                             }
                                         }
                                     }
@@ -2039,8 +2050,7 @@ async fn has_reliable_data(st: &AppState, team: &str, date: &str) -> bool {
 pub(crate) async fn daily_rank(st: &AppState, team: &str, date: &str) -> Vec<(u64, String, i64)> {
     let sql = DAILY_RANK_SQL;
     match pgrs::query_with_binds(&st.pools, &st.active_id(), sql, |q| {
-        q.bind(date.to_string())
-            .bind(team.to_string())
+        q.bind(date.to_string()).bind(team.to_string())
     })
     .await
     {

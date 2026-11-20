@@ -1078,7 +1078,10 @@ mod tests {
     #[test]
     fn day_month_year_queries_all_merge_secondary_accounts() {
         for sql in [WAVES_A, SERIES_A] {
-            assert!(sql.contains("FROM wave_snapshot ws"), "日查询缺副号音浪：{sql}");
+            assert!(
+                sql.contains("FROM wave_snapshot ws"),
+                "日查询缺副号音浪：{sql}"
+            );
             assert!(
                 sql.contains("a.anchor_id = ws.anchor_id AND a.is_primary = 0"),
                 "副号必须按非主号关联，避免主号快照重复：{sql}"
@@ -1098,7 +1101,10 @@ mod tests {
             true,
         );
         for token in ["FROM wave_snapshot ws", "FROM duration_snapshot ds"] {
-            assert!(month.contains(token), "月/年查询缺多号合并：{token}\n{month}");
+            assert!(
+                month.contains(token),
+                "月/年查询缺多号合并：{token}\n{month}"
+            );
         }
     }
 
@@ -1138,8 +1144,14 @@ mod tests {
             sql.contains("GROUP BY u.pid, u.biz_date"),
             "必须先把主号与副号按人/日聚一次：{sql}"
         );
-        assert!(sql.contains("FROM wave_snapshot ws"), "副号音浪要走 wave_snapshot：{sql}");
-        assert!(sql.contains("FROM duration_snapshot ds"), "副号时长要走 duration_snapshot：{sql}");
+        assert!(
+            sql.contains("FROM wave_snapshot ws"),
+            "副号音浪要走 wave_snapshot：{sql}"
+        );
+        assert!(
+            sql.contains("FROM duration_snapshot ds"),
+            "副号时长要走 duration_snapshot：{sql}"
+        );
         // 两个占位符都必须被替换干净（写错占位名会留下 {wave} 进 SQL → PG 语法错）
         assert!(
             !sql.contains("{wave}") && !sql.contains("{minutes}"),

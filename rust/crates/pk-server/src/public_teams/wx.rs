@@ -182,12 +182,10 @@ pub async fn my_push(
         obj.insert("rebindRequired".into(), json!(rebind_required));
         obj.insert(
             "scanNickname".into(),
-            json!(
-                wxacct
-                    .as_ref()
-                    .map(|a| a.nickname.clone())
-                    .unwrap_or_default()
-            ),
+            json!(wxacct
+                .as_ref()
+                .map(|a| a.nickname.clone())
+                .unwrap_or_default()),
         );
         // 手机号绑定（2026-10-10）：登记过手机号就走「发手机号」路径；
         // 只回显脱敏手机号（138****8000），不全量下发，避免页面被别人瞄到就能拿走号。

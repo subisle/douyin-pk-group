@@ -167,7 +167,12 @@ fn cn_range(start: &str, end: &str) -> String {
         return format!("{start}-{end}");
     };
     if s.year() == e.year() && s.month() == e.month() {
-        format!("{}月{}日-{}日", s.format("%-m"), s.format("%-d"), e.format("%-d"))
+        format!(
+            "{}月{}日-{}日",
+            s.format("%-m"),
+            s.format("%-d"),
+            e.format("%-d")
+        )
     } else if s.year() == e.year() {
         format!(
             "{}月{}日-{}月{}日",
@@ -529,15 +534,14 @@ pub async fn build_range(
     );
     let mut metrics: HashMap<u64, (i64, i64)> = HashMap::new();
     for r in pgrs::query(&st.pools, "LOCAL", &range_sql).await? {
-        metrics.insert(id_of(&r, "person_id"), (signed(&r, "wave"), signed(&r, "minutes")));
+        metrics.insert(
+            id_of(&r, "person_id"),
+            (signed(&r, "wave"), signed(&r, "minutes")),
+        );
     }
 
-    let qualified_minutes = per_day_qualified_minutes
-        .max(0)
-        .saturating_mul(range_days);
-    let severe_minutes = per_day_severe_minutes
-        .max(0)
-        .saturating_mul(range_days);
+    let qualified_minutes = per_day_qualified_minutes.max(0).saturating_mul(range_days);
+    let severe_minutes = per_day_severe_minutes.max(0).saturating_mul(range_days);
 
     let (master_wave, master_minutes) = metrics.get(&master_person_id).copied().unwrap_or((0, 0));
     let mut rows = vec![LineageRow {
@@ -1057,18 +1061,12 @@ fn render_range_page(
     let qualified = rep
         .rows
         .iter()
-        .filter(|r| {
-            !r.is_master
-                && has_standard
-                && r.month_minutes >= rep.daily_qualified_minutes
-        })
+        .filter(|r| !r.is_master && has_standard && r.month_minutes >= rep.daily_qualified_minutes)
         .count();
     let severe = rep
         .rows
         .iter()
-        .filter(|r| {
-            !r.is_master && has_standard && r.month_minutes < rep.daily_severe_minutes
-        })
+        .filter(|r| !r.is_master && has_standard && r.month_minutes < rep.daily_severe_minutes)
         .count();
     let mut sub = format!("门下 {} 人", rep.disciple_count());
     if fields.month_total {
@@ -1131,9 +1129,8 @@ fn render_range_page(
         let y = header_h + i as f64 * 48.0;
         let text_y = y + 24.0;
         let row_severe = has_standard && r.month_minutes < rep.daily_severe_minutes;
-        let row_unmet = has_standard
-            && !row_severe
-            && r.month_minutes < rep.daily_qualified_minutes;
+        let row_unmet =
+            has_standard && !row_severe && r.month_minutes < rep.daily_qualified_minutes;
         let row_bg = if r.is_master {
             MASTER_BG
         } else if !r.live || row_severe {

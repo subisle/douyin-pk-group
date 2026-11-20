@@ -1757,10 +1757,7 @@ async fn wxpush_account_from_headers(
 /// GET /api/public/my/wxpush/config：小程序推送页读取可用模板、授权状态与
 /// 一键微信对接入口。模板 ID 是公开给客户端的（订阅消息本来就要前端传），
 /// AppSecret / access_token 绝不下发。
-pub async fn my_wxpush_config(
-    State(st): State<ArcState>,
-    headers: HeaderMap,
-) -> ApiResult {
+pub async fn my_wxpush_config(State(st): State<ArcState>, headers: HeaderMap) -> ApiResult {
     let name = wxpush_account_from_headers(&st, &headers).await?;
     let templates = json!({
         "daily": wx_mini_template_id("daily"),
@@ -1810,12 +1807,7 @@ pub async fn my_wxpush_subscribe(
         return Err(ApiError::bad_request("微信身份未绑定，请重新微信一键登录"));
     }
     let accepted = body.get("accepted").unwrap_or(&body);
-    let yes = |key: &str| {
-        accepted
-            .get(key)
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-    };
+    let yes = |key: &str| accepted.get(key).and_then(Value::as_bool).unwrap_or(false);
     let daily = yes("daily");
     let target = yes("target");
     let lineage = yes("lineage");
@@ -1828,14 +1820,12 @@ pub async fn my_wxpush_subscribe(
     if team.is_empty() {
         return Err(ApiError::bad_request("账号未绑定主播，不能开启小程序推送"));
     }
-    crate::store::push_mini_subscribe_save(
-        &st, &name, &team, &openid, daily, target, lineage,
-    )
-    .await
-    .map_err(|e| {
-        tracing::error!(error = %e, account = %name, "保存小程序订阅状态失败");
-        ApiError::from(anyhow::anyhow!("保存订阅状态失败，请稍后重试"))
-    })?;
+    crate::store::push_mini_subscribe_save(&st, &name, &team, &openid, daily, target, lineage)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, account = %name, "保存小程序订阅状态失败");
+            ApiError::from(anyhow::anyhow!("保存订阅状态失败，请稍后重试"))
+        })?;
     Ok(Json(json!({
         "ok": true,
         "state": crate::store::push_mini_state(&st, &name).await,
@@ -1920,7 +1910,13 @@ fn truncate_thing(value: &str, max: usize) -> String {
         .join(" ");
     let chars: Vec<char> = compact.chars().collect();
     if chars.len() > max {
-        format!("{}…", chars.into_iter().take(max.saturating_sub(1)).collect::<String>())
+        format!(
+            "{}…",
+            chars
+                .into_iter()
+                .take(max.saturating_sub(1))
+                .collect::<String>()
+        )
     } else {
         compact
     }
@@ -1935,8 +1931,7 @@ fn wx_mini_state() -> String {
 }
 
 /// access_token 缓存：微信返回 expires_in 秒，提前 120 秒过期，避免临界点失败。
-fn wx_mini_token_cache()
--> &'static std::sync::Mutex<Option<(String, std::time::Instant)>> {
+fn wx_mini_token_cache() -> &'static std::sync::Mutex<Option<(String, std::time::Instant)>> {
     static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<(String, std::time::Instant)>>> =
         std::sync::OnceLock::new();
     CACHE.get_or_init(|| std::sync::Mutex::new(None))
@@ -2104,7 +2099,10 @@ mod wx_pending_tests {
         assert_eq!(data["thing1"]["value"], "每日数据已更新");
         assert_eq!(data["thing2"]["value"], "第一行 第二行");
         assert!(data["time3"]["value"].as_str().unwrap_or("").contains('-'));
-        assert_eq!(truncate_thing("一二三四五六七八九十一二三四五六七八九十多", 20), "一二三四五六七八九十一二三四五六七八九…");
+        assert_eq!(
+            truncate_thing("一二三四五六七八九十一二三四五六七八九十多", 20),
+            "一二三四五六七八九十一二三四五六七八九…"
+        );
     }
 
     /// wxbind 密码输错后必须还能用同一个 wxToken 重试；真正绑定成功后才消费。

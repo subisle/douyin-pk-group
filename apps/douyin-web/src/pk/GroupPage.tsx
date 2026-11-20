@@ -305,6 +305,8 @@ export default function GroupPage() {
   } | null>(null);
   const rafRef = useRef(0);
   const scrollRef = useRef(0);
+  const planListSeqRef = useRef(0);
+  const initialPlanRestoredRef = useRef(false);
   const [exportFallback, setExportFallback] = useState<{ url: string; filename: string } | null>(null);
   const [past, setPast] = useState<Snapshot[]>([]);
   const [future, setFuture] = useState<Snapshot[]>([]);
@@ -571,17 +573,22 @@ export default function GroupPage() {
   }
 
   async function loadPlans() {
+    const seq = ++planListSeqRef.current;
+    const wantedType = eventType;
     try {
       const r = await pk.listPlans();
+      // 配置加载会把赛事从初版默认值切到后台保存值；先发后到的旧请求不能覆盖新列表。
+      if (seq !== planListSeqRef.current) return;
       // P1-14：方案列表按当前赛事类型过滤（后端 /api/plans 无 type 参数，前端过滤；
       // eventType 为空的老方案不归类，不在任何赛事页出现，避免跨赛事载入/上架）
-      const items = (r.items || []).filter((p) => p.eventType === eventType);
+      const items = (r.items || []).filter((p) => p.eventType === wantedType);
       setPlans(items);
       setSelectedPublishId((prev) => {
         if (prev && items.some((p) => p.id === prev)) return prev;
         return items.find((p) => p.published)?.id ?? items[0]?.id ?? null;
       });
     } catch (e) {
+      if (seq !== planListSeqRef.current) return;
       // P2-5：方案列表加载失败不再静默 —— 显示出来（载入/上架按钮全会没数据）
       console.error('方案列表加载失败', e);
       setError((e as Error).message);
@@ -1036,6 +1043,18 @@ export default function GroupPage() {
       setError((e as Error).message);
     }
   }
+
+  /* 首次进入分组页时自动载入当前已上架方案；否则看板为空，用户点“导出”只会得到空看板。 */
+  useEffect(() => {
+    if (initialPlanRestoredRef.current || planId != null || buckets.length > 0 || plans.length === 0) return;
+    const published = plans.find((p) => p.published);
+    if (!published) {
+      initialPlanRestoredRef.current = true;
+      return;
+    }
+    initialPlanRestoredRef.current = true;
+    void loadPlan(published.id);
+  }, [plans, planId, buckets.length]);
 
   /* ---------------- 导出分组图 ---------------- */
   async function waitForInspectBeforeExport() {
@@ -1806,7 +1825,7 @@ export default function GroupPage() {
           <span className="hint">
             {revivalEvent
               ? revivalOn
-                ? `第 ${restAfterGroup} 组 ${slotAt(restAfterGroup - 1)} 开赛；随后在第 ${restAfterGroup} 组与第 ${restAfterGroup + 1} 组之间的 ${scheduleRestMin} 分钟内完成第一波 ${FIRST_WAVE_REVIVAL_ROOMS} 组复活赛（每组 ${restMin} 分钟，共 ${firstWaveRevivalSpanMin} 分钟），第 ${restAfterGroup + 1} 组 ${slotAt(restAfterGroup)} 开赛；后续小组全部结束后，剩余小组淘汰者按同样规则打第二波复活赛，每组前 4 名复活、其余直接淘汰`
+                ? `第 ${restAfterGroup} 组 ${slotAt(restAfterGroup - 1)} 开赛；随后在第 ${restAfterGroup} 组与第 ${restAfterGroup + 1} 组之间的 ${scheduleRestMin} 分钟内完成第一波 ${FIRST_WAVE_REVIVAL_ROOMS} 组复活赛（每组 ${restMin} 分钟，共 ${firstWaveRevivalSpanMin} 分钟），第 ${restAfterGroup + 1} 组 ${slotAt(restAfterGroup)} 开赛；后三组全部结束后，后三组淘汰者按同样流程打第二波复活赛，每组前 3 名复活、其余直接淘汰`
                 : `第一波复活赛共 ${FIRST_WAVE_REVIVAL_ROOMS} 组、每组 ${restMin} 分钟，两组都包含在第 ${restAfterGroup} 组与第 ${restAfterGroup + 1} 组之间的 ${scheduleRestMin} 分钟间隔内；分完组这里会自动定位；每组前 4 名复活、其余直接淘汰`
               : restMin > 0
                 ? `第 1 组 ${slotAt(0)}、第 2 组 ${slotAt(1)}、第 3 组 ${slotAt(2)}，之后休息 ${restMin} 分钟，第 4 组 ${slotAt(3)}`

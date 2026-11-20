@@ -662,6 +662,18 @@ pub enum StageKind {
     Final,
 }
 
+/// 复活赛每组晋级名额。
+///
+/// 2026-11-20 用户口径：第一波复活赛 8 进 4，后三组的复活赛 6 进 3。
+/// 第一波仍沿用赛事规则里的 `revival_qualify_per_room`，后三组复活固定取 3。
+pub fn revival_qualify_slots(rules: &LiveRules, kind: StageKind) -> i32 {
+    if kind == StageKind::RestRevival {
+        3
+    } else {
+        rules.revival_qualify_per_room
+    }
+}
+
 impl StageKind {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -875,7 +887,9 @@ pub async fn ingest_observation(
             }
             ScoringGate::Ready => {
                 out.phase = "unassigned".into();
-                out.note = "当前没有可接这一局的小组（名单未齐、阶段未开放或都已定稿），原始采样已保留".into();
+                out.note =
+                    "当前没有可接这一局的小组（名单未齐、阶段未开放或都已定稿），原始采样已保留"
+                        .into();
             }
         }
         return Ok(out);
@@ -1515,6 +1529,7 @@ pub async fn open_empty_revival_groups(
     }
 
     let stage_id = crate::store::live_stage_ensure(st, event_id, kind).await?;
+    let qualify_slots = revival_qualify_slots(&rules, kind);
     let existing = groups
         .iter()
         .filter(|g| g.get("stageKind").and_then(Value::as_str) == Some(kind.as_str()))
@@ -1528,7 +1543,7 @@ pub async fn open_empty_revival_groups(
             kind,
             slot as i32 + 1,
             &format!("复活{}组", slot + 1),
-            rules.revival_qualify_per_room,
+            qualify_slots,
             0,
         )
         .await?;
@@ -1575,6 +1590,7 @@ pub async fn build_revival_rooms(
     }
 
     let stage_id = crate::store::live_stage_ensure(st, event_id, kind).await?;
+    let qualify_slots = revival_qualify_slots(&rules, kind);
     let rooms = split_revival_rooms(&eliminated, rules.revival_room_capacity);
     for (i, room) in rooms.iter().enumerate() {
         let gid = crate::store::live_group_create(
@@ -1584,7 +1600,7 @@ pub async fn build_revival_rooms(
             kind,
             i as i32 + 1,
             &format!("复活{}组", i + 1),
-            rules.revival_qualify_per_room,
+            qualify_slots,
             0,
         )
         .await?;
@@ -1612,7 +1628,7 @@ pub async fn build_revival_rooms(
             group = gid,
             seats = room.len(),
             "复活房已生成（每房晋级 {} 人）",
-            rules.revival_qualify_per_room
+            qualify_slots
         );
     }
     Ok(rooms.len())
@@ -1935,6 +1951,16 @@ mod tests {
     }
 
     #[test]
+    fn revival_qualify_slots_match_round_rules() {
+        let rules = LiveRules::default();
+        assert_eq!(
+            revival_qualify_slots(&rules, StageKind::FirstWaveRevival),
+            4
+        );
+        assert_eq!(revival_qualify_slots(&rules, StageKind::RestRevival), 3);
+    }
+
+    #[test]
     fn rules_reject_bad_values() {
         let mut r = LiveRules::default();
         r.direct_qualify_per_group = 0;
@@ -2127,16 +2153,13 @@ mod tests {
         let six = snap(&["a", "b", "c", "d", "e", "f"], &[1; 6], 1, 1_000, 300);
         assert_eq!(scoring_gate(&six), ScoringGate::WaitingRoster);
 
-        let seven_not_started =
-            snap(&["a", "b", "c", "d", "e", "f", "g"], &[1; 7], 0, 1_000, 300);
+        let seven_not_started = snap(&["a", "b", "c", "d", "e", "f", "g"], &[1; 7], 0, 1_000, 300);
         assert_eq!(scoring_gate(&seven_not_started), ScoringGate::PkNotStarted);
 
-        let seven_running =
-            snap(&["a", "b", "c", "d", "e", "f", "g"], &[1; 7], 1, 1_000, 300);
+        let seven_running = snap(&["a", "b", "c", "d", "e", "f", "g"], &[1; 7], 1, 1_000, 300);
         assert_eq!(scoring_gate(&seven_running), ScoringGate::Ready);
 
-        let seven_ended =
-            snap(&["a", "b", "c", "d", "e", "f", "g"], &[1; 7], 2, 1_000, 300);
+        let seven_ended = snap(&["a", "b", "c", "d", "e", "f", "g"], &[1; 7], 2, 1_000, 300);
         assert_eq!(
             scoring_gate(&seven_ended),
             ScoringGate::Ready,

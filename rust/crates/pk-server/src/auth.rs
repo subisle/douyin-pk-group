@@ -389,7 +389,7 @@ const OPEN_PREFIXES: &[&str] = &[
     "/resources",
     "/resource",
     /* 比赛监控已融入展示端主壳，和 /st/m 一样属于公开页面；
-       token 历史深链 /live/{token} 也一起放行。 */
+    token 历史深链 /live/{token} 也一起放行。 */
     "/live/",
     "/my/",
     "/group/",
@@ -523,19 +523,18 @@ pub async fn login(
         .unwrap_or("")
         .to_string();
     let auth_for_check = auth.clone();
-    let verified = match tokio::task::spawn_blocking(move || auth_for_check.check_password(&password))
-        .await
-    {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::error!(error = %e, "管理员口令校验任务失败");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": "登录服务暂时不可用" })),
-            )
-                .into_response();
-        }
-    };
+    let verified =
+        match tokio::task::spawn_blocking(move || auth_for_check.check_password(&password)).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::error!(error = %e, "管理员口令校验任务失败");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": "登录服务暂时不可用" })),
+                )
+                    .into_response();
+            }
+        };
     if !verified {
         // 请求已在入口计入 10 次/分钟限流；这里只记录失败原因。
         tracing::warn!(source = %source, "后台登录口令不正确");
@@ -959,13 +958,14 @@ mod tests {
         let limiter = LoginRateLimiter::default();
         let t0 = Instant::now();
         for i in 0..LOGIN_RATE_LIMIT {
-            assert!(limiter.allow_at("203.0.113.10", t0), "第 {} 次应放行", i + 1);
+            assert!(
+                limiter.allow_at("203.0.113.10", t0),
+                "第 {} 次应放行",
+                i + 1
+            );
         }
         assert!(!limiter.allow_at("203.0.113.10", t0), "第 11 次应限速");
-        assert!(
-            limiter.allow_at("203.0.113.11", t0),
-            "不同来源不能互相影响"
-        );
+        assert!(limiter.allow_at("203.0.113.11", t0), "不同来源不能互相影响");
         assert!(
             !limiter.allow_at("203.0.113.10", t0 + Duration::from_secs(59)),
             "60 秒窗口内仍应限速"

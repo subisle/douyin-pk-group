@@ -15,8 +15,8 @@ import type {
 const STAGE_LABEL: Record<string, string> = {
   first_wave_group: '第一波小组赛',
   first_wave_revival: '第一波复活赛',
-  rest_group: '剩余小组赛',
-  rest_revival: '剩余复活赛',
+  rest_group: '后三组赛',
+  rest_revival: '后三组复活赛',
   promotion: '晋级赛',
   final: '决赛',
 }

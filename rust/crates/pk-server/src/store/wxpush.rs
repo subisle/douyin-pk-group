@@ -902,14 +902,8 @@ fn binding_from_row(r: &sqlx::postgres::PgRow) -> PushBinding {
             .unwrap_or_default(),
         mini_openid: r.try_get::<String, _>("mini_openid").unwrap_or_default(),
         mini_daily_report: r.try_get::<i16, _>("mini_daily_report").unwrap_or(0) == 1,
-        mini_notify_target: r
-            .try_get::<i16, _>("mini_notify_target")
-            .unwrap_or(0)
-            == 1,
-        mini_lineage_report: r
-            .try_get::<i16, _>("mini_lineage_report")
-            .unwrap_or(0)
-            == 1,
+        mini_notify_target: r.try_get::<i16, _>("mini_notify_target").unwrap_or(0) == 1,
+        mini_lineage_report: r.try_get::<i16, _>("mini_lineage_report").unwrap_or(0) == 1,
     }
 }
 

@@ -269,8 +269,7 @@ pub async fn daily(
 }
 
 /// 日榜开播状态唯一口径：有效时长 > 0。音浪只参与展示、排序和名次。
-const DAILY_LIVE_EXPR: &str =
-    "CASE WHEN COALESCE(SUM(d.minutes), 0) > 0 THEN 1 ELSE 0 END";
+const DAILY_LIVE_EXPR: &str = "CASE WHEN COALESCE(SUM(d.minutes), 0) > 0 THEN 1 ELSE 0 END";
 
 /// 每日榜单 payload 的纯组装层：已由 handler / 加密预取完成团别与权限校验。
 pub(super) async fn daily_payload(

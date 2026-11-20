@@ -7362,7 +7362,7 @@ function groupRulesHtml(raw) {
   }
   /* 已上架方案里保存的是生成时的规则快照。旧快照写的是单场复活赛 /
      21:15 第一组，这里做展示兜底，避免每次改口径都要重存所有历史方案。 */
-  const twoMatchRevival = '复活赛共两场，每场 5 分钟：前四组小组赛结束后一场，后续小组赛结束后一场；每场前 4 名复活进入晋级赛，剩余人员直接淘汰';
+  const twoMatchRevival = '复活赛共两场，每场 5 分钟：前四组小组赛结束后一场，后三组比赛结束后一场；第一场前 4 名复活，第二场前 3 名复活，剩余人员直接淘汰';
   lines = lines.map(s => {
     const clean = s.replace(/^\s*\d+[.、)]\s*/, '');
     if (/^复活赛只打一场/.test(clean)) return twoMatchRevival;
@@ -9943,8 +9943,8 @@ const LIVE_STAGE_ORDER = [
 const LIVE_STAGE_META = {
   first_wave_group: { short: '前四组', title: '前四组 · 小组赛', hint: '每组 10 分钟 · 前 4 名晋级' },
   first_wave_revival: { short: '复活赛', title: '前四组 · 复活赛', hint: '淘汰者复活 · 每组 5 分钟' },
-  rest_group: { short: '后续小组', title: '后续小组赛', hint: '每组 10 分钟 · 前 4 名晋级' },
-  rest_revival: { short: '后续复活', title: '后续小组 · 复活赛', hint: '淘汰者复活 · 每组 5 分钟' },
+  rest_group: { short: '后三组', title: '后三组 · 小组赛', hint: '每组 10 分钟 · 前 4 名晋级' },
+  rest_revival: { short: '后三组复活', title: '后三组 · 复活赛', hint: '淘汰者复活 · 每组 5 分钟' },
   promotion: { short: '晋级赛', title: '晋级赛', hint: '小组第一进入决赛' },
   final: { short: '决赛', title: '总决赛', hint: '决出冠亚季军' },
 };
@@ -10571,6 +10571,7 @@ let navClickSuppressUntil = 0;
 /** 底栏按钮的唯一激活函数：点击、键盘与长按拖拽共用同一网关。 */
 function activateNavButton(btn) {
   if (!btn || !btn.dataset || btn.disabled) return;
+  if (!btn.dataset.v) return;
   /* 「我的」是列表首页入口：先清掉上次停留的子页（与旧 bootRest 行为一致）。 */
   if (btn.dataset.v === 'my') mySub = null;
   switchView(btn.dataset.v);

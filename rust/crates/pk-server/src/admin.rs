@@ -7155,7 +7155,7 @@ mod tests {
         }
     }
 
-#[test]
+    #[test]
     fn all_same_wave_rejected() {
         let rows = vec![
             mk_import_row(Some(100.0)),
