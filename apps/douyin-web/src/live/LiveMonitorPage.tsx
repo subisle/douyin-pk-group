@@ -265,7 +265,7 @@ export default function LiveMonitorPage() {
       scoreRefreshTimerRef.current = null
       if (document.visibilityState === 'hidden' || navigator.onLine === false) return
       void loadScoresRef.current()
-    }, 500)
+    }, 50)
   }
 
   useEffect(() => { load() }, [])

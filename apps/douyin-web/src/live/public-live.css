@@ -93,9 +93,9 @@
 .plm-zone.is-revival-zone { color: #35120d; background: var(--plm-coral); }
 .plm-zone.is-eliminated-zone { color: #ffd9d1; background: rgba(255,128,107,.18); border: 1px solid rgba(255,128,107,.3); }
 .plm-score-track { height: 3px; margin-top: 6px; overflow: hidden; border-radius: 999px; background: rgba(255,255,255,.06); }
-.plm-score-track i { display: block; height: 100%; min-width: 2px; border-radius: inherit; background: linear-gradient(90deg, rgba(111,255,194,.5), var(--plm-lime)); transition: width .5s ease; }
+.plm-score-track i { display: block; height: 100%; min-width: 2px; border-radius: inherit; background: linear-gradient(90deg, rgba(111,255,194,.5), var(--plm-lime)); transition: width .25s ease; }
 .plm-score { color: var(--plm-ink); font: 800 13px ui-monospace, SFMono-Regular, Menlo, monospace; font-variant-numeric: tabular-nums; text-align: right; transform-origin: right center; transition: color .2s ease, text-shadow .2s ease; }
-.plm-score.is-updating { color: var(--plm-lime); text-shadow: 0 0 18px rgba(199,255,102,.42); animation: plm-score-pop .6s ease-out; }
+.plm-score.is-updating { color: var(--plm-lime); text-shadow: 0 0 18px rgba(199,255,102,.42); animation: plm-score-pop .36s ease-out; }
 .plm-group-foot { display: flex; justify-content: space-between; gap: 10px; margin-top: 9px; padding-top: 9px; border-top: 1px solid rgba(255,255,255,.055); color: var(--plm-muted); font-size: 9px; }
 .plm-empty, .plm-waiting { color: var(--plm-muted); text-align: center; }
 .plm-waiting { display: grid; place-items: center; min-height: 260px; border: 1px dashed var(--plm-line); border-radius: 20px; padding: 28px; background: rgba(255,255,255,.018); }

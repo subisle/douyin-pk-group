@@ -51,7 +51,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from collector import Api, _bonus_map, _empty_bonus, parse_linkmic, to_observation  # noqa: E402
 
 DEFAULT_API = "http://127.0.0.1:8787"
-DEFAULT_INTERVAL = 4.0
+DEFAULT_INTERVAL = 0.25
 DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -1096,7 +1096,7 @@ def main() -> int:
     ap.add_argument("--room", action="append", default=[], help="直播间 web_rid，可重复")
     ap.add_argument("--api", default=os.environ.get("LIVE_API", DEFAULT_API))
     ap.add_argument("--token", default=os.environ.get("LIVE_COLLECTOR_TOKEN", ""))
-    ap.add_argument("--interval", type=float, default=DEFAULT_INTERVAL)
+    ap.add_argument("--interval", type=float, default=DEFAULT_INTERVAL, help="两次上报的最小合并间隔（秒）")
     ap.add_argument(
         "--http-seconds",
         type=float,
@@ -1110,8 +1110,8 @@ def main() -> int:
     args = ap.parse_args()
     if not args.room:
         ap.error("至少需要一个 --room")
-    if args.interval < 1:
-        ap.error("--interval 不能小于 1 秒")
+    if args.interval < 0.1:
+        ap.error("--interval 不能小于 0.1 秒")
     if args.http_seconds < 5:
         ap.error("--http-seconds 不能小于 5 秒")
     return asyncio.run(async_main(args))
