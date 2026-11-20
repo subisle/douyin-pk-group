@@ -90,6 +90,47 @@ function playerName(player: PublicLivePlayer) {
   return player.personName || player.douyinUid || '未登记'
 }
 
+/** 分数按 600ms 平滑滚动到新值，避免每次轮询直接跳成新数字。 */
+function AnimatedScore({ value }: { value: number }) {
+  const target = Math.max(0, Number(value) || 0)
+  const [shown, setShown] = useState(target)
+  const [updating, setUpdating] = useState(false)
+  const shownRef = useRef(target)
+
+  useEffect(() => {
+    const from = shownRef.current
+    if (from === target) {
+      setShown(target)
+      return
+    }
+    setUpdating(true)
+    const started = performance.now()
+    let raf = 0
+    const tick = (now: number) => {
+      const progress = Math.min(1, (now - started) / 600)
+      const eased = 1 - Math.pow(1 - progress, 3)
+      const next = Math.round(from + (target - from) * eased)
+      shownRef.current = next
+      setShown(next)
+      if (progress < 1) {
+        raf = requestAnimationFrame(tick)
+      } else {
+        shownRef.current = target
+        setShown(target)
+        setUpdating(false)
+      }
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [target])
+
+  return (
+    <strong className={`plm-score${updating ? ' is-updating' : ''}`}>
+      {shown.toLocaleString('zh-CN')}
+    </strong>
+  )
+}
+
 function GroupCard({ group, nowMs, qualify }: { group: PublicLiveGroup; nowMs: number; qualify: number }) {
   const status = groupStatus(group)
   const phase = groupPhase(group, nowMs)
@@ -125,19 +166,32 @@ function GroupCard({ group, nowMs, qualify }: { group: PublicLiveGroup; nowMs: n
         {group.players.length === 0 && <div className="plm-empty">分组等待生成…</div>}
         {group.players.map((player, index) => {
           const position = player.position || index + 1
-          const qualified = player.rank > 0 && position <= qualify
+          const scored = player.rank > 0
+          const qualified = scored && position <= qualify
+          const zone = !scored
+            ? ''
+            : qualified
+              ? (revival ? '复活区' : '晋级区')
+              : (revival ? '淘汰区' : '复活区')
+          const zoneClass = zone === '晋级区'
+            ? 'is-promoted'
+            : zone === '复活区'
+              ? 'is-revival-zone'
+              : zone === '淘汰区'
+                ? 'is-eliminated-zone'
+                : ''
           const pct = Math.max(2, Math.round(((Number(player.score) || 0) / maxScore) * 100))
           return (
-            <div key={`${player.douyinUid || player.personId || 'p'}-${index}`} className={`plm-player${qualified ? ' is-qualified' : ''}`}>
-              <span className="plm-rank">{player.rank > 0 ? `#${position}` : '—'}</span>
+            <div key={`${player.douyinUid || player.personId || 'p'}-${index}`} className={`plm-player${qualified ? ' is-qualified' : ''}${zoneClass ? ` ${zoneClass}` : ''}`}>
+              <span className="plm-rank">{scored ? `#${position}` : '—'}</span>
               <div className="plm-player-main">
                 <div className="plm-player-name">
                   <b>{playerName(player)}</b>
-                  {qualified && <span className="plm-qualified">{revival ? '复活区' : '晋级区'}</span>}
+                  {zone && <span className={`plm-zone ${zoneClass}`}>{zone}</span>}
                 </div>
                 <div className="plm-score-track"><i style={{ width: `${pct}%` }} /></div>
               </div>
-              <strong className="plm-score">{(Number(player.score) || 0).toLocaleString('zh-CN')}</strong>
+              <AnimatedScore value={Number(player.score) || 0} />
             </div>
           )
         })}
