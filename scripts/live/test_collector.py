@@ -2,7 +2,27 @@ import time
 import unittest
 import json
 
-from collector import build_ingest_payload, parse_linkmic
+from collector import build_ingest_payload, parse_linkmic, to_observation
+
+
+class RefereeFilterTests(unittest.TestCase):
+    def test_referee_is_removed_from_competition_scores(self):
+        raw = {
+            "nowMs": 1_100_000,
+            "battle": {
+                "battleId": "battle-ref",
+                "scores": [
+                    {"userId": "3358343524517819", "nickname": "ST-001", "score": 20},
+                    {"userId": "1001", "nickname": "选手A", "score": 200},
+                    {"userId": "1002", "nickname": "选手B", "score": 100},
+                ],
+            },
+        }
+        obs = to_observation("room-1", raw, 1_100_000)
+        self.assertEqual(
+            [s["userId"] for s in obs["battle"]["scores"]],
+            ["1001", "1002"],
+        )
 
 
 class SnapshotFreshnessTests(unittest.TestCase):

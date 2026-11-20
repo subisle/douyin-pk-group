@@ -29,6 +29,19 @@ from typing import Any
 DEFAULT_API = "http://127.0.0.1:8787"
 DEFAULT_INTERVAL = 4.0
 
+# 裁判/主持等账号会出现在连麦分数列表里，但不属于参赛者。
+# 默认排除当前赛事的裁判号；可用 LIVE_REFEREE_UIDS 追加更多 UID（逗号分隔）。
+DEFAULT_REFEREE_UIDS = frozenset({"3358343524517819"})
+
+
+def referee_uids() -> set[str]:
+    extra = {
+        v.strip()
+        for v in os.environ.get("LIVE_REFEREE_UIDS", "").split(",")
+        if v.strip()
+    }
+    return set(DEFAULT_REFEREE_UIDS) | extra
+
 
 class Api:
     def __init__(self, base: str, token: str):
@@ -272,7 +285,14 @@ def to_observation(web_rid: str, raw: dict, now_ms: int) -> dict:
     }
     b = raw.get("battle")
     if isinstance(b, dict) and b.get("battleId"):
-        # 后端 Observation 用 camelCase（与前端其它接口一致），这里直接拼好
+        # 后端 Observation 用 camelCase（与前端其它接口一致），这里直接拼好。
+        # 裁判账号只用于现场执裁，不能进入人数门禁、正式席位或公开榜。
+        ignored_uids = referee_uids()
+        score_rows = [
+            s
+            for s in b.get("scores", [])
+            if str(s.get("userId", "")) not in ignored_uids
+        ]
         obs["battle"] = {
             "battleId": str(b["battleId"]),
             "channelId": str(b.get("channelId", "")),
@@ -293,7 +313,7 @@ def to_observation(web_rid: str, raw: dict, now_ms: int) -> dict:
                     "bonusEndMs": int(s.get("bonusEndMs", 0)),
                     "currentBonus": int(s.get("currentBonus", 0)),
                 }
-                for s in b.get("scores", [])
+                for s in score_rows
             ],
             "teamScores": [
                 {
