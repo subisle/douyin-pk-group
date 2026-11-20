@@ -2,11 +2,11 @@ import { lazy, Suspense, useEffect, useRef, useState } from 'react'
 import DashboardPage from './DashboardPage'
 import { hasToken, login, logout, UNAUTHORIZED_EVENT } from './api'
 import { subscribeChanges } from './useAutoRefresh'
-import { FULLSCREEN_ROUTES, ROUTES, routeHref, useRoute, type RouteKey } from './lib/router'
+import { ROUTES, routeHref, useRoute, type RouteKey } from './lib/router'
 
 /* 路由级代码分割（2026-10-17）：各页面懒加载，首屏只拉后台壳 + 数据概况页，
  * 其余页（主播管理 / 导入 / 族谱 / 公告 / 机器人 / 消息通知 / PK）切到才加载。
- * pk.css 也从 App 移到 GroupPage/BoardPage，只有进 PK 页才拉。
+ * pk.css 也从 App 移到 GroupPage，只有进 PK 页才拉。
  * 之前 10 个页面全打进一个 449KB 的 bundle，首屏一次全下载。 */
 const ImportPage = lazy(() => import('./ImportPage'))
 const StreamerPage = lazy(() => import('./StreamerPage'))
@@ -17,13 +17,11 @@ const BotPage = lazy(() => import('./BotPage'))
 const SendPage = lazy(() => import('./SendPage'))
 const LiveMonitorPage = lazy(() => import('./live/LiveMonitorPage'))
 const GroupPage = lazy(() => import('./pk/GroupPage'))
-const BoardPage = lazy(() => import('./pk/BoardPage'))
 
 /** 移动端导航断点：与 styles.css 的移动外壳保持一致。 */
 const MOBILE_NAV_QUERY = '(max-width: 760px)'
 
-/** 侧边栏导航图标（emoji，零依赖；与 router.ts 的 ROUTES 一一对应，
- *  全屏独立页（PK 展板）不在侧边栏里，因此没有图标项）。 */
+/** 侧边栏导航图标（emoji，零依赖；与 router.ts 的 ROUTES 一一对应）。 */
 const NAV_ICONS: Record<RouteKey, string> = {
   data: '📊',
   import: '📥',
@@ -31,7 +29,6 @@ const NAV_ICONS: Record<RouteKey, string> = {
   visits: '👁️',
   lineage: '🌳',
   group: '⚔️',
-  'pk-board': '🏆',
   announce: '📣',
   bots: '🤖',
   send: '📢',
@@ -157,19 +154,6 @@ function AdminApp() {
           </button>
           {error && <div className="alert bad">{error}</div>}
         </div>
-      </div>
-    )
-  }
-
-  /* 全屏独立页（2026-10-16 用户口径）：PK 展板不套后台壳（无侧边栏导航），
-     整屏只渲染展板本身 —— 展板要投屏/占满整屏，后台导航是干扰。
-     地址仍在 /admin/pk-board（可收藏、刷新不丢、鉴权同后台一套）。 */
-  if (FULLSCREEN_ROUTES.some((r) => r.key === route)) {
-    return (
-      <div className="pk-board-shell">
-        <Suspense fallback={<div className="route-loading">加载中…</div>}>
-          <BoardPage />
-        </Suspense>
       </div>
     )
   }

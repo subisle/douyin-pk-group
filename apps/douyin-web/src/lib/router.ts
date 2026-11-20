@@ -20,7 +20,6 @@ export type RouteKey =
   | 'visits'
   | 'lineage'
   | 'group'
-  | 'pk-board'
   | 'announce'
   | 'bots'
   | 'send'
@@ -28,9 +27,7 @@ export type RouteKey =
 
 export const DEFAULT_ROUTE: RouteKey = 'data'
 
-/** 导航顺序 = 页面顺序，path 是 base 之后的部分。
- *  PK 展板（2026-10-16 用户口径）不在侧边栏里：它是全屏独立页（展板要投屏/占满整屏），
- *  由后台跳转到新标签打开 —— 单独列在 FULLSCREEN_ROUTES，侧边栏 ROUTES 不含它。 */
+/** 导航顺序 = 页面顺序，path 是 base 之后的部分。 */
 export const ROUTES: { key: RouteKey; path: string; label: string }[] = [
   { key: 'data', path: '/data', label: '数据概况' },
   { key: 'import', path: '/import', label: '数据导入' },
@@ -44,18 +41,8 @@ export const ROUTES: { key: RouteKey; path: string; label: string }[] = [
   { key: 'live', path: '/live', label: '直播分数监控' },
 ]
 
-/** 全屏独立路由：有地址（可收藏/刷新不丢）但不进侧边栏，App 对它整屏渲染无壳。 */
-export const FULLSCREEN_ROUTES: { key: RouteKey; path: string; label: string }[] = [
-  { key: 'pk-board', path: '/pk-board', label: 'PK 展板' },
-]
-
-/** 后台跳转打开全屏页：新标签（target=_blank 语义），返回是否真的开了。 */
-export function openFullscreen(key: RouteKey, base: string = detectBase()): boolean {
-  return window.open(routeHref(key, base), '_blank', 'noopener') != null
-}
-
-const PATHS = new Map<RouteKey, string>([...ROUTES, ...FULLSCREEN_ROUTES].map((r) => [r.key, r.path]))
-const KEYS = new Map<string, RouteKey>([...ROUTES, ...FULLSCREEN_ROUTES].map((r) => [r.path, r.key]))
+const PATHS = new Map<RouteKey, string>(ROUTES.map((r) => [r.key, r.path]))
+const KEYS = new Map<string, RouteKey>(ROUTES.map((r) => [r.path, r.key]))
 
 /** 当前站点的 base：pathname 落在 /admin 下才是 /admin，开发态为空串 */
 export function detectBase(pathname: string = window.location.pathname): string {

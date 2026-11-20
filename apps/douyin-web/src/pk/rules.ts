@@ -25,7 +25,7 @@ export const revivalAfterGroup = (groupCount: number) =>
   groupCount > 0 ? Math.ceil(groupCount / 2) : 0;
 
 /** 月终争霸赛 / 两级晋级赛的加长休息点：第 3 组之后（分钟数可调）。
- *  2026-10-17：原先 GroupPage 与 BoardPage **各自写了一份**同名常量，改一处漏一处
+ *  2026-10-17：原先 GroupPage 内写死了同名常量，改一处漏一处
  *  就会让后台与展板的休息落点不一致（审计 4-8）。统一从这里导出，单一来源。 */
 export const BREAK_AFTER_GROUP = 3;
 

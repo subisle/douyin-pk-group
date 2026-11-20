@@ -305,6 +305,17 @@ impl DisplayConfig {
     }
 }
 
+/// 晋级赛方案里的 `wave` 是比赛分快照，不是日/月音浪。
+/// 展示接口必须原样使用，不能被实时音浪覆盖或重新排序。
+fn uses_snapshot_match_scores(event_type: &str, payload: &serde_json::Value) -> bool {
+    matches!(event_type, "初级争霸赛晋级赛" | "中级争霸赛晋级赛")
+        || matches!(
+            as_str(payload, "scoreSource").as_deref(),
+            Some("roster-score" | "match" | "snapshot")
+        )
+        || as_str(payload, "scoreKind").as_deref() == Some("match")
+}
+
 /// `GET /api/public/plans/{id}`：单个方案的公开展示数据
 pub async fn plan(
     State(st): State<std::sync::Arc<AppState>>,
@@ -339,6 +350,7 @@ pub async fn plan(
         return not_found();
     };
 
+    let snapshot_match_scores = uses_snapshot_match_scores(&row.event_type, &payload);
     let empty = Vec::new();
     let buckets = payload
         .get("buckets")
@@ -359,7 +371,11 @@ pub async fn plan(
         .get("publicRules")
         .and_then(|v| v.as_str())
         .unwrap_or_default();
-    let display = DisplayConfig::from_payload(&payload);
+    let mut display = DisplayConfig::from_payload(&payload);
+    if snapshot_match_scores {
+        // 比赛分项目没有“每日音浪明细”语义。
+        display.daily = false;
+    }
     let start = payload
         .get("schedule")
         .and_then(|s| s.get("start"))
@@ -442,7 +458,7 @@ pub async fn plan(
     // 管理端关掉「音浪数值」时整个跳过：不查库、也不把音浪带给前端。
     let mut stale = !st.pools.any_available();
     let mut dates: Vec<String> = Vec::new();
-    if display.wave && !person_ids.is_empty() {
+    if display.wave && !snapshot_match_scores && !person_ids.is_empty() {
         match repos::get_waves(&st, &metric, days, Some(&person_ids), false, None).await {
             Ok(info) => {
                 dates = info.dates;
@@ -466,7 +482,11 @@ pub async fn plan(
     /* ---- 2b. 每日明细：按日期切换分组明细 ----
     管理端关掉「每日音浪」或「音浪数值」时直接省略（每日明细本质也是音浪数据）。
     取不到就省略，前端退回纯列表展示，不留空壳。 */
-    let (mut trend, mut daily) = if display.daily && display.wave && display.groups {
+    let (mut trend, mut daily) = if !snapshot_match_scores
+        && display.daily
+        && display.wave
+        && display.groups
+    {
         match repos::get_wave_series(&st, false, None).await {
             Ok(series) if !series.dates.is_empty() => {
                 let dates = series.dates;
@@ -630,6 +650,7 @@ pub async fn plan(
         "rules": rules,
         "metric": metric,
         "days": days,
+        "scoreKind": if snapshot_match_scores { "match" } else { "wave" },
         "schedule": { "start": start, "intervalMin": interval },
         "display": display,
         "matchDay": match_day,
@@ -922,6 +943,21 @@ mod tests {
         let mut desc = waves.clone();
         desc.sort_by(|a, b| b.partial_cmp(a).unwrap());
         assert_eq!(waves, desc, "展示出来必须是音浪降序");
+    }
+
+    #[test]
+    fn promotion_plans_are_snapshot_match_scores() {
+        let empty = serde_json::json!({});
+        assert!(uses_snapshot_match_scores("中级争霸赛晋级赛", &empty));
+        assert!(uses_snapshot_match_scores(
+            "月终争霸赛",
+            &serde_json::json!({ "scoreSource": "snapshot" })
+        ));
+        assert!(uses_snapshot_match_scores(
+            "月终争霸赛",
+            &serde_json::json!({ "scoreKind": "match" })
+        ));
+        assert!(!uses_snapshot_match_scores("中级争霸赛小组赛", &empty));
     }
 
     #[test]

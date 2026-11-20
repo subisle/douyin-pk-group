@@ -626,19 +626,6 @@ a.tab {
   }
 }
 
-.pk-board-shell {
-  width: 100%;
-  min-height: 100vh;
-  min-height: 100dvh;
-}
-.pk-board-shell > .page {
-  width: 100%;
-  max-width: none;
-  min-height: 100vh;
-  min-height: 100dvh;
-  margin: 0;
-}
-
 /* 分页条 */
 .pager {
   display: flex;
