@@ -9735,7 +9735,7 @@ function syncNavActive() {
 
 /** 当前可见的底栏格子（后台关掉的视图按钮 offsetParent 为空，宽度 0 不参与定位） */
 function navVisibleTabs() {
-  return [...document.querySelectorAll('#navRow button[data-v]')]
+  return [...document.querySelectorAll('#navRow button[data-v], #navRow button[data-href]')]
     .filter(b => b.offsetParent !== null);
 }
 
@@ -10152,7 +10152,7 @@ function initNavDock() {
     startX = p0.clientX || 0; startY = p0.clientY || 0;
     lastX = startX; lastTime = pressT; velocity = 0;
     const target = p0.target || e.target;
-    pressBtn = target && target.closest ? target.closest('#navRow button[data-v]') : null;
+    pressBtn = target && target.closest ? target.closest('#navRow button[data-v], #navRow button[data-href]') : null;
     clearPressTimers();
     /* 只启动长按计时；不位移不进入拖拽，因此普通长按不会变形成贴壁霓虹。 */
     longPressTimer = setTimeout(() => {
