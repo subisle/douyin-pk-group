@@ -255,6 +255,8 @@ pub struct TeamScore {
 /// 不改变正常采集行为。
 const MAX_OBSERVATION_PARTICIPANTS: usize = 64;
 const MAX_BATTLE_DURATION_SECS: i64 = 24 * 60 * 60;
+/// 正式计分最少人数（用户口径：人数大于 6，即至少 7 人）。
+const MIN_SCORING_PARTICIPANTS: usize = 7;
 
 /// 校验内部采集上报，防止超长字符串、超大数组、负数分数和溢出时间进入热路径。
 ///
@@ -450,6 +452,30 @@ impl EndReason {
             Self::ManualAbort => "manual_abort",
             Self::RoomOffline => "room_offline",
         }
+    }
+}
+
+/// 新对局是否允许占用一个正式 round。
+///
+/// 抖音刚开始连麦时可能只有 1 人就自动起 PK；这种残局不能占用小组。必须同时满足：
+/// - battle_status >= 1（PK 已开始，包含刚结束但仍需抓最终分的状态）
+/// - 当前参与者至少 7 人（用户口径：人数 > 6）
+///
+/// 已经在 live_round 里登记过的 battle 不走这个门禁，避免开局后短暂掉人导致停止采样。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScoringGate {
+    Ready,
+    PkNotStarted,
+    WaitingRoster,
+}
+
+fn scoring_gate(snap: &BattleSnapshot) -> ScoringGate {
+    if snap.battle_status < 1 {
+        ScoringGate::PkNotStarted
+    } else if snap.scores.len() < MIN_SCORING_PARTICIPANTS {
+        ScoringGate::WaitingRoster
+    } else {
+        ScoringGate::Ready
     }
 }
 
@@ -743,8 +769,7 @@ pub async fn ingest_observation(
 
     // 1) 定位小组：优先按当前正在进行的阶段找「已认领本 battle」的小组，
     //    否则找该阶段里第一个还没定稿的小组（运营按赛程顺序开打）。
-    let (group_id, existing_round_id) =
-        resolve_group(st, event_id, snap, &obs.web_rid).await?;
+    let (group_id, existing_round_id) = resolve_group(st, event_id, snap, &obs.web_rid).await?;
     if group_id == 0 {
         // 还没归组也不能丢数据：先按直播间原始采样保留，等待后续认领 / 归组。
         crate::store::live_room_monitor_upsert(
@@ -765,8 +790,24 @@ pub async fn ingest_observation(
             &sample_rows,
         )
         .await?;
-        out.phase = "unassigned".into();
-        out.note = "当前没有可接这一局的小组（名单未齐、阶段未开放或都已定稿），原始采样已保留".into();
+        match scoring_gate(snap) {
+            ScoringGate::PkNotStarted => {
+                out.phase = "pk_preparing".into();
+                out.note = "PK 尚未正式开始；原始采样已保留，不计入小组分数".into();
+            }
+            ScoringGate::WaitingRoster => {
+                out.phase = "waiting_roster".into();
+                out.note = format!(
+                    "PK 当前只有 {} 人；至少 {} 人且名单到齐后才开始正式计分，原始采样已保留",
+                    snap.scores.len(),
+                    MIN_SCORING_PARTICIPANTS
+                );
+            }
+            ScoringGate::Ready => {
+                out.phase = "unassigned".into();
+                out.note = "当前没有可接这一局的小组（名单未齐、阶段未开放或都已定稿），原始采样已保留".into();
+            }
+        }
         return Ok(out);
     }
     out.group_id = group_id;
@@ -835,12 +876,7 @@ pub async fn ingest_observation(
     let person_ids = crate::store::live_person_ids_by_uids(st, &uids).await;
     let seat_rows: Vec<(&RankedSeat, i64)> = ranked
         .iter()
-        .map(|seat| {
-            (
-                seat,
-                person_ids.get(&seat.user_id).copied().unwrap_or(0),
-            )
-        })
+        .map(|seat| (seat, person_ids.get(&seat.user_id).copied().unwrap_or(0)))
         .collect();
     crate::store::live_seat_upsert_batch(st, round_id, &seat_rows, false).await?;
 
@@ -982,10 +1018,17 @@ pub async fn sample_prune_loop(st: Arc<AppState>) {
         }
         match crate::store::live_samples_prune(&st, days).await {
             Ok((event_rows, room_rows)) if event_rows + room_rows > 0 => {
-                tracing::info!(event_rows, room_rows, retention_days = days, "直播过期采样已清理");
+                tracing::info!(
+                    event_rows,
+                    room_rows,
+                    retention_days = days,
+                    "直播过期采样已清理"
+                );
             }
             Ok(_) => tracing::debug!(retention_days = days, "直播采样清理：没有过期数据"),
-            Err(e) => tracing::warn!(error = %e, retention_days = days, "直播采样清理失败（下轮重试）"),
+            Err(e) => {
+                tracing::warn!(error = %e, retention_days = days, "直播采样清理失败（下轮重试）")
+            }
         }
     }
 }
@@ -1000,10 +1043,17 @@ async fn resolve_group(
     snap: &BattleSnapshot,
     web_rid: &str,
 ) -> anyhow::Result<(i64, Option<i64>)> {
+    // 已在采集中的 battle 必须先续接原 round；即使这一拍人数暂时掉到 7 以下，
+    // 也不能中止采样，否则开局后的分数会丢失。
     if let Some((group_id, round_id)) =
         crate::store::live_round_ref_by_battle(st, &snap.battle_id).await?
     {
         return Ok((group_id, Some(round_id)));
+    }
+
+    // 只给真正开始且人数 > 6 的新 battle 分配小组。1 人自动起 PK 不计数。
+    if scoring_gate(snap) != ScoringGate::Ready {
+        return Ok((0, None));
     }
 
     let signature = snap.roster_signature();
@@ -1935,6 +1985,41 @@ mod tests {
             classify_duplicate("a,b,c", "a,b,c,d", true, true),
             DuplicateVerdict::DifferentRoster
         );
+    }
+
+    #[test]
+    fn scoring_gate_requires_started_pk_and_more_than_six_people() {
+        let one = snap(&["a"], &[1], 1, 1_000, 300);
+        assert_eq!(scoring_gate(&one), ScoringGate::WaitingRoster);
+
+        let six = snap(&["a", "b", "c", "d", "e", "f"], &[1; 6], 1, 1_000, 300);
+        assert_eq!(scoring_gate(&six), ScoringGate::WaitingRoster);
+
+        let seven_not_started =
+            snap(&["a", "b", "c", "d", "e", "f", "g"], &[1; 7], 0, 1_000, 300);
+        assert_eq!(scoring_gate(&seven_not_started), ScoringGate::PkNotStarted);
+
+        let seven_running =
+            snap(&["a", "b", "c", "d", "e", "f", "g"], &[1; 7], 1, 1_000, 300);
+        assert_eq!(scoring_gate(&seven_running), ScoringGate::Ready);
+
+        let seven_ended =
+            snap(&["a", "b", "c", "d", "e", "f", "g"], &[1; 7], 2, 1_000, 300);
+        assert_eq!(
+            scoring_gate(&seven_ended),
+            ScoringGate::Ready,
+            "结束时仍需接收最终分"
+        );
+    }
+
+    #[test]
+    fn four_groups_above_six_create_two_revival_rooms() {
+        // 4 个 7 人组各淘汰 3 人 = 12 人；复活房容量 8 → 2 房，每房 6 人。
+        let eliminated: Vec<i32> = (1..=12).collect();
+        let rooms = split_revival_rooms(&eliminated, 8);
+        assert_eq!(rooms.len(), 2);
+        assert_eq!(rooms[0].len(), 6);
+        assert_eq!(rooms[1].len(), 6);
     }
 
     #[test]
