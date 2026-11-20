@@ -21,8 +21,17 @@ pub async fn live_group_result_refresh(
     if stage_id <= 0 || round_id <= 0 {
         anyhow::bail!("比赛结果缺少阶段或正式局");
     }
-    let seats = live_seat_list(st, round_id).await?;
+    let seats = live_group_cumulative_seats(st, group_id).await?;
     let pool = w(st)?;
+    let qualified_uids: std::collections::HashSet<String> =
+        sqlx::query("SELECT douyin_uid FROM live_qualifier WHERE group_id = $1 AND source = $2")
+            .bind(group_id)
+            .bind(qualifier_source)
+            .fetch_all(pool)
+            .await?
+            .into_iter()
+            .filter_map(|r| r.try_get::<String, _>("douyin_uid").ok())
+            .collect();
     let mut tx = pool.begin().await?;
     sqlx::query("DELETE FROM live_group_result WHERE group_id = $1")
         .bind(group_id)
@@ -36,10 +45,7 @@ pub async fn live_group_result_refresh(
         if uid.is_empty() {
             continue;
         }
-        let qualified = seat
-            .get("qualified")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
+        let qualified = qualified_uids.contains(uid);
         sqlx::query(
             "INSERT INTO live_group_result
                (group_id, event_id, stage_id, round_id, person_id, douyin_uid,

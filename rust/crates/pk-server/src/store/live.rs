@@ -2161,6 +2161,84 @@ pub async fn live_group_seats_for_event(
     out
 }
 
+/// 同一小组所有有效分段（中断局 + 当前/正式局）的累计分。
+pub async fn live_group_cumulative_maps(
+    st: &AppState,
+    event_id: i64,
+) -> std::collections::HashMap<i64, Vec<serde_json::Value>> {
+    let Ok(pool) = w(st) else {
+        return std::collections::HashMap::new();
+    };
+    let rows = sqlx::query(
+        "WITH picked AS (
+           SELECT r.id, r.group_id, r.is_official, r.status,
+                  row_number() OVER (
+                    PARTITION BY r.group_id
+                    ORDER BY r.is_official DESC, r.id DESC
+                  ) AS latest_rank
+             FROM live_round r
+            WHERE r.event_id = $1 AND r.status <> 'void'
+         ), eligible AS (
+           SELECT id, group_id
+             FROM picked
+            WHERE status = 'aborted'
+               OR is_official = 1
+               OR (is_official = 0 AND latest_rank = 1)
+         ), totals AS (
+           SELECT e.group_id, s.douyin_uid,
+                  max(s.person_id) AS person_id,
+                  max(s.nickname) AS nickname,
+                  max(COALESCE(p.name, '')) AS person_name,
+                  sum(s.final_score)::BIGINT AS score
+             FROM eligible e
+             JOIN live_round_seat s ON s.round_id = e.id
+             LEFT JOIN person p ON p.id = s.person_id
+            GROUP BY e.group_id, s.douyin_uid
+         ), ranked AS (
+           SELECT totals.*,
+                  row_number() OVER (
+                    PARTITION BY group_id
+                    ORDER BY score DESC, person_id, douyin_uid
+                  ) AS position,
+                  rank() OVER (PARTITION BY group_id ORDER BY score DESC) AS match_rank
+             FROM totals
+         )
+         SELECT group_id, person_id, douyin_uid, nickname, person_name,
+                score, match_rank, position
+           FROM ranked ORDER BY group_id, position",
+    )
+    .bind(event_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+    let mut out: std::collections::HashMap<i64, Vec<serde_json::Value>> =
+        std::collections::HashMap::new();
+    for r in rows {
+        out.entry(r.try_get::<i64, _>("group_id").unwrap_or(0))
+            .or_default()
+            .push(serde_json::json!({
+                "personId": r.try_get::<i64, _>("person_id").unwrap_or(0),
+                "douyinUid": r.try_get::<String, _>("douyin_uid").unwrap_or_default(),
+                "nickname": r.try_get::<String, _>("nickname").unwrap_or_default(),
+                "personName": r.try_get::<String, _>("person_name").unwrap_or_default(),
+                "score": r.try_get::<i64, _>("score").unwrap_or(0),
+                "rank": r.try_get::<i64, _>("match_rank").unwrap_or(0) as i32,
+                "position": r.try_get::<i64, _>("position").unwrap_or(0) as i32,
+                "qualified": false,
+            }));
+    }
+    out
+}
+
+pub async fn live_group_cumulative_seats(
+    st: &AppState,
+    group_id: i64,
+) -> anyhow::Result<Vec<serde_json::Value>> {
+    let event_id = live_event_of_group(st, group_id).await?;
+    let mut maps = live_group_cumulative_maps(st, event_id).await;
+    Ok(maps.remove(&group_id).unwrap_or_default())
+}
+
 /// 公开直播页的小组快照。
 ///
 /// 不是管理端 `overview` 的裁剪版：这里一次批量取完小组、赛前名单、每组最近
@@ -2206,57 +2284,13 @@ pub async fn live_public_groups(st: &AppState, event_id: i64) -> Vec<serde_json:
             }),
         );
     }
-    let round_ids: Vec<i64> = round_by_group
-        .values()
-        .filter_map(|r| r.get("id").and_then(Value::as_i64))
-        .filter(|id| *id > 0)
-        .collect();
-    let mut seats_by_round: std::collections::HashMap<i64, Vec<serde_json::Value>> =
-        std::collections::HashMap::new();
-    if !round_ids.is_empty() {
-        let rows = sqlx::query(
-            "SELECT s.round_id, s.person_id, s.douyin_uid, s.nickname, s.team_id,
-                    s.final_score, s.final_rank, s.qualified,
-                    COALESCE(p.name, '') AS person_name
-               FROM live_round_seat s
-               LEFT JOIN person p ON p.id = s.person_id
-              WHERE s.round_id = ANY($1)
-              ORDER BY s.round_id,
-                       CASE WHEN s.final_rank > 0 THEN 0 ELSE 1 END,
-                       s.final_rank, s.final_score DESC, s.douyin_uid",
-        )
-        .bind(&round_ids)
-        .fetch_all(pool)
-        .await
-        .unwrap_or_default();
-        for row in rows {
-            let round_id = row.try_get::<i64, _>("round_id").unwrap_or(0);
-            seats_by_round
-                .entry(round_id)
-                .or_default()
-                .push(serde_json::json!({
-                    "personId": row.try_get::<i64, _>("person_id").unwrap_or(0),
-                    "douyinUid": row.try_get::<String, _>("douyin_uid").unwrap_or_default(),
-                    "nickname": row.try_get::<String, _>("nickname").unwrap_or_default(),
-                    "personName": row.try_get::<String, _>("person_name").unwrap_or_default(),
-                    "teamId": row.try_get::<String, _>("team_id").unwrap_or_default(),
-                    "score": row.try_get::<i64, _>("final_score").unwrap_or(0),
-                    "rank": row.try_get::<i32, _>("final_rank").unwrap_or(0),
-                    "qualified": row.try_get::<i16, _>("qualified").unwrap_or(0) == 1,
-                }));
-        }
-    }
+    let mut cumulative_by_group = live_group_cumulative_maps(st, event_id).await;
 
     for group in &mut groups {
         let group_id = group.get("id").and_then(Value::as_i64).unwrap_or(0);
         let round = round_by_group.get(&group_id).cloned();
-        let round_id = round
-            .as_ref()
-            .and_then(|r| r.get("id"))
-            .and_then(Value::as_i64)
-            .unwrap_or(0);
         let roster = roster_by_group.remove(&group_id).unwrap_or_default();
-        let mut players = seats_by_round.remove(&round_id).unwrap_or_default();
+        let mut players = cumulative_by_group.remove(&group_id).unwrap_or_default();
 
         /* 一旦正式对局已有采集席位，就以实际采集名单为准，不再把赛前名单
         追加到同一组里。赛前名单只用于开赛前占位和优先匹配。 */

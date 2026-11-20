@@ -1316,7 +1316,7 @@ pub async fn freeze_group_qualifiers(
     let round_id = crate::store::live_group_official_round(st, group_id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("小组还没有正式局，不能冻结结果"))?;
-    let seats = crate::store::live_seat_list(st, round_id).await?;
+    let seats = crate::store::live_group_cumulative_seats(st, group_id).await?;
     let qualify = crate::store::live_group_qualify_slots(st, group_id)
         .await?
         .unwrap_or(0);

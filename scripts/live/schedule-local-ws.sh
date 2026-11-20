@@ -57,9 +57,10 @@ if [[ "${LIVE_SCHEDULE_DRY_RUN:-0}" == "1" ]]; then
   exit 0
 fi
 
-# 到点后等本地服务可用；容器/服务重启时不要直接丢掉本次监控。
+# 到点后等目标服务可用；容器/服务重启时不要直接丢掉本次监控。
+HEALTH_BASE="${LIVE_API:-http://127.0.0.1:8787}"
 for _ in $(seq 1 120); do
-  if curl -fsS --max-time 3 http://127.0.0.1:8787/api/health >/dev/null 2>&1; then
+  if curl -fsS --max-time 3 "${HEALTH_BASE%/}/api/health" >/dev/null 2>&1; then
     break
   fi
   sleep 2
