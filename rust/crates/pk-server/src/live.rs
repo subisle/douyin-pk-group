@@ -14,6 +14,7 @@
 //!    必须结合 `start_time_ms + duration + battle_status + extra.now` 判定。
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::state::AppState;
 use std::collections::HashSet;
@@ -1429,7 +1430,63 @@ pub async fn build_stage_groups(
     Ok(n)
 }
 
-/// 生成某一波的复活赛：把该波所有小组的淘汰者**平均**分进若干房间。
+/// 只开放空的复活赛位置，不根据淘汰池预先分人。
+///
+/// 用户口径（2026-11-20）：复活赛实际谁连麦，就由直播采集名单直接形成对应组。
+/// 这里固定开放 2 个空位（复活1组 / 复活2组），每组前 N 名晋级仍在比赛结束后冻结。
+pub async fn open_empty_revival_groups(
+    st: &Arc<AppState>,
+    event_id: i64,
+    kind: StageKind,
+) -> anyhow::Result<usize> {
+    const REVIVAL_GROUP_SLOTS: usize = 2;
+    let rules = crate::store::live_event_rules(st, event_id)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("赛事不存在"))?;
+    let source_kind = if kind == StageKind::RestRevival {
+        StageKind::RestGroup
+    } else {
+        StageKind::FirstWaveGroup
+    };
+    let groups = crate::store::live_group_list(st, event_id).await;
+    let source: Vec<&serde_json::Value> = groups
+        .iter()
+        .filter(|g| g.get("stageKind").and_then(Value::as_str) == Some(source_kind.as_str()))
+        .collect();
+    if source.is_empty() {
+        anyhow::bail!("还没有对应的小组赛分组");
+    }
+    if source
+        .iter()
+        .any(|g| g.get("status").and_then(Value::as_str) != Some("finalized"))
+    {
+        anyhow::bail!("对应小组赛还没有全部定稿");
+    }
+
+    let stage_id = crate::store::live_stage_ensure(st, event_id, kind).await?;
+    let existing = groups
+        .iter()
+        .filter(|g| g.get("stageKind").and_then(Value::as_str) == Some(kind.as_str()))
+        .count();
+    let mut created = 0usize;
+    for slot in existing..REVIVAL_GROUP_SLOTS {
+        crate::store::live_group_create(
+            st,
+            event_id,
+            stage_id,
+            kind,
+            slot as i32 + 1,
+            &format!("复活{}组", slot + 1),
+            rules.revival_qualify_per_room,
+            0,
+        )
+        .await?;
+        created += 1;
+    }
+    Ok(created)
+}
+
+/// 旧版复活房自动分配（保留供历史兼容/单测，不再用于实时主链路）。
 ///
 /// 例：前四组共 16 名淘汰者、房容量 8 → 2 个 8 人房；每房前 3 晋级。
 /// 分配用蛇形发牌（`split_revival_rooms`），各房人数差 ≤ 1 且强弱不扎堆。
@@ -1510,11 +1567,10 @@ pub async fn build_revival_rooms(
     Ok(rooms.len())
 }
 
-/// 某一波小组全部定稿后，自动冻结晋级者并生成该波复活赛。
+/// 某一波小组全部定稿后，自动冻结晋级者并开放两个空的复活赛位置。
 ///
-/// 用户口径（2026-11-19）：前四组比完马上打前四组淘汰者的复活赛，公开监控页
-/// 自动出现复活分组，不再依赖运营再点一次按钮。函数可重复调用：复活阶段已经
-/// 有小组时直接返回，不会反复生成或改赛前名单。
+/// 用户口径（2026-11-20）：复活赛不按淘汰者自动分房，实际连麦名单由采集决定。
+/// 本函数只准备空位置；第一场、第二场 PK 开始后自然写入对应组。
 pub async fn auto_advance_revival(
     st: &Arc<AppState>,
     event_id: i64,
@@ -1557,25 +1613,12 @@ pub async fn auto_advance_revival(
                 freeze_group_qualifiers(st, event_id, group_id, "direct").await?;
             }
         }
-        let source_stage_id = source
-            .first()
-            .and_then(|g| g.get("stageId"))
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
-        if source_stage_id > 0
-            && crate::store::live_stage_eliminated(st, source_stage_id)
-                .await
-                .is_empty()
-        {
-            tracing::info!(event_id, stage_id = source_stage_id, "该波没有淘汰者，跳过复活赛");
-            continue;
-        }
-        let rooms = build_revival_rooms(st, event_id, revival_kind).await?;
-        if rooms > 0 {
-            generated.push(format!("{label} {rooms} 组"));
+        let created = open_empty_revival_groups(st, event_id, revival_kind).await?;
+        if created > 0 {
+            generated.push(format!("{label} {created} 个空位"));
             crate::events::emit(
                 crate::events::SCOPE_LIVE,
-                format!("赛事 {event_id} 已自动生成{label} {rooms} 组"),
+                format!("赛事 {event_id} 已开放{label} {created} 个空位，等待直播采集连麦名单"),
             );
         }
     }
