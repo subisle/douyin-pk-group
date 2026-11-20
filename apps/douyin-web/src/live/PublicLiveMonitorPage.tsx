@@ -65,24 +65,41 @@ function clockText(seconds: number) {
 
 /** 只描述直播间上报的真实状态；本页计时永远不能推进比赛。 */
 function groupPhase(group: PublicLiveGroup, nowMs: number) {
+  const people = group.players.length
   if (group.status === 'finalized') {
-    return { text: '已结束', detail: '结果已按直播间 PK 结束信号确认', urgent: false }
+    return { text: '已结束', detail: '结果已按直播间 PK 结束信号确认', countdown: '已结束', linkmic: `连麦结束 · ${people} 人`, tone: 'done', urgent: false }
   }
   if (group.status === 'settling') {
-    return { text: '等待结束', detail: '直播间 PK 已结束，等待最终分数', urgent: true }
+    return { text: '等待结束', detail: '直播间 PK 已结束，等待最终分数', countdown: '结算中', linkmic: `连麦结束 · ${people} 人`, tone: 'warn', urgent: true }
   }
   if (group.status === 'pending_review') {
-    return { text: '待确认', detail: '等待核对直播对局', urgent: true }
+    return { text: '待确认', detail: '等待核对直播对局', countdown: '待确认', linkmic: `连麦已结束 · ${people} 人`, tone: 'warn', urgent: true }
   }
   if (group.status === 'waiting_restart') {
-    return { text: '待重开', detail: '直播间异常结束，等待下一场', urgent: true }
+    return { text: '待重开', detail: '直播间异常结束，等待下一场', countdown: '待重开', linkmic: '连麦异常', tone: 'warn', urgent: true }
   }
   if (group.status === 'running') {
     const start = group.round?.startAt ? Date.parse(group.round.startAt) : NaN
-    const elapsed = Number.isNaN(start) ? '' : ` · 实际已进行 ${clockText(Math.max(0, (nowMs - start) / 1000))}`
-    return { text: 'PK 进行中', detail: `跟随直播间实际对局${elapsed}`, urgent: false }
+    const remaining = Number.isNaN(start)
+      ? group.durationSecs
+      : Math.max(0, group.durationSecs - (nowMs - start) / 1000)
+    return {
+      text: 'PK 进行中',
+      detail: Number.isNaN(start) ? '跟随直播间实际对局' : `剩余 ${clockText(remaining)}，实际结束以直播间为准`,
+      countdown: clockText(remaining),
+      linkmic: `PK 连麦中 · ${people} 人`,
+      tone: 'live',
+      urgent: remaining <= 60,
+    }
   }
-  return { text: '准备中', detail: '整组人齐后开始 PK', urgent: false }
+  return {
+    text: '准备中',
+    detail: '整组人齐后开始 PK',
+    countdown: clockText(group.durationSecs),
+    linkmic: people > 0 ? `准备连麦 · ${people} 人` : '等待连麦',
+    tone: 'idle',
+    urgent: false,
+  }
 }
 
 function playerName(player: PublicLivePlayer) {
@@ -139,7 +156,8 @@ function GroupCard({ group, nowMs, qualify }: { group: PublicLiveGroup; nowMs: n
             : `前 ${qualify} 名晋级 · 后 ${Math.max(group.players.length - qualify, 0)} 名进复活池`}
         </span>
         <span>{scored}/{group.players.length} 人已出分</span>
-        <strong className={phase.urgent ? 'is-urgent' : ''}>{phase.text}</strong>
+        <span className={`plm-group-linkmic is-${phase.tone}`}><i />{phase.linkmic}</span>
+        <strong className={phase.urgent ? 'is-urgent' : ''}>{phase.countdown}</strong>
       </div>
 
       <div className="plm-player-list">
@@ -378,13 +396,17 @@ export default function PublicLiveMonitorPage({ token }: { token?: string }) {
           <p>{currentGroup ? `${currentGroup.name} · ${groupStatus(currentGroup).text}` : '等待下一阶段自动开始'}</p>
         </div>
         <div className="plm-hero-clock">
-          <span className={`plm-phase-state${activePhase?.urgent ? ' is-urgent' : ''}`}>{activePhase?.text ?? '等待中'}</span>
-          <small>{activePhase?.detail ?? '以直播间实际 PK 状态为准'}</small>
+          <span className={`plm-countdown${activePhase?.urgent ? ' is-urgent' : ''}`}>{activePhase?.countdown ?? '--:--'}</span>
+          <small>PK 倒计时 · 实际结束以直播间为准</small>
+          <div className={`plm-linkmic-state is-${activePhase?.tone ?? 'idle'}`}>
+            <i />
+            <b>{activePhase?.linkmic ?? '等待连麦'}</b>
+          </div>
         </div>
         <div className="plm-summary">
           <div><b>{groups.filter((g) => g.status === 'finalized').length}</b><span>已结束</span></div>
           <div><b>{groups.filter((g) => LIVE_STATUSES.has(g.status)).length}</b><span>进行中</span></div>
-          <div><b>{groups.reduce((n, g) => n + g.players.length, 0)}</b><span>参赛人次</span></div>
+          <div><b>{currentGroup?.players.length ?? 0}</b><span>当前连麦</span></div>
         </div>
       </section>
 
