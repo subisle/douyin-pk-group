@@ -3179,8 +3179,10 @@ h2.card-t { font-size:13px; font-weight:700; color:var(--ink3); margin:0 0 4px;
   pointer-events: none;
   transition: opacity .16s ease;
 }
-.plm-stage-nav.is-overflow { padding-bottom: 12px; }
-.plm-stage-nav.is-overflow .plm-stage-swipe-hint { opacity: 1; }
+.plm-stage-nav.is-overflow,
+.plm-stage-nav.is-hint-always { padding-bottom: 12px; }
+.plm-stage-nav.is-overflow .plm-stage-swipe-hint,
+.plm-stage-nav.is-hint-always .plm-stage-swipe-hint { opacity: 1; }
 
 .plm-content { padding-top: 4px; }
 .plm-section-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; margin: 5px 0 10px; }
@@ -3519,7 +3521,7 @@ body.live-view-open .plm-content { padding-bottom: 8px; }
 <nav class="tabbar" id="navRow" aria-label="主导航">
   <!-- Stitch 1:1：9879920671738170074 / 2f32c73c9eb745c99ad617e812c6189f
        「主播数据榜-水滴仅边缘色散质感导航栏」
-       固定顺序：看板 / 分组 / 比赛监控 / 族谱 / 资源分享 / 微信对接 / 我的；族谱按后台开关与团别显隐。 -->
+       固定顺序：看板 / 分组 / PK赛事 / 族谱 / 资源分享 / 微信对接 / 我的；族谱按后台开关与团别显隐。 -->
   <div class="nav-wall nav-wall-l" id="navWallL" aria-hidden="true"></div>
   <div class="nav-wall nav-wall-r" id="navWallR" aria-hidden="true"></div>
   <div id="navDrop" class="is-idle" aria-hidden="true">
@@ -3533,8 +3535,8 @@ body.live-view-open .plm-content { padding-bottom: 8px; }
     <span class="ic"><svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path d="M2 11a1 1 0 011-1h2a1 1 0 011 1v5a1 1 0 01-1 1H3a1 1 0 01-1-1v-5zM8 7a1 1 0 011-1h2a1 1 0 011 1v9a1 1 0 01-1 1H9a1 1 0 01-1-1V7zM14 4a1 1 0 011-1h2a1 1 0 011 1v12a1 1 0 01-1 1h-2a1 1 0 01-1-1V4z"/></svg></span><span class="tab-label">看板</span></button>
   <button data-v="group" id="navGroup">
     <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span class="tab-label">分组</span></button>
-  <button data-v="live" id="navLive" aria-label="比赛监控">
-    <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2.5"/><path d="M8 21h8M12 17v4"/><path d="M7 10h2l1.5-3 3 6 1.5-3h2"/></svg></span><span class="tab-label">比赛监控</span></button>
+  <button data-v="live" id="navLive" aria-label="PK赛事">
+    <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2.5"/><path d="M8 21h8M12 17v4"/><path d="M7 10h2l1.5-3 3 6 1.5-3h2"/></svg></span><span class="tab-label">PK赛事</span></button>
   <button data-v="lineage" id="navLineage">
     <span class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><path d="M6 9v6a3 3 0 0 0 3 3h6"/><path d="M6 12h6a3 3 0 0 0 3-3"/></svg></span><span class="tab-label">族谱</span></button>
   <button data-v="resources" id="navResources">
@@ -10293,9 +10295,9 @@ function bindPushBox(p) {
 }
 
 
-/* ==================== 公开直播比赛监控（融入主站） ====================
+/* ==================== 公开直播PK赛事（融入主站） ====================
    2026-11-20 用户口径：/live/ 不再作为独立页面展示，而是主站内的
-   「比赛监控」视图。数据仍走 /api/public/live + /api/public/events(SSE)，
+   「PK赛事」视图。数据仍走 /api/public/live + /api/public/events(SSE)，
    切换页面时只停直播刷新节拍；主站公共 SSE 继续给公告/消息等其它功能使用。 */
 const LIVE_STAGE_ORDER = [
   'first_wave_group',
@@ -10375,8 +10377,8 @@ function liveStageShortLabel(kind) {
   const meta = LIVE_STAGE_META[kind];
   return meta ? (meta.session ? meta.session + ' · ' : '') + meta.short : (kind || '比赛');
 }
-function liveStageNavHtml(tabsHtml, ariaLabel) {
-  return '<div class="plm-stage-nav">' +
+function liveStageNavHtml(tabsHtml, ariaLabel, alwaysHint) {
+  return '<div class="plm-stage-nav' + (alwaysHint ? ' is-hint-always' : '') + '">' +
     '<button type="button" class="plm-stage-arrow is-left" data-stage-scroll="-1" aria-label="向左查看更多比赛阶段">‹</button>' +
     '<nav class="plm-stage-tabs" aria-label="' + esc(ariaLabel) + '">' + tabsHtml + '</nav>' +
     '<button type="button" class="plm-stage-arrow is-right" data-stage-scroll="1" aria-label="向右查看更多比赛阶段">›</button>' +
@@ -10625,9 +10627,9 @@ function liveRenderView() {
   const shell = liveLoadingHtml();
   if (shell) {
     box.innerHTML = shell;
-    $('mhTitle').textContent = '比赛监控';
+    $('mhTitle').textContent = 'PK赛事';
     $('mhSub').textContent = liveLastError ? 'LIVE · 等待赛事' : 'LIVE · 实时比分';
-    document.title = '比赛监控 · ' + LABEL() + '数据榜';
+    document.title = 'PK赛事 · ' + LABEL() + '数据榜';
     syncHeaderOffset();
     return;
   }
@@ -10699,7 +10701,7 @@ function liveRenderView() {
   });
   bindLiveModeSwitch(box);
   bindLiveStageNav(box);
-  $('mhTitle').textContent = '比赛监控';
+  $('mhTitle').textContent = 'PK赛事';
   const eventTitle = liveEventDisplayTitle(event);
   $('mhSub').textContent = 'LIVE · ' + eventTitle;
   document.title = eventTitle + ' · 实时比分';
@@ -10821,7 +10823,7 @@ function liveLoad(signal) {
     if (signal.aborted) return Promise.resolve();
     signal.addEventListener('abort', rt.abortHandler, { once: true });
   }
-  /* 每次进入比赛监控都先重绘现有快照。
+  /* 每次进入PK赛事都先重绘现有快照。
      用户从分组页切回来时 #view 仍是分组 DOM；若只在 liveSnapshot 为空时渲染，
      后台刷新又因数据未变化而跳过重绘，就会出现「地址已是 /live/，内容仍是分组」。 */
   liveRenderView();
@@ -10834,7 +10836,7 @@ function liveLoad(signal) {
 
 /* ==================== 比赛成绩历史（只读冻结结果） ==================== */
 function liveModeSwitchHtml(active) {
-  return '<div class="phm-mode-switch" role="tablist" aria-label="比赛监控模式">' +
+  return '<div class="phm-mode-switch" role="tablist" aria-label="PK赛事模式">' +
     '<button type="button" data-live-mode="current" class="' + (active === 'current' ? 'is-active' : '') + '">实时赛况</button>' +
     '<button type="button" data-live-mode="history" class="' + (active === 'history' ? 'is-active' : '') + '">历史成绩</button>' +
   '</div>';
@@ -10965,7 +10967,7 @@ function liveHistoryDetailHtml(snapshot) {
     '<button type="button" class="phm-back" id="phmBack"><span class="material-symbols-outlined">arrow_back</span>返回赛事列表</button>' +
     '<section class="phm-event-hero"><span class="plm-kicker">正式比赛成绩</span><h2>' + esc(liveEventDisplayTitle(event)) + '</h2>' +
     '<p>' + esc(event.eventDate || '') + ' · 比赛分不计入音浪、时长和收益</p></section>' +
-    liveStageNavHtml(tabs, '历史阶段') + content + '</div>';
+    liveStageNavHtml(tabs, '历史阶段', true) + content + '</div>';
 }
 
 function bindLiveHistoryView() {
@@ -11009,7 +11011,7 @@ function renderLiveHistoryList() {
   const box = $('view');
   if (!box || !liveHistoryList) return;
   box.innerHTML = liveHistoryEventListHtml(liveHistoryList);
-  $('mhTitle').textContent = '比赛监控';
+  $('mhTitle').textContent = 'PK赛事';
   $('mhSub').textContent = 'HISTORY · 比赛成绩';
   document.title = '比赛成绩历史 · ' + LABEL() + '数据榜';
   bindLiveHistoryView();
@@ -11020,7 +11022,7 @@ function renderLiveHistoryDetail() {
   const box = $('view');
   if (!box || !liveHistoryDetail) return;
   box.innerHTML = liveHistoryDetailHtml(liveHistoryDetail);
-  $('mhTitle').textContent = '比赛监控';
+  $('mhTitle').textContent = 'PK赛事';
   const eventTitle = liveEventDisplayTitle(liveHistoryDetail.event);
   $('mhSub').textContent = 'HISTORY · ' + eventTitle;
   document.title = eventTitle + ' · 成绩历史';
@@ -11766,7 +11768,7 @@ function switchView(v, opts) {
   /* 2026-10-15 task-11：底栏「微信对接」一级入口不新增视图 —— 折算成
      my + mySub='wechat'，复用「我的 → 消息设置」那张 #myPushCard（不出现第二份渲染）。 */
   if (v === 'wechat') { mySub = 'wechat'; v = 'my'; }
-  /* 比赛监控为男团专属：女团深链/历史恢复/导航切回统一改道。 */
+  /* PK赛事为男团专属：女团深链/历史恢复/导航切回统一改道。 */
   if (v === 'live' && TEAM === 'female') {
     v = 'data';
     try { history.replaceState(null, '', '/report'); } catch (_) {}
@@ -11795,7 +11797,7 @@ function switchView(v, opts) {
   }
   if (v === 'lineage' && (s.lineageEnabled === false || TEAM === 'female')) v = 'data';
   if (v === 'my' && s.loginRequired === false) v = 'data';
-  /* 比赛监控是主站内视图：进入时放宽内容宽度，离开时停止直播刷新并恢复主站标题。 */
+  /* PK赛事是主站内视图：进入时放宽内容宽度，离开时停止直播刷新并恢复主站标题。 */
   const wasLive = view === 'live';
   if (v !== 'group' && groupNoticeTimer) {
     clearInterval(groupNoticeTimer);
